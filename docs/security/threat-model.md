@@ -49,7 +49,7 @@ the instruction arrives without hub connectivity (local CLI).
 `agora-node::approvals` enforces on the node: signature verified against keys the node already trusts, signed message bound to
 node id, approval id and verdict (no replay on another node or request, no flipping deny to allow), 128-bit random single-use
 ids, expiry, cancellation when an agent stops, and a policy that lists which actions need approval. The signature scheme sits
-behind a `Verifier` trait; the scheme itself (ECDSA P-256 is the candidate) and how trusted device keys reach the node (a
+behind a `Verifier` trait; the scheme itself (ECDSA P-256, ADR-0028, implemented as `P256Verifier`) and how trusted device keys reach the node (a
 user-signed change, ADR-0020) are still to be decided and built.
 
 ### Approvals: node wiring

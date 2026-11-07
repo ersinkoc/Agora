@@ -110,6 +110,7 @@ dependencies = [
  "agora-vt",
  "getrandom",
  "prost",
+ "ring",
  "serde_json",
 ]
 
