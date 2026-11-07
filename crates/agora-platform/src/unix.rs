@@ -52,7 +52,8 @@ pub(crate) fn spawn(config: &PtyConfig) -> io::Result<Box<dyn Pty>> {
     // SAFETY: the out-pointers are valid; null name/termios are allowed; `ws` outlives the call. The
     // pointer mutability of the last three parameters differs between Linux (`*const`) and macOS (`*mut`),
     // so mutable pointers are passed, which coerce to both.
-    cvt(unsafe {
+    #[allow(clippy::unnecessary_mut_passed)] // required by the macOS signature, see above
+    let r = unsafe {
         libc::openpty(
             &mut master,
             &mut slave,
@@ -60,7 +61,8 @@ pub(crate) fn spawn(config: &PtyConfig) -> io::Result<Box<dyn Pty>> {
             std::ptr::null_mut(),
             &mut ws,
         )
-    })?;
+    };
+    cvt(r)?;
     // SAFETY: openpty returned two fresh descriptors that nothing else owns.
     let (master, slave) = unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
     // The child must not inherit the master side.
