@@ -204,3 +204,20 @@ fn without_a_node_the_cli_says_so_and_bad_arguments_print_usage() {
     assert_eq!(code, 1);
     assert!(err.contains("interactive terminal"), "{err}");
 }
+
+#[test]
+fn doctor_reports_agents_and_exits_zero_on_a_healthy_machine() {
+    let s = setup("doctor");
+    let (code, out, err) = cli(&s, &["doctor"]);
+    // Without terminal support (Windows for now) doctor correctly reports a problem and exits 1.
+    let expected = if agora_platform::PTY_SUPPORTED { 0 } else { 1 };
+    assert_eq!(code, expected, "{out}{err}");
+    assert!(out.contains("Git is available"), "{out}");
+    assert!(out.contains("1 agent description loaded."), "{out}");
+    // The manifest launches `sh`, which exists wherever this test can run on Unix; elsewhere it may not.
+    if agora_platform::PTY_SUPPORTED {
+        assert!(out.contains("shell is installed."), "{out}");
+    }
+    // No node is running in this setup: a note, not a failure.
+    assert!(out.contains("[note] No node is running"), "{out}");
+}
