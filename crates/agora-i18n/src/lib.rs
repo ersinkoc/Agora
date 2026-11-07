@@ -3,6 +3,7 @@
 //! Rust code refers to a message by wrapping its id in [`key!`]. The [`lint`] module checks those
 //! references against `locales/en/*.ftl` and checks that other locales stay in sync with English.
 
+pub mod catalog;
 pub mod lint;
 
 /// Marks a string literal as a Fluent message id. Evaluates to the literal.
@@ -13,3 +14,5 @@ macro_rules! key {
         $id
     };
 }
+
+pub use catalog::{Arg, Catalog};
