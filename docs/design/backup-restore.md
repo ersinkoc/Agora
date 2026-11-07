@@ -13,5 +13,6 @@
 ## Implementation status
 `agora-hub::store`: `SqliteStore::backup_to` (online, consistent, refuses to overwrite), `verify` (integrity check and
 schema version) and `restore` (verifies first, keeps the replaced file as `<db>.before-restore`, drops stale WAL files).
-A test restores an older backup and replays the gap from the node's side. Not yet: the `agora hub backup|restore`
-commands (they come with the hub binary), scheduled backups with retention, encryption, and the multi-node CI drill.
+A test restores an older backup and replays the gap from the node's side. CLI: `agora hub backup [FILE] [--keep N]` (without FILE: `<hub dir>/backups/hub-<unix ms>.db`, newest N kept, default 7;
+a given FILE is never overwritten) and `agora hub restore FILE` (stop the hub first). Not yet: running backups on a schedule
+from the hub itself (use cron or a timer for now), encryption, and the multi-node CI drill.
