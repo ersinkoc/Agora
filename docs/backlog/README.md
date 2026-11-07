@@ -6,4 +6,5 @@ accepted by the maintainer.
 
 - [Phase 0: bootstrap](phase-0.md)
 - [Phase 1: protocol and schema](phase-1.md)
+- [Phase 2: node core](phase-2.md)
 - [Research (ongoing): usage sources, quota profiles, model mapping](research.md)
