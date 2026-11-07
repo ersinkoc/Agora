@@ -255,6 +255,14 @@ mod tests {
 
     use super::*;
 
+    /// Windows canonicalizes to `\\?\C:\...`, which git cannot use; drop the verbatim prefix.
+    fn plain(p: PathBuf) -> PathBuf {
+        match p.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
+            Some(rest) => PathBuf::from(rest),
+            None => p,
+        }
+    }
+
     /// A temporary repository with one commit on `main`, removed on drop.
     struct Repo {
         dir: PathBuf,
@@ -268,9 +276,9 @@ mod tests {
                 std::process::id(),
                 N.fetch_add(1, Ordering::Relaxed)
             ));
-            // Canonicalize: macOS temp dirs are symlinks and git reports real paths.
             fs::create_dir_all(&dir).expect("mkdir");
-            let dir = dir.canonicalize().expect("canonicalize");
+            // Canonicalize: macOS temp dirs are symlinks and git reports real paths.
+            let dir = plain(dir.canonicalize().expect("canonicalize"));
             let r = Self { dir };
             r.git(&["init", "-q", "-b", "main"]);
             if let Some(url) = remote {
