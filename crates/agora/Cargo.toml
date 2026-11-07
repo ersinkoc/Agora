@@ -15,3 +15,7 @@ agora-tui = { path = "../agora-tui" }
 agora-i18n = { path = "../agora-i18n" }
 agora-protocol = { path = "../agora-protocol" }
 agora-platform = { path = "../agora-platform" }
+
+[dev-dependencies]
+# Builds raw protocol frames in the stdio bridge test.
+prost = "0.14"

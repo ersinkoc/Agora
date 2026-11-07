@@ -59,6 +59,9 @@ Order is `Hello` (role must be node) → `Resume` → events. The hub answers `R
 `from_seq` is one past what the hub already holds, regardless of what the node claims. Each event yields `Applied`,
 `Duplicate` or `Gap { expected }`.
 
+SSH stdio transport (ADR-0011): `agora node stdio` copies the node's local-socket frames to stdin/stdout, so a hub (or
+a person) can reach a node with `ssh host agora node stdio` and no open port. Frames are exactly those of the local
+control socket; the node's agents and policy are unchanged and nothing depends on the hub.
 Node authentication (`agora-hub::tls`, ADR-0011/0015): the hub's TLS endpoint requires a client certificate issued by
 its own CA. The node's id and certificate serial come from that certificate, not from any message; the session's
 producer id is that node id. A certificate from another authority, or none, never completes the handshake. Revocation
