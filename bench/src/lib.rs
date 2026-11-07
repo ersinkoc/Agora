@@ -189,6 +189,21 @@ pub fn best_of(a: ScenarioResult, b: ScenarioResult) -> ScenarioResult {
     }
 }
 
+/// Merge two reports of the same scenarios, keeping the best of each metric (see [`best_of`]). Scenarios present in
+/// only one report are kept as they are.
+pub fn merge_reports(mut a: Report, b: Report) -> Report {
+    for nb in b.scenarios {
+        match a.scenarios.iter().position(|x| x.name == nb.name) {
+            Some(i) => {
+                let old = a.scenarios[i].clone();
+                a.scenarios[i] = best_of(old, nb);
+            }
+            None => a.scenarios.push(nb),
+        }
+    }
+    a
+}
+
 /// Scenarios whose latency is reported but not gated. `terminals-20` runs twenty busy threads on a CI runner
 /// with a few cores, so its p95 measures the OS scheduler, not our code (a 25% swing on identical code was
 /// observed). Its throughput, which is stable, still gates.
@@ -253,6 +268,14 @@ pub fn compare(base: &Report, new: &Report, threshold_pct: f64) -> Vec<Regressio
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn merging_reports_keeps_the_best_of_each_metric() {
+        let merged = merge_reports(report(100.0, 50.0), report(90.0, 40.0));
+        assert_eq!(merged.scenarios.len(), 1);
+        assert!((merged.scenarios[0].throughput_mb_s - 100.0).abs() < 1e-9);
+        assert!((merged.scenarios[0].p95_latency_us - 40.0).abs() < 1e-9);
+    }
 
     fn report(tp: f64, lat: f64) -> Report {
         Report {
