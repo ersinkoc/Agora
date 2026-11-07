@@ -197,6 +197,27 @@ impl Error {
     }
 }
 
+impl Error {
+    /// The wire form of this error.
+    pub fn to_info(&self) -> crate::v1::ErrorInfo {
+        use crate::v1::param_value::Value;
+        crate::v1::ErrorInfo {
+            code: self.code.as_str().to_string(),
+            params: self
+                .params
+                .iter()
+                .map(|(k, v)| {
+                    let value = match v {
+                        ParamValue::Str(s) => Value::Str(s.clone()),
+                        ParamValue::Int(i) => Value::Int(*i),
+                    };
+                    (k.clone(), crate::v1::ParamValue { value: Some(value) })
+                })
+                .collect(),
+        }
+    }
+}
+
 impl std::fmt::Display for Error {
     /// Debug-oriented only (logs); user-facing text comes from Fluent.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

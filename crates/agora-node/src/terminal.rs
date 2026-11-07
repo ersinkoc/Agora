@@ -54,6 +54,32 @@ pub struct Snapshot {
     pub exit: Option<ExitStatus>,
 }
 
+impl Snapshot {
+    /// The screen as bytes a terminal emulator can paint (`terminal.raw` resync): every row is positioned
+    /// absolutely, so the output does not depend on the client's current cursor or size, and the cursor
+    /// ends where the program's cursor is. Colors and attributes are not carried.
+    pub fn to_ansi(&self) -> Vec<u8> {
+        let mut out = b"\x1b[0m\x1b[2J".to_vec();
+        for (i, line) in self.lines.iter().enumerate() {
+            out.extend_from_slice(format!("\x1b[{};1H{line}\x1b[K", i + 1).as_bytes());
+        }
+        out.extend_from_slice(
+            format!(
+                "\x1b[{};{}H{}",
+                self.cursor.row + 1,
+                self.cursor.col + 1,
+                if self.cursor.visible {
+                    "\x1b[?25h"
+                } else {
+                    "\x1b[?25l"
+                }
+            )
+            .as_bytes(),
+        );
+        out
+    }
+}
+
 enum Command {
     Input(Vec<u8>),
     Resize(Size),

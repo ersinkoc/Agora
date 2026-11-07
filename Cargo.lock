@@ -7,7 +7,10 @@ name = "agora"
 version = "0.0.0"
 dependencies = [
  "agora-hub",
+ "agora-i18n",
  "agora-node",
+ "agora-platform",
+ "agora-protocol",
  "agora-tui",
 ]
 
@@ -74,10 +77,12 @@ version = "0.0.0"
 dependencies = [
  "agora-adapters",
  "agora-core",
+ "agora-i18n",
  "agora-mesh",
  "agora-platform",
  "agora-protocol",
  "agora-vt",
+ "prost",
 ]
 
 [[package]]

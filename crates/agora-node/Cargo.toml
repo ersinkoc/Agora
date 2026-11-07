@@ -15,3 +15,6 @@ agora-platform = { path = "../agora-platform" }
 agora-vt = { path = "../agora-vt" }
 agora-adapters = { path = "../agora-adapters" }
 agora-mesh = { path = "../agora-mesh" }
+agora-i18n = { path = "../agora-i18n" }
+# Encode and decode the protocol messages the control socket carries.
+prost = "0.14"

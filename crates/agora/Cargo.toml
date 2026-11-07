@@ -12,3 +12,6 @@ workspace = true
 agora-hub = { path = "../agora-hub" }
 agora-node = { path = "../agora-node" }
 agora-tui = { path = "../agora-tui" }
+agora-i18n = { path = "../agora-i18n" }
+agora-protocol = { path = "../agora-protocol" }
+agora-platform = { path = "../agora-platform" }
