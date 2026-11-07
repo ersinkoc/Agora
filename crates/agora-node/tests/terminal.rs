@@ -133,3 +133,128 @@ fn scrollback_is_capped_and_screen_stays_live() {
     assert!(s.lines.iter().any(|l| l.ends_with("last-line")));
     assert!(s.lines.len() <= 24);
 }
+
+use agora_node::terminal::{Output, OutputSubscription};
+use agora_vt::{AlacrittyTerminal, Terminal};
+
+/// Apply subscription items to a fresh terminal until `done` says the screen is as expected.
+fn drain(
+    sub: &OutputSubscription,
+    term: &mut AlacrittyTerminal,
+    mut done: impl FnMut(&AlacrittyTerminal) -> bool,
+) {
+    let end = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < end {
+        match sub.recv_timeout(Duration::from_millis(100)) {
+            Ok(Output::Data(b)) => term.feed(&b),
+            Ok(Output::Resize(s)) => term.resize(s),
+            Ok(Output::Exited(_)) | Err(_) => {}
+            Ok(Output::Lagged) => panic!("unexpected lag"),
+        }
+        if done(term) {
+            return;
+        }
+    }
+    panic!("timed out; screen: {:?}", term.bottom_lines(24));
+}
+
+fn lines(t: &dyn Terminal) -> Vec<String> {
+    (0..t.size().rows).map(|r| t.line(r)).collect()
+}
+
+#[test]
+fn snapshot_plus_subscription_reconstructs_the_live_screen_exactly() {
+    let h = handle(&["sh"]);
+    h.send_input(b"echo before-subscribe\n".to_vec()).unwrap();
+    wait_for(&h, "first echo", |s| {
+        s.lines.iter().any(|l| l.ends_with("before-subscribe"))
+    });
+
+    let (snap, sub) = h.subscribe();
+    // A client builds its view from the snapshot lines, then applies live output after it.
+    let mut mirror = AlacrittyTerminal::new(snap.size);
+    for (i, l) in snap.lines.iter().enumerate() {
+        mirror.feed(format!("\x1b[{};1H{l}", i + 1).as_bytes());
+    }
+    // The cursor matters: the shell positions later output relative to it.
+    mirror.feed(format!("\x1b[{};{}H", snap.cursor.row + 1, snap.cursor.col + 1).as_bytes());
+    h.send_input(b"echo after-subscribe\n".to_vec()).unwrap();
+    drain(&sub, &mut mirror, |t| {
+        lines(t).iter().any(|l| l.ends_with("after-subscribe"))
+    });
+
+    // Same screen as the node's own view (once it has caught up).
+    wait_for(&h, "settled", |s| {
+        s.lines.iter().any(|l| l.ends_with("after-subscribe"))
+    });
+    let live = h.snapshot().lines;
+    let end = Instant::now() + Duration::from_secs(5);
+    while lines(&mirror) != live && Instant::now() < end {
+        drain_once(&sub, &mut mirror);
+    }
+    assert_eq!(lines(&mirror), live);
+    h.kill().unwrap();
+}
+
+fn drain_once(sub: &OutputSubscription, term: &mut AlacrittyTerminal) {
+    if let Ok(Output::Data(b)) = sub.recv_timeout(Duration::from_millis(50)) {
+        term.feed(&b);
+    }
+}
+
+#[test]
+fn resize_and_exit_are_delivered_to_subscribers() {
+    let h = handle(&["sh"]);
+    let (_snap, sub) = h.subscribe();
+    h.resize(Size { cols: 90, rows: 20 }).unwrap();
+    h.send_input(b"exit 7\n".to_vec()).unwrap();
+    let (mut resized, mut exit) = (false, None);
+    let end = Instant::now() + Duration::from_secs(10);
+    while exit.is_none() && Instant::now() < end {
+        match sub.recv_timeout(Duration::from_millis(100)) {
+            Ok(Output::Resize(s)) => resized = s == Size { cols: 90, rows: 20 },
+            Ok(Output::Exited(st)) => exit = Some(st),
+            _ => {}
+        }
+    }
+    assert!(resized, "resize not delivered");
+    assert_eq!(exit.and_then(|e| e.code), Some(7));
+}
+
+#[test]
+fn a_slow_subscriber_lags_without_slowing_the_terminal_and_can_resync() {
+    let flood = handle(&["sh", "-c", "yes 'flood flood flood flood flood flood'"]);
+    let (_s, slow) = flood.subscribe();
+    // Never read: the queue fills and the subscriber is marked lagging while the terminal keeps running.
+    let seq0 = flood.snapshot().seq;
+    std::thread::sleep(Duration::from_millis(700));
+    assert!(
+        flood.snapshot().seq > seq0 + 1000,
+        "terminal kept processing output"
+    );
+
+    assert_eq!(
+        slow.recv_timeout(Duration::from_millis(100)),
+        Ok(Output::Lagged)
+    );
+    let snap = flood.resync(&slow);
+    assert!(snap.lines.iter().any(|l| l.starts_with("flood")));
+    // After a resync, live data flows again.
+    let next = slow.recv_timeout(Duration::from_secs(5));
+    assert!(matches!(next, Ok(Output::Data(_))), "got {next:?}");
+    flood.kill().unwrap();
+}
+
+#[test]
+fn dropped_subscribers_are_forgotten() {
+    let h = handle(&["sh"]);
+    for _ in 0..50 {
+        let (_s, sub) = h.subscribe();
+        drop(sub);
+    }
+    h.send_input(b"echo still-fine\n".to_vec()).unwrap();
+    wait_for(&h, "echo", |s| {
+        s.lines.iter().any(|l| l.ends_with("still-fine"))
+    });
+    h.kill().unwrap();
+}
