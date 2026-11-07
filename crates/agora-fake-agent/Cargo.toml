@@ -8,4 +8,6 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-
+# Script parsing (TOML). Justification: the script format is TOML (like manifests); hand-rolling a parser is worse.
+toml = "0.8"
+serde = { version = "1", features = ["derive"] }
