@@ -11,3 +11,7 @@ workspace = true
 # Result files are JSON stored per commit as CI artifacts (ADR-0022).
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# The real hot path: fake agent output through a PTY into the VT backend (ADR-0022, P2-04).
+agora-platform = { path = "../crates/agora-platform" }
+agora-vt = { path = "../crates/agora-vt" }
+agora-fake-agent = { path = "../crates/agora-fake-agent" }

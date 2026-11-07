@@ -1,8 +1,8 @@
 //! Benchmark harness (ADR-0022): named scenarios, JSON results, regression comparison.
 //!
-//! The first scenario is a stand-in for "fake agent through a PTY into the VT backend": bytes go through
-//! an in-process channel into a [`Sink`]. It is replaced by the real PTY and VT path once `agora-platform`
-//! and `agora-vt` exist; the result format and comparison logic stay the same.
+//! `channel-throughput` measures bare channel overhead (a floor for the other scenarios). `pty-vt-throughput`
+//! and `terminals-20` run the real path: the fake agent floods a PTY and every chunk is fed to the VT backend,
+//! for one terminal and for twenty concurrent ones (`design/performance.md`).
 
 use std::sync::mpsc;
 use std::thread;
@@ -33,12 +33,17 @@ pub trait Sink: Send + 'static {
 }
 
 /// Names of built-in scenarios.
-pub const SCENARIOS: &[&str] = &["channel-throughput"];
+pub const SCENARIOS: &[&str] = &["channel-throughput", "pty-vt-throughput", "terminals-20"];
+
+/// Argument that makes the bench binary act as the flooding fake agent (it spawns itself in the PTY).
+pub const FLOOD_CHILD_ARG: &str = "flood-child";
 
 /// Run a scenario by name. `slowdown` adds a delay per chunk (used to prove regression detection).
 pub fn run_scenario(name: &str, duration: Duration, slowdown: Duration) -> Option<ScenarioResult> {
     match name {
         "channel-throughput" => Some(channel_throughput(duration, slowdown)),
+        "pty-vt-throughput" => pty_vt("pty-vt-throughput", 1, duration, slowdown),
+        "terminals-20" => pty_vt("terminals-20", 20, duration, slowdown),
         _ => None,
     }
 }
@@ -85,6 +90,82 @@ fn channel_throughput(duration: Duration, slowdown: Duration) -> ScenarioResult 
         throughput_mb_s: bytes as f64 / 1e6 / secs,
         p95_latency_us: p95_us(&mut latencies),
     }
+}
+
+/// `n` terminals, each a flooding fake agent in a PTY feeding an `AlacrittyTerminal`. Throughput is the total
+/// over all terminals; latency is the p95 time to parse one chunk. `None` if the PTY cannot be started.
+fn pty_vt(name: &str, n: usize, duration: Duration, slowdown: Duration) -> Option<ScenarioResult> {
+    let exe = std::env::current_exe().ok()?.to_string_lossy().into_owned();
+    pty_vt_with(
+        name,
+        n,
+        &[exe, FLOOD_CHILD_ARG.to_string()],
+        duration,
+        slowdown,
+    )
+}
+
+fn pty_vt_with(
+    name: &str,
+    n: usize,
+    argv: &[String],
+    duration: Duration,
+    slowdown: Duration,
+) -> Option<ScenarioResult> {
+    use agora_platform::{spawn, PtyConfig};
+    use agora_vt::{AlacrittyTerminal, Size, Terminal};
+
+    let size = Size {
+        cols: 120,
+        rows: 40,
+    };
+    let mut ptys = Vec::new();
+    for _ in 0..n {
+        let mut cfg = PtyConfig::new(argv.to_vec());
+        cfg.cols = size.cols;
+        cfg.rows = size.rows;
+        ptys.push(spawn(&cfg).ok()?);
+    }
+    let start = Instant::now();
+    let deadline = start + duration;
+    let results: Vec<(usize, Vec<Duration>)> = thread::scope(|s| {
+        let handles: Vec<_> = ptys
+            .iter_mut()
+            .map(|pty| {
+                s.spawn(move || {
+                    let mut term = AlacrittyTerminal::new(size);
+                    let (mut bytes, mut lat) = (0usize, Vec::new());
+                    while Instant::now() < deadline {
+                        let Ok(chunk) = pty.output().recv_timeout(Duration::from_millis(100))
+                        else {
+                            continue;
+                        };
+                        let t = Instant::now();
+                        term.feed(&chunk);
+                        if !slowdown.is_zero() {
+                            thread::sleep(slowdown);
+                        }
+                        lat.push(t.elapsed());
+                        bytes += chunk.len();
+                    }
+                    let _ = pty.kill();
+                    (bytes, lat)
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().unwrap_or((0, Vec::new())))
+            .collect()
+    });
+    let secs = start.elapsed().as_secs_f64();
+    let bytes: usize = results.iter().map(|r| r.0).sum();
+    let mut latencies: Vec<Duration> = results.into_iter().flat_map(|r| r.1).collect();
+    Some(ScenarioResult {
+        name: name.into(),
+        throughput_mb_s: bytes as f64 / 1e6 / secs,
+        p95_latency_us: p95_us(&mut latencies),
+    })
 }
 
 /// 95th percentile in microseconds; 0 for no samples.
@@ -147,6 +228,7 @@ pub fn compare(base: &Report, new: &Report, threshold_pct: f64) -> Vec<Regressio
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -187,6 +269,16 @@ mod tests {
         let mut s: Vec<_> = (1..=100).map(Duration::from_micros).collect();
         assert_eq!(p95_us(&mut s), 95.0);
         assert_eq!(p95_us(&mut []), 0.0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pty_pipeline_moves_bytes_through_the_vt_backend() {
+        let argv: Vec<String> = ["sh", "-c", "yes 'some output'"].map(String::from).to_vec();
+        let r =
+            pty_vt_with("t", 2, &argv, Duration::from_millis(300), Duration::ZERO).expect("spawn");
+        assert!(r.throughput_mb_s > 0.0);
+        assert!(r.p95_latency_us > 0.0);
     }
 
     #[test]

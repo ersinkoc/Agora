@@ -85,9 +85,32 @@ pub fn play<W: Write>(
     Ok(())
 }
 
+/// Write agent-like output (colored lines with CRLF) as fast as `out` accepts it, until a write fails (the
+/// terminal closed) or `max_lines` is reached. Used by the benchmark harness to drive the PTY and VT path.
+pub fn flood<W: Write>(out: &mut W, max_lines: Option<u64>) -> io::Result<u64> {
+    const LINE: &[u8] = b"\x1b[32m\xe2\x97\x8f\x1b[0m Edit src/lib.rs: \x1b[1mfn flood()\x1b[0m -- some representative agent output text\r\n";
+    // A batch per write keeps syscall overhead out of the measurement.
+    let batch: Vec<u8> = LINE.repeat(128);
+    let mut lines = 0;
+    while max_lines.is_none_or(|m| lines < m) {
+        out.write_all(&batch)?;
+        lines += 128;
+    }
+    out.flush()?;
+    Ok(lines)
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used)] // expect is allowed in tests
 mod tests {
+    #[test]
+    fn flood_stops_at_the_line_limit() {
+        let mut out = Vec::new();
+        let n = super::flood(&mut out, Some(200)).expect("write to vec");
+        assert!((200..200 + 128).contains(&n));
+        assert!(out.ends_with(b"\r\n"));
+    }
+
     use super::*;
 
     #[test]

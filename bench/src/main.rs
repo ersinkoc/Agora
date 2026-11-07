@@ -13,6 +13,11 @@ use agora_bench::{compare, run_scenario, Report, SCENARIOS};
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
+        // Acts as the fake agent inside a benchmark PTY; ends when the terminal closes.
+        Some(agora_bench::FLOOD_CHILD_ARG) => {
+            let _ = agora_fake_agent::flood(&mut std::io::stdout().lock(), None);
+            ExitCode::SUCCESS
+        }
         Some("run") => run(&args[1..]),
         Some("compare") => cmp(&args[1..]),
         _ => {
@@ -53,7 +58,7 @@ fn run(args: &[String]) -> ExitCode {
         let mut best: Option<agora_bench::ScenarioResult> = None;
         for _ in 0..repeat {
             let Some(r) = run_scenario(n, Duration::from_secs(secs), slow) else {
-                eprintln!("unknown scenario: {n}");
+                eprintln!("unknown scenario, or the PTY could not start: {n}");
                 return ExitCode::from(2);
             };
             best = Some(match best {
