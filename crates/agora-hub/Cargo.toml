@@ -31,3 +31,6 @@ getrandom = "0.2"
 sha2 = "0.10"
 # Parses the models.dev catalog (ADR-0021).
 serde_json = "1"
+# TLS with client certificates (ADR-0011, ADR-0015). The ring backend is already in the tree via rcgen and avoids a C toolchain.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }

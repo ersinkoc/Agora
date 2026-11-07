@@ -59,6 +59,11 @@ Order is `Hello` (role must be node) → `Resume` → events. The hub answers `R
 `from_seq` is one past what the hub already holds, regardless of what the node claims. Each event yields `Applied`,
 `Duplicate` or `Gap { expected }`.
 
+Node authentication (`agora-hub::tls`, ADR-0011/0015): the hub's TLS endpoint requires a client certificate issued by
+its own CA. The node's id and certificate serial come from that certificate, not from any message; the session's
+producer id is that node id. A certificate from another authority, or none, never completes the handshake. Revocation
+is checked against the device registry by serial.
+
 Initial event families:
 
 | Family | Examples |
