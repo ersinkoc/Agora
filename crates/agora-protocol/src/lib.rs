@@ -2,6 +2,7 @@
 
 pub mod error;
 pub mod frame;
+pub mod handshake;
 
 pub use error::{Error, ErrorCode, ParamValue};
 pub use frame::{Decoder, Frame};

@@ -1,0 +1,50 @@
+syntax = "proto3";
+
+package agora.v1;
+
+// Connection lifecycle messages (docs/specs/protocol.md section 1), sent on the control stream.
+
+enum Role {
+  // Unknown or not set. Receivers must treat an unrecognised value like this one.
+  ROLE_UNSPECIFIED = 0;
+  ROLE_NODE = 1;
+  ROLE_CLIENT = 2;
+  ROLE_ADAPTER = 3;
+}
+
+// First message from the connecting side.
+message Hello {
+  Role role = 1;
+  // Protocol generations the sender can speak, for example [1, 2].
+  repeated uint32 protocol_generations = 2;
+  // Lowercase dotted capability names, for example "terminal.raw". Unknown names are ignored.
+  repeated string capabilities = 3;
+  // Free-form build identifier, for diagnostics only.
+  string build = 4;
+  // BCP 47 locale tag the client prefers; absent for nodes.
+  optional string locale = 5;
+}
+
+// Reply to Hello with the agreed parameters.
+message Welcome {
+  uint32 chosen_generation = 1;
+  // Intersection of both sides' capabilities.
+  repeated string capabilities = 2;
+  string peer_id = 3;
+  // Milliseconds since the Unix epoch on the sender's clock.
+  uint64 server_time_ms = 4;
+}
+
+// Sent by a reconnecting node or client after Welcome.
+message Resume {
+  // Highest contiguous event sequence number the sender has applied; absent if it has none.
+  optional uint64 last_acked_seq = 1;
+}
+
+message ResumeOk {
+  // First sequence number that will be replayed.
+  uint64 from_seq = 1;
+}
+
+// The sender cannot replay from the requested point; the peer must fetch a fresh snapshot.
+message SnapshotRequired {}
