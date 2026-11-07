@@ -19,6 +19,16 @@ use linux as procinfo;
 #[cfg(target_os = "macos")]
 use macos as procinfo;
 
+/// Per-process OS limits, applied to the child before it starts. `None` means unlimited.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ProcessLimits {
+    /// CPU time in seconds (`RLIMIT_CPU`); the process is killed by the OS when it is exhausted.
+    pub cpu_seconds: Option<u64>,
+    /// Address space in bytes (`RLIMIT_AS`). Enforced on Linux only: macOS ignores it, so it is not applied
+    /// there. Runtimes such as Node reserve large virtual ranges, so leave this unset unless needed.
+    pub memory_bytes: Option<u64>,
+}
+
 /// How to start a process in a new pseudo-terminal.
 #[derive(Debug, Clone)]
 pub struct PtyConfig {
@@ -29,6 +39,7 @@ pub struct PtyConfig {
     pub env: Vec<(String, String)>,
     pub cols: u16,
     pub rows: u16,
+    pub limits: ProcessLimits,
 }
 
 impl PtyConfig {
@@ -39,6 +50,7 @@ impl PtyConfig {
             env: Vec::new(),
             cols: 80,
             rows: 24,
+            limits: ProcessLimits::default(),
         }
     }
 }

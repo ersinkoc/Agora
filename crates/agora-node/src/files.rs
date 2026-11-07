@@ -74,6 +74,47 @@ fn io_err(path: &str, e: &std::io::Error) -> FilesError {
     }
 }
 
+/// Disk used by a directory tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DiskUsage {
+    pub bytes: u64,
+    pub files: u64,
+    /// The walk stopped at the entry cap; the numbers are a lower bound.
+    pub truncated: bool,
+}
+
+/// Total size of regular files under `root` (symlinks are not followed or counted). Includes `.git` data,
+/// which is part of what a worktree costs.
+pub fn disk_usage(root: &Path) -> std::io::Result<DiskUsage> {
+    let mut usage = DiskUsage {
+        bytes: 0,
+        files: 0,
+        truncated: false,
+    };
+    let mut stack = vec![root.to_path_buf()];
+    let mut seen = 0usize;
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(&dir)? {
+            let Ok(entry) = entry else { continue };
+            seen += 1;
+            if seen > MAX_ENTRIES {
+                usage.truncated = true;
+                return Ok(usage);
+            }
+            let Ok(ft) = entry.file_type() else { continue };
+            if ft.is_dir() {
+                stack.push(entry.path());
+            } else if ft.is_file() {
+                if let Ok(meta) = entry.metadata() {
+                    usage.bytes += meta.len();
+                    usage.files += 1;
+                }
+            }
+        }
+    }
+    Ok(usage)
+}
+
 /// One directory entry. Names only: contents are listed lazily, one directory at a time.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
@@ -309,6 +350,27 @@ mod tests {
         let sub = f.list("src").unwrap();
         assert_eq!(sub.len(), 1);
         assert_eq!(sub[0].size, 9);
+    }
+
+    #[test]
+    fn disk_usage_counts_regular_files_and_ignores_symlinks() {
+        let (d, f) = setup();
+        let u = disk_usage(&d.join("wt")).unwrap();
+        assert_eq!((u.bytes, u.files, u.truncated), (9 + 2, 2, false));
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(d.join("secret.txt"), d.join("wt/link")).unwrap();
+            assert_eq!(disk_usage(&d.join("wt")).unwrap().bytes, 11);
+        }
+        f.write(
+            "big.bin",
+            &[0u8; 1000],
+            &AgentId::new("a"),
+            &LeaseTable::new(),
+            0,
+        )
+        .unwrap();
+        assert_eq!(disk_usage(&d.join("wt")).unwrap().bytes, 1011);
     }
 
     #[test]

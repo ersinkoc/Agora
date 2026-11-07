@@ -39,6 +39,16 @@ fn cvt(r: libc::c_int) -> io::Result<libc::c_int> {
     }
 }
 
+/// Set a soft and hard limit for the calling process. Async-signal-safe.
+fn set_limit(resource: u32, value: u64) -> io::Result<()> {
+    let lim = libc::rlimit {
+        rlim_cur: value as libc::rlim_t,
+        rlim_max: value as libc::rlim_t,
+    };
+    // SAFETY: `lim` is a valid rlimit; the resource constant comes from libc.
+    cvt(unsafe { libc::setrlimit(resource as _, &lim) }).map(|_| ())
+}
+
 fn status(s: std::process::ExitStatus) -> ExitStatus {
     ExitStatus {
         code: s.code(),
@@ -84,12 +94,21 @@ pub(crate) fn spawn(config: &PtyConfig) -> io::Result<Box<dyn Pty>> {
     cmd.stdin(Stdio::from(slave.try_clone()?));
     cmd.stdout(Stdio::from(slave.try_clone()?));
     cmd.stderr(Stdio::from(slave));
-    // SAFETY: runs between fork and exec and only calls async-signal-safe functions (setsid, ioctl).
+    let limits = config.limits;
+    // SAFETY: runs between fork and exec and only calls async-signal-safe functions (setsid, ioctl,
+    // setrlimit).
     unsafe {
-        cmd.pre_exec(|| {
+        cmd.pre_exec(move || {
             // New session so the child leads its own process group, then make the PTY its controlling terminal.
             cvt(libc::setsid())?;
             cvt(libc::ioctl(0, libc::TIOCSCTTY as _, 0))?;
+            if let Some(secs) = limits.cpu_seconds {
+                set_limit(libc::RLIMIT_CPU as _, secs)?;
+            }
+            #[cfg(target_os = "linux")]
+            if let Some(bytes) = limits.memory_bytes {
+                set_limit(libc::RLIMIT_AS as _, bytes)?;
+            }
             Ok(())
         });
     }
@@ -255,6 +274,28 @@ mod tests {
         cfg.rows = 17;
         let p = spawn(&cfg).expect("spawn");
         assert!(read_until(&*p, "17 91").contains("17 91"));
+    }
+
+    #[test]
+    fn process_limits_are_applied_to_the_child() {
+        let mut cfg = PtyConfig::new(vec![
+            "sh".into(),
+            "-c".into(),
+            "ulimit -t; ulimit -v".into(),
+        ]);
+        cfg.limits = crate::ProcessLimits {
+            cpu_seconds: Some(3600),
+            memory_bytes: Some(8 << 30),
+        };
+        let p = spawn(&cfg).expect("spawn");
+        let mut out = String::new();
+        while let Ok(chunk) = p.output().recv_timeout(std::time::Duration::from_secs(5)) {
+            out.push_str(&String::from_utf8_lossy(&chunk));
+        }
+        let lines: Vec<&str> = out.lines().map(str::trim).collect();
+        assert_eq!(lines.first().copied(), Some("3600"), "output: {out:?}");
+        #[cfg(target_os = "linux")]
+        assert_eq!(lines.get(1).copied(), Some("8388608"), "output: {out:?}"); // KiB
     }
 
     #[test]

@@ -10,7 +10,8 @@ use std::time::{Duration, Instant};
 use agora_adapters::Manifest;
 use agora_core::{AgentId, AgentState, NodeId};
 use agora_node::supervisor::{
-    RestartPolicy, StartRequest, Supervisor, SupervisorConfig, SupervisorError, SupervisorEvent,
+    NodeLimits, RestartPolicy, StartRequest, Supervisor, SupervisorConfig, SupervisorError,
+    SupervisorEvent,
 };
 use agora_node::terminal::TerminalOptions;
 use agora_protocol::ErrorCode;
@@ -119,6 +120,7 @@ fn supervisor(restart: RestartPolicy) -> Supervisor {
         node: NodeId::new("node-1"),
         restart,
         terminal: TerminalOptions::default(),
+        limits: NodeLimits::default(),
     })
 }
 
@@ -354,4 +356,74 @@ fn restart_delay_doubles_and_is_capped() {
     let secs: Vec<u64> = (0..6).map(|a| p.delay(a).as_secs()).collect();
     assert_eq!(secs, vec![1, 2, 4, 8, 10, 10]);
     assert_eq!(p.delay(10_000), Duration::from_secs(10));
+}
+
+#[test]
+fn agent_limit_returns_resource_limit_and_frees_up_on_stop() {
+    let e = env("limit");
+    let mut sup = Supervisor::new(SupervisorConfig {
+        node: NodeId::new("node-1"),
+        restart: RestartPolicy::default(),
+        terminal: TerminalOptions::default(),
+        limits: NodeLimits {
+            max_agents: Some(2),
+            ..NodeLimits::default()
+        },
+    });
+    sup.register(manifest("[\"sh\", \"-c\", \"sleep 30\"]", None));
+    let a = sup.start(&request(&e, "a"), Instant::now()).unwrap();
+    let _b = sup.start(&request(&e, "b"), Instant::now()).unwrap();
+
+    let err = sup.start(&request(&e, "c"), Instant::now()).unwrap_err();
+    assert_eq!(
+        err,
+        SupervisorError::ResourceLimit {
+            resource: "agents",
+            limit: 2
+        }
+    );
+    let p = err.to_protocol();
+    assert_eq!(p.code, ErrorCode::NodeResourceLimit);
+    assert_eq!(p.params.len(), 2);
+    // A refused start leaves nothing behind.
+    assert!(!e.dir.join("worktrees/c").exists());
+
+    // Stopping one frees a slot; the stopped agent can only resume while there is room.
+    sup.stop(&a).unwrap();
+    let c = sup.start(&request(&e, "c"), Instant::now()).unwrap();
+    assert!(matches!(
+        sup.resume(&a, Instant::now()),
+        Err(SupervisorError::ResourceLimit { .. })
+    ));
+    sup.stop(&c).unwrap();
+    sup.resume(&a, Instant::now()).unwrap();
+    sup.stop(&a).unwrap();
+}
+
+#[test]
+fn terminal_limit_and_disk_usage() {
+    let e = env("terminals");
+    let mut sup = Supervisor::new(SupervisorConfig {
+        node: NodeId::new("node-1"),
+        restart: RestartPolicy::default(),
+        terminal: TerminalOptions::default(),
+        limits: NodeLimits {
+            max_terminals: Some(1),
+            ..NodeLimits::default()
+        },
+    });
+    sup.register(manifest("[\"sh\", \"-c\", \"sleep 30\"]", None));
+    let a = sup.start(&request(&e, "a"), Instant::now()).unwrap();
+    let err = sup.start(&request(&e, "b"), Instant::now()).unwrap_err();
+    assert_eq!(
+        err,
+        SupervisorError::ResourceLimit {
+            resource: "terminals",
+            limit: 1
+        }
+    );
+
+    let usage = sup.disk_usage(&a).unwrap();
+    assert!(usage.files >= 1 && usage.bytes >= 1, "{usage:?}");
+    sup.stop(&a).unwrap();
 }
