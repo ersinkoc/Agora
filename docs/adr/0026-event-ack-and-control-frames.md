@@ -1,6 +1,7 @@
 # 0026. Event acknowledgement and control/event stream frame kinds
-Status: Proposed
+Status: Accepted
 Date: 2026-11-07
+Accepted: 2026-11-07 (maintainer's explicit approval in chat)
 
 ## Context
 `docs/specs/protocol.md` §3 says the hub "acknowledges the highest contiguous `seq`" and a node keeps unacknowledged

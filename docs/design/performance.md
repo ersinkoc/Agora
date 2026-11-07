@@ -99,12 +99,13 @@ the supervisor reads the exit status without copying anything.
   Implemented so far (`bench/`): `channel-throughput` (bare channel floor), `pty-vt-throughput` (fake agent
   flooding one PTY into the VT backend) and `terminals-20` (twenty at once). They run unpaced and report the
   maximum the pipeline sustains, which must stay well above the 10 MB/s budget; on a development machine
-  that is about 100 MB/s for one terminal and 240 MB/s in aggregate for twenty. The twenty-terminal scenario's
-  latency is reported but not gated (it measures CI scheduler noise); its throughput is. The single-terminal
-  scenario's latency (tens of microseconds per chunk) is gated at three times the threshold, because shared
-  runners swing it by 25% on identical code; throughput keeps the exact threshold.
+  that is about 100 MB/s for one terminal and 240 MB/s in aggregate for twenty. Latency of these scenarios is checked against an absolute ceiling (1 ms, 10 ms and 20 ms; the measured values are
+  about 50 us, 0.9 ms and 0.3 ms), not against the base build: on shared runners it moved by +13% to +116% on changes that
+  cannot touch it, which is below the noise of code layout and neighbours. Throughput is stable and is gated relative to
+  the base at the exact threshold for every scenario.
 - **CI gate:** a reduced benchmark suite runs on every PR touching hot-path crates; a regression above 10% on
-  any budget scenario fails the build. The full suite runs nightly.
+  any budget scenario's throughput, or a p95 latency above its ceiling, fails the build. Base and head are built on the same runner and measured alternately (three
+  rounds each, best of each metric per side), so drift on a shared runner hits both sides alike. The full suite runs nightly.
 - **Latency tracing:** every input and command carries timestamps per hop (client, hub, node, adapter) so the
   breakdown is visible, not guessed.
 - **Performance HUD:** a developer overlay in the client (also usable by users as "connection details") shows

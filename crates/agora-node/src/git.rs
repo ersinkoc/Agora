@@ -247,6 +247,44 @@ pub fn diff(worktree: &Path, path: Option<&str>) -> Result<String, GitError> {
     git(worktree, &args)
 }
 
+/// Adds `rel` to the worktree's private ignore list (`info/exclude` of its git dir), so a file the node wrote stays
+/// out of `git status` and `git add .` without touching a tracked `.gitignore`. Best effort: failure only means the
+/// file shows up as untracked.
+pub fn exclude_locally(worktree: &Path, rel: &Path) {
+    let Ok(out) = Command::new("git")
+        .arg("-C")
+        .arg(worktree)
+        .args(["rev-parse", "--git-path", "info/exclude"])
+        .output()
+    else {
+        return;
+    };
+    if !out.status.success() {
+        return;
+    }
+    let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let exclude = if Path::new(&p).is_absolute() {
+        PathBuf::from(p)
+    } else {
+        worktree.join(p)
+    };
+    if let Some(dir) = exclude.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let line = format!("/{}", rel.to_string_lossy().replace('\\', "/"));
+    let existing = std::fs::read_to_string(&exclude).unwrap_or_default();
+    if !existing.lines().any(|l| l == line) {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&exclude)
+        {
+            let _ = writeln!(f, "{line}");
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used)] // expect is allowed in tests
 mod tests {

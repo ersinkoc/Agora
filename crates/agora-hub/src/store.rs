@@ -33,7 +33,7 @@ pub struct StoredEvent {
 }
 
 #[derive(Debug)]
-pub struct StoreError(String);
+pub struct StoreError(pub(crate) String);
 
 impl fmt::Display for StoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -66,7 +66,7 @@ pub trait EventStore {
     fn set_setting(&self, key: &str, value: &[u8]) -> Result<(), StoreError>;
 }
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 pub struct SqliteStore {
     conn: Mutex<Connection>,
@@ -115,12 +115,44 @@ impl SqliteStore {
                  COMMIT;",
             )?;
         }
+        if version < 2 {
+            // Device enrollment (ADR-0015): one-time codes (hashed) and the devices they enrolled.
+            conn.execute_batch(
+                "BEGIN;
+                 CREATE TABLE enrollment_codes (
+                     code_hash  BLOB PRIMARY KEY,
+                     expires_ms INTEGER NOT NULL
+                 );
+                 CREATE TABLE devices (
+                     serial     TEXT PRIMARY KEY,
+                     node_id    TEXT NOT NULL,
+                     enrolled_ms INTEGER NOT NULL,
+                     revoked_ms INTEGER
+                 );
+                 PRAGMA user_version = 2;
+                 COMMIT;",
+            )?;
+        }
         Ok(Self {
             conn: Mutex::new(conn),
         })
     }
 
-    fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>, StoreError> {
+    /// Online, consistent backup into a new file (`VACUUM INTO` takes a snapshot while writers keep working).
+    /// Refuses to overwrite: a backup path that exists is almost certainly a mistake.
+    pub fn backup_to(&self, dest: &Path) -> Result<(), StoreError> {
+        if dest.exists() {
+            return Err(StoreError(format!("{} already exists", dest.display())));
+        }
+        let conn = self.lock()?;
+        let path = dest
+            .to_str()
+            .ok_or_else(|| StoreError("backup path is not valid UTF-8".into()))?;
+        conn.execute("VACUUM INTO ?1", [path])?;
+        Ok(())
+    }
+
+    pub(crate) fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>, StoreError> {
         self.conn
             .lock()
             .map_err(|_| StoreError("store lock poisoned".into()))
@@ -134,6 +166,42 @@ fn to_i64(v: u64) -> Result<i64, StoreError> {
 
 fn to_u64(v: i64) -> u64 {
     u64::try_from(v).unwrap_or(0)
+}
+
+/// Checks that `path` is a healthy hub database this build can read: SQLite integrity check passes and the
+/// schema is not newer than ours.
+pub fn verify(path: &Path) -> Result<(), StoreError> {
+    let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let check: String = conn.query_row("PRAGMA integrity_check", [], |r| r.get(0))?;
+    if check != "ok" {
+        return Err(StoreError(format!("integrity check failed: {check}")));
+    }
+    let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    if !(1..=SCHEMA_VERSION).contains(&version) {
+        return Err(StoreError(format!("unsupported schema version {version}")));
+    }
+    Ok(())
+}
+
+/// Replaces the database at `dest` with the verified backup `from`. The hub must not have `dest` open. The old
+/// file is kept next to it as `<dest>.before-restore` so a wrong restore can be undone.
+pub fn restore(from: &Path, dest: &Path) -> Result<(), StoreError> {
+    verify(from)?;
+    let io = |e: std::io::Error| StoreError(e.to_string());
+    let name = dest
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let tmp = dest.with_file_name(format!("{name}.restoring"));
+    std::fs::copy(from, &tmp).map_err(io)?;
+    if dest.exists() {
+        std::fs::rename(dest, dest.with_file_name(format!("{name}.before-restore"))).map_err(io)?;
+    }
+    // Stale write-ahead files belong to the replaced database and would corrupt the restored one.
+    for ext in ["-wal", "-shm"] {
+        let _ = std::fs::remove_file(dest.with_file_name(format!("{name}{ext}")));
+    }
+    std::fs::rename(&tmp, dest).map_err(io)
 }
 
 impl EventStore for SqliteStore {
@@ -348,5 +416,71 @@ mod tests {
         for p in 0..4 {
             assert_eq!(s.acked(&format!("n{p}")).unwrap(), 50);
         }
+    }
+
+    fn tmpdir(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("agora-hub-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn backup_is_consistent_and_restore_lets_nodes_replay_the_gap() {
+        let d = tmpdir("backup");
+        let live = d.join("hub.db");
+        let s = SqliteStore::open(&live).unwrap();
+        for i in 1..=3 {
+            s.append("n", i, 0, &[i as u8]).unwrap();
+        }
+        s.set_setting("k", b"v").unwrap();
+        let backup = d.join("backup.db");
+        s.backup_to(&backup).unwrap();
+        // Writes after the backup are lost by restoring it, until the node replays them.
+        for i in 4..=5 {
+            s.append("n", i, 0, &[i as u8]).unwrap();
+        }
+        assert!(s.backup_to(&backup).is_err(), "must not overwrite a backup");
+        drop(s);
+
+        restore(&backup, &live).unwrap();
+        assert!(d.join("hub.db.before-restore").exists());
+        let s = SqliteStore::open(&live).unwrap();
+        assert_eq!(s.acked("n").unwrap(), 3);
+        assert_eq!(s.setting("k").unwrap().as_deref(), Some(&b"v"[..]));
+        // The node still holds 4 and 5 and replays them from the hub's new ack.
+        assert_eq!(
+            s.append("n", 4, 0, &[4]).unwrap(),
+            Append::Applied { pos: 4 }
+        );
+        assert_eq!(
+            s.append("n", 5, 0, &[5]).unwrap(),
+            Append::Applied { pos: 5 }
+        );
+        assert_eq!(s.acked("n").unwrap(), 5);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn restore_refuses_a_damaged_or_unrelated_file() {
+        let d = tmpdir("badrestore");
+        let live = d.join("hub.db");
+        SqliteStore::open(&live)
+            .unwrap()
+            .set_setting("k", b"v")
+            .unwrap();
+        let junk = d.join("junk.db");
+        std::fs::write(&junk, b"this is not a database at all, just some bytes").unwrap();
+        assert!(restore(&junk, &live).is_err());
+        let foreign = d.join("foreign.db");
+        Connection::open(&foreign)
+            .unwrap()
+            .execute_batch("CREATE TABLE x (a); PRAGMA user_version = 7;")
+            .unwrap();
+        assert!(restore(&foreign, &live).is_err());
+        // The live database is untouched.
+        let s = SqliteStore::open(&live).unwrap();
+        assert_eq!(s.setting("k").unwrap().as_deref(), Some(&b"v"[..]));
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

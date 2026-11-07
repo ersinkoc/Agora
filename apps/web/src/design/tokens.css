@@ -1,0 +1,68 @@
+/* Design tokens (docs/ux/visual-language.md §3). Components use only these variables, never raw values.
+   Dark-first, light-equal. Color is reserved for agent state and one brand accent. */
+:root {
+  --font-ui: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+
+  --text-12: 12px;
+  --text-13: 13px;
+  --text-14: 14px;
+  --text-16: 16px;
+  --text-20: 20px;
+  --text-28: 28px;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+
+  --radius-s: 6px;
+  --radius-m: 10px;
+  --radius-l: 16px;
+
+  --motion-fast: 150ms;
+  --motion-base: 250ms;
+  --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+:root,
+:root[data-theme='dark'] {
+  --surface-0: #0f1115;
+  --surface-1: #161a20;
+  --surface-2: #1d222a;
+  --border: #2a303a;
+  --text: #e7eaf0;
+  --text-muted: #9aa3b2;
+  --accent: #7aa2ff;
+  --state-working: #6cb6ff;
+  --state-needs-you: #ffb454;
+  --state-finished: #5fd38d;
+  --state-idle: #8b93a1;
+  --state-unknown: #6b7280;
+  color-scheme: dark;
+}
+
+:root[data-theme='light'] {
+  --surface-0: #f6f7f9;
+  --surface-1: #ffffff;
+  --surface-2: #eef0f4;
+  --border: #d6dbe3;
+  --text: #16191f;
+  --text-muted: #566070;
+  --accent: #2f5fd0;
+  --state-working: #1a6fc4;
+  --state-needs-you: #a85d00;
+  --state-finished: #1c7d45;
+  --state-idle: #566070;
+  --state-unknown: #6b7280;
+  color-scheme: light;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --motion-fast: 0ms;
+    --motion-base: 0ms;
+  }
+}

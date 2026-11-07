@@ -25,10 +25,13 @@ acp = { argv = ["example-agent", "--acp"] }   # present = L2 available
 # adapter = "example-agent-adapter"           # present = L3 package from the registry
 
 [mcp]
-# How the node injects the mesh MCP server.
+# How the node hands the agent its own mesh MCP server (docs/specs/mesh-tools.md).
 method = "config_file"                  # config_file | cli_flag | env
-path = "{config_dir}/mcp.json"
-format = "json"
+path = ".mcp.json"                      # config_file, cli_flag: inside the agent's worktree
+format = "json"                         # only json for now
+# flag = ["--mcp-config", "{config_file}"]   # cli_flag: appended to the launch command
+# [mcp.env]                                  # env: variables set for the agent
+# AGORA_MCP_SOCKET = "{socket}"
 
 [hooks]
 # Optional hook installation for session identity and state reports.
@@ -81,3 +84,26 @@ Rule semantics: highest-priority matching rule wins; `all` = AND, `any` = OR, `n
 rule results.
 
 Manifests in this repository (Phase 2): `claude-code`, `codex`, `wrongstack`.
+
+## `[mcp]` injection
+
+Placeholders in `path`, `flag` and `env` values: `{worktree}`, `{socket}` (this agent's mesh socket), `{mcp_command}` (the
+program serving it, `agora`) and `{config_file}` (the file written for `config_file` and `cli_flag`); an unknown placeholder
+is an error. The written JSON is the usual `{"mcpServers": {"agora-mesh": {"command", "args"}}}` with
+`args = ["mesh", "stdio", "--socket", <socket>]`.
+
+Safety: a manifest is third-party input (threat T6), so files are written **only inside the agent's worktree**: `..` and
+absolute paths outside it are refused, no symlink on the path is ever followed (a repository can contain
+`.mcp.json -> ~/.ssh/authorized_keys`: a symlinked file is replaced by a real one, a symlinked directory refuses the start), and
+the written file is added to the worktree's private `info/exclude` so it stays out of `git status`. Flags and variables are
+added at every launch, restarts and resumes included; a resumed agent gets a fresh endpoint. An agent whose manifest has no
+`[mcp]` still joins the mesh. A manifest whose injection fails does not start (it asked for something the node refused).
+
+## `[adapter]` (L3)
+
+`[adapter] command = ["program", "args"...]` (and optional `env`) makes the kind an adapter agent: the node starts the
+process in the agent's own worktree, runs `initialize` and `session/start`, and drives the agent through the adapter protocol
+(`docs/specs/adapter-protocol.md`) instead of a terminal. The adapter's `state/update` is a reported state (it wins over
+anything else); chat items, usage, approval requests and the native session id are passed on as supervisor events; a crash ends the
+agent as `unknown` without touching others. Prompts and verified approval decisions are relayed by the node. Adapter agents have
+no terminal, so terminal commands do not apply to them; restart with backoff is not done yet.

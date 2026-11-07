@@ -60,6 +60,27 @@ fn starts_message(line: &str) -> Option<(&str, &str)> {
     ok.then_some((id, rest.trim_start()))
 }
 
+/// Locales with a translation in this build, besides the English source.
+pub const SUPPORTED_LOCALES: &[&str] = &["en", "tr"];
+
+/// `tr_TR.UTF-8` / `tr-TR` / `TR` -> `tr`.
+pub fn primary_language(tag: &str) -> String {
+    tag.split(['_', '-', '.', '@'])
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase()
+}
+
+/// The user's locale from the environment: `AGORA_LANG` first, then the usual `LC_ALL`, `LC_MESSAGES`, `LANG`.
+/// Empty and `C`/`POSIX` count as unset.
+pub fn locale_from_env() -> String {
+    ["AGORA_LANG", "LC_ALL", "LC_MESSAGES", "LANG"]
+        .iter()
+        .filter_map(|k| std::env::var(k).ok())
+        .find(|v| !v.is_empty() && v != "C" && v != "POSIX")
+        .unwrap_or_else(|| "en".to_string())
+}
+
 impl Catalog {
     /// Parse Fluent source and add its messages (later sources override earlier ones).
     pub fn add_source(&mut self, src: &str) {
@@ -93,7 +114,27 @@ impl Catalog {
         c.add_source(include_str!("../../../locales/en/main.ftl"));
         c.add_source(include_str!("../../../locales/en/errors.ftl"));
         c.add_source(include_str!("../../../locales/en/cli.ftl"));
+        c.add_source(include_str!("../../../locales/en/notify.ftl"));
         c
+    }
+
+    /// The Turkish translation on top of English: a message missing from `locales/tr` falls back to English, key by
+    /// key, so a partly translated locale never shows a bare key.
+    pub fn turkish() -> Self {
+        let mut c = Self::english();
+        c.add_source(include_str!("../../../locales/tr/main.ftl"));
+        c.add_source(include_str!("../../../locales/tr/errors.ftl"));
+        c.add_source(include_str!("../../../locales/tr/cli.ftl"));
+        c.add_source(include_str!("../../../locales/tr/notify.ftl"));
+        c
+    }
+
+    /// The catalog for a locale tag such as `tr`, `tr_TR.UTF-8` or `en-US`; anything unsupported gets English.
+    pub fn for_locale(tag: &str) -> Self {
+        match primary_language(tag).as_str() {
+            "tr" => Self::turkish(),
+            _ => Self::english(),
+        }
     }
 
     pub fn contains(&self, id: &str) -> bool {
@@ -290,5 +331,54 @@ mod tests {
                 assert!(!out.is_empty(), "{id} rendered empty");
             }
         }
+    }
+
+    #[test]
+    fn turkish_overlays_english_and_unknown_locales_fall_back() {
+        let tr = Catalog::for_locale("tr_TR.UTF-8");
+        assert_eq!(
+            tr.render("cli-agent-stopped", &[("agent_id", "a1".into())])
+                .as_deref(),
+            Some("a1 ajanı durduruldu")
+        );
+        assert_eq!(
+            Catalog::for_locale("TR")
+                .render("agent-state-done", &[])
+                .as_deref(),
+            Some("Bitti")
+        );
+        let en = Catalog::for_locale("de-DE");
+        assert_eq!(en.render("agent-state-done", &[]).as_deref(), Some("Done"));
+        assert_eq!(primary_language("en-US"), "en");
+        assert_eq!(primary_language("tr_TR.UTF-8@euro"), "tr");
+    }
+
+    #[test]
+    fn every_turkish_message_renders_cleanly_and_keeps_its_placeholders() {
+        let tr = Catalog::turkish();
+        let en = Catalog::english();
+        for id in en.ids() {
+            let args: Vec<(&str, Arg)> = [
+                "count", "detail", "agent", "machine", "name", "task", "percent", "version",
+                "socket", "agent_id", "worktree", "code", "message", "status", "text", "node_id",
+                "path", "limit", "kind",
+            ]
+            .iter()
+            .map(|k| (*k, Arg::Str("X".into())))
+            .collect();
+            let t = tr
+                .render(id, &args)
+                .unwrap_or_else(|| panic!("{id} missing"));
+            assert!(
+                !t.contains("{ $") && !t.contains("->") && !t.contains("*["),
+                "{id}: {t}"
+            );
+        }
+        // Plural categories work in Turkish too.
+        assert_eq!(
+            tr.render("nodes-connected", &[("count", 1.into())])
+                .as_deref(),
+            Some("1 makine bağlı")
+        );
     }
 }

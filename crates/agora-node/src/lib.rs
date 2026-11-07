@@ -1,10 +1,14 @@
 //! Node daemon: supervises terminals and agents, serves files and git, enforces leases, buffers events while the hub is unreachable.
 
+pub mod approvals;
 pub mod coalesce;
 pub mod control;
 pub mod daemon;
+pub mod doctor;
 pub mod event_buffer;
 pub mod files;
 pub mod git;
+pub mod mesh_server;
 pub mod supervisor;
 pub mod terminal;
+pub mod uplink;

@@ -15,3 +15,11 @@ agora-tui = { path = "../agora-tui" }
 agora-i18n = { path = "../agora-i18n" }
 agora-protocol = { path = "../agora-protocol" }
 agora-platform = { path = "../agora-platform" }
+
+[dev-dependencies]
+# Builds raw protocol frames in the stdio bridge test.
+prost = "0.14"
+# Reads the MCP config the node wrote, in the injection test.
+serde_json = "1"
+# The agent id type used by the hub link test.
+agora-core = { path = "../agora-core" }

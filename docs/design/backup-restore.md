@@ -9,3 +9,9 @@
 - **Node side:** session references and the local event buffer allow agents to be resumed after a node
   restart; worktrees are ordinary git and need no special backup.
 - **Disaster drill:** restore is tested in CI with a scripted multi-node scenario.
+
+## Implementation status
+`agora-hub::store`: `SqliteStore::backup_to` (online, consistent, refuses to overwrite), `verify` (integrity check and
+schema version) and `restore` (verifies first, keeps the replaced file as `<db>.before-restore`, drops stale WAL files).
+A test restores an older backup and replays the gap from the node's side. Not yet: the `agora hub backup|restore`
+commands (they come with the hub binary), scheduled backups with retention, encryption, and the multi-node CI drill.

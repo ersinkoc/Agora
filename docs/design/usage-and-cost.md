@@ -68,6 +68,10 @@ Quota facts are researched continuously, not decided once (backlog `research.md`
 - Collect observed limit events from opt-in users (anonymized: plan id, window, consumption at limit).
 - Every profile entry cites its sources; disagreements are recorded, not hidden.
 
+## Implementation status
+`agora-hub::usage`: models.dev catalog parsing, overrides, exact micro-USD estimates, reported-cost-wins, totals that keep
+reported, estimated and unpriced apart. Not yet: fetching the catalog, the bundled snapshot, quota profiles, the views.
+
 ## Views
 
 Totals per project and day; per agent session; per account; quota bars with confidence; budget alerts through

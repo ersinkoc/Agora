@@ -15,3 +15,22 @@ agora-mesh = { path = "../agora-mesh" }
 agora-i18n = { path = "../agora-i18n" }
 # Embedded SQLite for the hub store (ADR-0014); "bundled" so no system library is needed on any OS.
 rusqlite = { version = "0.32", features = ["bundled"] }
+prost = "0.14"
+# Networking (ADR-0013): tokio runtime, and WebSocket (ADR-0011) via tokio-tungstenite.
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros", "io-util"] }
+tokio-tungstenite = "0.24"
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+# Device certificates (ADR-0015): rcgen issues and signs X.509 certificates.
+rcgen = { version = "0.14", features = ["pem", "x509-parser"] }
+# Certificate validity timestamps (the type rcgen uses).
+time = "0.3"
+# Reads the serial number back from an issued certificate (and verifies chains in tests).
+x509-parser = { version = "0.18", features = ["verify"] }
+# One-time enrollment codes: system randomness (already in the tree via rcgen) and a hash so codes are not stored.
+getrandom = "0.2"
+sha2 = "0.10"
+# Parses the models.dev catalog (ADR-0021).
+serde_json = "1"
+# TLS with client certificates (ADR-0011, ADR-0015). The ring backend is already in the tree via rcgen and avoids a C toolchain.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }

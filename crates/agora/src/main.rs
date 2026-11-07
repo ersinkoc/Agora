@@ -112,9 +112,14 @@ fn socket_path(o: &Opts) -> PathBuf {
 }
 
 fn main() -> ExitCode {
-    let say = Say(Catalog::english());
+    let say = Say(Catalog::for_locale(&agora_i18n::catalog::locale_from_env()));
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let words: Vec<&str> = args.iter().map(String::as_str).take(2).collect();
+    let words: Vec<&str> = args
+        .iter()
+        .map(String::as_str)
+        .take(2)
+        .take_while(|w| !w.starts_with("--"))
+        .collect();
     let rest = args.get(words.len()..).unwrap_or(&[]);
     let Some(opts) = parse(rest) else {
         say.err(key!("cli-bad-arguments"), &[]);
@@ -131,10 +136,121 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
         ["terminal", "attach"] => terminal_attach(&say, &opts),
+        ["doctor"] => doctor(&say, &opts),
+        ["node", "stdio"] => bridge_stdio(&say, &socket_path(&opts)),
+        ["mesh", "stdio"] => match &opts.socket {
+            // An agent's MCP client starts this as its mesh server; the node told it which socket is its own.
+            Some(path) => bridge_stdio(&say, path),
+            None => {
+                say.err(key!("cli-bad-arguments"), &[]);
+                ExitCode::from(2)
+            }
+        },
         _ => {
             say.err(key!("cli-usage"), &[]);
             ExitCode::from(2)
         }
+    }
+}
+
+/// `agora node stdio` and `agora mesh stdio`: carry a local socket over this process's stdin/stdout.
+/// - `node stdio` bridges the node's framed protocol, so a remote hub can reach a node over
+///   `ssh host agora node stdio` with no open port (ADR-0011). The node, its agents and its policy are unchanged, and
+///   it never needs the hub.
+/// - `mesh stdio --socket PATH` is what an agent's MCP client starts as its mesh server: it carries the MCP
+///   conversation to that agent's own endpoint on the node.
+fn bridge_stdio(say: &Say, path: &std::path::Path) -> ExitCode {
+    let Ok(sock) = agora_platform::local_connect(path) else {
+        say.err(
+            key!("cli-node-not-running"),
+            &[("socket", path.display().to_string().into())],
+        );
+        return ExitCode::from(1);
+    };
+    let Ok(mut from_node) = sock.try_clone() else {
+        return ExitCode::from(1);
+    };
+    // node → stdout. Ends when the node closes the connection or the reader below shuts the socket.
+    let out = std::thread::spawn(move || {
+        let mut stdout = std::io::stdout().lock();
+        let mut buf = [0u8; 16 * 1024];
+        while let Ok(n) = from_node.read(&mut buf) {
+            if n == 0
+                || stdout
+                    .write_all(&buf[..n])
+                    .and_then(|()| stdout.flush())
+                    .is_err()
+            {
+                break;
+            }
+        }
+    });
+    // stdin → node. EOF means the remote side hung up: close the socket so the thread above wakes.
+    let mut to_node = sock;
+    let mut stdin = std::io::stdin().lock();
+    let mut buf = [0u8; 16 * 1024];
+    while let Ok(n) = stdin.read(&mut buf) {
+        if n == 0 || to_node.write_all(&buf[..n]).is_err() {
+            break;
+        }
+    }
+    let _ = to_node.shutdown();
+    let _ = out.join();
+    ExitCode::SUCCESS
+}
+
+/// `agora doctor`: checks that explain most "it does not work" reports.
+fn doctor(say: &Say, o: &Opts) -> ExitCode {
+    use agora_node::doctor::{healthy, run, Inputs, Status};
+    let h = home();
+    let checks = run(&Inputs {
+        data_dir: o.data.clone().unwrap_or_else(|| h.join("data")),
+        socket: socket_path(o),
+        manifests_dir: o.manifests.clone().unwrap_or_else(|| h.join("manifests")),
+    });
+    for c in &checks {
+        let sentence = match (c.id, c.status) {
+            ("version", _) => key!("doctor-version"),
+            ("pty", Status::Ok) => key!("doctor-pty"),
+            ("pty", _) => key!("doctor-pty-unsupported"),
+            ("local-sockets", Status::Ok) => key!("doctor-local-sockets"),
+            ("local-sockets", _) => key!("doctor-local-sockets-unsupported"),
+            ("git", Status::Ok) => key!("doctor-git"),
+            ("git", _) => key!("doctor-git-missing"),
+            ("data-dir", Status::Ok) => key!("doctor-data-dir"),
+            ("data-dir", _) => key!("doctor-data-dir-unwritable"),
+            ("node", Status::Ok) => key!("doctor-node"),
+            ("node", _) => key!("doctor-node-not-running"),
+            ("manifests", Status::Ok) => key!("doctor-manifests"),
+            ("manifests", _) => key!("doctor-manifests-missing"),
+            ("agent-installed", _) => key!("doctor-agent-installed"),
+            ("agent-missing", _) => key!("doctor-agent-missing"),
+            _ => key!("doctor-manifest-invalid"),
+        };
+        let detail: Arg = match (c.id, c.detail.parse::<i64>()) {
+            ("manifests", Ok(n)) => Arg::Num(n),
+            _ => c.detail.as_str().into(),
+        };
+        let text = say.text(sentence, &[("detail", detail)]);
+        let status = say.text(
+            match c.status {
+                Status::Ok => key!("doctor-status-ok"),
+                Status::Warn => key!("doctor-status-warn"),
+                Status::Fail => key!("doctor-status-fail"),
+            },
+            &[],
+        );
+        say.out(
+            key!("doctor-line"),
+            &[("status", status.into()), ("text", text.into())],
+        );
+    }
+    if healthy(&checks) {
+        say.out(key!("doctor-summary-ok"), &[]);
+        ExitCode::SUCCESS
+    } else {
+        say.err(key!("doctor-summary-problems"), &[]);
+        ExitCode::from(1)
     }
 }
 
@@ -347,8 +463,23 @@ fn terminal_attach(say: &Say, o: &Opts) -> ExitCode {
             });
     }
 
+    // Follow the window being resized: the loop wakes every 100 ms anyway, so compare the size then (no signal
+    // handling, so it works the same wherever terminals do).
+    let resizer = c.writer().ok();
+    let mut last_size = agora_platform::terminal_size();
     let mut stdout = std::io::stdout();
     loop {
+        let now = agora_platform::terminal_size();
+        if now != last_size {
+            last_size = now;
+            if let (Some(w), Some((cols, rows))) = (&resizer, now) {
+                let _ = w.send(Cmd::TerminalResize(v1::TerminalResize {
+                    terminal_id: terminal_id.clone(),
+                    cols: u32::from(cols),
+                    rows: u32::from(rows),
+                }));
+            }
+        }
         match c.read_frame(Some(Duration::from_millis(100))) {
             Ok(Some(f)) if f.stream_id == TERMINAL_STREAM => match f.kind {
                 KIND_TERM_SNAPSHOT | KIND_TERM_DATA => {

@@ -31,6 +31,11 @@ Every frame: `{ stream_id, kind, seq?, payload }`.
 | 3+ terminal | one per subscribed terminal | ordered | best-effort; resync by snapshot |
 | 3+ file | file transfer | ordered | reliable, chunked |
 
+
+WebSocket mapping (ADR-0011, `agora-hub::transport`): one binary message carries exactly one encoded frame; a message
+with trailing bytes, a partial frame, or a text message is a protocol error. Messages larger than the payload limit
+plus header are refused by the WebSocket layer before they are buffered.
+
 ## 3. Events (node → hub, hub → client)
 
 Events are immutable facts. Each producer numbers its events (`seq`); the hub applies an event at most once
@@ -47,6 +52,43 @@ Hub store (`agora-hub::store`, ADR-0014): SQLite in WAL mode behind an `EventSto
 returns `Applied` (stored, with a global position), `Duplicate` (already applied, ignored) or `Gap { expected }` (not the
 next event; nothing stored, the node replays from `expected`). `acked(producer)` is the acknowledgement to send back.
 Clients page the log by global position. Payloads are opaque encoded events.
+
+Hub node session (`agora-hub::session`): a state machine over decoded messages, independent of transport and framing.
+The producer id is the node's authenticated identity; an event naming another producer is `protocol.invalid_message`.
+Order is `Hello` (role must be node) → `Resume` → events. The hub answers `Resume` with `ResumeOk { from_seq }` where
+`from_seq` is one past what the hub already holds, regardless of what the node claims. Each event yields `Applied`,
+`Duplicate` or `Gap { expected }`.
+
+SSH stdio transport (ADR-0011): `agora node stdio` copies the node's local-socket frames to stdin/stdout, so a hub (or
+a person) can reach a node with `ssh host agora node stdio` and no open port. Frames are exactly those of the local
+control socket; the node's agents and policy are unchanged and nothing depends on the hub.
+Node authentication (`agora-hub::tls`, ADR-0011/0015): the hub's TLS endpoint requires a client certificate issued by
+its own CA. The node's id and certificate serial come from that certificate, not from any message; the session's
+producer id is that node id. A certificate from another authority, or none, never completes the handshake. Revocation
+is checked against the device registry by serial.
+
+Events a node emits (`agora-node::daemon::EventSink`): `NodeOnline` at start and `NodeOffline` on a clean stop; a
+`CheckoutDiscovered` per registered project; `NodeResources` when the running count changes (not on a timer, so an idle
+node is silent; `memory_used_bytes` is 0 until measured); and for each agent `WorktreeCreated`, `AgentStarted`,
+`TerminalOpened` in that order, then `AgentStateChanged` as the screen changes, and on the end `AgentExited` and
+`TerminalClosed` (once). A stop on request reports exit code `i32::MIN` (unknown), the same convention as the terminal
+exit frame. A reader that folds events into a view therefore always sees a workspace before the agent that uses it.
+
+Hub-wide ids: ids in events are local to the machine that made them (`agent-1` exists on every node). The hub's view keys
+every entity by `<producer>/<local id>` (`laptop/agent-1`; node ids are limited to `[A-Za-z0-9._-]`, so the split is
+unambiguous) and uses that key in what it shows clients and when it routes a command back to the owning node.
+
+Node uplink (`agora-node::uplink`): the node's state machine mirrors the hub's session: `Hello` → `Welcome` → `Resume` (carries
+the node's own idea of the ack) → `ResumeOk { from_seq }` (the hub's record decides) → events in batches from the durable buffer.
+A gap from the hub rewinds to `expected`; a `from_seq` older than the buffer keeps (dropped by the size cap) is reported as
+`Stale` so the hub resynchronizes from a snapshot. The hub's ack trims the buffer.
+
+Hub core (`agora-hub::hub`): store, view and subscriber fan-out are one step under one lock, so a subscriber that takes its
+snapshot (or backlog) and registers for live events together sees every event once, in order, even while several nodes
+ingest. A subscriber that falls more than 1024 events behind is dropped, never waited for; it reconnects with the last
+position it saw and gets the backlog, or a snapshot when that position is ahead of the log (a hub restored from an older
+backup). When a node's connection ends without a goodbye the hub records `NodeOffline` itself as producer `hub` (a name no
+node certificate can carry), in the same log, so live and rebuilt views agree.
 
 Initial event families:
 
