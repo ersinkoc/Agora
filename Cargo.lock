@@ -12,6 +12,7 @@ dependencies = [
  "agora-platform",
  "agora-protocol",
  "agora-tui",
+ "prost",
 ]
 
 [[package]]

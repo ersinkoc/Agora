@@ -7,6 +7,7 @@ cli-usage =
       agora agent stop AGENT_ID [--socket PATH]
       agora agent list [--socket PATH]
       agora terminal attach AGENT_ID [--socket PATH]
+      agora node stdio [--socket PATH]
       agora doctor [--data DIR] [--manifests DIR] [--socket PATH]
 cli-node-listening = Node is running. Control socket: { $socket }
 cli-agent-started = Started agent { $agent_id } in { $worktree }

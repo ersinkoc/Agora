@@ -3,6 +3,7 @@
 //! "agent" is a plain `sh` (never a real coding agent).
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -220,4 +221,76 @@ fn doctor_reports_agents_and_exits_zero_on_a_healthy_machine() {
     }
     // No node is running in this setup: a note, not a failure.
     assert!(out.contains("[note] No node is running"), "{out}");
+}
+
+#[test]
+fn node_stdio_carries_the_framed_protocol_over_pipes() {
+    use agora_protocol::frame::DEFAULT_MAX_PAYLOAD;
+    use agora_protocol::v1::{command_request::Command as Cmd, command_response::Result as Res};
+    use agora_protocol::{Decoder, Frame};
+    use prost::Message;
+
+    if !supported() {
+        return;
+    }
+    let s = setup("stdio");
+    let _node = start_node(&s);
+    let mut child = Command::new(AGORA)
+        .args(["node", "stdio"])
+        .env("AGORA_HOME", &s.home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let req = agora_protocol::v1::CommandRequest {
+        request_id: "r1".into(),
+        idempotency_key: String::new(),
+        command: Some(Cmd::AgentStop(agora_protocol::v1::AgentStop {
+            agent_id: "agent-404".into(),
+        })),
+    };
+    let bytes = Frame {
+        stream_id: 1,
+        kind: 0,
+        seq: None,
+        payload: req.encode_to_vec(),
+    }
+    .encode(DEFAULT_MAX_PAYLOAD)
+    .unwrap();
+    child.stdin.as_mut().unwrap().write_all(&bytes).unwrap();
+
+    let mut out = child.stdout.take().unwrap();
+    let mut dec = Decoder::new(DEFAULT_MAX_PAYLOAD);
+    let mut buf = [0u8; 4096];
+    let frame = loop {
+        let n = out.read(&mut buf).unwrap();
+        assert!(n > 0, "bridge closed before answering");
+        dec.push(&buf[..n]);
+        if let Some(f) = dec.next_frame().unwrap() {
+            break f;
+        }
+    };
+    assert_eq!((frame.stream_id, frame.kind), (1, 1));
+    let resp = agora_protocol::v1::CommandResponse::decode(frame.payload.as_slice()).unwrap();
+    assert_eq!(resp.request_id, "r1");
+    match resp.result {
+        Some(Res::Err(e)) => assert_eq!(e.code, "agent.not_found"),
+        other => panic!("expected agent.not_found, got {other:?}"),
+    }
+    // The remote side hanging up ends the bridge.
+    drop(child.stdin.take());
+    let status = child.wait().unwrap();
+    assert!(status.success());
+}
+
+#[test]
+fn node_stdio_without_a_node_says_so() {
+    if !supported() {
+        return;
+    }
+    let s = setup("stdio-none");
+    let (code, _, err) = cli(&s, &["node", "stdio"]);
+    assert_eq!(code, 1);
+    assert!(err.contains("No node is listening"), "{err}");
 }

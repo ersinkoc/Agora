@@ -137,11 +137,56 @@ fn main() -> ExitCode {
         }
         ["terminal", "attach"] => terminal_attach(&say, &opts),
         ["doctor"] => doctor(&say, &opts),
+        ["node", "stdio"] => node_stdio(&say, &opts),
         _ => {
             say.err(key!("cli-usage"), &[]);
             ExitCode::from(2)
         }
     }
+}
+
+/// `agora node stdio`: carries the node's framed protocol over this process's stdin/stdout, so a remote hub can
+/// reach a node over `ssh host agora node stdio` with no open port (ADR-0011). It bridges to the node already
+/// running on this machine; the node, its agents and its policy are unchanged, and it never needs the hub.
+fn node_stdio(say: &Say, o: &Opts) -> ExitCode {
+    let path = socket_path(o);
+    let Ok(sock) = agora_platform::local_connect(&path) else {
+        say.err(
+            key!("cli-node-not-running"),
+            &[("socket", path.display().to_string().into())],
+        );
+        return ExitCode::from(1);
+    };
+    let Ok(mut from_node) = sock.try_clone() else {
+        return ExitCode::from(1);
+    };
+    // node → stdout. Ends when the node closes the connection or the reader below shuts the socket.
+    let out = std::thread::spawn(move || {
+        let mut stdout = std::io::stdout().lock();
+        let mut buf = [0u8; 16 * 1024];
+        while let Ok(n) = from_node.read(&mut buf) {
+            if n == 0
+                || stdout
+                    .write_all(&buf[..n])
+                    .and_then(|()| stdout.flush())
+                    .is_err()
+            {
+                break;
+            }
+        }
+    });
+    // stdin → node. EOF means the remote side hung up: close the socket so the thread above wakes.
+    let mut to_node = sock;
+    let mut stdin = std::io::stdin().lock();
+    let mut buf = [0u8; 16 * 1024];
+    while let Ok(n) = stdin.read(&mut buf) {
+        if n == 0 || to_node.write_all(&buf[..n]).is_err() {
+            break;
+        }
+    }
+    let _ = to_node.shutdown();
+    let _ = out.join();
+    ExitCode::SUCCESS
 }
 
 /// `agora doctor`: checks that explain most "it does not work" reports.
