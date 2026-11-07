@@ -1,12 +1,13 @@
 # 0010. Wire encoding per surface
-Status: Proposed
+Status: Accepted
 Date: 2026-11-06
+Accepted: 2026-11-07
 
 ## Context
 Node ↔ hub carries high-volume terminal output and events. Client ↔ hub serves browsers. Adapters are
 written by third parties in any language and should not need a protobuf toolchain.
 
-## Decision (proposed)
+## Decision
 | Surface | Encoding |
 | --- | --- |
 | node ↔ hub | protobuf binary frames; terminal output as raw byte frames on dedicated streams |
