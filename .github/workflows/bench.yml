@@ -23,6 +23,17 @@ jobs:
         with:
           name: bench-${{ github.sha }}
           path: bench-head.json
+      # Footprint of a node with 50 terminals against the budgets in docs/design/performance.md. Informational
+      # for now (shared runners are noisy); the numbers are recorded as an artifact.
+      - name: Node footprint
+        continue-on-error: true
+        run: cargo run -q --release -p agora-bench -- footprint --commit "${{ github.sha }}" --out footprint.json --check
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: footprint-${{ github.sha }}
+          path: footprint.json
+          if-no-files-found: ignore
       # Regression gate (ADR-0022): on PRs, build the base commit and compare on the same runner.
       - name: Benchmark base and compare
         if: github.event_name == 'pull_request'

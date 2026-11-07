@@ -15,3 +15,8 @@ serde_json = "1"
 agora-platform = { path = "../crates/agora-platform" }
 agora-vt = { path = "../crates/agora-vt" }
 agora-fake-agent = { path = "../crates/agora-fake-agent" }
+# Footprint measurement runs a real node in-process (P2-15).
+agora-node = { path = "../crates/agora-node" }
+agora-adapters = { path = "../crates/agora-adapters" }
+agora-core = { path = "../crates/agora-core" }
+agora-protocol = { path = "../crates/agora-protocol" }

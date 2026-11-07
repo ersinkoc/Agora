@@ -4,6 +4,8 @@
 //! and `terminals-20` run the real path: the fake agent floods a PTY and every chunk is fed to the VT backend,
 //! for one terminal and for twenty concurrent ones (`design/performance.md`).
 
+pub mod footprint;
+
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};

@@ -351,7 +351,7 @@ impl Supervisor {
             return;
         };
 
-        let exit = term.snapshot().exit;
+        let exit = term.exit_status();
         if let Some(status) = exit {
             events.push(SupervisorEvent::Exited {
                 agent: id.clone(),
