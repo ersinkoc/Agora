@@ -34,6 +34,27 @@ recalibrated at the Phase 2 and Phase 3 exits, never relaxed silently.
 | Cold start | node ≤ 200 ms; hub ≤ 500 ms; client first useful paint ≤ 1.5 s (≤ 500 ms cached) |
 | Single binary incl. web assets | ≤ 40 MB per platform |
 
+### Measured at the Phase 2 exit (node, Linux, development machine)
+
+`cargo run --release -p agora-bench -- footprint` runs a real node with 50 terminals (`--terminals`) and checks the
+budgets above; CI runs it as an informational step and stores `footprint.json`. Nothing was relaxed.
+
+| Budget | Result | Note |
+| --- | --- | --- |
+| Node base memory ≤ 50 MB | 4 MB | node in-process, no terminals |
+| Memory per terminal ≤ 10 MB | 0.14 MB idle, 3.9 MB with 3000 lines printed | default 2000-line scrollback; shells are separate processes and not counted |
+| Idle CPU ≤ 1% | 0.2–0.4% | 50 idle terminals, supervision ticking |
+| Node cold start ≤ 200 ms | 10 ms | start until the control socket answers a command, in-process |
+| Keystroke → echo, same machine ≤ 16 ms | 0.06–0.2 ms p95 | node portion only (no client, no network) |
+
+Not measured yet: hub budgets and client rendering (Phase 3), binary size with web assets, process start (exec) in
+the cold-start figure, macOS and Windows numbers (CI will show macOS-agnostic regressions only through tests).
+
+The first run found idle CPU at 8.7% and keystroke echo at 5 ms: every terminal actor woke 200 times per second to
+poll for commands, and the supervisor copied a full screen per agent per tick just to read an exit status. Input,
+resize and kill now go straight to the PTY on the caller's thread (`PtyControl`), the actor blocks on output, and
+the supervisor reads the exit status without copying anything.
+
 ## 2. Tactics
 
 ### Data path

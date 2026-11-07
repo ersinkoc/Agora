@@ -5,7 +5,9 @@ use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use crate::{ExitStatus, Pty, PtyConfig};
@@ -20,6 +22,60 @@ struct UnixPty {
     output: Receiver<Vec<u8>>,
     reader: Option<JoinHandle<()>>,
     exited: bool,
+    /// Set once the child is reaped; shared with [`UnixControl`] so a late `kill` cannot hit a recycled pid.
+    reaped: Arc<AtomicBool>,
+}
+
+/// [`crate::PtyControl`] over duplicated master descriptors.
+struct UnixControl {
+    /// Serializes concurrent input writes; `resize` and `kill` do not take it.
+    input: Mutex<File>,
+    master: File,
+    pid: u32,
+    reaped: Arc<AtomicBool>,
+}
+
+impl crate::PtyControlOps for UnixControl {
+    fn write_input(&self, bytes: &[u8]) -> io::Result<()> {
+        let mut f = self.input.lock().unwrap_or_else(|e| e.into_inner());
+        f.write_all(bytes)
+    }
+
+    fn resize(&self, cols: u16, rows: u16) -> io::Result<()> {
+        let ws = winsize(cols, rows);
+        // SAFETY: valid master fd and a pointer to a live winsize.
+        cvt(unsafe { libc::ioctl(self.master.as_raw_fd(), libc::TIOCSWINSZ as _, &ws) }).map(|_| ())
+    }
+
+    fn kill(&self) -> io::Result<()> {
+        if self.reaped.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        kill_group(self.pid)
+    }
+
+    fn foreground_pid(&self) -> io::Result<u32> {
+        // SAFETY: valid master fd.
+        let pgid = cvt(unsafe { libc::tcgetpgrp(self.master.as_raw_fd()) })?;
+        Ok(pgid as u32)
+    }
+
+    fn pid(&self) -> u32 {
+        self.pid
+    }
+}
+
+fn kill_group(pid: u32) -> io::Result<()> {
+    // SAFETY: signalling a process group we created with setsid.
+    let r = unsafe { libc::killpg(pid as libc::pid_t, libc::SIGKILL) };
+    if r < 0 {
+        let e = io::Error::last_os_error();
+        // The group is already gone: nothing left to kill.
+        if e.raw_os_error() != Some(libc::ESRCH) {
+            return Err(e);
+        }
+    }
+    Ok(())
 }
 
 fn winsize(cols: u16, rows: u16) -> libc::winsize {
@@ -200,6 +256,7 @@ pub(crate) fn spawn(config: &PtyConfig) -> io::Result<Box<dyn Pty>> {
         output,
         reader: Some(reader),
         exited: false,
+        reaped: Arc::new(AtomicBool::new(false)),
     }))
 }
 
@@ -226,29 +283,34 @@ impl Pty for UnixPty {
         if self.exited {
             return Ok(());
         }
-        let pgid = self.child.id() as libc::pid_t;
-        // SAFETY: signalling a process group we created with setsid.
-        let r = unsafe { libc::killpg(pgid, libc::SIGKILL) };
-        if r < 0 {
-            let e = io::Error::last_os_error();
-            // The group is already gone: nothing left to kill.
-            if e.raw_os_error() != Some(libc::ESRCH) {
-                return Err(e);
-            }
-        }
-        Ok(())
+        kill_group(self.child.id())
     }
 
     fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
         let s = self.child.try_wait()?.map(status);
-        self.exited |= s.is_some();
+        if s.is_some() {
+            self.exited = true;
+            self.reaped.store(true, Ordering::Release);
+        }
         Ok(s)
     }
 
     fn wait(&mut self) -> io::Result<ExitStatus> {
         let s = status(self.child.wait()?);
         self.exited = true;
+        self.reaped.store(true, Ordering::Release);
         Ok(s)
+    }
+
+    fn control(&self) -> io::Result<crate::PtyControl> {
+        Ok(crate::PtyControl {
+            inner: Arc::new(UnixControl {
+                input: Mutex::new(self.writer.try_clone()?),
+                master: self.writer.try_clone()?,
+                pid: self.child.id(),
+                reaped: Arc::clone(&self.reaped),
+            }),
+        })
     }
 
     fn foreground_pid(&self) -> io::Result<u32> {
@@ -269,6 +331,7 @@ impl Drop for UnixPty {
             drop(std::mem::replace(&mut self.writer, null));
         }
         let _ = self.child.wait();
+        self.reaped.store(true, Ordering::Release);
         // Do not join the reader: a descendant that outlived the group could keep the PTY open.
         drop(self.reader.take());
     }
@@ -476,6 +539,34 @@ mod tests {
         }
         stop.store(true, Ordering::Relaxed);
         spawner.join().expect("spawner");
+    }
+
+    #[test]
+    fn control_works_from_another_thread_while_output_is_read_elsewhere() {
+        let mut p = spawn(&PtyConfig::new(vec![
+            "sh".into(),
+            "-c".into(),
+            "stty size; cat".into(),
+        ]))
+        .expect("spawn");
+        let control = p.control().expect("control");
+        assert_eq!(control.pid(), p.pid());
+        // Input, resize and kill all go through the control while `p` is only read.
+        control.resize(97, 31).expect("resize");
+        control.write_input(b"ping\n").expect("write");
+        let mut out = String::new();
+        let end = Instant::now() + Duration::from_secs(5);
+        while !out.contains("ping") && Instant::now() < end {
+            if let Ok(c) = p.output().recv_timeout(Duration::from_millis(100)) {
+                out.push_str(&String::from_utf8_lossy(&c));
+            }
+        }
+        assert!(out.contains("ping"), "{out:?}");
+        assert!(control.foreground_pid().is_ok());
+        control.kill().expect("kill");
+        p.wait().expect("wait");
+        // After the child is reaped, a late kill is a harmless no-op (it must not signal a recycled pid).
+        control.kill().expect("late kill");
     }
 
     #[test]

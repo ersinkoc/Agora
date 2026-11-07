@@ -1,26 +1,20 @@
 //! Terminal actor: one I/O thread per terminal (ADR-0013).
 //!
 //! Data path: PTY reader thread → bounded channel → this actor → VT feed → [`Snapshot`]s. The actor owns the
-//! [`Pty`]; callers send input, resize and kill through a command channel. Before every output chunk the
-//! actor drains pending commands, so input outranks output and a flooding terminal only ever delays its own
-//! rendering. Terminal bytes never go through the event store (AGENTS.md).
+//! [`Pty`] and only consumes output, blocking until some arrives (an idle terminal costs no wakeups). Input,
+//! resize and kill go straight to the PTY through a [`PtyControl`] on the caller's thread, so input never waits
+//! behind output processing and a flooding terminal only ever delays its own rendering. Terminal bytes never
+//! go through the event store (AGENTS.md).
 
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{
-    sync_channel, Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError,
-};
+use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use agora_platform::{ExitStatus, Pty};
+use agora_platform::{ExitStatus, Pty, PtyControl};
 use agora_vt::{AlacrittyTerminal, Cursor, Modes, Size, Terminal};
-
-/// Commands waiting for the actor; bounded so a stuck child pushes back on writers instead of growing memory.
-const COMMANDS: usize = 256;
-/// How long the actor waits for output before checking commands and the child again.
-const TICK: Duration = Duration::from_millis(5);
 
 /// Settings for a terminal actor.
 #[derive(Debug, Clone, Copy)]
@@ -78,12 +72,6 @@ impl Snapshot {
         );
         out
     }
-}
-
-enum Command {
-    Input(Vec<u8>),
-    Resize(Size),
-    Kill,
 }
 
 /// Chunks a subscriber may have queued before it is marked as lagging (16 KiB each at most).
@@ -177,7 +165,7 @@ fn snapshot_of(s: &Shared) -> Snapshot {
 /// Handle to a running terminal actor. Dropping it kills the process and stops the actor.
 pub struct TerminalHandle {
     inner: Arc<Inner>,
-    commands: SyncSender<Command>,
+    control: Option<PtyControl>,
     pid: u32,
     thread: Option<JoinHandle<()>>,
 }
@@ -186,6 +174,7 @@ impl TerminalHandle {
     /// Take ownership of a running PTY and start its actor.
     pub fn start(pty: Box<dyn Pty>, options: TerminalOptions) -> io::Result<Self> {
         let pid = pty.pid();
+        let control = pty.control()?;
         let term = AlacrittyTerminal::with_scrollback(options.size, options.scrollback);
         let inner = Arc::new(Inner {
             shared: Mutex::new(Shared {
@@ -196,14 +185,13 @@ impl TerminalHandle {
             }),
             changed: Condvar::new(),
         });
-        let (commands, rx) = sync_channel(COMMANDS);
         let actor_inner = Arc::clone(&inner);
         let thread = std::thread::Builder::new()
             .name("agora-terminal".into())
-            .spawn(move || run(pty, &actor_inner, &rx))?;
+            .spawn(move || run(pty, &actor_inner))?;
         Ok(Self {
             inner,
-            commands,
+            control: Some(control),
             pid,
             thread: Some(thread),
         })
@@ -213,24 +201,34 @@ impl TerminalHandle {
         self.pid
     }
 
-    /// Queue input for the process. Blocks only if 256 commands are already waiting.
-    pub fn send_input(&self, bytes: Vec<u8>) -> io::Result<()> {
-        self.send(Command::Input(bytes))
+    fn control(&self) -> io::Result<&PtyControl> {
+        self.control
+            .as_ref()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "terminal stopped"))
     }
 
+    /// Send input to the process, immediately and on the caller's thread. Blocks only while the process is
+    /// not reading and the terminal's input queue is full.
+    pub fn send_input(&self, bytes: Vec<u8>) -> io::Result<()> {
+        self.control()?.write_input(&bytes)
+    }
+
+    /// Resize the terminal. The PTY and the screen change together, between two output chunks.
     pub fn resize(&self, size: Size) -> io::Result<()> {
-        self.send(Command::Resize(size))
+        let control = self.control()?;
+        let mut g = self.inner.lock();
+        control.resize(size.cols, size.rows)?;
+        g.term.resize(size);
+        broadcast(&mut g, &Output::Resize(size));
+        g.seq += 1;
+        drop(g);
+        self.inner.changed.notify_all();
+        Ok(())
     }
 
     /// Kill the process and its group.
     pub fn kill(&self) -> io::Result<()> {
-        self.send(Command::Kill)
-    }
-
-    fn send(&self, c: Command) -> io::Result<()> {
-        self.commands
-            .send(c)
-            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "terminal actor stopped"))
+        self.control()?.kill()
     }
 
     /// Run `f` against the live terminal (for screen detection) without copying it. Keep `f` short: it holds
@@ -263,6 +261,11 @@ impl TerminalHandle {
         snapshot_of(&g)
     }
 
+    /// How the process ended, once it has. Cheap: no screen is copied (the supervisor polls this).
+    pub fn exit_status(&self) -> Option<ExitStatus> {
+        self.inner.lock().exit
+    }
+
     pub fn snapshot(&self) -> Snapshot {
         snapshot_of(&self.inner.lock())
     }
@@ -290,10 +293,11 @@ impl TerminalHandle {
 
 impl Drop for TerminalHandle {
     fn drop(&mut self) {
-        let _ = self.commands.try_send(Command::Kill);
-        // Closing the command channel makes the actor exit once its drain is done.
-        let (dead, _) = sync_channel(1);
-        drop(std::mem::replace(&mut self.commands, dead));
+        // Kill first, then release our copy of the PTY before waiting for the actor: a child blocked
+        // writing into a full terminal can only finish dying once every copy of the master is closed.
+        if let Some(c) = self.control.take() {
+            let _ = c.kill();
+        }
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
@@ -308,50 +312,29 @@ fn bump(inner: &Inner, f: impl FnOnce(&mut Shared)) {
     inner.changed.notify_all();
 }
 
-fn run(mut pty: Box<dyn Pty>, inner: &Inner, commands: &std::sync::mpsc::Receiver<Command>) {
-    let mut commands_open = true;
+/// How often an idle actor checks that the child still exists. Normally the output channel closing ends the
+/// loop at once; this only matters when a descendant that escaped the process group keeps the PTY open.
+const IDLE_CHECK: Duration = Duration::from_secs(1);
+
+fn run(mut pty: Box<dyn Pty>, inner: &Inner) {
     loop {
-        // Input first: drain everything queued before touching output.
-        while commands_open {
-            match commands.try_recv() {
-                Ok(Command::Input(b)) => {
-                    let _ = pty.write_input(&b);
-                }
-                Ok(Command::Resize(size)) => {
-                    let _ = pty.resize(size.cols, size.rows);
-                    bump(inner, |s| {
-                        s.term.resize(size);
-                        broadcast(s, &Output::Resize(size));
-                    });
-                }
-                Ok(Command::Kill) => {
-                    let _ = pty.kill();
-                }
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
-                    commands_open = false;
-                    let _ = pty.kill();
-                }
-            }
-        }
-        match pty.output().recv_timeout(TICK) {
+        match pty.output().recv_timeout(IDLE_CHECK) {
             Ok(chunk) => bump(inner, |s| {
                 s.term.feed(&chunk);
                 if !s.subscribers.is_empty() {
                     broadcast(s, &Output::Data(Arc::from(chunk)));
                 }
             }),
-            Err(RecvTimeoutError::Timeout) => {}
+            // Closed: the process side of the terminal is gone (killed or exited).
             Err(RecvTimeoutError::Disconnected) => break,
-        }
-        if !commands_open {
-            // The handle is gone: keep draining output until the process is gone, but do not linger.
-            if matches!(pty.try_wait(), Ok(Some(_))) {
-                break;
+            Err(RecvTimeoutError::Timeout) => {
+                if matches!(pty.try_wait(), Ok(Some(_))) {
+                    break;
+                }
             }
         }
     }
-    // Output is closed: collect everything the process printed, then record how it ended.
+    // Collect everything the process printed, then record how it ended.
     let status = pty.wait().ok();
     bump(inner, |s| {
         s.exit = status;

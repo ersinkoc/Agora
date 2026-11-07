@@ -279,6 +279,43 @@ impl ExitStatus {
     }
 }
 
+/// Operations on a running PTY that do not need exclusive access to it, so they can be used from any thread
+/// while another thread reads its output. Input never waits behind output processing, and `kill` never waits
+/// behind a blocked input write (ADR-0013: input outranks output).
+#[derive(Clone)]
+pub struct PtyControl {
+    inner: std::sync::Arc<dyn PtyControlOps>,
+}
+
+pub(crate) trait PtyControlOps: Send + Sync {
+    fn write_input(&self, bytes: &[u8]) -> io::Result<()>;
+    fn resize(&self, cols: u16, rows: u16) -> io::Result<()>;
+    fn kill(&self) -> io::Result<()>;
+    fn foreground_pid(&self) -> io::Result<u32>;
+    fn pid(&self) -> u32;
+}
+
+impl PtyControl {
+    /// Send input to the process. Blocks while the process is not reading and the terminal's input queue is
+    /// full; `resize` and `kill` are unaffected.
+    pub fn write_input(&self, bytes: &[u8]) -> io::Result<()> {
+        self.inner.write_input(bytes)
+    }
+    pub fn resize(&self, cols: u16, rows: u16) -> io::Result<()> {
+        self.inner.resize(cols, rows)
+    }
+    /// Kill the child and its process group. A no-op once the child has been reaped.
+    pub fn kill(&self) -> io::Result<()> {
+        self.inner.kill()
+    }
+    pub fn foreground_pid(&self) -> io::Result<u32> {
+        self.inner.foreground_pid()
+    }
+    pub fn pid(&self) -> u32 {
+        self.inner.pid()
+    }
+}
+
 /// A process running in a PTY.
 ///
 /// Output is read on a dedicated OS thread and delivered through a bounded channel in chunks of at most
@@ -300,6 +337,9 @@ pub trait Pty: Send {
     fn wait(&mut self) -> io::Result<ExitStatus>;
     /// Process id of the terminal's foreground process group leader (what the user sees running).
     fn foreground_pid(&self) -> io::Result<u32>;
+    /// A cloneable handle for input, resize and kill that works while another thread owns this `Pty` and
+    /// reads its output.
+    fn control(&self) -> io::Result<PtyControl>;
 }
 
 /// One process in a tree.
@@ -337,6 +377,28 @@ pub fn process_cwd(pid: u32) -> io::Result<PathBuf> {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         procinfo::cwd(pid)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = pid;
+        Err(unsupported())
+    }
+}
+
+/// Memory and CPU use of a process, for footprint measurement and resource reporting.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ProcessStats {
+    /// Resident set size in bytes.
+    pub rss_bytes: u64,
+    /// CPU time used so far (user + system) in seconds.
+    pub cpu_seconds: f64,
+}
+
+/// Current memory and CPU use of process `pid` (use `std::process::id()` for this process).
+pub fn process_stats(pid: u32) -> io::Result<ProcessStats> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        procinfo::stats(pid)
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
@@ -400,6 +462,22 @@ pub fn spawn(config: &PtyConfig) -> io::Result<Box<dyn Pty>> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod procinfo_tests {
     use super::*;
+
+    #[test]
+    fn own_process_stats_are_plausible_and_cpu_time_grows() {
+        let a = process_stats(std::process::id()).expect("stats");
+        assert!(a.rss_bytes > 100_000, "{a:?}");
+        // Burn a little CPU; cpu_seconds must not go backwards (and normally goes up).
+        let mut x = 0u64;
+        let t = std::time::Instant::now();
+        while t.elapsed() < Duration::from_millis(300) {
+            x = x.wrapping_mul(31).wrapping_add(1);
+        }
+        std::hint::black_box(x);
+        let b = process_stats(std::process::id()).expect("stats");
+        assert!(b.cpu_seconds >= a.cpu_seconds, "{a:?} {b:?}");
+        assert!(process_stats(u32::MAX - 1).is_err());
+    }
     use std::time::{Duration, Instant};
 
     fn wait_until(what: &str, mut f: impl FnMut() -> bool) {

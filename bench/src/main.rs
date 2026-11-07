@@ -19,6 +19,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Some("run") => run(&args[1..]),
+        Some("footprint") => footprint(&args[1..]),
         Some("compare") => cmp(&args[1..]),
         _ => {
             eprintln!("usage: agora-bench run [--out F] [--secs N] [--commit SHA] [scenario...] | compare BASE NEW [--threshold PCT]");
@@ -127,5 +128,70 @@ fn cmp(args: &[String]) -> ExitCode {
             eprintln!("agora-bench: {e}");
             ExitCode::from(2)
         }
+    }
+}
+
+/// `agora-bench footprint [--terminals N] [--idle-secs S] [--commit SHA] [--out FILE] [--check]`
+/// Measures a node against the footprint budgets (P2-15). With `--check`, exits 1 if any budget is exceeded.
+fn footprint(args: &[String]) -> ExitCode {
+    let (mut terminals, mut idle_secs, mut commit, mut out, mut check) =
+        (50usize, 5u64, "unknown".to_string(), None, false);
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--terminals" => {
+                terminals = it.next().and_then(|s| s.parse().ok()).unwrap_or(terminals)
+            }
+            "--idle-secs" => {
+                idle_secs = it.next().and_then(|s| s.parse().ok()).unwrap_or(idle_secs)
+            }
+            "--commit" => commit = it.next().cloned().unwrap_or(commit),
+            "--out" => out = it.next().cloned(),
+            "--check" => check = true,
+            _ => {
+                eprintln!("usage: agora-bench footprint [--terminals N] [--idle-secs S] [--commit SHA] [--out FILE] [--check]");
+                return ExitCode::from(2);
+            }
+        }
+    }
+    let report =
+        match agora_bench::footprint::run(terminals, Duration::from_secs(idle_secs), &commit) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("agora-bench: footprint: {e}");
+                return ExitCode::from(1);
+            }
+        };
+    let mut failed = false;
+    for b in agora_bench::footprint::budgets(&report) {
+        failed |= !b.ok();
+        println!(
+            "{:<28} {:>9.2} {:<2} (budget {:>6.1} {:<2}) {}",
+            b.name,
+            b.value,
+            b.unit,
+            b.limit,
+            b.unit,
+            if b.ok() { "ok" } else { "OVER BUDGET" }
+        );
+    }
+    if let Some(path) = out {
+        match serde_json::to_string_pretty(&report) {
+            Ok(j) => {
+                if let Err(e) = std::fs::write(&path, j) {
+                    eprintln!("agora-bench: {path}: {e}");
+                    return ExitCode::from(1);
+                }
+            }
+            Err(e) => {
+                eprintln!("agora-bench: {e}");
+                return ExitCode::from(1);
+            }
+        }
+    }
+    if check && failed {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
     }
 }

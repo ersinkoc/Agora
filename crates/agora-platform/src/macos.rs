@@ -4,6 +4,40 @@ use std::ffi::CStr;
 use std::io;
 use std::path::PathBuf;
 
+pub(crate) fn stats(pid: u32) -> io::Result<crate::ProcessStats> {
+    // SAFETY: an all-zero proc_taskinfo is a valid buffer for the kernel to fill.
+    let mut info: libc::proc_taskinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_taskinfo>() as i32;
+    // SAFETY: the buffer is a live proc_taskinfo of `size` bytes.
+    let n = unsafe {
+        libc::proc_pidinfo(
+            pid as i32,
+            libc::PROC_PIDTASKINFO,
+            0,
+            (&mut info as *mut libc::proc_taskinfo).cast(),
+            size,
+        )
+    };
+    if n <= 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // CPU times are in mach absolute-time units: nanoseconds on Intel, a different tick on Apple silicon.
+    // SAFETY: an all-zero mach_timebase_info is a valid out-buffer.
+    let mut tb: libc::mach_timebase_info = unsafe { std::mem::zeroed() };
+    // SAFETY: valid out-pointer.
+    unsafe { libc::mach_timebase_info(&mut tb) };
+    let (numer, denom) = if tb.denom == 0 {
+        (1, 1)
+    } else {
+        (u64::from(tb.numer), u64::from(tb.denom))
+    };
+    let ns = (info.pti_total_user + info.pti_total_system) as f64 * numer as f64 / denom as f64;
+    Ok(crate::ProcessStats {
+        rss_bytes: info.pti_resident_size,
+        cpu_seconds: ns / 1e9,
+    })
+}
+
 pub(crate) fn name(pid: u32) -> io::Result<String> {
     let mut buf = [0u8; 256];
     // SAFETY: the buffer is valid for `buf.len()` bytes.
