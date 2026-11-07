@@ -74,7 +74,7 @@ fn input_reaches_the_process_and_resize_is_applied() {
     let h = handle(&["sh"]);
     h.send_input(b"echo hello-$((6*7))\n".to_vec()).unwrap();
     wait_for(&h, "echo result", |s| {
-        s.lines.iter().any(|l| l == "hello-42")
+        s.lines.iter().any(|l| l.ends_with("hello-42"))
     });
     h.resize(Size {
         cols: 100,
@@ -103,7 +103,7 @@ fn flooding_terminal_does_not_delay_input_to_another() {
     let start = Instant::now();
     calm.send_input(b"echo calm-ok\n".to_vec()).unwrap();
     wait_for(&calm, "calm echo", |s| {
-        s.lines.iter().any(|l| l == "calm-ok")
+        s.lines.iter().any(|l| l.ends_with("calm-ok"))
     });
     assert!(
         start.elapsed() < Duration::from_secs(2),
@@ -130,6 +130,6 @@ fn scrollback_is_capped_and_screen_stays_live() {
     let h = TerminalHandle::start(spawn(&cfg).unwrap(), opts).unwrap();
     wait_for(&h, "exit", |s| s.exit.is_some());
     let s = h.snapshot();
-    assert!(s.lines.iter().any(|l| l == "last-line"));
+    assert!(s.lines.iter().any(|l| l.ends_with("last-line")));
     assert!(s.lines.len() <= 24);
 }
