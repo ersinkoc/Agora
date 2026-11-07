@@ -47,3 +47,4 @@ Date: YYYY-MM-DD
 | 0027 | Hub snapshot, client subscription and enrollment messages | Accepted |
 | 0028 | Approval signatures: ECDSA P-256 | Accepted |
 | 0029 | Command routing and terminal relay through the hub | Accepted |
+| 0030 | `agent.kinds` command: which agents a node can start | Proposed |
