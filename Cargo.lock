@@ -68,6 +68,7 @@ dependencies = [
  "rcgen",
  "rusqlite",
  "rustls",
+ "serde_json",
  "sha2",
  "time",
  "tokio",
