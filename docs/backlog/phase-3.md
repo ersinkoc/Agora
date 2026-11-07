@@ -14,7 +14,7 @@ agent accounts, usability sessions with people) are marked and skipped, never fa
 | P3-04 hub server | next | accept nodes, run sessions, store events |
 | P3-05 node uplink | next | node dials hub, replays its buffer after the hub's `from_seq` |
 | P3-06 enrollment and mTLS | next | one-time code, device keys, certificates (ADR-0015) |
-| P3-07 projections and snapshot | next | nodes, projects, agents derived from the event log |
+| P3-07 projections and snapshot | done (view) | `View` folds events; snapshot encoding needs a schema message (ADR to come) |
 | P3-08 client API | next | session tokens, snapshot + event subscription, command routing to nodes |
 | P3-09 terminal relay | next | terminal streams node → hub → client (input outranks output) |
 | P3-10 web client shell | next | design tokens, component gallery, store, Home, Focus view (ADR-0017, ADR-0024) |
