@@ -1,8 +1,9 @@
 # 0014. Hub storage
-Status: Proposed
+Status: Accepted
 Date: 2026-11-06
+Accepted: 2026-11-07
 
-## Decision (proposed)
+## Decision
 - A storage trait in `agora-hub` with an append-only event log, projections, and key-value settings.
 - First backend: embedded SQLite (WAL mode). Covers local and single-team server deployments.
 - Postgres backend added for team/cloud mode (Phase 7) behind the same trait.
