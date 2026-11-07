@@ -1,6 +1,7 @@
 # 0009. Schema format: Protocol Buffers as the IDL
-Status: Proposed
+Status: Accepted
 Date: 2026-11-06
+Accepted: 2026-11-07
 
 ## Context
 ADR-0006 requires one schema generating Rust, TypeScript, Go, and Python, with append-only evolution, a
@@ -14,7 +15,7 @@ Options:
 - **Custom IDL + own generator.** Full control and no external toolchain; months of work and a permanent
   maintenance burden before the first feature.
 
-## Decision (proposed)
+## Decision
 Use Protocol Buffers (proto3) as the IDL. Generate Rust code at build time with a pure-Rust generator so
 contributors do not need `protoc`. Use the canonical proto3 JSON mapping for the adapter protocol and debug
 mode. Lint schema changes with a breaking-change checker in CI.
