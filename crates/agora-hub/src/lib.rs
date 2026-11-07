@@ -1,1 +1,3 @@
-//! Hub: identity and device enrollment, event store and projections, routing, approvals, mesh broker, notifications, web asset serving.
+//! The hub: identity, routing, event store, approvals (docs/architecture.md).
+
+pub mod store;
