@@ -8,5 +8,6 @@ license.workspace = true
 [lints]
 workspace = true
 
-[dependencies]
-
+[target.'cfg(unix)'.dependencies]
+# openpty, ioctl, killpg: the system calls a PTY needs. This crate is the only place allowed to use them.
+libc = "0.2"
