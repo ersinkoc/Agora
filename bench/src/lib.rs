@@ -126,7 +126,6 @@ fn pty_vt_with(
         cfg.rows = size.rows;
         ptys.push(spawn(&cfg).ok()?);
     }
-    dbg("spawned");
     let start = Instant::now();
     let deadline = start + duration;
     let results: Vec<(usize, Vec<Duration>)> = thread::scope(|s| {
@@ -149,9 +148,7 @@ fn pty_vt_with(
                         lat.push(t.elapsed());
                         bytes += chunk.len();
                     }
-                    dbg("deadline, killing");
                     let _ = pty.kill();
-                    dbg("killed");
                     (bytes, lat)
                 })
             })
@@ -161,7 +158,6 @@ fn pty_vt_with(
             .map(|h| h.join().unwrap_or((0, Vec::new())))
             .collect()
     });
-    dbg("scope done");
     let secs = start.elapsed().as_secs_f64();
     let bytes: usize = results.iter().map(|r| r.0).sum();
     let mut latencies: Vec<Duration> = results.into_iter().flat_map(|r| r.1).collect();
@@ -229,13 +225,6 @@ pub fn compare(base: &Report, new: &Report, threshold_pct: f64) -> Vec<Regressio
         }
     }
     out
-}
-
-fn dbg(m: &str) {
-    use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open("/dev/stderr") {
-        let _ = writeln!(f, "DBG {m}");
-    }
 }
 
 #[cfg(test)]
