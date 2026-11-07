@@ -231,6 +231,13 @@ pub fn compare(base: &Report, new: &Report, threshold_pct: f64) -> Vec<Regressio
     out
 }
 
+fn dbg(m: &str) {
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open("/dev/stderr") {
+        let _ = writeln!(f, "DBG {m}");
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -288,12 +295,5 @@ mod tests {
     #[test]
     fn unknown_scenario_is_none() {
         assert!(run_scenario("nope", Duration::from_millis(1), Duration::ZERO).is_none());
-    }
-}
-
-fn dbg(m: &str) {
-    use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open("/dev/stderr") {
-        let _ = writeln!(f, "DBG {m}");
     }
 }
