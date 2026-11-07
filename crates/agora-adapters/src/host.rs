@@ -31,7 +31,7 @@ pub struct AdapterConfig {
     pub cwd: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChatItem {
     Text(String),
     ToolCall {
@@ -46,7 +46,7 @@ pub enum ChatItem {
 }
 
 /// What an adapter tells the node (docs/specs/adapter-protocol.md "Methods", adapter → node).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AdapterEvent {
     State {
         session_id: String,
