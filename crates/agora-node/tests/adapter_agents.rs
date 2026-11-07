@@ -65,9 +65,17 @@ fn env(name: &str) -> Env {
 }
 
 fn supervisor() -> Supervisor {
+    // Adapters that die stay dead unless a test asks for restarts.
+    supervisor_with(RestartPolicy {
+        max_restarts: 0,
+        ..RestartPolicy::default()
+    })
+}
+
+fn supervisor_with(restart: RestartPolicy) -> Supervisor {
     let mut s = Supervisor::new(SupervisorConfig {
         node: NodeId::new("node-1"),
-        restart: RestartPolicy::default(),
+        restart,
         terminal: TerminalOptions::default(),
         limits: NodeLimits::default(),
     });
@@ -113,6 +121,19 @@ fn until(
         std::thread::sleep(Duration::from_millis(20));
     }
     panic!("timed out; events so far: {all:#?}");
+}
+
+/// Tick until the agent's listed state is `want` (events in the same batch as the one we stopped at are not lost).
+fn settle(s: &mut Supervisor, id: &AgentId, want: AgentState) {
+    let end = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < end {
+        s.tick(Instant::now());
+        if s.list().iter().any(|v| &v.id == id && v.state == want) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    panic!("agent never reached {want:?}");
 }
 
 fn state_is(want: AgentState) -> impl FnMut(&SupervisorEvent) -> bool {
@@ -223,4 +244,58 @@ fn stopping_an_adapter_agent_ends_its_session() {
 fn a_manifest_needs_a_real_adapter_command() {
     let bad = Manifest::parse("kind = \"x\"\ndisplay_name = \"X\"\nversion = \"1\"\nmin_engine = 1\n[adapter]\ncommand = []\n");
     assert!(bad.is_err());
+}
+
+#[test]
+fn a_crashed_adapter_is_restarted_with_backoff_and_then_given_up_on() {
+    let e = env("restart");
+    let mut s = supervisor_with(RestartPolicy {
+        max_restarts: 2,
+        base_delay: Duration::from_millis(50),
+        max_delay: Duration::from_millis(100),
+    });
+    let id = start(&mut s, &e, "adp5");
+    until(&mut s, state_is(AgentState::Idle));
+
+    // First crash: it comes back by itself and can be prompted again.
+    let _ = s.adapter_prompt(&id, "crash", false);
+    let ev = until(&mut s, |e| matches!(e, SupervisorEvent::Started { .. }));
+    assert!(ev
+        .iter()
+        .any(|e| matches!(e, SupervisorEvent::Restarting { attempt: 1, .. })));
+    settle(&mut s, &id, AgentState::Idle);
+    assert!(s
+        .list()
+        .iter()
+        .any(|v| v.id == id && v.running && v.restarts == 1));
+    assert!(s.adapter_prompt(&id, "hello", false).is_ok());
+
+    // Crashing again and again exhausts the budget; the agent is left stopped.
+    let _ = s.adapter_prompt(&id, "crash", false);
+    until(&mut s, |e| matches!(e, SupervisorEvent::Started { .. }));
+    settle(&mut s, &id, AgentState::Idle);
+    let _ = s.adapter_prompt(&id, "crash", false);
+    until(&mut s, |e| matches!(e, SupervisorEvent::GaveUp { .. }));
+    assert!(!s.list().iter().find(|v| v.id == id).unwrap().running);
+}
+
+#[test]
+fn a_stop_cancels_a_pending_adapter_restart() {
+    let e = env("stoprestart");
+    let mut s = supervisor_with(RestartPolicy {
+        max_restarts: 3,
+        base_delay: Duration::from_millis(300),
+        max_delay: Duration::from_millis(300),
+    });
+    let id = start(&mut s, &e, "adp6");
+    until(&mut s, state_is(AgentState::Idle));
+    let _ = s.adapter_prompt(&id, "crash", false);
+    until(&mut s, |e| matches!(e, SupervisorEvent::Restarting { .. }));
+    s.stop(&id).unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    let ev = s.tick(std::time::Instant::now());
+    assert!(!ev
+        .iter()
+        .any(|e| matches!(e, SupervisorEvent::Started { .. })));
+    assert!(!s.list().iter().find(|v| v.id == id).unwrap().running);
 }

@@ -50,5 +50,7 @@ secrets by accident); lines longer than 4 MiB are discarded whole; malformed lin
 requests are ignored and counted (`ignored_lines`), never fatal; a crash fails calls in flight with `Exited` and ends the event
 stream with `Exited`; calls have timeouts. JSON uses the proto3 mapping (lowerCamelCase, enum names or numbers, 64-bit integers
 as strings or numbers on input). `agora-fake-agent --adapter` is the reference fake adapter used in tests.
-Not yet: restart with backoff (the supervisor will own that), mapping events into node state and the approvals queue, and the
+The supervisor restarts a crashed adapter with the same backoff and budget as a crashed terminal agent (`RestartPolicy`): the
+agent is `unknown` meanwhile, the session is resumed with `resumeSessionId` when the adapter reported a native session id,
+and after the budget is spent the agent stays stopped (`GaveUp`). A user stop cancels a pending restart. Not yet: the
 registry of installed adapters.
