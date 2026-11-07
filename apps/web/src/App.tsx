@@ -5,10 +5,10 @@ import { t } from './i18n';
 import { nextNeedingMe } from './model';
 import { connectLive, type Live, type LinkState } from './net/live';
 import type { TerminalSource } from './terminal/source';
-import { approvalList, machinesOnline, tiles, type ApprovalModel, type View } from './net/view';
+import { approvalList, machines, machinesOnline, tiles, type ApprovalModel, type View } from './net/view';
 import { indexedDbStore, signApproval, thisDevice, type Device } from './net/approval';
 import { forgetToken, hubConnection, readCode, signIn } from './net/session';
-import { DevicePage, Focus, Gallery, Home, SignInPage } from './screens';
+import { DevicePage, Focus, Gallery, Home, MachinesPage, SignInPage } from './screens';
 
 function useHash(): [string, (h: string) => void] {
   const [hash, setHash] = useState(window.location.hash);
@@ -85,6 +85,7 @@ export function App() {
   const items: PaletteItem[] = useMemo(() => [
     { id: 'next', label: t('palette-next-attention'), run: next },
     { id: 'home', label: t('palette-go-home'), run: () => go('#/') },
+    { id: 'machines', label: t('palette-go-machines'), run: () => go('#/machines') },
     ...(hub ? [{ id: 'device', label: t('device-link'), run: () => go('#/device') }] : []),
     ...agents.map((a) => ({ id: `agent-${a.id}`, label: t('palette-open-agent', { name: a.name }), run: () => open(a.id) })),
   ], [agents, go, hub, next, open]);
@@ -106,7 +107,7 @@ export function App() {
 
   return (
     <>
-      {hash === '#/gallery' ? <Gallery /> : hash === '#/device' ? <DevicePage device={device} onBack={() => go('#/')} /> : current !== undefined
+      {hash === '#/gallery' ? <Gallery /> : hash === '#/machines' ? <MachinesPage machines={live ? machines(live) : []} onBack={() => go('#/')} /> : hash === '#/device' ? <DevicePage device={device} onBack={() => go('#/')} /> : current !== undefined
         ? <Focus agent={agents.find((a) => a.id === current)} source={terminal} onBack={() => go('#/')} />
         : <Home onOpen={open} agents={agents} machines={live ? machinesOnline(live) : undefined} link={hub ? link : 'live'} approvals={live ? approvalList(live) : []} onResolve={resolve} notice={notice} />}
       {palette && <CommandPalette items={items} onClose={() => setPalette(false)} />}

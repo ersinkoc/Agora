@@ -63,3 +63,13 @@ signin-action = Sign in
 signin-refused = That code did not work. It may be wrong, expired or already used.
 signin-too-many = Too many wrong codes. Wait a minute and try again.
 signin-failed = Could not reach your hub. Try again.
+machines-title = Your machines
+machines-empty = No machines connected yet.
+machine-online = Online
+machine-offline = Offline
+machine-agents =
+    { $count ->
+        [one] { $count } agent running
+       *[other] { $count } agents running
+    }
+palette-go-machines = Show my machines

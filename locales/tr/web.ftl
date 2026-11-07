@@ -63,3 +63,13 @@ signin-action = Giriş yap
 signin-refused = Bu kod çalışmadı. Yanlış, süresi dolmuş veya daha önce kullanılmış olabilir.
 signin-too-many = Çok fazla yanlış kod. Bir dakika bekleyip yeniden deneyin.
 signin-failed = Hub'ınıza ulaşılamadı. Yeniden deneyin.
+machines-title = Makineleriniz
+machines-empty = Henüz bağlı makine yok.
+machine-online = Çevrimiçi
+machine-offline = Çevrimdışı
+machine-agents =
+    { $count ->
+        [one] { $count } ajan çalışıyor
+       *[other] { $count } ajan çalışıyor
+    }
+palette-go-machines = Makinelerimi göster

@@ -81,3 +81,7 @@ h2 { font-size: var(--text-16); color: var(--text-muted); }
   border: 1px solid var(--border); border-radius: var(--radius-m); }
 .approval__actions { display: flex; gap: var(--space-3); }
 .mono { font-family: var(--font-mono, ui-monospace, monospace); overflow-wrap: anywhere; user-select: all; }
+
+.machines { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--space-3); }
+.machine { display: flex; flex-wrap: wrap; gap: var(--space-4); align-items: baseline; padding: var(--space-3) var(--space-4);
+  background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--radius-m); }

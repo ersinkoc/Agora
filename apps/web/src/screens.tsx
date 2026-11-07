@@ -2,7 +2,7 @@ import { AgentTile } from './components/AgentTile';
 import { AttentionStrip } from './components/AttentionStrip';
 import { ApprovalCard } from './components/ApprovalCard';
 import { StateBadge } from './components/StateBadge';
-import type { ApprovalModel } from './net/view';
+import type { ApprovalModel, MachineModel } from './net/view';
 import type { Device } from './net/approval';
 import { demoAgents } from './fixtures';
 import { demoSource, type TerminalSource } from './terminal/source';
@@ -28,7 +28,7 @@ export function Home({ onOpen, agents = demoAgents, machines, link = 'live', app
     <main className="page">
       <header className="topbar">
         <h1>{t('home-title')}</h1>
-        <span className="muted">{t('machines-online', { count: machineCount })}</span>
+        <a className="muted" href="#/machines">{t('machines-online', { count: machineCount })}</a>
       </header>
       {link !== 'live' && <p className="muted" role="status">{t(link === 'offline' ? 'link-offline' : 'link-connecting')}</p>}
       <AttentionStrip agents={needsAttention(fleet)} onOpen={onOpen} />
@@ -151,6 +151,25 @@ export function SignInPage({ onSubmit, notice }: { onSubmit: (code: string) => v
         <button type="submit" className="button button--primary">{t('signin-action')}</button>
       </form>
       {notice && <p role="alert">{notice}</p>}
+export function MachinesPage({ machines, onBack }: { machines: readonly MachineModel[]; onBack: () => void }) {
+  return (
+    <main className="page">
+      <button type="button" className="link" onClick={onBack}>{t('focus-back')}</button>
+      <h1>{t('machines-title')}</h1>
+      {machines.length === 0 ? (
+        <p className="muted">{t('machines-empty')}</p>
+      ) : (
+        <ul className="machines">
+          {machines.map((m) => (
+            <li key={m.id} className="machine">
+              <strong>{m.name}</strong>
+              <span className="muted">{m.os}</span>
+              <span>{t(m.online ? 'machine-online' : 'machine-offline')}</span>
+              <span className="muted">{t('machine-agents', { count: m.agentsRunning })}</span>
+            </li>
+          ))}
+        </ul>
+      )}
     </main>
   );
 }
