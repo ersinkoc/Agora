@@ -25,6 +25,7 @@ lease-held = { $path } is in use by agent { $holder_agent_id } until { $expires_
 mesh-recipient_unknown = No agent or channel named { $to }.
 files-not_found = { $path } was not found.
 files-too_large = { $path } is too large (limit: { $limit }).
+files-outside_root = { $path } is outside the project folder.
 adapter-signature_invalid = Package { $package } could not be verified.
 adapter-crashed = { $kind } stopped unexpectedly (exit code { $exit_code }).
 internal = Something went wrong. Reference: { $incident_id }.
