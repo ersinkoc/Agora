@@ -5,3 +5,5 @@
 .DS_Store
 
 .dfmt/
+apps/web/node_modules/
+apps/web/src/gen/
