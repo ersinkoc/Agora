@@ -5,4 +5,5 @@ pub mod enroll;
 pub mod projection;
 pub mod session;
 pub mod store;
+pub mod tls;
 pub mod transport;

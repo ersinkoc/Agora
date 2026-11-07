@@ -10,6 +10,8 @@ export interface AgentTileModel {
   workspace: string;
   state: UiState;
   preview: string; // last lines of the terminal, from a cell snapshot
+  since?: number; // when the current state began (ms since epoch); orders the attention flow
+  reportedBy?: 'agent' | 'screen'; // where the state came from, shown by "why?"
 }
 
 // Protocol AgentState (schema/agora/v1/common.proto) → what the user sees.
@@ -35,4 +37,16 @@ export function sortFleet(agents: readonly AgentTileModel[]): AgentTileModel[] {
     .map((a, i) => [a, i] as const)
     .sort(([a, i], [b, j]) => ORDER[a.state] - ORDER[b.state] || i - j)
     .map(([a]) => a);
+}
+
+// Attention flow ("next that needs me"): oldest waiting first, then the one after `currentId` in that order, so
+// repeated presses cycle through everything that needs the user. `undefined` when nothing needs them.
+export function nextNeedingMe(agents: readonly AgentTileModel[], currentId?: string): AgentTileModel | undefined {
+  const waiting = needsAttention(agents)
+    .map((a, i) => [a, i] as const)
+    .sort(([a, i], [b, j]) => (a.since ?? Infinity) - (b.since ?? Infinity) || i - j)
+    .map(([a]) => a);
+  if (waiting.length === 0) return undefined;
+  const at = waiting.findIndex((a) => a.id === currentId);
+  return waiting[(at + 1) % waiting.length];
 }

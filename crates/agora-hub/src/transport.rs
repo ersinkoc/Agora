@@ -184,9 +184,24 @@ mod tests {
     #[tokio::test]
     async fn oversized_message_is_refused_before_buffering_it() {
         let (mut s, mut c) = pair().await;
-        c.ws.send(Message::Binary(vec![0; DEFAULT_MAX_PAYLOAD + 1024]))
-            .await
-            .unwrap();
-        assert!(s.recv().await.is_err());
+        // The sender and the refusing receiver must run together: a receiver that stops reading while the sender
+        // is still writing a megabyte blocks the sender once the socket buffers fill (small on macOS). Dropping
+        // the receiver after the error is what a real server does when it closes the connection.
+        let send = async {
+            let _ =
+                c.ws.send(Message::Binary(vec![0; DEFAULT_MAX_PAYLOAD + 1024]))
+                    .await;
+        };
+        let recv = async {
+            let r = s.recv().await;
+            drop(s);
+            r
+        };
+        let (_, r) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            tokio::join!(send, recv)
+        })
+        .await
+        .expect("must not hang");
+        assert!(r.is_err());
     }
 }
