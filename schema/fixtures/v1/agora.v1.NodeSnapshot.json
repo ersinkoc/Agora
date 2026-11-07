@@ -1,0 +1,11 @@
+{
+  "nodeId": "x",
+  "hostname": "x",
+  "os": "x",
+  "build": "x",
+  "online": true,
+  "agentsRunning": 1,
+  "terminalsOpen": 1,
+  "memoryUsedBytes": "1",
+  "lastEventMs": "1"
+}

@@ -1,0 +1,13 @@
+{
+  "agents": [
+    {
+      "agentId": "x",
+      "kind": "x",
+      "state": "AGENT_STATE_WORKING",
+      "worktreeId": "x",
+      "terminalId": "x",
+      "running": true,
+      "restarts": 1
+    }
+  ]
+}

@@ -170,6 +170,43 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                     .collect(),
             })),
         }),
+        Cmd::AgentList(l) => {
+            // Only this node's agents: a node answers for itself (the hub merges across nodes).
+            if !l.node_id.is_empty() && l.node_id != ctx.node_id {
+                return Err(Error::new(ErrorCode::NodeOffline).with("node_id", l.node_id.as_str()));
+            }
+            // One lock for the whole answer (the mutex is not reentrant).
+            let sup = ctx.sup();
+            let agents = sup
+                .list()
+                .into_iter()
+                .map(|v| {
+                    let has_terminal = sup.terminal(&v.id).is_some();
+                    v1::AgentSummary {
+                        agent_id: v.id.as_str().to_string(),
+                        kind: v.kind,
+                        state: match v.state {
+                            agora_core::AgentState::Working => v1::AgentState::Working,
+                            agora_core::AgentState::Blocked => v1::AgentState::Blocked,
+                            agora_core::AgentState::Idle => v1::AgentState::Idle,
+                            agora_core::AgentState::Done => v1::AgentState::Done,
+                            agora_core::AgentState::Unknown => v1::AgentState::Unspecified,
+                        } as i32,
+                        worktree_id: v.worktree.to_string_lossy().into_owned(),
+                        terminal_id: if has_terminal {
+                            terminal_id_of(&v.id)
+                        } else {
+                            String::new()
+                        },
+                        running: v.running,
+                        restarts: v.restarts,
+                    }
+                })
+                .collect();
+            Ok(v1::CommandOk {
+                result: Some(Ok_::AgentList(v1::AgentListResult { agents })),
+            })
+        }
         Cmd::AgentStart(a) => {
             if !a.worktree_id.is_empty() {
                 return Err(capability_missing("agent.start.existing_worktree"));
@@ -329,6 +366,8 @@ fn command_name(c: &Cmd) -> &'static str {
         Cmd::WorktreeRemove(_) => "worktree.remove",
         Cmd::ApprovalResolve(_) => "approval.resolve",
         Cmd::MeshPost(_) => "mesh.post",
+        Cmd::AgentList(_) => "agent.list",
+        Cmd::Enroll(_) => "enroll",
         Cmd::TaskUpdate(_) => "task.update",
         Cmd::NodePolicyGet(_) => "node.policy.get",
     }

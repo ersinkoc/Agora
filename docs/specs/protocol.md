@@ -90,6 +90,12 @@ position it saw and gets the backlog, or a snapshot when that position is ahead 
 backup). When a node's connection ends without a goodbye the hub records `NodeOffline` itself as producer `hub` (a name no
 node certificate can carry), in the same log, so live and rebuilt views agree.
 
+Schema additions (ADR-0025/0026/0027, all new messages, nothing published changed): `agent.list` (`AgentList` -> `AgentListResult` of
+`AgentSummary`; implemented on the node and as `agora agent list`), `EventAck` (hub -> producer, cumulative), `client.proto`
+(`Subscribe`, `Snapshot` with `*Snapshot` tables mirroring the hub view, `PositionedEvent`; named `*Snapshot` because
+`AgentState` is already the enum) and `enroll.proto` (`EnrollRequest`, `EnrollResponse`). Golden fixtures added for each.
+Frame kinds on streams 0 and 2 are the ADR-0026 table.
+
 Initial event families:
 
 | Family | Examples |

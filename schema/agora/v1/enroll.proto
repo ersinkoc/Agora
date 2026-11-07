@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+package agora.v1;
+
+// ADR-0027: enrollment of a node that has no certificate yet. The hub chooses the identity: node_id is a request.
+
+message EnrollRequest {
+  // One-time code the user created in the window.
+  string code = 1;
+  string node_id = 2;
+  string csr_pem = 3;
+}
+
+message EnrollResponse {
+  string cert_pem = 1;
+  // The hub CA to pin.
+  string ca_pem = 2;
+  uint64 not_after_ms = 3;
+}
