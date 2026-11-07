@@ -232,6 +232,10 @@ fn a_certificate_the_hub_does_not_know_never_gets_in() {
 
 #[test]
 fn a_signed_in_client_runs_a_command_on_a_node_through_the_hub() {
+    // Routed commands run on the node's local socket, which this platform does not have yet.
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return;
+    }
     use agora_protocol::frame::{kinds, STREAM_COMMANDS, STREAM_EVENTS};
     use agora_protocol::v1::{self, command_request, command_response};
     use agora_protocol::Frame;
