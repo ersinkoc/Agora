@@ -52,7 +52,22 @@ impl From<CaError> for EnrollError {
     }
 }
 
-fn hash(code: &str) -> Vec<u8> {
+/// A random one-time code shown as `XXXX-XXXX` (40 bits).
+pub(crate) fn new_code() -> Result<String, StoreError> {
+    let mut raw = [0u8; 8];
+    getrandom::getrandom(&mut raw).map_err(|e| StoreError(e.to_string()))?;
+    let chars: Vec<char> = raw
+        .iter()
+        .map(|b| char::from(ALPHABET[usize::from(b & 31)]))
+        .collect();
+    Ok(format!(
+        "{}-{}",
+        chars[..4].iter().collect::<String>(),
+        chars[4..].iter().collect::<String>()
+    ))
+}
+
+pub(crate) fn hash(code: &str) -> Vec<u8> {
     // Normalize what a person might type: case and the display hyphen.
     let clean: String = code
         .chars()
@@ -77,12 +92,12 @@ impl Lockout {
         Self::default()
     }
 
-    fn check(&self, now_ms: u64) -> Option<u64> {
+    pub(crate) fn check(&self, now_ms: u64) -> Option<u64> {
         let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         (now_ms < s.1).then(|| s.1 - now_ms)
     }
 
-    fn failed(&self, now_ms: u64) {
+    pub(crate) fn failed(&self, now_ms: u64) {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         s.0 += 1;
         if s.0 >= MAX_FAILURES {
@@ -91,7 +106,7 @@ impl Lockout {
         }
     }
 
-    fn succeeded(&self) {
+    pub(crate) fn succeeded(&self) {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).0 = 0;
     }
 }
@@ -113,17 +128,7 @@ impl<'a> Enrollment<'a> {
 
     /// A new one-time code, shown as `XXXX-XXXX`. 40 bits of randomness.
     pub fn create_code(&self, now_ms: u64) -> Result<String, EnrollError> {
-        let mut raw = [0u8; 8];
-        getrandom::getrandom(&mut raw).map_err(|e| StoreError(e.to_string()))?;
-        let chars: Vec<char> = raw
-            .iter()
-            .map(|b| char::from(ALPHABET[usize::from(b & 31)]))
-            .collect();
-        let code = format!(
-            "{}-{}",
-            chars[..4].iter().collect::<String>(),
-            chars[4..].iter().collect::<String>()
-        );
+        let code = new_code()?;
         let conn = self.store.lock()?;
         // Expired codes are of no use to anyone; drop them as we go.
         conn.execute(

@@ -66,7 +66,7 @@ pub trait EventStore {
     fn set_setting(&self, key: &str, value: &[u8]) -> Result<(), StoreError>;
 }
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 pub struct SqliteStore {
     conn: Mutex<Connection>,
@@ -130,6 +130,23 @@ impl SqliteStore {
                      revoked_ms INTEGER
                  );
                  PRAGMA user_version = 2;
+                 COMMIT;",
+            )?;
+        }
+        if version < 3 {
+            // Client sign-in: one-time codes and the sessions they were exchanged for (both hashed).
+            conn.execute_batch(
+                "BEGIN;
+                 CREATE TABLE signin_codes (
+                     code_hash  BLOB PRIMARY KEY,
+                     expires_ms INTEGER NOT NULL
+                 );
+                 CREATE TABLE sessions (
+                     token_hash BLOB PRIMARY KEY,
+                     created_ms INTEGER NOT NULL,
+                     expires_ms INTEGER NOT NULL
+                 );
+                 PRAGMA user_version = 3;
                  COMMIT;",
             )?;
         }

@@ -7,8 +7,8 @@ import { connectLive, type Live, type LinkState } from './net/live';
 import type { TerminalSource } from './terminal/source';
 import { approvalList, machinesOnline, tiles, type ApprovalModel, type View } from './net/view';
 import { indexedDbStore, signApproval, thisDevice, type Device } from './net/approval';
-import { hubConnection } from './net/session';
-import { DevicePage, Focus, Gallery, Home } from './screens';
+import { forgetToken, hubConnection, readCode, signIn } from './net/session';
+import { DevicePage, Focus, Gallery, Home, SignInPage } from './screens';
 
 function useHash(): [string, (h: string) => void] {
   const [hash, setHash] = useState(window.location.hash);
@@ -24,7 +24,20 @@ export function App() {
   const [hash, go] = useHash();
   const [palette, setPalette] = useState(false);
   // With a hub token the fleet comes from the hub; without one (development) the demo data stands in.
-  const hub = useMemo(hubConnection, []);
+  const [hub, setHub] = useState(hubConnection);
+  const [signInNotice, setSignInNotice] = useState<string | undefined>();
+  const trySignIn = useCallback(async (code: string) => {
+    const r = await signIn(code);
+    if (r.ok) { setSignInNotice(undefined); setHub(hubConnection()); return; }
+    setSignInNotice(t(r.reason === 'refused' ? 'signin-refused' : r.reason === 'too-many' ? 'signin-too-many' : 'signin-failed'));
+  }, []);
+  // A code in the address (`#code=...`) signs in at once; it is removed from the address either way.
+  useEffect(() => {
+    const { code, rest } = readCode(window.location.hash);
+    if (code === undefined) return;
+    window.history.replaceState(null, '', window.location.pathname + window.location.search + rest);
+    void trySignIn(code);
+  }, [trySignIn]);
   const [live, setLive] = useState<View | undefined>();
   const [link, setLink] = useState<LinkState>('connecting');
   const [api, setApi] = useState<Live | undefined>();
@@ -48,7 +61,8 @@ export function App() {
   }, [api, device]);
   useEffect(() => {
     if (!hub) return;
-    const c = connectLive({ url: hub.url, token: hub.token, onView: (v) => setLive({ ...v }), onState: setLink });
+    const c = connectLive({ url: hub.url, token: hub.token, onView: (v) => setLive({ ...v }), onState: setLink,
+      onRejected: () => { forgetToken(); setLive(undefined); setHub(undefined); } });
     setApi(c);
     return () => { c.close(); setApi(undefined); };
   }, [hub]);
@@ -84,6 +98,11 @@ export function App() {
     window.addEventListener('keydown', on);
     return () => window.removeEventListener('keydown', on);
   }, [next]);
+
+  // Served by the hub (a production build) and not signed in: ask for the code. Development keeps the demo data.
+  if (!hub && !import.meta.env.DEV && hash !== '#/gallery' && hash !== '#/demo') {
+    return <SignInPage onSubmit={trySignIn} notice={signInNotice} />;
+  }
 
   return (
     <>

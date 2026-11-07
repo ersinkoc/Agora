@@ -1,6 +1,8 @@
 // Where the hub is and how this browser proves itself. The hub serves this app, so its address is our own origin.
-// The token arrives once in the URL fragment (`#token=...`, never sent to a server or written to logs), is kept for
-// the tab's lifetime, and is removed from the address bar. Real sign-in (passkeys, ADR-0015) replaces this.
+// Signing in trades a one-time code (`agora hub login`, typed in or given as `#code=...`, a fragment that is never sent
+// to a server) for a session token via POST /api/session. The token lives for the tab and expires on the hub (12 h).
+// A long-lived token can still be given as `#token=...` for scripts and development. Passkeys (ADR-0015) will replace
+// the code.
 
 export interface HubConnection { url: string; token: string }
 
@@ -28,4 +30,37 @@ export function hubConnection(): HubConnection | undefined {
   }
   const scheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
   return { url: `${scheme}://${window.location.host}/`, token };
+}
+
+export type SignInResult = { ok: true; token: string } | { ok: false; reason: 'refused' | 'too-many' | 'failed' };
+
+// Trades a one-time code for a session token and remembers it for this tab.
+export async function signIn(code: string, fetcher: typeof fetch = fetch): Promise<SignInResult> {
+  try {
+    const r = await fetcher('/api/session', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ code: code.trim() }),
+    });
+    if (r.status === 401) return { ok: false, reason: 'refused' };
+    if (r.status === 429) return { ok: false, reason: 'too-many' };
+    if (!r.ok) return { ok: false, reason: 'failed' };
+    const body = (await r.json()) as { token?: unknown };
+    if (typeof body.token !== 'string') return { ok: false, reason: 'failed' };
+    try { window.sessionStorage.setItem(KEY, body.token); } catch { /* private mode: lasts until reload */ }
+    return { ok: true, token: body.token };
+  } catch {
+    return { ok: false, reason: 'failed' };
+  }
+}
+
+export function forgetToken(): void {
+  try { window.sessionStorage.removeItem(KEY); } catch { /* unavailable */ }
+}
+
+// `#code=XXXX-XXXX` in the address: returns the code and the rest of the fragment.
+export function readCode(hash: string): { code?: string; rest: string } {
+  const m = /^#code=([^&]+)(?:&(.*))?$/.exec(hash);
+  if (!m) return { rest: hash };
+  return { code: decodeURIComponent(m[1] as string), rest: m[2] ? `#${m[2]}` : '' };
 }

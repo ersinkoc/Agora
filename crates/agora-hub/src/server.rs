@@ -592,6 +592,8 @@ pub struct ServerState {
     pub auth: Box<dyn ClientAuth + Send + Sync>,
     /// The web app, served over HTTP on the same port when present.
     pub assets: Option<Arc<dyn crate::web::Assets>>,
+    /// Answers `POST /api/session` (sign-in with a one-time code) when present.
+    pub sessions: Option<Arc<dyn crate::web::SessionApi>>,
 }
 
 /// A peer with no certificate: its first frame says what it wants, and the answer is yes only for what it proved.
@@ -675,7 +677,7 @@ async fn websocket_only<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    match crate::web::route(stream, state.assets.as_deref())
+    match crate::web::route(stream, state.assets.as_deref(), state.sessions.as_deref())
         .await
         .map_err(|e| ServeError::Transport(TransportError::Ws(e.to_string())))?
     {

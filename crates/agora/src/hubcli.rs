@@ -10,6 +10,7 @@ use agora_hub::ca::{new_device_request, Ca};
 use agora_hub::enroll::{Enrollment, Lockout};
 use agora_hub::hub::Hub;
 use agora_hub::server::{self, ClientAuth, ServerState};
+use agora_hub::signin::{HubSessions, SignIn};
 use agora_hub::store::SqliteStore;
 use agora_hub::tls;
 use agora_i18n::key;
@@ -49,12 +50,17 @@ fn load_or_create_ca(dir: &Path) -> Result<Ca, String> {
     Ok(ca)
 }
 
-struct FileToken(String);
+/// Who may connect as a client: a live session (from the web sign-in) or the long-lived token in `<hub dir>/token`
+/// that scripts use.
+struct ClientTokens {
+    file_token: String,
+    sessions: Arc<HubSessions>,
+}
 
-impl ClientAuth for FileToken {
+impl ClientAuth for ClientTokens {
     fn check(&self, token: &str) -> bool {
         // Not constant time, but the token is 128 random bits compared once per connection; nothing to learn from timing.
-        token == self.0
+        token == self.file_token || self.sessions.check(token)
     }
 }
 
@@ -98,11 +104,16 @@ pub fn hub_run(say: &Say, o: &Opts) -> ExitCode {
                 t
             }
         };
-        let web_token = token.clone();
         let has_web = web_assets(o).is_some();
         let store = SqliteStore::open(&dir.join("hub.db")).map_err(|e| e.to_string())?;
+        let hub = Arc::new(Hub::open(store).map_err(|e| e.to_string())?);
+        let sessions = Arc::new(HubSessions::new(Arc::clone(&hub)));
+        // A fresh one-time code for the first sign-in; `agora hub login` makes more.
+        let web_code = SignIn::new(hub.store(), Arc::new(Lockout::new()))
+            .create_code(server::now_ms())
+            .map_err(|_| "could not create a sign-in code".to_string())?;
         let state = Arc::new(ServerState {
-            hub: Arc::new(Hub::open(store).map_err(|e| e.to_string())?),
+            hub,
             support: Support {
                 generations: vec![1],
                 capabilities: vec!["terminal.raw".into()],
@@ -110,8 +121,12 @@ pub fn hub_run(say: &Say, o: &Opts) -> ExitCode {
             },
             ca: Some(ca),
             lockout: Arc::new(Lockout::new()),
-            auth: Box::new(FileToken(token)),
+            auth: Box::new(ClientTokens {
+                file_token: token,
+                sessions: Arc::clone(&sessions),
+            }),
             assets: web_assets(o),
+            sessions: Some(sessions),
         });
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -133,10 +148,7 @@ pub fn hub_run(say: &Say, o: &Opts) -> ExitCode {
             if has_web {
                 say.out(
                     key!("cli-hub-web"),
-                    &[
-                        ("addr", addr.to_string().into()),
-                        ("token", web_token.into()),
-                    ],
+                    &[("addr", addr.to_string().into()), ("code", web_code.into())],
                 );
             }
             server::run(listener, state, Some(acceptor)).await;
@@ -145,6 +157,28 @@ pub fn hub_run(say: &Say, o: &Opts) -> ExitCode {
     };
     match run() {
         Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            say.err(key!("cli-hub-failed"), &[("reason", e.into())]);
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// `agora hub login`: a one-time code to sign in to the web app (valid 10 minutes).
+pub fn hub_login(say: &Say, o: &Opts) -> ExitCode {
+    let dir = hub_dir(o);
+    let result = (|| -> Result<String, String> {
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let store = SqliteStore::open(&dir.join("hub.db")).map_err(|e| e.to_string())?;
+        SignIn::new(&store, Arc::new(Lockout::new()))
+            .create_code(server::now_ms())
+            .map_err(|_| "could not create a sign-in code".to_string())
+    })();
+    match result {
+        Ok(code) => {
+            say.out(key!("cli-hub-login"), &[("code", code.into())]);
+            ExitCode::SUCCESS
+        }
         Err(e) => {
             say.err(key!("cli-hub-failed"), &[("reason", e.into())]);
             ExitCode::from(1)

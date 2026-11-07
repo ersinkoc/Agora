@@ -26,6 +26,8 @@ export interface LiveOptions {
   token: string;
   onView: (v: View) => void;
   onState: (s: LinkState) => void;
+  // The hub closed the connection twice in a row before saying anything: the session is no longer accepted.
+  onRejected?: () => void;
   socket?: SocketFactory;
   // Waits before reconnect attempt n (0-based); capped exponential by default.
   backoffMs?: (attempt: number) => number;
@@ -60,6 +62,8 @@ export function connectLive(o: LiveOptions): Live {
   let sock: Socket | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let isOpen = false;
+  let heard = false; // has this connection delivered anything
+  let refusals = 0;
   let requests = 0;
   let nextStream = 3;
   const pending = new Map<string, { resolve: (ok: agora.v1.CommandOk.$Properties) => void; reject: (e: CommandError) => void }>();
@@ -90,6 +94,7 @@ export function connectLive(o: LiveOptions): Live {
     s.binaryType = 'arraybuffer';
     s.onopen = () => {
       isOpen = true;
+      heard = false;
       const sub = agora.v1.Subscribe.encode(synced ? { afterPos: view.pos } : {}).finish();
       s.send(encodeFrame({ streamId: STREAM_EVENTS, kind: EVENT_KIND.SUBSCRIBE, payload: sub }));
       for (const stream of terminals.keys()) subscribeTerminal(stream);
@@ -97,6 +102,7 @@ export function connectLive(o: LiveOptions): Live {
     s.onmessage = (m) => {
       if (!(m.data instanceof ArrayBuffer || ArrayBuffer.isView(m.data))) return;
       const bytes = m.data instanceof ArrayBuffer ? new Uint8Array(m.data) : new Uint8Array((m.data as ArrayBufferView).buffer);
+      heard = true;
       const f = decodeFrame(bytes);
       if (!f) { s.close(); return; }
       if (f.streamId === STREAM_COMMANDS && f.kind === 1) {
@@ -143,7 +149,11 @@ export function connectLive(o: LiveOptions): Live {
       o.onView(view);
     };
     s.onclose = () => {
+      // Only a connection that opened and was dropped without a word counts: an unreachable hub is not a refusal.
+      const dropped = isOpen && !heard;
       isOpen = false;
+      refusals = heard ? 0 : dropped ? refusals + 1 : refusals;
+      if (refusals >= 2 && !closed) { closed = true; o.onRejected?.(); return; }
       for (const p of pending.values()) p.reject(new CommandError('node.offline'));
       pending.clear();
       if (closed) return;

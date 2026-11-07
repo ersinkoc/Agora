@@ -55,3 +55,11 @@ device-intro = Makineler yalnızca sahibinin güvendiği cihazların yanıtını
 device-name = Cihaz adı
 device-key = Cihaz anahtarı
 device-link = Bu cihaz
+
+signin-title = Giriş yap
+signin-intro = Hub'ınızdan bir kod isteyin: onu çalıştıran makinede "agora hub login" komutunu çalıştırıp kodu buraya yazın.
+signin-code = Kod
+signin-action = Giriş yap
+signin-refused = Bu kod çalışmadı. Yanlış, süresi dolmuş veya daha önce kullanılmış olabilir.
+signin-too-many = Çok fazla yanlış kod. Bir dakika bekleyip yeniden deneyin.
+signin-failed = Hub'ınıza ulaşılamadı. Yeniden deneyin.
