@@ -316,3 +316,95 @@ fn terminal_subscription_streams_snapshot_data_resize_and_exit() {
         "protocol.invalid_message"
     );
 }
+
+/// What a hub needs to build its view: the node, its checkout, then for each agent its workspace, the agent and its
+/// terminal, in that order, and the matching closings.
+#[test]
+fn the_node_reports_what_the_hub_needs_to_show_it() {
+    use v1::event::Body;
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
+        return;
+    }
+    let e = env("events");
+    let n = node(&e, NodeLimits::default());
+    let mut c = Client::connect(n.socket().unwrap()).unwrap();
+    let s = started(ok(c.call(start_cmd("shell"))));
+    ok(c.call(Cmd::AgentStop(v1::AgentStop {
+        agent_id: s.agent_id.clone(),
+    })));
+
+    // Exit is noticed by the supervision tick; wait for the terminal to be reported closed.
+    let end = Instant::now() + Duration::from_secs(15);
+    let events = loop {
+        let evs = n.events.events_after(0);
+        if evs
+            .iter()
+            .any(|e| matches!(e.body, Some(Body::TerminalClosed(_))))
+            || Instant::now() > end
+        {
+            break evs;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let names: Vec<&str> = events
+        .iter()
+        .filter_map(|e| e.body.as_ref())
+        .map(|b| match b {
+            Body::NodeOnline(_) => "node_online",
+            Body::CheckoutDiscovered(_) => "checkout",
+            Body::WorktreeCreated(_) => "worktree",
+            Body::AgentStarted(_) => "agent_started",
+            Body::TerminalOpened(_) => "terminal_opened",
+            Body::NodeResources(_) => "resources",
+            Body::AgentStateChanged(_) => "state",
+            Body::AgentExited(_) => "exited",
+            Body::TerminalClosed(_) => "terminal_closed",
+            _ => "other",
+        })
+        .collect();
+    let pos = |n: &str| names.iter().position(|x| *x == n).unwrap_or(usize::MAX);
+    assert_eq!(pos("node_online"), 0, "{names:?}");
+    assert!(pos("checkout") < pos("worktree"), "{names:?}");
+    assert!(pos("worktree") < pos("agent_started"), "{names:?}");
+    assert!(pos("agent_started") < pos("terminal_opened"), "{names:?}");
+    assert!(pos("exited") < pos("terminal_closed"), "{names:?}");
+
+    // Closed once, not once for the stop and again when the supervisor notices the process is gone.
+    std::thread::sleep(Duration::from_millis(500));
+    let closed = n
+        .events
+        .events_after(0)
+        .iter()
+        .filter(|e| matches!(e.body, Some(Body::TerminalClosed(_))))
+        .count();
+    assert_eq!(closed, 1);
+
+    // Sequence numbers are contiguous from 1, as the hub's exactly-once rule requires.
+    let seqs: Vec<u64> = events.iter().map(|e| e.seq).collect();
+    assert_eq!(seqs, (1..=seqs.len() as u64).collect::<Vec<_>>());
+
+    // The workspace event carries the branch the supervisor made, and the terminal id matches the control socket's.
+    let wt = events
+        .iter()
+        .find_map(|e| match &e.body {
+            Some(Body::WorktreeCreated(w)) => Some(w.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(wt.branch.starts_with("agent/"), "{wt:?}");
+    let term = events
+        .iter()
+        .find_map(|e| match &e.body {
+            Some(Body::TerminalOpened(t)) => Some(t.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(term.terminal_id, s.terminal_id);
+
+    // Going down cleanly says so.
+    drop(c);
+    let events_handle = std::sync::Arc::clone(&n.events);
+    drop(n);
+    let last = events_handle.events_after(0).pop().unwrap();
+    assert!(matches!(last.body, Some(Body::NodeOffline(_))));
+}

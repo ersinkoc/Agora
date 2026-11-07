@@ -187,6 +187,7 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                 .as_ref()
                 .map(|v| v.worktree.to_string_lossy().into_owned())
                 .unwrap_or_default();
+            let branch = view.as_ref().map(|v| v.branch.clone()).unwrap_or_default();
             if !a.prompt.is_empty() {
                 if let Some(t) = sup.terminal(&id) {
                     let _ = t.send_input(format!("{}\r", a.prompt).into_bytes());
@@ -194,7 +195,15 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
             }
             drop(sup);
             if let Some(ev) = &ctx.events {
-                ev.agent_started(&id, &project.id, &ctx.node_id, &worktree, &a.kind);
+                ev.agent_launched(
+                    &id,
+                    &project.id,
+                    &ctx.node_id,
+                    &project.root,
+                    std::path::Path::new(&worktree),
+                    &branch,
+                    &a.kind,
+                );
             }
             Ok(v1::CommandOk {
                 result: Some(Ok_::AgentStart(v1::AgentStartResult {
