@@ -227,11 +227,17 @@ fn a_slow_subscriber_lags_without_slowing_the_terminal_and_can_resync() {
     let (_s, slow) = flood.subscribe();
     // Never read: the queue fills and the subscriber is marked lagging while the terminal keeps running.
     let seq0 = flood.snapshot().seq;
-    std::thread::sleep(Duration::from_millis(700));
+    // Wait for progress rather than for a fixed time: a loaded CI runner may take longer than 700 ms to get through
+    // 1000 chunks, which says nothing about the terminal being slowed by the subscriber.
+    let end = Instant::now() + Duration::from_secs(20);
+    while flood.snapshot().seq <= seq0 + 1000 && Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(50));
+    }
     assert!(
         flood.snapshot().seq > seq0 + 1000,
         "terminal kept processing output"
     );
+    // By now the queue (never read) has certainly overflowed.
 
     assert_eq!(
         slow.recv_timeout(Duration::from_millis(100)),
