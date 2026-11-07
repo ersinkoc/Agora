@@ -44,3 +44,8 @@ Date: YYYY-MM-DD
 | 0024 | Simplicity and visual quality are requirements | Accepted |
 | 0025 | `agent.list` command for node-local control | Accepted |
 | 0028 | Approval signatures: ECDSA P-256 | Accepted |
+<<<<<<< HEAD
+| 0026 | Event acknowledgement and control/event stream frame kinds | Accepted |
+=======
+| 0025 | `agent.list` command for node-local control | Proposed |
+>>>>>>> origin/main
