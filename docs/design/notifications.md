@@ -10,3 +10,9 @@ Pipeline: event → rule → channel → delivery.
 - **Dedupe and batching:** collapse repeated states; digest mode for low-priority events.
 - **Localization:** notification text rendered in the recipient's locale from Fluent keys.
 - Approval notifications include deep links; acting on them still requires a signed approval (ADR-0020).
+
+## Implementation status
+`agora-hub::notify` implements the rule step: per-trigger channel preferences, quiet hours (wrapping midnight; only the in-app badge
+stays on), "only when I am not looking at it", dedupe over 60 s, and a digest for low-priority triggers. Text is rendered from
+`locales/en/notify.ftl`. Not yet: the delivery channels (desktop, web push, email, webhook), stored per-user preferences, and
+the settings screen.
