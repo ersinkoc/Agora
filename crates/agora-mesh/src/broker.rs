@@ -81,8 +81,8 @@ pub struct Message {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MeshError {
-    /// The caller is not registered.
-    UnknownAgent,
+    /// The caller is not registered (its id).
+    UnknownAgent(String),
     RecipientUnknown(String),
     BodyTooLarge,
     TooManyRefs,
@@ -90,35 +90,72 @@ pub enum MeshError {
     TooManyOpenAsks,
     TaskUnknown(String),
     /// The task is not open (claimed or done).
-    TaskNotOpen,
+    TaskNotOpen(String),
     /// A dependency of the task is not done yet.
-    TaskBlocked(String),
+    TaskBlocked {
+        task: String,
+        depends_on: String,
+    },
     /// Only the claiming agent may do this to the task.
-    NotTaskOwner,
+    NotTaskOwner(String),
     DependencyUnknown(String),
-    Lease(LeaseError),
-    LeaseUnknown,
+    /// A lease conflict, with the path that conflicts and who holds it.
+    LeaseHeld {
+        path: String,
+        holder: AgentId,
+    },
+    LeaseInvalidPath(String),
+    /// A lease must last at least a moment.
+    LeaseZeroTtl,
+    LeaseUnknown(String),
 }
 
 impl MeshError {
-    /// The protocol error, where an error code exists for it. Codes for rate limits, size limits and the task
-    /// board are not assigned yet (they need an addition to `docs/specs/error-codes.md`), so those give `None`.
-    pub fn to_error(&self) -> Option<Error> {
+    /// The protocol error for this failure (codes in `docs/specs/error-codes.md`).
+    pub fn to_error(&self, limits: &Limits) -> Error {
+        let limit = |n: usize| i64::try_from(n).unwrap_or(i64::MAX);
         match self {
+            Self::UnknownAgent(id) => {
+                Error::new(ErrorCode::AgentNotFound).with("agent_id", id.as_str())
+            }
             Self::RecipientUnknown(to) => {
-                Some(Error::new(ErrorCode::MeshRecipientUnknown).with("to", to.as_str()))
+                Error::new(ErrorCode::MeshRecipientUnknown).with("to", to.as_str())
             }
-            Self::Lease(LeaseError::Conflict { holder }) => {
-                Some(Error::new(ErrorCode::LeaseHeld).with("holder_agent_id", holder.as_str()))
+            Self::BodyTooLarge => {
+                Error::new(ErrorCode::MeshBodyTooLarge).with("limit", limit(limits.max_body_bytes))
             }
-            _ => None,
+            Self::TooManyRefs => {
+                Error::new(ErrorCode::MeshTooManyRefs).with("limit", limit(limits.max_refs))
+            }
+            Self::RateLimited => Error::new(ErrorCode::MeshRateLimited),
+            Self::TooManyOpenAsks => {
+                Error::new(ErrorCode::MeshTooManyAsks).with("limit", limit(limits.max_open_asks))
+            }
+            Self::TaskUnknown(t) | Self::DependencyUnknown(t) => {
+                Error::new(ErrorCode::TaskNotFound).with("task_id", t.as_str())
+            }
+            Self::TaskNotOpen(t) => Error::new(ErrorCode::TaskNotOpen).with("task_id", t.as_str()),
+            Self::TaskBlocked { task, depends_on } => Error::new(ErrorCode::TaskBlocked)
+                .with("task_id", task.as_str())
+                .with("depends_on", depends_on.as_str()),
+            Self::NotTaskOwner(t) => {
+                Error::new(ErrorCode::TaskNotOwner).with("task_id", t.as_str())
+            }
+            Self::LeaseHeld { path, holder } => Error::new(ErrorCode::LeaseHeld)
+                .with("path", path.as_str())
+                .with("holder_agent_id", holder.as_str())
+                // The lease's expiry is not tracked per conflict here; an empty value renders as "later".
+                .with("expires_at", ""),
+            Self::LeaseInvalidPath(p) => {
+                Error::new(ErrorCode::LeaseInvalidPath).with("path", p.as_str())
+            }
+            Self::LeaseZeroTtl => {
+                Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "ttl_s")
+            }
+            Self::LeaseUnknown(l) => {
+                Error::new(ErrorCode::LeaseNotFound).with("lease_id", l.as_str())
+            }
         }
-    }
-}
-
-impl From<LeaseError> for MeshError {
-    fn from(e: LeaseError) -> Self {
-        Self::Lease(e)
     }
 }
 
@@ -205,6 +242,10 @@ impl Mesh {
         format!("{prefix}-{n}")
     }
 
+    pub fn limits(&self) -> Limits {
+        self.limits
+    }
+
     /// Audit events queued since the last call, oldest first.
     pub fn take_events(&mut self) -> Vec<Body> {
         std::mem::take(&mut self.events)
@@ -247,7 +288,9 @@ impl Mesh {
     }
 
     fn caller(&self, agent: &AgentId) -> Result<&AgentInfo, MeshError> {
-        self.agents.get(agent).ok_or(MeshError::UnknownAgent)
+        self.agents
+            .get(agent)
+            .ok_or_else(|| MeshError::UnknownAgent(agent.as_str().to_string()))
     }
 
     /// `agents_list`: peers in a project (all projects when `None`), the caller included.
@@ -547,14 +590,17 @@ impl Mesh {
             .collect())
     }
 
-    fn deps_done(&self, t: &TaskRec) -> Result<(), MeshError> {
+    fn deps_done(&self, task: &str, t: &TaskRec) -> Result<(), MeshError> {
         for d in &t.depends_on {
             let done = self
                 .tasks
                 .get(d)
                 .is_some_and(|x| matches!(x.task.state(), TaskState::Done(_)));
             if !done {
-                return Err(MeshError::TaskBlocked(d.as_str().to_string()));
+                return Err(MeshError::TaskBlocked {
+                    task: task.to_string(),
+                    depends_on: d.as_str().to_string(),
+                });
             }
         }
         Ok(())
@@ -575,12 +621,14 @@ impl Mesh {
             .tasks
             .get(&tid)
             .ok_or_else(|| MeshError::TaskUnknown(id.into()))?;
-        self.deps_done(rec)?;
+        self.deps_done(id, rec)?;
         let rec = self
             .tasks
             .get_mut(&tid)
             .ok_or_else(|| MeshError::TaskUnknown(id.into()))?;
-        rec.task.claim(by).map_err(|_| MeshError::TaskNotOpen)?;
+        rec.task
+            .claim(by)
+            .map_err(|_| MeshError::TaskNotOpen(id.to_string()))?;
         self.task_changed(&tid);
         Ok(())
     }
@@ -598,7 +646,7 @@ impl Mesh {
             .ok_or_else(|| MeshError::TaskUnknown(id.into()))?;
         rec.task
             .complete(by)
-            .map_err(|_: TaskError| MeshError::NotTaskOwner)?;
+            .map_err(|_: TaskError| MeshError::NotTaskOwner(id.to_string()))?;
         rec.summary = Some(summary.to_string());
         self.task_changed(&tid);
         Ok(())
@@ -624,7 +672,14 @@ impl Mesh {
                     for t in &taken {
                         table.release(t, by);
                     }
-                    return Err(e.into());
+                    return Err(match e {
+                        LeaseError::Conflict { holder } => MeshError::LeaseHeld {
+                            path: p.clone(),
+                            holder,
+                        },
+                        LeaseError::InvalidPath => MeshError::LeaseInvalidPath(p.clone()),
+                        LeaseError::ZeroTtl => MeshError::LeaseZeroTtl,
+                    });
                 }
             }
         }
@@ -674,7 +729,7 @@ impl Mesh {
                 self.release_batch(lease_id, now_ms);
                 Ok(())
             }
-            _ => Err(MeshError::LeaseUnknown),
+            _ => Err(MeshError::LeaseUnknown(lease_id.to_string())),
         }
     }
 
@@ -728,7 +783,7 @@ impl Mesh {
                     .get(&tid)
                     .ok_or_else(|| MeshError::TaskUnknown(id.into()))?;
                 if !matches!(rec.task.state(), TaskState::Claimed(a) if a == from) {
-                    return Err(MeshError::NotTaskOwner);
+                    return Err(MeshError::NotTaskOwner(id.to_string()));
                 }
                 Some(tid)
             }
@@ -826,13 +881,16 @@ mod tests {
             .send_message(&id("a"), "nobody", "x", &[], None, 0)
             .unwrap_err();
         assert_eq!(e, MeshError::RecipientUnknown("nobody".into()));
-        assert_eq!(e.to_error().unwrap().code, ErrorCode::MeshRecipientUnknown);
+        assert_eq!(
+            e.to_error(&Limits::default()).code,
+            ErrorCode::MeshRecipientUnknown
+        );
         // Not to oneself either.
         assert!(m.send_message(&id("a"), "a", "x", &[], None, 0).is_err());
         assert_eq!(
             m.send_message(&id("ghost"), "b", "x", &[], None, 0)
                 .unwrap_err(),
-            MeshError::UnknownAgent
+            MeshError::UnknownAgent("ghost".into())
         );
     }
 
@@ -953,16 +1011,19 @@ mod tests {
         // t2 is blocked until t1 is done.
         assert_eq!(
             m.task_claim(&id("b"), t2.as_str()),
-            Err(MeshError::TaskBlocked(t1.as_str().into()))
+            Err(MeshError::TaskBlocked {
+                task: t2.as_str().into(),
+                depends_on: t1.as_str().into()
+            })
         );
         m.task_claim(&id("a"), t1.as_str()).unwrap();
         assert_eq!(
             m.task_claim(&id("b"), t1.as_str()),
-            Err(MeshError::TaskNotOpen)
+            Err(MeshError::TaskNotOpen(t1.as_str().into()))
         );
         assert_eq!(
             m.task_complete(&id("b"), t1.as_str(), "no"),
-            Err(MeshError::NotTaskOwner)
+            Err(MeshError::NotTaskOwner(t1.as_str().into()))
         );
         m.task_complete(&id("a"), t1.as_str(), "parser done")
             .unwrap();
@@ -993,15 +1054,18 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             err,
-            MeshError::Lease(LeaseError::Conflict { holder: id("a") })
+            MeshError::LeaseHeld {
+                path: "src/b/deep.rs".into(),
+                holder: id("a")
+            }
         );
-        assert_eq!(err.to_error().unwrap().code, ErrorCode::LeaseHeld);
+        assert_eq!(err.to_error(&Limits::default()).code, ErrorCode::LeaseHeld);
         // Nothing of the failed batch was kept: docs/x.md is free.
         m.lease_acquire(&id("b"), &["docs/x.md".into()], 1000, 20)
             .unwrap();
         assert_eq!(
             m.lease_release(&id("b"), &l, 30),
-            Err(MeshError::LeaseUnknown),
+            Err(MeshError::LeaseUnknown(l.clone())),
             "not the holder"
         );
         m.lease_release(&id("a"), &l, 30).unwrap();
@@ -1050,7 +1114,7 @@ mod tests {
         // Only the owner can hand a task off.
         assert_eq!(
             m.handoff(&id("a"), "b", Some(t.as_str()), "again", &[], 6),
-            Err(MeshError::NotTaskOwner)
+            Err(MeshError::NotTaskOwner(t.as_str().into()))
         );
         // A handoff whose message cannot be sent moves nothing.
         let t2 = m.task_create(&id("a"), "other", "", &[]).unwrap();
