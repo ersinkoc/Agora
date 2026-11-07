@@ -26,3 +26,6 @@ rcgen = { version = "0.14", features = ["pem", "x509-parser"] }
 time = "0.3"
 # Reads the serial number back from an issued certificate (and verifies chains in tests).
 x509-parser = { version = "0.18", features = ["verify"] }
+# One-time enrollment codes: system randomness (already in the tree via rcgen) and a hash so codes are not stored.
+getrandom = "0.2"
+sha2 = "0.10"
