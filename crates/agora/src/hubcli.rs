@@ -319,7 +319,7 @@ pub fn node_enroll(say: &Say, o: &Opts) -> ExitCode {
 }
 
 /// What enrollment left on this machine, if anything: the node id and how to dial the hub.
-pub fn load_link() -> Option<(String, HubLink)> {
+pub fn load_link(socket: PathBuf) -> Option<(String, HubLink)> {
     let dir = link_dir();
     let read = |n: &str| std::fs::read_to_string(dir.join(n)).ok();
     let id = read("node-id")?.trim().to_string();
@@ -330,6 +330,7 @@ pub fn load_link() -> Option<(String, HubLink)> {
             ca_pem: read("ca.pem")?,
             cert_pem: read("cert.pem")?,
             key_pem: read("key.pem")?,
+            commands: Some(socket),
         },
     ))
 }

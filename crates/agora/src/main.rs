@@ -309,7 +309,7 @@ fn node_trust(say: &Say, o: &Opts) -> ExitCode {
 fn node_run(say: &Say, o: &Opts) -> ExitCode {
     let h = home();
     // A machine enrolled with a hub reports under the id the hub's certificate names.
-    let link = hubcli::load_link();
+    let link = hubcli::load_link(socket_path(o));
     let cfg = NodeConfig {
         node_id: link
             .as_ref()

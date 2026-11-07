@@ -275,6 +275,7 @@ fn node_stdio_carries_the_framed_protocol_over_pipes() {
     let req = agora_protocol::v1::CommandRequest {
         request_id: "r1".into(),
         idempotency_key: String::new(),
+        target_node: String::new(),
         command: Some(Cmd::AgentStop(agora_protocol::v1::AgentStop {
             agent_id: "agent-404".into(),
         })),

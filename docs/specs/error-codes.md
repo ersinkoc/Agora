@@ -13,6 +13,8 @@ replaced by dashes). Codes are part of the public protocol: never rename or reus
 | `protocol.capability_missing` | `capability` | Peer lacks a required capability |
 | `protocol.invalid_message` | `field` | Message failed validation |
 | `node.offline` | `node_id` | Target node not connected |
+| `node.unknown` | `node_id` | The hub has never seen this node, or the request named none (ADR-0029) |
+| `node.timeout` | `node_id` | The node did not answer a routed command in time (ADR-0029) |
 | `node.policy_denied` | `node_id`, `rule` | Node local policy rejected the action |
 | `node.resource_limit` | `resource`, `limit` | Limit reached (agents, memory, disk) |
 | `project.not_found` | `project_id` | |

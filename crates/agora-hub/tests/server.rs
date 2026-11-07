@@ -325,6 +325,7 @@ fn enroll_request(code: &str, node: &str, csr: &str) -> Frame {
     let req = v1::CommandRequest {
         request_id: "r1".into(),
         idempotency_key: String::new(),
+        target_node: String::new(),
         command: Some(command_request::Command::Enroll(v1::EnrollRequest {
             code: code.into(),
             node_id: node.into(),
@@ -404,6 +405,7 @@ async fn an_unauthenticated_peer_can_do_nothing_but_enroll() {
     let req = v1::CommandRequest {
         request_id: "r".into(),
         idempotency_key: String::new(),
+        target_node: String::new(),
         command: Some(command_request::Command::ProjectList(v1::ProjectList {})),
     };
     c.send(&f(STREAM_COMMANDS, 0, req.encode_to_vec()))
@@ -613,4 +615,126 @@ async fn the_same_port_serves_the_web_app_and_takes_a_browser_style_subscription
     .await
     .unwrap();
     assert!(closed(&mut bad).await);
+}
+
+fn routed(id: &str, target: &str) -> Frame {
+    let req = v1::CommandRequest {
+        request_id: id.into(),
+        idempotency_key: String::new(),
+        target_node: target.into(),
+        command: Some(command_request::Command::AgentList(v1::AgentList::default())),
+    };
+    f(STREAM_COMMANDS, 0, req.encode_to_vec())
+}
+
+async fn response(c: &mut Conn<TcpStream>) -> v1::CommandResponse {
+    let fr = recv(c).await;
+    assert_eq!((fr.stream_id, fr.kind), (STREAM_COMMANDS, 1));
+    v1::CommandResponse::decode(fr.payload.as_slice()).unwrap()
+}
+
+#[tokio::test]
+async fn a_clients_command_is_routed_to_its_node_and_the_answer_comes_back() {
+    let st = state(None);
+    let addr = start(Arc::clone(&st)).await;
+    let (mut node, _t) = node_conn(&st, "n1").await;
+    handshake(&mut node).await;
+    node.send(&f(
+        STREAM_EVENTS,
+        kinds::EVENT,
+        event("n1", 1, online("n1")),
+    ))
+    .await
+    .unwrap();
+    next_ack(&mut node).await;
+
+    let mut client = dial(addr, Some("good-token")).await;
+    client
+        .send(&f(
+            STREAM_EVENTS,
+            kinds::SUBSCRIBE,
+            v1::Subscribe::default().encode_to_vec(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(recv(&mut client).await.kind, kinds::SNAPSHOT);
+
+    // Unknown node, no target, and enrollment are refused by the hub itself.
+    for (id, target, code) in [("a", "nope", "node.unknown"), ("b", "", "node.unknown")] {
+        client.send(&routed(id, target)).await.unwrap();
+        let r = response(&mut client).await;
+        assert_eq!(r.request_id, id);
+        assert_eq!(err_code(&r), code);
+    }
+
+    client.send(&routed("mine", "n1")).await.unwrap();
+    let got = recv(&mut node).await;
+    assert_eq!((got.stream_id, got.kind), (STREAM_COMMANDS, 0));
+    let forwarded = v1::CommandRequest::decode(got.payload.as_slice()).unwrap();
+    assert_ne!(forwarded.request_id, "mine", "the hub picks the id");
+    assert!(matches!(
+        forwarded.command,
+        Some(command_request::Command::AgentList(_))
+    ));
+    let answer = v1::CommandResponse {
+        request_id: forwarded.request_id,
+        result: Some(command_response::Result::Ok(v1::CommandOk {
+            result: Some(command_ok::Result::AgentList(v1::AgentListResult::default())),
+        })),
+    };
+    node.send(&f(STREAM_COMMANDS, 1, answer.encode_to_vec()))
+        .await
+        .unwrap();
+    let r = response(&mut client).await;
+    assert_eq!(r.request_id, "mine", "mapped back to the client's id");
+    assert!(matches!(r.result, Some(command_response::Result::Ok(_))));
+}
+
+#[tokio::test]
+async fn a_node_that_leaves_mid_command_gives_the_client_node_offline() {
+    let st = state(None);
+    let addr = start(Arc::clone(&st)).await;
+    let (mut node, task) = node_conn(&st, "n2").await;
+    handshake(&mut node).await;
+    node.send(&f(
+        STREAM_EVENTS,
+        kinds::EVENT,
+        event("n2", 1, online("n2")),
+    ))
+    .await
+    .unwrap();
+    next_ack(&mut node).await;
+    let mut client = dial(addr, Some("good-token")).await;
+    client
+        .send(&f(
+            STREAM_EVENTS,
+            kinds::SUBSCRIBE,
+            v1::Subscribe::default().encode_to_vec(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(recv(&mut client).await.kind, kinds::SNAPSHOT);
+    client.send(&routed("x", "n2")).await.unwrap();
+    let _ = recv(&mut node).await; // the node got it and never answers
+    drop(node);
+    let _ = task.await;
+    loop {
+        let fr = recv(&mut client).await;
+        if (fr.stream_id, fr.kind) == (STREAM_COMMANDS, 1) {
+            let r = v1::CommandResponse::decode(fr.payload.as_slice()).unwrap();
+            assert_eq!(r.request_id, "x");
+            assert_eq!(err_code(&r), "node.offline");
+            break;
+        }
+    }
+    // And with the node gone, a new command is refused at once.
+    client.send(&routed("y", "n2")).await.unwrap();
+    loop {
+        let fr = recv(&mut client).await;
+        if (fr.stream_id, fr.kind) == (STREAM_COMMANDS, 1) {
+            let r = v1::CommandResponse::decode(fr.payload.as_slice()).unwrap();
+            assert_eq!(err_code(&r), "node.offline");
+            break;
+        }
+    }
 }
