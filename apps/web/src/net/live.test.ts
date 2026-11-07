@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { agora } from '../gen/agora.js';
-import { decodeFrame, encodeFrame, EVENT_KIND, STREAM_EVENTS } from './frame';
+import { decodeFrame, encodeFrame, EVENT_KIND, STREAM_CLOSE, STREAM_COMMANDS, STREAM_EVENTS } from './frame';
 import { connectLive, type LinkState, type Socket } from './live';
 import { applyEvent, emptyView, fromSnapshot, machinesOnline, tiles, type View } from './view';
 
@@ -116,5 +116,67 @@ describe('live connection', () => {
     const s = sockets[0] as FakeSocket;
     s.onmessage?.({ data: new Uint8Array([0xff, 0xff]).buffer });
     expect(s.closed).toBe(true);
+  });
+});
+
+describe('commands and terminals', () => {
+  function setup() {
+    const sockets: FakeSocket[] = [];
+    const live = connectLive({
+      url: 'ws://hub/', token: 't', backoffMs: () => 0,
+      socket: (u, p) => { const s = new FakeSocket(u, p); sockets.push(s); return s; },
+      onState: () => {}, onView: () => {},
+    });
+    const s = sockets[0] as FakeSocket;
+    s.onopen?.();
+    const sentFrames = () => s.sent.map((b) => decodeFrame(b)).filter((f) => f !== undefined);
+    return { live, s, sentFrames };
+  }
+  const answer = (s: FakeSocket, requestId: string, body: Record<string, unknown>) => {
+    const b = encodeFrame({ streamId: STREAM_COMMANDS, kind: 1, payload: v1.CommandResponse.encode(v1.CommandResponse.create({ requestId, ...body })).finish() });
+    s.onmessage?.({ data: b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength) });
+  };
+
+  it('sends a command with the target node and resolves with the answer or rejects with the code', async () => {
+    const { live, s, sentFrames } = setup();
+    const ok = live.command('laptop', { agentList: {} });
+    const req = v1.CommandRequest.decode(sentFrames().at(-1)?.payload as Uint8Array);
+    expect(req.targetNode).toBe('laptop');
+    answer(s, req.requestId, { ok: { agentList: { agents: [] } } });
+    expect((await ok).agentList).toBeTruthy();
+
+    const bad = live.command('laptop', { agentList: {} });
+    const req2 = v1.CommandRequest.decode(sentFrames().at(-1)?.payload as Uint8Array);
+    answer(s, req2.requestId, { err: { code: 'node.offline' } });
+    await expect(bad).rejects.toMatchObject({ code: 'node.offline' });
+  });
+
+  it('relays a terminal on its own stream: subscribe, output, input as commands, close', () => {
+    const { live, s, sentFrames } = setup();
+    const events: string[] = [];
+    const session = live.terminal('laptop', 't-agent-1').connect((e) => events.push(e.type));
+    const sub = sentFrames().at(-1);
+    expect(sub?.streamId).toBe(3);
+    const req = v1.CommandRequest.decode(sub?.payload as Uint8Array);
+    expect(req.targetNode).toBe('laptop');
+    expect(req.terminalSubscribe?.terminalId).toBe('t-agent-1');
+
+    const deliver = (kind: number, payload: Uint8Array) => {
+      const b = encodeFrame({ streamId: 3, kind, payload });
+      s.onmessage?.({ data: b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength) });
+    };
+    deliver(1, new TextEncoder().encode('screen'));
+    deliver(0, new TextEncoder().encode('out'));
+    expect(events).toEqual(['snapshot', 'data']);
+
+    session.sendInput(new TextEncoder().encode('ls\n'));
+    const input = v1.CommandRequest.decode(sentFrames().at(-1)?.payload as Uint8Array);
+    expect(sentFrames().at(-1)?.streamId).toBe(STREAM_COMMANDS);
+    expect(input.terminalInput?.terminalId).toBe('t-agent-1');
+
+    session.close();
+    const last = sentFrames().at(-1);
+    expect(last).toMatchObject({ streamId: 3, kind: STREAM_CLOSE });
+    live.close();
   });
 });

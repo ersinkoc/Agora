@@ -51,7 +51,7 @@ node id, approval id and verdict (no replay on another node or request, no flipp
 ids, expiry, cancellation when an agent stops, and a policy that lists which actions need approval. The signature scheme sits
 behind a `Verifier` trait; the scheme is ECDSA P-256 (ADR-0028, `P256Verifier`). Trusted device keys reach the node only through its owner:
 `agora node trust DEVICE_ID PUBLIC_KEY_HEX` writes `<data>/trusted-devices` on the machine itself (read at start; malformed
-lines are skipped, never trusted), and no hub or client message can edit it. Adding a device by a user-signed message from an
+lines are skipped, never trusted), and no hub or client message can edit it. The web client keeps a non-extractable P-256 key in the browser (IndexedDB); its "This device" page shows the public key and the exact `agora node trust` command, and approvals are signed there (`apps/web/src/net/approval.ts`) and verified on the node. Adding a device by a user-signed message from an
 already trusted device (ADR-0020) is still to be built.
 
 ### Approvals: node wiring

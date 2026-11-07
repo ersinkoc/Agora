@@ -75,3 +75,9 @@ h2 { font-size: var(--text-16); color: var(--text-muted); }
 
 .terminal { background: var(--surface-0); border: 1px solid var(--border); border-radius: var(--radius-m);
   padding: var(--space-2); min-height: 320px; }
+
+.approvals { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: var(--space-4); }
+.approval { display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-4); background: var(--surface-1);
+  border: 1px solid var(--border); border-radius: var(--radius-m); }
+.approval__actions { display: flex; gap: var(--space-3); }
+.mono { font-family: var(--font-mono, ui-monospace, monospace); overflow-wrap: anywhere; user-select: all; }

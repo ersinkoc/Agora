@@ -3,7 +3,9 @@
 // subprotocol (`agora.v1`, `agora.bearer.<token>`).
 
 import { agora } from '../gen/agora.js';
-import { decodeFrame, encodeFrame, EVENT_KIND, STREAM_EVENTS } from './frame';
+import { decodeTerminalFrame, type TerminalEvent } from '../terminal/frames';
+import type { TerminalSource } from '../terminal/source';
+import { decodeFrame, encodeFrame, EVENT_KIND, STREAM_COMMANDS, STREAM_CLOSE, STREAM_EVENTS } from './frame';
 import { applyEvent, emptyView, fromSnapshot, num, type View } from './view';
 
 export type LinkState = 'connecting' | 'live' | 'offline';
@@ -29,7 +31,21 @@ export interface LiveOptions {
   backoffMs?: (attempt: number) => number;
 }
 
-export interface Live { close(): void }
+type CommandBody = Omit<agora.v1.CommandRequest.$Properties, 'requestId' | 'idempotencyKey' | 'targetNode'>;
+
+export interface Live {
+  close(): void;
+  // Runs a command on a node through the hub (ADR-0029). Rejects with the error code (`node.offline`, ...).
+  command(node: string, body: CommandBody): Promise<agora.v1.CommandOk.$Properties>;
+  // A terminal on a node, relayed by the hub. Re-subscribes by itself after a reconnect or when the hub ended the relay.
+  terminal(node: string, terminalId: string): TerminalSource;
+}
+
+export class CommandError extends Error {
+  constructor(readonly code: string) {
+    super(code);
+  }
+}
 
 const browserSocket: SocketFactory = (url, protocols) => new WebSocket(url, protocols) as unknown as Socket;
 const defaultBackoff = (n: number) => Math.min(30_000, 500 * 2 ** n);
@@ -43,6 +59,29 @@ export function connectLive(o: LiveOptions): Live {
   let closed = false;
   let sock: Socket | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let isOpen = false;
+  let requests = 0;
+  let nextStream = 3;
+  const pending = new Map<string, { resolve: (ok: agora.v1.CommandOk.$Properties) => void; reject: (e: CommandError) => void }>();
+  const terminals = new Map<number, { node: string; terminalId: string; onEvent: (e: TerminalEvent) => void }>();
+
+  const request = (stream: number, node: string, body: CommandBody): Promise<agora.v1.CommandOk.$Properties> =>
+    new Promise((resolve, reject) => {
+      if (!isOpen || !sock) { reject(new CommandError('node.offline')); return; }
+      const requestId = `c${++requests}`;
+      pending.set(requestId, { resolve, reject });
+      const payload = agora.v1.CommandRequest.encode({ ...body, requestId, targetNode: node }).finish();
+      sock.send(encodeFrame({ streamId: stream, kind: 0, payload }));
+    });
+
+  const subscribeTerminal = (stream: number) => {
+    const t = terminals.get(stream);
+    if (!t) return;
+    request(stream, t.node, { terminalSubscribe: { terminalId: t.terminalId, format: '' } }).catch(() => {
+      // The node may be away or the agent gone; try again a little later while someone is watching.
+      if (terminals.has(stream) && !closed) setTimeout(() => subscribeTerminal(stream), 2000);
+    });
+  };
 
   const start = () => {
     o.onState('connecting');
@@ -50,14 +89,38 @@ export function connectLive(o: LiveOptions): Live {
     sock = s;
     s.binaryType = 'arraybuffer';
     s.onopen = () => {
+      isOpen = true;
       const sub = agora.v1.Subscribe.encode(synced ? { afterPos: view.pos } : {}).finish();
       s.send(encodeFrame({ streamId: STREAM_EVENTS, kind: EVENT_KIND.SUBSCRIBE, payload: sub }));
+      for (const stream of terminals.keys()) subscribeTerminal(stream);
     };
     s.onmessage = (m) => {
       if (!(m.data instanceof ArrayBuffer || ArrayBuffer.isView(m.data))) return;
       const bytes = m.data instanceof ArrayBuffer ? new Uint8Array(m.data) : new Uint8Array((m.data as ArrayBufferView).buffer);
       const f = decodeFrame(bytes);
       if (!f) { s.close(); return; }
+      if (f.streamId === STREAM_COMMANDS && f.kind === 1) {
+        try {
+          const r = agora.v1.CommandResponse.decode(f.payload);
+          const p = pending.get(r.requestId);
+          pending.delete(r.requestId);
+          if (r.err) p?.reject(new CommandError(r.err.code ?? 'error'));
+          else p?.resolve(r.ok ?? agora.v1.CommandOk.create());
+        } catch { /* a garbled answer: the request stays pending until the connection ends */ }
+        return;
+      }
+      if (f.streamId >= 3) {
+        const t = terminals.get(f.streamId);
+        if (!t) return;
+        if (f.kind === STREAM_CLOSE) {
+          // The hub ended the relay (slow client, node left, exit): ask again for a fresh snapshot.
+          setTimeout(() => subscribeTerminal(f.streamId), 500);
+          return;
+        }
+        const e = decodeTerminalFrame(f.kind, f.payload);
+        if (e) t.onEvent(e);
+        return;
+      }
       if (f.streamId !== STREAM_EVENTS) return;
       try {
         if (f.kind === EVENT_KIND.SNAPSHOT) {
@@ -80,6 +143,9 @@ export function connectLive(o: LiveOptions): Live {
       o.onView(view);
     };
     s.onclose = () => {
+      isOpen = false;
+      for (const p of pending.values()) p.reject(new CommandError('node.offline'));
+      pending.clear();
       if (closed) return;
       o.onState('offline');
       timer = setTimeout(start, backoff(attempt++));
@@ -88,6 +154,26 @@ export function connectLive(o: LiveOptions): Live {
 
   start();
   return {
+    command: (node, body) => request(STREAM_COMMANDS, node, body),
+    terminal: (node, terminalId) => ({
+      connect(onEvent) {
+        const stream = nextStream++;
+        terminals.set(stream, { node, terminalId, onEvent });
+        if (isOpen) subscribeTerminal(stream);
+        return {
+          sendInput(bytes) {
+            request(STREAM_COMMANDS, node, { terminalInput: { terminalId, data: bytes } }).catch(() => {});
+          },
+          resize(cols, rows) {
+            request(STREAM_COMMANDS, node, { terminalResize: { terminalId, cols, rows } }).catch(() => {});
+          },
+          close() {
+            terminals.delete(stream);
+            if (isOpen && sock) sock.send(encodeFrame({ streamId: stream, kind: STREAM_CLOSE, payload: new Uint8Array() }));
+          },
+        };
+      },
+    }),
     close() {
       closed = true;
       if (timer) clearTimeout(timer);
