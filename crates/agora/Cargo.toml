@@ -1,0 +1,13 @@
+[package]
+name = "agora"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+agora-hub = { path = "../agora-hub" }
+agora-node = { path = "../agora-node" }
+agora-tui = { path = "../agora-tui" }

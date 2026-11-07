@@ -1,0 +1,30 @@
+# Sync with a label-sync action or `gh label create`.
+- name: task
+  color: "0e8a16"
+- name: bug
+  color: "d73a4a"
+- name: adr
+  color: "5319e7"
+  description: Needs an architecture decision before work starts
+- name: "claimed:claude-code"
+  color: "c5def5"
+  description: Claimed by Claude Code
+- name: "claimed:codex"
+  color: "bfd4f2"
+  description: Claimed by Codex
+- name: "claimed:human"
+  color: "fef2c0"
+- name: "review:claude-code"
+  color: "c5def5"
+  description: Claude Code to review
+- name: "review:codex"
+  color: "bfd4f2"
+  description: Codex to review
+- name: blocked
+  color: "b60205"
+- name: "phase:0"
+  color: "ededed"
+- name: "phase:1"
+  color: "ededed"
+- name: "phase:2"
+  color: "ededed"

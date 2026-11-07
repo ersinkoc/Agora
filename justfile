@@ -1,0 +1,16 @@
+default: check
+
+fmt:
+    cargo fmt --all
+
+check:
+    cargo fmt --all -- --check
+    cargo clippy --workspace --all-targets -- -D warnings
+    cargo test --workspace
+    ./scripts/check-docs.sh
+
+test:
+    cargo test --workspace
+
+deny:
+    cargo deny check

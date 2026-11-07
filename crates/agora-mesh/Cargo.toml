@@ -1,0 +1,12 @@
+[package]
+name = "agora-mesh"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+agora-core = { path = "../agora-core" }
+agora-protocol = { path = "../agora-protocol" }

@@ -1,0 +1,43 @@
+# Adapter protocol (L3)
+
+An adapter is a process, in any language, that connects one agent kind to Agora. The node starts it and talks
+JSON-RPC 2.0 over stdio (newline-delimited). Message types come from `schema/` (ADR-0010).
+
+## Lifecycle
+
+```
+node → adapter  initialize { protocol_generation, node_capabilities, locale }
+adapter → node  result     { adapter_name, version, agent_kind, capabilities[] }
+node → adapter  session/start   { project_root, worktree, env, mcp_servers[], resume_session_id? }
+adapter → node  result          { session_id }
+...                              notifications in both directions
+node → adapter  session/stop    { session_id, reason }
+node → adapter  shutdown
+```
+
+## Capabilities an adapter may declare
+
+`chat`, `terminal` (adapter exposes a PTY the node should attach), `diff`, `approvals`, `plan`, `resume`,
+`usage`, `cancel`, `mesh.deliver` (adapter can deliver mesh messages to the agent natively).
+
+## Methods
+
+| Direction | Method | Purpose |
+| --- | --- | --- |
+| node → adapter | `session/prompt` | Send user or mesh input |
+| node → adapter | `session/cancel` | Interrupt current turn |
+| node → adapter | `approval/resolve` | Answer a permission request (carries the verified decision) |
+| node → adapter | `mesh/deliver` | Deliver a mesh message |
+| adapter → node | `state/update` | `working`, `blocked`, `idle`, with optional message |
+| adapter → node | `chat/append` | Structured transcript items (text, tool call, plan, diff) |
+| adapter → node | `approval/request` | Ask permission; node routes to the approvals queue |
+| adapter → node | `usage/report` | Model id, tokens, reported cost if known, quota status if known |
+| adapter → node | `session/reported` | Native session id for resume |
+| adapter → node | `log` | Diagnostic log line (never user-facing text) |
+
+## Rules
+
+- Adapters never receive hub credentials or other agents' data; the node mediates everything.
+- Adapters must tolerate unknown fields and methods (ignore, do not crash).
+- A crashing adapter is restarted with backoff; the agent shows `unknown` until it recovers.
+- First-party adapters are the reference implementations and conformance test targets.

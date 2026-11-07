@@ -1,0 +1,4 @@
+[toolchain]
+# Pin to an exact stable version before the first release (for example "1.xx.0").
+channel = "stable"
+components = ["rustfmt", "clippy"]

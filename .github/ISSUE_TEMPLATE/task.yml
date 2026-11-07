@@ -1,0 +1,41 @@
+name: Task
+description: A unit of work sized for one coding agent session
+labels: ["task"]
+body:
+  - type: input
+    id: phase
+    attributes:
+      label: Phase
+      placeholder: "1"
+    validations:
+      required: true
+  - type: input
+    id: crates
+    attributes:
+      label: Crates allowed to change
+      placeholder: "agora-protocol"
+    validations:
+      required: true
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Testable statements. The task is done when all are true.
+    validations:
+      required: true
+  - type: input
+    id: depends
+    attributes:
+      label: Depends on
+      placeholder: "#12, #13"
+  - type: textarea
+    id: refs
+    attributes:
+      label: References
+      description: ADRs, specs, and docs the agent must read first.

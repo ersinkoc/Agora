@@ -1,0 +1,16 @@
+[package]
+name = "agora-node"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+agora-core = { path = "../agora-core" }
+agora-protocol = { path = "../agora-protocol" }
+agora-platform = { path = "../agora-platform" }
+agora-vt = { path = "../agora-vt" }
+agora-adapters = { path = "../agora-adapters" }
+agora-mesh = { path = "../agora-mesh" }

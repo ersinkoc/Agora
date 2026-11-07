@@ -1,0 +1,36 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/agora",
+    "crates/agora-core",
+    "crates/agora-protocol",
+    "crates/agora-platform",
+    "crates/agora-vt",
+    "crates/agora-node",
+    "crates/agora-adapters",
+    "crates/agora-mesh",
+    "crates/agora-hub",
+    "crates/agora-i18n",
+    "crates/agora-tui",
+    "crates/agora-fake-agent",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+publish = false
+# license: pending ADR-0016
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "warn"
+dbg_macro = "deny"
+todo = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
