@@ -58,6 +58,23 @@ impl ClientAuth for FileToken {
     }
 }
 
+mod embedded {
+    include!(concat!(env!("OUT_DIR"), "/web_files.rs"));
+}
+
+/// The web app the hub serves: `--web DIR` wins, else the copy compiled into this binary (when the build had one).
+fn web_assets(o: &Opts) -> Option<Arc<dyn agora_hub::web::Assets>> {
+    if let Some(dir) = &o.web {
+        return Some(Arc::new(agora_hub::web::DirAssets::new(dir)));
+    }
+    if embedded::WEB_FILES.is_empty() {
+        return None;
+    }
+    Some(Arc::new(agora_hub::web::EmbeddedAssets(
+        embedded::WEB_FILES,
+    )))
+}
+
 pub fn hub_run(say: &Say, o: &Opts) -> ExitCode {
     let dir = hub_dir(o);
     let run = || -> Result<(), String> {
@@ -82,6 +99,7 @@ pub fn hub_run(say: &Say, o: &Opts) -> ExitCode {
             }
         };
         let web_token = token.clone();
+        let has_web = web_assets(o).is_some();
         let store = SqliteStore::open(&dir.join("hub.db")).map_err(|e| e.to_string())?;
         let state = Arc::new(ServerState {
             hub: Arc::new(Hub::open(store).map_err(|e| e.to_string())?),
@@ -93,9 +111,7 @@ pub fn hub_run(say: &Say, o: &Opts) -> ExitCode {
             ca: Some(ca),
             lockout: Arc::new(Lockout::new()),
             auth: Box::new(FileToken(token)),
-            assets: o.web.as_ref().map(|d| {
-                Arc::new(agora_hub::web::DirAssets::new(d)) as Arc<dyn agora_hub::web::Assets>
-            }),
+            assets: web_assets(o),
         });
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -114,7 +130,7 @@ pub fn hub_run(say: &Say, o: &Opts) -> ExitCode {
                     ("dir", dir.display().to_string().into()),
                 ],
             );
-            if o.web.is_some() {
+            if has_web {
                 say.out(
                     key!("cli-hub-web"),
                     &[
