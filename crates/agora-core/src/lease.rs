@@ -113,6 +113,14 @@ impl LeaseTable {
         expired
     }
 
+    /// The live lease that blocks `agent` from writing `path`, if any.
+    pub fn blocking_lease(&self, path: &str, agent: &AgentId, now_ms: u64) -> Option<&Lease> {
+        let path = normalize(path).ok()?;
+        self.leases
+            .iter()
+            .find(|l| !l.is_expired(now_ms) && &l.holder != agent && overlaps(&l.path, &path))
+    }
+
     /// Who may not write `path` right now (a live lease held by someone else).
     pub fn blocked_for(&self, path: &str, agent: &AgentId, now_ms: u64) -> Option<&AgentId> {
         let path = normalize(path).ok()?;

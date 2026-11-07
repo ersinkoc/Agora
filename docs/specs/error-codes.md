@@ -30,6 +30,7 @@ replaced by dashes). Codes are part of the public protocol: never rename or reus
 | `mesh.recipient_unknown` | `to` | |
 | `files.not_found` | `path` | |
 | `files.too_large` | `path`, `limit` | |
+| `files.outside_root` | `path` | Path escapes the worktree (`..`, absolute, or a symlink leading out) |
 | `adapter.signature_invalid` | `package` | |
 | `adapter.crashed` | `kind`, `exit_code` | |
 | `internal` | `incident_id` | Unexpected failure; details only in logs |
