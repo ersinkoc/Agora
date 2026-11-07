@@ -4,6 +4,20 @@ use std::ffi::CStr;
 use std::io;
 use std::path::PathBuf;
 
+/// Mach absolute-time to nanoseconds ratio as `(numer, denom)`.
+#[allow(deprecated)] // `libc` prefers the `mach2` crate; one stable call is not worth a new dependency
+fn timebase() -> (u64, u64) {
+    // SAFETY: an all-zero mach_timebase_info is a valid out-buffer.
+    let mut tb: libc::mach_timebase_info = unsafe { std::mem::zeroed() };
+    // SAFETY: valid out-pointer.
+    unsafe { libc::mach_timebase_info(&mut tb) };
+    if tb.denom == 0 {
+        (1, 1)
+    } else {
+        (u64::from(tb.numer), u64::from(tb.denom))
+    }
+}
+
 pub(crate) fn stats(pid: u32) -> io::Result<crate::ProcessStats> {
     // SAFETY: an all-zero proc_taskinfo is a valid buffer for the kernel to fill.
     let mut info: libc::proc_taskinfo = unsafe { std::mem::zeroed() };
@@ -22,15 +36,7 @@ pub(crate) fn stats(pid: u32) -> io::Result<crate::ProcessStats> {
         return Err(io::Error::last_os_error());
     }
     // CPU times are in mach absolute-time units: nanoseconds on Intel, a different tick on Apple silicon.
-    // SAFETY: an all-zero mach_timebase_info is a valid out-buffer.
-    let mut tb: libc::mach_timebase_info = unsafe { std::mem::zeroed() };
-    // SAFETY: valid out-pointer.
-    unsafe { libc::mach_timebase_info(&mut tb) };
-    let (numer, denom) = if tb.denom == 0 {
-        (1, 1)
-    } else {
-        (u64::from(tb.numer), u64::from(tb.denom))
-    };
+    let (numer, denom) = timebase();
     let ns = (info.pti_total_user + info.pti_total_system) as f64 * numer as f64 / denom as f64;
     Ok(crate::ProcessStats {
         rss_bytes: info.pti_resident_size,
