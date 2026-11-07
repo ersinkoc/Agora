@@ -151,6 +151,10 @@ export function SignInPage({ onSubmit, notice }: { onSubmit: (code: string) => v
         <button type="submit" className="button button--primary">{t('signin-action')}</button>
       </form>
       {notice && <p role="alert">{notice}</p>}
+    </main>
+  );
+}
+
 export function MachinesPage({ machines, onBack }: { machines: readonly MachineModel[]; onBack: () => void }) {
   return (
     <main className="page">
