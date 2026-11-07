@@ -29,7 +29,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
-      - run: cargo build --release -p agora --target ${{ matrix.target }}
+      - run: cargo build --locked --release -p agora --target ${{ matrix.target }}
       - name: Package
         shell: bash
         run: |
