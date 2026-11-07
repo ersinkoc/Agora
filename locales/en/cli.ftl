@@ -11,6 +11,8 @@ cli-usage =
       agora mesh stdio --socket PATH
       agora hub run [--listen ADDR] [--hub-dir DIR] [--name HOST]... [--web DIR]
       agora hub code [--hub-dir DIR]
+      agora hub backup [FILE] [--keep N] [--hub-dir DIR]
+      agora hub restore FILE [--hub-dir DIR]
       agora node enroll --hub URL --ca FILE --code CODE --id NAME
       agora node trust DEVICE_ID PUBLIC_KEY_HEX [--data DIR]
       agora doctor [--data DIR] [--manifests DIR] [--socket PATH]
@@ -57,6 +59,8 @@ cli-hub-listening = Hub is running on { $addr }. Its data folder: { $dir }
 cli-hub-web = Web app: https://{ $addr }/#token={ $token } (the hub's certificate is signed by its own CA, so the browser warns until you trust it)
 cli-trusted = Device { $id } can now answer approvals on this node. Restart the node to apply it.
 cli-trust-failed = Could not trust that device: { $reason }
+cli-hub-backup = Backup written to { $path }.
+cli-hub-restored = Database restored from the backup into { $path }. The previous one is kept next to it as before-restore.
 cli-hub-failed = The hub command failed: { $reason }
 cli-hub-code = Enrollment code: { $code } (valid for 10 minutes). On the other machine run: agora node enroll --hub wss://HOST:PORT --ca { $ca } --code { $code } --id NAME
 cli-enrolled = This machine is enrolled as { $id }. Start it with "agora node run"; it will connect to the hub by itself. Saved in { $dir }.
