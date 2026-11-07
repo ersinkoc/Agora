@@ -12,7 +12,14 @@ workspace = true
 # Generated message types and the wire codec (ADR-0009, ADR-0010).
 prost = "0.14"
 
+[dev-dependencies]
+# Reflection + proto3 JSON mapping for golden fixtures in both encodings (ADR-0010).
+prost-reflect = { version = "0.16", features = ["serde"] }
+serde = "1"
+serde_json = "1"
+
 [build-dependencies]
+prost = "0.14"
 # Pure-Rust protobuf compiler, so contributors do not need `protoc` (ADR-0009).
 protox = "0.10"
 prost-build = "0.14"

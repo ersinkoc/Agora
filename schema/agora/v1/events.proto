@@ -1,0 +1,198 @@
+syntax = "proto3";
+
+package agora.v1;
+
+import "agora/v1/common.proto";
+
+// Events are immutable facts (docs/specs/protocol.md section 3). Each producer numbers its events;
+// the receiver applies a (producer_id, seq) at most once.
+message Event {
+  string producer_id = 1;
+  uint64 seq = 2;
+  // Milliseconds since the Unix epoch, producer clock.
+  uint64 at_ms = 3;
+
+  oneof body {
+    // node
+    NodeOnline node_online = 10;
+    NodeOffline node_offline = 11;
+    NodeResources node_resources = 12;
+    // project
+    CheckoutDiscovered checkout_discovered = 20;
+    WorktreeCreated worktree_created = 21;
+    WorktreeRemoved worktree_removed = 22;
+    GitStatusChanged git_status_changed = 23;
+    // agent
+    AgentStarted agent_started = 30;
+    AgentStateChanged agent_state_changed = 31;
+    AgentSessionReported agent_session_reported = 32;
+    AgentUsageReported agent_usage_reported = 33;
+    AgentExited agent_exited = 34;
+    // terminal
+    TerminalOpened terminal_opened = 40;
+    TerminalTitleChanged terminal_title_changed = 41;
+    TerminalClosed terminal_closed = 42;
+    // approval
+    ApprovalRequested approval_requested = 50;
+    ApprovalResolved approval_resolved = 51;
+    // mesh
+    MessagePosted message_posted = 60;
+    TaskChanged task_changed = 61;
+    LeaseGranted lease_granted = 62;
+    LeaseReleased lease_released = 63;
+    HandoffCreated handoff_created = 64;
+    // files
+    FilesChanged files_changed = 70;
+  }
+}
+
+message NodeOnline {
+  string node_id = 1;
+  string hostname = 2;
+  string os = 3;
+  string build = 4;
+}
+
+message NodeOffline {
+  string node_id = 1;
+}
+
+message NodeResources {
+  string node_id = 1;
+  uint32 agents_running = 2;
+  uint32 terminals_open = 3;
+  uint64 memory_used_bytes = 4;
+}
+
+message CheckoutDiscovered {
+  string checkout_id = 1;
+  string node_id = 2;
+  // Machine-independent project identity (normalized remote + root commit).
+  string project_id = 3;
+  string path = 4;
+}
+
+message WorktreeCreated {
+  string worktree_id = 1;
+  string checkout_id = 2;
+  string path = 3;
+  string branch = 4;
+}
+
+message WorktreeRemoved {
+  string worktree_id = 1;
+}
+
+message GitStatusChanged {
+  string worktree_id = 1;
+  uint32 files_changed = 2;
+  uint32 insertions = 3;
+  uint32 deletions = 4;
+  string head_commit = 5;
+}
+
+message AgentStarted {
+  string agent_id = 1;
+  string project_id = 2;
+  string node_id = 3;
+  string worktree_id = 4;
+  string kind = 5;
+  IntegrationLevel level = 6;
+}
+
+message AgentStateChanged {
+  string agent_id = 1;
+  AgentState state = 2;
+  // True when the agent or an adapter reported it; false when derived from the screen.
+  bool reported = 3;
+}
+
+message AgentSessionReported {
+  string agent_id = 1;
+  string session_id = 2;
+}
+
+message AgentUsageReported {
+  string agent_id = 1;
+  string model = 2;
+  uint64 input_tokens = 3;
+  uint64 output_tokens = 4;
+}
+
+message AgentExited {
+  string agent_id = 1;
+  int32 exit_code = 2;
+}
+
+message TerminalOpened {
+  string terminal_id = 1;
+  string node_id = 2;
+  TerminalPurpose purpose = 3;
+  string agent_id = 4;
+}
+
+message TerminalTitleChanged {
+  string terminal_id = 1;
+  string title = 2;
+}
+
+message TerminalClosed {
+  string terminal_id = 1;
+}
+
+message ApprovalRequested {
+  string approval_id = 1;
+  string agent_id = 2;
+  // What the agent wants to do, for example "run_command" or "write_file".
+  string action = 3;
+  string detail = 4;
+  uint64 expires_at_ms = 5;
+}
+
+message ApprovalResolved {
+  string approval_id = 1;
+  bool approved = 2;
+  // Device that signed the decision (ADR-0020).
+  string signer_device_id = 3;
+}
+
+message MessagePosted {
+  string message_id = 1;
+  string from_agent_id = 2;
+  // An agent id or a channel name.
+  string to = 3;
+  string body = 4;
+}
+
+message TaskChanged {
+  string task_id = 1;
+  string project_id = 2;
+  string title = 3;
+  string claimed_by_agent_id = 4;
+  bool done = 5;
+}
+
+message LeaseGranted {
+  string agent_id = 1;
+  string path = 2;
+  uint64 expires_at_ms = 3;
+}
+
+message LeaseReleased {
+  string agent_id = 1;
+  string path = 2;
+}
+
+message HandoffCreated {
+  string task_id = 1;
+  string from_agent_id = 2;
+  string to_agent_id = 3;
+  string summary = 4;
+  repeated string refs = 5;
+}
+
+message FilesChanged {
+  string worktree_id = 1;
+  // Batched, relative to the worktree root.
+  repeated string paths = 2;
+}

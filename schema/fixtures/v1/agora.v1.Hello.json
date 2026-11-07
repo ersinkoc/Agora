@@ -1,0 +1,11 @@
+{
+  "role": "ROLE_NODE",
+  "protocolGenerations": [
+    1
+  ],
+  "capabilities": [
+    "x"
+  ],
+  "build": "x",
+  "locale": "x"
+}

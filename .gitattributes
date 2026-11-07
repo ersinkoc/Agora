@@ -1,0 +1,8 @@
+# Fixtures are frozen byte-for-byte contracts (AGENTS.md): never let git rewrite line endings or treat
+# binary fixtures as text. Without this, Windows checkouts turn JSON fixtures into CRLF and golden tests fail.
+schema/fixtures/**/*.bin binary
+schema/fixtures/**/*.json text eol=lf
+*.proto text eol=lf
+*.ftl text eol=lf
+*.py text eol=lf
+*.sh text eol=lf
