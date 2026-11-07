@@ -134,7 +134,8 @@ where
     conn.send(&frame(STREAM_CONTROL, kinds::RESUME_OK, ok.encode_to_vec()))
         .await?;
 
-    let result = stream_events(&mut conn, &mut session, hub).await;
+    let (_registration, commands) = hub.router().register(node_id);
+    let result = stream_events(&mut conn, &mut session, hub, commands).await;
     // However it ended, the hub now knows this node is not connected.
     let _ = hub.node_disconnected(node_id, now_ms());
     result
@@ -144,15 +145,31 @@ async fn stream_events<S>(
     conn: &mut Conn<S>,
     session: &mut NodeSession<'_, crate::store::SqliteStore>,
     hub: &Hub,
+    mut commands: tokio::sync::mpsc::UnboundedReceiver<crate::router::Routed>,
 ) -> Result<(), ServeError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let mut acked: Option<u64> = None; // highest contiguous seq not yet acknowledged
     let mut since_ack = 0u32;
+    // Commands sent to this node and not yet answered, by the request id the hub chose.
+    let mut waiting: std::collections::HashMap<
+        String,
+        tokio::sync::oneshot::Sender<v1::CommandResponse>,
+    > = std::collections::HashMap::new();
     loop {
         let idle;
-        match tokio::time::timeout(ACK_IDLE, conn.recv()).await {
+        let received = tokio::select! {
+            r = tokio::time::timeout(ACK_IDLE, conn.recv()) => r,
+            Some(routed) = commands.recv() => {
+                waiting.retain(|_, s| !s.is_closed());
+                let payload = routed.request.encode_to_vec();
+                waiting.insert(routed.request.request_id.clone(), routed.reply);
+                conn.send(&frame(STREAM_COMMANDS, 0, payload)).await?;
+                continue;
+            }
+        };
+        match received {
             Ok(Ok(Some(f))) => {
                 idle = false;
                 match (f.stream_id, f.kind) {
@@ -171,6 +188,15 @@ where
                     (STREAM_CONTROL, kinds::PING) => {
                         conn.send(&frame(STREAM_CONTROL, kinds::PONG, f.payload))
                             .await?;
+                    }
+                    // An answer to a routed command: hand it to whoever asked. A garbled answer is dropped, and
+                    // the asker's deadline turns it into `node.timeout`.
+                    (STREAM_COMMANDS, 1) => {
+                        if let Ok(resp) = v1::CommandResponse::decode(f.payload.as_slice()) {
+                            if let Some(reply) = waiting.remove(&resp.request_id) {
+                                let _ = reply.send(resp);
+                            }
+                        }
                     }
                     // Unknown frames are ignored (newer peers may send more).
                     _ => {}
@@ -304,7 +330,9 @@ where
     for d in &subscription.backlog {
         send_positioned(&mut conn, d).await?;
     }
+    let mut inflight: Vec<Inflight> = Vec::new();
     loop {
+        answer_ready(&mut conn, &mut inflight).await?;
         // Push whatever is waiting; a closed channel means the hub dropped this client for being too slow.
         loop {
             match subscription.live.try_recv() {
@@ -315,11 +343,108 @@ where
         }
         // Watching the connection too: a client that went away ends this task.
         match tokio::time::timeout(PUSH, conn.recv()).await {
-            Ok(Ok(Some(_))) | Err(_) => {}
+            Ok(Ok(Some(f))) => {
+                if (f.stream_id, f.kind) == (STREAM_COMMANDS, 0) {
+                    forward_command(&mut conn, hub, &mut inflight, &f.payload).await?;
+                }
+            }
+            Err(_) => {}
             Ok(Ok(None)) => return Ok(()),
             Ok(Err(e)) => return Err(e.into()),
         }
     }
+}
+
+/// Longest a client waits for a node's answer to a routed command.
+const COMMAND_DEADLINE: Duration = Duration::from_secs(30);
+/// Routed commands one client may have waiting at once.
+const MAX_INFLIGHT: usize = 256;
+
+/// A routed command whose answer has not come back yet.
+struct Inflight {
+    client_request_id: String,
+    node: String,
+    reply: tokio::sync::oneshot::Receiver<v1::CommandResponse>,
+    deadline: tokio::time::Instant,
+}
+
+async fn forward_command<S>(
+    conn: &mut Conn<S>,
+    hub: &Hub,
+    inflight: &mut Vec<Inflight>,
+    payload: &[u8],
+) -> Result<(), ServeError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let req = v1::CommandRequest::decode(payload).map_err(|_| invalid("request"))?;
+    let client_request_id = req.request_id.clone();
+    let refuse = |e: Error| error_response(&client_request_id, &e);
+    let outcome = (|| {
+        let node = crate::router::forwardable(&req)?.to_string();
+        if !hub.node_known(&node) {
+            return Err(Error::new(ErrorCode::NodeUnknown).with("node_id", node.as_str()));
+        }
+        if inflight.len() >= MAX_INFLIGHT {
+            return Err(Error::new(ErrorCode::NodeResourceLimit)
+                .with("resource", "requests")
+                .with("limit", 256_i64));
+        }
+        let reply = hub.router().send(&node, req.clone())?;
+        Ok(Inflight {
+            client_request_id: client_request_id.clone(),
+            node,
+            reply,
+            deadline: tokio::time::Instant::now() + COMMAND_DEADLINE,
+        })
+    })();
+    match outcome {
+        Ok(i) => inflight.push(i),
+        Err(e) => {
+            conn.send(&frame(STREAM_COMMANDS, 1, refuse(e).encode_to_vec()))
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+/// Sends the answers that have arrived (or timed out) to the client, under the request ids the client chose.
+async fn answer_ready<S>(conn: &mut Conn<S>, inflight: &mut Vec<Inflight>) -> Result<(), ServeError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    use tokio::sync::oneshot::error::TryRecvError;
+    let mut i = 0;
+    while i < inflight.len() {
+        let item = &mut inflight[i];
+        let resp = match item.reply.try_recv() {
+            Ok(mut r) => {
+                r.request_id.clone_from(&item.client_request_id);
+                Some(r)
+            }
+            // The node's connection ended before it answered.
+            Err(TryRecvError::Closed) => Some(error_response(
+                &item.client_request_id,
+                &Error::new(ErrorCode::NodeOffline).with("node_id", item.node.as_str()),
+            )),
+            Err(TryRecvError::Empty) if tokio::time::Instant::now() >= item.deadline => {
+                Some(error_response(
+                    &item.client_request_id,
+                    &Error::new(ErrorCode::NodeTimeout).with("node_id", item.node.as_str()),
+                ))
+            }
+            Err(TryRecvError::Empty) => None,
+        };
+        match resp {
+            Some(r) => {
+                inflight.swap_remove(i);
+                conn.send(&frame(STREAM_COMMANDS, 1, r.encode_to_vec()))
+                    .await?;
+            }
+            None => i += 1,
+        }
+    }
+    Ok(())
 }
 
 async fn send_positioned<S>(conn: &mut Conn<S>, d: &crate::hub::Delivered) -> Result<(), ServeError>

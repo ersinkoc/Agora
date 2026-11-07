@@ -15,6 +15,7 @@ dependencies = [
  "agora-tui",
  "getrandom",
  "prost",
+ "rustls",
  "serde_json",
  "tokio",
  "tokio-rustls",

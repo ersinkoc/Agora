@@ -681,6 +681,7 @@ impl Client {
             request_id: id.to_string(),
             idempotency_key: key.to_string(),
             command: Some(cmd),
+            target_node: String::new(),
         };
         self.send_request(stream_id, &req)?;
         loop {
@@ -700,6 +701,32 @@ impl Client {
                 }
             } else {
                 self.pending.push_back(frame);
+            }
+        }
+    }
+
+    /// Sends a request as it is (keeping its request id and idempotency key) and waits for its answer, up to `limit`.
+    pub fn request(
+        &mut self,
+        req: &v1::CommandRequest,
+        limit: Duration,
+    ) -> io::Result<v1::CommandResponse> {
+        self.send_request(STREAM_COMMANDS, req)?;
+        let end = std::time::Instant::now() + limit;
+        loop {
+            let left = end.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return Err(io::Error::new(io::ErrorKind::TimedOut, "no answer in time"));
+            }
+            let Some(frame) = self.read_wire_frame(Some(left))? else {
+                continue;
+            };
+            if frame.stream_id == STREAM_COMMANDS && frame.kind == KIND_RESPONSE {
+                let resp = v1::CommandResponse::decode(frame.payload.as_slice())
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+                if resp.request_id == req.request_id {
+                    return Ok(resp);
+                }
             }
         }
     }
@@ -770,6 +797,7 @@ impl RequestWriter {
             request_id: id.to_string(),
             idempotency_key: String::new(),
             command: Some(cmd),
+            target_node: String::new(),
         };
         let bytes = Frame {
             stream_id: STREAM_COMMANDS,

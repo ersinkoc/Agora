@@ -104,6 +104,15 @@ resubscribe with the last position), or an enrolling node if its first frame is 
 Enrollment answers are the same for a wrong, expired or used code (`auth.unauthenticated`), and guessing is locked out for everyone
 (`auth.forbidden`). Frame kinds are in `agora_protocol::frame::kinds`.
 
+Routed commands (ADR-0029, `agora-hub::router`): a signed-in client sends `CommandRequest` frames (stream 1, kind 0) with
+`target_node` set. The hub answers `node.unknown` itself for a missing or never-seen node, a command it must not forward
+(enrollment) is `protocol.invalid_message`, and a node that is not connected is `node.offline`. Otherwise it forwards the request
+to that node's connection under a hub-chosen `request_id` (the idempotency key passes through) and maps the answer back to
+the client's id; a node that disconnects first gives `node.offline`, no answer within 30 s `node.timeout`, and a client may
+have 256 requests waiting. The node runs the command on its own control socket, so it gets the handler, policy and approval
+rules of a local command (the hub cannot widen them). Terminal subscriptions are not relayed on this path yet
+(`protocol.capability_missing`, capability `terminal.relay`); the relay is the next step of ADR-0029.
+
 Initial event families:
 
 | Family | Examples |

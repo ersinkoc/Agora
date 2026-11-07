@@ -9,8 +9,10 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use agora_protocol::frame::{kinds, STREAM_CONTROL, STREAM_EVENTS};
-use agora_protocol::v1::{EventAck, ResumeOk, Welcome};
+use agora_protocol::frame::{kinds, STREAM_COMMANDS, STREAM_CONTROL, STREAM_EVENTS};
+use agora_protocol::v1::{
+    command_request, command_response, CommandRequest, CommandResponse, EventAck, ResumeOk, Welcome,
+};
 use agora_protocol::ws::{self, Conn, TransportError};
 use agora_protocol::Frame;
 use prost::Message;
@@ -37,6 +39,9 @@ pub struct HubLink {
     pub ca_pem: String,
     pub cert_pem: String,
     pub key_pem: String,
+    /// The node's own control socket. Commands the hub routes here (ADR-0029) run through it, so they get exactly the
+    /// handler, policy and approval rules a local command gets. `None`: such commands are refused.
+    pub commands: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug)]
@@ -143,10 +148,10 @@ pub async fn run_once(
             .await
             .map_err(|e| LinkError::Transport(e.to_string()))?;
         let conn = ws::connect(stream, &link.url).await?;
-        converse(conn, sink, stop).await
+        converse(conn, sink, stop, link.commands.as_deref()).await
     } else {
         let conn = ws::connect(tcp, &link.url).await?;
-        converse(conn, sink, stop).await
+        converse(conn, sink, stop, link.commands.as_deref()).await
     }
 }
 
@@ -154,10 +159,12 @@ async fn converse<S>(
     mut conn: Conn<S>,
     sink: &Arc<EventSink>,
     stop: &AtomicBool,
+    commands: Option<&std::path::Path>,
 ) -> Result<(), LinkError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    let (answers_tx, mut answers) = tokio::sync::mpsc::unbounded_channel::<CommandResponse>();
     let mut up = Uplink::new(
         Arc::clone(sink),
         env!("CARGO_PKG_VERSION"),
@@ -203,6 +210,10 @@ where
                 .await?;
             last_ping = tokio::time::Instant::now();
         }
+        while let Ok(answer) = answers.try_recv() {
+            conn.send(&frame(STREAM_COMMANDS, 1, answer.encode_to_vec()))
+                .await?;
+        }
         match tokio::time::timeout(TICK, conn.recv()).await {
             Err(_) => {}
             Ok(Ok(None)) => return Err(LinkError::Closed),
@@ -212,6 +223,17 @@ where
                     if let Ok(a) = EventAck::decode(f.payload.as_slice()) {
                         up.on_ack(a.up_to_seq)?;
                     }
+                }
+                // A command the hub routes to this node: run it locally, answer when it is done.
+                (STREAM_COMMANDS, 0) => {
+                    let Ok(req) = CommandRequest::decode(f.payload.as_slice()) else {
+                        continue;
+                    };
+                    let socket = commands.map(std::path::Path::to_path_buf);
+                    let tx = answers_tx.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let _ = tx.send(run_local(socket.as_deref(), req));
+                    });
                 }
                 // The hub saw a gap and says where to start again.
                 (STREAM_CONTROL, kinds::RESUME_OK) => {
@@ -226,6 +248,39 @@ where
     conn.close().await;
     Ok(())
 }
+
+/// Runs a routed command on this node's control socket and returns its answer (an error answer when it cannot).
+/// Terminal streams are not relayed by this path (they need a stream of their own), so they are refused.
+fn run_local(socket: Option<&std::path::Path>, req: CommandRequest) -> CommandResponse {
+    use agora_protocol::{Error, ErrorCode};
+    let fail = |e: Error| CommandResponse {
+        request_id: req.request_id.clone(),
+        result: Some(command_response::Result::Err(e.to_info())),
+    };
+    if matches!(
+        req.command,
+        Some(command_request::Command::TerminalSubscribe(_))
+    ) {
+        return fail(
+            Error::new(ErrorCode::ProtocolCapabilityMissing).with("capability", "terminal.relay"),
+        );
+    }
+    let Some(socket) = socket else {
+        return fail(
+            Error::new(ErrorCode::NodePolicyDenied)
+                .with("node_id", "")
+                .with("rule", "commands.routed"),
+        );
+    };
+    match crate::control::Client::connect(socket).and_then(|mut c| c.request(&req, ROUTED_DEADLINE))
+    {
+        Ok(resp) => resp,
+        Err(_) => fail(Error::new(ErrorCode::NodeTimeout).with("node_id", "")),
+    }
+}
+
+/// Longest a routed command may take on the node before the hub is told it timed out.
+const ROUTED_DEADLINE: Duration = Duration::from_secs(25);
 
 /// A running uplink thread. Dropping it stops the connection (agents are not affected).
 pub struct UplinkHandle {
@@ -330,6 +385,7 @@ pub fn enroll(
         let req = CommandRequest {
             request_id: "enroll".into(),
             idempotency_key: String::new(),
+            target_node: String::new(),
             command: Some(command_request::Command::Enroll(EnrollRequest {
                 code: code.into(),
                 node_id: node_id.into(),

@@ -19,11 +19,12 @@ use agora_node::daemon::EventSink;
 use agora_node::uplink_client::{spawn, HubLink};
 use agora_protocol::handshake::Support;
 
+/// Accepts one client token (the tests' only signed-in user).
 struct NoClients;
 
 impl ClientAuth for NoClients {
-    fn check(&self, _: &str) -> bool {
-        false
+    fn check(&self, t: &str) -> bool {
+        t == "client-token"
     }
 }
 
@@ -98,7 +99,42 @@ impl Hubside {
             ca_pem: self.ca_pem.clone(),
             cert_pem: self.cert_pem.clone(),
             key_pem: self.key_pem.clone(),
+            commands: None,
         }
+    }
+
+    /// A signed-in client's WebSocket over TLS, trusting only the hub's CA.
+    fn client(
+        &self,
+        addr: SocketAddr,
+    ) -> agora_protocol::ws::Conn<tokio_rustls::client::TlsStream<tokio::net::TcpStream>> {
+        use rustls::pki_types::pem::PemObject;
+        use rustls::pki_types::{CertificateDer, ServerName};
+        self.rt.block_on(async {
+            let mut roots = rustls::RootCertStore::empty();
+            for c in CertificateDer::pem_slice_iter(self.ca_pem.as_bytes()) {
+                roots.add(c.unwrap()).unwrap();
+            }
+            let cfg = rustls::ClientConfig::builder_with_provider(Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+            let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+            let tls = tokio_rustls::TlsConnector::from(Arc::new(cfg))
+                .connect(ServerName::try_from("localhost").unwrap(), tcp)
+                .await
+                .unwrap();
+            agora_protocol::ws::connect_with_subprotocol_token(
+                tls,
+                &format!("wss://localhost:{}/", addr.port()),
+                "client-token",
+            )
+            .await
+            .unwrap()
+        })
     }
 }
 
@@ -192,4 +228,88 @@ fn a_certificate_the_hub_does_not_know_never_gets_in() {
     std::thread::sleep(Duration::from_secs(2));
     assert!(hub.state.hub.view().0.nodes.is_empty());
     assert_eq!(sink.acked(), 0);
+}
+
+#[test]
+fn a_signed_in_client_runs_a_command_on_a_node_through_the_hub() {
+    // Routed commands run on the node's local socket, which this platform does not have yet.
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return;
+    }
+    use agora_protocol::frame::{kinds, STREAM_COMMANDS, STREAM_EVENTS};
+    use agora_protocol::v1::{self, command_request, command_response};
+    use agora_protocol::Frame;
+    use prost::Message;
+
+    let hub = hubside("laptop");
+    let addr = hub.listen("127.0.0.1:0");
+    // A real node: its control socket is what routed commands run on.
+    let dir = tmp("routed");
+    std::fs::create_dir_all(&dir).unwrap();
+    let cfg = agora_node::daemon::NodeConfig {
+        node_id: "laptop".into(),
+        socket: dir.join("c.sock"),
+        data_dir: dir.join("data"),
+        worktree_root: dir.join("wt"),
+        manifests_dir: dir.join("manifests"),
+        projects: vec![],
+        limits: Default::default(),
+    };
+    let node = agora_node::daemon::Node::start(&cfg).unwrap();
+    let mut link = hub.link(addr);
+    link.commands = Some(cfg.socket.clone());
+    let _uplink = spawn(Arc::clone(&node.events), link).unwrap();
+    wait("the node to be online in the hub", || {
+        hub.state
+            .hub
+            .view()
+            .0
+            .nodes
+            .get("laptop")
+            .is_some_and(|n| n.online)
+    });
+
+    let mut client = hub.client(addr);
+    let f = |stream, kind, payload| Frame {
+        stream_id: stream,
+        kind,
+        seq: None,
+        payload,
+    };
+    let answer = hub.rt.block_on(async {
+        client
+            .send(&f(
+                STREAM_EVENTS,
+                kinds::SUBSCRIBE,
+                v1::Subscribe::default().encode_to_vec(),
+            ))
+            .await
+            .unwrap();
+        let req = v1::CommandRequest {
+            request_id: "c1".into(),
+            idempotency_key: String::new(),
+            target_node: "laptop".into(),
+            command: Some(command_request::Command::AgentList(v1::AgentList::default())),
+        };
+        client
+            .send(&f(STREAM_COMMANDS, 0, req.encode_to_vec()))
+            .await
+            .unwrap();
+        loop {
+            let fr = tokio::time::timeout(Duration::from_secs(20), client.recv())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            if (fr.stream_id, fr.kind) == (STREAM_COMMANDS, 1) {
+                break v1::CommandResponse::decode(fr.payload.as_slice()).unwrap();
+            }
+        }
+    });
+    assert_eq!(answer.request_id, "c1");
+    assert!(
+        matches!(answer.result, Some(command_response::Result::Ok(_))),
+        "{answer:?}"
+    );
+    drop(node);
 }

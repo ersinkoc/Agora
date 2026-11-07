@@ -53,6 +53,7 @@ struct Inner {
 
 pub struct Hub {
     store: SqliteStore,
+    router: std::sync::Arc<crate::router::Router>,
     inner: Mutex<Inner>,
 }
 
@@ -69,6 +70,7 @@ impl Hub {
         let hub_seq = store.acked(RESERVED_HUB_ID)?;
         Ok(Self {
             store,
+            router: crate::router::Router::new(),
             inner: Mutex::new(Inner {
                 view,
                 pos,
@@ -78,6 +80,11 @@ impl Hub {
         })
     }
 
+    /// Where connected nodes wait for commands (ADR-0029).
+    pub fn router(&self) -> &std::sync::Arc<crate::router::Router> {
+        &self.router
+    }
+
     pub fn store(&self) -> &SqliteStore {
         &self.store
     }
@@ -85,6 +92,11 @@ impl Hub {
     fn lock(&self) -> MutexGuard<'_, Inner> {
         // A panic while holding the lock cannot leave the view half-applied (apply is the last step), so keep going.
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Whether any node by this id has ever been seen (online or not).
+    pub fn node_known(&self, node: &str) -> bool {
+        self.lock().view.nodes.contains_key(node)
     }
 
     /// The current view and the log position it reflects.

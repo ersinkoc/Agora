@@ -27,3 +27,5 @@ prost = "0.14"
 serde_json = "1"
 # The agent id type used by the hub link test.
 agora-core = { path = "../agora-core" }
+# A signed-in client dials the hub over TLS in the routed-command test.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }

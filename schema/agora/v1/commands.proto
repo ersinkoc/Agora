@@ -11,6 +11,8 @@ message CommandRequest {
   string request_id = 1;
   // A retried request with the same key must not repeat its effect.
   string idempotency_key = 2;
+  // ADR-0029: the node that must run this command when it is sent to the hub. The hub forwards it to that node.
+  string target_node = 3;
 
   oneof command {
     ProjectList project_list = 10;

@@ -5,6 +5,7 @@ pub mod enroll;
 pub mod hub;
 pub mod notify;
 pub mod projection;
+pub mod router;
 pub mod server;
 pub mod session;
 pub mod store;
