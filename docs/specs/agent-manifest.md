@@ -98,3 +98,12 @@ absolute paths outside it are refused, no symlink on the path is ever followed (
 the written file is added to the worktree's private `info/exclude` so it stays out of `git status`. Flags and variables are
 added at every launch, restarts and resumes included; a resumed agent gets a fresh endpoint. An agent whose manifest has no
 `[mcp]` still joins the mesh. A manifest whose injection fails does not start (it asked for something the node refused).
+
+## `[adapter]` (L3)
+
+`[adapter] command = ["program", "args"...]` (and optional `env`) makes the kind an adapter agent: the node starts the
+process in the agent's own worktree, runs `initialize` and `session/start`, and drives the agent through the adapter protocol
+(`docs/specs/adapter-protocol.md`) instead of a terminal. The adapter's `state/update` is a reported state (it wins over
+anything else); chat items, usage, approval requests and the native session id are passed on as supervisor events; a crash ends the
+agent as `unknown` without touching others. Prompts and verified approval decisions are relayed by the node. Adapter agents have
+no terminal, so terminal commands do not apply to them; restart with backoff is not done yet.

@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use agora_adapters::host::{Adapter, AdapterConfig, AdapterEvent};
 use agora_adapters::{Detector, Manifest, Pacer};
 use agora_core::{Agent, AgentId, AgentState, IntegrationLevel, NodeId, StateSource, WorktreeId};
 use agora_platform::{spawn, ExitStatus, ProcessLimits, PtyConfig};
@@ -132,6 +133,16 @@ pub enum SupervisorEvent {
         agent: AgentId,
         native: bool,
     },
+    /// Something an L3 adapter reported that is not a state change: chat items, an approval request, usage, a
+    /// log line. The node turns these into events and the approvals queue.
+    Adapter {
+        agent: AgentId,
+        event: AdapterEvent,
+    },
+    /// An adapter process died. Its agent is `unknown` until it is started again.
+    AdapterCrashed {
+        agent: AgentId,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -202,6 +213,16 @@ struct KindEntry {
     detector: Detector,
 }
 
+/// An agent driven through an L3 adapter process instead of a terminal.
+struct AdapterEntry {
+    agent: Agent,
+    adapter: Adapter,
+    session_id: String,
+    worktree: PathBuf,
+    branch: String,
+    running: bool,
+}
+
 struct Entry {
     agent: Agent,
     worktree: PathBuf,
@@ -222,6 +243,7 @@ pub struct Supervisor {
     agents: BTreeMap<AgentId, Entry>,
     next_id: u64,
     hook: Option<LaunchHook>,
+    adapters: BTreeMap<AgentId, AdapterEntry>,
 }
 
 impl Supervisor {
@@ -232,6 +254,7 @@ impl Supervisor {
             agents: BTreeMap::new(),
             next_id: 1,
             hook: None,
+            adapters: BTreeMap::new(),
         }
     }
 
@@ -256,7 +279,7 @@ impl Supervisor {
     }
 
     fn check_limits(&self) -> Result<(), SupervisorError> {
-        let active = self.active();
+        let active = self.active() + self.adapters.values().filter(|a| a.running).count();
         for (resource, max) in [
             ("agents", self.cfg.limits.max_agents),
             ("terminals", self.cfg.limits.max_terminals),
@@ -290,6 +313,9 @@ impl Supervisor {
             .kinds
             .get(&req.kind)
             .ok_or_else(|| SupervisorError::UnknownKind(req.kind.clone()))?;
+        if let Some(spec) = kind.manifest.adapter.clone() {
+            return self.start_adapter(req, &spec);
+        }
         let argv = kind.manifest.process.launch.clone();
         if argv.is_empty() {
             return Err(SupervisorError::UnknownKind(req.kind.clone()));
@@ -369,6 +395,153 @@ impl Supervisor {
         })
     }
 
+    /// Starts an agent through its L3 adapter: own worktree, adapter process, `initialize`, `session/start`.
+    fn start_adapter(
+        &mut self,
+        req: &StartRequest,
+        spec: &agora_adapters::manifest::AdapterSpec,
+    ) -> Result<AgentId, SupervisorError> {
+        const STEP: Duration = Duration::from_secs(10);
+        let checkout = git::discover_checkout(&req.checkout)?;
+        let worktree = req.worktree_root.join(&req.name);
+        let branch = format!("agent/{}", req.name);
+        git::create_worktree(&checkout.root, &worktree, &branch, req.base.as_deref())?;
+        let (program, args) = spec
+            .command
+            .split_first()
+            .ok_or_else(|| SupervisorError::UnknownKind(req.kind.clone()))?;
+        let adapter = Adapter::spawn(&AdapterConfig {
+            program: program.into(),
+            args: args.to_vec(),
+            env: spec
+                .env
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            cwd: Some(worktree.clone()),
+        })
+        .map_err(|e| SupervisorError::Spawn(e.to_string()))?;
+        let fail = |e: agora_adapters::host::HostError| SupervisorError::Spawn(e.to_string());
+        adapter.initialize(&["chat"], "en", STEP).map_err(fail)?;
+        let session_id = adapter
+            .start_session(
+                &checkout.root.to_string_lossy(),
+                &worktree.to_string_lossy(),
+                None,
+                STEP,
+            )
+            .map_err(fail)?;
+        let id = AgentId::new(format!("agent-{}", self.next_id));
+        self.next_id += 1;
+        let mut agent = Agent::new(
+            id.clone(),
+            checkout.project,
+            self.cfg.node.clone(),
+            Some(WorktreeId::new(worktree.to_string_lossy())),
+            req.kind.clone(),
+            IntegrationLevel::L3Adapter,
+        );
+        agent.session = Some(session_id.clone());
+        self.adapters.insert(
+            id.clone(),
+            AdapterEntry {
+                agent,
+                adapter,
+                session_id,
+                worktree,
+                branch,
+                running: true,
+            },
+        );
+        Ok(id)
+    }
+
+    /// Drains what adapters said since the last call: states are applied (a report always wins over anything
+    /// else), the rest is passed on as events. A dead adapter ends its agent as `unknown`.
+    fn poll_adapters(&mut self, events: &mut Vec<SupervisorEvent>) {
+        for (id, e) in &mut self.adapters {
+            if !e.running {
+                continue;
+            }
+            for ev in e.adapter.poll() {
+                match ev {
+                    AdapterEvent::State { state, .. } => {
+                        if e.agent.observe(state, StateSource::Reported) {
+                            events.push(SupervisorEvent::StateChanged {
+                                agent: id.clone(),
+                                state,
+                            });
+                        }
+                    }
+                    AdapterEvent::SessionReported {
+                        native_session_id, ..
+                    } => {
+                        e.agent.session = Some(native_session_id.clone());
+                        events.push(SupervisorEvent::Adapter {
+                            agent: id.clone(),
+                            event: AdapterEvent::SessionReported {
+                                session_id: e.session_id.clone(),
+                                native_session_id,
+                            },
+                        });
+                    }
+                    AdapterEvent::Exited => {
+                        e.running = false;
+                        if e.agent.observe(AgentState::Unknown, StateSource::Reported) {
+                            events.push(SupervisorEvent::StateChanged {
+                                agent: id.clone(),
+                                state: AgentState::Unknown,
+                            });
+                        }
+                        events.push(SupervisorEvent::AdapterCrashed { agent: id.clone() });
+                    }
+                    other => events.push(SupervisorEvent::Adapter {
+                        agent: id.clone(),
+                        event: other,
+                    }),
+                }
+            }
+        }
+    }
+
+    fn adapter_of(&self, id: &AgentId) -> Result<&AdapterEntry, SupervisorError> {
+        self.adapters
+            .get(id)
+            .filter(|e| e.running)
+            .ok_or_else(|| SupervisorError::NotFound(id.clone()))
+    }
+
+    /// Sends text to an adapter agent (user input; mesh content uses `from_mesh`).
+    pub fn adapter_prompt(
+        &self,
+        id: &AgentId,
+        text: &str,
+        from_mesh: bool,
+    ) -> Result<(), SupervisorError> {
+        let e = self.adapter_of(id)?;
+        e.adapter
+            .prompt(&e.session_id, text, from_mesh, Duration::from_secs(10))
+            .map_err(|e| SupervisorError::Spawn(e.to_string()))
+    }
+
+    /// Delivers a decision the node has already verified (ADR-0020) to the adapter that asked.
+    pub fn adapter_resolve_approval(
+        &self,
+        id: &AgentId,
+        approval_id: &str,
+        approved: bool,
+    ) -> Result<(), SupervisorError> {
+        let e = self.adapter_of(id)?;
+        e.adapter
+            .resolve_approval(
+                &e.session_id,
+                approval_id,
+                approved,
+                Duration::from_secs(10),
+            )
+            .map_err(|e| SupervisorError::Spawn(e.to_string()))
+    }
+
     fn launch(
         &self,
         kind: &str,
@@ -406,6 +579,7 @@ impl Supervisor {
         for id in ids {
             self.tick_agent(&id, now, &mut events);
         }
+        self.poll_adapters(&mut events);
         events
     }
 
@@ -538,6 +712,23 @@ impl Supervisor {
     /// Stop an agent for good: kill its process group and cancel any pending restart. The worktree and its
     /// branch are kept (the work is the user's).
     pub fn stop(&mut self, id: &AgentId) -> Result<Vec<SupervisorEvent>, SupervisorError> {
+        if let Some(e) = self.adapters.get_mut(id) {
+            let mut events = Vec::new();
+            if e.running {
+                let _ = e
+                    .adapter
+                    .stop_session(&e.session_id, "stop", Duration::from_secs(5));
+                e.running = false;
+            }
+            if e.agent.observe(AgentState::Done, StateSource::Reported) {
+                events.push(SupervisorEvent::StateChanged {
+                    agent: id.clone(),
+                    state: AgentState::Done,
+                });
+            }
+            events.push(SupervisorEvent::Stopped { agent: id.clone() });
+            return Ok(events);
+        }
         let entry = self
             .agents
             .get_mut(id)
@@ -635,7 +826,8 @@ impl Supervisor {
     }
 
     pub fn list(&self) -> Vec<AgentView> {
-        self.agents
+        let mut out: Vec<AgentView> = self
+            .agents
             .iter()
             .map(|(id, e)| AgentView {
                 id: id.clone(),
@@ -646,7 +838,18 @@ impl Supervisor {
                 running: e.terminal.is_some(),
                 restarts: e.restarts,
             })
-            .collect()
+            .collect();
+        out.extend(self.adapters.iter().map(|(id, e)| AgentView {
+            id: id.clone(),
+            kind: e.agent.kind.clone(),
+            state: e.agent.state(),
+            worktree: e.worktree.clone(),
+            branch: e.branch.clone(),
+            running: e.running,
+            restarts: 0,
+        }));
+        out.sort_by(|a, b| a.id.cmp(&b.id));
+        out
     }
 
     /// Terminal size used for new agents (for callers that attach clients).

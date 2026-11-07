@@ -86,6 +86,17 @@ pub struct Resume {
     pub argv: Vec<String>,
 }
 
+/// An L3 adapter process that speaks the adapter protocol for this agent kind (docs/specs/adapter-protocol.md).
+/// A kind with `[adapter]` is driven through it instead of a terminal.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdapterSpec {
+    /// Program and arguments; the first element is the program.
+    pub command: Vec<String>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+}
+
 /// How the node hands an agent its own mesh MCP server (docs/specs/agent-manifest.md `[mcp]`).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -125,6 +136,7 @@ pub struct Manifest {
     #[serde(default)]
     pub rules: Vec<Rule>,
     pub mcp: Option<McpSpec>,
+    pub adapter: Option<AdapterSpec>,
 }
 
 fn invalid(field: impl Into<String>) -> ManifestError {
@@ -157,6 +169,13 @@ impl Manifest {
         }
         if self.display_name.trim().is_empty() {
             return Err(invalid("display_name"));
+        }
+        if self
+            .adapter
+            .as_ref()
+            .is_some_and(|a| a.command.first().is_none_or(String::is_empty))
+        {
+            return Err(invalid("adapter.command"));
         }
         if let Some(m) = &self.mcp {
             let ok = match m.method {
