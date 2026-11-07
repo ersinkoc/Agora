@@ -7,6 +7,31 @@ Prerequisites: Phase 1 merged (protocol, schema, domain model v0, event sequenci
 accepted (both are). Tasks marked `after P2-xx` depend on that task's merge. P2-01 and P2-04 can run in
 parallel; most others touch different crates.
 
+## Status (2026-11-07)
+
+| Task | State | Notes |
+| --- | --- | --- |
+| P2-01 PTY | done | |
+| P2-02 process inspection | done | macOS path verified by CI only |
+| P2-03 VT backend | done | |
+| P2-04 real bench path | done | `channel-throughput` kept so the gate has a stable base; new `pty-vt-throughput`, `terminals-20` |
+| P2-05 terminal actor | done | blocks on output; input/resize/kill via `PtyControl` |
+| P2-06 git and worktrees | done | |
+| P2-07 files | done | polling watcher; native watcher can replace it |
+| P2-08 L1 engine | done | |
+| P2-09 first manifests | **needs a human** | fixtures must be captured from real agents with dedicated accounts; agents never use real accounts (AGENTS.md) |
+| P2-10 supervision | done | |
+| P2-11 event buffer | done | |
+| P2-12 accounts | blocked on P2-09 | |
+| P2-13 resource limits | done | cgroups v2 and Job Objects not yet |
+| P2-14 local CLI | done except `agent list` | `agent list` needs ADR-0025 (proposed, awaiting a decision) |
+| P2-15 footprint | done | all budgets met, see `design/performance.md`; nothing relaxed |
+
+Exit criterion: a node runs agents in worktrees and reports state, controllable via the local CLI
+(`agora node run`, `agent start|stop`, `terminal attach`; covered end to end by `crates/agora/tests/cli.rs`), and
+the footprint budgets are measured. Open: P2-09/P2-12 (human-captured fixtures), ADR-0025 for `agent list`, and
+cross-review by Codex of all Phase 2 PRs (AGENTS.md).
+
 ### P2-01 Platform: PTY and process basics (Unix)
 - **Crates:** `agora-platform` (`unix.rs`, `linux.rs`, `macos.rs` as needed)
 - **Read:** `architecture.md` §2.1, ADR-0013, `AGENTS.md` (platform isolation)
