@@ -3,7 +3,8 @@ import { CommandPalette, type PaletteItem } from './components/CommandPalette';
 import { demoAgents } from './fixtures';
 import { t } from './i18n';
 import { nextNeedingMe } from './model';
-import { connectLive, type LinkState } from './net/live';
+import { connectLive, type Live, type LinkState } from './net/live';
+import type { TerminalSource } from './terminal/source';
 import { machinesOnline, tiles, type View } from './net/view';
 import { hubConnection } from './net/session';
 import { Focus, Gallery, Home } from './screens';
@@ -25,13 +26,22 @@ export function App() {
   const hub = useMemo(hubConnection, []);
   const [live, setLive] = useState<View | undefined>();
   const [link, setLink] = useState<LinkState>('connecting');
+  const [api, setApi] = useState<Live | undefined>();
   useEffect(() => {
     if (!hub) return;
     const c = connectLive({ url: hub.url, token: hub.token, onView: (v) => setLive({ ...v }), onState: setLink });
-    return () => c.close();
+    setApi(c);
+    return () => { c.close(); setApi(undefined); };
   }, [hub]);
   const agents = useMemo(() => (hub ? (live ? tiles(live) : []) : demoAgents), [hub, live]);
   const current = hash.startsWith('#/agent/') ? decodeURIComponent(hash.slice('#/agent/'.length)) : undefined;
+
+  // An agent's id here is the hub-wide key `<node>/<local id>`; its terminal is `t-<local id>` on that node.
+  const terminal: TerminalSource | undefined = useMemo(() => {
+    const at = current?.indexOf('/') ?? -1;
+    if (!api || !current || at < 1) return undefined;
+    return api.terminal(current.slice(0, at), `t-${current.slice(at + 1)}`);
+  }, [api, current]);
 
   const open = useCallback((id: string) => go(`#/agent/${encodeURIComponent(id)}`), [go]);
   const next = useCallback(() => {
@@ -58,7 +68,7 @@ export function App() {
   return (
     <>
       {hash === '#/gallery' ? <Gallery /> : current !== undefined
-        ? <Focus agent={agents.find((a) => a.id === current)} onBack={() => go('#/')} />
+        ? <Focus agent={agents.find((a) => a.id === current)} source={terminal} onBack={() => go('#/')} />
         : <Home onOpen={open} agents={agents} machines={live ? machinesOnline(live) : undefined} link={hub ? link : 'live'} />}
       {palette && <CommandPalette items={items} onClose={() => setPalette(false)} />}
     </>

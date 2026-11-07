@@ -2,7 +2,7 @@ import { AgentTile } from './components/AgentTile';
 import { AttentionStrip } from './components/AttentionStrip';
 import { StateBadge } from './components/StateBadge';
 import { demoAgents } from './fixtures';
-import { demoSource } from './terminal/source';
+import { demoSource, type TerminalSource } from './terminal/source';
 import { Suspense, lazy, useMemo } from 'react';
 
 // The terminal emulator is the heaviest part of the client; load it only when a Focus view needs it.
@@ -67,9 +67,14 @@ export function Gallery() {
 }
 
 // Focus: one agent, full size. The terminal arrives with the hub connection; until then a placeholder.
-export function Focus({ agent, onBack }: { agent: AgentTileModel | undefined; onBack: () => void }) {
+export function Focus({ agent, source: live, onBack }: {
+  agent: AgentTileModel | undefined;
+  source?: TerminalSource;
+  onBack: () => void;
+}) {
   const preview = agent?.preview ?? '';
-  const source = useMemo(() => demoSource(preview), [preview]);
+  const demo = useMemo(() => demoSource(preview), [preview]);
+  const source = live ?? demo;
   if (!agent) {
     return (
       <main className="page">
@@ -93,7 +98,7 @@ export function Focus({ agent, onBack }: { agent: AgentTileModel | undefined; on
       <Suspense fallback={<div className="terminal" aria-busy="true" />}>
         <TerminalView source={source} label={t('focus-terminal')} />
       </Suspense>
-      <p className="muted">{t('focus-terminal-placeholder')}</p>
+      {!live && <p className="muted">{t('focus-terminal-placeholder')}</p>}
     </main>
   );
 }
