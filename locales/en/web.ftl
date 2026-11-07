@@ -56,6 +56,13 @@ device-name = Device name
 device-key = Device key
 device-link = This device
 
+signin-title = Sign in
+signin-intro = Ask your hub for a code: run "agora hub login" on the machine that runs it, then type the code here.
+signin-code = Code
+signin-action = Sign in
+signin-refused = That code did not work. It may be wrong, expired or already used.
+signin-too-many = Too many wrong codes. Wait a minute and try again.
+signin-failed = Could not reach your hub. Try again.
 machines-title = Your machines
 machines-empty = No machines connected yet.
 machine-online = Online

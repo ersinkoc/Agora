@@ -9,6 +9,22 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 
+/// What `POST /api/session` needs from the hub: trade a one-time sign-in code for a session token.
+pub trait SessionApi: Send + Sync {
+    fn sign_in(&self, code: &str) -> SignInReply;
+}
+
+pub enum SignInReply {
+    Token(String),
+    /// A wrong, expired or used code.
+    Refused,
+    /// Too many wrong guesses; try later.
+    TooMany,
+}
+
+/// Largest body of the sign-in request.
+const MAX_BODY: usize = 1024;
+
 /// Largest request head accepted before the connection is dropped.
 const MAX_HEAD: usize = 16 * 1024;
 
@@ -171,7 +187,11 @@ pub enum First<S> {
 }
 
 /// Reads the request head. A WebSocket upgrade is handed back untouched; other requests are answered here.
-pub async fn route<S>(mut stream: S, assets: Option<&dyn Assets>) -> io::Result<First<S>>
+pub async fn route<S>(
+    mut stream: S,
+    assets: Option<&dyn Assets>,
+    sessions: Option<&dyn SessionApi>,
+) -> io::Result<First<S>>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -206,6 +226,43 @@ where
     let (method, target) = (parts.next().unwrap_or(""), parts.next().unwrap_or("/"));
     let path = target.split(['?', '#']).next().unwrap_or("/");
     let head_only = method == "HEAD";
+    if method == "POST" && path == "/api/session" {
+        let length = text
+            .split("\r\n")
+            .filter_map(|l| l.split_once(':'))
+            .find(|(k, _)| k.trim().eq_ignore_ascii_case("content-length"))
+            .and_then(|(_, v)| v.trim().parse::<usize>().ok())
+            .unwrap_or(usize::MAX);
+        if length > MAX_BODY {
+            respond(&mut stream, 413, "text/plain", b"", false).await?;
+            return Ok(First::Answered);
+        }
+        let mut body = head[end..].to_vec();
+        while body.len() < length {
+            let n = stream.read(&mut chunk).await?;
+            if n == 0 {
+                return Ok(First::Answered);
+            }
+            body.extend_from_slice(&chunk[..n]);
+        }
+        body.truncate(length);
+        let code = serde_json::from_slice::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|v| v.get("code").and_then(|c| c.as_str()).map(str::to_string));
+        match (sessions, code) {
+            (Some(api), Some(code)) => match api.sign_in(&code) {
+                SignInReply::Token(t) => {
+                    let json = serde_json::json!({ "token": t }).to_string();
+                    respond(&mut stream, 200, "application/json", json.as_bytes(), false).await?
+                }
+                SignInReply::Refused => respond(&mut stream, 401, "text/plain", b"", false).await?,
+                SignInReply::TooMany => respond(&mut stream, 429, "text/plain", b"", false).await?,
+            },
+            (None, _) => respond(&mut stream, 404, "text/plain", b"", false).await?,
+            _ => respond(&mut stream, 400, "text/plain", b"", false).await?,
+        }
+        return Ok(First::Answered);
+    }
     if method != "GET" && !head_only {
         respond(&mut stream, 405, "text/plain", b"", false).await?;
         return Ok(First::Answered);
@@ -230,8 +287,12 @@ async fn respond<S: AsyncWrite + Unpin>(
 ) -> io::Result<()> {
     let reason = match status {
         200 => "OK",
+        400 => "Bad Request",
+        401 => "Unauthorized",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        413 => "Payload Too Large",
+        429 => "Too Many Requests",
         _ => "Request Header Fields Too Large",
     };
     // The app talks only to its own origin; nothing is framed, sniffed or loaded from elsewhere.
@@ -318,7 +379,7 @@ mod tests {
         }
         let (mut c, s) = tokio::io::duplex(4096);
         let task = tokio::spawn(async move {
-            route(s, Some(&One))
+            route(s, Some(&One), None)
                 .await
                 .map(|f| matches!(f, First::Answered))
         });
@@ -334,7 +395,7 @@ mod tests {
 
         let (mut c, s) = tokio::io::duplex(4096);
         let task = tokio::spawn(async move {
-            match route(s, None).await.unwrap() {
+            match route(s, None, None).await.unwrap() {
                 First::WebSocket(mut r) => {
                     let mut buf = vec![0u8; 22];
                     r.read_exact(&mut buf).await.unwrap();

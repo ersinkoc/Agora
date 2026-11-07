@@ -11,6 +11,7 @@ cli-usage =
       agora mesh stdio --socket PATH
       agora hub run [--listen ADDR] [--hub-dir DIR] [--name HOST]... [--web DIR]
       agora hub code [--hub-dir DIR]
+      agora hub login [--hub-dir DIR]
       agora hub backup [FILE] [--keep N] [--hub-dir DIR]
       agora hub restore FILE [--hub-dir DIR]
       agora node enroll --hub URL --ca FILE --code CODE --id NAME
@@ -56,7 +57,8 @@ doctor-summary-ok = Everything Agora needs is in place.
 doctor-summary-problems = Something Agora needs is missing. Fix the items marked PROBLEM.
 
 cli-hub-listening = Hub is running on { $addr }. Its data folder: { $dir }
-cli-hub-web = Web app: https://{ $addr }/#token={ $token } (the hub's certificate is signed by its own CA, so the browser warns until you trust it)
+cli-hub-web = Web app: https://{ $addr }/ . Sign in with the code { $code } (valid for 10 minutes; `agora hub login` makes another). The hub's certificate is signed by its own CA, so the browser warns until you trust it.
+cli-hub-login = Sign-in code for the web app: { $code } (valid for 10 minutes). Open the hub's address in a browser and enter it.
 cli-trusted = Device { $id } can now answer approvals on this node. Restart the node to apply it.
 cli-trust-failed = Could not trust that device: { $reason }
 cli-hub-backup = Backup written to { $path }.

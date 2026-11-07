@@ -11,6 +11,7 @@ cli-usage =
       agora mesh stdio --socket YOL
       agora hub run [--listen ADDR] [--hub-dir DIR] [--name HOST]... [--web DIR]
       agora hub code [--hub-dir DIR]
+      agora hub login [--hub-dir DİZİN]
       agora hub backup [DOSYA] [--keep N] [--hub-dir DİZİN]
       agora hub restore DOSYA [--hub-dir DİZİN]
       agora node enroll --hub URL --ca FILE --code CODE --id NAME
@@ -56,7 +57,8 @@ doctor-summary-ok = Agora'nın ihtiyaç duyduğu her şey yerinde.
 doctor-summary-problems = Agora'nın ihtiyaç duyduğu bir şey eksik. SORUN olarak işaretlenenleri düzeltin.
 
 cli-hub-listening = Hub { $addr } adresinde çalışıyor. Veri klasörü: { $dir }
-cli-hub-web = Web uygulaması: https://{ $addr }/#token={ $token } (hub sertifikası kendi CA'sı tarafından imzalı; ona güvenene kadar tarayıcı uyarı verir)
+cli-hub-web = Web uygulaması: https://{ $addr }/ . { $code } koduyla giriş yapın (10 dakika geçerli; yenisi için `agora hub login`). Hub sertifikası kendi CA'sı tarafından imzalı; ona güvenene kadar tarayıcı uyarı verir.
+cli-hub-login = Web uygulaması için giriş kodu: { $code } (10 dakika geçerli). Hub adresini tarayıcıda açıp kodu girin.
 cli-trusted = { $id } cihazı artık bu node'daki onaylara yanıt verebilir. Uygulanması için node'u yeniden başlatın.
 cli-trust-failed = Cihaza güvenilemedi: { $reason }
 cli-hub-backup = Yedek { $path } dosyasına yazıldı.

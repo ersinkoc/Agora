@@ -8,6 +8,7 @@ pub mod projection;
 pub mod router;
 pub mod server;
 pub mod session;
+pub mod signin;
 pub mod store;
 pub mod tls;
 pub mod transport;

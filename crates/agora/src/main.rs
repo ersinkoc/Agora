@@ -155,6 +155,7 @@ fn main() -> ExitCode {
         ["doctor"] => doctor(&say, &opts),
         ["hub", "run"] => hubcli::hub_run(&say, &opts),
         ["hub", "code"] => hubcli::hub_code(&say, &opts),
+        ["hub", "login"] => hubcli::hub_login(&say, &opts),
         ["hub", "backup"] => hubcli::hub_backup(&say, &opts),
         ["hub", "restore"] => hubcli::hub_restore(&say, &opts),
         ["node", "enroll"] => hubcli::node_enroll(&say, &opts),

@@ -43,6 +43,7 @@ fn state(ca: Option<Ca>) -> Arc<ServerState> {
         lockout: Arc::new(Lockout::new()),
         auth: Box::new(Tokens),
         assets: None,
+        sessions: None,
     })
 }
 
@@ -576,6 +577,7 @@ async fn the_same_port_serves_the_web_app_and_takes_a_browser_style_subscription
         lockout: Arc::new(Lockout::new()),
         auth: Box::new(Tokens),
         assets: Some(Arc::new(App)),
+        sessions: None,
     });
     let addr = start(st).await;
 
@@ -736,5 +738,95 @@ async fn a_node_that_leaves_mid_command_gives_the_client_node_offline() {
             assert_eq!(err_code(&r), "node.offline");
             break;
         }
+    }
+}
+
+async fn post_session(addr: std::net::SocketAddr, code: &str) -> (u16, String) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let body = format!("{{\"code\":\"{code}\"}}");
+    let mut s = TcpStream::connect(addr).await.unwrap();
+    s.write_all(
+        format!(
+            "POST /api/session HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+        .as_bytes(),
+    )
+    .await
+    .unwrap();
+    let mut out = String::new();
+    s.read_to_string(&mut out).await.unwrap();
+    let status = out[9..12].parse().unwrap();
+    let body = out.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
+    (status, body)
+}
+
+#[tokio::test]
+async fn signing_in_with_a_code_gives_a_session_token_the_hub_accepts() {
+    use agora_hub::signin::{HubSessions, SignIn};
+    let hub = Arc::new(Hub::open(SqliteStore::open_in_memory().unwrap()).unwrap());
+    let sessions = Arc::new(HubSessions::new(Arc::clone(&hub)));
+    let st = Arc::new(ServerState {
+        hub: Arc::clone(&hub),
+        support: support(),
+        ca: None,
+        lockout: Arc::new(Lockout::new()),
+        auth: Box::new(HubSessionsAuth(Arc::clone(&sessions))),
+        assets: None,
+        sessions: Some(sessions),
+    });
+    let addr = start(st).await;
+    let code = SignIn::new(hub.store(), Arc::new(Lockout::new()))
+        .create_code(server::now_ms())
+        .unwrap();
+
+    let (status, body) = post_session(addr, &code).await;
+    assert_eq!(status, 200, "{body}");
+    let token = body
+        .split("\"token\":\"")
+        .nth(1)
+        .unwrap()
+        .split('"')
+        .next()
+        .unwrap()
+        .to_string();
+    // The code is spent.
+    assert_eq!(post_session(addr, &code).await.0, 401);
+
+    // The token opens a client connection; a made-up one does not.
+    let tcp = TcpStream::connect(addr).await.unwrap();
+    let mut c = ws::connect_with_subprotocol_token(tcp, &format!("ws://{addr}/"), &token)
+        .await
+        .unwrap();
+    c.send(&f(
+        STREAM_EVENTS,
+        kinds::SUBSCRIBE,
+        v1::Subscribe::default().encode_to_vec(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(recv(&mut c).await.kind, kinds::SNAPSHOT);
+    let mut bad = dial(addr, Some("0123456789abcdef0123456789abcdef")).await;
+    bad.send(&f(
+        STREAM_EVENTS,
+        kinds::SUBSCRIBE,
+        v1::Subscribe::default().encode_to_vec(),
+    ))
+    .await
+    .unwrap();
+    assert!(closed(&mut bad).await);
+
+    // Guessing is rate limited.
+    for _ in 0..6 {
+        let _ = post_session(addr, "AAAA-AAAA").await;
+    }
+    assert_eq!(post_session(addr, "AAAA-AAAA").await.0, 429);
+}
+
+struct HubSessionsAuth(Arc<agora_hub::signin::HubSessions>);
+
+impl ClientAuth for HubSessionsAuth {
+    fn check(&self, token: &str) -> bool {
+        self.0.check(token)
     }
 }

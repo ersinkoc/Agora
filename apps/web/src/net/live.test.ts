@@ -189,3 +189,34 @@ describe('commands and terminals', () => {
     live.close();
   });
 });
+
+describe('refused sessions', () => {
+  function run() {
+    const sockets: FakeSocket[] = [];
+    let rejected = 0;
+    connectLive({
+      url: 'ws://hub/', token: 'stale', backoffMs: () => 0,
+      socket: (u, p) => { const s = new FakeSocket(u, p); sockets.push(s); return s; },
+      onState: () => {}, onView: () => {}, onRejected: () => { rejected++; },
+    });
+    return { sockets, rejected: () => rejected };
+  }
+  it('reports a session the hub keeps closing without a word, but not an unreachable hub', async () => {
+    const down = run();
+    (down.sockets[0] as FakeSocket).onclose?.(); // never opened
+    await new Promise((r) => setTimeout(r, 5));
+    (down.sockets[1] as FakeSocket).onclose?.();
+    await new Promise((r) => setTimeout(r, 5));
+    expect(down.rejected()).toBe(0);
+
+    const refused = run();
+    for (let i = 0; i < 2; i++) {
+      const s = refused.sockets[i] as FakeSocket;
+      s.onopen?.();
+      s.onclose?.();
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    expect(refused.rejected()).toBe(1);
+    expect(refused.sockets).toHaveLength(2); // and it stops trying
+  });
+});

@@ -6,7 +6,7 @@ import type { ApprovalModel, MachineModel } from './net/view';
 import type { Device } from './net/approval';
 import { demoAgents } from './fixtures';
 import { demoSource, type TerminalSource } from './terminal/source';
-import { Suspense, lazy, useMemo } from 'react';
+import { Suspense, lazy, useMemo, useState } from 'react';
 
 // The terminal emulator is the heaviest part of the client; load it only when a Focus view needs it.
 const TerminalView = lazy(() => import('./terminal/TerminalView').then((m) => ({ default: m.TerminalView })));
@@ -133,6 +133,24 @@ export function DevicePage({ device, onBack }: { device: Device | undefined; onB
           <p className="mono">agora node trust {device.id} {device.publicKeyHex}</p>
         </>
       )}
+    </main>
+  );
+}
+
+export function SignInPage({ onSubmit, notice }: { onSubmit: (code: string) => void; notice?: string }) {
+  const [code, setCode] = useState('');
+  return (
+    <main className="page">
+      <h1>{t('signin-title')}</h1>
+      <p>{t('signin-intro')}</p>
+      <form onSubmit={(e) => { e.preventDefault(); if (code.trim()) onSubmit(code); }}>
+        <label>
+          <span className="muted">{t('signin-code')}</span>{' '}
+          <input value={code} onChange={(e) => setCode(e.target.value)} autoComplete="off" autoCapitalize="characters" spellCheck={false} />
+        </label>{' '}
+        <button type="submit" className="button button--primary">{t('signin-action')}</button>
+      </form>
+      {notice && <p role="alert">{notice}</p>}
     </main>
   );
 }
