@@ -47,16 +47,18 @@ fn status(s: std::process::ExitStatus) -> ExitStatus {
 }
 
 pub(crate) fn spawn(config: &PtyConfig) -> io::Result<Box<dyn Pty>> {
-    let ws = winsize(config.cols, config.rows);
+    let mut ws = winsize(config.cols, config.rows);
     let (mut master, mut slave) = (-1, -1);
-    // SAFETY: both out-pointers are valid; null name/termios are allowed; `ws` outlives the call.
+    // SAFETY: the out-pointers are valid; null name/termios are allowed; `ws` outlives the call. The
+    // pointer mutability of the last three parameters differs between Linux (`*const`) and macOS (`*mut`),
+    // so mutable pointers are passed, which coerce to both.
     cvt(unsafe {
         libc::openpty(
             &mut master,
             &mut slave,
             std::ptr::null_mut(),
-            std::ptr::null(),
-            &ws,
+            std::ptr::null_mut(),
+            &mut ws,
         )
     })?;
     // SAFETY: openpty returned two fresh descriptors that nothing else owns.
