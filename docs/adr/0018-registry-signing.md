@@ -17,3 +17,9 @@ New agent support ships without a binary release, and a compromised mirror canno
 ## Additions
 - Publisher keys can be rotated and revoked; the index carries a signed revocation list.
 - The index is versioned and signed with expiry, and nodes reject an index older than the one they last saw (rollback protection).
+
+## Implementation status
+`agora-adapters::registry` verifies a signed index (root key pinned by the node, version and expiry, rollback refusal) and
+packages (SHA-256 against the index entry, detached Ed25519 signature under the listed publisher, revoked publishers refused).
+Signed data is the exact bytes of the envelope's `payload` string, so there is no canonicalization. Not yet: fetching, caching,
+the install step with the user's approval, key rotation flow, and the revocation list as a separate signed document.
