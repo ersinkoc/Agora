@@ -62,6 +62,20 @@ region = "title"
 regex = '^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] '
 ```
 
+Engine details (`agora-adapters`):
+- A rule matches when its own `contains`/`regex` (if present) match, every `all` condition matches, at least one
+  `any` condition matches (if `any` is non-empty), and no `not` condition matches. A rule needs at least one
+  positive condition; a rule with only `not` is rejected.
+- `bottom_lines(n)` is the literal bottom `n` rows of the screen grid (agents that draw at the bottom fill it);
+  `bottom_non_empty_lines(n)` is the last `n` rows that contain text. Neither ever includes scrollback.
+- Regexes match per line (`^`/`$` are line anchors), use a linear-time engine (no catastrophic backtracking),
+  and are size-limited.
+- Ties in priority are broken by file order. No matching rule means "no opinion", not `idle`.
+- Sections the engine does not interpret yet are ignored, so newer manifests still load; unknown keys inside
+  `[[rules]]` are an error. `min_engine` above the engine's version is rejected.
+- Detection interval is adaptive (`Pacer`): faster while visible, slower when hidden, backing off while the state
+  is stable. Hidden terminals are still checked.
+
 Rule semantics: highest-priority matching rule wins; `all` = AND, `any` = OR, `not` = exclusion; regions are
 `title`, `bottom_lines(n)`, `bottom_non_empty_lines(n)`. Reported state (hooks, ACP, adapter) always overrides
 rule results.
