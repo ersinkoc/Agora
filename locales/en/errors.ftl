@@ -13,6 +13,7 @@ node-resource_limit = Machine limit reached for { $resource } (limit: { $limit }
 project-not_found = Project { $project_id } was not found.
 worktree-dirty = There are uncommitted changes in { $path }.
 worktree-exists = A worktree for branch { $branch } already exists.
+worktree-unmerged = Branch { $branch } has work that is not saved anywhere else.
 agent-not_found = Agent { $agent_id } was not found.
 agent-kind_unknown = Agent type { $kind } is not available.
 agent-not_authenticated = { $kind } is not signed in on machine { $node_id }.

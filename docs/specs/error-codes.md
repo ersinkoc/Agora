@@ -18,6 +18,7 @@ replaced by dashes). Codes are part of the public protocol: never rename or reus
 | `project.not_found` | `project_id` | |
 | `worktree.dirty` | `path` | Uncommitted changes block the operation |
 | `worktree.exists` | `branch` | |
+| `worktree.unmerged` | `branch` | The worktree's branch has commits that exist nowhere else |
 | `agent.not_found` | `agent_id` | |
 | `agent.kind_unknown` | `kind` | No manifest or adapter for this kind |
 | `agent.not_authenticated` | `kind`, `node_id` | Agent account not logged in on that node |

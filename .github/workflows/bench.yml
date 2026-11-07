@@ -18,7 +18,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Benchmark head
-        run: cargo run -q --release -p agora-bench -- run --commit "${{ github.sha }}" --out bench-head.json
+        run: cargo run -q --release -p agora-bench -- run --repeat 5 --secs 1 --commit "${{ github.sha }}" --out bench-head.json
       - uses: actions/upload-artifact@v4
         with:
           name: bench-${{ github.sha }}
@@ -30,7 +30,9 @@ jobs:
           cp target/release/agora-bench ./agora-bench-head
           git checkout --quiet "${{ github.event.pull_request.base.sha }}"
           if [ -d bench ]; then
-            cargo run -q --release -p agora-bench -- run --commit base --out bench-base.json
+            # A base from before --repeat existed does not know the flag; fall back to a single run.
+            cargo run -q --release -p agora-bench -- run --repeat 5 --secs 1 --commit base --out bench-base.json \
+              || cargo run -q --release -p agora-bench -- run --commit base --out bench-base.json
             ./agora-bench-head compare bench-base.json bench-head.json --threshold 10
           else
             echo "base has no bench harness yet; skipping comparison"

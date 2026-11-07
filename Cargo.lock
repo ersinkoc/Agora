@@ -76,6 +76,9 @@ dependencies = [
 [[package]]
 name = "agora-platform"
 version = "0.0.0"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "agora-protocol"
