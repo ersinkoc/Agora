@@ -169,3 +169,32 @@ export function tiles(v: View): AgentTileModel[] {
 export function machinesOnline(v: View): number {
   return [...v.nodes.values()].filter((n) => n.online).length;
 }
+
+export interface ApprovalModel {
+  id: string; // hub-wide key `<node>/<local id>`
+  node: string;
+  localId: string;
+  agentName: string;
+  action: string;
+  detail: string;
+  expiresAtMs: number;
+}
+
+// What the approvals section shows: soonest to expire first.
+export function approvalList(v: View): ApprovalModel[] {
+  const names = new Map(tiles(v).map((t) => [t.id, t.name]));
+  return [...v.approvals.entries()]
+    .map(([id, a]) => {
+      const at = id.indexOf('/');
+      return {
+        id,
+        node: at < 0 ? '' : id.slice(0, at),
+        localId: at < 0 ? id : id.slice(at + 1),
+        agentName: names.get(a.agentId) ?? a.agentId,
+        action: a.action,
+        detail: a.detail,
+        expiresAtMs: a.expiresAtMs,
+      };
+    })
+    .sort((a, b) => a.expiresAtMs - b.expiresAtMs);
+}

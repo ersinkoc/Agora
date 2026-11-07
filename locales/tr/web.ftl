@@ -43,3 +43,15 @@ focus-why = Bu neden gösteriliyor?
 focus-why-agent = Ajan bunu kendisi bildirdi.
 focus-why-screen = Ajanın ekranında görünenden okundu.
 focus-not-found = Bu ajan artık burada değil.
+
+approvals-title = Yanıtınızı bekleyenler
+approval-title = { $name } izin istiyor
+approval-allow = İzin ver
+approval-deny = Reddet
+approval-not-trusted = Bu cihaza o makine henüz güvenmiyor. "Bu cihaz" sayfasını açın ve gösterdiği komutu makinede çalıştırın.
+approval-failed = Yanıt iletilemedi. Yeniden deneyin.
+device-title = Bu cihaz
+device-intro = Makineler yalnızca sahibinin güvendiği cihazların yanıtını kabul eder. Buna güvenmek için makinede şunu çalıştırın:
+device-name = Cihaz adı
+device-key = Cihaz anahtarı
+device-link = Bu cihaz

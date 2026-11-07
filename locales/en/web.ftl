@@ -43,3 +43,15 @@ focus-why = Why is this shown?
 focus-why-agent = The agent reported this itself.
 focus-why-screen = Read from what is on the agent's screen.
 focus-not-found = That agent is not here any more.
+
+approvals-title = Waiting for your answer
+approval-title = { $name } asks permission
+approval-allow = Allow
+approval-deny = Deny
+approval-not-trusted = This device is not trusted by that machine yet. Open "This device" and run the command it shows on the machine.
+approval-failed = The answer did not go through. Try again.
+device-title = This device
+device-intro = Machines only accept an answer from a device their owner trusted. To trust this one, run this on the machine:
+device-name = Device name
+device-key = Device key
+device-link = This device

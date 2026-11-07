@@ -5,9 +5,10 @@ import { t } from './i18n';
 import { nextNeedingMe } from './model';
 import { connectLive, type Live, type LinkState } from './net/live';
 import type { TerminalSource } from './terminal/source';
-import { machinesOnline, tiles, type View } from './net/view';
+import { approvalList, machinesOnline, tiles, type ApprovalModel, type View } from './net/view';
+import { indexedDbStore, signApproval, thisDevice, type Device } from './net/approval';
 import { hubConnection } from './net/session';
-import { Focus, Gallery, Home } from './screens';
+import { DevicePage, Focus, Gallery, Home } from './screens';
 
 function useHash(): [string, (h: string) => void] {
   const [hash, setHash] = useState(window.location.hash);
@@ -27,6 +28,24 @@ export function App() {
   const [live, setLive] = useState<View | undefined>();
   const [link, setLink] = useState<LinkState>('connecting');
   const [api, setApi] = useState<Live | undefined>();
+  // This browser's own key: what the node checks an approval against (ADR-0028).
+  const [device, setDevice] = useState<Device | undefined>();
+  const [notice, setNotice] = useState<string | undefined>();
+  useEffect(() => {
+    const store = indexedDbStore();
+    if (store) void thisDevice(store).then(setDevice).catch(() => setDevice(undefined));
+  }, []);
+  const resolve = useCallback(async (a: ApprovalModel, approved: boolean) => {
+    if (!api || !device) { setNotice(t('approval-failed')); return; }
+    setNotice(undefined);
+    try {
+      const signature = await signApproval(device, a.node, a.localId, approved);
+      await api.command(a.node, { approvalResolve: { approvalId: a.localId, approved, signerDeviceId: device.id, signature } });
+    } catch (e) {
+      const code = (e as { code?: string }).code;
+      setNotice(code === 'approval.signature_invalid' ? t('approval-not-trusted') : t('approval-failed'));
+    }
+  }, [api, device]);
   useEffect(() => {
     if (!hub) return;
     const c = connectLive({ url: hub.url, token: hub.token, onView: (v) => setLive({ ...v }), onState: setLink });
@@ -52,8 +71,9 @@ export function App() {
   const items: PaletteItem[] = useMemo(() => [
     { id: 'next', label: t('palette-next-attention'), run: next },
     { id: 'home', label: t('palette-go-home'), run: () => go('#/') },
+    ...(hub ? [{ id: 'device', label: t('device-link'), run: () => go('#/device') }] : []),
     ...agents.map((a) => ({ id: `agent-${a.id}`, label: t('palette-open-agent', { name: a.name }), run: () => open(a.id) })),
-  ], [agents, go, next, open]);
+  ], [agents, go, hub, next, open]);
 
   useEffect(() => {
     const on = (e: KeyboardEvent) => {
@@ -67,9 +87,9 @@ export function App() {
 
   return (
     <>
-      {hash === '#/gallery' ? <Gallery /> : current !== undefined
+      {hash === '#/gallery' ? <Gallery /> : hash === '#/device' ? <DevicePage device={device} onBack={() => go('#/')} /> : current !== undefined
         ? <Focus agent={agents.find((a) => a.id === current)} source={terminal} onBack={() => go('#/')} />
-        : <Home onOpen={open} agents={agents} machines={live ? machinesOnline(live) : undefined} link={hub ? link : 'live'} />}
+        : <Home onOpen={open} agents={agents} machines={live ? machinesOnline(live) : undefined} link={hub ? link : 'live'} approvals={live ? approvalList(live) : []} onResolve={resolve} notice={notice} />}
       {palette && <CommandPalette items={items} onClose={() => setPalette(false)} />}
     </>
   );
