@@ -63,6 +63,20 @@ pub fn local_listen(path: &std::path::Path) -> io::Result<LocalListener> {
     }
 }
 
+/// Creates a symbolic link at `link` pointing to `target`. Only Unix for now (Windows links need privileges and a file
+/// or directory flavour); elsewhere it returns `Unsupported`, which tests that need a link use to skip themselves.
+pub fn symlink(target: &std::path::Path, link: &std::path::Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, link)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (target, link);
+        Err(unsupported_io("symbolic links"))
+    }
+}
+
 /// Connect to a local socket.
 pub fn local_connect(path: &std::path::Path) -> io::Result<LocalStream> {
     #[cfg(unix)]

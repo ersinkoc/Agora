@@ -642,9 +642,11 @@ fn a_symlink_in_the_repository_cannot_redirect_the_injected_file() {
     let victim = e.dir.join("victim.txt");
     std::fs::write(&victim, "precious").unwrap();
     // The repository itself contains `.mcp.json -> victim.txt` and a `cfg -> <dir>` directory link.
-    std::os::unix::fs::symlink(&victim, e.repo.join(".mcp.json")).unwrap();
+    if agora_platform::symlink(&victim, &e.repo.join(".mcp.json")).is_err() {
+        return; // no symlinks here (Windows): nothing to prove
+    }
     std::fs::create_dir_all(e.dir.join("elsewhere")).unwrap();
-    std::os::unix::fs::symlink(e.dir.join("elsewhere"), e.repo.join("cfg")).unwrap();
+    agora_platform::symlink(&e.dir.join("elsewhere"), &e.repo.join("cfg")).unwrap();
     git(&e.repo, &["add", "."]);
     git(&e.repo, &["commit", "-q", "-m", "links"]);
     add_manifest(
