@@ -307,3 +307,48 @@ fn node_stdio_without_a_node_says_so() {
     assert_eq!(code, 1);
     assert!(err.contains("No node is listening"), "{err}");
 }
+
+#[test]
+fn mesh_stdio_is_an_mcp_server_for_one_agent() {
+    if !supported() {
+        return;
+    }
+    let s = setup("mesh-stdio");
+    let _node = start_node(&s);
+    let (code, out, err) = cli(&s, &["agent", "start", "shell", "--project", "demo"]);
+    assert_eq!(code, 0, "{out}{err}");
+    // This is the command an agent's MCP configuration would run.
+    let socket = s.home.join("m").join("agent-1.sock");
+    let mut child = Command::new(AGORA)
+        .args(["mesh", "stdio", "--socket"])
+        .arg(&socket)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut out = std::io::BufReader::new(child.stdout.take().unwrap());
+    let mut ask = |req: &str| -> String {
+        use std::io::BufRead;
+        writeln!(stdin, "{req}").unwrap();
+        let mut line = String::new();
+        out.read_line(&mut line).unwrap();
+        line
+    };
+    let init = ask(
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}"#,
+    );
+    assert!(init.contains("agora-mesh"), "{init}");
+    let tools = ask(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#);
+    assert!(
+        tools.contains("send_message") && tools.contains("handoff"),
+        "{tools}"
+    );
+    let me = ask(
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"agents_list","arguments":{}}}"#,
+    );
+    assert!(me.contains("agent-1"), "{me}");
+    drop(stdin);
+    assert!(child.wait().unwrap().success());
+}

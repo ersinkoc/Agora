@@ -44,6 +44,18 @@ Tool errors are results with `isError: true` whose text is JSON `{"error": {"cod
 JSON-RPC `-32602`. `ask` does not block the library: the connection returns `Waiting { ask_id, deadline }` and the caller polls
 the broker and calls `finish_ask`.
 
+## Node-local server (`agora-node::mesh_server`)
+
+Each agent the node starts gets its own owner-only local socket (`<node dir>/m/<agent id>.sock`) serving the MCP
+conversation above, backed by a node-local broker, so agents on one machine coordinate with no hub (nodes are autonomous).
+Whatever connects to a socket is that agent as far as the broker is concerned, so the socket path is only given to that
+agent's process. `agora mesh stdio --socket PATH` is what an agent's MCP client runs as its server: it carries stdin/stdout to
+that socket. The node registers the agent on start, keeps its state current for `agents_list`, and on stop or exit
+unregisters it, which gives back its tasks, leases and open asks and closes the endpoint. Pending `ask`s are answered on the
+same connection without blocking the agent's other calls. Mesh activity is written to the node's event log.
+Not yet: putting the socket into each agent's MCP configuration at launch (manifest `[mcp]`), and the hub-side broker that
+joins agents on different machines.
+
 ## Implementation status
 `agora-mesh::broker::Mesh` implements the tools' logic as deterministic in-memory state: registry, messages with
 broker-stamped provenance, project-scoped `#channels`, inbox cursor, `ask` answered by a reply to its id with timeouts,

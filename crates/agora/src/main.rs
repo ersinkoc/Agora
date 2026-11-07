@@ -137,7 +137,15 @@ fn main() -> ExitCode {
         }
         ["terminal", "attach"] => terminal_attach(&say, &opts),
         ["doctor"] => doctor(&say, &opts),
-        ["node", "stdio"] => node_stdio(&say, &opts),
+        ["node", "stdio"] => bridge_stdio(&say, &socket_path(&opts)),
+        ["mesh", "stdio"] => match &opts.socket {
+            // An agent's MCP client starts this as its mesh server; the node told it which socket is its own.
+            Some(path) => bridge_stdio(&say, path),
+            None => {
+                say.err(key!("cli-bad-arguments"), &[]);
+                ExitCode::from(2)
+            }
+        },
         _ => {
             say.err(key!("cli-usage"), &[]);
             ExitCode::from(2)
@@ -145,12 +153,14 @@ fn main() -> ExitCode {
     }
 }
 
-/// `agora node stdio`: carries the node's framed protocol over this process's stdin/stdout, so a remote hub can
-/// reach a node over `ssh host agora node stdio` with no open port (ADR-0011). It bridges to the node already
-/// running on this machine; the node, its agents and its policy are unchanged, and it never needs the hub.
-fn node_stdio(say: &Say, o: &Opts) -> ExitCode {
-    let path = socket_path(o);
-    let Ok(sock) = agora_platform::local_connect(&path) else {
+/// `agora node stdio` and `agora mesh stdio`: carry a local socket over this process's stdin/stdout.
+/// - `node stdio` bridges the node's framed protocol, so a remote hub can reach a node over
+///   `ssh host agora node stdio` with no open port (ADR-0011). The node, its agents and its policy are unchanged, and
+///   it never needs the hub.
+/// - `mesh stdio --socket PATH` is what an agent's MCP client starts as its mesh server: it carries the MCP
+///   conversation to that agent's own endpoint on the node.
+fn bridge_stdio(say: &Say, path: &std::path::Path) -> ExitCode {
+    let Ok(sock) = agora_platform::local_connect(path) else {
         say.err(
             key!("cli-node-not-running"),
             &[("socket", path.display().to_string().into())],
