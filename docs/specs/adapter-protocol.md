@@ -41,3 +41,14 @@ node → adapter  shutdown
 - Adapters must tolerate unknown fields and methods (ignore, do not crash).
 - A crashing adapter is restarted with backoff; the agent shows `unknown` until it recovers.
 - First-party adapters are the reference implementations and conformance test targets.
+
+## Host implementation (`agora-adapters::host`)
+
+The node-side host runs an adapter as a child process and speaks this protocol over its stdio. Implemented behavior beyond the
+spec text: an adapter starts with a **cleared environment** plus `PATH` and what the node passes (it never inherits the node's
+secrets by accident); lines longer than 4 MiB are discarded whole; malformed lines, unknown notifications and unexpected
+requests are ignored and counted (`ignored_lines`), never fatal; a crash fails calls in flight with `Exited` and ends the event
+stream with `Exited`; calls have timeouts. JSON uses the proto3 mapping (lowerCamelCase, enum names or numbers, 64-bit integers
+as strings or numbers on input). `agora-fake-agent --adapter` is the reference fake adapter used in tests.
+Not yet: restart with backoff (the supervisor will own that), mapping events into node state and the approvals queue, and the
+registry of installed adapters.
