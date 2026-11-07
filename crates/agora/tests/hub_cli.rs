@@ -194,3 +194,68 @@ fn a_machine_enrolls_connects_and_its_agent_shows_up_in_the_hub() {
         std::thread::sleep(Duration::from_millis(200));
     }
 }
+
+#[test]
+fn the_hub_database_can_be_backed_up_pruned_and_restored_from_the_command_line() {
+    let home = tmp("backup");
+    // `hub code` creates the hub folder and database.
+    assert!(agora(&home, &["hub", "code"])
+        .output()
+        .unwrap()
+        .status
+        .success());
+    let db = home.join("hub/hub.db");
+    assert!(db.exists());
+
+    let out = agora(&home, &["hub", "backup", "--keep", "2"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    for _ in 0..3 {
+        std::thread::sleep(Duration::from_millis(5));
+        assert!(agora(&home, &["hub", "backup", "--keep", "2"])
+            .output()
+            .unwrap()
+            .status
+            .success());
+    }
+    let kept = std::fs::read_dir(home.join("hub/backups")).unwrap().count();
+    assert_eq!(kept, 2, "retention keeps the newest two");
+
+    // An explicit file never overwrites.
+    let file = home.join("manual.db");
+    let file_s = file.to_str().unwrap();
+    assert!(agora(&home, &["hub", "backup", file_s])
+        .output()
+        .unwrap()
+        .status
+        .success());
+    assert!(!agora(&home, &["hub", "backup", file_s])
+        .output()
+        .unwrap()
+        .status
+        .success());
+
+    // Restore replaces the database and keeps the old one.
+    assert!(agora(&home, &["hub", "restore", file_s])
+        .output()
+        .unwrap()
+        .status
+        .success());
+    assert!(home.join("hub/hub.db.before-restore").exists());
+    // A file that is not a hub database is refused and changes nothing.
+    std::fs::write(home.join("junk.db"), "not sqlite").unwrap();
+    assert!(!agora(
+        &home,
+        &["hub", "restore", home.join("junk.db").to_str().unwrap()]
+    )
+    .output()
+    .unwrap()
+    .status
+    .success());
+    let _ = std::fs::remove_dir_all(home);
+}

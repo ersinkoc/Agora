@@ -165,6 +165,84 @@ pub fn hub_code(say: &Say, o: &Opts) -> ExitCode {
     }
 }
 
+const BACKUP_PREFIX: &str = "hub-";
+const DEFAULT_KEEP: usize = 7;
+
+/// `agora hub backup [FILE] [--keep N]`: an online, consistent copy of the hub database. Without FILE it goes to
+/// `<hub dir>/backups/hub-<unix ms>.db` and only the newest `--keep` (default 7) of those are kept.
+pub fn hub_backup(say: &Say, o: &Opts) -> ExitCode {
+    let dir = hub_dir(o);
+    let result = (|| -> Result<PathBuf, String> {
+        let store = SqliteStore::open(&dir.join("hub.db")).map_err(|e| e.to_string())?;
+        if let Some(file) = o.positional.first() {
+            store
+                .backup_to(Path::new(file))
+                .map_err(|e| e.to_string())?;
+            return Ok(PathBuf::from(file));
+        }
+        let backups = dir.join("backups");
+        std::fs::create_dir_all(&backups).map_err(|e| e.to_string())?;
+        let dest = backups.join(format!("{BACKUP_PREFIX}{:013}.db", server::now_ms()));
+        store.backup_to(&dest).map_err(|e| e.to_string())?;
+        prune_backups(&backups, o.keep.unwrap_or(DEFAULT_KEEP));
+        Ok(dest)
+    })();
+    match result {
+        Ok(path) => {
+            say.out(
+                key!("cli-hub-backup"),
+                &[("path", path.display().to_string().into())],
+            );
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            say.err(key!("cli-hub-failed"), &[("reason", e.into())]);
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Deletes all but the newest `keep` automatic backups (the zero-padded timestamp makes names sort by age).
+fn prune_backups(dir: &Path, keep: usize) {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut names: Vec<_> = rd
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|n| n.starts_with(BACKUP_PREFIX) && n.ends_with(".db"))
+        .collect();
+    names.sort();
+    let drop = names.len().saturating_sub(keep.max(1));
+    for n in names.into_iter().take(drop) {
+        let _ = std::fs::remove_file(dir.join(n));
+    }
+}
+
+/// `agora hub restore FILE`: replaces the hub database with a verified backup. Stop the hub first; the replaced
+/// database stays next to it as `hub.db.before-restore`.
+pub fn hub_restore(say: &Say, o: &Opts) -> ExitCode {
+    let Some(file) = o.positional.first() else {
+        say.err(key!("cli-bad-arguments"), &[]);
+        say.err(key!("cli-usage"), &[]);
+        return ExitCode::from(2);
+    };
+    let dest = hub_dir(o).join("hub.db");
+    match agora_hub::store::restore(Path::new(file), &dest) {
+        Ok(()) => {
+            say.out(
+                key!("cli-hub-restored"),
+                &[("path", dest.display().to_string().into())],
+            );
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            say.err(key!("cli-hub-failed"), &[("reason", e.to_string().into())]);
+            ExitCode::from(1)
+        }
+    }
+}
+
 /// `agora node enroll --hub URL --ca FILE --code CODE --id NAME`
 pub fn node_enroll(say: &Say, o: &Opts) -> ExitCode {
     let (Some(url), Some(ca_file), Some(code), Some(id)) = (&o.hub, &o.ca, &o.code, &o.id) else {
@@ -238,4 +316,31 @@ pub fn load_link() -> Option<(String, HubLink)> {
             key_pem: read("key.pem")?,
         },
     ))
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_newest_automatic_backups_are_kept() {
+        let dir = std::env::temp_dir().join(format!("agora-prune-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for i in 1..=5u32 {
+            std::fs::write(dir.join(format!("hub-{i:013}.db")), "x").unwrap();
+        }
+        std::fs::write(dir.join("notes.txt"), "mine").unwrap();
+        prune_backups(&dir, 2);
+        let mut left: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        left.sort();
+        assert_eq!(
+            left,
+            ["hub-0000000000004.db", "hub-0000000000005.db", "notes.txt"]
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
