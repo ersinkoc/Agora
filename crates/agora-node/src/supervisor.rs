@@ -6,7 +6,7 @@
 //! passed in, so restart and detection timing is testable without sleeping.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use agora_adapters::host::{Adapter, AdapterConfig, AdapterEvent};
@@ -221,6 +221,11 @@ struct AdapterEntry {
     worktree: PathBuf,
     branch: String,
     running: bool,
+    /// What starts the adapter process again, and the checkout its session belongs to.
+    spec: agora_adapters::manifest::AdapterSpec,
+    checkout_root: PathBuf,
+    restarts: u32,
+    restart_at: Option<Instant>,
 }
 
 struct Entry {
@@ -279,7 +284,12 @@ impl Supervisor {
     }
 
     fn check_limits(&self) -> Result<(), SupervisorError> {
-        let active = self.active() + self.adapters.values().filter(|a| a.running).count();
+        let active = self.active()
+            + self
+                .adapters
+                .values()
+                .filter(|a| a.running || a.restart_at.is_some())
+                .count();
         for (resource, max) in [
             ("agents", self.cfg.limits.max_agents),
             ("terminals", self.cfg.limits.max_terminals),
@@ -401,36 +411,15 @@ impl Supervisor {
         req: &StartRequest,
         spec: &agora_adapters::manifest::AdapterSpec,
     ) -> Result<AgentId, SupervisorError> {
-        const STEP: Duration = Duration::from_secs(10);
         let checkout = git::discover_checkout(&req.checkout)?;
         let worktree = req.worktree_root.join(&req.name);
         let branch = format!("agent/{}", req.name);
         git::create_worktree(&checkout.root, &worktree, &branch, req.base.as_deref())?;
-        let (program, args) = spec
-            .command
-            .split_first()
-            .ok_or_else(|| SupervisorError::UnknownKind(req.kind.clone()))?;
-        let adapter = Adapter::spawn(&AdapterConfig {
-            program: program.into(),
-            args: args.to_vec(),
-            env: spec
-                .env
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect(),
-            cwd: Some(worktree.clone()),
-        })
-        .map_err(|e| SupervisorError::Spawn(e.to_string()))?;
-        let fail = |e: agora_adapters::host::HostError| SupervisorError::Spawn(e.to_string());
-        adapter.initialize(&["chat"], "en", STEP).map_err(fail)?;
-        let session_id = adapter
-            .start_session(
-                &checkout.root.to_string_lossy(),
-                &worktree.to_string_lossy(),
-                None,
-                STEP,
-            )
-            .map_err(fail)?;
+        if spec.command.is_empty() {
+            return Err(SupervisorError::UnknownKind(req.kind.clone()));
+        }
+        let (adapter, session_id) = launch_adapter(spec, &checkout.root, &worktree, None)
+            .map_err(SupervisorError::Spawn)?;
         let id = AgentId::new(format!("agent-{}", self.next_id));
         self.next_id += 1;
         let mut agent = Agent::new(
@@ -451,6 +440,10 @@ impl Supervisor {
                 worktree,
                 branch,
                 running: true,
+                spec: spec.clone(),
+                checkout_root: checkout.root,
+                restarts: 0,
+                restart_at: None,
             },
         );
         Ok(id)
@@ -458,7 +451,17 @@ impl Supervisor {
 
     /// Drains what adapters said since the last call: states are applied (a report always wins over anything
     /// else), the rest is passed on as events. A dead adapter ends its agent as `unknown`.
-    fn poll_adapters(&mut self, events: &mut Vec<SupervisorEvent>) {
+    fn poll_adapters(&mut self, now: Instant, events: &mut Vec<SupervisorEvent>) {
+        let policy = self.cfg.restart;
+        let due: Vec<AgentId> = self
+            .adapters
+            .iter()
+            .filter(|(_, e)| e.restart_at.is_some_and(|t| now >= t))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in due {
+            self.restart_adapter(&id, now, events);
+        }
         for (id, e) in &mut self.adapters {
             if !e.running {
                 continue;
@@ -494,6 +497,7 @@ impl Supervisor {
                             });
                         }
                         events.push(SupervisorEvent::AdapterCrashed { agent: id.clone() });
+                        schedule_adapter_restart(id, e, now, &policy, events);
                     }
                     other => events.push(SupervisorEvent::Adapter {
                         agent: id.clone(),
@@ -501,6 +505,32 @@ impl Supervisor {
                     }),
                 }
             }
+        }
+    }
+
+    /// Starts a crashed adapter again and resumes its session where the adapter supports it. A failed attempt
+    /// counts and backs off like a crash.
+    fn restart_adapter(&mut self, id: &AgentId, now: Instant, events: &mut Vec<SupervisorEvent>) {
+        let policy = self.cfg.restart;
+        let Some(e) = self.adapters.get_mut(id) else {
+            return;
+        };
+        e.restart_at = None;
+        e.restarts += 1;
+        match launch_adapter(
+            &e.spec,
+            &e.checkout_root,
+            &e.worktree,
+            e.agent.session.as_deref(),
+        ) {
+            Ok((adapter, session_id)) => {
+                e.adapter = adapter;
+                e.session_id = session_id;
+                e.running = true;
+                e.agent.process_restarted();
+                events.push(SupervisorEvent::Started { agent: id.clone() });
+            }
+            Err(_) => schedule_adapter_restart(id, e, now, &policy, events),
         }
     }
 
@@ -579,7 +609,7 @@ impl Supervisor {
         for id in ids {
             self.tick_agent(&id, now, &mut events);
         }
-        self.poll_adapters(&mut events);
+        self.poll_adapters(now, &mut events);
         events
     }
 
@@ -714,6 +744,7 @@ impl Supervisor {
     pub fn stop(&mut self, id: &AgentId) -> Result<Vec<SupervisorEvent>, SupervisorError> {
         if let Some(e) = self.adapters.get_mut(id) {
             let mut events = Vec::new();
+            e.restart_at = None;
             if e.running {
                 let _ = e
                     .adapter
@@ -846,7 +877,7 @@ impl Supervisor {
             worktree: e.worktree.clone(),
             branch: e.branch.clone(),
             running: e.running,
-            restarts: 0,
+            restarts: e.restarts,
         }));
         out.sort_by(|a, b| a.id.cmp(&b.id));
         out
@@ -855,6 +886,60 @@ impl Supervisor {
     /// Terminal size used for new agents (for callers that attach clients).
     pub fn terminal_size(&self) -> Size {
         self.cfg.terminal.size
+    }
+}
+
+/// Spawns an adapter process, initializes it and starts (or resumes) a session. Returns it with the session id.
+fn launch_adapter(
+    spec: &agora_adapters::manifest::AdapterSpec,
+    checkout_root: &Path,
+    worktree: &Path,
+    resume: Option<&str>,
+) -> Result<(Adapter, String), String> {
+    const STEP: Duration = Duration::from_secs(10);
+    let (program, args) = spec.command.split_first().ok_or("empty adapter command")?;
+    let adapter = Adapter::spawn(&AdapterConfig {
+        program: program.into(),
+        args: args.to_vec(),
+        env: spec
+            .env
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
+        cwd: Some(worktree.to_path_buf()),
+    })
+    .map_err(|e| e.to_string())?;
+    let fail = |e: agora_adapters::host::HostError| e.to_string();
+    adapter.initialize(&["chat"], "en", STEP).map_err(fail)?;
+    let session_id = adapter
+        .start_session(
+            &checkout_root.to_string_lossy(),
+            &worktree.to_string_lossy(),
+            resume,
+            STEP,
+        )
+        .map_err(fail)?;
+    Ok((adapter, session_id))
+}
+
+/// After an adapter died on its own: wait out the backoff and try again, or give up for good.
+fn schedule_adapter_restart(
+    id: &AgentId,
+    e: &mut AdapterEntry,
+    now: Instant,
+    policy: &RestartPolicy,
+    events: &mut Vec<SupervisorEvent>,
+) {
+    if e.restarts < policy.max_restarts {
+        let after = policy.delay(e.restarts);
+        e.restart_at = Some(now + after);
+        events.push(SupervisorEvent::Restarting {
+            agent: id.clone(),
+            attempt: e.restarts + 1,
+            after,
+        });
+    } else {
+        events.push(SupervisorEvent::GaveUp { agent: id.clone() });
     }
 }
 
