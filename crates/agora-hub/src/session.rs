@@ -15,8 +15,8 @@ use crate::store::{Append, EventStore, StoreError};
 /// What happened to one received event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ingest {
-    /// Stored; `acked` is the highest contiguous seq now held for this node.
-    Applied { acked: u64 },
+    /// Stored at global log position `pos`; `acked` is the highest contiguous seq now held for this node.
+    Applied { acked: u64, pos: u64 },
     /// Already held; `acked` is unchanged and may be re-sent.
     Duplicate { acked: u64 },
     /// Not the next event. Nothing was stored; the node must replay from `expected` (answer with `ResumeOk`).
@@ -115,8 +115,9 @@ impl<'a, S: EventStore> NodeSession<'a, S> {
                 .store
                 .append(&self.producer, ev.seq, ev.at_ms, payload)?
             {
-                Append::Applied { .. } => Ingest::Applied {
+                Append::Applied { pos } => Ingest::Applied {
                     acked: self.store.acked(&self.producer)?,
+                    pos,
                 },
                 Append::Duplicate => Ingest::Duplicate {
                     acked: self.store.acked(&self.producer)?,
@@ -248,7 +249,7 @@ mod tests {
         let mut s = ready(&store, &sup, "n");
         assert_eq!(
             s.event(&event("n", 1)).unwrap(),
-            Ingest::Applied { acked: 1 }
+            Ingest::Applied { acked: 1, pos: 1 }
         );
         assert_eq!(
             s.event(&event("n", 1)).unwrap(),
@@ -260,7 +261,7 @@ mod tests {
         );
         assert_eq!(
             s.event(&event("n", 2)).unwrap(),
-            Ingest::Applied { acked: 2 }
+            Ingest::Applied { acked: 2, pos: 2 }
         );
     }
 

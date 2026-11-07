@@ -75,7 +75,7 @@ fn connect(
                 break 'send; // the connection drops here
             }
             match hub.event(&payload).unwrap() {
-                Ingest::Applied { acked } => {
+                Ingest::Applied { acked, .. } => {
                     applied += 1;
                     up.on_ack(acked)?;
                 }

@@ -2,6 +2,7 @@
 
 pub mod ca;
 pub mod enroll;
+pub mod hub;
 pub mod notify;
 pub mod projection;
 pub mod session;
