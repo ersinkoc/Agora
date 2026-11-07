@@ -14,13 +14,14 @@ members = [
     "crates/agora-tui",
     "crates/agora-fake-agent",
     "tools/schema-check",
+    "bench",
 ]
 
 [workspace.package]
 version = "0.0.0"
 edition = "2021"
 publish = false
-# license: pending ADR-0016
+license = "Apache-2.0"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

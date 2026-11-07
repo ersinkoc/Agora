@@ -35,4 +35,4 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md). Coding agents: read [AGENTS.md](AGENTS.
 
 ## License
 
-Pending ([ADR-0016](docs/adr/0016-license.md)).
+Apache-2.0 ([ADR-0016](docs/adr/0016-license.md)); contributions use the DCO. See `LICENSE`.
