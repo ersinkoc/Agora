@@ -29,3 +29,5 @@ x509-parser = { version = "0.18", features = ["verify"] }
 # One-time enrollment codes: system randomness (already in the tree via rcgen) and a hash so codes are not stored.
 getrandom = "0.2"
 sha2 = "0.10"
+# Parses the models.dev catalog (ADR-0021).
+serde_json = "1"

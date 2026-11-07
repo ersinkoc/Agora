@@ -66,6 +66,7 @@ dependencies = [
  "prost",
  "rcgen",
  "rusqlite",
+ "serde_json",
  "sha2",
  "time",
  "tokio",
