@@ -1,0 +1,43 @@
+syntax = "proto3";
+
+package agora.v1;
+
+// Shared types used by events and commands.
+
+enum AgentState {
+  // Unknown or not set; receivers must treat any unrecognised value like this one.
+  AGENT_STATE_UNSPECIFIED = 0;
+  AGENT_STATE_WORKING = 1;
+  AGENT_STATE_BLOCKED = 2;
+  AGENT_STATE_IDLE = 3;
+  AGENT_STATE_DONE = 4;
+}
+
+enum IntegrationLevel {
+  INTEGRATION_LEVEL_UNSPECIFIED = 0;
+  INTEGRATION_LEVEL_L0_GENERIC = 1;
+  INTEGRATION_LEVEL_L1_MANIFEST = 2;
+  INTEGRATION_LEVEL_L2_ACP = 3;
+  INTEGRATION_LEVEL_L3_ADAPTER = 4;
+}
+
+enum TerminalPurpose {
+  TERMINAL_PURPOSE_UNSPECIFIED = 0;
+  TERMINAL_PURPOSE_AGENT = 1;
+  TERMINAL_PURPOSE_SHELL = 2;
+  TERMINAL_PURPOSE_SERVICE = 3;
+}
+
+// A flat error parameter: a string or a number (docs/specs/error-codes.md).
+message ParamValue {
+  oneof value {
+    string str = 1;
+    int64 int = 2;
+  }
+}
+
+// An error as carried on the wire. `code` is a stable dotted code; never human text.
+message ErrorInfo {
+  string code = 1;
+  map<string, ParamValue> params = 2;
+}

@@ -15,6 +15,12 @@ CI runs `agora-schema-check` against the target branch. Renaming, retyping, or r
 enum, or enum value fails the build; adding new ones is fine. Run locally:
 `cargo run -p agora-schema-check -- <base schema dir> schema`.
 
+## Golden fixtures
+
+`schema/fixtures/v1/` holds a binary (`.bin`) and proto3-JSON (`.json`) fixture for every message. A fixture is
+never edited, only added. `cargo test -p agora-protocol --test golden` checks them; for new messages run it with
+`AGORA_WRITE_FIXTURES=1` (existing files are never overwritten).
+
 ## Generating code
 
 - **Rust:** automatic. `crates/agora-protocol/build.rs` compiles the schema with `protox`, a pure-Rust

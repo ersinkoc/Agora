@@ -1,5 +1,9 @@
 //! Generated protocol types (from schema/), codecs, handshake and capability negotiation. See docs/specs/protocol.md.
 
+/// Serialized `FileDescriptorSet` of the schema, for reflection (golden fixtures, debug JSON).
+pub const FILE_DESCRIPTOR_SET: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/agora_descriptor.bin"));
+
 pub mod error;
 pub mod frame;
 pub mod handshake;

@@ -14,6 +14,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     protos.sort();
     println!("cargo:rerun-if-changed={}", schema.display());
     let fds = protox::compile(&protos, [&schema])?;
+    // Keep the descriptor set so tests (and later tools) can reflect over messages.
+    let out = std::path::PathBuf::from(std::env::var("OUT_DIR")?);
+    std::fs::write(
+        out.join("agora_descriptor.bin"),
+        prost::Message::encode_to_vec(&fds),
+    )?;
     prost_build::compile_fds(fds)?;
     Ok(())
 }

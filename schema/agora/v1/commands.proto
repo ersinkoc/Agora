@@ -1,0 +1,239 @@
+syntax = "proto3";
+
+package agora.v1;
+
+import "agora/v1/common.proto";
+
+// Commands flow client -> hub -> node (docs/specs/protocol.md section 4). Every request has a request_id
+// and an idempotency_key; the response is Ok or Err.
+message CommandRequest {
+  string request_id = 1;
+  // A retried request with the same key must not repeat its effect.
+  string idempotency_key = 2;
+
+  oneof command {
+    ProjectList project_list = 10;
+    AgentStart agent_start = 11;
+    AgentStop agent_stop = 12;
+    AgentPrompt agent_prompt = 13;
+    AgentSetMode agent_set_mode = 14;
+    TerminalOpen terminal_open = 20;
+    TerminalInput terminal_input = 21;
+    TerminalResize terminal_resize = 22;
+    TerminalSubscribe terminal_subscribe = 23;
+    FilesList files_list = 30;
+    FilesRead files_read = 31;
+    FilesWrite files_write = 32;
+    FilesWatch files_watch = 33;
+    GitDiff git_diff = 40;
+    GitStatus git_status = 41;
+    WorktreeCreate worktree_create = 42;
+    WorktreeRemove worktree_remove = 43;
+    ApprovalResolve approval_resolve = 50;
+    MeshPost mesh_post = 60;
+    TaskUpdate task_update = 61;
+    NodePolicyGet node_policy_get = 70;
+  }
+}
+
+message CommandResponse {
+  string request_id = 1;
+  oneof result {
+    CommandOk ok = 2;
+    ErrorInfo err = 3;
+  }
+}
+
+// Success. Commands that return data fill one of the results; the rest return `empty`.
+message CommandOk {
+  oneof result {
+    Empty empty = 1;
+    ProjectListResult project_list = 2;
+    AgentStartResult agent_start = 3;
+    TerminalOpenResult terminal_open = 4;
+    FilesListResult files_list = 5;
+    FilesReadResult files_read = 6;
+    GitStatusResult git_status = 7;
+    GitDiffResult git_diff = 8;
+    WorktreeCreateResult worktree_create = 9;
+    NodePolicyResult node_policy = 10;
+  }
+}
+
+message Empty {}
+
+// ---- requests ----
+
+message ProjectList {}
+
+message AgentStart {
+  string project_id = 1;
+  string node_id = 2;
+  string kind = 3;
+  // Empty means "create a new worktree"; otherwise reuse this one (opt-in sharing, uses leases).
+  string worktree_id = 4;
+  IntegrationLevel level = 5;
+  string prompt = 6;
+}
+
+message AgentStop {
+  string agent_id = 1;
+}
+
+message AgentPrompt {
+  string agent_id = 1;
+  string text = 2;
+}
+
+message AgentSetMode {
+  string agent_id = 1;
+  string mode = 2;
+}
+
+message TerminalOpen {
+  string node_id = 1;
+  string cwd = 2;
+  TerminalPurpose purpose = 3;
+  uint32 cols = 4;
+  uint32 rows = 5;
+}
+
+message TerminalInput {
+  string terminal_id = 1;
+  bytes data = 2;
+}
+
+message TerminalResize {
+  string terminal_id = 1;
+  uint32 cols = 2;
+  uint32 rows = 3;
+}
+
+message TerminalSubscribe {
+  string terminal_id = 1;
+  // Capability name chosen at handshake: "terminal.raw" or "terminal.cells".
+  string format = 2;
+}
+
+message FilesList {
+  string worktree_id = 1;
+  string path = 2;
+}
+
+message FilesRead {
+  string worktree_id = 1;
+  string path = 2;
+}
+
+message FilesWrite {
+  string worktree_id = 1;
+  string path = 2;
+  bytes data = 3;
+}
+
+message FilesWatch {
+  string worktree_id = 1;
+  bool enable = 2;
+}
+
+message GitDiff {
+  string worktree_id = 1;
+  // Optional: limit to one path.
+  string path = 2;
+}
+
+message GitStatus {
+  string worktree_id = 1;
+}
+
+message WorktreeCreate {
+  string checkout_id = 1;
+  string branch = 2;
+}
+
+message WorktreeRemove {
+  string worktree_id = 1;
+}
+
+// Signed by the approving user's device key; the node verifies it (ADR-0020).
+message ApprovalResolve {
+  string approval_id = 1;
+  bool approved = 2;
+  string signer_device_id = 3;
+  bytes signature = 4;
+}
+
+message MeshPost {
+  string to = 1;
+  string body = 2;
+}
+
+message TaskUpdate {
+  string task_id = 1;
+  string project_id = 2;
+  string title = 3;
+  string claim_by_agent_id = 4;
+  bool done = 5;
+}
+
+message NodePolicyGet {
+  string node_id = 1;
+}
+
+// ---- results ----
+
+message ProjectSummary {
+  string project_id = 1;
+  string name = 2;
+}
+
+message ProjectListResult {
+  repeated ProjectSummary projects = 1;
+}
+
+message AgentStartResult {
+  string agent_id = 1;
+  string terminal_id = 2;
+  string worktree_id = 3;
+}
+
+message TerminalOpenResult {
+  string terminal_id = 1;
+}
+
+message FileEntry {
+  string name = 1;
+  bool is_dir = 2;
+  uint64 size_bytes = 3;
+}
+
+message FilesListResult {
+  repeated FileEntry entries = 1;
+}
+
+message FilesReadResult {
+  bytes data = 1;
+}
+
+message GitStatusResult {
+  uint32 files_changed = 1;
+  uint32 insertions = 2;
+  uint32 deletions = 3;
+  string head_commit = 4;
+}
+
+message GitDiffResult {
+  // Unified diff.
+  string diff = 1;
+}
+
+message WorktreeCreateResult {
+  string worktree_id = 1;
+  string path = 2;
+}
+
+message NodePolicyResult {
+  // Commands that require a user-signed approval on this node.
+  repeated string approval_required = 1;
+  repeated string allowed_agent_kinds = 2;
+}
