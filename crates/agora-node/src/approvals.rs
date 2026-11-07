@@ -111,6 +111,11 @@ impl<V: Verifier> Approvals<V> {
         }
     }
 
+    /// Replaces the verifier (when trusted device keys are loaded or changed).
+    pub fn set_verifier(&mut self, verifier: V) {
+        self.verifier = verifier;
+    }
+
     /// Registers a request and returns its id, or `None` if no safe id could be made (the action must then be
     /// refused). `ttl_ms` of 0 uses the default.
     pub fn request(
@@ -222,6 +227,109 @@ impl<V: Verifier> Approvals<V> {
     /// spent id is no longer pending; this is for audit.)
     pub fn was_spent(&self, id: &str) -> bool {
         self.spent.iter().any(|s| s == id)
+    }
+}
+
+impl Verifier for Box<dyn Verifier + Send> {
+    fn verify(&self, device_id: &str, message: &[u8], signature: &[u8]) -> bool {
+        (**self).verify(device_id, message, signature)
+    }
+}
+
+/// Trusts no device: every decision is refused. The safe default until the node has trusted device keys (and the
+/// signature scheme exists): requests wait, expire, and the agent is told they were denied.
+pub struct DenyAll;
+
+impl Verifier for DenyAll {
+    fn verify(&self, _device_id: &str, _message: &[u8], _signature: &[u8]) -> bool {
+        false
+    }
+}
+
+/// The node's approvals queue plus the routes back to the adapters that asked. The adapter picked its own approval
+/// id; the node mints a random one (the one users and devices see and sign) and remembers the pairing.
+pub struct NodeApprovals {
+    queue: std::sync::Mutex<Approvals<Box<dyn Verifier + Send>>>,
+    routes: std::sync::Mutex<std::collections::HashMap<String, (agora_core::AgentId, String)>>,
+}
+
+impl NodeApprovals {
+    pub fn new(node_id: &str, verifier: Box<dyn Verifier + Send>) -> Self {
+        Self {
+            queue: std::sync::Mutex::new(Approvals::new(node_id, verifier)),
+            routes: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// Replaces the verifier; requests already waiting are judged by the new one.
+    pub fn set_verifier(&self, verifier: Box<dyn Verifier + Send>) {
+        self.q().set_verifier(verifier);
+    }
+
+    fn q(&self) -> std::sync::MutexGuard<'_, Approvals<Box<dyn Verifier + Send>>> {
+        self.queue.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn r(
+        &self,
+    ) -> std::sync::MutexGuard<'_, std::collections::HashMap<String, (agora_core::AgentId, String)>>
+    {
+        self.routes.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// An adapter asked. Returns the pending request to announce, or `None` if no safe id could be made.
+    pub fn request(
+        &self,
+        agent: &agora_core::AgentId,
+        adapter_approval_id: &str,
+        action: &str,
+        detail: &str,
+        now_ms: u64,
+    ) -> Option<Pending> {
+        let p = self
+            .q()
+            .request(agent.as_str(), action, detail, now_ms, 0)?;
+        self.r().insert(
+            p.id.clone(),
+            (agent.clone(), adapter_approval_id.to_string()),
+        );
+        Some(p)
+    }
+
+    /// A signed decision arrived. On success, the adapter's own approval id and agent to answer, and the verdict.
+    pub fn resolve(
+        &self,
+        r: &ApprovalResolve,
+        now_ms: u64,
+    ) -> Result<(agora_core::AgentId, String, Verdict), ApprovalError> {
+        let (_, verdict) = self.q().resolve(r, now_ms)?;
+        let route = self.r().remove(&r.approval_id);
+        route
+            .map(|(agent, id)| (agent, id, verdict))
+            .ok_or(ApprovalError::Unknown)
+    }
+
+    /// Requests that ran out of time: the agent behind each is told "denied". Returns `(node approval id, agent,
+    /// adapter approval id)`.
+    pub fn expire(&self, now_ms: u64) -> Vec<(String, agora_core::AgentId, String)> {
+        let gone = self.q().expire(now_ms);
+        let mut routes = self.r();
+        gone.into_iter()
+            .filter_map(|p| routes.remove(&p.id).map(|(a, id)| (p.id, a, id)))
+            .collect()
+    }
+
+    /// An agent stopped or died: nothing stays waiting on it.
+    pub fn cancel_agent(&self, agent: &agora_core::AgentId) {
+        let gone = self.q().cancel_agent(agent.as_str());
+        let mut routes = self.r();
+        for p in gone {
+            routes.remove(&p.id);
+        }
+    }
+
+    pub fn pending_count(&self) -> usize {
+        self.q().pending().count()
     }
 }
 

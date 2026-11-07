@@ -59,6 +59,7 @@ pub struct ControlContext {
     pub node_id: String,
     pub events: Option<Arc<EventSink>>,
     pub mesh: Option<Arc<crate::mesh_server::MeshServer>>,
+    pub approvals: Option<Arc<crate::approvals::NodeApprovals>>,
     names: AtomicU64,
     seen: Mutex<IdempotencyCache>,
 }
@@ -77,6 +78,7 @@ impl ControlContext {
         node_id: String,
         events: Option<Arc<EventSink>>,
         mesh: Option<Arc<crate::mesh_server::MeshServer>>,
+        approvals: Option<Arc<crate::approvals::NodeApprovals>>,
     ) -> Self {
         Self {
             supervisor,
@@ -85,6 +87,7 @@ impl ControlContext {
             node_id,
             events,
             mesh,
+            approvals,
             names: AtomicU64::new(0),
             seen: Mutex::new(IdempotencyCache::default()),
         }
@@ -196,6 +199,7 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                     let _ = t.send_input(format!("{}\r", a.prompt).into_bytes());
                 }
             }
+            let has_terminal = sup.terminal(&id).is_some();
             drop(sup);
             if let Some(ev) = &ctx.events {
                 ev.agent_launched(
@@ -206,11 +210,16 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                     std::path::Path::new(&worktree),
                     &branch,
                     &a.kind,
+                    has_terminal,
                 );
             }
             Ok(v1::CommandOk {
                 result: Some(Ok_::AgentStart(v1::AgentStartResult {
-                    terminal_id: terminal_id_of(&id),
+                    terminal_id: if has_terminal {
+                        terminal_id_of(&id)
+                    } else {
+                        String::new()
+                    },
                     agent_id: id.as_str().to_string(),
                     worktree_id: worktree,
                 })),
@@ -230,6 +239,13 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
         Cmd::AgentPrompt(a) => {
             let id = AgentId::new(a.agent_id.clone());
             let sup = ctx.sup();
+            if sup.terminal(&id).is_none() {
+                // An adapter agent takes prompts through its adapter.
+                return sup
+                    .adapter_prompt(&id, &a.text, false)
+                    .map(|()| ok_empty())
+                    .map_err(sup_err);
+            }
             let t = sup.terminal(&id).ok_or_else(|| {
                 Error::new(ErrorCode::AgentNotFound).with("agent_id", a.agent_id.as_str())
             })?;
@@ -250,6 +266,30 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                 return Err(invalid("cols"));
             }
             with_terminal(ctx, &t.terminal_id, |h| h.resize(Size { cols, rows }))?;
+            Ok(ok_empty())
+        }
+        Cmd::ApprovalResolve(r) => {
+            use crate::approvals::ApprovalError;
+            let Some(approvals) = &ctx.approvals else {
+                return Err(capability_missing("approval.resolve"));
+            };
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+            let (agent, adapter_id, verdict) = approvals.resolve(r, now).map_err(|e| match e {
+                ApprovalError::Unknown => invalid("approval_id"),
+                ApprovalError::Expired => Error::new(ErrorCode::ApprovalExpired)
+                    .with("approval_id", r.approval_id.as_str()),
+                ApprovalError::BadSignature => Error::new(ErrorCode::ApprovalSignatureInvalid)
+                    .with("approval_id", r.approval_id.as_str()),
+            })?;
+            let approved = verdict == crate::approvals::Verdict::Approved;
+            ctx.sup()
+                .adapter_resolve_approval(&agent, &adapter_id, approved)
+                .map_err(sup_err)?;
+            if let Some(ev) = &ctx.events {
+                ev.approval_resolved(&r.approval_id, approved, &r.signer_device_id);
+            }
             Ok(ok_empty())
         }
         other => Err(capability_missing(command_name(other))),

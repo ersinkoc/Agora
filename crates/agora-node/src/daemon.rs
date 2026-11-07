@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use agora_adapters::host::AdapterEvent;
 use agora_adapters::Manifest;
 use agora_core::{AgentId, AgentState, NodeId};
 use agora_protocol::v1::{self, event::Body};
@@ -136,6 +137,28 @@ impl EventSink {
                         terminal_id: crate::control::terminal_id_of(agent),
                     }));
                 }
+                SupervisorEvent::Adapter { agent, event } => match event {
+                    AdapterEvent::Usage {
+                        model,
+                        input_tokens,
+                        output_tokens,
+                        ..
+                    } => self.record(Body::AgentUsageReported(v1::AgentUsageReported {
+                        agent_id: agent.as_str().to_string(),
+                        model: model.clone(),
+                        input_tokens: *input_tokens,
+                        output_tokens: *output_tokens,
+                    })),
+                    AdapterEvent::SessionReported {
+                        native_session_id, ..
+                    } => self.record(Body::AgentSessionReported(v1::AgentSessionReported {
+                        agent_id: agent.as_str().to_string(),
+                        session_id: native_session_id.clone(),
+                    })),
+                    // Approval requests go through the node's approvals queue (see `Node`), chat and log lines
+                    // are not part of the event log.
+                    _ => {}
+                },
                 SupervisorEvent::Stopped { agent } => {
                     // Stopped on request: the exit code is not known (same convention as the terminal exit frame).
                     self.record(Body::AgentExited(v1::AgentExited {
@@ -149,6 +172,24 @@ impl EventSink {
                 _ => {}
             }
         }
+    }
+
+    pub fn approval_requested(&self, p: &crate::approvals::Pending) {
+        self.record(Body::ApprovalRequested(v1::ApprovalRequested {
+            approval_id: p.id.clone(),
+            agent_id: p.agent_id.clone(),
+            action: p.action.clone(),
+            detail: p.detail.clone(),
+            expires_at_ms: p.expires_ms,
+        }));
+    }
+
+    pub fn approval_resolved(&self, approval_id: &str, approved: bool, signer_device_id: &str) {
+        self.record(Body::ApprovalResolved(v1::ApprovalResolved {
+            approval_id: approval_id.to_string(),
+            approved,
+            signer_device_id: signer_device_id.to_string(),
+        }));
     }
 
     /// Appends already-built events (mesh activity for the audit log).
@@ -208,6 +249,7 @@ impl EventSink {
         worktree: &Path,
         branch: &str,
         kind: &str,
+        has_terminal: bool,
     ) {
         let worktree_id = worktree.to_string_lossy().into_owned();
         self.record(Body::WorktreeCreated(v1::WorktreeCreated {
@@ -217,6 +259,9 @@ impl EventSink {
             branch: branch.to_string(),
         }));
         self.agent_started(agent, project, node, &worktree_id, kind);
+        if !has_terminal {
+            return; // an adapter agent has no terminal
+        }
         self.record(Body::TerminalOpened(v1::TerminalOpened {
             terminal_id: crate::control::terminal_id_of(agent),
             node_id: node.to_string(),
@@ -322,6 +367,8 @@ pub struct Node {
     pub events: Arc<EventSink>,
     /// Per-agent mesh endpoints (messages, tasks, leases between the agents on this node).
     pub mesh: Arc<crate::mesh_server::MeshServer>,
+    /// Sensitive actions waiting for a user's signed decision (ADR-0020).
+    pub approvals: Arc<crate::approvals::NodeApprovals>,
     node_id: String,
     /// Manifests that could not be loaded, as `(path, reason)` for the log.
     pub manifest_problems: Vec<(PathBuf, String)>,
@@ -407,6 +454,12 @@ impl Node {
             }));
         }
 
+        // No device is trusted yet (no signature scheme or device keys exist): requests wait and expire as denied.
+        let approvals = Arc::new(crate::approvals::NodeApprovals::new(
+            &cfg.node_id,
+            Box::new(crate::approvals::DenyAll),
+        ));
+
         let supervisor = Arc::new(Mutex::new(sup));
         let ctx = Arc::new(ControlContext::new(
             Arc::clone(&supervisor),
@@ -415,17 +468,19 @@ impl Node {
             cfg.node_id.clone(),
             Some(Arc::clone(&events)),
             Some(Arc::clone(&mesh)),
+            Some(Arc::clone(&approvals)),
         ));
         let server = ControlServer::start(&cfg.socket, ctx)?;
 
         let stop = Arc::new(AtomicBool::new(false));
         let ticker = {
-            let (sup, ev, stop, node_id, mesh) = (
+            let (sup, ev, stop, node_id, mesh, approvals) = (
                 Arc::clone(&supervisor),
                 Arc::clone(&events),
                 Arc::clone(&stop),
                 cfg.node_id.clone(),
                 Arc::clone(&mesh),
+                Arc::clone(&approvals),
             );
             std::thread::Builder::new()
                 .name("agora-supervise".into())
@@ -455,6 +510,47 @@ impl Node {
                             mesh.set_state(&v.id, state_word(v.state));
                         }
                         ev.record_bodies(mesh.take_events());
+                        // Adapter approval requests enter the queue and are announced; stopped or dead agents leave
+                        // nothing waiting; requests that ran out of time are answered as denied.
+                        let now = now_ms();
+                        for e in &events {
+                            match e {
+                                SupervisorEvent::Adapter {
+                                    agent,
+                                    event:
+                                        AdapterEvent::ApprovalRequest {
+                                            approval_id,
+                                            action,
+                                            detail,
+                                            ..
+                                        },
+                                } => {
+                                    if let Some(p) =
+                                        approvals.request(agent, approval_id, action, detail, now)
+                                    {
+                                        ev.approval_requested(&p);
+                                    } else {
+                                        // No safe id: refuse rather than let the action through.
+                                        let _ = sup
+                                            .lock()
+                                            .unwrap_or_else(|e| e.into_inner())
+                                            .adapter_resolve_approval(agent, approval_id, false);
+                                    }
+                                }
+                                SupervisorEvent::Stopped { agent }
+                                | SupervisorEvent::AdapterCrashed { agent } => {
+                                    approvals.cancel_agent(agent);
+                                }
+                                _ => {}
+                            }
+                        }
+                        for (node_approval, agent, adapter_id) in approvals.expire(now) {
+                            let _ = sup
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .adapter_resolve_approval(&agent, &adapter_id, false);
+                            ev.approval_resolved(&node_approval, false, "");
+                        }
                         // Resources are reported when they change, not on a timer, so an idle node is silent.
                         let running = u32::try_from(views.iter().filter(|v| v.running).count())
                             .unwrap_or(u32::MAX);
@@ -473,6 +569,7 @@ impl Node {
             supervisor,
             events,
             mesh,
+            approvals,
             node_id: cfg.node_id.clone(),
             manifest_problems,
         })

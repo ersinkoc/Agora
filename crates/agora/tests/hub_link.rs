@@ -42,6 +42,7 @@ fn node(dir: &std::path::Path, id: &str) -> Arc<EventSink> {
         std::path::Path::new("/work/wt"),
         "agent/x",
         "shell",
+        true,
     );
     sink
 }

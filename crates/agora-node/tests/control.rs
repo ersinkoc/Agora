@@ -753,3 +753,207 @@ fn flags_and_variables_are_added_at_every_launch_including_restarts() {
             .to_string_lossy()
     );
 }
+
+/// A verifier for tests: a device "signs" by sending the message bytes themselves. The real scheme is a separate
+/// decision; this exercises the node's whole approval path.
+struct EchoVerifier;
+
+impl agora_node::approvals::Verifier for EchoVerifier {
+    fn verify(&self, device: &str, message: &[u8], signature: &[u8]) -> bool {
+        device == "phone" && message == signature
+    }
+}
+
+fn fake_adapter_path() -> String {
+    let mut p = std::env::current_exe().unwrap();
+    p.pop();
+    p.pop();
+    p.push(format!("agora-fake-agent{}", std::env::consts::EXE_SUFFIX));
+    if !p.exists() {
+        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+        assert!(Command::new(cargo)
+            .args(["build", "-q", "-p", "agora-fake-agent"])
+            .status()
+            .unwrap()
+            .success());
+    }
+    p.to_string_lossy().into_owned()
+}
+
+#[test]
+fn an_adapter_approval_waits_for_a_signed_decision_and_is_relayed() {
+    use agora_node::approvals::signed_message;
+    use v1::event::Body;
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return;
+    }
+    let e = env("approvals");
+    add_manifest(
+        &e,
+        "ad.toml",
+        &format!("kind = \"adapted\"\ndisplay_name = \"A\"\nversion = \"1\"\nmin_engine = 1\n[adapter]\ncommand = [{:?}, \"--adapter\"]\n", fake_adapter_path()),
+    );
+    let n = node(&e, NodeLimits::default());
+    n.approvals.set_verifier(Box::new(EchoVerifier));
+    let mut c = Client::connect(n.socket().unwrap()).unwrap();
+    let s = started(ok(c.call(start_cmd("adapted"))));
+    assert_eq!(s.terminal_id, "", "adapter agents have no terminal");
+
+    let wait_request = |n: &Node| -> String {
+        let end = Instant::now() + Duration::from_secs(15);
+        loop {
+            let found = n
+                .events
+                .events_after(0)
+                .into_iter()
+                .rev()
+                .find_map(|e| match e.body {
+                    Some(Body::ApprovalRequested(a)) => Some(a),
+                    _ => None,
+                });
+            if let Some(a) = found {
+                return a.approval_id;
+            }
+            assert!(Instant::now() < end, "no approval request announced");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    let resolve = |c: &mut Client, id: &str, approved: bool, device: &str, node: &str| {
+        c.call(Cmd::ApprovalResolve(v1::ApprovalResolve {
+            approval_id: id.into(),
+            approved,
+            signer_device_id: device.into(),
+            signature: signed_message(node, id, approved),
+        }))
+    };
+    let state_of = |n: &Node, id: &str| {
+        n.supervisor
+            .lock()
+            .unwrap()
+            .list()
+            .into_iter()
+            .find(|v| v.id.as_str() == id)
+            .unwrap()
+            .state
+    };
+
+    // The adapter asks: the node announces a request under its own random id and waits.
+    ok(c.call(Cmd::AgentPrompt(v1::AgentPrompt {
+        agent_id: s.agent_id.clone(),
+        text: "ask".into(),
+    })));
+    let id = wait_request(&n);
+    assert!(
+        id.starts_with("ap-") && id != "ap-1",
+        "the node's id, not the adapter's: {id}"
+    );
+    assert_eq!(n.approvals.pending_count(), 1);
+
+    // A decision from an unknown device or for another node is refused; the request keeps waiting.
+    assert_eq!(
+        err_code(resolve(&mut c, &id, true, "stranger", "node-test")),
+        "approval.signature_invalid"
+    );
+    assert_eq!(
+        err_code(resolve(&mut c, &id, true, "phone", "other-node")),
+        "approval.signature_invalid"
+    );
+    assert_eq!(n.approvals.pending_count(), 1);
+    assert_eq!(state_of(&n, &s.agent_id), agora_core::AgentState::Blocked);
+
+    // A signed decision is verified by the node and relayed to the adapter, which carries on.
+    ok(resolve(&mut c, &id, true, "phone", "node-test"));
+    let end = Instant::now() + Duration::from_secs(15);
+    while state_of(&n, &s.agent_id) != agora_core::AgentState::Idle {
+        assert!(Instant::now() < end, "agent never resumed");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(n.approvals.pending_count(), 0);
+    // Spent: replaying the same decision is refused.
+    assert!(r_is_err(resolve(&mut c, &id, true, "phone", "node-test")));
+    let resolved = n
+        .events
+        .events_after(0)
+        .into_iter()
+        .find_map(|e| match e.body {
+            Some(Body::ApprovalResolved(r)) => Some(r),
+            _ => None,
+        });
+    let r = resolved.expect("resolution recorded");
+    assert_eq!(
+        (
+            r.approval_id.as_str(),
+            r.approved,
+            r.signer_device_id.as_str()
+        ),
+        (id.as_str(), true, "phone")
+    );
+    // Usage and session reports from the adapter reached the event log too.
+    ok(c.call(Cmd::AgentPrompt(v1::AgentPrompt {
+        agent_id: s.agent_id.clone(),
+        text: "hello".into(),
+    })));
+    let end = Instant::now() + Duration::from_secs(15);
+    loop {
+        let evs = n.events.events_after(0);
+        let usage = evs
+            .iter()
+            .any(|e| matches!(e.body, Some(Body::AgentUsageReported(_))));
+        let session = evs
+            .iter()
+            .any(|e| matches!(e.body, Some(Body::AgentSessionReported(_))));
+        if usage && session {
+            break;
+        }
+        assert!(
+            Instant::now() < end,
+            "adapter reports never reached the log"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn with_no_trusted_device_every_decision_is_refused() {
+    use agora_node::approvals::signed_message;
+    use v1::event::Body;
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return;
+    }
+    let e = env("approvals-deny");
+    add_manifest(
+        &e,
+        "ad.toml",
+        &format!("kind = \"adapted\"\ndisplay_name = \"A\"\nversion = \"1\"\nmin_engine = 1\n[adapter]\ncommand = [{:?}, \"--adapter\"]\n", fake_adapter_path()),
+    );
+    let n = node(&e, NodeLimits::default());
+    let mut c = Client::connect(n.socket().unwrap()).unwrap();
+    let s = started(ok(c.call(start_cmd("adapted"))));
+    ok(c.call(Cmd::AgentPrompt(v1::AgentPrompt {
+        agent_id: s.agent_id,
+        text: "ask".into(),
+    })));
+    let end = Instant::now() + Duration::from_secs(15);
+    let id = loop {
+        if let Some(a) = n
+            .events
+            .events_after(0)
+            .into_iter()
+            .find_map(|e| match e.body {
+                Some(Body::ApprovalRequested(a)) => Some(a),
+                _ => None,
+            })
+        {
+            break a.approval_id;
+        }
+        assert!(Instant::now() < end);
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let r = c.call(Cmd::ApprovalResolve(v1::ApprovalResolve {
+        approval_id: id.clone(),
+        approved: true,
+        signer_device_id: "phone".into(),
+        signature: signed_message("node-test", &id, true),
+    }));
+    assert_eq!(err_code(r), "approval.signature_invalid");
+}
