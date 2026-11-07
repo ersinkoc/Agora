@@ -4,6 +4,7 @@ pub mod host;
 pub mod inject;
 pub mod manifest;
 pub mod pacer;
+pub mod registry;
 pub mod rules;
 
 pub use manifest::{Manifest, ManifestError};

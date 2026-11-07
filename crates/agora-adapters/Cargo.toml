@@ -21,6 +21,10 @@ regex = "1"
 # Adapter protocol messages are JSON-RPC (docs/specs/adapter-protocol.md); serde_json parses them.
 serde_json = "1"
 
+# Registry signatures are Ed25519 (ADR-0018): ring verifies them (already in the tree through rcgen and rustls); sha2 hashes packages.
+ring = { version = "0.17", default-features = false }
+sha2 = "0.10"
+
 [dev-dependencies]
 # The host tests run the fake adapter (a test-only crate) as the adapter process.
 agora-fake-agent = { path = "../agora-fake-agent" }
