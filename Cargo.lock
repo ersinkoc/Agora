@@ -21,10 +21,12 @@ name = "agora-adapters"
 version = "0.0.0"
 dependencies = [
  "agora-core",
+ "agora-fake-agent",
  "agora-protocol",
  "agora-vt",
  "regex",
  "serde",
+ "serde_json",
  "toml",
 ]
 
@@ -52,6 +54,7 @@ name = "agora-fake-agent"
 version = "0.0.0"
 dependencies = [
  "serde",
+ "serde_json",
  "toml",
 ]
 
