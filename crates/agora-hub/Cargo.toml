@@ -20,3 +20,9 @@ prost = "0.14"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros", "io-util"] }
 tokio-tungstenite = "0.24"
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+# Device certificates (ADR-0015): rcgen issues and signs X.509 certificates.
+rcgen = { version = "0.14", features = ["pem", "x509-parser"] }
+# Certificate validity timestamps (the type rcgen uses).
+time = "0.3"
+# Reads the serial number back from an issued certificate (and verifies chains in tests).
+x509-parser = { version = "0.18", features = ["verify"] }
