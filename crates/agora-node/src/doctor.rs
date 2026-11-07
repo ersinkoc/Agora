@@ -182,7 +182,9 @@ mod tests {
         assert_eq!(find(&checks, "data-dir")[0].status, Status::Ok);
         assert_eq!(find(&checks, "node")[0].status, Status::Warn);
         assert_eq!(find(&checks, "manifests")[0].status, Status::Warn);
-        assert!(healthy(&checks) || find(&checks, "git")[0].status == Status::Fail);
+        // Where terminals are unsupported (Windows for now) that is a reported problem, not a healthy machine.
+        let git_ok = find(&checks, "git")[0].status == Status::Ok;
+        assert_eq!(healthy(&checks), git_ok && agora_platform::PTY_SUPPORTED);
         let _ = std::fs::remove_dir_all(&d);
     }
 
