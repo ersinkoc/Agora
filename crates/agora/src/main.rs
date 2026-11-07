@@ -453,8 +453,23 @@ fn terminal_attach(say: &Say, o: &Opts) -> ExitCode {
             });
     }
 
+    // Follow the window being resized: the loop wakes every 100 ms anyway, so compare the size then (no signal
+    // handling, so it works the same wherever terminals do).
+    let resizer = c.writer().ok();
+    let mut last_size = agora_platform::terminal_size();
     let mut stdout = std::io::stdout();
     loop {
+        let now = agora_platform::terminal_size();
+        if now != last_size {
+            last_size = now;
+            if let (Some(w), Some((cols, rows))) = (&resizer, now) {
+                let _ = w.send(Cmd::TerminalResize(v1::TerminalResize {
+                    terminal_id: terminal_id.clone(),
+                    cols: u32::from(cols),
+                    rows: u32::from(rows),
+                }));
+            }
+        }
         match c.read_frame(Some(Duration::from_millis(100))) {
             Ok(Some(f)) if f.stream_id == TERMINAL_STREAM => match f.kind {
                 KIND_TERM_SNAPSHOT | KIND_TERM_DATA => {

@@ -136,6 +136,19 @@ fn start_attach_stop_from_the_command_line() {
             seen.push_str(&String::from_utf8_lossy(&chunk));
         }
     }
+    // Resizing the window resizes the agent's terminal: the shell inside reports the new size.
+    attach.resize(101, 33).unwrap();
+    attach.write_input(b"stty size\r").unwrap();
+    let end = Instant::now() + Duration::from_secs(15);
+    while !seen.contains("33 101") {
+        assert!(
+            Instant::now() < end,
+            "the agent never saw the new size; got: {seen:?}"
+        );
+        if let Ok(chunk) = attach.output().recv_timeout(Duration::from_millis(100)) {
+            seen.push_str(&String::from_utf8_lossy(&chunk));
+        }
+    }
     attach.write_input(&[0x1d]).unwrap();
     let status = attach.wait().unwrap();
     assert!(status.success(), "attach exited with {status:?}");
