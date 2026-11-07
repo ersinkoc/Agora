@@ -12,6 +12,7 @@ cli-usage =
       agora hub run [--listen ADDR] [--hub-dir DIR] [--name HOST]... [--web DIR]
       agora hub code [--hub-dir DIR]
       agora node enroll --hub URL --ca FILE --code CODE --id NAME
+      agora node trust DEVICE_ID PUBLIC_KEY_HEX [--data DIR]
       agora doctor [--data DIR] [--manifests DIR] [--socket PATH]
 cli-node-listening = Node is running. Control socket: { $socket }
 cli-agent-started = Started agent { $agent_id } in { $worktree }
@@ -54,6 +55,8 @@ doctor-summary-problems = Something Agora needs is missing. Fix the items marked
 
 cli-hub-listening = Hub is running on { $addr }. Its data folder: { $dir }
 cli-hub-web = Web app: https://{ $addr }/#token={ $token } (the hub's certificate is signed by its own CA, so the browser warns until you trust it)
+cli-trusted = Device { $id } can now answer approvals on this node. Restart the node to apply it.
+cli-trust-failed = Could not trust that device: { $reason }
 cli-hub-failed = The hub command failed: { $reason }
 cli-hub-code = Enrollment code: { $code } (valid for 10 minutes). On the other machine run: agora node enroll --hub wss://HOST:PORT --ca { $ca } --code { $code } --id NAME
 cli-enrolled = This machine is enrolled as { $id }. Start it with "agora node run"; it will connect to the hub by itself. Saved in { $dir }.
