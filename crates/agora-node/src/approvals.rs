@@ -262,6 +262,76 @@ impl P256Verifier {
     }
 }
 
+/// Name of the file in the node's data directory that lists the devices whose signatures this node accepts.
+pub const TRUSTED_DEVICES_FILE: &str = "trusted-devices";
+
+fn from_hex(s: &str) -> Option<Vec<u8>> {
+    if !s.len().is_multiple_of(2) || !s.is_ascii() {
+        return None;
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
+        .collect()
+}
+
+fn valid_device_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+impl P256Verifier {
+    /// Reads the trusted-devices file: one `<device id> <public key as 130 hex digits>` per line; blank lines and `#`
+    /// comments are skipped. A missing file trusts nothing. Lines that do not parse are skipped (the count of those
+    /// is returned) rather than trusted: a typo must never widen trust.
+    pub fn load(path: &std::path::Path) -> (Self, usize) {
+        let mut v = Self::new();
+        let mut skipped = 0;
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return (v, 0);
+        };
+        for line in text.lines().map(str::trim) {
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let ok = line
+                .split_once(char::is_whitespace)
+                .and_then(|(id, key)| {
+                    let key = from_hex(key.trim())?;
+                    (valid_device_id(id) && v.trust(id, &key)).then_some(())
+                })
+                .is_some();
+            if !ok {
+                skipped += 1;
+            }
+        }
+        (v, skipped)
+    }
+}
+
+/// Adds (or replaces) a device in the trusted-devices file. This is the node owner's act on the node itself: the
+/// hub has no way to call it, which is what keeps approvals from being widened remotely (ADR-0020).
+pub fn trust_device(path: &std::path::Path, device_id: &str, key_hex: &str) -> Result<(), String> {
+    let key = from_hex(key_hex).ok_or("the key is not hexadecimal")?;
+    if !valid_device_id(device_id) {
+        return Err("the device id may contain only letters, digits, '.', '_' and '-'".into());
+    }
+    if P256Verifier::new().trust(device_id, &key) {
+        let old = std::fs::read_to_string(path).unwrap_or_default();
+        let mut out: String = old
+            .lines()
+            .filter(|l| l.split_whitespace().next() != Some(device_id))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        out.push_str(&format!("{device_id} {}\n", key_hex.to_ascii_lowercase()));
+        return std::fs::write(path, out).map_err(|e| e.to_string());
+    }
+    Err("the key is not an uncompressed P-256 point (65 bytes)".into())
+}
+
 impl Verifier for P256Verifier {
     fn verify(&self, device_id: &str, message: &[u8], signature: &[u8]) -> bool {
         let Some(key) = self.keys.get(device_id) else {
@@ -551,6 +621,48 @@ mod tests {
             signed_message("ab", "c", true),
             signed_message("a", "bc", true)
         );
+    }
+
+    #[test]
+    fn the_trusted_devices_file_is_read_strictly() {
+        use ring::rand::SystemRandom;
+        use ring::signature::{EcdsaKeyPair, KeyPair, ECDSA_P256_SHA256_FIXED_SIGNING};
+        let rng = SystemRandom::new();
+        let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng).unwrap();
+        let pair = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8.as_ref(), &rng)
+            .unwrap();
+        let hex: String = pair
+            .public_key()
+            .as_ref()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let dir = std::env::temp_dir().join(format!("agora-trust-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(TRUSTED_DEVICES_FILE);
+        assert_eq!(
+            P256Verifier::load(&file).1,
+            0,
+            "a missing file trusts nothing"
+        );
+
+        trust_device(&file, "phone", &hex).unwrap();
+        assert!(trust_device(&file, "bad id", &hex).is_err());
+        assert!(trust_device(&file, "x", "zz").is_err());
+        assert!(trust_device(&file, "x", "0401").is_err());
+        trust_device(&file, "phone", &hex).unwrap(); // replaces, no duplicate line
+        assert_eq!(std::fs::read_to_string(&file).unwrap().lines().count(), 1);
+
+        let mut text = std::fs::read_to_string(&file).unwrap();
+        text.push_str("# a comment\n\nlaptop 04deadbeef\njustoneword\n");
+        std::fs::write(&file, text).unwrap();
+        let (v, skipped) = P256Verifier::load(&file);
+        assert_eq!(skipped, 2, "malformed lines are skipped, never trusted");
+        let msg = signed_message("node-1", "ap-1", true);
+        let sig = pair.sign(&rng, &msg).unwrap();
+        assert!(v.verify("phone", &msg, sig.as_ref()));
+        assert!(!v.verify("laptop", &msg, sig.as_ref()));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

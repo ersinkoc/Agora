@@ -454,10 +454,14 @@ impl Node {
             }));
         }
 
-        // No device is trusted yet (no signature scheme or device keys exist): requests wait and expire as denied.
+        // Only devices the owner listed in `<data>/trusted-devices` (`agora node trust`) can answer an approval; with
+        // none listed every request waits and expires as denied.
+        let (verifier, _skipped) = crate::approvals::P256Verifier::load(
+            &cfg.data_dir.join(crate::approvals::TRUSTED_DEVICES_FILE),
+        );
         let approvals = Arc::new(crate::approvals::NodeApprovals::new(
             &cfg.node_id,
-            Box::new(crate::approvals::DenyAll),
+            Box::new(verifier),
         ));
 
         let supervisor = Arc::new(Mutex::new(sup));

@@ -416,3 +416,31 @@ fn the_injected_mcp_config_launches_a_working_mesh_server() {
     drop(stdin);
     assert!(child.wait().unwrap().success());
 }
+
+#[test]
+fn a_node_owner_can_trust_a_device_and_bad_input_trusts_nothing() {
+    let home = std::env::temp_dir().join(format!("agora-trustcli-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    let key = format!("04{}", "ab".repeat(64));
+    let run = |args: &[&str]| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_agora"))
+            .args(args)
+            .env("AGORA_HOME", &home)
+            .env("AGORA_LANG", "en")
+            .output()
+            .unwrap()
+    };
+    assert!(run(&["node", "trust", "phone", &key]).status.success());
+    let file = home.join("data/trusted-devices");
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        format!("phone {key}\n")
+    );
+    assert!(!run(&["node", "trust", "phone", "zz"]).status.success());
+    assert!(!run(&["node", "trust", "phone"]).status.success());
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        format!("phone {key}\n")
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
