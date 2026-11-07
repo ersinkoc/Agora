@@ -6,7 +6,10 @@
 //! rendering. Terminal bytes never go through the event store (AGENTS.md).
 
 use std::io;
-use std::sync::mpsc::{sync_channel, RecvTimeoutError, SyncSender, TryRecvError};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{
+    sync_channel, Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError,
+};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -57,10 +60,67 @@ enum Command {
     Kill,
 }
 
+/// Chunks a subscriber may have queued before it is marked as lagging (16 KiB each at most).
+const SUBSCRIBER_QUEUE: usize = 256;
+
+/// One item of a terminal's live output, as seen by a subscriber.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Output {
+    /// Raw bytes the process wrote, in order.
+    Data(Arc<[u8]>),
+    Resize(Size),
+    /// The process ended; no more data follows.
+    Exited(ExitStatus),
+    /// This subscriber fell behind and chunks were dropped (the terminal and other subscribers are not
+    /// slowed down). Call [`TerminalHandle::resync`] for a fresh snapshot and continue from there.
+    Lagged,
+}
+
+struct Subscriber {
+    tx: SyncSender<Output>,
+    lagged: Arc<AtomicBool>,
+}
+
+/// Receiving end of [`TerminalHandle::subscribe`].
+pub struct OutputSubscription {
+    rx: Receiver<Output>,
+    lagged: Arc<AtomicBool>,
+}
+
+impl OutputSubscription {
+    /// Next item, or `Err(Timeout)`; `Err(Disconnected)` once the terminal is gone and drained.
+    /// Reports [`Output::Lagged`] before anything newer when chunks were dropped.
+    pub fn recv_timeout(&self, timeout: Duration) -> Result<Output, RecvTimeoutError> {
+        if self.lagged.load(Ordering::Acquire) {
+            return Ok(Output::Lagged);
+        }
+        let item = self.rx.recv_timeout(timeout)?;
+        if self.lagged.load(Ordering::Acquire) {
+            return Ok(Output::Lagged);
+        }
+        Ok(item)
+    }
+}
+
 struct Shared {
     term: Box<dyn Terminal>,
     seq: u64,
     exit: Option<ExitStatus>,
+    subscribers: Vec<Subscriber>,
+}
+
+/// Deliver to every subscriber without ever blocking the actor: a full queue marks that subscriber as
+/// lagging, a dropped receiver removes it.
+fn broadcast(s: &mut Shared, out: &Output) {
+    s.subscribers
+        .retain(|sub| match sub.tx.try_send(out.clone()) {
+            Ok(()) => true,
+            Err(TrySendError::Full(_)) => {
+                sub.lagged.store(true, Ordering::Release);
+                true
+            }
+            Err(TrySendError::Disconnected(_)) => false,
+        });
 }
 
 struct Inner {
@@ -106,6 +166,7 @@ impl TerminalHandle {
                 term: Box::new(term),
                 seq: 0,
                 exit: None,
+                subscribers: Vec::new(),
             }),
             changed: Condvar::new(),
         });
@@ -150,6 +211,30 @@ impl TerminalHandle {
     /// the lock the actor needs to feed output.
     pub fn inspect<R>(&self, f: impl FnOnce(&dyn Terminal) -> R) -> R {
         f(self.inner.lock().term.as_ref())
+    }
+
+    /// Subscribe to live output. Returns the current screen and a subscription that delivers everything
+    /// the process writes after exactly that screen: registration and snapshot happen under one lock, so
+    /// there is no gap and no duplicate. A client renders the snapshot, then applies the items in order.
+    pub fn subscribe(&self) -> (Snapshot, OutputSubscription) {
+        let (tx, rx) = sync_channel(SUBSCRIBER_QUEUE);
+        let lagged = Arc::new(AtomicBool::new(false));
+        let mut g = self.inner.lock();
+        let snap = snapshot_of(&g);
+        g.subscribers.push(Subscriber {
+            tx,
+            lagged: Arc::clone(&lagged),
+        });
+        (snap, OutputSubscription { rx, lagged })
+    }
+
+    /// After [`Output::Lagged`]: discard what is queued, clear the lag, and return a fresh snapshot that
+    /// the following items continue from.
+    pub fn resync(&self, sub: &OutputSubscription) -> Snapshot {
+        let g = self.inner.lock();
+        while sub.rx.try_recv().is_ok() {}
+        sub.lagged.store(false, Ordering::Release);
+        snapshot_of(&g)
     }
 
     pub fn snapshot(&self) -> Snapshot {
@@ -208,7 +293,10 @@ fn run(mut pty: Box<dyn Pty>, inner: &Inner, commands: &std::sync::mpsc::Receive
                 }
                 Ok(Command::Resize(size)) => {
                     let _ = pty.resize(size.cols, size.rows);
-                    bump(inner, |s| s.term.resize(size));
+                    bump(inner, |s| {
+                        s.term.resize(size);
+                        broadcast(s, &Output::Resize(size));
+                    });
                 }
                 Ok(Command::Kill) => {
                     let _ = pty.kill();
@@ -221,7 +309,12 @@ fn run(mut pty: Box<dyn Pty>, inner: &Inner, commands: &std::sync::mpsc::Receive
             }
         }
         match pty.output().recv_timeout(TICK) {
-            Ok(chunk) => bump(inner, |s| s.term.feed(&chunk)),
+            Ok(chunk) => bump(inner, |s| {
+                s.term.feed(&chunk);
+                if !s.subscribers.is_empty() {
+                    broadcast(s, &Output::Data(Arc::from(chunk)));
+                }
+            }),
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
         }
@@ -234,5 +327,10 @@ fn run(mut pty: Box<dyn Pty>, inner: &Inner, commands: &std::sync::mpsc::Receive
     }
     // Output is closed: collect everything the process printed, then record how it ended.
     let status = pty.wait().ok();
-    bump(inner, |s| s.exit = status);
+    bump(inner, |s| {
+        s.exit = status;
+        if let Some(st) = status {
+            broadcast(s, &Output::Exited(st));
+        }
+    });
 }
