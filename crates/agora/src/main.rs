@@ -114,7 +114,12 @@ fn socket_path(o: &Opts) -> PathBuf {
 fn main() -> ExitCode {
     let say = Say(Catalog::english());
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let words: Vec<&str> = args.iter().map(String::as_str).take(2).collect();
+    let words: Vec<&str> = args
+        .iter()
+        .map(String::as_str)
+        .take(2)
+        .take_while(|w| !w.starts_with("--"))
+        .collect();
     let rest = args.get(words.len()..).unwrap_or(&[]);
     let Some(opts) = parse(rest) else {
         say.err(key!("cli-bad-arguments"), &[]);
@@ -131,10 +136,66 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
         ["terminal", "attach"] => terminal_attach(&say, &opts),
+        ["doctor"] => doctor(&say, &opts),
         _ => {
             say.err(key!("cli-usage"), &[]);
             ExitCode::from(2)
         }
+    }
+}
+
+/// `agora doctor`: checks that explain most "it does not work" reports.
+fn doctor(say: &Say, o: &Opts) -> ExitCode {
+    use agora_node::doctor::{healthy, run, Inputs, Status};
+    let h = home();
+    let checks = run(&Inputs {
+        data_dir: o.data.clone().unwrap_or_else(|| h.join("data")),
+        socket: socket_path(o),
+        manifests_dir: o.manifests.clone().unwrap_or_else(|| h.join("manifests")),
+    });
+    for c in &checks {
+        let sentence = match (c.id, c.status) {
+            ("version", _) => key!("doctor-version"),
+            ("pty", Status::Ok) => key!("doctor-pty"),
+            ("pty", _) => key!("doctor-pty-unsupported"),
+            ("local-sockets", Status::Ok) => key!("doctor-local-sockets"),
+            ("local-sockets", _) => key!("doctor-local-sockets-unsupported"),
+            ("git", Status::Ok) => key!("doctor-git"),
+            ("git", _) => key!("doctor-git-missing"),
+            ("data-dir", Status::Ok) => key!("doctor-data-dir"),
+            ("data-dir", _) => key!("doctor-data-dir-unwritable"),
+            ("node", Status::Ok) => key!("doctor-node"),
+            ("node", _) => key!("doctor-node-not-running"),
+            ("manifests", Status::Ok) => key!("doctor-manifests"),
+            ("manifests", _) => key!("doctor-manifests-missing"),
+            ("agent-installed", _) => key!("doctor-agent-installed"),
+            ("agent-missing", _) => key!("doctor-agent-missing"),
+            _ => key!("doctor-manifest-invalid"),
+        };
+        let detail: Arg = match (c.id, c.detail.parse::<i64>()) {
+            ("manifests", Ok(n)) => Arg::Num(n),
+            _ => c.detail.as_str().into(),
+        };
+        let text = say.text(sentence, &[("detail", detail)]);
+        let status = say.text(
+            match c.status {
+                Status::Ok => key!("doctor-status-ok"),
+                Status::Warn => key!("doctor-status-warn"),
+                Status::Fail => key!("doctor-status-fail"),
+            },
+            &[],
+        );
+        say.out(
+            key!("doctor-line"),
+            &[("status", status.into()), ("text", text.into())],
+        );
+    }
+    if healthy(&checks) {
+        say.out(key!("doctor-summary-ok"), &[]);
+        ExitCode::SUCCESS
+    } else {
+        say.err(key!("doctor-summary-problems"), &[]);
+        ExitCode::from(1)
     }
 }
 

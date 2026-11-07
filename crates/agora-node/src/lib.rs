@@ -3,6 +3,7 @@
 pub mod coalesce;
 pub mod control;
 pub mod daemon;
+pub mod doctor;
 pub mod event_buffer;
 pub mod files;
 pub mod git;
