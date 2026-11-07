@@ -20,5 +20,7 @@ agora-i18n = { path = "../agora-i18n" }
 prost = "0.14"
 # Unguessable approval ids (a signed decision must not be replayable against a later request); already in the tree.
 getrandom = "0.2"
+# ECDSA P-256 verification of approval signatures (ADR-0028); already in the tree via the hub.
+ring = { version = "0.17", default-features = false }
 # The mesh server speaks MCP (JSON-RPC with JSON payloads).
 serde_json = "1"

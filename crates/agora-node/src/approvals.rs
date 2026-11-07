@@ -236,6 +236,43 @@ impl Verifier for Box<dyn Verifier + Send> {
     }
 }
 
+/// Verifies ECDSA P-256/SHA-256 signatures (ADR-0028) against the public keys of trusted devices. Keys are uncompressed
+/// SEC1 points (65 bytes); signatures are fixed 64 bytes (r || s). An unknown device never verifies.
+#[derive(Default)]
+pub struct P256Verifier {
+    keys: std::collections::HashMap<String, Vec<u8>>,
+}
+
+impl P256Verifier {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Trusts `device_id` with this public key. Returns false (and trusts nothing) if it is not a valid point encoding.
+    pub fn trust(&mut self, device_id: &str, public_key: &[u8]) -> bool {
+        if public_key.len() != 65 || public_key[0] != 4 {
+            return false;
+        }
+        self.keys.insert(device_id.to_string(), public_key.to_vec());
+        true
+    }
+
+    pub fn revoke(&mut self, device_id: &str) {
+        self.keys.remove(device_id);
+    }
+}
+
+impl Verifier for P256Verifier {
+    fn verify(&self, device_id: &str, message: &[u8], signature: &[u8]) -> bool {
+        let Some(key) = self.keys.get(device_id) else {
+            return false;
+        };
+        ring::signature::UnparsedPublicKey::new(&ring::signature::ECDSA_P256_SHA256_FIXED, key)
+            .verify(message, signature)
+            .is_ok()
+    }
+}
+
 /// Trusts no device: every decision is refused. The safe default until the node has trusted device keys (and the
 /// signature scheme exists): requests wait, expire, and the agent is told they were denied.
 pub struct DenyAll;
@@ -514,5 +551,46 @@ mod tests {
             signed_message("ab", "c", true),
             signed_message("a", "bc", true)
         );
+    }
+
+    #[test]
+    fn p256_signatures_verify_only_for_the_trusted_device_and_exact_message() {
+        use ring::rand::SystemRandom;
+        use ring::signature::{EcdsaKeyPair, KeyPair, ECDSA_P256_SHA256_FIXED_SIGNING};
+        let rng = SystemRandom::new();
+        let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng).unwrap();
+        let pair = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8.as_ref(), &rng)
+            .unwrap();
+        let mut v = P256Verifier::new();
+        assert!(v.trust("phone", pair.public_key().as_ref()));
+        assert!(!v.trust("bad", &[1, 2, 3]));
+        let msg = signed_message("node-1", "ap-1", true);
+        let sig = pair.sign(&rng, &msg).unwrap();
+        assert!(v.verify("phone", &msg, sig.as_ref()));
+        assert!(!v.verify("laptop", &msg, sig.as_ref()), "unknown device");
+        assert!(
+            !v.verify(
+                "phone",
+                &signed_message("node-1", "ap-1", false),
+                sig.as_ref()
+            ),
+            "other verdict"
+        );
+        assert!(!v.verify("phone", &msg, &sig.as_ref()[..63]), "truncated");
+        v.revoke("phone");
+        assert!(!v.verify("phone", &msg, sig.as_ref()));
+        // And through the whole queue.
+        let mut v = P256Verifier::new();
+        v.trust("phone", pair.public_key().as_ref());
+        let mut a = Approvals::new("node-1", v);
+        let p = a.request("agent-1", "run_command", "ls", 0, 0).unwrap();
+        let m = signed_message("node-1", &p.id, true);
+        let r = ApprovalResolve {
+            approval_id: p.id.clone(),
+            approved: true,
+            signer_device_id: "phone".into(),
+            signature: pair.sign(&rng, &m).unwrap().as_ref().to_vec(),
+        };
+        assert_eq!(a.resolve(&r, 1).unwrap().1, Verdict::Approved);
     }
 }
