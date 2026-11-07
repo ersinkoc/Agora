@@ -9,4 +9,10 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+# Generated message types and the wire codec (ADR-0009, ADR-0010).
+prost = "0.14"
 
+[build-dependencies]
+# Pure-Rust protobuf compiler, so contributors do not need `protoc` (ADR-0009).
+protox = "0.10"
+prost-build = "0.14"

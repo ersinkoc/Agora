@@ -41,3 +41,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: sh scripts/check-docs.sh
+
+  schema:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+        working-directory: apps/web
+      - run: sh scripts/gen-ts.sh
+      - name: Generated TypeScript matches the Rust wire layout
+        working-directory: apps/web
+        run: |
+          node -e "import('./src/gen/agora.js').then(m=>{const P=m.agora.v1.Ping;const b=Array.from(P.encode(P.create({nonce:42})).finish());if(b.join()!=='8,42')process.exit(1)})"

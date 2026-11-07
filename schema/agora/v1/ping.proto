@@ -1,0 +1,14 @@
+syntax = "proto3";
+
+package agora.v1;
+
+// Liveness probe on the control stream (docs/specs/protocol.md section 1).
+// Sent every 15 seconds; three missed replies mean the connection is lost.
+message Ping {
+  // Echoed back in the Pong so the sender can measure round-trip time.
+  uint64 nonce = 1;
+}
+
+message Pong {
+  uint64 nonce = 1;
+}
