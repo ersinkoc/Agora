@@ -1,6 +1,7 @@
 # 0025. `agent.list` command for node-local control
 Status: Accepted
 Date: 2026-11-07
+Accepted: 2026-11-07 (maintainer's explicit approval in chat)
 
 ## Context
 Phase 2's exit criterion is a node controllable from a local CLI: `agora agent start|stop|list`, each mapping 1:1

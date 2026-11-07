@@ -45,3 +45,4 @@ Date: YYYY-MM-DD
 | 0025 | `agent.list` command for node-local control | Accepted |
 | 0026 | Event acknowledgement and control/event stream frame kinds | Accepted |
 | 0027 | Hub snapshot, client subscription and enrollment messages | Accepted |
+| 0028 | Approval signatures: ECDSA P-256 | Accepted |
