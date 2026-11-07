@@ -10,7 +10,7 @@ workspace = true
 
 [dependencies]
 agora-core = { path = "../agora-core" }
-agora-protocol = { path = "../agora-protocol" }
+agora-protocol = { path = "../agora-protocol", features = ["ws"] }
 agora-platform = { path = "../agora-platform" }
 agora-vt = { path = "../agora-vt" }
 agora-adapters = { path = "../agora-adapters" }
@@ -20,6 +20,10 @@ agora-i18n = { path = "../agora-i18n" }
 prost = "0.14"
 # Unguessable approval ids (a signed decision must not be replayable against a later request); already in the tree.
 getrandom = "0.2"
+# The uplink dials the hub (ADR-0011, ADR-0013): a small tokio runtime on its own thread, TLS with the node's client certificate.
+tokio = { version = "1", features = ["rt", "net", "time", "macros"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 # ECDSA P-256 verification of approval signatures (ADR-0028); already in the tree via the hub.
 ring = { version = "0.17", default-features = false }
 # The mesh server speaks MCP (JSON-RPC with JSON payloads).

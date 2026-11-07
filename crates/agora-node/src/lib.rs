@@ -12,3 +12,4 @@ pub mod mesh_server;
 pub mod supervisor;
 pub mod terminal;
 pub mod uplink;
+pub mod uplink_client;
