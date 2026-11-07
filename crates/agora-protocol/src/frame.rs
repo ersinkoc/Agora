@@ -22,6 +22,10 @@ pub const STREAM_COMMANDS: u32 = 1;
 pub const STREAM_EVENTS: u32 = 2;
 pub const FIRST_DYNAMIC_STREAM: u32 = 3;
 
+/// Kind that ends a dynamic stream (terminal relay, ADR-0029): empty payload; the peer stops sending on it and
+/// forgets it. Terminal frames use kinds 0..=3 (docs/specs/protocol.md), so the top of the range is free.
+pub const STREAM_CLOSE: u8 = 255;
+
 /// Default maximum payload size. Terminal output is chunked far below this so input is never queued behind it.
 pub const DEFAULT_MAX_PAYLOAD: usize = 1 << 20;
 

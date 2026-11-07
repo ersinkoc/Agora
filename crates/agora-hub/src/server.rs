@@ -13,7 +13,9 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use agora_protocol::frame::{kinds, STREAM_COMMANDS, STREAM_CONTROL, STREAM_EVENTS};
+use agora_protocol::frame::{
+    kinds, FIRST_DYNAMIC_STREAM, STREAM_CLOSE, STREAM_COMMANDS, STREAM_CONTROL, STREAM_EVENTS,
+};
 use agora_protocol::handshake::Support;
 use agora_protocol::v1::{self, command_ok, command_request, command_response};
 use agora_protocol::ws::{Conn, TransportError};
@@ -135,7 +137,7 @@ where
         .await?;
 
     let (_registration, commands) = hub.router().register(node_id);
-    let result = stream_events(&mut conn, &mut session, hub, commands).await;
+    let result = stream_events(&mut conn, &mut session, hub, node_id, commands).await;
     // However it ended, the hub now knows this node is not connected.
     let _ = hub.node_disconnected(node_id, now_ms());
     result
@@ -145,7 +147,8 @@ async fn stream_events<S>(
     conn: &mut Conn<S>,
     session: &mut NodeSession<'_, crate::store::SqliteStore>,
     hub: &Hub,
-    mut commands: tokio::sync::mpsc::UnboundedReceiver<crate::router::Routed>,
+    node_id: &str,
+    mut commands: tokio::sync::mpsc::UnboundedReceiver<crate::router::ToNode>,
 ) -> Result<(), ServeError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -161,11 +164,18 @@ where
         let idle;
         let received = tokio::select! {
             r = tokio::time::timeout(ACK_IDLE, conn.recv()) => r,
-            Some(routed) = commands.recv() => {
-                waiting.retain(|_, s| !s.is_closed());
-                let payload = routed.request.encode_to_vec();
-                waiting.insert(routed.request.request_id.clone(), routed.reply);
-                conn.send(&frame(STREAM_COMMANDS, 0, payload)).await?;
+            Some(to_node) = commands.recv() => {
+                match to_node {
+                    crate::router::ToNode::Command { request, reply, stream } => {
+                        waiting.retain(|_, s| !s.is_closed());
+                        let payload = request.encode_to_vec();
+                        waiting.insert(request.request_id.clone(), reply);
+                        conn.send(&frame(stream, 0, payload)).await?;
+                    }
+                    crate::router::ToNode::Close { stream } => {
+                        conn.send(&frame(stream, STREAM_CLOSE, Vec::new())).await?;
+                    }
+                }
                 continue;
             }
         };
@@ -197,6 +207,10 @@ where
                                 let _ = reply.send(resp);
                             }
                         }
+                    }
+                    // Terminal frames of a relayed subscription: passed to the client, never stored or decoded.
+                    (stream, kind) if stream >= FIRST_DYNAMIC_STREAM => {
+                        hub.router().relay_frame(node_id, stream, kind, f.payload);
                     }
                     // Unknown frames are ignored (newer peers may send more).
                     _ => {}
@@ -331,8 +345,16 @@ where
         send_positioned(&mut conn, d).await?;
     }
     let mut inflight: Vec<Inflight> = Vec::new();
+    let (relays, mut relay_frames) = hub.router().client();
     loop {
-        answer_ready(&mut conn, &mut inflight).await?;
+        answer_ready(&mut conn, &mut inflight, hub).await?;
+        // Terminal frames from nodes, and streams the hub ended.
+        while let Ok(rf) = relay_frames.try_recv() {
+            conn.send(&frame(rf.stream, rf.kind, rf.payload)).await?;
+        }
+        for s in relays.take_closed() {
+            conn.send(&frame(s, STREAM_CLOSE, Vec::new())).await?;
+        }
         // Push whatever is waiting; a closed channel means the hub dropped this client for being too slow.
         loop {
             match subscription.live.try_recv() {
@@ -343,11 +365,15 @@ where
         }
         // Watching the connection too: a client that went away ends this task.
         match tokio::time::timeout(PUSH, conn.recv()).await {
-            Ok(Ok(Some(f))) => {
-                if (f.stream_id, f.kind) == (STREAM_COMMANDS, 0) {
-                    forward_command(&mut conn, hub, &mut inflight, &f.payload).await?;
+            Ok(Ok(Some(f))) => match (f.stream_id, f.kind) {
+                // A command; a terminal subscription arrives on the dynamic stream the client chose for it.
+                (stream, 0) if stream == STREAM_COMMANDS || stream >= FIRST_DYNAMIC_STREAM => {
+                    forward_command(&mut conn, hub, &relays, &mut inflight, stream, &f.payload)
+                        .await?;
                 }
-            }
+                (stream, STREAM_CLOSE) if stream >= FIRST_DYNAMIC_STREAM => relays.close(stream),
+                _ => {}
+            },
             Err(_) => {}
             Ok(Ok(None)) => return Ok(()),
             Ok(Err(e)) => return Err(e.into()),
@@ -364,6 +390,8 @@ const MAX_INFLIGHT: usize = 256;
 struct Inflight {
     client_request_id: String,
     node: String,
+    /// A terminal subscription: the stream on the node's connection that was reserved for it.
+    relay: Option<u32>,
     reply: tokio::sync::oneshot::Receiver<v1::CommandResponse>,
     deadline: tokio::time::Instant,
 }
@@ -371,7 +399,9 @@ struct Inflight {
 async fn forward_command<S>(
     conn: &mut Conn<S>,
     hub: &Hub,
+    relays: &crate::router::ClientRelays,
     inflight: &mut Vec<Inflight>,
+    stream_id: u32,
     payload: &[u8],
 ) -> Result<(), ServeError>
 where
@@ -390,10 +420,30 @@ where
                 .with("resource", "requests")
                 .with("limit", 256_i64));
         }
-        let reply = hub.router().send(&node, req.clone())?;
+        let subscribing = matches!(
+            req.command,
+            Some(command_request::Command::TerminalSubscribe(_))
+        );
+        if subscribing != (stream_id >= FIRST_DYNAMIC_STREAM) {
+            // A terminal stream needs a stream of its own, and nothing else may use one.
+            return Err(Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "stream_id"));
+        }
+        let (reply, relay) = if subscribing {
+            let node_stream = hub.router().open_relay(&node, relays, stream_id);
+            match hub.router().send_on(&node, req.clone(), node_stream) {
+                Ok(r) => (r, Some(node_stream)),
+                Err(e) => {
+                    hub.router().drop_relay(&node, node_stream);
+                    return Err(e);
+                }
+            }
+        } else {
+            (hub.router().send(&node, req.clone())?, None)
+        };
         Ok(Inflight {
             client_request_id: client_request_id.clone(),
             node,
+            relay,
             reply,
             deadline: tokio::time::Instant::now() + COMMAND_DEADLINE,
         })
@@ -409,7 +459,11 @@ where
 }
 
 /// Sends the answers that have arrived (or timed out) to the client, under the request ids the client chose.
-async fn answer_ready<S>(conn: &mut Conn<S>, inflight: &mut Vec<Inflight>) -> Result<(), ServeError>
+async fn answer_ready<S>(
+    conn: &mut Conn<S>,
+    inflight: &mut Vec<Inflight>,
+    hub: &Hub,
+) -> Result<(), ServeError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -437,7 +491,14 @@ where
         };
         match resp {
             Some(r) => {
-                inflight.swap_remove(i);
+                let done = inflight.swap_remove(i);
+                // A subscription the node refused (or never answered) leaves no relay behind.
+                if let (Some(stream), true) = (
+                    done.relay,
+                    !matches!(r.result, Some(command_response::Result::Ok(_))),
+                ) {
+                    hub.router().drop_relay(&done.node, stream);
+                }
                 conn.send(&frame(STREAM_COMMANDS, 1, r.encode_to_vec()))
                     .await?;
             }

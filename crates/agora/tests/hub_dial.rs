@@ -309,3 +309,189 @@ fn a_signed_in_client_runs_a_command_on_a_node_through_the_hub() {
     );
     drop(node);
 }
+
+async fn next_frame<S>(c: &mut agora_protocol::ws::Conn<S>) -> agora_protocol::Frame
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    tokio::time::timeout(Duration::from_secs(20), c.recv())
+        .await
+        .expect("timed out")
+        .unwrap()
+        .expect("closed")
+}
+
+fn git(dir: &Path, args: &[&str]) {
+    let ok = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("GIT_AUTHOR_NAME", "t")
+        .env("GIT_AUTHOR_EMAIL", "t@example.com")
+        .env("GIT_COMMITTER_NAME", "t")
+        .env("GIT_COMMITTER_EMAIL", "t@example.com")
+        .status()
+        .unwrap()
+        .success();
+    assert!(ok, "git {args:?}");
+}
+
+#[test]
+fn a_clients_terminal_is_relayed_through_the_hub_with_input_and_close() {
+    use agora_protocol::frame::{kinds, STREAM_CLOSE, STREAM_COMMANDS, STREAM_EVENTS};
+    use agora_protocol::v1::{self, command_ok, command_request, command_response};
+    use agora_protocol::Frame;
+    use prost::Message;
+
+    let hub = hubside("laptop");
+    let addr = hub.listen("127.0.0.1:0");
+    let dir = tmp("relay");
+    let repo = dir.join("myproject");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("a.txt"), "x").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "init"]);
+    std::fs::create_dir_all(dir.join("manifests")).unwrap();
+    std::fs::write(
+        dir.join("manifests/shell.toml"),
+        "kind = \"shell\"\ndisplay_name = \"Shell\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"sh\"]\n",
+    )
+    .unwrap();
+    let cfg = agora_node::daemon::NodeConfig {
+        node_id: "laptop".into(),
+        socket: dir.join("c.sock"),
+        data_dir: dir.join("data"),
+        worktree_root: dir.join("wt"),
+        manifests_dir: dir.join("manifests"),
+        projects: vec![repo.clone()],
+        limits: Default::default(),
+    };
+    let node = agora_node::daemon::Node::start(&cfg).unwrap();
+    let mut link = hub.link(addr);
+    link.commands = Some(cfg.socket.clone());
+    let _uplink = spawn(Arc::clone(&node.events), link).unwrap();
+    wait("the node to be online in the hub", || {
+        hub.state
+            .hub
+            .view()
+            .0
+            .nodes
+            .get("laptop")
+            .is_some_and(|n| n.online)
+    });
+
+    let mut client = hub.client(addr);
+    let f = |stream, kind, payload| Frame {
+        stream_id: stream,
+        kind,
+        seq: None,
+        payload,
+    };
+    let routed = |id: &str, command| {
+        f(
+            STREAM_COMMANDS,
+            0,
+            v1::CommandRequest {
+                request_id: id.into(),
+                idempotency_key: String::new(),
+                target_node: "laptop".into(),
+                command: Some(command),
+            }
+            .encode_to_vec(),
+        )
+    };
+    hub.rt.block_on(async {
+        client
+            .send(&f(
+                STREAM_EVENTS,
+                kinds::SUBSCRIBE,
+                v1::Subscribe::default().encode_to_vec(),
+            ))
+            .await
+            .unwrap();
+        // Start a shell agent on the node.
+        client
+            .send(&routed(
+                "start",
+                command_request::Command::AgentStart(v1::AgentStart {
+                    project_id: "myproject".into(),
+                    kind: "shell".into(),
+                    ..Default::default()
+                }),
+            ))
+            .await
+            .unwrap();
+        let terminal = loop {
+            let fr = next_frame(&mut client).await;
+            if (fr.stream_id, fr.kind) == (STREAM_COMMANDS, 1) {
+                let r = v1::CommandResponse::decode(fr.payload.as_slice()).unwrap();
+                match r.result {
+                    Some(command_response::Result::Ok(v1::CommandOk {
+                        result: Some(command_ok::Result::AgentStart(s)),
+                    })) => break s.terminal_id,
+                    other => panic!("start failed: {other:?}"),
+                }
+            }
+        };
+        // Subscribe on a stream of the client's choosing.
+        client
+            .send(&Frame {
+                stream_id: 5,
+                kind: 0,
+                seq: None,
+                payload: v1::CommandRequest {
+                    request_id: "sub".into(),
+                    idempotency_key: String::new(),
+                    target_node: "laptop".into(),
+                    command: Some(command_request::Command::TerminalSubscribe(
+                        v1::TerminalSubscribe {
+                            terminal_id: terminal.clone(),
+                            format: String::new(),
+                        },
+                    )),
+                }
+                .encode_to_vec(),
+            })
+            .await
+            .unwrap();
+        let mut saw_snapshot = false;
+        let mut got_answer = false;
+        while !(saw_snapshot && got_answer) {
+            let fr = next_frame(&mut client).await;
+            if fr.stream_id == 5 && fr.kind == 1 {
+                saw_snapshot = true;
+            } else if (fr.stream_id, fr.kind) == (STREAM_COMMANDS, 1) {
+                let r = v1::CommandResponse::decode(fr.payload.as_slice()).unwrap();
+                if r.request_id == "sub" {
+                    assert!(
+                        matches!(r.result, Some(command_response::Result::Ok(_))),
+                        "{r:?}"
+                    );
+                    got_answer = true;
+                }
+            }
+        }
+        // Type into it (an ordinary routed command) and watch the output arrive on the stream.
+        client
+            .send(&routed(
+                "in",
+                command_request::Command::TerminalInput(v1::TerminalInput {
+                    terminal_id: terminal.clone(),
+                    data: b"echo relayed-$((20+22))\n".to_vec(),
+                }),
+            ))
+            .await
+            .unwrap();
+        let mut out = Vec::new();
+        while !String::from_utf8_lossy(&out).contains("relayed-42") {
+            let fr = next_frame(&mut client).await;
+            if fr.stream_id == 5 && fr.kind == 0 {
+                out.extend_from_slice(&fr.payload);
+            }
+        }
+        // Closing the stream tells the node to stop writing on it.
+        client.send(&f(5, STREAM_CLOSE, Vec::new())).await.unwrap();
+    });
+    drop(node);
+}

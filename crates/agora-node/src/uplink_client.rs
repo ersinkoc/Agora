@@ -9,7 +9,9 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use agora_protocol::frame::{kinds, STREAM_COMMANDS, STREAM_CONTROL, STREAM_EVENTS};
+use agora_protocol::frame::{
+    kinds, FIRST_DYNAMIC_STREAM, STREAM_CLOSE, STREAM_COMMANDS, STREAM_CONTROL, STREAM_EVENTS,
+};
 use agora_protocol::v1::{
     command_request, command_response, CommandRequest, CommandResponse, EventAck, ResumeOk, Welcome,
 };
@@ -165,6 +167,10 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let (answers_tx, mut answers) = tokio::sync::mpsc::unbounded_channel::<CommandResponse>();
+    // Terminal frames from relay threads, bounded so a slow hub slows the thread (and, through the local socket,
+    // makes the node's own pump resync) instead of growing a queue.
+    let (relay_tx, mut relay_rx) = tokio::sync::mpsc::channel::<Frame>(256);
+    let mut relays = Relays::default();
     let mut up = Uplink::new(
         Arc::clone(sink),
         env!("CARGO_PKG_VERSION"),
@@ -210,11 +216,18 @@ where
                 .await?;
             last_ping = tokio::time::Instant::now();
         }
-        while let Ok(answer) = answers.try_recv() {
-            conn.send(&frame(STREAM_COMMANDS, 1, answer.encode_to_vec()))
-                .await?;
-        }
-        match tokio::time::timeout(TICK, conn.recv()).await {
+        let received = tokio::select! {
+            r = tokio::time::timeout(TICK, conn.recv()) => r,
+            Some(answer) = answers.recv() => {
+                conn.send(&frame(STREAM_COMMANDS, 1, answer.encode_to_vec())).await?;
+                continue;
+            }
+            Some(f) = relay_rx.recv() => {
+                conn.send(&f).await?;
+                continue;
+            }
+        };
+        match received {
             Err(_) => {}
             Ok(Ok(None)) => return Err(LinkError::Closed),
             Ok(Err(e)) => return Err(e.into()),
@@ -235,6 +248,27 @@ where
                         let _ = tx.send(run_local(socket.as_deref(), req));
                     });
                 }
+                // A terminal subscription: a thread bridges the node's local stream to this connection.
+                (stream, 0) if stream >= FIRST_DYNAMIC_STREAM => {
+                    let Ok(req) = CommandRequest::decode(f.payload.as_slice()) else {
+                        continue;
+                    };
+                    let alive = Arc::new(AtomicBool::new(true));
+                    relays.0.insert(stream, Arc::clone(&alive));
+                    let (socket, answers, out) = (
+                        commands.map(std::path::Path::to_path_buf),
+                        answers_tx.clone(),
+                        relay_tx.clone(),
+                    );
+                    tokio::task::spawn_blocking(move || {
+                        relay_terminal(socket.as_deref(), &req, stream, &alive, &answers, &out);
+                    });
+                }
+                (stream, STREAM_CLOSE) if stream >= FIRST_DYNAMIC_STREAM => {
+                    if let Some(alive) = relays.0.remove(&stream) {
+                        alive.store(false, Ordering::Release);
+                    }
+                }
                 // The hub saw a gap and says where to start again.
                 (STREAM_CONTROL, kinds::RESUME_OK) => {
                     if let Ok(r) = ResumeOk::decode(f.payload.as_slice()) {
@@ -247,6 +281,69 @@ where
     }
     conn.close().await;
     Ok(())
+}
+
+/// The relayed terminals of one connection; when it ends their threads are told to stop.
+#[derive(Default)]
+struct Relays(std::collections::HashMap<u32, Arc<AtomicBool>>);
+
+impl Drop for Relays {
+    fn drop(&mut self) {
+        for alive in self.0.values() {
+            alive.store(false, Ordering::Release);
+        }
+    }
+}
+
+/// Bridges one terminal subscription: opens the stream on the node's control socket, answers the hub's request,
+/// then copies the terminal's frames (snapshot, output, resize, exit) to the hub on `stream` until the hub closes it,
+/// the terminal exits or the connection ends. Blocking: runs on its own thread.
+fn relay_terminal(
+    socket: Option<&std::path::Path>,
+    req: &CommandRequest,
+    stream: u32,
+    alive: &AtomicBool,
+    answers: &tokio::sync::mpsc::UnboundedSender<CommandResponse>,
+    out: &tokio::sync::mpsc::Sender<Frame>,
+) {
+    use agora_protocol::{Error, ErrorCode};
+    let refuse = |e: Error| {
+        let _ = answers.send(CommandResponse {
+            request_id: req.request_id.clone(),
+            result: Some(command_response::Result::Err(e.to_info())),
+        });
+    };
+    let Some(socket) = socket else {
+        return refuse(
+            Error::new(ErrorCode::NodePolicyDenied)
+                .with("node_id", "")
+                .with("rule", "commands.routed"),
+        );
+    };
+    let Ok(mut local) = crate::control::Client::connect(socket) else {
+        return refuse(Error::new(ErrorCode::NodeTimeout).with("node_id", ""));
+    };
+    let Ok(resp) = local.request_on(stream, req, ROUTED_DEADLINE) else {
+        return refuse(Error::new(ErrorCode::NodeTimeout).with("node_id", ""));
+    };
+    let accepted = matches!(resp.result, Some(command_response::Result::Ok(_)));
+    let _ = answers.send(resp);
+    while accepted && alive.load(Ordering::Acquire) {
+        match local.read_frame(Some(Duration::from_millis(200))) {
+            Ok(Some(f)) if f.stream_id == stream => {
+                let exited = f.kind == 3;
+                if out.blocking_send(f).is_err() || exited {
+                    return;
+                }
+            }
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    // The local stream ended without an exit frame (the node closed it): tell the hub so the client can resubscribe.
+    if alive.load(Ordering::Acquire) && accepted {
+        let _ = out.blocking_send(frame(stream, STREAM_CLOSE, Vec::new()));
+    }
 }
 
 /// Runs a routed command on this node's control socket and returns its answer (an error answer when it cannot).
