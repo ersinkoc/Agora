@@ -2,6 +2,11 @@
 //! from runtime). Pure data, no I/O: `apply` folds one event in, so the view can be rebuilt from the log at any
 //! time and is identical however it was built. Clients get this as the snapshot, then live events.
 //!
+//! Ids are local to the machine that made them (`agent-1` exists on every node), so every entity is keyed by
+//! `<producer>/<local id>` in this view (`laptop/agent-1`). Node ids are limited to `[A-Za-z0-9._-]` by the
+//! certificate authority, so `/` never appears inside one and the hub can split a key to route a command back to
+//! the right node. Project ids are machine-independent already (normalized remote + root commit) and stay as is.
+//!
 //! Unknown or out-of-order facts are tolerated (a worktree event for an unseen checkout still records the
 //! worktree); the log is the truth, this is a cache.
 
@@ -79,8 +84,19 @@ pub struct View {
     pub approvals: BTreeMap<String, ApprovalView>,
 }
 
+/// The hub-wide key of an entity a producer named with a local id.
+pub fn qualified(producer: &str, local_id: &str) -> String {
+    format!("{producer}/{local_id}")
+}
+
+/// Splits a hub-wide key into `(producer, local id)`.
+pub fn split_key(key: &str) -> Option<(&str, &str)> {
+    key.split_once('/')
+}
+
 impl View {
     pub fn apply(&mut self, ev: &Event) {
+        let q = |id: &str| qualified(&ev.producer_id, id);
         let Some(body) = &ev.body else { return };
         // Any event from a producer proves its node is there.
         if let Some(n) = self.nodes.get_mut(&ev.producer_id) {
@@ -118,15 +134,15 @@ impl View {
             }
             Body::CheckoutDiscovered(e) => {
                 self.checkouts.insert(
-                    e.checkout_id.clone(),
+                    q(&e.checkout_id),
                     (e.node_id.clone(), e.project_id.clone(), e.path.clone()),
                 );
             }
             Body::WorktreeCreated(e) => {
                 self.worktrees.insert(
-                    e.worktree_id.clone(),
+                    q(&e.worktree_id),
                     WorktreeView {
-                        checkout_id: e.checkout_id.clone(),
+                        checkout_id: q(&e.checkout_id),
                         path: e.path.clone(),
                         branch: e.branch.clone(),
                         files_changed: 0,
@@ -137,10 +153,10 @@ impl View {
                 );
             }
             Body::WorktreeRemoved(e) => {
-                self.worktrees.remove(&e.worktree_id);
+                self.worktrees.remove(&q(&e.worktree_id));
             }
             Body::GitStatusChanged(e) => {
-                if let Some(w) = self.worktrees.get_mut(&e.worktree_id) {
+                if let Some(w) = self.worktrees.get_mut(&q(&e.worktree_id)) {
                     w.files_changed = e.files_changed;
                     w.insertions = e.insertions;
                     w.deletions = e.deletions;
@@ -149,11 +165,11 @@ impl View {
             }
             Body::AgentStarted(e) => {
                 self.agents.insert(
-                    e.agent_id.clone(),
+                    q(&e.agent_id),
                     AgentView {
                         node_id: e.node_id.clone(),
                         project_id: e.project_id.clone(),
-                        worktree_id: e.worktree_id.clone(),
+                        worktree_id: q(&e.worktree_id),
                         kind: e.kind.clone(),
                         state: AgentState::Idle,
                         reported: false,
@@ -166,24 +182,24 @@ impl View {
                 );
             }
             Body::AgentStateChanged(e) => {
-                if let Some(a) = self.agents.get_mut(&e.agent_id) {
+                if let Some(a) = self.agents.get_mut(&q(&e.agent_id)) {
                     a.state = AgentState::try_from(e.state).unwrap_or(AgentState::Unspecified);
                     a.reported = e.reported;
                 }
             }
             Body::AgentSessionReported(e) => {
-                if let Some(a) = self.agents.get_mut(&e.agent_id) {
+                if let Some(a) = self.agents.get_mut(&q(&e.agent_id)) {
                     a.session_id = Some(e.session_id.clone());
                 }
             }
             Body::AgentUsageReported(e) => {
-                if let Some(a) = self.agents.get_mut(&e.agent_id) {
+                if let Some(a) = self.agents.get_mut(&q(&e.agent_id)) {
                     a.input_tokens = a.input_tokens.saturating_add(e.input_tokens);
                     a.output_tokens = a.output_tokens.saturating_add(e.output_tokens);
                 }
             }
             Body::AgentExited(e) => {
-                if let Some(a) = self.agents.get_mut(&e.agent_id) {
+                if let Some(a) = self.agents.get_mut(&q(&e.agent_id)) {
                     a.running = false;
                     a.exit_code = Some(e.exit_code);
                     a.state = AgentState::Done;
@@ -191,27 +207,27 @@ impl View {
             }
             Body::TerminalOpened(e) => {
                 self.terminals.insert(
-                    e.terminal_id.clone(),
+                    q(&e.terminal_id),
                     TerminalView {
                         node_id: e.node_id.clone(),
-                        agent_id: e.agent_id.clone(),
+                        agent_id: q(&e.agent_id),
                         title: String::new(),
                     },
                 );
             }
             Body::TerminalTitleChanged(e) => {
-                if let Some(t) = self.terminals.get_mut(&e.terminal_id) {
+                if let Some(t) = self.terminals.get_mut(&q(&e.terminal_id)) {
                     t.title = e.title.clone();
                 }
             }
             Body::TerminalClosed(e) => {
-                self.terminals.remove(&e.terminal_id);
+                self.terminals.remove(&q(&e.terminal_id));
             }
             Body::ApprovalRequested(e) => {
                 self.approvals.insert(
-                    e.approval_id.clone(),
+                    q(&e.approval_id),
                     ApprovalView {
-                        agent_id: e.agent_id.clone(),
+                        agent_id: q(&e.agent_id),
                         action: e.action.clone(),
                         detail: e.detail.clone(),
                         expires_at_ms: e.expires_at_ms,
@@ -219,7 +235,7 @@ impl View {
                 );
             }
             Body::ApprovalResolved(e) => {
-                self.approvals.remove(&e.approval_id);
+                self.approvals.remove(&q(&e.approval_id));
             }
             // Mesh and file events are not part of this view (the mesh broker and clients consume them).
             Body::MessagePosted(_)
@@ -344,8 +360,8 @@ mod tests {
         let mut v = View::default();
         v.apply(&ev("n1", 1, started("a")));
         v.apply(&ev("n1", 2, state("a", AgentState::Working, true)));
-        assert_eq!(v.agents["a"].state, AgentState::Working);
-        assert!(v.agents["a"].reported);
+        assert_eq!(v.agents["n1/a"].state, AgentState::Working);
+        assert!(v.agents["n1/a"].reported);
         for _ in 0..2 {
             v.apply(&ev(
                 "n1",
@@ -359,7 +375,10 @@ mod tests {
             ));
         }
         assert_eq!(
-            (v.agents["a"].input_tokens, v.agents["a"].output_tokens),
+            (
+                v.agents["n1/a"].input_tokens,
+                v.agents["n1/a"].output_tokens
+            ),
             (10, 14)
         );
         v.apply(&ev(
@@ -370,7 +389,7 @@ mod tests {
                 exit_code: 3,
             }),
         ));
-        let a = &v.agents["a"];
+        let a = &v.agents["n1/a"];
         assert!(!a.running);
         assert_eq!((a.exit_code, a.state), (Some(3), AgentState::Done));
     }
@@ -409,7 +428,7 @@ mod tests {
                 expires_at_ms: 0,
             }),
         ));
-        assert_eq!(v.needs_attention(), ["a", "b"]);
+        assert_eq!(v.needs_attention(), ["n1/a", "n1/b"]);
         v.apply(&ev(
             "n1",
             4,
@@ -419,7 +438,7 @@ mod tests {
                 signer_device_id: "d".into(),
             }),
         ));
-        assert_eq!(v.needs_attention(), ["a"]);
+        assert_eq!(v.needs_attention(), ["n1/a"]);
     }
 
     #[test]
@@ -443,7 +462,7 @@ mod tests {
                 title: "vim".into(),
             }),
         ));
-        assert_eq!(v.terminals["t"].title, "vim");
+        assert_eq!(v.terminals["n1/t"].title, "vim");
         v.apply(&ev(
             "n1",
             3,
@@ -473,7 +492,7 @@ mod tests {
                 head_commit: "abc".into(),
             }),
         ));
-        assert_eq!(v.worktrees["w"].files_changed, 2);
+        assert_eq!(v.worktrees["n1/w"].files_changed, 2);
         v.apply(&ev(
             "n1",
             6,
@@ -482,6 +501,35 @@ mod tests {
             }),
         ));
         assert!(v.worktrees.is_empty());
+    }
+
+    #[test]
+    fn the_same_local_ids_on_two_machines_do_not_collide() {
+        let mut v = View::default();
+        for node in ["laptop", "server"] {
+            v.apply(&ev(node, 1, started("agent-1")));
+            v.apply(&ev(
+                node,
+                2,
+                Body::WorktreeCreated(WorktreeCreated {
+                    worktree_id: "w".into(),
+                    checkout_id: "c".into(),
+                    path: "/work".into(),
+                    branch: "agent/x".into(),
+                }),
+            ));
+        }
+        v.apply(&ev(
+            "laptop",
+            3,
+            state("agent-1", AgentState::Blocked, false),
+        ));
+        assert_eq!(v.agents.len(), 2);
+        assert_eq!(v.worktrees.len(), 2);
+        assert_eq!(v.agents["laptop/agent-1"].state, AgentState::Blocked);
+        assert_eq!(v.agents["server/agent-1"].state, AgentState::Idle);
+        assert_eq!(v.needs_attention(), ["laptop/agent-1"]);
+        assert_eq!(split_key("laptop/agent-1"), Some(("laptop", "agent-1")));
     }
 
     #[test]

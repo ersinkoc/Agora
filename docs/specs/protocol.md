@@ -74,6 +74,15 @@ node is silent; `memory_used_bytes` is 0 until measured); and for each agent `Wo
 `TerminalClosed` (once). A stop on request reports exit code `i32::MIN` (unknown), the same convention as the terminal
 exit frame. A reader that folds events into a view therefore always sees a workspace before the agent that uses it.
 
+Hub-wide ids: ids in events are local to the machine that made them (`agent-1` exists on every node). The hub's view keys
+every entity by `<producer>/<local id>` (`laptop/agent-1`; node ids are limited to `[A-Za-z0-9._-]`, so the split is
+unambiguous) and uses that key in what it shows clients and when it routes a command back to the owning node.
+
+Node uplink (`agora-node::uplink`): the node's state machine mirrors the hub's session: `Hello` → `Welcome` → `Resume` (carries
+the node's own idea of the ack) → `ResumeOk { from_seq }` (the hub's record decides) → events in batches from the durable buffer.
+A gap from the hub rewinds to `expected`; a `from_seq` older than the buffer keeps (dropped by the size cap) is reported as
+`Stale` so the hub resynchronizes from a snapshot. The hub's ack trims the buffer.
+
 Initial event families:
 
 | Family | Examples |
