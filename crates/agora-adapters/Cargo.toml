@@ -11,3 +11,10 @@ workspace = true
 [dependencies]
 agora-core = { path = "../agora-core" }
 agora-protocol = { path = "../agora-protocol" }
+agora-vt = { path = "../agora-vt" }
+# Manifests are TOML (docs/specs/agent-manifest.md); serde derives the typed structs.
+toml = "0.8"
+serde = { version = "1", features = ["derive"] }
+# Screen rules are regular expressions from manifests; the crate guarantees linear-time matching, so a
+# community manifest cannot hang the node with a pathological pattern.
+regex = "1"

@@ -1,0 +1,47 @@
+kind = "example-agent"
+display_name = "Example Agent"
+version = "2026.11.06.1"
+min_engine = 1
+
+[process]
+names = ["example-agent", "exa"]
+launch = ["example-agent"]
+
+[resume]
+argv = ["example-agent", "--resume", "{session_id}"]
+
+[[rules]]
+id = "permission_prompt"
+state = "blocked"
+priority = 900
+region = "bottom_lines(8)"
+all = [{ contains = "Allow" }, { regex = '\[y/n\]' }]
+
+[[rules]]
+id = "spinner"
+state = "working"
+priority = 800
+region = "title"
+regex = '^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] '
+
+[[rules]]
+id = "interrupt_hint"
+state = "working"
+priority = 700
+region = "bottom_non_empty_lines(4)"
+contains = "esc to interrupt"
+not = [{ contains = "[y/n]" }]
+
+[[rules]]
+id = "finished"
+state = "done"
+priority = 600
+region = "bottom_non_empty_lines(3)"
+any = [{ contains = "Task complete" }, { regex = '^Done\.$' }]
+
+[[rules]]
+id = "prompt"
+state = "idle"
+priority = 100
+region = "bottom_non_empty_lines(2)"
+regex = '^> ?$'

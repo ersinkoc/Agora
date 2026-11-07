@@ -17,6 +17,10 @@ version = "0.0.0"
 dependencies = [
  "agora-core",
  "agora-protocol",
+ "agora-vt",
+ "regex",
+ "serde",
+ "toml",
 ]
 
 [[package]]
