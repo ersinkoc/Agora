@@ -39,28 +39,26 @@ pub(crate) fn cwd(pid: u32) -> io::Result<PathBuf> {
 pub(crate) fn children(pid: u32) -> io::Result<Vec<u32>> {
     let mut buf = vec![0i32; 1024];
     loop {
+        buf.iter_mut().for_each(|p| *p = 0);
         // SAFETY: the buffer is valid for the byte size passed.
-        let bytes = unsafe {
+        let r = unsafe {
             libc::proc_listchildpids(
                 pid as i32,
                 buf.as_mut_ptr().cast(),
                 (buf.len() * std::mem::size_of::<i32>()) as i32,
             )
         };
-        if bytes < 0 {
+        if r < 0 {
             return Err(io::Error::last_os_error());
         }
-        let count = bytes as usize / std::mem::size_of::<i32>();
-        if count < buf.len() {
-            buf.truncate(count);
-            let mut out: Vec<u32> = buf
-                .into_iter()
-                .filter(|p| *p > 0)
-                .map(|p| p as u32)
-                .collect();
-            out.sort_unstable();
-            return Ok(out);
+        // Whether the return value counts bytes or pids differs between libproc versions, so read the
+        // zero-initialised buffer instead: unused slots stay 0. A full buffer may be truncated, so grow it.
+        if buf.last().is_some_and(|p| *p != 0) {
+            buf = vec![0i32; buf.len() * 2];
+            continue;
         }
-        buf = vec![0i32; buf.len() * 2];
+        let mut out: Vec<u32> = buf.iter().filter(|p| **p > 0).map(|p| *p as u32).collect();
+        out.sort_unstable();
+        return Ok(out);
     }
 }
