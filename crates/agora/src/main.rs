@@ -24,7 +24,9 @@ use agora_protocol::v1::{
 const DETACH: u8 = 0x1d;
 const TERMINAL_STREAM: u32 = 3;
 
-struct Say(Catalog);
+mod hubcli;
+
+pub(crate) struct Say(Catalog);
 
 impl Say {
     fn text(&self, id: &str, args: &[(&str, Arg)]) -> String {
@@ -60,7 +62,7 @@ impl Say {
     }
 }
 
-fn home() -> PathBuf {
+pub(crate) fn home() -> PathBuf {
     if let Some(h) = std::env::var_os("AGORA_HOME") {
         return PathBuf::from(h);
     }
@@ -74,7 +76,7 @@ fn home() -> PathBuf {
 
 /// Options shared by the subcommands, plus leftover positional arguments.
 #[derive(Default)]
-struct Opts {
+pub(crate) struct Opts {
     socket: Option<PathBuf>,
     manifests: Option<PathBuf>,
     data: Option<PathBuf>,
@@ -82,6 +84,13 @@ struct Opts {
     projects: Vec<PathBuf>,
     project: Option<String>,
     max_agents: Option<usize>,
+    hub_dir: Option<PathBuf>,
+    listen: Option<String>,
+    names: Vec<String>,
+    hub: Option<String>,
+    ca: Option<PathBuf>,
+    code: Option<String>,
+    id: Option<String>,
     positional: Vec<String>,
 }
 
@@ -100,6 +109,13 @@ fn parse(args: &[String]) -> Option<Opts> {
                 o.project = Some(v.clone());
             }
             "--max-agents" => o.max_agents = Some(it.next()?.parse().ok()?),
+            "--hub-dir" => o.hub_dir = Some(it.next()?.into()),
+            "--listen" => o.listen = Some(it.next()?.clone()),
+            "--name" => o.names.push(it.next()?.clone()),
+            "--hub" => o.hub = Some(it.next()?.clone()),
+            "--ca" => o.ca = Some(it.next()?.into()),
+            "--code" => o.code = Some(it.next()?.clone()),
+            "--id" => o.id = Some(it.next()?.clone()),
             s if s.starts_with("--") => return None,
             _ => o.positional.push(a.clone()),
         }
@@ -133,6 +149,9 @@ fn main() -> ExitCode {
         ["agent", "list"] => agent_list(&say, &opts),
         ["terminal", "attach"] => terminal_attach(&say, &opts),
         ["doctor"] => doctor(&say, &opts),
+        ["hub", "run"] => hubcli::hub_run(&say, &opts),
+        ["hub", "code"] => hubcli::hub_code(&say, &opts),
+        ["node", "enroll"] => hubcli::node_enroll(&say, &opts),
         ["node", "stdio"] => bridge_stdio(&say, &socket_path(&opts)),
         ["mesh", "stdio"] => match &opts.socket {
             // An agent's MCP client starts this as its mesh server; the node told it which socket is its own.
@@ -252,8 +271,12 @@ fn doctor(say: &Say, o: &Opts) -> ExitCode {
 
 fn node_run(say: &Say, o: &Opts) -> ExitCode {
     let h = home();
+    // A machine enrolled with a hub reports under the id the hub's certificate names.
+    let link = hubcli::load_link();
     let cfg = NodeConfig {
-        node_id: "local".into(),
+        node_id: link
+            .as_ref()
+            .map_or_else(|| "local".to_string(), |(id, _)| id.clone()),
         socket: socket_path(o),
         data_dir: o.data.clone().unwrap_or_else(|| h.join("data")),
         worktree_root: o.worktrees.clone().unwrap_or_else(|| h.join("worktrees")),
@@ -281,6 +304,9 @@ fn node_run(say: &Say, o: &Opts) -> ExitCode {
         key!("cli-node-listening"),
         &[("socket", cfg.socket.display().to_string().into())],
     );
+    // Connect to the hub in the background when enrolled. Agents never depend on it: events wait in the buffer.
+    let _uplink =
+        link.and_then(|(_, l)| agora_node::uplink_client::spawn(Arc::clone(&node.events), l).ok());
     // Run until the process is stopped; agents die with it and the socket file is replaced on next start.
     loop {
         std::thread::sleep(Duration::from_secs(3600));

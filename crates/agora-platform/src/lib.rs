@@ -63,6 +63,28 @@ pub fn local_listen(path: &std::path::Path) -> io::Result<LocalListener> {
     }
 }
 
+/// Writes `contents` to `path` readable and writable only by the current user (private keys and tokens), replacing any
+/// existing file. Elsewhere than Unix the file is written with the default permissions (Windows ACLs come with the
+/// Windows node).
+pub fn write_private(path: &std::path::Path, contents: &[u8]) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let _ = std::fs::remove_file(path);
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)?;
+        f.write_all(contents)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, contents)
+    }
+}
+
 /// Creates a symbolic link at `link` pointing to `target`. Only Unix for now (Windows links need privileges and a file
 /// or directory flavour); elsewhere it returns `Unsupported`, which tests that need a link use to skip themselves.
 pub fn symlink(target: &std::path::Path, link: &std::path::Path) -> io::Result<()> {

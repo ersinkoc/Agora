@@ -13,6 +13,7 @@ dependencies = [
  "agora-platform",
  "agora-protocol",
  "agora-tui",
+ "getrandom",
  "prost",
  "serde_json",
  "tokio",

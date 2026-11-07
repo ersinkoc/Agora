@@ -9,6 +9,9 @@ cli-usage =
       agora terminal attach AGENT_ID [--socket PATH]
       agora node stdio [--socket PATH]
       agora mesh stdio --socket PATH
+      agora hub run [--listen ADDR] [--hub-dir DIR] [--name HOST]...
+      agora hub code [--hub-dir DIR]
+      agora node enroll --hub URL --ca FILE --code CODE --id NAME
       agora doctor [--data DIR] [--manifests DIR] [--socket PATH]
 cli-node-listening = Node is running. Control socket: { $socket }
 cli-agent-started = Started agent { $agent_id } in { $worktree }
@@ -48,3 +51,9 @@ doctor-agent-missing = { $detail } is not installed on this machine.
 doctor-manifest-invalid = The agent description { $detail } could not be read.
 doctor-summary-ok = Everything Agora needs is in place.
 doctor-summary-problems = Something Agora needs is missing. Fix the items marked PROBLEM.
+
+cli-hub-listening = Hub is running on { $addr }. Its data folder: { $dir }
+cli-hub-failed = The hub command failed: { $reason }
+cli-hub-code = Enrollment code: { $code } (valid for 10 minutes). On the other machine run: agora node enroll --hub wss://HOST:PORT --ca { $ca } --code { $code } --id NAME
+cli-enrolled = This machine is enrolled as { $id }. Start it with "agora node run"; it will connect to the hub by itself. Saved in { $dir }.
+cli-enroll-refused = The hub refused to enroll this machine ({ $code }). The code may be wrong, expired or already used.

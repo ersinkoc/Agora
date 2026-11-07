@@ -13,7 +13,7 @@ agent accounts, usability sessions with people) are marked and skipped, never fa
 | P3-03 WebSocket transport | done | one frame per binary message; stream-generic so TLS wraps it (ADR-0011, ADR-0013) |
 | P3-04 hub server | done (service) | `agora-hub::hub`: store + view + fan-out under one lock, slow subscribers dropped, hub-recorded node-offline; `agora-hub::server`: node, client, enrollment over WS and mTLS TLS, snapshot, acks, revocation; the `agora hub run` command and the node dialer are next |
 | P3-05 node uplink | done (library) | `agora-node::uplink` + end-to-end test with the hub session (resume, no dups/gaps, restore, stale, two machines in one view); `agora-node::uplink_client`: dials wss with the node's certificate (pinned CA), reconnects with backoff, acks trim the buffer; CLI wiring (`agora node enroll`, `agora hub run`) is next |
-| P3-06 enrollment and mTLS | codes, CA, mTLS acceptor done | one-time codes (hashed, 10 min, lockout after 5 misses), CSR signing, revocation; wire messages for enrollment (need an ADR) and wiring the acceptor into the hub server still to do |
+| P3-06 enrollment and mTLS | done | one-time codes (hashed, 10 min, lockout after 5 misses), CSR signing, revocation; wire messages for enrollment (need an ADR) and wiring the acceptor into the hub server still to do |
 | P3-07 projections and snapshot | done (view) | `View` folds events; snapshot encoding needs a schema message (ADR to come) |
 | P3-08 client API | next | session tokens, snapshot + event subscription, command routing to nodes |
 | P3-09 terminal relay | next | terminal streams node → hub → client (input outranks output) |
@@ -24,3 +24,13 @@ agent accounts, usability sessions with people) are marked and skipped, never fa
 | P3-14 first-agent flow | needs a human | needs P2-09 manifests from real agents; five-user first-glance test |
 
 Not a Phase 3 task but done early: Turkish (`locales/tr`) for CLI, errors, notifications and the web client (Phase 6 lists first non-English locales).
+
+## Running it (Phase 3 slice, from the command line)
+```
+agora hub run --hub-dir ./hub --listen 0.0.0.0:7443 --name hub.example.com   # CA, token and database live in ./hub
+agora hub code --hub-dir ./hub                                              # a one-time code (10 minutes) and the CA path
+agora node enroll --hub wss://hub.example.com:7443 --ca ca.pem --code XXXX-XXXX --id laptop
+agora node run --project ~/code/myproject                                   # connects to the hub by itself
+```
+`crates/agora/tests/hub_cli.rs` runs exactly this with real processes. Clients authenticate with the token in `<hub dir>/token`
+until sign-in (passkeys, ADR-0015) exists.
