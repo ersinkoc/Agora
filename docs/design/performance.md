@@ -78,7 +78,8 @@ recalibrated at the Phase 2 and Phase 3 exits, never relaxed silently.
   Implemented so far (`bench/`): `channel-throughput` (bare channel floor), `pty-vt-throughput` (fake agent
   flooding one PTY into the VT backend) and `terminals-20` (twenty at once). They run unpaced and report the
   maximum the pipeline sustains, which must stay well above the 10 MB/s budget; on a development machine
-  that is about 100 MB/s for one terminal and 240 MB/s in aggregate for twenty.
+  that is about 100 MB/s for one terminal and 240 MB/s in aggregate for twenty. The twenty-terminal scenario's
+  latency is reported but not gated (it measures CI scheduler noise); its throughput is.
 - **CI gate:** a reduced benchmark suite runs on every PR touching hot-path crates; a regression above 10% on
   any budget scenario fails the build. The full suite runs nightly.
 - **Latency tracing:** every input and command carries timestamps per hop (client, hub, node, adapter) so the
