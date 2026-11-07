@@ -13,7 +13,7 @@ agent accounts, usability sessions with people) are marked and skipped, never fa
 | P3-03 WebSocket transport | done | one frame per binary message; stream-generic so TLS wraps it (ADR-0011, ADR-0013) |
 | P3-04 hub server | next | accept nodes, run sessions, store events |
 | P3-05 node uplink | next | node dials hub, replays its buffer after the hub's `from_seq` |
-| P3-06 enrollment and mTLS | codes + CA done | one-time codes (hashed, 10 min, lockout after 5 misses), CSR signing, revocation; wire messages for enrollment (need an ADR) and the mTLS listener still to do |
+| P3-06 enrollment and mTLS | codes, CA, mTLS acceptor done | one-time codes (hashed, 10 min, lockout after 5 misses), CSR signing, revocation; wire messages for enrollment (need an ADR) and wiring the acceptor into the hub server still to do |
 | P3-07 projections and snapshot | done (view) | `View` folds events; snapshot encoding needs a schema message (ADR to come) |
 | P3-08 client API | next | session tokens, snapshot + event subscription, command routing to nodes |
 | P3-09 terminal relay | next | terminal streams node → hub → client (input outranks output) |

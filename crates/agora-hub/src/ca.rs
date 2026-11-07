@@ -118,6 +118,29 @@ impl Ca {
     }
 }
 
+impl Ca {
+    /// A server certificate for the hub's own TLS endpoint, signed by this CA. Returns `(cert_pem, key_pem)`.
+    /// Nodes pin this CA; browsers need a publicly trusted certificate instead (a deployment choice).
+    pub fn issue_server(&self, dns_names: &[String]) -> Result<(String, String), CaError> {
+        if dns_names.is_empty() {
+            return Err(CaError(
+                "a server certificate needs at least one name".into(),
+            ));
+        }
+        let key = KeyPair::generate()?;
+        let mut p = CertificateParams::new(dns_names.to_vec())?;
+        p.distinguished_name = name(&dns_names[0]);
+        p.is_ca = IsCa::ExplicitNoCa;
+        p.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+        p.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+        p.not_before = OffsetDateTime::now_utc() - Duration::minutes(5);
+        p.not_after = OffsetDateTime::now_utc() + Duration::days(DEVICE_CERT_DAYS);
+        let issuer = Issuer::from_ca_cert_pem(&self.cert_pem, &self.key)?;
+        let cert = p.signed_by(&key, &issuer)?;
+        Ok((cert.pem(), key.serialize_pem()))
+    }
+}
+
 fn valid_id_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')
 }
