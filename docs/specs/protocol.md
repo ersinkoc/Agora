@@ -31,6 +31,11 @@ Every frame: `{ stream_id, kind, seq?, payload }`.
 | 3+ terminal | one per subscribed terminal | ordered | best-effort; resync by snapshot |
 | 3+ file | file transfer | ordered | reliable, chunked |
 
+
+WebSocket mapping (ADR-0011, `agora-hub::transport`): one binary message carries exactly one encoded frame; a message
+with trailing bytes, a partial frame, or a text message is a protocol error. Messages larger than the payload limit
+plus header are refused by the WebSocket layer before they are buffered.
+
 ## 3. Events (node → hub, hub → client)
 
 Events are immutable facts. Each producer numbers its events (`seq`); the hub applies an event at most once
