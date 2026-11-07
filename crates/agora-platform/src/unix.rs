@@ -166,6 +166,12 @@ impl Pty for UnixPty {
         self.exited = true;
         Ok(s)
     }
+
+    fn foreground_pid(&self) -> io::Result<u32> {
+        // SAFETY: valid master fd.
+        let pgid = cvt(unsafe { libc::tcgetpgrp(self.writer.as_raw_fd()) })?;
+        Ok(pgid as u32)
+    }
 }
 
 impl Drop for UnixPty {

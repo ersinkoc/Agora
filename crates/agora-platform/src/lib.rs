@@ -10,6 +10,15 @@ use std::sync::mpsc::Receiver;
 #[cfg(unix)]
 mod unix;
 
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "linux")]
+use linux as procinfo;
+#[cfg(target_os = "macos")]
+use macos as procinfo;
+
 /// How to start a process in a new pseudo-terminal.
 #[derive(Debug, Clone)]
 pub struct PtyConfig {
@@ -68,6 +77,84 @@ pub trait Pty: Send {
     fn try_wait(&mut self) -> io::Result<Option<ExitStatus>>;
     /// Block until the child exits.
     fn wait(&mut self) -> io::Result<ExitStatus>;
+    /// Process id of the terminal's foreground process group leader (what the user sees running).
+    fn foreground_pid(&self) -> io::Result<u32>;
+}
+
+/// One process in a tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessInfo {
+    pub pid: u32,
+    pub ppid: u32,
+    /// Executable name (the kernel's short name; may be truncated).
+    pub name: String,
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn unsupported() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::Unsupported,
+        "process inspection is not implemented on this platform",
+    )
+}
+
+/// Short executable name of a process.
+pub fn process_name(pid: u32) -> io::Result<String> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        procinfo::name(pid)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = pid;
+        Err(unsupported())
+    }
+}
+
+/// Current working directory of a process.
+pub fn process_cwd(pid: u32) -> io::Result<PathBuf> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        procinfo::cwd(pid)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = pid;
+        Err(unsupported())
+    }
+}
+
+/// Direct children of a process.
+pub fn process_children(pid: u32) -> io::Result<Vec<u32>> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        procinfo::children(pid)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = pid;
+        Err(unsupported())
+    }
+}
+
+/// The process and all its descendants, parents before children. Processes that exit while the tree is
+/// being walked are skipped.
+pub fn process_tree(root: u32) -> io::Result<Vec<ProcessInfo>> {
+    let mut out = Vec::new();
+    let mut queue = std::collections::VecDeque::from([(root, 0u32)]);
+    while let Some((pid, ppid)) = queue.pop_front() {
+        let Ok(name) = process_name(pid) else {
+            if pid == root {
+                return Err(io::Error::new(io::ErrorKind::NotFound, "process not found"));
+            }
+            continue;
+        };
+        out.push(ProcessInfo { pid, ppid, name });
+        if let Ok(kids) = process_children(pid) {
+            queue.extend(kids.into_iter().map(|k| (k, pid)));
+        }
+    }
+    Ok(out)
 }
 
 /// Start a process in a new PTY.
@@ -85,5 +172,55 @@ pub fn spawn(config: &PtyConfig) -> io::Result<Box<dyn Pty>> {
             io::ErrorKind::Unsupported,
             "PTY is not implemented on this platform yet",
         ))
+    }
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod procinfo_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn wait_until(what: &str, mut f: impl FnMut() -> bool) {
+        let end = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < end {
+            if f() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        panic!("timed out waiting for {what}");
+    }
+
+    #[test]
+    fn reports_cwd_foreground_and_tree() {
+        let mut p = spawn(&PtyConfig::new(vec!["sh".into()])).expect("spawn");
+        p.write_input(b"cd / && sleep 30\n").expect("write");
+        let shell = p.pid();
+
+        wait_until("sleep in the foreground", || {
+            p.foreground_pid()
+                .ok()
+                .and_then(|pid| process_name(pid).ok())
+                .is_some_and(|n| n == "sleep")
+        });
+        let fg = p.foreground_pid().expect("fg");
+        assert_ne!(fg, shell);
+        assert_eq!(process_cwd(fg).expect("cwd"), PathBuf::from("/"));
+
+        let tree = process_tree(shell).expect("tree");
+        assert_eq!(tree[0].pid, shell);
+        assert!(tree
+            .iter()
+            .any(|i| i.pid == fg && i.name == "sleep" && i.ppid == shell));
+
+        p.kill().expect("kill");
+        p.wait().expect("wait");
+    }
+
+    #[test]
+    fn missing_process_is_an_error() {
+        assert!(process_name(u32::MAX - 1).is_err());
+        assert!(process_tree(u32::MAX - 1).is_err());
     }
 }
