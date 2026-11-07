@@ -9,4 +9,5 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-
+# First terminal emulator backend (ADR-0012): pure Rust, Apache-2.0, battle-tested.
+alacritty_terminal = { version = "0.26", default-features = false }
