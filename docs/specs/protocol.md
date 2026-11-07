@@ -67,6 +67,13 @@ its own CA. The node's id and certificate serial come from that certificate, not
 producer id is that node id. A certificate from another authority, or none, never completes the handshake. Revocation
 is checked against the device registry by serial.
 
+Events a node emits (`agora-node::daemon::EventSink`): `NodeOnline` at start and `NodeOffline` on a clean stop; a
+`CheckoutDiscovered` per registered project; `NodeResources` when the running count changes (not on a timer, so an idle
+node is silent; `memory_used_bytes` is 0 until measured); and for each agent `WorktreeCreated`, `AgentStarted`,
+`TerminalOpened` in that order, then `AgentStateChanged` as the screen changes, and on the end `AgentExited` and
+`TerminalClosed` (once). A stop on request reports exit code `i32::MIN` (unknown), the same convention as the terminal
+exit frame. A reader that folds events into a view therefore always sees a workspace before the agent that uses it.
+
 Initial event families:
 
 | Family | Examples |

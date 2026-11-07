@@ -39,6 +39,16 @@ fn now_ms() -> u64 {
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
+/// Stable id of a checkout on this node: a hash of its path (the same path always gives the same id).
+pub fn checkout_id(root: &Path) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in root.to_string_lossy().bytes() {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    format!("co-{h:016x}")
+}
+
 fn proto_state(s: AgentState) -> v1::AgentState {
     match s {
         AgentState::Working => v1::AgentState::Working,
@@ -107,10 +117,100 @@ impl EventSink {
                             .or_else(|| status.signal.map(|s| -s))
                             .unwrap_or(-1),
                     }));
+                    self.record(Body::TerminalClosed(v1::TerminalClosed {
+                        terminal_id: crate::control::terminal_id_of(agent),
+                    }));
+                }
+                SupervisorEvent::Stopped { agent } => {
+                    // Stopped on request: the exit code is not known (same convention as the terminal exit frame).
+                    self.record(Body::AgentExited(v1::AgentExited {
+                        agent_id: agent.as_str().to_string(),
+                        exit_code: i32::MIN,
+                    }));
+                    self.record(Body::TerminalClosed(v1::TerminalClosed {
+                        terminal_id: crate::control::terminal_id_of(agent),
+                    }));
                 }
                 _ => {}
             }
         }
+    }
+
+    /// The node announces itself; the hub marks it online.
+    pub fn node_online(&self, node: &str) {
+        let host = std::env::var("HOSTNAME")
+            .or_else(|_| std::env::var("COMPUTERNAME"))
+            .unwrap_or_else(|_| node.to_string());
+        self.record(Body::NodeOnline(v1::NodeOnline {
+            node_id: node.to_string(),
+            hostname: host,
+            os: std::env::consts::OS.to_string(),
+            build: env!("CARGO_PKG_VERSION").to_string(),
+        }));
+    }
+
+    /// Recorded on a clean shutdown. A crash records nothing; the hub notices the dropped connection instead.
+    pub fn node_offline(&self, node: &str) {
+        self.record(Body::NodeOffline(v1::NodeOffline {
+            node_id: node.to_string(),
+        }));
+    }
+
+    pub fn node_resources(&self, node: &str, agents_running: u32, terminals_open: u32) {
+        self.record(Body::NodeResources(v1::NodeResources {
+            node_id: node.to_string(),
+            agents_running,
+            terminals_open,
+            memory_used_bytes: 0,
+        }));
+    }
+
+    pub fn checkout_discovered(&self, node: &str, project: &str, root: &Path) {
+        self.record(Body::CheckoutDiscovered(v1::CheckoutDiscovered {
+            checkout_id: checkout_id(root),
+            node_id: node.to_string(),
+            project_id: project.to_string(),
+            path: root.to_string_lossy().into_owned(),
+        }));
+    }
+
+    /// An agent is up: its workspace, the agent, and its terminal, in that order so a reader that builds a
+    /// view from the events always sees the workspace before the agent that uses it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn agent_launched(
+        &self,
+        agent: &AgentId,
+        project: &str,
+        node: &str,
+        checkout: &Path,
+        worktree: &Path,
+        branch: &str,
+        kind: &str,
+    ) {
+        let worktree_id = worktree.to_string_lossy().into_owned();
+        self.record(Body::WorktreeCreated(v1::WorktreeCreated {
+            worktree_id: worktree_id.clone(),
+            checkout_id: checkout_id(checkout),
+            path: worktree_id.clone(),
+            branch: branch.to_string(),
+        }));
+        self.agent_started(agent, project, node, &worktree_id, kind);
+        self.record(Body::TerminalOpened(v1::TerminalOpened {
+            terminal_id: crate::control::terminal_id_of(agent),
+            node_id: node.to_string(),
+            purpose: v1::TerminalPurpose::Agent as i32,
+            agent_id: agent.as_str().to_string(),
+        }));
+    }
+
+    /// Decoded events after `after` (exclusive), oldest first; what the uplink sends and tests inspect.
+    pub fn events_after(&self, after: u64) -> Vec<v1::Event> {
+        let log = self.log.lock().unwrap_or_else(|e| e.into_inner());
+        log.replay_after(after)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|b| v1::Event::decode(b.as_slice()).ok())
+            .collect()
     }
 
     pub fn next_seq(&self) -> u64 {
@@ -169,6 +269,7 @@ pub struct Node {
     ticker: Option<JoinHandle<()>>,
     pub supervisor: Arc<Mutex<Supervisor>>,
     pub events: Arc<EventSink>,
+    node_id: String,
     /// Manifests that could not be loaded, as `(path, reason)` for the log.
     pub manifest_problems: Vec<(PathBuf, String)>,
 }
@@ -218,6 +319,11 @@ impl Node {
             });
         }
 
+        events.node_online(&cfg.node_id);
+        for p in &projects {
+            events.checkout_discovered(&cfg.node_id, &p.id, &p.root);
+        }
+
         let supervisor = Arc::new(Mutex::new(sup));
         let ctx = Arc::new(ControlContext::new(
             Arc::clone(&supervisor),
@@ -230,14 +336,16 @@ impl Node {
 
         let stop = Arc::new(AtomicBool::new(false));
         let ticker = {
-            let (sup, ev, stop) = (
+            let (sup, ev, stop, node_id) = (
                 Arc::clone(&supervisor),
                 Arc::clone(&events),
                 Arc::clone(&stop),
+                cfg.node_id.clone(),
             );
             std::thread::Builder::new()
                 .name("agora-supervise".into())
                 .spawn(move || {
+                    let mut reported = (u32::MAX, u32::MAX);
                     while !stop.load(Ordering::Acquire) {
                         let (events, views) = {
                             let mut s = sup.lock().unwrap_or_else(|e| e.into_inner());
@@ -245,6 +353,13 @@ impl Node {
                         };
                         if !events.is_empty() {
                             ev.supervisor_events(&events, &views);
+                        }
+                        // Resources are reported when they change, not on a timer, so an idle node is silent.
+                        let running = u32::try_from(views.iter().filter(|v| v.running).count())
+                            .unwrap_or(u32::MAX);
+                        if (running, running) != reported {
+                            reported = (running, running);
+                            ev.node_resources(&node_id, running, running);
                         }
                         std::thread::sleep(TICK);
                     }
@@ -256,6 +371,7 @@ impl Node {
             ticker: Some(ticker),
             supervisor,
             events,
+            node_id: cfg.node_id.clone(),
             manifest_problems,
         })
     }
@@ -272,6 +388,7 @@ impl Drop for Node {
         if let Some(t) = self.ticker.take() {
             let _ = t.join();
         }
+        self.events.node_offline(&self.node_id);
         // Agents die with the node's supervisor (terminal handles kill their process groups on drop).
     }
 }
