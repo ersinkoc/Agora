@@ -82,6 +82,15 @@ impl Agent {
         changed
     }
 
+    /// A new process now backs this agent (restart or resume): forget the old process's state and let
+    /// screen detection speak again. The session id is kept. Returns true if the state changed.
+    pub fn process_restarted(&mut self) -> bool {
+        let changed = self.state != AgentState::Unknown;
+        self.state = AgentState::Unknown;
+        self.state_source = StateSource::Screen;
+        changed
+    }
+
     /// The user looked at a finished agent: `Done` becomes `Idle`.
     pub fn mark_seen(&mut self) {
         if self.state == AgentState::Done {
@@ -135,6 +144,17 @@ mod tests {
         assert!(!a.observe(AgentState::Idle, StateSource::Screen));
         assert_eq!(a.state(), AgentState::Blocked);
         assert!(a.observe(AgentState::Idle, StateSource::Reported));
+    }
+
+    #[test]
+    fn a_new_process_lets_screen_detection_speak_again() {
+        let mut a = agent();
+        a.observe(AgentState::Done, StateSource::Reported);
+        assert!(!a.observe(AgentState::Working, StateSource::Screen));
+        assert!(a.process_restarted());
+        assert_eq!(a.state(), AgentState::Unknown);
+        assert!(a.observe(AgentState::Working, StateSource::Screen));
+        assert!(!a.process_restarted() || a.state() == AgentState::Unknown);
     }
 
     #[test]

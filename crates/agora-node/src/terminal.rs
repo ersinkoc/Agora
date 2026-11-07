@@ -146,6 +146,12 @@ impl TerminalHandle {
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "terminal actor stopped"))
     }
 
+    /// Run `f` against the live terminal (for screen detection) without copying it. Keep `f` short: it holds
+    /// the lock the actor needs to feed output.
+    pub fn inspect<R>(&self, f: impl FnOnce(&dyn Terminal) -> R) -> R {
+        f(self.inner.lock().term.as_ref())
+    }
+
     pub fn snapshot(&self) -> Snapshot {
         snapshot_of(&self.inner.lock())
     }
