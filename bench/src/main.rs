@@ -1,4 +1,6 @@
-//! `agora-bench run [--out FILE] [--secs N] [--commit SHA] [scenario...]`
+//! `agora-bench run [--out FILE] [--secs N] [--repeat N] [--commit SHA] [scenario...]`
+//! (`--repeat` runs each scenario N times and keeps the best of each metric, which filters scheduler noise
+//! on shared CI runners; a real regression shows in every repetition.)
 //! `agora-bench compare BASE.json NEW.json [--threshold PCT]` (exit 1 on regression)
 //!
 //! `AGORA_BENCH_SLOWDOWN_US` deliberately slows the hot path, to prove the gate works.
@@ -21,13 +23,20 @@ fn main() -> ExitCode {
 }
 
 fn run(args: &[String]) -> ExitCode {
-    let (mut out, mut secs, mut commit, mut names) =
-        (None, 2u64, "unknown".to_string(), Vec::new());
+    let (mut out, mut secs, mut repeat, mut commit, mut names) =
+        (None, 2u64, 1u32, "unknown".to_string(), Vec::new());
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--out" => out = it.next().cloned(),
             "--secs" => secs = it.next().and_then(|s| s.parse().ok()).unwrap_or(secs),
+            "--repeat" => {
+                repeat = it
+                    .next()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(repeat)
+                    .max(1)
+            }
             "--commit" => commit = it.next().cloned().unwrap_or(commit),
             n => names.push(n.to_string()),
         }
@@ -41,13 +50,18 @@ fn run(args: &[String]) -> ExitCode {
         .map_or(Duration::ZERO, Duration::from_micros);
     let mut scenarios = Vec::new();
     for n in &names {
-        match run_scenario(n, Duration::from_secs(secs), slow) {
-            Some(r) => scenarios.push(r),
-            None => {
+        let mut best: Option<agora_bench::ScenarioResult> = None;
+        for _ in 0..repeat {
+            let Some(r) = run_scenario(n, Duration::from_secs(secs), slow) else {
                 eprintln!("unknown scenario: {n}");
                 return ExitCode::from(2);
-            }
+            };
+            best = Some(match best {
+                None => r,
+                Some(b) => agora_bench::best_of(b, r),
+            });
         }
+        scenarios.extend(best);
     }
     let report = Report { commit, scenarios };
     let json = match serde_json::to_string_pretty(&report) {

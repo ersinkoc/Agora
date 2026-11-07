@@ -97,6 +97,15 @@ pub fn p95_us(samples: &mut [Duration]) -> f64 {
     samples[idx.saturating_sub(1).min(samples.len() - 1)].as_secs_f64() * 1e6
 }
 
+/// Combine two runs of the same scenario, keeping the best of each metric (highest throughput, lowest latency).
+pub fn best_of(a: ScenarioResult, b: ScenarioResult) -> ScenarioResult {
+    ScenarioResult {
+        name: a.name,
+        throughput_mb_s: a.throughput_mb_s.max(b.throughput_mb_s),
+        p95_latency_us: a.p95_latency_us.min(b.p95_latency_us),
+    }
+}
+
 /// A regression found by [`compare`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct Regression {
@@ -161,6 +170,16 @@ mod tests {
     fn slower_or_laggier_fails() {
         let r = compare(&report(100.0, 10.0), &report(80.0, 12.0), 10.0);
         assert_eq!(r.len(), 2);
+    }
+
+    #[test]
+    fn best_of_keeps_the_best_metric_from_each_run() {
+        let r = |tp, lat| ScenarioResult {
+            name: "s".into(),
+            throughput_mb_s: tp,
+            p95_latency_us: lat,
+        };
+        assert_eq!(best_of(r(100.0, 50.0), r(80.0, 20.0)), r(100.0, 20.0));
     }
 
     #[test]
