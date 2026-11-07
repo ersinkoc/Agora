@@ -1,6 +1,7 @@
 # 0023. Optional direct data path between client and node
-Status: Proposed
+Status: Accepted
 Date: 2026-11-07
+Accepted: 2026-11-07
 Amends: 0002 (clients never connect to nodes directly)
 
 ## Context
@@ -8,7 +9,7 @@ With a hub far away (for example a VPS in another region), a client and node on 
 send every keystroke and every byte of terminal output through the hub and back. That hairpin breaks the
 interaction budgets in ADR-0022.
 
-## Decision (proposed)
+## Decision
 - The hub remains the only control plane: authentication, authorization, state, events, approvals.
 - For terminal streams and file transfers, the hub may broker a direct connection between a client and a node
   when one is reachable (same machine via local socket, or LAN via the node's direct listener).
@@ -21,3 +22,7 @@ interaction budgets in ADR-0022.
 - Local use is as fast as a native terminal even with a remote hub.
 - Nodes may open an optional listener; it is off by default on public interfaces.
 - The protocol needs ticket messages and a path-switch procedure that preserves stream ordering.
+
+## Constraint
+Before implementation, a spec defines the end-to-end encryption mechanism for the direct path (for example keys derived
+from the hub-issued ticket and the node certificate). The relay path through the hub must be working and benchmarked first.
