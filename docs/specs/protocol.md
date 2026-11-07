@@ -43,6 +43,11 @@ hub's ack, in order. The log is size-capped (oldest events dropped first); if un
 a replay from the old ack is refused (`Stale`) and the hub resynchronizes from a snapshot instead of silently
 missing events. Terminal bytes never enter this log.
 
+Hub store (`agora-hub::store`, ADR-0014): SQLite in WAL mode behind an `EventStore` trait. `append(producer, seq, ..)`
+returns `Applied` (stored, with a global position), `Duplicate` (already applied, ignored) or `Gap { expected }` (not the
+next event; nothing stored, the node replays from `expected`). `acked(producer)` is the acknowledgement to send back.
+Clients page the log by global position. Payloads are opaque encoded events.
+
 Initial event families:
 
 | Family | Examples |
