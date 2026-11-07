@@ -15,13 +15,14 @@ agora-tui = { path = "../agora-tui" }
 agora-i18n = { path = "../agora-i18n" }
 agora-protocol = { path = "../agora-protocol" }
 agora-platform = { path = "../agora-platform" }
+# `agora hub run` serves on tokio (ADR-0013) with TLS; getrandom makes the client token.
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+getrandom = "0.2"
 
 [dev-dependencies]
 # Builds raw protocol frames in the stdio bridge test.
 prost = "0.14"
-# A real hub in the same process for the dialing test.
-tokio = { version = "1", features = ["rt-multi-thread", "net", "time"] }
-tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 # Reads the MCP config the node wrote, in the injection test.
 serde_json = "1"
 # The agent id type used by the hub link test.

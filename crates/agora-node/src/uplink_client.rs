@@ -46,6 +46,8 @@ pub enum LinkError {
     Uplink(UplinkError),
     /// The hub closed the connection.
     Closed,
+    /// The hub answered with this error code (for enrollment: a wrong, expired or used code is `auth.unauthenticated`).
+    Refused(String),
 }
 
 impl From<TransportError> for LinkError {
@@ -279,6 +281,83 @@ pub fn spawn(sink: Arc<EventSink>, link: HubLink) -> std::io::Result<UplinkHandl
     Ok(UplinkHandle {
         stop,
         thread: Some(thread),
+    })
+}
+
+/// Enrolls this node with a hub: presents the one-time `code` and a CSR over TLS that trusts only `ca_pem`, and
+/// returns the hub's answer (the certificate for the id the hub approved, and the CA to keep pinning). Blocks the
+/// calling thread; enrollment happens once, from the CLI.
+pub fn enroll(
+    url: &str,
+    ca_pem: &str,
+    code: &str,
+    node_id: &str,
+    csr_pem: &str,
+) -> Result<agora_protocol::v1::EnrollResponse, LinkError> {
+    use agora_protocol::v1::{
+        command_ok, command_request, command_response, CommandRequest, CommandResponse,
+        EnrollRequest,
+    };
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| LinkError::Transport(e.to_string()))?;
+    rt.block_on(async {
+        let (tls, host, addr) = split_url(url)?;
+        if !tls {
+            return Err(LinkError::Bad("enrollment needs wss://".into()));
+        }
+        let bad = |e: &dyn std::fmt::Display| LinkError::Bad(e.to_string());
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let mut roots = rustls::RootCertStore::empty();
+        for c in CertificateDer::pem_slice_iter(ca_pem.as_bytes()) {
+            roots.add(c.map_err(|e| bad(&e))?).map_err(|e| bad(&e))?;
+        }
+        let cfg = rustls::ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .map_err(|e| bad(&e))?
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        let tcp = TcpStream::connect(&addr)
+            .await
+            .map_err(|e| LinkError::Transport(e.to_string()))?;
+        let name = ServerName::try_from(host).map_err(|e| bad(&e))?;
+        let stream = tokio_rustls::TlsConnector::from(Arc::new(cfg))
+            .connect(name, tcp)
+            .await
+            .map_err(|e| LinkError::Transport(e.to_string()))?;
+        let mut conn = ws::connect(stream, url).await?;
+        let req = CommandRequest {
+            request_id: "enroll".into(),
+            idempotency_key: String::new(),
+            command: Some(command_request::Command::Enroll(EnrollRequest {
+                code: code.into(),
+                node_id: node_id.into(),
+                csr_pem: csr_pem.into(),
+            })),
+        };
+        conn.send(&frame(
+            agora_protocol::frame::STREAM_COMMANDS,
+            0,
+            req.encode_to_vec(),
+        ))
+        .await?;
+        let f = match tokio::time::timeout(Duration::from_secs(15), conn.recv()).await {
+            Ok(Ok(Some(f))) => f,
+            Ok(Ok(None)) => return Err(LinkError::Closed),
+            Ok(Err(e)) => return Err(e.into()),
+            Err(_) => return Err(LinkError::Transport("the hub did not answer".into())),
+        };
+        let resp = CommandResponse::decode(f.payload.as_slice())
+            .map_err(|_| LinkError::Transport("bad response".into()))?;
+        match resp.result {
+            Some(command_response::Result::Ok(ok)) => match ok.result {
+                Some(command_ok::Result::Enroll(e)) => Ok(e),
+                _ => Err(LinkError::Transport("unexpected answer".into())),
+            },
+            Some(command_response::Result::Err(e)) => Err(LinkError::Refused(e.code)),
+            None => Err(LinkError::Transport("empty answer".into())),
+        }
     })
 }
 
