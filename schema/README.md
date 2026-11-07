@@ -9,6 +9,12 @@ Generated code is never edited by hand and is not committed. Published messages 
 `schema/agora/v1/*.proto` holds protocol generation 1. A new generation gets a new directory (`v2/`).
 Never reuse or renumber a field; add new fields and messages instead.
 
+## Breaking changes
+
+CI runs `agora-schema-check` against the target branch. Renaming, retyping, or removing a field, message,
+enum, or enum value fails the build; adding new ones is fine. Run locally:
+`cargo run -p agora-schema-check -- <base schema dir> schema`.
+
 ## Generating code
 
 - **Rust:** automatic. `crates/agora-protocol/build.rs` compiles the schema with `protox`, a pure-Rust
