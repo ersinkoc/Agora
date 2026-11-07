@@ -6,6 +6,7 @@ version = 4
 name = "agora"
 version = "0.0.0"
 dependencies = [
+ "agora-core",
  "agora-hub",
  "agora-i18n",
  "agora-node",
@@ -13,6 +14,7 @@ dependencies = [
  "agora-protocol",
  "agora-tui",
  "prost",
+ "serde_json",
 ]
 
 [[package]]
@@ -20,10 +22,14 @@ name = "agora-adapters"
 version = "0.0.0"
 dependencies = [
  "agora-core",
+ "agora-fake-agent",
  "agora-protocol",
  "agora-vt",
  "regex",
+ "ring",
  "serde",
+ "serde_json",
+ "sha2",
  "toml",
 ]
 
@@ -51,6 +57,7 @@ name = "agora-fake-agent"
 version = "0.0.0"
 dependencies = [
  "serde",
+ "serde_json",
  "toml",
 ]
 
@@ -87,6 +94,7 @@ version = "0.0.0"
 dependencies = [
  "agora-core",
  "agora-protocol",
+ "serde_json",
 ]
 
 [[package]]
@@ -100,7 +108,9 @@ dependencies = [
  "agora-platform",
  "agora-protocol",
  "agora-vt",
+ "getrandom",
  "prost",
+ "serde_json",
 ]
 
 [[package]]

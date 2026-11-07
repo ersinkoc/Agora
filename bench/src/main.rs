@@ -1,6 +1,8 @@
 //! `agora-bench run [--out FILE] [--secs N] [--repeat N] [--commit SHA] [scenario...]`
 //! (`--repeat` runs each scenario N times and keeps the best of each metric, which filters scheduler noise
 //! on shared CI runners; a real regression shows in every repetition.)
+//! `agora-bench bestof A.json B.json... [--out FILE]` (merge reports, keeping the best of each metric per scenario;
+//! CI alternates base and head runs and merges each side, so slow drift on a shared runner hits both equally)
 //! `agora-bench compare BASE.json NEW.json [--threshold PCT]` (exit 1 on regression)
 //!
 //! `AGORA_BENCH_SLOWDOWN_US` deliberately slows the hot path, to prove the gate works.
@@ -20,6 +22,7 @@ fn main() -> ExitCode {
         }
         Some("run") => run(&args[1..]),
         Some("footprint") => footprint(&args[1..]),
+        Some("bestof") => bestof(&args[1..]),
         Some("compare") => cmp(&args[1..]),
         _ => {
             eprintln!("usage: agora-bench run [--out F] [--secs N] [--commit SHA] [scenario...] | compare BASE NEW [--threshold PCT]");
@@ -87,6 +90,56 @@ fn run(args: &[String]) -> ExitCode {
         None => println!("{json}"),
     }
     ExitCode::SUCCESS
+}
+
+fn bestof(args: &[String]) -> ExitCode {
+    let mut files = Vec::new();
+    let mut out = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == "--out" {
+            out = it.next().cloned();
+        } else {
+            files.push(a.as_str());
+        }
+    }
+    let mut merged: Option<Report> = None;
+    for f in files {
+        let r = match load(f) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("agora-bench: {e}");
+                return ExitCode::from(2);
+            }
+        };
+        merged = Some(match merged {
+            None => r,
+            Some(m) => agora_bench::merge_reports(m, r),
+        });
+    }
+    let Some(report) = merged else {
+        eprintln!("usage: agora-bench bestof A.json B.json... [--out FILE]");
+        return ExitCode::from(2);
+    };
+    match serde_json::to_string_pretty(&report) {
+        Ok(j) => match out {
+            Some(p) => match std::fs::write(&p, j) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("agora-bench: {p}: {e}");
+                    ExitCode::from(1)
+                }
+            },
+            None => {
+                println!("{j}");
+                ExitCode::SUCCESS
+            }
+        },
+        Err(e) => {
+            eprintln!("agora-bench: {e}");
+            ExitCode::from(1)
+        }
+    }
 }
 
 fn load(path: &str) -> Result<Report, String> {

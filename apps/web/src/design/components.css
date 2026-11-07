@@ -72,3 +72,6 @@ h2 { font-size: var(--text-16); color: var(--text-muted); }
 .focus__terminal { background: var(--surface-0); border: 1px solid var(--border); border-radius: var(--radius-m);
   padding: var(--space-4); min-height: 240px; font: var(--text-13) / 1.4 var(--font-mono); white-space: pre-wrap; }
 .link { color: var(--accent); background: none; border: 0; font: inherit; cursor: pointer; padding: 0; text-align: left; }
+
+.terminal { background: var(--surface-0); border: 1px solid var(--border); border-radius: var(--radius-m);
+  padding: var(--space-2); min-height: 320px; }

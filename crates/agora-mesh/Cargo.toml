@@ -11,3 +11,5 @@ workspace = true
 [dependencies]
 agora-core = { path = "../agora-core" }
 agora-protocol = { path = "../agora-protocol" }
+# MCP messages are JSON-RPC with JSON payloads (ADR-0008); tool schemas are JSON Schema.
+serde_json = "1"

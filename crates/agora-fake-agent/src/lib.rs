@@ -1,6 +1,8 @@
 //! Scripted fake coding agent for tests: plays a TOML script of screen frames and delays to a terminal.
 //!
-//! This is the L0/L1 mode only (screen output). ACP (L2) and adapter (L3) modes come later.
+//! `play` is the L0/L1 mode (screen output); `adapter` is a fake L3 adapter (JSON-RPC over stdio). ACP (L2) comes later.
+
+pub mod adapter;
 
 use std::io::{self, Write};
 use std::time::Duration;

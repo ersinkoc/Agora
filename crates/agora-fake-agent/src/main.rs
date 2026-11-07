@@ -8,6 +8,16 @@ use agora_fake_agent::{play, Script};
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
     let mut path = None;
+    if std::env::args().nth(1).as_deref() == Some("--adapter") {
+        // L3 adapter mode: JSON-RPC over stdio (docs/specs/adapter-protocol.md).
+        return match agora_fake_agent::adapter::run(
+            std::io::stdin().lock(),
+            &mut io::stdout().lock(),
+        ) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(_) => ExitCode::from(1),
+        };
+    }
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--script" => path = args.next(),

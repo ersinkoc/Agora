@@ -82,6 +82,8 @@ fn cli(s: &Setup, args: &[&str]) -> (i32, String, String) {
     let out = Command::new(AGORA)
         .args(args)
         .env("AGORA_HOME", &s.home)
+        // Text assertions below are English whatever the machine running the tests is set to.
+        .env("AGORA_LANG", "en")
         .output()
         .expect("run agora");
     (
@@ -123,6 +125,7 @@ fn start_attach_stop_from_the_command_line() {
     ]);
     cfg.env
         .push(("AGORA_HOME".into(), s.home.display().to_string()));
+    cfg.env.push(("AGORA_LANG".into(), "en".into()));
     let mut attach = spawn(&cfg).expect("spawn attach");
     attach.write_input(b"echo attached-$((6*7))\r").unwrap();
     let mut seen = String::new();
@@ -131,6 +134,19 @@ fn start_attach_stop_from_the_command_line() {
         assert!(
             Instant::now() < end,
             "never saw the command output; got: {seen:?}"
+        );
+        if let Ok(chunk) = attach.output().recv_timeout(Duration::from_millis(100)) {
+            seen.push_str(&String::from_utf8_lossy(&chunk));
+        }
+    }
+    // Resizing the window resizes the agent's terminal: the shell inside reports the new size.
+    attach.resize(101, 33).unwrap();
+    attach.write_input(b"stty size\r").unwrap();
+    let end = Instant::now() + Duration::from_secs(15);
+    while !seen.contains("33 101") {
+        assert!(
+            Instant::now() < end,
+            "the agent never saw the new size; got: {seen:?}"
         );
         if let Ok(chunk) = attach.output().recv_timeout(Duration::from_millis(100)) {
             seen.push_str(&String::from_utf8_lossy(&chunk));
@@ -293,4 +309,97 @@ fn node_stdio_without_a_node_says_so() {
     let (code, _, err) = cli(&s, &["node", "stdio"]);
     assert_eq!(code, 1);
     assert!(err.contains("No node is listening"), "{err}");
+}
+
+#[test]
+fn mesh_stdio_is_an_mcp_server_for_one_agent() {
+    if !supported() {
+        return;
+    }
+    let s = setup("mesh-stdio");
+    let _node = start_node(&s);
+    let (code, out, err) = cli(&s, &["agent", "start", "shell", "--project", "demo"]);
+    assert_eq!(code, 0, "{out}{err}");
+    // This is the command an agent's MCP configuration would run.
+    let socket = s.home.join("m").join("agent-1.sock");
+    let mut child = Command::new(AGORA)
+        .args(["mesh", "stdio", "--socket"])
+        .arg(&socket)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut out = std::io::BufReader::new(child.stdout.take().unwrap());
+    let mut ask = |req: &str| -> String {
+        use std::io::BufRead;
+        writeln!(stdin, "{req}").unwrap();
+        let mut line = String::new();
+        out.read_line(&mut line).unwrap();
+        line
+    };
+    let init = ask(
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}"#,
+    );
+    assert!(init.contains("agora-mesh"), "{init}");
+    let tools = ask(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#);
+    assert!(
+        tools.contains("send_message") && tools.contains("handoff"),
+        "{tools}"
+    );
+    let me = ask(
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"agents_list","arguments":{}}}"#,
+    );
+    assert!(me.contains("agent-1"), "{me}");
+    drop(stdin);
+    assert!(child.wait().unwrap().success());
+}
+
+/// What an agent's MCP client does: read the config the node wrote, run the command in it, speak MCP to it.
+#[test]
+fn the_injected_mcp_config_launches_a_working_mesh_server() {
+    if !supported() {
+        return;
+    }
+    let s = setup("inject-e2e");
+    std::fs::write(
+        s.home.join("manifests/mcp-shell.toml"),
+        "kind = \"mcp-shell\"\ndisplay_name = \"S\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"sh\"]\n[mcp]\nmethod = \"config_file\"\npath = \".mcp.json\"\n",
+    )
+    .unwrap();
+    let _node = start_node(&s);
+    let (code, out, err) = cli(&s, &["agent", "start", "mcp-shell", "--project", "demo"]);
+    assert_eq!(code, 0, "{out}{err}");
+    let worktree = out.trim().rsplit(" in ").next().unwrap().to_string();
+    let cfg: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(Path::new(&worktree).join(".mcp.json")).unwrap(),
+    )
+    .unwrap();
+    let server = &cfg["mcpServers"]["agora-mesh"];
+    let args: Vec<String> = server["args"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a.as_str().unwrap().to_string())
+        .collect();
+    let mut child = Command::new(server["command"].as_str().unwrap())
+        .args(&args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut out = std::io::BufReader::new(child.stdout.take().unwrap());
+    writeln!(
+        stdin,
+        r#"{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{}}}}"#
+    )
+    .unwrap();
+    let mut line = String::new();
+    std::io::BufRead::read_line(&mut out, &mut line).unwrap();
+    assert!(line.contains("agora-mesh"), "{line}");
+    drop(stdin);
+    assert!(child.wait().unwrap().success());
 }
