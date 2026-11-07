@@ -10,15 +10,21 @@ const TerminalView = lazy(() => import('./terminal/TerminalView').then((m) => ({
 import { t } from './i18n';
 import { type AgentTileModel, type UiState, needsAttention, sortFleet } from './model';
 
-export function Home({ onOpen }: { onOpen?: (id: string) => void }) {
-  const fleet = sortFleet(demoAgents);
-  const machines = new Set(demoAgents.map((a) => a.machine)).size;
+export function Home({ onOpen, agents = demoAgents, machines, link = 'live' }: {
+  onOpen?: (id: string) => void;
+  agents?: readonly AgentTileModel[];
+  machines?: number;
+  link?: 'connecting' | 'live' | 'offline';
+}) {
+  const fleet = sortFleet(agents);
+  const machineCount = machines ?? new Set(agents.map((a) => a.machine)).size;
   return (
     <main className="page">
       <header className="topbar">
         <h1>{t('home-title')}</h1>
-        <span className="muted">{t('machines-online', { count: machines })}</span>
+        <span className="muted">{t('machines-online', { count: machineCount })}</span>
       </header>
+      {link !== 'live' && <p className="muted" role="status">{t(link === 'offline' ? 'link-offline' : 'link-connecting')}</p>}
       <AttentionStrip agents={needsAttention(fleet)} onOpen={onOpen} />
       <h2>{t('fleet-title')}</h2>
       {fleet.length === 0 ? (

@@ -21,6 +21,8 @@ machines-online =
         [one] { $count } machine online
        *[other] { $count } machines online
     }
+link-connecting = Connecting to your hub…
+link-offline = Hub unreachable. Retrying…
 action-open = Open
 action-start-agent = Start an agent
 theme-dark = Dark
