@@ -208,9 +208,10 @@ impl RawMode {
     }
 }
 
-#[cfg(unix)]
 impl Drop for RawMode {
     fn drop(&mut self) {
+        // Restores the saved terminal settings. Nothing to restore elsewhere (`enable` always fails there).
+        #[cfg(unix)]
         unix::restore_mode(&self.saved);
     }
 }
