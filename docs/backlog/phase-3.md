@@ -22,3 +22,5 @@ agent accounts, usability sessions with people) are marked and skipped, never fa
 | P3-12 SSH bootstrap | stdio bridge done | `agora node stdio`; hub-side SSH dialer and installing the node on a fresh machine still to do |
 | P3-13 notifications, doctor, backup/restore, usage view | doctor done | `agora doctor` (checks: terminals, sockets, git, data dir, node, manifests, installed agents); notification routing rules (`agora-hub::notify`), backup/restore library and cost estimation done; delivery channels, views and CLI commands still to do (cost estimation in `agora-hub::usage` done) | `design/notifications.md`, `backup-restore.md`, `usage-and-cost.md` |
 | P3-14 first-agent flow | needs a human | needs P2-09 manifests from real agents; five-user first-glance test |
+
+Not a Phase 3 task but done early: Turkish (`locales/tr`) for CLI, errors, notifications and the web client (Phase 6 lists first non-English locales).
