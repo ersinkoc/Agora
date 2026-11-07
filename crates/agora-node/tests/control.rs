@@ -554,12 +554,23 @@ fn agents_on_one_node_coordinate_through_their_own_mesh_endpoints() {
     let (_, err) = m2.tool("lease_acquire", json!({"paths": ["src"], "ttl_s": 60}));
     assert!(!err, "the stopped agent's lease was released");
 
-    // Mesh activity is in the node's audit log.
-    let events = n.events.events_after(0);
-    assert!(events
-        .iter()
-        .any(|e| matches!(e.body, Some(v1::event::Body::MessagePosted(_)))));
-    assert!(events
-        .iter()
-        .any(|e| matches!(e.body, Some(v1::event::Body::LeaseGranted(_)))));
+    // Mesh activity reaches the node's event log (the supervision tick moves it there, so wait for it).
+    let end = Instant::now() + Duration::from_secs(15);
+    loop {
+        let events = n.events.events_after(0);
+        let posted = events
+            .iter()
+            .any(|e| matches!(e.body, Some(v1::event::Body::MessagePosted(_))));
+        let granted = events
+            .iter()
+            .any(|e| matches!(e.body, Some(v1::event::Body::LeaseGranted(_))));
+        if posted && granted {
+            break;
+        }
+        assert!(
+            Instant::now() < end,
+            "mesh events never reached the log (posted {posted}, granted {granted})"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
