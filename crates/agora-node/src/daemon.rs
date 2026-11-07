@@ -333,6 +333,16 @@ impl Node {
         std::fs::create_dir_all(&cfg.worktree_root)?;
         let events = Arc::new(EventSink::open(&cfg.data_dir.join("events"), &cfg.node_id)?);
 
+        // Short path on purpose: Unix socket paths are limited to about 100 bytes.
+        let mesh_dir = cfg
+            .socket
+            .parent()
+            .map_or_else(|| PathBuf::from("m"), |p| p.join("m"));
+        let mesh = Arc::new(crate::mesh_server::MeshServer::new(
+            &mesh_dir,
+            agora_mesh::broker::Limits::default(),
+        )?);
+
         let mut sup = Supervisor::new(SupervisorConfig {
             node: NodeId::new(cfg.node_id.clone()),
             restart: RestartPolicy::default(),
@@ -377,15 +387,25 @@ impl Node {
             events.checkout_discovered(&cfg.node_id, &p.id, &p.root);
         }
 
-        // Short path on purpose: Unix socket paths are limited to about 100 bytes.
-        let mesh_dir = cfg
-            .socket
-            .parent()
-            .map_or_else(|| PathBuf::from("m"), |p| p.join("m"));
-        let mesh = Arc::new(crate::mesh_server::MeshServer::new(
-            &mesh_dir,
-            agora_mesh::broker::Limits::default(),
-        )?);
+        // Every agent that launches joins the mesh and, if its manifest has `[mcp]`, is handed its own endpoint.
+        {
+            let mesh = Arc::clone(&mesh);
+            sup.set_launch_hook(Box::new(move |l| {
+                let socket = mesh
+                    .register(agora_mesh::broker::AgentInfo {
+                        id: l.id.clone(),
+                        kind: l.kind.clone(),
+                        node: l.node.clone(),
+                        project: l.project.clone(),
+                        label: l.id.as_str().to_string(),
+                        worktree: l.worktree.to_string_lossy().into_owned(),
+                        state: "idle".into(),
+                    })
+                    .ok()?;
+                let command = std::env::current_exe().ok()?;
+                Some(agora_adapters::inject::Endpoint { command, socket })
+            }));
+        }
 
         let supervisor = Arc::new(Mutex::new(sup));
         let ctx = Arc::new(ControlContext::new(
@@ -420,9 +440,15 @@ impl Node {
                             ev.supervisor_events(&events, &views);
                         }
                         // Agents that ended on their own leave the mesh; the others keep their state current.
+                        // An agent that will be restarted keeps its endpoint (the config it was launched with still
+                        // points at it); one that finished or was given up on leaves the mesh.
                         for e in &events {
-                            if let SupervisorEvent::Exited { agent, .. } = e {
-                                mesh.unregister(agent);
+                            match e {
+                                SupervisorEvent::Exited { agent, status } if status.success() => {
+                                    mesh.unregister(agent);
+                                }
+                                SupervisorEvent::GaveUp { agent } => mesh.unregister(agent),
+                                _ => {}
                             }
                         }
                         for v in views.iter().filter(|v| v.running) {

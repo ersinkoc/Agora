@@ -574,3 +574,182 @@ fn agents_on_one_node_coordinate_through_their_own_mesh_endpoints() {
         std::thread::sleep(Duration::from_millis(50));
     }
 }
+
+fn add_manifest(e: &Env, file: &str, toml: &str) {
+    std::fs::write(e.dir.join("manifests").join(file), toml).unwrap();
+}
+
+fn worktree_of(r: &v1::AgentStartResult) -> PathBuf {
+    PathBuf::from(&r.worktree_id)
+}
+
+fn git_status(dir: &Path) -> String {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["status", "--porcelain"])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+#[test]
+fn a_manifest_with_mcp_gets_its_config_file_and_the_file_stays_out_of_git() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
+        return;
+    }
+    let e = env("inject-file");
+    add_manifest(
+        &e,
+        "mcp.toml",
+        "kind = \"mcp-agent\"\ndisplay_name = \"M\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"sh\"]\n[mcp]\nmethod = \"config_file\"\npath = \".agora/mcp.json\"\n",
+    );
+    let n = node(&e, NodeLimits::default());
+    let mut c = Client::connect(n.socket().unwrap()).unwrap();
+    let s = started(ok(c.call(start_cmd("mcp-agent"))));
+    let cfg = std::fs::read_to_string(worktree_of(&s).join(".agora/mcp.json")).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&cfg).unwrap();
+    let args = v["mcpServers"]["agora-mesh"]["args"].as_array().unwrap();
+    assert_eq!(&args[..3], &["mesh", "stdio", "--socket"]);
+    let socket = PathBuf::from(args[3].as_str().unwrap());
+    assert_eq!(
+        socket,
+        n.mesh.socket_path(&agora_core::AgentId::new(&s.agent_id))
+    );
+    assert!(
+        socket.exists(),
+        "the endpoint is already listening when the agent starts"
+    );
+    assert_eq!(
+        git_status(&worktree_of(&s)),
+        "",
+        "the injected file is not the agent's work"
+    );
+    // An agent whose manifest has no [mcp] is still in the mesh, with nothing injected.
+    let plain = started(ok(c.call(start_cmd("shell"))));
+    assert!(!worktree_of(&plain).join(".agora").exists());
+    assert!(n
+        .mesh
+        .is_registered(&agora_core::AgentId::new(&plain.agent_id)));
+}
+
+#[test]
+fn a_symlink_in_the_repository_cannot_redirect_the_injected_file() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
+        return;
+    }
+    let e = env("inject-symlink");
+    let victim = e.dir.join("victim.txt");
+    std::fs::write(&victim, "precious").unwrap();
+    // The repository itself contains `.mcp.json -> victim.txt` and a `cfg -> <dir>` directory link.
+    if agora_platform::symlink(&victim, &e.repo.join(".mcp.json")).is_err() {
+        return; // no symlinks here (Windows): nothing to prove
+    }
+    std::fs::create_dir_all(e.dir.join("elsewhere")).unwrap();
+    agora_platform::symlink(&e.dir.join("elsewhere"), &e.repo.join("cfg")).unwrap();
+    git(&e.repo, &["add", "."]);
+    git(&e.repo, &["commit", "-q", "-m", "links"]);
+    add_manifest(
+        &e,
+        "a.toml",
+        "kind = \"file-agent\"\ndisplay_name = \"A\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"sh\"]\n[mcp]\nmethod = \"config_file\"\npath = \".mcp.json\"\n",
+    );
+    add_manifest(
+        &e,
+        "b.toml",
+        "kind = \"dir-agent\"\ndisplay_name = \"B\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"sh\"]\n[mcp]\nmethod = \"config_file\"\npath = \"cfg/mcp.json\"\n",
+    );
+    let n = node(&e, NodeLimits::default());
+    let mut c = Client::connect(n.socket().unwrap()).unwrap();
+    // A symlinked file is replaced by a real one; the target is untouched.
+    let s = started(ok(c.call(start_cmd("file-agent"))));
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "precious");
+    let md = std::fs::symlink_metadata(worktree_of(&s).join(".mcp.json")).unwrap();
+    assert!(md.is_file() && !md.file_type().is_symlink());
+    // A symlinked directory on the path is refused: nothing is written through it, and the agent does not start.
+    assert!(r_is_err(c.call(start_cmd("dir-agent"))));
+    assert!(std::fs::read_dir(e.dir.join("elsewhere"))
+        .unwrap()
+        .next()
+        .is_none());
+}
+
+fn r_is_err(r: std::io::Result<Result<v1::CommandOk, v1::ErrorInfo>>) -> bool {
+    matches!(r, Ok(Err(_)))
+}
+
+#[test]
+fn a_manifest_cannot_point_its_config_outside_the_worktree() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
+        return;
+    }
+    let e = env("inject-escape");
+    add_manifest(
+        &e,
+        "evil.toml",
+        "kind = \"evil\"\ndisplay_name = \"E\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"sh\"]\n[mcp]\nmethod = \"config_file\"\npath = \"../../escaped.json\"\n",
+    );
+    let n = node(&e, NodeLimits::default());
+    let mut c = Client::connect(n.socket().unwrap()).unwrap();
+    assert!(r_is_err(c.call(start_cmd("evil"))));
+    assert!(!e.dir.join("escaped.json").exists());
+    assert!(!e.dir.join("worktrees").join("escaped.json").exists());
+}
+
+#[test]
+fn flags_and_variables_are_added_at_every_launch_including_restarts() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
+        return;
+    }
+    let e = env("inject-flags");
+    // The "agent" records its arguments and environment, then waits.
+    add_manifest(
+        &e,
+        "rec.toml",
+        "kind = \"rec\"\ndisplay_name = \"R\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"sh\", \"-c\", \"echo \\\"$@\\\" >> launches.txt; exit 1\", \"x\"]\n[mcp]\nmethod = \"cli_flag\"\npath = \".agora/mcp.json\"\nflag = [\"--mcp-config\", \"{config_file}\"]\n",
+    );
+    add_manifest(
+        &e,
+        "env.toml",
+        "kind = \"envrec\"\ndisplay_name = \"V\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"sh\", \"-c\", \"echo $AGORA_MCP_SOCKET > socks.txt; sleep 60\"]\n[mcp]\nmethod = \"env\"\n[mcp.env]\nAGORA_MCP_SOCKET = \"{socket}\"\n",
+    );
+    let n = node(&e, NodeLimits::default());
+    let mut c = Client::connect(n.socket().unwrap()).unwrap();
+    let wait_file = |p: PathBuf| {
+        let end = Instant::now() + Duration::from_secs(15);
+        loop {
+            if let Ok(s) = std::fs::read_to_string(&p) {
+                if !s.trim().is_empty() {
+                    return s;
+                }
+            }
+            assert!(Instant::now() < end, "{} never appeared", p.display());
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    let a = started(ok(c.call(start_cmd("rec"))));
+    // The agent exits with an error right away, so the supervisor restarts it; every launch gets the flag.
+    let expected = format!(
+        "--mcp-config {}",
+        worktree_of(&a).join(".agora/mcp.json").display()
+    );
+    let end = Instant::now() + Duration::from_secs(20);
+    let launches = loop {
+        let text =
+            std::fs::read_to_string(worktree_of(&a).join("launches.txt")).unwrap_or_default();
+        if text.lines().count() >= 2 {
+            break text;
+        }
+        assert!(Instant::now() < end, "no restart seen: {text:?}");
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert!(launches.lines().all(|l| l == expected), "{launches:?}");
+    let b = started(ok(c.call(start_cmd("envrec"))));
+    let sock = wait_file(worktree_of(&b).join("socks.txt"));
+    assert_eq!(
+        sock.trim(),
+        n.mesh
+            .socket_path(&agora_core::AgentId::new(&b.agent_id))
+            .to_string_lossy()
+    );
+}

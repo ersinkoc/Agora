@@ -86,7 +86,32 @@ pub struct Resume {
     pub argv: Vec<String>,
 }
 
-/// A parsed, validated manifest. Sections the engine does not interpret yet (accounts, mcp, hooks, usage,
+/// How the node hands an agent its own mesh MCP server (docs/specs/agent-manifest.md `[mcp]`).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpSpec {
+    pub method: McpMethod,
+    /// `config_file`/`cli_flag`: where to write the config, inside the agent's worktree.
+    pub path: Option<String>,
+    /// Only `json` for now.
+    pub format: Option<String>,
+    /// `cli_flag`: arguments appended to the launch command.
+    #[serde(default)]
+    pub flag: Vec<String>,
+    /// `env`: variables set for the agent.
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpMethod {
+    ConfigFile,
+    CliFlag,
+    Env,
+}
+
+/// A parsed, validated manifest. Sections the engine does not interpret yet (accounts, hooks, usage,
 /// structured) are accepted and ignored so newer manifests still load.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Manifest {
@@ -99,6 +124,7 @@ pub struct Manifest {
     pub resume: Option<Resume>,
     #[serde(default)]
     pub rules: Vec<Rule>,
+    pub mcp: Option<McpSpec>,
 }
 
 fn invalid(field: impl Into<String>) -> ManifestError {
@@ -131,6 +157,16 @@ impl Manifest {
         }
         if self.display_name.trim().is_empty() {
             return Err(invalid("display_name"));
+        }
+        if let Some(m) = &self.mcp {
+            let ok = match m.method {
+                McpMethod::ConfigFile => m.path.is_some(),
+                McpMethod::CliFlag => m.path.is_some() && !m.flag.is_empty(),
+                McpMethod::Env => !m.env.is_empty(),
+            };
+            if !ok || m.format.as_deref().is_some_and(|f| f != "json") {
+                return Err(invalid("mcp"));
+            }
         }
         let mut ids = HashSet::new();
         for (i, r) in self.rules.iter().enumerate() {

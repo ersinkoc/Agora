@@ -352,3 +352,51 @@ fn mesh_stdio_is_an_mcp_server_for_one_agent() {
     drop(stdin);
     assert!(child.wait().unwrap().success());
 }
+
+/// What an agent's MCP client does: read the config the node wrote, run the command in it, speak MCP to it.
+#[test]
+fn the_injected_mcp_config_launches_a_working_mesh_server() {
+    if !supported() {
+        return;
+    }
+    let s = setup("inject-e2e");
+    std::fs::write(
+        s.home.join("manifests/mcp-shell.toml"),
+        "kind = \"mcp-shell\"\ndisplay_name = \"S\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"sh\"]\n[mcp]\nmethod = \"config_file\"\npath = \".mcp.json\"\n",
+    )
+    .unwrap();
+    let _node = start_node(&s);
+    let (code, out, err) = cli(&s, &["agent", "start", "mcp-shell", "--project", "demo"]);
+    assert_eq!(code, 0, "{out}{err}");
+    let worktree = out.trim().rsplit(" in ").next().unwrap().to_string();
+    let cfg: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(Path::new(&worktree).join(".mcp.json")).unwrap(),
+    )
+    .unwrap();
+    let server = &cfg["mcpServers"]["agora-mesh"];
+    let args: Vec<String> = server["args"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a.as_str().unwrap().to_string())
+        .collect();
+    let mut child = Command::new(server["command"].as_str().unwrap())
+        .args(&args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut out = std::io::BufReader::new(child.stdout.take().unwrap());
+    writeln!(
+        stdin,
+        r#"{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{}}}}"#
+    )
+    .unwrap();
+    let mut line = String::new();
+    std::io::BufRead::read_line(&mut out, &mut line).unwrap();
+    assert!(line.contains("agora-mesh"), "{line}");
+    drop(stdin);
+    assert!(child.wait().unwrap().success());
+}
