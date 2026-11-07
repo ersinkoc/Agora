@@ -290,3 +290,10 @@ mod tests {
         assert!(run_scenario("nope", Duration::from_millis(1), Duration::ZERO).is_none());
     }
 }
+
+fn dbg(m: &str) {
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open("/dev/stderr") {
+        let _ = writeln!(f, "DBG {m}");
+    }
+}
