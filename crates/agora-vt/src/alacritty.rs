@@ -55,13 +55,19 @@ pub struct AlacrittyTerminal {
 
 impl AlacrittyTerminal {
     pub fn new(size: Size) -> Self {
+        Self::with_scrollback(size, SCROLLBACK)
+    }
+
+    /// Like [`new`](Self::new) with an explicit scrollback cap in lines. Scrollback is never read by
+    /// detection; the cap only bounds memory.
+    pub fn with_scrollback(size: Size, scrollback: usize) -> Self {
         let size = Size {
             cols: size.cols.max(1),
             rows: size.rows.max(1),
         };
         let listener = Listener::default();
         let config = Config {
-            scrolling_history: SCROLLBACK,
+            scrolling_history: scrollback,
             ..Config::default()
         };
         let term = Term::new(config, &Dims(size), listener.clone());
