@@ -112,7 +112,13 @@ fn status(s: std::process::ExitStatus) -> ExitStatus {
     }
 }
 
+/// Serializes PTY creation. Between `openpty` and the close-on-exec flag, and until the parent closes its
+/// copy of the slave, a concurrently spawned process would inherit the descriptors and keep this terminal
+/// open forever (its output would never reach end-of-file). Other spawns in this process wait here.
+static SPAWN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub(crate) fn spawn(config: &PtyConfig) -> io::Result<Box<dyn Pty>> {
+    let _guard = SPAWN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut ws = winsize(config.cols, config.rows);
     let (mut master, mut slave) = (-1, -1);
     // SAFETY: the out-pointers are valid; null name/termios are allowed; `ws` outlives the call. The
@@ -131,9 +137,12 @@ pub(crate) fn spawn(config: &PtyConfig) -> io::Result<Box<dyn Pty>> {
     cvt(r)?;
     // SAFETY: openpty returned two fresh descriptors that nothing else owns.
     let (master, slave) = unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
-    // The child must not inherit the master side.
-    // SAFETY: plain fcntl on a descriptor we own.
-    cvt(unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) })?;
+    // Neither side may leak into unrelated processes. The child gets the slave as stdin/stdout/stderr
+    // (duplicated by `Command`, which clears the flag on those copies).
+    for fd in [&master, &slave] {
+        // SAFETY: plain fcntl on a descriptor we own.
+        cvt(unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) })?;
+    }
 
     let Some((program, args)) = config.argv.split_first() else {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "argv is empty"));
@@ -421,6 +430,52 @@ mod tests {
         assert_eq!(lines.first().copied(), Some("3600"), "output: {out:?}");
         #[cfg(target_os = "linux")]
         assert_eq!(lines.get(1).copied(), Some("8388608"), "output: {out:?}"); // KiB
+    }
+
+    #[test]
+    fn concurrent_spawns_do_not_keep_each_others_terminals_open() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        // A thread keeps spawning long-lived processes while we spawn short-lived ones. Before the fix, a
+        // long-lived process inherited a short-lived terminal's slave and its output never ended.
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop2 = Arc::clone(&stop);
+        let spawner = std::thread::spawn(move || {
+            let mut keep = Vec::new();
+            while !stop2.load(Ordering::Relaxed) {
+                if let Ok(p) = spawn(&PtyConfig::new(vec!["sleep".into(), "30".into()])) {
+                    keep.push(p);
+                }
+                if keep.len() > 60 {
+                    keep.clear();
+                }
+            }
+        });
+        for i in 0..40 {
+            let p = spawn(&PtyConfig::new(vec![
+                "sh".into(),
+                "-c".into(),
+                "echo hi".into(),
+            ]))
+            .expect("spawn");
+            let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                match p
+                    .output()
+                    .recv_timeout(std::time::Duration::from_millis(100))
+                {
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                        if std::time::Instant::now() > end =>
+                    {
+                        panic!("terminal {i} never reached end-of-file: its descriptors leaked")
+                    }
+                    _ => {}
+                }
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        spawner.join().expect("spawner");
     }
 
     #[test]

@@ -1,0 +1,691 @@
+//! The node's local control socket: protocol commands over a local stream (docs/specs/protocol.md §2, §4).
+//!
+//! Framing is the protocol envelope (`agora_protocol::Frame`). Requests are `CommandRequest` payloads on stream 1
+//! (`KIND_REQUEST`); responses are `CommandResponse` payloads on stream 1 (`KIND_RESPONSE`). A terminal stream is
+//! opened by the client sending its `TerminalSubscribe` request on a dynamic stream id (3 or higher) of its
+//! choosing; after the response, the node writes that terminal's frames on that stream (`KIND_TERM_*`), starting
+//! with a snapshot. Input and resize are ordinary commands (`TerminalInput`, `TerminalResize`). The socket is owner-only,
+//! so no further authentication is needed locally; the hub path adds device auth and approvals.
+//!
+//! Retried requests (same `idempotency_key`) get the stored response and do not repeat their effect.
+
+use std::collections::{HashMap, VecDeque};
+use std::io::{self, Read, Write};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::RecvTimeoutError;
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
+
+use agora_core::AgentId;
+use agora_platform::{local_connect, local_listen, LocalStream};
+use agora_protocol::frame::{DEFAULT_MAX_PAYLOAD, STREAM_COMMANDS};
+use agora_protocol::v1::{self, command_request::Command as Cmd, command_response::Result as Res};
+use agora_protocol::{Decoder, Error, ErrorCode, Frame};
+use agora_vt::Size;
+use prost::Message;
+
+use crate::daemon::EventSink;
+use crate::supervisor::{StartRequest, Supervisor, SupervisorError};
+use crate::terminal::{Output, OutputSubscription, Snapshot};
+
+pub const KIND_REQUEST: u8 = 0;
+pub const KIND_RESPONSE: u8 = 1;
+/// Terminal stream frames, node to client.
+pub const KIND_TERM_DATA: u8 = 0;
+pub const KIND_TERM_SNAPSHOT: u8 = 1;
+/// Payload: cols u16 LE, rows u16 LE.
+pub const KIND_TERM_RESIZE: u8 = 2;
+/// Payload: exit code i32 LE (negative signal number when killed by a signal, `i32::MIN` if unknown).
+pub const KIND_TERM_EXIT: u8 = 3;
+
+const POLL: Duration = Duration::from_millis(100);
+const IDEMPOTENCY_CACHE: usize = 256;
+
+/// A project registered on this node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectEntry {
+    pub id: String,
+    pub name: String,
+    pub root: PathBuf,
+}
+
+/// Everything a connection handler needs.
+pub struct ControlContext {
+    pub supervisor: Arc<Mutex<Supervisor>>,
+    pub projects: Vec<ProjectEntry>,
+    pub worktree_root: PathBuf,
+    pub node_id: String,
+    pub events: Option<Arc<EventSink>>,
+    names: AtomicU64,
+    seen: Mutex<IdempotencyCache>,
+}
+
+#[derive(Default)]
+struct IdempotencyCache {
+    order: VecDeque<String>,
+    responses: HashMap<String, v1::CommandResponse>,
+}
+
+impl ControlContext {
+    pub fn new(
+        supervisor: Arc<Mutex<Supervisor>>,
+        projects: Vec<ProjectEntry>,
+        worktree_root: PathBuf,
+        node_id: String,
+        events: Option<Arc<EventSink>>,
+    ) -> Self {
+        Self {
+            supervisor,
+            projects,
+            worktree_root,
+            node_id,
+            events,
+            names: AtomicU64::new(0),
+            seen: Mutex::new(IdempotencyCache::default()),
+        }
+    }
+
+    fn sup(&self) -> MutexGuard<'_, Supervisor> {
+        self.supervisor.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn remembered(&self, key: &str) -> Option<v1::CommandResponse> {
+        let c = self.seen.lock().unwrap_or_else(|e| e.into_inner());
+        c.responses.get(key).cloned()
+    }
+
+    fn remember(&self, key: &str, resp: &v1::CommandResponse) {
+        let mut c = self.seen.lock().unwrap_or_else(|e| e.into_inner());
+        if c.responses.insert(key.to_string(), resp.clone()).is_none() {
+            c.order.push_back(key.to_string());
+            while c.order.len() > IDEMPOTENCY_CACHE {
+                if let Some(old) = c.order.pop_front() {
+                    c.responses.remove(&old);
+                }
+            }
+        }
+    }
+}
+
+pub fn terminal_id_of(agent: &AgentId) -> String {
+    format!("t-{}", agent.as_str())
+}
+
+fn agent_of_terminal(terminal_id: &str) -> Option<AgentId> {
+    terminal_id.strip_prefix("t-").map(AgentId::new)
+}
+
+fn ok_empty() -> v1::CommandOk {
+    v1::CommandOk {
+        result: Some(v1::command_ok::Result::Empty(v1::Empty {})),
+    }
+}
+
+fn capability_missing(what: &str) -> Error {
+    Error::new(ErrorCode::ProtocolCapabilityMissing).with("capability", what)
+}
+
+fn invalid(field: &str) -> Error {
+    Error::new(ErrorCode::ProtocolInvalidMessage).with("field", field)
+}
+
+fn resolve_project<'a>(ctx: &'a ControlContext, wanted: &str) -> Result<&'a ProjectEntry, Error> {
+    if wanted.is_empty() {
+        return match ctx.projects.as_slice() {
+            [only] => Ok(only),
+            _ => Err(invalid("project_id")),
+        };
+    }
+    ctx.projects
+        .iter()
+        .find(|p| p.id == wanted || p.name == wanted)
+        .ok_or_else(|| Error::new(ErrorCode::ProjectNotFound).with("project_id", wanted))
+}
+
+fn sup_err(e: SupervisorError) -> Error {
+    e.to_protocol()
+}
+
+/// Run one command. Terminal subscription is handled by the connection (it needs the stream).
+fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
+    use v1::command_ok::Result as Ok_;
+    match cmd {
+        Cmd::ProjectList(_) => Ok(v1::CommandOk {
+            result: Some(Ok_::ProjectList(v1::ProjectListResult {
+                projects: ctx
+                    .projects
+                    .iter()
+                    .map(|p| v1::ProjectSummary {
+                        project_id: p.id.clone(),
+                        name: p.name.clone(),
+                    })
+                    .collect(),
+            })),
+        }),
+        Cmd::AgentStart(a) => {
+            if !a.worktree_id.is_empty() {
+                return Err(capability_missing("agent.start.existing_worktree"));
+            }
+            let project = resolve_project(ctx, &a.project_id)?;
+            let n = ctx.names.fetch_add(1, Ordering::SeqCst);
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs());
+            let req = StartRequest {
+                kind: a.kind.clone(),
+                checkout: project.root.clone(),
+                worktree_root: ctx.worktree_root.clone(),
+                name: format!("{}-{stamp:x}{n}", a.kind),
+                base: None,
+            };
+            let mut sup = ctx.sup();
+            let id = sup.start(&req, Instant::now()).map_err(sup_err)?;
+            let view = sup.list().into_iter().find(|v| v.id == id);
+            let worktree = view
+                .as_ref()
+                .map(|v| v.worktree.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            if !a.prompt.is_empty() {
+                if let Some(t) = sup.terminal(&id) {
+                    let _ = t.send_input(format!("{}\r", a.prompt).into_bytes());
+                }
+            }
+            drop(sup);
+            if let Some(ev) = &ctx.events {
+                ev.agent_started(&id, &project.id, &ctx.node_id, &worktree, &a.kind);
+            }
+            Ok(v1::CommandOk {
+                result: Some(Ok_::AgentStart(v1::AgentStartResult {
+                    terminal_id: terminal_id_of(&id),
+                    agent_id: id.as_str().to_string(),
+                    worktree_id: worktree,
+                })),
+            })
+        }
+        Cmd::AgentStop(a) => {
+            let id = AgentId::new(a.agent_id.clone());
+            let events = ctx.sup().stop(&id).map_err(sup_err)?;
+            if let Some(ev) = &ctx.events {
+                ev.supervisor_events(&events, &ctx.sup().list());
+            }
+            Ok(ok_empty())
+        }
+        Cmd::AgentPrompt(a) => {
+            let id = AgentId::new(a.agent_id.clone());
+            let sup = ctx.sup();
+            let t = sup.terminal(&id).ok_or_else(|| {
+                Error::new(ErrorCode::AgentNotFound).with("agent_id", a.agent_id.as_str())
+            })?;
+            t.send_input(format!("{}\r", a.text).into_bytes())
+                .map_err(|_| {
+                    Error::new(ErrorCode::AgentNotFound).with("agent_id", a.agent_id.as_str())
+                })?;
+            Ok(ok_empty())
+        }
+        Cmd::TerminalInput(t) => {
+            with_terminal(ctx, &t.terminal_id, |h| h.send_input(t.data.clone()))?;
+            Ok(ok_empty())
+        }
+        Cmd::TerminalResize(t) => {
+            let cols = u16::try_from(t.cols).map_err(|_| invalid("cols"))?;
+            let rows = u16::try_from(t.rows).map_err(|_| invalid("rows"))?;
+            if cols == 0 || rows == 0 {
+                return Err(invalid("cols"));
+            }
+            with_terminal(ctx, &t.terminal_id, |h| h.resize(Size { cols, rows }))?;
+            Ok(ok_empty())
+        }
+        other => Err(capability_missing(command_name(other))),
+    }
+}
+
+fn with_terminal<R>(
+    ctx: &ControlContext,
+    terminal_id: &str,
+    f: impl FnOnce(&crate::terminal::TerminalHandle) -> io::Result<R>,
+) -> Result<R, Error> {
+    let not_found = || Error::new(ErrorCode::AgentNotFound).with("agent_id", terminal_id);
+    let id = agent_of_terminal(terminal_id).ok_or_else(not_found)?;
+    let sup = ctx.sup();
+    let h = sup.terminal(&id).ok_or_else(not_found)?;
+    f(h).map_err(|_| not_found())
+}
+
+fn command_name(c: &Cmd) -> &'static str {
+    match c {
+        Cmd::ProjectList(_) => "project.list",
+        Cmd::AgentStart(_) => "agent.start",
+        Cmd::AgentStop(_) => "agent.stop",
+        Cmd::AgentPrompt(_) => "agent.prompt",
+        Cmd::AgentSetMode(_) => "agent.set_mode",
+        Cmd::TerminalOpen(_) => "terminal.open",
+        Cmd::TerminalInput(_) => "terminal.input",
+        Cmd::TerminalResize(_) => "terminal.resize",
+        Cmd::TerminalSubscribe(_) => "terminal.subscribe",
+        Cmd::FilesList(_) => "files.list",
+        Cmd::FilesRead(_) => "files.read",
+        Cmd::FilesWrite(_) => "files.write",
+        Cmd::FilesWatch(_) => "files.watch",
+        Cmd::GitDiff(_) => "git.diff",
+        Cmd::GitStatus(_) => "git.status",
+        Cmd::WorktreeCreate(_) => "worktree.create",
+        Cmd::WorktreeRemove(_) => "worktree.remove",
+        Cmd::ApprovalResolve(_) => "approval.resolve",
+        Cmd::MeshPost(_) => "mesh.post",
+        Cmd::TaskUpdate(_) => "task.update",
+        Cmd::NodePolicyGet(_) => "node.policy.get",
+    }
+}
+
+fn response(request_id: &str, r: Result<v1::CommandOk, Error>) -> v1::CommandResponse {
+    v1::CommandResponse {
+        request_id: request_id.to_string(),
+        result: Some(match r {
+            Ok(ok) => Res::Ok(ok),
+            Err(e) => Res::Err(e.to_info()),
+        }),
+    }
+}
+
+/// A running control server. Dropping it stops accepting and removes the socket file.
+pub struct ControlServer {
+    stop: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+    path: PathBuf,
+}
+
+impl ControlServer {
+    pub fn start(path: &Path, ctx: Arc<ControlContext>) -> io::Result<Self> {
+        let listener = local_listen(path)?;
+        listener.set_nonblocking(true)?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop2 = Arc::clone(&stop);
+        let thread = std::thread::Builder::new()
+            .name("agora-control".into())
+            .spawn(move || {
+                while !stop2.load(Ordering::Acquire) {
+                    match listener.accept() {
+                        Ok(stream) => {
+                            let (ctx, stop) = (Arc::clone(&ctx), Arc::clone(&stop2));
+                            let _ = std::thread::Builder::new()
+                                .name("agora-control-conn".into())
+                                .spawn(move || handle_connection(stream, &ctx, &stop));
+                        }
+                        Err(e) if e.kind() == io::ErrorKind::WouldBlock => std::thread::sleep(POLL),
+                        Err(_) => std::thread::sleep(POLL),
+                    }
+                }
+            })?;
+        Ok(Self {
+            stop,
+            thread: Some(thread),
+            path: path.to_path_buf(),
+        })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for ControlServer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}
+
+type SharedWriter = Arc<Mutex<LocalStream>>;
+
+fn send(w: &SharedWriter, stream_id: u32, kind: u8, payload: Vec<u8>) -> io::Result<()> {
+    let frame = Frame {
+        stream_id,
+        kind,
+        seq: None,
+        payload,
+    };
+    let bytes = frame
+        .encode(DEFAULT_MAX_PAYLOAD)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "frame too large"))?;
+    let mut g = w.lock().unwrap_or_else(|e| e.into_inner());
+    g.write_all(&bytes)
+}
+
+fn handle_connection(stream: LocalStream, ctx: &Arc<ControlContext>, stop: &Arc<AtomicBool>) {
+    let Ok(reader_side) = stream.try_clone() else {
+        return;
+    };
+    let _ = reader_side.set_read_timeout(Some(POLL));
+    let mut reader = reader_side;
+    let writer: SharedWriter = Arc::new(Mutex::new(stream));
+    let alive = Arc::new(AtomicBool::new(true));
+    let mut decoder = Decoder::new(DEFAULT_MAX_PAYLOAD);
+    let mut buf = vec![0u8; 16 * 1024];
+    'conn: while !stop.load(Ordering::Acquire) {
+        match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => decoder.push(&buf[..n]),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
+            {
+                continue
+            }
+            Err(_) => break,
+        }
+        loop {
+            match decoder.next_frame() {
+                Ok(Some(frame)) => {
+                    if frame.kind == KIND_REQUEST {
+                        handle_request(&frame, ctx, &writer, &alive, stop);
+                    }
+                }
+                Ok(None) => break,
+                Err(_) => break 'conn,
+            }
+        }
+    }
+    alive.store(false, Ordering::Release);
+    let _ = writer.lock().map(|w| w.shutdown());
+}
+
+fn handle_request(
+    frame: &Frame,
+    ctx: &Arc<ControlContext>,
+    writer: &SharedWriter,
+    alive: &Arc<AtomicBool>,
+    stop: &Arc<AtomicBool>,
+) {
+    let Ok(req) = v1::CommandRequest::decode(frame.payload.as_slice()) else {
+        return;
+    };
+    if !req.idempotency_key.is_empty() {
+        if let Some(mut prev) = ctx.remembered(&req.idempotency_key) {
+            // Same result, addressed to this attempt: the client matches responses by request id.
+            prev.request_id.clone_from(&req.request_id);
+            let _ = send(writer, STREAM_COMMANDS, KIND_RESPONSE, prev.encode_to_vec());
+            return;
+        }
+    }
+    let Some(cmd) = &req.command else {
+        let resp = response(&req.request_id, Err(invalid("command")));
+        let _ = send(writer, STREAM_COMMANDS, KIND_RESPONSE, resp.encode_to_vec());
+        return;
+    };
+
+    // Terminal subscriptions need the stream the request arrived on.
+    if let Cmd::TerminalSubscribe(sub) = cmd {
+        let outcome = subscribe(ctx, sub, frame.stream_id);
+        let resp = response(
+            &req.request_id,
+            outcome.as_ref().map(|_| ok_empty()).map_err(Clone::clone),
+        );
+        let _ = send(writer, STREAM_COMMANDS, KIND_RESPONSE, resp.encode_to_vec());
+        if let Ok((agent, snap, sub)) = outcome {
+            let (ctx, writer, alive, stop) = (
+                Arc::clone(ctx),
+                Arc::clone(writer),
+                Arc::clone(alive),
+                Arc::clone(stop),
+            );
+            let stream_id = frame.stream_id;
+            let _ = std::thread::Builder::new()
+                .name("agora-control-term".into())
+                .spawn(move || pump(&ctx, &writer, stream_id, &agent, &snap, &sub, &alive, &stop));
+        }
+        return;
+    }
+
+    let resp = response(&req.request_id, execute(ctx, cmd));
+    if !req.idempotency_key.is_empty() {
+        ctx.remember(&req.idempotency_key, &resp);
+    }
+    let _ = send(writer, STREAM_COMMANDS, KIND_RESPONSE, resp.encode_to_vec());
+}
+
+fn subscribe(
+    ctx: &ControlContext,
+    sub: &v1::TerminalSubscribe,
+    stream_id: u32,
+) -> Result<(AgentId, Snapshot, OutputSubscription), Error> {
+    if stream_id < agora_protocol::frame::FIRST_DYNAMIC_STREAM {
+        return Err(invalid("stream_id"));
+    }
+    if !sub.format.is_empty() && sub.format != "terminal.raw" {
+        return Err(capability_missing(&sub.format));
+    }
+    let id = agent_of_terminal(&sub.terminal_id).ok_or_else(|| {
+        Error::new(ErrorCode::AgentNotFound).with("agent_id", sub.terminal_id.as_str())
+    })?;
+    let guard = ctx.sup();
+    let handle = guard.terminal(&id).ok_or_else(|| {
+        Error::new(ErrorCode::AgentNotFound).with("agent_id", sub.terminal_id.as_str())
+    })?;
+    let (snap, subscription) = handle.subscribe();
+    drop(guard);
+    Ok((id, snap, subscription))
+}
+
+fn exit_payload(st: &agora_platform::ExitStatus) -> Vec<u8> {
+    let code = st
+        .code
+        .or_else(|| st.signal.map(|s| -s))
+        .unwrap_or(i32::MIN);
+    code.to_le_bytes().to_vec()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn pump(
+    ctx: &ControlContext,
+    writer: &SharedWriter,
+    stream: u32,
+    agent: &AgentId,
+    snap: &Snapshot,
+    sub: &OutputSubscription,
+    alive: &AtomicBool,
+    stop: &AtomicBool,
+) {
+    if send(writer, stream, KIND_TERM_SNAPSHOT, snap.to_ansi()).is_err() {
+        return;
+    }
+    while alive.load(Ordering::Acquire) && !stop.load(Ordering::Acquire) {
+        let sent = match sub.recv_timeout(POLL) {
+            Ok(Output::Data(b)) => send(writer, stream, KIND_TERM_DATA, b.to_vec()),
+            Ok(Output::Resize(s)) => {
+                let mut p = s.cols.to_le_bytes().to_vec();
+                p.extend_from_slice(&s.rows.to_le_bytes());
+                send(writer, stream, KIND_TERM_RESIZE, p)
+            }
+            Ok(Output::Exited(st)) => {
+                let _ = send(writer, stream, KIND_TERM_EXIT, exit_payload(&st));
+                return;
+            }
+            Ok(Output::Lagged) => {
+                let snap = ctx.sup().terminal(agent).map(|h| h.resync(sub));
+                match snap {
+                    Some(s) => send(writer, stream, KIND_TERM_SNAPSHOT, s.to_ansi()),
+                    None => return,
+                }
+            }
+            Err(RecvTimeoutError::Timeout) => Ok(()),
+            Err(RecvTimeoutError::Disconnected) => return,
+        };
+        if sent.is_err() {
+            return;
+        }
+    }
+}
+
+/// A blocking client for the control socket (used by the CLI and tests).
+pub struct Client {
+    stream: LocalStream,
+    decoder: Decoder,
+    next_request: u64,
+    /// Frames that arrived while waiting for a response (terminal output).
+    pub pending: VecDeque<Frame>,
+}
+
+impl Client {
+    pub fn connect(path: &Path) -> io::Result<Self> {
+        let stream = local_connect(path)?;
+        Ok(Self {
+            stream,
+            decoder: Decoder::new(DEFAULT_MAX_PAYLOAD),
+            next_request: 1,
+            pending: VecDeque::new(),
+        })
+    }
+
+    /// A second handle for writing from another thread (for example forwarding keystrokes).
+    pub fn writer(&self) -> io::Result<RequestWriter> {
+        Ok(RequestWriter {
+            stream: Arc::new(Mutex::new(self.stream.try_clone()?)),
+            next_request: Arc::new(AtomicU64::new(1_000_000)),
+        })
+    }
+
+    /// Send a command on the commands stream and wait for its response.
+    pub fn call(&mut self, cmd: Cmd) -> io::Result<Result<v1::CommandOk, v1::ErrorInfo>> {
+        self.call_on(STREAM_COMMANDS, cmd)
+    }
+
+    /// Like [`call`](Self::call), sending the request on `stream_id` (opens a terminal stream for
+    /// `TerminalSubscribe`).
+    pub fn call_on(
+        &mut self,
+        stream_id: u32,
+        cmd: Cmd,
+    ) -> io::Result<Result<v1::CommandOk, v1::ErrorInfo>> {
+        self.call_full(stream_id, "", cmd)
+    }
+
+    /// Like [`call`](Self::call) with an idempotency key: a retry with the same key gets the first response
+    /// and does not repeat the effect.
+    pub fn call_with_key(
+        &mut self,
+        key: &str,
+        cmd: Cmd,
+    ) -> io::Result<Result<v1::CommandOk, v1::ErrorInfo>> {
+        self.call_full(STREAM_COMMANDS, key, cmd)
+    }
+
+    fn call_full(
+        &mut self,
+        stream_id: u32,
+        key: &str,
+        cmd: Cmd,
+    ) -> io::Result<Result<v1::CommandOk, v1::ErrorInfo>> {
+        let id = self.next_request;
+        self.next_request += 1;
+        let req = v1::CommandRequest {
+            request_id: id.to_string(),
+            idempotency_key: key.to_string(),
+            command: Some(cmd),
+        };
+        self.send_request(stream_id, &req)?;
+        loop {
+            // From the wire, not `pending`: frames set aside below must not be read back in this loop.
+            let frame = self.read_wire_frame(None)?.ok_or_else(|| {
+                io::Error::new(io::ErrorKind::UnexpectedEof, "node closed the connection")
+            })?;
+            if frame.stream_id == STREAM_COMMANDS && frame.kind == KIND_RESPONSE {
+                let resp = v1::CommandResponse::decode(frame.payload.as_slice())
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+                if resp.request_id == id.to_string() {
+                    return match resp.result {
+                        Some(Res::Ok(ok)) => Ok(Ok(ok)),
+                        Some(Res::Err(e)) => Ok(Err(e)),
+                        None => Err(io::Error::new(io::ErrorKind::InvalidData, "empty response")),
+                    };
+                }
+            } else {
+                self.pending.push_back(frame);
+            }
+        }
+    }
+
+    fn send_request(&mut self, stream_id: u32, req: &v1::CommandRequest) -> io::Result<()> {
+        let bytes = Frame {
+            stream_id,
+            kind: KIND_REQUEST,
+            seq: None,
+            payload: req.encode_to_vec(),
+        }
+        .encode(DEFAULT_MAX_PAYLOAD)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "request too large"))?;
+        self.stream.write_all(&bytes)
+    }
+
+    /// Next frame: from the pending queue, else from the socket. `Ok(None)` when the timeout passed;
+    /// `Err(UnexpectedEof)` when the node closed the connection.
+    pub fn read_frame(&mut self, timeout: Option<Duration>) -> io::Result<Option<Frame>> {
+        if let Some(f) = self.pending.pop_front() {
+            return Ok(Some(f));
+        }
+        self.read_wire_frame(timeout)
+    }
+
+    /// Next frame from the socket only (never from `pending`).
+    fn read_wire_frame(&mut self, timeout: Option<Duration>) -> io::Result<Option<Frame>> {
+        self.stream.set_read_timeout(timeout)?;
+        let mut buf = vec![0u8; 16 * 1024];
+        loop {
+            match self.decoder.next_frame() {
+                Ok(Some(f)) => return Ok(Some(f)),
+                Ok(None) => {}
+                Err(e) => return Err(io::Error::new(io::ErrorKind::InvalidData, e.to_string())),
+            }
+            match self.stream.read(&mut buf) {
+                Ok(0) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "node closed the connection",
+                    ))
+                }
+                Ok(n) => self.decoder.push(&buf[..n]),
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    return Ok(None)
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+}
+
+/// Fire-and-forget request sender for a [`Client`] connection (responses are read by the client).
+pub struct RequestWriter {
+    stream: Arc<Mutex<LocalStream>>,
+    next_request: Arc<AtomicU64>,
+}
+
+impl RequestWriter {
+    pub fn send(&self, cmd: Cmd) -> io::Result<()> {
+        let id = self.next_request.fetch_add(1, Ordering::SeqCst);
+        let req = v1::CommandRequest {
+            request_id: id.to_string(),
+            idempotency_key: String::new(),
+            command: Some(cmd),
+        };
+        let bytes = Frame {
+            stream_id: STREAM_COMMANDS,
+            kind: KIND_REQUEST,
+            seq: None,
+            payload: req.encode_to_vec(),
+        }
+        .encode(DEFAULT_MAX_PAYLOAD)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "request too large"))?;
+        let mut g = self.stream.lock().unwrap_or_else(|e| e.into_inner());
+        g.write_all(&bytes)
+    }
+}

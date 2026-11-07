@@ -65,6 +65,20 @@ Initial command set: `project.list`, `agent.start`, `agent.stop`, `agent.prompt`
 `files.write`, `files.watch`, `git.diff`, `git.status`, `worktree.create`, `worktree.remove`,
 `approval.resolve` (signed, ADR-0020), `mesh.post`, `task.update`, `node.policy.get`.
 
+### Node-local control socket
+
+A node serves the same commands on a local socket (owner-only; `agora node run`, default `$AGORA_HOME/node.sock`)
+so it can be driven with no hub. Frames are the envelope above. `CommandRequest` goes on stream 1 with kind 0 and
+`CommandResponse` comes back on stream 1 with kind 1, matched by `request_id`; a retry with the same
+`idempotency_key` gets the stored response (addressed to the retry) and repeats nothing. A terminal stream is
+opened by sending `TerminalSubscribe` on a dynamic stream id (3+) chosen by the client. After the response the
+node writes that terminal's frames on that stream: kind 1 snapshot (ANSI that repaints the screen), kind 0 raw
+output, kind 2 resize (cols, rows as u16 LE), kind 3 exit (i32 LE; negative = signal). A client that falls behind
+gets a fresh snapshot instead of the dropped output; it never slows the terminal. Input and resize are ordinary
+commands. Terminal ids are `t-<agent id>` (one terminal per agent). Implemented commands: `project.list`,
+`agent.start`, `agent.stop`, `agent.prompt`, `terminal.input`, `terminal.resize`, `terminal.subscribe`; the rest
+answer `protocol.capability_missing`. `agent.list` is proposed in ADR-0025.
+
 ## 5. Client state model
 
 1. Client connects and receives `Snapshot { as_of_seq, projects, agents, terminals, approvals, ... }`.
