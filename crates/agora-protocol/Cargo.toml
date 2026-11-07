@@ -10,12 +10,13 @@ workspace = true
 [dependencies]
 # Generated message types and the wire codec (ADR-0009, ADR-0010).
 prost = "0.14"
+# JSON-RPC envelope for the adapter protocol (ADR-0010).
+serde_json = "1"
 
 [dev-dependencies]
 # Reflection + proto3 JSON mapping for golden fixtures in both encodings (ADR-0010).
 prost-reflect = { version = "0.16", features = ["serde"] }
 serde = "1"
-serde_json = "1"
 
 [build-dependencies]
 prost = "0.14"

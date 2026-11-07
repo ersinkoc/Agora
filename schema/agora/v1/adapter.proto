@@ -1,0 +1,167 @@
+syntax = "proto3";
+
+package agora.v1;
+
+import "agora/v1/common.proto";
+
+// Adapter protocol (L3) payloads, docs/specs/adapter-protocol.md. They travel as the `params` and `result`
+// of JSON-RPC 2.0 messages over newline-delimited stdio, encoded with the proto3 JSON mapping (ADR-0010).
+
+// ---- lifecycle ----
+
+// node -> adapter: method "initialize"
+message InitializeParams {
+  uint32 protocol_generation = 1;
+  repeated string node_capabilities = 2;
+  string locale = 3;
+}
+
+// adapter -> node: result of "initialize"
+message InitializeResult {
+  string adapter_name = 1;
+  string version = 2;
+  string agent_kind = 3;
+  // chat, terminal, diff, approvals, plan, resume, usage, cancel, mesh.deliver
+  repeated string capabilities = 4;
+}
+
+message McpServer {
+  string name = 1;
+  string command = 2;
+  repeated string args = 3;
+}
+
+// node -> adapter: method "session/start"
+message SessionStartParams {
+  string project_root = 1;
+  string worktree = 2;
+  map<string, string> env = 3;
+  repeated McpServer mcp_servers = 4;
+  optional string resume_session_id = 5;
+}
+
+// adapter -> node: result of "session/start"
+message SessionStartResult {
+  string session_id = 1;
+}
+
+// node -> adapter: method "session/stop"
+message SessionStopParams {
+  string session_id = 1;
+  string reason = 2;
+}
+
+// ---- node -> adapter ----
+
+enum InputSource {
+  INPUT_SOURCE_UNSPECIFIED = 0;
+  INPUT_SOURCE_USER = 1;
+  INPUT_SOURCE_MESH = 2;
+}
+
+// method "session/prompt"
+message SessionPromptParams {
+  string session_id = 1;
+  string text = 2;
+  InputSource source = 3;
+}
+
+// method "session/cancel"
+message SessionCancelParams {
+  string session_id = 1;
+}
+
+// method "approval/resolve": carries the decision the node has already verified (ADR-0020).
+message ApprovalResolveParams {
+  string session_id = 1;
+  string approval_id = 2;
+  bool approved = 3;
+}
+
+// method "mesh/deliver"
+message MeshDeliverParams {
+  string session_id = 1;
+  string message_id = 2;
+  string from_agent_id = 3;
+  string body = 4;
+}
+
+// ---- adapter -> node ----
+
+// method "state/update" (notification)
+message StateUpdateParams {
+  string session_id = 1;
+  AgentState state = 2;
+  // Optional detail for diagnostics; never shown as UI text.
+  string message = 3;
+}
+
+message TextItem {
+  string text = 1;
+}
+
+message ToolCallItem {
+  string tool = 1;
+  // Tool arguments as a JSON document.
+  string arguments_json = 2;
+}
+
+message PlanItem {
+  repeated string steps = 1;
+}
+
+message DiffItem {
+  string path = 1;
+  string unified_diff = 2;
+}
+
+// method "chat/append" (notification): one structured transcript item.
+message ChatAppendParams {
+  string session_id = 1;
+  oneof item {
+    TextItem text = 2;
+    ToolCallItem tool_call = 3;
+    PlanItem plan = 4;
+    DiffItem diff = 5;
+  }
+}
+
+// method "approval/request" (notification): the node routes it to the approvals queue and answers later
+// with "approval/resolve".
+message ApprovalRequestParams {
+  string session_id = 1;
+  string approval_id = 2;
+  string action = 3;
+  string detail = 4;
+}
+
+// method "usage/report" (notification)
+message UsageReportParams {
+  string session_id = 1;
+  string model = 2;
+  uint64 input_tokens = 3;
+  uint64 output_tokens = 4;
+  // Reported cost in micro-units of `currency`, when the agent reports one.
+  optional uint64 cost_micros = 5;
+  string currency = 6;
+}
+
+// method "session/reported" (notification): the agent's own session id, for resume.
+message SessionReportedParams {
+  string session_id = 1;
+  string native_session_id = 2;
+}
+
+enum LogLevel {
+  LOG_LEVEL_UNSPECIFIED = 0;
+  LOG_LEVEL_DEBUG = 1;
+  LOG_LEVEL_INFO = 2;
+  LOG_LEVEL_WARN = 3;
+  LOG_LEVEL_ERROR = 4;
+}
+
+// method "log" (notification): a diagnostic line, never user-facing text.
+message LogParams {
+  LogLevel level = 1;
+  string message = 2;
+}

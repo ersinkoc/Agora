@@ -21,6 +21,12 @@ enum, or enum value fails the build; adding new ones is fine. Run locally:
 never edited, only added. `cargo test -p agora-protocol --test golden` checks them; for new messages run it with
 `AGORA_WRITE_FIXTURES=1` (existing files are never overwritten).
 
+## Adapter conformance
+
+`schema/fixtures/adapter/minimal.transcript.json` is a JSON-RPC transcript every L3 adapter must be able to play.
+`adapters/examples/minimal-python/` is a standard-library-only adapter that passes it; the test lives in
+`crates/agora-protocol/tests/adapter_conformance.rs`.
+
 ## Generating code
 
 - **Rust:** automatic. `crates/agora-protocol/build.rs` compiles the schema with `protox`, a pure-Rust

@@ -1,0 +1,17 @@
+{
+  "projectRoot": "x",
+  "worktree": "x",
+  "env": {
+    "x": "x"
+  },
+  "mcpServers": [
+    {
+      "name": "x",
+      "command": "x",
+      "args": [
+        "x"
+      ]
+    }
+  ],
+  "resumeSessionId": "x"
+}

@@ -1,0 +1,36 @@
+[
+  {
+    "send": {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolGeneration": 1, "nodeCapabilities": ["mesh.deliver"], "locale": "en"}},
+    "recv": [{"jsonrpc": "2.0", "id": 1, "result": {"adapterName": "minimal-python", "version": "0.1.0", "agentKind": "example", "capabilities": ["chat", "cancel"]}}]
+  },
+  {
+    "send": {"jsonrpc": "2.0", "method": "from/the/future", "params": {"anything": true}},
+    "recv": []
+  },
+  {
+    "send": {"jsonrpc": "2.0", "id": 2, "method": "session/start", "params": {"projectRoot": "/p", "worktree": "/p/wt", "env": {"A": "1"}, "mcpServers": [{"name": "mesh", "command": "agora", "args": ["mcp"]}]}},
+    "recv": [
+      {"jsonrpc": "2.0", "id": 2, "result": {"sessionId": "s-1"}},
+      {"jsonrpc": "2.0", "method": "state/update", "params": {"sessionId": "s-1", "state": "AGENT_STATE_IDLE"}}
+    ]
+  },
+  {
+    "send": {"jsonrpc": "2.0", "id": 3, "method": "session/prompt", "params": {"sessionId": "s-1", "text": "hi", "source": "INPUT_SOURCE_USER"}},
+    "recv": [
+      {"jsonrpc": "2.0", "id": 3, "result": {}},
+      {"jsonrpc": "2.0", "method": "chat/append", "params": {"sessionId": "s-1", "text": {"text": "echo: hi"}}}
+    ]
+  },
+  {
+    "send": {"jsonrpc": "2.0", "id": 4, "method": "unknown/request", "params": {}},
+    "recv": [{"jsonrpc": "2.0", "id": 4, "error": {"code": -32601, "message": "method not found"}}]
+  },
+  {
+    "send": {"jsonrpc": "2.0", "id": 5, "method": "session/stop", "params": {"sessionId": "s-1", "reason": "user"}},
+    "recv": [{"jsonrpc": "2.0", "id": 5, "result": {}}]
+  },
+  {
+    "send": {"jsonrpc": "2.0", "id": 6, "method": "shutdown", "params": {}},
+    "recv": [{"jsonrpc": "2.0", "id": 6, "result": {}}]
+  }
+]
