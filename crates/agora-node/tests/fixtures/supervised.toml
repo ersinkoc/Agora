@@ -1,0 +1,14 @@
+# Slow enough that a loaded CI runner still samples every screen at least once.
+name = "supervised"
+
+[[frame]]
+text = "Fake Agent\n\n* Thinking... (esc to interrupt)"
+delay_ms = 800
+
+[[frame]]
+text = "Fake Agent\n\nAllow Bash(rm -rf build)?\n  1. Yes\n  2. No"
+delay_ms = 800
+
+[[frame]]
+text = "Fake Agent\n\nDone.\n\n> "
+delay_ms = 400
