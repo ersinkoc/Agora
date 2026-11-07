@@ -87,6 +87,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "agora-schema-check"
+version = "0.0.0"
+dependencies = [
+ "prost-types",
+ "protox",
+]
+
+[[package]]
 name = "agora-tui"
 version = "0.0.0"
 dependencies = [
