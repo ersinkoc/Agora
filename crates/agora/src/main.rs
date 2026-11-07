@@ -112,7 +112,7 @@ fn socket_path(o: &Opts) -> PathBuf {
 }
 
 fn main() -> ExitCode {
-    let say = Say(Catalog::english());
+    let say = Say(Catalog::for_locale(&agora_i18n::catalog::locale_from_env()));
     let args: Vec<String> = std::env::args().skip(1).collect();
     let words: Vec<&str> = args
         .iter()

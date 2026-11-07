@@ -82,6 +82,8 @@ fn cli(s: &Setup, args: &[&str]) -> (i32, String, String) {
     let out = Command::new(AGORA)
         .args(args)
         .env("AGORA_HOME", &s.home)
+        // Text assertions below are English whatever the machine running the tests is set to.
+        .env("AGORA_LANG", "en")
         .output()
         .expect("run agora");
     (
@@ -123,6 +125,7 @@ fn start_attach_stop_from_the_command_line() {
     ]);
     cfg.env
         .push(("AGORA_HOME".into(), s.home.display().to_string()));
+    cfg.env.push(("AGORA_LANG".into(), "en".into()));
     let mut attach = spawn(&cfg).expect("spawn attach");
     attach.write_input(b"echo attached-$((6*7))\r").unwrap();
     let mut seen = String::new();

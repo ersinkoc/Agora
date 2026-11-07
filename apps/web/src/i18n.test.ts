@@ -1,6 +1,6 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { t } from './i18n';
+import { pickLanguage, setLanguage, t } from './i18n';
 
 // Every key the UI asks for must exist in locales/en/web.ftl (a missing key would render as its id).
 function sources(dir: string): string[] {
@@ -24,5 +24,21 @@ describe('i18n', () => {
   it('pluralizes', () => {
     expect(t('machines-online', { count: 1 })).toBe('1 machine online');
     expect(t('machines-online', { count: 2 })).toBe('2 machines online');
+  });
+  it('speaks Turkish when asked and falls back to English per message', () => {
+    expect(pickLanguage('tr-TR')).toBe('tr');
+    expect(pickLanguage('de')).toBe('en');
+    expect(pickLanguage(undefined)).toBe('en');
+    setLanguage('tr');
+    expect(t('state-needs-you')).toBe('Sizi bekliyor');
+    expect(t('machines-online', { count: 2 })).toBe('2 makine çevrimiçi');
+    setLanguage('en');
+    expect(t('state-needs-you')).toBe('Needs you');
+  });
+  it('has a Turkish message for every English one', () => {
+    const ids = (src: string) => [...src.matchAll(/^([a-z0-9-]+) =/gm)].map((m) => m[1]);
+    const en = ids(readFileSync('../../locales/en/web.ftl', 'utf8'));
+    const tr = new Set(ids(readFileSync('../../locales/tr/web.ftl', 'utf8')));
+    expect(en.filter((k) => !tr.has(k as string))).toEqual([]);
   });
 });
