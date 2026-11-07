@@ -1,6 +1,7 @@
 # 0029. Command routing and terminal relay through the hub
-Status: Proposed
+Status: Accepted
 Date: 2026-11-08
+Accepted: 2026-11-08 (maintainer's explicit approval in chat)
 
 ## Context
 A client (web, TUI) is connected to the hub and sees every node's agents (ADR-0027). To act on one (start or stop an agent,
