@@ -55,3 +55,14 @@ device-intro = Machines only accept an answer from a device their owner trusted.
 device-name = Device name
 device-key = Device key
 device-link = This device
+
+machines-title = Your machines
+machines-empty = No machines connected yet.
+machine-online = Online
+machine-offline = Offline
+machine-agents =
+    { $count ->
+        [one] { $count } agent running
+       *[other] { $count } agents running
+    }
+palette-go-machines = Show my machines

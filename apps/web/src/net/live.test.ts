@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { agora } from '../gen/agora.js';
 import { decodeFrame, encodeFrame, EVENT_KIND, STREAM_CLOSE, STREAM_COMMANDS, STREAM_EVENTS } from './frame';
 import { connectLive, type LinkState, type Socket } from './live';
-import { applyEvent, emptyView, fromSnapshot, machinesOnline, tiles, type View } from './view';
+import { applyEvent, emptyView, fromSnapshot, machines, machinesOnline, tiles, type View } from './view';
 
 const v1 = agora.v1;
 
@@ -40,6 +40,15 @@ describe('view', () => {
     applyEvent(v, 5, e);
     applyEvent(v, 5, ev('n', 2, { agentExited: { agentId: 'a', exitCode: 0 } }));
     expect(tiles(v)[0]?.state).toBe('idle');
+  });
+
+  it('lists machines, online first, and follows their resources', () => {
+    const v = emptyView();
+    applyEvent(v, 1, ev('b', 1, { nodeOnline: { nodeId: 'b', hostname: 'Build box', os: 'linux' } }));
+    applyEvent(v, 2, ev('a', 1, { nodeOnline: { nodeId: 'a', hostname: 'Alpha', os: 'macos' } }));
+    applyEvent(v, 3, ev('hub', 1, { nodeOffline: { nodeId: 'a' } }));
+    applyEvent(v, 4, ev('b', 2, { nodeResources: { nodeId: 'b', agentsRunning: 3 } }));
+    expect(machines(v).map((m) => [m.name, m.online, m.agentsRunning])).toEqual([['Build box', true, 3], ['Alpha', false, 0]]);
   });
 
   it('starts from a snapshot', () => {

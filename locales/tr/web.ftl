@@ -55,3 +55,14 @@ device-intro = Makineler yalnızca sahibinin güvendiği cihazların yanıtını
 device-name = Cihaz adı
 device-key = Cihaz anahtarı
 device-link = Bu cihaz
+
+machines-title = Makineleriniz
+machines-empty = Henüz bağlı makine yok.
+machine-online = Çevrimiçi
+machine-offline = Çevrimdışı
+machine-agents =
+    { $count ->
+        [one] { $count } ajan çalışıyor
+       *[other] { $count } ajan çalışıyor
+    }
+palette-go-machines = Makinelerimi göster

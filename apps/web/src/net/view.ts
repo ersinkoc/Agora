@@ -13,7 +13,7 @@ export function num(x: Num): number {
   return typeof x === 'number' ? x : Number(x.toString());
 }
 
-export interface NodeV { hostname: string; os: string; online: boolean; lastEventMs: number }
+export interface NodeV { hostname: string; os: string; online: boolean; lastEventMs: number; agentsRunning: number }
 export interface WorktreeV { checkoutId: string; path: string; branch: string; filesChanged: number }
 export interface AgentV {
   nodeId: string; worktreeId: string; kind: string; state: number; reported: boolean; running: boolean;
@@ -39,6 +39,7 @@ export function fromSnapshot(s: agora.v1.Snapshot.$Properties): View {
   for (const n of s.nodes ?? []) {
     v.nodes.set(n.nodeId ?? '', {
       hostname: n.hostname ?? '', os: n.os ?? '', online: !!n.online, lastEventMs: num(n.lastEventMs),
+      agentsRunning: n.agentsRunning ?? 0,
     });
   }
   for (const w of s.worktrees ?? []) {
@@ -74,12 +75,17 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
   switch (ev.body) {
     case 'nodeOnline': {
       const b = e.nodeOnline;
-      v.nodes.set(b.nodeId, { hostname: b.hostname ?? '', os: b.os ?? '', online: true, lastEventMs: at });
+      v.nodes.set(b.nodeId, { hostname: b.hostname ?? '', os: b.os ?? '', online: true, lastEventMs: at, agentsRunning: v.nodes.get(b.nodeId)?.agentsRunning ?? 0 });
       break;
     }
     case 'nodeOffline': {
       const n = v.nodes.get(e.nodeOffline.nodeId);
       if (n) n.online = false;
+      break;
+    }
+    case 'nodeResources': {
+      const n = v.nodes.get(e.nodeResources.nodeId);
+      if (n) n.agentsRunning = e.nodeResources.agentsRunning ?? 0;
       break;
     }
     case 'worktreeCreated': {
@@ -197,4 +203,13 @@ export function approvalList(v: View): ApprovalModel[] {
       };
     })
     .sort((a, b) => a.expiresAtMs - b.expiresAtMs);
+}
+
+export interface MachineModel { id: string; name: string; os: string; online: boolean; agentsRunning: number; lastSeenMs: number }
+
+// Online machines first, then by name.
+export function machines(v: View): MachineModel[] {
+  return [...v.nodes.entries()]
+    .map(([id, n]) => ({ id, name: n.hostname || id, os: n.os, online: n.online, agentsRunning: n.agentsRunning, lastSeenMs: n.lastEventMs }))
+    .sort((a, b) => Number(b.online) - Number(a.online) || a.name.localeCompare(b.name));
 }
