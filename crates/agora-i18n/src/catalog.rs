@@ -93,6 +93,7 @@ impl Catalog {
         c.add_source(include_str!("../../../locales/en/main.ftl"));
         c.add_source(include_str!("../../../locales/en/errors.ftl"));
         c.add_source(include_str!("../../../locales/en/cli.ftl"));
+        c.add_source(include_str!("../../../locales/en/notify.ftl"));
         c
     }
 
