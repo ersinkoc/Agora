@@ -83,6 +83,13 @@ the node's own idea of the ack) → `ResumeOk { from_seq }` (the hub's record de
 A gap from the hub rewinds to `expected`; a `from_seq` older than the buffer keeps (dropped by the size cap) is reported as
 `Stale` so the hub resynchronizes from a snapshot. The hub's ack trims the buffer.
 
+Hub core (`agora-hub::hub`): store, view and subscriber fan-out are one step under one lock, so a subscriber that takes its
+snapshot (or backlog) and registers for live events together sees every event once, in order, even while several nodes
+ingest. A subscriber that falls more than 1024 events behind is dropped, never waited for; it reconnects with the last
+position it saw and gets the backlog, or a snapshot when that position is ahead of the log (a hub restored from an older
+backup). When a node's connection ends without a goodbye the hub records `NodeOffline` itself as producer `hub` (a name no
+node certificate can carry), in the same log, so live and rebuilt views agree.
+
 Initial event families:
 
 | Family | Examples |

@@ -30,6 +30,8 @@ impl From<rcgen::Error> for CaError {
 /// Validity of an issued device certificate. Short-lived on purpose; renewal is automatic while enrolled.
 pub const DEVICE_CERT_DAYS: i64 = 90;
 const CA_DAYS: i64 = 3650;
+/// Producer id of events the hub records itself.
+pub const RESERVED_HUB_ID: &str = "hub";
 
 pub struct Ca {
     cert_pem: String,
@@ -93,7 +95,12 @@ impl Ca {
 
     /// Signs a node's CSR as `node_id`, valid for client authentication only.
     pub fn issue_node(&self, node_id: &str, csr_pem: &str) -> Result<IssuedCert, CaError> {
-        if node_id.is_empty() || node_id.len() > 64 || !node_id.chars().all(valid_id_char) {
+        // "hub" is the producer id of facts the hub itself records (a node going offline); no node may use it.
+        if node_id == RESERVED_HUB_ID
+            || node_id.is_empty()
+            || node_id.len() > 64
+            || !node_id.chars().all(valid_id_char)
+        {
             return Err(CaError("node id must be 1-64 of [A-Za-z0-9._-]".into()));
         }
         let mut csr = CertificateSigningRequestParams::from_pem(csr_pem)?;
@@ -207,7 +214,7 @@ mod tests {
     fn rejects_bad_node_ids_and_garbage_requests() {
         let ca = Ca::generate("ca").unwrap();
         let (_, csr) = new_device_request().unwrap();
-        for bad in ["", "has space", "a/b", &"x".repeat(65)] {
+        for bad in ["", "has space", "a/b", "hub", &"x".repeat(65)] {
             assert!(ca.issue_node(bad, &csr).is_err(), "{bad:?}");
         }
         assert!(ca.issue_node("ok", "not a csr").is_err());
