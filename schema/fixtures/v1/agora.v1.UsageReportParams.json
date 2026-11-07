@@ -1,0 +1,8 @@
+{
+  "sessionId": "x",
+  "model": "x",
+  "inputTokens": "1",
+  "outputTokens": "1",
+  "costMicros": "1",
+  "currency": "x"
+}

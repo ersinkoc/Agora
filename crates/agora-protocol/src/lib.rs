@@ -7,6 +7,7 @@ pub const FILE_DESCRIPTOR_SET: &[u8] =
 pub mod error;
 pub mod frame;
 pub mod handshake;
+pub mod jsonrpc;
 
 pub use error::{Error, ErrorCode, ParamValue};
 pub use frame::{Decoder, Frame};
