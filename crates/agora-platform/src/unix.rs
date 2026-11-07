@@ -49,6 +49,62 @@ fn set_limit(resource: u32, value: u64) -> io::Result<()> {
     cvt(unsafe { libc::setrlimit(resource as _, &lim) }).map(|_| ())
 }
 
+pub(crate) fn local_listen(path: &std::path::Path) -> io::Result<crate::LocalListener> {
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::net::{UnixListener, UnixStream};
+    // A socket file nobody serves is left over from a crash: replace it. A live one is an error.
+    if path.exists() {
+        match UnixStream::connect(path) {
+            Ok(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::AddrInUse,
+                    "socket is in use by another process",
+                ))
+            }
+            Err(_) => std::fs::remove_file(path)?,
+        }
+    }
+    let inner = UnixListener::bind(path)?;
+    // Only the owner may connect: the control socket can start and stop agents.
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    Ok(crate::LocalListener {
+        inner,
+        path: path.to_path_buf(),
+    })
+}
+
+pub(crate) fn local_connect(path: &std::path::Path) -> io::Result<crate::LocalStream> {
+    Ok(crate::LocalStream {
+        inner: std::os::unix::net::UnixStream::connect(path)?,
+    })
+}
+
+pub(crate) fn enable_raw_mode() -> io::Result<crate::RawMode> {
+    // SAFETY: an all-zero termios is a valid buffer for tcgetattr to fill.
+    let mut saved: libc::termios = unsafe { std::mem::zeroed() };
+    // SAFETY: fd 0 is stdin; `saved` is a valid out-pointer.
+    cvt(unsafe { libc::tcgetattr(0, &mut saved) })?;
+    let mut raw = saved;
+    // SAFETY: `raw` is a valid termios.
+    unsafe { libc::cfmakeraw(&mut raw) };
+    // SAFETY: fd 0 is stdin; `raw` is a valid termios.
+    cvt(unsafe { libc::tcsetattr(0, libc::TCSANOW, &raw) })?;
+    Ok(crate::RawMode { saved })
+}
+
+pub(crate) fn restore_mode(saved: &libc::termios) {
+    // SAFETY: restoring settings previously read from the same fd.
+    unsafe { libc::tcsetattr(0, libc::TCSANOW, saved) };
+}
+
+pub(crate) fn terminal_size() -> Option<(u16, u16)> {
+    // SAFETY: an all-zero winsize is a valid out-buffer.
+    let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
+    // SAFETY: fd 1 is stdout; `ws` is a valid out-pointer.
+    let r = unsafe { libc::ioctl(1, libc::TIOCGWINSZ as _, &mut ws) };
+    (r == 0 && ws.ws_col > 0 && ws.ws_row > 0).then_some((ws.ws_col, ws.ws_row))
+}
+
 fn status(s: std::process::ExitStatus) -> ExitStatus {
     ExitStatus {
         code: s.code(),
@@ -274,6 +330,75 @@ mod tests {
         cfg.rows = 17;
         let p = spawn(&cfg).expect("spawn");
         assert!(read_until(&*p, "17 91").contains("17 91"));
+    }
+
+    fn sock_path(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("agora-sock-{}-{name}", std::process::id()))
+    }
+
+    #[test]
+    fn local_sockets_carry_bytes_both_ways_and_are_owner_only() {
+        use std::io::{Read, Write};
+        use std::os::unix::fs::PermissionsExt;
+        let path = sock_path("rt");
+        let listener = crate::local_listen(&path).expect("listen");
+        assert_eq!(
+            std::fs::metadata(&path).expect("meta").permissions().mode() & 0o777,
+            0o600
+        );
+        let server = std::thread::spawn(move || {
+            let mut s = listener.accept().expect("accept");
+            let mut buf = [0u8; 5];
+            s.read_exact(&mut buf).expect("read");
+            s.write_all(&buf.map(|b| b.to_ascii_uppercase()))
+                .expect("write");
+        });
+        let mut c = crate::local_connect(&path).expect("connect");
+        c.write_all(b"hello").expect("write");
+        let mut out = [0u8; 5];
+        c.read_exact(&mut out).expect("read");
+        assert_eq!(&out, b"HELLO");
+        server.join().expect("server");
+        assert!(!path.exists(), "socket file is removed with the listener");
+    }
+
+    #[test]
+    fn a_stale_socket_file_is_replaced_but_a_live_one_is_not() {
+        let path = sock_path("stale");
+        // Simulate a crash: bind, then leave the file behind without cleanup.
+        let dead = std::os::unix::net::UnixListener::bind(&path).expect("bind");
+        drop(dead);
+        assert!(path.exists());
+        // A PTY test running in parallel can fork before our fd is closed and briefly keep the dead
+        // listener alive in its child (until exec), so retry for a moment.
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let live = loop {
+            match crate::local_listen(&path) {
+                Ok(l) => break l,
+                Err(e)
+                    if e.kind() == io::ErrorKind::AddrInUse && std::time::Instant::now() < end =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(e) => panic!("stale socket not replaced: {e}"),
+            }
+        };
+        let err = crate::local_listen(&path)
+            .err()
+            .expect("second listener refused");
+        assert_eq!(err.kind(), io::ErrorKind::AddrInUse);
+        drop(live);
+    }
+
+    #[test]
+    fn raw_mode_and_size_need_a_terminal() {
+        // Test runners do not give stdin/stdout a terminal; both must fail cleanly rather than misbehave.
+        if crate::terminal_size().is_none() {
+            assert!(
+                crate::RawMode::enable().is_err()
+                    || std::io::IsTerminal::is_terminal(&std::io::stdin())
+            );
+        }
     }
 
     #[test]
