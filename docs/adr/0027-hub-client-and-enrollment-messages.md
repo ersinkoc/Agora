@@ -1,6 +1,7 @@
 # 0027. Hub snapshot, client subscription and enrollment messages
-Status: Proposed
+Status: Accepted
 Date: 2026-11-07
+Accepted: 2026-11-07 (maintainer's explicit approval in chat)
 
 ## Context
 The hub now stores events (`agora-hub::store`), folds them into a view (`projection`), authenticates nodes with

@@ -43,4 +43,4 @@ Date: YYYY-MM-DD
 | 0023 | Optional direct data path between client and node | Accepted |
 | 0024 | Simplicity and visual quality are requirements | Accepted |
 | 0025 | `agent.list` command for node-local control | Proposed |
-| 0027 | Hub snapshot, client subscription and enrollment messages | Proposed |
+| 0027 | Hub snapshot, client subscription and enrollment messages | Accepted |
