@@ -48,6 +48,12 @@ returns `Applied` (stored, with a global position), `Duplicate` (already applied
 next event; nothing stored, the node replays from `expected`). `acked(producer)` is the acknowledgement to send back.
 Clients page the log by global position. Payloads are opaque encoded events.
 
+Hub node session (`agora-hub::session`): a state machine over decoded messages, independent of transport and framing.
+The producer id is the node's authenticated identity; an event naming another producer is `protocol.invalid_message`.
+Order is `Hello` (role must be node) → `Resume` → events. The hub answers `Resume` with `ResumeOk { from_seq }` where
+`from_seq` is one past what the hub already holds, regardless of what the node claims. Each event yields `Applied`,
+`Duplicate` or `Gap { expected }`.
+
 Initial event families:
 
 | Family | Examples |
