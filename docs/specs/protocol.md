@@ -37,6 +37,12 @@ Events are immutable facts. Each producer numbers its events (`seq`); the hub ap
 per `(producer_id, seq)` and acknowledges the highest contiguous `seq`. Nodes keep unacknowledged events on
 disk while disconnected.
 
+Node buffer (`agora-node::event_buffer`): an append-only log of checksummed records plus an atomically replaced ack
+file. A torn tail from a crash is truncated on open. After a reconnect the node replays everything after the
+hub's ack, in order. The log is size-capped (oldest events dropped first); if unacknowledged events were dropped,
+a replay from the old ack is refused (`Stale`) and the hub resynchronizes from a snapshot instead of silently
+missing events. Terminal bytes never enter this log.
+
 Initial event families:
 
 | Family | Examples |
