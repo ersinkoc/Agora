@@ -65,6 +65,28 @@ pub struct SupervisorConfig {
     pub limits: NodeLimits,
 }
 
+/// What the supervisor tells the node about an agent that is about to launch, so the node can give it a mesh
+/// endpoint first.
+#[derive(Debug, Clone)]
+pub struct Launching {
+    pub id: AgentId,
+    pub kind: String,
+    pub project: String,
+    pub node: String,
+    pub worktree: PathBuf,
+}
+
+/// Called before an agent's process starts. Returns the endpoint to inject into its MCP configuration, or `None`
+/// to start it without one (the mesh is an addition; an agent never fails to start because of it).
+pub type LaunchHook = Box<dyn Fn(&Launching) -> Option<agora_adapters::inject::Endpoint> + Send>;
+
+/// What injection adds to every (re)launch of one agent.
+#[derive(Debug, Clone, Default)]
+struct Extras {
+    argv: Vec<String>,
+    env: Vec<(String, String)>,
+}
+
 /// What to start.
 #[derive(Debug, Clone)]
 pub struct StartRequest {
@@ -191,6 +213,7 @@ struct Entry {
     restarts: u32,
     restart_at: Option<Instant>,
     gave_up: bool,
+    extras: Extras,
 }
 
 pub struct Supervisor {
@@ -198,6 +221,7 @@ pub struct Supervisor {
     kinds: BTreeMap<String, KindEntry>,
     agents: BTreeMap<AgentId, Entry>,
     next_id: u64,
+    hook: Option<LaunchHook>,
 }
 
 impl Supervisor {
@@ -207,7 +231,13 @@ impl Supervisor {
             kinds: BTreeMap::new(),
             agents: BTreeMap::new(),
             next_id: 1,
+            hook: None,
         }
+    }
+
+    /// Installs the hook that gives each launching agent a mesh endpoint.
+    pub fn set_launch_hook(&mut self, hook: LaunchHook) {
+        self.hook = Some(hook);
     }
 
     /// Make an agent kind available. Replaces a previous manifest of the same kind.
@@ -271,6 +301,7 @@ impl Supervisor {
 
         let id = AgentId::new(format!("agent-{}", self.next_id));
         self.next_id += 1;
+        let extras = self.inject(&id, &req.kind, &checkout.project.to_string(), &worktree)?;
         let agent = Agent::new(
             id.clone(),
             checkout.project,
@@ -279,7 +310,7 @@ impl Supervisor {
             req.kind.clone(),
             IntegrationLevel::L1Manifest,
         );
-        let terminal = self.launch(&req.kind, &argv, &worktree)?;
+        let terminal = self.launch(&req.kind, &argv, &worktree, &extras)?;
         self.agents.insert(
             id.clone(),
             Entry {
@@ -293,9 +324,49 @@ impl Supervisor {
                 restarts: 0,
                 restart_at: None,
                 gave_up: false,
+                extras,
             },
         );
         Ok(id)
+    }
+
+    /// Gives the agent its mesh MCP server as its manifest says (`[mcp]`): asks the hook for an endpoint, writes
+    /// the config file inside the worktree, and returns the arguments and variables to add at every launch.
+    fn inject(
+        &self,
+        id: &AgentId,
+        kind: &str,
+        project: &str,
+        worktree: &std::path::Path,
+    ) -> Result<Extras, SupervisorError> {
+        let Some(hook) = &self.hook else {
+            return Ok(Extras::default());
+        };
+        // The hook registers the agent with the mesh even when its manifest has no `[mcp]` (it may reach the mesh
+        // some other way); only a manifest with `[mcp]` gets anything injected.
+        let endpoint = hook(&Launching {
+            id: id.clone(),
+            kind: kind.to_string(),
+            project: project.to_string(),
+            node: self.cfg.node.as_str().to_string(),
+            worktree: worktree.to_path_buf(),
+        });
+        let (Some(endpoint), Some(spec)) = (
+            endpoint,
+            self.kinds.get(kind).and_then(|k| k.manifest.mcp.clone()),
+        ) else {
+            return Ok(Extras::default());
+        };
+        let plan = agora_adapters::inject::plan(&spec, worktree, &endpoint)
+            .map_err(|e| SupervisorError::Spawn(format!("mcp injection: {e}")))?;
+        for (path, contents) in &plan.files {
+            write_in_worktree(worktree, path, contents)
+                .map_err(|e| SupervisorError::Spawn(format!("mcp injection: {e}")))?;
+        }
+        Ok(Extras {
+            argv: plan.argv_extra,
+            env: plan.env,
+        })
     }
 
     fn launch(
@@ -303,8 +374,11 @@ impl Supervisor {
         kind: &str,
         argv: &[String],
         worktree: &std::path::Path,
+        extras: &Extras,
     ) -> Result<TerminalHandle, SupervisorError> {
-        let mut cfg = PtyConfig::new(argv.to_vec());
+        let mut argv = argv.to_vec();
+        argv.extend(extras.argv.iter().cloned());
+        let mut cfg = PtyConfig::new(argv);
         cfg.cwd = Some(worktree.to_path_buf());
         cfg.cols = self.cfg.terminal.size.cols;
         cfg.rows = self.cfg.terminal.size.rows;
@@ -318,6 +392,7 @@ impl Supervisor {
                 .map(|(a, b)| (a.clone(), b.clone()))
                 .collect();
         }
+        cfg.env.extend(extras.env.iter().cloned());
         let pty = spawn(&cfg).map_err(|e| SupervisorError::Spawn(e.to_string()))?;
         TerminalHandle::start(pty, self.cfg.terminal)
             .map_err(|e| SupervisorError::Spawn(e.to_string()))
@@ -403,13 +478,14 @@ impl Supervisor {
         let Some(entry) = self.agents.get(id) else {
             return;
         };
-        let (kind, worktree, session) = (
+        let (kind, worktree, session, extras) = (
             entry.agent.kind.clone(),
             entry.worktree.clone(),
             entry.agent.session.clone(),
+            entry.extras.clone(),
         );
         let (argv, _native) = self.argv_for_resume(&kind, session.as_deref());
-        let result = self.launch(&kind, &argv, &worktree);
+        let result = self.launch(&kind, &argv, &worktree, &extras);
         let Some(entry) = self.agents.get_mut(id) else {
             return;
         };
@@ -489,16 +565,20 @@ impl Supervisor {
             return Err(SupervisorError::StillRunning(id.clone()));
         }
         self.check_limits()?;
-        let (kind, worktree, session) = (
+        let (kind, worktree, session, project) = (
             entry.agent.kind.clone(),
             entry.worktree.clone(),
             entry.agent.session.clone(),
+            entry.agent.project.to_string(),
         );
         let (argv, native) = self.argv_for_resume(&kind, session.as_deref());
-        let terminal = self.launch(&kind, &argv, &worktree)?;
+        // A stopped agent left the mesh and its endpoint closed; resuming joins again with a fresh one.
+        let extras = self.inject(id, &kind, &project, &worktree)?;
+        let terminal = self.launch(&kind, &argv, &worktree, &extras)?;
         let Some(entry) = self.agents.get_mut(id) else {
             return Err(SupervisorError::NotFound(id.clone()));
         };
+        entry.extras = extras;
         entry.terminal = Some(terminal);
         entry.pacer = Pacer::default();
         entry.next_check = now;
@@ -587,4 +667,59 @@ fn set_state(
             state,
         });
     }
+}
+
+/// Writes `contents` at `path`, which must be inside `worktree`, without ever following a symlink: a repository can
+/// contain `.mcp.json -> ~/.ssh/authorized_keys`, and writing "through" it would let a checkout overwrite the user's
+/// files. Every directory between the worktree and the file must be a real directory (created if missing), and an
+/// existing file is replaced, not written into.
+fn write_in_worktree(
+    worktree: &std::path::Path,
+    path: &std::path::Path,
+    contents: &str,
+) -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind, Write};
+    let rel = path
+        .strip_prefix(worktree)
+        .map_err(|_| Error::new(ErrorKind::InvalidInput, "path is outside the worktree"))?;
+    let mut dir = worktree.to_path_buf();
+    let parts: Vec<_> = rel.components().collect();
+    let Some((file, dirs)) = parts.split_last() else {
+        return Err(Error::new(ErrorKind::InvalidInput, "empty path"));
+    };
+    for d in dirs {
+        dir.push(d);
+        match std::fs::symlink_metadata(&dir) {
+            Ok(m) if m.file_type().is_symlink() => {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    "a directory on the path is a symlink",
+                ));
+            }
+            Ok(m) if !m.is_dir() => {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    "a path component is not a directory",
+                ));
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == ErrorKind::NotFound => std::fs::create_dir(&dir)?,
+            Err(e) => return Err(e),
+        }
+    }
+    let target = dir.join(file);
+    match std::fs::symlink_metadata(&target) {
+        // Replace whatever is there (a symlink is removed, not followed).
+        Ok(_) => std::fs::remove_file(&target)?,
+        Err(e) if e.kind() == ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&target)?;
+    f.write_all(contents.as_bytes())?;
+    // Keep the injected file out of `git status`: it is the node's, not the agent's work.
+    git::exclude_locally(worktree, rel);
+    Ok(())
 }

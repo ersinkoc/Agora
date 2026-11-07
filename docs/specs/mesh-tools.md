@@ -53,7 +53,7 @@ agent's process. `agora mesh stdio --socket PATH` is what an agent's MCP client 
 that socket. The node registers the agent on start, keeps its state current for `agents_list`, and on stop or exit
 unregisters it, which gives back its tasks, leases and open asks and closes the endpoint. Pending `ask`s are answered on the
 same connection without blocking the agent's other calls. Mesh activity is written to the node's event log.
-Not yet: putting the socket into each agent's MCP configuration at launch (manifest `[mcp]`), and the hub-side broker that
+The socket reaches the agent through its manifest's `[mcp]` section (see `agent-manifest.md`). Not yet: the hub-side broker that
 joins agents on different machines.
 
 ## Implementation status

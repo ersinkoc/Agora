@@ -197,18 +197,6 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                 }
             }
             drop(sup);
-            if let Some(mesh) = &ctx.mesh {
-                // A mesh endpoint that cannot start must not stop the agent: it runs without coordination.
-                let _ = mesh.register(agora_mesh::broker::AgentInfo {
-                    id: id.clone(),
-                    kind: a.kind.clone(),
-                    node: ctx.node_id.clone(),
-                    project: project.id.clone(),
-                    label: id.as_str().to_string(),
-                    worktree: worktree.clone(),
-                    state: "idle".into(),
-                });
-            }
             if let Some(ev) = &ctx.events {
                 ev.agent_launched(
                     &id,

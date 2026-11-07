@@ -14,6 +14,7 @@ dependencies = [
  "agora-protocol",
  "agora-tui",
  "prost",
+ "serde_json",
 ]
 
 [[package]]
