@@ -1,8 +1,9 @@
 # 0017. Web client framework
-Status: Proposed
+Status: Accepted
 Date: 2026-11-06
+Accepted: 2026-11-07
 
-## Decision (proposed)
+## Decision
 - TypeScript, React, and a minimal dependency set; state through a single store fed by hub event subscriptions.
 - Terminal rendering with a browser terminal emulator (xterm.js or a WebAssembly emulator), behind an adapter
   interface so it can be swapped.
@@ -12,3 +13,7 @@ Date: 2026-11-06
 
 ## Consequences
 The same app runs in the browser and in the Tauri desktop shell.
+
+## Notes
+The terminal renderer choice (xterm.js with the WebGL renderer, or a WebAssembly emulator) is made by measuring against the
+budgets in ADR-0022 before Phase 3 screens are built; the adapter interface keeps it swappable.
