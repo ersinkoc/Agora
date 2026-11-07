@@ -128,7 +128,15 @@ pub struct Initialized {
     pub capabilities: Vec<String>,
 }
 
-type Pending = Arc<Mutex<HashMap<u64, Sender<Result<Value, HostError>>>>>;
+/// Calls waiting for an answer. `closed` is set (under the same lock) when the adapter's output ended, so a call
+/// that starts after that fails at once instead of waiting for an answer nobody can send.
+#[derive(Default)]
+struct PendingState {
+    map: HashMap<u64, Sender<Result<Value, HostError>>>,
+    closed: bool,
+}
+
+type Pending = Arc<Mutex<PendingState>>;
 
 pub struct Adapter {
     child: Child,
@@ -341,10 +349,13 @@ impl Adapter {
     pub fn call(&self, method: &str, params: Value, timeout: Duration) -> Result<Value, HostError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = channel();
-        self.pending
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(id, tx);
+        {
+            let mut p = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+            if p.closed {
+                return Err(HostError::Exited);
+            }
+            p.map.insert(id, tx);
+        }
         let sent = self.write(&Message::Request {
             id: json!(id),
             method: method.to_string(),
@@ -354,6 +365,7 @@ impl Adapter {
             self.pending
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
+                .map
                 .remove(&id);
             return Err(if e.kind() == io::ErrorKind::BrokenPipe {
                 HostError::Exited
@@ -369,6 +381,7 @@ impl Adapter {
         self.pending
             .lock()
             .unwrap_or_else(|e| e.into_inner())
+            .map
             .remove(&id);
         out
     }
@@ -549,7 +562,11 @@ fn read_loop<R: Read>(
         }
     }
     // Output ended: fail everyone still waiting, then say so.
-    pending.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    {
+        let mut p = pending.lock().unwrap_or_else(|e| e.into_inner());
+        p.closed = true;
+        p.map.clear();
+    }
     let _ = events.send(AdapterEvent::Exited);
 }
 
@@ -558,6 +575,7 @@ fn deliver(pending: &Pending, id: &Value, r: Result<Value, HostError>) {
     let tx = pending
         .lock()
         .unwrap_or_else(|e| e.into_inner())
+        .map
         .remove(&id);
     if let Some(tx) = tx {
         let _ = tx.send(r);
