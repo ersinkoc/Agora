@@ -408,3 +408,169 @@ fn the_node_reports_what_the_hub_needs_to_show_it() {
     let last = events_handle.events_after(0).pop().unwrap();
     assert!(matches!(last.body, Some(Body::NodeOffline(_))));
 }
+
+/// A raw MCP client on an agent's mesh socket: what an agent's MCP client would do, minus the agent.
+struct Mcp {
+    w: agora_platform::LocalStream,
+    r: std::io::BufReader<agora_platform::LocalStream>,
+    next: u64,
+}
+
+impl Mcp {
+    fn connect(path: &Path) -> Self {
+        use std::io::Write;
+        let w = agora_platform::local_connect(path).expect("connect mesh socket");
+        let r = w.try_clone().unwrap();
+        r.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        let mut c = Self {
+            w,
+            r: std::io::BufReader::new(r),
+            next: 1,
+        };
+        let init = c.rpc(
+            "initialize",
+            serde_json::json!({"protocolVersion": "2025-06-18"}),
+        );
+        assert_eq!(init["result"]["serverInfo"]["name"], "agora-mesh");
+        c.w.write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n")
+            .unwrap();
+        c
+    }
+
+    fn send(&mut self, method: &str, params: serde_json::Value) -> u64 {
+        use std::io::Write;
+        let id = self.next;
+        self.next += 1;
+        let line =
+            serde_json::json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+        writeln!(self.w, "{line}").unwrap();
+        id
+    }
+
+    fn read(&mut self) -> serde_json::Value {
+        use std::io::BufRead;
+        let mut s = String::new();
+        self.r.read_line(&mut s).expect("reply");
+        serde_json::from_str(&s).unwrap_or_else(|_| panic!("not json: {s:?}"))
+    }
+
+    fn rpc(&mut self, method: &str, params: serde_json::Value) -> serde_json::Value {
+        let id = self.send(method, params);
+        let v = self.read();
+        assert_eq!(v["id"], id);
+        v
+    }
+
+    /// A tool call: the decoded JSON text of the result, and whether it was an error.
+    fn tool(&mut self, name: &str, args: serde_json::Value) -> (serde_json::Value, bool) {
+        let v = self.rpc(
+            "tools/call",
+            serde_json::json!({"name": name, "arguments": args}),
+        );
+        decode_tool(&v)
+    }
+}
+
+fn decode_tool(v: &serde_json::Value) -> (serde_json::Value, bool) {
+    let text = v["result"]["content"][0]["text"]
+        .as_str()
+        .expect("tool result");
+    (
+        serde_json::from_str(text).unwrap(),
+        v["result"]["isError"] == true,
+    )
+}
+
+#[test]
+fn agents_on_one_node_coordinate_through_their_own_mesh_endpoints() {
+    use agora_core::AgentId;
+    use serde_json::json;
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
+        return;
+    }
+    let e = env("mesh");
+    let n = node(&e, NodeLimits::default());
+    let mut c = Client::connect(n.socket().unwrap()).unwrap();
+    let a1 = started(ok(c.call(start_cmd("shell")))).agent_id;
+    let a2 = started(ok(c.call(start_cmd("shell")))).agent_id;
+    let sock = |id: &str| n.mesh.socket_path(&AgentId::new(id));
+    let (mut m1, mut m2) = (Mcp::connect(&sock(&a1)), Mcp::connect(&sock(&a2)));
+
+    // Each endpoint is its agent: the broker stamps who sent what.
+    let (list, _) = m1.tool("agents_list", json!({}));
+    assert_eq!(list.as_array().unwrap().len(), 2);
+    let (r, err) = m1.tool("send_message", json!({"to": a2, "body": "hello from one"}));
+    assert!(!err, "{r}");
+    let (inbox, _) = m2.tool("inbox", json!({}));
+    assert_eq!(inbox[0]["body"], "hello from one");
+    assert_eq!(inbox[0]["provenance"]["agent"], json!(a1));
+    assert_eq!(inbox[0]["provenance"]["node"], "node-test");
+
+    // An ask waits for the reply without blocking the asker's other calls.
+    let ask = m1.send(
+        "tools/call",
+        json!({"name": "ask", "arguments": {"to": a2, "question": "which port?", "timeout_s": 20}}),
+    );
+    let ping = m1.rpc("ping", json!({}));
+    assert!(
+        ping["result"].is_object(),
+        "ping answered while the ask waits"
+    );
+    let (inbox, _) = m2.tool("inbox", json!({"since": inbox[0]["message_id"]}));
+    let q = inbox
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["kind"] == "ask")
+        .expect("the question");
+    let (_, err) = m2.tool(
+        "send_message",
+        json!({"to": a1, "body": "8080", "reply_to": q["message_id"]}),
+    );
+    assert!(!err);
+    let reply = m1.read();
+    assert_eq!(reply["id"], ask);
+    let (r, err) = decode_tool(&reply);
+    assert!(!err);
+    assert_eq!(
+        (r["reply"].as_str(), r["from"].as_str()),
+        (Some("8080"), Some(a2.as_str()))
+    );
+
+    // Leases conflict between agents; when an agent stops, it gives its leases back and its endpoint closes.
+    let (l, err) = m1.tool(
+        "lease_acquire",
+        json!({"paths": ["src/main.rs"], "ttl_s": 600, "reason": "edit"}),
+    );
+    assert!(!err, "{l}");
+    let (r, err) = m2.tool("lease_acquire", json!({"paths": ["src"], "ttl_s": 60}));
+    assert!(err);
+    assert_eq!(r["error"]["code"], "lease.held");
+    ok(c.call(Cmd::AgentStop(v1::AgentStop {
+        agent_id: a1.clone(),
+    })));
+    assert!(!n.mesh.is_registered(&AgentId::new(&a1)));
+    assert!(!sock(&a1).exists(), "its endpoint is gone");
+    let (_, err) = m2.tool("lease_acquire", json!({"paths": ["src"], "ttl_s": 60}));
+    assert!(!err, "the stopped agent's lease was released");
+
+    // Mesh activity reaches the node's event log (the supervision tick moves it there, so wait for it).
+    let end = Instant::now() + Duration::from_secs(15);
+    loop {
+        let events = n.events.events_after(0);
+        let posted = events
+            .iter()
+            .any(|e| matches!(e.body, Some(v1::event::Body::MessagePosted(_))));
+        let granted = events
+            .iter()
+            .any(|e| matches!(e.body, Some(v1::event::Body::LeaseGranted(_))));
+        if posted && granted {
+            break;
+        }
+        assert!(
+            Instant::now() < end,
+            "mesh events never reached the log (posted {posted}, granted {granted})"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}

@@ -49,6 +49,16 @@ pub fn checkout_id(root: &Path) -> String {
     format!("co-{h:016x}")
 }
 
+fn state_word(s: AgentState) -> &'static str {
+    match s {
+        AgentState::Working => "working",
+        AgentState::Blocked => "blocked",
+        AgentState::Idle => "idle",
+        AgentState::Done => "done",
+        AgentState::Unknown => "unknown",
+    }
+}
+
 fn proto_state(s: AgentState) -> v1::AgentState {
     match s {
         AgentState::Working => v1::AgentState::Working,
@@ -138,6 +148,13 @@ impl EventSink {
                 }
                 _ => {}
             }
+        }
+    }
+
+    /// Appends already-built events (mesh activity for the audit log).
+    pub fn record_bodies(&self, bodies: Vec<Body>) {
+        for b in bodies {
+            self.record(b);
         }
     }
 
@@ -303,6 +320,8 @@ pub struct Node {
     ticker: Option<JoinHandle<()>>,
     pub supervisor: Arc<Mutex<Supervisor>>,
     pub events: Arc<EventSink>,
+    /// Per-agent mesh endpoints (messages, tasks, leases between the agents on this node).
+    pub mesh: Arc<crate::mesh_server::MeshServer>,
     node_id: String,
     /// Manifests that could not be loaded, as `(path, reason)` for the log.
     pub manifest_problems: Vec<(PathBuf, String)>,
@@ -358,6 +377,16 @@ impl Node {
             events.checkout_discovered(&cfg.node_id, &p.id, &p.root);
         }
 
+        // Short path on purpose: Unix socket paths are limited to about 100 bytes.
+        let mesh_dir = cfg
+            .socket
+            .parent()
+            .map_or_else(|| PathBuf::from("m"), |p| p.join("m"));
+        let mesh = Arc::new(crate::mesh_server::MeshServer::new(
+            &mesh_dir,
+            agora_mesh::broker::Limits::default(),
+        )?);
+
         let supervisor = Arc::new(Mutex::new(sup));
         let ctx = Arc::new(ControlContext::new(
             Arc::clone(&supervisor),
@@ -365,16 +394,18 @@ impl Node {
             cfg.worktree_root.clone(),
             cfg.node_id.clone(),
             Some(Arc::clone(&events)),
+            Some(Arc::clone(&mesh)),
         ));
         let server = ControlServer::start(&cfg.socket, ctx)?;
 
         let stop = Arc::new(AtomicBool::new(false));
         let ticker = {
-            let (sup, ev, stop, node_id) = (
+            let (sup, ev, stop, node_id, mesh) = (
                 Arc::clone(&supervisor),
                 Arc::clone(&events),
                 Arc::clone(&stop),
                 cfg.node_id.clone(),
+                Arc::clone(&mesh),
             );
             std::thread::Builder::new()
                 .name("agora-supervise".into())
@@ -388,6 +419,16 @@ impl Node {
                         if !events.is_empty() {
                             ev.supervisor_events(&events, &views);
                         }
+                        // Agents that ended on their own leave the mesh; the others keep their state current.
+                        for e in &events {
+                            if let SupervisorEvent::Exited { agent, .. } = e {
+                                mesh.unregister(agent);
+                            }
+                        }
+                        for v in views.iter().filter(|v| v.running) {
+                            mesh.set_state(&v.id, state_word(v.state));
+                        }
+                        ev.record_bodies(mesh.take_events());
                         // Resources are reported when they change, not on a timer, so an idle node is silent.
                         let running = u32::try_from(views.iter().filter(|v| v.running).count())
                             .unwrap_or(u32::MAX);
@@ -405,6 +446,7 @@ impl Node {
             ticker: Some(ticker),
             supervisor,
             events,
+            mesh,
             node_id: cfg.node_id.clone(),
             manifest_problems,
         })

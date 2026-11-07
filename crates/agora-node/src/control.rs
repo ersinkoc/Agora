@@ -58,6 +58,7 @@ pub struct ControlContext {
     pub worktree_root: PathBuf,
     pub node_id: String,
     pub events: Option<Arc<EventSink>>,
+    pub mesh: Option<Arc<crate::mesh_server::MeshServer>>,
     names: AtomicU64,
     seen: Mutex<IdempotencyCache>,
 }
@@ -75,6 +76,7 @@ impl ControlContext {
         worktree_root: PathBuf,
         node_id: String,
         events: Option<Arc<EventSink>>,
+        mesh: Option<Arc<crate::mesh_server::MeshServer>>,
     ) -> Self {
         Self {
             supervisor,
@@ -82,6 +84,7 @@ impl ControlContext {
             worktree_root,
             node_id,
             events,
+            mesh,
             names: AtomicU64::new(0),
             seen: Mutex::new(IdempotencyCache::default()),
         }
@@ -194,6 +197,18 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                 }
             }
             drop(sup);
+            if let Some(mesh) = &ctx.mesh {
+                // A mesh endpoint that cannot start must not stop the agent: it runs without coordination.
+                let _ = mesh.register(agora_mesh::broker::AgentInfo {
+                    id: id.clone(),
+                    kind: a.kind.clone(),
+                    node: ctx.node_id.clone(),
+                    project: project.id.clone(),
+                    label: id.as_str().to_string(),
+                    worktree: worktree.clone(),
+                    state: "idle".into(),
+                });
+            }
             if let Some(ev) = &ctx.events {
                 ev.agent_launched(
                     &id,
@@ -216,6 +231,9 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
         Cmd::AgentStop(a) => {
             let id = AgentId::new(a.agent_id.clone());
             let events = ctx.sup().stop(&id).map_err(sup_err)?;
+            if let Some(mesh) = &ctx.mesh {
+                mesh.unregister(&id);
+            }
             if let Some(ev) = &ctx.events {
                 ev.supervisor_events(&events, &ctx.sup().list());
             }

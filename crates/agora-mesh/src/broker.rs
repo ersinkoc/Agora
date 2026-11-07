@@ -293,6 +293,15 @@ impl Mesh {
             .ok_or_else(|| MeshError::UnknownAgent(agent.as_str().to_string()))
     }
 
+    /// The agent's state as the UI words it (`working`, `blocked`, `idle`, `done`, `unknown`), for `agents_list`.
+    pub fn set_state(&mut self, agent: &AgentId, state: &str) {
+        if let Some(a) = self.agents.get_mut(agent) {
+            if a.state != state {
+                a.state = state.to_string();
+            }
+        }
+    }
+
     /// `agents_list`: peers in a project (all projects when `None`), the caller included.
     pub fn agents_list(&self, project: Option<&str>) -> Vec<AgentInfo> {
         self.agents
