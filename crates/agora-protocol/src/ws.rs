@@ -62,6 +62,10 @@ where
     Ok(Conn { ws })
 }
 
+/// Subprotocol a browser client offers, next to `agora.bearer.<token>`.
+pub const SUBPROTOCOL: &str = "agora.v1";
+const BEARER_PREFIX: &str = "agora.bearer.";
+
 /// Server side that also returns the bearer token the peer presented in `Authorization: Bearer <token>`, if any
 /// (clients authenticate this way; nodes authenticate with their TLS certificate).
 #[allow(clippy::result_large_err)] // the error type of the callback is dictated by tungstenite
@@ -70,6 +74,7 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
+    use tokio_tungstenite::tungstenite::http::HeaderValue;
     let mut token = None;
     let ws = tokio_tungstenite::accept_hdr_async_with_config(
         stream,
@@ -80,6 +85,31 @@ where
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.strip_prefix("Bearer "))
                 .map(str::to_string);
+            let mut resp = resp;
+            // Browsers cannot set headers on a WebSocket; they offer subprotocols instead:
+            // `agora.v1` and `agora.bearer.<token>`. Echo only `agora.v1`, never the token.
+            if let Some(offered) = req
+                .headers()
+                .get("sec-websocket-protocol")
+                .and_then(|v| v.to_str().ok())
+            {
+                let mut speaks_v1 = false;
+                for p in offered.split(',').map(str::trim) {
+                    if p == SUBPROTOCOL {
+                        speaks_v1 = true;
+                    } else if let Some(t) = p.strip_prefix(BEARER_PREFIX) {
+                        if token.is_none() {
+                            token = Some(t.to_string());
+                        }
+                    }
+                }
+                if speaks_v1 {
+                    resp.headers_mut().insert(
+                        "sec-websocket-protocol",
+                        HeaderValue::from_static(SUBPROTOCOL),
+                    );
+                }
+            }
             Ok(resp)
         },
         Some(config()),
@@ -103,6 +133,29 @@ where
     req.headers_mut().insert(
         "authorization",
         format!("Bearer {token}").parse().map_err(ws_err)?,
+    );
+    let (ws, _) = tokio_tungstenite::client_async_with_config(req, stream, Some(config()))
+        .await
+        .map_err(ws_err)?;
+    Ok(Conn { ws })
+}
+
+/// Client side the way a browser does it: the token travels as a subprotocol, not a header.
+pub async fn connect_with_subprotocol_token<S>(
+    stream: S,
+    url: &str,
+    token: &str,
+) -> Result<Conn<S>, TransportError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let mut req = url.into_client_request().map_err(ws_err)?;
+    req.headers_mut().insert(
+        "sec-websocket-protocol",
+        format!("{SUBPROTOCOL}, {BEARER_PREFIX}{token}")
+            .parse()
+            .map_err(ws_err)?,
     );
     let (ws, _) = tokio_tungstenite::client_async_with_config(req, stream, Some(config()))
         .await
@@ -196,6 +249,24 @@ mod tests {
         assert_eq!(s.recv().await.unwrap().unwrap(), frame(2, b"up"));
         s.send(&frame(0, b"down")).await.unwrap();
         assert_eq!(c.recv().await.unwrap().unwrap(), frame(0, b"down"));
+    }
+
+    #[tokio::test]
+    async fn a_browser_style_client_passes_its_token_as_a_subprotocol() {
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (s, _) = l.accept().await.unwrap();
+            accept_with_token(s).await.unwrap()
+        });
+        let c = TcpStream::connect(addr).await.unwrap();
+        let mut client = connect_with_subprotocol_token(c, &format!("ws://{addr}/"), "s3cret")
+            .await
+            .unwrap();
+        let (mut conn, token) = server.await.unwrap();
+        assert_eq!(token.as_deref(), Some("s3cret"));
+        client.send(&frame(2, b"hi")).await.unwrap();
+        assert_eq!(conn.recv().await.unwrap().unwrap(), frame(2, b"hi"));
     }
 
     #[tokio::test]

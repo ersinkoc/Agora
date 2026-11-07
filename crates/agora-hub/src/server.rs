@@ -404,6 +404,8 @@ pub struct ServerState {
     pub ca: Option<Ca>,
     pub lockout: Arc<Lockout>,
     pub auth: Box<dyn ClientAuth + Send + Sync>,
+    /// The web app, served over HTTP on the same port when present.
+    pub assets: Option<Arc<dyn crate::web::Assets>>,
 }
 
 /// A peer with no certificate: its first frame says what it wants, and the answer is yes only for what it proved.
@@ -448,6 +450,9 @@ async fn handle(
 ) -> Result<(), ServeError> {
     let Some(acceptor) = tls else {
         // Without TLS nothing can prove it is a node: only the token path exists (development and tests).
+        let Some(tcp) = websocket_only(tcp, state).await? else {
+            return Ok(());
+        };
         let (conn, token) = agora_protocol::ws::accept_with_token(tcp).await?;
         return serve_unauthenticated(conn, token.as_deref(), state).await;
     };
@@ -456,6 +461,9 @@ async fn handle(
         .await
         .map_err(|e| ServeError::Transport(TransportError::Ws(e.to_string())))?;
     let identity = crate::tls::identity(stream.get_ref().1.peer_certificates());
+    let Some(stream) = websocket_only(stream, state).await? else {
+        return Ok(());
+    };
     let (conn, token) = agora_protocol::ws::accept_with_token(stream).await?;
     match identity {
         Some(id) => {
@@ -470,6 +478,23 @@ async fn handle(
             serve_node(conn, &id.node_id, &state.hub, &state.support).await
         }
         None => serve_unauthenticated(conn, token.as_deref(), state).await,
+    }
+}
+
+/// Answers plain HTTP requests from the assets; returns the stream (replaying what was read) when it is a WebSocket.
+async fn websocket_only<S>(
+    stream: S,
+    state: &ServerState,
+) -> Result<Option<crate::web::Rewind<S>>, ServeError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    match crate::web::route(stream, state.assets.as_deref())
+        .await
+        .map_err(|e| ServeError::Transport(TransportError::Ws(e.to_string())))?
+    {
+        crate::web::First::WebSocket(s) => Ok(Some(s)),
+        crate::web::First::Answered => Ok(None),
     }
 }
 

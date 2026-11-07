@@ -86,6 +86,7 @@ pub(crate) struct Opts {
     max_agents: Option<usize>,
     hub_dir: Option<PathBuf>,
     listen: Option<String>,
+    web: Option<PathBuf>,
     names: Vec<String>,
     hub: Option<String>,
     ca: Option<PathBuf>,
@@ -110,6 +111,7 @@ fn parse(args: &[String]) -> Option<Opts> {
             }
             "--max-agents" => o.max_agents = Some(it.next()?.parse().ok()?),
             "--hub-dir" => o.hub_dir = Some(it.next()?.into()),
+            "--web" => o.web = Some(it.next()?.into()),
             "--listen" => o.listen = Some(it.next()?.clone()),
             "--name" => o.names.push(it.next()?.clone()),
             "--hub" => o.hub = Some(it.next()?.clone()),
