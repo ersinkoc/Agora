@@ -177,6 +177,13 @@ impl Pty for UnixPty {
 impl Drop for UnixPty {
     fn drop(&mut self) {
         let _ = self.kill();
+        // Release our ends of the master before waiting. A child blocked writing into a full terminal
+        // cannot finish dying (macOS) until the master is drained or closed, so waiting first would hang.
+        // Dropping the receiver makes the reader thread exit and close its duplicate of the master.
+        self.output = sync_channel(1).1;
+        if let Ok(null) = File::open("/dev/null") {
+            drop(std::mem::replace(&mut self.writer, null));
+        }
         let _ = self.child.wait();
         // Do not join the reader: a descendant that outlived the group could keep the PTY open.
         drop(self.reader.take());
@@ -248,6 +255,27 @@ mod tests {
         cfg.rows = 17;
         let p = spawn(&cfg).expect("spawn");
         assert!(read_until(&*p, "17 91").contains("17 91"));
+    }
+
+    #[test]
+    fn dropping_a_pty_whose_output_nobody_reads_does_not_hang() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let p = spawn(&PtyConfig::new(vec![
+                "sh".into(),
+                "-c".into(),
+                "yes".into(),
+            ]))
+            .expect("spawn");
+            // Let the child fill the terminal buffer and the output queue so it blocks on write.
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            drop(p);
+            let _ = tx.send(());
+        });
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_secs(10)).is_ok(),
+            "drop hung with a child blocked on write"
+        );
     }
 
     #[test]
