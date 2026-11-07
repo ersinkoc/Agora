@@ -20,5 +20,5 @@ agent accounts, usability sessions with people) are marked and skipped, never fa
 | P3-10 web client shell | next | design tokens, component gallery, store, Home, Focus view (ADR-0017, ADR-0024) |
 | P3-11 terminal rendering | next | renderer choice measured against ADR-0022 |
 | P3-12 SSH bootstrap | next | framed protocol over SSH stdio (ADR-0011) |
-| P3-13 notifications, doctor, backup/restore, usage view | next | `design/notifications.md`, `backup-restore.md`, `usage-and-cost.md` |
+| P3-13 notifications, doctor, backup/restore, usage view | doctor done | `agora doctor` (checks: terminals, sockets, git, data dir, node, manifests, installed agents); notifications, backup/restore and usage view still to do | `design/notifications.md`, `backup-restore.md`, `usage-and-cost.md` |
 | P3-14 first-agent flow | needs a human | needs P2-09 manifests from real agents; five-user first-glance test |

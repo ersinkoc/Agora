@@ -7,6 +7,7 @@ cli-usage =
       agora agent stop AGENT_ID [--socket PATH]
       agora agent list [--socket PATH]
       agora terminal attach AGENT_ID [--socket PATH]
+      agora doctor [--data DIR] [--manifests DIR] [--socket PATH]
 cli-node-listening = Node is running. Control socket: { $socket }
 cli-agent-started = Started agent { $agent_id } in { $worktree }
 cli-agent-stopped = Stopped agent { $agent_id }
@@ -19,3 +20,29 @@ cli-ambiguous-project = More than one project is registered; choose one with --p
 cli-no-projects = This node has no projects. Start it with --project PATH.
 cli-bad-arguments = The arguments were not understood.
 cli-error = Error { $code }: { $message }
+
+doctor-status-ok = ok
+doctor-status-warn = note
+doctor-status-fail = PROBLEM
+doctor-line = [{ $status }] { $text }
+doctor-version = Agora { $detail }
+doctor-pty = Terminals are supported on this system.
+doctor-pty-unsupported = Terminals are not supported on { $detail } yet.
+doctor-local-sockets = Local control sockets are supported.
+doctor-local-sockets-unsupported = Local control sockets are not supported on { $detail }; the CLI cannot reach a node here.
+doctor-git = Git is available ({ $detail }).
+doctor-git-missing = Git was not found. Agora needs it to give each agent its own workspace.
+doctor-data-dir = The data folder is writable: { $detail }
+doctor-data-dir-unwritable = The data folder cannot be written: { $detail }
+doctor-node = A node is running at { $detail }.
+doctor-node-not-running = No node is running at { $detail }. Start one with "agora node run".
+doctor-manifests = { $detail ->
+        [one] 1 agent description loaded.
+       *[other] { $detail } agent descriptions loaded.
+    }
+doctor-manifests-missing = No agent descriptions folder at { $detail }.
+doctor-agent-installed = { $detail } is installed.
+doctor-agent-missing = { $detail } is not installed on this machine.
+doctor-manifest-invalid = The agent description { $detail } could not be read.
+doctor-summary-ok = Everything Agora needs is in place.
+doctor-summary-problems = Something Agora needs is missing. Fix the items marked PROBLEM.
