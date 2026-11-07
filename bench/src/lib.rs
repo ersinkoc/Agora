@@ -198,7 +198,12 @@ pub const LATENCY_NOT_GATED: &[&str] = &["terminals-20"];
 /// parse one chunk, tens of microseconds, so shared-runner noise reached +26% on identical code. A real
 /// slowdown of the parser is orders of magnitude larger (the deliberate-slowdown check moves it by >1000%) and
 /// still fails, and the stable throughput metric keeps the exact threshold.
-pub const LATENCY_THRESHOLD_FACTOR: &[(&str, f64)] = &[("pty-vt-throughput", 3.0)];
+///
+/// `channel-throughput` is a bare in-process channel (the gate's stable base); its p95 is a few microseconds and
+/// showed +13% and +15% on two unrelated PRs (docs and a test fix), so it gets the same factor. Its throughput
+/// still gates at the exact threshold.
+pub const LATENCY_THRESHOLD_FACTOR: &[(&str, f64)] =
+    &[("pty-vt-throughput", 3.0), ("channel-throughput", 3.0)];
 
 /// A regression found by [`compare`].
 #[derive(Debug, Clone, PartialEq)]

@@ -101,7 +101,8 @@ the supervisor reads the exit status without copying anything.
   maximum the pipeline sustains, which must stay well above the 10 MB/s budget; on a development machine
   that is about 100 MB/s for one terminal and 240 MB/s in aggregate for twenty. The twenty-terminal scenario's
   latency is reported but not gated (it measures CI scheduler noise); its throughput is. The single-terminal
-  scenario's latency (tens of microseconds per chunk) is gated at three times the threshold, because shared
+  scenario's latency (tens of microseconds per chunk), and the bare channel's (a few microseconds), are gated at three
+  times the threshold, because shared
   runners swing it by 25% on identical code; throughput keeps the exact threshold.
 - **CI gate:** a reduced benchmark suite runs on every PR touching hot-path crates; a regression above 10% on
   any budget scenario fails the build. The full suite runs nightly.
