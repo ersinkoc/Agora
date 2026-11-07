@@ -105,7 +105,8 @@ the supervisor reads the exit status without copying anything.
   times the threshold, because shared
   runners swing it by 25% on identical code; throughput keeps the exact threshold.
 - **CI gate:** a reduced benchmark suite runs on every PR touching hot-path crates; a regression above 10% on
-  any budget scenario fails the build. The full suite runs nightly.
+  any budget scenario fails the build. Base and head are built on the same runner and measured alternately (three
+  rounds each, best of each metric per side), so drift on a shared runner hits both sides alike. The full suite runs nightly.
 - **Latency tracing:** every input and command carries timestamps per hop (client, hub, node, adapter) so the
   breakdown is visible, not guessed.
 - **Performance HUD:** a developer overlay in the client (also usable by users as "connection details") shows

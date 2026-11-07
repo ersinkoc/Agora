@@ -17,12 +17,10 @@ jobs:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Benchmark head
-        run: cargo run -q --release -p agora-bench -- run --repeat 5 --secs 1 --commit "${{ github.sha }}" --out bench-head.json
-      - uses: actions/upload-artifact@v4
-        with:
-          name: bench-${{ github.sha }}
-          path: bench-head.json
+      - name: Build head
+        run: |
+          cargo build -q --release -p agora-bench
+          cp target/release/agora-bench ./agora-bench-head
       # Footprint of a node with 50 terminals against the budgets in docs/design/performance.md. Informational
       # for now (shared runners are noisy); the numbers are recorded as an artifact.
       - name: Node footprint
@@ -34,17 +32,40 @@ jobs:
           name: footprint-${{ github.sha }}
           path: footprint.json
           if-no-files-found: ignore
-      # Regression gate (ADR-0022): on PRs, build the base commit and compare on the same runner.
-      - name: Benchmark base and compare
+      # Regression gate (ADR-0022): on PRs, build the base commit too and compare on the same runner.
+      - name: Build base
         if: github.event_name == 'pull_request'
         run: |
-          cp target/release/agora-bench ./agora-bench-head
           git checkout --quiet "${{ github.event.pull_request.base.sha }}"
           if [ -d bench ]; then
-            # A base from before --repeat existed does not know the flag; fall back to a single run.
-            cargo run -q --release -p agora-bench -- run --repeat 5 --secs 1 --commit base --out bench-base.json \
-              || cargo run -q --release -p agora-bench -- run --commit base --out bench-base.json
-            ./agora-bench-head compare bench-base.json bench-head.json --threshold 10
+            cargo build -q --release -p agora-bench && cp target/release/agora-bench ./agora-bench-base
           else
             echo "base has no bench harness yet; skipping comparison"
+          fi
+          git checkout --quiet "${{ github.sha }}"
+      # Base and head alternate, three rounds each, and each side keeps its best of each metric. A shared runner
+      # drifts (neighbours, thermal state); alternating makes the drift hit both sides alike instead of whichever
+      # ran second.
+      - name: Benchmark (head and base, alternating)
+        run: |
+          for i in 1 2 3; do
+            ./agora-bench-head run --repeat 2 --secs 1 --commit "${{ github.sha }}" --out "head-$i.json"
+            if [ -x ./agora-bench-base ]; then
+              ./agora-bench-base run --repeat 2 --secs 1 --commit base --out "base-$i.json" \
+                || ./agora-bench-base run --commit base --out "base-$i.json"
+            fi
+          done
+          ./agora-bench-head bestof head-1.json head-2.json head-3.json --out bench-head.json
+          if [ -x ./agora-bench-base ]; then
+            ./agora-bench-head bestof base-1.json base-2.json base-3.json --out bench-base.json
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bench-${{ github.sha }}
+          path: bench-*.json
+      - name: Compare
+        if: github.event_name == 'pull_request'
+        run: |
+          if [ -f bench-base.json ]; then
+            ./agora-bench-head compare bench-base.json bench-head.json --threshold 10
           fi
