@@ -33,7 +33,7 @@ pub struct StoredEvent {
 }
 
 #[derive(Debug)]
-pub struct StoreError(String);
+pub struct StoreError(pub(crate) String);
 
 impl fmt::Display for StoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -66,7 +66,7 @@ pub trait EventStore {
     fn set_setting(&self, key: &str, value: &[u8]) -> Result<(), StoreError>;
 }
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 pub struct SqliteStore {
     conn: Mutex<Connection>,
@@ -115,12 +115,30 @@ impl SqliteStore {
                  COMMIT;",
             )?;
         }
+        if version < 2 {
+            // Device enrollment (ADR-0015): one-time codes (hashed) and the devices they enrolled.
+            conn.execute_batch(
+                "BEGIN;
+                 CREATE TABLE enrollment_codes (
+                     code_hash  BLOB PRIMARY KEY,
+                     expires_ms INTEGER NOT NULL
+                 );
+                 CREATE TABLE devices (
+                     serial     TEXT PRIMARY KEY,
+                     node_id    TEXT NOT NULL,
+                     enrolled_ms INTEGER NOT NULL,
+                     revoked_ms INTEGER
+                 );
+                 PRAGMA user_version = 2;
+                 COMMIT;",
+            )?;
+        }
         Ok(Self {
             conn: Mutex::new(conn),
         })
     }
 
-    fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>, StoreError> {
+    pub(crate) fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>, StoreError> {
         self.conn
             .lock()
             .map_err(|_| StoreError("store lock poisoned".into()))
