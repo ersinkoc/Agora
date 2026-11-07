@@ -14,3 +14,8 @@ test:
 
 deny:
     cargo deny check
+
+# Run benchmark scenarios; results in target/bench.json (ADR-0022).
+bench:
+    cargo run -q --release -p agora-bench -- run --out target/bench.json
+    cat target/bench.json
