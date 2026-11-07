@@ -21,6 +21,8 @@ machines-online =
         [one] { $count } makine çevrimiçi
        *[other] { $count } makine çevrimiçi
     }
+link-connecting = Hub'a bağlanılıyor…
+link-offline = Hub'a ulaşılamıyor. Yeniden deneniyor…
 action-open = Aç
 action-start-agent = Ajan başlat
 theme-dark = Koyu

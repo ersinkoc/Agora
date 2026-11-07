@@ -3,6 +3,9 @@ import { CommandPalette, type PaletteItem } from './components/CommandPalette';
 import { demoAgents } from './fixtures';
 import { t } from './i18n';
 import { nextNeedingMe } from './model';
+import { connectLive, type LinkState } from './net/live';
+import { machinesOnline, tiles, type View } from './net/view';
+import { hubConnection } from './net/session';
 import { Focus, Gallery, Home } from './screens';
 
 function useHash(): [string, (h: string) => void] {
@@ -18,7 +21,16 @@ function useHash(): [string, (h: string) => void] {
 export function App() {
   const [hash, go] = useHash();
   const [palette, setPalette] = useState(false);
-  const agents = demoAgents;
+  // With a hub token the fleet comes from the hub; without one (development) the demo data stands in.
+  const hub = useMemo(hubConnection, []);
+  const [live, setLive] = useState<View | undefined>();
+  const [link, setLink] = useState<LinkState>('connecting');
+  useEffect(() => {
+    if (!hub) return;
+    const c = connectLive({ url: hub.url, token: hub.token, onView: (v) => setLive({ ...v }), onState: setLink });
+    return () => c.close();
+  }, [hub]);
+  const agents = useMemo(() => (hub ? (live ? tiles(live) : []) : demoAgents), [hub, live]);
   const current = hash.startsWith('#/agent/') ? decodeURIComponent(hash.slice('#/agent/'.length)) : undefined;
 
   const open = useCallback((id: string) => go(`#/agent/${encodeURIComponent(id)}`), [go]);
@@ -47,7 +59,7 @@ export function App() {
     <>
       {hash === '#/gallery' ? <Gallery /> : current !== undefined
         ? <Focus agent={agents.find((a) => a.id === current)} onBack={() => go('#/')} />
-        : <Home onOpen={open} />}
+        : <Home onOpen={open} agents={agents} machines={live ? machinesOnline(live) : undefined} link={hub ? link : 'live'} />}
       {palette && <CommandPalette items={items} onClose={() => setPalette(false)} />}
     </>
   );

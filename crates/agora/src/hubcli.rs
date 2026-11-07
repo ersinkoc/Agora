@@ -81,6 +81,7 @@ pub fn hub_run(say: &Say, o: &Opts) -> ExitCode {
                 t
             }
         };
+        let web_token = token.clone();
         let store = SqliteStore::open(&dir.join("hub.db")).map_err(|e| e.to_string())?;
         let state = Arc::new(ServerState {
             hub: Arc::new(Hub::open(store).map_err(|e| e.to_string())?),
@@ -113,6 +114,15 @@ pub fn hub_run(say: &Say, o: &Opts) -> ExitCode {
                     ("dir", dir.display().to_string().into()),
                 ],
             );
+            if o.web.is_some() {
+                say.out(
+                    key!("cli-hub-web"),
+                    &[
+                        ("addr", addr.to_string().into()),
+                        ("token", web_token.into()),
+                    ],
+                );
+            }
             server::run(listener, state, Some(acceptor)).await;
             Ok(())
         })

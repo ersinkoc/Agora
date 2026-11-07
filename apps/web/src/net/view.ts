@@ -1,0 +1,171 @@
+// The client's copy of the hub's view (crates/agora-hub/src/projection.rs): built from a Snapshot, then advanced by
+// positioned events. Keys are hub-wide `<producer>/<local id>`. Pure: no sockets, no React.
+
+import { agora } from '../gen/agora.js';
+import { type AgentTileModel, uiState } from '../model';
+
+type Ev = agora.v1.Event.$Properties;
+type Num = number | bigint | { toString(): string } | null | undefined;
+
+// uint64 fields arrive as number, Long or bigint depending on the generator; ids and times stay below 2^53.
+export function num(x: Num): number {
+  if (x === null || x === undefined) return 0;
+  return typeof x === 'number' ? x : Number(x.toString());
+}
+
+export interface NodeV { hostname: string; os: string; online: boolean; lastEventMs: number }
+export interface WorktreeV { checkoutId: string; path: string; branch: string; filesChanged: number }
+export interface AgentV {
+  nodeId: string; worktreeId: string; kind: string; state: number; reported: boolean; running: boolean;
+  sinceMs: number;
+}
+export interface ApprovalV { agentId: string; action: string; detail: string; expiresAtMs: number }
+
+export interface View {
+  pos: number;
+  nodes: Map<string, NodeV>;
+  worktrees: Map<string, WorktreeV>;
+  agents: Map<string, AgentV>;
+  approvals: Map<string, ApprovalV>;
+}
+
+export function emptyView(): View {
+  return { pos: 0, nodes: new Map(), worktrees: new Map(), agents: new Map(), approvals: new Map() };
+}
+
+export function fromSnapshot(s: agora.v1.Snapshot.$Properties): View {
+  const v = emptyView();
+  v.pos = num(s.pos);
+  for (const n of s.nodes ?? []) {
+    v.nodes.set(n.nodeId ?? '', {
+      hostname: n.hostname ?? '', os: n.os ?? '', online: !!n.online, lastEventMs: num(n.lastEventMs),
+    });
+  }
+  for (const w of s.worktrees ?? []) {
+    v.worktrees.set(w.worktreeId ?? '', {
+      checkoutId: w.checkoutId ?? '', path: w.path ?? '', branch: w.branch ?? '', filesChanged: w.filesChanged ?? 0,
+    });
+  }
+  for (const a of s.agents ?? []) {
+    v.agents.set(a.agentId ?? '', {
+      nodeId: a.nodeId ?? '', worktreeId: a.worktreeId ?? '', kind: a.kind ?? '', state: a.state ?? 0,
+      reported: !!a.reported, running: !!a.running, sinceMs: 0,
+    });
+  }
+  for (const p of s.approvals ?? []) {
+    v.approvals.set(p.approvalId ?? '', {
+      agentId: p.agentId ?? '', action: p.action ?? '', detail: p.detail ?? '', expiresAtMs: num(p.expiresAtMs),
+    });
+  }
+  return v;
+}
+
+// Applies one event at log position `pos`. An event at or before the view's position was already folded in
+// (a resume replays the tail), so it is ignored: applying is idempotent.
+export function applyEvent(v: View, pos: number, ev: Ev): void {
+  if (pos <= v.pos) return;
+  v.pos = pos;
+  const producer = ev.producerId ?? '';
+  const q = (id: string | null | undefined) => `${producer}/${id ?? ''}`;
+  const at = num(ev.atMs);
+  const node = v.nodes.get(producer);
+  if (node) node.lastEventMs = Math.max(node.lastEventMs, at);
+  const e = ev as Record<string, any>;
+  switch (ev.body) {
+    case 'nodeOnline': {
+      const b = e.nodeOnline;
+      v.nodes.set(b.nodeId, { hostname: b.hostname ?? '', os: b.os ?? '', online: true, lastEventMs: at });
+      break;
+    }
+    case 'nodeOffline': {
+      const n = v.nodes.get(e.nodeOffline.nodeId);
+      if (n) n.online = false;
+      break;
+    }
+    case 'worktreeCreated': {
+      const b = e.worktreeCreated;
+      v.worktrees.set(q(b.worktreeId), { checkoutId: q(b.checkoutId), path: b.path ?? '', branch: b.branch ?? '', filesChanged: 0 });
+      break;
+    }
+    case 'worktreeRemoved':
+      v.worktrees.delete(q(e.worktreeRemoved.worktreeId));
+      break;
+    case 'gitStatusChanged': {
+      const w = v.worktrees.get(q(e.gitStatusChanged.worktreeId));
+      if (w) w.filesChanged = e.gitStatusChanged.filesChanged ?? 0;
+      break;
+    }
+    case 'agentStarted': {
+      const b = e.agentStarted;
+      v.agents.set(q(b.agentId), {
+        nodeId: b.nodeId ?? '', worktreeId: q(b.worktreeId), kind: b.kind ?? '', state: 3 /* idle */,
+        reported: false, running: true, sinceMs: at,
+      });
+      break;
+    }
+    case 'agentStateChanged': {
+      const a = v.agents.get(q(e.agentStateChanged.agentId));
+      if (a) {
+        a.state = e.agentStateChanged.state ?? 0;
+        a.reported = !!e.agentStateChanged.reported;
+        a.sinceMs = at;
+      }
+      break;
+    }
+    case 'agentExited': {
+      const a = v.agents.get(q(e.agentExited.agentId));
+      if (a) { a.running = false; a.state = 4 /* done */; a.sinceMs = at; }
+      break;
+    }
+    case 'approvalRequested': {
+      const b = e.approvalRequested;
+      v.approvals.set(q(b.approvalId), { agentId: q(b.agentId), action: b.action ?? '', detail: b.detail ?? '', expiresAtMs: num(b.expiresAtMs) });
+      break;
+    }
+    case 'approvalResolved':
+      v.approvals.delete(q(e.approvalResolved.approvalId));
+      break;
+    default:
+      break; // terminals, usage, mesh and files do not change what the fleet screen shows
+  }
+}
+
+const ACCENTS = ['#ffb454', '#4fd1c5', '#a78bfa', '#fb7185', '#94a3b8', '#7dd3fc', '#86efac'];
+const ACCENT_NAMES = ['amber', 'teal', 'violet', 'rose', 'slate', 'sky', 'mint'];
+
+function hash(s: string): number {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+  return h;
+}
+
+function lastSegment(path: string): string {
+  const parts = path.split(/[\\/]/).filter(Boolean);
+  return parts[parts.length - 1] ?? '';
+}
+
+// What Home renders. A waiting approval makes its agent "needs you" even if the agent has not said so.
+export function tiles(v: View): AgentTileModel[] {
+  const waiting = new Set([...v.approvals.values()].map((a) => a.agentId));
+  return [...v.agents.entries()].map(([id, a]) => {
+    const i = hash(id) % ACCENTS.length;
+    const node = v.nodes.get(a.nodeId);
+    const wt = v.worktrees.get(a.worktreeId);
+    const state = waiting.has(id) ? 'needs-you' : uiState(a.state);
+    return {
+      id,
+      name: `${a.kind} · ${ACCENT_NAMES[i]}`,
+      accent: ACCENTS[i] as string,
+      machine: node?.hostname || a.nodeId,
+      workspace: wt ? wt.branch || lastSegment(wt.path) : '',
+      state,
+      preview: '',
+      since: a.sinceMs || undefined,
+      reportedBy: a.reported ? 'agent' : 'screen',
+    };
+  });
+}
+
+export function machinesOnline(v: View): number {
+  return [...v.nodes.values()].filter((n) => n.online).length;
+}
