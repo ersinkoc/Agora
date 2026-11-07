@@ -104,6 +104,7 @@ dependencies = [
  "agora-platform",
  "agora-protocol",
  "agora-vt",
+ "getrandom",
  "prost",
 ]
 
