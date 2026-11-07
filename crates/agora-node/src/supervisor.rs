@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use agora_adapters::{Detector, Manifest, Pacer};
 use agora_core::{Agent, AgentId, AgentState, IntegrationLevel, NodeId, StateSource, WorktreeId};
-use agora_platform::{spawn, ExitStatus, PtyConfig};
+use agora_platform::{spawn, ExitStatus, ProcessLimits, PtyConfig};
 use agora_protocol::{Error, ErrorCode};
 use agora_vt::Size;
 
@@ -46,11 +46,23 @@ impl RestartPolicy {
     }
 }
 
+/// Limits a node enforces on itself (docs/design/resource-limits.md). `None` means no limit.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NodeLimits {
+    /// Agents running (or waiting for a restart) at once.
+    pub max_agents: Option<usize>,
+    /// Open terminals. Every agent has one terminal; shell terminals will count here too.
+    pub max_terminals: Option<usize>,
+    /// OS limits applied to every agent process.
+    pub process: ProcessLimits,
+}
+
 #[derive(Debug, Clone)]
 pub struct SupervisorConfig {
     pub node: NodeId,
     pub restart: RestartPolicy,
     pub terminal: TerminalOptions,
+    pub limits: NodeLimits,
 }
 
 /// What to start.
@@ -109,6 +121,11 @@ pub enum SupervisorError {
     Git(GitError),
     /// Starting the process failed; the text is for logs only.
     Spawn(String),
+    /// The node is at one of its limits; `resource` is `agents` or `terminals`.
+    ResourceLimit {
+        resource: &'static str,
+        limit: u64,
+    },
 }
 
 impl SupervisorError {
@@ -125,6 +142,9 @@ impl SupervisorError {
             }
             Self::Git(e) => e.to_protocol(),
             Self::Spawn(_) => Error::new(ErrorCode::Internal).with("incident_id", "unassigned"),
+            Self::ResourceLimit { resource, limit } => Error::new(ErrorCode::NodeResourceLimit)
+                .with("resource", *resource)
+                .with("limit", i64::try_from(*limit).unwrap_or(i64::MAX)),
         }
     }
 }
@@ -197,8 +217,45 @@ impl Supervisor {
             .insert(manifest.kind.clone(), KindEntry { manifest, detector });
     }
 
+    /// Agents that are running or waiting for a restart.
+    fn active(&self) -> usize {
+        self.agents
+            .values()
+            .filter(|e| e.terminal.is_some() || e.restart_at.is_some())
+            .count()
+    }
+
+    fn check_limits(&self) -> Result<(), SupervisorError> {
+        let active = self.active();
+        for (resource, max) in [
+            ("agents", self.cfg.limits.max_agents),
+            ("terminals", self.cfg.limits.max_terminals),
+        ] {
+            if let Some(max) = max {
+                if active >= max {
+                    return Err(SupervisorError::ResourceLimit {
+                        resource,
+                        limit: max as u64,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Disk used by an agent's worktree.
+    pub fn disk_usage(&self, id: &AgentId) -> Result<crate::files::DiskUsage, SupervisorError> {
+        let e = self
+            .agents
+            .get(id)
+            .ok_or_else(|| SupervisorError::NotFound(id.clone()))?;
+        crate::files::disk_usage(&e.worktree).map_err(|e| SupervisorError::Spawn(e.to_string()))
+    }
+
     /// Create the agent's own worktree and start it there.
     pub fn start(&mut self, req: &StartRequest, now: Instant) -> Result<AgentId, SupervisorError> {
+        // Checked first: a refused start must not leave a worktree behind.
+        self.check_limits()?;
         let kind = self
             .kinds
             .get(&req.kind)
@@ -251,6 +308,7 @@ impl Supervisor {
         cfg.cwd = Some(worktree.to_path_buf());
         cfg.cols = self.cfg.terminal.size.cols;
         cfg.rows = self.cfg.terminal.size.rows;
+        cfg.limits = self.cfg.limits.process;
         if let Some(k) = self.kinds.get(kind) {
             cfg.env = k
                 .manifest
@@ -430,6 +488,7 @@ impl Supervisor {
         if entry.terminal.is_some() || entry.restart_at.is_some() {
             return Err(SupervisorError::StillRunning(id.clone()));
         }
+        self.check_limits()?;
         let (kind, worktree, session) = (
             entry.agent.kind.clone(),
             entry.worktree.clone(),
