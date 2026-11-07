@@ -13,4 +13,5 @@ npm run gen        # TypeScript types from schema/ into src/gen (not committed)
   only these variables.
 - `src/components/`: pure components that render a view model (`src/model.ts`); `src/screens.tsx`: Home and the gallery.
 - Text comes only from `locales/en/web.ftl` through `src/i18n.ts`. A test fails when a key is missing.
+- `src/terminal/`: the renderer interface (xterm.js behind it, lazy-loaded), terminal frame decoding, and a demo source.
 - The demo data in `src/fixtures.ts` stands in until the hub connection feeds the store.
