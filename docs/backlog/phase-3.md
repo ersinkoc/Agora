@@ -1,0 +1,24 @@
+# Phase 3 — Hub MVP and web client
+
+Exit criteria (roadmap): two machines' agents visible and controllable in one browser window; interaction and
+rendering budgets met; time to first agent ≤ 60 s; first-glance test passed with five users.
+
+Work proceeds in this order; each item is its own PR. Items that need a maintainer decision (a `Proposed` ADR, real
+agent accounts, usability sessions with people) are marked and skipped, never faked.
+
+| Task | State | Notes |
+| --- | --- | --- |
+| P3-01 hub event store | done | SQLite, exactly-once per `(producer, seq)` |
+| P3-02 node session | done | state machine; acks wait on ADR-0026 |
+| P3-03 WebSocket transport | in progress | frames over WS, plain and TLS, tokio (ADR-0011, ADR-0013) |
+| P3-04 hub server | next | accept nodes, run sessions, store events |
+| P3-05 node uplink | next | node dials hub, replays its buffer after the hub's `from_seq` |
+| P3-06 enrollment and mTLS | next | one-time code, device keys, certificates (ADR-0015) |
+| P3-07 projections and snapshot | next | nodes, projects, agents derived from the event log |
+| P3-08 client API | next | session tokens, snapshot + event subscription, command routing to nodes |
+| P3-09 terminal relay | next | terminal streams node → hub → client (input outranks output) |
+| P3-10 web client shell | next | design tokens, component gallery, store, Home, Focus view (ADR-0017, ADR-0024) |
+| P3-11 terminal rendering | next | renderer choice measured against ADR-0022 |
+| P3-12 SSH bootstrap | next | framed protocol over SSH stdio (ADR-0011) |
+| P3-13 notifications, doctor, backup/restore, usage view | next | `design/notifications.md`, `backup-restore.md`, `usage-and-cost.md` |
+| P3-14 first-agent flow | needs a human | needs P2-09 manifests from real agents; five-user first-glance test |
