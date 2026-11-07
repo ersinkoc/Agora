@@ -11,7 +11,10 @@ cli-usage =
       agora mesh stdio --socket YOL
       agora hub run [--listen ADDR] [--hub-dir DIR] [--name HOST]... [--web DIR]
       agora hub code [--hub-dir DIR]
+      agora hub backup [DOSYA] [--keep N] [--hub-dir DİZİN]
+      agora hub restore DOSYA [--hub-dir DİZİN]
       agora node enroll --hub URL --ca FILE --code CODE --id NAME
+      agora node trust CİHAZ_ID AÇIK_ANAHTAR_HEX [--data DİZİN]
       agora doctor [--data DİZİN] [--manifests DİZİN] [--socket YOL]
 cli-node-listening = Düğüm çalışıyor. Denetim soketi: { $socket }
 cli-agent-started = { $agent_id } ajanı { $worktree } içinde başlatıldı
@@ -54,6 +57,10 @@ doctor-summary-problems = Agora'nın ihtiyaç duyduğu bir şey eksik. SORUN ola
 
 cli-hub-listening = Hub { $addr } adresinde çalışıyor. Veri klasörü: { $dir }
 cli-hub-web = Web uygulaması: https://{ $addr }/#token={ $token } (hub sertifikası kendi CA'sı tarafından imzalı; ona güvenene kadar tarayıcı uyarı verir)
+cli-trusted = { $id } cihazı artık bu node'daki onaylara yanıt verebilir. Uygulanması için node'u yeniden başlatın.
+cli-trust-failed = Cihaza güvenilemedi: { $reason }
+cli-hub-backup = Yedek { $path } dosyasına yazıldı.
+cli-hub-restored = Veritabanı yedekten { $path } konumuna geri yüklendi. Önceki veritabanı yanında before-restore adıyla duruyor.
 cli-hub-failed = Hub komutu başarısız oldu: { $reason }
 cli-hub-code = Kayıt kodu: { $code } (10 dakika geçerli). Diğer makinede şunu çalıştırın: agora node enroll --hub wss://ADRES:PORT --ca { $ca } --code { $code } --id AD
 cli-enrolled = Bu makine { $id } adıyla kaydedildi. "agora node run" ile başlatın; hub'a kendiliğinden bağlanır. Kayıt yeri: { $dir }.

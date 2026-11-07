@@ -49,13 +49,15 @@ the instruction arrives without hub connectivity (local CLI).
 `agora-node::approvals` enforces on the node: signature verified against keys the node already trusts, signed message bound to
 node id, approval id and verdict (no replay on another node or request, no flipping deny to allow), 128-bit random single-use
 ids, expiry, cancellation when an agent stops, and a policy that lists which actions need approval. The signature scheme sits
-behind a `Verifier` trait; the scheme itself (ECDSA P-256, ADR-0028, implemented as `P256Verifier`) and how trusted device keys reach the node (a
-user-signed change, ADR-0020) are still to be decided and built.
+behind a `Verifier` trait; the scheme is ECDSA P-256 (ADR-0028, `P256Verifier`). Trusted device keys reach the node only through its owner:
+`agora node trust DEVICE_ID PUBLIC_KEY_HEX` writes `<data>/trusted-devices` on the machine itself (read at start; malformed
+lines are skipped, never trusted), and no hub or client message can edit it. Adding a device by a user-signed message from an
+already trusted device (ADR-0020) is still to be built.
 
 ### Approvals: node wiring
 Adapter approval requests enter the node's queue under a random node-minted id (the adapter's own id is only used to answer it),
 are announced as `ApprovalRequested`, and wait. `approval.resolve` verifies the device signature on the node and relays the verdict
 to the adapter, recording `ApprovalResolved` with the signer; requests that expire are answered as denied; a stopped or crashed
-agent leaves nothing waiting. With no trusted device (the default until keys and a signature scheme exist) every decision is
+agent leaves nothing waiting. With no trusted device (the default until the owner runs `agora node trust`) every decision is
 refused with `approval.signature_invalid`, so sensitive actions stay denied rather than open. Adapter usage and session reports
 are written to the event log.

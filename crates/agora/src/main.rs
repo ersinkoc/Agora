@@ -87,6 +87,7 @@ pub(crate) struct Opts {
     hub_dir: Option<PathBuf>,
     listen: Option<String>,
     web: Option<PathBuf>,
+    keep: Option<usize>,
     names: Vec<String>,
     hub: Option<String>,
     ca: Option<PathBuf>,
@@ -111,6 +112,7 @@ fn parse(args: &[String]) -> Option<Opts> {
             }
             "--max-agents" => o.max_agents = Some(it.next()?.parse().ok()?),
             "--hub-dir" => o.hub_dir = Some(it.next()?.into()),
+            "--keep" => o.keep = Some(it.next()?.parse().ok()?),
             "--web" => o.web = Some(it.next()?.into()),
             "--listen" => o.listen = Some(it.next()?.clone()),
             "--name" => o.names.push(it.next()?.clone()),
@@ -153,7 +155,10 @@ fn main() -> ExitCode {
         ["doctor"] => doctor(&say, &opts),
         ["hub", "run"] => hubcli::hub_run(&say, &opts),
         ["hub", "code"] => hubcli::hub_code(&say, &opts),
+        ["hub", "backup"] => hubcli::hub_backup(&say, &opts),
+        ["hub", "restore"] => hubcli::hub_restore(&say, &opts),
         ["node", "enroll"] => hubcli::node_enroll(&say, &opts),
+        ["node", "trust"] => node_trust(&say, &opts),
         ["node", "stdio"] => bridge_stdio(&say, &socket_path(&opts)),
         ["mesh", "stdio"] => match &opts.socket {
             // An agent's MCP client starts this as its mesh server; the node told it which socket is its own.
@@ -268,6 +273,36 @@ fn doctor(say: &Say, o: &Opts) -> ExitCode {
     } else {
         say.err(key!("doctor-summary-problems"), &[]);
         ExitCode::from(1)
+    }
+}
+
+/// `agora node trust DEVICE_ID PUBLIC_KEY_HEX`: lets a device answer approvals on this node. Run by the owner on the
+/// machine itself; nothing a hub or client sends can do this.
+fn node_trust(say: &Say, o: &Opts) -> ExitCode {
+    let (Some(id), Some(key)) = (o.positional.first(), o.positional.get(1)) else {
+        say.err(key!("cli-bad-arguments"), &[]);
+        say.err(key!("cli-usage"), &[]);
+        return ExitCode::from(2);
+    };
+    let dir = o.data.clone().unwrap_or_else(|| home().join("data"));
+    let result = std::fs::create_dir_all(&dir)
+        .map_err(|e| e.to_string())
+        .and_then(|()| {
+            agora_node::approvals::trust_device(
+                &dir.join(agora_node::approvals::TRUSTED_DEVICES_FILE),
+                id,
+                key,
+            )
+        });
+    match result {
+        Ok(()) => {
+            say.out(key!("cli-trusted"), &[("id", id.clone().into())]);
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            say.err(key!("cli-trust-failed"), &[("reason", e.into())]);
+            ExitCode::from(1)
+        }
     }
 }
 

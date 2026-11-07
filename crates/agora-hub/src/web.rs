@@ -46,16 +46,37 @@ impl DirAssets {
 
 impl Assets for DirAssets {
     fn get(&self, path: &str) -> Option<Asset> {
-        let rel = safe_relative(path)?;
-        if rel.as_os_str().is_empty() {
-            return self.read(Path::new("index.html"));
-        }
-        match self.read(&rel) {
-            Some(a) => Some(a),
-            // Client-side routes (no extension) fall back to the app shell; a missing file does not.
-            None if rel.extension().is_none() => self.read(Path::new("index.html")),
-            None => None,
-        }
+        resolve(path, |rel| self.read(rel))
+    }
+}
+
+/// Assets compiled into the binary: `(path relative to the web root, bytes)`.
+pub struct EmbeddedAssets(pub &'static [(&'static str, &'static [u8])]);
+
+impl Assets for EmbeddedAssets {
+    fn get(&self, path: &str) -> Option<Asset> {
+        resolve(path, |rel| {
+            let want = rel.to_str()?.replace('\\', "/");
+            let (_, body) = self.0.iter().find(|(name, _)| *name == want)?;
+            Some(Asset {
+                content_type: content_type(rel),
+                body: body.to_vec(),
+            })
+        })
+    }
+}
+
+/// The lookup rule both sources share: `/` is the app shell, a missing path without an extension is a client-side
+/// route and also gets the shell, and a missing file does not.
+fn resolve(path: &str, read: impl Fn(&Path) -> Option<Asset>) -> Option<Asset> {
+    let rel = safe_relative(path)?;
+    if rel.as_os_str().is_empty() {
+        return read(Path::new("index.html"));
+    }
+    match read(&rel) {
+        Some(a) => Some(a),
+        None if rel.extension().is_none() => read(Path::new("index.html")),
+        None => None,
     }
 }
 
@@ -271,6 +292,17 @@ mod tests {
         assert!(a.get("/assets/missing.js").is_none());
         assert!(a.get("/../x").is_none());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn embedded_assets_follow_the_same_rules() {
+        static FILES: &[(&str, &[u8])] = &[("index.html", b"shell"), ("assets/app.js", b"js")];
+        let a = EmbeddedAssets(FILES);
+        assert_eq!(a.get("/").unwrap().body, b"shell");
+        assert_eq!(a.get("/assets/app.js").unwrap().body, b"js");
+        assert_eq!(a.get("/agents/7").unwrap().body, b"shell");
+        assert!(a.get("/assets/nope.js").is_none());
+        assert!(a.get("/../index.html").is_none());
     }
 
     #[tokio::test]

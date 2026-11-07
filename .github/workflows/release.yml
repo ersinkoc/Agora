@@ -9,7 +9,23 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  web:
+    # The web app is built once and embedded into every binary (crates/agora/build.rs).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci && npm run gen && npm run build
+        working-directory: apps/web
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: apps/web/dist
+
   build:
+    needs: web
     strategy:
       fail-fast: false
       matrix:
@@ -22,6 +38,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: apps/web/dist
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.99.1
