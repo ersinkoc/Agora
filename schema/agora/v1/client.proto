@@ -1,0 +1,93 @@
+syntax = "proto3";
+
+package agora.v1;
+
+import "agora/v1/common.proto";
+import "agora/v1/events.proto";
+
+// ADR-0027: what a client receives from the hub. The snapshot tables mirror the hub's view field for field; entity ids
+// are hub-wide keys `<node>/<local id>`. (The ADR calls these tables NodeState, AgentState, ...; AgentState is already the
+// enum in common.proto, so the messages are named *Snapshot.)
+
+// client -> hub on the events stream. Absent after_pos: send a snapshot first.
+message Subscribe {
+  optional uint64 after_pos = 1;
+}
+
+message NodeSnapshot {
+  string node_id = 1;
+  string hostname = 2;
+  string os = 3;
+  string build = 4;
+  bool online = 5;
+  uint32 agents_running = 6;
+  uint32 terminals_open = 7;
+  uint64 memory_used_bytes = 8;
+  uint64 last_event_ms = 9;
+}
+
+message CheckoutSnapshot {
+  string checkout_id = 1;
+  string node_id = 2;
+  string project_id = 3;
+  string path = 4;
+}
+
+message WorktreeSnapshot {
+  string worktree_id = 1;
+  string checkout_id = 2;
+  string path = 3;
+  string branch = 4;
+  uint32 files_changed = 5;
+  uint32 insertions = 6;
+  uint32 deletions = 7;
+  string head_commit = 8;
+}
+
+message AgentSnapshot {
+  string agent_id = 1;
+  string node_id = 2;
+  string project_id = 3;
+  string worktree_id = 4;
+  string kind = 5;
+  AgentState state = 6;
+  // True when the agent or an adapter reported the state; false when read from the screen.
+  bool reported = 7;
+  optional string session_id = 8;
+  bool running = 9;
+  optional int32 exit_code = 10;
+  uint64 input_tokens = 11;
+  uint64 output_tokens = 12;
+}
+
+message TerminalSnapshot {
+  string terminal_id = 1;
+  string node_id = 2;
+  string agent_id = 3;
+  string title = 4;
+}
+
+message ApprovalSnapshot {
+  string approval_id = 1;
+  string agent_id = 2;
+  string action = 3;
+  string detail = 4;
+  uint64 expires_at_ms = 5;
+}
+
+// hub -> client. `pos` is the global log position the snapshot reflects; live events continue after it.
+message Snapshot {
+  uint64 pos = 1;
+  repeated NodeSnapshot nodes = 2;
+  repeated CheckoutSnapshot checkouts = 3;
+  repeated WorktreeSnapshot worktrees = 4;
+  repeated AgentSnapshot agents = 5;
+  repeated TerminalSnapshot terminals = 6;
+  repeated ApprovalSnapshot approvals = 7;
+}
+
+// hub -> client for every live or replayed event.
+message PositionedEvent {
+  uint64 pos = 1;
+  Event event = 2;
+}

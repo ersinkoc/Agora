@@ -29,5 +29,5 @@ Golden fixtures are added for the three new messages.
 ## Consequences
 - The local CLI and any future tooling can list agents without a hub.
 - One more command to keep stable forever; it is deliberately a plain read of existing state, with no new concepts.
-- Until this ADR is accepted, `agora agent list` is not implemented; `start`, `stop`, and `terminal attach` do not
+
   depend on it.

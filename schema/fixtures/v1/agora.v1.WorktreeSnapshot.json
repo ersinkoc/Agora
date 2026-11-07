@@ -1,0 +1,10 @@
+{
+  "worktreeId": "x",
+  "checkoutId": "x",
+  "path": "x",
+  "branch": "x",
+  "filesChanged": 1,
+  "insertions": 1,
+  "deletions": 1,
+  "headCommit": "x"
+}

@@ -1,0 +1,14 @@
+{
+  "agentId": "x",
+  "nodeId": "x",
+  "projectId": "x",
+  "worktreeId": "x",
+  "kind": "x",
+  "state": "AGENT_STATE_WORKING",
+  "reported": true,
+  "sessionId": "x",
+  "running": true,
+  "exitCode": 1,
+  "inputTokens": "1",
+  "outputTokens": "1"
+}

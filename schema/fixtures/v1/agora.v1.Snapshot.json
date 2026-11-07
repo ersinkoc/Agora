@@ -1,0 +1,69 @@
+{
+  "pos": "1",
+  "nodes": [
+    {
+      "nodeId": "x",
+      "hostname": "x",
+      "os": "x",
+      "build": "x",
+      "online": true,
+      "agentsRunning": 1,
+      "terminalsOpen": 1,
+      "memoryUsedBytes": "1",
+      "lastEventMs": "1"
+    }
+  ],
+  "checkouts": [
+    {
+      "checkoutId": "x",
+      "nodeId": "x",
+      "projectId": "x",
+      "path": "x"
+    }
+  ],
+  "worktrees": [
+    {
+      "worktreeId": "x",
+      "checkoutId": "x",
+      "path": "x",
+      "branch": "x",
+      "filesChanged": 1,
+      "insertions": 1,
+      "deletions": 1,
+      "headCommit": "x"
+    }
+  ],
+  "agents": [
+    {
+      "agentId": "x",
+      "nodeId": "x",
+      "projectId": "x",
+      "worktreeId": "x",
+      "kind": "x",
+      "state": "AGENT_STATE_WORKING",
+      "reported": true,
+      "sessionId": "x",
+      "running": true,
+      "exitCode": 1,
+      "inputTokens": "1",
+      "outputTokens": "1"
+    }
+  ],
+  "terminals": [
+    {
+      "terminalId": "x",
+      "nodeId": "x",
+      "agentId": "x",
+      "title": "x"
+    }
+  ],
+  "approvals": [
+    {
+      "approvalId": "x",
+      "agentId": "x",
+      "action": "x",
+      "detail": "x",
+      "expiresAtMs": "1"
+    }
+  ]
+}

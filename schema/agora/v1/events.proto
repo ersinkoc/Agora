@@ -196,3 +196,9 @@ message FilesChanged {
   // Batched, relative to the worktree root.
   repeated string paths = 2;
 }
+
+// ADR-0026: hub -> producer on the events stream. Cumulative: every event of that producer with seq <= up_to_seq is
+// durably stored and may be dropped.
+message EventAck {
+  uint64 up_to_seq = 1;
+}

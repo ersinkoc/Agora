@@ -189,10 +189,23 @@ fn errors_are_rendered_from_codes_and_exit_nonzero() {
     assert_eq!(code, 1);
     assert!(err.contains("project.not_found"), "{err}");
 
-    // Listing waits for ADR-0025.
-    let (code, _, err) = cli(&s, &["agent", "list"]);
-    assert_eq!(code, 2);
-    assert!(err.contains("not available"), "{err}");
+    // Listing (ADR-0025): empty first, then one tab-separated line per agent.
+    let (code, out, _) = cli(&s, &["agent", "list"]);
+    assert_eq!(code, 0);
+    assert_eq!(out.trim(), "This node has no agents.");
+    let (code, _, err) = cli(&s, &["agent", "start", "shell", "--project", "demo"]);
+    assert_eq!(code, 0, "{err}");
+    let (code, out, _) = cli(&s, &["agent", "list"]);
+    assert_eq!(code, 0);
+    let cols: Vec<&str> = out.trim().split('\t').collect();
+    assert_eq!(
+        (cols[0], cols[1], cols[3]),
+        ("agent-1", "shell", "running"),
+        "{out}"
+    );
+    cli(&s, &["agent", "stop", "agent-1"]);
+    let (_, out, _) = cli(&s, &["agent", "list"]);
+    assert!(out.trim().ends_with("stopped"), "{out}");
 }
 
 #[test]

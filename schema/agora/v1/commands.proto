@@ -3,6 +3,7 @@ syntax = "proto3";
 package agora.v1;
 
 import "agora/v1/common.proto";
+import "agora/v1/enroll.proto";
 
 // Commands flow client -> hub -> node (docs/specs/protocol.md section 4). Every request has a request_id
 // and an idempotency_key; the response is Ok or Err.
@@ -33,6 +34,10 @@ message CommandRequest {
     MeshPost mesh_post = 60;
     TaskUpdate task_update = 61;
     NodePolicyGet node_policy_get = 70;
+    // ADR-0025
+    AgentList agent_list = 15;
+    // ADR-0027: sent on a TLS connection that has no client certificate yet; accepts nothing else.
+    EnrollRequest enroll = 80;
   }
 }
 
@@ -57,6 +62,8 @@ message CommandOk {
     GitDiffResult git_diff = 8;
     WorktreeCreateResult worktree_create = 9;
     NodePolicyResult node_policy = 10;
+    AgentListResult agent_list = 11;
+    EnrollResponse enroll = 12;
   }
 }
 
@@ -236,4 +243,26 @@ message NodePolicyResult {
   // Commands that require a user-signed approval on this node.
   repeated string approval_required = 1;
   repeated string allowed_agent_kinds = 2;
+}
+
+// ---- ADR-0025: agent.list ----
+
+// An empty node_id means this node.
+message AgentList {
+  string node_id = 1;
+}
+
+message AgentSummary {
+  string agent_id = 1;
+  string kind = 2;
+  AgentState state = 3;
+  string worktree_id = 4;
+  // Empty for an agent with no terminal (an L3 adapter agent).
+  string terminal_id = 5;
+  bool running = 6;
+  uint32 restarts = 7;
+}
+
+message AgentListResult {
+  repeated AgentSummary agents = 1;
 }

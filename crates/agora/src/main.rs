@@ -130,11 +130,7 @@ fn main() -> ExitCode {
         ["node", "run"] => node_run(&say, &opts),
         ["agent", "start"] => agent_start(&say, &opts),
         ["agent", "stop"] => agent_stop(&say, &opts),
-        ["agent", "list"] => {
-            // Waiting for ADR-0025 (an `agent.list` command); see docs/adr/0025-agent-list-command.md.
-            say.err(key!("cli-agent-list-unavailable"), &[]);
-            ExitCode::from(2)
-        }
+        ["agent", "list"] => agent_list(&say, &opts),
         ["terminal", "attach"] => terminal_attach(&say, &opts),
         ["doctor"] => doctor(&say, &opts),
         ["node", "stdio"] => bridge_stdio(&say, &socket_path(&opts)),
@@ -352,6 +348,42 @@ fn agent_start(say: &Say, o: &Opts) -> ExitCode {
                     ("worktree", r.worktree_id.into()),
                 ],
             );
+            ExitCode::SUCCESS
+        }
+        Ok(_) => ExitCode::from(1),
+        Err(code) => code,
+    }
+}
+
+/// `agora agent list`: one line per agent, columns separated by tabs (id, kind, state, running or stopped).
+fn agent_list(say: &Say, o: &Opts) -> ExitCode {
+    let mut c = match connect(say, o) {
+        Ok(c) => c,
+        Err(code) => return code,
+    };
+    match call(say, &mut c, Cmd::AgentList(v1::AgentList::default())) {
+        Ok(v1::CommandOk {
+            result: Some(Ok_::AgentList(list)),
+        }) => {
+            if list.agents.is_empty() {
+                say.out(key!("cli-agent-list-empty"), &[]);
+            }
+            for a in &list.agents {
+                let state = v1::AgentState::try_from(a.state).map_or("unknown", |s| match s {
+                    v1::AgentState::Working => "working",
+                    v1::AgentState::Blocked => "blocked",
+                    v1::AgentState::Idle => "idle",
+                    v1::AgentState::Done => "done",
+                    v1::AgentState::Unspecified => "unknown",
+                });
+                println!(
+                    "{}\t{}\t{}\t{}",
+                    a.agent_id,
+                    a.kind,
+                    state,
+                    if a.running { "running" } else { "stopped" }
+                );
+            }
             ExitCode::SUCCESS
         }
         Ok(_) => ExitCode::from(1),
