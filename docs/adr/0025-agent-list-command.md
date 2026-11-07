@@ -1,5 +1,5 @@
 # 0025. `agent.list` command for node-local control
-Status: Proposed
+Status: Accepted
 Date: 2026-11-07
 
 ## Context
