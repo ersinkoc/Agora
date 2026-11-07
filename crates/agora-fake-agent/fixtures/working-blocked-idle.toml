@@ -1,0 +1,13 @@
+name = "working-blocked-idle"
+
+[[frame]]
+text = "Claude Code (fake)\n\n* Thinking... (esc to interrupt)"
+delay_ms = 200
+
+[[frame]]
+text = "Claude Code (fake)\n\nAllow Bash(rm -rf build)?\n  1. Yes\n  2. No"
+delay_ms = 200
+
+[[frame]]
+text = "Claude Code (fake)\n\nDone.\n\n> "
+delay_ms = 0

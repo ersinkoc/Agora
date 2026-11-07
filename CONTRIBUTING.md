@@ -7,7 +7,8 @@ human contributors too.
 2. Read the documents listed in the issue's References.
 3. Work in your own branch (and worktree if several tasks run in parallel).
 4. Open a PR using the template. Keep the diff inside the crates the task names.
-5. Architecture-level changes start as an ADR with status `Proposed`.
+5. Sign off every commit (`git commit -s`): contributions are under Apache-2.0 with the DCO (ADR-0016).
+6. Architecture-level changes start as an ADR with status `Proposed`.
 
 Translations: add or edit files under `locales/<lang>/`. Keys come from `locales/en/`; never translate by
 changing English keys.

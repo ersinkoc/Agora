@@ -26,19 +26,19 @@ Date: YYYY-MM-DD
 | 0006 | Schema-first, append-only protocol | Accepted |
 | 0007 | Localization with Fluent; codes not text in APIs | Accepted |
 | 0008 | Mesh via an MCP server injected into agents | Accepted |
-| 0009 | Schema format: Protocol Buffers as the IDL | Proposed |
-| 0010 | Wire encoding per surface | Proposed |
-| 0011 | Transport: WebSocket over TLS first, QUIC later | Proposed |
-| 0012 | Terminal emulator backend | Proposed |
-| 0013 | Async runtime | Proposed |
-| 0014 | Hub storage | Proposed |
-| 0015 | Identity and device enrollment | Proposed |
-| 0016 | License | Proposed |
-| 0017 | Web client framework | Proposed |
-| 0018 | Adapter registry and signing | Proposed |
-| 0019 | Updates and version skew | Proposed |
-| 0020 | Nodes enforce policy; approvals are signed by the user | Proposed |
+| 0009 | Schema format: Protocol Buffers as the IDL | Accepted |
+| 0010 | Wire encoding per surface | Accepted |
+| 0011 | Transport: WebSocket over TLS first, QUIC later | Accepted |
+| 0012 | Terminal emulator backend | Accepted |
+| 0013 | Async runtime | Accepted |
+| 0014 | Hub storage | Accepted |
+| 0015 | Identity and device enrollment | Accepted |
+| 0016 | License | Accepted |
+| 0017 | Web client framework | Accepted |
+| 0018 | Adapter registry and signing | Accepted |
+| 0019 | Updates and version skew | Accepted |
+| 0020 | Nodes enforce policy; approvals are signed by the user | Accepted |
 | 0021 | models.dev as the model and price catalog | Accepted |
 | 0022 | Performance budgets are requirements | Accepted |
-| 0023 | Optional direct data path between client and node | Proposed |
+| 0023 | Optional direct data path between client and node | Accepted |
 | 0024 | Simplicity and visual quality are requirements | Accepted |
