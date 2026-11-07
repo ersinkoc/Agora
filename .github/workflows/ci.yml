@@ -56,3 +56,19 @@ jobs:
         working-directory: apps/web
         run: |
           node -e "import('./src/gen/agora.js').then(m=>{const P=m.agora.v1.Ping;const b=Array.from(P.encode(P.create({nonce:42})).finish());if(b.join()!=='8,42')process.exit(1)})"
+
+  schema-breaking:
+    # A published message never changes (ADR-0006): compare schema/ with the target branch.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Extract base schema
+        run: |
+          mkdir base
+          git archive "${{ github.event.pull_request.base.sha }}" schema | tar -x -C base
+      - run: cargo run -q -p agora-schema-check -- base/schema schema

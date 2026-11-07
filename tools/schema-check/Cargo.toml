@@ -1,0 +1,13 @@
+[package]
+name = "agora-schema-check"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Same pure-Rust protobuf compiler the build uses (ADR-0009); no external `buf` binary needed.
+protox = "0.10"
+prost-types = "0.14"
