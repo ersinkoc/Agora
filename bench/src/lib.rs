@@ -187,6 +187,11 @@ pub fn best_of(a: ScenarioResult, b: ScenarioResult) -> ScenarioResult {
     }
 }
 
+/// Scenarios whose latency is reported but not gated. `terminals-20` runs twenty busy threads on a CI runner
+/// with a few cores, so its p95 measures the OS scheduler, not our code (a 25% swing on identical code was
+/// observed). Its throughput, which is stable, still gates.
+pub const LATENCY_NOT_GATED: &[&str] = &["terminals-20"];
+
 /// A regression found by [`compare`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct Regression {
@@ -213,7 +218,7 @@ pub fn compare(base: &Report, new: &Report, threshold_pct: f64) -> Vec<Regressio
                 });
             }
         }
-        if b.p95_latency_us > 0.0 {
+        if b.p95_latency_us > 0.0 && !LATENCY_NOT_GATED.contains(&n.name.as_str()) {
             let rise = (n.p95_latency_us - b.p95_latency_us) / b.p95_latency_us * 100.0;
             if rise > threshold_pct {
                 out.push(Regression {
@@ -252,6 +257,19 @@ mod tests {
     fn slower_or_laggier_fails() {
         let r = compare(&report(100.0, 10.0), &report(80.0, 12.0), 10.0);
         assert_eq!(r.len(), 2);
+    }
+
+    #[test]
+    fn oversubscribed_scenarios_gate_throughput_but_not_latency() {
+        let mut base = report(100.0, 10.0);
+        let mut new = report(100.0, 20.0);
+        base.scenarios[0].name = "terminals-20".into();
+        new.scenarios[0].name = "terminals-20".into();
+        assert!(compare(&base, &new, 10.0).is_empty());
+        new.scenarios[0].throughput_mb_s = 50.0;
+        let r = compare(&base, &new, 10.0);
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].metric, "throughput_mb_s");
     }
 
     #[test]
