@@ -3,12 +3,25 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "gen": "sh ../../scripts/gen-ts.sh"
+    "gen": "sh ../../scripts/gen-ts.sh",
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "typecheck": "tsc",
+    "test": "vitest run"
   },
   "dependencies": {
-    "protobufjs": "8.8.1"
+    "@fluent/bundle": "0.19.1",
+    "protobufjs": "8.8.1",
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
   },
   "devDependencies": {
-    "protobufjs-cli": "2.7.1"
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.2.1",
+    "protobufjs-cli": "2.7.1",
+    "typescript": "7.0.2",
+    "vite": "8.3.6",
+    "vitest": "5.1.0"
   }
 }
