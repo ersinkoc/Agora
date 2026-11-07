@@ -125,12 +125,15 @@ dependencies = [
 name = "agora-protocol"
 version = "0.0.0"
 dependencies = [
+ "futures-util",
  "prost",
  "prost-build",
  "prost-reflect",
  "protox",
  "serde",
  "serde_json",
+ "tokio",
+ "tokio-tungstenite",
 ]
 
 [[package]]

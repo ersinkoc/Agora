@@ -11,7 +11,7 @@ agent accounts, usability sessions with people) are marked and skipped, never fa
 | P3-01 hub event store | done | SQLite, exactly-once per `(producer, seq)` |
 | P3-02 node session | done | state machine; acks wait on ADR-0026 |
 | P3-03 WebSocket transport | done | one frame per binary message; stream-generic so TLS wraps it (ADR-0011, ADR-0013) |
-| P3-04 hub server | core done | `agora-hub::hub`: store + view + fan-out under one lock, slow subscribers dropped, hub-recorded node-offline; the listener (TLS, WebSocket, frames) waits on ADR-0026/0027 |
+| P3-04 hub server | done (service) | `agora-hub::hub`: store + view + fan-out under one lock, slow subscribers dropped, hub-recorded node-offline; `agora-hub::server`: node, client, enrollment over WS and mTLS TLS, snapshot, acks, revocation; the `agora hub run` command and the node dialer are next |
 | P3-05 node uplink | state machine done | `agora-node::uplink` + end-to-end test with the hub session (resume, no dups/gaps, restore, stale, two machines in one view); the dialer (mTLS WebSocket) and ack wiring wait on ADR-0026 |
 | P3-06 enrollment and mTLS | codes, CA, mTLS acceptor done | one-time codes (hashed, 10 min, lockout after 5 misses), CSR signing, revocation; wire messages for enrollment (need an ADR) and wiring the acceptor into the hub server still to do |
 | P3-07 projections and snapshot | done (view) | `View` folds events; snapshot encoding needs a schema message (ADR to come) |

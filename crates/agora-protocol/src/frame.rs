@@ -170,6 +170,24 @@ impl Decoder {
     }
 }
 
+/// Frame `kind` values on the control and events streams (ADR-0026, ADR-0027). The payload is the named message.
+pub mod kinds {
+    // Stream 0 (control)
+    pub const HELLO: u8 = 0;
+    pub const WELCOME: u8 = 1;
+    pub const RESUME: u8 = 2;
+    pub const RESUME_OK: u8 = 3;
+    pub const SNAPSHOT_REQUIRED: u8 = 4;
+    pub const PING: u8 = 5;
+    pub const PONG: u8 = 6;
+    // Stream 2 (events)
+    pub const EVENT: u8 = 0;
+    pub const EVENT_ACK: u8 = 1;
+    pub const SUBSCRIBE: u8 = 2;
+    pub const SNAPSHOT: u8 = 3;
+    pub const POSITIONED_EVENT: u8 = 4;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

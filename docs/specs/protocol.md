@@ -96,6 +96,14 @@ Schema additions (ADR-0025/0026/0027, all new messages, nothing published change
 `AgentState` is already the enum) and `enroll.proto` (`EnrollRequest`, `EnrollResponse`). Golden fixtures added for each.
 Frame kinds on streams 0 and 2 are the ADR-0026 table.
 
+Hub service (`agora-hub::server`, ADR-0011/0026/0027): one TLS port. A client certificate from the hub CA that is not revoked makes the
+peer a **node** (named by the certificate): `Hello`/`Welcome`, `Resume`/`ResumeOk`, then `Event` frames; the hub answers with a cumulative
+`EventAck` after each batch and when idle, and a `ResumeOk { from_seq }` on a gap. A peer **without** a certificate is a client if its first
+frame is `Subscribe` and its `Authorization: Bearer` token is accepted (`Snapshot` or backlog, then `PositionedEvent`s; too slow = dropped,
+resubscribe with the last position), or an enrolling node if its first frame is an `EnrollRequest` command (one command, nothing else).
+Enrollment answers are the same for a wrong, expired or used code (`auth.unauthenticated`), and guessing is locked out for everyone
+(`auth.forbidden`). Frame kinds are in `agora_protocol::frame::kinds`.
+
 Initial event families:
 
 | Family | Examples |
