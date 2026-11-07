@@ -192,6 +192,12 @@ pub fn best_of(a: ScenarioResult, b: ScenarioResult) -> ScenarioResult {
 /// observed). Its throughput, which is stable, still gates.
 pub const LATENCY_NOT_GATED: &[&str] = &["terminals-20"];
 
+/// Scenarios whose latency is gated at a multiple of the threshold. `pty-vt-throughput`'s p95 is the time to
+/// parse one chunk, tens of microseconds, so shared-runner noise reached +26% on identical code. A real
+/// slowdown of the parser is orders of magnitude larger (the deliberate-slowdown check moves it by >1000%) and
+/// still fails, and the stable throughput metric keeps the exact threshold.
+pub const LATENCY_THRESHOLD_FACTOR: &[(&str, f64)] = &[("pty-vt-throughput", 3.0)];
+
 /// A regression found by [`compare`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct Regression {
@@ -220,7 +226,11 @@ pub fn compare(base: &Report, new: &Report, threshold_pct: f64) -> Vec<Regressio
         }
         if b.p95_latency_us > 0.0 && !LATENCY_NOT_GATED.contains(&n.name.as_str()) {
             let rise = (n.p95_latency_us - b.p95_latency_us) / b.p95_latency_us * 100.0;
-            if rise > threshold_pct {
+            let factor = LATENCY_THRESHOLD_FACTOR
+                .iter()
+                .find(|(name, _)| *name == n.name)
+                .map_or(1.0, |(_, f)| *f);
+            if rise > threshold_pct * factor {
                 out.push(Regression {
                     scenario: n.name.clone(),
                     metric: "p95_latency_us",
@@ -270,6 +280,24 @@ mod tests {
         let r = compare(&base, &new, 10.0);
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].metric, "throughput_mb_s");
+    }
+
+    #[test]
+    fn micro_latency_scenarios_tolerate_noise_but_not_real_slowdowns() {
+        let named = |tp, lat| {
+            let mut r = report(tp, lat);
+            r.scenarios[0].name = "pty-vt-throughput".into();
+            r
+        };
+        // +26% latency (seen on identical code) passes; +100% fails; throughput keeps the exact threshold.
+        assert!(compare(&named(100.0, 50.0), &named(100.0, 63.0), 10.0).is_empty());
+        let r = compare(&named(100.0, 50.0), &named(100.0, 100.0), 10.0);
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].metric, "p95_latency_us");
+        assert_eq!(
+            compare(&named(100.0, 50.0), &named(85.0, 50.0), 10.0).len(),
+            1
+        );
     }
 
     #[test]
