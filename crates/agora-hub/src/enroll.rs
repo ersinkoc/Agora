@@ -66,19 +66,49 @@ fn to_i64(v: u64) -> i64 {
     i64::try_from(v).unwrap_or(i64::MAX)
 }
 
+/// Failed-guess bookkeeping, kept apart from [`Enrollment`] so one instance can be shared by every connection.
+#[derive(Debug, Default)]
+pub struct Lockout {
+    state: std::sync::Mutex<(u32, u64)>,
+}
+
+impl Lockout {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn check(&self, now_ms: u64) -> Option<u64> {
+        let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        (now_ms < s.1).then(|| s.1 - now_ms)
+    }
+
+    fn failed(&self, now_ms: u64) {
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        s.0 += 1;
+        if s.0 >= MAX_FAILURES {
+            s.0 = 0;
+            s.1 = now_ms.saturating_add(LOCKOUT_MS);
+        }
+    }
+
+    fn succeeded(&self) {
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).0 = 0;
+    }
+}
+
 pub struct Enrollment<'a> {
     store: &'a SqliteStore,
-    failures: u32,
-    locked_until_ms: u64,
+    lockout: std::sync::Arc<Lockout>,
 }
 
 impl<'a> Enrollment<'a> {
     pub fn new(store: &'a SqliteStore) -> Self {
-        Self {
-            store,
-            failures: 0,
-            locked_until_ms: 0,
-        }
+        Self::with_lockout(store, std::sync::Arc::new(Lockout::new()))
+    }
+
+    /// Shares the failed-guess counter with other `Enrollment`s (one per connection, one lockout for the hub).
+    pub fn with_lockout(store: &'a SqliteStore, lockout: std::sync::Arc<Lockout>) -> Self {
+        Self { store, lockout }
     }
 
     /// A new one-time code, shown as `XXXX-XXXX`. 40 bits of randomness.
@@ -116,10 +146,8 @@ impl<'a> Enrollment<'a> {
         csr_pem: &str,
         now_ms: u64,
     ) -> Result<IssuedCert, EnrollError> {
-        if now_ms < self.locked_until_ms {
-            return Err(EnrollError::LockedOut {
-                retry_after_ms: self.locked_until_ms - now_ms,
-            });
+        if let Some(retry_after_ms) = self.lockout.check(now_ms) {
+            return Err(EnrollError::LockedOut { retry_after_ms });
         }
         // Issue first: a bad CSR or node id must not burn a valid code (the user would have to start over).
         let mut conn = self.store.lock()?;
@@ -134,11 +162,7 @@ impl<'a> Enrollment<'a> {
         if live.is_none_or(|exp| exp <= to_i64(now_ms)) {
             drop(tx);
             drop(conn);
-            self.failures += 1;
-            if self.failures >= MAX_FAILURES {
-                self.failures = 0;
-                self.locked_until_ms = now_ms.saturating_add(LOCKOUT_MS);
-            }
+            self.lockout.failed(now_ms);
             return Err(EnrollError::BadCode);
         }
         let issued = ca.issue_node(node_id, csr_pem)?;
@@ -151,7 +175,7 @@ impl<'a> Enrollment<'a> {
             params![issued.serial_hex, node_id, to_i64(now_ms)],
         )?;
         tx.commit()?;
-        self.failures = 0;
+        self.lockout.succeeded();
         Ok(issued)
     }
 

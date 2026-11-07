@@ -40,14 +40,28 @@ pub fn acceptor(
     server_key_pem: &str,
     ca_cert_pem: &str,
 ) -> Result<TlsAcceptor, TlsError> {
+    acceptor_with(server_cert_pem, server_key_pem, ca_cert_pem, false)
+}
+
+/// Like [`acceptor`]; with `allow_unauthenticated` a peer without a client certificate also completes the handshake
+/// (it is a client with a bearer token, or a node that is enrolling), while a certificate that is presented must
+/// still verify against the CA. The server layer decides what an unauthenticated peer may do.
+pub fn acceptor_with(
+    server_cert_pem: &str,
+    server_key_pem: &str,
+    ca_cert_pem: &str,
+    allow_unauthenticated: bool,
+) -> Result<TlsAcceptor, TlsError> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let mut roots = RootCertStore::empty();
     for c in CertificateDer::pem_slice_iter(ca_cert_pem.as_bytes()) {
         roots.add(c.map_err(err)?).map_err(err)?;
     }
-    let verifier = WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider.clone())
-        .build()
-        .map_err(err)?;
+    let mut vb = WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider.clone());
+    if allow_unauthenticated {
+        vb = vb.allow_unauthenticated();
+    }
+    let verifier = vb.build().map_err(err)?;
     let chain: Vec<CertificateDer<'static>> =
         CertificateDer::pem_slice_iter(server_cert_pem.as_bytes())
             .collect::<Result<_, _>>()
