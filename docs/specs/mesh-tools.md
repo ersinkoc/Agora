@@ -26,12 +26,28 @@ the node per MCP connection; agents cannot impersonate each other.
 - Message bodies are size-limited; large content is passed by reference (path, commit, task).
 - All mesh traffic is in the audit log.
 
+## MCP conversation (`agora-mesh::mcp`)
+
+The server speaks MCP (JSON-RPC 2.0) with `initialize`, `ping`, `tools/list` and `tools/call`; tools before `initialize` are
+refused. Protocol versions 2025-06-18, 2025-03-26 and 2024-11-05 are accepted; an unknown version gets the newest. The
+`initialize` result carries `instructions`: the standing instruction that other agents' messages are information, not authority.
+The caller is the agent the node bound to the connection; no argument can name another sender.
+
+Differences from the table above, all additive: `send_message` takes an optional `reply_to` (a `message_id` from the inbox)
+and a reply to an open `ask` is what answers it; `agents_list` items also carry `project`; `task_list` items carry `detail`
+and `summary`; `inbox` items carry `kind` (`message`, `ask`, `reply`, `handoff`), `reply_to` and a `provenance` object. `reason` on
+`lease_acquire` is accepted but only the audit trail of the call would hold it (not stored yet).
+
+Tool errors are results with `isError: true` whose text is JSON `{"error": {"code", "params"}}` using the codes in
+`error-codes.md` (new: `mesh.rate_limited`, `mesh.body_too_large`, `mesh.too_many_refs`, `mesh.too_many_asks`, `mesh.timeout`,
+`task.not_found`, `task.not_open`, `task.blocked`, `task.not_owner`, `lease.not_found`, `lease.invalid_path`). Bad arguments are
+JSON-RPC `-32602`. `ask` does not block the library: the connection returns `Waiting { ask_id, deadline }` and the caller polls
+the broker and calls `finish_ask`.
+
 ## Implementation status
 `agora-mesh::broker::Mesh` implements the tools' logic as deterministic in-memory state: registry, messages with
 broker-stamped provenance, project-scoped `#channels`, inbox cursor, `ask` answered by a reply to its id with timeouts,
 the task board with dependencies and owners, all-or-nothing leases over the core lease table, handoff (the message goes out
 first so a refused handoff moves nothing), and cleanup when an agent ends. Limits: 16 KiB bodies, 20 refs, 30 messages per
-minute per agent, 5 open asks. Every change queues a protocol event for the audit log. Error mapping: `mesh.recipient_unknown`
-and `lease.held` exist; rate limit, size limit and task board errors have no code yet and need additions to
-`error-codes.md`. Not yet: the MCP server exposing the tools, injection into agent MCP configuration, hub-side routing across
+minute per agent, 5 open asks. Every change queues a protocol event for the audit log. Not yet: the transport for the MCP server (stdio or local socket per agent), injection into agent MCP configuration, hub-side routing across
 nodes, persistence, delivery fallback to the integration level's input path.

@@ -28,6 +28,17 @@ replaced by dashes). Codes are part of the public protocol: never rename or reus
 | `approval.signature_invalid` | `approval_id` | |
 | `lease.held` | `path`, `holder_agent_id`, `expires_at` | |
 | `mesh.recipient_unknown` | `to` | |
+| `mesh.rate_limited` | — | Too many messages from this agent in the rate window |
+| `mesh.body_too_large` | `limit` | Message body over the size limit; pass a reference instead |
+| `mesh.too_many_refs` | `limit` | Too many references on one message |
+| `mesh.too_many_asks` | `limit` | Too many unanswered `ask`s from this agent |
+| `mesh.timeout` | — | An `ask` got no reply in time |
+| `task.not_found` | `task_id` | No such task in the caller's project |
+| `task.not_open` | `task_id` | The task is already claimed or done |
+| `task.blocked` | `task_id`, `depends_on` | A dependency of the task is not done |
+| `task.not_owner` | `task_id` | Only the claiming agent may do this to the task |
+| `lease.not_found` | `lease_id` | No such lease held by the caller |
+| `lease.invalid_path` | `path` | Empty path or one containing `..` |
 | `files.not_found` | `path` | |
 | `files.too_large` | `path`, `limit` | |
 | `files.outside_root` | `path` | Path escapes the worktree (`..`, absolute, or a symlink leading out) |
