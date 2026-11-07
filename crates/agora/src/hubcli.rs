@@ -92,6 +92,9 @@ pub fn hub_run(say: &Say, o: &Opts) -> ExitCode {
             ca: Some(ca),
             lockout: Arc::new(Lockout::new()),
             auth: Box::new(FileToken(token)),
+            assets: o.web.as_ref().map(|d| {
+                Arc::new(agora_hub::web::DirAssets::new(d)) as Arc<dyn agora_hub::web::Assets>
+            }),
         });
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()

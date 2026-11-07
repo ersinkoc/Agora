@@ -65,6 +65,7 @@ fn hubside(node_id: &str) -> Hubside {
         ca: Some(ca),
         lockout: Arc::new(Lockout::new()),
         auth: Box::new(NoClients),
+        assets: None,
     });
     Hubside {
         rt: tokio::runtime::Runtime::new().unwrap(),

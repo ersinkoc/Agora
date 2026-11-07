@@ -42,6 +42,7 @@ fn state(ca: Option<Ca>) -> Arc<ServerState> {
         ca,
         lockout: Arc::new(Lockout::new()),
         auth: Box::new(Tokens),
+        assets: None,
     })
 }
 
@@ -551,4 +552,65 @@ async fn over_tls_the_certificate_decides_who_a_peer_is_and_revocation_is_immedi
         tokio::time::timeout(Duration::from_secs(5), again.recv()).await,
         Ok(Ok(None) | Err(_))
     ));
+}
+
+#[tokio::test]
+async fn the_same_port_serves_the_web_app_and_takes_a_browser_style_subscription() {
+    use agora_hub::web::{Asset, Assets};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    struct App;
+    impl Assets for App {
+        fn get(&self, p: &str) -> Option<Asset> {
+            (p == "/").then(|| Asset {
+                content_type: "text/html; charset=utf-8",
+                body: b"<html>app</html>".to_vec(),
+            })
+        }
+    }
+    let st = Arc::new(ServerState {
+        hub: Arc::new(Hub::open(SqliteStore::open_in_memory().unwrap()).unwrap()),
+        support: support(),
+        ca: None,
+        lockout: Arc::new(Lockout::new()),
+        auth: Box::new(Tokens),
+        assets: Some(Arc::new(App)),
+    });
+    let addr = start(st).await;
+
+    let mut s = TcpStream::connect(addr).await.unwrap();
+    s.write_all(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+        .await
+        .unwrap();
+    let mut out = String::new();
+    s.read_to_string(&mut out).await.unwrap();
+    assert!(out.starts_with("HTTP/1.1 200"), "{out}");
+    assert!(out.ends_with("<html>app</html>"));
+
+    // A browser cannot set headers: the token rides in the subprotocol list.
+    let tcp = TcpStream::connect(addr).await.unwrap();
+    let mut c = ws::connect_with_subprotocol_token(tcp, &format!("ws://{addr}/"), "good-token")
+        .await
+        .unwrap();
+    c.send(&f(
+        STREAM_EVENTS,
+        kinds::SUBSCRIBE,
+        v1::Subscribe::default().encode_to_vec(),
+    ))
+    .await
+    .unwrap();
+    let first = recv(&mut c).await;
+    assert_eq!(first.kind, kinds::SNAPSHOT);
+
+    let tcp = TcpStream::connect(addr).await.unwrap();
+    let mut bad = ws::connect_with_subprotocol_token(tcp, &format!("ws://{addr}/"), "nope")
+        .await
+        .unwrap();
+    bad.send(&f(
+        STREAM_EVENTS,
+        kinds::SUBSCRIBE,
+        v1::Subscribe::default().encode_to_vec(),
+    ))
+    .await
+    .unwrap();
+    assert!(closed(&mut bad).await);
 }
