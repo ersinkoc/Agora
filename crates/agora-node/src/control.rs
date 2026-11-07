@@ -711,7 +711,18 @@ impl Client {
         req: &v1::CommandRequest,
         limit: Duration,
     ) -> io::Result<v1::CommandResponse> {
-        self.send_request(STREAM_COMMANDS, req)?;
+        self.request_on(STREAM_COMMANDS, req, limit)
+    }
+
+    /// Like [`request`](Self::request), sending on `stream_id` (a dynamic stream for `TerminalSubscribe`). Frames that
+    /// arrive before the answer are kept in `pending`.
+    pub fn request_on(
+        &mut self,
+        stream_id: u32,
+        req: &v1::CommandRequest,
+        limit: Duration,
+    ) -> io::Result<v1::CommandResponse> {
+        self.send_request(stream_id, req)?;
         let end = std::time::Instant::now() + limit;
         loop {
             let left = end.saturating_duration_since(std::time::Instant::now());
@@ -727,6 +738,8 @@ impl Client {
                 if resp.request_id == req.request_id {
                     return Ok(resp);
                 }
+            } else {
+                self.pending.push_back(frame);
             }
         }
     }

@@ -110,8 +110,17 @@ Routed commands (ADR-0029, `agora-hub::router`): a signed-in client sends `Comma
 to that node's connection under a hub-chosen `request_id` (the idempotency key passes through) and maps the answer back to
 the client's id; a node that disconnects first gives `node.offline`, no answer within 30 s `node.timeout`, and a client may
 have 256 requests waiting. The node runs the command on its own control socket, so it gets the handler, policy and approval
-rules of a local command (the hub cannot widen them). Terminal subscriptions are not relayed on this path yet
-(`protocol.capability_missing`, capability `terminal.relay`); the relay is the next step of ADR-0029.
+rules of a local command (the hub cannot widen them).
+
+Terminal relay (ADR-0029): a client sends `TerminalSubscribe` (with `target_node`) on a dynamic stream id it chooses (3+; any
+other command on a dynamic stream, or a subscription on stream 1, is `protocol.invalid_message`). The hub reserves a dynamic
+stream on the node's connection, forwards the request on it, answers on stream 1, and then copies the node's terminal frames
+(kinds 0..=3 above) to the client's stream without decoding or storing them. Input and resize are ordinary routed commands.
+Kind 255 (`STREAM_CLOSE`, empty payload) ends a dynamic stream from either side: the client closing, the node leaving, or the
+terminal exiting (after the exit frame) ends the relay. A client that falls 512 frames behind is not waited for: the hub closes
+its relay on both sides and the client resubscribes for a fresh snapshot (a hub-side simplification of ADR-0029's "the node
+resends a snapshot"; the result for the client is the same and the node is never slowed). On the node, a thread bridges the
+stream from the node's own control socket to the hub connection through a bounded queue.
 
 Initial event families:
 
