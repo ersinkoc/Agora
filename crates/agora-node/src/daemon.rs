@@ -61,9 +61,14 @@ fn proto_state(s: AgentState) -> v1::AgentState {
 
 impl EventSink {
     pub fn open(dir: &Path, producer: &str) -> io::Result<Self> {
+        Self::open_with_cap(dir, producer, EVENT_BUFFER_BYTES)
+    }
+
+    /// Like [`open`](Self::open) with an explicit size cap for the buffer, in bytes.
+    pub fn open_with_cap(dir: &Path, producer: &str, max_bytes: u64) -> io::Result<Self> {
         Ok(Self {
             producer: producer.to_string(),
-            log: Mutex::new(DiskEventLog::open(dir, EVENT_BUFFER_BYTES)?),
+            log: Mutex::new(DiskEventLog::open(dir, max_bytes)?),
         })
     }
 
@@ -201,6 +206,35 @@ impl EventSink {
             purpose: v1::TerminalPurpose::Agent as i32,
             agent_id: agent.as_str().to_string(),
         }));
+    }
+
+    /// Highest sequence number the hub has acknowledged (durable).
+    pub fn acked(&self) -> u64 {
+        self.log.lock().unwrap_or_else(|e| e.into_inner()).acked()
+    }
+
+    /// The hub acknowledged everything up to `seq`: the buffer may drop it.
+    pub fn ack(&self, seq: u64) -> io::Result<()> {
+        self.log.lock().unwrap_or_else(|e| e.into_inner()).ack(seq)
+    }
+
+    /// Lowest sequence number still retained.
+    pub fn oldest_retained(&self) -> u64 {
+        self.log
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .oldest_retained()
+    }
+
+    /// Encoded events after `after`, oldest first, for the uplink.
+    pub fn payloads_after(
+        &self,
+        after: u64,
+    ) -> Result<Vec<Vec<u8>>, crate::event_buffer::ReplayError> {
+        self.log
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .replay_after(after)
     }
 
     /// Decoded events after `after` (exclusive), oldest first; what the uplink sends and tests inspect.

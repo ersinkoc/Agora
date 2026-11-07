@@ -19,3 +19,5 @@ agora-platform = { path = "../agora-platform" }
 [dev-dependencies]
 # Builds raw protocol frames in the stdio bridge test.
 prost = "0.14"
+# The agent id type used by the hub link test.
+agora-core = { path = "../agora-core" }
