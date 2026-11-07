@@ -1,5 +1,6 @@
 //! The hub: identity, routing, event store, approvals (docs/architecture.md).
 
+pub mod ca;
 pub mod projection;
 pub mod session;
 pub mod store;
