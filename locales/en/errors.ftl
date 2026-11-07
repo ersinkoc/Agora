@@ -1,0 +1,29 @@
+# Error messages. Key = error code with dots replaced by dashes (docs/specs/error-codes.md).
+# Every code must have a message here; a test enforces it.
+
+auth-unauthenticated = You are not signed in.
+auth-forbidden = You are not allowed to do this ({ $action }).
+auth-device_revoked = This device ({ $device_id }) has been removed and can no longer connect.
+protocol-unsupported_generation = This version is not compatible: offered { $offered }, supported { $supported }.
+protocol-capability_missing = The other side does not support { $capability }.
+protocol-invalid_message = The request was not valid (field: { $field }).
+node-offline = Machine { $node_id } is not connected.
+node-policy_denied = Machine { $node_id } does not allow this (rule: { $rule }).
+node-resource_limit = Machine limit reached for { $resource } (limit: { $limit }).
+project-not_found = Project { $project_id } was not found.
+worktree-dirty = There are uncommitted changes in { $path }.
+worktree-exists = A worktree for branch { $branch } already exists.
+agent-not_found = Agent { $agent_id } was not found.
+agent-kind_unknown = Agent type { $kind } is not available.
+agent-not_authenticated = { $kind } is not signed in on machine { $node_id }.
+agent-blocked = Agent { $agent_id } is waiting for input, so the message was not sent.
+agent-mode_unsupported = { $kind } does not support { $mode } mode.
+approval-expired = Approval { $approval_id } has expired.
+approval-signature_invalid = Approval { $approval_id } could not be verified.
+lease-held = { $path } is in use by agent { $holder_agent_id } until { $expires_at }.
+mesh-recipient_unknown = No agent or channel named { $to }.
+files-not_found = { $path } was not found.
+files-too_large = { $path } is too large (limit: { $limit }).
+adapter-signature_invalid = Package { $package } could not be verified.
+adapter-crashed = { $kind } stopped unexpectedly (exit code { $exit_code }).
+internal = Something went wrong. Reference: { $incident_id }.

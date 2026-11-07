@@ -1,5 +1,9 @@
 //! Generated protocol types (from schema/), codecs, handshake and capability negotiation. See docs/specs/protocol.md.
 
+pub mod error;
+
+pub use error::{Error, ErrorCode, ParamValue};
+
 /// Messages of protocol generation 1, generated from `schema/agora/v1/*.proto`.
 #[allow(clippy::all, clippy::pedantic, missing_docs)]
 pub mod v1 {
