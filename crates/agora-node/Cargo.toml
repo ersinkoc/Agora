@@ -18,3 +18,5 @@ agora-mesh = { path = "../agora-mesh" }
 agora-i18n = { path = "../agora-i18n" }
 # Encode and decode the protocol messages the control socket carries.
 prost = "0.14"
+# Unguessable approval ids (a signed decision must not be replayable against a later request); already in the tree.
+getrandom = "0.2"
