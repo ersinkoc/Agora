@@ -10,7 +10,7 @@ agent accounts, usability sessions with people) are marked and skipped, never fa
 | --- | --- | --- |
 | P3-01 hub event store | done | SQLite, exactly-once per `(producer, seq)` |
 | P3-02 node session | done | state machine; acks wait on ADR-0026 |
-| P3-03 WebSocket transport | in progress | frames over WS, plain and TLS, tokio (ADR-0011, ADR-0013) |
+| P3-03 WebSocket transport | done | one frame per binary message; stream-generic so TLS wraps it (ADR-0011, ADR-0013) |
 | P3-04 hub server | next | accept nodes, run sessions, store events |
 | P3-05 node uplink | next | node dials hub, replays its buffer after the hub's `from_seq` |
 | P3-06 enrollment and mTLS | next | one-time code, device keys, certificates (ADR-0015) |
