@@ -512,6 +512,29 @@ fn a_clients_terminal_is_relayed_through_the_hub_with_input_and_close() {
                 out.extend_from_slice(&fr.payload);
             }
         }
+        // Keystrokes arrive as one command each; the node must run them in the order they were sent, or typing scrambles.
+        out.clear();
+        for (i, b) in b"echo ordered-0123456789abcdefghijklmnopqrstuv\n"
+            .iter()
+            .enumerate()
+        {
+            client
+                .send(&routed(
+                    &format!("k{i}"),
+                    command_request::Command::TerminalInput(v1::TerminalInput {
+                        terminal_id: terminal.clone(),
+                        data: vec![*b],
+                    }),
+                ))
+                .await
+                .unwrap();
+        }
+        while !String::from_utf8_lossy(&out).contains("ordered-0123456789abcdefghijklmnopqrstuv") {
+            let fr = next_frame(&mut client).await;
+            if fr.stream_id == 5 && fr.kind == 0 {
+                out.extend_from_slice(&fr.payload);
+            }
+        }
         // Closing the stream tells the node to stop writing on it.
         client.send(&f(5, STREAM_CLOSE, Vec::new())).await.unwrap();
     });

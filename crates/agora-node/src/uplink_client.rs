@@ -274,6 +274,17 @@ where
     // makes the node's own pump resync) instead of growing a queue.
     let (relay_tx, mut relay_rx) = tokio::sync::mpsc::channel::<Frame>(256);
     let mut relays = Relays::default();
+    // The worker for commands whose order matters; it ends when this connection (and so `ordered`) is dropped.
+    let (ordered, ordered_rx) = std::sync::mpsc::channel::<(
+        Option<std::path::PathBuf>,
+        CommandRequest,
+        tokio::sync::mpsc::UnboundedSender<CommandResponse>,
+    )>();
+    std::thread::spawn(move || {
+        while let Ok((socket, req, tx)) = ordered_rx.recv() {
+            let _ = tx.send(run_local(socket.as_deref(), req));
+        }
+    });
     // Messages this node's agents send to agents on other nodes go out on this connection while it is up.
     let mut jobs = mesh_out.map(MeshOut::connect);
     let _disconnect = Disconnect(mesh_out);
@@ -370,9 +381,21 @@ where
                     };
                     let socket = commands.map(std::path::Path::to_path_buf);
                     let tx = answers_tx.clone();
-                    tokio::task::spawn_blocking(move || {
-                        let _ = tx.send(run_local(socket.as_deref(), req));
-                    });
+                    // Keystrokes and resizes must reach the terminal in the order they were typed, so they share one
+                    // worker; everything else may run side by side.
+                    if matches!(
+                        req.command,
+                        Some(
+                            command_request::Command::TerminalInput(_)
+                                | command_request::Command::TerminalResize(_)
+                        )
+                    ) {
+                        let _ = ordered.send((socket, req, tx));
+                    } else {
+                        tokio::task::spawn_blocking(move || {
+                            let _ = tx.send(run_local(socket.as_deref(), req));
+                        });
+                    }
                 }
                 // The hub's answer to a mesh post this node sent.
                 (STREAM_COMMANDS, 1) => {
