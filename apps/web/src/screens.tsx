@@ -52,24 +52,34 @@ export function Home({ onOpen, agents = demoAgents, machines, link = 'live', app
       ) : (
         <div className="fleet">{fleet.map((a) => <AgentTile key={a.id} agent={a} onOpen={onOpen} />)}</div>
       )}
-      {messages.length > 0 && (
-        <section aria-label={t('messages-title')}>
-          <h2>{t('messages-title')}</h2>
-          <ul className="messages">
-            {messages.map((m, i) => (
-              <li key={`${m.atMs}-${i}`}>
-                <strong>{m.from}</strong> → <strong>{m.to}</strong>{m.crossMachine ? <span className="muted"> · {t('message-cross')}</span> : null}
-                <div className="muted">{m.body}</div>
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
+      <Messages messages={messages} />
       <p className="muted">{t('palette-hint')}</p>
       {start ?? (
         <div><button type="button" className="button button--primary" disabled={!onStart} onClick={onStart}>{t('action-start-agent')}</button></div>
       )}
     </main>
+  );
+}
+
+const demoMessages: MessageModel[] = [
+  { from: 'claude · amber', to: 'codex · teal', body: 'The login fix is on branch login-fix, ready for review.', atMs: 2, crossMachine: false },
+  { from: 'claude · amber', to: 'laptop/codex · violet', body: 'Can you run the tests on your machine?', atMs: 1, crossMachine: true },
+];
+
+function Messages({ messages }: { messages: readonly MessageModel[] }) {
+  if (messages.length === 0) return null;
+  return (
+        <section aria-label={t('messages-title')}>
+        <h2>{t('messages-title')}</h2>
+        <ul className="messages">
+          {messages.map((m, i) => (
+            <li key={`${m.atMs}-${i}`}>
+              <strong>{m.from}</strong> → <strong>{m.to}</strong>{m.crossMachine ? <span className="muted"> · {t('message-cross')}</span> : null}
+              <div className="muted">{m.body}</div>
+            </li>
+          ))}
+        </ul>
+      </section>
   );
 }
 
@@ -82,6 +92,7 @@ function Themed({ theme }: { theme: 'dark' | 'light' }) {
       <div className="gallery__row">{STATES.map((s) => <StateBadge key={s} state={s} />)}</div>
       <AttentionStrip agents={needsAttention(demoAgents)} />
       <div className="fleet">{demoAgents.map((a) => <AgentTile key={a.id} agent={a} />)}</div>
+      <Messages messages={demoMessages} />
       <div className="gallery__row">
         <button type="button" className="button button--primary">{t('action-start-agent')}</button>
         <button type="button" className="button">{t('action-open')}</button>
