@@ -703,6 +703,7 @@ pub fn load_link(socket: PathBuf) -> Option<(String, HubLink)> {
             cert_pem: read("cert.pem")?,
             key_pem: read("key.pem")?,
             commands: Some(socket),
+            mesh_out: None,
         },
     ))
 }

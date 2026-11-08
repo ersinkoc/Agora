@@ -207,7 +207,27 @@ struct LeaseBatch {
     paths: Vec<String>,
 }
 
+/// A message for an agent on another node, waiting for the node's uplink to carry it to the hub (ADR-0031).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Outbound {
+    pub message_id: String,
+    pub from: AgentId,
+    pub to_node: String,
+    pub to_agent: String,
+    pub body: String,
+}
+
+/// `<node>/<agent>` split in two; `None` for a bare agent id, a `#channel` or anything with more or empty parts.
+fn split_address(to: &str) -> Option<(&str, &str)> {
+    if to.starts_with('#') {
+        return None;
+    }
+    let (node, agent) = to.split_once('/')?;
+    (!node.is_empty() && !agent.is_empty() && !agent.contains('/')).then_some((node, agent))
+}
+
 pub struct Mesh {
+    outbox: Vec<Outbound>,
     limits: Limits,
     agents: BTreeMap<AgentId, AgentInfo>,
     inboxes: BTreeMap<AgentId, VecDeque<Message>>,
@@ -223,6 +243,7 @@ pub struct Mesh {
 impl Mesh {
     pub fn new(limits: Limits) -> Self {
         Self {
+            outbox: Vec::new(),
             limits,
             agents: BTreeMap::new(),
             inboxes: BTreeMap::new(),
@@ -244,6 +265,82 @@ impl Mesh {
 
     pub fn limits(&self) -> Limits {
         self.limits
+    }
+
+    /// Messages for other nodes queued since the last call, oldest first. The caller hands them to the hub and reports a
+    /// failure back with [`Mesh::delivery_failed`].
+    pub fn take_outbound(&mut self) -> Vec<Outbound> {
+        std::mem::take(&mut self.outbox)
+    }
+
+    /// A message from an agent on another node (`origin` is the node the hub says it came from, `from_agent` what that node
+    /// calls the sender). It reaches the local agent `to` like any message, with the sender shown as `<origin>/<from_agent>`;
+    /// it is untrusted data like every mesh message. Counted against the same per-sender rate limit.
+    pub fn deliver_remote(
+        &mut self,
+        origin: &str,
+        from_agent: &str,
+        to: &AgentId,
+        body: &str,
+        now_ms: u64,
+    ) -> Result<String, MeshError> {
+        if origin.is_empty() || from_agent.is_empty() || from_agent.contains('/') {
+            return Err(MeshError::RecipientUnknown(to.as_str().to_string()));
+        }
+        self.check_content(body, &[])?;
+        let Some(recipient) = self.agents.get(to).cloned() else {
+            return Err(MeshError::RecipientUnknown(to.as_str().to_string()));
+        };
+        let sender = AgentId::new(format!("{origin}/{from_agent}"));
+        self.check_rate(&sender, now_ms)?;
+        let m = Message {
+            id: self.id("m"),
+            provenance: Provenance {
+                from: sender,
+                kind: String::new(),
+                node: origin.to_string(),
+                project: String::new(),
+            },
+            to: recipient.id.as_str().to_string(),
+            body: body.to_string(),
+            refs: Vec::new(),
+            at_ms: now_ms,
+            reply_to: None,
+            kind: "message",
+        };
+        let id = m.id.clone();
+        self.deliver(std::slice::from_ref(&recipient.id), &m);
+        Ok(id)
+    }
+
+    /// Tells `from` that a message it sent to another node did not arrive. It lands in the inbox as a notice (kind
+    /// `delivery_failed`, body the error code); delivery is at most once, so nothing is retried.
+    pub fn delivery_failed(&mut self, from: &AgentId, to: &str, code: &str, now_ms: u64) {
+        let Some(info) = self.agents.get(from).cloned() else {
+            return;
+        };
+        let m = Message {
+            id: self.id("m"),
+            provenance: Provenance {
+                from: AgentId::new(to),
+                kind: String::new(),
+                node: split_address(to)
+                    .map(|(n, _)| n.to_string())
+                    .unwrap_or_default(),
+                project: String::new(),
+            },
+            to: info.id.as_str().to_string(),
+            body: code.to_string(),
+            refs: Vec::new(),
+            at_ms: now_ms,
+            reply_to: None,
+            kind: "delivery_failed",
+        };
+        let inbox = self.inboxes.entry(info.id).or_default();
+        inbox.push_back(m);
+        while inbox.len() > self.limits.inbox_capacity {
+            inbox.pop_front();
+        }
     }
 
     /// Audit events queued since the last call, oldest first.
@@ -386,6 +483,43 @@ impl Mesh {
     ) -> Result<(Message, Vec<AgentId>), MeshError> {
         let info = self.caller(from)?.clone();
         self.check_content(body, refs)?;
+        // Your own node's name in front is just a longer way to say "here".
+        let to = match split_address(to) {
+            Some((node, agent)) if node == info.node => agent,
+            _ => to,
+        };
+        if let (Some((node, agent)), "message") = (split_address(to), kind) {
+            self.check_rate(from, now_ms)?;
+            let m = Message {
+                id: self.id("m"),
+                provenance: Provenance {
+                    from: info.id.clone(),
+                    kind: info.kind,
+                    node: info.node,
+                    project: info.project,
+                },
+                to: to.to_string(),
+                body: body.to_string(),
+                refs: refs.to_vec(),
+                at_ms: now_ms,
+                reply_to: reply_to.map(str::to_string),
+                kind,
+            };
+            self.outbox.push(Outbound {
+                message_id: m.id.clone(),
+                from: info.id,
+                to_node: node.to_string(),
+                to_agent: agent.to_string(),
+                body: body.to_string(),
+            });
+            self.events.push(Body::MessagePosted(MessagePosted {
+                message_id: m.id.clone(),
+                from_agent_id: m.provenance.from.as_str().to_string(),
+                to: m.to.clone(),
+                body: m.body.clone(),
+            }));
+            return Ok((m, Vec::new()));
+        }
         let recipients = self.recipients(&info, to)?;
         self.check_rate(from, now_ms)?;
         let m = Message {
@@ -1192,5 +1326,157 @@ mod tests {
         let m = mesh();
         assert_eq!(m.agents_list(Some("p")).len(), 2);
         assert_eq!(m.agents_list(None).len(), 3);
+    }
+
+    mod remote {
+        use super::*;
+
+        fn info(id: &str, node: &str) -> AgentInfo {
+            AgentInfo {
+                id: AgentId::new(id),
+                kind: "shell".into(),
+                node: node.into(),
+                project: "p".into(),
+                label: String::new(),
+                worktree: String::new(),
+                state: "idle".into(),
+            }
+        }
+
+        fn mesh() -> Mesh {
+            let mut m = Mesh::new(Limits::default());
+            m.register(info("a1", "n1"));
+            m.register(info("a2", "n1"));
+            m
+        }
+
+        #[test]
+        fn a_message_to_another_node_goes_to_the_outbox_not_an_inbox() {
+            let mut m = mesh();
+            let id = m
+                .send_message(&AgentId::new("a1"), "n2/b7", "hi", &[], None, 1)
+                .unwrap();
+            let out = m.take_outbound();
+            assert_eq!(out.len(), 1);
+            assert_eq!(
+                (
+                    out[0].to_node.as_str(),
+                    out[0].to_agent.as_str(),
+                    out[0].body.as_str()
+                ),
+                ("n2", "b7", "hi")
+            );
+            assert_eq!(out[0].message_id, id);
+            assert!(m.take_outbound().is_empty());
+            assert!(m.inbox(&AgentId::new("a2"), None, 10).unwrap().is_empty());
+        }
+
+        #[test]
+        fn your_own_node_name_in_front_means_here() {
+            let mut m = mesh();
+            m.send_message(&AgentId::new("a1"), "n1/a2", "hi", &[], None, 1)
+                .unwrap();
+            assert!(m.take_outbound().is_empty());
+            assert_eq!(m.inbox(&AgentId::new("a2"), None, 10).unwrap().len(), 1);
+        }
+
+        #[test]
+        fn asks_handoffs_and_odd_addresses_stay_refused() {
+            let mut m = mesh();
+            let a1 = AgentId::new("a1");
+            assert!(matches!(
+                m.ask(&a1, "n2/b7", "q?", None, 1),
+                Err(MeshError::RecipientUnknown(_))
+            ));
+            assert!(matches!(
+                m.handoff(&a1, "n2/b7", None, "s", &[], 1),
+                Err(MeshError::RecipientUnknown(_))
+            ));
+            for odd in ["n2/", "/b7", "n2/b7/x", "n2/b7/"] {
+                assert!(
+                    m.send_message(&a1, odd, "hi", &[], None, 1).is_err(),
+                    "{odd}"
+                );
+            }
+            assert!(
+                m.take_outbound().is_empty(),
+                "nothing queued by a refused call"
+            );
+        }
+
+        #[test]
+        fn remote_sends_count_against_the_rate_limit_and_the_size_limit() {
+            let mut m = mesh();
+            let a1 = AgentId::new("a1");
+            let big = "x".repeat(m.limits().max_body_bytes + 1);
+            assert!(matches!(
+                m.send_message(&a1, "n2/b", &big, &[], None, 1),
+                Err(MeshError::BodyTooLarge)
+            ));
+            let n = m.limits().messages_per_window;
+            for _ in 0..n {
+                m.send_message(&a1, "n2/b", "x", &[], None, 5).unwrap();
+            }
+            assert!(matches!(
+                m.send_message(&a1, "n2/b", "x", &[], None, 5),
+                Err(MeshError::RateLimited)
+            ));
+        }
+
+        #[test]
+        fn an_inbound_message_shows_where_it_came_from_and_can_be_answered() {
+            let mut m = mesh();
+            let id = m
+                .deliver_remote("n2", "b7", &AgentId::new("a1"), "hello", 9)
+                .unwrap();
+            let got = m.inbox(&AgentId::new("a1"), None, 10).unwrap();
+            assert_eq!(got.len(), 1);
+            assert_eq!(
+                (
+                    got[0].id.as_str(),
+                    got[0].provenance.from.as_str(),
+                    got[0].provenance.node.as_str()
+                ),
+                (id.as_str(), "n2/b7", "n2")
+            );
+            // Answering is a send to that address: it leaves through the outbox.
+            m.send_message(&AgentId::new("a1"), "n2/b7", "hi back", &[], None, 10)
+                .unwrap();
+            assert_eq!(m.take_outbound().len(), 1);
+            assert!(!m.take_events().is_empty());
+        }
+
+        #[test]
+        fn inbound_for_nobody_or_from_nobody_is_refused() {
+            let mut m = mesh();
+            assert!(m
+                .deliver_remote("n2", "b7", &AgentId::new("ghost"), "x", 1)
+                .is_err());
+            assert!(m
+                .deliver_remote("", "b7", &AgentId::new("a1"), "x", 1)
+                .is_err());
+            assert!(m
+                .deliver_remote("n2", "", &AgentId::new("a1"), "x", 1)
+                .is_err());
+            assert!(m
+                .deliver_remote("n2", "b/7", &AgentId::new("a1"), "x", 1)
+                .is_err());
+            let big = "x".repeat(m.limits().max_body_bytes + 1);
+            assert!(m
+                .deliver_remote("n2", "b7", &AgentId::new("a1"), &big, 1)
+                .is_err());
+        }
+
+        #[test]
+        fn a_failed_delivery_reaches_the_sender_as_a_notice() {
+            let mut m = mesh();
+            m.delivery_failed(&AgentId::new("a1"), "n2/b7", "node.offline", 3);
+            let got = m.inbox(&AgentId::new("a1"), None, 10).unwrap();
+            assert_eq!(
+                (got[0].kind, got[0].body.as_str()),
+                ("delivery_failed", "node.offline")
+            );
+            m.delivery_failed(&AgentId::new("gone"), "n2/b7", "x", 3); // an agent that left: nothing happens
+        }
     }
 }

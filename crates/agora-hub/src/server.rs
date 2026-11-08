@@ -160,10 +160,17 @@ where
         String,
         tokio::sync::oneshot::Sender<v1::CommandResponse>,
     > = std::collections::HashMap::new();
+    // Mesh posts this node sent for another node (ADR-0031): answers come back here from tasks that wait on the target.
+    let (posted_tx, mut posted) = tokio::sync::mpsc::unbounded_channel::<v1::CommandResponse>();
+    let posts_open = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     loop {
         let idle;
         let received = tokio::select! {
             r = tokio::time::timeout(ACK_IDLE, conn.recv()) => r,
+            Some(answer) = posted.recv() => {
+                conn.send(&frame(STREAM_COMMANDS, 1, answer.encode_to_vec())).await?;
+                continue;
+            }
             Some(to_node) = commands.recv() => {
                 match to_node {
                     crate::router::ToNode::Command { request, reply, stream } => {
@@ -198,6 +205,14 @@ where
                     (STREAM_CONTROL, kinds::PING) => {
                         conn.send(&frame(STREAM_CONTROL, kinds::PONG, f.payload))
                             .await?;
+                    }
+                    // A node asks the hub to carry one mesh message to an agent on another node (ADR-0031). Nothing else
+                    // is accepted from a node on this stream.
+                    (STREAM_COMMANDS, 0) => {
+                        let posted_tx = posted_tx.clone();
+                        let answer = v1::CommandRequest::decode(f.payload.as_slice())
+                            .map_err(|_| invalid("request"))?;
+                        post_for_node(hub, node_id, answer, &posts_open, posted_tx);
                     }
                     // An answer to a routed command: hand it to whoever asked. A garbled answer is dropped, and
                     // the asker's deadline turns it into `node.timeout`.
@@ -385,6 +400,8 @@ where
 const COMMAND_DEADLINE: Duration = Duration::from_secs(30);
 /// Routed commands one client may have waiting at once.
 const MAX_INFLIGHT: usize = 256;
+/// Mesh posts one node may have waiting at once (ADR-0031).
+const MAX_NODE_POSTS: usize = 64;
 
 /// A routed command whose answer has not come back yet.
 struct Inflight {
@@ -539,6 +556,79 @@ where
     ))
     .await?;
     Ok(())
+}
+
+/// A node's `MeshPost` for an agent on another node: forwarded to that node like a client command (ADR-0029) with `origin`
+/// set from the connection, whatever the node wrote. The answer (or an error) is sent on `answers`.
+fn post_for_node(
+    hub: &Hub,
+    node_id: &str,
+    req: v1::CommandRequest,
+    open: &Arc<std::sync::atomic::AtomicUsize>,
+    answers: tokio::sync::mpsc::UnboundedSender<v1::CommandResponse>,
+) {
+    use std::sync::atomic::Ordering;
+    let rid = req.request_id.clone();
+    let refuse = |e: Error| {
+        let _ = answers.send(error_response(&rid, &e));
+    };
+    let Some(command_request::Command::MeshPost(post)) = req.command else {
+        return refuse(Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "command"));
+    };
+    let target = post
+        .to
+        .split_once('/')
+        .filter(|(n, a)| !n.is_empty() && !a.is_empty() && !a.contains('/') && *n != node_id);
+    let Some((target, agent)) = target else {
+        return refuse(Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "to"));
+    };
+    if !hub.node_known(target) {
+        return refuse(Error::new(ErrorCode::NodeUnknown).with("node_id", target));
+    }
+    if open.load(Ordering::Relaxed) >= MAX_NODE_POSTS {
+        return refuse(
+            Error::new(ErrorCode::NodeResourceLimit)
+                .with("resource", "requests")
+                .with("limit", MAX_NODE_POSTS as i64),
+        );
+    }
+    let forwarded = v1::CommandRequest {
+        request_id: String::new(),
+        idempotency_key: String::new(),
+        target_node: String::new(),
+        command: Some(command_request::Command::MeshPost(v1::MeshPost {
+            to: agent.to_string(),
+            body: post.body.clone(),
+            // The hub's word, not the node's: a node cannot speak for another node.
+            origin: node_id.to_string(),
+            from_agent: post.from_agent.clone(),
+        })),
+    };
+    let reply = match hub.router().send(target, forwarded) {
+        Ok(r) => r,
+        Err(e) => return refuse(e),
+    };
+    open.fetch_add(1, Ordering::Relaxed);
+    let open = Arc::clone(open);
+    let target = target.to_string();
+    tokio::spawn(async move {
+        let resp = match tokio::time::timeout(COMMAND_DEADLINE, reply).await {
+            Ok(Ok(mut r)) => {
+                r.request_id.clone_from(&rid);
+                r
+            }
+            Ok(Err(_)) => error_response(
+                &rid,
+                &Error::new(ErrorCode::NodeOffline).with("node_id", target.as_str()),
+            ),
+            Err(_) => error_response(
+                &rid,
+                &Error::new(ErrorCode::NodeTimeout).with("node_id", target.as_str()),
+            ),
+        };
+        open.fetch_sub(1, Ordering::Relaxed);
+        let _ = answers.send(resp);
+    });
 }
 
 fn error_response(request_id: &str, e: &Error) -> v1::CommandResponse {

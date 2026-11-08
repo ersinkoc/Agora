@@ -32,6 +32,62 @@ fn now_ms() -> u64 {
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
+/// How a mesh message for an agent on another node leaves this node (ADR-0031). The uplink implements it.
+pub trait RemoteLink: Send + Sync {
+    /// Hands one message to the hub. `done` is called once: `Ok(())` when the target node took it, or the error code
+    /// (`node.offline` when there is no hub connection, `node.unknown`, `node.timeout`, `mesh.recipient_unknown`, ...).
+    /// Must not block.
+    fn post(
+        &self,
+        from_agent: &str,
+        to: &str,
+        body: &str,
+        done: Box<dyn FnOnce(Result<(), String>) + Send>,
+    );
+}
+
+type RemoteSlot = Mutex<Option<Arc<dyn RemoteLink>>>;
+
+/// Sends what the broker queued for other nodes. Called after every tool call, outside the broker's lock; a failure
+/// comes back to the sending agent as a notice in its inbox.
+fn dispatch_outbound(mesh: &Arc<Mutex<Mesh>>, remote: &RemoteSlot) {
+    let out = mesh
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take_outbound();
+    if out.is_empty() {
+        return;
+    }
+    let link = remote.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    for o in out {
+        let to = format!("{}/{}", o.to_node, o.to_agent);
+        let failed = {
+            let (mesh, from, to) = (Arc::clone(mesh), o.from.clone(), to.clone());
+            move |code: String| {
+                mesh.lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .delivery_failed(&from, &to, &code, now_ms());
+            }
+        };
+        match &link {
+            Some(l) => {
+                let failed = failed.clone();
+                l.post(
+                    o.from.as_str(),
+                    &to,
+                    &o.body,
+                    Box::new(move |r| {
+                        if let Err(code) = r {
+                            failed(code);
+                        }
+                    }),
+                );
+            }
+            None => failed("node.offline".to_string()),
+        }
+    }
+}
+
 struct AgentServer {
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
@@ -39,6 +95,7 @@ struct AgentServer {
 }
 
 pub struct MeshServer {
+    remote: Arc<RemoteSlot>,
     mesh: Arc<Mutex<Mesh>>,
     dir: PathBuf,
     agents: Mutex<HashMap<AgentId, AgentServer>>,
@@ -67,12 +124,33 @@ impl MeshServer {
                 })?
         };
         Ok(Self {
+            remote: Arc::new(Mutex::new(None)),
             mesh,
             dir: dir.to_path_buf(),
             agents: Mutex::new(HashMap::new()),
             stop,
             ticker: Some(ticker),
         })
+    }
+
+    /// Where messages for agents on other nodes go (the hub uplink). Without one they fail with `node.offline`.
+    pub fn set_remote(&self, link: Arc<dyn RemoteLink>) {
+        *self.remote.lock().unwrap_or_else(|e| e.into_inner()) = Some(link);
+    }
+
+    /// A message from an agent on another node, as the hub vouched for it (ADR-0031).
+    pub fn deliver_remote(
+        &self,
+        origin: &str,
+        from_agent: &str,
+        to: &AgentId,
+        body: &str,
+    ) -> Result<(), agora_protocol::Error> {
+        let mut m = self.mesh.lock().unwrap_or_else(|e| e.into_inner());
+        let limits = m.limits();
+        m.deliver_remote(origin, from_agent, to, body, now_ms())
+            .map(|_| ())
+            .map_err(|e| e.to_error(&limits))
     }
 
     pub fn mesh(&self) -> Arc<Mutex<Mesh>> {
@@ -96,7 +174,12 @@ impl MeshServer {
             .register(info);
         let stop = Arc::new(AtomicBool::new(false));
         let thread = {
-            let (mesh, stop, agent) = (Arc::clone(&self.mesh), Arc::clone(&stop), id.clone());
+            let (mesh, stop, agent, remote) = (
+                Arc::clone(&self.mesh),
+                Arc::clone(&stop),
+                id.clone(),
+                Arc::clone(&self.remote),
+            );
             std::thread::Builder::new()
                 .name("agora-mesh-agent".into())
                 .spawn(move || {
@@ -104,11 +187,15 @@ impl MeshServer {
                     while !stop.load(Ordering::Acquire) {
                         match listener.accept() {
                             Ok(stream) => {
-                                let (mesh, stop, agent) =
-                                    (Arc::clone(&mesh), Arc::clone(&stop), agent.clone());
+                                let (mesh, stop, agent, remote) = (
+                                    Arc::clone(&mesh),
+                                    Arc::clone(&stop),
+                                    agent.clone(),
+                                    Arc::clone(&remote),
+                                );
                                 if let Ok(h) = std::thread::Builder::new()
                                     .name("agora-mesh-conn".into())
-                                    .spawn(move || serve(stream, &agent, &mesh, &stop))
+                                    .spawn(move || serve(stream, &agent, &mesh, &remote, &stop))
                                 {
                                     conns.push(h);
                                 }
@@ -207,7 +294,13 @@ fn send(w: &mut LocalStream, msg: &Message) -> io::Result<()> {
 
 /// One connection: newline-delimited JSON-RPC in, replies out. Questions that wait for an answer are polled each
 /// time the read times out, so a pending `ask` never blocks the agent's other calls.
-fn serve(stream: LocalStream, agent: &AgentId, mesh: &Arc<Mutex<Mesh>>, stop: &AtomicBool) {
+fn serve(
+    stream: LocalStream,
+    agent: &AgentId,
+    mesh: &Arc<Mutex<Mesh>>,
+    remote: &RemoteSlot,
+    stop: &AtomicBool,
+) {
     let Ok(read_half) = stream.try_clone() else {
         return;
     };
@@ -231,6 +324,7 @@ fn serve(stream: LocalStream, agent: &AgentId, mesh: &Arc<Mutex<Mesh>>, stop: &A
                     let mut m = mesh.lock().unwrap_or_else(|e| e.into_inner());
                     conn.handle(&text, &mut m, now_ms())
                 };
+                dispatch_outbound(mesh, remote);
                 match outcome {
                     Outcome::Reply(msg) => {
                         if send(&mut writer, &msg).is_err() {

@@ -357,8 +357,13 @@ fn node_run(say: &Say, o: &Opts) -> ExitCode {
         &[("socket", cfg.socket.display().to_string().into())],
     );
     // Connect to the hub in the background when enrolled. Agents never depend on it: events wait in the buffer.
-    let _uplink =
-        link.and_then(|(_, l)| agora_node::uplink_client::spawn(Arc::clone(&node.events), l).ok());
+    let _uplink = link.and_then(|(_, mut l)| {
+        // Messages for agents on other machines go through the hub connection (ADR-0031).
+        let out = agora_node::uplink_client::MeshOut::new();
+        node.mesh.set_remote(out.clone());
+        l.mesh_out = Some(out);
+        agora_node::uplink_client::spawn(Arc::clone(&node.events), l).ok()
+    });
     // Run until the process is stopped; agents die with it and the socket file is replaced on next start.
     loop {
         std::thread::sleep(Duration::from_secs(3600));

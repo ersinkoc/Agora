@@ -40,6 +40,7 @@ phase exit.
 | T10 | Denial of service by runaway agents or mesh loops | Resource limits per node, mesh rate limits, kill switch per project/node |
 | T11 | Local privilege issues (socket accessible to other users) | Per-user sockets with owner-only permissions; named pipe security descriptors on Windows |
 | T12 | A local user on an SSH-only machine reaches the hub's reverse-tunnel port (ADR-0032) | The port is loopback-only; without a valid, unrevoked client certificate the only thing possible is an enrollment attempt, which is single-use, short-lived and rate limited hub-wide; `ssh` runs with BatchMode and strict host-key checking so the hub never trusts a new host silently |
+| T13 | A node forges messages as another node's agent (ADR-0031) | The hub sets `MeshPost.origin` from the connection's certificate and overwrites the node's value; only the agent id within a node is the node's word; mesh content stays untrusted data and cannot approve anything |
 
 ## Kill switch
 
