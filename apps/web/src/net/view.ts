@@ -167,6 +167,14 @@ function lastSegment(path: string): string {
   return parts[parts.length - 1] ?? '';
 }
 
+// The project's folder name; a branch the machine made for the agent (`agent/...`) is internal, so it is not shown.
+function workspaceName(v: View, wt: WorktreeV): string {
+  const folder = lastSegment(v.checkouts.get(wt.checkoutId)?.path ?? '');
+  const branch = wt.branch.startsWith('agent/') ? '' : wt.branch;
+  if (folder) return branch ? `${folder} (${branch})` : folder;
+  return branch || lastSegment(wt.path);
+}
+
 // What Home renders. A waiting approval makes its agent "needs you" even if the agent has not said so.
 export function tiles(v: View): AgentTileModel[] {
   const waiting = new Set([...v.approvals.values()].map((a) => a.agentId));
@@ -180,7 +188,7 @@ export function tiles(v: View): AgentTileModel[] {
       name: `${a.kind} · ${ACCENT_NAMES[i]}`,
       accent: ACCENTS[i] as string,
       machine: node?.hostname || a.nodeId,
-      workspace: wt ? wt.branch || lastSegment(wt.path) : '',
+      workspace: wt ? workspaceName(v, wt) : '',
       state,
       preview: '',
       since: a.sinceMs || undefined,
