@@ -281,8 +281,11 @@ where
         tokio::sync::mpsc::UnboundedSender<CommandResponse>,
     )>();
     std::thread::spawn(move || {
+        // One connection to the node's control socket for all keystrokes: a new connection per key would cost more than
+        // the key. It is opened on first use and again after any error.
+        let mut kept: Option<crate::control::Client> = None;
         while let Ok((socket, req, tx)) = ordered_rx.recv() {
-            let _ = tx.send(run_local(socket.as_deref(), req));
+            let _ = tx.send(run_local_on(&mut kept, socket.as_deref(), req));
         }
     });
     // Messages this node's agents send to agents on other nodes go out on this connection while it is up.
@@ -520,6 +523,15 @@ fn relay_terminal(
 /// Runs a routed command on this node's control socket and returns its answer (an error answer when it cannot).
 /// Terminal streams are not relayed by this path (they need a stream of their own), so they are refused.
 fn run_local(socket: Option<&std::path::Path>, req: CommandRequest) -> CommandResponse {
+    run_local_on(&mut None, socket, req)
+}
+
+/// Like [`run_local`], over `kept` when it holds a live connection, and leaving the connection there for the next call.
+fn run_local_on(
+    kept: &mut Option<crate::control::Client>,
+    socket: Option<&std::path::Path>,
+    req: CommandRequest,
+) -> CommandResponse {
     use agora_protocol::{Error, ErrorCode};
     let fail = |e: Error| CommandResponse {
         request_id: req.request_id.clone(),
@@ -540,11 +552,20 @@ fn run_local(socket: Option<&std::path::Path>, req: CommandRequest) -> CommandRe
                 .with("rule", "commands.routed"),
         );
     };
-    match crate::control::Client::connect(socket).and_then(|mut c| c.request(&req, ROUTED_DEADLINE))
-    {
-        Ok(resp) => resp,
-        Err(_) => fail(Error::new(ErrorCode::NodeTimeout).with("node_id", "")),
+    // A kept connection may have gone stale since the last key; one fresh attempt follows its failure.
+    for attempt in 0..2 {
+        let client = match kept.take() {
+            Some(c) if attempt == 0 => Ok(c),
+            _ => crate::control::Client::connect(socket),
+        };
+        if let Ok(mut c) = client {
+            if let Ok(resp) = c.request(&req, ROUTED_DEADLINE) {
+                *kept = Some(c);
+                return resp;
+            }
+        }
     }
+    fail(Error::new(ErrorCode::NodeTimeout).with("node_id", ""))
 }
 
 /// Longest a routed command may take on the node before the hub is told it timed out.

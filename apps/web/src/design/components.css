@@ -74,7 +74,8 @@ h2 { font-size: var(--text-16); color: var(--text-muted); }
 .link { color: var(--accent); background: none; border: 0; font: inherit; cursor: pointer; padding: 0; text-align: left; }
 
 .terminal { background: var(--surface-0); border: 1px solid var(--border); border-radius: var(--radius-m);
-  padding: var(--space-2); min-height: 320px; }
+  padding: var(--space-2); /* A fixed height: the terminal fits itself to this box, and a box that grows with its rows would never stop growing. */
+  height: clamp(320px, 65vh, 720px); overflow: hidden; }
 
 .approvals { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: var(--space-4); }
 .approval { display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-4); background: var(--surface-1);

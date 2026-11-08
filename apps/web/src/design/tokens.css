@@ -60,6 +60,25 @@
   color-scheme: light;
 }
 
+/* No explicit choice: follow the system. An explicit data-theme (the gallery) still wins. */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) {
+  --surface-0: #f6f7f9;
+  --surface-1: #ffffff;
+  --surface-2: #eef0f4;
+  --border: #d6dbe3;
+  --text: #16191f;
+  --text-muted: #566070;
+  --accent: #2f5fd0;
+  --state-working: #1a6fc4;
+  --state-needs-you: #a85d00;
+  --state-finished: #1c7d45;
+  --state-idle: #566070;
+  --state-unknown: #6b7280;
+  color-scheme: light;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   :root {
     --motion-fast: 0ms;

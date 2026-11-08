@@ -16,7 +16,7 @@ export function AgentTile({ agent, onOpen }: { agent: AgentTileModel; onOpen?: (
       <span className="muted">
         {t('agent-on-machine', { machine: agent.machine })} · {t('agent-workspace', { name: agent.workspace })}
       </span>
-      <span className="tile__preview" aria-hidden="true">{agent.preview}</span>
+      {agent.preview ? <span className="tile__preview" aria-hidden="true">{agent.preview}</span> : null}
     </button>
   );
 }
