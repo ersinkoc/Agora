@@ -34,6 +34,7 @@ describe('view', () => {
     applyEvent(v, 5, ev('n', 5, { agentStarted: { agentId: 'b', nodeId: 'n', worktreeId: 'w2', kind: 'shell' } }));
     const t = tiles(v);
     expect(t.find((x) => x.id === 'n/a')?.workspace).toBe('shop');
+    expect(t.find((x) => x.id === 'n/a')?.project).toBe('shop');
     expect(t.find((x) => x.id === 'n/b')?.workspace).toBe('shop (login-fix)');
   });
 

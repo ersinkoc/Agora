@@ -125,3 +125,5 @@ files-pick = Okumak için soldan bir dosya seçin.
 files-binary = Bu dosya metin olmadığı için gösterilmiyor.
 files-too-large = Bu dosya okunamadı (çok büyük olabilir).
 files-failed = Bu klasör listelenemedi.
+filter-placeholder = Ajana, makineye veya projeye göre süz
+filter-none = Eşleşen yok.
