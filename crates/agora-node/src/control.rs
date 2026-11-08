@@ -378,6 +378,26 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                 })),
             })
         }
+        Cmd::GitLog(g) => {
+            let wt = agent_worktree(ctx, &g.worktree_id)?;
+            let limit = match g.limit {
+                0 => 30,
+                n => (n as usize).min(200),
+            };
+            let commits = git::log(&wt, limit)
+                .map_err(|e| e.to_protocol())?
+                .into_iter()
+                .map(|c| v1::GitCommit {
+                    id: c.id,
+                    subject: c.subject,
+                    author: c.author,
+                    at_ms: c.at_ms,
+                })
+                .collect();
+            Ok(v1::CommandOk {
+                result: Some(Ok_::GitLog(v1::GitLogResult { commits })),
+            })
+        }
         Cmd::GitDiff(g) => {
             let wt = agent_worktree(ctx, &g.worktree_id)?;
             let path = (!g.path.is_empty()).then_some(g.path.as_str());
@@ -478,6 +498,7 @@ fn command_name(c: &Cmd) -> &'static str {
         Cmd::FilesWatch(_) => "files.watch",
         Cmd::GitDiff(_) => "git.diff",
         Cmd::GitStatus(_) => "git.status",
+        Cmd::GitLog(_) => "git.log",
         Cmd::WorktreeCreate(_) => "worktree.create",
         Cmd::WorktreeRemove(_) => "worktree.remove",
         Cmd::ApprovalResolve(_) => "approval.resolve",

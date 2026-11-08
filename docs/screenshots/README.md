@@ -37,3 +37,7 @@ Files of a workspace (the Files button on a terminal):
 A chat agent (no terminal): send it a request; its permission request appears on the right and is answered with this browser's device key:
 
 ![](approval-dark.png)
+
+Commit history of a workspace (the History button on a terminal):
+
+![](history-light.png)

@@ -1,6 +1,7 @@
 # 0037. `git.log` command: recent commits of an agent's workspace
-Status: Proposed
+Status: Accepted
 Date: 2026-11-08
+Accepted: 2026-11-09 (maintainer's explicit approval in chat)
 
 ## Context
 The console shows what an agent has changed but not yet committed (`git.status`, `git.diff`) and can browse its files. The next
@@ -12,11 +13,11 @@ Add one command and one result, with new message names and numbers (ADR-0006); n
 
 ```
 message GitLog { string worktree_id = 1; uint32 limit = 2; }          // limit 0 means the default (30); the node caps it at 200
-message Commit { string id = 1; string subject = 2; string author = 3; uint64 at_ms = 4; }
-message GitLogResult { repeated Commit commits = 1; }
+message GitCommit { string id = 1; string subject = 2; string author = 3; uint64 at_ms = 4; }
+message GitLogResult { repeated GitCommit commits = 1; }
 ```
-`CommandRequest.command` gets `GitLog git_log = 42;` and `CommandOk.result` gets `GitLogResult git_log = 15;` (numbers checked
-against `commands.proto` when the schema is written).
+`CommandRequest.command` gets `GitLog git_log = 18;` and `CommandOk.result` gets `GitLogResult git_log = 15;` (the next free
+numbers in `commands.proto`; 42 is taken by `worktree_create`).
 
 The node answers from `git log` of the agent's own workspace, newest first, for the same workspaces and with the same path
 rules as `git.status` and `git.diff` (only the node's own agents' workspaces; nothing else). Commit subjects and author names are

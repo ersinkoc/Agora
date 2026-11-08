@@ -41,6 +41,8 @@ message CommandRequest {
     // ADR-0030
     AgentKinds agent_kinds = 16;
     UsageReport usage_report = 17;
+    // ADR-0037
+    GitLog git_log = 18;
     // ADR-0027: sent on a TLS connection that has no client certificate yet; accepts nothing else.
     EnrollRequest enroll = 80;
   }
@@ -71,6 +73,7 @@ message CommandOk {
     EnrollResponse enroll = 12;
     AgentKindsResult agent_kinds = 13;
     UsageReportResult usage_report = 14;
+    GitLogResult git_log = 15;
   }
 }
 
@@ -160,6 +163,13 @@ message GitStatus {
   string worktree_id = 1;
 }
 
+// ADR-0037: the recent commits of an agent's workspace, newest first.
+message GitLog {
+  string worktree_id = 1;
+  // 0 means the default (30); the node caps it at 200.
+  uint32 limit = 2;
+}
+
 message WorktreeCreate {
   string checkout_id = 1;
   string branch = 2;
@@ -240,6 +250,17 @@ message GitStatusResult {
   uint32 insertions = 2;
   uint32 deletions = 3;
   string head_commit = 4;
+}
+
+message GitCommit {
+  string id = 1;
+  string subject = 2;
+  string author = 3;
+  uint64 at_ms = 4;
+}
+
+message GitLogResult {
+  repeated GitCommit commits = 1;
 }
 
 message GitDiffResult {
