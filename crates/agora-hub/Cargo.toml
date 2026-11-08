@@ -29,6 +29,8 @@ x509-parser = { version = "0.18", features = ["verify"] }
 # One-time enrollment codes: system randomness (already in the tree via rcgen) and a hash so codes are not stored.
 getrandom = "0.2"
 sha2 = "0.10"
+# Verifies WebAuthn ES256 assertions (ECDSA P-256, DER). Already in the tree through rustls and rcgen.
+ring = { version = "0.17", default-features = false }
 # Parses the models.dev catalog (ADR-0021).
 serde_json = "1"
 # TLS with client certificates (ADR-0011, ADR-0015). The ring backend is already in the tree via rcgen and avoids a C toolchain.

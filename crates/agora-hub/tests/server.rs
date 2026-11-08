@@ -830,3 +830,115 @@ impl ClientAuth for HubSessionsAuth {
         self.0.check(token)
     }
 }
+
+async fn post_json(
+    addr: std::net::SocketAddr,
+    path: &str,
+    bearer: Option<&str>,
+    body: &serde_json::Value,
+) -> (u16, serde_json::Value) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let body = body.to_string();
+    let auth = bearer.map_or(String::new(), |t| format!("Authorization: Bearer {t}\r\n"));
+    let mut s = TcpStream::connect(addr).await.unwrap();
+    s.write_all(
+        format!(
+            "POST {path} HTTP/1.1\r\nHost: hub.test:7443\r\n{auth}Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+        .as_bytes(),
+    )
+    .await
+    .unwrap();
+    let mut out = String::new();
+    s.read_to_string(&mut out).await.unwrap();
+    let status = out[9..12].parse().unwrap();
+    let json = serde_json::from_str(out.split("\r\n\r\n").nth(1).unwrap_or("")).unwrap_or_default();
+    (status, json)
+}
+
+#[tokio::test]
+async fn a_passkey_added_by_a_signed_in_owner_signs_in_later_without_a_code() {
+    use agora_hub::passkey::{b64url_encode as b64, SPKI_P256_PREFIX};
+    use agora_hub::signin::{HubSessions, SignIn};
+    use ring::rand::SystemRandom;
+    use ring::signature::{EcdsaKeyPair, KeyPair, ECDSA_P256_SHA256_ASN1_SIGNING};
+    use sha2::{Digest, Sha256};
+    let hub = Arc::new(Hub::open(SqliteStore::open_in_memory().unwrap()).unwrap());
+    let sessions = Arc::new(HubSessions::new(Arc::clone(&hub)));
+    let st = Arc::new(ServerState {
+        hub: Arc::clone(&hub),
+        support: support(),
+        ca: None,
+        lockout: Arc::new(Lockout::new()),
+        auth: Box::new(HubSessionsAuth(Arc::clone(&sessions))),
+        assets: None,
+        sessions: Some(sessions.clone()),
+    });
+    let addr = start(st).await;
+    let rng = SystemRandom::new();
+    let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, &rng).unwrap();
+    let pair =
+        EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, pkcs8.as_ref(), &rng).unwrap();
+    let origin = "https://hub.test:7443";
+
+    // Adding a passkey needs a session.
+    let none = serde_json::json!({});
+    assert_eq!(
+        post_json(addr, "/api/passkey/register-begin", None, &none)
+            .await
+            .0,
+        401
+    );
+    let code = SignIn::new(hub.store(), Arc::new(Lockout::new()))
+        .create_code(server::now_ms())
+        .unwrap();
+    let (_, body) = post_json(
+        addr,
+        "/api/session",
+        None,
+        &serde_json::json!({ "code": code }),
+    )
+    .await;
+    let session = body["token"].as_str().unwrap().to_string();
+
+    let (status, begin) =
+        post_json(addr, "/api/passkey/register-begin", Some(&session), &none).await;
+    assert_eq!(status, 200);
+    assert_eq!(begin["rpId"], "hub.test");
+    let cd = serde_json::json!({"type": "webauthn.create", "challenge": begin["challenge"], "origin": origin}).to_string();
+    let mut spki = SPKI_P256_PREFIX.to_vec();
+    spki.extend_from_slice(pair.public_key().as_ref());
+    let reg = serde_json::json!({"id": "cred_1", "publicKey": b64(&spki), "clientDataJSON": b64(cd.as_bytes())});
+    assert_eq!(
+        post_json(addr, "/api/passkey/register-finish", Some(&session), &reg)
+            .await
+            .0,
+        200
+    );
+
+    // Sign in with the passkey alone.
+    let (status, begin) = post_json(addr, "/api/passkey/login-begin", None, &none).await;
+    assert_eq!(status, 200);
+    assert_eq!(begin["ids"], serde_json::json!(["cred_1"]));
+    let cd = serde_json::json!({"type": "webauthn.get", "challenge": begin["challenge"], "origin": origin}).to_string();
+    let mut auth = Sha256::digest(b"hub.test").to_vec();
+    auth.extend_from_slice(&[0x05, 0, 0, 0, 1]);
+    let mut signed = auth.clone();
+    signed.extend_from_slice(&Sha256::digest(cd.as_bytes()));
+    let sig = pair.sign(&rng, &signed).unwrap();
+    let assertion = serde_json::json!({"id": "cred_1", "authenticatorData": b64(&auth),
+        "clientDataJSON": b64(cd.as_bytes()), "signature": b64(sig.as_ref())});
+    let (status, body) = post_json(addr, "/api/passkey/login-finish", None, &assertion).await;
+    assert_eq!(status, 200, "{body}");
+    let token = body["token"].as_str().unwrap();
+    assert!(sessions.check(token));
+
+    // The same assertion cannot be replayed: its challenge is spent.
+    assert_eq!(
+        post_json(addr, "/api/passkey/login-finish", None, &assertion)
+            .await
+            .0,
+        401
+    );
+}

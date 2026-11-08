@@ -38,8 +38,8 @@ target/release/agora agent start shell --project myproject
 
 What works today: several machines in one window, live agent states, the real terminal of each agent through the hub,
 approvals answered with a device key (the window's "This device" page shows the command that makes a machine trust it), the
-mesh between agents (per-agent MCP endpoint), backups (`agora hub backup`), starting an agent from the window (machine and project, then an agent that machine has
-installed). What does not yet: passkey sign-in, installing agents from the registry,
+mesh between agents (per-agent MCP endpoint), passkey sign-in, backups (`agora hub backup`), starting an agent from the window (machine and project, then an agent that machine has
+installed). What does not yet: installing agents from the registry,
 Windows terminals. Details and the open items per phase: [docs/backlog/](docs/backlog/).
 
 ## Status

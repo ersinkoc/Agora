@@ -44,6 +44,12 @@ fn token_hash(token: &str) -> Vec<u8> {
     Sha256::digest(token.as_bytes()).to_vec()
 }
 
+fn new_token() -> Result<String, SignInError> {
+    let mut raw = [0u8; 16];
+    getrandom::getrandom(&mut raw).map_err(|e| SignInError::Store(e.to_string()))?;
+    Ok(raw.iter().map(|b| format!("{b:02x}")).collect())
+}
+
 pub struct SignIn<'a> {
     store: &'a SqliteStore,
     lockout: Arc<Lockout>,
@@ -74,9 +80,7 @@ impl<'a> SignIn<'a> {
         if let Some(retry_after_ms) = self.lockout.check(now_ms) {
             return Err(SignInError::LockedOut { retry_after_ms });
         }
-        let mut raw = [0u8; 16];
-        getrandom::getrandom(&mut raw).map_err(|e| SignInError::Store(e.to_string()))?;
-        let token: String = raw.iter().map(|b| format!("{b:02x}")).collect();
+        let token = new_token()?;
         let mut conn = self.store.lock()?;
         let tx = conn.transaction()?;
         let live: Option<i64> = tx
@@ -113,6 +117,25 @@ impl<'a> SignIn<'a> {
         Ok(token)
     }
 
+    /// A session without a code: the caller has already proved who it is (a passkey assertion).
+    pub fn start_session(&self, now_ms: u64) -> Result<String, SignInError> {
+        let token = new_token()?;
+        let conn = self.store.lock()?;
+        conn.execute(
+            "DELETE FROM sessions WHERE expires_ms <= ?1",
+            [to_i64(now_ms)],
+        )?;
+        conn.execute(
+            "INSERT INTO sessions (token_hash, created_ms, expires_ms) VALUES (?1, ?2, ?3)",
+            params![
+                token_hash(&token),
+                to_i64(now_ms),
+                to_i64(now_ms.saturating_add(SESSION_TTL_MS))
+            ],
+        )?;
+        Ok(token)
+    }
+
     /// Is this a live session?
     pub fn check(&self, token: &str, now_ms: u64) -> bool {
         let Ok(conn) = self.store.lock() else {
@@ -139,6 +162,7 @@ impl<'a> SignIn<'a> {
 pub struct HubSessions {
     hub: Arc<crate::hub::Hub>,
     lockout: Arc<Lockout>,
+    challenges: crate::passkey::Challenges,
 }
 
 impl HubSessions {
@@ -146,11 +170,22 @@ impl HubSessions {
         Self {
             hub,
             lockout: Arc::new(Lockout::new()),
+            challenges: crate::passkey::Challenges::new(),
         }
     }
 }
 
 impl crate::web::SessionApi for HubSessions {
+    fn passkey(
+        &self,
+        op: &str,
+        bearer: Option<&str>,
+        host: &str,
+        body: &serde_json::Value,
+    ) -> (u16, String) {
+        self.passkey_op(op, bearer, host, body)
+    }
+
     fn sign_in(&self, code: &str) -> crate::web::SignInReply {
         use crate::web::SignInReply;
         match SignIn::new(self.hub.store(), Arc::clone(&self.lockout))
@@ -159,6 +194,85 @@ impl crate::web::SessionApi for HubSessions {
             Ok(t) => SignInReply::Token(t),
             Err(SignInError::LockedOut { .. }) => SignInReply::TooMany,
             Err(_) => SignInReply::Refused,
+        }
+    }
+}
+
+impl HubSessions {
+    fn passkey_op(
+        &self,
+        op: &str,
+        bearer: Option<&str>,
+        host: &str,
+        body: &serde_json::Value,
+    ) -> (u16, String) {
+        use crate::passkey::{self as pk, Purpose};
+        let now = crate::server::now_ms();
+        let store = self.hub.store();
+        let field = |k: &str| {
+            body.get(k)
+                .and_then(|v| v.as_str())
+                .and_then(pk::b64url_decode)
+        };
+        let signed_in =
+            bearer.is_some_and(|t| SignIn::new(store, Arc::clone(&self.lockout)).check(t, now));
+        let json = |v: serde_json::Value| (200, v.to_string());
+        match op {
+            // Adding a passkey needs a signed-in session: the code (or another passkey) proved who is here.
+            "register-begin" if signed_in => match self.challenges.issue(Purpose::Register, now) {
+                Ok(c) => json(serde_json::json!({ "challenge": c, "rpId": pk::rp_id(host) })),
+                Err(_) => (500, String::new()),
+            },
+            "register-finish" if signed_in => {
+                let id = body.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                match (field("publicKey"), field("clientDataJSON")) {
+                    (Some(key), Some(cd)) => {
+                        match pk::register(store, &self.challenges, host, id, &key, &cd, now) {
+                            Ok(()) => (200, "{}".into()),
+                            Err(pk::PasskeyError::Refused) => (403, String::new()),
+                            Err(_) => (500, String::new()),
+                        }
+                    }
+                    _ => (400, String::new()),
+                }
+            }
+            "register-begin" | "register-finish" => (401, String::new()),
+            "login-begin" => match (pk::ids(store), self.challenges.issue(Purpose::Login, now)) {
+                (Ok(ids), Ok(c)) => {
+                    json(serde_json::json!({ "challenge": c, "rpId": pk::rp_id(host), "ids": ids }))
+                }
+                _ => (500, String::new()),
+            },
+            "login-finish" => {
+                if self.lockout.check(now).is_some() {
+                    return (429, String::new());
+                }
+                let id = body.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                let (Some(auth), Some(cd), Some(sig)) = (
+                    field("authenticatorData"),
+                    field("clientDataJSON"),
+                    field("signature"),
+                ) else {
+                    return (400, String::new());
+                };
+                match pk::login(store, &self.challenges, host, id, &auth, &cd, &sig, now) {
+                    Ok(()) => {
+                        match SignIn::new(store, Arc::clone(&self.lockout)).start_session(now) {
+                            Ok(t) => {
+                                self.lockout.succeeded();
+                                json(serde_json::json!({ "token": t }))
+                            }
+                            Err(_) => (500, String::new()),
+                        }
+                    }
+                    Err(pk::PasskeyError::Refused) => {
+                        self.lockout.failed(now);
+                        (401, String::new())
+                    }
+                    Err(_) => (500, String::new()),
+                }
+            }
+            _ => (404, String::new()),
         }
     }
 }

@@ -125,7 +125,8 @@ export function Focus({ agent, source: live, onBack }: {
 }
 
 // How an owner makes a machine trust this browser: the key is public, the command is for a terminal.
-export function DevicePage({ device, onBack }: { device: Device | undefined; onBack: () => void }) {
+export function DevicePage({ device, onBack, onAddPasskey }: { device: Device | undefined; onBack: () => void; onAddPasskey?: () => Promise<boolean> }) {
+  const [passkey, setPasskey] = useState<'added' | 'failed' | undefined>();
   return (
     <main className="page">
       <button type="button" className="link" onClick={onBack}>{t('focus-back')}</button>
@@ -139,11 +140,18 @@ export function DevicePage({ device, onBack }: { device: Device | undefined; onB
           <p className="mono">agora node trust {device.id} {device.publicKeyHex}</p>
         </>
       )}
+      {onAddPasskey && (
+        <>
+          <p>{t('device-passkey-intro')}</p>
+          <button type="button" className="button" onClick={() => { void onAddPasskey().then((ok) => setPasskey(ok ? 'added' : 'failed')); }}>{t('device-passkey-add')}</button>
+          {passkey && <p role="status">{t(passkey === 'added' ? 'device-passkey-added' : 'device-passkey-failed')}</p>}
+        </>
+      )}
     </main>
   );
 }
 
-export function SignInPage({ onSubmit, notice }: { onSubmit: (code: string) => void; notice?: string }) {
+export function SignInPage({ onSubmit, onPasskey, notice }: { onSubmit: (code: string) => void; onPasskey?: () => void; notice?: string }) {
   const [code, setCode] = useState('');
   return (
     <main className="page">
@@ -156,6 +164,7 @@ export function SignInPage({ onSubmit, notice }: { onSubmit: (code: string) => v
         </label>{' '}
         <button type="submit" className="button button--primary">{t('signin-action')}</button>
       </form>
+      {onPasskey && <p><button type="button" className="button" onClick={onPasskey}>{t('signin-passkey')}</button></p>}
       {notice && <p role="alert">{notice}</p>}
     </main>
   );
