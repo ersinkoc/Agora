@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { CommandPalette, type PaletteItem } from './components/CommandPalette';
 import { demoAgents } from './fixtures';
 import { t } from './i18n';
@@ -7,6 +7,7 @@ import { connectLive, type Live, type LinkState } from './net/live';
 import type { TerminalSource } from './terminal/source';
 import { StartAgent, type KindChoice } from './components/StartAgent';
 import { approvalList, projectChoices, machines, machinesOnline, tiles, type ApprovalModel, type View } from './net/view';
+import { freshApprovals, titleWithCount } from './net/alert';
 import { indexedDbStore, signApproval, thisDevice, type Device } from './net/approval';
 import { forgetToken, hubConnection, readCode, signIn } from './net/session';
 import { DevicePage, Focus, Gallery, Home, MachinesPage, SignInPage } from './screens';
@@ -77,6 +78,27 @@ export function App() {
       setNotice(code === 'approval.signature_invalid' ? t('approval-not-trusted') : t('approval-failed'));
     }
   }, [api, device]);
+  // Approvals waiting while the tab is hidden: a count in the title, and a notification if the user allowed it.
+  const seenApprovals = useRef<Set<string>>(new Set());
+  const baseTitle = useRef(document.title);
+  useEffect(() => {
+    if (!live) return;
+    const list = approvalList(live);
+    document.title = titleWithCount(baseTitle.current, list.length);
+    const fresh = freshApprovals(seenApprovals.current, list);
+    seenApprovals.current = new Set(list.map((a) => a.id));
+    if (document.visibilityState === 'visible' || typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
+    for (const a of fresh) {
+      try { new Notification(t('approval-title', { name: a.agentName }), { body: a.action, tag: a.id }); } catch { /* not allowed here */ }
+    }
+  }, [live]);
+  // Browsers only ask for notification permission after a user gesture: ask at the first click once signed in.
+  useEffect(() => {
+    if (!hub || typeof Notification === 'undefined' || Notification.permission !== 'default') return;
+    const ask = () => { try { void Notification.requestPermission(); } catch { /* unsupported */ } };
+    window.addEventListener('pointerdown', ask, { once: true });
+    return () => window.removeEventListener('pointerdown', ask);
+  }, [hub]);
   useEffect(() => {
     if (!hub) return;
     const c = connectLive({ url: hub.url, token: hub.token, onView: (v) => setLive({ ...v }), onState: setLink,
