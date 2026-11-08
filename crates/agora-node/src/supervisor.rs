@@ -208,6 +208,15 @@ pub struct AgentView {
     pub restarts: u32,
 }
 
+/// One startable agent kind, as reported by [`Supervisor::kinds`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KindInfo {
+    pub kind: String,
+    pub display_name: String,
+    pub level: IntegrationLevel,
+    pub installed: bool,
+}
+
 struct KindEntry {
     manifest: Manifest,
     detector: Detector,
@@ -881,6 +890,26 @@ impl Supervisor {
         }));
         out.sort_by(|a, b| a.id.cmp(&b.id));
         out
+    }
+
+    /// The agents this node can start (ADR-0030): kind, name, level and whether the program is installed. Sorted by kind.
+    pub fn kinds(&self) -> Vec<KindInfo> {
+        self.kinds
+            .values()
+            .map(|k| {
+                let m = &k.manifest;
+                let (level, program) = match &m.adapter {
+                    Some(a) => (IntegrationLevel::L3Adapter, a.command.first()),
+                    None => (IntegrationLevel::L1Manifest, m.process.launch.first()),
+                };
+                KindInfo {
+                    kind: m.kind.clone(),
+                    display_name: m.display_name.clone(),
+                    level,
+                    installed: program.is_some_and(|p| crate::doctor::on_path(p)),
+                }
+            })
+            .collect()
     }
 
     /// Terminal size used for new agents (for callers that attach clients).
