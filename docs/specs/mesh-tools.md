@@ -66,8 +66,11 @@ node wrote. The target broker delivers it to the local agent with `provenance.fr
 returns once the broker accepted the message (limits and rate are checked there); if it does not arrive, the sender's inbox
 receives a notice of kind `delivery_failed` whose body is the error code (`node.offline`, `node.unknown`, `node.timeout`,
 `mesh.recipient_unknown`, `mesh.rate_limited`, ...). Only plain messages cross nodes: `ask`, `handoff`, `#channels`, tasks and
-leases stay node-local, and a node may have 64 posts waiting at the hub. Not yet: the node policy key `mesh.remote` that turns
-it off (it is always on for enrolled nodes), `refs`, and the web window showing cross-node messages.
+leases stay node-local, and a node may have 64 posts waiting at the hub. The machine's owner can turn it off:
+`<node data dir>/policy` with the line `mesh.remote = false` (default `true`; a value that is not exactly `true` or `false` counts as
+`false`, so a typo never widens the node). Then messages to other nodes fail with a `delivery_failed` notice `node.policy_denied`
+and messages from other nodes are refused with the same code; messages on this node are unaffected. The hub cannot change this
+file. Not yet: `refs` across nodes, and the web window showing cross-node messages.
 
 ## Implementation status
 `agora-mesh::broker::Mesh` implements the tools' logic as deterministic in-memory state: registry, messages with

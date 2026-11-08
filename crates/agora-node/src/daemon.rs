@@ -333,6 +333,43 @@ pub struct NodeConfig {
     pub limits: NodeLimits,
 }
 
+/// Name of the node's policy file in its data directory (written by the machine's owner; the hub cannot change it).
+pub const POLICY_FILE: &str = "policy";
+
+/// What the owner allows on this node. A missing file allows the defaults.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Policy {
+    /// Messages may cross to and from agents on other nodes (`mesh.remote`, default true; ADR-0031).
+    pub mesh_remote: bool,
+}
+
+impl Default for Policy {
+    fn default() -> Self {
+        Self { mesh_remote: true }
+    }
+}
+
+/// Reads `key = value` lines (blank lines and `#` comments skipped). A known key with a value that is not `true` or `false`
+/// counts as `false`: a typo must never widen what the node allows. Unknown keys are ignored.
+pub fn read_policy(path: &std::path::Path) -> Policy {
+    let mut p = Policy::default();
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return p;
+    };
+    for line in text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+    {
+        if let Some((k, v)) = line.split_once('=') {
+            if k.trim() == "mesh.remote" {
+                p.mesh_remote = v.trim() == "true";
+            }
+        }
+    }
+    p
+}
+
 #[derive(Debug)]
 pub enum NodeError {
     Io(io::Error),
@@ -389,6 +426,7 @@ impl Node {
             &mesh_dir,
             agora_mesh::broker::Limits::default(),
         )?);
+        mesh.set_remote_allowed(read_policy(&cfg.data_dir.join(POLICY_FILE)).mesh_remote);
 
         let mut sup = Supervisor::new(SupervisorConfig {
             node: NodeId::new(cfg.node_id.clone()),

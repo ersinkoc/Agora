@@ -50,7 +50,7 @@ type RemoteSlot = Mutex<Option<Arc<dyn RemoteLink>>>;
 
 /// Sends what the broker queued for other nodes. Called after every tool call, outside the broker's lock; a failure
 /// comes back to the sending agent as a notice in its inbox.
-fn dispatch_outbound(mesh: &Arc<Mutex<Mesh>>, remote: &RemoteSlot) {
+fn dispatch_outbound(mesh: &Arc<Mutex<Mesh>>, remote: &RemoteSlot, allowed: &AtomicBool) {
     let out = mesh
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -59,6 +59,11 @@ fn dispatch_outbound(mesh: &Arc<Mutex<Mesh>>, remote: &RemoteSlot) {
         return;
     }
     let link = remote.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let denied_or_offline = if allowed.load(Ordering::Acquire) {
+        "node.offline"
+    } else {
+        "node.policy_denied"
+    };
     for o in out {
         let to = format!("{}/{}", o.to_node, o.to_agent);
         let failed = {
@@ -83,7 +88,7 @@ fn dispatch_outbound(mesh: &Arc<Mutex<Mesh>>, remote: &RemoteSlot) {
                     }),
                 );
             }
-            None => failed("node.offline".to_string()),
+            None => failed(denied_or_offline.to_string()),
         }
     }
 }
@@ -95,6 +100,8 @@ struct AgentServer {
 }
 
 pub struct MeshServer {
+    /// Whether messages may cross to and from other nodes (node policy `mesh.remote`, ADR-0031).
+    remote_allowed: Arc<AtomicBool>,
     remote: Arc<RemoteSlot>,
     mesh: Arc<Mutex<Mesh>>,
     dir: PathBuf,
@@ -124,6 +131,7 @@ impl MeshServer {
                 })?
         };
         Ok(Self {
+            remote_allowed: Arc::new(AtomicBool::new(true)),
             remote: Arc::new(Mutex::new(None)),
             mesh,
             dir: dir.to_path_buf(),
@@ -135,7 +143,19 @@ impl MeshServer {
 
     /// Where messages for agents on other nodes go (the hub uplink). Without one they fail with `node.offline`.
     pub fn set_remote(&self, link: Arc<dyn RemoteLink>) {
+        if !self.remote_allowed.load(Ordering::Acquire) {
+            return;
+        }
         *self.remote.lock().unwrap_or_else(|e| e.into_inner()) = Some(link);
+    }
+
+    /// Node policy `mesh.remote`: when false, messages to other nodes fail with `node.policy_denied` and messages from
+    /// them are refused. Local messages are not affected.
+    pub fn set_remote_allowed(&self, allowed: bool) {
+        self.remote_allowed.store(allowed, Ordering::Release);
+        if !allowed {
+            *self.remote.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        }
     }
 
     /// A message from an agent on another node, as the hub vouched for it (ADR-0031).
@@ -146,6 +166,13 @@ impl MeshServer {
         to: &AgentId,
         body: &str,
     ) -> Result<(), agora_protocol::Error> {
+        if !self.remote_allowed.load(Ordering::Acquire) {
+            return Err(
+                agora_protocol::Error::new(agora_protocol::ErrorCode::NodePolicyDenied)
+                    .with("node_id", "")
+                    .with("rule", "mesh.remote"),
+            );
+        }
         let mut m = self.mesh.lock().unwrap_or_else(|e| e.into_inner());
         let limits = m.limits();
         m.deliver_remote(origin, from_agent, to, body, now_ms())
@@ -174,11 +201,12 @@ impl MeshServer {
             .register(info);
         let stop = Arc::new(AtomicBool::new(false));
         let thread = {
-            let (mesh, stop, agent, remote) = (
+            let (mesh, stop, agent, remote, allowed) = (
                 Arc::clone(&self.mesh),
                 Arc::clone(&stop),
                 id.clone(),
                 Arc::clone(&self.remote),
+                Arc::clone(&self.remote_allowed),
             );
             std::thread::Builder::new()
                 .name("agora-mesh-agent".into())
@@ -187,15 +215,18 @@ impl MeshServer {
                     while !stop.load(Ordering::Acquire) {
                         match listener.accept() {
                             Ok(stream) => {
-                                let (mesh, stop, agent, remote) = (
+                                let (mesh, stop, agent, remote, allowed) = (
                                     Arc::clone(&mesh),
                                     Arc::clone(&stop),
                                     agent.clone(),
                                     Arc::clone(&remote),
+                                    Arc::clone(&allowed),
                                 );
                                 if let Ok(h) = std::thread::Builder::new()
                                     .name("agora-mesh-conn".into())
-                                    .spawn(move || serve(stream, &agent, &mesh, &remote, &stop))
+                                    .spawn(move || {
+                                        serve(stream, &agent, &mesh, &remote, &allowed, &stop)
+                                    })
                                 {
                                     conns.push(h);
                                 }
@@ -299,6 +330,7 @@ fn serve(
     agent: &AgentId,
     mesh: &Arc<Mutex<Mesh>>,
     remote: &RemoteSlot,
+    allowed: &AtomicBool,
     stop: &AtomicBool,
 ) {
     let Ok(read_half) = stream.try_clone() else {
@@ -324,7 +356,7 @@ fn serve(
                     let mut m = mesh.lock().unwrap_or_else(|e| e.into_inner());
                     conn.handle(&text, &mut m, now_ms())
                 };
-                dispatch_outbound(mesh, remote);
+                dispatch_outbound(mesh, remote, allowed);
                 match outcome {
                     Outcome::Reply(msg) => {
                         if send(&mut writer, &msg).is_err() {
