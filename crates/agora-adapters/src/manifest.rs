@@ -97,6 +97,24 @@ pub struct AdapterSpec {
     pub env: BTreeMap<String, String>,
 }
 
+/// The agent speaks the Agent Client Protocol over stdio (L2, `[structured] acp = { argv = [...] }`). The node drives it through
+/// the ACP bridge (`agora acp-bridge`, `agora-adapters::acp`), which looks like an L3 adapter to everything else.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcpSpec {
+    /// Program and arguments of the agent in ACP mode; the first element is the program.
+    pub argv: Vec<String>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+}
+
+/// `[structured]`: the ways an agent can be driven without a terminal. Keys this engine does not know yet (`adapter` as a registry
+/// name) are accepted and ignored.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Structured {
+    pub acp: Option<AcpSpec>,
+}
+
 /// How the node hands an agent its own mesh MCP server (docs/specs/agent-manifest.md `[mcp]`).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -137,6 +155,7 @@ pub struct Manifest {
     pub rules: Vec<Rule>,
     pub mcp: Option<McpSpec>,
     pub adapter: Option<AdapterSpec>,
+    pub structured: Option<Structured>,
 }
 
 fn invalid(field: impl Into<String>) -> ManifestError {
@@ -146,6 +165,25 @@ fn invalid(field: impl Into<String>) -> ManifestError {
 }
 
 impl Manifest {
+    /// What drives this kind without a terminal, as an adapter command: its own `[adapter]`, or the ACP bridge (`bridge` is the
+    /// program that runs `acp-bridge`, the `agora` binary) around `[structured] acp`. `None` for a kind that runs in a terminal.
+    pub fn driver(&self, bridge: &std::path::Path) -> Option<AdapterSpec> {
+        if let Some(a) = &self.adapter {
+            return Some(a.clone());
+        }
+        let acp = self.structured.as_ref()?.acp.as_ref()?;
+        let mut command = vec![
+            bridge.to_string_lossy().into_owned(),
+            "acp-bridge".to_string(),
+            "--".to_string(),
+        ];
+        command.extend(acp.argv.iter().cloned());
+        Some(AdapterSpec {
+            command,
+            env: acp.env.clone(),
+        })
+    }
+
     pub fn parse(src: &str) -> Result<Self, ManifestError> {
         let m: Self = toml::from_str(src).map_err(|e| ManifestError::Parse(e.to_string()))?;
         m.validate()?;
@@ -176,6 +214,14 @@ impl Manifest {
             .is_some_and(|a| a.command.first().is_none_or(String::is_empty))
         {
             return Err(invalid("adapter.command"));
+        }
+        if self
+            .structured
+            .as_ref()
+            .and_then(|s| s.acp.as_ref())
+            .is_some_and(|a| a.argv.first().is_none_or(String::is_empty))
+        {
+            return Err(invalid("structured.acp.argv"));
         }
         if let Some(m) = &self.mcp {
             let ok = match m.method {

@@ -143,7 +143,24 @@ fn socket_path(o: &Opts) -> PathBuf {
     o.socket.clone().unwrap_or_else(|| home().join("node.sock"))
 }
 
+/// `agora acp-bridge -- AGENT ARGS...`: runs an ACP agent and speaks the adapter protocol on this process's stdio (L2, the node
+/// starts it; see `agora-adapters::acp`).
+fn acp_bridge(args: &[String]) -> ExitCode {
+    let agent = args.strip_prefix(&["--".to_string()]).unwrap_or(args);
+    if agent.is_empty() {
+        return ExitCode::from(2);
+    }
+    match agora_adapters::acp::run(agent, std::io::stdin(), std::io::stdout().lock()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(_) => ExitCode::from(1),
+    }
+}
+
 fn main() -> ExitCode {
+    if std::env::args().nth(1).as_deref() == Some("acp-bridge") {
+        let args: Vec<String> = std::env::args().skip(2).collect();
+        return acp_bridge(&args);
+    }
     let say = Say(Catalog::for_locale(&agora_i18n::catalog::locale_from_env()));
     let args: Vec<String> = std::env::args().skip(1).collect();
     let words: Vec<&str> = args

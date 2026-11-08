@@ -332,7 +332,7 @@ impl Supervisor {
             .kinds
             .get(&req.kind)
             .ok_or_else(|| SupervisorError::UnknownKind(req.kind.clone()))?;
-        if let Some(spec) = kind.manifest.adapter.clone() {
+        if let Some(spec) = kind.manifest.driver(&bridge_program()) {
             return self.start_adapter(req, &spec);
         }
         let argv = kind.manifest.process.launch.clone();
@@ -898,9 +898,11 @@ impl Supervisor {
             .values()
             .map(|k| {
                 let m = &k.manifest;
-                let (level, program) = match &m.adapter {
-                    Some(a) => (IntegrationLevel::L3Adapter, a.command.first()),
-                    None => (IntegrationLevel::L1Manifest, m.process.launch.first()),
+                let acp = m.structured.as_ref().and_then(|s| s.acp.as_ref());
+                let (level, program) = match (&m.adapter, acp) {
+                    (Some(a), _) => (IntegrationLevel::L3Adapter, a.command.first()),
+                    (None, Some(a)) => (IntegrationLevel::L2Acp, a.argv.first()),
+                    (None, None) => (IntegrationLevel::L1Manifest, m.process.launch.first()),
                 };
                 KindInfo {
                     kind: m.kind.clone(),
@@ -916,6 +918,15 @@ impl Supervisor {
     pub fn terminal_size(&self) -> Size {
         self.cfg.terminal.size
     }
+}
+
+/// The program that runs `acp-bridge` for ACP agents: this node's own binary (`agora`), unless `AGORA_ACP_BRIDGE` names another
+/// (tests, packaging).
+fn bridge_program() -> PathBuf {
+    std::env::var_os("AGORA_ACP_BRIDGE")
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_exe().ok())
+        .unwrap_or_else(|| PathBuf::from("agora"))
 }
 
 /// Spawns an adapter process, initializes it and starts (or resumes) a session. Returns it with the session id.

@@ -54,3 +54,27 @@ The supervisor restarts a crashed adapter with the same backoff and budget as a 
 agent is `unknown` meanwhile, the session is resumed with `resumeSessionId` when the adapter reported a native session id,
 and after the budget is spent the agent stays stopped (`GaveUp`). A user stop cancels a pending restart. Not yet: the
 registry of installed adapters.
+
+## L2: ACP agents through the bridge (`agora-adapters::acp`)
+An agent that speaks the Agent Client Protocol over stdio needs no adapter. Its manifest says `[structured] acp = { argv = [...] }`
+and the node runs `agora acp-bridge -- <argv>` as the adapter: the bridge is the ACP *client* towards the agent and an adapter
+towards the node, so chat items, approvals, state and cancel work as for any L3 agent and nothing else knows about ACP.
+`agora agent kinds` reports such a kind as level L2.
+
+| ACP (agent → client) | Adapter protocol (bridge → node) |
+| --- | --- |
+| `session/update` `agent_message_chunk` | `chat/append` text, chunks joined for up to 150 ms (or 4 KiB) |
+| `session/update` `tool_call` (title, `rawInput`) | `chat/append` tool call; a `diff` in its content (or in `tool_call_update`) becomes a diff item (old and new text shown as a whole-file replacement) |
+| `session/update` `plan` | `chat/append` plan, one step per entry |
+| `session/request_permission` | `approval/request` (action: the tool call's title, detail: its input cut at 300 characters) and state `blocked` |
+| answer to `session/prompt` (stop reason) | state `idle`; the prompt itself set `working` |
+| `agent_thought_chunk`, other updates | dropped |
+
+Node → bridge → agent: `session/start` → `session/new` (or `session/load` when the agent said it can and a resume id is known);
+`session/prompt` → `session/prompt` with one text block; `session/cancel` → the ACP `session/cancel` notification;
+`approval/resolve` → the agent's own option (`allow_once`, else `allow_always`, else the first option for an approval;
+`reject_once`, else `reject_always`, else `cancelled` for a denial). The bridge offers no capabilities: `fs/*` and `terminal/*`
+requests from the agent are refused (the agent works in its own worktree), and mesh delivery to ACP agents goes through the mesh MCP
+endpoint like for any agent. If the agent exits the bridge exits, which the node sees as the adapter exiting (restart policy as
+for L3). The fake ACP agent (`agora-fake-agent --acp`) is the test double; real agents (Claude Code, Codex, WrongStack) need their
+manifests and fixtures from real accounts (P2-09).
