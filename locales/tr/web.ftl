@@ -99,3 +99,5 @@ machine-cost = yaklaşık { $amount } harcandı (tahmini)
 usage-total = Toplam yaklaşık { $amount } harcandı (tahmini)
 usage-prices-date = fiyatlar { $date } tarihli
 usage-prices-bundled = fiyatlar bu hub sürümüyle gelen tablodan
+messages-title = Son mesajlar
+message-cross = makineler arası

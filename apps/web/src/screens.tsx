@@ -2,7 +2,7 @@ import { AgentTile } from './components/AgentTile';
 import { AttentionStrip } from './components/AttentionStrip';
 import { ApprovalCard } from './components/ApprovalCard';
 import { StateBadge } from './components/StateBadge';
-import type { ApprovalModel, MachineModel } from './net/view';
+import type { ApprovalModel, MachineModel, MessageModel } from './net/view';
 import type { ReactNode } from 'react';
 import type { Device } from './net/approval';
 import { money, type UsageSummary } from './net/usage';
@@ -15,12 +15,13 @@ const TerminalView = lazy(() => import('./terminal/TerminalView').then((m) => ({
 import { t } from './i18n';
 import { type AgentTileModel, type UiState, needsAttention, sortFleet } from './model';
 
-export function Home({ onOpen, agents = demoAgents, machines, link = 'live', approvals = [], onResolve, notice, start, onStart }: {
+export function Home({ onOpen, agents = demoAgents, machines, link = 'live', approvals = [], messages = [], onResolve, notice, start, onStart }: {
   onOpen?: (id: string) => void;
   agents?: readonly AgentTileModel[];
   machines?: number;
   link?: 'connecting' | 'live' | 'offline';
   approvals?: readonly ApprovalModel[];
+  messages?: readonly MessageModel[];
   onResolve?: (a: ApprovalModel, approved: boolean) => void;
   notice?: string;
   start?: ReactNode; // the start-an-agent panel, when open
@@ -50,6 +51,19 @@ export function Home({ onOpen, agents = demoAgents, machines, link = 'live', app
         <p className="muted">{t('fleet-empty')}</p>
       ) : (
         <div className="fleet">{fleet.map((a) => <AgentTile key={a.id} agent={a} onOpen={onOpen} />)}</div>
+      )}
+      {messages.length > 0 && (
+        <section aria-label={t('messages-title')}>
+          <h2>{t('messages-title')}</h2>
+          <ul className="messages">
+            {messages.map((m, i) => (
+              <li key={`${m.atMs}-${i}`}>
+                <strong>{m.from}</strong> → <strong>{m.to}</strong>{m.crossMachine ? <span className="muted"> · {t('message-cross')}</span> : null}
+                <div className="muted">{m.body}</div>
+              </li>
+            ))}
+          </ul>
+        </section>
       )}
       <p className="muted">{t('palette-hint')}</p>
       {start ?? (

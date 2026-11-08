@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { agora } from '../gen/agora.js';
 import { decodeFrame, encodeFrame, EVENT_KIND, STREAM_CLOSE, STREAM_COMMANDS, STREAM_EVENTS } from './frame';
 import { connectLive, type LinkState, type Socket } from './live';
-import { applyEvent, emptyView, fromSnapshot, machines, machinesOnline, projectChoices, tiles, type View } from './view';
+import { applyEvent, emptyView, fromSnapshot, machines, recentMessages, machinesOnline, projectChoices, tiles, type View } from './view';
 
 const v1 = agora.v1;
 
@@ -35,6 +35,17 @@ describe('view', () => {
     const t = tiles(v);
     expect(t.find((x) => x.id === 'n/a')?.workspace).toBe('shop');
     expect(t.find((x) => x.id === 'n/b')?.workspace).toBe('shop (login-fix)');
+  });
+
+  it('lists recent messages, newest first, and marks the ones that cross machines', () => {
+    const v = emptyView();
+    applyEvent(v, 1, ev('a', 1, { agentStarted: { agentId: 'x', nodeId: 'a', worktreeId: 'w', kind: 'claude' } }));
+    applyEvent(v, 2, ev('a', 2, { messagePosted: { messageId: 'm1', fromAgentId: 'x', to: 'y', body: 'local' } }));
+    applyEvent(v, 3, ev('a', 3, { messagePosted: { messageId: 'm2', fromAgentId: 'x', to: 'b/z', body: 'remote' } }));
+    const m = recentMessages(v);
+    expect(m.map((x) => x.body)).toEqual(['remote', 'local']);
+    expect(m.map((x) => x.crossMachine)).toEqual([true, false]);
+    expect(m[1]?.from).toBe('claude · ' + m[1]?.from.split(' · ')[1]);
   });
 
   it('a waiting approval makes the agent need you, and answering it clears that', () => {
