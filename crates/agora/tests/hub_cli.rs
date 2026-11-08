@@ -69,9 +69,9 @@ fn a_machine_enrolls_connects_and_its_agent_shows_up_in_the_hub() {
     .spawn()
     .unwrap();
     let mut line = String::new();
-    BufReader::new(hub.stdout.take().unwrap())
-        .read_line(&mut line)
-        .unwrap();
+    // Kept open: the hub prints more after its first line.
+    let mut out = BufReader::new(hub.stdout.take().unwrap());
+    out.read_line(&mut line).unwrap();
     let _hub = Proc(hub);
     let addr = line
         .split("running on ")
