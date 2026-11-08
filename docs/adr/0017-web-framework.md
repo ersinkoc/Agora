@@ -17,3 +17,5 @@ The same app runs in the browser and in the Tauri desktop shell.
 ## Notes
 The terminal renderer choice (xterm.js with the WebGL renderer, or a WebAssembly emulator) is made by measuring against the
 budgets in ADR-0022 before Phase 3 screens are built; the adapter interface keeps it swappable.
+
+Measured 2026-11-09 (`docs/design/performance.md`, `scripts/terminal-compare`): xterm.js with its DOM renderer meets the budgets and beat the WebGL addon and a WebAssembly emulator in headless Chromium, so it is the renderer; the adapter interface stays.

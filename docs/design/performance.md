@@ -133,6 +133,24 @@ nobody had set `TCP_NODELAY`, so Nagle's algorithm and the peer's delayed ACK he
 whenever keystrokes came less than a round trip apart. The loop now wakes on a terminal frame, and the hub's accepted
 sockets and the node's uplink set `TCP_NODELAY`.
 
-Not measured: the xterm.js against WebAssembly comparison (ADR-0017 keeps the renderer swappable; with the figures above
-xterm.js meets the interaction budget, so a WebAssembly emulator would have to win on throughput or memory to be worth
-it), twenty terminals all open and busy at once (the wall shows four; the other agents' output is not relayed to the browser), and any machine over a real network.
+Not measured: twenty terminals all open and busy at once (the wall shows four; the other agents' output is not relayed to the browser), and any machine over a real network.
+
+### xterm.js against a WebAssembly emulator (decides ADR-0017's open choice)
+
+`scripts/terminal-compare` feeds identical bytes to xterm.js (DOM renderer and the WebGL addon) and ghostty-web 0.4.0 (Ghostty's
+parser compiled to WebAssembly, xterm-compatible API) in the same headless Chromium (software GL), 20 MB per flood in 16 KB
+writes with up to 64 in flight:
+
+| Engine | Plain output | Colored output (SGR) | `write` of one key | Frame after it | Heap |
+| --- | --- | --- | --- | --- | --- |
+| xterm.js, DOM renderer (what the app ships) | 52 MB/s | 50 MB/s | 0.1 ms p50 / 0.2 p95 | 13 ms p95 13.5 | 14 MB |
+| xterm.js + WebGL addon | 32 MB/s | 25 MB/s | 0.1 / 0.2 ms | 13 / 13.6 ms | 18 MB |
+| ghostty-web (WebAssembly) | 37 MB/s | 32 MB/s | 13.6 / 14.1 ms | 30 / 30 ms | 13 MB |
+
+None produced a long main-thread task. **Decision: keep xterm.js with the DOM renderer.** It is the fastest of the three here, it meets
+every client budget measured above, and the WebAssembly emulator was slower on throughput and added a frame to each keystroke (it
+paints on the animation frame; xterm.js updates the DOM synchronously). The WebGL addon is slower under software GL; with a real
+GPU it may win on very large screens, which this headless setup cannot show, so it stays an option behind the `TerminalRenderer`
+interface rather than a default. Caveats: one machine, software rendering, ghostty-web is a young package, and the figures
+say nothing about text shaping (complex scripts), where Ghostty's parser is stronger; if that matters to users the swap is one
+file (`apps/web/src/terminal/renderer.ts`).
