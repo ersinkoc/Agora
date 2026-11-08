@@ -337,3 +337,102 @@ fn the_price_table_is_refreshed_only_on_request_and_a_bad_answer_changes_nothing
     assert!(String::from_utf8_lossy(&ok.stdout).contains("1 models"));
     assert!(hub.join("prices-catalog.json").exists());
 }
+
+#[test]
+fn a_machine_added_over_ssh_gets_a_tunnel_the_hub_keeps_open() {
+    if !agora_platform::PTY_SUPPORTED {
+        return; // the stand-in for ssh is a shell script
+    }
+    let root = tmp("ssh");
+    let hub_dir = root.join("hub");
+    let fake = root.join("fake-ssh");
+    let log = root.join("args");
+    std::fs::write(
+        &fake,
+        format!(
+            "#!/bin/sh\necho \"$@\" >> {}\nexec sleep 60\n",
+            log.display()
+        ),
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let run = |args: &[&str]| {
+        agora(&root, args)
+            .arg("--hub-dir")
+            .arg(&hub_dir)
+            .output()
+            .unwrap()
+    };
+
+    assert!(String::from_utf8_lossy(&run(&["hub", "ssh"]).stdout).contains("No SSH machines yet"));
+    assert_eq!(
+        run(&["hub", "ssh", "add", "box", "-oProxyCommand=x"])
+            .status
+            .code(),
+        Some(2)
+    );
+    let added = run(&["hub", "ssh", "add", "box", "user@box.example"]);
+    assert!(added.status.success(), "{added:?}");
+    let said = String::from_utf8_lossy(&added.stdout).into_owned();
+    assert!(
+        said.contains("wss://localhost:17443") && said.contains("--id box"),
+        "{said}"
+    );
+    assert_eq!(
+        run(&["hub", "ssh", "add", "box", "other"]).status.code(),
+        Some(2),
+        "names are unique"
+    );
+
+    let mut hub = agora(
+        &root,
+        &["hub", "run", "--listen", "127.0.0.1:0", "--hub-dir"],
+    )
+    .arg(&hub_dir)
+    .env("AGORA_SSH", &fake)
+    .stdout(Stdio::piped())
+    .stderr(Stdio::null())
+    .spawn()
+    .unwrap();
+    let mut line = String::new();
+    // Kept open: the hub prints more after its first line, and a closed pipe would end it.
+    let mut out = BufReader::new(hub.stdout.take().unwrap());
+    out.read_line(&mut line).unwrap();
+    let _hub = Proc(hub);
+    let t0 = Instant::now();
+    let args = loop {
+        if let Ok(a) = std::fs::read_to_string(&log) {
+            if !a.is_empty() {
+                break a;
+            }
+        }
+        assert!(
+            t0.elapsed() < Duration::from_secs(15),
+            "the tunnel was never started"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(
+        args.contains("BatchMode=yes") && args.contains("StrictHostKeyChecking=yes"),
+        "{args}"
+    );
+    assert!(
+        args.contains("-R 127.0.0.1:17443:127.0.0.1:") && args.contains("-- user@box.example"),
+        "{args}"
+    );
+    let t0 = Instant::now();
+    loop {
+        let listed = String::from_utf8_lossy(&run(&["hub", "ssh"]).stdout).into_owned();
+        if listed.contains("box user@box.example 17443 up") {
+            break;
+        }
+        assert!(
+            t0.elapsed() < Duration::from_secs(15),
+            "never reported up: {listed}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}

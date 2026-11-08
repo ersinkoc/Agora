@@ -182,6 +182,7 @@ pub fn hub_run(say: &Say, o: &Opts) -> ExitCode {
                     ("dir", dir.display().to_string().into()),
                 ],
             );
+            let _tunnels = start_tunnels(say, &dir, addr);
             if has_web {
                 say.out(
                     key!("cli-hub-web"),
@@ -284,6 +285,146 @@ pub fn hub_prices(say: &Say, o: &Opts) -> ExitCode {
         Err(e) => {
             say.err(key!("cli-hub-prices-failed"), &[("reason", e.into())]);
             ExitCode::from(1)
+        }
+    }
+}
+
+/// Starts the SSH tunnels listed in `<hub dir>/ssh-machines` (ADR-0032) and keeps `<hub dir>/ssh-status` up to date.
+fn start_tunnels(
+    say: &Say,
+    dir: &Path,
+    listen: std::net::SocketAddr,
+) -> Option<agora_hub::ssh::Dialer> {
+    use agora_hub::ssh::{parse_machines, Backoff, Dialer, State};
+    let file = dir.join("ssh-machines");
+    let text = std::fs::read_to_string(&file).ok()?;
+    let (machines, skipped) = parse_machines(&text);
+    let name = file.display().to_string();
+    if skipped > 0 {
+        say.err(
+            key!("cli-hub-ssh-skipped"),
+            &[
+                ("count", (skipped as i64).into()),
+                ("file", name.clone().into()),
+            ],
+        );
+    }
+    if machines.is_empty() {
+        return None;
+    }
+    say.out(
+        key!("cli-hub-ssh-started"),
+        &[
+            ("count", (machines.len() as i64).into()),
+            ("file", name.into()),
+        ],
+    );
+    // The hub dials itself on loopback when it listens on every address.
+    let ip = if listen.ip().is_unspecified() {
+        std::net::Ipv4Addr::LOCALHOST.into()
+    } else {
+        listen.ip()
+    };
+    let hub = std::net::SocketAddr::new(ip, listen.port()).to_string();
+    let status = dir.join("ssh-status");
+    let states: std::sync::Mutex<std::collections::BTreeMap<String, String>> = Default::default();
+    let program = std::env::var("AGORA_SSH").unwrap_or_else(|_| "ssh".into());
+    Some(Dialer::start(
+        machines,
+        &hub,
+        &program,
+        Backoff::default(),
+        Arc::new(move |name, st| {
+            let text = match st {
+                State::Connecting => "connecting".to_string(),
+                State::Up => "up".to_string(),
+                State::Down { reason, retry_ms } => {
+                    format!("down, retry in {} s: {reason}", retry_ms / 1000)
+                }
+            };
+            if let Ok(mut m) = states.lock() {
+                m.insert(name.to_string(), text);
+                let all: String = m.iter().map(|(k, v)| format!("{k} {v}\n")).collect();
+                let _ = std::fs::write(&status, all);
+            }
+        }),
+    ))
+}
+
+/// `agora hub ssh` lists the machines the hub keeps a tunnel to, with the last state it wrote; `agora hub ssh add NAME
+/// DESTINATION [--port N]` adds one and says what to run on it (ADR-0032).
+pub fn hub_ssh(say: &Say, o: &Opts) -> ExitCode {
+    use agora_hub::ssh::{parse_machines, Machine, DEFAULT_PORT};
+    let dir = hub_dir(o);
+    let file = dir.join("ssh-machines");
+    let name = file.display().to_string();
+    let mut text = std::fs::read_to_string(&file).unwrap_or_default();
+    match o.positional.as_slice() {
+        [] => {
+            let (machines, _) = parse_machines(&text);
+            if machines.is_empty() {
+                say.out(key!("cli-hub-ssh-none"), &[]);
+                return ExitCode::SUCCESS;
+            }
+            let status = std::fs::read_to_string(dir.join("ssh-status")).unwrap_or_default();
+            for m in machines {
+                let state = status
+                    .lines()
+                    .find_map(|l| l.strip_prefix(&format!("{} ", m.name)))
+                    .unwrap_or("not running");
+                println!("{} {} {} {state}", m.name, m.destination, m.port);
+            }
+            ExitCode::SUCCESS
+        }
+        [verb, machine, destination] if verb == "add" => {
+            let port = o.port.unwrap_or(DEFAULT_PORT);
+            let Some(m) = Machine::new(machine, destination, port) else {
+                say.err(key!("cli-hub-ssh-bad"), &[]);
+                return ExitCode::from(2);
+            };
+            if parse_machines(&text).0.iter().any(|x| x.name == m.name) {
+                say.err(key!("cli-hub-ssh-bad"), &[]);
+                return ExitCode::from(2);
+            }
+            let result = (|| -> Result<String, String> {
+                std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+                let _ = load_or_create_ca(&dir)?;
+                let store = SqliteStore::open(&dir.join("hub.db")).map_err(|e| e.to_string())?;
+                let code = Enrollment::new(&store)
+                    .create_code(server::now_ms())
+                    .map_err(|_| "could not create a code".to_string())?;
+                if !text.is_empty() && !text.ends_with('\n') {
+                    text.push('\n');
+                }
+                text.push_str(&m.line());
+                text.push('\n');
+                std::fs::write(&file, &text).map_err(|e| e.to_string())?;
+                Ok(code)
+            })();
+            match result {
+                Ok(code) => {
+                    say.out(
+                        key!("cli-hub-ssh-added"),
+                        &[
+                            ("name", m.name.clone().into()),
+                            ("file", name.into()),
+                            ("ca", dir.join("ca.pem").display().to_string().into()),
+                            ("port", i64::from(m.port).into()),
+                            ("code", code.into()),
+                        ],
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    say.err(key!("cli-hub-failed"), &[("reason", e.into())]);
+                    ExitCode::from(1)
+                }
+            }
+        }
+        _ => {
+            say.err(key!("cli-bad-arguments"), &[]);
+            say.err(key!("cli-usage"), &[]);
+            ExitCode::from(2)
         }
     }
 }
