@@ -43,6 +43,8 @@ message CommandRequest {
     UsageReport usage_report = 17;
     // ADR-0037
     GitLog git_log = 18;
+    // ADR-0038: opened on a dynamic stream like TerminalSubscribe; frames follow (kind 10 snapshot, kind 11 entry).
+    ChatSubscribe chat_subscribe = 19;
     // ADR-0027: sent on a TLS connection that has no client certificate yet; accepts nothing else.
     EnrollRequest enroll = 80;
   }
@@ -250,6 +252,41 @@ message GitStatusResult {
   uint32 insertions = 2;
   uint32 deletions = 3;
   string head_commit = 4;
+}
+
+message ChatSubscribe {
+  string agent_id = 1;
+}
+
+enum ChatRole {
+  CHAT_ROLE_UNSPECIFIED = 0;
+  CHAT_ROLE_AGENT = 1;
+  CHAT_ROLE_USER = 2;
+}
+
+enum ChatKind {
+  CHAT_KIND_UNSPECIFIED = 0;
+  CHAT_KIND_TEXT = 1;
+  CHAT_KIND_TOOL_CALL = 2;
+  CHAT_KIND_PLAN = 3;
+  CHAT_KIND_DIFF = 4;
+}
+
+// One line of an agent's conversation (ADR-0038). Untrusted text: a model or a person wrote it.
+message ChatEntry {
+  // Increases per agent; a client ignores one it already has.
+  uint64 entry_id = 1;
+  uint64 at_ms = 2;
+  ChatRole role = 3;
+  ChatKind kind = 4;
+  // Text; tool name and arguments as JSON; plan lines joined by "\n"; or the unified diff.
+  string text = 5;
+  // For a diff: the file.
+  string path = 6;
+}
+
+message ChatSnapshot {
+  repeated ChatEntry entries = 1;
 }
 
 message GitCommit {

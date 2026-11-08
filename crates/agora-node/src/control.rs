@@ -40,6 +40,10 @@ pub const KIND_TERM_SNAPSHOT: u8 = 1;
 pub const KIND_TERM_RESIZE: u8 = 2;
 /// Payload: exit code i32 LE (negative signal number when killed by a signal, `i32::MIN` if unknown).
 pub const KIND_TERM_EXIT: u8 = 3;
+/// Chat transcript stream (ADR-0038). Payload: an encoded `ChatSnapshot`, sent first.
+pub const KIND_CHAT_SNAPSHOT: u8 = 10;
+/// Payload: an encoded `ChatEntry`, one for every line added after the snapshot.
+pub const KIND_CHAT_ENTRY: u8 = 11;
 
 const POLL: Duration = Duration::from_millis(100);
 const IDEMPOTENCY_CACHE: usize = 256;
@@ -61,6 +65,8 @@ pub struct ControlContext {
     pub events: Option<Arc<EventSink>>,
     pub mesh: Option<Arc<crate::mesh_server::MeshServer>>,
     pub approvals: Option<Arc<crate::approvals::NodeApprovals>>,
+    /// Transcripts of agents without a terminal (ADR-0038).
+    pub chat: Arc<crate::chat::ChatBoard>,
     names: AtomicU64,
     seen: Mutex<IdempotencyCache>,
 }
@@ -72,6 +78,7 @@ struct IdempotencyCache {
 }
 
 impl ControlContext {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         supervisor: Arc<Mutex<Supervisor>>,
         projects: Vec<ProjectEntry>,
@@ -80,6 +87,7 @@ impl ControlContext {
         events: Option<Arc<EventSink>>,
         mesh: Option<Arc<crate::mesh_server::MeshServer>>,
         approvals: Option<Arc<crate::approvals::NodeApprovals>>,
+        chat: Arc<crate::chat::ChatBoard>,
     ) -> Self {
         Self {
             supervisor,
@@ -89,6 +97,7 @@ impl ControlContext {
             events,
             mesh,
             approvals,
+            chat,
             names: AtomicU64::new(0),
             seen: Mutex::new(IdempotencyCache::default()),
         }
@@ -314,10 +323,20 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
             let id = AgentId::new(a.agent_id.clone());
             let sup = ctx.sup();
             if sup.terminal(&id).is_none() {
-                // An adapter agent takes prompts through its adapter.
+                // An adapter agent takes prompts through its adapter; the request is part of its conversation.
                 return sup
                     .adapter_prompt(&id, &a.text, false)
-                    .map(|()| ok_empty())
+                    .map(|()| {
+                        ctx.chat.push(
+                            &id,
+                            v1::ChatRole::User,
+                            v1::ChatKind::Text,
+                            a.text.clone(),
+                            String::new(),
+                            crate::daemon::now_ms(),
+                        );
+                        ok_empty()
+                    })
                     .map_err(sup_err);
             }
             let t = sup.terminal(&id).ok_or_else(|| {
@@ -492,6 +511,7 @@ fn command_name(c: &Cmd) -> &'static str {
         Cmd::TerminalInput(_) => "terminal.input",
         Cmd::TerminalResize(_) => "terminal.resize",
         Cmd::TerminalSubscribe(_) => "terminal.subscribe",
+        Cmd::ChatSubscribe(_) => "chat.subscribe",
         Cmd::FilesList(_) => "files.list",
         Cmd::FilesRead(_) => "files.read",
         Cmd::FilesWrite(_) => "files.write",
@@ -675,6 +695,30 @@ fn handle_request(
         return;
     }
 
+    // A chat transcript: the snapshot, then every new entry, on the stream the request arrived on.
+    if let Cmd::ChatSubscribe(sub) = cmd {
+        let agent = AgentId::new(sub.agent_id.clone());
+        let known = ctx.sup().list().iter().any(|v| v.id == agent);
+        let outcome = if known {
+            Ok(ctx.chat.follow(&agent))
+        } else {
+            Err(Error::new(ErrorCode::AgentNotFound).with("agent_id", sub.agent_id.as_str()))
+        };
+        let resp = response(
+            &req.request_id,
+            outcome.as_ref().map(|_| ok_empty()).map_err(Clone::clone),
+        );
+        let _ = send(writer, STREAM_COMMANDS, KIND_RESPONSE, resp.encode_to_vec());
+        if let Ok((entries, rx)) = outcome {
+            let (writer, alive, stop) = (Arc::clone(writer), Arc::clone(alive), Arc::clone(stop));
+            let stream_id = frame.stream_id;
+            let _ = std::thread::Builder::new()
+                .name("agora-control-chat".into())
+                .spawn(move || pump_chat(&writer, stream_id, entries, &rx, &alive, &stop));
+        }
+        return;
+    }
+
     let resp = response(&req.request_id, execute(ctx, cmd));
     if !req.idempotency_key.is_empty() {
         ctx.remember(&req.idempotency_key, &resp);
@@ -751,6 +795,31 @@ fn pump(
         };
         if sent.is_err() {
             return;
+        }
+    }
+}
+
+fn pump_chat(
+    writer: &SharedWriter,
+    stream: u32,
+    entries: Vec<v1::ChatEntry>,
+    rx: &std::sync::mpsc::Receiver<v1::ChatEntry>,
+    alive: &AtomicBool,
+    stop: &AtomicBool,
+) {
+    let snapshot = v1::ChatSnapshot { entries };
+    if send(writer, stream, KIND_CHAT_SNAPSHOT, snapshot.encode_to_vec()).is_err() {
+        return;
+    }
+    while alive.load(Ordering::Acquire) && !stop.load(Ordering::Acquire) {
+        match rx.recv_timeout(POLL) {
+            Ok(e) => {
+                if send(writer, stream, KIND_CHAT_ENTRY, e.encode_to_vec()).is_err() {
+                    return;
+                }
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => return,
         }
     }
 }

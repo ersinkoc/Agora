@@ -41,3 +41,7 @@ A chat agent (no terminal): send it a request; its permission request appears on
 Commit history of a workspace (the History button on a terminal):
 
 ![](history-light.png)
+
+A chat agent's conversation (ADR-0038): your requests and its answers, streamed from the node:
+
+![](chat-light.png)

@@ -36,10 +36,10 @@ target/release/agora agent start shell --project myproject
 #    (`agora hub login` makes another). Your agents and their terminals appear in the window.
 ```
 
-What works today: several machines in one window (the console: machines and agents on the left, several live terminals side by side in the middle, what needs you, uncommitted changes, agent messages and spend on the right), live agent states, the real terminal of each agent through the hub, what each agent changed (diff), its commits and its files, a prompt box for agents without a terminal,
+What works today: several machines in one window (the console: machines and agents on the left, several live terminals side by side in the middle, what needs you, uncommitted changes, agent messages and spend on the right), live agent states, the real terminal of each agent through the hub, what each agent changed (diff), its commits and its files, a conversation view for agents without a terminal,
 approvals answered with a device key (the window's "This device" page shows the command that makes a machine trust it), the
 mesh between agents (per-agent MCP endpoint), passkey sign-in, backups (`agora hub backup`), starting an agent from the window (machine and project, then an agent that machine has
-installed). What does not yet: the answers of agents without a terminal in the window and installing a node on a fresh machine over SSH (both wait on Proposed ADRs), machines reachable only by SSH need `agora hub ssh add` (a tunnel the hub keeps open; try it on a real host first), installing agents from the registry,
+installed). What does not yet: installing a node on a fresh machine over SSH (waits on a Proposed ADR), machines reachable only by SSH need `agora hub ssh add` (a tunnel the hub keeps open; try it on a real host first), installing agents from the registry,
 Windows terminals. Details and the open items per phase: [docs/backlog/](docs/backlog/).
 
 ## Status
