@@ -1,0 +1,78 @@
+//! The owner's `mesh.remote` policy (ADR-0031): off means nothing crosses between nodes, in either direction, while
+//! messages on this node keep working. A typo in the policy file closes the door rather than opening it.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
+use std::io::{BufRead, BufReader, Write};
+
+use agora_core::AgentId;
+use agora_mesh::broker::{AgentInfo, Limits};
+use agora_node::daemon::{read_policy, Policy};
+use agora_node::mesh_server::MeshServer;
+
+fn tmp(name: &str) -> std::path::PathBuf {
+    let d = std::env::temp_dir().join(format!("agora-policy-{}-{name}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    d
+}
+
+#[test]
+fn the_policy_file_defaults_to_allowed_and_a_bad_value_means_denied() {
+    let dir = tmp("file");
+    let file = dir.join("policy");
+    assert_eq!(read_policy(&file), Policy { mesh_remote: true }, "no file");
+    for (text, allowed) in [
+        ("mesh.remote = true\n", true),
+        ("# off\nmesh.remote = false\n", false),
+        ("mesh.remote=false", false),
+        ("mesh.remote = flase\n", false),
+        ("mesh.remote =\n", false),
+        ("other = 1\n", true),
+    ] {
+        std::fs::write(&file, text).unwrap();
+        assert_eq!(read_policy(&file).mesh_remote, allowed, "{text:?}");
+    }
+}
+
+#[test]
+fn with_remote_denied_outgoing_messages_fail_with_a_policy_notice_and_incoming_ones_are_refused() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return;
+    }
+    let dir = tmp("deny");
+    let server = MeshServer::new(&dir.join("m"), Limits::default()).unwrap();
+    server.set_remote_allowed(false);
+    let a1 = AgentId::new("a1");
+    let socket = server
+        .register(AgentInfo {
+            id: a1.clone(),
+            kind: "shell".into(),
+            node: "n1".into(),
+            project: "p".into(),
+            label: String::new(),
+            worktree: String::new(),
+            state: "idle".into(),
+        })
+        .unwrap();
+    let mut conn = agora_platform::local_connect(&socket).unwrap();
+    let mut reader = BufReader::new(conn.try_clone().unwrap());
+    let mut call = |line: serde_json::Value| {
+        writeln!(conn, "{line}").unwrap();
+        let mut out = String::new();
+        reader.read_line(&mut out).unwrap();
+    };
+    call(
+        serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-03-26"}}),
+    );
+    call(
+        serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": {"name": "send_message", "arguments": {"to": "n2/b1", "body": "x"}}}),
+    );
+    let inbox = server.mesh().lock().unwrap().inbox(&a1, None, 10).unwrap();
+    assert_eq!(
+        (inbox[0].kind, inbox[0].body.as_str()),
+        ("delivery_failed", "node.policy_denied")
+    );
+    let err = server.deliver_remote("n2", "b1", &a1, "hi").unwrap_err();
+    assert_eq!(err.code.as_str(), "node.policy_denied");
+}
