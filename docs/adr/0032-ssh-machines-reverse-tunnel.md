@@ -1,6 +1,7 @@
 # 0032. Machines reachable only by SSH: the hub keeps a reverse tunnel
-Status: Proposed
+Status: Accepted
 Date: 2026-11-08
+Accepted: 2026-11-08 (maintainer's explicit approval in chat)
 
 ## Context
 Many machines can be reached with `ssh` from where the hub runs but cannot dial the hub: no inbound route to the hub, a

@@ -1,6 +1,7 @@
 # 0033. `usage.report`: tokens and estimated cost for clients
-Status: Proposed
+Status: Accepted
 Date: 2026-11-08
+Accepted: 2026-11-08 (maintainer's explicit approval in chat)
 
 ## Context
 The hub has the pieces of cost (ADR-0021): token usage per agent in its view, a price catalog parser with overrides, and exact
