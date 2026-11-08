@@ -34,7 +34,9 @@ impl Say {
     }
 
     fn out(&self, id: &str, args: &[(&str, Arg)]) {
-        println!("{}", self.text(id, args));
+        // A reader that went away (a closed pipe) must not take a running hub or node down with a panic.
+        use std::io::Write;
+        let _ = writeln!(std::io::stdout(), "{}", self.text(id, args));
     }
 
     fn err(&self, id: &str, args: &[(&str, Arg)]) {
