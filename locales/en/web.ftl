@@ -127,3 +127,4 @@ files-too-large = This file could not be read (it may be too large).
 files-failed = Could not list this folder.
 filter-placeholder = Filter by agent, machine or project
 filter-none = Nothing matches.
+console-drag = Drag this bar onto another terminal to swap their places

@@ -49,6 +49,20 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
       return alive.length === cur.length && room.length === 0 ? cur : [...alive, ...room];
     });
   }, [fleet]);
+  // Panes are rearranged by dragging a pane's header onto another pane: the dragged pane takes that pane's place.
+  const [dragging, setDragging] = useState<string | undefined>();
+  const move = (from: string, to: string) => {
+    touched.current = true;
+    setPinned((cur) => {
+      const a = cur.indexOf(from);
+      const b = cur.indexOf(to);
+      if (a < 0 || b < 0 || a === b) return cur;
+      const next = [...cur];
+      next.splice(a, 1);
+      next.splice(b, 0, from);
+      return next;
+    });
+  };
   const toggle = (id: string) => {
     touched.current = true;
     setPinned((cur) => (cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id]));
@@ -133,8 +147,10 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
           ) : (
             <div className={`grid h-full grid-cols-1 gap-3 ${cols}`} style={{ gridAutoRows: 'minmax(0, 1fr)' }}>
               {shown.map((a) => (
-                <section key={a.id} className={`flex h-[70vh] min-h-0 flex-col overflow-hidden rounded-l border bg-surface-1 shadow-card lg:h-auto ${a.state === 'needs-you' ? 'border-needs-you' : 'border-line'}`}>
-                  <header className="flex flex-none items-center justify-between gap-2 border-b border-line px-3 py-2">
+                <section key={a.id} onDragOver={(e) => { if (dragging) e.preventDefault(); }} onDrop={(e) => { e.preventDefault(); if (dragging) move(dragging, a.id); setDragging(undefined); }}
+                  className={`flex h-[70vh] min-h-0 flex-col overflow-hidden rounded-l border bg-surface-1 shadow-card lg:h-auto ${a.state === 'needs-you' ? 'border-needs-you' : 'border-line'} ${dragging && dragging !== a.id ? 'ring-1 ring-accent/50' : ''}`}>
+                  <header draggable onDragStart={(e) => { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', a.id); setDragging(a.id); }} onDragEnd={() => setDragging(undefined)}
+                    title={t('console-drag')} className="flex flex-none cursor-grab items-center justify-between gap-2 border-b border-line px-3 py-2 active:cursor-grabbing">
                     <div className="flex min-w-0 items-center gap-2">
                       <span aria-hidden className="size-2.5 flex-none rounded-full" style={{ background: a.accent }} />
                       <strong className="truncate" title={`${a.machine} · ${a.workspace}`}>{a.name}</strong>
