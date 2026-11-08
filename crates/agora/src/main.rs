@@ -93,6 +93,9 @@ pub(crate) struct Opts {
     ca: Option<PathBuf>,
     code: Option<String>,
     id: Option<String>,
+    ntfy: Option<String>,
+    webhook: Option<String>,
+    test: bool,
     positional: Vec<String>,
 }
 
@@ -120,6 +123,9 @@ fn parse(args: &[String]) -> Option<Opts> {
             "--ca" => o.ca = Some(it.next()?.into()),
             "--code" => o.code = Some(it.next()?.clone()),
             "--id" => o.id = Some(it.next()?.clone()),
+            "--ntfy" => o.ntfy = Some(it.next()?.clone()),
+            "--webhook" => o.webhook = Some(it.next()?.clone()),
+            "--test" => o.test = true,
             s if s.starts_with("--") => return None,
             _ => o.positional.push(a.clone()),
         }
@@ -157,6 +163,7 @@ fn main() -> ExitCode {
         ["hub", "run"] => hubcli::hub_run(&say, &opts),
         ["hub", "code"] => hubcli::hub_code(&say, &opts),
         ["hub", "login"] => hubcli::hub_login(&say, &opts),
+        ["hub", "notify"] => hubcli::hub_notify(&say, &opts),
         ["hub", "backup"] => hubcli::hub_backup(&say, &opts),
         ["hub", "restore"] => hubcli::hub_restore(&say, &opts),
         ["node", "enroll"] => hubcli::node_enroll(&say, &opts),

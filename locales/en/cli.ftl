@@ -13,6 +13,7 @@ cli-usage =
       agora hub run [--listen ADDR] [--hub-dir DIR] [--name HOST]... [--web DIR]
       agora hub code [--hub-dir DIR]
       agora hub login [--hub-dir DIR]
+      agora hub notify [--ntfy URL | --webhook URL | --test] [--hub-dir DIR]
       agora hub backup [FILE] [--keep N] [--hub-dir DIR]
       agora hub restore FILE [--hub-dir DIR]
       agora node enroll --hub URL --ca FILE --code CODE --id NAME
@@ -71,3 +72,9 @@ cli-hub-failed = The hub command failed: { $reason }
 cli-hub-code = Enrollment code: { $code } (valid for 10 minutes). On the other machine run: agora node enroll --hub wss://HOST:PORT --ca { $ca } --code { $code } --id NAME
 cli-enrolled = This machine is enrolled as { $id }. Start it with "agora node run"; it will connect to the hub by itself. Saved in { $dir }.
 cli-enroll-refused = The hub refused to enroll this machine ({ $code }). The code may be wrong, expired or already used.
+cli-hub-notify-added = Added to { $file }. Restart the hub to use it.
+cli-hub-notify-none = No notification targets yet. Add one with --ntfy URL or --webhook URL ({ $file }).
+cli-hub-notify-bad-url = That is not an http:// or https:// address.
+cli-hub-notify-sent = Sent a test message to { $target }.
+cli-hub-notify-refused = { $target } answered with status { $status }.
+cli-hub-notify-unreachable = Could not reach { $target }: { $reason }
