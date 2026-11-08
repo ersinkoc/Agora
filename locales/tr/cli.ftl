@@ -15,6 +15,7 @@ cli-usage =
       agora hub login [--hub-dir DİZİN]
       agora hub notify [--ntfy URL | --webhook URL | --test] [--hub-dir DIR]
       agora hub prices update [--url URL] [--hub-dir DIR]
+      agora hub ssh [add AD HEDEF [--port N]] [--hub-dir DIR]
       agora hub backup [DOSYA] [--keep N] [--hub-dir DİZİN]
       agora hub restore DOSYA [--hub-dir DİZİN]
       agora node enroll --hub URL --ca FILE --code CODE --id NAME
@@ -82,3 +83,8 @@ cli-hub-notify-unreachable = { $target } hedefine ulaşılamadı: { $reason }
 cli-hub-prices-updated = Fiyat tablosu güncellendi: { $count } model.
 cli-hub-prices-failed = Fiyat tablosu güncellenemedi: { $reason }
 cli-hub-prices-skipped = prices.json içindeki { $count } kayıt anlaşılamadı ve yok sayılıyor. Her kayıtta giriş ve çıkış fiyatı (milyon token başına USD) olmalı.
+cli-hub-ssh-started = { $file } dosyasındaki { $count } makineye SSH tünelleri açık tutuluyor.
+cli-hub-ssh-skipped = { $file } dosyasının { $count } satırı anlaşılamadı ve yok sayılıyor. Her satır `AD HEDEF [PORT]` olmalı.
+cli-hub-ssh-none = Henüz SSH makinesi yok. "agora hub ssh add AD HEDEF" ile ekleyin.
+cli-hub-ssh-bad = Bu makine eklenemez. Ad harf, rakam, "." "_" ya da "-" içermeli ve yeni olmalı; hedef "-" ile başlayamaz ve boşluk içeremez.
+cli-hub-ssh-added = { $name } makinesi { $file } dosyasına eklendi. Tünelini açmak için hub'ı yeniden başlatın (makinenin sunucu anahtarı known_hosts dosyanızda olmalı). Sonra { $name } üzerinde hub'ın CA'sını ({ $ca }) kopyalayıp şunu çalıştırın: agora node enroll --hub wss://localhost:{ $port } --ca CA_DOSYASI --code { $code } --id { $name }   (kod 10 dakika geçerli), ardından: agora node run --project YOL

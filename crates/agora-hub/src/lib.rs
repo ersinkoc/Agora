@@ -12,6 +12,7 @@ pub mod router;
 pub mod server;
 pub mod session;
 pub mod signin;
+pub mod ssh;
 pub mod store;
 pub mod tls;
 pub mod transport;
