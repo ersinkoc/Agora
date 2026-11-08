@@ -1,6 +1,7 @@
 # 0030. `agent.kinds` command: which agents a node can start
-Status: Proposed
+Status: Accepted
 Date: 2026-11-08
+Accepted: 2026-11-08 (maintainer's explicit approval in chat)
 
 ## Context
 A client that starts an agent (web "Start an agent", TUI, CLI) must offer the user a choice of agents. Which agents a node can
