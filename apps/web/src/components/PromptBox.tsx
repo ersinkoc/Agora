@@ -1,13 +1,50 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { t } from '../i18n';
 import type { AgentTileModel } from '../model';
+import { mergeLines, type ChatLine, type ChatSource } from '../net/chat';
 
-// A chat agent has no terminal: you talk to it with requests. What it says back is not streamed to the window yet (that needs
-// a protocol addition); its state, approvals, files and changes show everywhere else.
-export function PromptBox({ agent, send }: { agent: AgentTileModel; send?: (a: AgentTileModel, text: string) => Promise<boolean> }) {
+function Line({ line }: { line: ChatLine }) {
+  if (line.role === 'user') {
+    return <div className="ml-auto max-w-[85%] rounded-m bg-accent/15 px-3 py-2 break-words whitespace-pre-wrap">{line.text}</div>;
+  }
+  if (line.kind === 'tool') {
+    return <div className="max-w-[90%] rounded-s border border-line bg-surface-0 px-3 py-1.5 font-mono text-xs break-all text-muted"><span className="font-sans font-medium text-ink">{t('chat-tool')}</span> {line.text}</div>;
+  }
+  if (line.kind === 'plan') {
+    return (
+      <div className="max-w-[90%] rounded-s border border-line px-3 py-2 text-[13px]">
+        <div className="muted mb-1">{t('chat-plan')}</div>
+        <ol className="m-0 list-decimal pl-5">{line.text.split('\n').map((p, i) => <li key={i}>{p}</li>)}</ol>
+      </div>
+    );
+  }
+  if (line.kind === 'diff') {
+    return (
+      <div className="max-w-full overflow-hidden rounded-s border border-line">
+        <div className="border-b border-line bg-surface-2 px-3 py-1 font-mono text-xs">{line.path}</div>
+        <pre className="m-0 max-h-60 overflow-auto p-2 font-mono text-xs">{line.text}</pre>
+      </div>
+    );
+  }
+  return <div className="max-w-[90%] break-words whitespace-pre-wrap">{line.text}</div>;
+}
+
+// A chat agent has no terminal: you talk to it with requests and read its answers, as a conversation the node keeps (ADR-0038).
+export function PromptBox({ agent, send, source }: { agent: AgentTileModel; send?: (a: AgentTileModel, text: string) => Promise<boolean>; source?: ChatSource }) {
   const [text, setText] = useState('');
   const [sent, setSent] = useState<'ok' | 'failed' | undefined>();
   const [busy, setBusy] = useState(false);
+  const [lines, setLines] = useState<ChatLine[]>([]);
+  const end = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!source) return;
+    setLines([]);
+    const sub = source.connect((incoming, replace) => setLines((held) => (replace ? incoming : mergeLines(held, incoming))));
+    return () => sub.close();
+  }, [source]);
+  useEffect(() => { end.current?.scrollIntoView?.({ block: 'end' }); }, [lines.length]);
+
   const go = async () => {
     const body = text.trim();
     if (!body || !send) return;
@@ -18,15 +55,21 @@ export function PromptBox({ agent, send }: { agent: AgentTileModel; send?: (a: A
     if (ok) setText('');
   };
   return (
-    <form className="flex h-full flex-col gap-3 rounded-m bg-surface-0 p-4" onSubmit={(e) => { e.preventDefault(); void go(); }}>
-      <p className="muted m-0">{t('prompt-intro')}</p>
-      <textarea value={text} onChange={(e) => setText(e.target.value)} aria-label={t('prompt-label')} placeholder={t('prompt-label')}
-        className="min-h-24 w-full flex-1 resize-none rounded-s border border-line bg-surface-1 p-3 text-ink"
-        onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void go(); } }} />
-      <div className="flex items-center gap-3">
-        <button type="submit" className="button button--primary" disabled={busy || !text.trim() || !send}>{t('prompt-send')}</button>
-        {sent && <span role="status" className={`text-xs ${sent === 'ok' ? 'text-finished' : 'text-needs-you'}`}>{t(sent === 'ok' ? 'prompt-sent' : 'prompt-failed')}</span>}
+    <div className="flex h-full min-h-0 flex-col gap-3 rounded-m bg-surface-0 p-3">
+      <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto" aria-live="polite" aria-label={t('chat-log')}>
+        {lines.length === 0 && <p className="muted m-0">{t(source ? 'chat-empty' : 'prompt-intro')}</p>}
+        {lines.map((l) => <Line key={l.id} line={l} />)}
+        <div ref={end} />
       </div>
-    </form>
+      <form className="flex flex-none flex-col gap-2" onSubmit={(e) => { e.preventDefault(); void go(); }}>
+        <textarea value={text} onChange={(e) => setText(e.target.value)} aria-label={t('prompt-label')} placeholder={t('prompt-label')} rows={3}
+          className="w-full resize-none rounded-s border border-line bg-surface-1 p-3 text-ink"
+          onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void go(); } }} />
+        <div className="flex items-center gap-3">
+          <button type="submit" className="button button--primary" disabled={busy || !text.trim() || !send}>{t('prompt-send')}</button>
+          {sent && <span role="status" className={`text-xs ${sent === 'ok' ? 'text-finished' : 'text-needs-you'}`}>{t(sent === 'ok' ? 'prompt-sent' : 'prompt-failed')}</span>}
+        </div>
+      </form>
+    </div>
   );
 }

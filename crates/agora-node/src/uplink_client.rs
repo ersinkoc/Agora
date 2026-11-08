@@ -541,7 +541,10 @@ fn run_local_on(
     };
     if matches!(
         req.command,
-        Some(command_request::Command::TerminalSubscribe(_))
+        Some(
+            command_request::Command::TerminalSubscribe(_)
+                | command_request::Command::ChatSubscribe(_)
+        )
     ) {
         return fail(
             Error::new(ErrorCode::ProtocolCapabilityMissing).with("capability", "terminal.relay"),

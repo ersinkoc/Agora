@@ -38,6 +38,12 @@ try {
   await page.click('button:has-text("Allow")');
   await page.waitForTimeout(2500);
   check((await page.locator('button:has-text("Allow")').count()) === 0, 'allowing it (signed by this browser) clears the request');
+  // The conversation streams back: the request as a bubble, and the agent's own line (the fake agent echoes what it is told).
+  await page.fill('form textarea', 'hello there');
+  await page.click('button:has-text("Send")');
+  await page.waitForFunction(() => (document.querySelector('[aria-label="Conversation"]')?.innerText.match(/hello there/g) ?? []).length >= 2, null, { timeout: 8000 }).catch(() => {});
+  const said = await page.locator('[aria-label="Conversation"]').innerText();
+  check((said.match(/hello there/g) ?? []).length >= 2, 'the chat agent\'s conversation shows the request and its answer');
   check((await page.locator('[role=alert]').count()) === 0, 'no error is shown');
   check(errors.length === 0, `no page errors${errors.length ? `: ${errors[0]}` : ''}`);
 } catch (e) {

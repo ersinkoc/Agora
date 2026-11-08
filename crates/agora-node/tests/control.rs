@@ -7,7 +7,8 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use agora_node::control::{
-    Client, KIND_TERM_DATA, KIND_TERM_EXIT, KIND_TERM_RESIZE, KIND_TERM_SNAPSHOT,
+    Client, KIND_CHAT_ENTRY, KIND_CHAT_SNAPSHOT, KIND_TERM_DATA, KIND_TERM_EXIT, KIND_TERM_RESIZE,
+    KIND_TERM_SNAPSHOT,
 };
 use agora_node::daemon::{Node, NodeConfig};
 use agora_node::supervisor::NodeLimits;
@@ -1195,6 +1196,99 @@ fn git_log_lists_the_workspaces_commits_newest_first() {
             limit: 0
         }))),
         "protocol.invalid_message"
+    );
+    ok(c.call(Cmd::AgentStop(v1::AgentStop {
+        agent_id: s.agent_id,
+    })));
+}
+
+fn fake_agent_path() -> String {
+    let mut p = std::env::current_exe().expect("exe");
+    p.pop();
+    p.pop();
+    p.push(format!("agora-fake-agent{}", std::env::consts::EXE_SUFFIX));
+    if !p.exists() {
+        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+        assert!(
+            Command::new(cargo)
+                .args(["build", "-q", "-p", "agora-fake-agent"])
+                .status()
+                .expect("run cargo")
+                .success(),
+            "building agora-fake-agent failed"
+        );
+    }
+    p.to_string_lossy().into_owned()
+}
+
+#[test]
+fn a_chat_agents_conversation_streams_to_whoever_subscribes() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return;
+    }
+    let e = env("chat");
+    std::fs::write(
+        e.dir.join("manifests/fake.toml"),
+        format!(
+            "kind = \"fake-adapter\"\ndisplay_name = \"F\"\nversion = \"1\"\nmin_engine = 1\n[adapter]\ncommand = [{:?}, \"--adapter\"]\n",
+            fake_agent_path()
+        ),
+    )
+    .unwrap();
+    let n = node(&e, NodeLimits::default());
+    let mut c = Client::connect(n.socket().unwrap()).unwrap();
+    let s = started(ok(c.call(start_cmd("fake-adapter"))));
+    let prompt = |c: &mut Client, text: &str| {
+        ok(c.call(Cmd::AgentPrompt(v1::AgentPrompt {
+            agent_id: s.agent_id.clone(),
+            text: text.into(),
+        })));
+    };
+    // A request sent before anyone subscribes is in the snapshot.
+    std::thread::sleep(Duration::from_millis(800)); // the adapter finishes its handshake
+    prompt(&mut c, "first question");
+
+    ok(c.call_on(
+        3,
+        Cmd::ChatSubscribe(v1::ChatSubscribe {
+            agent_id: s.agent_id.clone(),
+        }),
+    ));
+    let snap = wait_frame(&mut c, 3, |f| f.kind == KIND_CHAT_SNAPSHOT);
+    let snap = <v1::ChatSnapshot as prost::Message>::decode(snap.payload.as_slice()).unwrap();
+    assert!(
+        snap.entries
+            .iter()
+            .any(|e| e.text == "first question" && e.role == v1::ChatRole::User as i32),
+        "{snap:?}"
+    );
+
+    // A later one arrives live, as the user's request and as the agent's answer (the fake agent echoes it).
+    prompt(&mut c, "second question");
+    let mut got = Vec::new();
+    wait_frame(&mut c, 3, |f| {
+        if f.kind == KIND_CHAT_ENTRY {
+            got.push(<v1::ChatEntry as prost::Message>::decode(f.payload.as_slice()).unwrap());
+        }
+        got.iter()
+            .any(|e| e.role == v1::ChatRole::Agent as i32 && e.text == "second question")
+    });
+    assert!(
+        got.iter()
+            .any(|e| e.role == v1::ChatRole::User as i32 && e.text == "second question"),
+        "{got:?}"
+    );
+    let ids: Vec<u64> = got.iter().map(|e| e.entry_id).collect();
+    assert!(ids.windows(2).all(|w| w[0] < w[1]), "ids increase: {ids:?}");
+
+    assert_eq!(
+        err_code(c.call_on(
+            4,
+            Cmd::ChatSubscribe(v1::ChatSubscribe {
+                agent_id: "agent-nope".into()
+            })
+        )),
+        "agent.not_found"
     );
     ok(c.call(Cmd::AgentStop(v1::AgentStop {
         agent_id: s.agent_id,

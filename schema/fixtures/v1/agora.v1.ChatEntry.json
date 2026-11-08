@@ -1,0 +1,8 @@
+{
+  "entryId": "1",
+  "atMs": "1",
+  "role": "CHAT_ROLE_AGENT",
+  "kind": "CHAT_KIND_TEXT",
+  "text": "x",
+  "path": "x"
+}

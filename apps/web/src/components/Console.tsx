@@ -7,6 +7,7 @@ import type { TerminalSource } from '../terminal/source';
 import { ApprovalCard } from './ApprovalCard';
 import { DiffDialog } from './DiffDialog';
 import { PromptBox } from './PromptBox';
+import type { ChatSource } from '../net/chat';
 import { FilesDialog } from './FilesDialog';
 import { HistoryDialog } from './HistoryDialog';
 import type { CommitItem } from '../net/history';
@@ -19,7 +20,7 @@ const MAX_AUTO_PINNED = 4;
 
 // The one window: machines and agents on the left, the terminals of the agents you are watching in the middle (several at
 // once), and what needs you, what agents say to each other and what it costs on the right. Everything is derived from props.
-export function Console({ agents, machines, usage, projects = [], approvals, messages, terminalFor, sendPrompt, loadDiff, loadHistory, filesOf, onOpen, onStart, start, onResolve, notice, link }: {
+export function Console({ agents, machines, usage, projects = [], approvals, messages, terminalFor, chatOf, sendPrompt, loadDiff, loadHistory, filesOf, onOpen, onStart, start, onResolve, notice, link }: {
   agents: readonly AgentTileModel[];
   machines: readonly MachineModel[];
   usage?: UsageSummary;
@@ -27,6 +28,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   approvals: readonly ApprovalModel[];
   messages: readonly MessageModel[];
   terminalFor: (agentId: string) => TerminalSource;
+  chatOf?: (agent: AgentTileModel) => ChatSource | undefined;
   sendPrompt?: (agent: AgentTileModel, text: string) => Promise<boolean>;
   loadDiff?: (agent: AgentTileModel) => Promise<string>;
   loadHistory?: (agent: AgentTileModel) => Promise<CommitItem[]>;
@@ -174,7 +176,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
                     </div>
                   </header>
                   <div className="pane min-h-0 flex-1 p-1.5">
-                    {a.terminal === false ? <PromptBox agent={a} send={sendPrompt} /> : (
+                    {a.terminal === false ? <PromptBox agent={a} send={sendPrompt} source={chatOf?.(a)} /> : (
                       <Suspense fallback={<div className="terminal" aria-busy="true" />}>
                         <TerminalView source={terminalFor(a.id)} label={`${t('focus-terminal')} · ${a.name}`} />
                       </Suspense>

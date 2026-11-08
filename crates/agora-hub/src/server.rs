@@ -463,7 +463,10 @@ where
         }
         let subscribing = matches!(
             req.command,
-            Some(command_request::Command::TerminalSubscribe(_))
+            Some(
+                command_request::Command::TerminalSubscribe(_)
+                    | command_request::Command::ChatSubscribe(_)
+            )
         );
         if subscribing != (stream_id >= FIRST_DYNAMIC_STREAM) {
             // A terminal stream needs a stream of its own, and nothing else may use one.

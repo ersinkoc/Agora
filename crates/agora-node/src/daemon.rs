@@ -36,7 +36,7 @@ pub struct EventSink {
     log: Mutex<DiskEventLog>,
 }
 
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
@@ -517,6 +517,7 @@ impl Node {
         approvals.follow_trust_file(&cfg.data_dir.join(crate::approvals::TRUSTED_DEVICES_FILE));
 
         let supervisor = Arc::new(Mutex::new(sup));
+        let chat = Arc::new(crate::chat::ChatBoard::new());
         let ctx = Arc::new(ControlContext::new(
             Arc::clone(&supervisor),
             projects,
@@ -525,18 +526,20 @@ impl Node {
             Some(Arc::clone(&events)),
             Some(Arc::clone(&mesh)),
             Some(Arc::clone(&approvals)),
+            Arc::clone(&chat),
         ));
         let server = ControlServer::start(&cfg.socket, ctx)?;
 
         let stop = Arc::new(AtomicBool::new(false));
         let ticker = {
-            let (sup, ev, stop, node_id, mesh, approvals) = (
+            let (sup, ev, stop, node_id, mesh, approvals, chat) = (
                 Arc::clone(&supervisor),
                 Arc::clone(&events),
                 Arc::clone(&stop),
                 cfg.node_id.clone(),
                 Arc::clone(&mesh),
                 Arc::clone(&approvals),
+                Arc::clone(&chat),
             );
             std::thread::Builder::new()
                 .name("agora-supervise".into())
@@ -571,6 +574,11 @@ impl Node {
                         let now = now_ms();
                         for e in &events {
                             match e {
+                                // What a chat agent says goes to its transcript (ADR-0038).
+                                SupervisorEvent::Adapter {
+                                    agent,
+                                    event: AdapterEvent::Chat { item, .. },
+                                } => chat.push_item(agent, item, now),
                                 SupervisorEvent::Adapter {
                                     agent,
                                     event:

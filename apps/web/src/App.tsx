@@ -13,6 +13,7 @@ import { addPasskey, passkeysSupported, signInWithPasskey } from './net/passkey'
 import { summarize, type UsageSummary } from './net/usage';
 import { forgetToken, hubConnection, readCode, signIn } from './net/session';
 import { Console } from './components/Console';
+import type { ChatSource } from './net/chat';
 import { commitsOf, type CommitItem } from './net/history';
 import type { WorkspaceFiles } from './net/files';
 import { demoSource } from './terminal/source';
@@ -191,6 +192,19 @@ export function App() {
     return commitsOf(ok.gitLog?.commits);
   }, [api]);
 
+  // One conversation source per agent, kept stable so the transcript does not reload when the fleet updates.
+  const chats = useRef(new Map<string, ChatSource>());
+  useEffect(() => { chats.current.clear(); }, [api]);
+  const chatOf = useCallback((a: AgentTileModel): ChatSource | undefined => {
+    if (!api || !a.workspaceRef) return undefined;
+    let c = chats.current.get(a.id);
+    if (!c) {
+      c = api.chat(a.workspaceRef.node, a.id.slice(a.id.indexOf('/') + 1));
+      chats.current.set(a.id, c);
+    }
+    return c;
+  }, [api]);
+
   const open = useCallback((id: string) => go(`#/agent/${encodeURIComponent(id)}`), [go]);
   const next = useCallback(() => {
     const n = nextNeedingMe(agents, current);
@@ -226,7 +240,7 @@ export function App() {
       {hash === '#/gallery' ? <Gallery /> : hash === '#/machines' ? <MachinesPage machines={live ? machines(live) : []} usage={usage} projects={live && usage ? costByProject(live, usage.perAgent) : []} onBack={() => go('#/')} /> : hash === '#/device' ? <DevicePage device={device} onBack={() => go('#/')} onAddPasskey={hub && passkeysSupported() ? async () => (await addPasskey(hub.token)).ok : undefined} /> : current !== undefined
         ? <Focus agent={agents.find((a) => a.id === current)} costMicroUsd={current ? usage?.perAgent.get(current) : undefined} source={terminal} onBack={() => go('#/')} />
         : <Console agents={agents} machines={live ? machines(live) : []} usage={usage} projects={live && usage ? costByProject(live, usage.perAgent) : []}
-          approvals={live ? approvalList(live) : []} messages={live ? recentMessages(live) : []} terminalFor={terminalFor} sendPrompt={hub && api ? sendPrompt : undefined} loadDiff={hub && api ? loadDiff : undefined} loadHistory={hub && api ? loadHistory : undefined} filesOf={hub && api ? filesOf : undefined} onOpen={open}
+          approvals={live ? approvalList(live) : []} messages={live ? recentMessages(live) : []} terminalFor={terminalFor} chatOf={hub && api ? chatOf : undefined} sendPrompt={hub && api ? sendPrompt : undefined} loadDiff={hub && api ? loadDiff : undefined} loadHistory={hub && api ? loadHistory : undefined} filesOf={hub && api ? filesOf : undefined} onOpen={open}
           onResolve={resolve} notice={notice} link={hub ? link : 'live'}
           onStart={hub && api && live ? () => setStarting(true) : undefined}
           start={starting && live ? <StartAgent projects={projectChoices(live)} loadKinds={loadKinds} onStart={startAgent} onClose={() => setStarting(false)} /> : undefined} />}

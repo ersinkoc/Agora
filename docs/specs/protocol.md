@@ -169,7 +169,7 @@ Initial command set: `project.list`, `agent.start`, `agent.stop`, `agent.prompt`
 `approval.resolve` (signed, ADR-0020), `mesh.post`, `task.update`, `node.policy.get`.
 
 Implemented by the node today: `project.list`, `agent.*`, `terminal.*`, `approval.resolve`, `mesh.post`, `agent.list`, `agent.kinds`,
-`git.status`, `git.log` (ADR-0037: newest first, default 30, at most 200), `git.diff`, `files.list` and `files.read`. The git and files commands answer only for the workspace of one of the node's own agents (`worktree_id` is the id
+`chat.subscribe` (ADR-0038: a conversation stream, below), `git.status`, `git.log` (ADR-0037: newest first, default 30, at most 200), `git.diff`, `files.list` and `files.read`. The git and files commands answer only for the workspace of one of the node's own agents (`worktree_id` is the id
 the node reported in `WorktreeCreated`); a path that is absolute, climbs with `..` or starts with `:` or `-` is refused as
 `protocol.invalid_message`. `git.diff` is the unified diff against HEAD plus the new files git does not track yet (shown as
 all-added, at most 50 files of at most 64 KiB), and an answer is cut at 512 KiB. `files.list` hides `.git`; `files.read` refuses
@@ -205,3 +205,11 @@ files. Slow clients get coalesced terminal updates (latest snapshot wins) rather
 
 See ADR-0006. Hubs accept the current and previous generation (ADR-0019). Every published message has golden
 fixtures in binary and JSON form.
+
+### Chat transcript stream (ADR-0038)
+`chat.subscribe { agent_id }` is sent on a dynamic stream like `terminal.subscribe` and routed by the hub the same way (a relay, not
+stored). After the response the node writes on that stream: frame kind 10, an encoded `ChatSnapshot` (the transcript so far), then
+frame kind 11, an encoded `ChatEntry` for each line added. Kind 3 closes a relay and is not used here. The node keeps the last 500
+entries or 256 KiB of each chat agent's conversation in memory (one entry at most 16 KiB; the user's own requests are entries with
+role USER; adapter items map to TEXT, TOOL_CALL as JSON, PLAN as lines, DIFF with its path). Entry ids increase per agent; a client
+ignores an id it already holds. The text is untrusted.

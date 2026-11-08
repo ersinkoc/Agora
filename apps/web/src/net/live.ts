@@ -3,6 +3,8 @@
 // subprotocol (`agora.v1`, `agora.bearer.<token>`).
 
 import { agora } from '../gen/agora.js';
+import { chatLine, type ChatLine, type ChatSource } from './chat';
+const CHAT_KIND = { SNAPSHOT: 10, ENTRY: 11 } as const;
 import { decodeTerminalFrame, type TerminalEvent } from '../terminal/frames';
 import type { TerminalSource } from '../terminal/source';
 import { decodeFrame, encodeFrame, EVENT_KIND, STREAM_COMMANDS, STREAM_CLOSE, STREAM_EVENTS } from './frame';
@@ -41,6 +43,8 @@ export interface Live {
   command(node: string, body: CommandBody): Promise<agora.v1.CommandOk.$Properties>;
   // A terminal on a node, relayed by the hub. Re-subscribes by itself after a reconnect or when the hub ended the relay.
   terminal(node: string, terminalId: string): TerminalSource;
+  // The conversation of an agent that has no terminal (ADR-0038), relayed and resubscribed like a terminal.
+  chat(node: string, agentId: string): ChatSource;
 }
 
 export class CommandError extends Error {
@@ -69,6 +73,8 @@ export function connectLive(o: LiveOptions): Live {
   const pending = new Map<string, { resolve: (ok: agora.v1.CommandOk.$Properties) => void; reject: (e: CommandError) => void }>();
   const terminals = new Map<number, { node: string; terminalId: string; onEvent: (e: TerminalEvent) => void }>();
 
+  const chats = new Map<number, { node: string; agentId: string; onLines: (lines: ChatLine[], replace: boolean) => void }>();
+
   const request = (stream: number, node: string, body: CommandBody): Promise<agora.v1.CommandOk.$Properties> =>
     new Promise((resolve, reject) => {
       if (!isOpen || !sock) { reject(new CommandError('node.offline')); return; }
@@ -87,6 +93,14 @@ export function connectLive(o: LiveOptions): Live {
     });
   };
 
+  const subscribeChat = (stream: number) => {
+    const c = chats.get(stream);
+    if (!c) return;
+    request(stream, c.node, { chatSubscribe: { agentId: c.agentId } }).catch(() => {
+      if (chats.has(stream) && !closed) setTimeout(() => subscribeChat(stream), 2000);
+    });
+  };
+
   const start = () => {
     o.onState('connecting');
     const s = open(o.url, ['agora.v1', `agora.bearer.${o.token}`]);
@@ -98,6 +112,7 @@ export function connectLive(o: LiveOptions): Live {
       const sub = agora.v1.Subscribe.encode(synced ? { afterPos: view.pos } : {}).finish();
       s.send(encodeFrame({ streamId: STREAM_EVENTS, kind: EVENT_KIND.SUBSCRIBE, payload: sub }));
       for (const stream of terminals.keys()) subscribeTerminal(stream);
+      for (const stream of chats.keys()) subscribeChat(stream);
     };
     s.onmessage = (m) => {
       if (!(m.data instanceof ArrayBuffer || ArrayBuffer.isView(m.data))) return;
@@ -113,6 +128,16 @@ export function connectLive(o: LiveOptions): Live {
           if (r.err) p?.reject(new CommandError(r.err.code ?? 'error'));
           else p?.resolve(r.ok ?? agora.v1.CommandOk.create());
         } catch { /* a garbled answer: the request stays pending until the connection ends */ }
+        return;
+      }
+      if (f.streamId >= 3 && chats.has(f.streamId)) {
+        const c = chats.get(f.streamId);
+        if (!c) return;
+        if (f.kind === STREAM_CLOSE) { setTimeout(() => subscribeChat(f.streamId), 500); return; }
+        try {
+          if (f.kind === CHAT_KIND.SNAPSHOT) c.onLines((agora.v1.ChatSnapshot.decode(f.payload).entries ?? []).map(chatLine), true);
+          else if (f.kind === CHAT_KIND.ENTRY) c.onLines([chatLine(agora.v1.ChatEntry.decode(f.payload))], false);
+        } catch { /* a garbled frame: the next one carries on */ }
         return;
       }
       if (f.streamId >= 3) {
@@ -179,6 +204,19 @@ export function connectLive(o: LiveOptions): Live {
           },
           close() {
             terminals.delete(stream);
+            if (isOpen && sock) sock.send(encodeFrame({ streamId: stream, kind: STREAM_CLOSE, payload: new Uint8Array() }));
+          },
+        };
+      },
+    }),
+    chat: (node, agentId) => ({
+      connect(onLines) {
+        const stream = nextStream++;
+        chats.set(stream, { node, agentId, onLines });
+        if (isOpen) subscribeChat(stream);
+        return {
+          close() {
+            chats.delete(stream);
             if (isOpen && sock) sock.send(encodeFrame({ streamId: stream, kind: STREAM_CLOSE, payload: new Uint8Array() }));
           },
         };
