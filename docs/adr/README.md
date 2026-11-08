@@ -55,3 +55,4 @@ Date: YYYY-MM-DD
 | 0036 | Web UI stack: Tailwind CSS and Radix primitives | Accepted |
 | 0037 | `git.log` command: recent commits of an agent's workspace | Accepted |
 | 0038 | Chat transcript stream for agents without a terminal | Accepted |
+| 0039 | A shared board for tasks, channels and leases across nodes | Proposed |
