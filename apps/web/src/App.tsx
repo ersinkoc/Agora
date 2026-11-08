@@ -6,7 +6,7 @@ import { nextNeedingMe } from './model';
 import { connectLive, type Live, type LinkState } from './net/live';
 import type { TerminalSource } from './terminal/source';
 import { StartAgent, type KindChoice } from './components/StartAgent';
-import { approvalList, projectChoices, recentMessages, machines, machinesOnline, tiles, type ApprovalModel, type View } from './net/view';
+import { approvalList, costByProject, projectChoices, recentMessages, machines, machinesOnline, tiles, type ApprovalModel, type View } from './net/view';
 import { freshApprovals, titleWithCount } from './net/alert';
 import { indexedDbStore, signApproval, thisDevice, type Device } from './net/approval';
 import { addPasskey, passkeysSupported, signInWithPasskey } from './net/passkey';
@@ -165,7 +165,7 @@ export function App() {
 
   return (
     <>
-      {hash === '#/gallery' ? <Gallery /> : hash === '#/machines' ? <MachinesPage machines={live ? machines(live) : []} usage={usage} onBack={() => go('#/')} /> : hash === '#/device' ? <DevicePage device={device} onBack={() => go('#/')} onAddPasskey={hub && passkeysSupported() ? async () => (await addPasskey(hub.token)).ok : undefined} /> : current !== undefined
+      {hash === '#/gallery' ? <Gallery /> : hash === '#/machines' ? <MachinesPage machines={live ? machines(live) : []} usage={usage} projects={live && usage ? costByProject(live, usage.perAgent) : []} onBack={() => go('#/')} /> : hash === '#/device' ? <DevicePage device={device} onBack={() => go('#/')} onAddPasskey={hub && passkeysSupported() ? async () => (await addPasskey(hub.token)).ok : undefined} /> : current !== undefined
         ? <Focus agent={agents.find((a) => a.id === current)} costMicroUsd={current ? usage?.perAgent.get(current) : undefined} source={terminal} onBack={() => go('#/')} />
         : <Home onOpen={open} agents={agents} machines={live ? machinesOnline(live) : undefined} link={hub ? link : 'live'} approvals={live ? approvalList(live) : []} messages={live ? recentMessages(live) : []} onResolve={resolve} notice={notice}
           onStart={hub && api && live ? () => setStarting(true) : undefined}

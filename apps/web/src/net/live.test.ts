@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { agora } from '../gen/agora.js';
 import { decodeFrame, encodeFrame, EVENT_KIND, STREAM_CLOSE, STREAM_COMMANDS, STREAM_EVENTS } from './frame';
 import { connectLive, type LinkState, type Socket } from './live';
-import { applyEvent, emptyView, fromSnapshot, machines, recentMessages, machinesOnline, projectChoices, tiles, type View } from './view';
+import { costByProject, applyEvent, emptyView, fromSnapshot, machines, recentMessages, machinesOnline, projectChoices, tiles, type View } from './view';
 
 const v1 = agora.v1;
 
@@ -46,6 +46,15 @@ describe('view', () => {
     expect(m.map((x) => x.body)).toEqual(['remote', 'local']);
     expect(m.map((x) => x.crossMachine)).toEqual([true, false]);
     expect(m[1]?.from).toBe('claude · ' + m[1]?.from.split(' · ')[1]);
+  });
+
+  it('adds up estimated cost per project and skips agents without a price', () => {
+    const v = emptyView();
+    applyEvent(v, 1, ev('n', 1, { checkoutDiscovered: { checkoutId: 'c', nodeId: 'n', projectId: 'p', path: '/home/me/shop' } }));
+    applyEvent(v, 2, ev('n', 2, { worktreeCreated: { worktreeId: 'w', checkoutId: 'c', path: '/x', branch: 'b' } }));
+    for (const [i, id] of ['a', 'b', 'c'].entries()) applyEvent(v, 3 + i, ev('n', 3 + i, { agentStarted: { agentId: id, nodeId: 'n', worktreeId: 'w', kind: 'shell' } }));
+    expect(costByProject(v, new Map([['n/a', 1_000_000], ['n/b', 500_000]]))).toEqual([{ label: 'shop', microUsd: 1_500_000 }]);
+    expect(costByProject(v, new Map())).toEqual([]);
   });
 
   it('a waiting approval makes the agent need you, and answering it clears that', () => {
