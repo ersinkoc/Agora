@@ -1032,3 +1032,60 @@ fn uncommitted_changes_in_an_agents_workspace_are_reported() {
         agent_id: s.agent_id,
     })));
 }
+
+#[test]
+fn git_status_and_diff_cover_new_and_changed_files_and_only_agent_workspaces() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
+        return;
+    }
+    let e = env("gitdiff");
+    let n = node(&e, NodeLimits::default());
+    let mut c = Client::connect(n.socket().unwrap()).unwrap();
+    let s = started(ok(c.call(start_cmd("shell"))));
+    let wt = Path::new(&s.worktree_id);
+    std::fs::write(wt.join("a.txt"), "changed\n").unwrap();
+    std::fs::write(wt.join("fresh.txt"), "brand new\n").unwrap();
+
+    let Some(Ok_::GitStatus(st)) = ok(c.call(Cmd::GitStatus(v1::GitStatus {
+        worktree_id: s.worktree_id.clone(),
+    })))
+    .result
+    else {
+        panic!("no status");
+    };
+    assert_eq!(st.files_changed, 2);
+    let Some(Ok_::GitDiff(d)) = ok(c.call(Cmd::GitDiff(v1::GitDiff {
+        worktree_id: s.worktree_id.clone(),
+        path: String::new(),
+    })))
+    .result
+    else {
+        panic!("no diff");
+    };
+    assert!(
+        d.diff.contains("+changed") && d.diff.contains("+brand new"),
+        "{}",
+        d.diff
+    );
+    assert!(d.diff.contains("fresh.txt"), "untracked file is named");
+
+    // Not an agent's workspace, and a path that climbs out: refused.
+    let other = e.repo.to_string_lossy().into_owned();
+    assert_eq!(
+        err_code(c.call(Cmd::GitDiff(v1::GitDiff {
+            worktree_id: other,
+            path: String::new()
+        }))),
+        "protocol.invalid_message"
+    );
+    assert_eq!(
+        err_code(c.call(Cmd::GitDiff(v1::GitDiff {
+            worktree_id: s.worktree_id.clone(),
+            path: "../x".into()
+        }))),
+        "protocol.invalid_message"
+    );
+    ok(c.call(Cmd::AgentStop(v1::AgentStop {
+        agent_id: s.agent_id,
+    })));
+}

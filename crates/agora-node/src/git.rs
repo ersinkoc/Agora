@@ -238,13 +238,52 @@ pub fn status(worktree: &Path) -> Result<GitStatus, GitError> {
     })
 }
 
-/// Unified diff of tracked changes against HEAD, optionally for one path.
+/// Most untracked files a diff shows, and the most bytes of one it reads.
+const MAX_UNTRACKED: usize = 50;
+const MAX_UNTRACKED_BYTES: u64 = 64 * 1024;
+
+/// Unified diff of the changes against HEAD, optionally for one path. A new file that git does not track yet is shown as
+/// all-added (what a reviewer would see), without touching the index.
 pub fn diff(worktree: &Path, path: Option<&str>) -> Result<String, GitError> {
     let mut args = vec!["diff", "--no-color", "--no-ext-diff", "HEAD"];
     if let Some(p) = path {
         args.extend(["--", p]);
     }
-    git(worktree, &args)
+    let mut out = git(worktree, &args)?;
+    let mut ls = vec!["ls-files", "--others", "--exclude-standard", "-z"];
+    if let Some(p) = path {
+        ls.extend(["--", p]);
+    }
+    for name in git(worktree, &ls)?
+        .split('\0')
+        .filter(|n| !n.is_empty())
+        .take(MAX_UNTRACKED)
+    {
+        let small = std::fs::metadata(worktree.join(name))
+            .is_ok_and(|m| m.is_file() && m.len() <= MAX_UNTRACKED_BYTES);
+        if !small {
+            continue;
+        }
+        // `--no-index` exits 1 when the files differ, which is the normal case here.
+        let shown = Command::new("git")
+            .arg("-C")
+            .arg(worktree)
+            .args([
+                "diff",
+                "--no-index",
+                "--no-color",
+                "--no-ext-diff",
+                "--",
+                "/dev/null",
+                name,
+            ])
+            .env("LC_ALL", "C")
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .output()
+            .map_err(|e| GitError::Io(e.to_string()))?;
+        out.push_str(&String::from_utf8_lossy(&shown.stdout));
+    }
+    Ok(out)
 }
 
 /// Adds `rel` to the worktree's private ignore list (`info/exclude` of its git dir), so a file the node wrote stays

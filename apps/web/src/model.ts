@@ -14,6 +14,7 @@ export interface AgentTileModel {
   tokens?: number; // tokens used so far (input + output); the estimated cost comes separately from the hub (`usage.report`, ADR-0033)
   reportedBy?: 'agent' | 'screen'; // where the state came from, shown by "why?"
   branch?: string; // the workspace's branch, when it has one
+  workspaceRef?: { node: string; id: string }; // where to ask the node about this workspace (`git.diff`)
   filesChanged?: number; // files with uncommitted changes in the agent's workspace
 }
 

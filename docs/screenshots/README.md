@@ -25,3 +25,7 @@ what needs you, uncommitted changes, agent messages and spend on the right.
 Command palette (Ctrl+K), on Radix Dialog:
 
 ![](palette-dark.png)
+
+What an agent changed (click "N files changed"):
+
+![](diff-dark.png)

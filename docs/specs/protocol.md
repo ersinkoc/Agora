@@ -168,6 +168,12 @@ Initial command set: `project.list`, `agent.start`, `agent.stop`, `agent.prompt`
 `files.write`, `files.watch`, `git.diff`, `git.status`, `worktree.create`, `worktree.remove`,
 `approval.resolve` (signed, ADR-0020), `mesh.post`, `task.update`, `node.policy.get`.
 
+Implemented by the node today: `project.list`, `agent.*`, `terminal.*`, `approval.resolve`, `mesh.post`, `agent.list`, `agent.kinds`,
+`git.status` and `git.diff`. The last two answer only for the workspace of one of the node's own agents (`worktree_id` is the id
+the node reported in `WorktreeCreated`); a path that is absolute, climbs with `..` or starts with `:` or `-` is refused as
+`protocol.invalid_message`. `git.diff` is the unified diff against HEAD plus the new files git does not track yet (shown as
+all-added, at most 50 files of at most 64 KiB), and an answer is cut at 512 KiB.
+
 ### Node-local control socket
 
 A node serves the same commands on a local socket (owner-only; `agora node run`, default `$AGORA_HOME/node.sock`)
