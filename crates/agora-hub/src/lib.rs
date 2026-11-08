@@ -1,8 +1,10 @@
 //! The hub: identity, routing, event store, approvals (docs/architecture.md).
 
 pub mod ca;
+pub mod deliver;
 pub mod enroll;
 pub mod hub;
+pub mod notifier;
 pub mod notify;
 pub mod passkey;
 pub mod projection;

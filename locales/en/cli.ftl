@@ -59,6 +59,8 @@ doctor-summary-ok = Everything Agora needs is in place.
 doctor-summary-problems = Something Agora needs is missing. Fix the items marked PROBLEM.
 
 cli-hub-listening = Hub is running on { $addr }. Its data folder: { $dir }
+cli-hub-notify = Notifications go to { $count } target(s) from { $file }.
+cli-hub-notify-skipped = { $count } line(s) of { $file } were not understood and are ignored. Each line is `ntfy URL` or `webhook URL`.
 cli-hub-web = Web app: https://{ $addr }/ . Sign in with the code { $code } (valid for 10 minutes; `agora hub login` makes another). The hub's certificate is signed by its own CA, so the browser warns until you trust it.
 cli-hub-login = Sign-in code for the web app: { $code } (valid for 10 minutes). Open the hub's address in a browser and enter it.
 cli-trusted = Device { $id } can now answer approvals on this node. Restart the node to apply it.

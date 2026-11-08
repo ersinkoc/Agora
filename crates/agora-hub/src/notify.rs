@@ -104,6 +104,19 @@ impl Default for Prefs {
 }
 
 impl Prefs {
+    /// Every trigger on the webhook channel and nothing else: what a hub with delivery targets uses.
+    pub fn webhooks_only() -> Self {
+        let mut p = Self {
+            channels: ALL_TRIGGERS.iter().map(|t| (*t, BTreeSet::new())).collect(),
+            quiet_hours: None,
+            only_when_not_looking: false,
+        };
+        for t in ALL_TRIGGERS {
+            p.set(t, Channel::Webhook, true);
+        }
+        p
+    }
+
     pub fn set(&mut self, trigger: Trigger, channel: Channel, enabled: bool) {
         let set = self.channels.entry(trigger).or_default();
         if enabled {
