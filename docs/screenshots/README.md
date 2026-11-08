@@ -45,3 +45,8 @@ Commit history of a workspace (the History button on a terminal):
 A chat agent's conversation (ADR-0038): your requests and its answers, streamed from the node:
 
 ![](chat-light.png)
+
+## Visual regression baselines
+`apps/web/visual/` holds the reference images that `scripts/visual-regression.mjs` compares against (gallery and sign-in, both
+themes, desktop and phone). They are the contract for how the shared components look: a pull request that changes them updates the
+images with `--update`, and the diff shows in review.
