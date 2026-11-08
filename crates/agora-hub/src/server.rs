@@ -379,7 +379,15 @@ where
             }
         }
         // Watching the connection too: a client that went away ends this task.
-        match tokio::time::timeout(PUSH, conn.recv()).await {
+        // A terminal frame from a node wakes this loop at once (input and output latency must not wait for the next tick).
+        let received = tokio::select! {
+            r = tokio::time::timeout(PUSH, conn.recv()) => r,
+            Some(rf) = relay_frames.recv() => {
+                conn.send(&frame(rf.stream, rf.kind, rf.payload)).await?;
+                continue;
+            }
+        };
+        match received {
             Ok(Ok(Some(f))) => match (f.stream_id, f.kind) {
                 // A command; a terminal subscription arrives on the dynamic stream the client chose for it.
                 (stream, 0) if stream == STREAM_COMMANDS || stream >= FIRST_DYNAMIC_STREAM => {
@@ -799,6 +807,9 @@ pub async fn run(
     tls: Option<tokio_rustls::TlsAcceptor>,
 ) {
     while let Ok((tcp, _)) = listener.accept().await {
+        // Small frames (a keystroke, an echo) must leave at once: without this, Nagle's algorithm plus the peer's delayed
+        // ACK holds one back for up to 40 ms.
+        let _ = tcp.set_nodelay(true);
         tokio::spawn(handle_connection(Arc::clone(&state), tcp, tls.clone()));
     }
 }

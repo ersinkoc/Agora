@@ -231,6 +231,8 @@ pub async fn run_once(
     let tcp = TcpStream::connect(&addr)
         .await
         .map_err(|e| LinkError::Transport(e.to_string()))?;
+    // Keystrokes and echoes are small frames; do not let Nagle's algorithm hold them back.
+    let _ = tcp.set_nodelay(true);
     if tls {
         let name = ServerName::try_from(host.clone()).map_err(|e| LinkError::Bad(e.to_string()))?;
         let stream = connector(link)?

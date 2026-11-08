@@ -47,7 +47,7 @@ budgets above; CI runs it as an informational step and stores `footprint.json`. 
 | Node cold start ≤ 200 ms | 10 ms | start until the control socket answers a command, in-process |
 | Keystroke → echo, same machine ≤ 16 ms | 0.06–0.2 ms p95 | node portion only (no client, no network) |
 
-Not measured yet: hub budgets and client rendering (Phase 3), binary size with web assets, process start (exec) in
+Not measured yet: binary size with web assets, process start (exec) in
 the cold-start figure, macOS and Windows numbers (CI will show macOS-agnostic regressions only through tests).
 
 The first run found idle CPU at 8.7% and keystroke echo at 5 ms: every terminal actor woke 200 times per second to
@@ -112,3 +112,24 @@ the supervisor reads the exit status without copying anything.
   per-hop latency, frame time, and stream backlog.
 - **Profiles at phase exits:** CPU and memory profiles of node and hub under the capacity scenario are attached
   to the phase exit report.
+
+### Measured through the hub and a real browser (Phase 3)
+
+`node scripts/perf-browser.mjs` starts a hub and a node on one machine, signs in with headless Chromium (no GPU) and measures the
+whole path: browser, TLS WebSocket, hub, node, PTY and back, with xterm.js (DOM renderer) drawing the result.
+
+| Budget | Result | Note |
+| --- | --- | --- |
+| Keystroke → echo, same machine, ≤ 16 ms p95 | text on screen p50 2.6 ms, p95 14 ms; at the next frame p50 13 ms, p95 30 ms | 100 synthetic key presses 20 ms apart; the frame figure includes headless Chromium's software frame pacing |
+| WebSocket round trip for a key (send → echo frame received) | 1.7 ms p50, 2.2 ms p95 | in the page, before xterm |
+| One terminal flooding output, no main-thread task > 50 ms | no long task at 8–9 MB/s | 20 MB through `yes \| head -c`, drained in 2.4 s |
+
+The first run measured the echo at 80 ms (p95). Two causes, both in the hub and node, both invisible to unit tests:
+the hub's client loop drained terminal frames from nodes only on its 20 ms wake-up instead of when they arrived, and
+nobody had set `TCP_NODELAY`, so Nagle's algorithm and the peer's delayed ACK held small frames back for up to 40 ms
+whenever keystrokes came less than a round trip apart. The loop now wakes on a terminal frame, and the hub's accepted
+sockets and the node's uplink set `TCP_NODELAY`.
+
+Not measured: the xterm.js against WebAssembly comparison (ADR-0017 keeps the renderer swappable; with the figures above
+xterm.js meets the interaction budget, so a WebAssembly emulator would have to win on throughput or memory to be worth
+it), the 10 MB/s plus twenty busy terminals scenario, switching terminals, and any machine over a real network.
