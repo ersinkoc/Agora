@@ -181,6 +181,12 @@ fn errors_are_rendered_from_codes_and_exit_nonzero() {
         "{err}"
     );
 
+    let (code, _, err) = cli(&s, &["agent", "prompt", "agent-9", "hello", "there"]);
+    assert_eq!(code, 1);
+    assert!(err.contains("agent.not_found"), "{err}");
+    let (code, _, err) = cli(&s, &["agent", "prompt", "agent-9"]);
+    assert_eq!(code, 2, "a prompt needs text: {err}");
+
     let (code, _, err) = cli(&s, &["agent", "start", "nope"]);
     assert_eq!(code, 1);
     assert!(err.contains("agent.kind_unknown"), "{err}");

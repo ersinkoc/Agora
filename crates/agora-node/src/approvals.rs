@@ -358,6 +358,8 @@ impl Verifier for DenyAll {
 pub struct NodeApprovals {
     queue: std::sync::Mutex<Approvals<Box<dyn Verifier + Send>>>,
     routes: std::sync::Mutex<std::collections::HashMap<String, (agora_core::AgentId, String)>>,
+    /// The trusted-devices file and its modification time when it was last read.
+    trust_file: std::sync::Mutex<Option<(std::path::PathBuf, Option<std::time::SystemTime>)>>,
 }
 
 impl NodeApprovals {
@@ -365,6 +367,28 @@ impl NodeApprovals {
         Self {
             queue: std::sync::Mutex::new(Approvals::new(node_id, verifier)),
             routes: std::sync::Mutex::new(std::collections::HashMap::new()),
+            trust_file: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// Follows the trusted-devices file: when the owner changes it (`agora node trust`), the next decision is judged by
+    /// the new list, so trusting a browser does not mean restarting the node (which would stop its agents).
+    pub fn follow_trust_file(&self, path: &std::path::Path) {
+        let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+        *self.trust_file.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some((path.to_path_buf(), mtime));
+    }
+
+    fn reload_trust_if_changed(&self) {
+        let mut guard = self.trust_file.lock().unwrap_or_else(|e| e.into_inner());
+        let Some((path, seen)) = guard.as_mut() else {
+            return;
+        };
+        let now = std::fs::metadata(&*path).and_then(|m| m.modified()).ok();
+        if now != *seen {
+            *seen = now;
+            let (verifier, _skipped) = P256Verifier::load(path);
+            self.set_verifier(Box::new(verifier));
         }
     }
 
@@ -409,6 +433,7 @@ impl NodeApprovals {
         r: &ApprovalResolve,
         now_ms: u64,
     ) -> Result<(agora_core::AgentId, String, Verdict), ApprovalError> {
+        self.reload_trust_if_changed();
         let (_, verdict) = self.q().resolve(r, now_ms)?;
         let route = self.r().remove(&r.approval_id);
         route
@@ -662,6 +687,56 @@ mod tests {
         let sig = pair.sign(&rng, &msg).unwrap();
         assert!(v.verify("phone", &msg, sig.as_ref()));
         assert!(!v.verify("laptop", &msg, sig.as_ref()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_device_trusted_while_the_node_runs_can_answer_without_a_restart() {
+        use ring::rand::SystemRandom;
+        use ring::signature::{EcdsaKeyPair, KeyPair, ECDSA_P256_SHA256_FIXED_SIGNING};
+        let rng = SystemRandom::new();
+        let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng).unwrap();
+        let pair = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8.as_ref(), &rng)
+            .unwrap();
+        let hex: String = pair
+            .public_key()
+            .as_ref()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let dir = std::env::temp_dir().join(format!("agora-trust-live-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(TRUSTED_DEVICES_FILE);
+
+        let n = NodeApprovals::new("node-1", Box::new(P256Verifier::load(&file).0));
+        n.follow_trust_file(&file);
+        let agent = agora_core::AgentId::new("agent-1");
+        let p = n.request(&agent, "ap-1", "run_command", "ls", 0).unwrap();
+        let sign = |approved: bool| {
+            let sig = pair
+                .sign(&rng, &signed_message("node-1", &p.id, approved))
+                .unwrap();
+            ApprovalResolve {
+                approval_id: p.id.clone(),
+                approved,
+                signer_device_id: "web-1".into(),
+                signature: sig.as_ref().to_vec(),
+            }
+        };
+        assert_eq!(
+            n.resolve(&sign(true), 1).unwrap_err(),
+            ApprovalError::BadSignature,
+            "not trusted yet"
+        );
+
+        // The owner trusts the device on the machine; the same node, with the same waiting request, now accepts it.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        trust_device(&file, "web-1", &hex).unwrap();
+        let (a, id, verdict) = n.resolve(&sign(true), 2).unwrap();
+        assert_eq!(
+            (a.as_str(), id.as_str(), verdict),
+            ("agent-1", "ap-1", Verdict::Approved)
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 

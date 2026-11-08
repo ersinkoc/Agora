@@ -162,6 +162,7 @@ fn main() -> ExitCode {
         ["node", "run"] => node_run(&say, &opts),
         ["agent", "start"] => agent_start(&say, &opts),
         ["agent", "stop"] => agent_stop(&say, &opts),
+        ["agent", "prompt"] => agent_prompt(&say, &opts),
         ["agent", "list"] => agent_list(&say, &opts),
         ["agent", "kinds"] => agent_kinds(&say, &opts),
         ["terminal", "attach"] => terminal_attach(&say, &opts),
@@ -523,6 +524,46 @@ fn agent_stop(say: &Say, o: &Opts) -> ExitCode {
         Ok(_) => {
             say.out(
                 key!("cli-agent-stopped"),
+                &[("agent_id", id.as_str().into())],
+            );
+            ExitCode::SUCCESS
+        }
+        Err(code) => code,
+    }
+}
+
+fn agent_prompt(say: &Say, o: &Opts) -> ExitCode {
+    let (Some(id), text) = (
+        o.positional.first(),
+        o.positional
+            .iter()
+            .skip(1)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" "),
+    ) else {
+        say.err(key!("cli-usage"), &[]);
+        return ExitCode::from(2);
+    };
+    if text.is_empty() {
+        say.err(key!("cli-usage"), &[]);
+        return ExitCode::from(2);
+    }
+    let mut c = match connect(say, o) {
+        Ok(c) => c,
+        Err(code) => return code,
+    };
+    match call(
+        say,
+        &mut c,
+        Cmd::AgentPrompt(v1::AgentPrompt {
+            agent_id: id.clone(),
+            text,
+        }),
+    ) {
+        Ok(_) => {
+            say.out(
+                key!("cli-agent-prompted"),
                 &[("agent_id", id.as_str().into())],
             );
             ExitCode::SUCCESS

@@ -67,6 +67,27 @@ describe('view', () => {
     expect(tiles(v)[0]).toMatchObject({ filesChanged: 3, branch: 'b' });
   });
 
+  it('a node that starts again has lost its agents and waiting approvals', () => {
+    const v = emptyView();
+    applyEvent(v, 1, ev('n', 1, { nodeOnline: { nodeId: 'n', hostname: 'N' } }));
+    applyEvent(v, 2, ev('n', 2, { agentStarted: { agentId: 'a', nodeId: 'n', worktreeId: 'w', kind: 'claude' } }));
+    applyEvent(v, 3, ev('n', 3, { approvalRequested: { approvalId: 'p', agentId: 'a', action: 'write' } }));
+    expect(v.approvals.size).toBe(1);
+    applyEvent(v, 4, ev('n', 4, { nodeOnline: { nodeId: 'n', hostname: 'N' } }));
+    expect(v.approvals.size).toBe(0);
+    expect(tiles(v)[0]?.state).toBe('finished');
+  });
+
+  it('knows which agents have a terminal and which are chat agents', () => {
+    const v = emptyView();
+    applyEvent(v, 1, ev('n', 1, { agentStarted: { agentId: 'sh', nodeId: 'n', worktreeId: 'w', kind: 'shell' } }));
+    applyEvent(v, 2, ev('n', 2, { agentStarted: { agentId: 'chat', nodeId: 'n', worktreeId: 'w', kind: 'fake' } }));
+    applyEvent(v, 3, ev('n', 3, { terminalOpened: { terminalId: 't-sh', nodeId: 'n', agentId: 'sh' } }));
+    const t = tiles(v);
+    expect(t.find((x) => x.id === 'n/sh')?.terminal).toBe(true);
+    expect(t.find((x) => x.id === 'n/chat')?.terminal).toBe(false);
+  });
+
   it('a waiting approval makes the agent need you, and answering it clears that', () => {
     const v = emptyView();
     applyEvent(v, 1, ev('n', 1, { agentStarted: { agentId: 'a', nodeId: 'n', worktreeId: 'w', kind: 'claude' } }));

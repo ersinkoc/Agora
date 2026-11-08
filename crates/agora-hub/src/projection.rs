@@ -106,6 +106,18 @@ impl View {
         }
         match body {
             Body::NodeOnline(e) => {
+                // A node announces itself when its process starts, never when only the link to the hub comes back. So
+                // whatever it had running before is gone (agents die with the node) and its waiting approvals are lost.
+                for a in self
+                    .agents
+                    .values_mut()
+                    .filter(|a| a.node_id == e.node_id && a.running)
+                {
+                    a.running = false;
+                    a.state = AgentState::Done;
+                }
+                let prefix = format!("{}/", e.node_id);
+                self.approvals.retain(|k, _| !k.starts_with(&prefix));
                 let n = self.nodes.entry(e.node_id.clone()).or_insert(NodeView {
                     hostname: String::new(),
                     os: String::new(),
@@ -359,6 +371,37 @@ mod tests {
             }),
         ));
         assert!(!v.nodes["n1"].online);
+    }
+
+    #[test]
+    fn a_node_that_starts_again_has_lost_its_agents_and_waiting_approvals() {
+        let online = || {
+            Body::NodeOnline(NodeOnline {
+                node_id: "n1".into(),
+                hostname: "laptop".into(),
+                os: "linux".into(),
+                build: "b".into(),
+            })
+        };
+        let mut v = View::default();
+        v.apply(&ev("n1", 1, online()));
+        v.apply(&ev("n1", 2, started("a")));
+        v.apply(&ev(
+            "n1",
+            3,
+            Body::ApprovalRequested(ApprovalRequested {
+                approval_id: "x".into(),
+                agent_id: "a".into(),
+                action: "run_command".into(),
+                detail: String::new(),
+                expires_at_ms: 0,
+            }),
+        ));
+        assert_eq!(v.approvals.len(), 1);
+        v.apply(&ev("n1", 4, online()));
+        assert!(v.approvals.is_empty(), "the node forgot them");
+        assert!(!v.agents["n1/a"].running);
+        assert_eq!(v.agents["n1/a"].state, AgentState::Done);
     }
 
     #[test]

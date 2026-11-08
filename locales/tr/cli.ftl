@@ -5,6 +5,7 @@ cli-usage =
       agora node run [--socket YOL] [--manifests DİZİN] [--project YOL]... [--data DİZİN] [--worktrees DİZİN]
       agora agent start TÜR [--project AD] [--name AD] [--socket YOL]
       agora agent stop AJAN_KİMLİĞİ [--socket YOL]
+      agora agent prompt AJAN_KİMLİĞİ METİN... [--socket YOL]
       agora agent list [--socket YOL]
       agora agent kinds [--socket YOL]
       agora terminal attach AJAN_KİMLİĞİ [--socket YOL]
@@ -24,6 +25,7 @@ cli-usage =
 cli-node-listening = Düğüm çalışıyor. Denetim soketi: { $socket }
 cli-agent-started = { $agent_id } ajanı { $worktree } içinde başlatıldı
 cli-agent-stopped = { $agent_id } ajanı durduruldu
+cli-agent-prompted = İstem { $agent_id } ajanına gönderildi
 cli-agent-list-empty = Bu düğümde ajan yok.
 cli-agent-kinds-empty = Bu düğümde ajan tanımı yok.
 cli-terminal-detached = { $agent_id } ajanından ayrıldınız.

@@ -514,6 +514,7 @@ impl Node {
             &cfg.node_id,
             Box::new(verifier),
         ));
+        approvals.follow_trust_file(&cfg.data_dir.join(crate::approvals::TRUSTED_DEVICES_FILE));
 
         let supervisor = Arc::new(Mutex::new(sup));
         let ctx = Arc::new(ControlContext::new(

@@ -6,6 +6,7 @@ import type { ApprovalModel, MachineModel, MessageModel, ProjectCost } from '../
 import type { TerminalSource } from '../terminal/source';
 import { ApprovalCard } from './ApprovalCard';
 import { DiffDialog } from './DiffDialog';
+import { PromptBox } from './PromptBox';
 import { FilesDialog } from './FilesDialog';
 import type { WorkspaceFiles } from '../net/files';
 import { StateBadge } from './StateBadge';
@@ -16,7 +17,7 @@ const MAX_AUTO_PINNED = 4;
 
 // The one window: machines and agents on the left, the terminals of the agents you are watching in the middle (several at
 // once), and what needs you, what agents say to each other and what it costs on the right. Everything is derived from props.
-export function Console({ agents, machines, usage, projects = [], approvals, messages, terminalFor, loadDiff, filesOf, onOpen, onStart, start, onResolve, notice, link }: {
+export function Console({ agents, machines, usage, projects = [], approvals, messages, terminalFor, sendPrompt, loadDiff, filesOf, onOpen, onStart, start, onResolve, notice, link }: {
   agents: readonly AgentTileModel[];
   machines: readonly MachineModel[];
   usage?: UsageSummary;
@@ -24,6 +25,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   approvals: readonly ApprovalModel[];
   messages: readonly MessageModel[];
   terminalFor: (agentId: string) => TerminalSource;
+  sendPrompt?: (agent: AgentTileModel, text: string) => Promise<boolean>;
   loadDiff?: (agent: AgentTileModel) => Promise<string>;
   filesOf?: (agent: AgentTileModel) => WorkspaceFiles | undefined;
   onOpen: (agentId: string) => void;
@@ -45,7 +47,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   useEffect(() => {
     setPinned((cur) => {
       const alive = cur.filter((id) => fleet.some((a) => a.id === id));
-      const room = touched.current ? [] : fleet.filter((a) => !alive.includes(a.id)).slice(0, Math.max(0, MAX_AUTO_PINNED - alive.length)).map((a) => a.id);
+      const room = touched.current ? [] : fleet.filter((a) => a.state !== 'finished' && a.state !== 'unknown' && !alive.includes(a.id)).slice(0, Math.max(0, MAX_AUTO_PINNED - alive.length)).map((a) => a.id);
       return alive.length === cur.length && room.length === 0 ? cur : [...alive, ...room];
     });
   }, [fleet]);
@@ -167,9 +169,11 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
                     </div>
                   </header>
                   <div className="pane min-h-0 flex-1 p-1.5">
-                    <Suspense fallback={<div className="terminal" aria-busy="true" />}>
-                      <TerminalView source={terminalFor(a.id)} label={`${t('focus-terminal')} · ${a.name}`} />
-                    </Suspense>
+                    {a.terminal === false ? <PromptBox agent={a} send={sendPrompt} /> : (
+                      <Suspense fallback={<div className="terminal" aria-busy="true" />}>
+                        <TerminalView source={terminalFor(a.id)} label={`${t('focus-terminal')} · ${a.name}`} />
+                      </Suspense>
+                    )}
                   </div>
                 </section>
               ))}
