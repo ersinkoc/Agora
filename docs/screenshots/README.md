@@ -29,3 +29,7 @@ Command palette (Ctrl+K), on Radix Dialog:
 What an agent changed (click "N files changed"):
 
 ![](diff-dark.png)
+
+Files of a workspace (the Files button on a terminal):
+
+![](files-dark.png)

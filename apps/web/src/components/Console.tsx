@@ -6,6 +6,8 @@ import type { ApprovalModel, MachineModel, MessageModel, ProjectCost } from '../
 import type { TerminalSource } from '../terminal/source';
 import { ApprovalCard } from './ApprovalCard';
 import { DiffDialog } from './DiffDialog';
+import { FilesDialog } from './FilesDialog';
+import type { WorkspaceFiles } from '../net/files';
 import { StateBadge } from './StateBadge';
 
 const TerminalView = lazy(() => import('../terminal/TerminalView').then((m) => ({ default: m.TerminalView })));
@@ -14,7 +16,7 @@ const MAX_AUTO_PINNED = 4;
 
 // The one window: machines and agents on the left, the terminals of the agents you are watching in the middle (several at
 // once), and what needs you, what agents say to each other and what it costs on the right. Everything is derived from props.
-export function Console({ agents, machines, usage, projects = [], approvals, messages, terminalFor, loadDiff, onOpen, onStart, start, onResolve, notice, link }: {
+export function Console({ agents, machines, usage, projects = [], approvals, messages, terminalFor, loadDiff, filesOf, onOpen, onStart, start, onResolve, notice, link }: {
   agents: readonly AgentTileModel[];
   machines: readonly MachineModel[];
   usage?: UsageSummary;
@@ -23,6 +25,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   messages: readonly MessageModel[];
   terminalFor: (agentId: string) => TerminalSource;
   loadDiff?: (agent: AgentTileModel) => Promise<string>;
+  filesOf?: (agent: AgentTileModel) => WorkspaceFiles | undefined;
   onOpen: (agentId: string) => void;
   onStart?: () => void;
   start?: ReactNode;
@@ -34,6 +37,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   const [pinned, setPinned] = useState<string[]>([]);
   const touched = useRef(false);
   const [reviewing, setReviewing] = useState<string | undefined>();
+  const [browsing, setBrowsing] = useState<string | undefined>();
 
   // Until the user picks for themselves, watch the first few agents (those that need you come first). A new agent joins
   // while there is room; one that is gone leaves. Nothing is reordered, so a terminal never jumps under your hands.
@@ -126,6 +130,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
                     </div>
                     <div className="flex flex-none items-center gap-2">
                       <StateBadge state={a.state} />
+                      {filesOf && <button type="button" className="rounded-s px-2 py-1 text-xs text-muted hover:bg-surface-2 hover:text-ink" onClick={() => setBrowsing(a.id)}>{t('console-files')}</button>}
                       <button type="button" className="rounded-s px-2 py-1 text-xs text-muted hover:bg-surface-2 hover:text-ink" onClick={() => onOpen(a.id)}>{t('console-maximize')}</button>
                       <button type="button" aria-label={t('console-hide')} className="rounded-s px-2 py-1 text-xs text-muted hover:bg-surface-2 hover:text-ink" onClick={() => toggle(a.id)}>✕</button>
                     </div>
@@ -197,6 +202,9 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
           )}
         </aside>
       </div>
+      {browsing && filesOf && fleet.find((a) => a.id === browsing) && filesOf(fleet.find((a) => a.id === browsing) as AgentTileModel) && (
+        <FilesDialog agent={fleet.find((a) => a.id === browsing) as AgentTileModel} files={filesOf(fleet.find((a) => a.id === browsing) as AgentTileModel) as WorkspaceFiles} onClose={() => setBrowsing(undefined)} />
+      )}
       {reviewing && loadDiff && fleet.find((a) => a.id === reviewing) && (
         <DiffDialog agent={fleet.find((a) => a.id === reviewing) as AgentTileModel} load={loadDiff} onClose={() => setReviewing(undefined)} />
       )}

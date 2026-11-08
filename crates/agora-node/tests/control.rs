@@ -1089,3 +1089,66 @@ fn git_status_and_diff_cover_new_and_changed_files_and_only_agent_workspaces() {
         agent_id: s.agent_id,
     })));
 }
+
+#[test]
+fn files_list_and_read_stay_inside_an_agents_workspace() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
+        return;
+    }
+    let e = env("filesview");
+    let n = node(&e, NodeLimits::default());
+    let mut c = Client::connect(n.socket().unwrap()).unwrap();
+    let s = started(ok(c.call(start_cmd("shell"))));
+    let wt = Path::new(&s.worktree_id);
+    std::fs::create_dir_all(wt.join("src")).unwrap();
+    std::fs::write(wt.join("src/lib.rs"), "pub fn x() {}\n").unwrap();
+
+    let Some(Ok_::FilesList(l)) = ok(c.call(Cmd::FilesList(v1::FilesList {
+        worktree_id: s.worktree_id.clone(),
+        path: String::new(),
+    })))
+    .result
+    else {
+        panic!("no list");
+    };
+    let names: Vec<(&str, bool)> = l
+        .entries
+        .iter()
+        .map(|e| (e.name.as_str(), e.is_dir))
+        .collect();
+    assert!(
+        names.contains(&("src", true)) && names.contains(&("a.txt", false)),
+        "{names:?}"
+    );
+    assert!(
+        !names.iter().any(|(n, _)| *n == ".git"),
+        "git's own files are hidden: {names:?}"
+    );
+
+    let Some(Ok_::FilesRead(r)) = ok(c.call(Cmd::FilesRead(v1::FilesRead {
+        worktree_id: s.worktree_id.clone(),
+        path: "src/lib.rs".into(),
+    })))
+    .result
+    else {
+        panic!("no read");
+    };
+    assert_eq!(r.data, b"pub fn x() {}\n");
+    assert_eq!(
+        err_code(c.call(Cmd::FilesRead(v1::FilesRead {
+            worktree_id: s.worktree_id.clone(),
+            path: "../../etc/passwd".into()
+        }))),
+        "files.outside_root"
+    );
+    assert_eq!(
+        err_code(c.call(Cmd::FilesList(v1::FilesList {
+            worktree_id: e.repo.to_string_lossy().into_owned(),
+            path: String::new()
+        }))),
+        "protocol.invalid_message"
+    );
+    ok(c.call(Cmd::AgentStop(v1::AgentStop {
+        agent_id: s.agent_id,
+    })));
+}
