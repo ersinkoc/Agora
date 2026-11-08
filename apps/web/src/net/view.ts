@@ -206,6 +206,8 @@ export function tiles(v: View): AgentTileModel[] {
       since: a.sinceMs || undefined,
       tokens: a.tokens,
       reportedBy: a.reported ? 'agent' : 'screen',
+      branch: wt?.branch || undefined,
+      filesChanged: wt?.filesChanged ?? 0,
     };
   });
 }

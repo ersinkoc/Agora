@@ -57,6 +57,15 @@ describe('view', () => {
     expect(costByProject(v, new Map())).toEqual([]);
   });
 
+  it('carries each workspace\'s uncommitted file count onto its agent', () => {
+    const v = emptyView();
+    applyEvent(v, 1, ev('n', 1, { worktreeCreated: { worktreeId: 'w', checkoutId: 'c', path: '/x', branch: 'b' } }));
+    applyEvent(v, 2, ev('n', 2, { agentStarted: { agentId: 'a', nodeId: 'n', worktreeId: 'w', kind: 'shell' } }));
+    expect(tiles(v)[0]?.filesChanged).toBe(0);
+    applyEvent(v, 3, ev('n', 3, { gitStatusChanged: { worktreeId: 'w', filesChanged: 3 } }));
+    expect(tiles(v)[0]).toMatchObject({ filesChanged: 3, branch: 'b' });
+  });
+
   it('a waiting approval makes the agent need you, and answering it clears that', () => {
     const v = emptyView();
     applyEvent(v, 1, ev('n', 1, { agentStarted: { agentId: 'a', nodeId: 'n', worktreeId: 'w', kind: 'claude' } }));

@@ -12,7 +12,9 @@ import { indexedDbStore, signApproval, thisDevice, type Device } from './net/app
 import { addPasskey, passkeysSupported, signInWithPasskey } from './net/passkey';
 import { summarize, type UsageSummary } from './net/usage';
 import { forgetToken, hubConnection, readCode, signIn } from './net/session';
-import { DevicePage, Focus, Gallery, Home, MachinesPage, SignInPage } from './screens';
+import { Console } from './components/Console';
+import { demoSource } from './terminal/source';
+import { DevicePage, Focus, Gallery, MachinesPage, SignInPage } from './screens';
 
 function useHash(): [string, (h: string) => void] {
   const [hash, setHash] = useState(window.location.hash);
@@ -133,6 +135,19 @@ export function App() {
     return api.terminal(current.slice(0, at), `t-${current.slice(at + 1)}`);
   }, [api, current]);
 
+  // One source per agent, kept for as long as the agent is on the wall, so a terminal keeps its connection when others change.
+  const sources = useRef(new Map<string, TerminalSource>());
+  useEffect(() => { sources.current.clear(); }, [api]);
+  const terminalFor = useCallback((id: string): TerminalSource => {
+    let s = sources.current.get(id);
+    if (!s) {
+      const at = id.indexOf('/');
+      s = api && at > 0 ? api.terminal(id.slice(0, at), `t-${id.slice(at + 1)}`) : demoSource(agents.find((a) => a.id === id)?.preview ?? '');
+      sources.current.set(id, s);
+    }
+    return s;
+  }, [api, agents]);
+
   const open = useCallback((id: string) => go(`#/agent/${encodeURIComponent(id)}`), [go]);
   const next = useCallback(() => {
     const n = nextNeedingMe(agents, current);
@@ -167,7 +182,9 @@ export function App() {
     <>
       {hash === '#/gallery' ? <Gallery /> : hash === '#/machines' ? <MachinesPage machines={live ? machines(live) : []} usage={usage} projects={live && usage ? costByProject(live, usage.perAgent) : []} onBack={() => go('#/')} /> : hash === '#/device' ? <DevicePage device={device} onBack={() => go('#/')} onAddPasskey={hub && passkeysSupported() ? async () => (await addPasskey(hub.token)).ok : undefined} /> : current !== undefined
         ? <Focus agent={agents.find((a) => a.id === current)} costMicroUsd={current ? usage?.perAgent.get(current) : undefined} source={terminal} onBack={() => go('#/')} />
-        : <Home onOpen={open} agents={agents} machines={live ? machinesOnline(live) : undefined} link={hub ? link : 'live'} approvals={live ? approvalList(live) : []} messages={live ? recentMessages(live) : []} onResolve={resolve} notice={notice}
+        : <Console agents={agents} machines={live ? machines(live) : []} usage={usage} projects={live && usage ? costByProject(live, usage.perAgent) : []}
+          approvals={live ? approvalList(live) : []} messages={live ? recentMessages(live) : []} terminalFor={terminalFor} onOpen={open}
+          onResolve={resolve} notice={notice} link={hub ? link : 'live'}
           onStart={hub && api && live ? () => setStarting(true) : undefined}
           start={starting && live ? <StartAgent projects={projectChoices(live)} loadKinds={loadKinds} onStart={startAgent} onClose={() => setStarting(false)} /> : undefined} />}
       {palette && <CommandPalette items={items} onClose={() => setPalette(false)} />}

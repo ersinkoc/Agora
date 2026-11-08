@@ -13,3 +13,11 @@ Each image shows a dark panel and a light panel; both themes appear whatever the
 The sign-in page (unauthenticated routes redirect to it):
 
 ![](signin-desktop-dark.png) ![](signin-desktop-light.png)
+
+## The console (Home)
+One window: machines and agents on the left, the terminals of the agents being watched in the middle (several at once), and
+what needs you, uncommitted changes, agent messages and spend on the right.
+
+![](console-dark.png)
+![](console-light.png)
+![](console-phone-dark.png)

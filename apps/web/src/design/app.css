@@ -1,0 +1,100 @@
+@import 'tailwindcss';
+@import './tokens.css';
+
+/* The Tailwind theme is the design tokens (ADR-0036): utilities like `bg-surface-1` and `text-muted` resolve to the variables. */
+@theme inline {
+  --color-surface-0: var(--surface-0);
+  --color-surface-1: var(--surface-1);
+  --color-surface-2: var(--surface-2);
+  --color-line: var(--border);
+  --color-ink: var(--text);
+  --color-muted: var(--text-muted);
+  --color-accent: var(--accent);
+  --color-on-accent: var(--on-accent);
+  --color-working: var(--state-working);
+  --color-needs-you: var(--state-needs-you);
+  --color-finished: var(--state-finished);
+  --color-idle: var(--state-idle);
+  --color-unknown: var(--state-unknown);
+  --font-sans: var(--font-ui);
+  --font-mono: var(--font-mono);
+  --radius-s: var(--radius-s);
+  --radius-m: var(--radius-m);
+  --radius-l: var(--radius-l);
+  --shadow-card: var(--shadow);
+}
+
+@layer base {
+  html { -webkit-text-size-adjust: 100%; }
+  body { @apply bg-surface-0 text-ink font-sans text-sm antialiased; }
+  h1 { @apply text-2xl font-semibold tracking-tight; }
+  h2 { @apply text-xs font-semibold uppercase tracking-wider text-muted; }
+  button { @apply cursor-pointer; }
+  input, select { @apply rounded-s border border-line bg-surface-1 px-3 py-2 text-ink; font: inherit; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+}
+
+@layer components {
+  .page { @apply mx-auto grid max-w-3xl gap-6 px-4 py-8; }
+  .topbar { @apply flex items-center justify-between gap-4; }
+  .muted { @apply text-[13px] text-muted; }
+  .link { @apply bg-transparent p-0 text-left text-accent hover:underline; }
+  .mono { @apply font-mono break-all select-all; }
+  .stack { @apply grid justify-items-start gap-3; }
+  .codebox { @apply rounded-m border border-line bg-surface-2 p-3 text-[13px]; }
+  .page p, .page h1, .page h2 { margin: 0; }
+
+  .button {
+    @apply inline-flex items-center justify-center gap-2 rounded-s border border-line bg-surface-2 px-4 py-2 font-medium text-ink
+      transition-colors duration-150 hover:bg-surface-1 disabled:cursor-not-allowed disabled:opacity-50;
+  }
+  .button--primary { @apply border-transparent bg-accent text-on-accent hover:brightness-110 hover:bg-accent; }
+
+  /* State language: color + shape + motion + text, never color alone. */
+  .state { @apply inline-flex items-center gap-1.5 text-xs font-medium; }
+  .state__mark { @apply size-3 flex-none; }
+  .state--working { color: var(--state-working); }
+  .state--needs-you { color: var(--state-needs-you); }
+  .state--finished { color: var(--state-finished); }
+  .state--idle { color: var(--state-idle); }
+  .state--unknown { color: var(--state-unknown); }
+  .state--working .state__mark { animation: breathe 2.4s ease-in-out infinite; }
+  .state--needs-you .state__mark { animation: attend 1.6s ease-in-out infinite; }
+
+  .strip { @apply flex items-center gap-3 overflow-x-auto rounded-m border border-line bg-surface-1 p-3; }
+  .strip__title { @apply font-semibold whitespace-nowrap; }
+
+  .fleet { @apply grid gap-4; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
+  .tile {
+    @apply grid gap-2 rounded-m border border-line bg-surface-1 p-4 text-left shadow-card transition-colors duration-150 hover:bg-surface-2;
+    border-left: 4px solid var(--tile-accent, var(--border));
+  }
+  .tile--needs-you { border-color: var(--state-needs-you); }
+  .tile__name { @apply font-semibold; }
+  .tile__preview { @apply overflow-hidden rounded-s bg-surface-0 p-2 font-mono text-xs whitespace-pre text-muted; min-height: 3.2em; }
+
+  .gallery { @apply max-w-5xl; }
+  .gallery__row { @apply flex flex-wrap items-center gap-4; }
+  .theme-panel { @apply grid gap-4 rounded-l border border-line bg-surface-0 p-4 text-ink; }
+
+  .pane .terminal { border: 0; }
+  .terminal { @apply h-full min-h-0 overflow-hidden rounded-m bg-surface-0 p-2; }
+  .page .terminal { height: clamp(320px, 65vh, 720px); @apply border border-line; }
+  .approvals { @apply grid gap-4; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
+  .approval { @apply flex flex-col gap-2 rounded-m border border-line bg-surface-1 p-4; }
+  .approval__actions { @apply flex gap-3; }
+  .machines { @apply m-0 grid list-none gap-3 p-0; }
+  .machine { @apply flex flex-wrap items-baseline gap-4 rounded-m border border-line bg-surface-1 px-4 py-3; }
+  .start { @apply flex flex-col gap-3 rounded-m border border-line bg-surface-1 p-4; }
+  .start__actions { @apply flex gap-3; }
+  .messages { @apply m-0 grid list-none gap-2 p-0; }
+  .messages li { @apply break-words; }
+  .focus { @apply grid gap-4; }
+}
+
+@keyframes breathe { 50% { opacity: 0.45; } }
+@keyframes attend { 50% { transform: scale(1.25); } }
+@media (prefers-reduced-motion: reduce) { .state__mark { animation: none !important; } }
+
+/* xterm paints its scroll area black by default; let the pane's own (themed) background show. */
+.xterm .xterm-viewport { background-color: transparent !important; }

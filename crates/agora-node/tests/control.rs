@@ -993,3 +993,42 @@ fn agent_kinds_lists_what_this_node_can_start() {
     assert!(!by.contains_key("broken"), "invalid manifests are omitted");
     drop(n);
 }
+
+#[test]
+fn uncommitted_changes_in_an_agents_workspace_are_reported() {
+    use v1::event::Body;
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
+        return;
+    }
+    let e = env("gitwatch");
+    let n = node(&e, NodeLimits::default());
+    let mut c = Client::connect(n.socket().unwrap()).unwrap();
+    let s = started(ok(c.call(start_cmd("shell"))));
+    std::fs::write(Path::new(&s.worktree_id).join("new.txt"), "x").unwrap();
+    std::fs::write(Path::new(&s.worktree_id).join("other.txt"), "y").unwrap();
+
+    // The watcher checks every few seconds; the latest report for this workspace must show both new files.
+    let end = Instant::now() + Duration::from_secs(20);
+    loop {
+        let latest = n
+            .events
+            .events_after(0)
+            .into_iter()
+            .filter_map(|ev| match ev.body {
+                Some(Body::GitStatusChanged(g)) if g.worktree_id == s.worktree_id => Some(g),
+                _ => None,
+            })
+            .next_back();
+        if latest.as_ref().is_some_and(|g| g.files_changed == 2) {
+            break;
+        }
+        assert!(
+            Instant::now() < end,
+            "no report of the two changed files: {latest:?}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    ok(c.call(Cmd::AgentStop(v1::AgentStop {
+        agent_id: s.agent_id,
+    })));
+}

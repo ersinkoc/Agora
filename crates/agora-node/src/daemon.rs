@@ -25,6 +25,8 @@ use crate::supervisor::{
 use crate::terminal::TerminalOptions;
 
 const TICK: Duration = Duration::from_millis(100);
+/// How often each agent's workspace is checked for uncommitted changes.
+const GIT_POLL: Duration = Duration::from_secs(5);
 /// Default size cap of the on-disk event buffer.
 pub const EVENT_BUFFER_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -228,6 +230,16 @@ impl EventSink {
         }));
     }
 
+    pub fn git_status_changed(&self, worktree_id: &str, st: &git::GitStatus) {
+        self.record(Body::GitStatusChanged(v1::GitStatusChanged {
+            worktree_id: worktree_id.to_string(),
+            files_changed: st.files_changed,
+            insertions: st.insertions,
+            deletions: st.deletions,
+            head_commit: st.head_commit.clone(),
+        }));
+    }
+
     pub fn checkout_discovered(&self, node: &str, project: &str, root: &Path) {
         self.record(Body::CheckoutDiscovered(v1::CheckoutDiscovered {
             checkout_id: checkout_id(root),
@@ -400,6 +412,7 @@ pub struct Node {
     server: Option<ControlServer>,
     stop: Arc<AtomicBool>,
     ticker: Option<JoinHandle<()>>,
+    git_watch: Option<JoinHandle<()>>,
     pub supervisor: Arc<Mutex<Supervisor>>,
     pub events: Arc<EventSink>,
     /// Per-agent mesh endpoints (messages, tasks, leases between the agents on this node).
@@ -604,10 +617,21 @@ impl Node {
                     }
                 })?
         };
+        let git_watch = {
+            let (sup, ev, stop) = (
+                Arc::clone(&supervisor),
+                Arc::clone(&events),
+                Arc::clone(&stop),
+            );
+            std::thread::Builder::new()
+                .name("agora-git".into())
+                .spawn(move || watch_git(&sup, &ev, &stop))?
+        };
         Ok(Self {
             server: Some(server),
             stop,
             ticker: Some(ticker),
+            git_watch: Some(git_watch),
             supervisor,
             events,
             mesh,
@@ -622,11 +646,48 @@ impl Node {
     }
 }
 
+/// Reports each agent workspace's uncommitted changes whenever they change (`GitStatusChanged`), checked every
+/// [`GIT_POLL`] on its own thread so slow git calls never delay the supervisor's ticks. The first check of a
+/// workspace is reported too, so a client that connects later sees the current state from the event log.
+fn watch_git(sup: &Mutex<Supervisor>, ev: &EventSink, stop: &AtomicBool) {
+    let mut last: std::collections::HashMap<PathBuf, (u32, u32, u32, String)> =
+        std::collections::HashMap::new();
+    while !stop.load(Ordering::Acquire) {
+        let views = sup.lock().unwrap_or_else(|e| e.into_inner()).list();
+        last.retain(|path, _| views.iter().any(|v| &v.worktree == path));
+        for v in views.iter().filter(|v| v.running) {
+            if stop.load(Ordering::Acquire) {
+                return;
+            }
+            let Ok(st) = git::status(&v.worktree) else {
+                continue;
+            };
+            let now = (
+                st.files_changed,
+                st.insertions,
+                st.deletions,
+                st.head_commit.clone(),
+            );
+            if last.get(&v.worktree) != Some(&now) {
+                last.insert(v.worktree.clone(), now);
+                ev.git_status_changed(&v.worktree.to_string_lossy(), &st);
+            }
+        }
+        let until = Instant::now() + GIT_POLL;
+        while Instant::now() < until && !stop.load(Ordering::Acquire) {
+            std::thread::sleep(TICK);
+        }
+    }
+}
+
 impl Drop for Node {
     fn drop(&mut self) {
         drop(self.server.take());
         self.stop.store(true, Ordering::Release);
         if let Some(t) = self.ticker.take() {
+            let _ = t.join();
+        }
+        if let Some(t) = self.git_watch.take() {
             let _ = t.join();
         }
         self.events.node_offline(&self.node_id);
