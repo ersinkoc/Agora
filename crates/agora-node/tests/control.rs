@@ -167,13 +167,13 @@ fn errors_travel_as_codes_with_params() {
     );
     // Commands this node does not implement yet say so.
     let info = c
-        .call(Cmd::FilesList(v1::FilesList::default()))
+        .call(Cmd::WorktreeRemove(v1::WorktreeRemove::default()))
         .unwrap()
         .unwrap_err();
     assert_eq!(info.code, "protocol.capability_missing");
     assert_eq!(
         info.params["capability"].value,
-        Some(v1::param_value::Value::Str("files.list".into()))
+        Some(v1::param_value::Value::Str("worktree.remove".into()))
     );
 }
 
