@@ -1,0 +1,13 @@
+{
+  "agents": [
+    {
+      "agentId": "x",
+      "model": "x",
+      "inputTokens": "1",
+      "outputTokens": "1",
+      "microUsd": "1"
+    }
+  ],
+  "totalMicroUsd": "1",
+  "pricesAtMs": "1"
+}

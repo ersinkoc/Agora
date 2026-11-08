@@ -135,6 +135,10 @@ out). The relying party id is the request's `Host` without the port and the orig
 last 5 minutes; user presence and verification are required; a signature counter that counts must rise. The hub stores public keys only
 (schema v4, table `passkeys`, at most 32).
 
+`usage.report` (ADR-0033): a client command the hub answers itself (no `target_node`; one that names a node is refused). It returns
+`UsageReportResult`: per agent (`<node>/<agent>`) the model, tokens and an optional `micro_usd` estimate (absent when no price is known),
+the sum, and when the prices were refreshed (0 = the table bundled with the release).
+
 Initial event families:
 
 | Family | Examples |

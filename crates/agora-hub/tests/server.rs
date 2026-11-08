@@ -942,3 +942,82 @@ async fn a_passkey_added_by_a_signed_in_owner_signs_in_later_without_a_code() {
         401
     );
 }
+
+#[tokio::test]
+async fn a_client_asks_the_hub_for_usage_and_gets_tokens_with_a_price_only_where_one_is_known() {
+    let st = state(None);
+    let addr = start(Arc::clone(&st)).await;
+    let (mut node, _t) = node_conn(&st, "n1").await;
+    handshake(&mut node).await;
+    let usage = |agent: &str, model: &str| {
+        Body::AgentUsageReported(v1::AgentUsageReported {
+            agent_id: agent.into(),
+            model: model.into(),
+            input_tokens: 1_000_000,
+            output_tokens: 1_000_000,
+        })
+    };
+    let bodies = vec![
+        online("n1"),
+        agent("a1"),
+        agent("a2"),
+        usage("a1", "anthropic/claude-haiku-4-5"),
+        usage("a2", "no-such-model"),
+    ];
+    for (i, b) in bodies.into_iter().enumerate() {
+        let seq = i as u64 + 1;
+        node.send(&f(STREAM_EVENTS, kinds::EVENT, event("n1", seq, b)))
+            .await
+            .unwrap();
+        next_ack(&mut node).await;
+    }
+    let mut client = dial(addr, Some("good-token")).await;
+    client
+        .send(&f(
+            STREAM_EVENTS,
+            kinds::SUBSCRIBE,
+            v1::Subscribe::default().encode_to_vec(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(recv(&mut client).await.kind, kinds::SNAPSHOT);
+
+    let ask = |target: &str| {
+        let req = v1::CommandRequest {
+            request_id: "u".into(),
+            idempotency_key: String::new(),
+            target_node: target.into(),
+            command: Some(command_request::Command::UsageReport(v1::UsageReport {})),
+        };
+        f(STREAM_COMMANDS, 0, req.encode_to_vec())
+    };
+    client.send(&ask("")).await.unwrap();
+    let r = response(&mut client).await;
+    let Some(command_response::Result::Ok(v1::CommandOk {
+        result: Some(command_ok::Result::UsageReport(report)),
+    })) = r.result
+    else {
+        panic!("not a usage report: {r:?}");
+    };
+    assert_eq!(report.agents.len(), 2);
+    let priced = report
+        .agents
+        .iter()
+        .find(|a| a.agent_id == "n1/a1")
+        .unwrap();
+    let unpriced = report
+        .agents
+        .iter()
+        .find(|a| a.agent_id == "n1/a2")
+        .unwrap();
+    assert!(priced.micro_usd.is_some_and(|c| c > 0), "{priced:?}");
+    assert_eq!(unpriced.micro_usd, None, "no price, no guess");
+    assert_eq!(report.total_micro_usd, priced.micro_usd.unwrap());
+
+    // A usage report that names a node is not a routed command.
+    client.send(&ask("n1")).await.unwrap();
+    assert_eq!(
+        err_code(&response(&mut client).await),
+        "protocol.invalid_message"
+    );
+}

@@ -55,6 +55,8 @@ pub struct AgentView {
     pub exit_code: Option<i32>,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    /// The model the agent last reported; empty until it reports one.
+    pub model: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -178,6 +180,7 @@ impl View {
                         exit_code: None,
                         input_tokens: 0,
                         output_tokens: 0,
+                        model: String::new(),
                     },
                 );
             }
@@ -196,6 +199,9 @@ impl View {
                 if let Some(a) = self.agents.get_mut(&q(&e.agent_id)) {
                     a.input_tokens = a.input_tokens.saturating_add(e.input_tokens);
                     a.output_tokens = a.output_tokens.saturating_add(e.output_tokens);
+                    if !e.model.is_empty() {
+                        a.model.clone_from(&e.model);
+                    }
                 }
             }
             Body::AgentExited(e) => {

@@ -15,7 +15,7 @@ describe('i18n', () => {
       for (const m of readFileSync(f, 'utf8').matchAll(/\bt\('([a-z0-9-]+)'/g)) keys.add(m[1] as string);
     }
     expect(keys.size).toBeGreaterThan(5);
-    for (const k of keys) expect(t(k, { machine: 'm', name: 'n', count: 1 }), k).not.toBe(k);
+    for (const k of keys) expect(t(k, { machine: 'm', name: 'n', count: 1, amount: '$1', date: 'd' }), k).not.toBe(k);
   });
   it('has the dynamic state and theme keys', () => {
     for (const s of ['working', 'needs-you', 'finished', 'idle', 'unknown']) expect(t(`state-${s}`)).not.toBe(`state-${s}`);

@@ -2,6 +2,6 @@
 
 | Component | Use | License | Source |
 | --- | --- | --- | --- |
-| models.dev | Model metadata and per-token prices (ADR-0021) | MIT | https://github.com/sst/models.dev |
+| models.dev | Model metadata and per-token prices (ADR-0021); a trimmed snapshot is embedded in the hub (`crates/agora-hub/data/prices.json`) | MIT | https://github.com/sst/models.dev |
 
 Rust and JavaScript dependencies are tracked by their package managers and checked by `cargo deny`.

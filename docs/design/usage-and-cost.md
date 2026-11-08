@@ -70,7 +70,12 @@ Quota facts are researched continuously, not decided once (backlog `research.md`
 
 ## Implementation status
 `agora-hub::usage`: models.dev catalog parsing, overrides, exact micro-USD estimates, reported-cost-wins, totals that keep
-reported, estimated and unpriced apart. Not yet: fetching the catalog, the bundled snapshot, quota profiles, the views.
+reported, estimated and unpriced apart. ADR-0033 is built: the hub embeds a trimmed models.dev snapshot (`crates/agora-hub/data/prices.json`, rebuilt by
+`scripts/update-prices.sh`), `agora hub prices update` fetches the live catalog on request into `<hub dir>/prices-catalog.json`, and
+`<hub dir>/prices.json` overrides (USD per million tokens) sit on top. A bare model id (what agents report) takes its first-party
+provider's price, or the only provider that lists it; several resellers with different prices give no estimate. The
+`usage.report` command returns tokens and the estimate per agent; the window shows it in Focus and per machine, always as an
+estimate with the price date. Not yet: quota profiles, per-project and per-day totals, budget alerts, agent-reported costs.
 
 ## Views
 

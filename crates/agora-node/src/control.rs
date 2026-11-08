@@ -391,6 +391,7 @@ fn command_name(c: &Cmd) -> &'static str {
         Cmd::MeshPost(_) => "mesh.post",
         Cmd::AgentList(_) => "agent.list",
         Cmd::AgentKinds(_) => "agent.kinds",
+        Cmd::UsageReport(_) => "usage.report",
         Cmd::Enroll(_) => "enroll",
         Cmd::TaskUpdate(_) => "task.update",
         Cmd::NodePolicyGet(_) => "node.policy.get",

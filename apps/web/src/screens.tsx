@@ -5,6 +5,7 @@ import { StateBadge } from './components/StateBadge';
 import type { ApprovalModel, MachineModel } from './net/view';
 import type { ReactNode } from 'react';
 import type { Device } from './net/approval';
+import { money, type UsageSummary } from './net/usage';
 import { demoAgents } from './fixtures';
 import { demoSource, type TerminalSource } from './terminal/source';
 import { Suspense, lazy, useMemo, useState } from 'react';
@@ -87,8 +88,9 @@ export function Gallery() {
 }
 
 // Focus: one agent, full size. The terminal arrives with the hub connection; until then a placeholder.
-export function Focus({ agent, source: live, onBack }: {
+export function Focus({ agent, source: live, costMicroUsd, onBack }: {
   agent: AgentTileModel | undefined;
+  costMicroUsd?: number;
   source?: TerminalSource;
   onBack: () => void;
 }) {
@@ -114,7 +116,7 @@ export function Focus({ agent, source: live, onBack }: {
       <span className="muted">
         {t('agent-on-machine', { machine: agent.machine })} · {t('agent-workspace', { name: agent.workspace })}
       </span>
-      {agent.tokens ? <span className="muted">{t('agent-tokens', { count: agent.tokens })}</span> : null}
+      {agent.tokens ? <span className="muted">{t('agent-tokens', { count: agent.tokens })}{costMicroUsd !== undefined ? ` · ${t('agent-cost', { amount: money(costMicroUsd) })}` : ''}</span> : null}
       <h2>{t('focus-terminal')}</h2>
       <Suspense fallback={<div className="terminal" aria-busy="true" />}>
         <TerminalView source={source} label={t('focus-terminal')} />
@@ -170,7 +172,7 @@ export function SignInPage({ onSubmit, onPasskey, notice }: { onSubmit: (code: s
   );
 }
 
-export function MachinesPage({ machines, onBack }: { machines: readonly MachineModel[]; onBack: () => void }) {
+export function MachinesPage({ machines, usage, onBack }: { machines: readonly MachineModel[]; usage?: UsageSummary; onBack: () => void }) {
   return (
     <main className="page">
       <button type="button" className="link" onClick={onBack}>{t('focus-back')}</button>
@@ -185,9 +187,15 @@ export function MachinesPage({ machines, onBack }: { machines: readonly MachineM
               <span className="muted">{m.os}</span>
               <span>{t(m.online ? 'machine-online' : 'machine-offline')}</span>
               <span className="muted">{t('machine-agents', { count: m.agentsRunning })}</span>
+              {usage?.perNode.has(m.id) ? <span className="muted">{t('machine-cost', { amount: money(usage.perNode.get(m.id) ?? 0) })}</span> : null}
             </li>
           ))}
         </ul>
+      )}
+      {usage && usage.totalMicroUsd > 0 && (
+        <p className="muted">
+          {t('usage-total', { amount: money(usage.totalMicroUsd) })} · {usage.pricesAtMs ? t('usage-prices-date', { date: new Date(usage.pricesAtMs).toLocaleDateString() }) : t('usage-prices-bundled')}
+        </p>
       )}
     </main>
   );

@@ -56,6 +56,16 @@ impl Cost {
     }
 }
 
+/// Providers whose own price is taken for a bare model id several providers list.
+const FIRST_PARTY: [&str; 6] = [
+    "anthropic",
+    "openai",
+    "google",
+    "mistral",
+    "deepseek",
+    "xai",
+];
+
 #[derive(Debug, Default, Clone)]
 pub struct Catalog {
     prices: BTreeMap<String, Price>,
@@ -111,11 +121,73 @@ impl Catalog {
         self.overrides.insert(model.to_string(), price);
     }
 
+    /// The price of `model`: an override, then the catalog by the id as given (`provider/model`), then a bare model id
+    /// (what agents usually report) by its first-party provider, or by the only provider that lists it. A bare id that
+    /// several providers list at their own prices has no price rather than a guess.
     pub fn price(&self, model: &str) -> Option<Price> {
-        self.overrides
-            .get(model)
-            .or_else(|| self.prices.get(model))
-            .copied()
+        if let Some(p) = self.overrides.get(model).or_else(|| self.prices.get(model)) {
+            return Some(*p);
+        }
+        if model.is_empty() || model.contains('/') {
+            return None;
+        }
+        let suffix = format!("/{model}");
+        let found: Vec<(&str, &Price)> = self
+            .prices
+            .iter()
+            .filter_map(|(k, p)| k.strip_suffix(suffix.as_str()).map(|prov| (prov, p)))
+            .collect();
+        if let [(_, p)] = found.as_slice() {
+            return Some(**p);
+        }
+        FIRST_PARTY
+            .iter()
+            .find_map(|f| found.iter().find(|(prov, _)| prov == f).map(|(_, p)| **p))
+    }
+
+    /// Reads the hub owner's override file: `{ "<model>": { "input": USD, "output": USD, "cache_read": USD,
+    /// "cache_write": USD } }`, USD per million tokens. Entries without an input and output price are skipped; the
+    /// count of skipped entries is returned.
+    pub fn load_overrides(&mut self, json: &str) -> Result<usize, serde_json::Error> {
+        let root: Value = serde_json::from_str(json)?;
+        let mut skipped = 0;
+        for (model, p) in root.as_object().into_iter().flatten() {
+            match (
+                p.get("input").and_then(micro),
+                p.get("output").and_then(micro),
+            ) {
+                (Some(input), Some(output)) => self.set_override(
+                    model,
+                    Price {
+                        input,
+                        output,
+                        cache_read: p.get("cache_read").and_then(micro).unwrap_or(0),
+                        cache_write: p.get("cache_write").and_then(micro).unwrap_or(0),
+                    },
+                ),
+                _ => skipped += 1,
+            }
+        }
+        Ok(skipped)
+    }
+
+    /// How many models have a catalog price (overrides not counted).
+    pub fn len(&self) -> usize {
+        self.prices.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.prices.is_empty()
+    }
+
+    /// The table that ships with the release (`scripts/update-prices.sh`), parsed once.
+    pub fn bundled() -> std::sync::Arc<Catalog> {
+        static BUNDLED: std::sync::OnceLock<std::sync::Arc<Catalog>> = std::sync::OnceLock::new();
+        std::sync::Arc::clone(BUNDLED.get_or_init(|| {
+            std::sync::Arc::new(
+                Catalog::from_models_dev(include_str!("../data/prices.json")).unwrap_or_default(),
+            )
+        }))
     }
 
     /// Cost of `usage` on `model`: the reported value if there is one, else an estimate, else `None`.
@@ -306,5 +378,58 @@ mod tests {
         t.add(&big, Some(Cost::Estimated(5)));
         assert_eq!(t.usage.input_tokens, u64::MAX);
         assert_eq!(t.estimated_micro_usd, u64::MAX);
+    }
+
+    #[test]
+    fn a_bare_model_id_uses_its_first_party_price_or_its_only_provider_and_never_a_guess() {
+        let c = Catalog::from_models_dev(
+            r#"{"anthropic":{"models":{"claude-x":{"cost":{"input":3,"output":15}}}},
+                "reseller":{"models":{"claude-x":{"cost":{"input":4,"output":20}},"solo":{"cost":{"input":1,"output":2}},"dup":{"cost":{"input":1,"output":2}}}},
+                "other":{"models":{"dup":{"cost":{"input":9,"output":9}}}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            c.price("claude-x").unwrap().input,
+            3_000_000,
+            "first party wins"
+        );
+        assert_eq!(
+            c.price("reseller/claude-x").unwrap().input,
+            4_000_000,
+            "as given"
+        );
+        assert_eq!(
+            c.price("solo").unwrap().output,
+            2_000_000,
+            "the only provider"
+        );
+        assert_eq!(c.price("dup"), None, "two resellers, two prices: no guess");
+        assert_eq!(c.price(""), None);
+    }
+
+    #[test]
+    fn the_owners_override_file_beats_the_catalog_and_bad_entries_are_counted() {
+        let mut c =
+            Catalog::from_models_dev(r#"{"p":{"models":{"m":{"cost":{"input":1,"output":1}}}}}"#)
+                .unwrap();
+        let skipped = c
+            .load_overrides(
+                r#"{"p/m":{"input":2.5,"output":10,"cache_read":0.25},"bad":{"input":1}}"#,
+            )
+            .unwrap();
+        assert_eq!(skipped, 1);
+        let p = c.price("p/m").unwrap();
+        assert_eq!(
+            (p.input, p.output, p.cache_read),
+            (2_500_000, 10_000_000, 250_000)
+        );
+        assert!(c.load_overrides("not json").is_err());
+    }
+
+    #[test]
+    fn the_bundled_table_prices_real_models() {
+        assert!(Catalog::bundled()
+            .price("anthropic/claude-haiku-4-5")
+            .is_some());
     }
 }

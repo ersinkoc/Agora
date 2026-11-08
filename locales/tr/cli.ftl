@@ -14,6 +14,7 @@ cli-usage =
       agora hub code [--hub-dir DIR]
       agora hub login [--hub-dir DİZİN]
       agora hub notify [--ntfy URL | --webhook URL | --test] [--hub-dir DIR]
+      agora hub prices update [--url URL] [--hub-dir DIR]
       agora hub backup [DOSYA] [--keep N] [--hub-dir DİZİN]
       agora hub restore DOSYA [--hub-dir DİZİN]
       agora node enroll --hub URL --ca FILE --code CODE --id NAME
@@ -78,3 +79,6 @@ cli-hub-notify-bad-url = Bu bir http:// ya da https:// adresi değil.
 cli-hub-notify-sent = { $target } hedefine deneme mesajı gönderildi.
 cli-hub-notify-refused = { $target } { $status } durumuyla yanıt verdi.
 cli-hub-notify-unreachable = { $target } hedefine ulaşılamadı: { $reason }
+cli-hub-prices-updated = Fiyat tablosu güncellendi: { $count } model.
+cli-hub-prices-failed = Fiyat tablosu güncellenemedi: { $reason }
+cli-hub-prices-skipped = prices.json içindeki { $count } kayıt anlaşılamadı ve yok sayılıyor. Her kayıtta giriş ve çıkış fiyatı (milyon token başına USD) olmalı.

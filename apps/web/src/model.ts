@@ -11,7 +11,7 @@ export interface AgentTileModel {
   state: UiState;
   preview: string; // last lines of the terminal, from a cell snapshot
   since?: number; // when the current state began (ms since epoch); orders the attention flow
-  tokens?: number; // tokens used so far (input + output); cost needs the price catalog, which the hub does not send yet
+  tokens?: number; // tokens used so far (input + output); the estimated cost comes separately from the hub (`usage.report`, ADR-0033)
   reportedBy?: 'agent' | 'screen'; // where the state came from, shown by "why?"
 }
 

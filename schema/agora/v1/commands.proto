@@ -40,6 +40,7 @@ message CommandRequest {
     AgentList agent_list = 15;
     // ADR-0030
     AgentKinds agent_kinds = 16;
+    UsageReport usage_report = 17;
     // ADR-0027: sent on a TLS connection that has no client certificate yet; accepts nothing else.
     EnrollRequest enroll = 80;
   }
@@ -69,6 +70,7 @@ message CommandOk {
     AgentListResult agent_list = 11;
     EnrollResponse enroll = 12;
     AgentKindsResult agent_kinds = 13;
+    UsageReportResult usage_report = 14;
   }
 }
 
@@ -286,4 +288,26 @@ message AgentKind {
 
 message AgentKindsResult {
   repeated AgentKind kinds = 1;
+}
+
+// ADR-0033. Answered by the hub itself from its view and price table; never routed to a node.
+message UsageReport {}
+
+message AgentUsage {
+  // The hub-wide key <node>/<agent>.
+  string agent_id = 1;
+  // As the agent reported it; empty when it never did.
+  string model = 2;
+  uint64 input_tokens = 3;
+  uint64 output_tokens = 4;
+  // Estimated cost in micro-USD (1 USD = 1_000_000). Absent when no price is known: never a guess.
+  optional uint64 micro_usd = 5;
+}
+
+message UsageReportResult {
+  repeated AgentUsage agents = 1;
+  // Sum of the estimates above; agents without a price add nothing.
+  uint64 total_micro_usd = 2;
+  // When the price table was refreshed, ms since the epoch; 0 for the table bundled with the release.
+  uint64 prices_at_ms = 3;
 }
