@@ -23,8 +23,11 @@ export interface AgentV {
 export interface CheckoutV { nodeId: string; projectId: string; path: string }
 export interface ApprovalV { agentId: string; action: string; detail: string; expiresAtMs: number }
 
+export interface MessageV { from: string; to: string; body: string; atMs: number }
+
 export interface View {
   pos: number;
+  messages: MessageV[]; // the latest agent-to-agent messages, oldest first
   nodes: Map<string, NodeV>;
   checkouts: Map<string, CheckoutV>;
   worktrees: Map<string, WorktreeV>;
@@ -32,8 +35,10 @@ export interface View {
   approvals: Map<string, ApprovalV>;
 }
 
+const MAX_MESSAGES = 50;
+
 export function emptyView(): View {
-  return { pos: 0, nodes: new Map(), checkouts: new Map(), worktrees: new Map(), agents: new Map(), approvals: new Map() };
+  return { pos: 0, messages: [], nodes: new Map(), checkouts: new Map(), worktrees: new Map(), agents: new Map(), approvals: new Map() };
 }
 
 export function fromSnapshot(s: agora.v1.Snapshot.$Properties): View {
@@ -148,8 +153,15 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
     case 'approvalResolved':
       v.approvals.delete(q(e.approvalResolved.approvalId));
       break;
+    case 'messagePosted': {
+      const b = e.messagePosted;
+      const to = String(b.to ?? '');
+      v.messages.push({ from: q(b.fromAgentId), to: to.includes('/') || to.startsWith('#') ? to : q(to), body: b.body ?? '', atMs: at });
+      if (v.messages.length > MAX_MESSAGES) v.messages.shift();
+      break;
+    }
     default:
-      break; // terminals, usage, mesh and files do not change what the fleet screen shows
+      break; // terminals, usage, tasks and files do not change what the fleet screen shows
   }
 }
 
@@ -248,4 +260,17 @@ export function projectChoices(v: View): ProjectChoice[] {
     .filter((c) => v.nodes.get(c.nodeId)?.online)
     .map((c) => ({ node: c.nodeId, projectId: c.projectId, label: `${v.nodes.get(c.nodeId)?.hostname || c.nodeId} · ${lastSegment(c.path) || c.projectId}` }))
     .sort((a, b) => a.label.localeCompare(b.label));
+}
+
+export interface MessageModel { from: string; to: string; body: string; atMs: number; crossMachine: boolean }
+
+// The newest messages first, with agent names instead of ids. A message between two machines says so.
+export function recentMessages(v: View, limit = 5): MessageModel[] {
+  const names = new Map(tiles(v).map((t) => [t.id, t.name]));
+  const label = (id: string) => names.get(id) ?? id;
+  const machine = (id: string) => id.split('/')[0];
+  return v.messages.slice(-limit).reverse().map((m) => ({
+    from: label(m.from), to: label(m.to), body: m.body, atMs: m.atMs,
+    crossMachine: m.to.includes('/') && machine(m.from) !== machine(m.to),
+  }));
 }
