@@ -21,3 +21,7 @@ what needs you, uncommitted changes, agent messages and spend on the right.
 ![](console-dark.png)
 ![](console-light.png)
 ![](console-phone-dark.png)
+
+Command palette (Ctrl+K), on Radix Dialog:
+
+![](palette-dark.png)
