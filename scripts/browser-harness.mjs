@@ -54,7 +54,7 @@ export async function startStack({ viewport = { width: 1440, height: 900 } } = {
       await page.waitForTimeout(2500);
       await page.goto('https://localhost:7443/#/');
     };
-    return { page, run, start, errors, close };
+    return { page, run, start, errors, close, env, bin };
   } catch (e) {
     await close();
     throw e;
