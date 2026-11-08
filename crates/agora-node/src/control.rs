@@ -399,8 +399,40 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                 result: Some(Ok_::GitDiff(v1::GitDiffResult { diff })),
             })
         }
+        Cmd::FilesList(f) => {
+            let files = open_files(ctx, &f.worktree_id)?;
+            let entries = files
+                .list(&f.path)
+                .map_err(|e| e.to_protocol())?
+                .into_iter()
+                .filter(|e| e.name != ".git") // git's own directory (a file in a linked worktree) is not project content
+                .map(|e| v1::FileEntry {
+                    name: e.name,
+                    is_dir: e.is_dir,
+                    size_bytes: e.size,
+                })
+                .collect();
+            Ok(v1::CommandOk {
+                result: Some(Ok_::FilesList(v1::FilesListResult { entries })),
+            })
+        }
+        Cmd::FilesRead(f) => {
+            let files = open_files(ctx, &f.worktree_id)?;
+            let data = files.read(&f.path).map_err(|e| e.to_protocol())?;
+            Ok(v1::CommandOk {
+                result: Some(Ok_::FilesRead(v1::FilesReadResult { data })),
+            })
+        }
         other => Err(capability_missing(command_name(other))),
     }
+}
+
+/// Largest file `files.read` returns.
+const MAX_READ_BYTES: u64 = 512 * 1024;
+
+fn open_files(ctx: &ControlContext, worktree_id: &str) -> Result<crate::files::Files, Error> {
+    let wt = agent_worktree(ctx, worktree_id)?;
+    crate::files::Files::open(&wt, MAX_READ_BYTES).map_err(|e| e.to_protocol())
 }
 
 /// Largest diff one answer carries; a bigger one is cut (the file view is for reading, not for patching).
