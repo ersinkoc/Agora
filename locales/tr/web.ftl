@@ -74,3 +74,17 @@ machine-agents =
     }
 palette-go-machines = Makinelerimi göster
 agent-tokens = { $count } token kullanıldı
+
+start-title = Ajan başlat
+start-where = Nerede
+start-which = Hangi ajan
+start-loading = Makineye soruluyor…
+start-kinds-failed = Makine yanıt vermedi. Yeniden deneyin.
+start-no-kinds = Bu makinede henüz ajan tanımlı değil.
+start-no-projects = Bağlı hiçbir makinede proje yok. Birinde "agora node run --project YOL" çalıştırın.
+start-not-installed = kurulu değil
+start-go = Başlat
+start-cancel = Vazgeç
+start-kind-unknown = Bu makine o ajanı tanımıyor.
+start-limit = Makine sınırında. Bir ajanı durdurup yeniden deneyin.
+start-failed = Ajan başlamadı. Yeniden deneyin.

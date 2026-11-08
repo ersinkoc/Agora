@@ -5,7 +5,8 @@ import { t } from './i18n';
 import { nextNeedingMe } from './model';
 import { connectLive, type Live, type LinkState } from './net/live';
 import type { TerminalSource } from './terminal/source';
-import { approvalList, machines, machinesOnline, tiles, type ApprovalModel, type View } from './net/view';
+import { StartAgent, type KindChoice } from './components/StartAgent';
+import { approvalList, projectChoices, machines, machinesOnline, tiles, type ApprovalModel, type View } from './net/view';
 import { indexedDbStore, signApproval, thisDevice, type Device } from './net/approval';
 import { forgetToken, hubConnection, readCode, signIn } from './net/session';
 import { DevicePage, Focus, Gallery, Home, MachinesPage, SignInPage } from './screens';
@@ -44,6 +45,23 @@ export function App() {
   // This browser's own key: what the node checks an approval against (ADR-0028).
   const [device, setDevice] = useState<Device | undefined>();
   const [notice, setNotice] = useState<string | undefined>();
+  const [starting, setStarting] = useState(false);
+  const loadKinds = useCallback(async (node: string): Promise<KindChoice[]> => {
+    const ok = await api!.command(node, { agentKinds: {} });
+    return (ok.agentKinds?.kinds ?? []).map((k) => ({ kind: k.kind ?? '', name: k.displayName || (k.kind ?? ''), installed: !!k.installed }));
+  }, [api]);
+  const startAgent = useCallback(async (node: string, projectId: string, kind: string): Promise<string | undefined> => {
+    try {
+      const ok = await api!.command(node, { agentStart: { projectId, kind } });
+      const id = ok.agentStart?.agentId;
+      setStarting(false);
+      if (id) window.location.hash = `#/agent/${encodeURIComponent(`${node}/${id}`)}`;
+      return undefined;
+    } catch (e) {
+      const code = (e as { code?: string }).code;
+      return t(code === 'agent.kind_unknown' ? 'start-kind-unknown' : code === 'node.resource_limit' ? 'start-limit' : 'start-failed');
+    }
+  }, [api]);
   useEffect(() => {
     const store = indexedDbStore();
     if (store) void thisDevice(store).then(setDevice).catch(() => setDevice(undefined));
@@ -85,6 +103,7 @@ export function App() {
   const items: PaletteItem[] = useMemo(() => [
     { id: 'next', label: t('palette-next-attention'), run: next },
     { id: 'home', label: t('palette-go-home'), run: () => go('#/') },
+    ...(hub ? [{ id: 'start', label: t('action-start-agent'), run: () => { go('#/'); setStarting(true); } }] : []),
     { id: 'machines', label: t('palette-go-machines'), run: () => go('#/machines') },
     ...(hub ? [{ id: 'device', label: t('device-link'), run: () => go('#/device') }] : []),
     ...agents.map((a) => ({ id: `agent-${a.id}`, label: t('palette-open-agent', { name: a.name }), run: () => open(a.id) })),
@@ -109,7 +128,9 @@ export function App() {
     <>
       {hash === '#/gallery' ? <Gallery /> : hash === '#/machines' ? <MachinesPage machines={live ? machines(live) : []} onBack={() => go('#/')} /> : hash === '#/device' ? <DevicePage device={device} onBack={() => go('#/')} /> : current !== undefined
         ? <Focus agent={agents.find((a) => a.id === current)} source={terminal} onBack={() => go('#/')} />
-        : <Home onOpen={open} agents={agents} machines={live ? machinesOnline(live) : undefined} link={hub ? link : 'live'} approvals={live ? approvalList(live) : []} onResolve={resolve} notice={notice} />}
+        : <Home onOpen={open} agents={agents} machines={live ? machinesOnline(live) : undefined} link={hub ? link : 'live'} approvals={live ? approvalList(live) : []} onResolve={resolve} notice={notice}
+          onStart={hub && api && live ? () => setStarting(true) : undefined}
+          start={starting && live ? <StartAgent projects={projectChoices(live)} loadKinds={loadKinds} onStart={startAgent} onClose={() => setStarting(false)} /> : undefined} />}
       {palette && <CommandPalette items={items} onClose={() => setPalette(false)} />}
     </>
   );

@@ -3,6 +3,7 @@ import { AttentionStrip } from './components/AttentionStrip';
 import { ApprovalCard } from './components/ApprovalCard';
 import { StateBadge } from './components/StateBadge';
 import type { ApprovalModel, MachineModel } from './net/view';
+import type { ReactNode } from 'react';
 import type { Device } from './net/approval';
 import { demoAgents } from './fixtures';
 import { demoSource, type TerminalSource } from './terminal/source';
@@ -13,7 +14,7 @@ const TerminalView = lazy(() => import('./terminal/TerminalView').then((m) => ({
 import { t } from './i18n';
 import { type AgentTileModel, type UiState, needsAttention, sortFleet } from './model';
 
-export function Home({ onOpen, agents = demoAgents, machines, link = 'live', approvals = [], onResolve, notice }: {
+export function Home({ onOpen, agents = demoAgents, machines, link = 'live', approvals = [], onResolve, notice, start, onStart }: {
   onOpen?: (id: string) => void;
   agents?: readonly AgentTileModel[];
   machines?: number;
@@ -21,6 +22,8 @@ export function Home({ onOpen, agents = demoAgents, machines, link = 'live', app
   approvals?: readonly ApprovalModel[];
   onResolve?: (a: ApprovalModel, approved: boolean) => void;
   notice?: string;
+  start?: ReactNode; // the start-an-agent panel, when open
+  onStart?: () => void;
 }) {
   const fleet = sortFleet(agents);
   const machineCount = machines ?? new Set(agents.map((a) => a.machine)).size;
@@ -48,7 +51,9 @@ export function Home({ onOpen, agents = demoAgents, machines, link = 'live', app
         <div className="fleet">{fleet.map((a) => <AgentTile key={a.id} agent={a} onOpen={onOpen} />)}</div>
       )}
       <p className="muted">{t('palette-hint')}</p>
-      <div><button type="button" className="button button--primary">{t('action-start-agent')}</button></div>
+      {start ?? (
+        <div><button type="button" className="button button--primary" disabled={!onStart} onClick={onStart}>{t('action-start-agent')}</button></div>
+      )}
     </main>
   );
 }
