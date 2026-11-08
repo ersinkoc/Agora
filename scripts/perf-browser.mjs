@@ -91,6 +91,22 @@ try {
   });
   const good = switches.filter((x) => x >= 0);
   console.log(`pick one of 20 agents -> its terminal shows the prompt (${good.length}/${switches.length}): p50 ${pct(good, 50).toFixed(0)} ms, p95 ${pct(good, 95).toFixed(0)} ms   [budget: snapshot <= 150 ms]`);
+  // Busy: every visible terminal floods at once while the other agents sit idle in the background.
+  await page.evaluate(() => {
+    window.__long = [];
+    new PerformanceObserver((l) => l.getEntries().forEach((e) => window.__long.push(e.duration))).observe({ entryTypes: ['longtask'] });
+  });
+  const areas = await page.locator('.xterm-helper-textarea').count();
+  const each = Math.max(1, Math.floor(megabytes / 2));
+  const tb = Date.now();
+  for (let i = 0; i < areas; i++) {
+    await page.locator('.xterm-helper-textarea').nth(i).focus();
+    await page.keyboard.type(`yes 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef | head -c ${each * 1_000_000}; echo BUSY-DONE\n`, { delay: 0 });
+  }
+  await page.waitForFunction((n) => [...document.querySelectorAll('.xterm-rows')].filter((r) => /BUSY-DONE/.test(r.innerText.split('\n').slice(2).join('\n'))).length >= n, areas, { timeout: 180000 }).catch(() => {});
+  const busySecs = (Date.now() - tb) / 1000;
+  const busyLong = await page.evaluate(() => window.__long);
+  console.log(`${areas} terminals flooding ${each} MB each at once (${areas * each} MB, ${(areas * each / busySecs).toFixed(1)} MB/s together): drained in ${busySecs.toFixed(1)} s, long main-thread tasks: ${busyLong.length}, longest ${busyLong.length ? Math.max(...busyLong).toFixed(0) : 0} ms   [budget: no task > 50 ms]`);
   const heap = await page.evaluate(() => (performance.memory ? performance.memory.usedJSHeapSize / 1e6 : -1));
   console.log(`page JS heap with 20 agents listed and ${await page.locator('main section').count()} terminals open: ${heap.toFixed(0)} MB`);
 } finally {
