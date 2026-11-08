@@ -33,3 +33,7 @@ What an agent changed (click "N files changed"):
 Files of a workspace (the Files button on a terminal):
 
 ![](files-dark.png)
+
+A chat agent (no terminal): send it a request; its permission request appears on the right and is answered with this browser's device key:
+
+![](approval-dark.png)

@@ -47,7 +47,7 @@ budgets above; CI runs it as an informational step and stores `footprint.json`. 
 | Node cold start ≤ 200 ms | 10 ms | start until the control socket answers a command, in-process |
 | Keystroke → echo, same machine ≤ 16 ms | 0.06–0.2 ms p95 | node portion only (no client, no network) |
 
-Not measured yet: hub budgets and client rendering (Phase 3), binary size with web assets, process start (exec) in
+Not measured yet: binary size with web assets, process start (exec) in
 the cold-start figure, macOS and Windows numbers (CI will show macOS-agnostic regressions only through tests).
 
 The first run found idle CPU at 8.7% and keystroke echo at 5 ms: every terminal actor woke 200 times per second to
@@ -112,3 +112,45 @@ the supervisor reads the exit status without copying anything.
   per-hop latency, frame time, and stream backlog.
 - **Profiles at phase exits:** CPU and memory profiles of node and hub under the capacity scenario are attached
   to the phase exit report.
+
+### Measured through the hub and a real browser (Phase 3)
+
+`node scripts/perf-browser.mjs` starts a hub and a node on one machine, signs in with headless Chromium (no GPU) and measures the
+whole path: browser, TLS WebSocket, hub, node, PTY and back, with xterm.js (DOM renderer) drawing the result.
+
+| Budget | Result | Note |
+| --- | --- | --- |
+| Keystroke → echo, same machine, ≤ 16 ms p95 | text on screen p50 2.6 ms, p95 14 ms; at the next frame p50 13 ms, p95 30 ms | 100 synthetic key presses 20 ms apart; the frame figure includes headless Chromium's software frame pacing |
+| WebSocket round trip for a key (send → echo frame received) | 1.7 ms p50, 2.2 ms p95 | in the page, before xterm |
+| Terminal snapshot after picking one of 20 agents, ≤ 150 ms | 50 ms p50, 50 ms p95 (12 of 12 picks) | from the click until the new pane's terminal shows its prompt, polled every frame |
+| Four visible terminals flooding at once, 16 more agents idle, no main-thread task > 50 ms | no long task at 18.6 MB/s together | 4 × 10 MB, drained in 2.1 s (long-task API in headless Chromium) |
+| Page memory | 15–19 MB JS heap | 20 agents listed, 4 terminals open |
+| One terminal flooding output, no main-thread task > 50 ms | no long task at 8–9 MB/s | 20 MB through `yes \| head -c`, drained in 2.4 s |
+
+The first run measured the echo at 80 ms (p95). Two causes, both in the hub and node, both invisible to unit tests:
+the hub's client loop drained terminal frames from nodes only on its 20 ms wake-up instead of when they arrived, and
+nobody had set `TCP_NODELAY`, so Nagle's algorithm and the peer's delayed ACK held small frames back for up to 40 ms
+whenever keystrokes came less than a round trip apart. The loop now wakes on a terminal frame, and the hub's accepted
+sockets and the node's uplink set `TCP_NODELAY`.
+
+Not measured: twenty terminals all open and busy at once (the wall shows four; the other agents' output is not relayed to the browser), and any machine over a real network.
+
+### xterm.js against a WebAssembly emulator (decides ADR-0017's open choice)
+
+`scripts/terminal-compare` feeds identical bytes to xterm.js (DOM renderer and the WebGL addon) and ghostty-web 0.4.0 (Ghostty's
+parser compiled to WebAssembly, xterm-compatible API) in the same headless Chromium (software GL), 20 MB per flood in 16 KB
+writes with up to 64 in flight:
+
+| Engine | Plain output | Colored output (SGR) | `write` of one key | Frame after it | Heap |
+| --- | --- | --- | --- | --- | --- |
+| xterm.js, DOM renderer (what the app ships) | 52 MB/s | 50 MB/s | 0.1 ms p50 / 0.2 p95 | 13 ms p95 13.5 | 14 MB |
+| xterm.js + WebGL addon | 32 MB/s | 25 MB/s | 0.1 / 0.2 ms | 13 / 13.6 ms | 18 MB |
+| ghostty-web (WebAssembly) | 37 MB/s | 32 MB/s | 13.6 / 14.1 ms | 30 / 30 ms | 13 MB |
+
+None produced a long main-thread task. **Decision: keep xterm.js with the DOM renderer.** It is the fastest of the three here, it meets
+every client budget measured above, and the WebAssembly emulator was slower on throughput and added a frame to each keystroke (it
+paints on the animation frame; xterm.js updates the DOM synchronously). The WebGL addon is slower under software GL; with a real
+GPU it may win on very large screens, which this headless setup cannot show, so it stays an option behind the `TerminalRenderer`
+interface rather than a default. Caveats: one machine, software rendering, ghostty-web is a young package, and the figures
+say nothing about text shaping (complex scripts), where Ghostty's parser is stronger; if that matters to users the swap is one
+file (`apps/web/src/terminal/renderer.ts`).
