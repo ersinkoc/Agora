@@ -127,3 +127,4 @@ files-too-large = Bu dosya okunamadı (çok büyük olabilir).
 files-failed = Bu klasör listelenemedi.
 filter-placeholder = Ajana, makineye veya projeye göre süz
 filter-none = Eşleşen yok.
+console-drag = Yerlerini değiştirmek için bu çubuğu başka bir terminalin üzerine sürükleyin
