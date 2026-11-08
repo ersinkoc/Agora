@@ -957,3 +957,39 @@ fn with_no_trusted_device_every_decision_is_refused() {
     }));
     assert_eq!(err_code(r), "approval.signature_invalid");
 }
+
+#[test]
+fn agent_kinds_lists_what_this_node_can_start() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return;
+    }
+    let e = env("kinds");
+    // A manifest whose program does not exist is listed as not installed.
+    std::fs::write(
+        e.dir.join("manifests/ghost.toml"),
+        "kind = \"ghost\"\ndisplay_name = \"Ghost\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"definitely-not-installed-xyz\"]\n",
+    )
+    .unwrap();
+    let n = node(&e, NodeLimits::default());
+    let mut c = Client::connect(&e.dir.join("c.sock")).unwrap();
+    let r = ok(c.call(Cmd::AgentKinds(v1::AgentKinds {})));
+    let Some(Ok_::AgentKinds(list)) = r.result else {
+        panic!("not an AgentKinds result");
+    };
+    let by: std::collections::BTreeMap<_, _> = list
+        .kinds
+        .iter()
+        .map(|k| {
+            (
+                k.kind.as_str(),
+                (k.display_name.as_str(), k.installed, k.level),
+            )
+        })
+        .collect();
+    assert_eq!(by["shell"].0, "Shell");
+    assert!(by["shell"].1, "sh is on PATH");
+    assert!(!by["ghost"].1);
+    assert_eq!(by["shell"].2, v1::IntegrationLevel::L1Manifest as i32);
+    assert!(!by.contains_key("broken"), "invalid manifests are omitted");
+    drop(n);
+}

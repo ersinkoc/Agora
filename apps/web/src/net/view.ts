@@ -20,18 +20,20 @@ export interface AgentV {
   sinceMs: number;
   tokens: number; // input + output so far
 }
+export interface CheckoutV { nodeId: string; projectId: string; path: string }
 export interface ApprovalV { agentId: string; action: string; detail: string; expiresAtMs: number }
 
 export interface View {
   pos: number;
   nodes: Map<string, NodeV>;
+  checkouts: Map<string, CheckoutV>;
   worktrees: Map<string, WorktreeV>;
   agents: Map<string, AgentV>;
   approvals: Map<string, ApprovalV>;
 }
 
 export function emptyView(): View {
-  return { pos: 0, nodes: new Map(), worktrees: new Map(), agents: new Map(), approvals: new Map() };
+  return { pos: 0, nodes: new Map(), checkouts: new Map(), worktrees: new Map(), agents: new Map(), approvals: new Map() };
 }
 
 export function fromSnapshot(s: agora.v1.Snapshot.$Properties): View {
@@ -42,6 +44,9 @@ export function fromSnapshot(s: agora.v1.Snapshot.$Properties): View {
       hostname: n.hostname ?? '', os: n.os ?? '', online: !!n.online, lastEventMs: num(n.lastEventMs),
       agentsRunning: n.agentsRunning ?? 0,
     });
+  }
+  for (const c of s.checkouts ?? []) {
+    v.checkouts.set(c.checkoutId ?? '', { nodeId: c.nodeId ?? '', projectId: c.projectId ?? '', path: c.path ?? '' });
   }
   for (const w of s.worktrees ?? []) {
     v.worktrees.set(w.worktreeId ?? '', {
@@ -83,6 +88,11 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
     case 'nodeOffline': {
       const n = v.nodes.get(e.nodeOffline.nodeId);
       if (n) n.online = false;
+      break;
+    }
+    case 'checkoutDiscovered': {
+      const b = e.checkoutDiscovered;
+      v.checkouts.set(q(b.checkoutId), { nodeId: b.nodeId ?? '', projectId: b.projectId ?? '', path: b.path ?? '' });
       break;
     }
     case 'nodeResources': {
@@ -220,4 +230,14 @@ export function machines(v: View): MachineModel[] {
   return [...v.nodes.entries()]
     .map(([id, n]) => ({ id, name: n.hostname || id, os: n.os, online: n.online, agentsRunning: n.agentsRunning, lastSeenMs: n.lastEventMs }))
     .sort((a, b) => Number(b.online) - Number(a.online) || a.name.localeCompare(b.name));
+}
+
+export interface ProjectChoice { node: string; projectId: string; label: string }
+
+// Where an agent can be started: every project checked out on a machine that is online.
+export function projectChoices(v: View): ProjectChoice[] {
+  return [...v.checkouts.values()]
+    .filter((c) => v.nodes.get(c.nodeId)?.online)
+    .map((c) => ({ node: c.nodeId, projectId: c.projectId, label: `${v.nodes.get(c.nodeId)?.hostname || c.nodeId} · ${c.projectId}` }))
+    .sort((a, b) => a.label.localeCompare(b.label));
 }

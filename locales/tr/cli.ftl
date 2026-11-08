@@ -6,6 +6,7 @@ cli-usage =
       agora agent start TÜR [--project AD] [--name AD] [--socket YOL]
       agora agent stop AJAN_KİMLİĞİ [--socket YOL]
       agora agent list [--socket YOL]
+      agora agent kinds [--socket YOL]
       agora terminal attach AJAN_KİMLİĞİ [--socket YOL]
       agora node stdio [--socket YOL]
       agora mesh stdio --socket YOL
@@ -21,6 +22,7 @@ cli-node-listening = Düğüm çalışıyor. Denetim soketi: { $socket }
 cli-agent-started = { $agent_id } ajanı { $worktree } içinde başlatıldı
 cli-agent-stopped = { $agent_id } ajanı durduruldu
 cli-agent-list-empty = Bu düğümde ajan yok.
+cli-agent-kinds-empty = Bu düğümde ajan tanımı yok.
 cli-terminal-detached = { $agent_id } ajanından ayrıldınız.
 cli-attach-needs-terminal = Bağlanmak için etkileşimli bir terminal gerekir.
 cli-node-not-running = { $socket } adresinde dinleyen bir düğüm yok. "agora node run" ile başlatın.

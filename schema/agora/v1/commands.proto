@@ -38,6 +38,8 @@ message CommandRequest {
     NodePolicyGet node_policy_get = 70;
     // ADR-0025
     AgentList agent_list = 15;
+    // ADR-0030
+    AgentKinds agent_kinds = 16;
     // ADR-0027: sent on a TLS connection that has no client certificate yet; accepts nothing else.
     EnrollRequest enroll = 80;
   }
@@ -66,6 +68,7 @@ message CommandOk {
     NodePolicyResult node_policy = 10;
     AgentListResult agent_list = 11;
     EnrollResponse enroll = 12;
+    AgentKindsResult agent_kinds = 13;
   }
 }
 
@@ -267,4 +270,20 @@ message AgentSummary {
 
 message AgentListResult {
   repeated AgentSummary agents = 1;
+}
+
+// ADR-0030: which agents this node can start.
+message AgentKinds {}
+
+message AgentKind {
+  // What AgentStart.kind takes.
+  string kind = 1;
+  string display_name = 2;
+  IntegrationLevel level = 3;
+  // Whether the launch program is found on this node.
+  bool installed = 4;
+}
+
+message AgentKindsResult {
+  repeated AgentKind kinds = 1;
 }

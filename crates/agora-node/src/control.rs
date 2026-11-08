@@ -170,6 +170,29 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                     .collect(),
             })),
         }),
+        Cmd::AgentKinds(_) => {
+            let kinds = ctx
+                .sup()
+                .kinds()
+                .into_iter()
+                .map(|k| v1::AgentKind {
+                    kind: k.kind,
+                    display_name: k.display_name,
+                    level: match k.level {
+                        agora_core::IntegrationLevel::L0Generic => v1::IntegrationLevel::L0Generic,
+                        agora_core::IntegrationLevel::L1Manifest => {
+                            v1::IntegrationLevel::L1Manifest
+                        }
+                        agora_core::IntegrationLevel::L2Acp => v1::IntegrationLevel::L2Acp,
+                        agora_core::IntegrationLevel::L3Adapter => v1::IntegrationLevel::L3Adapter,
+                    } as i32,
+                    installed: k.installed,
+                })
+                .collect();
+            Ok(v1::CommandOk {
+                result: Some(Ok_::AgentKinds(v1::AgentKindsResult { kinds })),
+            })
+        }
         Cmd::AgentList(l) => {
             // Only this node's agents: a node answers for itself (the hub merges across nodes).
             if !l.node_id.is_empty() && l.node_id != ctx.node_id {
@@ -367,6 +390,7 @@ fn command_name(c: &Cmd) -> &'static str {
         Cmd::ApprovalResolve(_) => "approval.resolve",
         Cmd::MeshPost(_) => "mesh.post",
         Cmd::AgentList(_) => "agent.list",
+        Cmd::AgentKinds(_) => "agent.kinds",
         Cmd::Enroll(_) => "enroll",
         Cmd::TaskUpdate(_) => "task.update",
         Cmd::NodePolicyGet(_) => "node.policy.get",
