@@ -9,6 +9,7 @@ import { StartAgent, type KindChoice } from './components/StartAgent';
 import { approvalList, projectChoices, machines, machinesOnline, tiles, type ApprovalModel, type View } from './net/view';
 import { freshApprovals, titleWithCount } from './net/alert';
 import { indexedDbStore, signApproval, thisDevice, type Device } from './net/approval';
+import { addPasskey, passkeysSupported, signInWithPasskey } from './net/passkey';
 import { forgetToken, hubConnection, readCode, signIn } from './net/session';
 import { DevicePage, Focus, Gallery, Home, MachinesPage, SignInPage } from './screens';
 
@@ -32,6 +33,11 @@ export function App() {
     const r = await signIn(code);
     if (r.ok) { setSignInNotice(undefined); setHub(hubConnection()); return; }
     setSignInNotice(t(r.reason === 'refused' ? 'signin-refused' : r.reason === 'too-many' ? 'signin-too-many' : 'signin-failed'));
+  }, []);
+  const trySignInPasskey = useCallback(async () => {
+    const r = await signInWithPasskey();
+    if (r.ok) { setSignInNotice(undefined); setHub(hubConnection()); return; }
+    if (r.reason !== 'cancelled') setSignInNotice(t(r.reason === 'too-many' ? 'signin-too-many' : 'signin-passkey-failed'));
   }, []);
   // A code in the address (`#code=...`) signs in at once; it is removed from the address either way.
   useEffect(() => {
@@ -143,12 +149,12 @@ export function App() {
 
   // Served by the hub (a production build) and not signed in: ask for the code. Development keeps the demo data.
   if (!hub && !import.meta.env.DEV && hash !== '#/gallery' && hash !== '#/demo') {
-    return <SignInPage onSubmit={trySignIn} notice={signInNotice} />;
+    return <SignInPage onSubmit={trySignIn} onPasskey={passkeysSupported() ? trySignInPasskey : undefined} notice={signInNotice} />;
   }
 
   return (
     <>
-      {hash === '#/gallery' ? <Gallery /> : hash === '#/machines' ? <MachinesPage machines={live ? machines(live) : []} onBack={() => go('#/')} /> : hash === '#/device' ? <DevicePage device={device} onBack={() => go('#/')} /> : current !== undefined
+      {hash === '#/gallery' ? <Gallery /> : hash === '#/machines' ? <MachinesPage machines={live ? machines(live) : []} onBack={() => go('#/')} /> : hash === '#/device' ? <DevicePage device={device} onBack={() => go('#/')} onAddPasskey={hub && passkeysSupported() ? async () => (await addPasskey(hub.token)).ok : undefined} /> : current !== undefined
         ? <Focus agent={agents.find((a) => a.id === current)} source={terminal} onBack={() => go('#/')} />
         : <Home onOpen={open} agents={agents} machines={live ? machinesOnline(live) : undefined} link={hub ? link : 'live'} approvals={live ? approvalList(live) : []} onResolve={resolve} notice={notice}
           onStart={hub && api && live ? () => setStarting(true) : undefined}

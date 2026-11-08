@@ -77,6 +77,7 @@ dependencies = [
  "getrandom",
  "prost",
  "rcgen",
+ "ring",
  "rusqlite",
  "rustls",
  "serde_json",

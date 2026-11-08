@@ -29,7 +29,7 @@ phase exit.
 | # | Threat | Mitigation |
 | --- | --- | --- |
 | T1 | Hub compromise → commands to all nodes | Node-local policy; sensitive actions require user-signed approvals verified on the node (ADR-0020) |
-| T2 | Stolen client session | Passkeys (planned; today a one-time code); 12-hour sessions stored hashed; device-bound keys; approvals require device signature |
+| T2 | Stolen client session | Passkeys (WebAuthn, hub stores public keys only; a one-time code remains the first sign-in); 12-hour sessions stored hashed; device-bound keys; approvals require device signature |
 | T3 | Rogue node enrollment | One-time enrollment codes, user confirmation in window, mTLS, revocation (ADR-0015) |
 | T4 | Cross-agent prompt injection over mesh (agent A tells agent B to exfiltrate or delete) | Messages marked untrusted with provenance; standing instruction to agents; approvals unaffected by mesh content; rate limits |
 | T5 | Prompt injection from repository content causing destructive commands | Approval policies per node/project; deny-lists for destructive commands; worktree isolation limits blast radius |

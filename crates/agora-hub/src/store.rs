@@ -66,7 +66,7 @@ pub trait EventStore {
     fn set_setting(&self, key: &str, value: &[u8]) -> Result<(), StoreError>;
 }
 
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 pub struct SqliteStore {
     conn: Mutex<Connection>,
@@ -147,6 +147,20 @@ impl SqliteStore {
                      expires_ms INTEGER NOT NULL
                  );
                  PRAGMA user_version = 3;
+                 COMMIT;",
+            )?;
+        }
+        if version < 4 {
+            // Passkeys (WebAuthn, ADR-0015): the public half only; the private key never leaves the user's authenticator.
+            conn.execute_batch(
+                "BEGIN;
+                 CREATE TABLE passkeys (
+                     id         TEXT PRIMARY KEY,
+                     public_key BLOB NOT NULL,
+                     sign_count INTEGER NOT NULL,
+                     created_ms INTEGER NOT NULL
+                 );
+                 PRAGMA user_version = 4;
                  COMMIT;",
             )?;
         }

@@ -12,6 +12,18 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 /// What `POST /api/session` needs from the hub: trade a one-time sign-in code for a session token.
 pub trait SessionApi: Send + Sync {
     fn sign_in(&self, code: &str) -> SignInReply;
+
+    /// `POST /api/passkey/<op>` (WebAuthn, ADR-0015): `bearer` is the session token of the request, `host` its `Host`
+    /// header. Returns the status and the JSON body. Hubs without passkeys answer 404.
+    fn passkey(
+        &self,
+        _op: &str,
+        _bearer: Option<&str>,
+        _host: &str,
+        _body: &serde_json::Value,
+    ) -> (u16, String) {
+        (404, String::new())
+    }
 }
 
 pub enum SignInReply {
@@ -23,7 +35,7 @@ pub enum SignInReply {
 }
 
 /// Largest body of the sign-in request.
-const MAX_BODY: usize = 1024;
+const MAX_BODY: usize = 8 * 1024;
 
 /// Largest request head accepted before the connection is dropped.
 const MAX_HEAD: usize = 16 * 1024;
@@ -226,12 +238,16 @@ where
     let (method, target) = (parts.next().unwrap_or(""), parts.next().unwrap_or("/"));
     let path = target.split(['?', '#']).next().unwrap_or("/");
     let head_only = method == "HEAD";
-    if method == "POST" && path == "/api/session" {
-        let length = text
-            .split("\r\n")
-            .filter_map(|l| l.split_once(':'))
-            .find(|(k, _)| k.trim().eq_ignore_ascii_case("content-length"))
-            .and_then(|(_, v)| v.trim().parse::<usize>().ok())
+    let passkey_op = path.strip_prefix("/api/passkey/");
+    if method == "POST" && (path == "/api/session" || passkey_op.is_some()) {
+        let header = |name: &str| {
+            text.split("\r\n")
+                .filter_map(|l| l.split_once(':'))
+                .find(|(k, _)| k.trim().eq_ignore_ascii_case(name))
+                .map(|(_, v)| v.trim().to_string())
+        };
+        let length = header("content-length")
+            .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(usize::MAX);
         if length > MAX_BODY {
             respond(&mut stream, 413, "text/plain", b"", false).await?;
@@ -246,9 +262,27 @@ where
             body.extend_from_slice(&chunk[..n]);
         }
         body.truncate(length);
-        let code = serde_json::from_slice::<serde_json::Value>(&body)
-            .ok()
-            .and_then(|v| v.get("code").and_then(|c| c.as_str()).map(str::to_string));
+        let json = serde_json::from_slice::<serde_json::Value>(&body).ok();
+        if let Some(op) = passkey_op {
+            let bearer = header("authorization")
+                .and_then(|v| v.strip_prefix("Bearer ").map(|t| t.trim().to_string()));
+            let host = header("host").unwrap_or_default();
+            let (status, out) = match (sessions, json) {
+                (Some(api), Some(j)) => api.passkey(op, bearer.as_deref(), &host, &j),
+                (None, _) => (404, String::new()),
+                _ => (400, String::new()),
+            };
+            respond(
+                &mut stream,
+                status,
+                "application/json",
+                out.as_bytes(),
+                false,
+            )
+            .await?;
+            return Ok(First::Answered);
+        }
+        let code = json.and_then(|v| v.get("code").and_then(|c| c.as_str()).map(str::to_string));
         match (sessions, code) {
             (Some(api), Some(code)) => match api.sign_in(&code) {
                 SignInReply::Token(t) => {
@@ -289,6 +323,7 @@ async fn respond<S: AsyncWrite + Unpin>(
         200 => "OK",
         400 => "Bad Request",
         401 => "Unauthorized",
+        403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
         413 => "Payload Too Large",
