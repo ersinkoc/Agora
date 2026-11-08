@@ -24,7 +24,13 @@ target/release/agora hub run --listen 127.0.0.1:7443
 # 3. A machine: get an enrollment code from the hub, enroll, run the node on a git project
 target/release/agora hub code
 target/release/agora node enroll --hub wss://localhost:7443 --ca ~/.agora/hub/ca.pem --code XXXX-XXXX --id laptop
+#    The node starts agents from manifests in ~/.agora/manifests (format: docs/specs/agent-manifest.md). Manifests for
+#    real agents are not shipped yet; a plain shell shows the whole flow:
+mkdir -p ~/.agora/manifests
+printf 'kind = "shell"\ndisplay_name = "Shell"\nversion = "1"\nmin_engine = 1\n[process]\nlaunch = ["sh"]\n' > ~/.agora/manifests/shell.toml
 target/release/agora node run --project ~/code/myproject
+#    in another terminal:
+target/release/agora agent start shell --project myproject
 
 # 4. Open https://localhost:7443/ , accept the hub's own certificate, sign in with the code from step 2
 #    (`agora hub login` makes another). Your agents and their terminals appear in the window.
