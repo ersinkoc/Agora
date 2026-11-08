@@ -53,8 +53,21 @@ agent's process. `agora mesh stdio --socket PATH` is what an agent's MCP client 
 that socket. The node registers the agent on start, keeps its state current for `agents_list`, and on stop or exit
 unregisters it, which gives back its tasks, leases and open asks and closes the endpoint. Pending `ask`s are answered on the
 same connection without blocking the agent's other calls. Mesh activity is written to the node's event log.
-The socket reaches the agent through its manifest's `[mcp]` section (see `agent-manifest.md`). Not yet: the hub-side broker that
-joins agents on different machines.
+The socket reaches the agent through its manifest's `[mcp]` section (see `agent-manifest.md`). Messages to agents on other nodes: see below.
+
+
+## Messages between nodes (ADR-0031)
+
+`send_message` accepts `<node id>/<agent id>` as `to`. A bare id means this node (so does your own node's name in front). The
+broker queues the message for the node's uplink, which sends a `MeshPost` command to the hub; the hub forwards it to the target
+node like a client command (ADR-0029) and writes `origin` (the node the post arrived from, by certificate) over whatever the
+node wrote. The target broker delivers it to the local agent with `provenance.from = "<origin>/<sender agent id>"` and
+`provenance.node = <origin>`; answering is a `send_message` to that address. Delivery is at most once. `send_message`
+returns once the broker accepted the message (limits and rate are checked there); if it does not arrive, the sender's inbox
+receives a notice of kind `delivery_failed` whose body is the error code (`node.offline`, `node.unknown`, `node.timeout`,
+`mesh.recipient_unknown`, `mesh.rate_limited`, ...). Only plain messages cross nodes: `ask`, `handoff`, `#channels`, tasks and
+leases stay node-local, and a node may have 64 posts waiting at the hub. Not yet: the node policy key `mesh.remote` that turns
+it off (it is always on for enrolled nodes), `refs`, and the web window showing cross-node messages.
 
 ## Implementation status
 `agora-mesh::broker::Mesh` implements the tools' logic as deterministic in-memory state: registry, messages with

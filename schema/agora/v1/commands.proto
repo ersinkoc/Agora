@@ -178,8 +178,14 @@ message ApprovalResolve {
 }
 
 message MeshPost {
+  // An agent on this node, or `<node>/<agent>` for one on another node (ADR-0031).
   string to = 1;
   string body = 2;
+  // The node the hub saw this post arrive from. Set by the hub from the connection's certificate and overwritten if a node
+  // wrote it; the receiving broker trusts only this value for where a message came from (ADR-0031).
+  string origin = 3;
+  // The sending agent's id on `origin`, as that node says it (a node can only vouch for its own agents).
+  string from_agent = 4;
 }
 
 message TaskUpdate {

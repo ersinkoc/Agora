@@ -80,6 +80,18 @@ fn hubside(node_id: &str) -> Hubside {
 }
 
 impl Hubside {
+    /// A certificate for one more node (the hub's own CA signs it, as enrollment would).
+    fn enroll(&self, node_id: &str) -> (String, String) {
+        let (key_pem, csr) = new_device_request().unwrap();
+        let mut e = Enrollment::new(self.state.hub.store());
+        let code = e.create_code(server::now_ms()).unwrap();
+        let ca = self.state.ca.as_ref().unwrap();
+        let issued = e
+            .redeem(ca, &code, node_id, &csr, server::now_ms())
+            .unwrap();
+        (issued.cert_pem, key_pem)
+    }
+
     fn listen(&self, addr: &str) -> SocketAddr {
         let l = self
             .rt
@@ -96,6 +108,7 @@ impl Hubside {
 
     fn link(&self, addr: SocketAddr) -> HubLink {
         HubLink {
+            mesh_out: None,
             url: format!("wss://localhost:{}", addr.port()),
             ca_pem: self.ca_pem.clone(),
             cert_pem: self.cert_pem.clone(),
@@ -503,4 +516,141 @@ fn a_clients_terminal_is_relayed_through_the_hub_with_input_and_close() {
         client.send(&f(5, STREAM_CLOSE, Vec::new())).await.unwrap();
     });
     drop(node);
+}
+
+/// One JSON-RPC call on an agent's mesh socket; returns the `result` object.
+fn mcp(
+    conn: &mut agora_platform::LocalStream,
+    id: u64,
+    method: &str,
+    params: serde_json::Value,
+) -> serde_json::Value {
+    use std::io::{BufRead, BufReader, Write};
+    let line = serde_json::json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+    writeln!(conn, "{line}").unwrap();
+    let mut reader = BufReader::new(conn.try_clone().unwrap());
+    let mut out = String::new();
+    reader.read_line(&mut out).unwrap();
+    serde_json::from_str::<serde_json::Value>(&out).unwrap()["result"].clone()
+}
+
+#[test]
+fn an_agent_messages_an_agent_on_another_node_through_the_hub_and_a_failure_comes_back_as_a_notice()
+{
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return;
+    }
+    use agora_core::AgentId;
+    use agora_mesh::broker::AgentInfo;
+    use agora_node::uplink_client::MeshOut;
+    let hub = hubside("alpha");
+    let addr = hub.listen("127.0.0.1:0");
+    let start = |name: &str, cert: String, key: String| {
+        let dir = tmp(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = agora_node::daemon::NodeConfig {
+            node_id: name.into(),
+            socket: dir.join("c.sock"),
+            data_dir: dir.join("data"),
+            worktree_root: dir.join("wt"),
+            manifests_dir: dir.join("manifests"),
+            projects: vec![],
+            limits: Default::default(),
+        };
+        let node = agora_node::daemon::Node::start(&cfg).unwrap();
+        let out = MeshOut::new();
+        node.mesh.set_remote(out.clone());
+        let mut link = hub.link(addr);
+        (link.cert_pem, link.key_pem) = (cert, key);
+        link.commands = Some(cfg.socket.clone());
+        link.mesh_out = Some(out);
+        let up = spawn(Arc::clone(&node.events), link).unwrap();
+        let agent = AgentId::new(if name == "alpha" { "a1" } else { "b1" });
+        let socket = node
+            .mesh
+            .register(AgentInfo {
+                id: agent.clone(),
+                kind: "shell".into(),
+                node: name.into(),
+                project: "p".into(),
+                label: String::new(),
+                worktree: String::new(),
+                state: "idle".into(),
+            })
+            .unwrap();
+        (node, up, agent, socket)
+    };
+    let (cert, key) = (hub.enroll("alpha"), hub.enroll("beta"));
+    let (a, _ua, a1, a_sock) = start("alpha", cert.0, cert.1);
+    let (b, _ub, b1, _b_sock) = start("beta", key.0, key.1);
+    for n in ["alpha", "beta"] {
+        wait("a node to be online", || {
+            hub.state
+                .hub
+                .view()
+                .0
+                .nodes
+                .get(n)
+                .is_some_and(|x| x.online)
+        });
+    }
+
+    let mut conn = agora_platform::local_connect(&a_sock).unwrap();
+    mcp(
+        &mut conn,
+        1,
+        "initialize",
+        serde_json::json!({"protocolVersion": "2025-03-26"}),
+    );
+    let call = |conn: &mut agora_platform::LocalStream, id, to: &str, body: &str| {
+        mcp(
+            conn,
+            id,
+            "tools/call",
+            serde_json::json!({"name": "send_message", "arguments": {"to": to, "body": body}}),
+        )
+    };
+    let sent = call(&mut conn, 2, "beta/b1", "hello from alpha");
+    assert_ne!(sent["isError"], true, "{sent}");
+
+    // It arrives in b1's inbox, from alpha/a1: the hub vouched for "alpha".
+    wait("the message to arrive on the other node", || {
+        !b.mesh
+            .mesh()
+            .lock()
+            .unwrap()
+            .inbox(&b1, None, 10)
+            .unwrap()
+            .is_empty()
+    });
+    let got = b.mesh.mesh().lock().unwrap().inbox(&b1, None, 10).unwrap();
+    assert_eq!(
+        (
+            got[0].body.as_str(),
+            got[0].provenance.from.as_str(),
+            got[0].provenance.node.as_str()
+        ),
+        ("hello from alpha", "alpha/a1", "alpha")
+    );
+
+    // A node the hub does not know, and an agent the target does not have: the sender is told.
+    call(&mut conn, 3, "nowhere/x", "lost");
+    call(&mut conn, 4, "beta/ghost", "lost");
+    wait("both failures to come back", || {
+        a.mesh
+            .mesh()
+            .lock()
+            .unwrap()
+            .inbox(&a1, None, 10)
+            .unwrap()
+            .len()
+            == 2
+    });
+    let notices = a.mesh.mesh().lock().unwrap().inbox(&a1, None, 10).unwrap();
+    assert!(notices.iter().all(|m| m.kind == "delivery_failed"));
+    let codes: Vec<&str> = notices.iter().map(|m| m.body.as_str()).collect();
+    assert!(
+        codes.contains(&"node.unknown") && codes.contains(&"mesh.recipient_unknown"),
+        "{codes:?}"
+    );
 }

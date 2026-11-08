@@ -135,6 +135,13 @@ out). The relying party id is the request's `Host` without the port and the orig
 last 5 minutes; user presence and verification are required; a signature counter that counts must rise. The hub stores public keys only
 (schema v4, table `passkeys`, at most 32).
 
+Mesh posts between nodes (ADR-0031): a node sends `CommandRequest{mesh_post{to: "<node>/<agent>", body, from_agent}}` on stream 1
+(kind 0) and the hub answers on the same stream (kind 1) with the node's request id. This is the only command the hub accepts from a
+node. The hub forwards it to the target node as an ordinary routed command with `to` rewritten to the local agent id and `origin`
+set to the sending node's id (the connection's certificate), overwriting anything the node wrote; at most 64 per node are waiting at
+once. Errors: `node.unknown`, `node.offline`, `node.timeout`, `node.resource_limit`, `protocol.invalid_message`, and the target
+broker's `mesh.*` codes.
+
 `usage.report` (ADR-0033): a client command the hub answers itself (no `target_node`; one that names a node is refused). It returns
 `UsageReportResult`: per agent (`<node>/<agent>`) the model, tokens and an optional `micro_usd` estimate (absent when no price is known),
 the sum, and when the prices were refreshed (0 = the table bundled with the release).

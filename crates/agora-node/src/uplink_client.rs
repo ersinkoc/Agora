@@ -44,6 +44,94 @@ pub struct HubLink {
     /// The node's own control socket. Commands the hub routes here (ADR-0029) run through it, so they get exactly the
     /// handler, policy and approval rules a local command gets. `None`: such commands are refused.
     pub commands: Option<std::path::PathBuf>,
+    /// Where this node's agents' messages for agents on other nodes are carried to the hub (ADR-0031).
+    pub mesh_out: Option<Arc<MeshOut>>,
+}
+
+type Done = Box<dyn FnOnce(Result<(), String>) + Send>;
+
+struct PostJob {
+    from_agent: String,
+    to: String,
+    body: String,
+    done: Option<Done>,
+}
+
+impl PostJob {
+    /// The parts, with the obligation to call `done` handed over.
+    fn take(mut self) -> (String, String, String, Done) {
+        let done = self.done.take().unwrap_or_else(|| Box::new(|_| {}));
+        (
+            std::mem::take(&mut self.from_agent),
+            std::mem::take(&mut self.to),
+            std::mem::take(&mut self.body),
+            done,
+        )
+    }
+}
+
+// A job that is dropped unsent (the connection ended with it still queued) still tells its sender.
+impl Drop for PostJob {
+    fn drop(&mut self) {
+        if let Some(done) = self.done.take() {
+            done(Err("node.offline".into()));
+        }
+    }
+}
+
+/// The uplink's side of [`RemoteLink`](crate::mesh_server::RemoteLink): jobs are handed to whichever hub connection is up
+/// and fail at once with `node.offline` when none is. Delivery is at most once; nothing is kept for later.
+#[derive(Default)]
+pub struct MeshOut {
+    jobs: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<PostJob>>>,
+}
+
+impl MeshOut {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    fn connect(&self) -> tokio::sync::mpsc::UnboundedReceiver<PostJob> {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        *self.jobs.lock().unwrap_or_else(|e| e.into_inner()) = Some(tx);
+        rx
+    }
+
+    fn disconnect(&self) {
+        *self.jobs.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+}
+
+impl crate::mesh_server::RemoteLink for MeshOut {
+    fn post(&self, from_agent: &str, to: &str, body: &str, done: Done) {
+        let tx = self.jobs.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let job = PostJob {
+            from_agent: from_agent.to_string(),
+            to: to.to_string(),
+            body: body.to_string(),
+            done: Some(done),
+        };
+        // A job that cannot be queued is dropped, which fails it with `node.offline`.
+        if let Some(tx) = tx {
+            let _ = tx.send(job);
+        }
+    }
+}
+
+/// Posts sent on one connection and not yet answered, by the request id this node chose. When the connection ends they
+/// all fail with `node.offline`.
+#[derive(Default)]
+struct Posts {
+    next: u64,
+    waiting: std::collections::HashMap<String, Done>,
+}
+
+impl Drop for Posts {
+    fn drop(&mut self) {
+        for (_, done) in self.waiting.drain() {
+            done(Err("node.offline".into()));
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -150,10 +238,24 @@ pub async fn run_once(
             .await
             .map_err(|e| LinkError::Transport(e.to_string()))?;
         let conn = ws::connect(stream, &link.url).await?;
-        converse(conn, sink, stop, link.commands.as_deref()).await
+        converse(
+            conn,
+            sink,
+            stop,
+            link.commands.as_deref(),
+            link.mesh_out.as_deref(),
+        )
+        .await
     } else {
         let conn = ws::connect(tcp, &link.url).await?;
-        converse(conn, sink, stop, link.commands.as_deref()).await
+        converse(
+            conn,
+            sink,
+            stop,
+            link.commands.as_deref(),
+            link.mesh_out.as_deref(),
+        )
+        .await
     }
 }
 
@@ -162,6 +264,7 @@ async fn converse<S>(
     sink: &Arc<EventSink>,
     stop: &AtomicBool,
     commands: Option<&std::path::Path>,
+    mesh_out: Option<&MeshOut>,
 ) -> Result<(), LinkError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -171,6 +274,10 @@ where
     // makes the node's own pump resync) instead of growing a queue.
     let (relay_tx, mut relay_rx) = tokio::sync::mpsc::channel::<Frame>(256);
     let mut relays = Relays::default();
+    // Messages this node's agents send to agents on other nodes go out on this connection while it is up.
+    let mut jobs = mesh_out.map(MeshOut::connect);
+    let _disconnect = Disconnect(mesh_out);
+    let mut posts = Posts::default();
     let mut up = Uplink::new(
         Arc::clone(sink),
         env!("CARGO_PKG_VERSION"),
@@ -226,6 +333,25 @@ where
                 conn.send(&f).await?;
                 continue;
             }
+            Some(job) = async { match jobs.as_mut() { Some(j) => j.recv().await, None => std::future::pending().await } } => {
+                let (from_agent, to, body, done) = job.take();
+                posts.next += 1;
+                let id = format!("m{}", posts.next);
+                let req = CommandRequest {
+                    request_id: id.clone(),
+                    idempotency_key: String::new(),
+                    target_node: String::new(),
+                    command: Some(command_request::Command::MeshPost(agora_protocol::v1::MeshPost {
+                        to,
+                        body,
+                        origin: String::new(),
+                        from_agent,
+                    })),
+                };
+                posts.waiting.insert(id, done);
+                conn.send(&frame(STREAM_COMMANDS, 0, req.encode_to_vec())).await?;
+                continue;
+            }
         };
         match received {
             Err(_) => {}
@@ -247,6 +373,17 @@ where
                     tokio::task::spawn_blocking(move || {
                         let _ = tx.send(run_local(socket.as_deref(), req));
                     });
+                }
+                // The hub's answer to a mesh post this node sent.
+                (STREAM_COMMANDS, 1) => {
+                    if let Ok(r) = CommandResponse::decode(f.payload.as_slice()) {
+                        if let Some(done) = posts.waiting.remove(&r.request_id) {
+                            done(match r.result {
+                                Some(command_response::Result::Err(e)) => Err(e.code),
+                                _ => Ok(()),
+                            });
+                        }
+                    }
                 }
                 // A terminal subscription: a thread bridges the node's local stream to this connection.
                 (stream, 0) if stream >= FIRST_DYNAMIC_STREAM => {
@@ -281,6 +418,17 @@ where
     }
     conn.close().await;
     Ok(())
+}
+
+/// Marks the mesh link down when the connection's conversation ends, however it ends.
+struct Disconnect<'a>(Option<&'a MeshOut>);
+
+impl Drop for Disconnect<'_> {
+    fn drop(&mut self) {
+        if let Some(m) = self.0 {
+            m.disconnect();
+        }
+    }
 }
 
 /// The relayed terminals of one connection; when it ends their threads are told to stop.

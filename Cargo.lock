@@ -9,6 +9,7 @@ dependencies = [
  "agora-core",
  "agora-hub",
  "agora-i18n",
+ "agora-mesh",
  "agora-node",
  "agora-platform",
  "agora-protocol",

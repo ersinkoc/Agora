@@ -170,6 +170,19 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                     .collect(),
             })),
         }),
+        // A mesh message another node's agent sent, routed here by the hub with `origin` set by the hub (ADR-0031).
+        Cmd::MeshPost(p) => {
+            if p.origin.is_empty() {
+                return Err(invalid("origin"));
+            }
+            let Some(mesh) = &ctx.mesh else {
+                return Err(Error::new(ErrorCode::MeshRecipientUnknown).with("to", p.to.as_str()));
+            };
+            mesh.deliver_remote(&p.origin, &p.from_agent, &AgentId::new(&p.to), &p.body)?;
+            Ok(v1::CommandOk {
+                result: Some(Ok_::Empty(v1::Empty {})),
+            })
+        }
         Cmd::AgentKinds(_) => {
             let kinds = ctx
                 .sup()

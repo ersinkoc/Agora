@@ -1021,3 +1021,84 @@ async fn a_client_asks_the_hub_for_usage_and_gets_tokens_with_a_price_only_where
         "protocol.invalid_message"
     );
 }
+
+fn mesh_post(id: &str, to: &str, origin: &str) -> Frame {
+    let req = v1::CommandRequest {
+        request_id: id.into(),
+        idempotency_key: String::new(),
+        target_node: String::new(),
+        command: Some(command_request::Command::MeshPost(v1::MeshPost {
+            to: to.into(),
+            body: "hi".into(),
+            origin: origin.into(),
+            from_agent: "a1".into(),
+        })),
+    };
+    f(STREAM_COMMANDS, 0, req.encode_to_vec())
+}
+
+#[tokio::test]
+async fn a_nodes_mesh_post_is_routed_with_the_origin_the_hub_saw_and_nothing_else_is_accepted_from_a_node(
+) {
+    let st = state(None);
+    let (mut n1, _t1) = node_conn(&st, "n1").await;
+    handshake(&mut n1).await;
+    n1.send(&f(
+        STREAM_EVENTS,
+        kinds::EVENT,
+        event("n1", 1, online("n1")),
+    ))
+    .await
+    .unwrap();
+    next_ack(&mut n1).await;
+    let (mut n2, _t2) = node_conn(&st, "n2").await;
+    handshake(&mut n2).await;
+    n2.send(&f(
+        STREAM_EVENTS,
+        kinds::EVENT,
+        event("n2", 1, online("n2")),
+    ))
+    .await
+    .unwrap();
+    next_ack(&mut n2).await;
+
+    // n1 claims to be n9; the hub writes n1. The target sees its own agent id, not the `n2/` prefix.
+    n1.send(&mesh_post("p1", "n2/b1", "n9")).await.unwrap();
+    let got = recv(&mut n2).await;
+    assert_eq!((got.stream_id, got.kind), (STREAM_COMMANDS, 0));
+    let forwarded = v1::CommandRequest::decode(got.payload.as_slice()).unwrap();
+    let Some(command_request::Command::MeshPost(p)) = forwarded.command else {
+        panic!("not a mesh post");
+    };
+    assert_eq!(
+        (p.to.as_str(), p.origin.as_str(), p.from_agent.as_str()),
+        ("b1", "n1", "a1")
+    );
+    let answer = v1::CommandResponse {
+        request_id: forwarded.request_id,
+        result: Some(command_response::Result::Ok(v1::CommandOk::default())),
+    };
+    n2.send(&f(STREAM_COMMANDS, 1, answer.encode_to_vec()))
+        .await
+        .unwrap();
+    let r = response(&mut n1).await;
+    assert_eq!(r.request_id, "p1", "the answer carries the id n1 chose");
+    assert!(matches!(r.result, Some(command_response::Result::Ok(_))));
+
+    // Refusals: an unknown node, itself, a bare id, and any other command.
+    for (id, to, code) in [
+        ("p2", "nowhere/x", "node.unknown"),
+        ("p3", "n1/a2", "protocol.invalid_message"),
+        ("p4", "bare", "protocol.invalid_message"),
+    ] {
+        n1.send(&mesh_post(id, to, "")).await.unwrap();
+        let r = response(&mut n1).await;
+        assert_eq!((r.request_id.as_str(), err_code(&r)), (id, code));
+    }
+    n1.send(&routed("p5", "n2")).await.unwrap();
+    let r = response(&mut n1).await;
+    assert_eq!(
+        (r.request_id.as_str(), err_code(&r)),
+        ("p5", "protocol.invalid_message")
+    );
+}
