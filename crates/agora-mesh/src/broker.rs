@@ -215,6 +215,7 @@ pub struct Outbound {
     pub to_node: String,
     pub to_agent: String,
     pub body: String,
+    pub refs: Vec<String>,
 }
 
 /// `<node>/<agent>` split in two; `None` for a bare agent id, a `#channel` or anything with more or empty parts.
@@ -282,12 +283,13 @@ impl Mesh {
         from_agent: &str,
         to: &AgentId,
         body: &str,
+        refs: &[String],
         now_ms: u64,
     ) -> Result<String, MeshError> {
         if origin.is_empty() || from_agent.is_empty() || from_agent.contains('/') {
             return Err(MeshError::RecipientUnknown(to.as_str().to_string()));
         }
-        self.check_content(body, &[])?;
+        self.check_content(body, refs)?;
         let Some(recipient) = self.agents.get(to).cloned() else {
             return Err(MeshError::RecipientUnknown(to.as_str().to_string()));
         };
@@ -303,7 +305,9 @@ impl Mesh {
             },
             to: recipient.id.as_str().to_string(),
             body: body.to_string(),
-            refs: Vec::new(),
+            // A path or task id means something on the sender's machine only: it is kept with that machine's name in front,
+            // and an already qualified ref is qualified again, never taken for a local one (ADR-0035).
+            refs: refs.iter().map(|r| format!("{origin}:{r}")).collect(),
             at_ms: now_ms,
             reply_to: None,
             kind: "message",
@@ -511,6 +515,7 @@ impl Mesh {
                 to_node: node.to_string(),
                 to_agent: agent.to_string(),
                 body: body.to_string(),
+                refs: refs.to_vec(),
             });
             self.events.push(Body::MessagePosted(MessagePosted {
                 message_id: m.id.clone(),
@@ -1424,10 +1429,41 @@ mod tests {
         }
 
         #[test]
+        fn refs_cross_nodes_qualified_by_origin_and_within_the_usual_limits() {
+            let mut m = mesh();
+            let refs = vec!["src/lib.rs".to_string(), "n9:already".to_string()];
+            m.deliver_remote("n2", "b7", &AgentId::new("a1"), "see", &refs, 9)
+                .unwrap();
+            let got = m.inbox(&AgentId::new("a1"), None, 10).unwrap();
+            assert_eq!(
+                got[0].refs,
+                ["n2:src/lib.rs", "n2:n9:already"],
+                "an already qualified ref is qualified again"
+            );
+            // The same limits as for a local message.
+            let too_many: Vec<String> =
+                (0..=m.limits().max_refs).map(|i| format!("r{i}")).collect();
+            assert!(m
+                .deliver_remote("n2", "b7", &AgentId::new("a1"), "x", &too_many, 10)
+                .is_err());
+            // A send to another node carries its refs out as written.
+            m.send_message(
+                &AgentId::new("a1"),
+                "n2/b7",
+                "look",
+                &["a.rs".to_string()],
+                None,
+                11,
+            )
+            .unwrap();
+            assert_eq!(m.take_outbound()[0].refs, ["a.rs"]);
+        }
+
+        #[test]
         fn an_inbound_message_shows_where_it_came_from_and_can_be_answered() {
             let mut m = mesh();
             let id = m
-                .deliver_remote("n2", "b7", &AgentId::new("a1"), "hello", 9)
+                .deliver_remote("n2", "b7", &AgentId::new("a1"), "hello", &[], 9)
                 .unwrap();
             let got = m.inbox(&AgentId::new("a1"), None, 10).unwrap();
             assert_eq!(got.len(), 1);
@@ -1450,20 +1486,20 @@ mod tests {
         fn inbound_for_nobody_or_from_nobody_is_refused() {
             let mut m = mesh();
             assert!(m
-                .deliver_remote("n2", "b7", &AgentId::new("ghost"), "x", 1)
+                .deliver_remote("n2", "b7", &AgentId::new("ghost"), "x", &[], 1)
                 .is_err());
             assert!(m
-                .deliver_remote("", "b7", &AgentId::new("a1"), "x", 1)
+                .deliver_remote("", "b7", &AgentId::new("a1"), "x", &[], 1)
                 .is_err());
             assert!(m
-                .deliver_remote("n2", "", &AgentId::new("a1"), "x", 1)
+                .deliver_remote("n2", "", &AgentId::new("a1"), "x", &[], 1)
                 .is_err());
             assert!(m
-                .deliver_remote("n2", "b/7", &AgentId::new("a1"), "x", 1)
+                .deliver_remote("n2", "b/7", &AgentId::new("a1"), "x", &[], 1)
                 .is_err());
             let big = "x".repeat(m.limits().max_body_bytes + 1);
             assert!(m
-                .deliver_remote("n2", "b7", &AgentId::new("a1"), &big, 1)
+                .deliver_remote("n2", "b7", &AgentId::new("a1"), &big, &[], 1)
                 .is_err());
         }
 

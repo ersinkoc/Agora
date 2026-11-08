@@ -73,6 +73,8 @@ fn with_remote_denied_outgoing_messages_fail_with_a_policy_notice_and_incoming_o
         (inbox[0].kind, inbox[0].body.as_str()),
         ("delivery_failed", "node.policy_denied")
     );
-    let err = server.deliver_remote("n2", "b1", &a1, "hi").unwrap_err();
+    let err = server
+        .deliver_remote("n2", "b1", &a1, "hi", &[])
+        .unwrap_err();
     assert_eq!(err.code.as_str(), "node.policy_denied");
 }

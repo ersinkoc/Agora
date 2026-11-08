@@ -198,6 +198,8 @@ message MeshPost {
   string origin = 3;
   // The sending agent's id on `origin`, as that node says it (a node can only vouch for its own agents).
   string from_agent = 4;
+  // ADR-0035: the sender's refs (paths, commits, task ids) as written. The receiving broker stores each as `<origin>:<ref>`.
+  repeated string refs = 5;
 }
 
 message TaskUpdate {

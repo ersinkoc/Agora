@@ -1032,6 +1032,7 @@ fn mesh_post(id: &str, to: &str, origin: &str) -> Frame {
             body: "hi".into(),
             origin: origin.into(),
             from_agent: "a1".into(),
+            refs: vec!["src/lib.rs".into(), "commit:abc".into()],
         })),
     };
     f(STREAM_COMMANDS, 0, req.encode_to_vec())
@@ -1073,6 +1074,11 @@ async fn a_nodes_mesh_post_is_routed_with_the_origin_the_hub_saw_and_nothing_els
     assert_eq!(
         (p.to.as_str(), p.origin.as_str(), p.from_agent.as_str()),
         ("b1", "n1", "a1")
+    );
+    assert_eq!(
+        p.refs,
+        ["src/lib.rs", "commit:abc"],
+        "refs travel as written; the receiver qualifies them"
     );
     let answer = v1::CommandResponse {
         request_id: forwarded.request_id,
