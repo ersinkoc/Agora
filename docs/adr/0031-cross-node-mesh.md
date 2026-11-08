@@ -1,6 +1,7 @@
 # 0031. Mesh messages between agents on different nodes
-Status: Proposed
+Status: Accepted
 Date: 2026-11-08
+Accepted: 2026-11-08 (maintainer's explicit approval in chat)
 
 ## Context
 The mesh (`agora-mesh`, ADR-0012, `docs/specs/mesh-tools.md`) works inside one node: a broker per node, one MCP endpoint per agent.
