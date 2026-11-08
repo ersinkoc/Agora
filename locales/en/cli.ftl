@@ -5,6 +5,7 @@ cli-usage =
       agora node run [--socket PATH] [--manifests DIR] [--project PATH]... [--data DIR] [--worktrees DIR]
       agora agent start KIND [--project NAME] [--name NAME] [--socket PATH]
       agora agent stop AGENT_ID [--socket PATH]
+      agora agent prompt AGENT_ID TEXT... [--socket PATH]
       agora agent list [--socket PATH]
       agora agent kinds [--socket PATH]
       agora terminal attach AGENT_ID [--socket PATH]
@@ -24,6 +25,7 @@ cli-usage =
 cli-node-listening = Node is running. Control socket: { $socket }
 cli-agent-started = Started agent { $agent_id } in { $worktree }
 cli-agent-stopped = Stopped agent { $agent_id }
+cli-agent-prompted = Sent the prompt to agent { $agent_id }
 cli-agent-list-empty = This node has no agents.
 cli-agent-kinds-empty = This node has no agent descriptions.
 cli-terminal-detached = Detached from { $agent_id }.

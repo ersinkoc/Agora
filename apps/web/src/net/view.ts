@@ -33,12 +33,13 @@ export interface View {
   worktrees: Map<string, WorktreeV>;
   agents: Map<string, AgentV>;
   approvals: Map<string, ApprovalV>;
+  withTerminal: Set<string>; // agents that have a terminal; the others (chat agents) are talked to with prompts
 }
 
 const MAX_MESSAGES = 50;
 
 export function emptyView(): View {
-  return { pos: 0, messages: [], nodes: new Map(), checkouts: new Map(), worktrees: new Map(), agents: new Map(), approvals: new Map() };
+  return { pos: 0, messages: [], nodes: new Map(), checkouts: new Map(), worktrees: new Map(), agents: new Map(), approvals: new Map(), withTerminal: new Set() };
 }
 
 export function fromSnapshot(s: agora.v1.Snapshot.$Properties): View {
@@ -65,6 +66,7 @@ export function fromSnapshot(s: agora.v1.Snapshot.$Properties): View {
       tokens: num(a.inputTokens) + num(a.outputTokens),
     });
   }
+  for (const tm of s.terminals ?? []) if (tm.agentId) v.withTerminal.add(tm.agentId);
   for (const p of s.approvals ?? []) {
     v.approvals.set(p.approvalId ?? '', {
       agentId: p.agentId ?? '', action: p.action ?? '', detail: p.detail ?? '', expiresAtMs: num(p.expiresAtMs),
@@ -87,6 +89,9 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
   switch (ev.body) {
     case 'nodeOnline': {
       const b = e.nodeOnline;
+      // The node's process started: what it ran before is gone, and its waiting approvals are lost.
+      for (const a of v.agents.values()) if (a.nodeId === b.nodeId && a.running) { a.running = false; a.state = 4 /* done */; }
+      for (const k of [...v.approvals.keys()]) if (k.startsWith(`${b.nodeId}/`)) v.approvals.delete(k);
       v.nodes.set(b.nodeId, { hostname: b.hostname ?? '', os: b.os ?? '', online: true, lastEventMs: at, agentsRunning: v.nodes.get(b.nodeId)?.agentsRunning ?? 0 });
       break;
     }
@@ -145,6 +150,9 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
       if (a) { a.running = false; a.state = 4 /* done */; a.sinceMs = at; }
       break;
     }
+    case 'terminalOpened':
+      if (e.terminalOpened.agentId) v.withTerminal.add(q(e.terminalOpened.agentId));
+      break;
     case 'approvalRequested': {
       const b = e.approvalRequested;
       v.approvals.set(q(b.approvalId), { agentId: q(b.agentId), action: b.action ?? '', detail: b.detail ?? '', expiresAtMs: num(b.expiresAtMs) });
@@ -208,6 +216,7 @@ export function tiles(v: View): AgentTileModel[] {
       reportedBy: a.reported ? 'agent' : 'screen',
       workspaceRef: wt ? { node: a.nodeId, id: a.worktreeId.slice(a.worktreeId.indexOf('/') + 1) } : undefined,
       project: wt ? lastSegment(v.checkouts.get(wt.checkoutId)?.path ?? '') || undefined : undefined,
+      terminal: v.withTerminal.has(id),
       branch: wt?.branch || undefined,
       filesChanged: wt?.filesChanged ?? 0,
     };
