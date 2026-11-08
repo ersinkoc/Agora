@@ -75,7 +75,7 @@ reported, estimated and unpriced apart. ADR-0033 is built: the hub embeds a trim
 `<hub dir>/prices.json` overrides (USD per million tokens) sit on top. A bare model id (what agents report) takes its first-party
 provider's price, or the only provider that lists it; several resellers with different prices give no estimate. The
 `usage.report` command returns tokens and the estimate per agent; the window shows it in Focus and per machine, always as an
-estimate with the price date. Not yet: quota profiles, per-project and per-day totals, budget alerts, agent-reported costs.
+estimate with the price date. Not yet: quota profiles, per-day totals (the hub keeps no usage history yet; per-project totals are summed in the web client from the hub's per-agent answer), budget alerts, agent-reported costs.
 
 ## Views
 

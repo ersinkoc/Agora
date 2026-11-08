@@ -2,7 +2,7 @@ import { AgentTile } from './components/AgentTile';
 import { AttentionStrip } from './components/AttentionStrip';
 import { ApprovalCard } from './components/ApprovalCard';
 import { StateBadge } from './components/StateBadge';
-import type { ApprovalModel, MachineModel, MessageModel } from './net/view';
+import type { ApprovalModel, MachineModel, MessageModel, ProjectCost } from './net/view';
 import type { ReactNode } from 'react';
 import type { Device } from './net/approval';
 import { money, type UsageSummary } from './net/usage';
@@ -195,7 +195,7 @@ export function SignInPage({ onSubmit, onPasskey, notice }: { onSubmit: (code: s
   );
 }
 
-export function MachinesPage({ machines, usage, onBack }: { machines: readonly MachineModel[]; usage?: UsageSummary; onBack: () => void }) {
+export function MachinesPage({ machines, usage, projects = [], onBack }: { machines: readonly MachineModel[]; usage?: UsageSummary; projects?: readonly ProjectCost[]; onBack: () => void }) {
   return (
     <main className="page">
       <button type="button" className="link" onClick={onBack}>{t('focus-back')}</button>
@@ -214,6 +214,14 @@ export function MachinesPage({ machines, usage, onBack }: { machines: readonly M
             </li>
           ))}
         </ul>
+      )}
+      {projects.length > 0 && (
+        <section className="stack" aria-label={t('usage-projects')}>
+          <h2>{t('usage-projects')}</h2>
+          <ul className="machines">
+            {projects.map((p) => <li key={p.label} className="machine"><strong>{p.label}</strong><span className="muted">{t('machine-cost', { amount: money(p.microUsd) })}</span></li>)}
+          </ul>
+        </section>
       )}
       {usage && usage.totalMicroUsd > 0 && (
         <p className="muted">

@@ -101,3 +101,4 @@ usage-prices-date = fiyatlar { $date } tarihli
 usage-prices-bundled = fiyatlar bu hub sürümüyle gelen tablodan
 messages-title = Son mesajlar
 message-cross = makineler arası
+usage-projects = Projeye göre harcama

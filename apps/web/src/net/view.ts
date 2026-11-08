@@ -274,3 +274,21 @@ export function recentMessages(v: View, limit = 5): MessageModel[] {
     crossMachine: m.to.includes('/') && machine(m.from) !== machine(m.to),
   }));
 }
+
+export interface ProjectCost { label: string; microUsd: number }
+
+// Estimated spend per project (the folder name of its checkout), biggest first. Only agents the hub had a price for
+// count; `perAgent` is the hub's answer keyed by agent. Agents whose project is not known add to no row.
+export function costByProject(v: View, perAgent: ReadonlyMap<string, number>): ProjectCost[] {
+  const byProject = new Map<string, ProjectCost>();
+  for (const [id, a] of v.agents) {
+    const micro = perAgent.get(id);
+    if (micro === undefined) continue;
+    const checkout = v.checkouts.get(v.worktrees.get(a.worktreeId)?.checkoutId ?? '');
+    if (!checkout) continue;
+    const row = byProject.get(checkout.projectId) ?? { label: lastSegment(checkout.path) || checkout.projectId, microUsd: 0 };
+    row.microUsd += micro;
+    byProject.set(checkout.projectId, row);
+  }
+  return [...byProject.values()].sort((a, b) => b.microUsd - a.microUsd || a.label.localeCompare(b.label));
+}

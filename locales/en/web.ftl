@@ -101,3 +101,4 @@ usage-prices-date = prices from { $date }
 usage-prices-bundled = prices from this hub's release
 messages-title = Recent messages
 message-cross = between machines
+usage-projects = Spent by project
