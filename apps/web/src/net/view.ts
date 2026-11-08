@@ -206,6 +206,7 @@ export function tiles(v: View): AgentTileModel[] {
       since: a.sinceMs || undefined,
       tokens: a.tokens,
       reportedBy: a.reported ? 'agent' : 'screen',
+      workspaceRef: wt ? { node: a.nodeId, id: a.worktreeId.slice(a.worktreeId.indexOf('/') + 1) } : undefined,
       branch: wt?.branch || undefined,
       filesChanged: wt?.filesChanged ?? 0,
     };

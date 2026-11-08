@@ -27,6 +27,7 @@ use agora_vt::Size;
 use prost::Message;
 
 use crate::daemon::EventSink;
+use crate::git;
 use crate::supervisor::{StartRequest, Supervisor, SupervisorError};
 use crate::terminal::{Output, OutputSubscription, Snapshot};
 
@@ -365,8 +366,55 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
             }
             Ok(ok_empty())
         }
+        Cmd::GitStatus(g) => {
+            let wt = agent_worktree(ctx, &g.worktree_id)?;
+            let st = git::status(&wt).map_err(|e| e.to_protocol())?;
+            Ok(v1::CommandOk {
+                result: Some(Ok_::GitStatus(v1::GitStatusResult {
+                    files_changed: st.files_changed,
+                    insertions: st.insertions,
+                    deletions: st.deletions,
+                    head_commit: st.head_commit,
+                })),
+            })
+        }
+        Cmd::GitDiff(g) => {
+            let wt = agent_worktree(ctx, &g.worktree_id)?;
+            let path = (!g.path.is_empty()).then_some(g.path.as_str());
+            // A path is a path inside the workspace: no absolute paths, no `..`, no git pathspec magic (`:(...)`).
+            if path.is_some_and(|p| {
+                p.starts_with(['/', ':', '-']) || p.split(['/', '\\']).any(|c| c == "..")
+            }) {
+                return Err(invalid("path"));
+            }
+            let mut diff = git::diff(&wt, path).map_err(|e| e.to_protocol())?;
+            if diff.len() > MAX_DIFF_BYTES {
+                let mut end = MAX_DIFF_BYTES;
+                while !diff.is_char_boundary(end) {
+                    end -= 1;
+                }
+                diff.truncate(end);
+            }
+            Ok(v1::CommandOk {
+                result: Some(Ok_::GitDiff(v1::GitDiffResult { diff })),
+            })
+        }
         other => Err(capability_missing(command_name(other))),
     }
+}
+
+/// Largest diff one answer carries; a bigger one is cut (the file view is for reading, not for patching).
+const MAX_DIFF_BYTES: usize = 512 * 1024;
+
+/// The workspace of one of this node's agents, by the id the node reported it under. Only those: a client cannot
+/// point a git command at any other directory.
+fn agent_worktree(ctx: &ControlContext, worktree_id: &str) -> Result<PathBuf, Error> {
+    ctx.sup()
+        .list()
+        .into_iter()
+        .find(|v| v.worktree.to_string_lossy() == worktree_id)
+        .map(|v| v.worktree)
+        .ok_or_else(|| invalid("worktree_id"))
 }
 
 fn with_terminal<R>(

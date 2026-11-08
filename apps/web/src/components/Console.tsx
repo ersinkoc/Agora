@@ -5,6 +5,7 @@ import { money, type UsageSummary } from '../net/usage';
 import type { ApprovalModel, MachineModel, MessageModel, ProjectCost } from '../net/view';
 import type { TerminalSource } from '../terminal/source';
 import { ApprovalCard } from './ApprovalCard';
+import { DiffDialog } from './DiffDialog';
 import { StateBadge } from './StateBadge';
 
 const TerminalView = lazy(() => import('../terminal/TerminalView').then((m) => ({ default: m.TerminalView })));
@@ -13,7 +14,7 @@ const MAX_AUTO_PINNED = 4;
 
 // The one window: machines and agents on the left, the terminals of the agents you are watching in the middle (several at
 // once), and what needs you, what agents say to each other and what it costs on the right. Everything is derived from props.
-export function Console({ agents, machines, usage, projects = [], approvals, messages, terminalFor, onOpen, onStart, start, onResolve, notice, link }: {
+export function Console({ agents, machines, usage, projects = [], approvals, messages, terminalFor, loadDiff, onOpen, onStart, start, onResolve, notice, link }: {
   agents: readonly AgentTileModel[];
   machines: readonly MachineModel[];
   usage?: UsageSummary;
@@ -21,6 +22,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   approvals: readonly ApprovalModel[];
   messages: readonly MessageModel[];
   terminalFor: (agentId: string) => TerminalSource;
+  loadDiff?: (agent: AgentTileModel) => Promise<string>;
   onOpen: (agentId: string) => void;
   onStart?: () => void;
   start?: ReactNode;
@@ -31,6 +33,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   const fleet = useMemo(() => sortFleet(agents), [agents]);
   const [pinned, setPinned] = useState<string[]>([]);
   const touched = useRef(false);
+  const [reviewing, setReviewing] = useState<string | undefined>();
 
   // Until the user picks for themselves, watch the first few agents (those that need you come first). A new agent joins
   // while there is room; one that is gone leaves. Nothing is reordered, so a terminal never jumps under your hands.
@@ -116,7 +119,9 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
                       <span aria-hidden className="size-2.5 flex-none rounded-full" style={{ background: a.accent }} />
                       <strong className="truncate">{a.name}</strong>
                       <span className="hidden truncate text-xs text-muted xl:inline">{a.machine} · {a.workspace}</span>
-                      {(a.filesChanged ?? 0) > 0 && <span className="rounded-full bg-surface-2 px-2 py-0.5 text-xs whitespace-nowrap text-needs-you">{t('changes-files', { count: a.filesChanged ?? 0 })}</span>}
+                      {(a.filesChanged ?? 0) > 0 && (loadDiff
+                        ? <button type="button" className="rounded-full bg-surface-2 px-2 py-0.5 text-xs whitespace-nowrap text-needs-you hover:brightness-125" onClick={() => setReviewing(a.id)}>{t('changes-files', { count: a.filesChanged ?? 0 })}</button>
+                        : <span className="rounded-full bg-surface-2 px-2 py-0.5 text-xs whitespace-nowrap text-needs-you">{t('changes-files', { count: a.filesChanged ?? 0 })}</span>)}
                       {usage?.perAgent.has(a.id) && <span className="hidden text-xs text-muted xl:inline">{t('agent-cost', { amount: money(usage.perAgent.get(a.id) ?? 0) })}</span>}
                     </div>
                     <div className="flex flex-none items-center gap-2">
@@ -156,7 +161,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
               <ul className="m-0 grid list-none gap-1.5 p-0">
                 {changed.map((a) => (
                   <li key={a.id}>
-                    <button type="button" className="flex w-full items-center justify-between gap-2 rounded-s border border-line px-3 py-2 text-left hover:bg-surface-2" onClick={() => onOpen(a.id)}>
+                    <button type="button" className="flex w-full items-center justify-between gap-2 rounded-s border border-line px-3 py-2 text-left hover:bg-surface-2" onClick={() => (loadDiff ? setReviewing(a.id) : onOpen(a.id))}>
                       <span className="min-w-0"><span className="block truncate font-medium">{a.name}</span><span className="block truncate text-xs text-muted">{a.machine} · {a.workspace}</span></span>
                       <span className="flex-none text-xs text-needs-you">{t('changes-files', { count: a.filesChanged ?? 0 })}</span>
                     </button>
@@ -192,6 +197,9 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
           )}
         </aside>
       </div>
+      {reviewing && loadDiff && fleet.find((a) => a.id === reviewing) && (
+        <DiffDialog agent={fleet.find((a) => a.id === reviewing) as AgentTileModel} load={loadDiff} onClose={() => setReviewing(undefined)} />
+      )}
     </div>
   );
 }

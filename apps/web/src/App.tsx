@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { CommandPalette, type PaletteItem } from './components/CommandPalette';
 import { demoAgents } from './fixtures';
 import { t } from './i18n';
-import { nextNeedingMe } from './model';
+import { nextNeedingMe, type AgentTileModel } from './model';
 import { connectLive, type Live, type LinkState } from './net/live';
 import type { TerminalSource } from './terminal/source';
 import { StartAgent, type KindChoice } from './components/StartAgent';
@@ -148,6 +148,12 @@ export function App() {
     return s;
   }, [api, agents]);
 
+  const loadDiff = useCallback(async (a: AgentTileModel): Promise<string> => {
+    if (!api || !a.workspaceRef) return '';
+    const ok = await api.command(a.workspaceRef.node, { gitDiff: { worktreeId: a.workspaceRef.id, path: '' } });
+    return ok.gitDiff?.diff ?? '';
+  }, [api]);
+
   const open = useCallback((id: string) => go(`#/agent/${encodeURIComponent(id)}`), [go]);
   const next = useCallback(() => {
     const n = nextNeedingMe(agents, current);
@@ -183,7 +189,7 @@ export function App() {
       {hash === '#/gallery' ? <Gallery /> : hash === '#/machines' ? <MachinesPage machines={live ? machines(live) : []} usage={usage} projects={live && usage ? costByProject(live, usage.perAgent) : []} onBack={() => go('#/')} /> : hash === '#/device' ? <DevicePage device={device} onBack={() => go('#/')} onAddPasskey={hub && passkeysSupported() ? async () => (await addPasskey(hub.token)).ok : undefined} /> : current !== undefined
         ? <Focus agent={agents.find((a) => a.id === current)} costMicroUsd={current ? usage?.perAgent.get(current) : undefined} source={terminal} onBack={() => go('#/')} />
         : <Console agents={agents} machines={live ? machines(live) : []} usage={usage} projects={live && usage ? costByProject(live, usage.perAgent) : []}
-          approvals={live ? approvalList(live) : []} messages={live ? recentMessages(live) : []} terminalFor={terminalFor} onOpen={open}
+          approvals={live ? approvalList(live) : []} messages={live ? recentMessages(live) : []} terminalFor={terminalFor} loadDiff={hub && api ? loadDiff : undefined} onOpen={open}
           onResolve={resolve} notice={notice} link={hub ? link : 'live'}
           onStart={hub && api && live ? () => setStarting(true) : undefined}
           start={starting && live ? <StartAgent projects={projectChoices(live)} loadKinds={loadKinds} onStart={startAgent} onClose={() => setStarting(false)} /> : undefined} />}

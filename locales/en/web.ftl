@@ -115,3 +115,6 @@ changes-files = { $count ->
     [one] 1 file changed
    *[other] { $count } files changed
 }
+diff-title = What { $name } changed
+diff-close = Close
+diff-failed = Could not read the changes from that machine.

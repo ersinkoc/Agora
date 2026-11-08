@@ -115,3 +115,6 @@ changes-files = { $count ->
     [one] 1 dosya değişti
    *[other] { $count } dosya değişti
 }
+diff-title = { $name } neleri değiştirdi
+diff-close = Kapat
+diff-failed = Değişiklikler o makineden okunamadı.
