@@ -160,19 +160,17 @@ export function DevicePage({ device, onBack, onAddPasskey }: { device: Device | 
       <h1>{t('device-title')}</h1>
       <p>{t('device-intro')}</p>
       {device && (
-        <>
+        <section className="stack">
           <p><span className="muted">{t('device-name')}</span> <span className="mono">{device.id}</span></p>
-          <p className="muted">{t('device-key')}</p>
-          <p className="mono">{device.publicKeyHex}</p>
-          <p className="mono">agora node trust {device.id} {device.publicKeyHex}</p>
-        </>
+          <p className="mono codebox">agora node trust {device.id} {device.publicKeyHex}</p>
+        </section>
       )}
       {onAddPasskey && (
-        <>
+        <section className="stack">
           <p>{t('device-passkey-intro')}</p>
           <button type="button" className="button" onClick={() => { void onAddPasskey().then((ok) => setPasskey(ok ? 'added' : 'failed')); }}>{t('device-passkey-add')}</button>
           {passkey && <p role="status">{t(passkey === 'added' ? 'device-passkey-added' : 'device-passkey-failed')}</p>}
-        </>
+        </section>
       )}
     </main>
   );
