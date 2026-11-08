@@ -73,3 +73,4 @@ machine-agents =
        *[other] { $count } ajan çalışıyor
     }
 palette-go-machines = Makinelerimi göster
+agent-tokens = { $count } token kullanıldı

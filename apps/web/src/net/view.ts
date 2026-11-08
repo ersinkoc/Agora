@@ -18,6 +18,7 @@ export interface WorktreeV { checkoutId: string; path: string; branch: string; f
 export interface AgentV {
   nodeId: string; worktreeId: string; kind: string; state: number; reported: boolean; running: boolean;
   sinceMs: number;
+  tokens: number; // input + output so far
 }
 export interface ApprovalV { agentId: string; action: string; detail: string; expiresAtMs: number }
 
@@ -51,6 +52,7 @@ export function fromSnapshot(s: agora.v1.Snapshot.$Properties): View {
     v.agents.set(a.agentId ?? '', {
       nodeId: a.nodeId ?? '', worktreeId: a.worktreeId ?? '', kind: a.kind ?? '', state: a.state ?? 0,
       reported: !!a.reported, running: !!a.running, sinceMs: 0,
+      tokens: num(a.inputTokens) + num(a.outputTokens),
     });
   }
   for (const p of s.approvals ?? []) {
@@ -105,7 +107,7 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
       const b = e.agentStarted;
       v.agents.set(q(b.agentId), {
         nodeId: b.nodeId ?? '', worktreeId: q(b.worktreeId), kind: b.kind ?? '', state: 3 /* idle */,
-        reported: false, running: true, sinceMs: at,
+        reported: false, running: true, sinceMs: at, tokens: 0,
       });
       break;
     }
@@ -116,6 +118,11 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
         a.reported = !!e.agentStateChanged.reported;
         a.sinceMs = at;
       }
+      break;
+    }
+    case 'agentUsageReported': {
+      const a = v.agents.get(q(e.agentUsageReported.agentId));
+      if (a) a.tokens += num(e.agentUsageReported.inputTokens) + num(e.agentUsageReported.outputTokens);
       break;
     }
     case 'agentExited': {
@@ -167,6 +174,7 @@ export function tiles(v: View): AgentTileModel[] {
       state,
       preview: '',
       since: a.sinceMs || undefined,
+      tokens: a.tokens,
       reportedBy: a.reported ? 'agent' : 'screen',
     };
   });
