@@ -338,11 +338,10 @@ fn the_price_table_is_refreshed_only_on_request_and_a_bad_answer_changes_nothing
     assert!(hub.join("prices-catalog.json").exists());
 }
 
+// The stand-in for ssh is a shell script with the executable bit.
+#[cfg(unix)]
 #[test]
 fn a_machine_added_over_ssh_gets_a_tunnel_the_hub_keeps_open() {
-    if !agora_platform::PTY_SUPPORTED {
-        return; // the stand-in for ssh is a shell script
-    }
     let root = tmp("ssh");
     let hub_dir = root.join("hub");
     let fake = root.join("fake-ssh");
