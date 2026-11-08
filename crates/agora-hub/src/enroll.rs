@@ -20,7 +20,8 @@ pub const MAX_FAILURES: u32 = 5;
 pub const LOCKOUT_MS: u64 = 60 * 1000;
 
 /// Crockford-style alphabet without look-alikes (no 0/O, 1/I/L, U).
-const ALPHABET: &[u8; 32] = b"23456789ABCDEFGHJKMNPQRSTVWXYZ_-";
+/// No 0/O, 1/I/L or U, and nothing that could be taken for the display hyphen.
+const ALPHABET: &[u8; 30] = b"23456789ABCDEFGHJKMNPQRSTVWXYZ";
 
 #[derive(Debug)]
 pub enum EnrollError {
@@ -52,14 +53,21 @@ impl From<CaError> for EnrollError {
     }
 }
 
-/// A random one-time code shown as `XXXX-XXXX` (40 bits).
+/// A random one-time code shown as `XXXX-XXXX` (about 39 bits). Bytes are drawn by rejection so every symbol is equally
+/// likely.
 pub(crate) fn new_code() -> Result<String, StoreError> {
-    let mut raw = [0u8; 8];
-    getrandom::getrandom(&mut raw).map_err(|e| StoreError(e.to_string()))?;
-    let chars: Vec<char> = raw
-        .iter()
-        .map(|b| char::from(ALPHABET[usize::from(b & 31)]))
-        .collect();
+    let limit = u8::try_from(256 - 256 % ALPHABET.len()).unwrap_or(u8::MAX);
+    let mut chars: Vec<char> = Vec::with_capacity(8);
+    while chars.len() < 8 {
+        let mut raw = [0u8; 16];
+        getrandom::getrandom(&mut raw).map_err(|e| StoreError(e.to_string()))?;
+        chars.extend(
+            raw.iter()
+                .filter(|b| **b < limit)
+                .map(|b| char::from(ALPHABET[usize::from(*b) % ALPHABET.len()])),
+        );
+    }
+    chars.truncate(8);
     Ok(format!(
         "{}-{}",
         chars[..4].iter().collect::<String>(),
@@ -126,7 +134,7 @@ impl<'a> Enrollment<'a> {
         Self { store, lockout }
     }
 
-    /// A new one-time code, shown as `XXXX-XXXX`. 40 bits of randomness.
+    /// A new one-time code, shown as `XXXX-XXXX`. about 39 bits of randomness.
     pub fn create_code(&self, now_ms: u64) -> Result<String, EnrollError> {
         let code = new_code()?;
         let conn = self.store.lock()?;
@@ -211,6 +219,21 @@ impl<'a> Enrollment<'a> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    #[test]
+    fn a_code_is_two_groups_of_four_from_the_unambiguous_alphabet() {
+        for _ in 0..500 {
+            let c = new_code().unwrap();
+            let (a, b) = c.split_once('-').expect("one hyphen");
+            assert_eq!((a.len(), b.len()), (4, 4), "{c}");
+            assert!(
+                c.chars()
+                    .filter(|c| *c != '-')
+                    .all(|c| ALPHABET.contains(&(c as u8))),
+                "{c}"
+            );
+        }
+    }
+
     use super::*;
     use crate::ca::new_device_request;
 

@@ -122,7 +122,7 @@ its relay on both sides and the client resubscribes for a fresh snapshot (a hub-
 resends a snapshot"; the result for the client is the same and the node is never slowed). On the node, a thread bridges the
 stream from the node's own control socket to the hub connection through a bounded queue.
 
-Client sign-in (`agora-hub::signin`): `agora hub login` (and `agora hub run`, once at start) prints a one-time code (`XXXX-XXXX`, 40
+Client sign-in (`agora-hub::signin`): `agora hub login` (and `agora hub run`, once at start) prints a one-time code (`XXXX-XXXX`, about 39
 bits, 10 minutes, single use). The web app trades it with `POST /api/session` (`{"code": "..."}` → `{"token": "..."}`, 401 for a
 wrong, expired or used code, 429 after five misses in a row) for a session token: 128 random bits, valid 12 hours, stored only as a
 hash. The token is the bearer credential above. `<hub dir>/token` stays valid for scripts. 
