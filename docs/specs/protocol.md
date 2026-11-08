@@ -125,7 +125,15 @@ stream from the node's own control socket to the hub connection through a bounde
 Client sign-in (`agora-hub::signin`): `agora hub login` (and `agora hub run`, once at start) prints a one-time code (`XXXX-XXXX`, 40
 bits, 10 minutes, single use). The web app trades it with `POST /api/session` (`{"code": "..."}` → `{"token": "..."}`, 401 for a
 wrong, expired or used code, 429 after five misses in a row) for a session token: 128 random bits, valid 12 hours, stored only as a
-hash. The token is the bearer credential above. `<hub dir>/token` stays valid for scripts. Passkeys (ADR-0015) will replace the code.
+hash. The token is the bearer credential above. `<hub dir>/token` stays valid for scripts. 
+
+Passkeys (`agora-hub::passkey`, WebAuthn, ES256 only, no attestation): a signed-in session adds one with
+`POST /api/passkey/register-begin` (`{}` → `{"challenge","rpId"}`, `Authorization: Bearer <session>`) and `register-finish`
+(`{"id","publicKey"(SPKI),"clientDataJSON"}`, all base64url). Without a session: `login-begin` (→ `{"challenge","rpId","ids"}`) and
+`login-finish` (`{"id","authenticatorData","clientDataJSON","signature"}` → `{"token"}`, 401 on any failed proof, 429 while locked
+out). The relying party id is the request's `Host` without the port and the origin must be that host; challenges are single use and
+last 5 minutes; user presence and verification are required; a signature counter that counts must rise. The hub stores public keys only
+(schema v4, table `passkeys`, at most 32).
 
 Initial event families:
 
@@ -161,7 +169,7 @@ output, kind 2 resize (cols, rows as u16 LE), kind 3 exit (i32 LE; negative = si
 gets a fresh snapshot instead of the dropped output; it never slows the terminal. Input and resize are ordinary
 commands. Terminal ids are `t-<agent id>` (one terminal per agent). Implemented commands: `project.list`,
 `agent.start`, `agent.stop`, `agent.prompt`, `terminal.input`, `terminal.resize`, `terminal.subscribe`; the rest
-answer `protocol.capability_missing`. `agent.list` is proposed in ADR-0025.
+answer `protocol.capability_missing`. `agent.list` (ADR-0025) and `agent.kinds` (ADR-0030: the node's loaded manifests with display name, integration level and whether the launch program is on `PATH`; invalid manifests omitted; `agora agent kinds`).
 
 ## 5. Client state model
 

@@ -12,3 +12,6 @@ notify-digest =
         [one] Siz yokken 1 gelişme oldu.
        *[other] Siz yokken { $count } gelişme oldu.
     }
+
+notify-title = Agora
+notify-test = Agora bildirimleri çalışıyor.

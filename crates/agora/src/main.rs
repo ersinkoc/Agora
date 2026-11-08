@@ -93,6 +93,9 @@ pub(crate) struct Opts {
     ca: Option<PathBuf>,
     code: Option<String>,
     id: Option<String>,
+    ntfy: Option<String>,
+    webhook: Option<String>,
+    test: bool,
     positional: Vec<String>,
 }
 
@@ -120,6 +123,9 @@ fn parse(args: &[String]) -> Option<Opts> {
             "--ca" => o.ca = Some(it.next()?.into()),
             "--code" => o.code = Some(it.next()?.clone()),
             "--id" => o.id = Some(it.next()?.clone()),
+            "--ntfy" => o.ntfy = Some(it.next()?.clone()),
+            "--webhook" => o.webhook = Some(it.next()?.clone()),
+            "--test" => o.test = true,
             s if s.starts_with("--") => return None,
             _ => o.positional.push(a.clone()),
         }
@@ -151,11 +157,13 @@ fn main() -> ExitCode {
         ["agent", "start"] => agent_start(&say, &opts),
         ["agent", "stop"] => agent_stop(&say, &opts),
         ["agent", "list"] => agent_list(&say, &opts),
+        ["agent", "kinds"] => agent_kinds(&say, &opts),
         ["terminal", "attach"] => terminal_attach(&say, &opts),
         ["doctor"] => doctor(&say, &opts),
         ["hub", "run"] => hubcli::hub_run(&say, &opts),
         ["hub", "code"] => hubcli::hub_code(&say, &opts),
         ["hub", "login"] => hubcli::hub_login(&say, &opts),
+        ["hub", "notify"] => hubcli::hub_notify(&say, &opts),
         ["hub", "backup"] => hubcli::hub_backup(&say, &opts),
         ["hub", "restore"] => hubcli::hub_restore(&say, &opts),
         ["node", "enroll"] => hubcli::node_enroll(&say, &opts),
@@ -446,6 +454,34 @@ fn agent_list(say: &Say, o: &Opts) -> ExitCode {
                     a.kind,
                     state,
                     if a.running { "running" } else { "stopped" }
+                );
+            }
+            ExitCode::SUCCESS
+        }
+        Ok(_) => ExitCode::from(1),
+        Err(code) => code,
+    }
+}
+
+/// `agora agent kinds`: the agents this node can start, and whether each is installed.
+fn agent_kinds(say: &Say, o: &Opts) -> ExitCode {
+    let mut c = match connect(say, o) {
+        Ok(c) => c,
+        Err(code) => return code,
+    };
+    match call(say, &mut c, Cmd::AgentKinds(v1::AgentKinds {})) {
+        Ok(v1::CommandOk {
+            result: Some(Ok_::AgentKinds(list)),
+        }) => {
+            if list.kinds.is_empty() {
+                say.out(key!("cli-agent-kinds-empty"), &[]);
+            }
+            for k in &list.kinds {
+                println!(
+                    "{}\t{}\t{}",
+                    k.kind,
+                    k.display_name,
+                    if k.installed { "installed" } else { "missing" }
                 );
             }
             ExitCode::SUCCESS

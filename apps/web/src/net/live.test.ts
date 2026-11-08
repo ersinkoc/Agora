@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { agora } from '../gen/agora.js';
 import { decodeFrame, encodeFrame, EVENT_KIND, STREAM_CLOSE, STREAM_COMMANDS, STREAM_EVENTS } from './frame';
 import { connectLive, type LinkState, type Socket } from './live';
-import { applyEvent, emptyView, fromSnapshot, machines, machinesOnline, tiles, type View } from './view';
+import { applyEvent, emptyView, fromSnapshot, machines, machinesOnline, projectChoices, tiles, type View } from './view';
 
 const v1 = agora.v1;
 
@@ -57,6 +57,16 @@ describe('view', () => {
     applyEvent(v, 2, ev('n', 2, { agentUsageReported: { agentId: 'a', model: 'm', inputTokens: 100, outputTokens: 20 } }));
     applyEvent(v, 3, ev('n', 3, { agentUsageReported: { agentId: 'a', model: 'm', inputTokens: 5, outputTokens: 5 } }));
     expect(tiles(v)[0]?.tokens).toBe(130);
+  });
+
+  it('offers projects only on machines that are online', () => {
+    const v = emptyView();
+    applyEvent(v, 1, ev('a', 1, { nodeOnline: { nodeId: 'a', hostname: 'Alpha' } }));
+    applyEvent(v, 2, ev('a', 2, { checkoutDiscovered: { checkoutId: 'c1', nodeId: 'a', projectId: 'web', path: '/w' } }));
+    applyEvent(v, 3, ev('b', 1, { nodeOnline: { nodeId: 'b', hostname: 'Beta' } }));
+    applyEvent(v, 4, ev('b', 2, { checkoutDiscovered: { checkoutId: 'c1', nodeId: 'b', projectId: 'api', path: '/a' } }));
+    applyEvent(v, 5, ev('hub', 1, { nodeOffline: { nodeId: 'b' } }));
+    expect(projectChoices(v)).toEqual([{ node: 'a', projectId: 'web', label: 'Alpha · web' }]);
   });
 
   it('starts from a snapshot', () => {

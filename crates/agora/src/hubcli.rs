@@ -107,6 +107,35 @@ pub fn hub_run(say: &Say, o: &Opts) -> ExitCode {
         let has_web = web_assets(o).is_some();
         let store = SqliteStore::open(&dir.join("hub.db")).map_err(|e| e.to_string())?;
         let hub = Arc::new(Hub::open(store).map_err(|e| e.to_string())?);
+        // Where notifications go, if the owner listed any (docs/design/notifications.md).
+        let notify_file = dir.join("notify");
+        if let Ok(text) = std::fs::read_to_string(&notify_file) {
+            let (targets, skipped) = agora_hub::deliver::parse_targets(&text);
+            let file = notify_file.display().to_string();
+            if skipped > 0 {
+                say.err(
+                    key!("cli-hub-notify-skipped"),
+                    &[
+                        ("count", (skipped as i64).into()),
+                        ("file", file.clone().into()),
+                    ],
+                );
+            }
+            if !targets.is_empty() {
+                say.out(
+                    key!("cli-hub-notify"),
+                    &[
+                        ("count", (targets.len() as i64).into()),
+                        ("file", file.into()),
+                    ],
+                );
+            }
+            agora_hub::notifier::spawn(
+                Arc::clone(&hub),
+                targets,
+                agora_i18n::Catalog::for_locale(&agora_i18n::catalog::locale_from_env()),
+            );
+        }
         let sessions = Arc::new(HubSessions::new(Arc::clone(&hub)));
         // A fresh one-time code for the first sign-in; `agora hub login` makes more.
         let web_code = SignIn::new(hub.store(), Arc::new(Lockout::new()))
@@ -183,6 +212,101 @@ pub fn hub_login(say: &Say, o: &Opts) -> ExitCode {
             say.err(key!("cli-hub-failed"), &[("reason", e.into())]);
             ExitCode::from(1)
         }
+    }
+}
+
+/// `agora hub notify [--ntfy URL | --webhook URL | --test]`: lists where notifications go, adds a target, or sends a test
+/// message to every target (docs/design/notifications.md).
+pub fn hub_notify(say: &Say, o: &Opts) -> ExitCode {
+    use agora_hub::deliver::{parse_targets, request, send, Kind};
+    let file = hub_dir(o).join("notify");
+    let name = file.display().to_string();
+    let fail = |e: String| {
+        say.err(key!("cli-hub-failed"), &[("reason", e.into())]);
+        ExitCode::from(1)
+    };
+    let mut text = std::fs::read_to_string(&file).unwrap_or_default();
+    let add = match (&o.ntfy, &o.webhook) {
+        (Some(u), None) => Some(("ntfy", u)),
+        (None, Some(u)) => Some(("webhook", u)),
+        (None, None) => None,
+        _ => {
+            say.err(key!("cli-bad-arguments"), &[]);
+            return ExitCode::from(2);
+        }
+    };
+    if let Some((kind, url)) = add {
+        let line = format!("{kind} {url}");
+        if parse_targets(&line).0.is_empty() {
+            say.err(key!("cli-hub-notify-bad-url"), &[]);
+            return ExitCode::from(2);
+        }
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str(&line);
+        text.push('\n');
+        // The URL of a topic is the only secret ntfy has, so the file is private to the owner.
+        if let Err(e) = std::fs::create_dir_all(hub_dir(o))
+            .and_then(|()| agora_platform::write_private(&file, text.as_bytes()))
+        {
+            return fail(e.to_string());
+        }
+        say.out(
+            key!("cli-hub-notify-added"),
+            &[("file", name.clone().into())],
+        );
+    }
+    let (targets, _) = parse_targets(&text);
+    if targets.is_empty() {
+        say.out(key!("cli-hub-notify-none"), &[("file", name.into())]);
+        return ExitCode::SUCCESS;
+    }
+    let message = say.text(key!("notify-test"), &[]);
+    let mut all_ok = true;
+    for t in &targets {
+        let kind = if t.kind == Kind::Ntfy {
+            "ntfy"
+        } else {
+            "webhook"
+        };
+        let target = format!("{kind} {}:{}", t.url.host, t.url.port);
+        if !o.test {
+            println!("{target}");
+            continue;
+        }
+        let title = say.text(key!("notify-title"), &[]);
+        let sent = send(
+            &t.url,
+            &request(t, &title, &message, agora_hub::notify::Priority::Normal),
+        );
+        match sent {
+            Ok(status) if (200..300).contains(&status) => {
+                say.out(key!("cli-hub-notify-sent"), &[("target", target.into())]);
+            }
+            Ok(status) => {
+                all_ok = false;
+                say.err(
+                    key!("cli-hub-notify-refused"),
+                    &[
+                        ("target", target.into()),
+                        ("status", i64::from(status).into()),
+                    ],
+                );
+            }
+            Err(e) => {
+                all_ok = false;
+                say.err(
+                    key!("cli-hub-notify-unreachable"),
+                    &[("target", target.into()), ("reason", e.to_string().into())],
+                );
+            }
+        }
+    }
+    if all_ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
     }
 }
 

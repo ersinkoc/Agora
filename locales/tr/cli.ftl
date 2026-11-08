@@ -6,12 +6,14 @@ cli-usage =
       agora agent start TÜR [--project AD] [--name AD] [--socket YOL]
       agora agent stop AJAN_KİMLİĞİ [--socket YOL]
       agora agent list [--socket YOL]
+      agora agent kinds [--socket YOL]
       agora terminal attach AJAN_KİMLİĞİ [--socket YOL]
       agora node stdio [--socket YOL]
       agora mesh stdio --socket YOL
       agora hub run [--listen ADDR] [--hub-dir DIR] [--name HOST]... [--web DIR]
       agora hub code [--hub-dir DIR]
       agora hub login [--hub-dir DİZİN]
+      agora hub notify [--ntfy URL | --webhook URL | --test] [--hub-dir DIR]
       agora hub backup [DOSYA] [--keep N] [--hub-dir DİZİN]
       agora hub restore DOSYA [--hub-dir DİZİN]
       agora node enroll --hub URL --ca FILE --code CODE --id NAME
@@ -21,6 +23,7 @@ cli-node-listening = Düğüm çalışıyor. Denetim soketi: { $socket }
 cli-agent-started = { $agent_id } ajanı { $worktree } içinde başlatıldı
 cli-agent-stopped = { $agent_id } ajanı durduruldu
 cli-agent-list-empty = Bu düğümde ajan yok.
+cli-agent-kinds-empty = Bu düğümde ajan tanımı yok.
 cli-terminal-detached = { $agent_id } ajanından ayrıldınız.
 cli-attach-needs-terminal = Bağlanmak için etkileşimli bir terminal gerekir.
 cli-node-not-running = { $socket } adresinde dinleyen bir düğüm yok. "agora node run" ile başlatın.
@@ -57,6 +60,8 @@ doctor-summary-ok = Agora'nın ihtiyaç duyduğu her şey yerinde.
 doctor-summary-problems = Agora'nın ihtiyaç duyduğu bir şey eksik. SORUN olarak işaretlenenleri düzeltin.
 
 cli-hub-listening = Hub { $addr } adresinde çalışıyor. Veri klasörü: { $dir }
+cli-hub-notify = Bildirimler { $file } dosyasındaki { $count } hedefe gidiyor.
+cli-hub-notify-skipped = { $file } dosyasının { $count } satırı anlaşılamadı ve yok sayılıyor. Her satır `ntfy URL` ya da `webhook URL` olmalı.
 cli-hub-web = Web uygulaması: https://{ $addr }/ . { $code } koduyla giriş yapın (10 dakika geçerli; yenisi için `agora hub login`). Hub sertifikası kendi CA'sı tarafından imzalı; ona güvenene kadar tarayıcı uyarı verir.
 cli-hub-login = Web uygulaması için giriş kodu: { $code } (10 dakika geçerli). Hub adresini tarayıcıda açıp kodu girin.
 cli-trusted = { $id } cihazı artık bu node'daki onaylara yanıt verebilir. Uygulanması için node'u yeniden başlatın.
@@ -67,3 +72,9 @@ cli-hub-failed = Hub komutu başarısız oldu: { $reason }
 cli-hub-code = Kayıt kodu: { $code } (10 dakika geçerli). Diğer makinede şunu çalıştırın: agora node enroll --hub wss://ADRES:PORT --ca { $ca } --code { $code } --id AD
 cli-enrolled = Bu makine { $id } adıyla kaydedildi. "agora node run" ile başlatın; hub'a kendiliğinden bağlanır. Kayıt yeri: { $dir }.
 cli-enroll-refused = Hub bu makineyi kaydetmeyi reddetti ({ $code }). Kod yanlış, süresi dolmuş veya zaten kullanılmış olabilir.
+cli-hub-notify-added = { $file } dosyasına eklendi. Kullanmak için hub'ı yeniden başlatın.
+cli-hub-notify-none = Henüz bildirim hedefi yok. --ntfy URL ya da --webhook URL ile ekleyin ({ $file }).
+cli-hub-notify-bad-url = Bu bir http:// ya da https:// adresi değil.
+cli-hub-notify-sent = { $target } hedefine deneme mesajı gönderildi.
+cli-hub-notify-refused = { $target } { $status } durumuyla yanıt verdi.
+cli-hub-notify-unreachable = { $target } hedefine ulaşılamadı: { $reason }

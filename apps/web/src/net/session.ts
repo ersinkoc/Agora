@@ -1,8 +1,8 @@
 // Where the hub is and how this browser proves itself. The hub serves this app, so its address is our own origin.
 // Signing in trades a one-time code (`agora hub login`, typed in or given as `#code=...`, a fragment that is never sent
 // to a server) for a session token via POST /api/session. The token lives for the tab and expires on the hub (12 h).
-// A long-lived token can still be given as `#token=...` for scripts and development. Passkeys (ADR-0015) will replace
-// the code.
+// A long-lived token can still be given as `#token=...` for scripts and development. A passkey (net/passkey.ts) signs in
+// without a code once one has been added.
 
 export interface HubConnection { url: string; token: string }
 
@@ -47,11 +47,16 @@ export async function signIn(code: string, fetcher: typeof fetch = fetch): Promi
     if (!r.ok) return { ok: false, reason: 'failed' };
     const body = (await r.json()) as { token?: unknown };
     if (typeof body.token !== 'string') return { ok: false, reason: 'failed' };
-    try { window.sessionStorage.setItem(KEY, body.token); } catch { /* private mode: lasts until reload */ }
+    rememberToken(body.token);
     return { ok: true, token: body.token };
   } catch {
     return { ok: false, reason: 'failed' };
   }
+}
+
+// Keeps a session token for this tab.
+export function rememberToken(token: string): void {
+  try { window.sessionStorage.setItem(KEY, token); } catch { /* private mode: lasts until reload */ }
 }
 
 export function forgetToken(): void {

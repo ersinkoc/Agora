@@ -29,7 +29,7 @@ target/release/agora node enroll --hub wss://localhost:7443 --ca ~/.agora/hub/ca
 mkdir -p ~/.agora/manifests
 printf 'kind = "shell"\ndisplay_name = "Shell"\nversion = "1"\nmin_engine = 1\n[process]\nlaunch = ["sh"]\n' > ~/.agora/manifests/shell.toml
 target/release/agora node run --project ~/code/myproject
-#    in another terminal:
+#    in the window, "Start an agent"; or in another terminal:
 target/release/agora agent start shell --project myproject
 
 # 4. Open https://localhost:7443/ , accept the hub's own certificate, sign in with the code from step 2
@@ -38,8 +38,8 @@ target/release/agora agent start shell --project myproject
 
 What works today: several machines in one window, live agent states, the real terminal of each agent through the hub,
 approvals answered with a device key (the window's "This device" page shows the command that makes a machine trust it), the
-mesh between agents (per-agent MCP endpoint), backups (`agora hub backup`). What does not yet: starting an agent from the
-window (use `agora agent start KIND --project NAME` on the machine), passkey sign-in, installing agents from the registry,
+mesh between agents (per-agent MCP endpoint), passkey sign-in, backups (`agora hub backup`), starting an agent from the window (machine and project, then an agent that machine has
+installed). What does not yet: installing agents from the registry,
 Windows terminals. Details and the open items per phase: [docs/backlog/](docs/backlog/).
 
 ## Status

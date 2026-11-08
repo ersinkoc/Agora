@@ -74,3 +74,23 @@ machine-agents =
     }
 palette-go-machines = Show my machines
 agent-tokens = { $count } tokens used
+
+start-title = Start an agent
+start-where = Where
+start-which = Which agent
+start-loading = Asking the machine…
+start-kinds-failed = The machine did not answer. Try again.
+start-no-kinds = This machine has no agents set up yet.
+start-no-projects = No project is set up on a connected machine. Run "agora node run --project PATH" on one.
+start-not-installed = not installed
+start-go = Start
+start-cancel = Cancel
+start-kind-unknown = That machine does not know this agent.
+start-limit = That machine is at its limit. Stop an agent and try again.
+start-failed = The agent did not start. Try again.
+signin-passkey = Sign in with a passkey
+signin-passkey-failed = The passkey did not work. Use a code instead.
+device-passkey-intro = Add a passkey to sign in on this device without a code.
+device-passkey-add = Add a passkey
+device-passkey-added = Passkey added. Next time, choose "Sign in with a passkey".
+device-passkey-failed = Could not add the passkey.

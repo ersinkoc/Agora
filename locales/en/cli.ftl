@@ -6,12 +6,14 @@ cli-usage =
       agora agent start KIND [--project NAME] [--name NAME] [--socket PATH]
       agora agent stop AGENT_ID [--socket PATH]
       agora agent list [--socket PATH]
+      agora agent kinds [--socket PATH]
       agora terminal attach AGENT_ID [--socket PATH]
       agora node stdio [--socket PATH]
       agora mesh stdio --socket PATH
       agora hub run [--listen ADDR] [--hub-dir DIR] [--name HOST]... [--web DIR]
       agora hub code [--hub-dir DIR]
       agora hub login [--hub-dir DIR]
+      agora hub notify [--ntfy URL | --webhook URL | --test] [--hub-dir DIR]
       agora hub backup [FILE] [--keep N] [--hub-dir DIR]
       agora hub restore FILE [--hub-dir DIR]
       agora node enroll --hub URL --ca FILE --code CODE --id NAME
@@ -21,6 +23,7 @@ cli-node-listening = Node is running. Control socket: { $socket }
 cli-agent-started = Started agent { $agent_id } in { $worktree }
 cli-agent-stopped = Stopped agent { $agent_id }
 cli-agent-list-empty = This node has no agents.
+cli-agent-kinds-empty = This node has no agent descriptions.
 cli-terminal-detached = Detached from { $agent_id }.
 cli-attach-needs-terminal = Attaching needs an interactive terminal.
 cli-node-not-running = No node is listening at { $socket }. Start one with "agora node run".
@@ -57,6 +60,8 @@ doctor-summary-ok = Everything Agora needs is in place.
 doctor-summary-problems = Something Agora needs is missing. Fix the items marked PROBLEM.
 
 cli-hub-listening = Hub is running on { $addr }. Its data folder: { $dir }
+cli-hub-notify = Notifications go to { $count } target(s) from { $file }.
+cli-hub-notify-skipped = { $count } line(s) of { $file } were not understood and are ignored. Each line is `ntfy URL` or `webhook URL`.
 cli-hub-web = Web app: https://{ $addr }/ . Sign in with the code { $code } (valid for 10 minutes; `agora hub login` makes another). The hub's certificate is signed by its own CA, so the browser warns until you trust it.
 cli-hub-login = Sign-in code for the web app: { $code } (valid for 10 minutes). Open the hub's address in a browser and enter it.
 cli-trusted = Device { $id } can now answer approvals on this node. Restart the node to apply it.
@@ -67,3 +72,9 @@ cli-hub-failed = The hub command failed: { $reason }
 cli-hub-code = Enrollment code: { $code } (valid for 10 minutes). On the other machine run: agora node enroll --hub wss://HOST:PORT --ca { $ca } --code { $code } --id NAME
 cli-enrolled = This machine is enrolled as { $id }. Start it with "agora node run"; it will connect to the hub by itself. Saved in { $dir }.
 cli-enroll-refused = The hub refused to enroll this machine ({ $code }). The code may be wrong, expired or already used.
+cli-hub-notify-added = Added to { $file }. Restart the hub to use it.
+cli-hub-notify-none = No notification targets yet. Add one with --ntfy URL or --webhook URL ({ $file }).
+cli-hub-notify-bad-url = That is not an http:// or https:// address.
+cli-hub-notify-sent = Sent a test message to { $target }.
+cli-hub-notify-refused = { $target } answered with status { $status }.
+cli-hub-notify-unreachable = Could not reach { $target }: { $reason }

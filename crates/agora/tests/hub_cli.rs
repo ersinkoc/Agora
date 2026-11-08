@@ -259,3 +259,37 @@ fn the_hub_database_can_be_backed_up_pruned_and_restored_from_the_command_line()
     .success());
     let _ = std::fs::remove_dir_all(home);
 }
+
+#[test]
+fn notification_targets_are_added_listed_and_tested_from_the_command_line() {
+    use std::io::{Read, Write};
+    let root = tmp("notify");
+    let hub = root.join("hub");
+    let hub = hub.to_str().unwrap();
+    let run = |args: &[&str]| agora(&root, args).output().unwrap();
+
+    let none = run(&["hub", "notify", "--hub-dir", hub]);
+    assert!(String::from_utf8_lossy(&none.stdout).contains("No notification targets yet"));
+    let bad = run(&["hub", "notify", "--webhook", "ftp://x", "--hub-dir", hub]);
+    assert_eq!(bad.status.code(), Some(2));
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let url = format!("http://127.0.0.1:{port}/hook");
+    let added = run(&["hub", "notify", "--webhook", &url, "--hub-dir", hub]);
+    assert!(added.status.success(), "{added:?}");
+    let listed = run(&["hub", "notify", "--hub-dir", hub]);
+    assert!(String::from_utf8_lossy(&listed.stdout).contains(&format!("webhook 127.0.0.1:{port}")));
+
+    let server = std::thread::spawn(move || {
+        let (mut s, _) = listener.accept().unwrap();
+        let mut got = vec![0u8; 2048];
+        let n = s.read(&mut got).unwrap();
+        s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+            .unwrap();
+        String::from_utf8_lossy(&got[..n]).to_string()
+    });
+    let tested = run(&["hub", "notify", "--test", "--hub-dir", hub]);
+    assert!(tested.status.success(), "{tested:?}");
+    assert!(server.join().unwrap().contains("Agora notifications work."));
+}
