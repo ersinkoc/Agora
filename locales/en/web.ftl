@@ -73,3 +73,4 @@ machine-agents =
        *[other] { $count } agents running
     }
 palette-go-machines = Show my machines
+agent-tokens = { $count } tokens used

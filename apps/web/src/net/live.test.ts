@@ -51,6 +51,14 @@ describe('view', () => {
     expect(machines(v).map((m) => [m.name, m.online, m.agentsRunning])).toEqual([['Build box', true, 3], ['Alpha', false, 0]]);
   });
 
+  it('adds up reported token usage', () => {
+    const v = emptyView();
+    applyEvent(v, 1, ev('n', 1, { agentStarted: { agentId: 'a', nodeId: 'n', worktreeId: 'w', kind: 'claude' } }));
+    applyEvent(v, 2, ev('n', 2, { agentUsageReported: { agentId: 'a', model: 'm', inputTokens: 100, outputTokens: 20 } }));
+    applyEvent(v, 3, ev('n', 3, { agentUsageReported: { agentId: 'a', model: 'm', inputTokens: 5, outputTokens: 5 } }));
+    expect(tiles(v)[0]?.tokens).toBe(130);
+  });
+
   it('starts from a snapshot', () => {
     const v = fromSnapshot(v1.Snapshot.create({
       pos: 7,

@@ -109,6 +109,7 @@ export function Focus({ agent, source: live, onBack }: {
       <span className="muted">
         {t('agent-on-machine', { machine: agent.machine })} · {t('agent-workspace', { name: agent.workspace })}
       </span>
+      {agent.tokens ? <span className="muted">{t('agent-tokens', { count: agent.tokens })}</span> : null}
       <h2>{t('focus-terminal')}</h2>
       <Suspense fallback={<div className="terminal" aria-busy="true" />}>
         <TerminalView source={source} label={t('focus-terminal')} />
