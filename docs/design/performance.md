@@ -123,7 +123,8 @@ whole path: browser, TLS WebSocket, hub, node, PTY and back, with xterm.js (DOM 
 | Keystroke → echo, same machine, ≤ 16 ms p95 | text on screen p50 2.6 ms, p95 14 ms; at the next frame p50 13 ms, p95 30 ms | 100 synthetic key presses 20 ms apart; the frame figure includes headless Chromium's software frame pacing |
 | WebSocket round trip for a key (send → echo frame received) | 1.7 ms p50, 2.2 ms p95 | in the page, before xterm |
 | Terminal snapshot after picking one of 20 agents, ≤ 150 ms | 50 ms p50, 50 ms p95 (12 of 12 picks) | from the click until the new pane's terminal shows its prompt, polled every frame |
-| Page memory | 15 MB JS heap | 20 agents listed, 4 terminals open |
+| Four visible terminals flooding at once, 16 more agents idle, no main-thread task > 50 ms | no long task at 18.6 MB/s together | 4 × 10 MB, drained in 2.1 s (long-task API in headless Chromium) |
+| Page memory | 15–19 MB JS heap | 20 agents listed, 4 terminals open |
 | One terminal flooding output, no main-thread task > 50 ms | no long task at 8–9 MB/s | 20 MB through `yes \| head -c`, drained in 2.4 s |
 
 The first run measured the echo at 80 ms (p95). Two causes, both in the hub and node, both invisible to unit tests:
@@ -134,4 +135,4 @@ sockets and the node's uplink set `TCP_NODELAY`.
 
 Not measured: the xterm.js against WebAssembly comparison (ADR-0017 keeps the renderer swappable; with the figures above
 xterm.js meets the interaction budget, so a WebAssembly emulator would have to win on throughput or memory to be worth
-it), the 10 MB/s plus twenty *busy* terminals scenario (the twenty here are idle shells), and any machine over a real network.
+it), twenty terminals all open and busy at once (the wall shows four; the other agents' output is not relayed to the browser), and any machine over a real network.
