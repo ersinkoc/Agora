@@ -10,6 +10,7 @@ import { approvalList, projectChoices, machines, machinesOnline, tiles, type App
 import { freshApprovals, titleWithCount } from './net/alert';
 import { indexedDbStore, signApproval, thisDevice, type Device } from './net/approval';
 import { addPasskey, passkeysSupported, signInWithPasskey } from './net/passkey';
+import { summarize, type UsageSummary } from './net/usage';
 import { forgetToken, hubConnection, readCode, signIn } from './net/session';
 import { DevicePage, Focus, Gallery, Home, MachinesPage, SignInPage } from './screens';
 
@@ -51,6 +52,7 @@ export function App() {
   const [api, setApi] = useState<Live | undefined>();
   // This browser's own key: what the node checks an approval against (ADR-0028).
   const [device, setDevice] = useState<Device | undefined>();
+  const [usage, setUsage] = useState<UsageSummary | undefined>();
   const [notice, setNotice] = useState<string | undefined>();
   const [starting, setStarting] = useState(false);
   const loadKinds = useCallback(async (node: string): Promise<KindChoice[]> => {
@@ -105,6 +107,15 @@ export function App() {
     window.addEventListener('pointerdown', ask, { once: true });
     return () => window.removeEventListener('pointerdown', ask);
   }, [hub]);
+  // What the agents cost so far, estimated by the hub from its price table; asked for again every half minute.
+  useEffect(() => {
+    if (!api || !live) return;
+    let stop = false;
+    const ask = () => { api.command('', { usageReport: {} }).then((ok) => { if (!stop && ok.usageReport) setUsage(summarize(ok.usageReport)); }).catch(() => {}); };
+    ask();
+    const timer = setInterval(ask, 30_000);
+    return () => { stop = true; clearInterval(timer); };
+  }, [api, live !== undefined]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (!hub) return;
     const c = connectLive({ url: hub.url, token: hub.token, onView: (v) => setLive({ ...v }), onState: setLink,
@@ -154,8 +165,8 @@ export function App() {
 
   return (
     <>
-      {hash === '#/gallery' ? <Gallery /> : hash === '#/machines' ? <MachinesPage machines={live ? machines(live) : []} onBack={() => go('#/')} /> : hash === '#/device' ? <DevicePage device={device} onBack={() => go('#/')} onAddPasskey={hub && passkeysSupported() ? async () => (await addPasskey(hub.token)).ok : undefined} /> : current !== undefined
-        ? <Focus agent={agents.find((a) => a.id === current)} source={terminal} onBack={() => go('#/')} />
+      {hash === '#/gallery' ? <Gallery /> : hash === '#/machines' ? <MachinesPage machines={live ? machines(live) : []} usage={usage} onBack={() => go('#/')} /> : hash === '#/device' ? <DevicePage device={device} onBack={() => go('#/')} onAddPasskey={hub && passkeysSupported() ? async () => (await addPasskey(hub.token)).ok : undefined} /> : current !== undefined
+        ? <Focus agent={agents.find((a) => a.id === current)} costMicroUsd={current ? usage?.perAgent.get(current) : undefined} source={terminal} onBack={() => go('#/')} />
         : <Home onOpen={open} agents={agents} machines={live ? machinesOnline(live) : undefined} link={hub ? link : 'live'} approvals={live ? approvalList(live) : []} onResolve={resolve} notice={notice}
           onStart={hub && api && live ? () => setStarting(true) : undefined}
           start={starting && live ? <StartAgent projects={projectChoices(live)} loadKinds={loadKinds} onStart={startAgent} onClose={() => setStarting(false)} /> : undefined} />}

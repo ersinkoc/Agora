@@ -410,6 +410,22 @@ where
     let req = v1::CommandRequest::decode(payload).map_err(|_| invalid("request"))?;
     let client_request_id = req.request_id.clone();
     let refuse = |e: Error| error_response(&client_request_id, &e);
+    // Answered by the hub itself from its own view and prices (ADR-0033); it names no node.
+    if matches!(req.command, Some(command_request::Command::UsageReport(_))) {
+        let resp = if req.target_node.is_empty() {
+            v1::CommandResponse {
+                request_id: client_request_id,
+                result: Some(command_response::Result::Ok(v1::CommandOk {
+                    result: Some(command_ok::Result::UsageReport(hub.usage_report())),
+                })),
+            }
+        } else {
+            refuse(Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "target_node"))
+        };
+        conn.send(&frame(STREAM_COMMANDS, 1, resp.encode_to_vec()))
+            .await?;
+        return Ok(());
+    }
     let outcome = (|| {
         let node = crate::router::forwardable(&req)?.to_string();
         if !hub.node_known(&node) {

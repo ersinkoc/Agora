@@ -136,6 +136,14 @@ pub fn hub_run(say: &Say, o: &Opts) -> ExitCode {
                 agora_i18n::Catalog::for_locale(&agora_i18n::catalog::locale_from_env()),
             );
         }
+        let (prices, prices_at, bad_overrides) = load_prices(&dir);
+        hub.set_prices(prices, prices_at);
+        if bad_overrides > 0 {
+            say.err(
+                key!("cli-hub-prices-skipped"),
+                &[("count", (bad_overrides as i64).into())],
+            );
+        }
         let sessions = Arc::new(HubSessions::new(Arc::clone(&hub)));
         // A fresh one-time code for the first sign-in; `agora hub login` makes more.
         let web_code = SignIn::new(hub.store(), Arc::new(Lockout::new()))
@@ -210,6 +218,71 @@ pub fn hub_login(say: &Say, o: &Opts) -> ExitCode {
         }
         Err(e) => {
             say.err(key!("cli-hub-failed"), &[("reason", e.into())]);
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// The catalog is a refreshed copy in the hub dir if there is one, else the table bundled with the release; the owner's
+/// `prices.json` overrides sit on top (ADR-0033). Returns the table, when it was refreshed (0 = bundled) and how many
+/// override entries could not be read.
+fn load_prices(dir: &Path) -> (agora_hub::usage::Catalog, u64, usize) {
+    use agora_hub::usage::Catalog;
+    let refreshed = std::fs::read_to_string(dir.join("prices-catalog.json"))
+        .ok()
+        .and_then(|t| Catalog::from_models_dev(&t).ok())
+        .filter(|c| !c.is_empty());
+    let at_ms = refreshed
+        .as_ref()
+        .and_then(|_| std::fs::metadata(dir.join("prices-catalog.json")).ok())
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(0));
+    let mut catalog = refreshed.unwrap_or_else(|| (*Catalog::bundled()).clone());
+    let skipped = std::fs::read_to_string(dir.join("prices.json"))
+        .ok()
+        .and_then(|t| catalog.load_overrides(&t).ok())
+        .unwrap_or(0);
+    (catalog, at_ms, skipped)
+}
+
+/// `agora hub prices update [--url URL]`: fetches the live models.dev catalog (only when asked) and keeps it in the hub dir.
+pub fn hub_prices(say: &Say, o: &Opts) -> ExitCode {
+    use agora_hub::deliver::{get, Url};
+    if o.positional.first().map(String::as_str) != Some("update") {
+        say.err(key!("cli-bad-arguments"), &[]);
+        say.err(key!("cli-usage"), &[]);
+        return ExitCode::from(2);
+    }
+    let dir = hub_dir(o);
+    let fetched = (|| -> Result<usize, String> {
+        let url = Url::parse(o.url.as_deref().unwrap_or("https://models.dev/api.json"))
+            .ok_or("not an http:// or https:// address")?;
+        let (status, body) = get(&url, 64 * 1024 * 1024).map_err(|e| e.to_string())?;
+        if status != 200 {
+            return Err(format!("status {status}"));
+        }
+        let text = String::from_utf8(body).map_err(|e| e.to_string())?;
+        let count = agora_hub::usage::Catalog::from_models_dev(&text)
+            .map_err(|e| e.to_string())?
+            .len();
+        if count == 0 {
+            return Err("no prices in the answer".into());
+        }
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        std::fs::write(dir.join("prices-catalog.json"), text).map_err(|e| e.to_string())?;
+        Ok(count)
+    })();
+    match fetched {
+        Ok(n) => {
+            say.out(
+                key!("cli-hub-prices-updated"),
+                &[("count", (n as i64).into())],
+            );
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            say.err(key!("cli-hub-prices-failed"), &[("reason", e.into())]);
             ExitCode::from(1)
         }
     }

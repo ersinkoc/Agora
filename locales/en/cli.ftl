@@ -14,6 +14,7 @@ cli-usage =
       agora hub code [--hub-dir DIR]
       agora hub login [--hub-dir DIR]
       agora hub notify [--ntfy URL | --webhook URL | --test] [--hub-dir DIR]
+      agora hub prices update [--url URL] [--hub-dir DIR]
       agora hub backup [FILE] [--keep N] [--hub-dir DIR]
       agora hub restore FILE [--hub-dir DIR]
       agora node enroll --hub URL --ca FILE --code CODE --id NAME
@@ -78,3 +79,6 @@ cli-hub-notify-bad-url = That is not an http:// or https:// address.
 cli-hub-notify-sent = Sent a test message to { $target }.
 cli-hub-notify-refused = { $target } answered with status { $status }.
 cli-hub-notify-unreachable = Could not reach { $target }: { $reason }
+cli-hub-prices-updated = Price table updated: { $count } models.
+cli-hub-prices-failed = Could not update the price table: { $reason }
+cli-hub-prices-skipped = { $count } entries of prices.json were not understood and are ignored. Each needs input and output prices (USD per million tokens).

@@ -293,3 +293,47 @@ fn notification_targets_are_added_listed_and_tested_from_the_command_line() {
     assert!(tested.status.success(), "{tested:?}");
     assert!(server.join().unwrap().contains("Agora notifications work."));
 }
+
+#[test]
+fn the_price_table_is_refreshed_only_on_request_and_a_bad_answer_changes_nothing() {
+    use std::io::{Read, Write};
+    let root = tmp("prices");
+    let hub = root.join("hub");
+    let serve = |body: &'static str| {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (mut s, _) = l.accept().unwrap();
+            let mut got = [0u8; 512];
+            let _ = s.read(&mut got).unwrap();
+            s.write_all(format!("HTTP/1.0 200 OK\r\n\r\n{body}").as_bytes())
+                .unwrap();
+        });
+        format!("http://127.0.0.1:{port}/api.json")
+    };
+    let update = |url: &str| {
+        agora(
+            &root,
+            &[
+                "hub",
+                "prices",
+                "update",
+                "--url",
+                url,
+                "--hub-dir",
+                hub.to_str().unwrap(),
+            ],
+        )
+        .output()
+        .unwrap()
+    };
+    let bad = update(&serve("{\"p\":{\"models\":{}}}"));
+    assert_eq!(bad.status.code(), Some(1));
+    assert!(!hub.join("prices-catalog.json").exists());
+    let ok = update(&serve(
+        "{\"p\":{\"models\":{\"m\":{\"cost\":{\"input\":1,\"output\":2}}}}}",
+    ));
+    assert!(ok.status.success(), "{ok:?}");
+    assert!(String::from_utf8_lossy(&ok.stdout).contains("1 models"));
+    assert!(hub.join("prices-catalog.json").exists());
+}

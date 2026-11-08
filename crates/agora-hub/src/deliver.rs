@@ -178,8 +178,10 @@ fn tls_config() -> io::Result<Arc<rustls::ClientConfig>> {
     ))
 }
 
-/// Sends one prepared request; returns the HTTP status. Blocking: call it from a thread of its own.
-pub fn send(url: &Url, bytes: &[u8]) -> io::Result<u16> {
+trait Stream: Read + Write {}
+impl<T: Read + Write> Stream for T {}
+
+fn open(url: &Url) -> io::Result<Box<dyn Stream>> {
     let addr = (url.host.as_str(), url.port)
         .to_socket_addrs()?
         .next()
@@ -188,13 +190,65 @@ pub fn send(url: &Url, bytes: &[u8]) -> io::Result<u16> {
     tcp.set_read_timeout(Some(TIMEOUT))?;
     tcp.set_write_timeout(Some(TIMEOUT))?;
     if !url.https {
-        return exchange(tcp, bytes);
+        return Ok(Box::new(tcp));
     }
     let name = rustls::pki_types::ServerName::try_from(url.host.clone())
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
     let conn = rustls::ClientConnection::new(tls_config()?, name)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
-    exchange(rustls::StreamOwned::new(conn, tcp), bytes)
+    Ok(Box::new(rustls::StreamOwned::new(conn, tcp)))
+}
+
+/// Sends one prepared request; returns the HTTP status. Blocking: call it from a thread of its own.
+pub fn send(url: &Url, bytes: &[u8]) -> io::Result<u16> {
+    exchange(open(url)?, bytes)
+}
+
+/// `GET` the URL and return the status and the body (at most `max` bytes; more is an error). HTTP/1.0 so the body is not
+/// chunked. Blocking.
+pub fn get(url: &Url, max: usize) -> io::Result<(u16, Vec<u8>)> {
+    let mut s = open(url)?;
+    let req = format!(
+        "GET {} HTTP/1.0\r\nHost: {}\r\nUser-Agent: agora\r\nAccept: application/json\r\nConnection: close\r\n\r\n",
+        url.path, url.host
+    );
+    s.write_all(req.as_bytes())?;
+    let mut all = Vec::new();
+    let mut buf = [0u8; 16 * 1024];
+    loop {
+        let n = match s.read(&mut buf) {
+            Ok(n) => n,
+            // A server that closes without a TLS close_notify has still sent its whole body.
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => 0,
+            Err(e) => return Err(e),
+        };
+        if n == 0 {
+            break;
+        }
+        all.extend_from_slice(&buf[..n]);
+        if all.len() > max + 16 * 1024 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "response too large",
+            ));
+        }
+    }
+    let status = status_of(&all)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "no HTTP status"))?;
+    let body_at = find_body(&all)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "no HTTP body"))?;
+    let body = all.split_off(body_at);
+    if body.len() > max {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "response too large",
+        ));
+    }
+    Ok((status, body))
+}
+
+fn find_body(r: &[u8]) -> Option<usize> {
+    r.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4)
 }
 
 #[cfg(test)]
@@ -249,6 +303,25 @@ mod tests {
             w.contains("Content-Type: application/json")
                 && w.ends_with(r#"{"content":"Hi \"there\"","text":"Hi \"there\""}"#)
         );
+    }
+
+    #[test]
+    fn get_returns_the_status_and_only_the_body_and_refuses_a_body_over_the_limit() {
+        use std::net::TcpListener;
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut s, _) = l.accept().unwrap();
+                let mut got = [0u8; 512];
+                let _ = s.read(&mut got).unwrap();
+                s.write_all(b"HTTP/1.0 200 OK\r\nX: y\r\n\r\n0123456789")
+                    .unwrap();
+            }
+        });
+        let u = Url::parse(&format!("http://127.0.0.1:{port}/api.json")).unwrap();
+        assert_eq!(get(&u, 100).unwrap(), (200, b"0123456789".to_vec()));
+        assert!(get(&u, 5).is_err());
     }
 
     #[test]

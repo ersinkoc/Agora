@@ -52,6 +52,7 @@ struct Inner {
 }
 
 pub struct Hub {
+    prices: std::sync::RwLock<(std::sync::Arc<crate::usage::Catalog>, u64)>,
     store: SqliteStore,
     router: std::sync::Arc<crate::router::Router>,
     inner: Mutex<Inner>,
@@ -69,6 +70,7 @@ impl Hub {
         let (view, pos) = View::rebuild(&store)?;
         let hub_seq = store.acked(RESERVED_HUB_ID)?;
         Ok(Self {
+            prices: std::sync::RwLock::new((crate::usage::Catalog::bundled(), 0)),
             store,
             router: crate::router::Router::new(),
             inner: Mutex::new(Inner {
@@ -78,6 +80,50 @@ impl Hub {
                 subs: Vec::new(),
             }),
         })
+    }
+
+    /// Replaces the price table (overrides already applied) and says when it was refreshed (ms since the epoch; 0 for the
+    /// table bundled with the release).
+    pub fn set_prices(&self, catalog: crate::usage::Catalog, at_ms: u64) {
+        if let Ok(mut p) = self.prices.write() {
+            *p = (std::sync::Arc::new(catalog), at_ms);
+        }
+    }
+
+    /// Tokens and estimated cost per agent (ADR-0033). An agent whose model has no price has no estimate.
+    pub fn usage_report(&self) -> agora_protocol::v1::UsageReportResult {
+        use crate::usage::{Cost, Usage};
+        let (catalog, prices_at_ms) = match self.prices.read() {
+            Ok(p) => (std::sync::Arc::clone(&p.0), p.1),
+            Err(_) => (crate::usage::Catalog::bundled(), 0),
+        };
+        let (view, _) = self.view();
+        let mut total = 0u64;
+        let agents = view
+            .agents
+            .iter()
+            .map(|(id, a)| {
+                let usage = Usage {
+                    input_tokens: a.input_tokens,
+                    output_tokens: a.output_tokens,
+                    ..Usage::default()
+                };
+                let micro_usd = catalog.cost(&a.model, &usage, None).map(Cost::micro_usd);
+                total = total.saturating_add(micro_usd.unwrap_or(0));
+                agora_protocol::v1::AgentUsage {
+                    agent_id: id.clone(),
+                    model: a.model.clone(),
+                    input_tokens: a.input_tokens,
+                    output_tokens: a.output_tokens,
+                    micro_usd,
+                }
+            })
+            .collect();
+        agora_protocol::v1::UsageReportResult {
+            agents,
+            total_micro_usd: total,
+            prices_at_ms,
+        }
     }
 
     /// Where connected nodes wait for commands (ADR-0029).
