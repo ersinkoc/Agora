@@ -1,27 +1,23 @@
-/* Design tokens (docs/ux/visual-language.md §3). Components use only these variables, never raw values.
-   Dark-first, light-equal. Color is reserved for agent state and one brand accent. */
+/* Design tokens (docs/ux/visual-language.md §3). Components use only these variables, never raw values; the Tailwind theme in
+   app.css maps onto them (ADR-0036). Dark-first, light-equal. Color is reserved for agent state and one brand accent. */
 :root {
-  --font-ui: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
-  --font-mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
-
+  --font-ui: 'Inter Variable', Inter, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, Consolas, monospace;
   --text-12: 12px;
   --text-13: 13px;
   --text-14: 14px;
   --text-16: 16px;
   --text-20: 20px;
   --text-28: 28px;
-
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 12px;
   --space-4: 16px;
   --space-6: 24px;
   --space-8: 32px;
-
-  --radius-s: 6px;
-  --radius-m: 10px;
-  --radius-l: 16px;
-
+  --radius-s: 8px;
+  --radius-m: 12px;
+  --radius-l: 18px;
   --motion-fast: 150ms;
   --motion-base: 250ms;
   --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
@@ -29,53 +25,59 @@
 
 :root,
 [data-theme='dark'] {
-  --surface-0: #0f1115;
-  --surface-1: #161a20;
-  --surface-2: #1d222a;
-  --border: #2a303a;
-  --text: #e7eaf0;
-  --text-muted: #9aa3b2;
-  --accent: #7aa2ff;
-  --state-working: #6cb6ff;
-  --state-needs-you: #ffb454;
-  --state-finished: #5fd38d;
-  --state-idle: #8b93a1;
-  --state-unknown: #6b7280;
+  --surface-0: #09090b;
+  --surface-1: #111114;
+  --surface-2: #1b1b20;
+  --border: #26262c;
+  --text: #f4f4f5;
+  --text-muted: #a1a1aa;
+  --accent: #8b93ff;
+  --on-accent: #0b0b14;
+  --state-working: #60a5fa;
+  --state-needs-you: #fbbf24;
+  --state-finished: #4ade80;
+  --state-idle: #8b8b96;
+  --state-unknown: #71717a;
+  --shadow: 0 1px 2px rgb(0 0 0 / 0.5), 0 8px 24px rgb(0 0 0 / 0.35);
   color-scheme: dark;
 }
 
 [data-theme='light'] {
-  --surface-0: #f6f7f9;
+  --surface-0: #f6f6f8;
   --surface-1: #ffffff;
-  --surface-2: #eef0f4;
-  --border: #d6dbe3;
-  --text: #16191f;
-  --text-muted: #566070;
-  --accent: #2f5fd0;
-  --state-working: #1a6fc4;
-  --state-needs-you: #a85d00;
-  --state-finished: #1c7d45;
-  --state-idle: #566070;
-  --state-unknown: #6b7280;
+  --surface-2: #efeff3;
+  --border: #e1e1e8;
+  --text: #17171c;
+  --text-muted: #5b5b68;
+  --accent: #4f46e5;
+  --on-accent: #ffffff;
+  --state-working: #1d6fd1;
+  --state-needs-you: #a35a00;
+  --state-finished: #15803d;
+  --state-idle: #5b5b68;
+  --state-unknown: #71717a;
+  --shadow: 0 1px 2px rgb(20 20 40 / 0.06), 0 8px 24px rgb(20 20 40 / 0.08);
   color-scheme: light;
 }
 
 /* No explicit choice: follow the system. An explicit data-theme (the gallery) still wins. */
 @media (prefers-color-scheme: light) {
   :root:not([data-theme]) {
-  --surface-0: #f6f7f9;
-  --surface-1: #ffffff;
-  --surface-2: #eef0f4;
-  --border: #d6dbe3;
-  --text: #16191f;
-  --text-muted: #566070;
-  --accent: #2f5fd0;
-  --state-working: #1a6fc4;
-  --state-needs-you: #a85d00;
-  --state-finished: #1c7d45;
-  --state-idle: #566070;
-  --state-unknown: #6b7280;
-  color-scheme: light;
+    --surface-0: #f6f6f8;
+    --surface-1: #ffffff;
+    --surface-2: #efeff3;
+    --border: #e1e1e8;
+    --text: #17171c;
+    --text-muted: #5b5b68;
+    --accent: #4f46e5;
+    --on-accent: #ffffff;
+    --state-working: #1d6fd1;
+    --state-needs-you: #a35a00;
+    --state-finished: #15803d;
+    --state-idle: #5b5b68;
+    --state-unknown: #71717a;
+    --shadow: 0 1px 2px rgb(20 20 40 / 0.06), 0 8px 24px rgb(20 20 40 / 0.08);
+    color-scheme: light;
   }
 }
 

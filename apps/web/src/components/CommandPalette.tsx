@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import * as Dialog from '@radix-ui/react-dialog';
+import { useMemo, useRef, useState } from 'react';
 import { rank } from '../fuzzy';
 import { t } from '../i18n';
 
@@ -16,12 +17,6 @@ export function CommandPalette({ items, onClose }: { items: readonly PaletteItem
   const results = useMemo(() => rank(items, query, (i) => i.label), [items, query]);
   const shown = Math.min(active, Math.max(results.length - 1, 0));
 
-  useEffect(() => {
-    const opener = document.activeElement as HTMLElement | null;
-    input.current?.focus();
-    return () => opener?.focus?.();
-  }, []);
-
   const choose = (item: PaletteItem | undefined) => {
     if (!item) return;
     onClose();
@@ -29,23 +24,23 @@ export function CommandPalette({ items, onClose }: { items: readonly PaletteItem
   };
 
   return (
-    <div className="palette__backdrop" onMouseDown={onClose}>
-      <div
-        className="palette"
-        role="dialog"
-        aria-modal="true"
-        aria-label={t('palette-title')}
-        onMouseDown={(e) => e.stopPropagation()}
-        onKeyDown={(e) => {
-          if (e.key === 'Escape') onClose();
-          else if (e.key === 'ArrowDown') { e.preventDefault(); setActive(Math.min(shown + 1, results.length - 1)); }
-          else if (e.key === 'ArrowUp') { e.preventDefault(); setActive(Math.max(shown - 1, 0)); }
-          else if (e.key === 'Enter') choose(results[shown]);
-        }}
-      >
+    <Dialog.Root open onOpenChange={(open) => { if (!open) onClose(); }}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="fixed inset-0 z-40 bg-surface-0/70 backdrop-blur-sm" />
+        <Dialog.Content
+          aria-describedby={undefined}
+          onOpenAutoFocus={(e) => { e.preventDefault(); input.current?.focus(); }}
+          className="fixed top-[12vh] left-1/2 z-50 w-[min(560px,calc(100vw-2rem))] -translate-x-1/2 overflow-hidden rounded-l border border-line bg-surface-1 shadow-card"
+          onKeyDown={(e) => {
+            if (e.key === 'ArrowDown') { e.preventDefault(); setActive(Math.min(shown + 1, results.length - 1)); }
+            else if (e.key === 'ArrowUp') { e.preventDefault(); setActive(Math.max(shown - 1, 0)); }
+            else if (e.key === 'Enter') choose(results[shown]);
+          }}
+        >
+          <Dialog.Title className="sr-only">{t('palette-title')}</Dialog.Title>
         <input
           ref={input}
-          className="palette__input"
+          className="w-full rounded-none border-0 border-b border-line bg-transparent px-4 py-4 text-base outline-none"
           value={query}
           placeholder={t('palette-placeholder')}
           aria-label={t('palette-title')}
@@ -55,15 +50,15 @@ export function CommandPalette({ items, onClose }: { items: readonly PaletteItem
           aria-activedescendant={results[shown] ? `palette-${results[shown].id}` : undefined}
           onChange={(e) => { setQuery(e.target.value); setActive(0); }}
         />
-        <ul id="palette-list" className="palette__list" role="listbox">
-          {results.length === 0 && <li className="palette__empty muted">{t('palette-empty')}</li>}
+        <ul id="palette-list" className="m-0 max-h-[50vh] list-none overflow-y-auto p-2" role="listbox">
+          {results.length === 0 && <li className="px-3 py-2 muted">{t('palette-empty')}</li>}
           {results.map((r, i) => (
             <li
               key={r.id}
               id={`palette-${r.id}`}
               role="option"
               aria-selected={i === shown}
-              className={`palette__item${i === shown ? ' palette__item--active' : ''}`}
+              className={`cursor-pointer rounded-s px-3 py-2 ${i === shown ? 'bg-surface-2 ring-1 ring-accent' : ''}`}
               onMouseEnter={() => setActive(i)}
               onClick={() => choose(r)}
             >
@@ -71,7 +66,8 @@ export function CommandPalette({ items, onClose }: { items: readonly PaletteItem
             </li>
           ))}
         </ul>
-      </div>
-    </div>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
   );
 }

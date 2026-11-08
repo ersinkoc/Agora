@@ -102,3 +102,16 @@ usage-prices-bundled = prices from this hub's release
 messages-title = Recent messages
 message-cross = between machines
 usage-projects = Spent by project
+console-agents = Agents
+console-activity = Activity
+console-wall-empty = Pick an agent on the left to watch its terminal here.
+console-maximize = Full size
+console-hide = Stop watching
+console-no-messages = Agents have not written to each other yet.
+console-spent = Spent so far (estimated)
+changes-title = Uncommitted changes
+changes-none = Nothing uncommitted. Every workspace is clean.
+changes-files = { $count ->
+    [one] 1 file changed
+   *[other] { $count } files changed
+}

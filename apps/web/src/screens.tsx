@@ -1,9 +1,7 @@
 import { AgentTile } from './components/AgentTile';
 import { AttentionStrip } from './components/AttentionStrip';
-import { ApprovalCard } from './components/ApprovalCard';
 import { StateBadge } from './components/StateBadge';
-import type { ApprovalModel, MachineModel, MessageModel, ProjectCost } from './net/view';
-import type { ReactNode } from 'react';
+import type { MachineModel, MessageModel, ProjectCost } from './net/view';
 import type { Device } from './net/approval';
 import { money, type UsageSummary } from './net/usage';
 import { demoAgents } from './fixtures';
@@ -14,52 +12,6 @@ import { Suspense, lazy, useMemo, useState } from 'react';
 const TerminalView = lazy(() => import('./terminal/TerminalView').then((m) => ({ default: m.TerminalView })));
 import { t } from './i18n';
 import { type AgentTileModel, type UiState, needsAttention, sortFleet } from './model';
-
-export function Home({ onOpen, agents = demoAgents, machines, link = 'live', approvals = [], messages = [], onResolve, notice, start, onStart }: {
-  onOpen?: (id: string) => void;
-  agents?: readonly AgentTileModel[];
-  machines?: number;
-  link?: 'connecting' | 'live' | 'offline';
-  approvals?: readonly ApprovalModel[];
-  messages?: readonly MessageModel[];
-  onResolve?: (a: ApprovalModel, approved: boolean) => void;
-  notice?: string;
-  start?: ReactNode; // the start-an-agent panel, when open
-  onStart?: () => void;
-}) {
-  const fleet = sortFleet(agents);
-  const machineCount = machines ?? new Set(agents.map((a) => a.machine)).size;
-  return (
-    <main className="page">
-      <header className="topbar">
-        <h1>{t('home-title')}</h1>
-        <a className="muted" href="#/machines">{t('machines-online', { count: machineCount })}</a>
-      </header>
-      {link !== 'live' && <p className="muted" role="status">{t(link === 'offline' ? 'link-offline' : 'link-connecting')}</p>}
-      <AttentionStrip agents={needsAttention(fleet)} onOpen={onOpen} />
-      {approvals.length > 0 && (
-        <section aria-label={t('approvals-title')}>
-          <h2>{t('approvals-title')}</h2>
-          {notice && <p role="alert">{notice}</p>}
-          <div className="approvals">
-            {approvals.map((a) => <ApprovalCard key={a.id} approval={a} onResolve={(ok) => onResolve?.(a, ok)} />)}
-          </div>
-        </section>
-      )}
-      <h2>{t('fleet-title')}</h2>
-      {fleet.length === 0 ? (
-        <p className="muted">{t('fleet-empty')}</p>
-      ) : (
-        <div className="fleet">{fleet.map((a) => <AgentTile key={a.id} agent={a} onOpen={onOpen} />)}</div>
-      )}
-      <Messages messages={messages} />
-      <p className="muted">{t('palette-hint')}</p>
-      {start ?? (
-        <div><button type="button" className="button button--primary" disabled={!onStart} onClick={onStart}>{t('action-start-agent')}</button></div>
-      )}
-    </main>
-  );
-}
 
 const demoMessages: MessageModel[] = [
   { from: 'claude · amber', to: 'codex · teal', body: 'The login fix is on branch login-fix, ready for review.', atMs: 2, crossMachine: false },

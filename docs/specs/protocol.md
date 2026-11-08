@@ -151,7 +151,7 @@ Initial event families:
 | Family | Examples |
 | --- | --- |
 | node | `NodeOnline`, `NodeOffline`, `NodeResources` |
-| project | `CheckoutDiscovered`, `WorktreeCreated`, `WorktreeRemoved`, `GitStatusChanged` |
+| project | `CheckoutDiscovered`, `WorktreeCreated`, `WorktreeRemoved`, `GitStatusChanged` (the node checks each running agent's workspace every 5 s and reports when the changed-file count, line counts or HEAD differ from the last report) |
 | agent | `AgentStarted`, `AgentStateChanged`, `AgentSessionReported`, `AgentUsageReported`, `AgentExited` |
 | terminal | `TerminalOpened`, `TerminalTitleChanged`, `TerminalClosed` |
 | approval | `ApprovalRequested`, `ApprovalResolved` |

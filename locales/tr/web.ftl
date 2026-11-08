@@ -102,3 +102,16 @@ usage-prices-bundled = fiyatlar bu hub sürümüyle gelen tablodan
 messages-title = Son mesajlar
 message-cross = makineler arası
 usage-projects = Projeye göre harcama
+console-agents = Ajanlar
+console-activity = Etkinlik
+console-wall-empty = Terminalini burada izlemek için soldan bir ajan seçin.
+console-maximize = Tam boyut
+console-hide = İzlemeyi bırak
+console-no-messages = Ajanlar henüz birbirine yazmadı.
+console-spent = Şimdiye kadarki harcama (tahmini)
+changes-title = Commit edilmemiş değişiklikler
+changes-none = Commit edilmemiş bir şey yok. Tüm çalışma alanları temiz.
+changes-files = { $count ->
+    [one] 1 dosya değişti
+   *[other] { $count } dosya değişti
+}
