@@ -25,6 +25,18 @@ describe('view', () => {
     expect(machinesOnline(v)).toBe(1);
   });
 
+  it('names the workspace by project folder and hides machine-made branches', () => {
+    const v = emptyView();
+    applyEvent(v, 1, ev('n', 1, { checkoutDiscovered: { checkoutId: 'c', nodeId: 'n', projectId: 'p', path: '/home/me/shop' } }));
+    applyEvent(v, 2, ev('n', 2, { worktreeCreated: { worktreeId: 'w', checkoutId: 'c', path: '/x/agent-1', branch: 'agent/shell-1' } }));
+    applyEvent(v, 3, ev('n', 3, { worktreeCreated: { worktreeId: 'w2', checkoutId: 'c', path: '/x/fix', branch: 'login-fix' } }));
+    applyEvent(v, 4, ev('n', 4, { agentStarted: { agentId: 'a', nodeId: 'n', worktreeId: 'w', kind: 'shell' } }));
+    applyEvent(v, 5, ev('n', 5, { agentStarted: { agentId: 'b', nodeId: 'n', worktreeId: 'w2', kind: 'shell' } }));
+    const t = tiles(v);
+    expect(t.find((x) => x.id === 'n/a')?.workspace).toBe('shop');
+    expect(t.find((x) => x.id === 'n/b')?.workspace).toBe('shop (login-fix)');
+  });
+
   it('a waiting approval makes the agent need you, and answering it clears that', () => {
     const v = emptyView();
     applyEvent(v, 1, ev('n', 1, { agentStarted: { agentId: 'a', nodeId: 'n', worktreeId: 'w', kind: 'claude' } }));
