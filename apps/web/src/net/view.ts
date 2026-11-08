@@ -238,6 +238,6 @@ export interface ProjectChoice { node: string; projectId: string; label: string 
 export function projectChoices(v: View): ProjectChoice[] {
   return [...v.checkouts.values()]
     .filter((c) => v.nodes.get(c.nodeId)?.online)
-    .map((c) => ({ node: c.nodeId, projectId: c.projectId, label: `${v.nodes.get(c.nodeId)?.hostname || c.nodeId} · ${c.projectId}` }))
+    .map((c) => ({ node: c.nodeId, projectId: c.projectId, label: `${v.nodes.get(c.nodeId)?.hostname || c.nodeId} · ${lastSegment(c.path) || c.projectId}` }))
     .sort((a, b) => a.label.localeCompare(b.label));
 }

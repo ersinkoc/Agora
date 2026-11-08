@@ -62,11 +62,11 @@ describe('view', () => {
   it('offers projects only on machines that are online', () => {
     const v = emptyView();
     applyEvent(v, 1, ev('a', 1, { nodeOnline: { nodeId: 'a', hostname: 'Alpha' } }));
-    applyEvent(v, 2, ev('a', 2, { checkoutDiscovered: { checkoutId: 'c1', nodeId: 'a', projectId: 'web', path: '/w' } }));
+    applyEvent(v, 2, ev('a', 2, { checkoutDiscovered: { checkoutId: 'c1', nodeId: 'a', projectId: '4be2b2e8', path: '/home/me/webapp' } }));
     applyEvent(v, 3, ev('b', 1, { nodeOnline: { nodeId: 'b', hostname: 'Beta' } }));
     applyEvent(v, 4, ev('b', 2, { checkoutDiscovered: { checkoutId: 'c1', nodeId: 'b', projectId: 'api', path: '/a' } }));
     applyEvent(v, 5, ev('hub', 1, { nodeOffline: { nodeId: 'b' } }));
-    expect(projectChoices(v)).toEqual([{ node: 'a', projectId: 'web', label: 'Alpha · web' }]);
+    expect(projectChoices(v)).toEqual([{ node: 'a', projectId: '4be2b2e8', label: 'Alpha · webapp' }]);
   });
 
   it('starts from a snapshot', () => {
