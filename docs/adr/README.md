@@ -51,6 +51,7 @@ Date: YYYY-MM-DD
 | 0031 | Mesh messages between agents on different nodes | Accepted |
 | 0032 | Machines reachable only by SSH: the hub keeps a reverse tunnel | Accepted |
 | 0033 | `usage.report`: tokens and estimated cost for clients | Accepted |
+| 0035 | `refs` on messages between nodes | Accepted |
 | 0036 | Web UI stack: Tailwind CSS and Radix primitives | Accepted |
 | 0037 | `git.log` command: recent commits of an agent's workspace | Accepted |
 | 0038 | Chat transcript stream for agents without a terminal | Accepted |

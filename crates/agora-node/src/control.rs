@@ -188,7 +188,13 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
             let Some(mesh) = &ctx.mesh else {
                 return Err(Error::new(ErrorCode::MeshRecipientUnknown).with("to", p.to.as_str()));
             };
-            mesh.deliver_remote(&p.origin, &p.from_agent, &AgentId::new(&p.to), &p.body)?;
+            mesh.deliver_remote(
+                &p.origin,
+                &p.from_agent,
+                &AgentId::new(&p.to),
+                &p.body,
+                &p.refs,
+            )?;
             Ok(v1::CommandOk {
                 result: Some(Ok_::Empty(v1::Empty {})),
             })

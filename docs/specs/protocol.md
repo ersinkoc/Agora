@@ -213,3 +213,5 @@ frame kind 11, an encoded `ChatEntry` for each line added. Kind 3 closes a relay
 entries or 256 KiB of each chat agent's conversation in memory (one entry at most 16 KiB; the user's own requests are entries with
 role USER; adapter items map to TEXT, TOOL_CALL as JSON, PLAN as lines, DIFF with its path). Entry ids increase per agent; a client
 ignores an id it already holds. The text is untrusted.
+
+`MeshPost.refs` (ADR-0035, field 5): the sender's refs as written; the receiving broker qualifies them with the hub-vouched `origin`.

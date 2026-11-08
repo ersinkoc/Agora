@@ -613,6 +613,7 @@ fn post_for_node(
             // The hub's word, not the node's: a node cannot speak for another node.
             origin: node_id.to_string(),
             from_agent: post.from_agent.clone(),
+            refs: post.refs.clone(),
         })),
     };
     let reply = match hub.router().send(target, forwarded) {

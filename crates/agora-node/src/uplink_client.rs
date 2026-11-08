@@ -54,17 +54,19 @@ struct PostJob {
     from_agent: String,
     to: String,
     body: String,
+    refs: Vec<String>,
     done: Option<Done>,
 }
 
 impl PostJob {
     /// The parts, with the obligation to call `done` handed over.
-    fn take(mut self) -> (String, String, String, Done) {
+    fn take(mut self) -> (String, String, String, Vec<String>, Done) {
         let done = self.done.take().unwrap_or_else(|| Box::new(|_| {}));
         (
             std::mem::take(&mut self.from_agent),
             std::mem::take(&mut self.to),
             std::mem::take(&mut self.body),
+            std::mem::take(&mut self.refs),
             done,
         )
     }
@@ -103,12 +105,13 @@ impl MeshOut {
 }
 
 impl crate::mesh_server::RemoteLink for MeshOut {
-    fn post(&self, from_agent: &str, to: &str, body: &str, done: Done) {
+    fn post(&self, from_agent: &str, to: &str, body: &str, refs: &[String], done: Done) {
         let tx = self.jobs.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let job = PostJob {
             from_agent: from_agent.to_string(),
             to: to.to_string(),
             body: body.to_string(),
+            refs: refs.to_vec(),
             done: Some(done),
         };
         // A job that cannot be queued is dropped, which fails it with `node.offline`.
@@ -350,7 +353,7 @@ where
                 continue;
             }
             Some(job) = async { match jobs.as_mut() { Some(j) => j.recv().await, None => std::future::pending().await } } => {
-                let (from_agent, to, body, done) = job.take();
+                let (from_agent, to, body, refs, done) = job.take();
                 posts.next += 1;
                 let id = format!("m{}", posts.next);
                 let req = CommandRequest {
@@ -362,6 +365,7 @@ where
                         body,
                         origin: String::new(),
                         from_agent,
+                        refs,
                     })),
                 };
                 posts.waiting.insert(id, done);

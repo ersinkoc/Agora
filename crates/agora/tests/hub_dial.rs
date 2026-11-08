@@ -630,7 +630,7 @@ fn an_agent_messages_an_agent_on_another_node_through_the_hub_and_a_failure_come
             conn,
             id,
             "tools/call",
-            serde_json::json!({"name": "send_message", "arguments": {"to": to, "body": body}}),
+            serde_json::json!({"name": "send_message", "arguments": {"to": to, "body": body, "refs": ["src/auth.rs", "commit:abc123"]}}),
         )
     };
     let sent = call(&mut conn, 2, "beta/b1", "hello from alpha");
@@ -655,6 +655,8 @@ fn an_agent_messages_an_agent_on_another_node_through_the_hub_and_a_failure_come
         ),
         ("hello from alpha", "alpha/a1", "alpha")
     );
+    // Its refs mean something on alpha only: they arrive with alpha's name in front.
+    assert_eq!(got[0].refs, ["alpha:src/auth.rs", "alpha:commit:abc123"]);
 
     // A node the hub does not know, and an agent the target does not have: the sender is told.
     call(&mut conn, 3, "nowhere/x", "lost");

@@ -42,6 +42,7 @@ pub trait RemoteLink: Send + Sync {
         from_agent: &str,
         to: &str,
         body: &str,
+        refs: &[String],
         done: Box<dyn FnOnce(Result<(), String>) + Send>,
     );
 }
@@ -81,6 +82,7 @@ fn dispatch_outbound(mesh: &Arc<Mutex<Mesh>>, remote: &RemoteSlot, allowed: &Ato
                     o.from.as_str(),
                     &to,
                     &o.body,
+                    &o.refs,
                     Box::new(move |r| {
                         if let Err(code) = r {
                             failed(code);
@@ -165,6 +167,7 @@ impl MeshServer {
         from_agent: &str,
         to: &AgentId,
         body: &str,
+        refs: &[String],
     ) -> Result<(), agora_protocol::Error> {
         if !self.remote_allowed.load(Ordering::Acquire) {
             return Err(
@@ -175,7 +178,7 @@ impl MeshServer {
         }
         let mut m = self.mesh.lock().unwrap_or_else(|e| e.into_inner());
         let limits = m.limits();
-        m.deliver_remote(origin, from_agent, to, body, now_ms())
+        m.deliver_remote(origin, from_agent, to, body, refs, now_ms())
             .map(|_| ())
             .map_err(|e| e.to_error(&limits))
     }
