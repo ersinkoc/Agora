@@ -12,3 +12,5 @@ notify-digest =
         [one] Siz yokken 1 gelişme oldu.
        *[other] Siz yokken { $count } gelişme oldu.
     }
+
+notify-title = Agora

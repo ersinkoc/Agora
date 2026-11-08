@@ -107,6 +107,35 @@ pub fn hub_run(say: &Say, o: &Opts) -> ExitCode {
         let has_web = web_assets(o).is_some();
         let store = SqliteStore::open(&dir.join("hub.db")).map_err(|e| e.to_string())?;
         let hub = Arc::new(Hub::open(store).map_err(|e| e.to_string())?);
+        // Where notifications go, if the owner listed any (docs/design/notifications.md).
+        let notify_file = dir.join("notify");
+        if let Ok(text) = std::fs::read_to_string(&notify_file) {
+            let (targets, skipped) = agora_hub::deliver::parse_targets(&text);
+            let file = notify_file.display().to_string();
+            if skipped > 0 {
+                say.err(
+                    key!("cli-hub-notify-skipped"),
+                    &[
+                        ("count", (skipped as i64).into()),
+                        ("file", file.clone().into()),
+                    ],
+                );
+            }
+            if !targets.is_empty() {
+                say.out(
+                    key!("cli-hub-notify"),
+                    &[
+                        ("count", (targets.len() as i64).into()),
+                        ("file", file.into()),
+                    ],
+                );
+            }
+            agora_hub::notifier::spawn(
+                Arc::clone(&hub),
+                targets,
+                agora_i18n::Catalog::for_locale(&agora_i18n::catalog::locale_from_env()),
+            );
+        }
         let sessions = Arc::new(HubSessions::new(Arc::clone(&hub)));
         // A fresh one-time code for the first sign-in; `agora hub login` makes more.
         let web_code = SignIn::new(hub.store(), Arc::new(Lockout::new()))

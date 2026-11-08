@@ -12,3 +12,4 @@ notify-digest =
         [one] 1 update while you were away.
        *[other] { $count } updates while you were away.
     }
+notify-title = Agora

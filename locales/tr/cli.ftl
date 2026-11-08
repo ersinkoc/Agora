@@ -59,6 +59,8 @@ doctor-summary-ok = Agora'nın ihtiyaç duyduğu her şey yerinde.
 doctor-summary-problems = Agora'nın ihtiyaç duyduğu bir şey eksik. SORUN olarak işaretlenenleri düzeltin.
 
 cli-hub-listening = Hub { $addr } adresinde çalışıyor. Veri klasörü: { $dir }
+cli-hub-notify = Bildirimler { $file } dosyasındaki { $count } hedefe gidiyor.
+cli-hub-notify-skipped = { $file } dosyasının { $count } satırı anlaşılamadı ve yok sayılıyor. Her satır `ntfy URL` ya da `webhook URL` olmalı.
 cli-hub-web = Web uygulaması: https://{ $addr }/ . { $code } koduyla giriş yapın (10 dakika geçerli; yenisi için `agora hub login`). Hub sertifikası kendi CA'sı tarafından imzalı; ona güvenene kadar tarayıcı uyarı verir.
 cli-hub-login = Web uygulaması için giriş kodu: { $code } (10 dakika geçerli). Hub adresini tarayıcıda açıp kodu girin.
 cli-trusted = { $id } cihazı artık bu node'daki onaylara yanıt verebilir. Uygulanması için node'u yeniden başlatın.
