@@ -8,6 +8,8 @@ import { ApprovalCard } from './ApprovalCard';
 import { DiffDialog } from './DiffDialog';
 import { PromptBox } from './PromptBox';
 import { FilesDialog } from './FilesDialog';
+import { HistoryDialog } from './HistoryDialog';
+import type { CommitItem } from '../net/history';
 import type { WorkspaceFiles } from '../net/files';
 import { StateBadge } from './StateBadge';
 
@@ -17,7 +19,7 @@ const MAX_AUTO_PINNED = 4;
 
 // The one window: machines and agents on the left, the terminals of the agents you are watching in the middle (several at
 // once), and what needs you, what agents say to each other and what it costs on the right. Everything is derived from props.
-export function Console({ agents, machines, usage, projects = [], approvals, messages, terminalFor, sendPrompt, loadDiff, filesOf, onOpen, onStart, start, onResolve, notice, link }: {
+export function Console({ agents, machines, usage, projects = [], approvals, messages, terminalFor, sendPrompt, loadDiff, loadHistory, filesOf, onOpen, onStart, start, onResolve, notice, link }: {
   agents: readonly AgentTileModel[];
   machines: readonly MachineModel[];
   usage?: UsageSummary;
@@ -27,6 +29,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   terminalFor: (agentId: string) => TerminalSource;
   sendPrompt?: (agent: AgentTileModel, text: string) => Promise<boolean>;
   loadDiff?: (agent: AgentTileModel) => Promise<string>;
+  loadHistory?: (agent: AgentTileModel) => Promise<CommitItem[]>;
   filesOf?: (agent: AgentTileModel) => WorkspaceFiles | undefined;
   onOpen: (agentId: string) => void;
   onStart?: () => void;
@@ -41,6 +44,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   const [reviewing, setReviewing] = useState<string | undefined>();
   const [filter, setFilter] = useState('');
   const [browsing, setBrowsing] = useState<string | undefined>();
+  const [history, setHistory] = useState<string | undefined>();
 
   // Until the user picks for themselves, watch the first few agents (those that need you come first). A new agent joins
   // while there is room; one that is gone leaves. Nothing is reordered, so a terminal never jumps under your hands.
@@ -163,6 +167,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
                     </div>
                     <div className="flex flex-none items-center gap-2">
                       <StateBadge state={a.state} />
+                      {loadHistory && <button type="button" className="rounded-s px-2 py-1 text-xs text-muted hover:bg-surface-2 hover:text-ink" onClick={() => setHistory(a.id)}>{t('console-history')}</button>}
                       {filesOf && <button type="button" className="rounded-s px-2 py-1 text-xs text-muted hover:bg-surface-2 hover:text-ink" onClick={() => setBrowsing(a.id)}>{t('console-files')}</button>}
                       <button type="button" className="rounded-s px-2 py-1 text-xs text-muted hover:bg-surface-2 hover:text-ink" onClick={() => onOpen(a.id)}>{t('console-maximize')}</button>
                       <button type="button" aria-label={t('console-hide')} className="rounded-s px-2 py-1 text-xs text-muted hover:bg-surface-2 hover:text-ink" onClick={() => toggle(a.id)}>✕</button>
@@ -237,6 +242,9 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
           )}
         </aside>
       </div>
+      {history && loadHistory && fleet.find((a) => a.id === history) && (
+        <HistoryDialog agent={fleet.find((a) => a.id === history) as AgentTileModel} load={loadHistory} onClose={() => setHistory(undefined)} />
+      )}
       {browsing && filesOf && fleet.find((a) => a.id === browsing) && filesOf(fleet.find((a) => a.id === browsing) as AgentTileModel) && (
         <FilesDialog agent={fleet.find((a) => a.id === browsing) as AgentTileModel} files={filesOf(fleet.find((a) => a.id === browsing) as AgentTileModel) as WorkspaceFiles} onClose={() => setBrowsing(undefined)} />
       )}

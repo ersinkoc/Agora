@@ -286,6 +286,46 @@ pub fn diff(worktree: &Path, path: Option<&str>) -> Result<String, GitError> {
     Ok(out)
 }
 
+/// One commit of [`log`].
+pub struct Commit {
+    pub id: String,
+    pub subject: String,
+    pub author: String,
+    pub at_ms: u64,
+}
+
+/// The newest `limit` commits reachable from HEAD. A workspace with no commit yet has an empty log.
+pub fn log(worktree: &Path, limit: usize) -> Result<Vec<Commit>, GitError> {
+    if git(worktree, &["rev-parse", "--verify", "-q", "HEAD"]).is_err() {
+        return Ok(Vec::new());
+    }
+    let n = format!("-n{limit}");
+    // Fields are split by the ASCII unit separator and records end with the record separator: neither can occur in a
+    // subject or a name, so no quoting is needed.
+    let out = git(
+        worktree,
+        &[
+            "log",
+            &n,
+            "--no-color",
+            "--format=%H%x1f%an%x1f%ct%x1f%s%x1e",
+        ],
+    )?;
+    Ok(out
+        .split('\u{1e}')
+        .filter_map(|rec| {
+            let mut f = rec.trim_start_matches('\n').splitn(4, '\u{1f}');
+            let (id, author, ct, subject) = (f.next()?, f.next()?, f.next()?, f.next()?);
+            Some(Commit {
+                id: id.to_string(),
+                author: author.to_string(),
+                at_ms: ct.parse::<u64>().ok()?.saturating_mul(1000),
+                subject: subject.to_string(),
+            })
+        })
+        .collect())
+}
+
 /// Adds `rel` to the worktree's private ignore list (`info/exclude` of its git dir), so a file the node wrote stays
 /// out of `git status` and `git add .` without touching a tracked `.gitignore`. Best effort: failure only means the
 /// file shows up as untracked.

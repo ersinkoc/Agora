@@ -169,7 +169,7 @@ Initial command set: `project.list`, `agent.start`, `agent.stop`, `agent.prompt`
 `approval.resolve` (signed, ADR-0020), `mesh.post`, `task.update`, `node.policy.get`.
 
 Implemented by the node today: `project.list`, `agent.*`, `terminal.*`, `approval.resolve`, `mesh.post`, `agent.list`, `agent.kinds`,
-`git.status`, `git.diff`, `files.list` and `files.read`. The git and files commands answer only for the workspace of one of the node's own agents (`worktree_id` is the id
+`git.status`, `git.log` (ADR-0037: newest first, default 30, at most 200), `git.diff`, `files.list` and `files.read`. The git and files commands answer only for the workspace of one of the node's own agents (`worktree_id` is the id
 the node reported in `WorktreeCreated`); a path that is absolute, climbs with `..` or starts with `:` or `-` is refused as
 `protocol.invalid_message`. `git.diff` is the unified diff against HEAD plus the new files git does not track yet (shown as
 all-added, at most 50 files of at most 64 KiB), and an answer is cut at 512 KiB. `files.list` hides `.git`; `files.read` refuses

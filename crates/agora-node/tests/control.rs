@@ -1152,3 +1152,51 @@ fn files_list_and_read_stay_inside_an_agents_workspace() {
         agent_id: s.agent_id,
     })));
 }
+
+#[test]
+fn git_log_lists_the_workspaces_commits_newest_first() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
+        return;
+    }
+    let e = env("gitlog");
+    let n = node(&e, NodeLimits::default());
+    let mut c = Client::connect(n.socket().unwrap()).unwrap();
+    let s = started(ok(c.call(start_cmd("shell"))));
+    let wt = Path::new(&s.worktree_id);
+    std::fs::write(wt.join("b.txt"), "b").unwrap();
+    git(wt, &["add", "."]);
+    git(wt, &["commit", "-q", "-m", "add b: the second commit"]);
+
+    let mut log = |limit: u32| {
+        let Some(Ok_::GitLog(l)) = ok(c.call(Cmd::GitLog(v1::GitLog {
+            worktree_id: s.worktree_id.clone(),
+            limit,
+        })))
+        .result
+        else {
+            panic!("no log");
+        };
+        l.commits
+    };
+    let all = log(0);
+    assert_eq!(all.len(), 2, "{all:?}");
+    assert_eq!(all[0].subject, "add b: the second commit");
+    assert_eq!(all[1].subject, "init");
+    assert_eq!(all[0].author, "t");
+    assert!(
+        all[0].at_ms > 1_600_000_000_000 && all[0].id.len() >= 40,
+        "{:?}",
+        all[0]
+    );
+    assert_eq!(log(1).len(), 1);
+    assert_eq!(
+        err_code(c.call(Cmd::GitLog(v1::GitLog {
+            worktree_id: e.repo.to_string_lossy().into_owned(),
+            limit: 0
+        }))),
+        "protocol.invalid_message"
+    );
+    ok(c.call(Cmd::AgentStop(v1::AgentStop {
+        agent_id: s.agent_id,
+    })));
+}
