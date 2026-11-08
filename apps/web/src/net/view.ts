@@ -207,6 +207,7 @@ export function tiles(v: View): AgentTileModel[] {
       tokens: a.tokens,
       reportedBy: a.reported ? 'agent' : 'screen',
       workspaceRef: wt ? { node: a.nodeId, id: a.worktreeId.slice(a.worktreeId.indexOf('/') + 1) } : undefined,
+      project: wt ? lastSegment(v.checkouts.get(wt.checkoutId)?.path ?? '') || undefined : undefined,
       branch: wt?.branch || undefined,
       filesChanged: wt?.filesChanged ?? 0,
     };

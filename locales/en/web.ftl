@@ -125,3 +125,5 @@ files-pick = Pick a file on the left to read it.
 files-binary = This file is not text, so it is not shown.
 files-too-large = This file could not be read (it may be too large).
 files-failed = Could not list this folder.
+filter-placeholder = Filter by agent, machine or project
+filter-none = Nothing matches.

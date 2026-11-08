@@ -37,6 +37,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   const [pinned, setPinned] = useState<string[]>([]);
   const touched = useRef(false);
   const [reviewing, setReviewing] = useState<string | undefined>();
+  const [filter, setFilter] = useState('');
   const [browsing, setBrowsing] = useState<string | undefined>();
 
   // Until the user picks for themselves, watch the first few agents (those that need you come first). A new agent joins
@@ -53,11 +54,19 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
     setPinned((cur) => (cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id]));
   };
 
+  // machine → project → agents, after the search box (matches name, machine, project or workspace).
   const byMachine = useMemo(() => {
-    const groups = new Map<string, AgentTileModel[]>();
-    for (const a of fleet) groups.set(a.machine, [...(groups.get(a.machine) ?? []), a]);
+    const q = filter.trim().toLowerCase();
+    const groups = new Map<string, Map<string, AgentTileModel[]>>();
+    for (const a of fleet) {
+      if (q && ![a.name, a.machine, a.project ?? '', a.workspace].some((x) => x.toLowerCase().includes(q))) continue;
+      const projects = groups.get(a.machine) ?? new Map<string, AgentTileModel[]>();
+      const key = a.project ?? '';
+      projects.set(key, [...(projects.get(key) ?? []), a]);
+      groups.set(a.machine, projects);
+    }
     return groups;
-  }, [fleet]);
+  }, [fleet, filter]);
   const shown = pinned.map((id) => fleet.find((a) => a.id === id)).filter((a): a is AgentTileModel => !!a);
   const attention = needsAttention(fleet);
   const changed = fleet.filter((a) => (a.filesChanged ?? 0) > 0).sort((a, b) => (b.filesChanged ?? 0) - (a.filesChanged ?? 0));
@@ -82,8 +91,9 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
         <aside className="order-3 flex min-h-0 flex-col gap-5 overflow-y-auto border-line bg-surface-1 p-4 lg:order-1 lg:border-r" aria-label={t('console-agents')}>
           <button type="button" className="button button--primary w-full" disabled={!onStart} onClick={onStart}>{t('action-start-agent')}</button>
           {start}
-          {machines.length === 0 && byMachine.size === 0 && <p className="muted">{t('machines-empty')}</p>}
-          {[...byMachine.entries()].map(([machine, list]) => {
+          {fleet.length > 1 && <input type="search" value={filter} onChange={(e) => setFilter(e.target.value)} placeholder={t('filter-placeholder')} aria-label={t('filter-placeholder')} className="w-full" />}
+          {machines.length === 0 && byMachine.size === 0 && !filter && <p className="muted">{t('machines-empty')}</p>}
+          {[...byMachine.entries()].map(([machine, projects]) => {
             const m = machines.find((x) => x.name === machine);
             return (
               <section key={machine} className="grid gap-1.5">
@@ -91,23 +101,29 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
                   <span aria-hidden className={`size-2 rounded-full ${m && !m.online ? 'bg-unknown' : 'bg-finished'}`} />
                   {machine}
                 </h2>
-                <ul className="m-0 grid list-none gap-1 p-0">
-                  {list.map((a) => (
-                    <li key={a.id}>
-                      <button type="button" aria-pressed={pinned.includes(a.id)} onClick={() => toggle(a.id)}
-                        className={`flex w-full items-center justify-between gap-2 rounded-s border px-3 py-2 text-left transition-colors hover:bg-surface-2 ${pinned.includes(a.id) ? 'border-accent bg-surface-2' : 'border-transparent'}`}>
-                        <span className="min-w-0">
-                          <span className="block truncate font-medium">{a.name}</span>
-                          <span className="block truncate text-xs text-muted">{a.workspace}</span>
-                        </span>
-                        <StateBadge state={a.state} />
-                      </button>
-                    </li>
-                  ))}
-                </ul>
+                {[...projects.entries()].map(([project, list]) => (
+                  <div key={project} className="grid gap-1">
+                    {project && <h3 className="m-0 px-1 text-[11px] font-medium tracking-wide text-muted">{project}</h3>}
+                    <ul className="m-0 grid list-none gap-1 p-0">
+                      {list.map((a) => (
+                        <li key={a.id}>
+                          <button type="button" aria-pressed={pinned.includes(a.id)} onClick={() => toggle(a.id)}
+                            className={`flex w-full items-center justify-between gap-2 rounded-s border px-3 py-2 text-left transition-colors hover:bg-surface-2 ${pinned.includes(a.id) ? 'border-accent bg-surface-2' : 'border-transparent'}`}>
+                            <span className="min-w-0">
+                              <span className="block truncate font-medium">{a.name}</span>
+                              <span className="block truncate text-xs text-muted">{a.workspace}</span>
+                            </span>
+                            <StateBadge state={a.state} />
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ))}
               </section>
             );
           })}
+          {fleet.length > 0 && byMachine.size === 0 && <p className="muted">{t('filter-none')}</p>}
           {fleet.length === 0 && <p className="muted">{t('fleet-empty')}</p>}
         </aside>
 
@@ -121,8 +137,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
                   <header className="flex flex-none items-center justify-between gap-2 border-b border-line px-3 py-2">
                     <div className="flex min-w-0 items-center gap-2">
                       <span aria-hidden className="size-2.5 flex-none rounded-full" style={{ background: a.accent }} />
-                      <strong className="truncate">{a.name}</strong>
-                      <span className="hidden truncate text-xs text-muted xl:inline">{a.machine} · {a.workspace}</span>
+                      <strong className="truncate" title={`${a.machine} · ${a.workspace}`}>{a.name}</strong>
                       {(a.filesChanged ?? 0) > 0 && (loadDiff
                         ? <button type="button" className="rounded-full bg-surface-2 px-2 py-0.5 text-xs whitespace-nowrap text-needs-you hover:brightness-125" onClick={() => setReviewing(a.id)}>{t('changes-files', { count: a.filesChanged ?? 0 })}</button>
                         : <span className="rounded-full bg-surface-2 px-2 py-0.5 text-xs whitespace-nowrap text-needs-you">{t('changes-files', { count: a.filesChanged ?? 0 })}</span>)}
