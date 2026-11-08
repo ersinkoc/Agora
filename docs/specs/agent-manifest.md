@@ -21,7 +21,7 @@ login = ["example-agent", "login"]      # run in a terminal streamed to the user
 status = ["example-agent", "whoami"]    # exit 0 = authenticated
 
 [structured]
-acp = { argv = ["example-agent", "--acp"] }   # present = L2 available
+acp = { argv = ["example-agent", "--acp"] }   # present = L2 available (run through `agora acp-bridge`, see adapter-protocol.md)
 # adapter = "example-agent-adapter"           # present = L3 package from the registry
 
 [mcp]

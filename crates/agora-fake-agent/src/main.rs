@@ -18,6 +18,13 @@ fn main() -> ExitCode {
             Err(_) => ExitCode::from(1),
         };
     }
+    if std::env::args().nth(1).as_deref() == Some("--acp") {
+        // L2 mode: the Agent Client Protocol over stdio.
+        return match agora_fake_agent::acp::run(std::io::stdin().lock(), &mut io::stdout().lock()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(_) => ExitCode::from(1),
+        };
+    }
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--script" => path = args.next(),

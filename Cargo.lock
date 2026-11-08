@@ -6,6 +6,7 @@ version = 4
 name = "agora"
 version = "0.0.0"
 dependencies = [
+ "agora-adapters",
  "agora-core",
  "agora-hub",
  "agora-i18n",
