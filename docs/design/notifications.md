@@ -19,4 +19,4 @@ plain HTTP/1.1 with rustls for `https` (system root certificates), 10 s timeouts
 watches the hub's live events (an approval waits, an agent is blocked or done, a machine went offline), routes them through the
 rules above and sends from a thread of its own. Targets are listed in `<hub dir>/notify`, one `ntfy URL` or `webhook URL` per line;
 `hub run` reads it at start. Not yet: desktop notifications from the hub, web push, email, Teams-style webhooks, the digest
-delivery, stored per-user preferences, the settings screen, and an `agora hub notify` command (edit the file for now).
+delivery, stored per-user preferences, the settings screen, (`agora hub notify --ntfy URL | --webhook URL` adds a target, `--test` sends a test message to each, no option lists them).

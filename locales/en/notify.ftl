@@ -13,3 +13,4 @@ notify-digest =
        *[other] { $count } updates while you were away.
     }
 notify-title = Agora
+notify-test = Agora notifications work.

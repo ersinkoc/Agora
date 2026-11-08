@@ -14,3 +14,4 @@ notify-digest =
     }
 
 notify-title = Agora
+notify-test = Agora bildirimleri çalışıyor.

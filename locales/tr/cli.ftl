@@ -13,6 +13,7 @@ cli-usage =
       agora hub run [--listen ADDR] [--hub-dir DIR] [--name HOST]... [--web DIR]
       agora hub code [--hub-dir DIR]
       agora hub login [--hub-dir DİZİN]
+      agora hub notify [--ntfy URL | --webhook URL | --test] [--hub-dir DIR]
       agora hub backup [DOSYA] [--keep N] [--hub-dir DİZİN]
       agora hub restore DOSYA [--hub-dir DİZİN]
       agora node enroll --hub URL --ca FILE --code CODE --id NAME
@@ -71,3 +72,9 @@ cli-hub-failed = Hub komutu başarısız oldu: { $reason }
 cli-hub-code = Kayıt kodu: { $code } (10 dakika geçerli). Diğer makinede şunu çalıştırın: agora node enroll --hub wss://ADRES:PORT --ca { $ca } --code { $code } --id AD
 cli-enrolled = Bu makine { $id } adıyla kaydedildi. "agora node run" ile başlatın; hub'a kendiliğinden bağlanır. Kayıt yeri: { $dir }.
 cli-enroll-refused = Hub bu makineyi kaydetmeyi reddetti ({ $code }). Kod yanlış, süresi dolmuş veya zaten kullanılmış olabilir.
+cli-hub-notify-added = { $file } dosyasına eklendi. Kullanmak için hub'ı yeniden başlatın.
+cli-hub-notify-none = Henüz bildirim hedefi yok. --ntfy URL ya da --webhook URL ile ekleyin ({ $file }).
+cli-hub-notify-bad-url = Bu bir http:// ya da https:// adresi değil.
+cli-hub-notify-sent = { $target } hedefine deneme mesajı gönderildi.
+cli-hub-notify-refused = { $target } { $status } durumuyla yanıt verdi.
+cli-hub-notify-unreachable = { $target } hedefine ulaşılamadı: { $reason }
