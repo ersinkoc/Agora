@@ -2,7 +2,7 @@ import { Suspense, lazy, useEffect, useMemo, useRef, useState, type ReactNode } 
 import { t } from '../i18n';
 import { type AgentTileModel, needsAttention, sortFleet } from '../model';
 import { money, type UsageSummary } from '../net/usage';
-import type { ApprovalModel, MachineModel, MessageModel, ProjectCost } from '../net/view';
+import type { ApprovalModel, BoardModel, MachineModel, MessageModel, ProjectCost } from '../net/view';
 import type { TerminalSource } from '../terminal/source';
 import { ApprovalCard } from './ApprovalCard';
 import { DiffDialog } from './DiffDialog';
@@ -20,13 +20,14 @@ const MAX_AUTO_PINNED = 4;
 
 // The one window: machines and agents on the left, the terminals of the agents you are watching in the middle (several at
 // once), and what needs you, what agents say to each other and what it costs on the right. Everything is derived from props.
-export function Console({ agents, machines, usage, projects = [], approvals, messages, terminalFor, chatOf, sendPrompt, loadDiff, loadHistory, filesOf, onOpen, onStart, start, onResolve, notice, link }: {
+export function Console({ agents, machines, usage, projects = [], approvals, messages, boards = [], terminalFor, chatOf, sendPrompt, loadDiff, loadHistory, filesOf, onOpen, onStart, start, onResolve, notice, link }: {
   agents: readonly AgentTileModel[];
   machines: readonly MachineModel[];
   usage?: UsageSummary;
   projects?: readonly ProjectCost[];
   approvals: readonly ApprovalModel[];
   messages: readonly MessageModel[];
+  boards?: readonly BoardModel[];
   terminalFor: (agentId: string) => TerminalSource;
   chatOf?: (agent: AgentTileModel) => ChatSource | undefined;
   sendPrompt?: (agent: AgentTileModel, text: string) => Promise<boolean>;
@@ -217,6 +218,30 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
               </ul>
             )}
           </section>
+
+          {boards.length > 0 && (
+            <section className="grid gap-2" aria-label={t('board-title')}>
+              <h2>{t('board-title')}</h2>
+              {boards.map((b) => (
+                <div key={b.project} className="grid gap-1.5 rounded-s border border-line bg-surface-0 p-2.5">
+                  <strong className="text-xs">{b.project}</strong>
+                  <ul className="m-0 grid list-none gap-1 p-0 text-[13px]">
+                    {b.tasks.map((task) => (
+                      <li key={task.id} className="flex items-baseline justify-between gap-2">
+                        <span className={`min-w-0 break-words ${task.status === 'done' ? 'text-muted line-through' : ''}`}>{task.title}</span>
+                        <span className="shrink-0 text-xs text-muted">{task.status === 'open' ? t('board-open') : task.status === 'done' ? t('board-done') : task.owner}</span>
+                      </li>
+                    ))}
+                  </ul>
+                  {b.leases.length > 0 && (
+                    <ul className="m-0 grid list-none gap-1 border-t border-line p-0 pt-1.5 text-xs text-muted">
+                      {b.leases.map((l) => <li key={`${l.holder}${l.path}`} className="flex justify-between gap-2"><span className="truncate font-mono">{l.path}</span><span className="shrink-0">{l.holder}</span></li>)}
+                    </ul>
+                  )}
+                </div>
+              ))}
+            </section>
+          )}
 
           <section className="grid gap-2" aria-label={t('messages-title')}>
             <h2>{t('messages-title')}</h2>

@@ -23,6 +23,8 @@ export interface AgentV {
 export interface CheckoutV { nodeId: string; projectId: string; path: string }
 export interface ApprovalV { agentId: string; action: string; detail: string; expiresAtMs: number }
 
+export interface TaskV { projectId: string; title: string; ownerId: string; done: boolean }
+export interface LeaseV { agentId: string; path: string; expiresAtMs: number }
 export interface MessageV { from: string; to: string; body: string; atMs: number }
 
 export interface View {
@@ -33,13 +35,15 @@ export interface View {
   worktrees: Map<string, WorktreeV>;
   agents: Map<string, AgentV>;
   approvals: Map<string, ApprovalV>;
+  tasks: Map<string, TaskV>; // the shared board's tasks seen since this window opened (ADR-0039)
+  leases: Map<string, LeaseV>;
   withTerminal: Set<string>; // agents that have a terminal; the others (chat agents) are talked to with prompts
 }
 
 const MAX_MESSAGES = 50;
 
 export function emptyView(): View {
-  return { pos: 0, messages: [], nodes: new Map(), checkouts: new Map(), worktrees: new Map(), agents: new Map(), approvals: new Map(), withTerminal: new Set() };
+  return { pos: 0, messages: [], nodes: new Map(), checkouts: new Map(), worktrees: new Map(), agents: new Map(), approvals: new Map(), tasks: new Map(), leases: new Map(), withTerminal: new Set() };
 }
 
 export function fromSnapshot(s: agora.v1.Snapshot.$Properties): View {
@@ -82,6 +86,8 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
   v.pos = pos;
   const producer = ev.producerId ?? '';
   const q = (id: string | null | undefined) => `${producer}/${id ?? ''}`;
+  // The hub's own events (the shared board) already carry `<node>/<agent>` ids.
+  const qb = (id: string | null | undefined) => (producer === 'hub' ? (id ?? '') : q(id));
   const at = num(ev.atMs);
   const node = v.nodes.get(producer);
   if (node) node.lastEventMs = Math.max(node.lastEventMs, at);
@@ -168,8 +174,22 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
       if (v.messages.length > MAX_MESSAGES) v.messages.shift();
       break;
     }
+    // The hub writes board events with ids that are already `<node>/<agent>`.
+    case 'taskChanged': {
+      const b = e.taskChanged;
+      v.tasks.set(String(b.taskId ?? ''), { projectId: b.projectId ?? '', title: b.title ?? '', ownerId: b.claimedByAgentId ? qb(b.claimedByAgentId) : '', done: !!b.done });
+      break;
+    }
+    case 'leaseGranted': {
+      const b = e.leaseGranted;
+      v.leases.set(`${qb(b.agentId)}\u0000${b.path}`, { agentId: qb(b.agentId), path: b.path ?? '', expiresAtMs: num(b.expiresAtMs) });
+      break;
+    }
+    case 'leaseReleased':
+      v.leases.delete(`${qb(e.leaseReleased.agentId)}\u0000${e.leaseReleased.path}`);
+      break;
     default:
-      break; // terminals, usage, tasks and files do not change what the fleet screen shows
+      break; // terminals, usage and files do not change what the fleet screen shows
   }
 }
 
@@ -286,6 +306,36 @@ export function recentMessages(v: View, limit = 5): MessageModel[] {
     from: label(m.from), to: label(m.to), body: m.body, atMs: m.atMs,
     crossMachine: m.to.includes('/') && machine(m.from) !== machine(m.to),
   }));
+}
+
+export interface BoardTaskModel { id: string; title: string; status: 'open' | 'claimed' | 'done'; owner: string }
+export interface BoardLeaseModel { path: string; holder: string; expiresAtMs: number }
+export interface BoardModel { project: string; tasks: BoardTaskModel[]; leases: BoardLeaseModel[] }
+
+// The shared boards, one per project, with agent names instead of ids. A board only exists once something happened on it.
+export function boards(v: View): BoardModel[] {
+  const names = new Map(tiles(v).map((t) => [t.id, t.name]));
+  const label = (id: string) => names.get(id) ?? id;
+  const projectName = (id: string) => {
+    for (const c of v.checkouts.values()) if (c.projectId === id) return lastSegment(c.path) || id;
+    return id;
+  };
+  const by = new Map<string, BoardModel>();
+  const board = (id: string) => {
+    let b = by.get(id);
+    if (!b) by.set(id, (b = { project: projectName(id), tasks: [], leases: [] }));
+    return b;
+  };
+  for (const [id, t] of v.tasks) {
+    board(t.projectId).tasks.push({ id, title: t.title, status: t.done ? 'done' : t.ownerId ? 'claimed' : 'open', owner: t.ownerId ? label(t.ownerId) : '' });
+  }
+  // A lease belongs to its holder's project.
+  for (const l of v.leases.values()) {
+    const a = v.agents.get(l.agentId);
+    const project = v.checkouts.get(v.worktrees.get(a?.worktreeId ?? '')?.checkoutId ?? '')?.projectId ?? '';
+    board(project).leases.push({ path: l.path, holder: label(l.agentId), expiresAtMs: l.expiresAtMs });
+  }
+  return [...by.values()].sort((a, b) => a.project.localeCompare(b.project));
 }
 
 export interface ProjectCost { label: string; microUsd: number }
