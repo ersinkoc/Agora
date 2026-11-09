@@ -1,0 +1,5 @@
+{"type":"session_start","ts":"2026-11-09T10:00:00.000Z","id":"2026-11-09/sess_EXAMPLE","model":"glm-5.3-flash","provider":"zai-coding-plan","checkout":"/work/proj"}
+{"type":"enhance_usage","ts":"2026-11-09T10:00:02.000Z","usage":{"input":581,"output":116},"provider":"zai-coding-plan","model":"glm-5.3-flash"}
+{"type":"llm_response","ts":"2026-11-09T10:00:05.000Z","stopReason":"tool_use","usage":{"input":27289,"output":485},"model":"glm-5.3-flash","provider":"zai-coding-plan"}
+{"type":"llm_response","ts":"2026-11-09T10:00:14.000Z","stopReason":"tool_use","usage":{"input":29511,"output":243},"model":"glm-5.3-flash","provider":"zai-coding-plan"}
+{"type":"llm_response","ts":"2026-11-09T10:00:23.000Z","stopReason":"tool_use","usage":{"input":3105,"output":155,"cacheRead":27072},"model":"glm-5.3-flash","provider":"zai-coding-plan"}
