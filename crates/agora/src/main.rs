@@ -25,6 +25,7 @@ const DETACH: u8 = 0x1d;
 const TERMINAL_STREAM: u32 = 3;
 
 mod hubcli;
+mod tuicmd;
 
 pub(crate) struct Say(Catalog);
 
@@ -190,6 +191,7 @@ fn main() -> ExitCode {
         ["agent", "kinds"] => agent_kinds(&say, &opts),
         ["terminal", "attach"] => terminal_attach(&say, &opts),
         ["doctor"] => doctor(&say, &opts),
+        ["tui"] => tuicmd::tui(&say, &opts),
         ["hub", "run"] => hubcli::hub_run(&say, &opts),
         ["hub", "code"] => hubcli::hub_code(&say, &opts),
         ["hub", "login"] => hubcli::hub_login(&say, &opts),

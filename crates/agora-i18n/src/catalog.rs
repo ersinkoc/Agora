@@ -115,6 +115,7 @@ impl Catalog {
         c.add_source(include_str!("../../../locales/en/errors.ftl"));
         c.add_source(include_str!("../../../locales/en/cli.ftl"));
         c.add_source(include_str!("../../../locales/en/notify.ftl"));
+        c.add_source(include_str!("../../../locales/en/tui.ftl"));
         c
     }
 
@@ -126,6 +127,7 @@ impl Catalog {
         c.add_source(include_str!("../../../locales/tr/errors.ftl"));
         c.add_source(include_str!("../../../locales/tr/cli.ftl"));
         c.add_source(include_str!("../../../locales/tr/notify.ftl"));
+        c.add_source(include_str!("../../../locales/tr/tui.ftl"));
         c
     }
 

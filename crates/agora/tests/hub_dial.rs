@@ -204,6 +204,52 @@ fn a_node_dials_the_hub_and_its_agents_appear_in_the_view_then_new_events_follow
 }
 
 #[test]
+fn the_terminal_console_gets_the_snapshot_of_a_node_and_draws_it() {
+    use agora_tui::client::{Hub as ConsoleHub, Session, Update};
+    let hub = hubside("laptop");
+    let addr = hub.listen("127.0.0.1:0");
+    let sink = sink_with_agent(&tmp("console"), "laptop");
+    let _link = spawn(Arc::clone(&sink), hub.link(addr)).unwrap();
+    wait("the node to appear", || {
+        hub.state.hub.view().0.agents.contains_key("laptop/agent-1")
+    });
+
+    let console = ConsoleHub {
+        addr: addr.to_string(),
+        ca_pem: hub.ca_pem.clone(),
+    };
+    // A token the hub does not know is refused; the tests' signed-in one gets the snapshot first.
+    assert!(
+        Session::connect(&console, "wrong").is_err() || {
+            let mut s = Session::connect(&console, "wrong").unwrap();
+            matches!(s.next(Duration::from_secs(2)), Update::Closed)
+        }
+    );
+    let mut session = Session::connect(&console, "client-token").unwrap();
+    let end = Instant::now() + Duration::from_secs(20);
+    let snapshot = loop {
+        match session.next(Duration::from_millis(200)) {
+            Update::Snapshot(s) => break *s,
+            Update::Closed => panic!("the hub closed the console's connection"),
+            _ => assert!(Instant::now() < end, "no snapshot"),
+        }
+    };
+    assert!(snapshot
+        .agents
+        .iter()
+        .any(|a| a.agent_id == "laptop/agent-1"));
+    let catalog = agora_i18n::Catalog::english();
+    let text = |id: &str, args: &[(&str, agora_i18n::Arg)]| {
+        catalog.render(id, args).unwrap_or_else(|| id.to_string())
+    };
+    let screen = agora_tui::render::render(&snapshot, false, &text).join("\n");
+    assert!(
+        screen.contains("agent-1") && screen.contains("1 of 1 machines online"),
+        "{screen}"
+    );
+}
+
+#[test]
 fn a_node_keeps_working_without_the_hub_and_catches_up_when_it_appears() {
     let hub = hubside("server");
     // Reserve a port, then release it so the node's first attempts are refused.

@@ -19,9 +19,9 @@ use agora_protocol::handshake::Support;
 
 use crate::{home, Opts, Say};
 
-const DEFAULT_LISTEN: &str = "127.0.0.1:7443";
+pub(crate) const DEFAULT_LISTEN: &str = "127.0.0.1:7443";
 
-fn hub_dir(o: &Opts) -> PathBuf {
+pub(crate) fn hub_dir(o: &Opts) -> PathBuf {
     o.hub_dir.clone().unwrap_or_else(|| home().join("hub"))
 }
 
@@ -212,16 +212,18 @@ pub fn hub_run(say: &Say, o: &Opts) -> ExitCode {
     }
 }
 
+/// A fresh one-time sign-in code from the hub's own store (valid 10 minutes).
+pub fn new_login_code(dir: &Path) -> Result<String, String> {
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let store = SqliteStore::open(&dir.join("hub.db")).map_err(|e| e.to_string())?;
+    SignIn::new(&store, Arc::new(Lockout::new()))
+        .create_code(server::now_ms())
+        .map_err(|_| "could not create a sign-in code".to_string())
+}
+
 /// `agora hub login`: a one-time code to sign in to the web app (valid 10 minutes).
 pub fn hub_login(say: &Say, o: &Opts) -> ExitCode {
-    let dir = hub_dir(o);
-    let result = (|| -> Result<String, String> {
-        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        let store = SqliteStore::open(&dir.join("hub.db")).map_err(|e| e.to_string())?;
-        SignIn::new(&store, Arc::new(Lockout::new()))
-            .create_code(server::now_ms())
-            .map_err(|_| "could not create a sign-in code".to_string())
-    })();
+    let result = new_login_code(&hub_dir(o));
     match result {
         Ok(code) => {
             say.out(key!("cli-hub-login"), &[("code", code.into())]);
