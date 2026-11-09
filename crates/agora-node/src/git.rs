@@ -242,6 +242,40 @@ pub fn status(worktree: &Path) -> Result<GitStatus, GitError> {
 const MAX_UNTRACKED: usize = 50;
 const MAX_UNTRACKED_BYTES: u64 = 64 * 1024;
 
+/// The most diff output ever held in memory; what is beyond it is dropped as it is read.
+const MAX_DIFF_READ: u64 = 1024 * 1024;
+
+/// Like [`git`], keeping at most `cap` bytes of stdout (the process is stopped when it has produced that much).
+fn git_capped(dir: &Path, args: &[&str], cap: u64) -> Result<String, GitError> {
+    use std::io::Read;
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("LC_ALL", "C")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| GitError::Io(e.to_string()))?;
+    let mut buf = Vec::new();
+    if let Some(out) = child.stdout.take() {
+        let _ = out.take(cap).read_to_end(&mut buf);
+    }
+    // Past the cap git may still be writing; closing its pipe and killing it is how it stops.
+    let _ = child.kill();
+    let status = child.wait().map_err(|e| GitError::Io(e.to_string()))?;
+    if buf.len() as u64 >= cap || status.success() {
+        Ok(String::from_utf8_lossy(&buf).into_owned())
+    } else {
+        Err(GitError::Command {
+            args: args.join(" "),
+            stderr: String::new(),
+        })
+    }
+}
+
 /// Unified diff of the changes against HEAD, optionally for one path. A new file that git does not track yet is shown as
 /// all-added (what a reviewer would see), without touching the index.
 pub fn diff(worktree: &Path, path: Option<&str>) -> Result<String, GitError> {
@@ -249,7 +283,7 @@ pub fn diff(worktree: &Path, path: Option<&str>) -> Result<String, GitError> {
     if let Some(p) = path {
         args.extend(["--", p]);
     }
-    let mut out = git(worktree, &args)?;
+    let mut out = git_capped(worktree, &args, MAX_DIFF_READ)?;
     let mut ls = vec!["ls-files", "--others", "--exclude-standard", "-z"];
     if let Some(p) = path {
         ls.extend(["--", p]);
@@ -596,5 +630,13 @@ mod tests {
         );
         assert_eq!(parse_shortstat(" 1 file changed, 1 deletion(-)\n"), (0, 1));
         assert_eq!(parse_shortstat(""), (0, 0));
+    }
+
+    #[test]
+    fn a_capped_read_keeps_only_that_much_output_and_still_reports_real_failures() {
+        let here = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let out = git_capped(here, &["log", "--format=%H%n%s%n%b"], 100).expect("log");
+        assert!(out.len() <= 100);
+        assert!(git_capped(here, &["rev-parse", "no-such-ref-xyz"], 100).is_err());
     }
 }

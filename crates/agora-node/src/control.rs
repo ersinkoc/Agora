@@ -428,7 +428,9 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
             let path = (!g.path.is_empty()).then_some(g.path.as_str());
             // A path is a path inside the workspace: no absolute paths, no `..`, no git pathspec magic (`:(...)`).
             if path.is_some_and(|p| {
-                p.starts_with(['/', ':', '-']) || p.split(['/', '\\']).any(|c| c == "..")
+                p.starts_with(['/', ':', '-', '\\'])
+                    || p.as_bytes().get(1) == Some(&b':') // a Windows drive (`C:\...`)
+                    || p.split(['/', '\\']).any(|c| c == ".." || c == ".git")
             }) {
                 return Err(invalid("path"));
             }
@@ -445,6 +447,9 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
             })
         }
         Cmd::FilesList(f) => {
+            if is_git_dir(&f.path) {
+                return Err(invalid("path"));
+            }
             let files = open_files(ctx, &f.worktree_id)?;
             let entries = files
                 .list(&f.path)
@@ -462,6 +467,9 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
             })
         }
         Cmd::FilesRead(f) => {
+            if is_git_dir(&f.path) {
+                return Err(invalid("path"));
+            }
             let files = open_files(ctx, &f.worktree_id)?;
             let data = files.read(&f.path).map_err(|e| e.to_protocol())?;
             Ok(v1::CommandOk {
@@ -470,6 +478,12 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
         }
         other => Err(capability_missing(command_name(other))),
     }
+}
+
+/// Git's own directory (or a file standing in for it in a linked worktree) is bookkeeping, not project content: its config
+/// can hold remote URLs with credentials, and a linked worktree's `.git` file names an absolute path elsewhere.
+fn is_git_dir(path: &str) -> bool {
+    path.split(['/', '\\']).any(|c| c == ".git")
 }
 
 /// Largest file `files.read` returns.

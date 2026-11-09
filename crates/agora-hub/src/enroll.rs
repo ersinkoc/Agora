@@ -183,6 +183,12 @@ impl<'a> Enrollment<'a> {
             "DELETE FROM enrollment_codes WHERE code_hash = ?1",
             [hash(code)],
         )?;
+        // One live identity per node id: enrolling again under a name replaces what was there (the old certificate is revoked,
+        // and a connection it still holds is closed), so a redeemed code can never add a second route for an existing node.
+        tx.execute(
+            "UPDATE devices SET revoked_ms = ?2 WHERE node_id = ?1 AND revoked_ms IS NULL",
+            params![node_id, to_i64(now_ms)],
+        )?;
         tx.execute(
             "INSERT INTO devices (serial, node_id, enrolled_ms) VALUES (?1, ?2, ?3)",
             params![issued.serial_hex, node_id, to_i64(now_ms)],
@@ -258,6 +264,32 @@ mod tests {
             e.redeem(&ca, &code, "other", &csr, 3000),
             Err(EnrollError::BadCode)
         ));
+    }
+
+    #[test]
+    fn enrolling_again_under_a_name_replaces_the_old_identity_instead_of_adding_a_second_one() {
+        let (store, ca, csr) = setup();
+        let mut e = Enrollment::new(&store);
+        let first = {
+            let c = e.create_code(0).unwrap();
+            e.redeem(&ca, &c, "vps", &csr, 1).unwrap()
+        };
+        let second = {
+            let c = e.create_code(0).unwrap();
+            // A reinstalled machine has a new key, hence a new request.
+            let (_, fresh) = new_device_request().unwrap();
+            e.redeem(&ca, &c, "vps", &fresh, 2).unwrap()
+        };
+        assert!(!e.is_active(&first.serial_hex).unwrap());
+        assert!(e.is_active(&second.serial_hex).unwrap());
+        // Other names are untouched.
+        let other = {
+            let c = e.create_code(0).unwrap();
+            let (_, fresh) = new_device_request().unwrap();
+            e.redeem(&ca, &c, "laptop", &fresh, 3).unwrap()
+        };
+        assert!(e.is_active(&other.serial_hex).unwrap());
+        assert!(e.is_active(&second.serial_hex).unwrap());
     }
 
     #[test]

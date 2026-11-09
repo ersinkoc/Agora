@@ -901,7 +901,12 @@ where
             None => Err(ServeError::Refused),
         },
         (STREAM_EVENTS, kinds::SUBSCRIBE) if token.is_some_and(|t| state.auth.check(t)) => {
-            serve_client(conn, &state.hub, first).await
+            // The token was good when the connection opened; an expired or revoked session must not keep a live one.
+            let token = token.unwrap_or_default();
+            tokio::select! {
+                r = serve_client(conn, &state.hub, first) => r,
+                () = still(|| state.auth.check(token)) => Err(ServeError::Refused),
+            }
         }
         _ => Err(ServeError::Refused),
     }
@@ -949,9 +954,35 @@ async fn handle(
                     Error::new(ErrorCode::AuthDeviceRevoked).with("device_id", id.node_id.as_str()),
                 ));
             }
-            serve_node(conn, &id.node_id, &state.hub, &state.support).await
+            // Revoking a node ends its connection, not only its next one.
+            tokio::select! {
+                r = serve_node(conn, &id.node_id, &state.hub, &state.support) => r,
+                () = still(|| Enrollment::new(state.hub.store()).is_active(&id.serial_hex).unwrap_or(false)) => {
+                    Err(ServeError::Protocol(
+                        Error::new(ErrorCode::AuthDeviceRevoked).with("device_id", id.node_id.as_str()),
+                    ))
+                }
+            }
         }
         None => serve_unauthenticated(conn, token.as_deref(), state).await,
+    }
+}
+
+/// How often a live connection is checked against its credential (10 s; `AGORA_RECHECK_MS` shortens it for tests).
+fn recheck() -> Duration {
+    std::env::var("AGORA_RECHECK_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .map_or(Duration::from_secs(10), Duration::from_millis)
+}
+
+/// Completes when `valid` first says no. Checked every [`RECHECK`].
+async fn still(valid: impl Fn() -> bool) {
+    loop {
+        tokio::time::sleep(recheck()).await;
+        if !valid() {
+            return;
+        }
     }
 }
 

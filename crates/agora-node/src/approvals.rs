@@ -359,7 +359,9 @@ pub struct NodeApprovals {
     queue: std::sync::Mutex<Approvals<Box<dyn Verifier + Send>>>,
     routes: std::sync::Mutex<std::collections::HashMap<String, (agora_core::AgentId, String)>>,
     /// The trusted-devices file and its modification time when it was last read.
-    trust_file: std::sync::Mutex<Option<(std::path::PathBuf, Option<std::time::SystemTime>)>>,
+    /// The file and what was last read from it. The content is compared, not only the modification time: an edit within the
+    /// filesystem's timestamp granularity (or one that restores the time) must still take a revoked device out at once.
+    trust_file: std::sync::Mutex<Option<(std::path::PathBuf, Option<Vec<u8>>)>>,
 }
 
 impl NodeApprovals {
@@ -374,9 +376,9 @@ impl NodeApprovals {
     /// Follows the trusted-devices file: when the owner changes it (`agora node trust`), the next decision is judged by
     /// the new list, so trusting a browser does not mean restarting the node (which would stop its agents).
     pub fn follow_trust_file(&self, path: &std::path::Path) {
-        let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+        let seen = std::fs::read(path).ok();
         *self.trust_file.lock().unwrap_or_else(|e| e.into_inner()) =
-            Some((path.to_path_buf(), mtime));
+            Some((path.to_path_buf(), seen));
     }
 
     fn reload_trust_if_changed(&self) {
@@ -384,7 +386,7 @@ impl NodeApprovals {
         let Some((path, seen)) = guard.as_mut() else {
             return;
         };
-        let now = std::fs::metadata(&*path).and_then(|m| m.modified()).ok();
+        let now = std::fs::read(&*path).ok();
         if now != *seen {
             *seen = now;
             let (verifier, _skipped) = P256Verifier::load(path);
@@ -736,6 +738,31 @@ mod tests {
         assert_eq!(
             (a.as_str(), id.as_str(), verdict),
             ("agent-1", "ap-1", Verdict::Approved)
+        );
+
+        // The owner removes the device again, and the edit keeps the file's modification time (a coarse clock, or a copy that
+        // preserves it): the device must still be out on the very next decision.
+        let before = std::fs::metadata(&file).unwrap().modified().unwrap();
+        std::fs::write(&file, "").unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(before)
+            .unwrap();
+        let p2 = n.request(&agent, "ap-2", "run_command", "ls", 3).unwrap();
+        let sig = pair
+            .sign(&rng, &signed_message("node-1", &p2.id, true))
+            .unwrap();
+        let resolve = ApprovalResolve {
+            approval_id: p2.id.clone(),
+            approved: true,
+            signer_device_id: "web-1".into(),
+            signature: sig.as_ref().to_vec(),
+        };
+        assert_eq!(
+            n.resolve(&resolve, 4).unwrap_err(),
+            ApprovalError::BadSignature
         );
         let _ = std::fs::remove_dir_all(dir);
     }

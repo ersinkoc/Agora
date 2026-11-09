@@ -1108,3 +1108,39 @@ async fn a_nodes_mesh_post_is_routed_with_the_origin_the_hub_saw_and_nothing_els
         ("p5", "protocol.invalid_message")
     );
 }
+
+struct Switch(Arc<std::sync::atomic::AtomicBool>);
+
+impl ClientAuth for Switch {
+    fn check(&self, _: &str) -> bool {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[tokio::test]
+async fn a_live_client_connection_ends_when_its_session_stops_being_valid() {
+    std::env::set_var("AGORA_RECHECK_MS", "100");
+    let valid = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let st = Arc::new(ServerState {
+        hub: Arc::new(Hub::open(SqliteStore::open_in_memory().unwrap()).unwrap()),
+        support: support(),
+        ca: None,
+        lockout: Arc::new(Lockout::new()),
+        auth: Box::new(Switch(Arc::clone(&valid))),
+        assets: None,
+        sessions: None,
+    });
+    let addr = start(st).await;
+    let mut c = dial(addr, Some("any")).await;
+    c.send(&f(
+        STREAM_EVENTS,
+        kinds::SUBSCRIBE,
+        v1::Subscribe::default().encode_to_vec(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(recv(&mut c).await.kind, kinds::SNAPSHOT);
+    // Expiry or "sign out everywhere": the connection that was already open goes too.
+    valid.store(false, std::sync::atomic::Ordering::SeqCst);
+    assert!(closed(&mut c).await);
+}
