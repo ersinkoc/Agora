@@ -291,6 +291,31 @@ impl Session {
     /// Opens a terminal of a machine (ADR-0029): the hub relays its screen and output on a stream of ours. `terminal_id` is the
     /// machine's own id. Returns the stream; read it with [`Session::terminal_next`].
     pub fn terminal_open(&mut self, node: &str, terminal_id: &str) -> Result<u32, String> {
+        self.open_stream(
+            node,
+            command_request::Command::TerminalSubscribe(agora_protocol::v1::TerminalSubscribe {
+                terminal_id: terminal_id.to_string(),
+                format: String::new(),
+            }),
+        )
+    }
+
+    /// Opens the conversation of an agent that has no terminal (ADR-0038). `agent_id` is the machine's own id. Read it with
+    /// [`Session::chat_next`].
+    pub fn chat_open(&mut self, node: &str, agent_id: &str) -> Result<u32, String> {
+        self.open_stream(
+            node,
+            command_request::Command::ChatSubscribe(agora_protocol::v1::ChatSubscribe {
+                agent_id: agent_id.to_string(),
+            }),
+        )
+    }
+
+    fn open_stream(
+        &mut self,
+        node: &str,
+        command: command_request::Command,
+    ) -> Result<u32, String> {
         let stream = self.next_stream;
         self.next_stream += 1;
         self.requests += 1;
@@ -299,12 +324,7 @@ impl Session {
             request_id: id.clone(),
             idempotency_key: String::new(),
             target_node: node.to_string(),
-            command: Some(command_request::Command::TerminalSubscribe(
-                agora_protocol::v1::TerminalSubscribe {
-                    terminal_id: terminal_id.to_string(),
-                    format: String::new(),
-                },
-            )),
+            command: Some(command),
         };
         let conn = &mut self.conn;
         let changed = &mut self.changed;
@@ -390,6 +410,71 @@ impl Session {
         })
     }
 
+    /// The next thing on a chat stream, waiting up to `wait`.
+    pub fn chat_next(&mut self, stream: u32, wait: Duration) -> ChatEvent {
+        // Chat frames share the machinery of terminal streams: kind 10 is a snapshot, kind 11 one entry.
+        let take = |f: &Frame| -> Option<ChatEvent> {
+            if f.kind == STREAM_CLOSE {
+                return Some(ChatEvent::Ended);
+            }
+            match f.kind {
+                10 => agora_protocol::v1::ChatSnapshot::decode(f.payload.as_slice())
+                    .ok()
+                    .map(|c| ChatEvent::Lines(c.entries, true)),
+                11 => agora_protocol::v1::ChatEntry::decode(f.payload.as_slice())
+                    .ok()
+                    .map(|e| ChatEvent::Lines(vec![e], false)),
+                _ => None,
+            }
+        };
+        if let Some(pos) = self.term_frames.iter().position(|f| f.stream_id == stream) {
+            if let Some(f) = self.term_frames.remove(pos) {
+                return take(&f).unwrap_or(ChatEvent::Quiet);
+            }
+        }
+        let conn = &mut self.conn;
+        let changed = &mut self.changed;
+        let queue = &mut self.term_frames;
+        self.rt.block_on(async {
+            match tokio::time::timeout(wait, conn.recv()).await {
+                Err(_) => ChatEvent::Quiet,
+                Ok(Ok(Some(f))) if f.stream_id == stream => take(&f).unwrap_or(ChatEvent::Quiet),
+                Ok(Ok(Some(f))) => {
+                    if f.stream_id == STREAM_EVENTS && f.kind == kinds::POSITIONED_EVENT {
+                        *changed = true;
+                    } else if f.stream_id >= agora_protocol::frame::FIRST_DYNAMIC_STREAM {
+                        queue.push_back(f);
+                    }
+                    ChatEvent::Quiet
+                }
+                Ok(_) => ChatEvent::Lost,
+            }
+        })
+    }
+
+    /// Sends a request to an agent (a routed `agent.prompt`) and waits for the machine to take it.
+    pub fn prompt(&mut self, node: &str, agent_id: &str, text: &str) -> Result<(), String> {
+        self.command(
+            node,
+            command_request::Command::AgentPrompt(agora_protocol::v1::AgentPrompt {
+                agent_id: agent_id.to_string(),
+                text: text.to_string(),
+            }),
+            Duration::from_secs(15),
+        )
+    }
+
+    /// Stops an agent on a machine.
+    pub fn stop_agent(&mut self, node: &str, agent_id: &str) -> Result<(), String> {
+        self.command(
+            node,
+            command_request::Command::AgentStop(agora_protocol::v1::AgentStop {
+                agent_id: agent_id.to_string(),
+            }),
+            Duration::from_secs(15),
+        )
+    }
+
     /// Keys typed into the terminal (an ordinary routed command; the machine runs them in the order sent). Fire and forget.
     pub fn terminal_input(&mut self, node: &str, terminal_id: &str, data: &[u8]) {
         self.send_nowait(
@@ -455,5 +540,14 @@ pub enum TermEvent {
     Ended,
     Quiet,
     /// The link to the hub is gone.
+    Lost,
+}
+
+/// What an agent's conversation said.
+pub enum ChatEvent {
+    /// Entries to show; `true` means they replace what is held (a snapshot), `false` that they follow it.
+    Lines(Vec<agora_protocol::v1::ChatEntry>, bool),
+    Ended,
+    Quiet,
     Lost,
 }

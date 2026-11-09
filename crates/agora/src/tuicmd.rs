@@ -8,10 +8,10 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use agora_i18n::{key, Arg};
-use agora_protocol::v1::Snapshot;
-use agora_tui::client::{sign_in, ClientError, Hub, Session, TermEvent, Update};
+use agora_protocol::v1::{ChatEntry, Snapshot};
+use agora_tui::client::{sign_in, ChatEvent, ClientError, Hub, Session, TermEvent, Update};
 use agora_tui::device::Device;
-use agora_tui::render::render;
+use agora_tui::render::{plain, render, render_chat};
 
 use crate::hubcli::{hub_dir, new_login_code, DEFAULT_LISTEN};
 use crate::{home, Opts, Say};
@@ -110,6 +110,93 @@ fn attach(
         }
         if !typed.is_empty() {
             session.terminal_input(node, &terminal, &typed);
+        }
+    }
+    session.terminal_close(stream);
+    Ok(lost)
+}
+
+/// The conversation of an agent that has no terminal, with a line to type the next request on. Ctrl-] leaves it. Same results as
+/// [`attach`].
+fn chat(
+    say: &Say,
+    session: &mut Session,
+    agent: &str,
+    rx: &mpsc::Receiver<u8>,
+    color: bool,
+) -> Result<bool, String> {
+    let (node, local) = agent.split_once('/').unwrap_or(("", agent));
+    let stream = session.chat_open(node, local)?;
+    let text = |id: &str, args: &[(&str, Arg)]| say.text(id, args);
+    let mut entries: Vec<ChatEntry> = Vec::new();
+    let mut typed: Vec<u8> = Vec::new();
+    let mut note = String::new();
+    let mut lost = false;
+    let mut dirty = true;
+    'watch: loop {
+        match session.chat_next(stream, Duration::from_millis(100)) {
+            ChatEvent::Lines(lines, replace) => {
+                if replace {
+                    entries = lines;
+                } else {
+                    let last = entries.last().map_or(0, |e| e.entry_id);
+                    entries.extend(lines.into_iter().filter(|e| e.entry_id > last));
+                }
+                dirty = true;
+            }
+            ChatEvent::Ended => break,
+            ChatEvent::Lost => {
+                lost = true;
+                break;
+            }
+            ChatEvent::Quiet => {}
+        }
+        while let Ok(k) = rx.try_recv() {
+            match k {
+                DETACH => break 'watch,
+                b'\r' | b'\n' => {
+                    let line = String::from_utf8_lossy(&typed).trim().to_string();
+                    typed.clear();
+                    if !line.is_empty() {
+                        note = match session.prompt(node, local, &line) {
+                            Ok(()) => String::new(),
+                            Err(code) => {
+                                say.text(key!("tui-send-failed"), &[("code", Arg::Str(code))])
+                            }
+                        };
+                    }
+                    dirty = true;
+                }
+                0x7f | 0x08 => {
+                    // Backspace removes one character, not one byte.
+                    while typed.pop().is_some_and(|b| b & 0xC0 == 0x80) {}
+                    dirty = true;
+                }
+                b if b >= 0x20 => {
+                    typed.push(b);
+                    dirty = true;
+                }
+                _ => {}
+            }
+        }
+        if dirty {
+            dirty = false;
+            let size = agora_platform::terminal_size()
+                .map_or((80, 24), |(c, r)| (usize::from(c), usize::from(r)));
+            let mut lines = render_chat(
+                &entries,
+                local,
+                &String::from_utf8_lossy(&typed),
+                size,
+                color,
+                &text,
+            );
+            if !note.is_empty() {
+                lines.insert(lines.len().saturating_sub(1), plain(&note));
+            }
+            let mut out = std::io::stdout();
+            let _ = write!(out, "\x1b[H\x1b[2J{}", lines.join("\r\n"));
+            let _ = out.flush();
         }
     }
     session.terminal_close(stream);
@@ -238,10 +325,27 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                             draw(&snapshot, &selected, &notice);
                         }
                     }
+                    b'x' => {
+                        if !selected.is_empty() {
+                            let (node, local) = selected.split_once('/').unwrap_or(("", &selected));
+                            notice = match session.stop_agent(node, local) {
+                                Ok(()) => say.text(key!("tui-stopped"), &[]),
+                                Err(code) => {
+                                    say.text(key!("tui-stop-failed"), &[("code", Arg::Str(code))])
+                                }
+                            };
+                            dirty_since.get_or_insert_with(Instant::now);
+                            draw(&snapshot, &selected, &notice);
+                        }
+                    }
                     b'\t' => {
                         if let Some(s) = &snapshot {
-                            let with_terminal: Vec<&str> =
-                                s.terminals.iter().map(|t| t.agent_id.as_str()).collect();
+                            let with_terminal: Vec<&str> = s
+                                .agents
+                                .iter()
+                                .filter(|a| a.running)
+                                .map(|a| a.agent_id.as_str())
+                                .collect();
                             let at = with_terminal.iter().position(|a| *a == selected);
                             let next = at.map_or(0, |i| (i + 1) % with_terminal.len().max(1));
                             selected = with_terminal
@@ -253,7 +357,13 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                     }
                     b'\r' | b'\n' => {
                         if let (Some(s), false) = (&snapshot, selected.is_empty()) {
-                            match attach(&mut session, s, &selected, &rx) {
+                            let has_terminal = s.terminals.iter().any(|t| t.agent_id == selected);
+                            let opened = if has_terminal {
+                                attach(&mut session, s, &selected, &rx)
+                            } else {
+                                chat(say, &mut session, &selected, &rx, color)
+                            };
+                            match opened {
                                 Ok(true) => {
                                     say.err(key!("tui-lost"), &hub_arg);
                                     link_lost = true;
