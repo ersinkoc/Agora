@@ -14,7 +14,7 @@ agora-protocol = { path = "../agora-protocol", features = ["ws"] }
 agora-mesh = { path = "../agora-mesh" }
 agora-i18n = { path = "../agora-i18n" }
 # Embedded SQLite for the hub store (ADR-0014); "bundled" so no system library is needed on any OS.
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 prost = "0.14"
 # Networking (ADR-0013): tokio runtime, and WebSocket (ADR-0011) via tokio-tungstenite.
 tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros", "io-util"] }
