@@ -29,10 +29,10 @@ theme-dark = Koyu
 theme-light = Açık
 
 palette-title = Komut paleti
-palette-placeholder = Bir ajana git veya bir eylem çalıştır…
+palette-placeholder = Bir ajana git veya bir işlem yap…
 palette-empty = Eşleşen yok.
 palette-open-agent = { $name } aç
-palette-next-attention = Sıradaki bekleyen
+palette-next-attention = Beni bekleyen sıradaki
 palette-go-home = Ana sayfaya git
 palette-hint = Aramak için Ctrl+K veya ⌘K, sizi bekleyen sıradaki ajan için N tuşuna basın.
 
@@ -57,7 +57,7 @@ device-key = Cihaz anahtarı
 device-link = Bu cihaz
 
 signin-title = Giriş yap
-signin-intro = Hub'ınızdan bir kod isteyin: onu çalıştıran makinede "agora hub login" komutunu çalıştırıp kodu buraya yazın.
+signin-intro = Hub'ınızdan bir kod isteyin: hub'ı çalıştıran makinede "agora hub login" komutunu çalıştırıp kodu buraya yazın.
 signin-code = Kod
 signin-action = Giriş yap
 signin-refused = Bu kod çalışmadı. Yanlış, süresi dolmuş veya daha önce kullanılmış olabilir.
@@ -86,7 +86,7 @@ start-not-installed = kurulu değil
 start-go = Başlat
 start-cancel = Vazgeç
 start-kind-unknown = Bu makine o ajanı tanımıyor.
-start-limit = Makine sınırında. Bir ajanı durdurup yeniden deneyin.
+start-limit = Makine kapasitesine ulaştı. Bir ajanı durdurup yeniden deneyin.
 start-failed = Ajan başlamadı. Yeniden deneyin.
 signin-passkey = Geçiş anahtarıyla giriş yap
 signin-passkey-failed = Geçiş anahtarı çalışmadı. Bunun yerine kod kullanın.
@@ -112,8 +112,8 @@ console-maximize = Tam boyut
 console-hide = İzlemeyi bırak
 console-no-messages = Ajanlar henüz birbirine yazmadı.
 console-spent = Şimdiye kadarki harcama (tahmini)
-changes-title = Commit edilmemiş değişiklikler
-changes-none = Commit edilmemiş bir şey yok. Tüm çalışma alanları temiz.
+changes-title = Git'e kaydedilmemiş değişiklikler
+changes-none = Git'e kaydedilmemiş değişiklik yok. Tüm çalışma alanları temiz.
 changes-files = { $count ->
     [one] 1 dosya değişti
    *[other] { $count } dosya değişti
@@ -137,7 +137,7 @@ prompt-send = Gönder
 prompt-sent = Gönderildi.
 prompt-failed = Gitmedi. Yeniden deneyin.
 console-history = Geçmiş
-history-title = { $name } commit'leri
+history-title = { $name }: commit'ler
 history-none = Burada henüz commit yapılmadı.
 history-failed = Geçmiş o makineden okunamadı.
 history-no-subject = (mesaj yok)
