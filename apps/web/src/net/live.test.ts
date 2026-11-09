@@ -71,6 +71,20 @@ describe('view', () => {
     expect(b[0]?.tasks[0]?.status).toBe('done');
   });
 
+  it('has the board right after a snapshot, before any new event', () => {
+    const v = fromSnapshot(v1.Snapshot.create({
+      checkouts: [{ checkoutId: 'c', nodeId: 'alpha', projectId: 'p', path: '/home/me/shop' }],
+      worktrees: [{ worktreeId: 'w', checkoutId: 'c', path: '/x', branch: 'b' }],
+      agents: [{ agentId: 'alpha/a1', nodeId: 'alpha', worktreeId: 'w', kind: 'claude', running: true }],
+      tasks: [{ taskId: 't-1', projectId: 'p', title: 'port parser', claimedByAgentId: 'alpha/a1', done: false }],
+      leases: [{ agentId: 'alpha/a1', path: 'src/x.rs', expiresAtMs: 9000 }],
+    }));
+    const b = boards(v);
+    expect(b[0]?.project).toBe('shop');
+    expect(b[0]?.tasks.map((t) => t.title)).toEqual(['port parser']);
+    expect(b[0]?.leases.map((l) => l.path)).toEqual(['src/x.rs']);
+  });
+
   it('adds up estimated cost per project and skips agents without a price', () => {
     const v = emptyView();
     applyEvent(v, 1, ev('n', 1, { checkoutDiscovered: { checkoutId: 'c', nodeId: 'n', projectId: 'p', path: '/home/me/shop' } }));

@@ -56,4 +56,4 @@ Date: YYYY-MM-DD
 | 0037 | `git.log` command: recent commits of an agent's workspace | Accepted |
 | 0038 | Chat transcript stream for agents without a terminal | Accepted |
 | 0039 | A shared board for tasks, channels and leases across nodes | Accepted |
-| 0040 | Shared boards in the client snapshot, and leases kept across a hub restart | Proposed |
+| 0040 | Shared boards in the client snapshot, and leases kept across a hub restart | Accepted |

@@ -1,6 +1,7 @@
 # 0040. Shared boards in the client snapshot, and leases kept across a hub restart
-Status: Proposed
+Status: Accepted
 Date: 2026-11-09
+Accepted: 2026-11-09 (maintainer's explicit approval in chat: "her şeyi onaylıyorum", answering the list of Proposed ADRs 0040 and 0034)
 
 ## Context
 ADR-0039 gave shared projects a board on the hub. The console learns about tasks and leases only from `TaskChanged`,

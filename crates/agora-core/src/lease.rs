@@ -60,6 +60,11 @@ impl LeaseTable {
         Self::default()
     }
 
+    /// Every lease held, expired or not (for a store that outlives this table).
+    pub fn all(&self) -> &[Lease] {
+        &self.leases
+    }
+
     /// Acquire or renew. The same holder may re-acquire (renew) its own lease.
     pub fn acquire(
         &mut self,

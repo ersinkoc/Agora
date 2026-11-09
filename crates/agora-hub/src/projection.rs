@@ -16,6 +16,7 @@ use agora_protocol::v1::event::Body;
 use agora_protocol::v1::{AgentState, Event};
 use prost::Message;
 
+use crate::ca::RESERVED_HUB_ID;
 use crate::store::{EventStore, StoreError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,8 +75,21 @@ pub struct ApprovalView {
     pub expires_at_ms: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskView {
+    pub project_id: String,
+    pub title: String,
+    /// `<node>/<agent>`; empty while the task is open.
+    pub owner: String,
+    pub done: bool,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct View {
+    /// Shared-board tasks (ADR-0040), keyed `<project>/<task id>`.
+    pub tasks: BTreeMap<String, TaskView>,
+    /// Held paths, keyed `<agent>\0<path>` → expiry (ms).
+    pub leases: BTreeMap<String, (String, String, u64)>,
     pub nodes: BTreeMap<String, NodeView>,
     /// checkout id → (node id, project id, path)
     pub checkouts: BTreeMap<String, (String, String, String)>,
@@ -98,6 +112,7 @@ pub fn split_key(key: &str) -> Option<(&str, &str)> {
 
 impl View {
     pub fn apply(&mut self, ev: &Event) {
+        let producer = ev.producer_id.as_str();
         let q = |id: &str| qualified(&ev.producer_id, id);
         let Some(body) = &ev.body else { return };
         // Any event from a producer proves its node is there.
@@ -256,12 +271,46 @@ impl View {
                 self.approvals.remove(&q(&e.approval_id));
             }
             // Mesh and file events are not part of this view (the mesh broker and clients consume them).
-            Body::MessagePosted(_)
-            | Body::TaskChanged(_)
-            | Body::LeaseGranted(_)
-            | Body::LeaseReleased(_)
-            | Body::HandoffCreated(_)
-            | Body::FilesChanged(_) => {}
+            Body::TaskChanged(t) => {
+                // The hub's own events (the shared board) already carry `<node>/<agent>`; a node's carry its local ids.
+                let owner = match (
+                    t.claimed_by_agent_id.is_empty(),
+                    producer == RESERVED_HUB_ID,
+                ) {
+                    (true, _) => String::new(),
+                    (false, true) => t.claimed_by_agent_id.clone(),
+                    (false, false) => qualified(producer, &t.claimed_by_agent_id),
+                };
+                self.tasks.insert(
+                    format!("{}/{}", t.project_id, t.task_id),
+                    TaskView {
+                        project_id: t.project_id.clone(),
+                        title: t.title.clone(),
+                        owner,
+                        done: t.done,
+                    },
+                );
+            }
+            Body::LeaseGranted(l) => {
+                let agent = if producer == RESERVED_HUB_ID {
+                    l.agent_id.clone()
+                } else {
+                    qualified(producer, &l.agent_id)
+                };
+                self.leases.insert(
+                    format!("{agent}\0{}", l.path),
+                    (agent, l.path.clone(), l.expires_at_ms),
+                );
+            }
+            Body::LeaseReleased(l) => {
+                let agent = if producer == RESERVED_HUB_ID {
+                    l.agent_id.clone()
+                } else {
+                    qualified(producer, &l.agent_id)
+                };
+                self.leases.remove(&format!("{agent}\0{}", l.path));
+            }
+            Body::MessagePosted(_) | Body::HandoffCreated(_) | Body::FilesChanged(_) => {}
         }
     }
 
@@ -601,5 +650,57 @@ mod tests {
         let (rebuilt, pos) = View::rebuild(&store).unwrap();
         assert_eq!(rebuilt, live);
         assert_eq!(pos, 4);
+    }
+
+    #[test]
+    fn board_events_fill_the_view_and_the_snapshot_and_a_rebuilt_view_has_them_too() {
+        let mut v = View::default();
+        let task = |id: &str, owner: &str, done: bool| {
+            Body::TaskChanged(TaskChanged {
+                task_id: id.into(),
+                project_id: "p".into(),
+                title: "t".into(),
+                claimed_by_agent_id: owner.into(),
+                done,
+            })
+        };
+        // The hub's events carry `<node>/<agent>`; a node's own carry its local ids.
+        v.apply(&ev("hub", 1, task("t-1", "alpha/a1", false)));
+        v.apply(&ev("beta", 1, task("t-9", "b1", false)));
+        v.apply(&ev("hub", 2, task("t-1", "alpha/a1", true)));
+        v.apply(&ev(
+            "hub",
+            3,
+            Body::LeaseGranted(LeaseGranted {
+                agent_id: "alpha/a1".into(),
+                path: "src/x".into(),
+                expires_at_ms: 99,
+            }),
+        ));
+        v.apply(&ev(
+            "hub",
+            4,
+            Body::LeaseGranted(LeaseGranted {
+                agent_id: "alpha/a1".into(),
+                path: "src/y".into(),
+                expires_at_ms: 99,
+            }),
+        ));
+        v.apply(&ev(
+            "hub",
+            5,
+            Body::LeaseReleased(LeaseReleased {
+                agent_id: "alpha/a1".into(),
+                path: "src/y".into(),
+            }),
+        ));
+        assert_eq!(v.tasks["p/t-1"].owner, "alpha/a1");
+        assert!(v.tasks["p/t-1"].done);
+        assert_eq!(v.tasks["p/t-9"].owner, "beta/b1");
+        let snap = crate::server::snapshot_of(&v, 7);
+        assert_eq!(snap.tasks.len(), 2);
+        assert_eq!(snap.leases.len(), 1);
+        assert_eq!(snap.leases[0].path, "src/x");
+        assert!(snap.tasks.iter().any(|t| t.task_id == "t-1" && t.done));
     }
 }

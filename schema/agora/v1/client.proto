@@ -75,6 +75,21 @@ message ApprovalSnapshot {
   uint64 expires_at_ms = 5;
 }
 
+message TaskSnapshot {
+  string task_id = 1;
+  string project_id = 2;
+  string title = 3;
+  // `<node>/<agent>` for a shared board; empty while open.
+  string claimed_by_agent_id = 4;
+  bool done = 5;
+}
+
+message LeaseSnapshot {
+  string agent_id = 1;
+  string path = 2;
+  uint64 expires_at_ms = 3;
+}
+
 // hub -> client. `pos` is the global log position the snapshot reflects; live events continue after it.
 message Snapshot {
   uint64 pos = 1;
@@ -84,6 +99,9 @@ message Snapshot {
   repeated AgentSnapshot agents = 5;
   repeated TerminalSnapshot terminals = 6;
   repeated ApprovalSnapshot approvals = 7;
+  // ADR-0040: the shared boards, so a window that opens or reloads sees them before the next change.
+  repeated TaskSnapshot tasks = 8;
+  repeated LeaseSnapshot leases = 9;
 }
 
 // hub -> client for every live or replayed event.

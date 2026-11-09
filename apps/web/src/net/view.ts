@@ -71,6 +71,12 @@ export function fromSnapshot(s: agora.v1.Snapshot.$Properties): View {
     });
   }
   for (const tm of s.terminals ?? []) if (tm.agentId) v.withTerminal.add(tm.agentId);
+  for (const t of s.tasks ?? []) {
+    v.tasks.set(`${t.projectId ?? ''}/${t.taskId ?? ''}`, { projectId: t.projectId ?? '', title: t.title ?? '', ownerId: t.claimedByAgentId ?? '', done: !!t.done });
+  }
+  for (const l of s.leases ?? []) {
+    v.leases.set(`${l.agentId}\u0000${l.path}`, { agentId: l.agentId ?? '', path: l.path ?? '', expiresAtMs: num(l.expiresAtMs) });
+  }
   for (const p of s.approvals ?? []) {
     v.approvals.set(p.approvalId ?? '', {
       agentId: p.agentId ?? '', action: p.action ?? '', detail: p.detail ?? '', expiresAtMs: num(p.expiresAtMs),
@@ -177,7 +183,7 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
     // The hub writes board events with ids that are already `<node>/<agent>`.
     case 'taskChanged': {
       const b = e.taskChanged;
-      v.tasks.set(String(b.taskId ?? ''), { projectId: b.projectId ?? '', title: b.title ?? '', ownerId: b.claimedByAgentId ? qb(b.claimedByAgentId) : '', done: !!b.done });
+      v.tasks.set(`${b.projectId ?? ''}/${b.taskId ?? ''}`, { projectId: b.projectId ?? '', title: b.title ?? '', ownerId: b.claimedByAgentId ? qb(b.claimedByAgentId) : '', done: !!b.done });
       break;
     }
     case 'leaseGranted': {
@@ -333,6 +339,7 @@ export function boards(v: View): BoardModel[] {
   for (const l of v.leases.values()) {
     const a = v.agents.get(l.agentId);
     const project = v.checkouts.get(v.worktrees.get(a?.worktreeId ?? '')?.checkoutId ?? '')?.projectId ?? '';
+    if (!project) continue; // a holder this window does not know (yet) has no project to show it under
     board(project).leases.push({ path: l.path, holder: label(l.agentId), expiresAtMs: l.expiresAtMs });
   }
   return [...by.values()].sort((a, b) => a.project.localeCompare(b.project));

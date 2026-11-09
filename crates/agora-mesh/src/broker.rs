@@ -760,6 +760,27 @@ impl Mesh {
         }
     }
 
+    /// Every lease of one project that has not expired, as `(path, holder, expires_at_ms)`.
+    pub fn export_leases(&self, project: &str, now_ms: u64) -> Vec<(String, AgentId, u64)> {
+        self.leases.get(project).map_or_else(Vec::new, |t| {
+            t.all()
+                .iter()
+                .filter(|l| !l.is_expired(now_ms))
+                .map(|l| (l.path.clone(), l.holder.clone(), l.expires_at_ms))
+                .collect()
+        })
+    }
+
+    /// Restores leases from [`export_leases`](Self::export_leases); those already past their time are not restored.
+    pub fn import_leases(&mut self, project: &str, leases: &[(String, AgentId, u64)], now_ms: u64) {
+        let table = self.leases.entry(project.to_string()).or_default();
+        for (path, holder, expires) in leases {
+            if *expires > now_ms {
+                let _ = table.acquire(path, holder, now_ms, expires - now_ms);
+            }
+        }
+    }
+
     /// Gives back claimed tasks whose owner is not a registered agent (it ended, or the broker was restored without it).
     pub fn release_orphans(&mut self) {
         let orphans: Vec<(TaskId, AgentId)> = self

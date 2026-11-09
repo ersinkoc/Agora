@@ -206,10 +206,16 @@ impl Boards {
     }
 
     /// The project's tasks as stored text (ADR-0039: the board is part of the hub's SQLite file and its backup).
-    pub fn snapshot(&self, project: &str) -> Option<Vec<u8>> {
+    pub fn snapshot(&self, project: &str, now_ms: u64) -> Option<Vec<u8>> {
         use agora_mesh::broker::TaskStatus;
         let g = self.by_project.lock().unwrap_or_else(|e| e.into_inner());
-        let (next, tasks) = g.get(project)?.export_tasks();
+        let mesh = g.get(project)?;
+        let (next, tasks) = mesh.export_tasks();
+        let leases: Vec<Value> = mesh
+            .export_leases(project, now_ms)
+            .iter()
+            .map(|(path, holder, exp)| json!({"path": path, "holder": holder.as_str(), "expires_at_ms": exp}))
+            .collect();
         let tasks: Vec<Value> = tasks
             .iter()
             .filter(|t| t.project == project)
@@ -224,14 +230,14 @@ impl Boards {
             })
             .collect();
         Some(
-            json!({"next": next, "tasks": tasks})
+            json!({"next": next, "tasks": tasks, "leases": leases})
                 .to_string()
                 .into_bytes(),
         )
     }
 
     /// Restores a board from [`snapshot`](Self::snapshot) text. A damaged snapshot is ignored: the board starts empty.
-    pub fn load(&self, project: &str, bytes: &[u8]) {
+    pub fn load(&self, project: &str, bytes: &[u8], now_ms: u64) {
         use agora_mesh::broker::{TaskEntry, TaskStatus};
         let Ok(v) = serde_json::from_slice::<Value>(bytes) else {
             return;
@@ -274,6 +280,21 @@ impl Boards {
             .entry(project.to_string())
             .or_insert_with(|| Mesh::new(Limits::default()));
         mesh.import_tasks(v["next"].as_u64().unwrap_or(1), &tasks);
+        let leases: Vec<(String, AgentId, u64)> = v["leases"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|l| {
+                        Some((
+                            l["path"].as_str()?.to_string(),
+                            AgentId::new(l["holder"].as_str()?),
+                            l["expires_at_ms"].as_u64()?,
+                        ))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        mesh.import_leases(project, &leases, now_ms);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -572,11 +593,11 @@ mod tests {
             .unwrap()
             .to_string();
         run(&b, &v, "alpha", "task_claim", json!({"task_id": id}), 2);
-        let saved = b.snapshot("p").unwrap();
+        let saved = b.snapshot("p", 3).unwrap();
 
         // A new hub process: same view, empty memory, then the stored board.
         let b2 = Boards::new();
-        b2.load("p", &saved);
+        b2.load("p", &saved, 3);
         let a = run(&b2, &v, "beta", "task_list", json!({}), 3);
         let Verdict::Done { result, .. } = a.verdict else {
             panic!()
@@ -607,7 +628,7 @@ mod tests {
 
         // The owner is no longer running after the restart: its claim is given back.
         let b3 = Boards::new();
-        b3.load("p", &saved);
+        b3.load("p", &saved, 5);
         let mut gone = view(&["alpha", "beta"]);
         gone.agents.remove("alpha/a");
         assert_eq!(
@@ -623,6 +644,54 @@ mod tests {
         );
 
         // Garbage in the store never takes the hub down.
-        Boards::new().load("p", b"not json");
+        Boards::new().load("p", b"not json", 1);
+    }
+
+    #[test]
+    fn an_unexpired_lease_survives_a_restart_and_an_expired_one_does_not() {
+        let b = Boards::new();
+        let v = view(&["alpha", "beta"]);
+        run(
+            &b,
+            &v,
+            "alpha",
+            "lease_acquire",
+            json!({"paths": ["keep"], "ttl_s": 100}),
+            1_000,
+        );
+        run(
+            &b,
+            &v,
+            "alpha",
+            "lease_acquire",
+            json!({"paths": ["gone"], "ttl_s": 5}),
+            1_000,
+        );
+        let saved = b.snapshot("p", 2_000).unwrap();
+        let b2 = Boards::new();
+        // The hub is back at t = 10 s: "gone" ended at 6 s, "keep" lasts until 101 s.
+        b2.load("p", &saved, 10_000);
+        assert_eq!(
+            code(&run(
+                &b2,
+                &v,
+                "beta",
+                "lease_acquire",
+                json!({"paths": ["keep"], "ttl_s": 10}),
+                10_001
+            )),
+            "lease.held"
+        );
+        assert_eq!(
+            code(&run(
+                &b2,
+                &v,
+                "beta",
+                "lease_acquire",
+                json!({"paths": ["gone"], "ttl_s": 10}),
+                10_001
+            )),
+            ""
+        );
     }
 }
