@@ -81,6 +81,9 @@ pub struct Launching {
 /// to start it without one (the mesh is an addition; an agent never fails to start because of it).
 pub type LaunchHook = Box<dyn Fn(&Launching) -> Option<agora_adapters::inject::Endpoint> + Send>;
 
+/// Undoes the launch hook for an agent whose start then failed (its mesh endpoint would otherwise stay registered).
+pub type AbortHook = Box<dyn Fn(&AgentId) + Send>;
+
 /// What injection adds to every (re)launch of one agent.
 #[derive(Debug, Clone, Default)]
 struct Extras {
@@ -257,6 +260,7 @@ pub struct Supervisor {
     agents: BTreeMap<AgentId, Entry>,
     next_id: u64,
     hook: Option<LaunchHook>,
+    abort_hook: Option<AbortHook>,
     adapters: BTreeMap<AgentId, AdapterEntry>,
 }
 
@@ -268,6 +272,7 @@ impl Supervisor {
             agents: BTreeMap::new(),
             next_id: 1,
             hook: None,
+            abort_hook: None,
             adapters: BTreeMap::new(),
         }
     }
@@ -275,6 +280,19 @@ impl Supervisor {
     /// Installs the hook that gives each launching agent a mesh endpoint.
     pub fn set_launch_hook(&mut self, hook: LaunchHook) {
         self.hook = Some(hook);
+    }
+
+    /// Installs the hook that undoes the launch hook when a start fails after it ran.
+    pub fn set_abort_hook(&mut self, hook: AbortHook) {
+        self.abort_hook = Some(hook);
+    }
+
+    /// A start that failed after the worktree and the mesh endpoint were made: give both back, so repeated failures cannot pile up.
+    fn abandon(&self, id: &AgentId, checkout: &std::path::Path, worktree: &std::path::Path) {
+        if let Some(h) = &self.abort_hook {
+            h(id);
+        }
+        let _ = git::remove_worktree(checkout, worktree, true);
     }
 
     /// Make an agent kind available. Replaces a previous manifest of the same kind.
@@ -346,7 +364,13 @@ impl Supervisor {
 
         let id = AgentId::new(format!("agent-{}", self.next_id));
         self.next_id += 1;
-        let extras = self.inject(&id, &req.kind, &checkout.project.to_string(), &worktree)?;
+        let extras = match self.inject(&id, &req.kind, &checkout.project.to_string(), &worktree) {
+            Ok(x) => x,
+            Err(e) => {
+                self.abandon(&id, &checkout.root, &worktree);
+                return Err(e);
+            }
+        };
         let agent = Agent::new(
             id.clone(),
             checkout.project,
@@ -355,7 +379,13 @@ impl Supervisor {
             req.kind.clone(),
             IntegrationLevel::L1Manifest,
         );
-        let terminal = self.launch(&req.kind, &argv, &worktree, &extras)?;
+        let terminal = match self.launch(&req.kind, &argv, &worktree, &extras) {
+            Ok(t) => t,
+            Err(e) => {
+                self.abandon(&id, &checkout.root, &worktree);
+                return Err(e);
+            }
+        };
         self.agents.insert(
             id.clone(),
             Entry {

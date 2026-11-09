@@ -95,8 +95,16 @@ pub fn run(inputs: &Inputs) -> Vec<Check> {
 
 fn data_dir(dir: &Path) -> Check {
     let probe = dir.join(format!(".doctor-{}", std::process::id()));
+    // `create_new` never follows a link planted at the probe's name.
     let ok = std::fs::create_dir_all(dir)
-        .and_then(|()| std::fs::write(&probe, b"x"))
+        .and_then(|()| {
+            use std::io::Write;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&probe)?
+                .write_all(b"x")
+        })
         .is_ok();
     let _ = std::fs::remove_file(&probe);
     check(

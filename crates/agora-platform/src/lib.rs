@@ -71,13 +71,26 @@ pub fn write_private(path: &std::path::Path, contents: &[u8]) -> io::Result<()> 
     {
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
-        let _ = std::fs::remove_file(path);
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(path)?;
-        f.write_all(contents)
+        // Written beside the target and renamed over it: a full disk or an interruption leaves the old file whole, never
+        // a half-written key or token. The temporary name is exclusive (`create_new`), so a planted link is never followed.
+        let mut tmp = path.as_os_str().to_owned();
+        tmp.push(format!(".tmp-{}", std::process::id()));
+        let tmp = std::path::PathBuf::from(tmp);
+        let _ = std::fs::remove_file(&tmp);
+        let result = (|| {
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&tmp)?;
+            f.write_all(contents)?;
+            f.sync_all()?;
+            std::fs::rename(&tmp, path)
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        result
     }
     #[cfg(not(unix))]
     {

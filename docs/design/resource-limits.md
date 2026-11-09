@@ -18,3 +18,11 @@
 - **Not yet:** cgroups v2 memory/CPU caps on Linux (needs a delegated cgroup, so it is best-effort and will be
   added with the platform's service integration), Job Objects (Windows, Phase 4), worktree cleanup offers,
   mesh rate limits, idle-agent timeouts, the kill switch, hub-side start queue.
+
+## Known gaps (Codex review of 2026-11-09, `docs/reviews/2026-11-09-codex-platform-cli-workflows.md`)
+- **Stalled terminal input.** A program that never reads its input fills the PTY queue, and `terminal.input` then blocks while the supervisor lock is
+  held, so ticks, stop and shutdown wait behind it. The fix is a writer thread per terminal with a bounded queue (drop or refuse when full) so the
+  lock is never held across a write. Not done yet.
+- **Descendants that leave the process group.** Stop and node exit kill the agent's process group; a child that calls `setsid` is outside it and
+  survives. Containment by cgroup (Linux) and job object (Windows) is Phase 7; until then an agent that does this is not fully stopped.
+

@@ -361,7 +361,8 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
         Cmd::TerminalResize(t) => {
             let cols = u16::try_from(t.cols).map_err(|_| invalid("cols"))?;
             let rows = u16::try_from(t.rows).map_err(|_| invalid("rows"))?;
-            if cols == 0 || rows == 0 {
+            // A terminal is at most a few thousand cells wide; the emulator allocates the whole grid.
+            if cols == 0 || rows == 0 || cols > MAX_TERMINAL_COLS || rows > MAX_TERMINAL_ROWS {
                 return Err(invalid("cols"));
             }
             with_terminal(ctx, &t.terminal_id, |h| h.resize(Size { cols, rows }))?;
@@ -485,6 +486,10 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
 fn is_git_dir(path: &str) -> bool {
     path.split(['/', '\\']).any(|c| c == ".git")
 }
+
+/// The largest terminal a client may ask for.
+const MAX_TERMINAL_COLS: u16 = 1000;
+const MAX_TERMINAL_ROWS: u16 = 1000;
 
 /// Largest file `files.read` returns.
 const MAX_READ_BYTES: u64 = 512 * 1024;
