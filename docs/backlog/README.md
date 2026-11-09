@@ -9,4 +9,5 @@ accepted by the maintainer.
 - [Phase 2: node core](phase-2.md)
 - [Phase 4: ACP and approvals](phase-4.md)
 - [Phase 6: extensibility, terminal client](phase-6.md)
+- [Phase 7: scale out (Windows node)](phase-7.md)
 - [Research (ongoing): usage sources, quota profiles, model mapping](research.md)

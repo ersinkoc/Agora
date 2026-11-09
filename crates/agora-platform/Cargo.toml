@@ -11,3 +11,16 @@ workspace = true
 [target.'cfg(unix)'.dependencies]
 # openpty, ioctl, killpg: the system calls a PTY needs. This crate is the only place allowed to use them.
 libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+# The local control channel is a named pipe and the terminals are ConPTY (ADR-0045): raw bindings from Microsoft, no code of its own;
+# only the groups used are enabled, and no other platform compiles it. Already in the tree through tokio and ring.
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_Storage_FileSystem",
+  "Win32_System_IO",
+  "Win32_System_Pipes",
+  "Win32_System_Threading",
+] }
