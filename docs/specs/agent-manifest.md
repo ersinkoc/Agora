@@ -29,7 +29,10 @@ acp = { argv = ["example-agent", "--acp"] }   # present = L2 available (run thro
 method = "config_file"                  # config_file | cli_flag | env
 path = ".mcp.json"                      # config_file, cli_flag: inside the agent's worktree
 format = "json"                         # only json for now
-# flag = ["--mcp-config", "{config_file}"]   # cli_flag: appended to the launch command
+# flag = ["--mcp-config", "{config_file}"]   # cli_flag: appended to the launch command; `path` is optional (omit it when the
+#                                              # flags carry the whole server and no file is needed)
+# Placeholders: {worktree} {socket} {mcp_command} {config_file} and the quoted-TOML forms {socket_toml} {mcp_command_toml}
+# (for agents that take `-c key=value` overrides, such as Codex).
 # [mcp.env]                                  # env: variables set for the agent
 # AGORA_MCP_SOCKET = "{socket}"
 
