@@ -159,11 +159,17 @@ fn board_reply(
         return None;
     };
     let name = params.get("name").and_then(Value::as_str)?;
-    if method != "tools/call" || !BOARD_TOOLS.contains(&name) {
-        return None;
-    }
     let args = params.get("arguments").cloned().unwrap_or(json!({}));
     if !args.is_object() {
+        return None;
+    }
+    // A message to a `#channel` of a shared project goes to every agent of the project, so it is the board's too.
+    let channel = name == "send_message"
+        && args
+            .get("to")
+            .and_then(Value::as_str)
+            .is_some_and(|t| t.starts_with('#'));
+    if method != "tools/call" || !(channel || BOARD_TOOLS.contains(&name)) {
         return None;
     }
     let link = remote.lock().unwrap_or_else(|e| e.into_inner()).clone()?;

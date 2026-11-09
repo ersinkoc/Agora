@@ -859,6 +859,26 @@ fn agents_on_two_nodes_share_a_board_claims_leases_and_handoffs_and_it_fails_clo
     assert_eq!(got[0].body, "parser is yours");
     assert_eq!(got[0].provenance.from.as_str(), "beta/b1");
 
+    // A `#channel` message reaches the project's agents on the other node, from the sender, with the channel's name.
+    let (_, err) = call(
+        &mut ac,
+        "send_message",
+        json!({"to": "#dev", "body": "who has the parser?", "refs": ["src/parser.rs"]}),
+    );
+    assert!(!err);
+    wait("the channel message on the other node", || {
+        !b.mesh
+            .mesh()
+            .lock()
+            .unwrap()
+            .inbox(&b1, None, 10)
+            .unwrap()
+            .is_empty()
+    });
+    let got = b.mesh.mesh().lock().unwrap().inbox(&b1, None, 10).unwrap();
+    assert_eq!(got.last().unwrap().body, "[#dev] who has the parser?");
+    assert_eq!(got.last().unwrap().provenance.from.as_str(), "alpha/a1");
+
     // A project on one node is untouched by the board.
     let (t, err) = call(
         &mut sc,
