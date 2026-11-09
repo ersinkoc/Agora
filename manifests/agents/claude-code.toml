@@ -30,6 +30,13 @@ region = "bottom_non_empty_lines(12)"
 all = [{ contains = "Yes, I trust this folder" }, { contains = "Enter to confirm" }]
 
 [[rules]]
+id = "permission_prompt"
+state = "blocked"
+priority = 900
+region = "bottom_non_empty_lines(12)"
+all = [{ contains = "Do you want to proceed?" }, { contains = "Esc to cancel" }]
+
+[[rules]]
 id = "esc_to_interrupt"
 state = "working"
 priority = 800
