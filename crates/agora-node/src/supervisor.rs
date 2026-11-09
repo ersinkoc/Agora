@@ -925,6 +925,29 @@ impl Supervisor {
         out
     }
 
+    /// Running terminal agents whose kind names a usage file (ADR-0042), for the node's usage watcher.
+    pub fn usage_targets(&self) -> Vec<crate::usage_files::Target> {
+        self.agents
+            .iter()
+            .filter(|(_, e)| e.terminal.is_some())
+            .filter_map(|(id, e)| {
+                let spec = self
+                    .kinds
+                    .get(&e.agent.kind)?
+                    .manifest
+                    .usage
+                    .as_ref()?
+                    .file
+                    .clone()?;
+                Some(crate::usage_files::Target {
+                    agent: id.clone(),
+                    worktree: e.worktree.clone(),
+                    spec,
+                })
+            })
+            .collect()
+    }
+
     /// The agents this node can start (ADR-0030): kind, name, level and whether the program is installed. Sorted by kind.
     pub fn kinds(&self) -> Vec<KindInfo> {
         self.kinds

@@ -21,6 +21,24 @@ flag = ["--mcp-config", "{config_file}"]
 [resume]
 argv = ["claude", "--resume", "{session_id}"]
 
+[usage]
+# Claude Code writes one JSON line per message to ~/.claude/projects/<cwd>/<session>.jsonl (checked on 2.1.319, ADR-0042). A message
+# can be on several lines with the same usage, so it is counted once by `message.id`; cached prompt tokens count as input.
+source = "file"
+
+[usage.file]
+glob = "{home}/.claude/projects/*/*.jsonl"
+format = "jsonl"
+select = { path = "type", equals = "assistant" }
+cwd = "cwd"
+model = "message.model"
+input = "message.usage.input_tokens"
+output = "message.usage.output_tokens"
+cache_read = "message.usage.cache_read_input_tokens"
+cache_write = "message.usage.cache_creation_input_tokens"
+dedupe = "message.id"
+mode = "delta"
+
 # Screen rules, from screens captured on Claude Code 2.1.319 (manifests/agents/fixtures/claude-code/).
 [[rules]]
 id = "trust_prompt"

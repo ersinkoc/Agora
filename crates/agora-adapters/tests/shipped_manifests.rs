@@ -61,3 +61,40 @@ fn every_shipped_manifest_loads_and_its_captured_screens_produce_the_expected_st
     }
     assert!(kinds >= 1);
 }
+
+/// The usage files the manifests describe (ADR-0042): lines of the real shape (scrubbed) read through the manifest's own paths.
+#[test]
+fn the_usage_fixtures_add_up_to_what_the_files_say() {
+    let mut checked = 0;
+    for entry in std::fs::read_dir(root()).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_none_or(|e| e != "toml") {
+            continue;
+        }
+        let manifest = Manifest::parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let Some(spec) = manifest.usage.and_then(|u| u.file) else {
+            continue;
+        };
+        let dir = root().join("fixtures").join(&manifest.kind);
+        let mut reader = agora_adapters::usage::FileReader::new(spec);
+        let (mut input, mut output, mut model) = (0, 0, String::new());
+        for line in std::fs::read_to_string(dir.join("usage.jsonl"))
+            .unwrap()
+            .lines()
+        {
+            if let Some(s) = reader.line(line) {
+                input += s.input;
+                output += s.output;
+                model = s.model;
+            }
+        }
+        let got = format!(
+            "input {input} output {output} model {model} cwd {}",
+            reader.cwd().unwrap_or("")
+        );
+        let want = std::fs::read_to_string(dir.join("usage.expect")).unwrap();
+        assert_eq!(got, want.trim(), "{}", manifest.kind);
+        checked += 1;
+    }
+    assert!(checked >= 2, "claude-code and codex both read usage files");
+}

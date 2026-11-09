@@ -1,5 +1,5 @@
 # 0042. Token usage read from the files an agent already writes
-Status: Proposed
+Status: Accepted: 2026-11-09 (maintainer's explicit approval in chat)
 Date: 2026-11-09
 
 ## Context
@@ -23,8 +23,8 @@ Both agents we ship already write what we need, in different shapes (checked on 
 2. **Which file is the agent's.** The node only reads files whose `session` path value equals the agent's native session id when it knows
    it (hook or screen-reported), otherwise files created after the agent started whose `cwd` path value equals the agent's worktree. A
    file that matches neither is ignored, so another session of the same tool is never counted for this agent.
-3. **Reporting.** The node emits the existing `AgentUsageReported { agent_id, model, input_tokens, output_tokens }` (cache tokens are added
-   into `input_tokens` at reduced weight only by the hub's price table, as today for L2); no protocol change.
+3. **Reporting.** The node emits the existing `AgentUsageReported { agent_id, model, input_tokens, output_tokens }` (`cache_read` and `cache_write`, when the manifest
+   names them, are added into `input_tokens`: all prompt-side tokens the model processed); no protocol change.
 4. **Limits.** The node reads from a saved offset, at most 1 MiB per second per agent, ignores lines over 256 KiB, follows at most 4 files
    per agent, and stops when the agent exits. Reading is local file access with the user's own permissions; nothing leaves the node but the
    four numbers above. `{home}` expands only to the node user's home directory.

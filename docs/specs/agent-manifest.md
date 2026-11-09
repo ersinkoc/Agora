@@ -44,9 +44,20 @@ install = "builtin:example"             # or a script path from the package
 argv = ["example-agent", "--resume", "{session_id}"]
 
 [usage]
-source = "otel"                         # otel | file | adapter | none
-# file_glob = "{config_dir}/usage/*.jsonl"
+source = "file"                         # file is read by the node today (ADR-0042); otel | adapter | none are reserved
 quota_profiles = ["example-provider/pro", "example-provider/max"]
+
+[usage.file]                            # ADR-0042: the file the agent writes its own usage to, one JSON object per line
+glob = "{home}/.example/sessions/*/*.jsonl"   # must start with {home}/; `*` matches within one path component
+format = "jsonl"                        # only jsonl
+select = { path = "type", equals = "assistant" }   # a line must have this to count (optional)
+cwd = "cwd"                             # dotted path of the working directory the file records
+model = "message.model"                 # the latest value seen on any line is used for later usage lines
+input = "message.usage.input_tokens"
+output = "message.usage.output_tokens"
+# cache_read = "..."; cache_write = "..."   # prompt-side tokens counted into input
+# dedupe = "message.id"                 # a usage line whose id was seen before is skipped
+mode = "delta"                          # delta: each line adds; total: each line is the session's running total
 
 [usage.model_map]
 # agent-reported model id → models.dev provider/model id (ADR-0021)
@@ -87,6 +98,13 @@ Rule semantics: highest-priority matching rule wins; `all` = AND, `any` = OR, `n
 rule results.
 
 Manifests in this repository: `claude-code` and `codex` (screens captured from the real agents, `manifests/agents/fixtures/`); `wrongstack` is planned and not shipped yet (it needs a machine that has it). `crates/agora-adapters/tests/shipped_manifests.rs` checks every shipped manifest against its captured screens.
+
+## Usage files (ADR-0042)
+The node follows the files of a running terminal agent whose kind has `[usage.file]`: a file belongs to the agent when it was touched after
+the agent started and the directory it records (`cwd`) is the agent's worktree (until a line says it, usage lines wait, at most 1000). Limits:
+4 files per agent, 1 MiB read per second per agent, lines over 256 KiB skipped, files looked for every 5 seconds. A line that does not
+parse or lacks the numbers adds nothing. Usage is reported as `AgentUsageReported`. Shipped for `claude-code` (`delta`, de-duplicated by
+`message.id`) and `codex` (`total`).
 
 ## `[mcp]` injection
 

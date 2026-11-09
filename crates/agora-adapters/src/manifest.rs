@@ -141,7 +141,55 @@ pub enum McpMethod {
     Env,
 }
 
-/// A parsed, validated manifest. Sections the engine does not interpret yet (accounts, hooks, usage,
+/// How the numbers in a usage file are to be read (ADR-0042): each line is a JSON object, the paths are dotted object keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageMode {
+    /// Every selected line is one more use: add it.
+    Delta,
+    /// Every selected line is the running total of the session: report the growth since the last one.
+    Total,
+}
+
+/// A line must have `path` equal to `equals` to count as a usage line.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UsageSelect {
+    pub path: String,
+    pub equals: String,
+}
+
+/// `[usage.file]`: the file an agent writes its own usage to (ADR-0042).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UsageFile {
+    /// Starts with `{home}/`; `*` matches within one path component.
+    pub glob: String,
+    /// Only `jsonl`.
+    pub format: Option<String>,
+    pub select: Option<UsageSelect>,
+    /// The agent's working directory as the file records it; a file whose directory is not the agent's worktree is not the agent's.
+    pub cwd: String,
+    /// The latest value seen on any line is used for later usage lines (a line that has it uses its own).
+    pub model: String,
+    pub input: String,
+    pub output: String,
+    /// Prompt-side tokens counted in `input` as well (Claude Code reports them apart).
+    pub cache_read: Option<String>,
+    pub cache_write: Option<String>,
+    /// A usage line whose value at this path was seen before is skipped (Claude Code repeats a message on several lines).
+    pub dedupe: Option<String>,
+    pub mode: UsageMode,
+}
+
+/// `[usage]`: other keys (`quota_profiles`, `model_map`) are accepted and not read yet.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct UsageSpec {
+    pub source: Option<String>,
+    pub file: Option<UsageFile>,
+}
+
+/// A parsed, validated manifest. Sections the engine does not interpret yet (accounts, hooks,
 /// structured) are accepted and ignored so newer manifests still load.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Manifest {
@@ -157,6 +205,7 @@ pub struct Manifest {
     pub mcp: Option<McpSpec>,
     pub adapter: Option<AdapterSpec>,
     pub structured: Option<Structured>,
+    pub usage: Option<UsageSpec>,
 }
 
 fn invalid(field: impl Into<String>) -> ManifestError {
@@ -224,6 +273,21 @@ impl Manifest {
         {
             return Err(invalid("structured.acp.argv"));
         }
+        if let Some(u) = self.usage.as_ref().and_then(|u| u.file.as_ref()) {
+            let paths_ok = [&u.cwd, &u.model, &u.input, &u.output]
+                .into_iter()
+                .chain(u.cache_read.iter())
+                .chain(u.cache_write.iter())
+                .chain(u.dedupe.iter())
+                .chain(u.select.iter().map(|s| &s.path))
+                .all(|p| !p.is_empty());
+            let glob_ok = u.glob.starts_with("{home}/")
+                && !u.glob.split('/').any(|c| c == "..")
+                && !u.glob.contains('\0');
+            if !paths_ok || !glob_ok || u.format.as_deref().is_some_and(|f| f != "jsonl") {
+                return Err(invalid("usage.file"));
+            }
+        }
         if let Some(m) = &self.mcp {
             let ok = match m.method {
                 McpMethod::ConfigFile => m.path.is_some(),
@@ -268,5 +332,35 @@ impl Manifest {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod usage_tests {
+    use super::*;
+
+    fn with(file: &str) -> String {
+        format!(
+            "kind = \"k\"\ndisplay_name = \"K\"\nversion = \"1\"\nmin_engine = 1\n[usage]\nsource = \"file\"\n[usage.file]\n{file}"
+        )
+    }
+
+    const GOOD: &str = "glob = \"{home}/.k/*/*.jsonl\"\ncwd = \"cwd\"\nmodel = \"m\"\ninput = \"i\"\noutput = \"o\"\nmode = \"delta\"\n";
+
+    #[test]
+    fn a_usage_file_needs_a_home_glob_real_paths_and_a_known_format() {
+        let m = Manifest::parse(&with(GOOD)).unwrap();
+        assert_eq!(m.usage.unwrap().file.unwrap().mode, UsageMode::Delta);
+        for bad in [
+            GOOD.replace("{home}/", "/etc/"),
+            GOOD.replace("{home}/.k", "{home}/../x"),
+            GOOD.replace("cwd = \"cwd\"", "cwd = \"\""),
+            format!("{GOOD}format = \"csv\"\n"),
+            format!("{GOOD}extra = 1\n"),
+            GOOD.replace("mode = \"delta\"", "mode = \"sometimes\""),
+        ] {
+            assert!(Manifest::parse(&with(&bad)).is_err(), "{bad}");
+        }
     }
 }
