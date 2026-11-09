@@ -164,6 +164,11 @@ dependencies = [
  "agora-i18n",
  "agora-protocol",
  "agora-vt",
+ "prost",
+ "rustls",
+ "serde_json",
+ "tokio",
+ "tokio-rustls",
 ]
 
 [[package]]
