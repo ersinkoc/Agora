@@ -104,6 +104,7 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
       // The node's process started: what it ran before is gone, and its waiting approvals are lost.
       for (const a of v.agents.values()) if (a.nodeId === b.nodeId && a.running) { a.running = false; a.state = 4 /* done */; }
       for (const k of [...v.approvals.keys()]) if (k.startsWith(`${b.nodeId}/`)) v.approvals.delete(k);
+      for (const k of [...v.withTerminal]) if (k.startsWith(`${b.nodeId}/`)) v.withTerminal.delete(k);
       v.nodes.set(b.nodeId, { hostname: b.hostname ?? '', os: b.os ?? '', online: true, lastEventMs: at, agentsRunning: v.nodes.get(b.nodeId)?.agentsRunning ?? 0 });
       break;
     }
@@ -137,6 +138,8 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
     }
     case 'agentStarted': {
       const b = e.agentStarted;
+      // A new run of an id: whether it has a terminal is told again by the `terminalOpened` that follows (or not at all).
+      v.withTerminal.delete(q(b.agentId));
       v.agents.set(q(b.agentId), {
         nodeId: b.nodeId ?? '', worktreeId: q(b.worktreeId), kind: b.kind ?? '', state: 3 /* idle */,
         reported: false, running: true, sinceMs: at, tokens: 0,

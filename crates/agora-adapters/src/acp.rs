@@ -35,8 +35,14 @@ enum Ev {
 }
 
 enum Waiting {
-    Initialize,
-    NewSession { node_id: Value },
+    /// The node's `initialize` is answered only when the ACP agent has answered its own: a strict agent refuses
+    /// `session/new` before that.
+    Initialize {
+        node_id: Value,
+    },
+    NewSession {
+        node_id: Value,
+    },
     Prompt,
 }
 
@@ -184,17 +190,12 @@ impl<W: Write> Bridge<W> {
         };
         match method {
             "initialize" => {
-                if let Some(id) = &id {
-                    self.reply(
-                        id,
-                        json!({"adapterName": "acp-bridge", "version": "1", "agentKind": "acp",
-                               "capabilities": ["chat", "approvals", "plan", "diff", "cancel"]}),
-                    )?;
-                }
                 self.ask_agent(
                     "initialize",
                     json!({"protocolVersion": 1, "clientCapabilities": {"fs": {"readTextFile": false, "writeTextFile": false}, "terminal": false}}),
-                    Waiting::Initialize,
+                    Waiting::Initialize {
+                        node_id: id.clone().unwrap_or(Value::Null),
+                    },
                 )?;
             }
             "session/start" => {
@@ -414,11 +415,22 @@ impl<W: Write> Bridge<W> {
             (None, Some(id)) => {
                 let Some(n) = id.as_u64() else { return Ok(()) };
                 match self.waiting.remove(&n) {
-                    Some(Waiting::Initialize) => {
-                        self.can_load = msg
-                            .pointer("/result/agentCapabilities/loadSession")
-                            .and_then(Value::as_bool)
-                            .unwrap_or(false);
+                    Some(Waiting::Initialize { node_id }) => {
+                        if msg.get("error").is_some() {
+                            self.send_node(&json!({"jsonrpc": "2.0", "id": node_id, "error": {"code": -32000, "message": "the agent refused to initialize"}}))?;
+                        } else {
+                            self.can_load = msg
+                                .pointer("/result/agentCapabilities/loadSession")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false);
+                            if !node_id.is_null() {
+                                self.reply(
+                                    &node_id,
+                                    json!({"adapterName": "acp-bridge", "version": "1", "agentKind": "acp",
+                                           "capabilities": ["chat", "approvals", "plan", "diff", "cancel"]}),
+                                )?;
+                            }
+                        }
                     }
                     Some(Waiting::NewSession { node_id }) => {
                         let sid = msg
