@@ -17,6 +17,13 @@ argv = ["codex", "resume", "{session_id}"]
 # Screen rules, from screens captured on codex-cli 0.167.0 (manifests/agents/fixtures/codex/).
 # The prompt box can be on screen while Codex works, so the working rule outranks it.
 [[rules]]
+id = "permission_prompt"
+state = "blocked"
+priority = 900
+region = "bottom_non_empty_lines(12)"
+all = [{ contains = "Would you like to run the following command?" }, { contains = "esc to cancel" }]
+
+[[rules]]
 id = "esc_to_interrupt"
 state = "working"
 priority = 800
