@@ -155,7 +155,7 @@ pub fn install(
     };
     done.push("check");
     let have = run(
-        "\"$HOME/.local/bin/agora\" --version 2>/dev/null || agora --version 2>/dev/null",
+        "\"$HOME/.local/bin/agora\" --version 2>/dev/null",
         b"",
         "check",
         &done,
@@ -227,6 +227,9 @@ pub fn install(
     // 4. Run as a user service, or say what to run.
     say("run");
     let kind = run("uname -s", b"", "run", &done)?;
+    if !kind.ok {
+        return Err(fail("run", kind.stderr.trim(), &done));
+    }
     let svc = match kind.stdout.trim() {
         "Linux" => {
             let has = run("command -v systemctl >/dev/null && systemctl --user show-environment >/dev/null 2>&1", b"", "run", &done)?;
@@ -262,6 +265,7 @@ mod tests {
         version: Option<&'static str>,
         fail_on: Option<&'static str>,
         systemd: bool,
+        uname_s_fails: bool,
     }
 
     impl Fake {
@@ -272,6 +276,7 @@ mod tests {
                 version: None,
                 fail_on: None,
                 systemd: true,
+                uname_s_fails: false,
             }
         }
     }
@@ -303,6 +308,7 @@ mod tests {
             }
             match command {
                 "uname -sm" => ok(self.uname),
+                "uname -s" if self.uname_s_fails => bad("connection reset"),
                 "uname -s" => ok(self.uname.split_whitespace().next().unwrap()),
                 c if c.contains("--version") => match self.version {
                     Some(v) => ok(&format!("agora {v}")),
@@ -454,5 +460,24 @@ mod tests {
         assert!(
             r.log.borrow().is_empty() || r.log.borrow().iter().all(|(c, _)| !c.contains("id;"))
         );
+    }
+
+    #[test]
+    fn a_failed_service_check_stops_the_install_instead_of_passing_for_success() {
+        let mut r = Fake::new("Linux x86_64");
+        r.uname_s_fails = true;
+        let e = install(&r, &machine(), &opts(), &mut |_| {}).unwrap_err();
+        assert_eq!((e.step, e.detail.as_str()), ("run", "connection reset"));
+        assert_eq!(e.done, ["check", "binary", "enroll"]);
+    }
+
+    #[test]
+    fn only_the_binary_the_install_would_run_counts_as_already_installed() {
+        let r = Fake::new("Linux x86_64");
+        install(&r, &machine(), &opts(), &mut |_| {}).unwrap();
+        let log = r.log.borrow();
+        let check = log.iter().find(|(c, _)| c.contains("--version")).unwrap();
+        // A copy elsewhere on PATH is not used by the enroll and run steps, so it must not skip the install.
+        assert!(check.0.contains("$HOME/.local/bin/agora") && !check.0.contains("|| agora"));
     }
 }

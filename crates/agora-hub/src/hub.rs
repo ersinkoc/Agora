@@ -201,6 +201,22 @@ impl Hub {
         Ok(())
     }
 
+    /// A handoff could not be delivered after the board accepted it: give the task back to the giver.
+    pub fn board_revert(&self, h: &crate::board::Handoff, now_ms: u64) {
+        let mut g = self.lock();
+        let events = self.boards.revert_handoff(h);
+        if !events.is_empty() {
+            if let Some(bytes) = self.boards.snapshot(&h.project_id, now_ms) {
+                let _ = self
+                    .store
+                    .set_setting(&format!("board.{}", h.project_id), &bytes);
+            }
+        }
+        for body in events {
+            let _ = self.emit(&mut g, body, now_ms);
+        }
+    }
+
     /// A board tool call from `node` (ADR-0039). The caller's identity is the connection's, never the call's. Events the
     /// board produced are published here; a handoff to pass on to another node is returned for the caller to forward.
     pub fn board_call(
