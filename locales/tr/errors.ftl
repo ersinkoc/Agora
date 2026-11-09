@@ -22,6 +22,7 @@ agent-blocked = { $agent_id } ajanı girdi bekliyor, bu yüzden ileti gönderilm
 agent-mode_unsupported = { $kind }, { $mode } kipini desteklemiyor.
 approval-expired = { $approval_id } onayının süresi doldu.
 approval-signature_invalid = { $approval_id } onayı doğrulanamadı.
+approval-grant_required = Bu makine önce sizden izin istiyor: { $command }.
 lease-held = { $path }, { $expires_at } zamanına kadar { $holder_agent_id } ajanı tarafından kullanılıyor.
 board-unavailable = { $project_id } için ortak panoya şu anda ulaşılamıyor. Çalışmanız bu makinede devam ediyor.
 mesh-recipient_unknown = { $to } adında bir ajan veya kanal yok.

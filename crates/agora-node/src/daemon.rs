@@ -378,11 +378,16 @@ pub const POLICY_FILE: &str = "policy";
 pub struct Policy {
     /// Messages may cross to and from agents on other nodes (`mesh.remote`, default true; ADR-0031).
     pub mesh_remote: bool,
+    /// Routed commands that need a user-signed grant (`signed_commands = a, b*`; ADR-0041). Empty: none do.
+    pub signed_commands: crate::grants::SignedCommands,
 }
 
 impl Default for Policy {
     fn default() -> Self {
-        Self { mesh_remote: true }
+        Self {
+            mesh_remote: true,
+            signed_commands: crate::grants::SignedCommands::default(),
+        }
     }
 }
 
@@ -399,8 +404,18 @@ pub fn read_policy(path: &std::path::Path) -> Policy {
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
     {
         if let Some((k, v)) = line.split_once('=') {
-            if k.trim() == "mesh.remote" {
-                p.mesh_remote = v.trim() == "true";
+            match k.trim() {
+                "mesh.remote" => p.mesh_remote = v.trim() == "true",
+                "signed_commands" => {
+                    p.signed_commands = crate::grants::SignedCommands(
+                        v.split(',')
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_string)
+                            .collect(),
+                    );
+                }
+                _ => {}
             }
         }
     }
@@ -444,6 +459,8 @@ pub struct Node {
     pub mesh: Arc<crate::mesh_server::MeshServer>,
     /// Sensitive actions waiting for a user's signed decision (ADR-0020).
     pub approvals: Arc<crate::approvals::NodeApprovals>,
+    /// User-signed grants for commands the hub routes here (ADR-0041).
+    pub grants: Arc<crate::grants::Grants>,
     node_id: String,
     /// Manifests that could not be loaded, as `(path, reason)` for the log.
     pub manifest_problems: Vec<(PathBuf, String)>,
@@ -555,8 +572,23 @@ impl Node {
             Box::new(verifier),
         ));
         approvals.follow_trust_file(&cfg.data_dir.join(crate::approvals::TRUSTED_DEVICES_FILE));
+        let grants = Arc::new(crate::grants::Grants::new(
+            &cfg.node_id,
+            Arc::clone(&approvals),
+            read_policy(&cfg.data_dir.join(POLICY_FILE)).signed_commands,
+        ));
 
         let supervisor = Arc::new(Mutex::new(sup));
+        {
+            let sup = Arc::clone(&supervisor);
+            grants.set_project_resolver(Box::new(move |agent| {
+                let s = sup.lock().unwrap_or_else(|e| e.into_inner());
+                s.list()
+                    .into_iter()
+                    .find(|v| v.id.as_str() == agent)
+                    .map(|v| v.project)
+            }));
+        }
         let chat = Arc::new(crate::chat::ChatBoard::new());
         let ctx = Arc::new(ControlContext::new(
             Arc::clone(&supervisor),
@@ -685,6 +717,7 @@ impl Node {
             events,
             mesh,
             approvals,
+            grants,
             node_id: cfg.node_id.clone(),
             manifest_problems,
         })

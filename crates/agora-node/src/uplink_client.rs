@@ -46,6 +46,8 @@ pub struct HubLink {
     pub commands: Option<std::path::PathBuf>,
     /// Where this node's agents' messages for agents on other nodes are carried to the hub (ADR-0031).
     pub mesh_out: Option<Arc<MeshOut>>,
+    /// Grants for the commands this node's policy lists in `signed_commands` (ADR-0041). `None`: no routed command is gated.
+    pub grants: Option<Arc<crate::grants::Grants>>,
 }
 
 type Done = Box<dyn FnOnce(Result<Option<crate::mesh_server::BoardReply>, String>) + Send>;
@@ -289,6 +291,7 @@ pub async fn run_once(
             stop,
             link.commands.as_deref(),
             link.mesh_out.as_deref(),
+            link.grants.clone(),
         )
         .await
     } else {
@@ -299,6 +302,7 @@ pub async fn run_once(
             stop,
             link.commands.as_deref(),
             link.mesh_out.as_deref(),
+            link.grants.clone(),
         )
         .await
     }
@@ -310,6 +314,7 @@ async fn converse<S>(
     stop: &AtomicBool,
     commands: Option<&std::path::Path>,
     mesh_out: Option<&MeshOut>,
+    grants: Option<Arc<crate::grants::Grants>>,
 ) -> Result<(), LinkError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -325,12 +330,18 @@ where
         CommandRequest,
         tokio::sync::mpsc::UnboundedSender<CommandResponse>,
     )>();
+    let ordered_grants = grants.clone();
     std::thread::spawn(move || {
         // One connection to the node's control socket for all keystrokes: a new connection per key would cost more than
         // the key. It is opened on first use and again after any error.
         let mut kept: Option<crate::control::Client> = None;
         while let Ok((socket, req, tx)) = ordered_rx.recv() {
-            let _ = tx.send(run_local_on(&mut kept, socket.as_deref(), req));
+            let _ = tx.send(run_local_on(
+                &mut kept,
+                socket.as_deref(),
+                req,
+                ordered_grants.as_deref(),
+            ));
         }
     });
     // Messages this node's agents send to agents on other nodes go out on this connection while it is up.
@@ -452,8 +463,9 @@ where
                     ) {
                         let _ = ordered.send((socket, req, tx));
                     } else {
+                        let grants = grants.clone();
                         tokio::task::spawn_blocking(move || {
-                            let _ = tx.send(run_local(socket.as_deref(), req));
+                            let _ = tx.send(run_local(socket.as_deref(), req, grants.as_deref()));
                         });
                     }
                 }
@@ -588,8 +600,12 @@ fn relay_terminal(
 
 /// Runs a routed command on this node's control socket and returns its answer (an error answer when it cannot).
 /// Terminal streams are not relayed by this path (they need a stream of their own), so they are refused.
-fn run_local(socket: Option<&std::path::Path>, req: CommandRequest) -> CommandResponse {
-    run_local_on(&mut None, socket, req)
+fn run_local(
+    socket: Option<&std::path::Path>,
+    req: CommandRequest,
+    grants: Option<&crate::grants::Grants>,
+) -> CommandResponse {
+    run_local_on(&mut None, socket, req, grants)
 }
 
 /// Like [`run_local`], over `kept` when it holds a live connection, and leaving the connection there for the next call.
@@ -597,12 +613,51 @@ fn run_local_on(
     kept: &mut Option<crate::control::Client>,
     socket: Option<&std::path::Path>,
     req: CommandRequest,
+    grants: Option<&crate::grants::Grants>,
 ) -> CommandResponse {
     use agora_protocol::{Error, ErrorCode};
     let fail = |e: Error| CommandResponse {
         request_id: req.request_id.clone(),
         result: Some(command_response::Result::Err(e.to_info())),
     };
+    // ADR-0041: grants are made and judged here, where the hub's commands enter the node. A command the policy lists
+    // runs only under a live grant; the local socket never passes through this function.
+    if let Some(g) = grants {
+        let now = crate::grants::now_ms();
+        let done = |r: Result<agora_protocol::v1::command_ok::Result, Error>| CommandResponse {
+            request_id: req.request_id.clone(),
+            result: Some(match r {
+                Ok(ok) => {
+                    command_response::Result::Ok(agora_protocol::v1::CommandOk { result: Some(ok) })
+                }
+                Err(e) => command_response::Result::Err(e.to_info()),
+            }),
+        };
+        use agora_protocol::v1::command_ok::Result as Ok_;
+        match &req.command {
+            Some(command_request::Command::GrantCreate(c)) => {
+                return done(
+                    g.create(c, now)
+                        .map(|()| Ok_::Empty(agora_protocol::v1::Empty {})),
+                );
+            }
+            Some(command_request::Command::GrantList(_)) => {
+                return done(Ok(Ok_::GrantList(agora_protocol::v1::GrantListResult {
+                    grants: g.list(now),
+                })));
+            }
+            Some(command_request::Command::GrantRevoke(r)) => {
+                g.revoke(&r.grant_id);
+                return done(Ok(Ok_::Empty(agora_protocol::v1::Empty {})));
+            }
+            Some(c) => {
+                if let Err(e) = g.gate(c, now) {
+                    return fail(e);
+                }
+            }
+            None => {}
+        }
+    }
     if matches!(
         req.command,
         Some(

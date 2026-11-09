@@ -1,0 +1,13 @@
+{
+  "grants": [
+    {
+      "grantId": "x",
+      "scope": "x",
+      "commands": [
+        "x"
+      ],
+      "expiresAtMs": "1",
+      "signerDeviceId": "x"
+    }
+  ]
+}

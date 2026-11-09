@@ -129,7 +129,7 @@ pub fn terminal_id_of(agent: &AgentId) -> String {
     format!("t-{}", agent.as_str())
 }
 
-fn agent_of_terminal(terminal_id: &str) -> Option<AgentId> {
+pub(crate) fn agent_of_terminal(terminal_id: &str) -> Option<AgentId> {
     terminal_id.strip_prefix("t-").map(AgentId::new)
 }
 
@@ -198,6 +198,11 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
             Ok(v1::CommandOk {
                 result: Some(Ok_::Empty(v1::Empty {})),
             })
+        }
+        // Grants are made and judged where the hub's commands enter the node; the local socket has no use for them
+        // (the person at this machine is not routed through the hub, ADR-0041).
+        Cmd::GrantCreate(_) | Cmd::GrantList(_) | Cmd::GrantRevoke(_) => {
+            Err(Error::new(ErrorCode::ProtocolCapabilityMissing).with("capability", "grants.local"))
         }
         Cmd::AgentKinds(_) => {
             let kinds = ctx
@@ -530,7 +535,7 @@ fn with_terminal<R>(
     f(h).map_err(|_| not_found())
 }
 
-fn command_name(c: &Cmd) -> &'static str {
+pub(crate) fn command_name(c: &Cmd) -> &'static str {
     match c {
         Cmd::ProjectList(_) => "project.list",
         Cmd::AgentStart(_) => "agent.start",
@@ -560,6 +565,9 @@ fn command_name(c: &Cmd) -> &'static str {
         Cmd::TaskUpdate(_) => "task.update",
         Cmd::BoardCall(_) => "board.call",
         Cmd::NodePolicyGet(_) => "node.policy.get",
+        Cmd::GrantCreate(_) => "grant.create",
+        Cmd::GrantList(_) => "grant.list",
+        Cmd::GrantRevoke(_) => "grant.revoke",
     }
 }
 

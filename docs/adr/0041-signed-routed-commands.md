@@ -1,5 +1,5 @@
 # 0041. User-signed grants for sensitive commands routed through the hub
-Status: Proposed
+Status: Accepted: 2026-11-09 (maintainer's explicit approval in chat)
 Date: 2026-11-09
 
 ## Context
