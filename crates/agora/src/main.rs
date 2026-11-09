@@ -24,6 +24,7 @@ use agora_protocol::v1::{
 const DETACH: u8 = 0x1d;
 const TERMINAL_STREAM: u32 = 3;
 
+mod adaptercmd;
 mod hubcli;
 mod tuicmd;
 mod update;
@@ -108,6 +109,8 @@ pub(crate) struct Opts {
     release_key: Option<PathBuf>,
     version: Option<String>,
     check: bool,
+    registry: Option<String>,
+    root_key: Option<PathBuf>,
     positional: Vec<String>,
 }
 
@@ -146,6 +149,8 @@ fn parse(args: &[String]) -> Option<Opts> {
             "--release-key" => o.release_key = Some(it.next()?.into()),
             "--version" => o.version = Some(it.next()?.clone()),
             "--check" => o.check = true,
+            "--registry" => o.registry = Some(it.next()?.clone()),
+            "--root-key" => o.root_key = Some(it.next()?.into()),
             s if s.starts_with("--") => return None,
             _ => o.positional.push(a.clone()),
         }
@@ -200,6 +205,9 @@ fn main() -> ExitCode {
         ["doctor"] => doctor(&say, &opts),
         ["tui"] => tuicmd::tui(&say, &opts),
         ["update"] => update::update(&say, &opts),
+        ["adapter", "install"] => adaptercmd::install(&say, &opts),
+        ["adapter", "list"] => adaptercmd::list(&say, &opts),
+        ["adapter", "remove"] => adaptercmd::remove(&say, &opts),
         ["hub", "run"] => hubcli::hub_run(&say, &opts),
         ["hub", "code"] => hubcli::hub_code(&say, &opts),
         ["hub", "login"] => hubcli::hub_login(&say, &opts),

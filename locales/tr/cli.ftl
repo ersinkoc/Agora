@@ -24,6 +24,7 @@ cli-usage =
       agora node trust CİHAZ_ID AÇIK_ANAHTAR_HEX [--data DİZİN]
       agora tui [--hub ADRES:PORT --ca DOSYA --code KOD] [--hub-dir DİZİN]
       agora update [--check] [--version X] [--release-url URL] [--release-key DOSYA] [--unsigned]
+      agora adapter install AD [--registry URL] [--root-key DOSYA] [--yes] | list | remove AD
       agora doctor [--data DİZİN] [--manifests DİZİN] [--socket YOL]
 cli-node-listening = Düğüm çalışıyor. Denetim soketi: { $socket }
 cli-agent-started = { $agent_id } ajanı { $worktree } içinde başlatıldı
@@ -110,3 +111,16 @@ cli-update-failed = Güncelleme yapılamadı: { $reason }
 cli-update-checksum = İndirilen dosya yayımlanan sağlama toplamıyla uyuşmuyor. Hiçbir şey değişmedi.
 cli-update-signature = İndirilen dosyanın imzası sabitlenmiş sürüm anahtarı için geçerli değil. Hiçbir şey değişmedi.
 cli-update-needs-key = Sürümün imzalı olması gerekir: anahtarını Agora klasörüne release-key adıyla kaydedin (ya da --release-key DOSYA verin), yalnızca sağlama toplamıyla yetinmek için --unsigned kullanın. Hiçbir şey değişmedi.
+cli-adapter-failed = Bağdaştırıcı kurulmadı: { $reason }
+cli-adapter-no-registry = Kayıt defteri belirtilmedi. --registry URL verin ya da adresini hub klasöründeki registry-url dosyasına yazın. Hiçbir şey değişmedi.
+cli-adapter-no-key = Kayıt defterinin kök anahtarı sabitlenmemiş: Agora klasörüne registry-root-key adıyla kaydedin (ya da --root-key DOSYA verin). Hiçbir şey değişmedi.
+cli-adapter-exists = Bu adda bir bildirim zaten bildirimler klasöründe duruyor ve bir kayıt defterinden kurulmamış. Hiçbir şey değişmedi.
+cli-adapter-about = { $name } { $version }, yayımlayan { $publisher } (anahtar { $key }), sağlama toplamı { $hash }. Şunu çalıştırır: { $command }
+cli-adapter-ask-new = Bu yayımcıdan daha önce bir şey kurmadınız. Kurulsun mu? [e/H]
+cli-adapter-ask-known = Kurulsun mu? [e/H]
+cli-adapter-declined = Hiçbir şey kurulmadı.
+cli-adapter-installed = { $name } { $version } kuruldu. Yalnızca türünden bir ajan başlatıldığında çalışır.
+cli-adapter-removed = { $name } kaldırıldı.
+cli-adapter-none = Kurulu bağdaştırıcı yok.
+cli-adapter-listed = { $name } { $version } (yayımcı { $publisher })
+cli-adapter-listed-revoked = { $name } { $version } (yayımcı { $publisher }, en yeni dizinde iptal edilmiş: kaldırın ya da yeni bir yayımcı bulun)

@@ -111,6 +111,22 @@ pub fn verify_index(
     Ok(index)
 }
 
+/// The publishers a stored (already verified) index marks as revoked, for `agora adapter list`. Unreadable input gives none.
+pub fn revoked_publishers(signed: &str) -> Vec<String> {
+    let Ok(env) = serde_json::from_str::<Envelope>(signed) else {
+        return Vec::new();
+    };
+    serde_json::from_str::<Index>(&env.payload)
+        .map(|i| {
+            i.publishers
+                .into_iter()
+                .filter(|p| p.revoked)
+                .map(|p| p.id)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 impl Index {
     /// Checks a downloaded package against its index entry and its publisher's signature. Returns the entry.
     pub fn verify_package(
