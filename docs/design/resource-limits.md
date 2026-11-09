@@ -20,9 +20,7 @@
   mesh rate limits, idle-agent timeouts, the kill switch, hub-side start queue.
 
 ## Known gaps (Codex review of 2026-11-09, `docs/reviews/2026-11-09-codex-platform-cli-workflows.md`)
-- **Stalled terminal input.** A program that never reads its input fills the PTY queue, and `terminal.input` then blocks while the supervisor lock is
-  held, so ticks, stop and shutdown wait behind it. The fix is a writer thread per terminal with a bounded queue (drop or refuse when full) so the
-  lock is never held across a write. Not done yet.
+- **Stalled terminal input** (fixed 2026-11-09). A program that never reads its input blocks `terminal.input`; the write now happens after the supervisor lock is let go, so ticks, stop and shutdown keep going (the blocked call ends when the process does). A bounded per-terminal queue would also bound the memory of waiting calls; not done.
 - **Descendants that leave the process group.** Stop and node exit kill the agent's process group; a child that calls `setsid` is outside it and
   survives. Containment by cgroup (Linux) and job object (Windows) is Phase 7; until then an agent that does this is not fully stopped.
 
