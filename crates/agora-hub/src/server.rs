@@ -583,8 +583,14 @@ fn post_for_node(
     let refuse = |e: Error| {
         let _ = answers.send(error_response(&rid, &e));
     };
-    let Some(command_request::Command::MeshPost(post)) = req.command else {
-        return refuse(Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "command"));
+    let post = match req.command {
+        Some(command_request::Command::MeshPost(post)) => post,
+        Some(command_request::Command::BoardCall(call)) => {
+            return board_for_node(hub, node_id, &rid, &call, open, answers);
+        }
+        _ => {
+            return refuse(Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "command"));
+        }
     };
     let target = post
         .to
@@ -639,6 +645,97 @@ fn post_for_node(
             ),
         };
         open.fetch_sub(1, Ordering::Relaxed);
+        let _ = answers.send(resp);
+    });
+}
+
+/// A node's `BoardCall` (ADR-0039): the board decides, the answer goes back to the node. A handoff is also passed to the
+/// receiving agent's node, as a mesh message from the giver, and the node's answer waits for that.
+fn board_for_node(
+    hub: &Hub,
+    node_id: &str,
+    rid: &str,
+    call: &v1::BoardCall,
+    open: &Arc<std::sync::atomic::AtomicUsize>,
+    answers: tokio::sync::mpsc::UnboundedSender<v1::CommandResponse>,
+) {
+    use crate::board::Verdict;
+    use std::sync::atomic::Ordering;
+    let a = hub.board_call(node_id, call, now_ms());
+    let ok = |shared: bool, result: String, is_error: bool| v1::CommandResponse {
+        request_id: rid.to_string(),
+        result: Some(command_response::Result::Ok(v1::CommandOk {
+            result: Some(v1::command_ok::Result::BoardResult(v1::BoardResult {
+                shared,
+                result_json: result,
+                is_error,
+            })),
+        })),
+    };
+    let (result, is_error) = match a.verdict {
+        Verdict::NotShared => {
+            let _ = answers.send(ok(false, String::new(), false));
+            return;
+        }
+        Verdict::Invalid(e) => {
+            let _ = answers.send(error_response(rid, &e));
+            return;
+        }
+        Verdict::Done { result, is_error } => (result.to_string(), is_error),
+    };
+    let Some(h) = a.handoff else {
+        let _ = answers.send(ok(true, result, is_error));
+        return;
+    };
+    // The message for the receiver: sent like a node's own `MeshPost`, with `origin` from the hub.
+    let forwarded = v1::CommandRequest {
+        request_id: String::new(),
+        idempotency_key: String::new(),
+        target_node: String::new(),
+        command: Some(command_request::Command::MeshPost(v1::MeshPost {
+            to: h.to_agent.clone(),
+            body: h.body,
+            origin: h.from_node,
+            from_agent: h.from_agent,
+            refs: h.refs,
+        })),
+    };
+    let reply = match hub.router().send(&h.to_node, forwarded) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = answers.send(error_response(rid, &e));
+            return;
+        }
+    };
+    open.fetch_add(1, Ordering::Relaxed);
+    let (open, rid, node) = (Arc::clone(open), rid.to_string(), h.to_node);
+    tokio::spawn(async move {
+        // The board has accepted the handoff; whether the message arrived only changes what the giver is told.
+        let delivered = matches!(
+            tokio::time::timeout(COMMAND_DEADLINE, reply).await,
+            Ok(Ok(v1::CommandResponse {
+                result: Some(command_response::Result::Ok(_)),
+                ..
+            }))
+        );
+        open.fetch_sub(1, Ordering::Relaxed);
+        let resp = if delivered {
+            v1::CommandResponse {
+                request_id: rid,
+                result: Some(command_response::Result::Ok(v1::CommandOk {
+                    result: Some(v1::command_ok::Result::BoardResult(v1::BoardResult {
+                        shared: true,
+                        result_json: result,
+                        is_error,
+                    })),
+                })),
+            }
+        } else {
+            error_response(
+                &rid,
+                &Error::new(ErrorCode::NodeOffline).with("node_id", node.as_str()),
+            )
+        };
         let _ = answers.send(resp);
     });
 }

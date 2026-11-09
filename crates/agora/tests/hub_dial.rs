@@ -679,3 +679,203 @@ fn an_agent_messages_an_agent_on_another_node_through_the_hub_and_a_failure_come
         "{codes:?}"
     );
 }
+
+/// ADR-0039: two nodes share a project, so tasks, leases and handoffs are decided on the hub's board.
+#[test]
+fn agents_on_two_nodes_share_a_board_claims_leases_and_handoffs_and_it_fails_closed_without_the_hub(
+) {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return;
+    }
+    use agora_mesh::broker::AgentInfo;
+    use agora_node::uplink_client::MeshOut;
+    use serde_json::{json, Value};
+    let hub = hubside("alpha");
+    let addr = hub.listen("127.0.0.1:0");
+    let start = |name: &str, agent: &str, project: &str, cert: String, key: String| {
+        let dir = tmp(&format!("board-{name}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = agora_node::daemon::NodeConfig {
+            node_id: name.into(),
+            socket: dir.join("c.sock"),
+            data_dir: dir.join("data"),
+            worktree_root: dir.join("wt"),
+            manifests_dir: dir.join("manifests"),
+            projects: vec![],
+            limits: Default::default(),
+        };
+        let node = agora_node::daemon::Node::start(&cfg).unwrap();
+        let out = MeshOut::new();
+        node.mesh.set_remote(out.clone());
+        let mut link = hub.link(addr);
+        (link.cert_pem, link.key_pem) = (cert, key);
+        link.commands = Some(cfg.socket.clone());
+        link.mesh_out = Some(out);
+        let up = spawn(Arc::clone(&node.events), link).unwrap();
+        node.events
+            .checkout_discovered(name, project, Path::new("/work/p"));
+        let id = AgentId::new(agent);
+        node.events.agent_launched(
+            &id,
+            project,
+            name,
+            Path::new("/work/p"),
+            Path::new("/work/wt"),
+            "agent/x",
+            "shell",
+            true,
+        );
+        let socket = node
+            .mesh
+            .register(AgentInfo {
+                id: id.clone(),
+                kind: "shell".into(),
+                node: name.into(),
+                project: project.into(),
+                label: String::new(),
+                worktree: String::new(),
+                state: "idle".into(),
+            })
+            .unwrap();
+        let mut conn = agora_platform::local_connect(&socket).unwrap();
+        mcp(
+            &mut conn,
+            1,
+            "initialize",
+            json!({"protocolVersion": "2025-03-26"}),
+        );
+        (node, up, id, conn)
+    };
+    let (ca, cb) = (hub.enroll("alpha"), hub.enroll("beta"));
+    let (a, ua, _a1, mut ac) = start("alpha", "a1", "p", ca.0.clone(), ca.1.clone());
+    let (b, _ub, b1, mut bc) = start("beta", "b1", "p", cb.0, cb.1);
+    // A project only alpha has: it never reaches the board.
+    let (_solo, _us, _s1, mut sc) = {
+        let (c2, k2) = hub.enroll("solo");
+        start("solo", "s1", "only-here", c2, k2)
+    };
+    for (node, agent) in [
+        ("alpha", "alpha/a1"),
+        ("beta", "beta/b1"),
+        ("solo", "solo/s1"),
+    ] {
+        wait(
+            &format!("{node} and {agent} to reach the hub: {:?}", {
+                let (v, _) = hub.state.hub.view();
+                (
+                    v.nodes.keys().cloned().collect::<Vec<_>>(),
+                    v.agents.keys().cloned().collect::<Vec<_>>(),
+                )
+            }),
+            || {
+                let (v, _) = hub.state.hub.view();
+                v.nodes.get(node).is_some_and(|n| n.online) && v.agents.contains_key(agent)
+            },
+        );
+    }
+    let call = |c: &mut agora_platform::LocalStream, name: &str, args: Value| -> (Value, bool) {
+        let r = mcp(c, 9, "tools/call", json!({"name": name, "arguments": args}));
+        let text = r["content"][0]["text"]
+            .as_str()
+            .unwrap_or("null")
+            .to_string();
+        (
+            serde_json::from_str(&text).unwrap_or(Value::Null),
+            r["isError"] == true,
+        )
+    };
+
+    // A task made on alpha is on beta's board; only one of two claims wins.
+    let (t, err) = call(
+        &mut ac,
+        "task_create",
+        json!({"title": "port the parser", "depends_on": []}),
+    );
+    assert!(!err, "{t}");
+    let tid = t["task_id"].as_str().unwrap().to_string();
+    let (list, _) = call(&mut bc, "task_list", json!({}));
+    assert_eq!(list[0]["title"], "port the parser", "{list}");
+    let (_, first) = call(&mut bc, "task_claim", json!({"task_id": tid}));
+    let (lost, second) = call(&mut ac, "task_claim", json!({"task_id": tid}));
+    assert!(!first && second, "{lost}");
+    assert_eq!(lost["error"]["code"], "task.not_open");
+
+    // Leases are exclusive across nodes, and name who holds the path.
+    let (l, err) = call(
+        &mut ac,
+        "lease_acquire",
+        json!({"paths": ["src/x.rs"], "ttl_s": 60}),
+    );
+    assert!(!err, "{l}");
+    let (held, err) = call(
+        &mut bc,
+        "lease_acquire",
+        json!({"paths": ["src/x.rs", "src/y.rs"], "ttl_s": 60}),
+    );
+    assert!(err);
+    assert_eq!(held["error"]["code"], "lease.held");
+    assert_eq!(held["error"]["params"]["holder_agent_id"], "alpha/a1");
+    // All or nothing: the failed batch did not leave src/y.rs locked.
+    let (y, err) = call(
+        &mut ac,
+        "lease_acquire",
+        json!({"paths": ["src/y.rs"], "ttl_s": 60}),
+    );
+    assert!(!err, "{y}");
+    let (_, err) = call(&mut ac, "lease_release", json!({"lease_id": l["lease_id"]}));
+    assert!(!err);
+    let (_, err) = call(
+        &mut bc,
+        "lease_acquire",
+        json!({"paths": ["src/x.rs"], "ttl_s": 60}),
+    );
+    assert!(!err);
+
+    // A handoff moves the task and tells the receiver, in one step; to a node that is gone it changes nothing.
+    let (_, err) = call(
+        &mut bc,
+        "handoff",
+        json!({"to": "alpha/a1", "task_id": tid, "summary": "parser is yours", "refs": ["src/parser.rs"]}),
+    );
+    assert!(!err);
+    let (list, _) = call(&mut ac, "task_list", json!({"status": "claimed"}));
+    assert_eq!(list[0]["owner"], "alpha/a1", "{list}");
+    wait("the handoff message on the receiving node", || {
+        !a.mesh
+            .mesh()
+            .lock()
+            .unwrap()
+            .inbox(&AgentId::new("a1"), None, 10)
+            .unwrap()
+            .is_empty()
+    });
+    let got = a
+        .mesh
+        .mesh()
+        .lock()
+        .unwrap()
+        .inbox(&AgentId::new("a1"), None, 10)
+        .unwrap();
+    assert_eq!(got[0].body, "parser is yours");
+    assert_eq!(got[0].provenance.from.as_str(), "beta/b1");
+
+    // A project on one node is untouched by the board.
+    let (t, err) = call(
+        &mut sc,
+        "task_create",
+        json!({"title": "local", "depends_on": []}),
+    );
+    assert!(!err, "{t}");
+    let (list, _) = call(&mut sc, "task_list", json!({}));
+    assert_eq!(list.as_array().unwrap().len(), 1);
+    assert_eq!(list[0]["owner"], Value::Null);
+
+    // Without the hub a shared project's board fails closed and says so; the agent's own tools keep working.
+    drop(ua);
+    let (e, err) = call(&mut ac, "task_list", json!({}));
+    assert!(err, "{e}");
+    assert_eq!(e["error"]["code"], "board.unavailable");
+    let (_, err) = call(&mut ac, "inbox", json!({}));
+    assert!(!err);
+    drop((a, b, b1));
+}

@@ -65,12 +65,29 @@ node wrote. The target broker delivers it to the local agent with `provenance.fr
 `provenance.node = <origin>`; answering is a `send_message` to that address. Delivery is at most once. `send_message`
 returns once the broker accepted the message (limits and rate are checked there); if it does not arrive, the sender's inbox
 receives a notice of kind `delivery_failed` whose body is the error code (`node.offline`, `node.unknown`, `node.timeout`,
-`mesh.recipient_unknown`, `mesh.rate_limited`, ...). Only plain messages cross nodes: `ask`, `handoff`, `#channels`, tasks and
-leases stay node-local, and a node may have 64 posts waiting at the hub. The machine's owner can turn it off:
+`mesh.recipient_unknown`, `mesh.rate_limited`, ...). Plain messages cross nodes; `ask` and `#channels` stay node-local, and a node may have 64 posts waiting at the hub. Tasks, leases and
+`handoff` cross nodes through the shared board below, for a project that is on two or more online nodes. The machine's owner can turn it off:
 `<node data dir>/policy` with the line `mesh.remote = false` (default `true`; a value that is not exactly `true` or `false` counts as
 `false`, so a typo never widens the node). Then messages to other nodes fail with a `delivery_failed` notice `node.policy_denied`
 and messages from other nodes are refused with the same code; messages on this node are unaffected. The hub cannot change this
 file. `refs` travel with a cross-node message (ADR-0035, `MeshPost.refs`) and the receiver stores each as `<origin node>:<ref>` (`laptop:src/auth.rs`; one that is already qualified is qualified again), so an agent can tell a path on another machine from a local one; refs stay inert text, within the usual limits, and confer no lease or permission. The web window lists recent messages and marks the ones between machines.
+
+## Shared board (ADR-0039)
+
+When a project has checkouts on two or more online nodes, `task_*`, `lease_*` and `handoff` are decided by the hub, which keeps one
+board per project and is its only writer: a claim has exactly one winner and a lease is all-or-nothing across nodes. The agent's
+tool calls do not change. The node sends each of these tools to the hub as `BoardCall{project_id, tool, arguments_json}` (the hub
+writes `origin` from the certificate and names agents `<node>/<agent>`) and the hub answers `BoardResult{shared, result_json,
+is_error}`. `shared = false` means the project is not on two online nodes: nothing happened and the node runs the tool on its own
+broker, so a project that lives on one machine never needs the hub. The board's agents are the project's running agents in the
+hub's view; one that ended gives its tasks and leases back, and a lease also ends at its TTL if its node vanishes.
+
+A `handoff` to `<node>/<agent>` moves the task and sends the receiver a message from the giver in one step; if the receiving node
+is offline it fails with `node.offline` and the task does not move. When the hub cannot be reached, a project this node knows to
+be shared fails with `board.unavailable` (the agent's other tools and its worktree keep working); a project it does not know to be
+shared stays on the local broker. Tasks and leases made locally before a project became shared stay local. Not done yet: boards
+are kept in the hub's memory (a hub restart empties them; leases and tasks are advice, git is the final guard), `#channels` stay
+node-local, and the web window has no board view.
 
 ## Implementation status
 `agora-mesh::broker::Mesh` implements the tools' logic as deterministic in-memory state: registry, messages with

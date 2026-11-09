@@ -24,6 +24,7 @@ agent-mode_unsupported = { $kind } does not support { $mode } mode.
 approval-expired = Approval { $approval_id } has expired.
 approval-signature_invalid = Approval { $approval_id } could not be verified.
 lease-held = { $path } is in use by agent { $holder_agent_id } until { $expires_at }.
+board-unavailable = The shared board for { $project_id } is not reachable right now. Your work continues locally.
 mesh-recipient_unknown = No agent or channel named { $to }.
 mesh-rate_limited = You are sending messages too fast. Try again in a moment.
 mesh-body_too_large = The message is too large (limit: { $limit }). Send a reference instead.

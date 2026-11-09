@@ -29,6 +29,7 @@ replaced by dashes). Codes are part of the public protocol: never rename or reus
 | `approval.expired` | `approval_id` | |
 | `approval.signature_invalid` | `approval_id` | |
 | `lease.held` | `path`, `holder_agent_id`, `expires_at` | |
+| `board.unavailable` | `project_id` | A shared project's board cannot be reached (hub unreachable); the agent keeps working locally (ADR-0039) |
 | `mesh.recipient_unknown` | `to` | |
 | `mesh.rate_limited` | — | Too many messages from this agent in the rate window |
 | `mesh.body_too_large` | `limit` | Message body over the size limit; pass a reference instead |

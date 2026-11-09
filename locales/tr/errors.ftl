@@ -23,6 +23,7 @@ agent-mode_unsupported = { $kind }, { $mode } kipini desteklemiyor.
 approval-expired = { $approval_id } onayının süresi doldu.
 approval-signature_invalid = { $approval_id } onayı doğrulanamadı.
 lease-held = { $path }, { $expires_at } zamanına kadar { $holder_agent_id } ajanı tarafından kullanılıyor.
+board-unavailable = { $project_id } için ortak pano şu an erişilemiyor. Çalışmanız yerelde devam ediyor.
 mesh-recipient_unknown = { $to } adında bir ajan veya kanal yok.
 mesh-rate_limited = Çok hızlı ileti gönderiyorsunuz. Biraz sonra yeniden deneyin.
 mesh-body_too_large = İleti çok büyük (sınır: { $limit }). Bunun yerine bir başvuru gönderin.

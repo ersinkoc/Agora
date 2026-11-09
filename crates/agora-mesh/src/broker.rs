@@ -403,6 +403,11 @@ impl Mesh {
         }
     }
 
+    /// One registered agent.
+    pub fn agent_info(&self, agent: &AgentId) -> Option<&AgentInfo> {
+        self.agents.get(agent)
+    }
+
     /// `agents_list`: peers in a project (all projects when `None`), the caller included.
     pub fn agents_list(&self, project: Option<&str>) -> Vec<AgentInfo> {
         self.agents
