@@ -219,7 +219,7 @@ fn an_acp_agent_looks_like_an_adapter_to_the_node() {
 #[test]
 fn the_node_is_told_the_bridge_is_ready_only_after_the_agent_finished_initializing() {
     std::env::set_var("AGORA_FAKE_ACP_INIT_DELAY_MS", "400");
-    let mut n = Node::start();
+    let n = Node::start();
     n.to_bridge
         .send(
             format!(
