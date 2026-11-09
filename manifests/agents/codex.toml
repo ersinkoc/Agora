@@ -11,6 +11,15 @@ launch = ["codex"]
 login = ["codex", "login"]
 status = ["codex", "login", "status"]
 
+[mcp]
+# Codex takes MCP servers as config overrides (`codex -c mcp_servers.NAME.command=... -c mcp_servers.NAME.args=[...]`, checked
+# with `codex mcp list` on codex-cli 0.167.0), so no file is written.
+method = "cli_flag"
+flag = [
+  "-c", "mcp_servers.agora-mesh.command={mcp_command_toml}",
+  "-c", 'mcp_servers.agora-mesh.args=["mesh","stdio","--socket",{socket_toml}]',
+]
+
 [resume]
 argv = ["codex", "resume", "{session_id}"]
 

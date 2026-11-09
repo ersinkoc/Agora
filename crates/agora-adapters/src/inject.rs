@@ -4,7 +4,9 @@
 //! described is in its manifest, not here.
 //!
 //! Placeholders usable in `path`, `flag` and `env` values: `{worktree}`, `{socket}` (this agent's mesh socket),
-//! `{mcp_command}` (the program that serves it) and `{config_file}` (the file written for `config_file`/`cli_flag`).
+//! `{mcp_command}` (the program that serves it) and `{config_file}` (the file written for `config_file`/`cli_flag`). The
+//! `_toml` forms, `{socket_toml}` and `{mcp_command_toml}`, are the same values as quoted TOML strings, for agents that take
+//! config overrides as `key=value` flags (Codex's `-c mcp_servers.NAME.command=...`).
 //!
 //! Safety (threat T6, a third-party manifest): files are only ever written **inside the agent's worktree**. A path
 //! that is absolute outside it, or that climbs out with `..`, is refused, so a manifest cannot make the node write
@@ -107,14 +109,44 @@ fn json_config(ep: &Endpoint) -> String {
     serde_json::to_string_pretty(&cfg).unwrap_or_default()
 }
 
+/// `s` as a TOML basic string, quotes included.
+fn toml_string(s: &str) -> String {
+    let mut out = String::from("\"");
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 pub fn plan(spec: &McpSpec, worktree: &Path, ep: &Endpoint) -> Result<Plan, InjectError> {
     let mut vars: Vec<(&str, String)> = vec![
         ("worktree", worktree.to_string_lossy().into_owned()),
         ("socket", ep.socket.to_string_lossy().into_owned()),
         ("mcp_command", ep.command.to_string_lossy().into_owned()),
+        ("socket_toml", toml_string(&ep.socket.to_string_lossy())),
+        (
+            "mcp_command_toml",
+            toml_string(&ep.command.to_string_lossy()),
+        ),
     ];
     let mut plan = Plan::default();
-    if matches!(spec.method, McpMethod::ConfigFile | McpMethod::CliFlag) {
+    // `config_file` always writes its file; `cli_flag` writes one only when the manifest names a path (an agent that takes the
+    // server as flags has none, and `{config_file}` is then an unknown placeholder).
+    let wants_file = match spec.method {
+        McpMethod::ConfigFile => true,
+        McpMethod::CliFlag => spec.path.is_some(),
+        McpMethod::Env => false,
+    };
+    if wants_file {
         let path = spec.path.as_deref().ok_or(InjectError::Incomplete)?;
         let file = inside(worktree, &expand(path, &vars)?)?;
         vars.push(("config_file", file.to_string_lossy().into_owned()));
@@ -183,6 +215,31 @@ mod tests {
         let p = plan(&s, Path::new("/work/wt"), &ep()).unwrap();
         assert_eq!(p.argv_extra, ["--mcp-config", "/work/wt/.agora/mcp.json"]);
         assert_eq!(p.files[0].0, Path::new("/work/wt/.agora/mcp.json"));
+    }
+
+    #[test]
+    fn cli_flag_without_a_path_writes_no_file_and_can_pass_the_server_as_toml_overrides() {
+        let s = spec("method = \"cli_flag\"\nflag = [\"-c\", \"mcp_servers.agora-mesh.command={mcp_command_toml}\", \"-c\", \"mcp_servers.agora-mesh.args=[\\\"mesh\\\",\\\"stdio\\\",\\\"--socket\\\",{socket_toml}]\"]\n");
+        let p = plan(&s, Path::new("/work/wt"), &ep()).unwrap();
+        assert!(p.files.is_empty());
+        assert_eq!(
+            p.argv_extra,
+            [
+                "-c",
+                "mcp_servers.agora-mesh.command=\"/usr/bin/agora\"",
+                "-c",
+                "mcp_servers.agora-mesh.args=[\"mesh\",\"stdio\",\"--socket\",\"/home/u/.agora/m/agent-1.sock\"]"
+            ]
+        );
+        // `{config_file}` needs a file; without a path it is an unknown placeholder, not an empty string.
+        let bad = spec("method = \"cli_flag\"\nflag = [\"{config_file}\"]\n");
+        assert!(plan(&bad, Path::new("/w"), &ep()).is_err());
+    }
+
+    #[test]
+    fn toml_strings_escape_quotes_backslashes_and_control_characters() {
+        assert_eq!(toml_string("a\"b\\c\nd"), "\"a\\\"b\\\\c\\nd\"");
+        assert_eq!(toml_string("C:\\x"), "\"C:\\\\x\"");
     }
 
     #[test]
