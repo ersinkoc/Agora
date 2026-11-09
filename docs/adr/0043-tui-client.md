@@ -1,5 +1,5 @@
 # 0043. The terminal client: scope, order and dependencies
-Status: Proposed
+Status: Accepted: 2026-11-09 (the maintainer delegated full authority in chat: "ne lazımsa kapat devam et ... sana tam yetki verdim", read as approval of this open item)
 Date: 2026-11-09
 
 ## Context
