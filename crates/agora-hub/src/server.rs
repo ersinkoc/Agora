@@ -334,6 +334,29 @@ pub fn snapshot_of(view: &View, pos: u64) -> v1::Snapshot {
                 expires_at_ms: a.expires_at_ms,
             })
             .collect(),
+        tasks: view
+            .tasks
+            .iter()
+            .map(|(key, t)| v1::TaskSnapshot {
+                task_id: key
+                    .rsplit_once('/')
+                    .map_or(key.as_str(), |(_, id)| id)
+                    .to_string(),
+                project_id: t.project_id.clone(),
+                title: t.title.clone(),
+                claimed_by_agent_id: t.owner.clone(),
+                done: t.done,
+            })
+            .collect(),
+        leases: view
+            .leases
+            .values()
+            .map(|(agent, path, exp)| v1::LeaseSnapshot {
+                agent_id: agent.clone(),
+                path: path.clone(),
+                expires_at_ms: *exp,
+            })
+            .collect(),
     }
 }
 

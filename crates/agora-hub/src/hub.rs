@@ -213,7 +213,7 @@ impl Hub {
         let key = format!("board.{}", call.project_id);
         if !self.boards.has(&call.project_id) {
             if let Ok(Some(bytes)) = self.store.setting(&key) {
-                self.boards.load(&call.project_id, &bytes);
+                self.boards.load(&call.project_id, &bytes, now_ms);
             }
         }
         let mut a = self.boards.call(
@@ -227,7 +227,7 @@ impl Hub {
         );
         if !a.events.is_empty() {
             // Tasks changed: keep the board in the store (best effort; the call already succeeded).
-            if let Some(bytes) = self.boards.snapshot(&call.project_id) {
+            if let Some(bytes) = self.boards.snapshot(&call.project_id, now_ms) {
                 let _ = self.store.set_setting(&key, &bytes);
             }
         }
