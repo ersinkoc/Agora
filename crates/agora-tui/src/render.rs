@@ -51,13 +51,14 @@ fn local(id: &str) -> &str {
 
 /// One screen of lines for a snapshot. `color` off spells states out with a marker and no escape sequences (NO_COLOR).
 /// `selected` is the agent the keyboard points at (Enter opens its terminal); `keys` says the console takes answers from the keyboard (a hint line appears while something waits); `notice` is the last
-/// thing the user did, shown at the bottom.
+/// thing the user did, shown at the bottom; `cost_micro_usd` is the hub's estimate of what the agents cost (0 when unknown).
 pub fn render(
     s: &Snapshot,
     color: bool,
     keys: bool,
     selected: &str,
     notice: &str,
+    cost_micro_usd: u64,
     t: Text<'_>,
 ) -> Vec<String> {
     let (bold, dim, reset) = if color {
@@ -83,22 +84,30 @@ pub fn render(
         (i + a.input_tokens, o + a.output_tokens)
     });
     if tokens_in + tokens_out > 0 {
-        out.push(format!(
-            "{dim}{}{reset}",
-            t(
-                key!("tui-usage"),
-                &[
-                    (
-                        "input",
-                        Arg::Num(i64::try_from(tokens_in).unwrap_or(i64::MAX))
-                    ),
-                    (
-                        "output",
-                        Arg::Num(i64::try_from(tokens_out).unwrap_or(i64::MAX))
-                    ),
-                ],
-            )
-        ));
+        let mut line = t(
+            key!("tui-usage"),
+            &[
+                (
+                    "input",
+                    Arg::Num(i64::try_from(tokens_in).unwrap_or(i64::MAX)),
+                ),
+                (
+                    "output",
+                    Arg::Num(i64::try_from(tokens_out).unwrap_or(i64::MAX)),
+                ),
+            ],
+        );
+        // Only an estimate the hub could price; an agent without a price adds nothing (never a guess).
+        if cost_micro_usd > 0 {
+            let usd = format!(
+                "{}.{:02}",
+                cost_micro_usd / 1_000_000,
+                cost_micro_usd % 1_000_000 / 10_000
+            );
+            line.push_str(" · ");
+            line.push_str(&t(key!("tui-cost"), &[("usd", Arg::Str(usd))]));
+        }
+        out.push(format!("{dim}{line}{reset}"));
     }
     out.push(String::new());
 
@@ -369,7 +378,7 @@ mod tests {
 
     #[test]
     fn the_screen_says_what_waits_for_the_user_and_groups_agents_by_project() {
-        let lines = render(&snapshot(), false, true, "", "", &t);
+        let lines = render(&snapshot(), false, true, "", "", 0, &t);
         let text = lines.join("\n");
         assert!(
             text.contains("tui-header[online=1,total=2,agents=2]"),
@@ -394,7 +403,7 @@ mod tests {
         );
         assert!(text.contains("vps") && text.contains("tui-offline[]"));
         assert!(text.contains("tui-hint-answer[]"), "{text}");
-        let quiet = render(&snapshot(), false, false, "", "done!", &t).join("\n");
+        let quiet = render(&snapshot(), false, false, "", "done!", 0, &t).join("\n");
         assert!(
             !quiet.contains("tui-hint-answer") && quiet.contains("done!"),
             "{quiet}"
@@ -410,14 +419,14 @@ mod tests {
             agent_id: "laptop/agent-1".into(),
             title: String::new(),
         });
-        let lines = render(&snap, false, true, "laptop/agent-1", "", &t);
+        let lines = render(&snap, false, true, "laptop/agent-1", "", 0, &t);
         let row = lines
             .iter()
             .find(|l| l.contains("agent-1") && l.contains("codex"))
             .expect("row");
         assert!(row.starts_with('>'), "{row}");
         assert!(lines.join("\n").contains("tui-hint-open[]"));
-        let other = render(&snap, false, true, "nobody/agent-9", "", &t).join("\n");
+        let other = render(&snap, false, true, "nobody/agent-9", "", 0, &t).join("\n");
         assert!(!other.contains("tui-hint-open"), "{other}");
     }
 
@@ -465,21 +474,24 @@ mod tests {
         let mut snap = snapshot();
         snap.agents[0].input_tokens = 1000;
         snap.agents[1].output_tokens = 250;
-        let text = render(&snap, false, false, "", "", &t).join("\n");
+        let text = render(&snap, false, false, "", "", 0, &t).join("\n");
         assert!(text.contains("tui-usage[input=1000,output=250]"), "{text}");
+        assert!(!text.contains("tui-cost"), "{text}");
+        let priced = render(&snap, false, false, "", "", 1_234_567, &t).join("\n");
+        assert!(priced.contains("tui-cost[usd=1.23]"), "{priced}");
     }
 
     #[test]
     fn without_color_there_are_no_escape_sequences() {
-        let text = render(&snapshot(), false, true, "", "", &t).join("\n");
+        let text = render(&snapshot(), false, true, "", "", 0, &t).join("\n");
         assert!(!text.contains('\x1b'));
-        let colored = render(&snapshot(), true, true, "", "", &t).join("\n");
+        let colored = render(&snapshot(), true, true, "", "", 0, &t).join("\n");
         assert!(colored.contains('\x1b'));
     }
 
     #[test]
     fn an_empty_hub_says_nothing_waits_and_there_are_no_agents() {
-        let text = render(&Snapshot::default(), false, true, "", "", &t).join("\n");
+        let text = render(&Snapshot::default(), false, true, "", "", 0, &t).join("\n");
         assert!(
             text.contains("tui-nothing-waiting[]") && text.contains("tui-no-agents[]"),
             "{text}"

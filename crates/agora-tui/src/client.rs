@@ -476,6 +476,19 @@ impl Session {
         )
     }
 
+    /// What the agents used so far, as the hub estimates it: total in micro-USD (the hub answers this itself, ADR-0033).
+    pub fn usage_total(&mut self) -> Result<u64, String> {
+        let ok = self.command_ok(
+            "",
+            command_request::Command::UsageReport(agora_protocol::v1::UsageReport {}),
+            Duration::from_secs(10),
+        )?;
+        match ok.result {
+            Some(command_ok::Result::UsageReport(r)) => Ok(r.total_micro_usd),
+            _ => Ok(0),
+        }
+    }
+
     /// The agents a machine can start: `(kind, display name)` of the installed ones.
     pub fn agent_kinds(&mut self, node: &str) -> Result<Vec<(String, String)>, String> {
         let ok = self.command_ok(
