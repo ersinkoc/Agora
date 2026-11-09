@@ -3,7 +3,9 @@ import { CommandPalette, type PaletteItem } from './components/CommandPalette';
 import { demoAgents } from './fixtures';
 import { t } from './i18n';
 import { nextNeedingMe, type AgentTileModel } from './model';
-import { connectLive, type Live, type LinkState } from './net/live';
+import { connectLive, type CommandBody, type Live, type LinkState } from './net/live';
+import { GrantDialog } from './components/GrantDialog';
+import { grantFor, signGrant, type GrantAsk } from './net/grant';
 import type { TerminalSource } from './terminal/source';
 import { StartAgent, type KindChoice } from './components/StartAgent';
 import { approvalList, boards, costByProject, projectChoices, recentMessages, machines, machinesOnline, tiles, type ApprovalModel, type View } from './net/view';
@@ -60,6 +62,8 @@ export function App() {
   const [usage, setUsage] = useState<UsageSummary | undefined>();
   const [notice, setNotice] = useState<string | undefined>();
   const [starting, setStarting] = useState(false);
+  // A machine refused a command until the owner allows it (ADR-0041): what was asked, shown as a dialog.
+  const [grantAsk, setGrantAsk] = useState<{ node: string; body: CommandBody; ask: GrantAsk; busy: boolean; failed: boolean } | undefined>();
   const loadKinds = useCallback(async (node: string): Promise<KindChoice[]> => {
     const ok = await api!.command(node, { agentKinds: {} });
     return (ok.agentKinds?.kinds ?? []).map((k) => ({ kind: k.kind ?? '', name: k.displayName || (k.kind ?? ''), installed: !!k.installed }));
@@ -91,6 +95,20 @@ export function App() {
       setNotice(code === 'approval.signature_invalid' ? t('approval-not-trusted') : t('approval-failed'));
     }
   }, [api, device]);
+  // The owner allowed it: sign the grant with this device's key, send it to the machine, then repeat what was refused.
+  const allowGrant = useCallback(async () => {
+    const g = grantAsk;
+    if (!g || !api || !device) { setGrantAsk((c) => c && { ...c, failed: true }); return; }
+    setGrantAsk({ ...g, busy: true, failed: false });
+    try {
+      const s = await signGrant(device, g.node, g.ask, Date.now());
+      await api.command(g.node, { grantCreate: s });
+      setGrantAsk(undefined);
+      if (!('terminalResize' in g.body)) await api.command(g.node, g.body).catch(() => {});
+    } catch {
+      setGrantAsk({ ...g, busy: false, failed: true });
+    }
+  }, [api, device, grantAsk]);
   // Approvals waiting while the tab is hidden: a count in the title, and a notification if the user allowed it.
   const seenApprovals = useRef<Set<string>>(new Set());
   const baseTitle = useRef(document.title);
@@ -124,7 +142,11 @@ export function App() {
   useEffect(() => {
     if (!hub) return;
     const c = connectLive({ url: hub.url, token: hub.token, onView: (v) => setLive({ ...v }), onState: setLink,
-      onRejected: () => { forgetToken(); setLive(undefined); setHub(undefined); } });
+      onRejected: () => { forgetToken(); setLive(undefined); setHub(undefined); },
+      onGrantRequired: (node, body) => {
+        const ask = grantFor(body as Record<string, unknown>);
+        if (ask) setGrantAsk((cur) => cur ?? { node, body, ask, busy: false, failed: false });
+      } });
     setApi(c);
     return () => { c.close(); setApi(undefined); };
   }, [hub]);
@@ -244,6 +266,7 @@ export function App() {
           onResolve={resolve} notice={notice} link={hub ? link : 'live'}
           onStart={hub && api && live ? () => setStarting(true) : undefined}
           start={starting && live ? <StartAgent projects={projectChoices(live)} loadKinds={loadKinds} onStart={startAgent} onClose={() => setStarting(false)} /> : undefined} />}
+      {grantAsk && <GrantDialog machine={live?.nodes.get(grantAsk.node)?.hostname || grantAsk.node} kind={grantAsk.ask.kind} busy={grantAsk.busy} failed={grantAsk.failed} onAllow={() => void allowGrant()} onClose={() => setGrantAsk(undefined)} />}
       {palette && <CommandPalette items={items} onClose={() => setPalette(false)} />}
     </>
   );

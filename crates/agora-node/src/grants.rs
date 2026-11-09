@@ -313,6 +313,22 @@ mod tests {
     }
 
     #[test]
+    fn the_signed_bytes_are_the_ones_the_web_client_builds() {
+        // The same literal is asserted in apps/web/src/net/grant.test.ts: both sides must agree byte for byte.
+        let m = signed_message(
+            "laptop",
+            "g1",
+            "agent:a-1",
+            &["agent.prompt".to_string(), "terminal.input".to_string()],
+            1234,
+        );
+        assert_eq!(
+            m,
+            b"agora-grant-v1\0laptop\0g1\0agent:a-1\0agent.prompt,terminal.input\x001234".to_vec()
+        );
+    }
+
+    #[test]
     fn without_the_policy_line_nothing_changes() {
         let g = grants(&[]);
         assert!(g.gate(&prompt("a-1"), NOW).is_ok());

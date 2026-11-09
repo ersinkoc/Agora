@@ -259,12 +259,12 @@ describe('live connection', () => {
 });
 
 describe('commands and terminals', () => {
-  function setup() {
+  function setup(onGrantRequired?: (node: string, body: unknown) => void) {
     const sockets: FakeSocket[] = [];
     const live = connectLive({
       url: 'ws://hub/', token: 't', backoffMs: () => 0,
       socket: (u, p) => { const s = new FakeSocket(u, p); sockets.push(s); return s; },
-      onState: () => {}, onView: () => {},
+      onState: () => {}, onView: () => {}, onGrantRequired,
     });
     const s = sockets[0] as FakeSocket;
     s.onopen?.();
@@ -288,6 +288,24 @@ describe('commands and terminals', () => {
     const req2 = v1.CommandRequest.decode(sentFrames().at(-1)?.payload as Uint8Array);
     answer(s, req2.requestId, { err: { code: 'node.offline' } });
     await expect(bad).rejects.toMatchObject({ code: 'node.offline' });
+  });
+
+  it('tells the window which command a machine refused until the owner grants it', async () => {
+    const asked: Array<[string, unknown]> = [];
+    const { live, s, sentFrames } = setup((node, body) => asked.push([node, body]));
+    const p = live.command('laptop', { agentPrompt: { agentId: 'a-1', text: 'hi' } });
+    const req = v1.CommandRequest.decode(sentFrames().at(-1)?.payload as Uint8Array);
+    answer(s, req.requestId, { err: { code: 'approval.grant_required' } });
+    await expect(p).rejects.toMatchObject({ code: 'approval.grant_required' });
+    expect(asked).toHaveLength(1);
+    expect(asked[0]?.[0]).toBe('laptop');
+    expect(asked[0]?.[1]).toMatchObject({ agentPrompt: { agentId: 'a-1' } });
+    // Other refusals are not asks.
+    const q = live.command('laptop', { agentList: {} });
+    const req2 = v1.CommandRequest.decode(sentFrames().at(-1)?.payload as Uint8Array);
+    answer(s, req2.requestId, { err: { code: 'node.offline' } });
+    await expect(q).rejects.toBeTruthy();
+    expect(asked).toHaveLength(1);
   });
 
   it('relays a terminal on its own stream: subscribe, output, input as commands, close', () => {

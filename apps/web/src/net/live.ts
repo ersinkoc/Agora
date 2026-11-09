@@ -30,12 +30,14 @@ export interface LiveOptions {
   onState: (s: LinkState) => void;
   // The hub closed the connection twice in a row before saying anything: the session is no longer accepted.
   onRejected?: () => void;
+  // A machine refused a command until the owner grants it (ADR-0041): what was asked, so the window can ask the owner.
+  onGrantRequired?: (node: string, body: CommandBody) => void;
   socket?: SocketFactory;
   // Waits before reconnect attempt n (0-based); capped exponential by default.
   backoffMs?: (attempt: number) => number;
 }
 
-type CommandBody = Omit<agora.v1.CommandRequest.$Properties, 'requestId' | 'idempotencyKey' | 'targetNode'>;
+export type CommandBody = Omit<agora.v1.CommandRequest.$Properties, 'requestId' | 'idempotencyKey' | 'targetNode'>;
 
 export interface Live {
   close(): void;
@@ -76,7 +78,7 @@ export function connectLive(o: LiveOptions): Live {
     const g = generation;
     setTimeout(() => { if (g === generation && !closed) fn(); }, ms);
   };
-  const pending = new Map<string, { resolve: (ok: agora.v1.CommandOk.$Properties) => void; reject: (e: CommandError) => void }>();
+  const pending = new Map<string, { resolve: (ok: agora.v1.CommandOk.$Properties) => void; reject: (e: CommandError) => void; node: string; body: CommandBody }>();
   const terminals = new Map<number, { node: string; terminalId: string; onEvent: (e: TerminalEvent) => void }>();
 
   const chats = new Map<number, { node: string; agentId: string; onLines: (lines: ChatLine[], replace: boolean) => void }>();
@@ -85,7 +87,7 @@ export function connectLive(o: LiveOptions): Live {
     new Promise((resolve, reject) => {
       if (!isOpen || !sock) { reject(new CommandError('node.offline')); return; }
       const requestId = `c${++requests}`;
-      pending.set(requestId, { resolve, reject });
+      pending.set(requestId, { resolve, reject, node, body });
       const payload = agora.v1.CommandRequest.encode({ ...body, requestId, targetNode: node }).finish();
       sock.send(encodeFrame({ streamId: stream, kind: 0, payload }));
     });
@@ -132,7 +134,10 @@ export function connectLive(o: LiveOptions): Live {
           const r = agora.v1.CommandResponse.decode(f.payload);
           const p = pending.get(r.requestId);
           pending.delete(r.requestId);
-          if (r.err) p?.reject(new CommandError(r.err.code ?? 'error'));
+          if (r.err) {
+            if (p && r.err.code === 'approval.grant_required') o.onGrantRequired?.(p.node, p.body);
+            p?.reject(new CommandError(r.err.code ?? 'error'));
+          }
           else p?.resolve(r.ok ?? agora.v1.CommandOk.create());
         } catch { /* a garbled answer: the request stays pending until the connection ends */ }
         return;
