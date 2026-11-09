@@ -14,6 +14,7 @@ pub mod server;
 pub mod session;
 pub mod signin;
 pub mod ssh;
+pub mod ssh_install;
 pub mod store;
 pub mod tls;
 pub mod transport;

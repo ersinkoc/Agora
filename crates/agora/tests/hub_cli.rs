@@ -435,3 +435,104 @@ fn a_machine_added_over_ssh_gets_a_tunnel_the_hub_keeps_open() {
         std::thread::sleep(Duration::from_millis(100));
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn hub_ssh_install_walks_the_four_steps_on_a_machine_and_stops_with_the_failing_step() {
+    let root = tmp("ssh-install");
+    let hub_dir = root.join("hub");
+    let fake = root.join("fake-ssh");
+    let log = root.join("log");
+    // The stand-in answers like a fresh Linux box with systemd, records each command and what it was given on stdin.
+    std::fs::write(
+        &fake,
+        format!(
+            "#!/bin/sh\nfor last; do :; done\nprintf '%s\\n' \"$last\" >> {log}\ncat >> {log}.stdin\ncase \"$last\" in\n  'uname -sm') echo 'Linux x86_64';;\n  'uname -s') echo Linux;;\n  *--version*) exit 1;;\n  *'node enroll'*) [ -f {root}/refuse ] && {{ echo refused >&2; exit 1; }};;\nesac\nexit 0\n",
+            log = log.display(),
+            root = root.display()
+        ),
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let run = |args: &[&str]| {
+        agora(&root, args)
+            .arg("--hub-dir")
+            .arg(&hub_dir)
+            .env("AGORA_SSH", &fake)
+            .output()
+            .unwrap()
+    };
+    assert_eq!(
+        run(&["hub", "ssh", "install", "box", "--yes"])
+            .status
+            .code(),
+        Some(2),
+        "unknown machine"
+    );
+    assert!(run(&["hub", "ssh", "add", "box", "user@box.example"])
+        .status
+        .success());
+
+    // Without a pinned key it refuses to fetch anything.
+    let refused = run(&[
+        "hub",
+        "ssh",
+        "install",
+        "box",
+        "--yes",
+        "--release-url",
+        "https://example.test/dl",
+    ]);
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("binary"),
+        "{refused:?}"
+    );
+    assert!(!std::fs::read_to_string(&log).unwrap().contains("curl"));
+
+    let ok = run(&[
+        "hub",
+        "ssh",
+        "install",
+        "box",
+        "--yes",
+        "--unsigned",
+        "--release-url",
+        "https://example.test/dl",
+    ]);
+    assert!(ok.status.success(), "{ok:?}");
+    let said = String::from_utf8_lossy(&ok.stdout).into_owned();
+    assert!(said.contains("4/4") && said.contains("systemd"), "{said}");
+    let commands = std::fs::read_to_string(&log).unwrap();
+    assert!(commands.contains("https://example.test/dl/v"), "{commands}");
+    assert!(
+        commands.contains("node enroll --hub wss://localhost:17443 --ca - --code "),
+        "{commands}"
+    );
+    // The CA went over stdin, not onto the command line.
+    assert!(std::fs::read_to_string(format!("{}.stdin", log.display()))
+        .unwrap()
+        .contains("BEGIN CERTIFICATE"));
+
+    // A refused enrollment stops there and says what was done.
+    std::fs::write(root.join("refuse"), "").unwrap();
+    let stopped = run(&[
+        "hub",
+        "ssh",
+        "install",
+        "box",
+        "--yes",
+        "--unsigned",
+        "--release-url",
+        "https://example.test/dl",
+    ]);
+    assert_eq!(stopped.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&stopped.stderr).into_owned();
+    assert!(
+        err.contains("enroll") && err.contains("refused") && err.contains("check, binary"),
+        "{err}"
+    );
+}

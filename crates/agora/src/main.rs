@@ -100,6 +100,9 @@ pub(crate) struct Opts {
     ntfy: Option<String>,
     webhook: Option<String>,
     test: bool,
+    yes: bool,
+    unsigned: bool,
+    release_url: Option<String>,
     positional: Vec<String>,
 }
 
@@ -132,6 +135,9 @@ fn parse(args: &[String]) -> Option<Opts> {
             "--ntfy" => o.ntfy = Some(it.next()?.clone()),
             "--webhook" => o.webhook = Some(it.next()?.clone()),
             "--test" => o.test = true,
+            "--yes" => o.yes = true,
+            "--unsigned" => o.unsigned = true,
+            "--release-url" => o.release_url = Some(it.next()?.clone()),
             s if s.starts_with("--") => return None,
             _ => o.positional.push(a.clone()),
         }
