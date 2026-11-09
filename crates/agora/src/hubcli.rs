@@ -38,11 +38,21 @@ fn random_token() -> Option<String> {
 /// Loads the hub's CA from `dir`, creating it the first time.
 fn load_or_create_ca(dir: &Path) -> Result<Ca, String> {
     let (cert, key) = (dir.join("ca.pem"), dir.join("ca.key"));
-    if let (Ok(c), Ok(k)) = (
-        std::fs::read_to_string(&cert),
-        std::fs::read_to_string(&key),
-    ) {
-        return Ca::from_pem(&c, &k).map_err(|e| e.to_string());
+    match (cert.exists(), key.exists()) {
+        (true, true) => {
+            let c = std::fs::read_to_string(&cert).map_err(|e| format!("{}: {e}", cert.display()))?;
+            let k = std::fs::read_to_string(&key).map_err(|e| format!("{}: {e}", key.display()))?;
+            return Ca::from_pem(&c, &k).map_err(|e| e.to_string());
+        }
+        // One half alone is damage, not a fresh start: making a new CA would cut off every enrolled node.
+        (true, false) | (false, true) => {
+            return Err(format!(
+                "{} and {} must both exist; restore the missing one from a backup (a new CA would disconnect every node)",
+                cert.display(),
+                key.display()
+            ))
+        }
+        (false, false) => {}
     }
     let ca = Ca::generate("Agora hub CA").map_err(|e| e.to_string())?;
     std::fs::write(&cert, ca.cert_pem()).map_err(|e| e.to_string())?;

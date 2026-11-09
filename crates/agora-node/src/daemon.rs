@@ -487,6 +487,7 @@ impl Node {
 
         // Every agent that launches joins the mesh and, if its manifest has `[mcp]`, is handed its own endpoint.
         {
+            let for_abort = Arc::clone(&mesh);
             let mesh = Arc::clone(&mesh);
             sup.set_launch_hook(Box::new(move |l| {
                 let socket = mesh
@@ -503,6 +504,7 @@ impl Node {
                 let command = std::env::current_exe().ok()?;
                 Some(agora_adapters::inject::Endpoint { command, socket })
             }));
+            sup.set_abort_hook(Box::new(move |id| for_abort.unregister(id)));
         }
 
         // Only devices the owner listed in `<data>/trusted-devices` (`agora node trust`) can answer an approval; with

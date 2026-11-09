@@ -108,8 +108,16 @@ fn set_limit(resource: u32, value: u64) -> io::Result<()> {
 pub(crate) fn local_listen(path: &std::path::Path) -> io::Result<crate::LocalListener> {
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::{UnixListener, UnixStream};
-    // A socket file nobody serves is left over from a crash: replace it. A live one is an error.
-    if path.exists() {
+    // A socket file nobody serves is left over from a crash: replace it. A live one is an error, and so is anything that is
+    // not a socket at all (a mistyped `--socket` must not delete somebody's file).
+    if let Ok(meta) = std::fs::symlink_metadata(path) {
+        use std::os::unix::fs::FileTypeExt;
+        if !meta.file_type().is_socket() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "the socket path exists and is not a socket",
+            ));
+        }
         match UnixStream::connect(path) {
             Ok(_) => {
                 return Err(io::Error::new(
@@ -239,6 +247,7 @@ pub(crate) fn spawn(config: &PtyConfig) -> io::Result<Box<dyn Pty>> {
     let writer = File::from(master);
     let mut read_side = writer.try_clone()?;
     let (tx, output) = sync_channel::<Vec<u8>>(QUEUE);
+    let mut child = child;
     let reader = std::thread::Builder::new()
         .name("agora-pty-reader".into())
         .spawn(move || {
@@ -249,6 +258,11 @@ pub(crate) fn spawn(config: &PtyConfig) -> io::Result<Box<dyn Pty>> {
                     break;
                 }
             }
+        })
+        .inspect_err(|_| {
+            // The child is already running: do not leave it behind (or as a zombie) when the reader cannot start.
+            let _ = child.kill();
+            let _ = child.wait();
         })?;
     Ok(Box::new(UnixPty {
         child,
@@ -633,5 +647,33 @@ mod tests {
         let err = spawn(&PtyConfig::new(vec!["/definitely/not/a/program".into()]));
         assert!(err.is_err());
         assert!(spawn(&PtyConfig::new(vec![])).is_err());
+    }
+
+    #[test]
+    fn a_socket_path_that_is_a_regular_file_is_refused_and_the_file_is_left_alone() {
+        let dir = std::env::temp_dir().join(format!("agora-plat-sock-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("io");
+        let file = dir.join("precious");
+        std::fs::write(&file, "keep me").expect("io");
+        assert!(crate::local_listen(&file).is_err());
+        assert_eq!(std::fs::read_to_string(&file).expect("io"), "keep me");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn write_private_replaces_the_file_whole_keeps_it_private_and_leaves_no_temporary_behind() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("agora-plat-priv-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("io");
+        let f = dir.join("key");
+        crate::write_private(&f, b"one").expect("io");
+        crate::write_private(&f, b"two-longer").expect("io");
+        assert_eq!(std::fs::read(&f).expect("io"), b"two-longer");
+        assert_eq!(
+            std::fs::metadata(&f).expect("io").permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(std::fs::read_dir(&dir).expect("io").count(), 1);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
