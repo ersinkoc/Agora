@@ -183,6 +183,9 @@ struct ListenState {
 }
 
 pub struct Listener {
+    /// An empty file at the socket path while this listens, as the Unix backend has a socket file: callers and tests look at the path
+    /// to see that a node is up. The pipe is what is served; a file left by a crash is harmless.
+    marker: std::path::PathBuf,
     name: Vec<u16>,
     sd: Descriptor,
     state: Mutex<ListenState>,
@@ -193,7 +196,12 @@ pub fn listen(path: &Path) -> io::Result<Listener> {
     let name = pipe_name(path);
     let sd = Descriptor::owner_only()?;
     let first = create_instance(&name, &sd, true)?;
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    std::fs::write(path, b"")?;
     Ok(Listener {
+        marker: path.to_path_buf(),
         name,
         sd,
         state: Mutex::new(ListenState {
@@ -272,6 +280,7 @@ impl Listener {
 
 impl Drop for Listener {
     fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.marker);
         if let Ok(mut st) = self.state.lock() {
             if let (Some(p), Some(inst)) = (st.pending.take(), st.instance.as_ref()) {
                 let mut n = 0u32;
