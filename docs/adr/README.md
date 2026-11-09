@@ -61,4 +61,4 @@ Date: YYYY-MM-DD
 | 0041 | User-signed grants for sensitive commands routed through the hub | Accepted |
 | 0042 | Token usage read from the files an agent already writes | Accepted |
 | 0043 | The terminal client: scope, order and dependencies | Accepted |
-| 0044 | Installing adapters and manifests from the registry | Proposed |
+| 0044 | Installing adapters and manifests from the registry | Accepted |

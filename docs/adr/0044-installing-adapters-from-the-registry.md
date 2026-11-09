@@ -1,5 +1,5 @@
 # 0044. Installing adapters and manifests from the registry
-Status: Proposed
+Status: Accepted
 Date: 2026-11-09
 
 ## Context
