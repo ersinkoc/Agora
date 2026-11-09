@@ -727,6 +727,59 @@ impl Mesh {
         Ok(id)
     }
 
+    /// Every task of every project, and the id counter, for a store that outlives this broker (ADR-0039).
+    pub fn export_tasks(&self) -> (u64, Vec<TaskEntry>) {
+        (
+            self.next,
+            self.tasks.iter().map(|(id, t)| self.entry(id, t)).collect(),
+        )
+    }
+
+    /// Restores what [`export_tasks`](Self::export_tasks) wrote. Owners keep their claim until
+    /// [`release_orphans`](Self::release_orphans) finds they are gone.
+    pub fn import_tasks(&mut self, next: u64, tasks: &[TaskEntry]) {
+        self.next = self.next.max(next);
+        for e in tasks {
+            let mut task = Task::new(e.id.clone(), e.title.clone());
+            if let Some(owner) = &e.owner {
+                let _ = task.claim(owner);
+                if e.status == TaskStatus::Done {
+                    let _ = task.complete(owner);
+                }
+            }
+            self.tasks.insert(
+                e.id.clone(),
+                TaskRec {
+                    task,
+                    project: e.project.clone(),
+                    detail: e.detail.clone(),
+                    depends_on: e.depends_on.clone(),
+                    summary: e.summary.clone(),
+                },
+            );
+        }
+    }
+
+    /// Gives back claimed tasks whose owner is not a registered agent (it ended, or the broker was restored without it).
+    pub fn release_orphans(&mut self) {
+        let orphans: Vec<(TaskId, AgentId)> = self
+            .tasks
+            .iter()
+            .filter_map(|(id, t)| match t.task.state() {
+                TaskState::Claimed(a) if !self.agents.contains_key(a) => {
+                    Some((id.clone(), a.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        for (id, owner) in orphans {
+            if let Some(t) = self.tasks.get_mut(&id) {
+                let _ = t.task.release(&owner);
+            }
+            self.task_changed(&id);
+        }
+    }
+
     /// `task_list` for the caller's project.
     pub fn task_list(
         &self,

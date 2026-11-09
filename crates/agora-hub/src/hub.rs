@@ -210,6 +210,12 @@ impl Hub {
         now_ms: u64,
     ) -> crate::board::Answer {
         let mut g = self.lock();
+        let key = format!("board.{}", call.project_id);
+        if !self.boards.has(&call.project_id) {
+            if let Ok(Some(bytes)) = self.store.setting(&key) {
+                self.boards.load(&call.project_id, &bytes);
+            }
+        }
         let mut a = self.boards.call(
             &g.view,
             node,
@@ -219,6 +225,12 @@ impl Hub {
             &call.arguments_json,
             now_ms,
         );
+        if !a.events.is_empty() {
+            // Tasks changed: keep the board in the store (best effort; the call already succeeded).
+            if let Some(bytes) = self.boards.snapshot(&call.project_id) {
+                let _ = self.store.set_setting(&key, &bytes);
+            }
+        }
         for body in std::mem::take(&mut a.events) {
             let _ = self.emit(&mut g, body, now_ms);
         }

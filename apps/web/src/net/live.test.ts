@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { agora } from '../gen/agora.js';
 import { decodeFrame, encodeFrame, EVENT_KIND, STREAM_CLOSE, STREAM_COMMANDS, STREAM_EVENTS } from './frame';
 import { connectLive, type LinkState, type Socket } from './live';
-import { costByProject, applyEvent, emptyView, fromSnapshot, machines, recentMessages, machinesOnline, projectChoices, tiles, type View } from './view';
+import { boards, costByProject, applyEvent, emptyView, fromSnapshot, machines, recentMessages, machinesOnline, projectChoices, tiles, type View } from './view';
 
 const v1 = agora.v1;
 
@@ -47,6 +47,28 @@ describe('view', () => {
     expect(m.map((x) => x.body)).toEqual(['remote', 'local']);
     expect(m.map((x) => x.crossMachine)).toEqual([true, false]);
     expect(m[1]?.from).toBe('claude · ' + m[1]?.from.split(' · ')[1]);
+  });
+
+  it('shows the shared board per project: tasks with their owner, leases with their holder, from the hub\'s events', () => {
+    const v = emptyView();
+    applyEvent(v, 1, ev('alpha', 1, { checkoutDiscovered: { checkoutId: 'c', nodeId: 'alpha', projectId: 'p', path: '/home/me/shop' } }));
+    applyEvent(v, 2, ev('alpha', 2, { worktreeCreated: { worktreeId: 'w', checkoutId: 'c', path: '/x', branch: 'b' } }));
+    applyEvent(v, 3, ev('alpha', 3, { agentStarted: { agentId: 'a1', nodeId: 'alpha', worktreeId: 'w', kind: 'claude' } }));
+    // The hub's events already carry `<node>/<agent>`.
+    applyEvent(v, 4, ev('hub', 1, { taskChanged: { taskId: 't-1', projectId: 'p', title: 'port parser', claimedByAgentId: 'alpha/a1', done: false } }));
+    applyEvent(v, 5, ev('hub', 2, { taskChanged: { taskId: 't-2', projectId: 'p', title: 'docs', claimedByAgentId: '', done: false } }));
+    applyEvent(v, 6, ev('hub', 3, { leaseGranted: { agentId: 'alpha/a1', path: 'src/x.rs', expiresAtMs: 5000 } }));
+    let b = boards(v);
+    expect(b).toHaveLength(1);
+    expect(b[0]?.project).toBe('shop');
+    expect(b[0]?.tasks.map((t) => [t.title, t.status])).toEqual([['port parser', 'claimed'], ['docs', 'open']]);
+    expect(b[0]?.tasks[0]?.owner).toMatch(/^claude/);
+    expect(b[0]?.leases.map((l) => l.path)).toEqual(['src/x.rs']);
+    applyEvent(v, 7, ev('hub', 4, { leaseReleased: { agentId: 'alpha/a1', path: 'src/x.rs' } }));
+    applyEvent(v, 8, ev('hub', 5, { taskChanged: { taskId: 't-1', projectId: 'p', title: 'port parser', claimedByAgentId: 'alpha/a1', done: true } }));
+    b = boards(v);
+    expect(b[0]?.leases).toEqual([]);
+    expect(b[0]?.tasks[0]?.status).toBe('done');
   });
 
   it('adds up estimated cost per project and skips agents without a price', () => {
