@@ -95,5 +95,4 @@ keep their tasks in the hub's SQLite file (settings key `board.<project>`, so th
 broker-stamped provenance, project-scoped `#channels`, inbox cursor, `ask` answered by a reply to its id with timeouts,
 the task board with dependencies and owners, all-or-nothing leases over the core lease table, handoff (the message goes out
 first so a refused handoff moves nothing), and cleanup when an agent ends. Limits: 16 KiB bodies, 20 refs, 30 messages per
-minute per agent, 5 open asks. Every change queues a protocol event for the audit log. Not yet: the transport for the MCP server (stdio or local socket per agent), injection into agent MCP configuration, hub-side routing across
-nodes, persistence, delivery fallback to the integration level's input path.
+minute per agent, 5 open asks. Every change queues a protocol event for the audit log. The transport (a local socket per agent, `agora mesh stdio`), the injection into each agent's MCP configuration (the manifest's `[mcp]`), routing across nodes (ADR-0031) and the shared board with its persistence (ADR-0039, ADR-0040) are described in the sections above. Not done: delivery fallback to the integration level's input path.
