@@ -355,7 +355,12 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
             Ok(ok_empty())
         }
         Cmd::TerminalInput(t) => {
-            with_terminal(ctx, &t.terminal_id, |h| h.send_input(t.data.clone()))?;
+            // The write happens after the supervisor lock is let go: a program that does not read its input blocks this
+            // call, and nothing else (ticks, stop and shutdown keep going).
+            let control = with_terminal(ctx, &t.terminal_id, |h| h.input_handle())?;
+            control.write_input(&t.data).map_err(|_| {
+                Error::new(ErrorCode::AgentNotFound).with("agent_id", t.terminal_id.as_str())
+            })?;
             Ok(ok_empty())
         }
         Cmd::TerminalResize(t) => {

@@ -207,6 +207,12 @@ impl TerminalHandle {
             .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "terminal stopped"))
     }
 
+    /// A handle that writes input without the terminal (or whatever lock reached it): clone it, let go of the locks, then
+    /// write. A program that never reads its input blocks the writer, and only the writer.
+    pub fn input_handle(&self) -> io::Result<PtyControl> {
+        self.control().cloned()
+    }
+
     /// Send input to the process, immediately and on the caller's thread. Blocks only while the process is
     /// not reading and the terminal's input queue is full.
     pub fn send_input(&self, bytes: Vec<u8>) -> io::Result<()> {

@@ -707,6 +707,48 @@ fn a_manifest_cannot_point_its_config_outside_the_worktree() {
 }
 
 #[test]
+fn input_to_a_program_that_never_reads_does_not_wedge_the_node() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
+        return;
+    }
+    let e = env("stalled-input");
+    add_manifest(
+        &e,
+        "sleeper.toml",
+        "kind = \"sleeper\"\ndisplay_name = \"S\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"sh\", \"-c\", \"stty raw -echo; sleep 60\"]\n",
+    );
+    let n = node(&e, NodeLimits::default());
+    let socket = n.socket().unwrap().to_path_buf();
+    let mut c = Client::connect(&socket).unwrap();
+    let s = started(ok(c.call(start_cmd("sleeper"))));
+    // The shell has put the terminal in raw mode by now (in cooked mode the excess is thrown away and nothing blocks).
+    std::thread::sleep(Duration::from_millis(1000));
+    // More than the terminal can queue for a program that is not reading (the old code held the supervisor lock for the whole
+    // write and this test hung): this call stays stuck.
+    let terminal = s.terminal_id.clone();
+    let stuck = std::thread::spawn(move || {
+        let mut c = Client::connect(&socket).unwrap();
+        let _ = c.call(Cmd::TerminalInput(v1::TerminalInput {
+            terminal_id: terminal,
+            data: vec![b'x'; 512 * 1024],
+        }));
+    });
+    std::thread::sleep(Duration::from_millis(1500));
+    // Meanwhile the node answers, and the agent can be stopped.
+    let t0 = Instant::now();
+    ok(c.call(Cmd::AgentList(v1::AgentList::default())));
+    ok(c.call(Cmd::AgentStop(v1::AgentStop {
+        agent_id: s.agent_id.clone(),
+    })));
+    assert!(
+        t0.elapsed() < Duration::from_secs(5),
+        "the node waited behind the stuck write: {:?}",
+        t0.elapsed()
+    );
+    drop(stuck); // the writer ends when the process is gone
+}
+
+#[test]
 fn a_start_that_fails_gives_back_its_worktree_and_its_mesh_endpoint() {
     if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
         return;
