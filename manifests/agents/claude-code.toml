@@ -1,0 +1,44 @@
+kind = "claude-code"
+display_name = "Claude Code"
+version = "2026.11.09.1"
+min_engine = 1
+
+[process]
+names = ["claude"]
+launch = ["claude"]
+
+[accounts]
+login = ["claude", "auth", "login"]
+status = ["claude", "auth", "status"]
+
+[mcp]
+# `claude --mcp-config <file>` (checked against Claude Code 2.1.319).
+method = "cli_flag"
+path = ".agora-mcp.json"
+format = "json"
+flag = ["--mcp-config", "{config_file}"]
+
+[resume]
+argv = ["claude", "--resume", "{session_id}"]
+
+# Screen rules, from screens captured on Claude Code 2.1.319 (manifests/agents/fixtures/claude-code/).
+[[rules]]
+id = "trust_prompt"
+state = "blocked"
+priority = 900
+region = "bottom_non_empty_lines(12)"
+all = [{ contains = "Yes, I trust this folder" }, { contains = "Enter to confirm" }]
+
+[[rules]]
+id = "esc_to_interrupt"
+state = "working"
+priority = 800
+region = "bottom_non_empty_lines(12)"
+contains = "esc to interrupt"
+
+[[rules]]
+id = "prompt_box"
+state = "idle"
+priority = 100
+region = "bottom_non_empty_lines(12)"
+regex = '^\s*❯'
