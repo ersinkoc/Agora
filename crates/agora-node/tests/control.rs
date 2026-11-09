@@ -1043,7 +1043,7 @@ fn with_no_trusted_device_every_decision_is_refused() {
 
 #[test]
 fn agent_kinds_lists_what_this_node_can_start() {
-    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
         return;
     }
     let e = env("kinds");
