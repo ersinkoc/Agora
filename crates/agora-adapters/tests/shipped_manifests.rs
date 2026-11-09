@@ -96,5 +96,5 @@ fn the_usage_fixtures_add_up_to_what_the_files_say() {
         assert_eq!(got, want.trim(), "{}", manifest.kind);
         checked += 1;
     }
-    assert!(checked >= 2, "claude-code and codex both read usage files");
+    assert!(checked >= 3, "claude-code, codex and wrongstack read usage files");
 }

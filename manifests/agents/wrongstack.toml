@@ -19,6 +19,23 @@ flag = ["--mcp-config", "{config_file}"]
 [resume]
 argv = ["wstack", "--resume", "{session_id}"]
 
+[usage]
+# WrongStack appends one `llm_response` line per model call to ~/.wrongstack/projects/<project>/sessions/<day>/sess_*.jsonl (checked
+# on WrongStack 1.5.3, ADR-0042); `input` there does not include `cacheRead`, which the node adds. The directory comes from the
+# `session_start` line (`checkout`), which has no usage and only gives the file its owner.
+source = "file"
+
+[usage.file]
+glob = "{home}/.wrongstack/projects/*/sessions/*/*.jsonl"
+format = "jsonl"
+select = { path = "type", equals = "llm_response" }
+cwd = "checkout"
+model = "model"
+input = "usage.input"
+output = "usage.output"
+cache_read = "usage.cacheRead"
+mode = "delta"
+
 # Screen rules, from screens captured on WrongStack 1.5.3 (manifests/agents/fixtures/wrongstack/). The input box has a title bar
 # that says `idle` when nothing runs and shows a spinner and a verb with an ellipsis (`⠙ bamboozling…`) while a turn runs; side
 # panels and a swarm view can push it up the screen, so the region is wider than for the other agents.
