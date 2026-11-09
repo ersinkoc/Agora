@@ -34,6 +34,8 @@ pub const EVENT_BUFFER_BYTES: u64 = 64 * 1024 * 1024;
 pub struct EventSink {
     producer: String,
     log: Mutex<DiskEventLog>,
+    /// Says again what the hub must know about this node (online, its checkouts), see [`EventSink::announce`].
+    announcer: Mutex<Option<Box<dyn Fn(&EventSink) + Send>>>,
 }
 
 pub(crate) fn now_ms() -> u64 {
@@ -82,7 +84,27 @@ impl EventSink {
         Ok(Self {
             producer: producer.to_string(),
             log: Mutex::new(DiskEventLog::open(dir, max_bytes)?),
+            announcer: Mutex::new(None),
         })
+    }
+
+    /// What this node says about itself when the hub turns out to be ahead of it (see [`announce`](Self::announce)).
+    pub fn set_announcer(&self, f: Box<dyn Fn(&EventSink) + Send>) {
+        *self.announcer.lock().unwrap_or_else(|e| e.into_inner()) = Some(f);
+    }
+
+    /// The hub has acknowledged numbers this buffer never produced (this machine came back under a known name with an empty data
+    /// directory): skip our numbering forward to `next` and say again who we are, since what we recorded before the skip is gone.
+    pub fn catch_up_with_hub(&self, next: u64) -> io::Result<()> {
+        self.log
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .advance_to(next)?;
+        let announcer = self.announcer.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(f) = &*announcer {
+            f(self);
+        }
+        Ok(())
     }
 
     fn record(&self, body: Body) {
@@ -483,6 +505,19 @@ impl Node {
         events.node_online(&cfg.node_id);
         for p in &projects {
             events.checkout_discovered(&cfg.node_id, &p.id, &p.root);
+        }
+        {
+            let node = cfg.node_id.clone();
+            let known: Vec<(String, PathBuf)> = projects
+                .iter()
+                .map(|p| (p.id.clone(), p.root.clone()))
+                .collect();
+            events.set_announcer(Box::new(move |ev| {
+                ev.node_online(&node);
+                for (id, root) in &known {
+                    ev.checkout_discovered(&node, id, root);
+                }
+            }));
         }
 
         // Every agent that launches joins the mesh and, if its manifest has `[mcp]`, is handed its own endpoint.

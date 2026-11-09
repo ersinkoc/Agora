@@ -20,10 +20,11 @@ of this build, with its `.sha256`, over HTTP on loopback). Remote commands ran w
    `trap` that runs on any exit. Test in `ssh_install.rs`.
 2. **A node that comes back under a known name with an empty data directory loses its first events.** The hub had already acknowledged
    sequence 5 for that name from the earlier incarnation; the new node starts again at 1, so its events 1 to 5 (its `NodeOnline` and
-   checkouts) are treated as duplicates and dropped, and the hub keeps showing the old state until the node passes sequence 5. Not fixed.
-   It needs the node to notice that the hub is ahead of it (the `ResumeOk` position is past its own next sequence), skip its numbering
-   forward and announce itself again (online, checkouts, agents). Recorded in `docs/backlog/phase-3.md` (P3-12). Reinstalling with the
-   data directory kept (the normal upgrade) is not affected.
+   checkouts) are treated as duplicates and dropped, and the hub keeps showing the old state until the node passes sequence 5.
+   **Fixed afterwards:** when the `ResumeOk` position is past the node's own next sequence, the node skips its numbering forward
+   (`DiskEventLog::advance_to`, a restart-safe rewrite of the buffer header) and announces itself again through the sink's announcer
+   (online and checkouts; agents that are already running are not re-announced). Test `a_node_that_returns_under_a_known_name_with_an_empty_data_dir_is_still_heard`
+   (it fails on the old code). Reinstalling with the data directory kept (the normal upgrade) was never affected.
 3. Not a bug but worth knowing: the install picks a user service only when `systemctl --user show-environment` answers. In an ssh session
    without a user bus (for example `sshd` with PAM off, as here) it falls back to printing a `tmux` command, which is the documented
    behaviour.

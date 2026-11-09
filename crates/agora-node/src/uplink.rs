@@ -98,6 +98,13 @@ impl Uplink {
         if self.phase != Phase::Negotiated {
             return Err(UplinkError::OutOfOrder);
         }
+        // The hub is ahead of everything this node has (it acknowledged those numbers for an earlier life of this producer):
+        // events below `from_seq` would be dropped as duplicates, so number on from there and announce the node again.
+        if ok.from_seq > self.sink.next_seq() {
+            self.sink
+                .catch_up_with_hub(ok.from_seq)
+                .map_err(|e| UplinkError::Io(e.to_string()))?;
+        }
         self.rewind_to(ok.from_seq)?;
         self.phase = Phase::Streaming;
         Ok(())
