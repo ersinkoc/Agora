@@ -350,13 +350,21 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                     })
                     .map_err(sup_err);
             }
-            let t = sup.terminal(&id).ok_or_else(|| {
-                Error::new(ErrorCode::AgentNotFound).with("agent_id", a.agent_id.as_str())
-            })?;
-            t.send_input(format!("{}\r", a.text).into_bytes())
-                .map_err(|_| {
+            let control = sup
+                .terminal(&id)
+                .and_then(|h| h.input_handle().ok())
+                .ok_or_else(|| {
                     Error::new(ErrorCode::AgentNotFound).with("agent_id", a.agent_id.as_str())
                 })?;
+            // The write happens after the supervisor lock is let go. The text and the Enter key are two writes: a terminal
+            // program that reads both in one go takes them for a paste and keeps the Enter as a newline in its input box
+            // (seen with WrongStack, whose prompt then never ran).
+            drop(sup);
+            let gone =
+                |_| Error::new(ErrorCode::AgentNotFound).with("agent_id", a.agent_id.as_str());
+            control.write_input(a.text.as_bytes()).map_err(gone)?;
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            control.write_input(b"\r").map_err(gone)?;
             Ok(ok_empty())
         }
         Cmd::TerminalInput(t) => {
