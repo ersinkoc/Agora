@@ -1,5 +1,5 @@
 # 0045. The Windows node: how it gets terminals, a control channel and a process view
-Status: Proposed
+Status: Accepted
 Date: 2026-11-09
 
 ## Context
