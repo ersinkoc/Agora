@@ -7,6 +7,8 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 
+#[cfg(windows)]
+mod conpty;
 #[cfg(unix)]
 mod unix;
 #[cfg(windows)]
@@ -556,12 +558,9 @@ pub fn spawn(config: &PtyConfig) -> io::Result<Box<dyn Pty>> {
     {
         unix::spawn(config)
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "PTY is not implemented on this platform yet",
-        ))
+        conpty::spawn(config)
     }
 }
 
