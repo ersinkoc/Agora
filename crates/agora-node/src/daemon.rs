@@ -617,11 +617,28 @@ impl Node {
                 .name("agora-supervise".into())
                 .spawn(move || {
                     let mut reported = (u32::MAX, u32::MAX);
+                    let mut usage = crate::usage_files::UsageWatcher::default();
                     while !stop.load(Ordering::Acquire) {
-                        let (events, views) = {
+                        let (events, views, usage_targets) = {
                             let mut s = sup.lock().unwrap_or_else(|e| e.into_inner());
-                            (s.tick(Instant::now()), s.list())
+                            (s.tick(Instant::now()), s.list(), s.usage_targets())
                         };
+                        // Usage that terminal agents wrote to their own files (ADR-0042); the files are read outside the lock.
+                        let used = usage.poll(Instant::now(), &usage_targets);
+                        if !used.is_empty() {
+                            ev.record_bodies(
+                                used.into_iter()
+                                    .map(|(agent, s)| {
+                                        Body::AgentUsageReported(v1::AgentUsageReported {
+                                            agent_id: agent.as_str().to_string(),
+                                            model: s.model,
+                                            input_tokens: s.input,
+                                            output_tokens: s.output,
+                                        })
+                                    })
+                                    .collect(),
+                            );
+                        }
                         if !events.is_empty() {
                             ev.supervisor_events(&events, &views);
                         }

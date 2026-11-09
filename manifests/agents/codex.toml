@@ -23,6 +23,22 @@ flag = [
 [resume]
 argv = ["codex", "resume", "{session_id}"]
 
+[usage]
+# Codex appends `token_count` events with the running total of the session to ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl
+# (checked on codex-cli 0.167.0, ADR-0042); the model comes from the `turn_context` line before them. `input_tokens` already
+# includes the cached part.
+source = "file"
+
+[usage.file]
+glob = "{home}/.codex/sessions/*/*/*/*.jsonl"
+format = "jsonl"
+select = { path = "payload.type", equals = "token_count" }
+cwd = "payload.cwd"
+model = "payload.model"
+input = "payload.info.total_token_usage.input_tokens"
+output = "payload.info.total_token_usage.output_tokens"
+mode = "total"
+
 # Screen rules, from screens captured on codex-cli 0.167.0 (manifests/agents/fixtures/codex/).
 # The prompt box can be on screen while Codex works, so the working rule outranks it.
 [[rules]]

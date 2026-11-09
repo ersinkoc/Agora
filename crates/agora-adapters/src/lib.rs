@@ -7,6 +7,7 @@ pub mod manifest;
 pub mod pacer;
 pub mod registry;
 pub mod rules;
+pub mod usage;
 
 pub use manifest::{Manifest, ManifestError};
 pub use pacer::Pacer;

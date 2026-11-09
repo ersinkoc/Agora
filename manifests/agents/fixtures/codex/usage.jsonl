@@ -1,0 +1,5 @@
+{"type": "session_meta", "payload": {"id": "s-2", "cwd": "/work/proj"}}
+{"type": "turn_context", "payload": {"turn_id": "t1", "cwd": "/work/proj", "model": "gpt-example-1"}}
+{"type": "token_usage_record", "payload": {"note": "not a usage line for us"}}
+{"type": "event_msg", "payload": {"type": "token_count", "info": {"total_token_usage": {"input_tokens": 100, "cached_input_tokens": 50, "cache_write_input_tokens": 0, "output_tokens": 5, "reasoning_output_tokens": 1, "total_tokens": 105}}}}
+{"type": "event_msg", "payload": {"type": "token_count", "info": {"total_token_usage": {"input_tokens": 160, "cached_input_tokens": 80, "cache_write_input_tokens": 0, "output_tokens": 9, "reasoning_output_tokens": 1, "total_tokens": 169}}}}
