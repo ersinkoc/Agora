@@ -151,6 +151,8 @@ pub enum SupervisorEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SupervisorError {
     UnknownKind(String),
+    /// The adapter of this kind came from a registry publisher that was revoked (ADR-0044): `(kind, publisher)`.
+    PublisherRevoked(String, String),
     NotFound(AgentId),
     /// The agent is still running (resume applies to stopped agents).
     StillRunning(AgentId),
@@ -170,6 +172,9 @@ impl SupervisorError {
             Self::UnknownKind(k) => {
                 Error::new(ErrorCode::AgentKindUnknown).with("kind", k.as_str())
             }
+            Self::PublisherRevoked(k, p) => Error::new(ErrorCode::AgentPublisherRevoked)
+                .with("kind", k.as_str())
+                .with("publisher", p.as_str()),
             Self::NotFound(id) => {
                 Error::new(ErrorCode::AgentNotFound).with("agent_id", id.as_str())
             }
@@ -355,6 +360,14 @@ impl Supervisor {
             .get(&req.kind)
             .ok_or_else(|| SupervisorError::UnknownKind(req.kind.clone()))?;
         if let Some(spec) = kind.manifest.driver(&bridge_program()) {
+            if let Some(p) = spec.command.first().and_then(|c| {
+                agora_adapters::package::revoked_publisher_of(
+                    &agora_adapters::package::agora_home(),
+                    c,
+                )
+            }) {
+                return Err(SupervisorError::PublisherRevoked(req.kind.clone(), p));
+            }
             return self.start_adapter(req, &spec);
         }
         let argv = kind.manifest.process.launch.clone();
