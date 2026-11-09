@@ -10,6 +10,13 @@ workspace = true
 
 [dependencies]
 agora-core = { path = "../agora-core" }
-agora-protocol = { path = "../agora-protocol" }
+agora-protocol = { path = "../agora-protocol", features = ["ws"] }
 agora-vt = { path = "../agora-vt" }
 agora-i18n = { path = "../agora-i18n" }
+# The hub client (ADR-0043): TLS to the hub with only its CA trusted, the same crates the node's uplink uses; serde_json reads the
+# sign-in answer.
+tokio = { version = "1", features = ["rt", "net", "time", "io-util"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+prost = "0.14"
+serde_json = "1"

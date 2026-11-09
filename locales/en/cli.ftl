@@ -22,6 +22,7 @@ cli-usage =
       agora hub restore FILE [--hub-dir DIR]
       agora node enroll --hub URL --ca FILE --code CODE --id NAME
       agora node trust DEVICE_ID PUBLIC_KEY_HEX [--data DIR]
+      agora tui [--hub HOST:PORT --ca FILE --code CODE] [--hub-dir DIR]
       agora doctor [--data DIR] [--manifests DIR] [--socket PATH]
 cli-node-listening = Node is running. Control socket: { $socket }
 cli-agent-started = Started agent { $agent_id } in { $worktree }

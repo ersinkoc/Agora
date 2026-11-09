@@ -1,0 +1,21 @@
+# Terminal istemcisi (ADR-0043). Arayüz sözlüğü: makine, "Sizi bekliyor", "Bitti" (docs/ux/visual-language.md).
+tui-connecting = { $hub } adresine bağlanılıyor…
+tui-lost = { $hub } ile bağlantı koptu. Yeniden deneniyor…
+tui-signin-failed = Hub kodu kabul etmedi. "agora hub login" ile yeni bir kod alın.
+tui-need-hub = Hub'ınızın nerede olduğunu söyleyin: bunu hub'ın çalıştığı makinede çalıştırın ya da --hub ADRES:PORT --ca DOSYA --code KOD verin.
+tui-quit-hint = Çıkmak için Ctrl-C
+tui-header = Agora · { $total } makineden { $online } tanesi çevrimiçi · { $agents } ajan çalışıyor
+tui-attention = Sizi bekliyor
+tui-nothing-waiting = Sizi bekleyen bir şey yok.
+tui-asks = { $agent } soruyor: { $action }
+tui-blocked = { $agent } sizi bekliyor
+tui-machines = Makineler
+tui-online = çevrimiçi
+tui-offline = çevrimdışı
+tui-no-agents = Henüz ajan yok. Web uygulamasından ya da "agora agent start" ile bir tane başlatın.
+tui-state-working = Çalışıyor
+tui-state-needs-you = Sizi bekliyor
+tui-state-idle = Boşta
+tui-state-finished = Bitti
+tui-state-unknown = Bilinmiyor
+tui-no-project = (proje yok)

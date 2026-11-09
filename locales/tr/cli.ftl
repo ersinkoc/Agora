@@ -22,6 +22,7 @@ cli-usage =
       agora hub restore DOSYA [--hub-dir DİZİN]
       agora node enroll --hub URL --ca FILE --code CODE --id NAME
       agora node trust CİHAZ_ID AÇIK_ANAHTAR_HEX [--data DİZİN]
+      agora tui [--hub ADRES:PORT --ca DOSYA --code KOD] [--hub-dir DİZİN]
       agora doctor [--data DİZİN] [--manifests DİZİN] [--socket YOL]
 cli-node-listening = Düğüm çalışıyor. Denetim soketi: { $socket }
 cli-agent-started = { $agent_id } ajanı { $worktree } içinde başlatıldı
