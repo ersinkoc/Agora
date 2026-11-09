@@ -192,7 +192,7 @@ pub fn install(
             ""
         };
         let cmd = format!(
-            "set -e; U='{url}'; d=$(mktemp -d); cd \"$d\"; cat > allowed; \
+            "set -e; U='{url}'; d=$(mktemp -d); trap 'cd /; rm -rf \"$d\"' EXIT; cd \"$d\"; cat > allowed; \
              curl -fsSL -o agora \"$U\"; curl -fsSL -o agora.sha256 \"$U.sha256\"; \
              want=$(cut -d' ' -f1 agora.sha256); \
              got=$( (sha256sum agora 2>/dev/null || shasum -a 256 agora) | cut -d' ' -f1); \
@@ -479,5 +479,23 @@ mod tests {
         let check = log.iter().find(|(c, _)| c.contains("--version")).unwrap();
         // A copy elsewhere on PATH is not used by the enroll and run steps, so it must not skip the install.
         assert!(check.0.contains("$HOME/.local/bin/agora") && !check.0.contains("|| agora"));
+    }
+
+    #[test]
+    fn the_download_directory_is_removed_even_when_a_step_fails() {
+        // Found by running the install against a real sshd: `set -e` stopped at a failed download and left the directory.
+        let r = Fake::new("Linux x86_64");
+        install(&r, &machine(), &opts(), &mut |_| {}).unwrap();
+        let log = r.log.borrow();
+        let bin = log
+            .iter()
+            .find(|(c, _)| c.contains("agora.sha256"))
+            .unwrap();
+        assert!(
+            bin.0.contains("trap 'cd /; rm -rf \"$d\"' EXIT"),
+            "{}",
+            bin.0
+        );
+        assert!(bin.0.find("trap").unwrap() < bin.0.find("curl").unwrap());
     }
 }
