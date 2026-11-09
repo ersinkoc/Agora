@@ -62,3 +62,4 @@ Date: YYYY-MM-DD
 | 0042 | Token usage read from the files an agent already writes | Accepted |
 | 0043 | The terminal client: scope, order and dependencies | Accepted |
 | 0044 | Installing adapters and manifests from the registry | Accepted |
+| 0045 | The Windows node: terminals, a control channel and a process view | Proposed |
