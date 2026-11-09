@@ -1,0 +1,31 @@
+kind = "codex"
+display_name = "Codex"
+version = "2026.11.09.1"
+min_engine = 1
+
+[process]
+names = ["codex"]
+launch = ["codex"]
+
+[accounts]
+login = ["codex", "login"]
+status = ["codex", "login", "status"]
+
+[resume]
+argv = ["codex", "resume", "{session_id}"]
+
+# Screen rules, from screens captured on codex-cli 0.167.0 (manifests/agents/fixtures/codex/).
+# The prompt box can be on screen while Codex works, so the working rule outranks it.
+[[rules]]
+id = "esc_to_interrupt"
+state = "working"
+priority = 800
+region = "bottom_non_empty_lines(12)"
+contains = "esc to interrupt"
+
+[[rules]]
+id = "prompt_box"
+state = "idle"
+priority = 100
+region = "bottom_non_empty_lines(12)"
+regex = '^\s*› '
