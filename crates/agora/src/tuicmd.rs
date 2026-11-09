@@ -156,7 +156,8 @@ fn attach(
     }
     let terminal = format!("t-{local}");
     let stream = session.terminal_open(node, &terminal)?;
-    if let Some((cols, rows)) = agora_platform::terminal_size() {
+    let mut size = agora_platform::terminal_size();
+    if let Some((cols, rows)) = size {
         session.terminal_resize(node, &terminal, cols, rows);
     }
     let mut out = std::io::stdout();
@@ -175,6 +176,14 @@ fn attach(
                 break;
             }
             TermEvent::Resized(..) | TermEvent::Quiet => {}
+        }
+        // A window that was resized is told to the machine, so the agent redraws for the new size.
+        let now = agora_platform::terminal_size();
+        if now != size {
+            size = now;
+            if let Some((cols, rows)) = now {
+                session.terminal_resize(node, &terminal, cols, rows);
+            }
         }
         let mut typed = Vec::new();
         while let Ok(k) = rx.try_recv() {
