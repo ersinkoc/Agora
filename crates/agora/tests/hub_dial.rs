@@ -256,7 +256,7 @@ fn the_terminal_console_answers_an_approval_with_its_own_key_through_the_hub() {
     use agora_node::control::Client;
     use agora_protocol::v1::{self, command_request::Command as Cmd};
     use agora_tui::client::{Hub as ConsoleHub, Session, Update};
-    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
         return;
     }
     let hub = hubside("node-test");
@@ -481,7 +481,7 @@ fn the_terminal_console_follows_a_chat_agents_conversation_sends_a_request_and_s
     use agora_node::control::Client;
     use agora_protocol::v1::{self, command_request::Command as Cmd};
     use agora_tui::client::{ChatEvent, Hub as ConsoleHub, Session, Update};
-    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
         return;
     }
     let hub = hubside("laptop");
@@ -1012,7 +1012,7 @@ fn git(dir: &Path, args: &[&str]) {
 #[test]
 fn a_clients_terminal_is_relayed_through_the_hub_with_input_and_close() {
     // Routed commands run on the node's local socket, which this platform does not have yet.
-    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
         return;
     }
     use agora_protocol::frame::{kinds, STREAM_CLOSE, STREAM_COMMANDS, STREAM_EVENTS};
@@ -1215,7 +1215,7 @@ fn mcp(
 #[test]
 fn an_agent_messages_an_agent_on_another_node_through_the_hub_and_a_failure_comes_back_as_a_notice()
 {
-    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
         return;
     }
     use agora_core::AgentId;
@@ -1339,7 +1339,7 @@ fn an_agent_messages_an_agent_on_another_node_through_the_hub_and_a_failure_come
 #[test]
 fn agents_on_two_nodes_share_a_board_claims_leases_and_handoffs_and_it_fails_closed_without_the_hub(
 ) {
-    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
         return;
     }
     use agora_mesh::broker::AgentInfo;

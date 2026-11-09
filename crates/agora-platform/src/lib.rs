@@ -9,6 +9,8 @@ use std::sync::mpsc::Receiver;
 
 #[cfg(unix)]
 mod unix;
+#[cfg(windows)]
+mod windows;
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -19,9 +21,9 @@ use linux as procinfo;
 #[cfg(target_os = "macos")]
 use macos as procinfo;
 
-/// True where [`local_listen`] and [`local_connect`] work (Unix domain sockets; Windows named pipes come in
-/// Phase 4). Callers and tests use this instead of any `cfg`.
-pub const LOCAL_SOCKETS_SUPPORTED: bool = cfg!(unix);
+/// True where [`local_listen`] and [`local_connect`] work (Unix domain sockets; Windows named pipes, ADR-0045). Callers and tests
+/// use this instead of any `cfg`.
+pub const LOCAL_SOCKETS_SUPPORTED: bool = cfg!(any(unix, windows));
 
 /// True where [`spawn`] can start a PTY.
 pub const PTY_SUPPORTED: bool = cfg!(unix);
@@ -30,6 +32,8 @@ pub const PTY_SUPPORTED: bool = cfg!(unix);
 pub struct LocalStream {
     #[cfg(unix)]
     inner: std::os::unix::net::UnixStream,
+    #[cfg(windows)]
+    inner: windows::Stream,
 }
 
 /// A listening local socket. Removes its socket file when dropped.
@@ -38,6 +42,8 @@ pub struct LocalListener {
     inner: std::os::unix::net::UnixListener,
     #[cfg(unix)]
     path: PathBuf,
+    #[cfg(windows)]
+    inner: windows::Listener,
 }
 
 #[cfg(not(unix))]
@@ -56,10 +62,11 @@ pub fn local_listen(path: &std::path::Path) -> io::Result<LocalListener> {
     {
         unix::local_listen(path)
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        let _ = path;
-        Err(unsupported_io("local sockets"))
+        Ok(LocalListener {
+            inner: windows::listen(path)?,
+        })
     }
 }
 
@@ -169,10 +176,11 @@ pub fn local_connect(path: &std::path::Path) -> io::Result<LocalStream> {
     {
         unix::local_connect(path)
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        let _ = path;
-        Err(unsupported_io("local sockets"))
+        Ok(LocalStream {
+            inner: windows::connect(path)?,
+        })
     }
 }
 
@@ -183,9 +191,9 @@ impl LocalListener {
         {
             self.inner.accept().map(|(inner, _)| LocalStream { inner })
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
         {
-            Err(unsupported_io("local sockets"))
+            self.inner.accept().map(|inner| LocalStream { inner })
         }
     }
 
@@ -195,10 +203,10 @@ impl LocalListener {
         {
             self.inner.set_nonblocking(nonblocking)
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
         {
-            let _ = nonblocking;
-            Err(unsupported_io("local sockets"))
+            self.inner.set_nonblocking(nonblocking);
+            Ok(())
         }
     }
 }
@@ -218,9 +226,11 @@ impl LocalStream {
                 inner: self.inner.try_clone()?,
             })
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
         {
-            Err(unsupported_io("local sockets"))
+            Ok(Self {
+                inner: self.inner.try_clone()?,
+            })
         }
     }
 
@@ -229,10 +239,9 @@ impl LocalStream {
         {
             self.inner.set_read_timeout(timeout)
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
         {
-            let _ = timeout;
-            Err(unsupported_io("local sockets"))
+            self.inner.set_read_timeout(timeout)
         }
     }
 
@@ -242,9 +251,9 @@ impl LocalStream {
         {
             self.inner.shutdown(std::net::Shutdown::Both)
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
         {
-            Err(unsupported_io("local sockets"))
+            self.inner.shutdown()
         }
     }
 }
@@ -255,10 +264,9 @@ impl io::Read for LocalStream {
         {
             io::Read::read(&mut self.inner, buf)
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
         {
-            let _ = buf;
-            Err(unsupported_io("local sockets"))
+            self.inner.read(buf)
         }
     }
 }
@@ -269,10 +277,9 @@ impl io::Write for LocalStream {
         {
             io::Write::write(&mut self.inner, buf)
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
         {
-            let _ = buf;
-            Err(unsupported_io("local sockets"))
+            self.inner.write(buf)
         }
     }
 
@@ -281,7 +288,7 @@ impl io::Write for LocalStream {
         {
             io::Write::flush(&mut self.inner)
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
         {
             Ok(())
         }

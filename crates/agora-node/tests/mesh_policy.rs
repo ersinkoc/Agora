@@ -36,7 +36,7 @@ fn the_policy_file_defaults_to_allowed_and_a_bad_value_means_denied() {
 
 #[test]
 fn with_remote_denied_outgoing_messages_fail_with_a_policy_notice_and_incoming_ones_are_refused() {
-    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
         return;
     }
     let dir = tmp("deny");
