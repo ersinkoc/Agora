@@ -259,6 +259,8 @@ pub struct Supervisor {
     cfg: SupervisorConfig,
     kinds: BTreeMap<String, KindEntry>,
     agents: BTreeMap<AgentId, Entry>,
+    /// Terminal agents that ended and still owe one last usage read.
+    ended_usage: Vec<AgentId>,
     next_id: u64,
     hook: Option<LaunchHook>,
     abort_hook: Option<AbortHook>,
@@ -271,6 +273,7 @@ impl Supervisor {
             cfg,
             kinds: BTreeMap::new(),
             agents: BTreeMap::new(),
+            ended_usage: Vec::new(),
             next_id: 1,
             hook: None,
             abort_hook: None,
@@ -677,6 +680,7 @@ impl Supervisor {
                 status,
             });
             entry.terminal = None;
+            self.ended_usage.push(id.clone());
             if status.success() {
                 set_state(entry, AgentState::Done, StateSource::Reported, events);
             } else if entry.restarts < self.cfg.restart.max_restarts {
@@ -808,6 +812,7 @@ impl Supervisor {
         entry.restart_at = None;
         // Dropping the handle kills the process and joins the actor.
         entry.terminal = None;
+        self.ended_usage.push(id.clone());
         set_state(entry, AgentState::Done, StateSource::Reported, &mut events);
         events.push(SupervisorEvent::Stopped { agent: id.clone() });
         Ok(events)
@@ -925,26 +930,37 @@ impl Supervisor {
         out
     }
 
+    fn usage_target(&self, id: &AgentId) -> Option<crate::usage_files::Target> {
+        let e = self.agents.get(id)?;
+        let spec = self
+            .kinds
+            .get(&e.agent.kind)?
+            .manifest
+            .usage
+            .as_ref()?
+            .file
+            .clone()?;
+        Some(crate::usage_files::Target {
+            agent: id.clone(),
+            worktree: e.worktree.clone(),
+            spec,
+        })
+    }
+
     /// Running terminal agents whose kind names a usage file (ADR-0042), for the node's usage watcher.
     pub fn usage_targets(&self) -> Vec<crate::usage_files::Target> {
         self.agents
             .iter()
             .filter(|(_, e)| e.terminal.is_some())
-            .filter_map(|(id, e)| {
-                let spec = self
-                    .kinds
-                    .get(&e.agent.kind)?
-                    .manifest
-                    .usage
-                    .as_ref()?
-                    .file
-                    .clone()?;
-                Some(crate::usage_files::Target {
-                    agent: id.clone(),
-                    worktree: e.worktree.clone(),
-                    spec,
-                })
-            })
+            .filter_map(|(id, _)| self.usage_target(id))
+            .collect()
+    }
+
+    /// Agents that ended since the last call, for one final read of their usage file (what they wrote in their last second).
+    pub fn take_ended_usage_targets(&mut self) -> Vec<crate::usage_files::Target> {
+        std::mem::take(&mut self.ended_usage)
+            .iter()
+            .filter_map(|id| self.usage_target(id))
             .collect()
     }
 
