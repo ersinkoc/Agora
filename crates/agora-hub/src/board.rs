@@ -113,6 +113,84 @@ impl Boards {
         }
     }
 
+    pub fn has(&self, project: &str) -> bool {
+        self.by_project
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(project)
+    }
+
+    /// The project's tasks as stored text (ADR-0039: the board is part of the hub's SQLite file and its backup).
+    pub fn snapshot(&self, project: &str) -> Option<Vec<u8>> {
+        use agora_mesh::broker::TaskStatus;
+        let g = self.by_project.lock().unwrap_or_else(|e| e.into_inner());
+        let (next, tasks) = g.get(project)?.export_tasks();
+        let tasks: Vec<Value> = tasks
+            .iter()
+            .filter(|t| t.project == project)
+            .map(|t| {
+                json!({
+                    "id": t.id.as_str(), "title": t.title, "detail": t.detail,
+                    "depends_on": t.depends_on.iter().map(agora_core::TaskId::as_str).collect::<Vec<_>>(),
+                    "done": t.status == TaskStatus::Done,
+                    "owner": t.owner.as_ref().map(AgentId::as_str),
+                    "summary": t.summary,
+                })
+            })
+            .collect();
+        Some(
+            json!({"next": next, "tasks": tasks})
+                .to_string()
+                .into_bytes(),
+        )
+    }
+
+    /// Restores a board from [`snapshot`](Self::snapshot) text. A damaged snapshot is ignored: the board starts empty.
+    pub fn load(&self, project: &str, bytes: &[u8]) {
+        use agora_mesh::broker::{TaskEntry, TaskStatus};
+        let Ok(v) = serde_json::from_slice::<Value>(bytes) else {
+            return;
+        };
+        let text = |t: &Value, k: &str| t[k].as_str().unwrap_or("").to_string();
+        let tasks: Vec<TaskEntry> = v["tasks"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .map(|t| {
+                        let owner = t["owner"].as_str().map(AgentId::new);
+                        let done = t["done"].as_bool().unwrap_or(false);
+                        TaskEntry {
+                            id: agora_core::TaskId::new(text(t, "id")),
+                            project: project.to_string(),
+                            title: text(t, "title"),
+                            detail: text(t, "detail"),
+                            depends_on: t["depends_on"]
+                                .as_array()
+                                .map(|d| {
+                                    d.iter()
+                                        .filter_map(|x| x.as_str().map(agora_core::TaskId::new))
+                                        .collect()
+                                })
+                                .unwrap_or_default(),
+                            status: match (&owner, done) {
+                                (None, _) => TaskStatus::Open,
+                                (Some(_), false) => TaskStatus::Claimed,
+                                (Some(_), true) => TaskStatus::Done,
+                            },
+                            owner,
+                            summary: t["summary"].as_str().map(str::to_string),
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut g = self.by_project.lock().unwrap_or_else(|e| e.into_inner());
+        let mesh = g
+            .entry(project.to_string())
+            .or_insert_with(|| Mesh::new(Limits::default()));
+        mesh.import_tasks(v["next"].as_u64().unwrap_or(1), &tasks);
+    }
+
     #[allow(clippy::too_many_arguments)]
     /// Runs one board tool for `agent` of `node` (both as the hub knows them: `node` from the connection's certificate).
     pub fn call(
@@ -150,6 +228,7 @@ impl Boards {
             .entry(project.to_string())
             .or_insert_with(|| Mesh::new(Limits::default()));
         Self::sync(mesh, view, project, now_ms);
+        mesh.release_orphans();
         mesh.expire_leases(now_ms);
 
         let mut target: Option<(String, String)> = None;
@@ -381,5 +460,79 @@ mod tests {
             )),
             "task.not_open"
         );
+    }
+
+    #[test]
+    fn tasks_survive_a_restart_and_a_claim_by_an_agent_that_is_gone_is_given_back() {
+        let b = Boards::new();
+        let v = view(&["alpha", "beta"]);
+        let made = run(
+            &b,
+            &v,
+            "alpha",
+            "task_create",
+            json!({"title": "keep me", "detail": "d", "depends_on": []}),
+            1,
+        );
+        let Verdict::Done { result, .. } = made.verdict else {
+            panic!()
+        };
+        let id = agora_mesh::mcp::tool_result_value(&result).unwrap()["task_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        run(&b, &v, "alpha", "task_claim", json!({"task_id": id}), 2);
+        let saved = b.snapshot("p").unwrap();
+
+        // A new hub process: same view, empty memory, then the stored board.
+        let b2 = Boards::new();
+        b2.load("p", &saved);
+        let a = run(&b2, &v, "beta", "task_list", json!({}), 3);
+        let Verdict::Done { result, .. } = a.verdict else {
+            panic!()
+        };
+        let list = agora_mesh::mcp::tool_result_value(&result).unwrap();
+        assert_eq!(
+            (list[0]["title"].as_str(), list[0]["owner"].as_str()),
+            (Some("keep me"), Some("alpha/a"))
+        );
+        // New ids do not collide with restored ones.
+        let n = run(
+            &b2,
+            &v,
+            "beta",
+            "task_create",
+            json!({"title": "new", "depends_on": []}),
+            4,
+        );
+        let Verdict::Done { result, .. } = n.verdict else {
+            panic!()
+        };
+        assert_ne!(
+            agora_mesh::mcp::tool_result_value(&result).unwrap()["task_id"]
+                .as_str()
+                .unwrap(),
+            id
+        );
+
+        // The owner is no longer running after the restart: its claim is given back.
+        let b3 = Boards::new();
+        b3.load("p", &saved);
+        let mut gone = view(&["alpha", "beta"]);
+        gone.agents.remove("alpha/a");
+        assert_eq!(
+            code(&run(
+                &b3,
+                &gone,
+                "beta",
+                "task_claim",
+                json!({"task_id": id}),
+                5
+            )),
+            ""
+        );
+
+        // Garbage in the store never takes the hub down.
+        Boards::new().load("p", b"not json");
     }
 }

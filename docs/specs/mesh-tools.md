@@ -86,7 +86,7 @@ A `handoff` to `<node>/<agent>` moves the task and sends the receiver a message 
 is offline it fails with `node.offline` and the task does not move. When the hub cannot be reached, a project this node knows to
 be shared fails with `board.unavailable` (the agent's other tools and its worktree keep working); a project it does not know to be
 shared stays on the local broker. Tasks and leases made locally before a project became shared stay local. Not done yet: boards
-are kept in the hub's memory (a hub restart empties them; leases and tasks are advice, git is the final guard), `#channels` stay
+keep their tasks in the hub's SQLite file (settings key `board.<project>`, so they are in its backup); leases are held in memory and a hub restart drops them (they are advice with a TTL, git is the final guard), a task claimed by an agent that is gone after a restart is given back, `#channels` stay
 node-local, and the web window has no board view.
 
 ## Implementation status
