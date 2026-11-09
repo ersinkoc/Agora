@@ -63,6 +63,28 @@ pub fn local_listen(path: &std::path::Path) -> io::Result<LocalListener> {
     }
 }
 
+/// Puts a freshly downloaded program in place of the one at `target` (which may be running): the new file is made executable and
+/// renamed over it. Windows cannot replace a running program, so the old one is moved aside to `<target>.old` first.
+pub fn replace_executable(new: &std::path::Path, target: &std::path::Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(new, std::fs::Permissions::from_mode(0o755))?;
+        std::fs::rename(new, target)
+    }
+    #[cfg(not(unix))]
+    {
+        let mut old = target.as_os_str().to_owned();
+        old.push(".old");
+        let old = std::path::PathBuf::from(old);
+        let _ = std::fs::remove_file(&old);
+        std::fs::rename(target, &old)?;
+        std::fs::rename(new, target).inspect_err(|_| {
+            let _ = std::fs::rename(&old, target);
+        })
+    }
+}
+
 /// Writes `contents` to `path` readable and writable only by the current user (private keys and tokens), replacing any
 /// existing file. Elsewhere than Unix the file is written with the default permissions (Windows ACLs come with the
 /// Windows node).

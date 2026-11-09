@@ -20,10 +20,10 @@ agora-platform = { path = "../agora-platform" }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "time"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 getrandom = "0.2"
+# `agora update` checks the downloaded binary against its published SHA-256; already in the tree through rustls.
+ring = { version = "0.17", default-features = false }
 
 [dev-dependencies]
-# Signs grants with a real P-256 key in the signed-commands test (ADR-0041).
-ring = { version = "0.17", default-features = false }
 # Builds raw protocol frames in the stdio bridge test.
 prost = "0.14"
 # Reads the MCP config the node wrote, in the injection test.
