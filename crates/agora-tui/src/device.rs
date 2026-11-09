@@ -61,6 +61,37 @@ pub fn approval_message(node_id: &str, approval_id: &str, approved: bool) -> Vec
     m
 }
 
+/// The exact bytes a device signs for a grant (ADR-0041): a domain tag, then node id, grant id, scope, the commands joined by commas and
+/// the expiry in decimal milliseconds, NUL-separated.
+pub fn grant_message(
+    node_id: &str,
+    grant_id: &str,
+    scope: &str,
+    commands: &[String],
+    expires_at_ms: u64,
+) -> Vec<u8> {
+    let mut m = b"agora-grant-v1".to_vec();
+    for part in [
+        node_id,
+        grant_id,
+        scope,
+        &commands.join(","),
+        &expires_at_ms.to_string(),
+    ] {
+        m.push(0);
+        m.extend_from_slice(part.as_bytes());
+    }
+    m
+}
+
+/// A fresh grant id.
+pub fn new_grant_id() -> Option<String> {
+    use ring::rand::SecureRandom;
+    let mut b = [0u8; 8];
+    SystemRandom::new().fill(&mut b).ok()?;
+    Some(format!("gr-{}", hex(&b)))
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -74,6 +105,29 @@ mod tests {
                 agora_node::approvals::signed_message("laptop", "7", approved)
             );
         }
+    }
+
+    #[test]
+    fn the_grant_message_is_the_one_the_node_rebuilds() {
+        let commands = vec!["agent.stop".to_string(), "agent.prompt".to_string()];
+        assert_eq!(
+            grant_message(
+                "laptop",
+                "gr-1",
+                "agent:agent-1",
+                &commands,
+                1_700_000_000_000
+            ),
+            agora_node::grants::signed_message(
+                "laptop",
+                "gr-1",
+                "agent:agent-1",
+                &commands,
+                1_700_000_000_000
+            )
+        );
+        let id = new_grant_id().unwrap();
+        assert!(id.starts_with("gr-") && id.len() == 19, "{id}");
     }
 
     #[test]
