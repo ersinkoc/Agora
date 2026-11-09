@@ -890,6 +890,15 @@ fn agents_on_two_nodes_share_a_board_claims_leases_and_handoffs_and_it_fails_clo
     assert_eq!(list.as_array().unwrap().len(), 1);
     assert_eq!(list[0]["owner"], Value::Null);
 
+    // `mesh.remote` turned off on a node that knows the project is shared: the board is not reachable and local state is not used.
+    a.mesh.set_remote_allowed(false);
+    let (e, err) = call(
+        &mut ac,
+        "lease_acquire",
+        json!({"paths": ["src/z.rs"], "ttl_s": 60}),
+    );
+    assert!(err && e["error"]["code"] == "board.unavailable", "{e}");
+
     // Without the hub a shared project's board fails closed and says so; the agent's own tools keep working.
     drop(ua);
     let (e, err) = call(&mut ac, "task_list", json!({}));

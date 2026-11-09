@@ -172,7 +172,6 @@ fn board_reply(
     if method != "tools/call" || !(channel || BOARD_TOOLS.contains(&name)) {
         return None;
     }
-    let link = remote.lock().unwrap_or_else(|e| e.into_inner()).clone()?;
     let project = mesh
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -180,6 +179,19 @@ fn board_reply(
         .project
         .clone();
     let known = shares.get(&project);
+    let unavailable = || {
+        let text =
+            json!({"error": {"code": "board.unavailable", "params": {"project_id": project}}});
+        Message::Response {
+            id: id.clone(),
+            result: json!({"content": [{"type": "text", "text": text.to_string()}], "isError": true}),
+        }
+    };
+    // No link (the node never had a hub, or `mesh.remote` is off): a project known to be shared must not fall back to local
+    // state, or two machines could each believe they hold the same path.
+    let Some(link) = remote.lock().unwrap_or_else(|e| e.into_inner()).clone() else {
+        return matches!(known, Some((true, _))).then(unavailable);
+    };
     if matches!(known, Some((false, at)) if at.elapsed() < LOCAL_FOR) {
         return None;
     }
@@ -193,14 +205,6 @@ fn board_reply(
             let _ = tx.send(r);
         }),
     );
-    let unavailable = || {
-        let text =
-            json!({"error": {"code": "board.unavailable", "params": {"project_id": project}}});
-        Message::Response {
-            id: id.clone(),
-            result: json!({"content": [{"type": "text", "text": text.to_string()}], "isError": true}),
-        }
-    };
     match rx.recv_timeout(BOARD_WAIT) {
         Ok(Ok(r)) if r.shared => {
             shares.set(&project, true);

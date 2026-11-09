@@ -20,6 +20,8 @@ use crate::projection::View;
 /// A handoff the hub must now pass to the receiving agent's node, after the board accepted it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Handoff {
+    pub project_id: String,
+    pub task_id: Option<String>,
     pub to_node: String,
     pub to_agent: String,
     pub from_node: String,
@@ -196,6 +198,21 @@ impl Boards {
             refs,
         });
         a
+    }
+
+    /// Undoes a handoff whose message could not be delivered: the task goes back to the giver. Returns the audit events.
+    pub fn revert_handoff(&self, h: &Handoff) -> Vec<Body> {
+        let Some(task) = &h.task_id else {
+            return Vec::new();
+        };
+        let mut g = self.by_project.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(mesh) = g.get_mut(&h.project_id) else {
+            return Vec::new();
+        };
+        let giver = AgentId::new(format!("{}/{}", h.from_node, h.from_agent));
+        let receiver = AgentId::new(format!("{}/{}", h.to_node, h.to_agent));
+        mesh.reassign_task(task, &receiver, &giver);
+        mesh.take_events()
     }
 
     pub fn has(&self, project: &str) -> bool {
@@ -378,6 +395,11 @@ impl Boards {
         let events = mesh.take_events();
         let handoff = match (&target, is_error, tool) {
             (Some((to_node, to_agent)), false, "handoff") => Some(Handoff {
+                project_id: project.to_string(),
+                task_id: args
+                    .get("task_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
                 to_node: to_node.clone(),
                 to_agent: to_agent.clone(),
                 from_node: node.to_string(),
@@ -690,6 +712,73 @@ mod tests {
                 "lease_acquire",
                 json!({"paths": ["gone"], "ttl_s": 10}),
                 10_001
+            )),
+            ""
+        );
+    }
+
+    #[test]
+    fn a_handoff_that_could_not_be_delivered_is_undone() {
+        let b = Boards::new();
+        let v = view(&["alpha", "beta"]);
+        let made = run(
+            &b,
+            &v,
+            "alpha",
+            "task_create",
+            json!({"title": "t", "depends_on": []}),
+            1,
+        );
+        let Verdict::Done { result, .. } = made.verdict else {
+            panic!()
+        };
+        let id = agora_mesh::mcp::tool_result_value(&result).unwrap()["task_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        run(&b, &v, "alpha", "task_claim", json!({"task_id": id}), 2);
+        let a = run(
+            &b,
+            &v,
+            "alpha",
+            "handoff",
+            json!({"to": "beta/a", "task_id": id, "summary": "s", "refs": []}),
+            3,
+        );
+        let h = a.handoff.unwrap();
+        assert_eq!(
+            code(&run(
+                &b,
+                &v,
+                "alpha",
+                "task_complete",
+                json!({"task_id": id, "summary": "x"}),
+                4
+            )),
+            "task.not_owner"
+        );
+        let events = b.revert_handoff(&h);
+        assert!(!events.is_empty());
+        // Back with the giver, who can finish it; the receiver cannot.
+        assert_eq!(
+            code(&run(
+                &b,
+                &v,
+                "beta",
+                "task_complete",
+                json!({"task_id": id, "summary": "x"}),
+                5
+            )),
+            "task.not_owner"
+        );
+        assert_eq!(
+            code(&run(
+                &b,
+                &v,
+                "alpha",
+                "task_complete",
+                json!({"task_id": id, "summary": "x"}),
+                6
             )),
             ""
         );

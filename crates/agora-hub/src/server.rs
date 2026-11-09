@@ -163,12 +163,18 @@ where
     // Mesh posts this node sent for another node (ADR-0031): answers come back here from tasks that wait on the target.
     let (posted_tx, mut posted) = tokio::sync::mpsc::unbounded_channel::<v1::CommandResponse>();
     let posts_open = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    // Handoffs the board accepted but the receiving node did not take: undone here, where the hub is at hand.
+    let (revert_tx, mut reverts) = tokio::sync::mpsc::unbounded_channel::<crate::board::Handoff>();
     loop {
         let idle;
         let received = tokio::select! {
             r = tokio::time::timeout(ACK_IDLE, conn.recv()) => r,
             Some(answer) = posted.recv() => {
                 conn.send(&frame(STREAM_COMMANDS, 1, answer.encode_to_vec())).await?;
+                continue;
+            }
+            Some(handoff) = reverts.recv() => {
+                hub.board_revert(&handoff, now_ms());
                 continue;
             }
             Some(to_node) = commands.recv() => {
@@ -212,7 +218,14 @@ where
                         let posted_tx = posted_tx.clone();
                         let answer = v1::CommandRequest::decode(f.payload.as_slice())
                             .map_err(|_| invalid("request"))?;
-                        post_for_node(hub, node_id, answer, &posts_open, posted_tx);
+                        post_for_node(
+                            hub,
+                            node_id,
+                            answer,
+                            &posts_open,
+                            posted_tx,
+                            revert_tx.clone(),
+                        );
                     }
                     // An answer to a routed command: hand it to whoever asked. A garbled answer is dropped, and
                     // the asker's deadline turns it into `node.timeout`.
@@ -600,6 +613,7 @@ fn post_for_node(
     req: v1::CommandRequest,
     open: &Arc<std::sync::atomic::AtomicUsize>,
     answers: tokio::sync::mpsc::UnboundedSender<v1::CommandResponse>,
+    reverts: tokio::sync::mpsc::UnboundedSender<crate::board::Handoff>,
 ) {
     use std::sync::atomic::Ordering;
     let rid = req.request_id.clone();
@@ -609,7 +623,7 @@ fn post_for_node(
     let post = match req.command {
         Some(command_request::Command::MeshPost(post)) => post,
         Some(command_request::Command::BoardCall(call)) => {
-            return board_for_node(hub, node_id, &rid, &call, open, answers);
+            return board_for_node(hub, node_id, &rid, &call, open, answers, reverts);
         }
         _ => {
             return refuse(Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "command"));
@@ -681,9 +695,18 @@ fn board_for_node(
     call: &v1::BoardCall,
     open: &Arc<std::sync::atomic::AtomicUsize>,
     answers: tokio::sync::mpsc::UnboundedSender<v1::CommandResponse>,
+    reverts: tokio::sync::mpsc::UnboundedSender<crate::board::Handoff>,
 ) {
     use crate::board::Verdict;
     use std::sync::atomic::Ordering;
+    // A handoff waits for the receiving node, so it counts against the same cap as a mesh post.
+    if call.tool == "handoff" && open.load(Ordering::Relaxed) >= MAX_NODE_POSTS {
+        let e = Error::new(ErrorCode::NodeResourceLimit)
+            .with("resource", "requests")
+            .with("limit", MAX_NODE_POSTS as i64);
+        let _ = answers.send(error_response(rid, &e));
+        return;
+    }
     let a = hub.board_call(node_id, call, now_ms());
     let ok = |shared: bool, result: String, is_error: bool| v1::CommandResponse {
         request_id: rid.to_string(),
@@ -726,10 +749,11 @@ fn board_for_node(
         let _ = answers.send(ok(true, result, is_error));
         return;
     }
-    let Some(h) = a.handoff else {
+    let Some(handoff) = a.handoff else {
         let _ = answers.send(ok(true, result, is_error));
         return;
     };
+    let h = &handoff;
     // The message for the receiver: sent like a node's own `MeshPost`, with `origin` from the hub.
     let forwarded = v1::CommandRequest {
         request_id: String::new(),
@@ -737,21 +761,22 @@ fn board_for_node(
         target_node: String::new(),
         command: Some(command_request::Command::MeshPost(v1::MeshPost {
             to: h.to_agent.clone(),
-            body: h.body,
-            origin: h.from_node,
-            from_agent: h.from_agent,
-            refs: h.refs,
+            body: h.body.clone(),
+            origin: h.from_node.clone(),
+            from_agent: h.from_agent.clone(),
+            refs: h.refs.clone(),
         })),
     };
     let reply = match hub.router().send(&h.to_node, forwarded) {
         Ok(r) => r,
         Err(e) => {
+            let _ = reverts.send(handoff);
             let _ = answers.send(error_response(rid, &e));
             return;
         }
     };
     open.fetch_add(1, Ordering::Relaxed);
-    let (open, rid, node) = (Arc::clone(open), rid.to_string(), h.to_node);
+    let (open, rid, node) = (Arc::clone(open), rid.to_string(), handoff.to_node.clone());
     tokio::spawn(async move {
         // The board has accepted the handoff; whether the message arrived only changes what the giver is told.
         let delivered = matches!(
@@ -762,6 +787,9 @@ fn board_for_node(
             }))
         );
         open.fetch_sub(1, Ordering::Relaxed);
+        if !delivered {
+            let _ = reverts.send(handoff);
+        }
         let resp = if delivered {
             v1::CommandResponse {
                 request_id: rid,

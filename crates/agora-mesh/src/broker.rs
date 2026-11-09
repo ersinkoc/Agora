@@ -760,12 +760,11 @@ impl Mesh {
         }
     }
 
-    /// Every lease of one project that has not expired, as `(path, holder, expires_at_ms)`.
-    pub fn export_leases(&self, project: &str, now_ms: u64) -> Vec<(String, AgentId, u64)> {
+    /// Every lease of one project, as `(path, holder, expires_at_ms)`; the store keeps expired ones until a restore releases them.
+    pub fn export_leases(&self, project: &str, _now_ms: u64) -> Vec<(String, AgentId, u64)> {
         self.leases.get(project).map_or_else(Vec::new, |t| {
             t.all()
                 .iter()
-                .filter(|l| !l.is_expired(now_ms))
                 .map(|l| (l.path.clone(), l.holder.clone(), l.expires_at_ms))
                 .collect()
         })
@@ -777,8 +776,30 @@ impl Mesh {
         for (path, holder, expires) in leases {
             if *expires > now_ms {
                 let _ = table.acquire(path, holder, now_ms, expires - now_ms);
+            } else {
+                // It ended while the hub was away; clients that rebuilt their view from the log still show it granted.
+                self.events.push(Body::LeaseReleased(LeaseReleased {
+                    agent_id: holder.as_str().to_string(),
+                    path: path.clone(),
+                }));
             }
         }
+    }
+
+    /// Moves a claimed task from `from` to `to` if `from` is not the owner any more (a handoff that could not be delivered is
+    /// undone this way). Returns whether it moved.
+    pub fn reassign_task(&mut self, id: &str, from: &AgentId, to: &AgentId) -> bool {
+        let tid = TaskId::new(id);
+        let Some(rec) = self.tasks.get_mut(&tid) else {
+            return false;
+        };
+        if !matches!(rec.task.state(), TaskState::Claimed(a) if a == from) {
+            return false;
+        }
+        let _ = rec.task.release(from);
+        let moved = rec.task.claim(to).is_ok();
+        self.task_changed(&tid);
+        moved
     }
 
     /// Gives back claimed tasks whose owner is not a registered agent (it ended, or the broker was restored without it).
