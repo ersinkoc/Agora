@@ -239,12 +239,17 @@ mod tests {
             ("run", b"#!", b'0'),
         ]))
         .unwrap();
-        let out = registered_manifest("demo", &e, Path::new("/h/adapters/demo/1")).unwrap();
-        assert!(
-            out.contains("/h/adapters/demo/1/run")
-                && out.contains("\"--x\"")
-                && out.contains("\"node\"")
-        );
+        let dir = Path::new("/h/adapters/demo/1");
+        let out = registered_manifest("demo", &e, dir).unwrap();
+        let doc: toml::Table = out.parse().unwrap();
+        let cmd: Vec<&str> = doc["adapter"]["command"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        let run = dir.join("run");
+        assert_eq!(cmd, [run.to_str().unwrap(), "--x", "node"]);
         assert_eq!(adapter_command(&e).unwrap()[0], "./run");
         // A different kind, a missing file and a bad name are refused.
         assert_eq!(
