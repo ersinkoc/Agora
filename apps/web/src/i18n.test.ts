@@ -1,6 +1,6 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { pickLanguage, setLanguage, t } from './i18n';
+import { directionOf, pickLanguage, setLanguage, t } from './i18n';
 
 // Every key the UI asks for must exist in locales/en/web.ftl (a missing key would render as its id).
 function sources(dir: string): string[] {
@@ -20,6 +20,10 @@ describe('i18n', () => {
   it('has the dynamic state and theme keys', () => {
     for (const s of ['working', 'needs-you', 'finished', 'idle', 'unknown']) expect(t(`state-${s}`)).not.toBe(`state-${s}`);
     for (const s of ['dark', 'light']) expect(t(`theme-${s}`)).not.toBe(`theme-${s}`);
+  });
+  it('lays the page out right to left for the languages written that way', () => {
+    for (const l of ['ar', 'he', 'fa-IR', 'ur']) expect(directionOf(l), l).toBe('rtl');
+    for (const l of ['en', 'tr', 'de', '']) expect(directionOf(l), l).toBe('ltr');
   });
   it('pluralizes', () => {
     expect(t('machines-online', { count: 1 })).toBe('1 machine online');
