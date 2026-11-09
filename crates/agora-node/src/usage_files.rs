@@ -300,10 +300,10 @@ mod tests {
         }
     }
 
+    /// Built with serde_json: a Windows path has backslashes that a hand-written JSON string would not escape.
     fn line(cwd: &str, id: &str, i: u64, o: u64) -> String {
-        format!(
-            r#"{{"type":"assistant","cwd":"{cwd}","model":"m","id":"{id}","in":{i},"out":{o}}}"#
-        )
+        serde_json::json!({"type":"assistant","cwd":cwd,"model":"m","id":id,"in":i,"out":o})
+            .to_string()
     }
 
     fn tmp(name: &str) -> PathBuf {
@@ -437,7 +437,7 @@ mod tests {
         step(&mut w, &t, 0);
         // The first usage line has no `cwd` of its own; a later line says it.
         let first = r#"{"type":"assistant","model":"m","id":"p1","in":3,"out":1}"#;
-        let later = r#"{"type":"user","cwd":"WORK"}"#.replace("WORK", &work.to_string_lossy());
+        let later = serde_json::json!({"type":"user","cwd":work.to_string_lossy()}).to_string();
         std::fs::write(d.join("logs/p/s.jsonl"), format!("{first}\n{later}\n")).unwrap();
         let got = step(&mut w, &t, 1);
         assert_eq!(got.len(), 1, "{got:?}");

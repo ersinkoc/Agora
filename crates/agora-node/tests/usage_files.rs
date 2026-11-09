@@ -29,7 +29,8 @@ fn git(dir: &Path, args: &[&str]) {
 }
 
 fn line(cwd: &str, id: &str, i: u64, o: u64) -> String {
-    format!(r#"{{"type":"assistant","cwd":"{cwd}","model":"m-1","id":"{id}","in":{i},"out":{o}}}"#)
+    serde_json::json!({"type":"assistant","cwd":cwd,"model":"m-1","id":id,"in":i,"out":o})
+        .to_string()
 }
 
 #[test]
