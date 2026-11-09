@@ -48,6 +48,15 @@ priority = 900
 region = "bottom_non_empty_lines(12)"
 all = [{ contains = "Would you like to run the following command?" }, { contains = "esc to cancel" }]
 
+# On the first start after a lifecycle hook was added to the user's config, Codex opens a review dialog (`t trust all`) that waits
+# for the user; its menu rows start with `›`, which the prompt box rule below would take for the idle prompt.
+[[rules]]
+id = "hook_review"
+state = "blocked"
+priority = 950
+region = "bottom_non_empty_lines(12)"
+all = [{ contains = "t trust all" }, { contains = "enter review" }]
+
 [[rules]]
 id = "esc_to_interrupt"
 state = "working"
