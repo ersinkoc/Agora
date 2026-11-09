@@ -171,6 +171,39 @@ pub fn package_dir(home: &Path, name: &str, version: &str) -> PathBuf {
     home.join("adapters").join(name).join(version)
 }
 
+/// The Agora folder (`AGORA_HOME`, else `~/.agora`), where installed adapters and the stored registry index live.
+pub fn agora_home() -> PathBuf {
+    if let Some(h) = std::env::var_os("AGORA_HOME") {
+        return PathBuf::from(h);
+    }
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map_or_else(
+            || PathBuf::from(".agora"),
+            |h| PathBuf::from(h).join(".agora"),
+        )
+}
+
+/// When `program` is a file of a package installed under `<home>/adapters/<name>/<version>/` whose publisher the stored registry
+/// index marks revoked, that publisher's id (ADR-0044: such an adapter is not started until the user removes or replaces it).
+pub fn revoked_publisher_of(home: &Path, program: &str) -> Option<String> {
+    let rel = Path::new(program)
+        .strip_prefix(home.join("adapters"))
+        .ok()?;
+    let mut parts = rel.components();
+    let (name, version) = (parts.next()?, parts.next()?);
+    parts.next()?;
+    let dir = home.join("adapters").join(name).join(version);
+    let publisher = std::fs::read_to_string(dir.join("publisher"))
+        .ok()?
+        .trim()
+        .to_string();
+    let index = std::fs::read_to_string(home.join("registry-index")).ok()?;
+    crate::registry::revoked_publishers(&index)
+        .contains(&publisher)
+        .then_some(publisher)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -219,6 +252,32 @@ mod tests {
             Err(PackageError::Malformed)
         );
         assert_eq!(unpack(&[1u8; 100]), Err(PackageError::Malformed));
+    }
+
+    #[test]
+    fn a_program_of_a_package_whose_publisher_is_revoked_is_found() {
+        let home = std::env::temp_dir().join(format!("agora-revoked-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let dir = home.join("adapters/demo/1");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("publisher"), "acme\n").unwrap();
+        let program = dir.join("run").to_string_lossy().into_owned();
+        let index = |revoked: bool| {
+            let payload = format!("{{\"version\":1,\"expires_ms\":1,\"publishers\":[{{\"id\":\"acme\",\"key\":\"00\",\"revoked\":{revoked}}}],\"packages\":[]}}");
+            format!(
+                "{{\"payload\":{},\"sig\":\"\"}}",
+                serde_json::to_string(&payload).unwrap()
+            )
+        };
+        // No stored index, a clean one, a revoking one; and a program that is not part of any package.
+        assert_eq!(revoked_publisher_of(&home, &program), None);
+        std::fs::write(home.join("registry-index"), index(false)).unwrap();
+        assert_eq!(revoked_publisher_of(&home, &program), None);
+        std::fs::write(home.join("registry-index"), index(true)).unwrap();
+        assert_eq!(revoked_publisher_of(&home, &program), Some("acme".into()));
+        assert_eq!(revoked_publisher_of(&home, "/usr/bin/sh"), None);
+        assert_eq!(revoked_publisher_of(&home, "demo"), None);
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]

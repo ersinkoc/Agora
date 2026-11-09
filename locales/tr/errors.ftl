@@ -17,6 +17,7 @@ worktree-exists = { $branch } dalı için bir çalışma alanı zaten var.
 worktree-unmerged = { $branch } dalındaki değişiklikler başka hiçbir yerde kayıtlı değil.
 agent-not_found = { $agent_id } ajanı bulunamadı.
 agent-kind_unknown = { $kind } ajan türü kullanılamıyor.
+agent-publisher_revoked = { $kind } bağdaştırıcısı, kayıt defterinin iptal ettiği { $publisher } yayımcısından geliyor. Kaldırın ya da başka bir yayımcıdan kurun.
 agent-not_authenticated = { $kind }, { $node_id } makinesinde oturum açmamış.
 agent-blocked = { $agent_id } ajanı girdi bekliyor, bu yüzden ileti gönderilmedi.
 agent-mode_unsupported = { $kind }, { $mode } kipini desteklemiyor.
