@@ -242,11 +242,139 @@ fn the_terminal_console_gets_the_snapshot_of_a_node_and_draws_it() {
     let text = |id: &str, args: &[(&str, agora_i18n::Arg)]| {
         catalog.render(id, args).unwrap_or_else(|| id.to_string())
     };
-    let screen = agora_tui::render::render(&snapshot, false, &text).join("\n");
+    let screen = agora_tui::render::render(&snapshot, false, false, "", &text).join("\n");
     assert!(
         screen.contains("agent-1") && screen.contains("1 of 1 machines online"),
         "{screen}"
     );
+}
+
+#[test]
+fn the_terminal_console_answers_an_approval_with_its_own_key_through_the_hub() {
+    use agora_node::control::Client;
+    use agora_protocol::v1::{self, command_request::Command as Cmd};
+    use agora_tui::client::{Hub as ConsoleHub, Session, Update};
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return;
+    }
+    let hub = hubside("node-test");
+    let addr = hub.listen("127.0.0.1:0");
+    let dir = tmp("console-approve");
+    let repo = dir.join("myproject");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("a.txt"), "x").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "init"]);
+    let manifests = dir.join("manifests");
+    std::fs::create_dir_all(&manifests).unwrap();
+    let mut fake = std::path::PathBuf::from(env!("CARGO_BIN_EXE_agora"));
+    fake.pop();
+    fake.push(format!("agora-fake-agent{}", std::env::consts::EXE_SUFFIX));
+    if !fake.exists() {
+        assert!(std::process::Command::new(
+            std::env::var("CARGO").unwrap_or_else(|_| "cargo".into())
+        )
+        .args(["build", "-q", "-p", "agora-fake-agent"])
+        .status()
+        .unwrap()
+        .success());
+    }
+    std::fs::write(
+        manifests.join("ad.toml"),
+        format!("kind = \"adapted\"\ndisplay_name = \"A\"\nversion = \"1\"\nmin_engine = 1\n[adapter]\ncommand = [{:?}, \"--adapter\"]\n", fake.to_string_lossy()),
+    )
+    .unwrap();
+
+    // This console's key; the machine's owner trusts it the way `agora node trust` does.
+    let (device, _) = agora_tui::device::Device::generate().unwrap();
+    let data = dir.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    agora_node::approvals::trust_device(
+        &data.join(agora_node::approvals::TRUSTED_DEVICES_FILE),
+        &device.id,
+        &device.public_key_hex(),
+    )
+    .unwrap();
+    let cfg = agora_node::daemon::NodeConfig {
+        node_id: "node-test".into(),
+        socket: dir.join("c.sock"),
+        data_dir: data,
+        worktree_root: dir.join("wt"),
+        manifests_dir: manifests,
+        projects: vec![repo],
+        limits: Default::default(),
+    };
+    let node = agora_node::daemon::Node::start(&cfg).unwrap();
+    let mut link = hub.link(addr);
+    link.commands = Some(cfg.socket.clone());
+    let _uplink = spawn(Arc::clone(&node.events), link).unwrap();
+    wait("the node to be online in the hub", || {
+        hub.state
+            .hub
+            .view()
+            .0
+            .nodes
+            .get("node-test")
+            .is_some_and(|n| n.online)
+    });
+
+    // The adapter agent asks for something; the machine now waits for a signed answer.
+    let mut local = Client::connect(&cfg.socket).unwrap();
+    let started = local
+        .call(Cmd::AgentStart(v1::AgentStart {
+            kind: "adapted".into(),
+            ..Default::default()
+        }))
+        .unwrap()
+        .unwrap();
+    let Some(v1::command_ok::Result::AgentStart(s)) = started.result else {
+        panic!("not started");
+    };
+    local
+        .call(Cmd::AgentPrompt(v1::AgentPrompt {
+            agent_id: s.agent_id,
+            text: "ask".into(),
+        }))
+        .unwrap()
+        .unwrap();
+
+    let console = ConsoleHub {
+        addr: addr.to_string(),
+        ca_pem: hub.ca_pem.clone(),
+    };
+    let end = Instant::now() + Duration::from_secs(20);
+    let (mut session, snapshot) = loop {
+        let mut session = Session::connect(&console, "client-token").unwrap();
+        if let Update::Snapshot(s) = session.next(Duration::from_secs(2)) {
+            if !s.approvals.is_empty() {
+                break (session, *s);
+            }
+        }
+        assert!(
+            Instant::now() < end,
+            "the approval never reached the console"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert_eq!(node.approvals.pending_count(), 1);
+
+    // A device the machine does not trust is told so; the request keeps waiting.
+    let (stranger, _) = agora_tui::device::Device::generate().unwrap();
+    assert_eq!(
+        session.resolve_first_approval(&snapshot, &stranger, true),
+        Err("approval.signature_invalid".to_string())
+    );
+    assert_eq!(node.approvals.pending_count(), 1);
+    // This console's own key is accepted.
+    assert_eq!(
+        session.resolve_first_approval(&snapshot, &device, true),
+        Ok(true)
+    );
+    wait("the machine to take the answer", || {
+        node.approvals.pending_count() == 0
+    });
+    drop(node);
 }
 
 #[test]

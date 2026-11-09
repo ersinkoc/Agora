@@ -50,7 +50,9 @@ fn local(id: &str) -> &str {
 }
 
 /// One screen of lines for a snapshot. `color` off spells states out with a marker and no escape sequences (NO_COLOR).
-pub fn render(s: &Snapshot, color: bool, t: Text<'_>) -> Vec<String> {
+/// `keys` says the console takes answers from the keyboard (a hint line appears while something waits); `notice` is the last
+/// thing the user did, shown at the bottom.
+pub fn render(s: &Snapshot, color: bool, keys: bool, notice: &str, t: Text<'_>) -> Vec<String> {
     let (bold, dim, reset) = if color {
         (BOLD, DIM, RESET)
     } else {
@@ -108,6 +110,8 @@ pub fn render(s: &Snapshot, color: bool, t: Text<'_>) -> Vec<String> {
             "  {dim}{}{reset}",
             t(key!("tui-nothing-waiting"), &[])
         ));
+    } else if keys && !s.approvals.is_empty() {
+        out.push(format!("  {dim}{}{reset}", t(key!("tui-hint-answer"), &[])));
     }
     out.push(String::new());
 
@@ -159,6 +163,9 @@ pub fn render(s: &Snapshot, color: bool, t: Text<'_>) -> Vec<String> {
         out.push(format!("  {id}  {dim}{status}{reset}"));
     }
     out.push(String::new());
+    if !notice.is_empty() {
+        out.push(notice.to_string());
+    }
     out.push(format!("{dim}{}{reset}", t(key!("tui-quit-hint"), &[])));
     out
 }
@@ -228,7 +235,7 @@ mod tests {
 
     #[test]
     fn the_screen_says_what_waits_for_the_user_and_groups_agents_by_project() {
-        let lines = render(&snapshot(), false, &t);
+        let lines = render(&snapshot(), false, true, "", &t);
         let text = lines.join("\n");
         assert!(
             text.contains("tui-header[online=1,total=2,agents=2]"),
@@ -249,19 +256,25 @@ mod tests {
                 && lines[project + 2].contains("tui-state-working")
         );
         assert!(text.contains("vps") && text.contains("tui-offline[]"));
+        assert!(text.contains("tui-hint-answer[]"), "{text}");
+        let quiet = render(&snapshot(), false, false, "done!", &t).join("\n");
+        assert!(
+            !quiet.contains("tui-hint-answer") && quiet.contains("done!"),
+            "{quiet}"
+        );
     }
 
     #[test]
     fn without_color_there_are_no_escape_sequences() {
-        let text = render(&snapshot(), false, &t).join("\n");
+        let text = render(&snapshot(), false, true, "", &t).join("\n");
         assert!(!text.contains('\x1b'));
-        let colored = render(&snapshot(), true, &t).join("\n");
+        let colored = render(&snapshot(), true, true, "", &t).join("\n");
         assert!(colored.contains('\x1b'));
     }
 
     #[test]
     fn an_empty_hub_says_nothing_waits_and_there_are_no_agents() {
-        let text = render(&Snapshot::default(), false, &t).join("\n");
+        let text = render(&Snapshot::default(), false, true, "", &t).join("\n");
         assert!(
             text.contains("tui-nothing-waiting[]") && text.contains("tui-no-agents[]"),
             "{text}"

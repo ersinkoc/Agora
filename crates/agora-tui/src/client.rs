@@ -6,8 +6,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use agora_protocol::frame::{kinds, STREAM_EVENTS};
-use agora_protocol::v1::Snapshot;
+use crate::device::{approval_message, Device};
+use agora_protocol::frame::{kinds, STREAM_COMMANDS, STREAM_EVENTS};
+use agora_protocol::v1::{
+    command_request, command_response, CommandRequest, CommandResponse, Snapshot,
+};
 use agora_protocol::ws::{connect_with_token, Conn};
 use agora_protocol::Frame;
 use prost::Message;
@@ -120,6 +123,9 @@ pub fn sign_in(hub: &Hub, code: &str) -> Result<String, ClientError> {
 pub struct Session {
     rt: tokio::runtime::Runtime,
     conn: Conn<TlsStream<TcpStream>>,
+    requests: u64,
+    /// An event arrived while a command was waiting for its answer.
+    changed: bool,
 }
 
 /// What the hub sent next.
@@ -156,11 +162,19 @@ impl Session {
             .map_err(|_| ClientError::Unreachable)?;
             Ok::<_, ClientError>(conn)
         })?;
-        Ok(Session { rt, conn })
+        Ok(Session {
+            rt,
+            conn,
+            requests: 0,
+            changed: false,
+        })
     }
 
     /// Waits up to `wait` for the hub to say something.
     pub fn next(&mut self, wait: Duration) -> Update {
+        if std::mem::take(&mut self.changed) {
+            return Update::Changed;
+        }
         let conn = &mut self.conn;
         self.rt.block_on(async {
             match tokio::time::timeout(wait, conn.recv()).await {
@@ -180,5 +194,89 @@ impl Session {
                 Ok(_) => Update::Closed,
             }
         })
+    }
+
+    /// Runs a command on a machine through the hub (ADR-0029) and waits for its answer. `Err` carries the error code the machine or
+    /// the hub answered with (`approval.signature_invalid`, `node.offline`, ...), or `client.unreachable` when the link failed.
+    pub fn command(
+        &mut self,
+        node: &str,
+        command: command_request::Command,
+        wait: Duration,
+    ) -> Result<(), String> {
+        self.requests += 1;
+        let id = format!("t{}", self.requests);
+        let req = CommandRequest {
+            request_id: id.clone(),
+            idempotency_key: String::new(),
+            target_node: node.to_string(),
+            command: Some(command),
+        };
+        let conn = &mut self.conn;
+        let changed = &mut self.changed;
+        self.rt.block_on(async {
+            conn.send(&Frame {
+                stream_id: STREAM_COMMANDS,
+                kind: 0,
+                seq: None,
+                payload: req.encode_to_vec(),
+            })
+            .await
+            .map_err(|_| "client.unreachable".to_string())?;
+            let end = tokio::time::Instant::now() + wait;
+            loop {
+                let left = end.saturating_duration_since(tokio::time::Instant::now());
+                let f = match tokio::time::timeout(left, conn.recv()).await {
+                    Ok(Ok(Some(f))) => f,
+                    Err(_) => return Err("node.timeout".to_string()),
+                    Ok(_) => return Err("client.unreachable".to_string()),
+                };
+                if (f.stream_id, f.kind) == (STREAM_COMMANDS, 1) {
+                    let Ok(r) = CommandResponse::decode(f.payload.as_slice()) else {
+                        continue;
+                    };
+                    if r.request_id != id {
+                        continue;
+                    }
+                    return match r.result {
+                        Some(command_response::Result::Err(e)) => Err(e.code),
+                        _ => Ok(()),
+                    };
+                }
+                if f.stream_id == STREAM_EVENTS && f.kind == kinds::POSITIONED_EVENT {
+                    *changed = true;
+                }
+            }
+        })
+    }
+
+    /// Answers the first approval waiting in `snapshot` with this device's signature (ADR-0028). `Ok(true)` when there was one and the
+    /// machine took the answer, `Ok(false)` when nothing was waiting, `Err` with the error code otherwise
+    /// (`approval.signature_invalid` means the machine does not trust this device yet).
+    pub fn resolve_first_approval(
+        &mut self,
+        snapshot: &Snapshot,
+        device: &Device,
+        approved: bool,
+    ) -> Result<bool, String> {
+        let Some(a) = snapshot.approvals.first() else {
+            return Ok(false);
+        };
+        // Hub-wide ids are `<node>/<local id>`; the machine knows the local one.
+        let (node, local) = a
+            .approval_id
+            .split_once('/')
+            .unwrap_or(("", a.approval_id.as_str()));
+        let signature = device
+            .sign(&approval_message(node, local, approved))
+            .ok_or_else(|| "client.sign".to_string())?;
+        let cmd = command_request::Command::ApprovalResolve(agora_protocol::v1::ApprovalResolve {
+            approval_id: local.to_string(),
+            approved,
+            signer_device_id: device.id.clone(),
+            signature,
+        });
+        self.command(node, cmd, Duration::from_secs(15))
+            .map(|()| true)
     }
 }
