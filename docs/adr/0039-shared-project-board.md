@@ -1,6 +1,7 @@
 # 0039. A shared board for tasks, channels and leases across nodes
-Status: Proposed
+Status: Accepted
 Date: 2026-11-09
+Accepted: 2026-11-09 (maintainer's explicit approval in chat: "0039'u onaylıyorum")
 
 ## Context
 Phase 5's exit criterion: two agents on different machines complete a task with a handoff and no file collisions. Today every node

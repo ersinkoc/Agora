@@ -534,6 +534,7 @@ fn command_name(c: &Cmd) -> &'static str {
         Cmd::UsageReport(_) => "usage.report",
         Cmd::Enroll(_) => "enroll",
         Cmd::TaskUpdate(_) => "task.update",
+        Cmd::BoardCall(_) => "board.call",
         Cmd::NodePolicyGet(_) => "node.policy.get",
     }
 }

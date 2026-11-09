@@ -48,25 +48,30 @@ pub struct HubLink {
     pub mesh_out: Option<Arc<MeshOut>>,
 }
 
-type Done = Box<dyn FnOnce(Result<(), String>) + Send>;
+type Done = Box<dyn FnOnce(Result<Option<crate::mesh_server::BoardReply>, String>) + Send>;
+
+/// A board tool call (ADR-0039): project, tool, arguments as JSON.
+type BoardArgs = (String, String, String);
 
 struct PostJob {
     from_agent: String,
     to: String,
     body: String,
     refs: Vec<String>,
+    board: Option<BoardArgs>,
     done: Option<Done>,
 }
 
 impl PostJob {
     /// The parts, with the obligation to call `done` handed over.
-    fn take(mut self) -> (String, String, String, Vec<String>, Done) {
+    fn take(mut self) -> (String, String, String, Vec<String>, Option<BoardArgs>, Done) {
         let done = self.done.take().unwrap_or_else(|| Box::new(|_| {}));
         (
             std::mem::take(&mut self.from_agent),
             std::mem::take(&mut self.to),
             std::mem::take(&mut self.body),
             std::mem::take(&mut self.refs),
+            self.board.take(),
             done,
         )
     }
@@ -89,6 +94,14 @@ pub struct MeshOut {
 }
 
 impl MeshOut {
+    /// A job that cannot be queued is dropped, which fails it with `node.offline`.
+    fn queue(&self, job: PostJob) {
+        let tx = self.jobs.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if let Some(tx) = tx {
+            let _ = tx.send(job);
+        }
+    }
+
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
     }
@@ -105,19 +118,46 @@ impl MeshOut {
 }
 
 impl crate::mesh_server::RemoteLink for MeshOut {
-    fn post(&self, from_agent: &str, to: &str, body: &str, refs: &[String], done: Done) {
-        let tx = self.jobs.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        let job = PostJob {
+    fn post(
+        &self,
+        from_agent: &str,
+        to: &str,
+        body: &str,
+        refs: &[String],
+        done: Box<dyn FnOnce(Result<(), String>) + Send>,
+    ) {
+        self.queue(PostJob {
             from_agent: from_agent.to_string(),
             to: to.to_string(),
             body: body.to_string(),
             refs: refs.to_vec(),
-            done: Some(done),
-        };
-        // A job that cannot be queued is dropped, which fails it with `node.offline`.
-        if let Some(tx) = tx {
-            let _ = tx.send(job);
-        }
+            board: None,
+            done: Some(Box::new(move |r| done(r.map(|_| ())))),
+        });
+    }
+
+    fn board(
+        &self,
+        from_agent: &str,
+        project: &str,
+        tool: &str,
+        arguments_json: &str,
+        done: Box<dyn FnOnce(Result<crate::mesh_server::BoardReply, String>) + Send>,
+    ) {
+        self.queue(PostJob {
+            from_agent: from_agent.to_string(),
+            to: String::new(),
+            body: String::new(),
+            refs: Vec::new(),
+            board: Some((
+                project.to_string(),
+                tool.to_string(),
+                arguments_json.to_string(),
+            )),
+            done: Some(Box::new(move |r| {
+                done(r.and_then(|b| b.ok_or_else(|| "protocol.invalid_message".to_string())))
+            })),
+        });
     }
 }
 
@@ -353,20 +393,31 @@ where
                 continue;
             }
             Some(job) = async { match jobs.as_mut() { Some(j) => j.recv().await, None => std::future::pending().await } } => {
-                let (from_agent, to, body, refs, done) = job.take();
+                let (from_agent, to, body, refs, board, done) = job.take();
                 posts.next += 1;
                 let id = format!("m{}", posts.next);
                 let req = CommandRequest {
                     request_id: id.clone(),
                     idempotency_key: String::new(),
                     target_node: String::new(),
-                    command: Some(command_request::Command::MeshPost(agora_protocol::v1::MeshPost {
-                        to,
-                        body,
-                        origin: String::new(),
-                        from_agent,
-                        refs,
-                    })),
+                    command: Some(match board {
+                        Some((project_id, tool, arguments_json)) => {
+                            command_request::Command::BoardCall(agora_protocol::v1::BoardCall {
+                                project_id,
+                                tool,
+                                arguments_json,
+                                origin: String::new(),
+                                from_agent,
+                            })
+                        }
+                        None => command_request::Command::MeshPost(agora_protocol::v1::MeshPost {
+                            to,
+                            body,
+                            origin: String::new(),
+                            from_agent,
+                            refs,
+                        }),
+                    }),
                 };
                 posts.waiting.insert(id, done);
                 conn.send(&frame(STREAM_COMMANDS, 0, req.encode_to_vec())).await?;
@@ -412,7 +463,16 @@ where
                         if let Some(done) = posts.waiting.remove(&r.request_id) {
                             done(match r.result {
                                 Some(command_response::Result::Err(e)) => Err(e.code),
-                                _ => Ok(()),
+                                Some(command_response::Result::Ok(ok)) => match ok.result {
+                                    Some(agora_protocol::v1::command_ok::Result::BoardResult(
+                                        b,
+                                    )) => Ok(Some(crate::mesh_server::BoardReply {
+                                        shared: b.shared,
+                                        result_json: b.result_json,
+                                    })),
+                                    _ => Ok(None),
+                                },
+                                None => Ok(None),
                             });
                         }
                     }

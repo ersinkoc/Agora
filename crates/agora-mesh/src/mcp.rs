@@ -173,6 +173,51 @@ fn rpc_error(id: &Value, code: i64) -> Outcome {
     })
 }
 
+/// The tools that read or change a project's shared state (ADR-0039): on a shared project they run on the hub's board.
+pub const BOARD_TOOLS: &[&str] = &[
+    "task_list",
+    "task_create",
+    "task_claim",
+    "task_complete",
+    "lease_acquire",
+    "lease_release",
+    "handoff",
+];
+
+/// Runs one of [`BOARD_TOOLS`] for `agent` on `mesh` and returns the MCP tool result (what `tools/call` would send back).
+/// `None` for a tool not in the list or arguments that are not valid for it (a protocol error, not a tool error).
+pub fn board_tool(
+    agent: &AgentId,
+    name: &str,
+    args: &Value,
+    mesh: &mut Mesh,
+    now_ms: u64,
+) -> Option<Value> {
+    if !BOARD_TOOLS.contains(&name) {
+        return None;
+    }
+    let conn = McpConnection {
+        agent: agent.clone(),
+        initialized: true,
+    };
+    let params = json!({"name": name, "arguments": args});
+    match conn.call(&Value::Null, &params, mesh, now_ms) {
+        Outcome::Reply(Message::Response { result, .. }) => Some(result),
+        _ => None,
+    }
+}
+
+/// The text of a tool result's first content item, parsed (for callers that need the value itself).
+pub fn tool_result_value(result: &Value) -> Option<Value> {
+    let text = result.get("content")?.get(0)?.get("text")?.as_str()?;
+    serde_json::from_str(text).ok()
+}
+
+/// A tool result that says the call is not valid for this tool.
+pub fn invalid_params_error() -> i64 {
+    INVALID_PARAMS
+}
+
 impl McpConnection {
     pub fn new(agent: AgentId) -> Self {
         Self {
@@ -183,6 +228,11 @@ impl McpConnection {
 
     pub fn agent(&self) -> &AgentId {
         &self.agent
+    }
+
+    /// Whether the client has completed `initialize`.
+    pub fn initialized(&self) -> bool {
+        self.initialized
     }
 
     pub fn handle(&mut self, line: &str, mesh: &mut Mesh, now_ms: u64) -> Outcome {

@@ -215,3 +215,6 @@ role USER; adapter items map to TEXT, TOOL_CALL as JSON, PLAN as lines, DIFF wit
 ignores an id it already holds. The text is untrusted.
 
 `MeshPost.refs` (ADR-0035, field 5): the sender's refs as written; the receiving broker qualifies them with the hub-vouched `origin`.
+
+`BoardCall` (command 62, node → hub on the stream-1 request path like `MeshPost`) and `BoardResult` (`CommandOk` field 16), ADR-0039: a mesh tool on a shared
+project's board; see `docs/specs/mesh-tools.md#shared-board-adr-0039`. New error code `board.unavailable`.

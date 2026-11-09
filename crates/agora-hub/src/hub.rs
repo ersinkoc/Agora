@@ -52,6 +52,7 @@ struct Inner {
 }
 
 pub struct Hub {
+    boards: crate::board::Boards,
     prices: std::sync::RwLock<(std::sync::Arc<crate::usage::Catalog>, u64)>,
     store: SqliteStore,
     router: std::sync::Arc<crate::router::Router>,
@@ -70,6 +71,7 @@ impl Hub {
         let (view, pos) = View::rebuild(&store)?;
         let hub_seq = store.acked(RESERVED_HUB_ID)?;
         Ok(Self {
+            boards: crate::board::Boards::new(),
             prices: std::sync::RwLock::new((crate::usage::Catalog::bundled(), 0)),
             store,
             router: crate::router::Router::new(),
@@ -171,23 +173,56 @@ impl Hub {
     /// A node's connection ended without it saying goodbye: record that it is offline.
     pub fn node_disconnected(&self, node: &str, now_ms: u64) -> Result<(), StoreError> {
         let mut g = self.lock();
+        self.emit(
+            &mut g,
+            Body::NodeOffline(NodeOffline {
+                node_id: node.to_string(),
+            }),
+            now_ms,
+        )
+    }
+
+    /// Records an event the hub itself produced (as the reserved hub producer).
+    fn emit(&self, g: &mut Inner, body: Body, now_ms: u64) -> Result<(), StoreError> {
         let seq = g.hub_seq + 1;
         let event = Event {
             producer_id: RESERVED_HUB_ID.to_string(),
             seq,
             at_ms: now_ms,
-            body: Some(Body::NodeOffline(NodeOffline {
-                node_id: node.to_string(),
-            })),
+            body: Some(body),
         };
         if let Append::Applied { pos } =
             self.store
                 .append(RESERVED_HUB_ID, seq, now_ms, &event.encode_to_vec())?
         {
             g.hub_seq = seq;
-            Self::publish(&mut g, Delivered { pos, event });
+            Self::publish(g, Delivered { pos, event });
         }
         Ok(())
+    }
+
+    /// A board tool call from `node` (ADR-0039). The caller's identity is the connection's, never the call's. Events the
+    /// board produced are published here; a handoff to pass on to another node is returned for the caller to forward.
+    pub fn board_call(
+        &self,
+        node: &str,
+        call: &agora_protocol::v1::BoardCall,
+        now_ms: u64,
+    ) -> crate::board::Answer {
+        let mut g = self.lock();
+        let mut a = self.boards.call(
+            &g.view,
+            node,
+            &call.from_agent,
+            &call.project_id,
+            &call.tool,
+            &call.arguments_json,
+            now_ms,
+        );
+        for body in std::mem::take(&mut a.events) {
+            let _ = self.emit(&mut g, body, now_ms);
+        }
+        a
     }
 
     fn publish(g: &mut Inner, d: Delivered) {

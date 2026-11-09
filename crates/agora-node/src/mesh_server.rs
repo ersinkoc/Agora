@@ -12,16 +12,20 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use agora_core::AgentId;
 use agora_mesh::broker::{AgentInfo, AskStatus, Limits, Mesh};
-use agora_mesh::mcp::{McpConnection, Outcome};
+use agora_mesh::mcp::{McpConnection, Outcome, BOARD_TOOLS};
 use agora_platform::{local_listen, LocalStream};
 use agora_protocol::jsonrpc::{to_line, Message};
 use agora_protocol::v1::event::Body;
-use serde_json::Value;
+use serde_json::{json, Value};
 
+/// How long an agent's board call waits for the hub before it is treated as unreachable.
+const BOARD_WAIT: Duration = Duration::from_secs(10);
+/// How long "this project is not shared" is believed before the hub is asked again.
+const LOCAL_FOR: Duration = Duration::from_secs(10);
 const POLL: Duration = Duration::from_millis(100);
 /// A longer line is a broken or hostile client; the connection is closed.
 const MAX_LINE: usize = 1024 * 1024;
@@ -45,6 +49,26 @@ pub trait RemoteLink: Send + Sync {
         refs: &[String],
         done: Box<dyn FnOnce(Result<(), String>) + Send>,
     );
+
+    /// Asks the hub to run a mesh tool on a project's shared board (ADR-0039). `done` is called once. Must not block.
+    /// The default says the hub cannot be reached, so a link that does not know boards leaves everything local.
+    fn board(
+        &self,
+        _from_agent: &str,
+        _project: &str,
+        _tool: &str,
+        _arguments_json: &str,
+        done: Box<dyn FnOnce(Result<BoardReply, String>) + Send>,
+    ) {
+        done(Err("node.offline".into()));
+    }
+}
+
+/// The hub's answer to a board call (ADR-0039): not shared (run it locally) or the tool's MCP result as JSON.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoardReply {
+    pub shared: bool,
+    pub result_json: String,
 }
 
 type RemoteSlot = Mutex<Option<Arc<dyn RemoteLink>>>;
@@ -95,6 +119,102 @@ fn dispatch_outbound(mesh: &Arc<Mutex<Mesh>>, remote: &RemoteSlot, allowed: &Ato
     }
 }
 
+/// What this node last learned from the hub about each project (ADR-0039). A project known to be shared fails closed when
+/// the hub cannot be reached; one not known to be shared keeps working on the node's own broker.
+#[derive(Default)]
+struct Shares {
+    shared: Mutex<HashMap<String, (bool, Instant)>>,
+}
+
+impl Shares {
+    fn get(&self, project: &str) -> Option<(bool, Instant)> {
+        self.shared
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(project)
+            .copied()
+    }
+
+    fn set(&self, project: &str, shared: bool) {
+        self.shared
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(project.to_string(), (shared, Instant::now()));
+    }
+}
+
+/// A call to one of the board tools: on a shared project the hub's board answers; `None` means "use the local broker".
+fn board_reply(
+    conn: &McpConnection,
+    line: &str,
+    mesh: &Arc<Mutex<Mesh>>,
+    remote: &RemoteSlot,
+    shares: &Shares,
+) -> Option<Message> {
+    if !conn.initialized() {
+        return None;
+    }
+    let Ok(Message::Request { id, method, params }) = agora_protocol::jsonrpc::parse_line(line)
+    else {
+        return None;
+    };
+    let name = params.get("name").and_then(Value::as_str)?;
+    if method != "tools/call" || !BOARD_TOOLS.contains(&name) {
+        return None;
+    }
+    let args = params.get("arguments").cloned().unwrap_or(json!({}));
+    if !args.is_object() {
+        return None;
+    }
+    let link = remote.lock().unwrap_or_else(|e| e.into_inner()).clone()?;
+    let project = mesh
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .agent_info(conn.agent())?
+        .project
+        .clone();
+    let known = shares.get(&project);
+    if matches!(known, Some((false, at)) if at.elapsed() < LOCAL_FOR) {
+        return None;
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    link.board(
+        conn.agent().as_str(),
+        &project,
+        name,
+        &args.to_string(),
+        Box::new(move |r| {
+            let _ = tx.send(r);
+        }),
+    );
+    let unavailable = || {
+        let text =
+            json!({"error": {"code": "board.unavailable", "params": {"project_id": project}}});
+        Message::Response {
+            id: id.clone(),
+            result: json!({"content": [{"type": "text", "text": text.to_string()}], "isError": true}),
+        }
+    };
+    match rx.recv_timeout(BOARD_WAIT) {
+        Ok(Ok(r)) if r.shared => {
+            shares.set(&project, true);
+            let result = serde_json::from_str(&r.result_json).ok();
+            Some(match result {
+                Some(result) => Message::Response {
+                    id: id.clone(),
+                    result,
+                },
+                None => unavailable(),
+            })
+        }
+        Ok(Ok(_)) => {
+            shares.set(&project, false);
+            None
+        }
+        _ => matches!(known, Some((true, _))).then(unavailable),
+    }
+}
+
 struct AgentServer {
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
@@ -105,6 +225,7 @@ pub struct MeshServer {
     /// Whether messages may cross to and from other nodes (node policy `mesh.remote`, ADR-0031).
     remote_allowed: Arc<AtomicBool>,
     remote: Arc<RemoteSlot>,
+    shares: Arc<Shares>,
     mesh: Arc<Mutex<Mesh>>,
     dir: PathBuf,
     agents: Mutex<HashMap<AgentId, AgentServer>>,
@@ -135,6 +256,7 @@ impl MeshServer {
         Ok(Self {
             remote_allowed: Arc::new(AtomicBool::new(true)),
             remote: Arc::new(Mutex::new(None)),
+            shares: Arc::new(Shares::default()),
             mesh,
             dir: dir.to_path_buf(),
             agents: Mutex::new(HashMap::new()),
@@ -204,12 +326,13 @@ impl MeshServer {
             .register(info);
         let stop = Arc::new(AtomicBool::new(false));
         let thread = {
-            let (mesh, stop, agent, remote, allowed) = (
+            let (mesh, stop, agent, remote, allowed, shares) = (
                 Arc::clone(&self.mesh),
                 Arc::clone(&stop),
                 id.clone(),
                 Arc::clone(&self.remote),
                 Arc::clone(&self.remote_allowed),
+                Arc::clone(&self.shares),
             );
             std::thread::Builder::new()
                 .name("agora-mesh-agent".into())
@@ -218,17 +341,21 @@ impl MeshServer {
                     while !stop.load(Ordering::Acquire) {
                         match listener.accept() {
                             Ok(stream) => {
-                                let (mesh, stop, agent, remote, allowed) = (
+                                let (mesh, stop, agent, remote, allowed, shares) = (
                                     Arc::clone(&mesh),
                                     Arc::clone(&stop),
                                     agent.clone(),
                                     Arc::clone(&remote),
                                     Arc::clone(&allowed),
+                                    Arc::clone(&shares),
                                 );
                                 if let Ok(h) = std::thread::Builder::new()
                                     .name("agora-mesh-conn".into())
                                     .spawn(move || {
-                                        serve(stream, &agent, &mesh, &remote, &allowed, &stop)
+                                        serve(
+                                            stream, &agent, &mesh, &remote, &allowed, &shares,
+                                            &stop,
+                                        )
                                     })
                                 {
                                     conns.push(h);
@@ -334,6 +461,7 @@ fn serve(
     mesh: &Arc<Mutex<Mesh>>,
     remote: &RemoteSlot,
     allowed: &AtomicBool,
+    shares: &Shares,
     stop: &AtomicBool,
 ) {
     let Ok(read_half) = stream.try_clone() else {
@@ -353,6 +481,13 @@ fn serve(
                 let text = String::from_utf8_lossy(&line).trim().to_string();
                 line.clear();
                 if text.is_empty() {
+                    continue;
+                }
+                // A shared project's tasks, leases and handoffs are decided on the hub's board (ADR-0039).
+                if let Some(msg) = board_reply(&conn, &text, mesh, remote, shares) {
+                    if send(&mut writer, &msg).is_err() {
+                        break;
+                    }
                     continue;
                 }
                 let outcome = {

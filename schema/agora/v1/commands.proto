@@ -45,6 +45,8 @@ message CommandRequest {
     GitLog git_log = 18;
     // ADR-0038: opened on a dynamic stream like TerminalSubscribe; frames follow (kind 10 snapshot, kind 11 entry).
     ChatSubscribe chat_subscribe = 19;
+    // ADR-0039: node -> hub, a mesh tool that touches a shared project's board.
+    BoardCall board_call = 62;
     // ADR-0027: sent on a TLS connection that has no client certificate yet; accepts nothing else.
     EnrollRequest enroll = 80;
   }
@@ -76,6 +78,7 @@ message CommandOk {
     AgentKindsResult agent_kinds = 13;
     UsageReportResult usage_report = 14;
     GitLogResult git_log = 15;
+    BoardResult board_result = 16;
   }
 }
 
@@ -200,6 +203,27 @@ message MeshPost {
   string from_agent = 4;
   // ADR-0035: the sender's refs (paths, commits, task ids) as written. The receiving broker stores each as `<origin>:<ref>`.
   repeated string refs = 5;
+}
+
+// ADR-0039. `tool` is one of task_list, task_create, task_claim, task_complete, lease_acquire, lease_release, handoff.
+message BoardCall {
+  string project_id = 1;
+  string tool = 2;
+  // The tool's arguments exactly as the agent gave them (a JSON object).
+  string arguments_json = 3;
+  // Set by the hub from the connection's certificate; a node cannot write it.
+  string origin = 4;
+  // The calling agent's id on this node (a node can only vouch for its own agents).
+  string from_agent = 5;
+}
+
+// The hub's answer. `shared` is false when the project is not on two or more online nodes: nothing was done and the node
+// runs the tool on its own broker. Otherwise `result_json` is the tool's result and `is_error` says whether it is a tool error
+// (`{"code":..., "data":...}` like a local one).
+message BoardResult {
+  bool shared = 1;
+  string result_json = 2;
+  bool is_error = 3;
 }
 
 message TaskUpdate {
