@@ -28,9 +28,9 @@ phase exit.
 
 | # | Threat | Mitigation |
 | --- | --- | --- |
-| T1 | Hub compromise → commands to all nodes | Node-local policy; sensitive actions require user-signed approvals verified on the node (ADR-0020) |
+| T1 | Hub compromise → commands to all nodes | Node-local policy; sensitive actions require user-signed approvals verified on the node (ADR-0020). **Gap:** approvals today cover what an agent asks to do (`approval_required`); the commands a hub or client routes to a node (`agent.start`, `agent.prompt`, `terminal.input`) run without a signature, so a compromised hub can still start and drive agents. Closing it needs a signed-command field and its own ADR (found by the Codex review of 2026-11-09, `docs/reviews/2026-11-09-codex-security-surfaces.md`) |
 | T2 | Stolen client session | Passkeys (WebAuthn, hub stores public keys only; a one-time code remains the first sign-in); 12-hour sessions stored hashed; device-bound keys; approvals require device signature |
-| T3 | Rogue node enrollment | One-time enrollment codes, user confirmation in window, mTLS, revocation (ADR-0015) |
+| T3 | Rogue node enrollment | One-time enrollment codes, user confirmation in window, mTLS, revocation (ADR-0015); enrolling again under a name revokes the earlier certificate for it (one live identity per node id) and live connections are re-checked every 10 s, so a revoked node, an expired session or "sign out everywhere" ends the connection that is already open |
 | T4 | Cross-agent prompt injection over mesh (agent A tells agent B to exfiltrate or delete) | Messages marked untrusted with provenance; standing instruction to agents; approvals unaffected by mesh content; rate limits |
 | T5 | Prompt injection from repository content causing destructive commands | Approval policies per node/project; deny-lists for destructive commands; worktree isolation limits blast radius |
 | T6 | Malicious adapter or manifest | Signed packages, pinned publisher keys, user approval to install, private registry option (ADR-0018) |

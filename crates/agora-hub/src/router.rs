@@ -313,9 +313,13 @@ impl Router {
 pub fn forwardable(req: &v1::CommandRequest) -> Result<&str, Error> {
     match &req.command {
         None => Err(Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "command")),
-        Some(command_request::Command::Enroll(_)) => {
-            Err(Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "command"))
-        }
+        // `MeshPost` and `BoardCall` are what a node sends the hub (the hub writes `origin` from the certificate); a client
+        // forwarding one would put its own `origin` on a message, so they are not client commands.
+        Some(
+            command_request::Command::Enroll(_)
+            | command_request::Command::MeshPost(_)
+            | command_request::Command::BoardCall(_),
+        ) => Err(Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "command")),
         Some(_) if req.target_node.is_empty() => {
             Err(Error::new(ErrorCode::NodeUnknown).with("node_id", ""))
         }
@@ -440,6 +444,11 @@ mod tests {
         ));
         assert!(forwardable(&e).is_err());
         e.command = None;
+        assert!(forwardable(&e).is_err());
+        // What a node says to the hub is not something a client may forward (it would choose its own `origin`).
+        e.command = Some(command_request::Command::MeshPost(v1::MeshPost::default()));
+        assert!(forwardable(&e).is_err());
+        e.command = Some(command_request::Command::BoardCall(v1::BoardCall::default()));
         assert!(forwardable(&e).is_err());
     }
 }

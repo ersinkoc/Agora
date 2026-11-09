@@ -1079,13 +1079,16 @@ fn git_status_and_diff_cover_new_and_changed_files_and_only_agent_workspaces() {
         }))),
         "protocol.invalid_message"
     );
-    assert_eq!(
-        err_code(c.call(Cmd::GitDiff(v1::GitDiff {
-            worktree_id: s.worktree_id.clone(),
-            path: "../x".into()
-        }))),
-        "protocol.invalid_message"
-    );
+    for bad in ["../x", "C:\\w\\secret", "\\\\server\\share", ".git/config"] {
+        assert_eq!(
+            err_code(c.call(Cmd::GitDiff(v1::GitDiff {
+                worktree_id: s.worktree_id.clone(),
+                path: bad.into()
+            }))),
+            "protocol.invalid_message",
+            "{bad}"
+        );
+    }
     ok(c.call(Cmd::AgentStop(v1::AgentStop {
         agent_id: s.agent_id,
     })));
@@ -1142,6 +1145,25 @@ fn files_list_and_read_stay_inside_an_agents_workspace() {
         }))),
         "files.outside_root"
     );
+    // Git's own directory is not project content, whether listed or read directly.
+    for p in [".git", ".git/config", "sub/.git"] {
+        assert_eq!(
+            err_code(c.call(Cmd::FilesRead(v1::FilesRead {
+                worktree_id: s.worktree_id.clone(),
+                path: p.into()
+            }))),
+            "protocol.invalid_message",
+            "{p}"
+        );
+        assert_eq!(
+            err_code(c.call(Cmd::FilesList(v1::FilesList {
+                worktree_id: s.worktree_id.clone(),
+                path: p.into()
+            }))),
+            "protocol.invalid_message",
+            "{p}"
+        );
+    }
     assert_eq!(
         err_code(c.call(Cmd::FilesList(v1::FilesList {
             worktree_id: e.repo.to_string_lossy().into_owned(),
