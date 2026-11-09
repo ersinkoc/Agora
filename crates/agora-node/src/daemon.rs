@@ -619,12 +619,19 @@ impl Node {
                     let mut reported = (u32::MAX, u32::MAX);
                     let mut usage = crate::usage_files::UsageWatcher::default();
                     while !stop.load(Ordering::Acquire) {
-                        let (events, views, usage_targets) = {
+                        let (events, views, usage_targets, ended) = {
                             let mut s = sup.lock().unwrap_or_else(|e| e.into_inner());
-                            (s.tick(Instant::now()), s.list(), s.usage_targets())
+                            let events = s.tick(Instant::now());
+                            (
+                                events,
+                                s.list(),
+                                s.usage_targets(),
+                                s.take_ended_usage_targets(),
+                            )
                         };
                         // Usage that terminal agents wrote to their own files (ADR-0042); the files are read outside the lock.
-                        let used = usage.poll(Instant::now(), &usage_targets);
+                        let mut used = usage.finish(Instant::now(), &ended);
+                        used.extend(usage.poll(Instant::now(), &usage_targets));
                         if !used.is_empty() {
                             ev.record_bodies(
                                 used.into_iter()

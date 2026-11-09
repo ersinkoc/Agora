@@ -145,67 +145,88 @@ impl UsageWatcher {
             return out;
         };
         for t in targets {
-            let a = self
-                .agents
-                .entry(t.agent.clone())
-                .or_insert_with(|| AgentUsage {
-                    first_seen: SystemTime::now(),
-                    next_scan: now,
-                    next_read: now,
-                    files: BTreeMap::new(),
-                    ignored: HashSet::new(),
-                });
-            if now >= a.next_scan {
-                a.next_scan = now + SCAN_EVERY;
-                let glob = t.spec.glob.replacen("{home}", &home.to_string_lossy(), 1);
-                for path in expand(Path::new(&glob)) {
-                    if a.files.len() >= MAX_FILES {
-                        break;
-                    }
-                    if a.files.contains_key(&path) || a.ignored.contains(&path) {
-                        continue;
-                    }
-                    let fresh = std::fs::metadata(&path)
-                        .and_then(|m| m.modified())
-                        .is_ok_and(|m| m + SLACK >= a.first_seen);
-                    if fresh {
-                        a.files.insert(
-                            path,
-                            FileState {
-                                reader: FileReader::new(t.spec.clone()),
-                                offset: 0,
-                                owned: None,
-                                pending: Vec::new(),
-                                partial: Vec::new(),
-                            },
-                        );
-                    }
-                }
+            self.step(now, t, &home, &mut out);
+        }
+        out
+    }
+
+    /// One last read of agents that just ended, so what they wrote in their final second is not lost. Their state is dropped after.
+    pub fn finish(&mut self, now: Instant, targets: &[Target]) -> Vec<(AgentId, Sample)> {
+        let mut out = Vec::new();
+        let Some(home) = self.home.clone() else {
+            return out;
+        };
+        for t in targets {
+            if let Some(a) = self.agents.get_mut(&t.agent) {
+                a.next_scan = now;
+                a.next_read = now;
             }
-            if now < a.next_read {
-                continue;
-            }
-            a.next_read = now + READ_EVERY;
-            let mut budget = READ_BUDGET;
-            let mut drop_files = Vec::new();
-            for (path, f) in &mut a.files {
-                if budget == 0 {
+            self.step(now, t, &home, &mut out);
+            self.agents.remove(&t.agent);
+        }
+        out
+    }
+
+    fn step(&mut self, now: Instant, t: &Target, home: &Path, out: &mut Vec<(AgentId, Sample)>) {
+        let a = self
+            .agents
+            .entry(t.agent.clone())
+            .or_insert_with(|| AgentUsage {
+                first_seen: SystemTime::now(),
+                next_scan: now,
+                next_read: now,
+                files: BTreeMap::new(),
+                ignored: HashSet::new(),
+            });
+        if now >= a.next_scan {
+            a.next_scan = now + SCAN_EVERY;
+            let glob = t.spec.glob.replacen("{home}", &home.to_string_lossy(), 1);
+            for path in expand(Path::new(&glob)) {
+                if a.files.len() >= MAX_FILES {
                     break;
                 }
-                let samples = read_new(path, f, &mut budget, &t.worktree, &t.spec);
-                if f.owned == Some(false) {
-                    drop_files.push(path.clone());
+                if a.files.contains_key(&path) || a.ignored.contains(&path) {
+                    continue;
                 }
-                out.extend(samples.into_iter().map(|s| (t.agent.clone(), s)));
-            }
-            for p in drop_files {
-                a.files.remove(&p);
-                if a.ignored.len() < MAX_MATCHES {
-                    a.ignored.insert(p);
+                let fresh = std::fs::metadata(&path)
+                    .and_then(|m| m.modified())
+                    .is_ok_and(|m| m + SLACK >= a.first_seen);
+                if fresh {
+                    a.files.insert(
+                        path,
+                        FileState {
+                            reader: FileReader::new(t.spec.clone()),
+                            offset: 0,
+                            owned: None,
+                            pending: Vec::new(),
+                            partial: Vec::new(),
+                        },
+                    );
                 }
             }
         }
-        out
+        if now < a.next_read {
+            return;
+        }
+        a.next_read = now + READ_EVERY;
+        let mut budget = READ_BUDGET;
+        let mut drop_files = Vec::new();
+        for (path, f) in &mut a.files {
+            if budget == 0 {
+                break;
+            }
+            let samples = read_new(path, f, &mut budget, &t.worktree, &t.spec);
+            if f.owned == Some(false) {
+                drop_files.push(path.clone());
+            }
+            out.extend(samples.into_iter().map(|s| (t.agent.clone(), s)));
+        }
+        for p in drop_files {
+            a.files.remove(&p);
+            if a.ignored.len() < MAX_MATCHES {
+                a.ignored.insert(p);
+            }
+        }
     }
 }
 
