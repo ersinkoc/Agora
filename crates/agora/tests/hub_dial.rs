@@ -573,6 +573,20 @@ fn the_terminal_console_follows_a_chat_agents_conversation_sends_a_request_and_s
     }
     session.terminal_close(stream);
     session.stop_agent("laptop", &s.agent_id).unwrap();
+    // Starting another one from the console: the machine lists what it can start, the project comes from the snapshot.
+    let kinds = session.agent_kinds("laptop").unwrap();
+    assert!(kinds.iter().any(|(k, _)| k == "adapted"), "{kinds:?}");
+    let project = loop {
+        let mut again = Session::connect(&console, "client-token").unwrap();
+        if let Update::Snapshot(sn) = again.next(Duration::from_secs(2)) {
+            if let Some(c) = sn.checkouts.first() {
+                break c.project_id.clone();
+            }
+        }
+        assert!(Instant::now() < end + Duration::from_secs(20), "no project");
+    };
+    let second = session.start_agent("laptop", &project, "adapted").unwrap();
+    assert!(!second.is_empty() && second != s.agent_id, "{second}");
     drop(node);
 }
 

@@ -203,6 +203,75 @@ fn chat(
     Ok(lost)
 }
 
+/// `s`: asks which agent to start on the machine the pointer is on (or the first online one with a project), then starts it in that
+/// project. Returns the line to show.
+fn start(
+    say: &Say,
+    session: &mut Session,
+    snapshot: &Snapshot,
+    selected: &str,
+    rx: &mpsc::Receiver<u8>,
+) -> String {
+    let from_selected = snapshot.agents.iter().find(|a| a.agent_id == selected);
+    let target = from_selected
+        .map(|a| (a.node_id.clone(), a.project_id.clone()))
+        .or_else(|| {
+            snapshot
+                .checkouts
+                .iter()
+                .find(|c| {
+                    snapshot
+                        .nodes
+                        .iter()
+                        .any(|n| n.node_id == c.node_id && n.online)
+                })
+                .map(|c| (c.node_id.clone(), c.project_id.clone()))
+        });
+    let Some((node, project)) = target else {
+        return say.text(key!("tui-start-nowhere"), &[]);
+    };
+    let machine = [("machine", Arg::Str(node.clone()))];
+    let kinds = match session.agent_kinds(&node) {
+        Ok(k) if !k.is_empty() => k,
+        Ok(_) => return say.text(key!("tui-start-none"), &machine),
+        Err(code) => return say.text(key!("tui-start-failed"), &[("code", Arg::Str(code))]),
+    };
+    let kinds: Vec<_> = kinds.into_iter().take(9).collect();
+    let mut menu = vec![say.text(key!("tui-start-pick"), &machine), String::new()];
+    for (i, (_, name)) in kinds.iter().enumerate() {
+        menu.push(say.text(
+            key!("tui-start-item"),
+            &[
+                ("n", Arg::Num(i as i64 + 1)),
+                ("name", Arg::Str(plain(name))),
+            ],
+        ));
+    }
+    let mut out = std::io::stdout();
+    let _ = write!(out, "\x1b[H\x1b[2J{}", menu.join("\r\n"));
+    let _ = out.flush();
+    // Wait for one key; anything but a listed number cancels.
+    let end = Instant::now() + Duration::from_secs(30);
+    let pick = loop {
+        match rx.recv_timeout(Duration::from_millis(200)) {
+            Ok(k) => break Some(k),
+            Err(mpsc::RecvTimeoutError::Timeout) if Instant::now() < end => {}
+            Err(_) => break None,
+        }
+    };
+    let Some(index) = pick.and_then(|k| (b'1'..=b'9').contains(&k).then(|| usize::from(k - b'1')))
+    else {
+        return String::new();
+    };
+    let Some((kind, _)) = kinds.get(index) else {
+        return String::new();
+    };
+    match session.start_agent(&node, &project, kind) {
+        Ok(agent) => say.text(key!("tui-started"), &[("agent", Arg::Str(agent))]),
+        Err(code) => say.text(key!("tui-start-failed"), &[("code", Arg::Str(code))]),
+    }
+}
+
 pub fn tui(say: &Say, o: &Opts) -> ExitCode {
     let dir = hub_dir(o);
     // On the hub's own machine the directory has everything: its CA and a way to make a code. Elsewhere the user passes them.
@@ -321,6 +390,13 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                     b'y' | b'n' => {
                         if let Some(s) = &snapshot {
                             notice = answer(say, &mut session, s, k == b'y');
+                            dirty_since.get_or_insert_with(Instant::now);
+                            draw(&snapshot, &selected, &notice);
+                        }
+                    }
+                    b's' => {
+                        if let Some(sn) = &snapshot {
+                            notice = start(say, &mut session, sn, &selected, &rx);
                             dirty_since.get_or_insert_with(Instant::now);
                             draw(&snapshot, &selected, &notice);
                         }

@@ -9,7 +9,8 @@ use std::time::Duration;
 use crate::device::{approval_message, Device};
 use agora_protocol::frame::{kinds, STREAM_CLOSE, STREAM_COMMANDS, STREAM_EVENTS};
 use agora_protocol::v1::{
-    command_request, command_response, CommandRequest, CommandResponse, Snapshot,
+    command_ok, command_request, command_response, CommandOk, CommandRequest, CommandResponse,
+    Snapshot,
 };
 use agora_protocol::ws::{connect_with_token, Conn};
 use agora_protocol::Frame;
@@ -209,6 +210,16 @@ impl Session {
         command: command_request::Command,
         wait: Duration,
     ) -> Result<(), String> {
+        self.command_ok(node, command, wait).map(|_| ())
+    }
+
+    /// Like [`Session::command`], returning what the machine answered with.
+    pub fn command_ok(
+        &mut self,
+        node: &str,
+        command: command_request::Command,
+        wait: Duration,
+    ) -> Result<CommandOk, String> {
         self.requests += 1;
         let id = format!("t{}", self.requests);
         let req = CommandRequest {
@@ -246,7 +257,8 @@ impl Session {
                     }
                     return match r.result {
                         Some(command_response::Result::Err(e)) => Err(e.code),
-                        _ => Ok(()),
+                        Some(command_response::Result::Ok(ok)) => Ok(ok),
+                        None => Ok(CommandOk::default()),
                     };
                 }
                 if f.stream_id == STREAM_EVENTS && f.kind == kinds::POSITIONED_EVENT {
@@ -462,6 +474,52 @@ impl Session {
             }),
             Duration::from_secs(15),
         )
+    }
+
+    /// The agents a machine can start: `(kind, display name)` of the installed ones.
+    pub fn agent_kinds(&mut self, node: &str) -> Result<Vec<(String, String)>, String> {
+        let ok = self.command_ok(
+            node,
+            command_request::Command::AgentKinds(agora_protocol::v1::AgentKinds {}),
+            Duration::from_secs(15),
+        )?;
+        let Some(command_ok::Result::AgentKinds(k)) = ok.result else {
+            return Ok(Vec::new());
+        };
+        Ok(k.kinds
+            .into_iter()
+            .filter(|k| k.installed)
+            .map(|k| {
+                let name = if k.display_name.is_empty() {
+                    k.kind.clone()
+                } else {
+                    k.display_name
+                };
+                (k.kind, name)
+            })
+            .collect())
+    }
+
+    /// Starts an agent of `kind` in a project (its hub-wide id) on a machine; returns the agent's own id.
+    pub fn start_agent(
+        &mut self,
+        node: &str,
+        project_id: &str,
+        kind: &str,
+    ) -> Result<String, String> {
+        let ok = self.command_ok(
+            node,
+            command_request::Command::AgentStart(agora_protocol::v1::AgentStart {
+                project_id: project_id.to_string(),
+                kind: kind.to_string(),
+                ..Default::default()
+            }),
+            Duration::from_secs(30),
+        )?;
+        match ok.result {
+            Some(command_ok::Result::AgentStart(s)) => Ok(s.agent_id),
+            _ => Ok(String::new()),
+        }
     }
 
     /// Stops an agent on a machine.
