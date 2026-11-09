@@ -162,9 +162,11 @@ version = "0.1.0"
 dependencies = [
  "agora-core",
  "agora-i18n",
+ "agora-node",
  "agora-protocol",
  "agora-vt",
  "prost",
+ "ring",
  "rustls",
  "serde_json",
  "tokio",
