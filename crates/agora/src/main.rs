@@ -26,6 +26,7 @@ const TERMINAL_STREAM: u32 = 3;
 
 mod hubcli;
 mod tuicmd;
+mod update;
 
 pub(crate) struct Say(Catalog);
 
@@ -104,6 +105,9 @@ pub(crate) struct Opts {
     yes: bool,
     unsigned: bool,
     release_url: Option<String>,
+    release_key: Option<PathBuf>,
+    version: Option<String>,
+    check: bool,
     positional: Vec<String>,
 }
 
@@ -139,6 +143,9 @@ fn parse(args: &[String]) -> Option<Opts> {
             "--yes" => o.yes = true,
             "--unsigned" => o.unsigned = true,
             "--release-url" => o.release_url = Some(it.next()?.clone()),
+            "--release-key" => o.release_key = Some(it.next()?.into()),
+            "--version" => o.version = Some(it.next()?.clone()),
+            "--check" => o.check = true,
             s if s.starts_with("--") => return None,
             _ => o.positional.push(a.clone()),
         }
@@ -192,6 +199,7 @@ fn main() -> ExitCode {
         ["terminal", "attach"] => terminal_attach(&say, &opts),
         ["doctor"] => doctor(&say, &opts),
         ["tui"] => tuicmd::tui(&say, &opts),
+        ["update"] => update::update(&say, &opts),
         ["hub", "run"] => hubcli::hub_run(&say, &opts),
         ["hub", "code"] => hubcli::hub_code(&say, &opts),
         ["hub", "login"] => hubcli::hub_login(&say, &opts),

@@ -23,6 +23,7 @@ cli-usage =
       agora node enroll --hub URL --ca FILE --code CODE --id NAME
       agora node trust DEVICE_ID PUBLIC_KEY_HEX [--data DIR]
       agora tui [--hub HOST:PORT --ca FILE --code CODE] [--hub-dir DIR]
+      agora update [--check] [--version X] [--release-url URL] [--release-key FILE] [--unsigned]
       agora doctor [--data DIR] [--manifests DIR] [--socket PATH]
 cli-node-listening = Node is running. Control socket: { $socket }
 cli-agent-started = Started agent { $agent_id } in { $worktree }
@@ -102,3 +103,10 @@ cli-hub-ssh-install-run = 4/4 Starting the node…
 cli-hub-ssh-install-done = Done: { $name } is enrolled and its node runs as a { $service } user service. Approvals there still need you to trust a device on { $name } ("agora node trust").
 cli-hub-ssh-install-manual = { $name } is enrolled, but it has neither systemd nor launchd for user services. Start the node there yourself, for example: { $command }
 cli-hub-ssh-install-failed = Stopped at step "{ $step }" on { $name }: { $detail } Already done: { $done }. Nothing was rolled back.
+cli-update-current = Agora { $version } is the newest release.
+cli-update-available = Agora { $version } is available (this is { $current }). Run "agora update" to install it.
+cli-update-done = Updated to Agora { $version }. Running agents keep going; restart the node to use the new version.
+cli-update-failed = The update did not happen: { $reason }
+cli-update-checksum = The download does not match its published checksum. Nothing was changed.
+cli-update-signature = The download's signature is not valid for the pinned release key. Nothing was changed.
+cli-update-needs-key = The release has to be signed: save its key as release-key in the Agora folder (or pass --release-key FILE), or accept a checksum only with --unsigned. Nothing was changed.

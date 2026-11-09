@@ -23,6 +23,7 @@ cli-usage =
       agora node enroll --hub URL --ca FILE --code CODE --id NAME
       agora node trust CİHAZ_ID AÇIK_ANAHTAR_HEX [--data DİZİN]
       agora tui [--hub ADRES:PORT --ca DOSYA --code KOD] [--hub-dir DİZİN]
+      agora update [--check] [--version X] [--release-url URL] [--release-key DOSYA] [--unsigned]
       agora doctor [--data DİZİN] [--manifests DİZİN] [--socket YOL]
 cli-node-listening = Düğüm çalışıyor. Denetim soketi: { $socket }
 cli-agent-started = { $agent_id } ajanı { $worktree } içinde başlatıldı
@@ -102,3 +103,10 @@ cli-hub-ssh-install-run = 4/4 Düğüm başlatılıyor…
 cli-hub-ssh-install-done = Bitti: { $name } kaydedildi ve düğümü { $service } kullanıcı servisi olarak çalışıyor. Orada onay verebilmek için yine de { $name } üzerinde bir cihaza güvenmeniz gerekir ("agora node trust").
 cli-hub-ssh-install-manual = { $name } kaydedildi ama kullanıcı servisleri için ne systemd ne launchd var. Düğümü orada kendiniz başlatın, örneğin: { $command }
 cli-hub-ssh-install-failed = { $name } üzerinde "{ $step }" adımında durdu: { $detail } Önceden yapılanlar: { $done }. Hiçbir şey geri alınmadı.
+cli-update-current = Agora { $version } en yeni sürüm.
+cli-update-available = Agora { $version } hazır (şu an { $current } kullanılıyor). Kurmak için "agora update" çalıştırın.
+cli-update-done = Agora { $version } sürümüne güncellendi. Çalışan ajanlar devam eder; yeni sürümü kullanmak için node'u yeniden başlatın.
+cli-update-failed = Güncelleme yapılamadı: { $reason }
+cli-update-checksum = İndirilen dosya yayımlanan sağlama toplamıyla uyuşmuyor. Hiçbir şey değişmedi.
+cli-update-signature = İndirilen dosyanın imzası sabitlenmiş sürüm anahtarı için geçerli değil. Hiçbir şey değişmedi.
+cli-update-needs-key = Sürümün imzalı olması gerekir: anahtarını Agora klasörüne release-key adıyla kaydedin (ya da --release-key DOSYA verin), yalnızca sağlama toplamıyla yetinmek için --unsigned kullanın. Hiçbir şey değişmedi.
