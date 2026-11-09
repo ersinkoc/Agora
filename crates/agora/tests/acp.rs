@@ -157,6 +157,16 @@ fn an_acp_agent_runs_through_the_bridge_like_any_chat_agent() {
             && kinds_seen.contains(&(v1::ChatKind::ToolCall as i32)),
         "{kinds_seen:?}"
     );
+    // The state the bridge reports (idle once the turn ended) reaches `agent list`; it used to stay `unknown`.
+    let end = Instant::now() + Duration::from_secs(15);
+    let listed = loop {
+        let (_, out) = agora(&home, &["agent", "list"]);
+        if out.contains("idle") || Instant::now() > end {
+            break out;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert!(listed.contains("idle"), "{listed}");
     drop(node);
     let _ = std::fs::remove_dir_all(&home);
 }

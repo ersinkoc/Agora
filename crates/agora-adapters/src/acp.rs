@@ -145,7 +145,11 @@ impl<W: Write> Bridge<W> {
 
     fn state(&mut self, s: &str) -> io::Result<()> {
         let sid = self.session.clone().unwrap_or_default();
-        self.note("state/update", json!({"sessionId": sid, "state": s}))
+        // The adapter protocol carries `AgentState` as its proto JSON name; the node reads anything else as unknown.
+        self.note(
+            "state/update",
+            json!({"sessionId": sid, "state": format!("AGENT_STATE_{s}")}),
+        )
     }
 
     fn chat(&mut self, item: Value) -> io::Result<()> {
