@@ -230,6 +230,24 @@ impl DiskEventLog {
         self.compact()
     }
 
+    /// Starts numbering at `next` and forgets what is retained: for a node whose consumer is already past everything it has
+    /// (the consumer acknowledged those numbers for an earlier life of this producer, and this buffer started over). A no-op when
+    /// `next` is not ahead of the next number. Everything before `next` counts as acknowledged afterwards.
+    pub fn advance_to(&mut self, next: u64) -> io::Result<()> {
+        if next <= self.next_seq() {
+            return Ok(());
+        }
+        let path = self.dir.join("events.log");
+        write_log(&path, next, &[])?;
+        let mut file = OpenOptions::new().read(true).write(true).open(&path)?;
+        file.seek(SeekFrom::End(0))?;
+        self.file = file;
+        self.offsets.clear();
+        self.first_seq = next;
+        self.end = HEADER_LEN;
+        self.ack(next - 1)
+    }
+
     /// Events after `after`, in order, for replay following a reconnect (`after` is the consumer's ack).
     pub fn replay_after(&self, after: u64) -> Result<Vec<Vec<u8>>, ReplayError> {
         if after.saturating_add(1) < self.first_seq {
@@ -526,5 +544,33 @@ mod tests {
         let huge = vec![0u8; MAX_PAYLOAD as usize + 1];
         assert!(log.append(&huge).is_err());
         assert_eq!(log.next_seq(), 1);
+    }
+
+    #[test]
+    fn advancing_past_a_consumer_that_is_ahead_drops_the_old_events_and_numbers_on_from_there() {
+        let dir = std::env::temp_dir().join(format!("agora-evbuf-adv-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut log = DiskEventLog::open(&dir, 1 << 20).unwrap();
+        log.append(b"a").unwrap();
+        log.append(b"b").unwrap();
+        assert_eq!(log.next_seq(), 3);
+        log.advance_to(2).unwrap(); // not ahead: nothing changes
+        assert_eq!((log.next_seq(), log.len()), (3, 2));
+        log.advance_to(10).unwrap();
+        assert_eq!(
+            (
+                log.next_seq(),
+                log.oldest_retained(),
+                log.acked(),
+                log.len()
+            ),
+            (10, 10, 9, 0)
+        );
+        assert_eq!(log.append(b"c").unwrap().seq, 10);
+        // It survives a restart.
+        drop(log);
+        let log = DiskEventLog::open(&dir, 1 << 20).unwrap();
+        assert_eq!((log.next_seq(), log.acked(), log.len()), (11, 9, 1));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

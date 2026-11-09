@@ -272,6 +272,15 @@ fn terminal_subscription_streams_snapshot_data_resize_and_exit() {
         String::from_utf8_lossy(&seen).contains("wire-42")
     });
 
+    // A grid is allocated for whatever size is asked: absurd sizes are refused instead of taking the node down.
+    assert_eq!(
+        err_code(c.call(Cmd::TerminalResize(v1::TerminalResize {
+            terminal_id: s.terminal_id.clone(),
+            cols: 65535,
+            rows: 65535,
+        }))),
+        "protocol.invalid_message"
+    );
     ok(c.call(Cmd::TerminalResize(v1::TerminalResize {
         terminal_id: s.terminal_id.clone(),
         cols: 100,
@@ -695,6 +704,79 @@ fn a_manifest_cannot_point_its_config_outside_the_worktree() {
     assert!(r_is_err(c.call(start_cmd("evil"))));
     assert!(!e.dir.join("escaped.json").exists());
     assert!(!e.dir.join("worktrees").join("escaped.json").exists());
+}
+
+#[test]
+fn input_to_a_program_that_never_reads_does_not_wedge_the_node() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
+        return;
+    }
+    let e = env("stalled-input");
+    add_manifest(
+        &e,
+        "sleeper.toml",
+        "kind = \"sleeper\"\ndisplay_name = \"S\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"sh\", \"-c\", \"stty raw -echo; sleep 60\"]\n",
+    );
+    let n = node(&e, NodeLimits::default());
+    let socket = n.socket().unwrap().to_path_buf();
+    let mut c = Client::connect(&socket).unwrap();
+    let s = started(ok(c.call(start_cmd("sleeper"))));
+    // The shell has put the terminal in raw mode by now (in cooked mode the excess is thrown away and nothing blocks).
+    std::thread::sleep(Duration::from_millis(1000));
+    // More than the terminal can queue for a program that is not reading (the old code held the supervisor lock for the whole
+    // write and this test hung): this call stays stuck.
+    let terminal = s.terminal_id.clone();
+    let stuck = std::thread::spawn(move || {
+        let mut c = Client::connect(&socket).unwrap();
+        let _ = c.call(Cmd::TerminalInput(v1::TerminalInput {
+            terminal_id: terminal,
+            data: vec![b'x'; 512 * 1024],
+        }));
+    });
+    std::thread::sleep(Duration::from_millis(1500));
+    // Meanwhile the node answers, and the agent can be stopped.
+    let t0 = Instant::now();
+    ok(c.call(Cmd::AgentList(v1::AgentList::default())));
+    ok(c.call(Cmd::AgentStop(v1::AgentStop {
+        agent_id: s.agent_id.clone(),
+    })));
+    assert!(
+        t0.elapsed() < Duration::from_secs(5),
+        "the node waited behind the stuck write: {:?}",
+        t0.elapsed()
+    );
+    drop(stuck); // the writer ends when the process is gone
+}
+
+#[test]
+fn a_start_that_fails_gives_back_its_worktree_and_its_mesh_endpoint() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
+        return;
+    }
+    let e = env("start-fails");
+    add_manifest(
+        &e,
+        "ghost.toml",
+        "kind = \"ghost\"\ndisplay_name = \"G\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"/no/such/program-agora\"]\n",
+    );
+    add_manifest(
+        &e,
+        "evil.toml",
+        "kind = \"evil\"\ndisplay_name = \"E\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"sh\"]\n[mcp]\nmethod = \"config_file\"\npath = \"../../escaped.json\"\n",
+    );
+    let n = node(&e, NodeLimits::default());
+    let mut c = Client::connect(n.socket().unwrap()).unwrap();
+    for kind in ["ghost", "evil", "ghost"] {
+        assert!(r_is_err(c.call(start_cmd(kind))), "{kind}");
+    }
+    let left = std::fs::read_dir(e.dir.join("worktrees")).map_or(0, |d| d.count());
+    assert_eq!(left, 0, "failed starts left worktrees behind");
+    for id in ["agent-1", "agent-2", "agent-3"] {
+        assert!(
+            !n.mesh.is_registered(&agora_core::AgentId::new(id)),
+            "{id} still has a mesh endpoint"
+        );
+    }
 }
 
 #[test]

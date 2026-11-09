@@ -355,13 +355,19 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
             Ok(ok_empty())
         }
         Cmd::TerminalInput(t) => {
-            with_terminal(ctx, &t.terminal_id, |h| h.send_input(t.data.clone()))?;
+            // The write happens after the supervisor lock is let go: a program that does not read its input blocks this
+            // call, and nothing else (ticks, stop and shutdown keep going).
+            let control = with_terminal(ctx, &t.terminal_id, |h| h.input_handle())?;
+            control.write_input(&t.data).map_err(|_| {
+                Error::new(ErrorCode::AgentNotFound).with("agent_id", t.terminal_id.as_str())
+            })?;
             Ok(ok_empty())
         }
         Cmd::TerminalResize(t) => {
             let cols = u16::try_from(t.cols).map_err(|_| invalid("cols"))?;
             let rows = u16::try_from(t.rows).map_err(|_| invalid("rows"))?;
-            if cols == 0 || rows == 0 {
+            // A terminal is at most a few thousand cells wide; the emulator allocates the whole grid.
+            if cols == 0 || rows == 0 || cols > MAX_TERMINAL_COLS || rows > MAX_TERMINAL_ROWS {
                 return Err(invalid("cols"));
             }
             with_terminal(ctx, &t.terminal_id, |h| h.resize(Size { cols, rows }))?;
@@ -485,6 +491,10 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
 fn is_git_dir(path: &str) -> bool {
     path.split(['/', '\\']).any(|c| c == ".git")
 }
+
+/// The largest terminal a client may ask for.
+const MAX_TERMINAL_COLS: u16 = 1000;
+const MAX_TERMINAL_ROWS: u16 = 1000;
 
 /// Largest file `files.read` returns.
 const MAX_READ_BYTES: u64 = 512 * 1024;

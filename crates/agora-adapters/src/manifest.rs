@@ -120,7 +120,8 @@ pub struct Structured {
 #[serde(deny_unknown_fields)]
 pub struct McpSpec {
     pub method: McpMethod,
-    /// `config_file`/`cli_flag`: where to write the config, inside the agent's worktree.
+    /// `config_file` (required) and `cli_flag` (optional, for agents that take the server as flags and need no file): where to
+    /// write the config, inside the agent's worktree.
     pub path: Option<String>,
     /// Only `json` for now.
     pub format: Option<String>,
@@ -226,7 +227,7 @@ impl Manifest {
         if let Some(m) = &self.mcp {
             let ok = match m.method {
                 McpMethod::ConfigFile => m.path.is_some(),
-                McpMethod::CliFlag => m.path.is_some() && !m.flag.is_empty(),
+                McpMethod::CliFlag => !m.flag.is_empty(),
                 McpMethod::Env => !m.env.is_empty(),
             };
             if !ok || m.format.as_deref().is_some_and(|f| f != "json") {

@@ -226,6 +226,50 @@ fn a_node_keeps_working_without_the_hub_and_catches_up_when_it_appears() {
     });
 }
 
+/// Found by running a real install over ssh: a machine that comes back under a known name with an empty data directory starts
+/// numbering at 1, but the hub already acknowledged those numbers for the earlier life. Its first events were dropped as duplicates.
+#[test]
+fn a_node_that_returns_under_a_known_name_with_an_empty_data_dir_is_still_heard() {
+    let hub = hubside("vps");
+    let addr = hub.listen("127.0.0.1:0");
+    // First life: five or more events reach the hub and are acknowledged.
+    let first = sink_with_agent(&tmp("returns-1"), "vps");
+    first.node_resources("vps", 1, 1);
+    first.node_resources("vps", 2, 2);
+    let link = spawn(Arc::clone(&first), hub.link(addr)).unwrap();
+    wait("the first life to be acknowledged", || {
+        first.acked() >= 6 && first.acked() == first.next_seq() - 1
+    });
+    let acked_by_hub = first.acked();
+    drop(link);
+
+    // Second life: same name and certificate, a fresh data directory; it records two events and knows how to announce itself.
+    let second = Arc::new(EventSink::open(&tmp("returns-2"), "vps").unwrap());
+    second.node_online("vps");
+    second.checkout_discovered("vps", "reborn", Path::new("/work/reborn"));
+    assert!(
+        second.next_seq() <= acked_by_hub,
+        "the test needs the hub to be ahead"
+    );
+    second.set_announcer(Box::new(|ev| {
+        ev.node_online("vps");
+        ev.checkout_discovered("vps", "reborn", Path::new("/work/reborn"));
+    }));
+    let _link = spawn(Arc::clone(&second), hub.link(addr)).unwrap();
+    wait("the returning node's checkout to show up", || {
+        hub.state
+            .hub
+            .view()
+            .0
+            .checkouts
+            .values()
+            .any(|(node, project, _)| node == "vps" && project == "reborn")
+    });
+    wait("everything to be acknowledged", || {
+        second.acked() == second.next_seq() - 1
+    });
+}
+
 #[test]
 fn a_certificate_the_hub_does_not_know_never_gets_in() {
     let hub = hubside("honest");

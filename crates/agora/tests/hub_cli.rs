@@ -536,3 +536,30 @@ fn hub_ssh_install_walks_the_four_steps_on_a_machine_and_stops_with_the_failing_
         "{err}"
     );
 }
+
+#[test]
+fn half_a_ca_is_an_error_not_a_reason_to_make_a_new_one() {
+    let root = tmp("half-ca");
+    let hub_dir = root.join("hub");
+    let first = agora(&root, &["hub", "code"])
+        .arg("--hub-dir")
+        .arg(&hub_dir)
+        .output()
+        .unwrap();
+    assert!(first.status.success(), "{first:?}");
+    let cert_before = std::fs::read_to_string(hub_dir.join("ca.pem")).unwrap();
+    // The key goes missing (a restore that forgot it, a permission slip).
+    std::fs::remove_file(hub_dir.join("ca.key")).unwrap();
+    let again = agora(&root, &["hub", "code"])
+        .arg("--hub-dir")
+        .arg(&hub_dir)
+        .output()
+        .unwrap();
+    assert!(!again.status.success(), "{again:?}");
+    assert_eq!(
+        std::fs::read_to_string(hub_dir.join("ca.pem")).unwrap(),
+        cert_before,
+        "the certificate must not be replaced"
+    );
+    assert!(!hub_dir.join("ca.key").exists(), "no new key either");
+}
