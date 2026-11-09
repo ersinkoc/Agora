@@ -43,3 +43,4 @@ tui-start-none = No agent is installed on { $machine }.
 tui-start-nowhere = No machine with a project is online.
 tui-started = Started { $agent }.
 tui-start-failed = Could not start it ({ $code }).
+tui-cost = about { $usd } USD

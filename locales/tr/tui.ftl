@@ -43,3 +43,4 @@ tui-start-none = { $machine } makinesinde kurulu bir ajan yok.
 tui-start-nowhere = Projesi olan çevrimiçi bir makine yok.
 tui-started = { $agent } başlatıldı.
 tui-start-failed = Başlatılamadı ({ $code }).
+tui-cost = yaklaşık { $usd } USD

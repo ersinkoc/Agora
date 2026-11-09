@@ -316,6 +316,7 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
     let mut snapshot: Option<Snapshot> = None;
     let mut notice = String::new();
     let mut selected = String::new();
+    let mut cost = 0u64;
     loop {
         if first {
             say.err(key!("tui-connecting"), &hub_arg);
@@ -358,9 +359,9 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
         first = false;
         let mut dirty_since: Option<Instant> = None;
         let mut last_refresh = Instant::now();
-        let draw = |snapshot: &Option<Snapshot>, selected: &str, notice: &str| {
+        let draw = |snapshot: &Option<Snapshot>, selected: &str, notice: &str, cost: u64| {
             if let Some(s) = snapshot {
-                let lines = render(s, color, keys, selected, notice, &text);
+                let lines = render(s, color, keys, selected, notice, cost, &text);
                 let mut out = std::io::stdout().lock();
                 let _ = write!(out, "\x1b[H\x1b[2J{}{eol}", lines.join(eol));
                 let _ = out.flush();
@@ -370,7 +371,8 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
             match session.next(Duration::from_millis(250)) {
                 Update::Snapshot(s) => {
                     snapshot = Some(*s);
-                    draw(&snapshot, &selected, &notice);
+                    cost = session.usage_total().unwrap_or(cost);
+                    draw(&snapshot, &selected, &notice, cost);
                     dirty_since = None;
                 }
                 Update::Changed => {
@@ -391,14 +393,14 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                         if let Some(s) = &snapshot {
                             notice = answer(say, &mut session, s, k == b'y');
                             dirty_since.get_or_insert_with(Instant::now);
-                            draw(&snapshot, &selected, &notice);
+                            draw(&snapshot, &selected, &notice, cost);
                         }
                     }
                     b's' => {
                         if let Some(sn) = &snapshot {
                             notice = start(say, &mut session, sn, &selected, &rx);
                             dirty_since.get_or_insert_with(Instant::now);
-                            draw(&snapshot, &selected, &notice);
+                            draw(&snapshot, &selected, &notice, cost);
                         }
                     }
                     b'x' => {
@@ -411,7 +413,7 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                                 }
                             };
                             dirty_since.get_or_insert_with(Instant::now);
-                            draw(&snapshot, &selected, &notice);
+                            draw(&snapshot, &selected, &notice, cost);
                         }
                     }
                     b'\t' => {
@@ -428,7 +430,7 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                                 .get(next)
                                 .map(|a| (*a).to_string())
                                 .unwrap_or_default();
-                            draw(&snapshot, &selected, &notice);
+                            draw(&snapshot, &selected, &notice, cost);
                         }
                     }
                     b'\r' | b'\n' => {
@@ -453,7 +455,7 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                                 }
                             }
                             dirty_since.get_or_insert_with(Instant::now);
-                            draw(&snapshot, &selected, &notice);
+                            draw(&snapshot, &selected, &notice, cost);
                         }
                     }
                     _ => {}

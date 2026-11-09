@@ -238,11 +238,13 @@ fn the_terminal_console_gets_the_snapshot_of_a_node_and_draws_it() {
         .agents
         .iter()
         .any(|a| a.agent_id == "laptop/agent-1"));
+    // The hub answers the cost question itself, with no machine in between (nothing is priced here, so zero).
+    assert_eq!(session.usage_total(), Ok(0));
     let catalog = agora_i18n::Catalog::english();
     let text = |id: &str, args: &[(&str, agora_i18n::Arg)]| {
         catalog.render(id, args).unwrap_or_else(|| id.to_string())
     };
-    let screen = agora_tui::render::render(&snapshot, false, false, "", "", &text).join("\n");
+    let screen = agora_tui::render::render(&snapshot, false, false, "", "", 0, &text).join("\n");
     assert!(
         screen.contains("agent-1") && screen.contains("1 of 1 machines online"),
         "{screen}"
