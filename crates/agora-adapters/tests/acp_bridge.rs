@@ -141,7 +141,7 @@ fn an_acp_agent_looks_like_an_adapter_to_the_node() {
         json!({"projectRoot": ".", "worktree": "."}),
     );
     assert_eq!(started["result"]["sessionId"], "acp-s1");
-    n.wait(|m| m["method"] == "state/update" && m["params"]["state"] == "IDLE");
+    n.wait(|m| m["method"] == "state/update" && m["params"]["state"] == "AGENT_STATE_IDLE");
 
     // A turn that plans, edits and talks: a plan, a tool call, a diff, and the chunks joined into one text.
     n.call(
@@ -168,12 +168,12 @@ fn an_acp_agent_looks_like_an_adapter_to_the_node() {
     let working = n
         .messages()
         .iter()
-        .position(|m| m["params"]["state"] == "WORKING")
+        .position(|m| m["params"]["state"] == "AGENT_STATE_WORKING")
         .expect("working");
     let idle_after = n
         .messages()
         .iter()
-        .rposition(|m| m["params"]["state"] == "IDLE")
+        .rposition(|m| m["params"]["state"] == "AGENT_STATE_IDLE")
         .expect("idle");
     assert!(working < idle_after, "the turn ends idle");
 
@@ -190,7 +190,7 @@ fn an_acp_agent_looks_like_an_adapter_to_the_node() {
         ),
         (Some("run_command"), Some("{\"command\":\"ls\"}"))
     );
-    assert!(n.state("BLOCKED"));
+    assert!(n.state("AGENT_STATE_BLOCKED"));
     let id = ask["params"]["approvalId"].as_str().unwrap().to_string();
     n.call(
         "approval/resolve",
