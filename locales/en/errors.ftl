@@ -23,6 +23,7 @@ agent-blocked = Agent { $agent_id } is waiting for input, so the message was not
 agent-mode_unsupported = { $kind } does not support { $mode } mode.
 approval-expired = Approval { $approval_id } has expired.
 approval-signature_invalid = Approval { $approval_id } could not be verified.
+approval-grant_required = This machine needs your permission first: { $command }.
 lease-held = { $path } is in use by agent { $holder_agent_id } until { $expires_at }.
 board-unavailable = The shared board for { $project_id } is not reachable right now. Your work continues locally.
 mesh-recipient_unknown = No agent or channel named { $to }.

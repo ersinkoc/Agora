@@ -20,7 +20,7 @@ fn tmp(name: &str) -> std::path::PathBuf {
 fn the_policy_file_defaults_to_allowed_and_a_bad_value_means_denied() {
     let dir = tmp("file");
     let file = dir.join("policy");
-    assert_eq!(read_policy(&file), Policy { mesh_remote: true }, "no file");
+    assert_eq!(read_policy(&file), Policy::default(), "no file");
     for (text, allowed) in [
         ("mesh.remote = true\n", true),
         ("# off\nmesh.remote = false\n", false),
@@ -77,4 +77,31 @@ fn with_remote_denied_outgoing_messages_fail_with_a_policy_notice_and_incoming_o
         .deliver_remote("n2", "b1", &a1, "hi", &[])
         .unwrap_err();
     assert_eq!(err.code.as_str(), "node.policy_denied");
+}
+
+#[test]
+fn the_signed_commands_line_lists_commands_and_an_absent_or_empty_one_lists_none() {
+    let dir = tmp("signed");
+    let file = dir.join("policy");
+    assert!(!read_policy(&file).signed_commands.requires("agent.prompt"));
+    std::fs::write(
+        &file,
+        "signed_commands = agent.start, terminal.*, ,files.write\nmesh.remote = false\n",
+    )
+    .unwrap();
+    let p = read_policy(&file);
+    assert!(!p.mesh_remote, "other lines still read");
+    for yes in [
+        "agent.start",
+        "terminal.input",
+        "terminal.open",
+        "files.write",
+    ] {
+        assert!(p.signed_commands.requires(yes), "{yes}");
+    }
+    for no in ["agent.prompt", "files.read", "git.diff"] {
+        assert!(!p.signed_commands.requires(no), "{no}");
+    }
+    std::fs::write(&file, "signed_commands =\n").unwrap();
+    assert!(!read_policy(&file).signed_commands.requires("agent.start"));
 }

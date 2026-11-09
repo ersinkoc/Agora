@@ -58,3 +58,4 @@ Date: YYYY-MM-DD
 | 0038 | Chat transcript stream for agents without a terminal | Accepted |
 | 0039 | A shared board for tasks, channels and leases across nodes | Accepted |
 | 0040 | Shared boards in the client snapshot, and leases kept across a hub restart | Accepted |
+| 0041 | User-signed grants for sensitive commands routed through the hub | Accepted |

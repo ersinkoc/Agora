@@ -114,6 +114,7 @@ impl Hubside {
             cert_pem: self.cert_pem.clone(),
             key_pem: self.key_pem.clone(),
             commands: None,
+            grants: None,
         }
     }
 
@@ -951,4 +952,203 @@ fn agents_on_two_nodes_share_a_board_claims_leases_and_handoffs_and_it_fails_clo
     let (_, err) = call(&mut ac, "inbox", json!({}));
     assert!(!err);
     drop((a, b, b1));
+}
+
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+#[test]
+fn a_command_the_policy_lists_needs_a_grant_signed_by_a_trusted_device_and_the_local_socket_does_not(
+) {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return;
+    }
+    use agora_protocol::frame::{kinds, STREAM_COMMANDS, STREAM_EVENTS};
+    use agora_protocol::v1::{self, command_ok, command_request as cr, command_response};
+    use agora_protocol::{ErrorCode, Frame};
+    use prost::Message;
+    use ring::rand::SystemRandom;
+    use ring::signature::{EcdsaKeyPair, KeyPair, ECDSA_P256_SHA256_FIXED_SIGNING};
+
+    let hub = hubside("laptop");
+    let addr = hub.listen("127.0.0.1:0");
+    let dir = tmp("grants");
+    std::fs::create_dir_all(dir.join("data")).unwrap();
+    let rng = SystemRandom::new();
+    let key = |rng: &SystemRandom| {
+        let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, rng).unwrap();
+        EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8.as_ref(), rng).unwrap()
+    };
+    let (owner, stranger) = (key(&rng), key(&rng));
+    agora_node::approvals::trust_device(
+        &dir.join("data").join("trusted-devices"),
+        "phone",
+        &hex(owner.public_key().as_ref()),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("data").join("policy"),
+        "signed_commands = agent.prompt, terminal.input\n",
+    )
+    .unwrap();
+    let cfg = agora_node::daemon::NodeConfig {
+        node_id: "laptop".into(),
+        socket: dir.join("c.sock"),
+        data_dir: dir.join("data"),
+        worktree_root: dir.join("wt"),
+        manifests_dir: dir.join("manifests"),
+        projects: vec![],
+        limits: Default::default(),
+    };
+    let node = agora_node::daemon::Node::start(&cfg).unwrap();
+    let mut link = hub.link(addr);
+    link.commands = Some(cfg.socket.clone());
+    link.grants = Some(Arc::clone(&node.grants));
+    let _uplink = spawn(Arc::clone(&node.events), link).unwrap();
+    wait("the node to be online in the hub", || {
+        hub.state
+            .hub
+            .view()
+            .0
+            .nodes
+            .get("laptop")
+            .is_some_and(|n| n.online)
+    });
+
+    let mut client = hub.client(addr);
+    let f = |stream, kind, payload| Frame {
+        stream_id: stream,
+        kind,
+        seq: None,
+        payload,
+    };
+    let mut n = 0u32;
+    let mut call = |cmd: cr::Command| {
+        n += 1;
+        let id = format!("r{n}");
+        hub.rt.block_on(async {
+            client
+                .send(&f(
+                    STREAM_EVENTS,
+                    kinds::SUBSCRIBE,
+                    v1::Subscribe::default().encode_to_vec(),
+                ))
+                .await
+                .unwrap();
+            let req = v1::CommandRequest {
+                request_id: id.clone(),
+                idempotency_key: String::new(),
+                target_node: "laptop".into(),
+                command: Some(cmd),
+            };
+            client
+                .send(&f(STREAM_COMMANDS, 0, req.encode_to_vec()))
+                .await
+                .unwrap();
+            loop {
+                let fr = next_frame(&mut client).await;
+                if (fr.stream_id, fr.kind) == (STREAM_COMMANDS, 1) {
+                    let r = v1::CommandResponse::decode(fr.payload.as_slice()).unwrap();
+                    if r.request_id == id {
+                        break r;
+                    }
+                }
+            }
+        })
+    };
+    let prompt = || {
+        cr::Command::AgentPrompt(v1::AgentPrompt {
+            agent_id: "no-such-agent".into(),
+            text: "hi".into(),
+        })
+    };
+    let code = |r: &v1::CommandResponse| match &r.result {
+        Some(command_response::Result::Err(e)) => e.code.clone(),
+        _ => String::new(),
+    };
+    let grant_for = |signer: &EcdsaKeyPair, id: &str, node: &str, expires: u64| {
+        let cmds = vec!["agent.prompt".to_string()];
+        let msg = agora_node::grants::signed_message(node, id, "node", &cmds, expires);
+        v1::GrantCreate {
+            grant_id: id.into(),
+            scope: "node".into(),
+            commands: cmds,
+            expires_at_ms: expires,
+            signer_device_id: "phone".into(),
+            signature: signer
+                .sign(&SystemRandom::new(), &msg)
+                .unwrap()
+                .as_ref()
+                .to_vec(),
+        }
+    };
+    let soon = agora_node::grants::now_ms() + 3_600_000;
+
+    // Listed and no grant: refused, and nothing ran. Reading stays free.
+    assert_eq!(
+        code(&call(prompt())),
+        ErrorCode::ApprovalGrantRequired.as_str()
+    );
+    assert!(matches!(
+        call(cr::Command::AgentList(v1::AgentList::default())).result,
+        Some(command_response::Result::Ok(_))
+    ));
+    // A grant the hub (or anyone without the device key) made up, and one signed for another node, do not count.
+    let forged = call(cr::Command::GrantCreate(grant_for(
+        &stranger, "g-forged", "laptop", soon,
+    )));
+    assert_eq!(code(&forged), ErrorCode::ApprovalSignatureInvalid.as_str());
+    let wrong_node = call(cr::Command::GrantCreate(grant_for(
+        &owner, "g-other", "desktop", soon,
+    )));
+    assert_eq!(
+        code(&wrong_node),
+        ErrorCode::ApprovalSignatureInvalid.as_str()
+    );
+    assert_eq!(
+        code(&call(prompt())),
+        ErrorCode::ApprovalGrantRequired.as_str()
+    );
+    // The owner's signed grant lets it through (the agent does not exist, so the node says so instead of refusing).
+    let ok = call(cr::Command::GrantCreate(grant_for(
+        &owner, "g-1", "laptop", soon,
+    )));
+    assert!(
+        matches!(ok.result, Some(command_response::Result::Ok(_))),
+        "{ok:?}"
+    );
+    assert_ne!(
+        code(&call(prompt())),
+        ErrorCode::ApprovalGrantRequired.as_str()
+    );
+    // The same grant id again is a replay.
+    let replay = call(cr::Command::GrantCreate(grant_for(
+        &owner, "g-1", "laptop", soon,
+    )));
+    assert_eq!(code(&replay), ErrorCode::ApprovalSignatureInvalid.as_str());
+    // It shows in the list and ends when revoked.
+    let listed = call(cr::Command::GrantList(v1::GrantList::default()));
+    let Some(command_response::Result::Ok(v1::CommandOk {
+        result: Some(command_ok::Result::GrantList(l)),
+    })) = listed.result
+    else {
+        panic!("{listed:?}");
+    };
+    assert_eq!(l.grants.len(), 1);
+    assert_eq!(l.grants[0].grant_id, "g-1");
+    call(cr::Command::GrantRevoke(v1::GrantRevoke {
+        grant_id: "g-1".into(),
+    }));
+    assert_eq!(
+        code(&call(prompt())),
+        ErrorCode::ApprovalGrantRequired.as_str()
+    );
+
+    // The person at the machine uses the control socket and needs no grant.
+    let mut local = agora_node::control::Client::connect(&cfg.socket).unwrap();
+    let r = local.call(prompt()).unwrap();
+    let e = r.unwrap_err();
+    assert_ne!(e.code, ErrorCode::ApprovalGrantRequired.as_str(), "{e:?}");
+    drop(node);
 }

@@ -219,4 +219,6 @@ ignores an id it already holds. The text is untrusted.
 `BoardCall` (command 62, node → hub on the stream-1 request path like `MeshPost`) and `BoardResult` (`CommandOk` field 16), ADR-0039: a mesh tool on a shared
 project's board; see `docs/specs/mesh-tools.md#shared-board-adr-0039`. New error code `board.unavailable`.
 
+`GrantCreate` (63), `GrantList` (64), `GrantRevoke` (65) and `GrantListResult` (`CommandOk` field 17), ADR-0041: user-signed grants for the commands a node's policy lists in `signed_commands`; see `docs/security/threat-model.md`. New error code `approval.grant_required` (`command`). The node answers them itself; the local control socket refuses them.
+
 `Snapshot.tasks` (8) and `Snapshot.leases` (9), ADR-0040: the shared boards' tasks and held paths, so a client that connects sees them before the next change.

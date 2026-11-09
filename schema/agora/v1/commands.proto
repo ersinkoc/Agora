@@ -47,6 +47,10 @@ message CommandRequest {
     ChatSubscribe chat_subscribe = 19;
     // ADR-0039: node -> hub, a mesh tool that touches a shared project's board.
     BoardCall board_call = 62;
+    // ADR-0041: user-signed grants for the commands a node's policy lists in `signed_commands`.
+    GrantCreate grant_create = 63;
+    GrantList grant_list = 64;
+    GrantRevoke grant_revoke = 65;
     // ADR-0027: sent on a TLS connection that has no client certificate yet; accepts nothing else.
     EnrollRequest enroll = 80;
   }
@@ -79,6 +83,7 @@ message CommandOk {
     UsageReportResult usage_report = 14;
     GitLogResult git_log = 15;
     BoardResult board_result = 16;
+    GrantListResult grant_list = 17;
   }
 }
 
@@ -190,6 +195,37 @@ message ApprovalResolve {
   bool approved = 2;
   string signer_device_id = 3;
   bytes signature = 4;
+}
+
+// ADR-0041. Signed by a trusted device (the same ES256 scheme as ApprovalResolve) over
+// `agora-grant-v1 NUL node_id NUL grant_id NUL scope NUL commands (comma-joined) NUL expires_at_ms (decimal)`.
+// `scope` is `node`, `agent:<id>` or `project:<id>`. The node verifies; a hub cannot forge one.
+message GrantCreate {
+  string grant_id = 1;
+  string scope = 2;
+  repeated string commands = 3;
+  uint64 expires_at_ms = 4;
+  string signer_device_id = 5;
+  bytes signature = 6;
+}
+
+message GrantList {}
+
+// Ending access needs no signature.
+message GrantRevoke {
+  string grant_id = 1;
+}
+
+message GrantInfo {
+  string grant_id = 1;
+  string scope = 2;
+  repeated string commands = 3;
+  uint64 expires_at_ms = 4;
+  string signer_device_id = 5;
+}
+
+message GrantListResult {
+  repeated GrantInfo grants = 1;
 }
 
 message MeshPost {

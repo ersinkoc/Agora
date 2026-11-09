@@ -9,6 +9,7 @@ pub mod doctor;
 pub mod event_buffer;
 pub mod files;
 pub mod git;
+pub mod grants;
 pub mod mesh_server;
 pub mod supervisor;
 pub mod terminal;

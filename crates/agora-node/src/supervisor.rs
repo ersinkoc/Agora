@@ -207,6 +207,7 @@ pub struct AgentView {
     pub state: AgentState,
     pub worktree: PathBuf,
     pub branch: String,
+    pub project: String,
     pub running: bool,
     pub restarts: u32,
 }
@@ -905,6 +906,7 @@ impl Supervisor {
                 state: e.agent.state(),
                 worktree: e.worktree.clone(),
                 branch: e.branch.clone(),
+                project: e.agent.project.to_string(),
                 running: e.terminal.is_some(),
                 restarts: e.restarts,
             })
@@ -915,6 +917,7 @@ impl Supervisor {
             state: e.agent.state(),
             worktree: e.worktree.clone(),
             branch: e.branch.clone(),
+            project: e.agent.project.to_string(),
             running: e.running,
             restarts: e.restarts,
         }));

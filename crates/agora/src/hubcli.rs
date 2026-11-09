@@ -828,6 +828,7 @@ pub fn load_link(socket: PathBuf) -> Option<(String, HubLink)> {
             key_pem: read("key.pem")?,
             commands: Some(socket),
             mesh_out: None,
+            grants: None,
         },
     ))
 }

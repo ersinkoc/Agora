@@ -50,3 +50,5 @@ A chat agent's conversation (ADR-0038): your requests and its answers, streamed 
 `apps/web/visual/` holds the reference images that `scripts/visual-regression.mjs` compares against (gallery and sign-in, both
 themes, desktop and phone). They are the contract for how the shared components look: a pull request that changes them updates the
 images with `--update`, and the diff shows in review.
+
+`grant-dark.png` and `grant-light.png` show the permission window a machine's `signed_commands` policy triggers (ADR-0041).

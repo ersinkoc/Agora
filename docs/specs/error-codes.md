@@ -28,6 +28,7 @@ replaced by dashes). Codes are part of the public protocol: never rename or reus
 | `agent.mode_unsupported` | `kind`, `mode` | e.g. chat mode for an L1 agent |
 | `approval.expired` | `approval_id` | |
 | `approval.signature_invalid` | `approval_id` | |
+| `approval.grant_required` | `command` | ADR-0041: the node's `signed_commands` policy lists this command and no live grant covers it |
 | `lease.held` | `path`, `holder_agent_id`, `expires_at` | |
 | `board.unavailable` | `project_id` | A shared project's board cannot be reached (hub unreachable); the agent keeps working locally (ADR-0039) |
 | `mesh.recipient_unknown` | `to` | |

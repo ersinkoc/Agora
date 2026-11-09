@@ -223,6 +223,11 @@ impl<V: Verifier> Approvals<V> {
         }
     }
 
+    /// The verifier's answer, for callers that sign other things with the same devices (grants, ADR-0041).
+    pub fn verify_with(&self, device_id: &str, message: &[u8], signature: &[u8]) -> bool {
+        self.verifier.verify(device_id, message, signature)
+    }
+
     /// Was this id answered, expired or cancelled before? (Replays are refused as `Unknown` by `resolve`, because a
     /// spent id is no longer pending; this is for audit.)
     pub fn was_spent(&self, id: &str) -> bool {
@@ -392,6 +397,12 @@ impl NodeApprovals {
             let (verifier, _skipped) = P256Verifier::load(path);
             self.set_verifier(Box::new(verifier));
         }
+    }
+
+    /// Does `device_id` (as the trusted-devices file lists it now) vouch for `message`? Used for grants (ADR-0041).
+    pub fn verify_device(&self, device_id: &str, message: &[u8], signature: &[u8]) -> bool {
+        self.reload_trust_if_changed();
+        self.q().verify_with(device_id, message, signature)
     }
 
     /// Replaces the verifier; requests already waiting are judged by the new one.
