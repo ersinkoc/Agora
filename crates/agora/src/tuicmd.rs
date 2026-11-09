@@ -144,6 +144,7 @@ const DETACH: u8 = 0x1d;
 /// Shows an agent's terminal until the user detaches or the program ends. `Err` is the error code when it could not be opened.
 /// `Ok(true)` means the link to the hub was lost while watching.
 fn attach(
+    say: &Say,
     session: &mut Session,
     snapshot: &Snapshot,
     agent: &str,
@@ -155,7 +156,7 @@ fn attach(
         return Err("terminal.not_found".into());
     }
     let terminal = format!("t-{local}");
-    let stream = session.terminal_open(node, &terminal)?;
+    let mut stream = session.terminal_open(node, &terminal)?;
     let mut size = agora_platform::terminal_size();
     if let Some((cols, rows)) = size {
         session.terminal_resize(node, &terminal, cols, rows);
@@ -176,6 +177,18 @@ fn attach(
                 break;
             }
             TermEvent::Resized(..) | TermEvent::Quiet => {}
+        }
+        // What was typed was refused until the owner allows it: ask, and show the screen again either way (the typed keys are lost).
+        if session.take_grant_wanted() {
+            let scope = format!("agent:{local}");
+            let _ = ask_grant(say, session, rx, node, &scope, &TYPING);
+            session.terminal_close(stream);
+            stream = session.terminal_open(node, &terminal)?;
+            if let Some((cols, rows)) = size {
+                session.terminal_resize(node, &terminal, cols, rows);
+            }
+            let _ = write!(out, "\x1b[2J\x1b[H");
+            let _ = out.flush();
         }
         // A window that was resized is told to the machine, so the agent redraws for the new size.
         let now = agora_platform::terminal_size();
@@ -539,7 +552,7 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                         if let (Some(s), false) = (&snapshot, selected.is_empty()) {
                             let has_terminal = s.terminals.iter().any(|t| t.agent_id == selected);
                             let opened = if has_terminal {
-                                attach(&mut session, s, &selected, &rx)
+                                attach(say, &mut session, s, &selected, &rx)
                             } else {
                                 chat(say, &mut session, &selected, &rx, color)
                             };

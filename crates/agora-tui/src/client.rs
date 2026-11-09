@@ -130,6 +130,8 @@ pub struct Session {
     next_stream: u32,
     /// An event arrived while a command was waiting for its answer.
     changed: bool,
+    /// A machine refused something that was sent without waiting for the answer (typing) because it wants a grant first.
+    grant_wanted: bool,
 }
 
 /// What the hub sent next.
@@ -173,6 +175,7 @@ impl Session {
             term_frames: std::collections::VecDeque::new(),
             next_stream: agora_protocol::frame::FIRST_DYNAMIC_STREAM,
             changed: false,
+            grant_wanted: false,
         })
     }
 
@@ -231,6 +234,7 @@ impl Session {
         let conn = &mut self.conn;
         let changed = &mut self.changed;
         let term_frames = &mut self.term_frames;
+        let grant_wanted = &mut self.grant_wanted;
         self.rt.block_on(async {
             conn.send(&Frame {
                 stream_id: STREAM_COMMANDS,
@@ -253,6 +257,9 @@ impl Session {
                         continue;
                     };
                     if r.request_id != id {
+                        if refused_for_grant(&r) {
+                            *grant_wanted = true;
+                        }
                         continue;
                     }
                     return match r.result {
@@ -405,6 +412,7 @@ impl Session {
         let conn = &mut self.conn;
         let changed = &mut self.changed;
         let queue = &mut self.term_frames;
+        let grant_wanted = &mut self.grant_wanted;
         self.rt.block_on(async {
             match tokio::time::timeout(wait, conn.recv()).await {
                 Err(_) => TermEvent::Quiet,
@@ -412,6 +420,13 @@ impl Session {
                 Ok(Ok(Some(f))) => {
                     if f.stream_id == STREAM_EVENTS && f.kind == kinds::POSITIONED_EVENT {
                         *changed = true;
+                    } else if (f.stream_id, f.kind) == (STREAM_COMMANDS, 1) {
+                        // The answer to something typed without waiting: only a missing grant matters.
+                        if CommandResponse::decode(f.payload.as_slice())
+                            .is_ok_and(|r| refused_for_grant(&r))
+                        {
+                            *grant_wanted = true;
+                        }
                     } else if f.stream_id >= agora_protocol::frame::FIRST_DYNAMIC_STREAM {
                         queue.push_back(f);
                     }
@@ -597,6 +612,11 @@ impl Session {
         );
     }
 
+    /// Was something typed refused because the machine wants a grant first (ADR-0041)? Reading it clears it.
+    pub fn take_grant_wanted(&mut self) -> bool {
+        std::mem::take(&mut self.grant_wanted)
+    }
+
     pub fn terminal_resize(&mut self, node: &str, terminal_id: &str, cols: u16, rows: u16) {
         self.send_nowait(
             node,
@@ -636,6 +656,10 @@ impl Session {
             payload: req.encode_to_vec(),
         }));
     }
+}
+
+fn refused_for_grant(r: &CommandResponse) -> bool {
+    matches!(&r.result, Some(command_response::Result::Err(e)) if e.code == "approval.grant_required")
 }
 
 /// What a watched terminal said.

@@ -699,6 +699,121 @@ fn the_terminal_console_gives_a_machine_a_signed_grant_when_its_policy_asks_for_
 }
 
 #[test]
+fn the_terminal_console_learns_that_typing_was_refused_for_want_of_a_grant() {
+    use agora_node::control::Client;
+    use agora_protocol::v1::{self, command_request::Command as Cmd};
+    use agora_tui::client::{Hub as ConsoleHub, Session, Update};
+    use std::time::Duration as D;
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
+        return;
+    }
+    let hub = hubside("laptop");
+    let addr = hub.listen("127.0.0.1:0");
+    let dir = tmp("console-typing-grant");
+    let repo = dir.join("myproject");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("a.txt"), "x").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "init"]);
+    let manifests = dir.join("manifests");
+    std::fs::create_dir_all(&manifests).unwrap();
+    std::fs::write(
+        manifests.join("shell.toml"),
+        "kind = \"shell\"\ndisplay_name = \"Shell\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"sh\"]\n",
+    )
+    .unwrap();
+    let (device, _) = agora_tui::device::Device::generate().unwrap();
+    let data = dir.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    agora_node::approvals::trust_device(
+        &data.join(agora_node::approvals::TRUSTED_DEVICES_FILE),
+        &device.id,
+        &device.public_key_hex(),
+    )
+    .unwrap();
+    // The owner's policy: typing into a terminal through the hub needs a grant.
+    std::fs::write(data.join("policy"), "signed_commands = terminal.input\n").unwrap();
+    let cfg = agora_node::daemon::NodeConfig {
+        node_id: "laptop".into(),
+        socket: dir.join("c.sock"),
+        data_dir: data,
+        worktree_root: dir.join("wt"),
+        manifests_dir: manifests,
+        projects: vec![repo],
+        limits: Default::default(),
+    };
+    let node = agora_node::daemon::Node::start(&cfg).unwrap();
+    let mut link = hub.link(addr);
+    link.commands = Some(cfg.socket.clone());
+    link.grants = Some(Arc::clone(&node.grants));
+    let _uplink = spawn(Arc::clone(&node.events), link).unwrap();
+    let mut local = Client::connect(&cfg.socket).unwrap();
+    let started = local
+        .call(Cmd::AgentStart(v1::AgentStart {
+            kind: "shell".into(),
+            ..Default::default()
+        }))
+        .unwrap()
+        .unwrap();
+    let Some(v1::command_ok::Result::AgentStart(s)) = started.result else {
+        panic!("not started");
+    };
+
+    let console = ConsoleHub {
+        addr: addr.to_string(),
+        ca_pem: hub.ca_pem.clone(),
+    };
+    let end = Instant::now() + D::from_secs(20);
+    let mut session = loop {
+        let mut session = Session::connect(&console, "client-token").unwrap();
+        if let Update::Snapshot(sn) = session.next(D::from_secs(2)) {
+            if sn
+                .agents
+                .iter()
+                .any(|a| a.agent_id == format!("laptop/{}", s.agent_id))
+            {
+                break session;
+            }
+        }
+        assert!(Instant::now() < end, "the agent never reached the console");
+        std::thread::sleep(D::from_millis(100));
+    };
+    let terminal = format!("t-{}", s.agent_id);
+    let stream = session.terminal_open("laptop", &terminal).unwrap();
+    // Typing is sent without waiting for an answer; the refusal is noticed all the same.
+    session.terminal_input("laptop", &terminal, b"echo first-try\n");
+    let end = Instant::now() + D::from_secs(10);
+    while !session.take_grant_wanted() {
+        let _ = session.terminal_next(stream, D::from_millis(100));
+        assert!(Instant::now() < end, "the refusal was never noticed");
+    }
+    // After a grant the same typing reaches the shell.
+    let scope = format!("agent:{}", s.agent_id);
+    let commands = ["agent.stop", "agent.prompt", "terminal.input"];
+    assert_eq!(
+        session.grant("laptop", &device, &scope, &commands, D::from_secs(3600)),
+        Ok(())
+    );
+    session.terminal_input("laptop", &terminal, b"echo second-try\n");
+    let mut seen = String::new();
+    let end = Instant::now() + D::from_secs(10);
+    while !seen.contains("second-try") {
+        if let agora_tui::client::TermEvent::Data(b) | agora_tui::client::TermEvent::Screen(b) =
+            session.terminal_next(stream, D::from_millis(100))
+        {
+            seen.push_str(&String::from_utf8_lossy(&b));
+        }
+        assert!(
+            Instant::now() < end,
+            "typing after the grant never arrived: {seen}"
+        );
+    }
+    assert!(!session.take_grant_wanted());
+    drop(node);
+}
+
+#[test]
 fn a_node_keeps_working_without_the_hub_and_catches_up_when_it_appears() {
     let hub = hubside("server");
     // Reserve a port, then release it so the node's first attempts are refused.
