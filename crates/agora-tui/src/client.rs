@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::device::{approval_message, Device};
-use agora_protocol::frame::{kinds, STREAM_COMMANDS, STREAM_EVENTS};
+use agora_protocol::frame::{kinds, STREAM_CLOSE, STREAM_COMMANDS, STREAM_EVENTS};
 use agora_protocol::v1::{
     command_request, command_response, CommandRequest, CommandResponse, Snapshot,
 };
@@ -124,6 +124,9 @@ pub struct Session {
     rt: tokio::runtime::Runtime,
     conn: Conn<TlsStream<TcpStream>>,
     requests: u64,
+    /// Frames of terminal streams that arrived while something else was waiting.
+    term_frames: std::collections::VecDeque<Frame>,
+    next_stream: u32,
     /// An event arrived while a command was waiting for its answer.
     changed: bool,
 }
@@ -166,6 +169,8 @@ impl Session {
             rt,
             conn,
             requests: 0,
+            term_frames: std::collections::VecDeque::new(),
+            next_stream: agora_protocol::frame::FIRST_DYNAMIC_STREAM,
             changed: false,
         })
     }
@@ -214,6 +219,7 @@ impl Session {
         };
         let conn = &mut self.conn;
         let changed = &mut self.changed;
+        let term_frames = &mut self.term_frames;
         self.rt.block_on(async {
             conn.send(&Frame {
                 stream_id: STREAM_COMMANDS,
@@ -245,6 +251,8 @@ impl Session {
                 }
                 if f.stream_id == STREAM_EVENTS && f.kind == kinds::POSITIONED_EVENT {
                     *changed = true;
+                } else if f.stream_id >= agora_protocol::frame::FIRST_DYNAMIC_STREAM {
+                    term_frames.push_back(f);
                 }
             }
         })
@@ -279,4 +287,173 @@ impl Session {
         self.command(node, cmd, Duration::from_secs(15))
             .map(|()| true)
     }
+
+    /// Opens a terminal of a machine (ADR-0029): the hub relays its screen and output on a stream of ours. `terminal_id` is the
+    /// machine's own id. Returns the stream; read it with [`Session::terminal_next`].
+    pub fn terminal_open(&mut self, node: &str, terminal_id: &str) -> Result<u32, String> {
+        let stream = self.next_stream;
+        self.next_stream += 1;
+        self.requests += 1;
+        let id = format!("t{}", self.requests);
+        let req = CommandRequest {
+            request_id: id.clone(),
+            idempotency_key: String::new(),
+            target_node: node.to_string(),
+            command: Some(command_request::Command::TerminalSubscribe(
+                agora_protocol::v1::TerminalSubscribe {
+                    terminal_id: terminal_id.to_string(),
+                    format: String::new(),
+                },
+            )),
+        };
+        let conn = &mut self.conn;
+        let changed = &mut self.changed;
+        let term_frames = &mut self.term_frames;
+        self.rt.block_on(async {
+            conn.send(&Frame {
+                stream_id: stream,
+                kind: 0,
+                seq: None,
+                payload: req.encode_to_vec(),
+            })
+            .await
+            .map_err(|_| "client.unreachable".to_string())?;
+            let end = tokio::time::Instant::now() + Duration::from_secs(15);
+            loop {
+                let left = end.saturating_duration_since(tokio::time::Instant::now());
+                let f = match tokio::time::timeout(left, conn.recv()).await {
+                    Ok(Ok(Some(f))) => f,
+                    Err(_) => return Err("node.timeout".to_string()),
+                    Ok(_) => return Err("client.unreachable".to_string()),
+                };
+                if (f.stream_id, f.kind) == (STREAM_COMMANDS, 1) {
+                    let Ok(r) = CommandResponse::decode(f.payload.as_slice()) else {
+                        continue;
+                    };
+                    if r.request_id == id {
+                        return match r.result {
+                            Some(command_response::Result::Err(e)) => Err(e.code),
+                            _ => Ok(stream),
+                        };
+                    }
+                } else if f.stream_id == STREAM_EVENTS && f.kind == kinds::POSITIONED_EVENT {
+                    *changed = true;
+                } else if f.stream_id >= agora_protocol::frame::FIRST_DYNAMIC_STREAM {
+                    term_frames.push_back(f);
+                }
+            }
+        })
+    }
+
+    /// The next thing on a terminal stream, waiting up to `wait`.
+    pub fn terminal_next(&mut self, stream: u32, wait: Duration) -> TermEvent {
+        fn event(f: &Frame) -> Option<TermEvent> {
+            if f.kind == STREAM_CLOSE {
+                return Some(TermEvent::Ended);
+            }
+            let p = &f.payload;
+            match f.kind {
+                0 => Some(TermEvent::Data(p.clone())),
+                1 => Some(TermEvent::Screen(p.clone())),
+                2 if p.len() == 4 => Some(TermEvent::Resized(
+                    u16::from_le_bytes([p[0], p[1]]),
+                    u16::from_le_bytes([p[2], p[3]]),
+                )),
+                3 if p.len() == 4 => Some(TermEvent::Exit(i32::from_le_bytes([
+                    p[0], p[1], p[2], p[3],
+                ]))),
+                _ => None,
+            }
+        }
+        if let Some(pos) = self.term_frames.iter().position(|f| f.stream_id == stream) {
+            if let Some(f) = self.term_frames.remove(pos) {
+                return event(&f).unwrap_or(TermEvent::Quiet);
+            }
+        }
+        let conn = &mut self.conn;
+        let changed = &mut self.changed;
+        let queue = &mut self.term_frames;
+        self.rt.block_on(async {
+            match tokio::time::timeout(wait, conn.recv()).await {
+                Err(_) => TermEvent::Quiet,
+                Ok(Ok(Some(f))) if f.stream_id == stream => event(&f).unwrap_or(TermEvent::Quiet),
+                Ok(Ok(Some(f))) => {
+                    if f.stream_id == STREAM_EVENTS && f.kind == kinds::POSITIONED_EVENT {
+                        *changed = true;
+                    } else if f.stream_id >= agora_protocol::frame::FIRST_DYNAMIC_STREAM {
+                        queue.push_back(f);
+                    }
+                    TermEvent::Quiet
+                }
+                Ok(_) => TermEvent::Lost,
+            }
+        })
+    }
+
+    /// Keys typed into the terminal (an ordinary routed command; the machine runs them in the order sent). Fire and forget.
+    pub fn terminal_input(&mut self, node: &str, terminal_id: &str, data: &[u8]) {
+        self.send_nowait(
+            node,
+            command_request::Command::TerminalInput(agora_protocol::v1::TerminalInput {
+                terminal_id: terminal_id.to_string(),
+                data: data.to_vec(),
+            }),
+        );
+    }
+
+    pub fn terminal_resize(&mut self, node: &str, terminal_id: &str, cols: u16, rows: u16) {
+        self.send_nowait(
+            node,
+            command_request::Command::TerminalResize(agora_protocol::v1::TerminalResize {
+                terminal_id: terminal_id.to_string(),
+                cols: u32::from(cols),
+                rows: u32::from(rows),
+            }),
+        );
+    }
+
+    /// Tells the hub we stopped watching this stream.
+    pub fn terminal_close(&mut self, stream: u32) {
+        let conn = &mut self.conn;
+        let _ = self.rt.block_on(conn.send(&Frame {
+            stream_id: stream,
+            kind: STREAM_CLOSE,
+            seq: None,
+            payload: Vec::new(),
+        }));
+        self.term_frames.retain(|f| f.stream_id != stream);
+    }
+
+    fn send_nowait(&mut self, node: &str, command: command_request::Command) {
+        self.requests += 1;
+        let req = CommandRequest {
+            request_id: format!("t{}", self.requests),
+            idempotency_key: String::new(),
+            target_node: node.to_string(),
+            command: Some(command),
+        };
+        let conn = &mut self.conn;
+        let _ = self.rt.block_on(conn.send(&Frame {
+            stream_id: STREAM_COMMANDS,
+            kind: 0,
+            seq: None,
+            payload: req.encode_to_vec(),
+        }));
+    }
+}
+
+/// What a watched terminal said.
+pub enum TermEvent {
+    /// Output to write as it is.
+    Data(Vec<u8>),
+    /// A repaint of the whole screen (first, and after the viewer fell behind).
+    Screen(Vec<u8>),
+    Resized(u16, u16),
+    /// The program ended with this status (negative: a signal).
+    Exit(i32),
+    /// The hub ended the relay.
+    Ended,
+    Quiet,
+    /// The link to the hub is gone.
+    Lost,
 }

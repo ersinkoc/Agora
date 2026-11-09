@@ -24,3 +24,5 @@ tui-allowed = İzin verildi.
 tui-denied = Reddedildi.
 tui-not-trusted = Bu cihaza o makine henüz güvenmiyor. O makinede şunu çalıştırın: agora node trust { $id } { $key }
 tui-answer-failed = Yanıtınız gönderilemedi ({ $code }).
+tui-hint-open = Tab: sonraki ajan · Enter: terminalini aç (Ctrl-] geri döner)
+tui-opening-failed = Bu terminal açılamadı ({ $code }).

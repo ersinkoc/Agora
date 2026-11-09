@@ -50,9 +50,16 @@ fn local(id: &str) -> &str {
 }
 
 /// One screen of lines for a snapshot. `color` off spells states out with a marker and no escape sequences (NO_COLOR).
-/// `keys` says the console takes answers from the keyboard (a hint line appears while something waits); `notice` is the last
+/// `selected` is the agent the keyboard points at (Enter opens its terminal); `keys` says the console takes answers from the keyboard (a hint line appears while something waits); `notice` is the last
 /// thing the user did, shown at the bottom.
-pub fn render(s: &Snapshot, color: bool, keys: bool, notice: &str, t: Text<'_>) -> Vec<String> {
+pub fn render(
+    s: &Snapshot,
+    color: bool,
+    keys: bool,
+    selected: &str,
+    notice: &str,
+    t: Text<'_>,
+) -> Vec<String> {
     let (bold, dim, reset) = if color {
         (BOLD, DIM, RESET)
     } else {
@@ -123,20 +130,39 @@ pub fn render(s: &Snapshot, color: bool, keys: bool, notice: &str, t: Text<'_>) 
     for a in &s.agents {
         by_project.entry(a.project_id.as_str()).or_default().push(a);
     }
+    // A project is known by its id; its folder name on a machine is what people recognise.
+    let folder = |project: &str| {
+        s.checkouts
+            .iter()
+            .find(|c| c.project_id == project)
+            .and_then(|c| {
+                c.path
+                    .trim_end_matches(['/', '\\'])
+                    .rsplit(['/', '\\'])
+                    .next()
+            })
+            .filter(|n| !n.is_empty())
+            .map(str::to_string)
+    };
     for (project, agents) in by_project {
         let name = if project.is_empty() {
             t(key!("tui-no-project"), &[])
         } else {
-            project.to_string()
+            folder(project).unwrap_or_else(|| project.to_string())
         };
         out.push(format!("{bold}{name}{reset}"));
         for a in agents {
             let st = state_of(a);
             let (on, off) = paint(st, color);
             let marker = if color { "●" } else { "*" };
+            let pointer = if keys && a.agent_id == selected {
+                ">"
+            } else {
+                " "
+            };
             let word = state_text(st, t);
             out.push(format!(
-                "  {on}{marker} {word:<10}{off} {}  {dim}{}  {}{reset}",
+                "{pointer} {on}{marker} {word:<10}{off} {}  {dim}{}  {}{reset}",
                 local(&a.agent_id),
                 a.kind,
                 a.node_id,
@@ -163,6 +189,9 @@ pub fn render(s: &Snapshot, color: bool, keys: bool, notice: &str, t: Text<'_>) 
         out.push(format!("  {id}  {dim}{status}{reset}"));
     }
     out.push(String::new());
+    if keys && s.terminals.iter().any(|x| x.agent_id == selected) {
+        out.push(format!("{dim}{}{reset}", t(key!("tui-hint-open"), &[])));
+    }
     if !notice.is_empty() {
         out.push(notice.to_string());
     }
@@ -222,6 +251,12 @@ mod tests {
                     ..Default::default()
                 },
             ],
+            checkouts: vec![agora_protocol::v1::CheckoutSnapshot {
+                checkout_id: "laptop/c".into(),
+                node_id: "laptop".into(),
+                project_id: "web".into(),
+                path: "/home/me/code/website/".into(),
+            }],
             approvals: vec![ApprovalSnapshot {
                 approval_id: "a1".into(),
                 agent_id: "laptop/agent-1".into(),
@@ -235,7 +270,7 @@ mod tests {
 
     #[test]
     fn the_screen_says_what_waits_for_the_user_and_groups_agents_by_project() {
-        let lines = render(&snapshot(), false, true, "", &t);
+        let lines = render(&snapshot(), false, true, "", "", &t);
         let text = lines.join("\n");
         assert!(
             text.contains("tui-header[online=1,total=2,agents=2]"),
@@ -246,7 +281,10 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("tui-blocked[agent=agent-1]"), "{text}");
-        let project = lines.iter().position(|l| l == "web").expect("project row");
+        let project = lines
+            .iter()
+            .position(|l| l == "website")
+            .expect("project row");
         assert!(
             lines[project + 1].contains("agent-1")
                 && lines[project + 1].contains("tui-state-needs-you")
@@ -257,7 +295,7 @@ mod tests {
         );
         assert!(text.contains("vps") && text.contains("tui-offline[]"));
         assert!(text.contains("tui-hint-answer[]"), "{text}");
-        let quiet = render(&snapshot(), false, false, "done!", &t).join("\n");
+        let quiet = render(&snapshot(), false, false, "", "done!", &t).join("\n");
         assert!(
             !quiet.contains("tui-hint-answer") && quiet.contains("done!"),
             "{quiet}"
@@ -265,16 +303,36 @@ mod tests {
     }
 
     #[test]
+    fn the_pointer_marks_the_selected_agent_and_offers_its_terminal() {
+        let mut snap = snapshot();
+        snap.terminals.push(agora_protocol::v1::TerminalSnapshot {
+            terminal_id: "laptop/t-agent-1".into(),
+            node_id: "laptop".into(),
+            agent_id: "laptop/agent-1".into(),
+            title: String::new(),
+        });
+        let lines = render(&snap, false, true, "laptop/agent-1", "", &t);
+        let row = lines
+            .iter()
+            .find(|l| l.contains("agent-1") && l.contains("codex"))
+            .expect("row");
+        assert!(row.starts_with('>'), "{row}");
+        assert!(lines.join("\n").contains("tui-hint-open[]"));
+        let other = render(&snap, false, true, "vps/agent-2", "", &t).join("\n");
+        assert!(!other.contains("tui-hint-open"), "{other}");
+    }
+
+    #[test]
     fn without_color_there_are_no_escape_sequences() {
-        let text = render(&snapshot(), false, true, "", &t).join("\n");
+        let text = render(&snapshot(), false, true, "", "", &t).join("\n");
         assert!(!text.contains('\x1b'));
-        let colored = render(&snapshot(), true, true, "", &t).join("\n");
+        let colored = render(&snapshot(), true, true, "", "", &t).join("\n");
         assert!(colored.contains('\x1b'));
     }
 
     #[test]
     fn an_empty_hub_says_nothing_waits_and_there_are_no_agents() {
-        let text = render(&Snapshot::default(), false, true, "", &t).join("\n");
+        let text = render(&Snapshot::default(), false, true, "", "", &t).join("\n");
         assert!(
             text.contains("tui-nothing-waiting[]") && text.contains("tui-no-agents[]"),
             "{text}"

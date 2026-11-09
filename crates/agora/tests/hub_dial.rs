@@ -242,7 +242,7 @@ fn the_terminal_console_gets_the_snapshot_of_a_node_and_draws_it() {
     let text = |id: &str, args: &[(&str, agora_i18n::Arg)]| {
         catalog.render(id, args).unwrap_or_else(|| id.to_string())
     };
-    let screen = agora_tui::render::render(&snapshot, false, false, "", &text).join("\n");
+    let screen = agora_tui::render::render(&snapshot, false, false, "", "", &text).join("\n");
     assert!(
         screen.contains("agent-1") && screen.contains("1 of 1 machines online"),
         "{screen}"
@@ -374,6 +374,103 @@ fn the_terminal_console_answers_an_approval_with_its_own_key_through_the_hub() {
     wait("the machine to take the answer", || {
         node.approvals.pending_count() == 0
     });
+    drop(node);
+}
+
+#[test]
+fn the_terminal_console_opens_an_agents_terminal_through_the_hub_types_into_it_and_leaves() {
+    use agora_node::control::Client;
+    use agora_protocol::v1::{self, command_request::Command as Cmd};
+    use agora_tui::client::{Hub as ConsoleHub, Session, TermEvent, Update};
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
+        return;
+    }
+    let hub = hubside("laptop");
+    let addr = hub.listen("127.0.0.1:0");
+    let dir = tmp("console-term");
+    let repo = dir.join("myproject");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("a.txt"), "x").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "init"]);
+    let manifests = dir.join("manifests");
+    std::fs::create_dir_all(&manifests).unwrap();
+    std::fs::write(
+        manifests.join("shell.toml"),
+        "kind = \"shell\"\ndisplay_name = \"Shell\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"sh\"]\n",
+    )
+    .unwrap();
+    let cfg = agora_node::daemon::NodeConfig {
+        node_id: "laptop".into(),
+        socket: dir.join("c.sock"),
+        data_dir: dir.join("data"),
+        worktree_root: dir.join("wt"),
+        manifests_dir: manifests,
+        projects: vec![repo],
+        limits: Default::default(),
+    };
+    let node = agora_node::daemon::Node::start(&cfg).unwrap();
+    let mut link = hub.link(addr);
+    link.commands = Some(cfg.socket.clone());
+    let _uplink = spawn(Arc::clone(&node.events), link).unwrap();
+    let mut local = Client::connect(&cfg.socket).unwrap();
+    let started = local
+        .call(Cmd::AgentStart(v1::AgentStart {
+            kind: "shell".into(),
+            ..Default::default()
+        }))
+        .unwrap()
+        .unwrap();
+    let Some(v1::command_ok::Result::AgentStart(s)) = started.result else {
+        panic!("not started");
+    };
+
+    let console = ConsoleHub {
+        addr: addr.to_string(),
+        ca_pem: hub.ca_pem.clone(),
+    };
+    let end = Instant::now() + Duration::from_secs(20);
+    let (mut session, snapshot) = loop {
+        let mut session = Session::connect(&console, "client-token").unwrap();
+        if let Update::Snapshot(sn) = session.next(Duration::from_secs(2)) {
+            if sn
+                .terminals
+                .iter()
+                .any(|t| t.agent_id == format!("laptop/{}", s.agent_id))
+            {
+                break (session, *sn);
+            }
+        }
+        assert!(
+            Instant::now() < end,
+            "the terminal never reached the console"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    // The machine's own id for it is `t-<agent id>`, which is how the console names it.
+    assert!(snapshot
+        .terminals
+        .iter()
+        .any(|t| t.terminal_id.ends_with(&format!("t-{}", s.agent_id))));
+    let terminal = format!("t-{}", s.agent_id);
+    let stream = session.terminal_open("laptop", &terminal).unwrap();
+    session.terminal_input("laptop", &terminal, b"echo seen-$((20+22))\n");
+    let mut out = Vec::new();
+    let end = Instant::now() + Duration::from_secs(20);
+    while !String::from_utf8_lossy(&out).contains("seen-42") {
+        assert!(
+            Instant::now() < end,
+            "no output: {}",
+            String::from_utf8_lossy(&out)
+        );
+        match session.terminal_next(stream, Duration::from_millis(200)) {
+            TermEvent::Data(b) | TermEvent::Screen(b) => out.extend_from_slice(&b),
+            TermEvent::Lost | TermEvent::Ended => panic!("the terminal stream ended"),
+            _ => {}
+        }
+    }
+    session.terminal_close(stream);
     drop(node);
 }
 
