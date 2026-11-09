@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 
 use agora_i18n::{key, Arg};
-use agora_protocol::v1::{AgentSnapshot, AgentState, Snapshot};
+use agora_protocol::v1::{AgentSnapshot, AgentState, ChatEntry, ChatKind, ChatRole, Snapshot};
 
 /// Looks a message up by id and fills its arguments (the binary passes its `Say`).
 pub type Text<'a> = &'a dyn Fn(&str, &[(&str, Arg)]) -> String;
@@ -79,6 +79,27 @@ pub fn render(
             ],
         )
     ));
+    let (tokens_in, tokens_out) = s.agents.iter().fold((0u64, 0u64), |(i, o), a| {
+        (i + a.input_tokens, o + a.output_tokens)
+    });
+    if tokens_in + tokens_out > 0 {
+        out.push(format!(
+            "{dim}{}{reset}",
+            t(
+                key!("tui-usage"),
+                &[
+                    (
+                        "input",
+                        Arg::Num(i64::try_from(tokens_in).unwrap_or(i64::MAX))
+                    ),
+                    (
+                        "output",
+                        Arg::Num(i64::try_from(tokens_out).unwrap_or(i64::MAX))
+                    ),
+                ],
+            )
+        ));
+    }
     out.push(String::new());
 
     // What needs the user: approvals first, then agents that are waiting.
@@ -189,13 +210,91 @@ pub fn render(
         out.push(format!("  {id}  {dim}{status}{reset}"));
     }
     out.push(String::new());
-    if keys && s.terminals.iter().any(|x| x.agent_id == selected) {
+    if keys && s.agents.iter().any(|x| x.agent_id == selected) {
         out.push(format!("{dim}{}{reset}", t(key!("tui-hint-open"), &[])));
     }
     if !notice.is_empty() {
         out.push(notice.to_string());
     }
     out.push(format!("{dim}{}{reset}", t(key!("tui-quit-hint"), &[])));
+    out
+}
+
+/// Text an agent or a person wrote is shown as plain text: control characters (escape sequences that could move the cursor, change the
+/// title or paste into the prompt) and bidirectional overrides are dropped, a tab becomes spaces.
+pub fn plain(text: &str) -> String {
+    text.chars()
+        .filter_map(|c| match c {
+            '\t' => Some(' '),
+            '\n' => Some('\n'),
+            c if c.is_control() => None,
+            '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' => None,
+            c => Some(c),
+        })
+        .collect()
+}
+
+/// The conversation of an agent that has no terminal, as the last lines that fit `rows` x `cols`, then the line being typed.
+pub fn render_chat(
+    entries: &[ChatEntry],
+    agent: &str,
+    typed: &str,
+    (cols, rows): (usize, usize),
+    color: bool,
+    t: Text<'_>,
+) -> Vec<String> {
+    let (bold, dim, reset) = if color {
+        (BOLD, DIM, RESET)
+    } else {
+        ("", "", "")
+    };
+    let mut lines: Vec<String> = Vec::new();
+    for e in entries {
+        let who = if e.role == ChatRole::User as i32 {
+            t(key!("tui-chat-you"), &[])
+        } else {
+            t(
+                key!("tui-chat-agent"),
+                &[("agent", Arg::Str(agent.to_string()))],
+            )
+        };
+        let body = match ChatKind::try_from(e.kind).unwrap_or(ChatKind::Unspecified) {
+            ChatKind::ToolCall => t(key!("tui-chat-tool"), &[("text", Arg::Str(plain(&e.text)))]),
+            ChatKind::Plan => format!("{}\n{}", t(key!("tui-chat-plan"), &[]), plain(&e.text)),
+            ChatKind::Diff => t(key!("tui-chat-diff"), &[("path", Arg::Str(plain(&e.path)))]),
+            _ => plain(&e.text),
+        };
+        for (i, row) in body.split('\n').enumerate() {
+            let prefix = if i == 0 {
+                format!("{bold}{who}:{reset} ")
+            } else {
+                "  ".to_string()
+            };
+            // Hard wrap by characters; a wide character may overshoot a little, which is harmless.
+            let width = cols.saturating_sub(4).max(10);
+            let chars: Vec<char> = row.chars().collect();
+            if chars.is_empty() {
+                lines.push(prefix.trim_end().to_string());
+            }
+            for (j, chunk) in chars.chunks(width).enumerate() {
+                let head = if j == 0 {
+                    prefix.clone()
+                } else {
+                    "  ".to_string()
+                };
+                lines.push(format!("{head}{}", chunk.iter().collect::<String>()));
+            }
+        }
+    }
+    let room = rows.saturating_sub(3).max(1);
+    let skip = lines.len().saturating_sub(room);
+    let mut out: Vec<String> = lines.into_iter().skip(skip).collect();
+    out.push(format!("{dim}{}{reset}", t(key!("tui-chat-hint"), &[])));
+    out.push(format!(
+        "{} {}",
+        t(key!("tui-chat-input"), &[]),
+        plain(typed)
+    ));
     out
 }
 
@@ -318,8 +417,56 @@ mod tests {
             .expect("row");
         assert!(row.starts_with('>'), "{row}");
         assert!(lines.join("\n").contains("tui-hint-open[]"));
-        let other = render(&snap, false, true, "vps/agent-2", "", &t).join("\n");
+        let other = render(&snap, false, true, "nobody/agent-9", "", &t).join("\n");
         assert!(!other.contains("tui-hint-open"), "{other}");
+    }
+
+    #[test]
+    fn the_chat_shows_the_last_lines_and_drops_what_an_agent_could_use_to_drive_the_terminal() {
+        let entry = |role: ChatRole, kind: ChatKind, text: &str| ChatEntry {
+            role: role as i32,
+            kind: kind as i32,
+            text: text.into(),
+            ..Default::default()
+        };
+        let entries = vec![
+            entry(ChatRole::User, ChatKind::Text, "hello"),
+            entry(
+                ChatRole::Agent,
+                ChatKind::Text,
+                "hi\x1b]0;owned\x07 there\u{202e}x",
+            ),
+            entry(ChatRole::Agent, ChatKind::ToolCall, "{\"tool\":\"ls\"}"),
+        ];
+        let lines = render_chat(&entries, "agent-1", "ty\x1bped", (80, 24), false, &t);
+        let text = lines.join("\n");
+        assert!(
+            !text.contains('\x1b') && !text.contains('\x07') && !text.contains('\u{202e}'),
+            "{text:?}"
+        );
+        assert!(text.contains("tui-chat-you[]: hello"), "{text}");
+        assert!(text.contains("hi]0;owned there"), "{text}");
+        assert!(text.contains("tui-chat-tool[text="), "{text}");
+        assert!(lines.last().is_some_and(|l| l.contains("typed")));
+        // Only what fits is kept.
+        let many: Vec<ChatEntry> = (0..50)
+            .map(|i| entry(ChatRole::Agent, ChatKind::Text, &format!("line {i}")))
+            .collect();
+        let short = render_chat(&many, "a", "", (80, 10), false, &t);
+        assert_eq!(short.len(), 7 + 2);
+        assert!(
+            short.iter().any(|l| l.contains("line 49"))
+                && !short.iter().any(|l| l.contains("line 0"))
+        );
+    }
+
+    #[test]
+    fn the_header_adds_up_the_tokens_the_agents_used() {
+        let mut snap = snapshot();
+        snap.agents[0].input_tokens = 1000;
+        snap.agents[1].output_tokens = 250;
+        let text = render(&snap, false, false, "", "", &t).join("\n");
+        assert!(text.contains("tui-usage[input=1000,output=250]"), "{text}");
     }
 
     #[test]

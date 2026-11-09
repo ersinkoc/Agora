@@ -475,6 +475,108 @@ fn the_terminal_console_opens_an_agents_terminal_through_the_hub_types_into_it_a
 }
 
 #[test]
+fn the_terminal_console_follows_a_chat_agents_conversation_sends_a_request_and_stops_it() {
+    use agora_node::control::Client;
+    use agora_protocol::v1::{self, command_request::Command as Cmd};
+    use agora_tui::client::{ChatEvent, Hub as ConsoleHub, Session, Update};
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return;
+    }
+    let hub = hubside("laptop");
+    let addr = hub.listen("127.0.0.1:0");
+    let dir = tmp("console-chat");
+    let repo = dir.join("myproject");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("a.txt"), "x").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "init"]);
+    let manifests = dir.join("manifests");
+    std::fs::create_dir_all(&manifests).unwrap();
+    let mut fake = std::path::PathBuf::from(env!("CARGO_BIN_EXE_agora"));
+    fake.pop();
+    fake.push(format!("agora-fake-agent{}", std::env::consts::EXE_SUFFIX));
+    if !fake.exists() {
+        assert!(std::process::Command::new(
+            std::env::var("CARGO").unwrap_or_else(|_| "cargo".into())
+        )
+        .args(["build", "-q", "-p", "agora-fake-agent"])
+        .status()
+        .unwrap()
+        .success());
+    }
+    std::fs::write(
+        manifests.join("ad.toml"),
+        format!("kind = \"adapted\"\ndisplay_name = \"A\"\nversion = \"1\"\nmin_engine = 1\n[adapter]\ncommand = [{:?}, \"--adapter\"]\n", fake.to_string_lossy()),
+    )
+    .unwrap();
+    let cfg = agora_node::daemon::NodeConfig {
+        node_id: "laptop".into(),
+        socket: dir.join("c.sock"),
+        data_dir: dir.join("data"),
+        worktree_root: dir.join("wt"),
+        manifests_dir: manifests,
+        projects: vec![repo],
+        limits: Default::default(),
+    };
+    let node = agora_node::daemon::Node::start(&cfg).unwrap();
+    let mut link = hub.link(addr);
+    link.commands = Some(cfg.socket.clone());
+    let _uplink = spawn(Arc::clone(&node.events), link).unwrap();
+    let mut local = Client::connect(&cfg.socket).unwrap();
+    let started = local
+        .call(Cmd::AgentStart(v1::AgentStart {
+            kind: "adapted".into(),
+            ..Default::default()
+        }))
+        .unwrap()
+        .unwrap();
+    let Some(v1::command_ok::Result::AgentStart(s)) = started.result else {
+        panic!("not started");
+    };
+
+    let console = ConsoleHub {
+        addr: addr.to_string(),
+        ca_pem: hub.ca_pem.clone(),
+    };
+    let end = Instant::now() + Duration::from_secs(20);
+    let mut session = loop {
+        let mut session = Session::connect(&console, "client-token").unwrap();
+        if let Update::Snapshot(sn) = session.next(Duration::from_secs(2)) {
+            if sn
+                .agents
+                .iter()
+                .any(|a| a.agent_id == format!("laptop/{}", s.agent_id))
+            {
+                break session;
+            }
+        }
+        assert!(Instant::now() < end, "the agent never reached the console");
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    let stream = session.chat_open("laptop", &s.agent_id).unwrap();
+    session
+        .prompt("laptop", &s.agent_id, "hello from the console")
+        .unwrap();
+    let end = Instant::now() + Duration::from_secs(20);
+    let mut said = String::new();
+    while !said.contains("hello from the console") {
+        assert!(
+            Instant::now() < end,
+            "the request never showed in the conversation: {said}"
+        );
+        match session.chat_next(stream, Duration::from_millis(200)) {
+            ChatEvent::Lines(entries, _) => entries.iter().for_each(|e| said.push_str(&e.text)),
+            ChatEvent::Lost | ChatEvent::Ended => panic!("the chat stream ended"),
+            ChatEvent::Quiet => {}
+        }
+    }
+    session.terminal_close(stream);
+    session.stop_agent("laptop", &s.agent_id).unwrap();
+    drop(node);
+}
+
+#[test]
 fn a_node_keeps_working_without_the_hub_and_catches_up_when_it_appears() {
     let hub = hubside("server");
     // Reserve a port, then release it so the node's first attempts are refused.
