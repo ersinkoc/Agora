@@ -38,8 +38,20 @@ pub enum Verdict {
     Invalid(Error),
 }
 
+/// A `#channel` message on a shared project: one copy for every other running agent of the project, on any node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Fanout {
+    pub from_node: String,
+    pub from_agent: String,
+    /// `(node, agent)` of each receiver.
+    pub targets: Vec<(String, String)>,
+    pub body: String,
+    pub refs: Vec<String>,
+}
+
 #[derive(Debug)]
 pub struct Answer {
+    pub fanout: Option<Fanout>,
     pub verdict: Verdict,
     /// Audit events the call produced, to be published as hub events.
     pub events: Vec<Body>,
@@ -51,6 +63,7 @@ fn answer(verdict: Verdict) -> Answer {
         verdict,
         events: Vec::new(),
         handoff: None,
+        fanout: None,
     }
 }
 
@@ -111,6 +124,78 @@ impl Boards {
                 mesh.unregister(&id, now_ms);
             }
         }
+    }
+
+    /// `send_message` to `#channel`: the same limits as a local message, then one copy per other running agent.
+    fn channel(view: &View, node: &str, agent: &str, project: &str, args: &Value) -> Answer {
+        let limits = Limits::default();
+        let invalid = |f: &str| {
+            answer(Verdict::Invalid(
+                Error::new(ErrorCode::ProtocolInvalidMessage).with("field", f),
+            ))
+        };
+        let (Some(to), Some(body)) = (
+            args.get("to").and_then(Value::as_str),
+            args.get("body").and_then(Value::as_str),
+        ) else {
+            return invalid("body");
+        };
+        if !to.starts_with('#') || to.len() < 2 {
+            return invalid("to");
+        }
+        let refs: Vec<String> = args
+            .get("refs")
+            .and_then(Value::as_array)
+            .map(|r| {
+                r.iter()
+                    .filter_map(|x| x.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let done = |result: Value, is_error: bool| Verdict::Done { result, is_error };
+        let refuse = |code: ErrorCode, limit: usize| {
+            let text = json!({"error": {"code": code.as_str(), "params": {"limit": limit}}});
+            done(
+                json!({"content": [{"type": "text", "text": text.to_string()}], "isError": true}),
+                true,
+            )
+        };
+        if body.len() > limits.max_body_bytes {
+            return answer(refuse(ErrorCode::MeshBodyTooLarge, limits.max_body_bytes));
+        }
+        if refs.len() > limits.max_refs {
+            return answer(refuse(ErrorCode::MeshTooManyRefs, limits.max_refs));
+        }
+        let me = format!("{node}/{agent}");
+        let mut targets: Vec<(String, String)> = view
+            .agents
+            .iter()
+            .filter(|(k, a)| {
+                a.project_id == project
+                    && a.running
+                    && **k != me
+                    && view.nodes.get(&a.node_id).is_some_and(|n| n.online)
+            })
+            .filter_map(|(k, a)| {
+                k.strip_prefix(&format!("{}/", a.node_id))
+                    .map(|local| (a.node_id.clone(), local.to_string()))
+            })
+            .collect();
+        targets.sort();
+        let text = json!({"delivered_to": targets.len()});
+        let mut a = answer(done(
+            json!({"content": [{"type": "text", "text": text.to_string()}], "isError": false}),
+            false,
+        ));
+        // The channel's name stays in front of the text: receivers get it as a message from the sender, like any cross-node one.
+        a.fanout = Some(Fanout {
+            from_node: node.to_string(),
+            from_agent: agent.to_string(),
+            targets,
+            body: format!("[{to}] {body}"),
+            refs,
+        });
+        a
     }
 
     pub fn has(&self, project: &str) -> bool {
@@ -208,7 +293,8 @@ impl Boards {
                 Error::new(ErrorCode::ProtocolInvalidMessage).with("field", field),
             ))
         };
-        if !BOARD_TOOLS.contains(&tool) {
+        let channel = tool == "send_message";
+        if !channel && !BOARD_TOOLS.contains(&tool) {
             return bad("tool");
         }
         let Ok(mut args) = serde_json::from_str::<Value>(arguments_json) else {
@@ -221,6 +307,9 @@ impl Boards {
         // A node can only speak for a project it has a checkout of, and a board exists only when two nodes share it.
         if nodes.len() < 2 || !nodes.iter().any(|n| n == node) {
             return answer(Verdict::NotShared);
+        }
+        if channel {
+            return Self::channel(view, node, agent, project, &args);
         }
         let caller = format!("{node}/{agent}");
         let mut guard = self.by_project.lock().unwrap_or_else(|e| e.into_inner());
@@ -293,6 +382,7 @@ impl Boards {
             verdict: Verdict::Done { result, is_error },
             events,
             handoff,
+            fanout: None,
         }
     }
 }

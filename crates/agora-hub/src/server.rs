@@ -683,6 +683,26 @@ fn board_for_node(
         }
         Verdict::Done { result, is_error } => (result.to_string(), is_error),
     };
+    if let Some(f) = a.fanout {
+        // Best effort, like any mesh post: a receiver that is gone just does not get its copy.
+        for (to_node, to_agent) in f.targets {
+            let post = v1::CommandRequest {
+                request_id: String::new(),
+                idempotency_key: String::new(),
+                target_node: String::new(),
+                command: Some(command_request::Command::MeshPost(v1::MeshPost {
+                    to: to_agent,
+                    body: f.body.clone(),
+                    origin: f.from_node.clone(),
+                    from_agent: f.from_agent.clone(),
+                    refs: f.refs.clone(),
+                })),
+            };
+            let _ = hub.router().send(&to_node, post);
+        }
+        let _ = answers.send(ok(true, result, is_error));
+        return;
+    }
     let Some(h) = a.handoff else {
         let _ = answers.send(ok(true, result, is_error));
         return;
