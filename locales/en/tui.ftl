@@ -44,3 +44,5 @@ tui-start-nowhere = No machine with a project is online.
 tui-started = Started { $agent }.
 tui-start-failed = Could not start it ({ $code }).
 tui-cost = about { $usd } USD
+tui-grant-ask = That machine wants your OK before it lets you do this. Press y to allow it for one hour, any other key to cancel.
+tui-granted = Allowed for one hour.

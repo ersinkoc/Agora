@@ -63,6 +63,81 @@ fn answer(say: &Say, session: &mut Session, snapshot: &Snapshot, approved: bool)
     }
 }
 
+const GRANT_TTL: Duration = Duration::from_secs(60 * 60);
+
+/// A machine refused until its owner allows it (ADR-0041). Asks, and on `y` signs a grant with this device's key. `Ok(true)` means it
+/// was given and the action can be repeated; `Ok(false)` that the user said no; `Err` is the line to show.
+fn ask_grant(
+    say: &Say,
+    session: &mut Session,
+    rx: &mpsc::Receiver<u8>,
+    node: &str,
+    scope: &str,
+    commands: &[&str],
+) -> Result<bool, String> {
+    let mut out = std::io::stdout();
+    let _ = write!(out, "\x1b[H\x1b[2J{}", say.text(key!("tui-grant-ask"), &[]));
+    let _ = out.flush();
+    let end = Instant::now() + Duration::from_secs(30);
+    let yes = loop {
+        match rx.recv_timeout(Duration::from_millis(200)) {
+            Ok(k) => break k == b'y',
+            Err(mpsc::RecvTimeoutError::Timeout) if Instant::now() < end => {}
+            Err(_) => break false,
+        }
+    };
+    if !yes {
+        return Ok(false);
+    }
+    let fail = |code: String| say.text(key!("tui-answer-failed"), &[("code", Arg::Str(code))]);
+    let device = device().ok_or_else(|| fail("device".into()))?;
+    match session.grant(node, &device, scope, commands, GRANT_TTL) {
+        Ok(()) => Ok(true),
+        Err(code) if code == "approval.signature_invalid" => Err(say.text(
+            key!("tui-not-trusted"),
+            &[
+                ("id", Arg::Str(device.id.clone())),
+                ("key", Arg::Str(device.public_key_hex())),
+            ],
+        )),
+        Err(code) => Err(fail(code)),
+    }
+}
+
+/// What `action` came to once a refusal for a missing grant was handled.
+enum Tried<T> {
+    Done(Result<T, String>),
+    /// The user did not allow it.
+    Declined,
+    /// Asking failed; the line to show.
+    Line(String),
+}
+
+/// Runs `action`; when the machine wants a grant first, asks the user and, if given, runs it once more.
+fn with_grant<T>(
+    say: &Say,
+    session: &mut Session,
+    rx: &mpsc::Receiver<u8>,
+    (node, scope, commands): (&str, &str, &[&str]),
+    mut action: impl FnMut(&mut Session) -> Result<T, String>,
+) -> Tried<T> {
+    let first = action(session);
+    if !first
+        .as_ref()
+        .is_err_and(|c| c == "approval.grant_required")
+    {
+        return Tried::Done(first);
+    }
+    match ask_grant(say, session, rx, node, scope, commands) {
+        Ok(true) => Tried::Done(action(session)),
+        Ok(false) => Tried::Declined,
+        Err(line) => Tried::Line(line),
+    }
+}
+
+/// What typing to one agent needs a grant for (what the web client asks for too).
+const TYPING: [&str; 3] = ["agent.stop", "agent.prompt", "terminal.input"];
+
 /// Ctrl-] : the key that leaves an opened terminal (the same one `agora terminal attach` uses).
 const DETACH: u8 = 0x1d;
 
@@ -158,11 +233,15 @@ fn chat(
                     let line = String::from_utf8_lossy(&typed).trim().to_string();
                     typed.clear();
                     if !line.is_empty() {
-                        note = match session.prompt(node, local, &line) {
-                            Ok(()) => String::new(),
-                            Err(code) => {
+                        let scope = format!("agent:{local}");
+                        note = match with_grant(say, session, rx, (node, &scope, &TYPING), |s| {
+                            s.prompt(node, local, &line)
+                        }) {
+                            Tried::Done(Ok(())) | Tried::Declined => String::new(),
+                            Tried::Done(Err(code)) => {
                                 say.text(key!("tui-send-failed"), &[("code", Arg::Str(code))])
                             }
+                            Tried::Line(l) => l,
                         };
                     }
                     dirty = true;
@@ -266,9 +345,14 @@ fn start(
     let Some((kind, _)) = kinds.get(index) else {
         return String::new();
     };
-    match session.start_agent(&node, &project, kind) {
-        Ok(agent) => say.text(key!("tui-started"), &[("agent", Arg::Str(agent))]),
-        Err(code) => say.text(key!("tui-start-failed"), &[("code", Arg::Str(code))]),
+    let scope = format!("project:{project}");
+    match with_grant(say, session, rx, (&node, &scope, &["agent.start"]), |s| {
+        s.start_agent(&node, &project, kind)
+    }) {
+        Tried::Done(Ok(agent)) => say.text(key!("tui-started"), &[("agent", Arg::Str(agent))]),
+        Tried::Done(Err(code)) => say.text(key!("tui-start-failed"), &[("code", Arg::Str(code))]),
+        Tried::Declined => String::new(),
+        Tried::Line(l) => l,
     }
 }
 
@@ -406,11 +490,20 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                     b'x' => {
                         if !selected.is_empty() {
                             let (node, local) = selected.split_once('/').unwrap_or(("", &selected));
-                            notice = match session.stop_agent(node, local) {
-                                Ok(()) => say.text(key!("tui-stopped"), &[]),
-                                Err(code) => {
+                            let scope = format!("agent:{local}");
+                            notice = match with_grant(
+                                say,
+                                &mut session,
+                                &rx,
+                                (node, &scope, &TYPING),
+                                |s| s.stop_agent(node, local),
+                            ) {
+                                Tried::Done(Ok(())) => say.text(key!("tui-stopped"), &[]),
+                                Tried::Done(Err(code)) => {
                                     say.text(key!("tui-stop-failed"), &[("code", Arg::Str(code))])
                                 }
+                                Tried::Declined => String::new(),
+                                Tried::Line(l) => l,
                             };
                             dirty_since.get_or_insert_with(Instant::now);
                             draw(&snapshot, &selected, &notice, cost);

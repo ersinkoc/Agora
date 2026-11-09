@@ -44,3 +44,5 @@ tui-start-nowhere = Projesi olan çevrimiçi bir makine yok.
 tui-started = { $agent } başlatıldı.
 tui-start-failed = Başlatılamadı ({ $code }).
 tui-cost = yaklaşık { $usd } USD
+tui-grant-ask = O makine bunu yapmanıza izin vermeden önce onayınızı istiyor. Bir saatliğine izin vermek için y'ye basın, başka bir tuş iptal eder.
+tui-granted = Bir saatliğine izin verildi.

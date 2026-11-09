@@ -6,7 +6,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::device::{approval_message, Device};
+use crate::device::{approval_message, grant_message, new_grant_id, Device};
 use agora_protocol::frame::{kinds, STREAM_CLOSE, STREAM_COMMANDS, STREAM_EVENTS};
 use agora_protocol::v1::{
     command_ok, command_request, command_response, CommandOk, CommandRequest, CommandResponse,
@@ -533,6 +533,46 @@ impl Session {
             Some(command_ok::Result::AgentStart(s)) => Ok(s.agent_id),
             _ => Ok(String::new()),
         }
+    }
+
+    /// Gives a machine the owner's permission (ADR-0041) for `commands` within `scope` (`node`, `agent:<id>` or `project:<id>`) for
+    /// `ttl`, signed with this device's key. `Err` carries the error code (`approval.signature_invalid`: the machine does not trust this
+    /// device yet).
+    pub fn grant(
+        &mut self,
+        node: &str,
+        device: &Device,
+        scope: &str,
+        commands: &[&str],
+        ttl: Duration,
+    ) -> Result<(), String> {
+        let grant_id = new_grant_id().ok_or_else(|| "client.sign".to_string())?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(0));
+        let expires_at_ms = now + u64::try_from(ttl.as_millis()).unwrap_or(0);
+        let commands: Vec<String> = commands.iter().map(|c| (*c).to_string()).collect();
+        let signature = device
+            .sign(&grant_message(
+                node,
+                &grant_id,
+                scope,
+                &commands,
+                expires_at_ms,
+            ))
+            .ok_or_else(|| "client.sign".to_string())?;
+        self.command(
+            node,
+            command_request::Command::GrantCreate(agora_protocol::v1::GrantCreate {
+                grant_id,
+                scope: scope.to_string(),
+                commands,
+                expires_at_ms,
+                signer_device_id: device.id.clone(),
+                signature,
+            }),
+            Duration::from_secs(15),
+        )
     }
 
     /// Stops an agent on a machine.
