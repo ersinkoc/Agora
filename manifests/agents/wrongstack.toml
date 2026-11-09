@@ -1,0 +1,44 @@
+kind = "wrongstack"
+display_name = "WrongStack"
+version = "2026.11.09.1"
+min_engine = 1
+
+[process]
+names = ["wstack", "wrongstack"]
+# `--skip` answers every startup question from saved choices (otherwise a launcher menu and a "no project manifest" question
+# wait for a key); `--tui` is the terminal UI the screen rules below were captured from (checked against WrongStack 1.5.3).
+launch = ["wstack", "--skip", "--tui"]
+
+[mcp]
+# `wstack --mcp-config <file|json>` takes extra MCP servers for the run and accepts a `.mcp.json` (WrongStack 1.5.3 `--help`).
+method = "cli_flag"
+path = ".agora-mcp.json"
+format = "json"
+flag = ["--mcp-config", "{config_file}"]
+
+[resume]
+argv = ["wstack", "--resume", "{session_id}"]
+
+# Screen rules, from screens captured on WrongStack 1.5.3 (manifests/agents/fixtures/wrongstack/). The input box has a title bar
+# that says `idle` when nothing runs and shows a spinner and a verb with an ellipsis (`⠙ bamboozling…`) while a turn runs; side
+# panels and a swarm view can push it up the screen, so the region is wider than for the other agents.
+[[rules]]
+id = "approval_prompt"
+state = "blocked"
+priority = 900
+region = "bottom_non_empty_lines(24)"
+all = [{ contains = "APPROVAL REQUIRED" }, { contains = "[y]es [n]o" }]
+
+[[rules]]
+id = "title_spinner"
+state = "working"
+priority = 800
+region = "bottom_non_empty_lines(24)"
+regex = 'WRONGSTACK v[0-9.]+ .*… +─╮'
+
+[[rules]]
+id = "prompt_box"
+state = "idle"
+priority = 100
+region = "bottom_non_empty_lines(24)"
+regex = 'WRONGSTACK v[0-9.]+ .*idle ─╮'
