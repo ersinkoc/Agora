@@ -19,12 +19,23 @@ export function pickLanguage(tag: string | undefined): string {
   return primary in SOURCES ? primary : 'en';
 }
 
+// Languages written right to left. The page's direction follows the language so a right-to-left translation lays out correctly
+// from its first release (docs/architecture.md: RTL is fully supported in the web client).
+const RTL = new Set(['ar', 'he', 'fa', 'ur', 'ps', 'sd', 'yi', 'dv', 'ku']);
+
+export function directionOf(lang: string): 'rtl' | 'ltr' {
+  return RTL.has(lang.split(/[-_]/)[0]?.toLowerCase() ?? '') ? 'rtl' : 'ltr';
+}
+
 let chain: FluentBundle[] = [];
 
 export function setLanguage(tag: string | undefined): void {
   const lang = pickLanguage(tag);
   chain = lang === 'en' ? [bundle('en')] : [bundle(lang), bundle('en')];
-  if (typeof document !== 'undefined') document.documentElement.lang = lang;
+  if (typeof document !== 'undefined') {
+    document.documentElement.lang = lang;
+    document.documentElement.dir = directionOf(lang);
+  }
 }
 
 setLanguage(typeof navigator !== 'undefined' ? navigator.language : 'en');
