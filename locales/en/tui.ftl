@@ -24,3 +24,5 @@ tui-allowed = Allowed.
 tui-denied = Denied.
 tui-not-trusted = This device is not trusted by that machine yet. On that machine run: agora node trust { $id } { $key }
 tui-answer-failed = Could not send your answer ({ $code }).
+tui-hint-open = Tab: next agent · Enter: open its terminal (Ctrl-] comes back)
+tui-opening-failed = Could not open that terminal ({ $code }).
