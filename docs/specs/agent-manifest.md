@@ -83,7 +83,7 @@ Rule semantics: highest-priority matching rule wins; `all` = AND, `any` = OR, `n
 `title`, `bottom_lines(n)`, `bottom_non_empty_lines(n)`. Reported state (hooks, ACP, adapter) always overrides
 rule results.
 
-Manifests in this repository (Phase 2): `claude-code`, `codex`, `wrongstack`.
+Manifests in this repository: `claude-code` and `codex` (screens captured from the real agents, `manifests/agents/fixtures/`); `wrongstack` is planned and not shipped yet (it needs a machine that has it). `crates/agora-adapters/tests/shipped_manifests.rs` checks every shipped manifest against its captured screens.
 
 ## `[mcp]` injection
 

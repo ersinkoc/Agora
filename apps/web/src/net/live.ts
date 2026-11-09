@@ -70,6 +70,12 @@ export function connectLive(o: LiveOptions): Live {
   let refusals = 0;
   let requests = 0;
   let nextStream = 3;
+  // Bumped for every socket: a retry scheduled on an older one must not resubscribe on the new one (which already did).
+  let generation = 0;
+  const later = (ms: number, fn: () => void) => {
+    const g = generation;
+    setTimeout(() => { if (g === generation && !closed) fn(); }, ms);
+  };
   const pending = new Map<string, { resolve: (ok: agora.v1.CommandOk.$Properties) => void; reject: (e: CommandError) => void }>();
   const terminals = new Map<number, { node: string; terminalId: string; onEvent: (e: TerminalEvent) => void }>();
 
@@ -89,7 +95,7 @@ export function connectLive(o: LiveOptions): Live {
     if (!t) return;
     request(stream, t.node, { terminalSubscribe: { terminalId: t.terminalId, format: '' } }).catch(() => {
       // The node may be away or the agent gone; try again a little later while someone is watching.
-      if (terminals.has(stream) && !closed) setTimeout(() => subscribeTerminal(stream), 2000);
+      if (terminals.has(stream)) later(2000, () => subscribeTerminal(stream));
     });
   };
 
@@ -97,12 +103,13 @@ export function connectLive(o: LiveOptions): Live {
     const c = chats.get(stream);
     if (!c) return;
     request(stream, c.node, { chatSubscribe: { agentId: c.agentId } }).catch(() => {
-      if (chats.has(stream) && !closed) setTimeout(() => subscribeChat(stream), 2000);
+      if (chats.has(stream)) later(2000, () => subscribeChat(stream));
     });
   };
 
   const start = () => {
     o.onState('connecting');
+    generation++;
     const s = open(o.url, ['agora.v1', `agora.bearer.${o.token}`]);
     sock = s;
     s.binaryType = 'arraybuffer';
@@ -133,7 +140,7 @@ export function connectLive(o: LiveOptions): Live {
       if (f.streamId >= 3 && chats.has(f.streamId)) {
         const c = chats.get(f.streamId);
         if (!c) return;
-        if (f.kind === STREAM_CLOSE) { setTimeout(() => subscribeChat(f.streamId), 500); return; }
+        if (f.kind === STREAM_CLOSE) { later(500, () => subscribeChat(f.streamId)); return; }
         try {
           if (f.kind === CHAT_KIND.SNAPSHOT) c.onLines((agora.v1.ChatSnapshot.decode(f.payload).entries ?? []).map(chatLine), true);
           else if (f.kind === CHAT_KIND.ENTRY) c.onLines([chatLine(agora.v1.ChatEntry.decode(f.payload))], false);
@@ -145,7 +152,7 @@ export function connectLive(o: LiveOptions): Live {
         if (!t) return;
         if (f.kind === STREAM_CLOSE) {
           // The hub ended the relay (slow client, node left, exit): ask again for a fresh snapshot.
-          setTimeout(() => subscribeTerminal(f.streamId), 500);
+          later(500, () => subscribeTerminal(f.streamId));
           return;
         }
         const e = decodeTerminalFrame(f.kind, f.payload);

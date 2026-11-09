@@ -85,6 +85,19 @@ describe('view', () => {
     expect(b[0]?.leases.map((l) => l.path)).toEqual(['src/x.rs']);
   });
 
+  it('forgets that an agent id had a terminal when the id is started again or its node restarts', () => {
+    const v = emptyView();
+    applyEvent(v, 1, ev('n', 1, { agentStarted: { agentId: 'a', nodeId: 'n', worktreeId: 'w', kind: 'shell' } }));
+    applyEvent(v, 2, ev('n', 2, { terminalOpened: { terminalId: 't', agentId: 'a', nodeId: 'n' } }));
+    expect(tiles(v)[0]?.terminal).toBe(true);
+    // The id is reused by a chat agent: no terminal event follows.
+    applyEvent(v, 3, ev('n', 3, { agentStarted: { agentId: 'a', nodeId: 'n', worktreeId: 'w', kind: 'claude' } }));
+    expect(tiles(v)[0]?.terminal).toBe(false);
+    applyEvent(v, 4, ev('n', 4, { terminalOpened: { terminalId: 't2', agentId: 'a', nodeId: 'n' } }));
+    applyEvent(v, 5, ev('n', 5, { nodeOnline: { nodeId: 'n', hostname: 'N' } }));
+    expect(v.withTerminal.size).toBe(0);
+  });
+
   it('adds up estimated cost per project and skips agents without a price', () => {
     const v = emptyView();
     applyEvent(v, 1, ev('n', 1, { checkoutDiscovered: { checkoutId: 'c', nodeId: 'n', projectId: 'p', path: '/home/me/shop' } }));
@@ -305,6 +318,35 @@ describe('commands and terminals', () => {
     expect(last).toMatchObject({ streamId: 3, kind: STREAM_CLOSE });
     live.close();
   });
+});
+
+describe('reconnects', () => {
+  it('does not subscribe a terminal twice when a retry scheduled on the old connection comes due after the new one subscribed', async () => {
+    const sockets: FakeSocket[] = [];
+    const live = connectLive({
+      url: 'ws://hub/', token: 't', backoffMs: () => 0,
+      socket: (u, p) => { const s = new FakeSocket(u, p); sockets.push(s); return s; },
+      onState: () => {}, onView: () => {},
+    });
+    const first = sockets[0] as FakeSocket;
+    first.onopen?.();
+    live.terminal('laptop', 't-1').connect(() => {});
+    const subscribes = (s: FakeSocket) => s.sent.map((b) => decodeFrame(b)).filter((f) => f && f.streamId >= 3 && f.kind === 0).length;
+    // The hub answers "not there"; a retry is scheduled on this connection.
+    const req = v1.CommandRequest.decode(first.sent.map((b) => decodeFrame(b)).filter((f) => f && f.streamId >= 3).at(-1)?.payload as Uint8Array);
+    const bad = encodeFrame({ streamId: STREAM_COMMANDS, kind: 1, payload: v1.CommandResponse.encode(v1.CommandResponse.create({ requestId: req.requestId, err: { code: 'node.offline' } })).finish() });
+    first.onmessage?.({ data: bad.buffer.slice(bad.byteOffset, bad.byteOffset + bad.byteLength) });
+    // The connection drops and comes back at once: the new one subscribes by itself.
+    first.onclose?.();
+    await new Promise((r) => setTimeout(r, 10));
+    const second = sockets[1] as FakeSocket;
+    second.onopen?.();
+    expect(subscribes(second)).toBe(1);
+    // The old retry fires (2 s) and must find itself out of date.
+    await new Promise((r) => setTimeout(r, 2100));
+    expect(subscribes(second)).toBe(1);
+    live.close();
+  }, 10000);
 });
 
 describe('refused sessions', () => {

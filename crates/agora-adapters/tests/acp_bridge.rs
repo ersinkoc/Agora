@@ -217,6 +217,31 @@ fn an_acp_agent_looks_like_an_adapter_to_the_node() {
 }
 
 #[test]
+fn the_node_is_told_the_bridge_is_ready_only_after_the_agent_finished_initializing() {
+    std::env::set_var("AGORA_FAKE_ACP_INIT_DELAY_MS", "400");
+    let n = Node::start();
+    n.to_bridge
+        .send(
+            format!(
+                "{}\n",
+                json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+            )
+            .into_bytes(),
+        )
+        .unwrap();
+    // The agent is still initializing: a strict ACP agent would refuse `session/new` now, so the node must not be told to start one.
+    std::thread::sleep(Duration::from_millis(150));
+    assert!(
+        !n.messages().iter().any(|m| m.get("id") == Some(&json!(1))),
+        "answered early: {:?}",
+        n.messages()
+    );
+    let reply = n.wait(|m| m.get("id") == Some(&json!(1)));
+    assert_eq!(reply["result"]["adapterName"], "acp-bridge");
+    std::env::remove_var("AGORA_FAKE_ACP_INIT_DELAY_MS");
+}
+
+#[test]
 fn an_agent_that_dies_ends_the_bridge_so_the_node_sees_the_adapter_exit() {
     let mut n = Node::start();
     n.call("initialize", json!({}));

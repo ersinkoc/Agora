@@ -38,10 +38,19 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
             }
         };
         match method {
-            "initialize" => reply(
-                out,
-                json!({"protocolVersion": 1, "agentCapabilities": {"loadSession": false}}),
-            )?,
+            "initialize" => {
+                // A slow agent: `AGORA_FAKE_ACP_INIT_DELAY_MS` makes initialization take that long.
+                if let Some(ms) = std::env::var("AGORA_FAKE_ACP_INIT_DELAY_MS")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(ms));
+                }
+                reply(
+                    out,
+                    json!({"protocolVersion": 1, "agentCapabilities": {"loadSession": false}}),
+                )?;
+            }
             "session/new" => reply(out, json!({"sessionId": "acp-s1"}))?,
             "session/prompt" => {
                 let session = params
