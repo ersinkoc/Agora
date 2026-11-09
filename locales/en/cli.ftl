@@ -13,6 +13,7 @@ cli-usage =
       agora mesh stdio --socket PATH
       agora hub run [--listen ADDR] [--hub-dir DIR] [--name HOST]... [--web DIR]
       agora hub code [--hub-dir DIR]
+      agora hub ssh install NAME [--yes] [--unsigned] [--release-url URL] [--hub-dir DIR]
       agora hub login [--hub-dir DIR]
       agora hub notify [--ntfy URL | --webhook URL | --test] [--hub-dir DIR]
       agora hub prices update [--url URL] [--hub-dir DIR]
@@ -90,3 +91,13 @@ cli-hub-ssh-skipped = { $count } line(s) of { $file } were not understood and ar
 cli-hub-ssh-none = No SSH machines yet. Add one with "agora hub ssh add NAME DESTINATION".
 cli-hub-ssh-bad = That machine cannot be added. The name needs letters, digits, "." "_" or "-" and must be new; the destination cannot start with "-" or contain spaces.
 cli-hub-ssh-added = Added { $name } to { $file }. Restart the hub to open its tunnel (the machine's host key must already be in your known_hosts). Then, on { $name }, copy the hub's CA ({ $ca }) and run: agora node enroll --hub wss://localhost:{ $port } --ca CA_FILE --code { $code } --id { $name }   (the code is valid for 10 minutes), then: agora node run --project PATH
+cli-hub-ssh-unknown = No SSH machine named { $name }. Add it first with "agora hub ssh add NAME DESTINATION".
+cli-hub-ssh-install-plan = Install the node on { $name } ({ $destination }), version { $version }, from { $base }. Steps: check what is there, get the release binary (checked before use), enroll through the tunnel, run as a user service. Nothing needs root. Continue? [y/N]
+cli-hub-ssh-install-cancelled = Nothing was changed.
+cli-hub-ssh-install-check = 1/4 Checking the machine…
+cli-hub-ssh-install-binary = 2/4 Getting and checking the release binary…
+cli-hub-ssh-install-enroll = 3/4 Enrolling the node (the tunnel must be up: the hub has to be running)…
+cli-hub-ssh-install-run = 4/4 Starting the node…
+cli-hub-ssh-install-done = Done: { $name } is enrolled and its node runs as a { $service } user service. Approvals there still need you to trust a device on { $name } ("agora node trust").
+cli-hub-ssh-install-manual = { $name } is enrolled, but it has neither systemd nor launchd for user services. Start the node there yourself, for example: { $command }
+cli-hub-ssh-install-failed = Stopped at step "{ $step }" on { $name }: { $detail } Already done: { $done }. Nothing was rolled back.

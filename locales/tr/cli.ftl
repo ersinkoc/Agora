@@ -13,6 +13,7 @@ cli-usage =
       agora mesh stdio --socket YOL
       agora hub run [--listen ADDR] [--hub-dir DIR] [--name HOST]... [--web DIR]
       agora hub code [--hub-dir DIR]
+      agora hub ssh install AD [--yes] [--unsigned] [--release-url URL] [--hub-dir DIR]
       agora hub login [--hub-dir DİZİN]
       agora hub notify [--ntfy URL | --webhook URL | --test] [--hub-dir DIR]
       agora hub prices update [--url URL] [--hub-dir DIR]
@@ -90,3 +91,13 @@ cli-hub-ssh-skipped = { $file } dosyasının { $count } satırı anlaşılamadı
 cli-hub-ssh-none = Henüz SSH makinesi yok. "agora hub ssh add AD HEDEF" ile ekleyin.
 cli-hub-ssh-bad = Bu makine eklenemez. Ad harf, rakam, "." "_" ya da "-" içermeli ve yeni olmalı; hedef "-" ile başlayamaz ve boşluk içeremez.
 cli-hub-ssh-added = { $name } makinesi { $file } dosyasına eklendi. Tünelini açmak için hub'ı yeniden başlatın (makinenin sunucu anahtarı known_hosts dosyanızda olmalı). Sonra { $name } üzerinde hub'ın CA'sını ({ $ca }) kopyalayıp şunu çalıştırın: agora node enroll --hub wss://localhost:{ $port } --ca CA_DOSYASI --code { $code } --id { $name }   (kod 10 dakika geçerli), ardından: agora node run --project YOL
+cli-hub-ssh-unknown = { $name } adında bir SSH makinesi yok. Önce "agora hub ssh add AD HEDEF" ile ekleyin.
+cli-hub-ssh-install-plan = { $name } ({ $destination }) makinesine düğüm kurulacak: sürüm { $version }, kaynak { $base }. Adımlar: makineyi denetle, sürüm ikilisini al (kullanılmadan önce doğrulanır), tünel üzerinden kaydet, kullanıcı servisi olarak çalıştır. Root gerekmez. Devam edilsin mi? [e/H]
+cli-hub-ssh-install-cancelled = Hiçbir şey değiştirilmedi.
+cli-hub-ssh-install-check = 1/4 Makine denetleniyor…
+cli-hub-ssh-install-binary = 2/4 Sürüm ikilisi alınıyor ve doğrulanıyor…
+cli-hub-ssh-install-enroll = 3/4 Düğüm kaydediliyor (tünel açık olmalı: hub çalışıyor olmalı)…
+cli-hub-ssh-install-run = 4/4 Düğüm başlatılıyor…
+cli-hub-ssh-install-done = Bitti: { $name } kaydedildi ve düğümü { $service } kullanıcı servisi olarak çalışıyor. Orada onay verebilmek için yine de { $name } üzerinde bir cihaza güvenmeniz gerekir ("agora node trust").
+cli-hub-ssh-install-manual = { $name } kaydedildi ama kullanıcı servisleri için ne systemd ne launchd var. Düğümü orada kendiniz başlatın, örneğin: { $command }
+cli-hub-ssh-install-failed = { $name } üzerinde "{ $step }" adımında durdu: { $detail } Önceden yapılanlar: { $done }. Hiçbir şey geri alınmadı.

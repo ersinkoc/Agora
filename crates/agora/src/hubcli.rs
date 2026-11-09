@@ -421,10 +421,117 @@ pub fn hub_ssh(say: &Say, o: &Opts) -> ExitCode {
                 }
             }
         }
+        [verb, machine] if verb == "install" => hub_ssh_install(say, o, &dir, machine, &text),
         _ => {
             say.err(key!("cli-bad-arguments"), &[]);
             say.err(key!("cli-usage"), &[]);
             ExitCode::from(2)
+        }
+    }
+}
+
+/// Where release archives are published, unless `--release-url` or `<hub dir>/release-url` says otherwise.
+const RELEASE_BASE: &str = "https://github.com/ersinkoc/Agora/releases/download";
+
+/// `agora hub ssh install NAME` (ADR-0034): shows the plan, asks once, then runs check / binary / enroll / run on the machine.
+fn hub_ssh_install(say: &Say, o: &Opts, dir: &Path, name: &str, machines: &str) -> ExitCode {
+    use agora_hub::ssh::parse_machines;
+    use agora_hub::ssh_install::{install, Finish, Options, SshRemote};
+    let Some(machine) = parse_machines(machines)
+        .0
+        .into_iter()
+        .find(|m| m.name == name)
+    else {
+        say.err(key!("cli-hub-ssh-unknown"), &[("name", name.into())]);
+        return ExitCode::from(2);
+    };
+    let read = |f: &str| {
+        std::fs::read_to_string(dir.join(f))
+            .ok()
+            .map(|t| t.trim().to_string())
+    };
+    let base = o
+        .release_url
+        .clone()
+        .or_else(|| read("release-url"))
+        .unwrap_or_else(|| RELEASE_BASE.to_string());
+    let version = env!("CARGO_PKG_VERSION");
+    say.out(
+        key!("cli-hub-ssh-install-plan"),
+        &[
+            ("name", name.into()),
+            ("destination", machine.destination.clone().into()),
+            ("version", version.into()),
+            ("base", base.clone().into()),
+        ],
+    );
+    if !o.yes {
+        let mut line = String::new();
+        let _ = std::io::stdin().read_line(&mut line);
+        if !matches!(
+            line.trim().to_lowercase().as_str(),
+            "y" | "yes" | "e" | "evet"
+        ) {
+            say.out(key!("cli-hub-ssh-install-cancelled"), &[]);
+            return ExitCode::from(1);
+        }
+    }
+    let prepared = (|| -> Result<(String, String), String> {
+        let ca = load_or_create_ca(dir)?;
+        let store = SqliteStore::open(&dir.join("hub.db")).map_err(|e| e.to_string())?;
+        let code = Enrollment::new(&store)
+            .create_code(server::now_ms())
+            .map_err(|_| "could not create a code".to_string())?;
+        Ok((ca.cert_pem().to_string(), code))
+    })();
+    let (ca_pem, code) = match prepared {
+        Ok(v) => v,
+        Err(e) => {
+            say.err(key!("cli-hub-failed"), &[("reason", e.into())]);
+            return ExitCode::from(1);
+        }
+    };
+    let opts = Options {
+        version: version.to_string(),
+        release_base: base,
+        ca_pem,
+        code,
+        port: machine.port,
+        release_key: read("release-key"),
+        unsigned: o.unsigned,
+    };
+    let mut step = |s: &'static str| match s {
+        "check" => say.out(key!("cli-hub-ssh-install-check"), &[]),
+        "binary" => say.out(key!("cli-hub-ssh-install-binary"), &[]),
+        "enroll" => say.out(key!("cli-hub-ssh-install-enroll"), &[]),
+        _ => say.out(key!("cli-hub-ssh-install-run"), &[]),
+    };
+    match install(&SshRemote, &machine, &opts, &mut step) {
+        Ok(Finish::Service(service)) => {
+            say.out(
+                key!("cli-hub-ssh-install-done"),
+                &[("name", name.into()), ("service", service.into())],
+            );
+            ExitCode::SUCCESS
+        }
+        Ok(Finish::Manual(command)) => {
+            say.out(
+                key!("cli-hub-ssh-install-manual"),
+                &[("name", name.into()), ("command", command.into())],
+            );
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            say.err(
+                key!("cli-hub-ssh-install-failed"),
+                &[
+                    ("name", name.into()),
+                    ("step", e.step.into()),
+                    ("detail", e.detail.into()),
+                    ("done", e.done.join(", ").into()),
+                ],
+            );
+            ExitCode::from(1)
         }
     }
 }
@@ -638,7 +745,14 @@ pub fn node_enroll(say: &Say, o: &Opts) -> ExitCode {
         say.err(key!("cli-usage"), &[]);
         return ExitCode::from(2);
     };
-    let Ok(ca_pem) = std::fs::read_to_string(ca_file) else {
+    // `--ca -` reads the certificate from standard input (how `hub ssh install` hands it over, ADR-0034).
+    let ca_text = if ca_file.as_os_str() == "-" {
+        let mut t = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut t).map(|_| t)
+    } else {
+        std::fs::read_to_string(ca_file)
+    };
+    let Ok(ca_pem) = ca_text else {
         say.err(
             key!("cli-hub-failed"),
             &[("reason", format!("{}", ca_file.display()).into())],

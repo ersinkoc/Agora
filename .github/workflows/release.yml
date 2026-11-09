@@ -56,7 +56,42 @@ jobs:
           ext=""; [ "${{ runner.os }}" = "Windows" ] && ext=".exe"
           mkdir dist
           cp "target/${{ matrix.target }}/release/agora$ext" "dist/agora-${{ matrix.target }}$ext"
+          # The checksum `agora hub ssh install` verifies on the machine (ADR-0034): "<sha256>  <file>".
+          cd dist
+          f="agora-${{ matrix.target }}$ext"
+          if command -v sha256sum >/dev/null; then sha256sum "$f" > "$f.sha256"; else shasum -a 256 "$f" > "$f.sha256"; fi
       - uses: actions/upload-artifact@v4
         with:
           name: agora-${{ matrix.target }}
           path: dist/*
+
+  publish:
+    # Attaches the binaries, their checksums and (when the release key is configured) their signatures to the release for
+    # the tag. The key is a repository secret the maintainer provisions: an ssh ed25519 private key, whose public half the
+    # owner of each hub pins in `<hub dir>/release-key` as an allowed_signers line for principal `agora-release`.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: agora-*
+          merge-multiple: true
+      - name: Sign
+        env:
+          KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: |
+          [ -n "$KEY" ] || { echo "no RELEASE_SIGNING_KEY: publishing checksums only"; exit 0; }
+          umask 077; printf '%s\n' "$KEY" > key
+          for f in dist/agora-*; do
+            case "$f" in *.sha256|*.sig) continue;; esac
+            ssh-keygen -Y sign -f key -n file "$f"
+          done
+          rm -f key
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" dist/* --repo "${{ github.repository }}" --generate-notes
