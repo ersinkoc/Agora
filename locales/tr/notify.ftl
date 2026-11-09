@@ -1,7 +1,7 @@
 # Bildirim metinleri, alıcının dilinde üretilir. Sade sözcükler, iç terim yok.
 
 notify-agent-blocked = { $agent } sizi bekliyor.
-notify-agent-done = { $agent } bitti.
+notify-agent-done = { $agent } işini bitirdi.
 notify-approval-requested = { $agent } onayınızı istiyor.
 notify-task-completed = Bir görev tamamlandı: { $task }.
 notify-node-offline = { $machine } çevrimdışı oldu.
