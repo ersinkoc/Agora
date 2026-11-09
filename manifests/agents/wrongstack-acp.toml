@@ -1,0 +1,11 @@
+kind = "wrongstack-acp"
+display_name = "WrongStack (structured)"
+version = "2026.11.09.1"
+min_engine = 1
+
+# L2: WrongStack as an Agent Client Protocol server (`wstack acp serve`, ACP protocol version 1; its `initialize` answer was
+# checked with `agora acp-bridge`: the bridge got an `IDLE` session without any model call). The node runs it through the bridge,
+# so there is no terminal: the transcript, plans, diffs and permission requests arrive as chat items and approvals. The terminal
+# version of the same agent is the `wrongstack` kind.
+[structured]
+acp = { argv = ["wstack", "acp", "serve"] }

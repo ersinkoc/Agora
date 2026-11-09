@@ -22,6 +22,11 @@ fn every_shipped_manifest_loads_and_its_captured_screens_produce_the_expected_st
         let manifest = Manifest::parse(&std::fs::read_to_string(&path).unwrap())
             .unwrap_or_else(|e| panic!("{}: {e:?}", path.display()));
         let kind = path.file_stem().unwrap().to_string_lossy().into_owned();
+        // A kind the node drives without a terminal (an ACP agent, L2) has no screens to check.
+        if manifest.driver(std::path::Path::new("agora")).is_some() {
+            kinds += 1;
+            continue;
+        }
         let detector = Detector::new(&manifest);
         let dir = root().join("fixtures").join(&kind);
         let mut screens = 0;
