@@ -5,6 +5,7 @@ pub mod host;
 pub mod inject;
 pub mod manifest;
 pub mod pacer;
+pub mod package;
 pub mod registry;
 pub mod rules;
 pub mod usage;

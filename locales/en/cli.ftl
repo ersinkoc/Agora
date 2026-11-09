@@ -24,6 +24,7 @@ cli-usage =
       agora node trust DEVICE_ID PUBLIC_KEY_HEX [--data DIR]
       agora tui [--hub HOST:PORT --ca FILE --code CODE] [--hub-dir DIR]
       agora update [--check] [--version X] [--release-url URL] [--release-key FILE] [--unsigned]
+      agora adapter install NAME [--registry URL] [--root-key FILE] [--yes] | list | remove NAME
       agora doctor [--data DIR] [--manifests DIR] [--socket PATH]
 cli-node-listening = Node is running. Control socket: { $socket }
 cli-agent-started = Started agent { $agent_id } in { $worktree }
@@ -110,3 +111,16 @@ cli-update-failed = The update did not happen: { $reason }
 cli-update-checksum = The download does not match its published checksum. Nothing was changed.
 cli-update-signature = The download's signature is not valid for the pinned release key. Nothing was changed.
 cli-update-needs-key = The release has to be signed: save its key as release-key in the Agora folder (or pass --release-key FILE), or accept a checksum only with --unsigned. Nothing was changed.
+cli-adapter-failed = The adapter was not installed: { $reason }
+cli-adapter-no-registry = No registry is set. Pass --registry URL, or put its address in registry-url in the hub folder. Nothing was changed.
+cli-adapter-no-key = The registry's root key is not pinned: save it as registry-root-key in the Agora folder (or pass --root-key FILE). Nothing was changed.
+cli-adapter-exists = A manifest with this name is already in the manifests folder and was not installed from a registry. Nothing was changed.
+cli-adapter-about = { $name } { $version }, published by { $publisher } (key { $key }), checksum { $hash }. It runs: { $command }
+cli-adapter-ask-new = You have not installed anything from this publisher before. Install it? [y/N]
+cli-adapter-ask-known = Install it? [y/N]
+cli-adapter-declined = Nothing was installed.
+cli-adapter-installed = Installed { $name } { $version }. It starts only when an agent of its kind is started.
+cli-adapter-removed = Removed { $name }.
+cli-adapter-none = No adapters are installed.
+cli-adapter-listed = { $name } { $version } (publisher { $publisher })
+cli-adapter-listed-revoked = { $name } { $version } (publisher { $publisher }, revoked in the newest registry index: remove it or find a new publisher)

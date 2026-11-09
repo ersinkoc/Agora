@@ -9,7 +9,7 @@ approval", but nothing fetches, stores or installs anything: no URL layout, no p
 Phase 6's exit ("a third-party adapter in another language connects without a core change") works today by hand-placing a manifest
 with an `[adapter]` command; the registry is what makes it safe for someone else to do it.
 
-## Decision (proposed)
+## Decision
 1. **Layout.** A registry is a base URL with `index.json` (the signed envelope `verify_index` takes) and, per package entry,
    `packages/<name>-<version>.tar` plus `packages/<name>-<version>.sig` (hex Ed25519 over the tar bytes). A package is a plain tar
    (no compression, no links, no absolute or `..` paths, at most 64 files and 64 MiB unpacked) holding `manifest.toml` and, for an L3

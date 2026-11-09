@@ -85,6 +85,35 @@ pub fn replace_executable(new: &std::path::Path, target: &std::path::Path) -> io
     }
 }
 
+/// Sets or clears the execute bits of an unpacked file (`agora adapter install`). Elsewhere than Unix a file runs by its name, so this does nothing.
+pub fn set_executable(path: &std::path::Path, executable: bool) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = if executable { 0o700 } else { 0o600 };
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, executable);
+        Ok(())
+    }
+}
+
+/// Makes a folder usable by the current user only (the folder of installed adapters). A no-op elsewhere than Unix.
+pub fn restrict_to_owner(path: &std::path::Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(())
+    }
+}
+
 /// Writes `contents` to `path` readable and writable only by the current user (private keys and tokens), replacing any
 /// existing file. Elsewhere than Unix the file is written with the default permissions (Windows ACLs come with the
 /// Windows node).
