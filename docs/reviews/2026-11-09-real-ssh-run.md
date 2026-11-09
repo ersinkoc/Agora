@@ -31,3 +31,14 @@ of this build, with its `.sha256`, over HTTP on loopback). Remote commands ran w
 
 Not covered: the user service branch (systemd or launchd) with a working user manager, an `ssh` that needs a passphrase or a jump host,
 a Windows or macOS target, and a real release signature (the run used `--unsigned`).
+
+## Second run: the published v0.1.0 release with its real signature (2026-11-09)
+Same setup (private `sshd` on loopback, throwaway keys, scratch `HOME`), but the hub was the **published** `agora-x86_64-unknown-linux-gnu`
+of release `v0.1.0` (not a local build), and `agora hub ssh install` fetched the release binary from GitHub itself with the project's
+public key pinned in `<hub dir>/release-key` (`docs/security/release-key.pub`), without `--unsigned`.
+- All four steps ran: check, download, SHA-256 and signature check on the machine, enrollment through the tunnel with the CA on stdin.
+  The binary landed in `~/.local/bin/agora` and the fallback `tmux` hint was printed (no user service manager over this ssh session,
+  as in the first run).
+- **Negative case:** with a different key pinned, the install stopped at step "binary" with `signature invalid`, "Already done: check",
+  and changed nothing.
+- Still not covered: the user service branch with a working user manager, a jump host or passphrase, and a macOS or Windows target.
