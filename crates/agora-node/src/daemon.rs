@@ -31,11 +31,14 @@ const GIT_POLL: Duration = Duration::from_secs(5);
 pub const EVENT_BUFFER_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Writes protocol events to the durable buffer.
+/// What a node says about itself again when the hub is ahead of it.
+type Announcer = Box<dyn Fn(&EventSink) + Send>;
+
 pub struct EventSink {
     producer: String,
     log: Mutex<DiskEventLog>,
     /// Says again what the hub must know about this node (online, its checkouts), see [`EventSink::announce`].
-    announcer: Mutex<Option<Box<dyn Fn(&EventSink) + Send>>>,
+    announcer: Mutex<Option<Announcer>>,
 }
 
 pub(crate) fn now_ms() -> u64 {
@@ -89,7 +92,7 @@ impl EventSink {
     }
 
     /// What this node says about itself when the hub turns out to be ahead of it (see [`announce`](Self::announce)).
-    pub fn set_announcer(&self, f: Box<dyn Fn(&EventSink) + Send>) {
+    pub fn set_announcer(&self, f: Announcer) {
         *self.announcer.lock().unwrap_or_else(|e| e.into_inner()) = Some(f);
     }
 
