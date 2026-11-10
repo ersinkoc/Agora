@@ -32,7 +32,7 @@ use macos as procinfo;
 pub const LOCAL_SOCKETS_SUPPORTED: bool = cfg!(any(unix, windows));
 
 /// True where [`spawn`] can start a PTY.
-pub const PTY_SUPPORTED: bool = cfg!(unix);
+pub const PTY_SUPPORTED: bool = cfg!(any(unix, windows));
 
 /// A connected local (same-machine) stream, used for the node's control socket.
 pub struct LocalStream {
