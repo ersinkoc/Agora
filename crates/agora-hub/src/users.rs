@@ -40,6 +40,8 @@ pub struct Access {
     pub role: Role,
     /// The person's id; `owner` for a session that names nobody.
     pub user: String,
+    /// The projects (`node/project`) this person may see and work in; `None` means all of them (the owner).
+    pub projects: Option<std::collections::BTreeSet<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -173,6 +175,8 @@ impl<'a> Users<'a> {
             .map_err(db)?;
         conn.execute("DELETE FROM signin_codes WHERE user_id = ?1", [id])
             .map_err(db)?;
+        conn.execute("DELETE FROM grants WHERE user_id = ?1", [id])
+            .map_err(db)?;
         let n = conn
             .execute("DELETE FROM users WHERE id = ?1", [id])
             .map_err(db)?;
@@ -204,18 +208,103 @@ impl<'a> Users<'a> {
             None => Some(Access {
                 role: Role::Owner,
                 user: "owner".into(),
+                projects: None,
             }),
             Some(id) => {
                 let role: String = conn
                     .query_row("SELECT role FROM users WHERE id = ?1", [&id], |r| r.get(0))
                     .optional()
                     .ok()??;
+                let role = Role::parse(&role)?;
+                let projects = if role == Role::Owner {
+                    None
+                } else {
+                    let mut st = conn
+                        .prepare("SELECT node, project FROM grants WHERE user_id = ?1")
+                        .ok()?;
+                    let rows = st
+                        .query_map([&id], |r| {
+                            Ok(format!(
+                                "{}/{}",
+                                r.get::<_, String>(0)?,
+                                r.get::<_, String>(1)?
+                            ))
+                        })
+                        .ok()?;
+                    Some(rows.filter_map(Result::ok).collect())
+                };
                 Some(Access {
-                    role: Role::parse(&role)?,
+                    role,
                     user: id,
+                    projects,
                 })
             }
         }
+    }
+
+    /// Lets a person see and work in a project of a machine.
+    pub fn grant(&self, id: &str, node: &str, project: &str) -> Result<bool, StoreError> {
+        let conn = self.store.lock()?;
+        let known = conn
+            .query_row("SELECT 1 FROM users WHERE id = ?1", [id], |_| Ok(()))
+            .optional()
+            .map_err(db)?
+            .is_some();
+        if !known {
+            return Ok(false);
+        }
+        conn.execute(
+            "INSERT OR IGNORE INTO grants (user_id, node, project) VALUES (?1, ?2, ?3)",
+            params![id, node, project],
+        )
+        .map_err(db)?;
+        drop(conn);
+        let _ = crate::audit::Audit::new(self.store).record(
+            crate::server::now_ms(),
+            "owner",
+            "user.grant",
+            &format!("{id} {node}/{project}"),
+            "ok",
+        );
+        Ok(true)
+    }
+
+    pub fn revoke(&self, id: &str, node: &str, project: &str) -> Result<bool, StoreError> {
+        let conn = self.store.lock()?;
+        let n = conn
+            .execute(
+                "DELETE FROM grants WHERE user_id = ?1 AND node = ?2 AND project = ?3",
+                params![id, node, project],
+            )
+            .map_err(db)?;
+        drop(conn);
+        if n > 0 {
+            let _ = crate::audit::Audit::new(self.store).record(
+                crate::server::now_ms(),
+                "owner",
+                "user.revoke",
+                &format!("{id} {node}/{project}"),
+                "ok",
+            );
+        }
+        Ok(n > 0)
+    }
+
+    pub fn grants_of(&self, id: &str) -> Result<Vec<String>, StoreError> {
+        let conn = self.store.lock()?;
+        let mut st = conn
+            .prepare("SELECT node, project FROM grants WHERE user_id = ?1 ORDER BY node, project")
+            .map_err(db)?;
+        let rows = st
+            .query_map([id], |r| {
+                Ok(format!(
+                    "{}/{}",
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?
+                ))
+            })
+            .map_err(db)?;
+        rows.collect::<Result<_, _>>().map_err(db)
     }
 }
 

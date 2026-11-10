@@ -1156,6 +1156,7 @@ impl ClientAuth for Demotable {
         self.check(token).then(|| agora_hub::users::Access {
             role: *self.0.lock().unwrap(),
             user: "eda".into(),
+            projects: None,
         })
     }
 }
@@ -1226,9 +1227,21 @@ async fn a_viewer_can_read_but_every_command_that_changes_something_stops_at_the
         Some(command_request::Command::AgentList(_))
     ));
 
-    // A member's stop is forwarded; demoted again, the very next stop is refused on the same connection.
+    // A role that changes ends the open connection (the client reconnects into what it may now do). As a member, a stop goes through.
     *role.lock().unwrap() = Role::Member;
     client.send(&stop_request("s2", "n1")).await.unwrap();
+    assert!(closed(&mut client).await);
+    let mut client = dial(addr, Some("good-token")).await;
+    client
+        .send(&f(
+            STREAM_EVENTS,
+            kinds::SUBSCRIBE,
+            v1::Subscribe::default().encode_to_vec(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(recv(&mut client).await.kind, kinds::SNAPSHOT);
+    client.send(&stop_request("s3", "n1")).await.unwrap();
     let got = recv(&mut node).await;
     let forwarded = v1::CommandRequest::decode(got.payload.as_slice()).unwrap();
     assert!(matches!(
@@ -1236,14 +1249,8 @@ async fn a_viewer_can_read_but_every_command_that_changes_something_stops_at_the
         Some(command_request::Command::AgentStop(_))
     ));
     *role.lock().unwrap() = Role::Viewer;
-    client.send(&stop_request("s3", "n1")).await.unwrap();
-    let r = loop {
-        let r = response(&mut client).await;
-        if r.request_id == "s3" {
-            break r;
-        }
-    };
-    assert_eq!(err_code(&r), "auth.forbidden");
+    client.send(&stop_request("s4", "n1")).await.unwrap();
+    assert!(closed(&mut client).await);
 
     // Everything above is in the audit trail with who asked, what, where and how it ended; a refusal is recorded too.
     let rows = agora_hub::audit::Audit::new(st.hub.store())
@@ -1259,7 +1266,129 @@ async fn a_viewer_can_read_but_every_command_that_changes_something_stops_at_the
             ("AgentStop", "n1", "auth.forbidden"),
             ("AgentList", "n1", "sent"),
             ("AgentStop", "n1", "sent"),
-            ("AgentStop", "n1", "auth.forbidden"),
         ]
+    );
+}
+
+/// A member who was granted one project (ADR-0049).
+struct Scoped;
+
+impl ClientAuth for Scoped {
+    fn check(&self, token: &str) -> bool {
+        token == "good-token"
+    }
+    fn access(&self, token: &str) -> Option<agora_hub::users::Access> {
+        self.check(token).then(|| agora_hub::users::Access {
+            role: agora_hub::users::Role::Member,
+            user: "eda".into(),
+            projects: Some(["n1/mine".to_string()].into()),
+        })
+    }
+}
+
+fn started(id: &str, project: &str) -> Body {
+    Body::AgentStarted(v1::AgentStarted {
+        agent_id: id.into(),
+        project_id: project.into(),
+        node_id: "n1".into(),
+        worktree_id: String::new(),
+        kind: "shell".into(),
+        level: 2,
+    })
+}
+
+fn working(id: &str) -> Body {
+    Body::AgentStateChanged(v1::AgentStateChanged {
+        agent_id: id.into(),
+        state: v1::AgentState::Working as i32,
+        reported: false,
+    })
+}
+
+fn stop_of(id: &str, agent: &str) -> Frame {
+    let req = v1::CommandRequest {
+        request_id: id.into(),
+        idempotency_key: String::new(),
+        target_node: "n1".into(),
+        command: Some(command_request::Command::AgentStop(v1::AgentStop {
+            agent_id: agent.into(),
+        })),
+    };
+    f(STREAM_COMMANDS, 0, req.encode_to_vec())
+}
+
+#[tokio::test]
+async fn a_member_never_receives_another_projects_snapshot_events_or_commands() {
+    let st = Arc::new(ServerState {
+        hub: Arc::new(Hub::open(SqliteStore::open_in_memory().unwrap()).unwrap()),
+        support: support(),
+        ca: None,
+        lockout: Arc::new(Lockout::new()),
+        auth: Box::new(Scoped),
+        assets: None,
+        sessions: None,
+    });
+    let addr = start(Arc::clone(&st)).await;
+    let (mut node, _t) = node_conn(&st, "n1").await;
+    handshake(&mut node).await;
+    for (seq, body) in [
+        (1, online("n1")),
+        (2, started("a1", "mine")),
+        (3, started("a2", "theirs")),
+    ] {
+        node.send(&f(STREAM_EVENTS, kinds::EVENT, event("n1", seq, body)))
+            .await
+            .unwrap();
+        next_ack(&mut node).await;
+    }
+
+    let mut client = dial(addr, Some("good-token")).await;
+    // Asking to replay the log from the start must not replay anyone else's events: the answer is a cut snapshot.
+    client
+        .send(&f(
+            STREAM_EVENTS,
+            kinds::SUBSCRIBE,
+            v1::Subscribe { after_pos: Some(0) }.encode_to_vec(),
+        ))
+        .await
+        .unwrap();
+    let fr = recv(&mut client).await;
+    assert_eq!(fr.kind, kinds::SNAPSHOT);
+    let snap = v1::Snapshot::decode(fr.payload.as_slice()).unwrap();
+    let agents: Vec<&str> = snap.agents.iter().map(|a| a.agent_id.as_str()).collect();
+    assert_eq!(agents, ["n1/a1"], "{snap:?}");
+
+    // Live: the other project's change is not sent, this one's is (and it is the next frame the client gets).
+    for (seq, body) in [(4, working("a2")), (5, working("a1"))] {
+        node.send(&f(STREAM_EVENTS, kinds::EVENT, event("n1", seq, body)))
+            .await
+            .unwrap();
+        next_ack(&mut node).await;
+    }
+    let fr = recv(&mut client).await;
+    assert_eq!(fr.kind, kinds::POSITIONED_EVENT);
+    let ev = v1::PositionedEvent::decode(fr.payload.as_slice()).unwrap();
+    let Some(Body::AgentStateChanged(e)) = ev.event.and_then(|e| e.body) else {
+        panic!("expected a state change");
+    };
+    assert_eq!(e.agent_id, "a1");
+
+    // Commands: the other project's agent and anything machine-wide are refused at the hub; their own goes through.
+    for (id, frame) in [
+        ("x1", stop_of("x1", "a2")),
+        ("x2", routed("x2", "n1")), // AgentList across the machine
+    ] {
+        client.send(&frame).await.unwrap();
+        let r = response(&mut client).await;
+        assert_eq!(
+            (r.request_id.as_str(), err_code(&r)),
+            (id, "auth.forbidden")
+        );
+    }
+    client.send(&stop_of("ok", "a1")).await.unwrap();
+    let got = recv(&mut node).await;
+    let forwarded = v1::CommandRequest::decode(got.payload.as_slice()).unwrap();
+    assert!(
+        matches!(&forwarded.command, Some(command_request::Command::AgentStop(s)) if s.agent_id == "a1")
     );
 }

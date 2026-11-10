@@ -66,7 +66,7 @@ pub trait EventStore {
     fn set_setting(&self, key: &str, value: &[u8]) -> Result<(), StoreError>;
 }
 
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 
 pub struct SqliteStore {
     conn: Mutex<Connection>,
@@ -200,6 +200,20 @@ impl SqliteStore {
                       OR NEW.action != OLD.action OR NEW.node != OLD.node
                  BEGIN SELECT RAISE(ABORT, 'the audit trail is append-only'); END;
                  PRAGMA user_version = 6;
+                 COMMIT;",
+            )?;
+        }
+        if version < 7 {
+            // Which projects a member or viewer may see and work in (ADR-0049): `node/project`, one row each. An owner needs none.
+            conn.execute_batch(
+                "BEGIN;
+                 CREATE TABLE grants (
+                     user_id TEXT NOT NULL,
+                     node    TEXT NOT NULL,
+                     project TEXT NOT NULL,
+                     PRIMARY KEY (user_id, node, project)
+                 );
+                 PRAGMA user_version = 7;
                  COMMIT;",
             )?;
         }
@@ -545,7 +559,7 @@ mod tests {
         let foreign = d.join("foreign.db");
         Connection::open(&foreign)
             .unwrap()
-            .execute_batch("CREATE TABLE x (a); PRAGMA user_version = 7;")
+            .execute_batch("CREATE TABLE x (a); PRAGMA user_version = 99;")
             .unwrap();
         assert!(restore(&foreign, &live).is_err());
         // The live database is untouched.

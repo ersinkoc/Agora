@@ -11,6 +11,7 @@ pub mod notify;
 pub mod passkey;
 pub mod projection;
 pub mod router;
+pub mod scope;
 pub mod server;
 pub mod session;
 pub mod signin;
