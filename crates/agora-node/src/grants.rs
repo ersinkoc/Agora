@@ -64,6 +64,26 @@ fn matches(pattern: &str, name: &str) -> bool {
 }
 
 impl SignedCommands {
+    /// What a node with limited devices (`device.<id>.projects`, ADR-0049) needs signed when its owner wrote no `signed_commands`
+    /// line: everything that changes something, so the device limits bind every such command and not only the ones the owner listed.
+    pub fn team_default() -> Self {
+        Self(
+            [
+                "agent.start",
+                "agent.stop",
+                "agent.prompt",
+                "agent.set_mode",
+                "terminal.open",
+                "terminal.input",
+                "files.write",
+                "worktree.create",
+                "worktree.remove",
+            ]
+            .map(String::from)
+            .to_vec(),
+        )
+    }
+
     pub fn requires(&self, name: &str) -> bool {
         self.0.iter().any(|p| matches(p, name))
     }
@@ -499,5 +519,30 @@ mod tests {
         )
         .unwrap();
         assert_eq!(g.list(NOW).len(), 2);
+    }
+
+    #[test]
+    fn the_team_default_covers_every_command_that_changes_something_and_no_reading() {
+        let d = SignedCommands::team_default();
+        for name in [
+            "agent.start",
+            "agent.stop",
+            "agent.prompt",
+            "terminal.input",
+            "files.write",
+            "worktree.remove",
+        ] {
+            assert!(d.requires(name), "{name}");
+        }
+        for name in [
+            "agent.list",
+            "files.read",
+            "git.diff",
+            "terminal.subscribe",
+            "project.list",
+            "usage.report",
+        ] {
+            assert!(!d.requires(name), "{name}");
+        }
     }
 }
