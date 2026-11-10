@@ -73,11 +73,14 @@ impl ClientAuth for ClientTokens {
         token == self.file_token || self.sessions.check(token)
     }
 
-    fn role(&self, token: &str) -> Option<agora_hub::users::Role> {
+    fn access(&self, token: &str) -> Option<agora_hub::users::Access> {
         if token == self.file_token {
-            return Some(agora_hub::users::Role::Owner);
+            return Some(agora_hub::users::Access {
+                role: agora_hub::users::Role::Owner,
+                user: "owner".into(),
+            });
         }
-        agora_hub::server::ClientAuth::role(&*self.sessions, token)
+        agora_hub::server::ClientAuth::access(&*self.sessions, token)
     }
 }
 
@@ -359,6 +362,34 @@ pub fn hub_user(say: &Say, o: &Opts) -> ExitCode {
             Err(e) => fail(e.to_string()),
         },
         _ => bad(),
+    }
+}
+
+/// `agora hub audit export [--since MS] [--who ID]`: the audit trail (ADR-0049) as JSON lines on standard output, oldest first.
+pub fn hub_audit(say: &Say, o: &Opts) -> ExitCode {
+    if o.positional.iter().map(String::as_str).collect::<Vec<_>>() != ["export"] {
+        say.err(key!("cli-bad-arguments"), &[]);
+        return ExitCode::from(2);
+    }
+    let dir = hub_dir(o);
+    let rows = SqliteStore::open(&dir.join("hub.db"))
+        .map_err(|e| e.to_string())
+        .and_then(|store| {
+            agora_hub::audit::Audit::new(&store)
+                .list(o.since.unwrap_or(0), o.who.as_deref(), usize::MAX / 2)
+                .map_err(|e| e.to_string())
+        });
+    match rows {
+        Ok(rows) => {
+            for e in rows {
+                println!("{}", agora_hub::audit::json_line(&e));
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            say.err(key!("cli-hub-failed"), &[("reason", e.into())]);
+            ExitCode::from(1)
+        }
     }
 }
 

@@ -66,7 +66,7 @@ pub trait EventStore {
     fn set_setting(&self, key: &str, value: &[u8]) -> Result<(), StoreError>;
 }
 
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 
 pub struct SqliteStore {
     conn: Mutex<Connection>,
@@ -177,6 +177,29 @@ impl SqliteStore {
                  ALTER TABLE signin_codes ADD COLUMN user_id TEXT;
                  ALTER TABLE sessions ADD COLUMN user_id TEXT;
                  PRAGMA user_version = 5;
+                 COMMIT;",
+            )?;
+        }
+        if version < 6 {
+            // The audit trail (ADR-0049): who did what, where, and how it ended. Rows are never deleted and only the outcome of a row
+            // still marked `sent` may change, once; the triggers hold that even for a bug elsewhere in the hub.
+            conn.execute_batch(
+                "BEGIN;
+                 CREATE TABLE audit (
+                     id      INTEGER PRIMARY KEY AUTOINCREMENT,
+                     at_ms   INTEGER NOT NULL,
+                     who     TEXT NOT NULL,
+                     action  TEXT NOT NULL,
+                     node    TEXT NOT NULL,
+                     outcome TEXT NOT NULL
+                 );
+                 CREATE TRIGGER audit_no_delete BEFORE DELETE ON audit
+                 BEGIN SELECT RAISE(ABORT, 'the audit trail is append-only'); END;
+                 CREATE TRIGGER audit_only_the_outcome BEFORE UPDATE ON audit
+                 WHEN OLD.outcome != 'sent' OR NEW.id != OLD.id OR NEW.at_ms != OLD.at_ms OR NEW.who != OLD.who
+                      OR NEW.action != OLD.action OR NEW.node != OLD.node
+                 BEGIN SELECT RAISE(ABORT, 'the audit trail is append-only'); END;
+                 PRAGMA user_version = 6;
                  COMMIT;",
             )?;
         }

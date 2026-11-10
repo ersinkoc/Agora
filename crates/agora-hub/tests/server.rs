@@ -1152,8 +1152,11 @@ impl ClientAuth for Demotable {
     fn check(&self, token: &str) -> bool {
         token == "good-token"
     }
-    fn role(&self, token: &str) -> Option<agora_hub::users::Role> {
-        self.check(token).then(|| *self.0.lock().unwrap())
+    fn access(&self, token: &str) -> Option<agora_hub::users::Access> {
+        self.check(token).then(|| agora_hub::users::Access {
+            role: *self.0.lock().unwrap(),
+            user: "eda".into(),
+        })
     }
 }
 
@@ -1241,4 +1244,22 @@ async fn a_viewer_can_read_but_every_command_that_changes_something_stops_at_the
         }
     };
     assert_eq!(err_code(&r), "auth.forbidden");
+
+    // Everything above is in the audit trail with who asked, what, where and how it ended; a refusal is recorded too.
+    let rows = agora_hub::audit::Audit::new(st.hub.store())
+        .list(0, Some("eda"), 100)
+        .unwrap();
+    let seen: Vec<(&str, &str, &str)> = rows
+        .iter()
+        .map(|e| (e.action.as_str(), e.node.as_str(), e.outcome.as_str()))
+        .collect();
+    assert_eq!(
+        seen,
+        [
+            ("AgentStop", "n1", "auth.forbidden"),
+            ("AgentList", "n1", "sent"),
+            ("AgentStop", "n1", "sent"),
+            ("AgentStop", "n1", "auth.forbidden"),
+        ]
+    );
 }

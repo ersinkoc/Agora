@@ -265,8 +265,11 @@ pub trait ClientAuth {
     fn check(&self, token: &str) -> bool;
     /// What the holder of a live token may do (ADR-0049); `None` when it is not one. The default is the owner's, which is what a
     /// hub with one person has always meant.
-    fn role(&self, token: &str) -> Option<crate::users::Role> {
-        self.check(token).then_some(crate::users::Role::Owner)
+    fn access(&self, token: &str) -> Option<crate::users::Access> {
+        self.check(token).then(|| crate::users::Access {
+            role: crate::users::Role::Owner,
+            user: "owner".into(),
+        })
     }
 }
 
@@ -384,7 +387,13 @@ pub async fn serve_client<S>(conn: Conn<S>, hub: &Hub, first: Frame) -> Result<(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    serve_client_as(conn, hub, first, &|| Some(crate::users::Role::Owner)).await
+    serve_client_as(conn, hub, first, &|| {
+        Some(crate::users::Access {
+            role: crate::users::Role::Owner,
+            user: "owner".into(),
+        })
+    })
+    .await
 }
 
 /// [`serve_client`] for a person with a role (ADR-0049). `role` is asked for every command, so a demotion or a removed person takes
@@ -393,7 +402,7 @@ pub async fn serve_client_as<S>(
     mut conn: Conn<S>,
     hub: &Hub,
     first: Frame,
-    role: &(dyn Fn() -> Option<crate::users::Role> + Sync),
+    access: &(dyn Fn() -> Option<crate::users::Access> + Sync),
 ) -> Result<(), ServeError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -446,7 +455,7 @@ where
             Ok(Ok(Some(f))) => match (f.stream_id, f.kind) {
                 // A command; a terminal subscription arrives on the dynamic stream the client chose for it.
                 (stream, 0) if stream == STREAM_COMMANDS || stream >= FIRST_DYNAMIC_STREAM => {
-                    let Some(role) = role() else {
+                    let Some(who) = access() else {
                         return Err(ServeError::Refused);
                     };
                     forward_command(
@@ -456,7 +465,7 @@ where
                         &mut inflight,
                         stream,
                         &f.payload,
-                        role,
+                        &who,
                     )
                     .await?;
                 }
@@ -485,6 +494,8 @@ struct Inflight {
     relay: Option<u32>,
     reply: tokio::sync::oneshot::Receiver<v1::CommandResponse>,
     deadline: tokio::time::Instant,
+    /// The audit row that says this command is on its way (ADR-0049); finished when the answer comes.
+    audit: Option<i64>,
 }
 
 async fn forward_command<S>(
@@ -494,7 +505,7 @@ async fn forward_command<S>(
     inflight: &mut Vec<Inflight>,
     stream_id: u32,
     payload: &[u8],
-    role: crate::users::Role,
+    who: &crate::users::Access,
 ) -> Result<(), ServeError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -503,10 +514,11 @@ where
     let client_request_id = req.request_id.clone();
     let refuse = |e: Error| error_response(&client_request_id, &e);
     // ADR-0049: a viewer's commands stop here, before any node hears of them. (The node still decides what its devices may do.)
-    if role == crate::users::Role::Viewer
+    if who.role == crate::users::Role::Viewer
         && !req.command.as_ref().is_some_and(crate::users::viewer_may)
     {
         let action = command_name(&req);
+        audit(hub, who, &action, &req.target_node, "auth.forbidden");
         conn.send(&frame(
             STREAM_COMMANDS,
             1,
@@ -571,11 +583,22 @@ where
             relay,
             reply,
             deadline: tokio::time::Instant::now() + COMMAND_DEADLINE,
+            audit: None,
         })
     })();
     match outcome {
-        Ok(i) => inflight.push(i),
+        Ok(mut i) => {
+            i.audit = audit(hub, who, &command_name(&req), &i.node, "sent");
+            inflight.push(i);
+        }
         Err(e) => {
+            audit(
+                hub,
+                who,
+                &command_name(&req),
+                &req.target_node,
+                e.code.as_str(),
+            );
             conn.send(&frame(STREAM_COMMANDS, 1, refuse(e).encode_to_vec()))
                 .await?;
         }
@@ -617,6 +640,13 @@ where
         match resp {
             Some(r) => {
                 let done = inflight.swap_remove(i);
+                if let Some(id) = done.audit {
+                    let outcome = match &r.result {
+                        Some(command_response::Result::Err(info)) => info.code.as_str(),
+                        _ => "ok",
+                    };
+                    let _ = crate::audit::Audit::new(hub.store()).finish(id, outcome);
+                }
                 // A subscription the node refused (or never answered) leaves no relay behind.
                 if let (Some(stream), true) = (
                     done.relay,
@@ -856,6 +886,19 @@ fn board_for_node(
     });
 }
 
+/// Appends a row to the audit trail. A failure to write is not allowed to take the hub down with it.
+fn audit(
+    hub: &Hub,
+    who: &crate::users::Access,
+    action: &str,
+    node: &str,
+    outcome: &str,
+) -> Option<i64> {
+    crate::audit::Audit::new(hub.store())
+        .record(now_ms(), &who.user, action, node, outcome)
+        .ok()
+}
+
 /// The command's schema name (`AgentStop`), for an error that names what was refused.
 fn command_name(req: &v1::CommandRequest) -> String {
     let dbg = format!("{:?}", req.command);
@@ -955,7 +998,7 @@ where
         (STREAM_EVENTS, kinds::SUBSCRIBE) if token.is_some_and(|t| state.auth.check(t)) => {
             // The token was good when the connection opened; an expired or revoked session must not keep a live one.
             let token = token.unwrap_or_default();
-            let role = || state.auth.role(token);
+            let role = || state.auth.access(token);
             tokio::select! {
                 r = serve_client_as(conn, &state.hub, first, &role) => r,
                 () = still(|| state.auth.check(token)) => Err(ServeError::Refused),

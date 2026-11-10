@@ -34,6 +34,14 @@ impl Role {
     }
 }
 
+/// Whose connection this is and what they may do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Access {
+    pub role: Role,
+    /// The person's id; `owner` for a session that names nobody.
+    pub user: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct User {
     pub id: String,
@@ -97,6 +105,14 @@ impl<'a> Users<'a> {
             params![id, name, role.as_str(), to_i64(now_ms)],
         )
         .map_err(db)?;
+        drop(conn);
+        let _ = crate::audit::Audit::new(self.store).record(
+            now_ms,
+            "owner",
+            "user.add",
+            &id,
+            role.as_str(),
+        );
         Ok(User {
             id,
             name: name.into(),
@@ -137,6 +153,16 @@ impl<'a> Users<'a> {
                 params![id, role.as_str()],
             )
             .map_err(db)?;
+        drop(conn);
+        if n > 0 {
+            let _ = crate::audit::Audit::new(self.store).record(
+                crate::server::now_ms(),
+                "owner",
+                "user.role",
+                id,
+                role.as_str(),
+            );
+        }
         Ok(n > 0)
     }
 
@@ -150,11 +176,21 @@ impl<'a> Users<'a> {
         let n = conn
             .execute("DELETE FROM users WHERE id = ?1", [id])
             .map_err(db)?;
+        drop(conn);
+        if n > 0 {
+            let _ = crate::audit::Audit::new(self.store).record(
+                crate::server::now_ms(),
+                "owner",
+                "user.remove",
+                id,
+                "ok",
+            );
+        }
         Ok(n > 0)
     }
 
-    /// The role of whoever holds this session token: the owner's when the session names no user, nothing when the user is gone.
-    pub fn role_of_session(&self, token_hash: &[u8]) -> Option<Role> {
+    /// Who holds this session token and what they may do: the owner when the session names no person, nothing when the person is gone.
+    pub fn access_of_session(&self, token_hash: &[u8]) -> Option<Access> {
         let conn = self.store.lock().ok()?;
         let user: Option<Option<String>> = conn
             .query_row(
@@ -165,13 +201,19 @@ impl<'a> Users<'a> {
             .optional()
             .ok()?;
         match user? {
-            None => Some(Role::Owner),
+            None => Some(Access {
+                role: Role::Owner,
+                user: "owner".into(),
+            }),
             Some(id) => {
                 let role: String = conn
-                    .query_row("SELECT role FROM users WHERE id = ?1", [id], |r| r.get(0))
+                    .query_row("SELECT role FROM users WHERE id = ?1", [&id], |r| r.get(0))
                     .optional()
                     .ok()??;
-                Role::parse(&role)
+                Some(Access {
+                    role: Role::parse(&role)?,
+                    user: id,
+                })
             }
         }
     }
