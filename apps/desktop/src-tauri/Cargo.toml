@@ -1,0 +1,25 @@
+# The desktop shell (ADR-0048). Its own workspace on purpose: Tauri and its webview crates enter only here, never in a crate the
+# node or hub links, and the main workspace builds and tests without WebKitGTK.
+[workspace]
+
+[package]
+name = "agora-desktop"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "Apache-2.0"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# The pinned-CA loopback tunnel (ADR-0048 decision 3).
+agora-desktop-tunnel = { path = "../../../crates/agora-desktop-tunnel" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

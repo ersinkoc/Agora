@@ -1,0 +1,24 @@
+# cargo-deny for the desktop shell only (ADR-0048 decision 7): the main workspace's policy plus what Tauri's tree needs, each with its reason.
+[advisories]
+yanked = "deny"
+ignore = [
+    # `proc-macro-error` is unmaintained; it is a build-time proc-macro pulled in by gtk-rs (Tauri's Linux webview binding), runs on the
+    # developer's machine at compile time only and ships no code. Revisit when gtk-rs drops it.
+    "RUSTSEC-2024-0370",
+]
+
+[licenses]
+# MPL-2.0 is file-level copyleft: used unmodified as a dependency (cssparser and its siblings, Mozilla's CSS parser, which Tauri's
+# build tooling reads CSP and assets with) it places no obligation on this project's own files.
+allow = ["MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Unicode-3.0", "Zlib", "MPL-2.0"]
+confidence-threshold = 0.9
+private = { ignore = true }
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

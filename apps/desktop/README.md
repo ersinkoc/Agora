@@ -1,3 +1,17 @@
 # Desktop client
 
-Tauri shell around `apps/web` (ADR-0005). Starts in Phase 7.
+A thin Tauri shell around the hub's page (ADR-0048). It asks for a hub address and the hub's CA certificate once, shows the
+certificate's fingerprint for the user to compare with `agora hub fingerprint`, and then opens the hub's own page. The connection goes
+through a loopback tunnel (`crates/agora-desktop-tunnel`) that trusts only that CA. The hub's page gets no access to the shell.
+
+This crate is its own Cargo workspace so that Tauri and its webview crates never enter the node, the hub or the main build.
+
+```sh
+cd apps/desktop/src-tauri
+cargo check          # Linux needs: libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libayatana-appindicator3-dev librsvg2-dev
+cargo run            # a window with the connect screen
+```
+
+Not done yet: native notifications for a waiting approval while the window is hidden, installers and per-platform signing (needs the
+maintainer's Apple and Windows accounts; unsigned builds are published as such), a real icon (the name and logo are open question Q1).
+The product name appears in `src-tauri/tauri.conf.json` (`productName`, window title) and `ui/index.html`; renaming is a change to those.
