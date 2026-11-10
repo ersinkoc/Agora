@@ -242,6 +242,26 @@ pub fn new_login_code(dir: &Path) -> Result<String, String> {
         .map_err(|_| "could not create a sign-in code".to_string())
 }
 
+/// `agora hub fingerprint`: the SHA-256 of the hub's CA certificate, for the desktop app's first-use check (ADR-0048).
+pub fn hub_fingerprint(say: &Say, o: &Opts) -> ExitCode {
+    let path = hub_dir(o).join("ca.pem");
+    let result = std::fs::read_to_string(&path)
+        .map_err(|_| path.display().to_string())
+        .and_then(|pem| {
+            agora_desktop_tunnel::fingerprint(&pem).map_err(|_| path.display().to_string())
+        });
+    match result {
+        Ok(f) => {
+            say.out(key!("cli-hub-fingerprint"), &[("fingerprint", f.into())]);
+            ExitCode::SUCCESS
+        }
+        Err(p) => {
+            say.err(key!("cli-hub-failed"), &[("reason", p.into())]);
+            ExitCode::from(1)
+        }
+    }
+}
+
 /// `agora hub login`: a one-time code to sign in to the web app (valid 10 minutes).
 pub fn hub_login(say: &Say, o: &Opts) -> ExitCode {
     let result = new_login_code(&hub_dir(o));

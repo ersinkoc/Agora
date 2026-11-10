@@ -12,6 +12,7 @@ members = [
     "crates/agora-hub",
     "crates/agora-i18n",
     "crates/agora-tui",
+    "crates/agora-desktop-tunnel",
     "crates/agora-fake-agent",
     "tools/schema-check",
     "bench",

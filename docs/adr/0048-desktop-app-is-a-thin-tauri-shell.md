@@ -25,6 +25,14 @@ webview does not trust.
 7. **New third-party code is a stated cost:** Tauri and its webview crates enter only in `apps/desktop`, never in a crate the node
    or hub links; `cargo deny` covers them in CI.
 
+## Implementation note
+A webview trusts the system's certificate store and offers no way to pin one CA, so decision 3 is carried out by a loopback tunnel
+(`crates/agora-desktop-tunnel`, no Tauri dependency, tested): the shell opens `127.0.0.1:<port>`, the webview loads
+`http://127.0.0.1:<port>/`, and each connection is carried to the hub over TLS that trusts only the CA the user confirmed. The tunnel
+copies bytes and holds no credential. The fingerprint to confirm is printed by `agora hub fingerprint` (not `agora hub code`, which
+does not print one). The webview's origin includes the port, and the page's storage (the device key of decision 4, the sign-in)
+is per origin, so the shell keeps one fixed port per hub in its settings.
+
 ## Consequences
 - One client, one translation set; desktop quality is web quality plus a small native layer.
 - Needs a signing story per platform (Apple notarization, Windows code signing) that costs money and accounts only the maintainer has;

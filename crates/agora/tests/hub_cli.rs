@@ -643,3 +643,30 @@ fn team_members_are_added_listed_changed_and_removed_from_the_command_line() {
     assert!(ok && out.is_empty());
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn the_hub_prints_its_ca_fingerprint_for_the_desktop_apps_first_use() {
+    let root = tmp("fingerprint");
+    let run = |args: &[&str]| {
+        let o = agora(&root, args)
+            .arg("--hub-dir")
+            .arg(&root)
+            .output()
+            .unwrap();
+        (
+            o.status.success(),
+            String::from_utf8_lossy(&o.stdout).into_owned(),
+        )
+    };
+    // No CA yet: a clear failure, not a made-up value.
+    assert!(!run(&["hub", "fingerprint"]).0);
+    let (cert, key) = (root.join("ca.pem"), root.join("ca.key"));
+    let ca = agora_hub::ca::Ca::generate("hub CA").unwrap();
+    std::fs::write(&cert, ca.cert_pem()).unwrap();
+    std::fs::write(&key, ca.key_pem()).unwrap();
+    let (ok, out) = run(&["hub", "fingerprint"]);
+    assert!(ok, "{out}");
+    let want = agora_desktop_tunnel::fingerprint(ca.cert_pem()).unwrap();
+    assert!(out.contains(&want), "{out}");
+    let _ = std::fs::remove_dir_all(root);
+}

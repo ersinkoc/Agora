@@ -13,6 +13,8 @@ agora-hub = { path = "../agora-hub" }
 agora-adapters = { path = "../agora-adapters" }
 agora-node = { path = "../agora-node" }
 agora-tui = { path = "../agora-tui" }
+# The desktop app's fingerprint of the hub CA (ADR-0048); `agora hub fingerprint` prints the same value.
+agora-desktop-tunnel = { path = "../agora-desktop-tunnel" }
 agora-i18n = { path = "../agora-i18n" }
 agora-protocol = { path = "../agora-protocol" }
 agora-platform = { path = "../agora-platform" }
