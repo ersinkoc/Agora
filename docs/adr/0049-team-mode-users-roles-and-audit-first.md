@@ -1,5 +1,5 @@
 # 0049. Team mode: users, roles and an audit trail first, Postgres only when SQLite is not enough
-Status: Proposed
+Status: Accepted
 Date: 2026-11-10
 
 ## Context
