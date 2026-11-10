@@ -368,6 +368,28 @@ pub struct PtyConfig {
     pub cols: u16,
     pub rows: u16,
     pub limits: ProcessLimits,
+    /// Confine the process to these paths (ADR-0047). `spawn` refuses, rather than ignores it, where this cannot be enforced.
+    pub sandbox: Option<Sandbox>,
+}
+
+/// File-system confinement for a process and everything it starts: it may read (and run programs from) `read` and `write`, and
+/// create, change and remove files only below `write`. Everything else is denied. Paths that do not exist on this machine are skipped.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Sandbox {
+    pub read: Vec<PathBuf>,
+    pub write: Vec<PathBuf>,
+}
+
+/// True when this machine can enforce a [`Sandbox`] (Linux with Landlock). `agora doctor` and the node ask before starting anything.
+pub fn sandbox_supported() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        linux::sandbox_supported()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
 }
 
 impl PtyConfig {
@@ -379,6 +401,7 @@ impl PtyConfig {
             cols: 80,
             rows: 24,
             limits: ProcessLimits::default(),
+            sandbox: None,
         }
     }
 }
@@ -563,6 +586,12 @@ pub fn process_tree(root: u32) -> io::Result<Vec<ProcessInfo>> {
 pub fn spawn(config: &PtyConfig) -> io::Result<Box<dyn Pty>> {
     if config.argv.is_empty() {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "argv is empty"));
+    }
+    if config.sandbox.is_some() && !sandbox_supported() {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "this machine cannot confine a process",
+        ));
     }
     #[cfg(unix)]
     {

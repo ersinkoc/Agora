@@ -224,6 +224,13 @@ pub(crate) fn spawn(config: &PtyConfig) -> io::Result<Box<dyn Pty>> {
     cmd.stdout(Stdio::from(slave.try_clone()?));
     cmd.stderr(Stdio::from(slave));
     let limits = config.limits;
+    // Made before the fork: the child only applies it.
+    #[cfg(target_os = "linux")]
+    let ruleset = config
+        .sandbox
+        .as_ref()
+        .map(crate::linux::ruleset)
+        .transpose()?;
     // SAFETY: runs between fork and exec and only calls async-signal-safe functions (setsid, ioctl,
     // setrlimit).
     unsafe {
@@ -237,6 +244,10 @@ pub(crate) fn spawn(config: &PtyConfig) -> io::Result<Box<dyn Pty>> {
             #[cfg(target_os = "linux")]
             if let Some(bytes) = limits.memory_bytes {
                 set_limit(libc::RLIMIT_AS as _, bytes)?;
+            }
+            #[cfg(target_os = "linux")]
+            if let Some(r) = &ruleset {
+                r.enforce()?;
             }
             Ok(())
         });
