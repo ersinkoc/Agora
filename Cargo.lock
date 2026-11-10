@@ -30,6 +30,7 @@ version = "0.1.0"
 dependencies = [
  "agora-core",
  "agora-fake-agent",
+ "agora-platform",
  "agora-protocol",
  "agora-vt",
  "regex",

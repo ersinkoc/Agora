@@ -12,6 +12,8 @@ workspace = true
 agora-core = { path = "../agora-core" }
 agora-protocol = { path = "../agora-protocol" }
 agora-vt = { path = "../agora-vt" }
+# Confines an adapter process (ADR-0047); platform code lives there.
+agora-platform = { path = "../agora-platform" }
 # Manifests are TOML (docs/specs/agent-manifest.md); serde derives the typed structs.
 toml = "0.8"
 serde = { version = "1", features = ["derive"] }

@@ -34,6 +34,7 @@ fn spawn() -> Adapter {
         .to_vec(),
         env: vec![("AGORA_TEST_ADAPTER".into(), "1".into())],
         cwd: None,
+        sandbox: None,
     })
     .unwrap()
 }
@@ -206,6 +207,7 @@ fn an_adapter_that_never_answers_times_out() {
         args: vec![],
         env: vec![],
         cwd: None,
+        sandbox: None,
     });
     let Ok(a) = a else { return }; // no `cat` here (Windows): nothing to prove
     assert!(matches!(
@@ -234,4 +236,46 @@ fn the_adapter_does_not_inherit_the_nodes_secrets() {
         matches!(ev.last(), Some(AdapterEvent::Chat { item: ChatItem::Text(t), .. }) if t == "secret:hidden"),
         "{ev:?}"
     );
+}
+
+#[test]
+fn a_confined_adapter_writes_only_where_it_may() {
+    if !agora_platform::sandbox_supported() {
+        eprintln!("skipped: no Landlock on this machine");
+        return;
+    }
+    let base = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("host-sbx-{}", std::process::id()));
+    let (allowed, outside) = (base.join("allowed"), base.join("outside"));
+    std::fs::create_dir_all(&allowed).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    let script = format!(
+        "echo a > {a}/f; echo b > {o}/f 2>/dev/null; sleep 5",
+        a = allowed.display(),
+        o = outside.display()
+    );
+    let _a = Adapter::spawn(&AdapterConfig {
+        program: "/bin/sh".into(),
+        args: vec!["-c".into(), script],
+        env: vec![],
+        cwd: None,
+        sandbox: Some(agora_platform::Sandbox {
+            read: ["/usr", "/lib", "/lib64", "/bin", "/etc", "/dev"]
+                .map(Into::into)
+                .to_vec(),
+            write: vec![allowed.clone(), "/dev".into()],
+        }),
+    })
+    .unwrap();
+    let end = Instant::now() + T;
+    while !allowed.join("f").exists() && Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(
+        allowed.join("f").exists(),
+        "it could not write where it may"
+    );
+    assert!(!outside.join("f").exists(), "it wrote where it may not");
+    let _ = std::fs::remove_dir_all(base);
 }
