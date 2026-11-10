@@ -297,6 +297,8 @@ fn doctor(say: &Say, o: &Opts) -> ExitCode {
             ("pty", _) => key!("doctor-pty-unsupported"),
             ("local-sockets", Status::Ok) => key!("doctor-local-sockets"),
             ("local-sockets", _) => key!("doctor-local-sockets-unsupported"),
+            ("sandbox", Status::Ok) => key!("doctor-sandbox"),
+            ("sandbox", _) => key!("doctor-sandbox-unsupported"),
             ("git", Status::Ok) => key!("doctor-git"),
             ("git", _) => key!("doctor-git-missing"),
             ("data-dir", Status::Ok) => key!("doctor-data-dir"),
