@@ -33,5 +33,5 @@ export function TerminalView({ source, label }: { source: TerminalSource; label:
     };
   }, [source, label]);
 
-  return <div ref={host} className="terminal" role="region" aria-label={label} />;
+  return <div ref={host} className="terminal" role="region" aria-label={label} dir="ltr" />;
 }

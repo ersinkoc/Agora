@@ -66,8 +66,8 @@
 
   .fleet { @apply grid gap-4; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
   .tile {
-    @apply grid gap-2 rounded-m border border-line bg-surface-1 p-4 text-left shadow-card transition-colors duration-150 hover:bg-surface-2;
-    border-left: 4px solid var(--tile-accent, var(--border));
+    @apply grid gap-2 rounded-m border border-line bg-surface-1 p-4 text-start shadow-card transition-colors duration-150 hover:bg-surface-2;
+    border-inline-start: 4px solid var(--tile-accent, var(--border));
   }
   .tile--needs-you { border-color: var(--state-needs-you); }
   .tile__name { @apply font-semibold; }

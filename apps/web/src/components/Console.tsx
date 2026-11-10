@@ -249,7 +249,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
               <ul className="m-0 grid list-none gap-2 p-0">
                 {messages.map((m, i) => (
                   <li key={`${m.atMs}-${i}`} className="rounded-s border border-line bg-surface-0 p-2.5">
-                    <div className="text-xs"><strong>{m.from}</strong> → <strong>{m.to}</strong>{m.crossMachine ? <span className="ml-1.5 rounded-full bg-surface-2 px-2 py-0.5 text-muted">{t('message-cross')}</span> : null}</div>
+                    <div className="text-xs"><strong>{m.from}</strong> <span className="inline-block rtl:-scale-x-100" aria-hidden="true">→</span> <strong>{m.to}</strong>{m.crossMachine ? <span className="ms-1.5 rounded-full bg-surface-2 px-2 py-0.5 text-muted">{t('message-cross')}</span> : null}</div>
                     <div className="mt-1 break-words text-[13px] text-muted">{m.body}</div>
                   </li>
                 ))}
