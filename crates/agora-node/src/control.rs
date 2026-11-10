@@ -400,6 +400,9 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                     .with("approval_id", r.approval_id.as_str()),
                 ApprovalError::BadSignature => Error::new(ErrorCode::ApprovalSignatureInvalid)
                     .with("approval_id", r.approval_id.as_str()),
+                ApprovalError::Forbidden => {
+                    Error::new(ErrorCode::AuthForbidden).with("action", "approval.resolve")
+                }
             })?;
             let approved = verdict == crate::approvals::Verdict::Approved;
             ctx.sup()

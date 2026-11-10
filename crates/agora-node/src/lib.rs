@@ -10,6 +10,7 @@ pub mod event_buffer;
 pub mod files;
 pub mod git;
 pub mod grants;
+pub mod limits;
 pub mod mesh_server;
 pub mod sandbox;
 pub mod supervisor;
