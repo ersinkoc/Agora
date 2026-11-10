@@ -189,7 +189,13 @@ fn a_signed_package_is_installed_after_the_users_yes_and_listed_and_removed() {
     assert!(ok, "{out}{err}");
     let installed = std::fs::read_to_string(manifests.join("demo.toml")).unwrap();
     let run = home.join("adapters/demo/1.0.0/run");
-    assert!(installed.contains(&*run.to_string_lossy()), "{installed}");
+    // The command points into the install folder (TOML escapes Windows separators, so compare the parts, not the whole path).
+    assert!(
+        installed.contains("adapters")
+            && installed.contains("1.0.0")
+            && !installed.contains("\"./run\""),
+        "{installed}"
+    );
     assert!(run.exists() && home.join("publishers").exists());
     assert_eq!(
         std::fs::read_to_string(home.join("registry-version"))
