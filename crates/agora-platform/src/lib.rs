@@ -13,6 +13,10 @@ mod conpty;
 mod unix;
 #[cfg(windows)]
 mod windows;
+#[cfg(windows)]
+mod winproc;
+#[cfg(windows)]
+use winproc as procinfo;
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -470,11 +474,11 @@ fn unsupported() -> io::Error {
 
 /// Short executable name of a process.
 pub fn process_name(pid: u32) -> io::Result<String> {
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     {
         procinfo::name(pid)
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
         let _ = pid;
         Err(unsupported())
@@ -505,11 +509,11 @@ pub struct ProcessStats {
 
 /// Current memory and CPU use of process `pid` (use `std::process::id()` for this process).
 pub fn process_stats(pid: u32) -> io::Result<ProcessStats> {
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     {
         procinfo::stats(pid)
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
         let _ = pid;
         Err(unsupported())
@@ -518,11 +522,11 @@ pub fn process_stats(pid: u32) -> io::Result<ProcessStats> {
 
 /// Direct children of a process.
 pub fn process_children(pid: u32) -> io::Result<Vec<u32>> {
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     {
         procinfo::children(pid)
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
         let _ = pid;
         Err(unsupported())
