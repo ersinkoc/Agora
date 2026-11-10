@@ -563,3 +563,43 @@ fn half_a_ca_is_an_error_not_a_reason_to_make_a_new_one() {
     );
     assert!(!hub_dir.join("ca.key").exists(), "no new key either");
 }
+
+#[test]
+fn team_members_are_added_listed_changed_and_removed_from_the_command_line() {
+    let root = tmp("users");
+    let run = |args: &[&str]| {
+        let o = agora(&root, args)
+            .arg("--hub-dir")
+            .arg(&root)
+            .output()
+            .unwrap();
+        (
+            o.status.success(),
+            String::from_utf8_lossy(&o.stdout).into_owned(),
+            String::from_utf8_lossy(&o.stderr).into_owned(),
+        )
+    };
+    let (ok, out, _) = run(&["hub", "user", "list"]);
+    assert!(ok && out.contains("No team members"), "{out}");
+    let (ok, out, err) = run(&["hub", "user", "add", "Ayse", "--role", "viewer"]);
+    assert!(
+        ok && out.contains("ayse") && out.contains("viewer") && out.contains('-'),
+        "{out}{err}"
+    );
+    let (ok, _, _) = run(&["hub", "user", "add", "Bad", "--role", "root"]);
+    assert!(!ok);
+    let (ok, out, _) = run(&["hub", "user", "list"]);
+    assert!(
+        ok && out.contains("ayse") && out.contains("viewer"),
+        "{out}"
+    );
+    let (ok, _, _) = run(&["hub", "user", "role", "ayse", "member"]);
+    assert!(ok);
+    let (ok, out, _) = run(&["hub", "user", "login", "ayse"]);
+    assert!(ok && out.contains("Sign-in code"), "{out}");
+    let (ok, _, err) = run(&["hub", "user", "remove", "nobody"]);
+    assert!(!ok && err.contains("nobody"), "{err}");
+    let (ok, _, _) = run(&["hub", "user", "remove", "ayse"]);
+    assert!(ok);
+    let _ = std::fs::remove_dir_all(root);
+}

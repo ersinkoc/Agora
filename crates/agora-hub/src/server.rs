@@ -263,6 +263,11 @@ where
 /// Decides whether a bearer token is a signed-in user.
 pub trait ClientAuth {
     fn check(&self, token: &str) -> bool;
+    /// What the holder of a live token may do (ADR-0049); `None` when it is not one. The default is the owner's, which is what a
+    /// hub with one person has always meant.
+    fn role(&self, token: &str) -> Option<crate::users::Role> {
+        self.check(token).then_some(crate::users::Role::Owner)
+    }
 }
 
 /// The wire form of the hub's view (ADR-0027). Ids are the hub-wide keys.
@@ -375,7 +380,21 @@ pub fn snapshot_of(view: &View, pos: u64) -> v1::Snapshot {
 
 /// A signed-in client: waits for `Subscribe`, answers with a snapshot or the backlog, then pushes live events until
 /// either side ends. A client that falls too far behind is dropped by the hub and must resubscribe.
-pub async fn serve_client<S>(mut conn: Conn<S>, hub: &Hub, first: Frame) -> Result<(), ServeError>
+pub async fn serve_client<S>(conn: Conn<S>, hub: &Hub, first: Frame) -> Result<(), ServeError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    serve_client_as(conn, hub, first, &|| Some(crate::users::Role::Owner)).await
+}
+
+/// [`serve_client`] for a person with a role (ADR-0049). `role` is asked for every command, so a demotion or a removed person takes
+/// effect at once; `None` ends the connection.
+pub async fn serve_client_as<S>(
+    mut conn: Conn<S>,
+    hub: &Hub,
+    first: Frame,
+    role: &(dyn Fn() -> Option<crate::users::Role> + Sync),
+) -> Result<(), ServeError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -427,8 +446,19 @@ where
             Ok(Ok(Some(f))) => match (f.stream_id, f.kind) {
                 // A command; a terminal subscription arrives on the dynamic stream the client chose for it.
                 (stream, 0) if stream == STREAM_COMMANDS || stream >= FIRST_DYNAMIC_STREAM => {
-                    forward_command(&mut conn, hub, &relays, &mut inflight, stream, &f.payload)
-                        .await?;
+                    let Some(role) = role() else {
+                        return Err(ServeError::Refused);
+                    };
+                    forward_command(
+                        &mut conn,
+                        hub,
+                        &relays,
+                        &mut inflight,
+                        stream,
+                        &f.payload,
+                        role,
+                    )
+                    .await?;
                 }
                 (stream, STREAM_CLOSE) if stream >= FIRST_DYNAMIC_STREAM => relays.close(stream),
                 _ => {}
@@ -464,6 +494,7 @@ async fn forward_command<S>(
     inflight: &mut Vec<Inflight>,
     stream_id: u32,
     payload: &[u8],
+    role: crate::users::Role,
 ) -> Result<(), ServeError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -471,6 +502,20 @@ where
     let req = v1::CommandRequest::decode(payload).map_err(|_| invalid("request"))?;
     let client_request_id = req.request_id.clone();
     let refuse = |e: Error| error_response(&client_request_id, &e);
+    // ADR-0049: a viewer's commands stop here, before any node hears of them. (The node still decides what its devices may do.)
+    if role == crate::users::Role::Viewer
+        && !req.command.as_ref().is_some_and(crate::users::viewer_may)
+    {
+        let action = command_name(&req);
+        conn.send(&frame(
+            STREAM_COMMANDS,
+            1,
+            refuse(Error::new(ErrorCode::AuthForbidden).with("action", action.as_str()))
+                .encode_to_vec(),
+        ))
+        .await?;
+        return Ok(());
+    }
     // Answered by the hub itself from its own view and prices (ADR-0033); it names no node.
     if matches!(req.command, Some(command_request::Command::UsageReport(_))) {
         let resp = if req.target_node.is_empty() {
@@ -811,6 +856,13 @@ fn board_for_node(
     });
 }
 
+/// The command's schema name (`AgentStop`), for an error that names what was refused.
+fn command_name(req: &v1::CommandRequest) -> String {
+    let dbg = format!("{:?}", req.command);
+    let inner = dbg.strip_prefix("Some(").unwrap_or(&dbg);
+    inner.split('(').next().unwrap_or("").to_string()
+}
+
 fn error_response(request_id: &str, e: &Error) -> v1::CommandResponse {
     v1::CommandResponse {
         request_id: request_id.to_string(),
@@ -903,8 +955,9 @@ where
         (STREAM_EVENTS, kinds::SUBSCRIBE) if token.is_some_and(|t| state.auth.check(t)) => {
             // The token was good when the connection opened; an expired or revoked session must not keep a live one.
             let token = token.unwrap_or_default();
+            let role = || state.auth.role(token);
             tokio::select! {
-                r = serve_client(conn, &state.hub, first) => r,
+                r = serve_client_as(conn, &state.hub, first, &role) => r,
                 () = still(|| state.auth.check(token)) => Err(ServeError::Refused),
             }
         }

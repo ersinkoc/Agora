@@ -1144,3 +1144,101 @@ async fn a_live_client_connection_ends_when_its_session_stops_being_valid() {
     valid.store(false, std::sync::atomic::Ordering::SeqCst);
     assert!(closed(&mut c).await);
 }
+
+/// A token whose person's role can be changed while the connection is open (ADR-0049).
+struct Demotable(Arc<std::sync::Mutex<agora_hub::users::Role>>);
+
+impl ClientAuth for Demotable {
+    fn check(&self, token: &str) -> bool {
+        token == "good-token"
+    }
+    fn role(&self, token: &str) -> Option<agora_hub::users::Role> {
+        self.check(token).then(|| *self.0.lock().unwrap())
+    }
+}
+
+fn stop_request(id: &str, target: &str) -> Frame {
+    let req = v1::CommandRequest {
+        request_id: id.into(),
+        idempotency_key: String::new(),
+        target_node: target.into(),
+        command: Some(command_request::Command::AgentStop(v1::AgentStop::default())),
+    };
+    f(STREAM_COMMANDS, 0, req.encode_to_vec())
+}
+
+#[tokio::test]
+async fn a_viewer_can_read_but_every_command_that_changes_something_stops_at_the_hub() {
+    use agora_hub::users::Role;
+    let role = Arc::new(std::sync::Mutex::new(Role::Viewer));
+    let st = Arc::new(ServerState {
+        hub: Arc::new(Hub::open(SqliteStore::open_in_memory().unwrap()).unwrap()),
+        support: support(),
+        ca: None,
+        lockout: Arc::new(Lockout::new()),
+        auth: Box::new(Demotable(Arc::clone(&role))),
+        assets: None,
+        sessions: None,
+    });
+    let addr = start(Arc::clone(&st)).await;
+    let (mut node, _t) = node_conn(&st, "n1").await;
+    handshake(&mut node).await;
+    node.send(&f(
+        STREAM_EVENTS,
+        kinds::EVENT,
+        event("n1", 1, online("n1")),
+    ))
+    .await
+    .unwrap();
+    next_ack(&mut node).await;
+    let mut client = dial(addr, Some("good-token")).await;
+    client
+        .send(&f(
+            STREAM_EVENTS,
+            kinds::SUBSCRIBE,
+            v1::Subscribe::default().encode_to_vec(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(recv(&mut client).await.kind, kinds::SNAPSHOT);
+
+    // A viewer's stop is refused by the hub, naming what was refused; the node never hears of it.
+    client.send(&stop_request("s1", "n1")).await.unwrap();
+    let r = response(&mut client).await;
+    assert_eq!(
+        (r.request_id.as_str(), err_code(&r)),
+        ("s1", "auth.forbidden")
+    );
+    let Some(command_response::Result::Err(info)) = &r.result else {
+        panic!("expected an error");
+    };
+    assert!(format!("{info:?}").contains("AgentStop"), "{info:?}");
+
+    // Reading goes through.
+    client.send(&routed("r1", "n1")).await.unwrap();
+    let got = recv(&mut node).await;
+    let forwarded = v1::CommandRequest::decode(got.payload.as_slice()).unwrap();
+    assert!(matches!(
+        forwarded.command,
+        Some(command_request::Command::AgentList(_))
+    ));
+
+    // A member's stop is forwarded; demoted again, the very next stop is refused on the same connection.
+    *role.lock().unwrap() = Role::Member;
+    client.send(&stop_request("s2", "n1")).await.unwrap();
+    let got = recv(&mut node).await;
+    let forwarded = v1::CommandRequest::decode(got.payload.as_slice()).unwrap();
+    assert!(matches!(
+        forwarded.command,
+        Some(command_request::Command::AgentStop(_))
+    ));
+    *role.lock().unwrap() = Role::Viewer;
+    client.send(&stop_request("s3", "n1")).await.unwrap();
+    let r = loop {
+        let r = response(&mut client).await;
+        if r.request_id == "s3" {
+            break r;
+        }
+    };
+    assert_eq!(err_code(&r), "auth.forbidden");
+}

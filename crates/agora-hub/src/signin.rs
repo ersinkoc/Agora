@@ -62,6 +62,11 @@ impl<'a> SignIn<'a> {
 
     /// A new one-time sign-in code (`XXXX-XXXX`, valid 10 minutes).
     pub fn create_code(&self, now_ms: u64) -> Result<String, SignInError> {
+        self.create_code_for(None, now_ms)
+    }
+
+    /// As [`Self::create_code`], for a person of the team (ADR-0049): the session it is exchanged for is theirs.
+    pub fn create_code_for(&self, user: Option<&str>, now_ms: u64) -> Result<String, SignInError> {
         let code = new_code()?;
         let conn = self.store.lock()?;
         conn.execute(
@@ -69,8 +74,12 @@ impl<'a> SignIn<'a> {
             [to_i64(now_ms)],
         )?;
         conn.execute(
-            "INSERT INTO signin_codes (code_hash, expires_ms) VALUES (?1, ?2)",
-            params![hash(&code), to_i64(now_ms.saturating_add(CODE_TTL_MS))],
+            "INSERT INTO signin_codes (code_hash, expires_ms, user_id) VALUES (?1, ?2, ?3)",
+            params![
+                hash(&code),
+                to_i64(now_ms.saturating_add(CODE_TTL_MS)),
+                user
+            ],
         )?;
         Ok(code)
     }
@@ -83,14 +92,14 @@ impl<'a> SignIn<'a> {
         let token = new_token()?;
         let mut conn = self.store.lock()?;
         let tx = conn.transaction()?;
-        let live: Option<i64> = tx
+        let live: Option<(i64, Option<String>)> = tx
             .query_row(
-                "SELECT expires_ms FROM signin_codes WHERE code_hash = ?1",
+                "SELECT expires_ms, user_id FROM signin_codes WHERE code_hash = ?1",
                 [hash(code)],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
-        if live.is_none_or(|exp| exp <= to_i64(now_ms)) {
+        if live.as_ref().is_none_or(|(exp, _)| *exp <= to_i64(now_ms)) {
             drop(tx);
             drop(conn);
             self.lockout.failed(now_ms);
@@ -104,12 +113,14 @@ impl<'a> SignIn<'a> {
             "DELETE FROM sessions WHERE expires_ms <= ?1",
             [to_i64(now_ms)],
         )?;
+        let user = live.and_then(|(_, u)| u);
         tx.execute(
-            "INSERT INTO sessions (token_hash, created_ms, expires_ms) VALUES (?1, ?2, ?3)",
+            "INSERT INTO sessions (token_hash, created_ms, expires_ms, user_id) VALUES (?1, ?2, ?3, ?4)",
             params![
                 token_hash(&token),
                 to_i64(now_ms),
-                to_i64(now_ms.saturating_add(SESSION_TTL_MS))
+                to_i64(now_ms.saturating_add(SESSION_TTL_MS)),
+                user
             ],
         )?;
         tx.commit()?;
@@ -150,6 +161,14 @@ impl<'a> SignIn<'a> {
         .ok()
         .flatten()
         .is_some_and(|exp| exp > to_i64(now_ms))
+    }
+
+    /// What the holder of this session may do (ADR-0049); `None` for a session that is not live or whose person was removed.
+    pub fn role(&self, token: &str, now_ms: u64) -> Option<crate::users::Role> {
+        if !self.check(token, now_ms) {
+            return None;
+        }
+        crate::users::Users::new(self.store).role_of_session(&token_hash(token))
     }
 
     /// Ends every session (the owner's "sign out everywhere").
@@ -279,8 +298,12 @@ impl HubSessions {
 
 impl crate::server::ClientAuth for HubSessions {
     fn check(&self, token: &str) -> bool {
+        self.role(token).is_some()
+    }
+
+    fn role(&self, token: &str) -> Option<crate::users::Role> {
         SignIn::new(self.hub.store(), Arc::clone(&self.lockout))
-            .check(token, crate::server::now_ms())
+            .role(token, crate::server::now_ms())
     }
 }
 
@@ -342,5 +365,25 @@ mod tests {
         assert!(!String::from_utf8_lossy(&stored).contains(&token));
         assert_eq!(s.revoke_all().unwrap(), 1);
         assert!(!s.check(&token, 2));
+    }
+
+    #[test]
+    fn a_code_made_for_a_person_gives_a_session_with_their_role_and_removing_them_ends_it() {
+        use crate::users::{Role, Users};
+        let store = SqliteStore::open_in_memory().unwrap();
+        let signin = si(&store);
+        let user = Users::new(&store).add("Eda", Role::Viewer, 1).unwrap();
+        let token = signin
+            .redeem(&signin.create_code_for(Some(&user.id), 10).unwrap(), 11)
+            .unwrap();
+        assert_eq!(signin.role(&token, 12), Some(Role::Viewer));
+        // The owner's code has no person: the owner's role, as before.
+        let owner = signin.redeem(&signin.create_code(10).unwrap(), 11).unwrap();
+        assert_eq!(signin.role(&owner, 12), Some(Role::Owner));
+        Users::new(&store).set_role(&user.id, Role::Member).unwrap();
+        assert_eq!(signin.role(&token, 12), Some(Role::Member));
+        Users::new(&store).remove(&user.id).unwrap();
+        assert_eq!(signin.role(&token, 12), None);
+        assert_eq!(signin.role("not-a-token", 12), None);
     }
 }
