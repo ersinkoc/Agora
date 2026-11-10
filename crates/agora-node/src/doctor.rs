@@ -68,6 +68,20 @@ pub fn run(inputs: &Inputs) -> Vec<Check> {
         check("local-sockets", Status::Warn, std::env::consts::OS)
     });
 
+    // What the node's policy asks for, and whether this machine can do it (ADR-0047).
+    let level = crate::daemon::read_policy(&inputs.data_dir.join(crate::daemon::POLICY_FILE))
+        .sandbox
+        .level;
+    out.push(check(
+        "sandbox",
+        if agora_platform::sandbox_supported() {
+            Status::Ok
+        } else {
+            Status::Warn
+        },
+        level.name(),
+    ));
+
     out.push(match Command::new("git").arg("--version").output() {
         Ok(o) if o.status.success() => check(
             "git",
