@@ -110,6 +110,7 @@ pub(crate) struct Opts {
     version: Option<String>,
     check: bool,
     registry: Option<String>,
+    role: Option<String>,
     root_key: Option<PathBuf>,
     positional: Vec<String>,
 }
@@ -150,6 +151,7 @@ fn parse(args: &[String]) -> Option<Opts> {
             "--version" => o.version = Some(it.next()?.clone()),
             "--check" => o.check = true,
             "--registry" => o.registry = Some(it.next()?.clone()),
+            "--role" => o.role = Some(it.next()?.clone()),
             "--root-key" => o.root_key = Some(it.next()?.into()),
             s if s.starts_with("--") => return None,
             _ => o.positional.push(a.clone()),
@@ -212,6 +214,7 @@ fn main() -> ExitCode {
         ["hub", "run"] => hubcli::hub_run(&say, &opts),
         ["hub", "code"] => hubcli::hub_code(&say, &opts),
         ["hub", "login"] => hubcli::hub_login(&say, &opts),
+        ["hub", "user"] => hubcli::hub_user(&say, &opts),
         ["hub", "ssh"] => hubcli::hub_ssh(&say, &opts),
         ["hub", "prices"] => hubcli::hub_prices(&say, &opts),
         ["hub", "notify"] => hubcli::hub_notify(&say, &opts),

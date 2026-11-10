@@ -66,7 +66,7 @@ pub trait EventStore {
     fn set_setting(&self, key: &str, value: &[u8]) -> Result<(), StoreError>;
 }
 
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 pub struct SqliteStore {
     conn: Mutex<Connection>,
@@ -161,6 +161,22 @@ impl SqliteStore {
                      created_ms INTEGER NOT NULL
                  );
                  PRAGMA user_version = 4;
+                 COMMIT;",
+            )?;
+        }
+        if version < 5 {
+            // Team mode (ADR-0049): people with a role. A session or sign-in code with no user belongs to the owner, as before.
+            conn.execute_batch(
+                "BEGIN;
+                 CREATE TABLE users (
+                     id         TEXT PRIMARY KEY,
+                     name       TEXT NOT NULL,
+                     role       TEXT NOT NULL,
+                     created_ms INTEGER NOT NULL
+                 );
+                 ALTER TABLE signin_codes ADD COLUMN user_id TEXT;
+                 ALTER TABLE sessions ADD COLUMN user_id TEXT;
+                 PRAGMA user_version = 5;
                  COMMIT;",
             )?;
         }

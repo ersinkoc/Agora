@@ -72,6 +72,13 @@ impl ClientAuth for ClientTokens {
         // Not constant time, but the token is 128 random bits compared once per connection; nothing to learn from timing.
         token == self.file_token || self.sessions.check(token)
     }
+
+    fn role(&self, token: &str) -> Option<agora_hub::users::Role> {
+        if token == self.file_token {
+            return Some(agora_hub::users::Role::Owner);
+        }
+        agora_hub::server::ClientAuth::role(&*self.sessions, token)
+    }
 }
 
 mod embedded {
@@ -243,6 +250,115 @@ pub fn hub_login(say: &Say, o: &Opts) -> ExitCode {
             say.err(key!("cli-hub-failed"), &[("reason", e.into())]);
             ExitCode::from(1)
         }
+    }
+}
+
+/// `agora hub user add|list|role|remove|login` (ADR-0049): the people of a team hub and what each may do.
+pub fn hub_user(say: &Say, o: &Opts) -> ExitCode {
+    use agora_hub::users::{Role, Users};
+    let fail = |e: String| {
+        say.err(key!("cli-hub-failed"), &[("reason", e.into())]);
+        ExitCode::from(1)
+    };
+    let bad = || {
+        say.err(key!("cli-bad-arguments"), &[]);
+        ExitCode::from(2)
+    };
+    let dir = hub_dir(o);
+    if std::fs::create_dir_all(&dir).is_err() {
+        return fail(dir.display().to_string());
+    }
+    let store = match SqliteStore::open(&dir.join("hub.db")) {
+        Ok(s) => s,
+        Err(e) => return fail(e.to_string()),
+    };
+    let users = Users::new(&store);
+    let code_for = |id: &str| {
+        SignIn::new(&store, Arc::new(Lockout::new()))
+            .create_code_for(Some(id), server::now_ms())
+            .map_err(|_| "could not create a sign-in code".to_string())
+    };
+    let words: Vec<&str> = o.positional.iter().map(String::as_str).collect();
+    match words.as_slice() {
+        ["add", name] => {
+            let Some(role) = o.role.as_deref().map_or(Some(Role::Member), Role::parse) else {
+                return bad();
+            };
+            let user = match users.add(name, role, server::now_ms()) {
+                Ok(u) => u,
+                Err(e) => return fail(e.to_string()),
+            };
+            match code_for(&user.id) {
+                Ok(code) => {
+                    say.out(
+                        key!("cli-hub-user-added"),
+                        &[
+                            ("id", user.id.into()),
+                            ("role", user.role.as_str().into()),
+                            ("code", code.into()),
+                        ],
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(e) => fail(e),
+            }
+        }
+        ["list"] => match users.list() {
+            Ok(list) if list.is_empty() => {
+                say.out(key!("cli-hub-user-none"), &[]);
+                ExitCode::SUCCESS
+            }
+            Ok(list) => {
+                for u in list {
+                    say.out(
+                        key!("cli-hub-user-line"),
+                        &[
+                            ("id", u.id.into()),
+                            ("name", u.name.into()),
+                            ("role", u.role.as_str().into()),
+                        ],
+                    );
+                }
+                ExitCode::SUCCESS
+            }
+            Err(e) => fail(e.to_string()),
+        },
+        ["role", id, role] => {
+            let Some(role) = Role::parse(role) else {
+                return bad();
+            };
+            match users.set_role(id, role) {
+                Ok(true) => ExitCode::SUCCESS,
+                Ok(false) => {
+                    say.err(key!("cli-hub-user-unknown"), &[("id", (*id).into())]);
+                    ExitCode::from(1)
+                }
+                Err(e) => fail(e.to_string()),
+            }
+        }
+        ["remove", id] => match users.remove(id) {
+            Ok(true) => ExitCode::SUCCESS,
+            Ok(false) => {
+                say.err(key!("cli-hub-user-unknown"), &[("id", (*id).into())]);
+                ExitCode::from(1)
+            }
+            Err(e) => fail(e.to_string()),
+        },
+        ["login", id] => match users.list() {
+            Ok(list) if list.iter().any(|u| u.id == *id) => match code_for(id) {
+                Ok(code) => {
+                    say.out(key!("cli-hub-login"), &[("code", code.into())]);
+                    ExitCode::SUCCESS
+                }
+                Err(e) => fail(e),
+            },
+            Ok(_) => {
+                say.err(key!("cli-hub-user-unknown"), &[("id", (*id).into())]);
+                ExitCode::from(1)
+            }
+            Err(e) => fail(e.to_string()),
+        },
+        _ => bad(),
     }
 }
 

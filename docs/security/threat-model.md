@@ -74,3 +74,6 @@ to the adapter, recording `ApprovalResolved` with the signer; requests that expi
 agent leaves nothing waiting. With no trusted device (the default until the owner runs `agora node trust`) every decision is
 refused with `approval.signature_invalid`, so sensitive actions stay denied rather than open. Adapter usage and session reports
 are written to the event log.
+
+## Team mode (ADR-0049)
+A hub may have several people with a role each (`owner`, `member`, `viewer`). The hub refuses a viewer's commands that change anything (`auth.forbidden`) and checks the role on every command, so a demotion or a removal takes effect on an open connection. This is the hub's own limit on its clients and not a security boundary: a compromised hub is still bounded only by the node's policy and signed grants (ADR-0020, ADR-0041). Not yet: per-user project filtering (a member can still see every project), node-side limits by user, and the audit trail.
