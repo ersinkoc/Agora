@@ -501,7 +501,11 @@ mod tests {
     fn a_program_in_a_console_prints_and_its_exit_code_comes_back() {
         let mut p = cmd(&["/c", "echo agora-conpty-ok & exit 7"]);
         let seen = read_until(&*p, "agora-conpty-ok");
-        assert!(seen.contains("agora-conpty-ok"), "{seen:?}");
+        assert!(
+            seen.contains("agora-conpty-ok"),
+            "{seen:?} exited={:?}",
+            p.try_wait()
+        );
         let status = p.wait().unwrap();
         assert_eq!(status.code, Some(7));
         // The output channel ends once the process is over.
@@ -519,7 +523,11 @@ mod tests {
         let mut p = cmd(&[]);
         p.write_input(b"echo typed-%OS%-line\r\n").unwrap();
         let seen = read_until(&*p, "typed-Windows_NT-line");
-        assert!(seen.contains("typed-Windows_NT-line"), "{seen:?}");
+        assert!(
+            seen.contains("typed-Windows_NT-line"),
+            "{seen:?} exited={:?}",
+            p.try_wait()
+        );
         p.resize(100, 30).unwrap();
         assert!(p.try_wait().unwrap().is_none());
         let control = p.control().unwrap();
