@@ -21,6 +21,9 @@ Agents are data, not code (AGENTS.md), so any confinement must apply to a manife
    each machine can enforce, so the UI can say so before a start.
 4. **Agents' own needs are declared:** a manifest may list extra read paths and network hosts the agent needs (its CLI's config
    folder, its API host); they are shown to the owner on first start and need a signed grant (ADR-0041) like other widening.
+   *Implementation note:* the owner's consent is a line in the node's own `policy` file (`sandbox.trust_manifest = kind, ...`), which
+   needs no network and cannot be forged by the hub; it is stricter than a signed grant (the person at the machine decides), and a
+   grant-based path can be added later without changing the manifest field.
 5. **Not a claim of safety:** the profile narrows what a compromised or confused agent can touch; it does not make untrusted code
    safe. The threat model keeps T8 as "reduced when enabled", and docs say what each OS does and does not stop.
 

@@ -298,6 +298,20 @@ impl Supervisor {
         self.hook = Some(hook);
     }
 
+    /// The confinement of one agent of `kind`: the node's policy plus what the kind's manifest asks, if the owner trusts that kind.
+    fn sandbox_for(
+        &self,
+        kind: &str,
+        worktree: &Path,
+        program: &str,
+    ) -> Option<agora_platform::Sandbox> {
+        let needs = self
+            .kinds
+            .get(kind)
+            .and_then(|k| k.manifest.sandbox.as_ref());
+        self.sandbox.profile(kind, needs, worktree, program)
+    }
+
     /// Sets how agents are confined (ADR-0047); the default is not at all.
     pub fn set_sandbox(&mut self, sandbox: crate::sandbox::SandboxPolicy) {
         self.sandbox = sandbox;
@@ -499,7 +513,7 @@ impl Supervisor {
             &checkout.root,
             &worktree,
             None,
-            self.sandbox.profile(&worktree, &spec.command[0]),
+            self.sandbox_for(&req.kind, &worktree, &spec.command[0]),
         )
         .map_err(SupervisorError::Spawn)?;
         let id = AgentId::new(format!("agent-{}", self.next_id));
@@ -594,7 +608,11 @@ impl Supervisor {
     /// counts and backs off like a crash.
     fn restart_adapter(&mut self, id: &AgentId, now: Instant, events: &mut Vec<SupervisorEvent>) {
         let policy = self.cfg.restart;
-        let sandbox = self.sandbox.clone();
+        let Some(profile) = self.adapters.get(id).and_then(|e| {
+            Some(self.sandbox_for(&e.agent.kind, &e.worktree, e.spec.command.first()?))
+        }) else {
+            return;
+        };
         let Some(e) = self.adapters.get_mut(id) else {
             return;
         };
@@ -605,10 +623,7 @@ impl Supervisor {
             &e.checkout_root,
             &e.worktree,
             e.agent.session.as_deref(),
-            e.spec
-                .command
-                .first()
-                .and_then(|p| sandbox.profile(&e.worktree, p)),
+            profile,
         ) {
             Ok((adapter, session_id)) => {
                 e.adapter = adapter;
@@ -674,7 +689,7 @@ impl Supervisor {
         cfg.cols = self.cfg.terminal.size.cols;
         cfg.rows = self.cfg.terminal.size.rows;
         cfg.limits = self.cfg.limits.process;
-        cfg.sandbox = program.and_then(|p| self.sandbox.profile(worktree, &p));
+        cfg.sandbox = program.and_then(|p| self.sandbox_for(kind, worktree, &p));
         if let Some(k) = self.kinds.get(kind) {
             cfg.env = k
                 .manifest

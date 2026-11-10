@@ -120,6 +120,13 @@ the written file is added to the worktree's private `info/exclude` so it stays o
 added at every launch, restarts and resumes included; a resumed agent gets a fresh endpoint. An agent whose manifest has no
 `[mcp]` still joins the mesh. A manifest whose injection fails does not start (it asked for something the node refused).
 
+## `[sandbox]` (ADR-0047)
+
+`[sandbox] read = ["~/.config/tool"]`, `write = ["~/.cache/tool"]` lists what the agent needs beyond its worktree when the node
+confines agents (`~/` is the home folder; relative paths and `..` are ignored). These are requests: the node adds them only for
+a kind its owner listed in `sandbox.trust_manifest` in the node's `policy` file, so a community manifest cannot widen anything by
+asking.
+
 ## `[adapter]` (L3)
 
 `[adapter] command = ["program", "args"...]` (and optional `env`) makes the kind an adapter agent: the node starts the
