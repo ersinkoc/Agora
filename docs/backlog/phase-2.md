@@ -24,7 +24,7 @@ parallel; most others touch different crates.
 | P2-11 event buffer | done | |
 | P2-12 accounts | blocked on P2-09 | |
 | P2-13 resource limits | done | cgroups v2 and Job Objects not yet |
-| P2-14 local CLI | done except `agent list` | `agent list` needs ADR-0025 (proposed, awaiting a decision) |
+| P2-14 local CLI | done | `agent list` came with ADR-0025 (accepted); `agent kinds`, `agent start|stop|prompt` and `terminal attach` are there too |
 | P2-15 footprint | done | all budgets met, see `design/performance.md`; nothing relaxed |
 
 Exit criterion: a node runs agents in worktrees and reports state, controllable via the local CLI
