@@ -208,6 +208,7 @@ fn main() -> ExitCode {
         ["adapter", "install"] => adaptercmd::install(&say, &opts),
         ["adapter", "list"] => adaptercmd::list(&say, &opts),
         ["adapter", "remove"] => adaptercmd::remove(&say, &opts),
+        ["adapter", "update"] => adaptercmd::update(&say, &opts),
         ["hub", "run"] => hubcli::hub_run(&say, &opts),
         ["hub", "code"] => hubcli::hub_code(&say, &opts),
         ["hub", "login"] => hubcli::hub_login(&say, &opts),
