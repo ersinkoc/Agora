@@ -296,8 +296,12 @@ fn to_event(method: &str, p: &Value) -> Option<AdapterEvent> {
 impl Adapter {
     pub fn spawn(cfg: &AdapterConfig) -> io::Result<Self> {
         let mut cmd = Command::new(&cfg.program);
-        cmd.args(&cfg.args)
-            .stdin(Stdio::piped())
+        cmd.args(&cfg.args);
+        // Confined first: on macOS this rewrites the command, which must happen before the streams are set.
+        if let Some(sb) = &cfg.sandbox {
+            agora_platform::confine_command(&mut cmd, sb)?;
+        }
+        cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             // The adapter's own stderr is diagnostics for whoever runs the node; it is not parsed.
             .stderr(Stdio::inherit());
@@ -310,9 +314,6 @@ impl Adapter {
         cmd.envs(cfg.env.iter().map(|(k, v)| (k, v)));
         if let Some(dir) = &cfg.cwd {
             cmd.current_dir(dir);
-        }
-        if let Some(sb) = &cfg.sandbox {
-            agora_platform::confine_command(&mut cmd, sb)?;
         }
         let mut child = cmd.spawn()?;
         let (stdin, stdout) = match (child.stdin.take(), child.stdout.take()) {

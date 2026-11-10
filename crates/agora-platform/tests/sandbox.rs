@@ -25,7 +25,7 @@ fn run(sandbox: Option<Sandbox>, script: &str) -> String {
 #[test]
 fn a_confined_process_writes_only_where_it_was_allowed() {
     if !sandbox_supported() {
-        eprintln!("skipped: no Landlock on this machine");
+        eprintln!("skipped: this machine cannot confine");
         return;
     }
     let dir = std::env::temp_dir().join(format!("agora-sandbox-{}", std::process::id()));

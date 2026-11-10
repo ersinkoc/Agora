@@ -386,7 +386,11 @@ pub fn sandbox_supported() -> bool {
     {
         linux::sandbox_supported()
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        macos::sandbox_supported()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         false
     }
@@ -409,7 +413,29 @@ pub fn confine_command(cmd: &mut std::process::Command, sandbox: &Sandbox) -> io
         unsafe { cmd.pre_exec(move || ruleset.enforce()) };
         Ok(())
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        // The command becomes `sandbox-exec -p <profile> -- <program> <args>`. Environment and folder carry over; standard streams do
+        // not (std cannot read them back), so callers confine first and set the streams after.
+        let (program, args) = {
+            let a: Vec<_> = cmd.get_args().map(ToOwned::to_owned).collect();
+            macos::wrap(sandbox, cmd.get_program(), &a)
+        };
+        let mut wrapped = std::process::Command::new(program);
+        wrapped.args(args);
+        if let Some(dir) = cmd.get_current_dir() {
+            wrapped.current_dir(dir);
+        }
+        for (k, v) in cmd.get_envs() {
+            match v {
+                Some(v) => wrapped.env(k, v),
+                None => wrapped.env_remove(k),
+            };
+        }
+        *cmd = wrapped;
+        Ok(())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = (cmd, sandbox);
         Err(io::Error::new(

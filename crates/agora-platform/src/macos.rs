@@ -102,3 +102,85 @@ pub(crate) fn children(pid: u32) -> io::Result<Vec<u32>> {
         return Ok(out);
     }
 }
+
+// ---- Seatbelt (ADR-0047): the profile language `sandbox-exec` enforces on a process and everything it starts ----
+
+const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
+/// Where people's own files live. Reading is denied below these unless the caller lists the folder; the system folders stay readable,
+/// because every program needs them to start at all (denying them aborts the process in dyld).
+const PRIVATE: [&str; 4] = ["/Users", "/Volumes", "/private/var/folders", "/private/tmp"];
+
+/// True when `sandbox-exec` is on this machine.
+pub(crate) fn sandbox_supported() -> bool {
+    std::path::Path::new(SANDBOX_EXEC).exists()
+}
+
+fn quote(p: &std::path::Path) -> String {
+    let s = p
+        .to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    format!("(subpath \"{s}\")")
+}
+
+/// The profile for `sb`: writing is denied everywhere except below the `write` folders, and reading contents is denied below
+/// [`PRIVATE`] except below the listed folders. Metadata stays readable so a path can be walked down to an allowed folder.
+pub(crate) fn profile(sb: &crate::Sandbox) -> String {
+    let real = |p: &std::path::Path| std::fs::canonicalize(p).ok();
+    let reads: Vec<String> = sb
+        .read
+        .iter()
+        .chain(sb.write.iter())
+        .filter_map(|p| real(p))
+        .map(|p| quote(&p))
+        .collect();
+    let writes: Vec<String> = sb
+        .write
+        .iter()
+        .filter_map(|p| real(p))
+        .map(|p| quote(&p))
+        .collect();
+    let private: Vec<String> = PRIVATE
+        .iter()
+        .map(|p| quote(std::path::Path::new(p)))
+        .collect();
+    let mut out = format!(
+        "(version 1)\n(allow default)\n(deny file-write*)\n(deny file-read-data {})\n",
+        private.join(" ")
+    );
+    if !reads.is_empty() {
+        out.push_str(&format!("(allow file-read* {})\n", reads.join(" ")));
+    }
+    if !writes.is_empty() {
+        out.push_str(&format!("(allow file-write* {})\n", writes.join(" ")));
+    }
+    out
+}
+
+/// `program args...` rewritten to run under `sandbox-exec` with the profile for `sb`.
+pub(crate) fn wrap(
+    sb: &crate::Sandbox,
+    program: &std::ffi::OsStr,
+    args: &[std::ffi::OsString],
+) -> (std::ffi::OsString, Vec<std::ffi::OsString>) {
+    let mut v: Vec<std::ffi::OsString> =
+        vec!["-p".into(), profile(sb).into(), "--".into(), program.into()];
+    v.extend(args.iter().cloned());
+    (SANDBOX_EXEC.into(), v)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod sandbox_tests {
+    #[test]
+    fn the_profile_denies_first_and_allows_listed_folders_after() {
+        let sb = crate::Sandbox {
+            read: vec!["/usr".into()],
+            write: vec![std::env::temp_dir()],
+        };
+        let p = super::profile(&sb);
+        let deny = p.find("(deny file-read-data").unwrap();
+        let allow = p.find("(allow file-write*").unwrap();
+        assert!(deny < allow, "{p}");
+    }
+}
