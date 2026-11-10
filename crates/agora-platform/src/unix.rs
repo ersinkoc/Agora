@@ -211,6 +211,20 @@ pub(crate) fn spawn(config: &PtyConfig) -> io::Result<Box<dyn Pty>> {
     let Some((program, args)) = config.argv.split_first() else {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "argv is empty"));
     };
+    #[cfg(target_os = "macos")]
+    let (program, args) = match &config.sandbox {
+        Some(sb) => {
+            let a: Vec<std::ffi::OsString> = args.iter().map(Into::into).collect();
+            let (p, a) = crate::macos::wrap(sb, program.as_ref(), &a);
+            (p, a)
+        }
+        None => (
+            program.into(),
+            args.iter()
+                .map(Into::into)
+                .collect::<Vec<std::ffi::OsString>>(),
+        ),
+    };
     let mut cmd = Command::new(program);
     cmd.args(args);
     if let Some(cwd) = &config.cwd {
