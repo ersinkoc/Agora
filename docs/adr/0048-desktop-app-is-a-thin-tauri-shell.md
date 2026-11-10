@@ -1,5 +1,5 @@
 # 0048. The desktop app is a thin Tauri shell around the hub's page
-Status: Proposed
+Status: Accepted
 Date: 2026-11-10
 
 ## Context
