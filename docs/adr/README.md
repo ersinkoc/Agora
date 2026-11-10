@@ -63,4 +63,4 @@ Date: YYYY-MM-DD
 | 0043 | The terminal client: scope, order and dependencies | Accepted |
 | 0044 | Installing adapters and manifests from the registry | Accepted |
 | 0045 | The Windows node: terminals, a control channel and a process view | Accepted |
-| 0046 | Mobile is the web client, installable as a PWA | Proposed |
+| 0046 | Mobile is the web client, installable as a PWA | Accepted |

@@ -1,5 +1,5 @@
 # 0046. Mobile is the web client, installable as a PWA
-Status: Proposed
+Status: Accepted
 Date: 2026-11-10
 
 ## Context
