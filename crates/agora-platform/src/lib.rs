@@ -392,6 +392,33 @@ pub fn sandbox_supported() -> bool {
     }
 }
 
+/// Confines `cmd` (and what it starts) the same way [`PtyConfig::sandbox`] does a PTY process. Fails with `Unsupported` where that
+/// cannot be enforced, so the caller never runs the command unconfined by accident.
+pub fn confine_command(cmd: &mut std::process::Command, sandbox: &Sandbox) -> io::Result<()> {
+    if !sandbox_supported() {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "this machine cannot confine a process",
+        ));
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::process::CommandExt;
+        let ruleset = linux::ruleset(sandbox)?;
+        // SAFETY: the closure only applies a ruleset made before the fork (async-signal-safe calls).
+        unsafe { cmd.pre_exec(move || ruleset.enforce()) };
+        Ok(())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (cmd, sandbox);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "no confinement here",
+        ))
+    }
+}
+
 impl PtyConfig {
     pub fn new(argv: Vec<String>) -> Self {
         Self {

@@ -373,9 +373,7 @@ impl Supervisor {
             .ok_or_else(|| SupervisorError::UnknownKind(req.kind.clone()))?;
         // An agent that cannot be confined is not started unconfined (ADR-0047). Adapter-hosted agents are not confined yet.
         let driver = kind.manifest.driver(&bridge_program());
-        if !self.sandbox.enforceable()
-            || (driver.is_some() && self.sandbox.level != crate::sandbox::Level::Off)
-        {
+        if !self.sandbox.enforceable() {
             return Err(SupervisorError::SandboxUnavailable(
                 req.kind.clone(),
                 self.sandbox.level.name(),
@@ -496,8 +494,14 @@ impl Supervisor {
         if spec.command.is_empty() {
             return Err(SupervisorError::UnknownKind(req.kind.clone()));
         }
-        let (adapter, session_id) = launch_adapter(spec, &checkout.root, &worktree, None)
-            .map_err(SupervisorError::Spawn)?;
+        let (adapter, session_id) = launch_adapter(
+            spec,
+            &checkout.root,
+            &worktree,
+            None,
+            self.sandbox.profile(&worktree, &spec.command[0]),
+        )
+        .map_err(SupervisorError::Spawn)?;
         let id = AgentId::new(format!("agent-{}", self.next_id));
         self.next_id += 1;
         let mut agent = Agent::new(
@@ -590,6 +594,7 @@ impl Supervisor {
     /// counts and backs off like a crash.
     fn restart_adapter(&mut self, id: &AgentId, now: Instant, events: &mut Vec<SupervisorEvent>) {
         let policy = self.cfg.restart;
+        let sandbox = self.sandbox.clone();
         let Some(e) = self.adapters.get_mut(id) else {
             return;
         };
@@ -600,6 +605,10 @@ impl Supervisor {
             &e.checkout_root,
             &e.worktree,
             e.agent.session.as_deref(),
+            e.spec
+                .command
+                .first()
+                .and_then(|p| sandbox.profile(&e.worktree, p)),
         ) {
             Ok((adapter, session_id)) => {
                 e.adapter = adapter;
@@ -1044,6 +1053,7 @@ fn launch_adapter(
     checkout_root: &Path,
     worktree: &Path,
     resume: Option<&str>,
+    sandbox: Option<agora_platform::Sandbox>,
 ) -> Result<(Adapter, String), String> {
     const STEP: Duration = Duration::from_secs(10);
     let (program, args) = spec.command.split_first().ok_or("empty adapter command")?;
@@ -1056,6 +1066,7 @@ fn launch_adapter(
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect(),
         cwd: Some(worktree.to_path_buf()),
+        sandbox,
     })
     .map_err(|e| e.to_string())?;
     let fail = |e: agora_adapters::host::HostError| e.to_string();

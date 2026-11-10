@@ -29,6 +29,8 @@ pub struct AdapterConfig {
     pub args: Vec<String>,
     pub env: Vec<(String, String)>,
     pub cwd: Option<PathBuf>,
+    /// Confine the adapter, and so the agent it hosts (ADR-0047). Spawning fails where that cannot be done.
+    pub sandbox: Option<agora_platform::Sandbox>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -308,6 +310,9 @@ impl Adapter {
         cmd.envs(cfg.env.iter().map(|(k, v)| (k, v)));
         if let Some(dir) = &cfg.cwd {
             cmd.current_dir(dir);
+        }
+        if let Some(sb) = &cfg.sandbox {
+            agora_platform::confine_command(&mut cmd, sb)?;
         }
         let mut child = cmd.spawn()?;
         let (stdin, stdout) = match (child.stdin.take(), child.stdout.take()) {
