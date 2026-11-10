@@ -567,4 +567,57 @@ mod tests {
         assert_eq!(s.setting("k").unwrap().as_deref(), Some(&b"v"[..]));
         let _ = std::fs::remove_dir_all(&d);
     }
+
+    /// A hub made by the last release before team mode (schema 4) keeps working after an upgrade: its events and its owner's
+    /// session survive, and what the new schemas add starts empty (ADR-0049).
+    #[test]
+    fn a_database_from_before_team_mode_upgrades_in_place() {
+        let d = tmpdir("upgrade");
+        let path = d.join("hub.db");
+        {
+            let c = Connection::open(&path).unwrap();
+            c.execute_batch(
+                "CREATE TABLE events (pos INTEGER PRIMARY KEY AUTOINCREMENT, producer TEXT NOT NULL, seq INTEGER NOT NULL, at_ms INTEGER NOT NULL, payload BLOB NOT NULL, UNIQUE (producer, seq));
+                 CREATE TABLE producers (producer TEXT PRIMARY KEY, last_seq INTEGER NOT NULL);
+                 CREATE TABLE settings (key TEXT PRIMARY KEY, value BLOB NOT NULL);
+                 CREATE TABLE enrollment_codes (code_hash BLOB PRIMARY KEY, expires_ms INTEGER NOT NULL);
+                 CREATE TABLE devices (serial TEXT PRIMARY KEY, node_id TEXT NOT NULL, enrolled_ms INTEGER NOT NULL, revoked_ms INTEGER);
+                 CREATE TABLE signin_codes (code_hash BLOB PRIMARY KEY, expires_ms INTEGER NOT NULL);
+                 CREATE TABLE sessions (token_hash BLOB PRIMARY KEY, created_ms INTEGER NOT NULL, expires_ms INTEGER NOT NULL);
+                 CREATE TABLE passkeys (id TEXT PRIMARY KEY, public_key BLOB NOT NULL, sign_count INTEGER NOT NULL, created_ms INTEGER NOT NULL);
+                 INSERT INTO events (producer, seq, at_ms, payload) VALUES ('n1', 1, 5, x'0a');
+                 INSERT INTO settings (key, value) VALUES ('k', x'76');
+                 INSERT INTO sessions (token_hash, created_ms, expires_ms) VALUES (x'aa', 1, 9999999999999);
+                 PRAGMA user_version = 4;",
+            )
+            .unwrap();
+        }
+        let s = SqliteStore::open(&path).unwrap();
+        let conn = s.lock().unwrap();
+        let version: i64 = conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        let events: i64 = conn
+            .query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(events, 1);
+        // The old session names no person: the owner's, as before.
+        let user: Option<String> = conn
+            .query_row("SELECT user_id FROM sessions", [], |r| r.get(0))
+            .unwrap();
+        assert!(user.is_none());
+        for table in ["users", "audit", "grants"] {
+            let n: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(n, 0, "{table}");
+        }
+        drop(conn);
+        assert_eq!(s.setting("k").unwrap().as_deref(), Some(&b"v"[..]));
+        // And reopening an upgraded database changes nothing.
+        drop(s);
+        assert!(SqliteStore::open(&path).is_ok());
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }
