@@ -66,3 +66,4 @@ Date: YYYY-MM-DD
 | 0046 | Mobile is the web client, installable as a PWA | Accepted |
 | 0047 | Agent sandboxing with the operating system's own profiles | Accepted |
 | 0048 | The desktop app is a thin Tauri shell around the hub's page | Accepted |
+| 0049 | Team mode: users, roles and an audit trail first, Postgres only when SQLite is not enough | Proposed |
