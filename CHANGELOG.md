@@ -2,7 +2,7 @@
 
 Each release lists what a person using Agora can now do. The reasons are in `docs/adr/`; the state of every task is in `docs/backlog/`.
 
-## 0.2.0 (not released yet; bump `version` in `Cargo.toml`, `apps/desktop/src-tauri` and `tauri.conf.json` when tagging)
+## 0.2.0
 
 ### Teams
 - A hub can have several people. `agora hub user add NAME --role owner|member|viewer` gives each a sign-in code and a role; a viewer can only

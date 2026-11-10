@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "agora"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "agora-adapters",
  "agora-core",
@@ -27,7 +27,7 @@ dependencies = [
 
 [[package]]
 name = "agora-adapters"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "agora-core",
  "agora-fake-agent",
@@ -44,7 +44,7 @@ dependencies = [
 
 [[package]]
 name = "agora-bench"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "agora-adapters",
  "agora-core",
@@ -59,11 +59,11 @@ dependencies = [
 
 [[package]]
 name = "agora-core"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "agora-desktop-tunnel"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "agora-hub",
  "ring",
@@ -74,7 +74,7 @@ dependencies = [
 
 [[package]]
 name = "agora-fake-agent"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -83,7 +83,7 @@ dependencies = [
 
 [[package]]
 name = "agora-hub"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "agora-core",
  "agora-i18n",
@@ -108,11 +108,11 @@ dependencies = [
 
 [[package]]
 name = "agora-i18n"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "agora-mesh"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "agora-core",
  "agora-protocol",
@@ -121,7 +121,7 @@ dependencies = [
 
 [[package]]
 name = "agora-node"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "agora-adapters",
  "agora-core",
@@ -141,7 +141,7 @@ dependencies = [
 
 [[package]]
 name = "agora-platform"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
@@ -149,7 +149,7 @@ dependencies = [
 
 [[package]]
 name = "agora-protocol"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "futures-util",
  "prost",
@@ -164,7 +164,7 @@ dependencies = [
 
 [[package]]
 name = "agora-schema-check"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "prost-types",
  "protox",
@@ -172,7 +172,7 @@ dependencies = [
 
 [[package]]
 name = "agora-tui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "agora-core",
  "agora-i18n",
@@ -189,7 +189,7 @@ dependencies = [
 
 [[package]]
 name = "agora-vt"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "alacritty_terminal",
 ]
