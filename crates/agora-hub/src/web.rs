@@ -6,6 +6,7 @@
 use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 
@@ -78,6 +79,40 @@ impl Assets for DirAssets {
     }
 }
 
+/// The page's install manifest (ADR-0046): installable to a phone's home screen, no service worker. The name is the locale's
+/// product string; colours are the design tokens' dark surface and accent.
+pub fn manifest(name: &str) -> Vec<u8> {
+    serde_json::json!({
+        "name": name,
+        "short_name": name,
+        "start_url": "/",
+        "display": "standalone",
+        "background_color": "#09090b",
+        "theme_color": "#09090b",
+        "icons": [{ "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }],
+    })
+    .to_string()
+    .into_bytes()
+}
+
+/// `inner` plus `/manifest.webmanifest`, which is answered here and never read from the folder.
+pub struct Installable {
+    pub inner: Arc<dyn Assets>,
+    pub manifest: Vec<u8>,
+}
+
+impl Assets for Installable {
+    fn get(&self, path: &str) -> Option<Asset> {
+        if path == "/manifest.webmanifest" {
+            return Some(Asset {
+                content_type: content_type(Path::new("manifest.webmanifest")),
+                body: self.manifest.clone(),
+            });
+        }
+        self.inner.get(path)
+    }
+}
+
 /// Assets compiled into the binary: `(path relative to the web root, bytes)`.
 pub struct EmbeddedAssets(pub &'static [(&'static str, &'static [u8])]);
 
@@ -133,6 +168,7 @@ fn content_type(p: &Path) -> &'static str {
         Some("js") | Some("mjs") => "text/javascript; charset=utf-8",
         Some("css") => "text/css; charset=utf-8",
         Some("json") => "application/json",
+        Some("webmanifest") => "application/manifest+json",
         Some("svg") => "image/svg+xml",
         Some("png") => "image/png",
         Some("woff2") => "font/woff2",
@@ -399,6 +435,23 @@ mod tests {
         assert_eq!(a.get("/agents/7").unwrap().body, b"shell");
         assert!(a.get("/assets/nope.js").is_none());
         assert!(a.get("/../index.html").is_none());
+    }
+
+    #[test]
+    fn the_manifest_is_answered_by_the_hub_and_everything_else_by_the_folder() {
+        static FILES: &[(&str, &[u8])] = &[("index.html", b"shell")];
+        let a = Installable {
+            inner: Arc::new(EmbeddedAssets(FILES)),
+            manifest: manifest("Name"),
+        };
+        let m = a.get("/manifest.webmanifest").unwrap();
+        assert_eq!(m.content_type, "application/manifest+json");
+        let v: serde_json::Value = serde_json::from_slice(&m.body).unwrap();
+        assert_eq!(
+            (v["name"].as_str(), v["display"].as_str()),
+            (Some("Name"), Some("standalone"))
+        );
+        assert_eq!(a.get("/").unwrap().body, b"shell");
     }
 
     #[tokio::test]
