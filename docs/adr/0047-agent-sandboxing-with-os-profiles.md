@@ -1,5 +1,5 @@
 # 0047. Agent sandboxing with the operating system's own profiles
-Status: Proposed
+Status: Accepted
 Date: 2026-11-10
 
 ## Context
