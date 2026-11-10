@@ -613,15 +613,18 @@ impl Node {
         ));
         approvals.follow_trust_file(&cfg.data_dir.join(crate::approvals::TRUSTED_DEVICES_FILE));
         let policy_now = read_policy(&cfg.data_dir.join(POLICY_FILE));
+        // Limited devices only mean something if the commands they could sign are the ones that need a signature.
+        let signed =
+            if policy_now.signed_commands.0.is_empty() && !policy_now.device_projects.is_empty() {
+                crate::grants::SignedCommands::team_default()
+            } else {
+                policy_now.signed_commands
+            };
         let limits = Arc::new(crate::limits::DeviceLimits::new(policy_now.device_projects));
         approvals.set_limits(Arc::clone(&limits));
         let grants = Arc::new(
-            crate::grants::Grants::new(
-                &cfg.node_id,
-                Arc::clone(&approvals),
-                policy_now.signed_commands,
-            )
-            .with_limits(Arc::clone(&limits)),
+            crate::grants::Grants::new(&cfg.node_id, Arc::clone(&approvals), signed)
+                .with_limits(Arc::clone(&limits)),
         );
 
         let supervisor = Arc::new(Mutex::new(sup));
