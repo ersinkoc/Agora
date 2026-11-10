@@ -6,7 +6,8 @@ import type { Device } from './net/approval';
 import { money, type UsageSummary } from './net/usage';
 import { demoAgents } from './fixtures';
 import { demoSource, type TerminalSource } from './terminal/source';
-import { Suspense, lazy, useMemo, useState } from 'react';
+import { Suspense, lazy, useEffect, useMemo, useState } from 'react';
+import { actionKey, outcomeKind, type AuditResult } from './net/audit';
 
 // The terminal emulator is the heaviest part of the client; load it only when a Focus view needs it.
 const TerminalView = lazy(() => import('./terminal/TerminalView').then((m) => ({ default: m.TerminalView })));
@@ -126,6 +127,57 @@ export function DevicePage({ device, onBack, onAddPasskey }: { device: Device | 
       )}
     </main>
   );
+}
+
+// Who did what on this hub, newest first. The hub shows it to its owner only.
+export function AuditPage({ load, onBack }: { load: (who: string) => Promise<AuditResult>; onBack: () => void }) {
+  const [who, setWho] = useState('');
+  const [result, setResult] = useState<AuditResult | undefined>();
+  useEffect(() => {
+    let live = true;
+    const timer = setTimeout(() => { void load(who.trim()).then((r) => { if (live) setResult(r); }); }, who ? 250 : 0);
+    return () => { live = false; clearTimeout(timer); };
+  }, [who, load]);
+  return (
+    <main className="page">
+      <button type="button" className="link" onClick={onBack}>{t('focus-back')}</button>
+      <h1>{t('audit-title')}</h1>
+      <p className="muted">{t('audit-intro')}</p>
+      <label>
+        <span className="muted">{t('audit-person')}</span>{' '}
+        <input value={who} onChange={(e) => setWho(e.target.value)} autoComplete="off" spellCheck={false} />
+      </label>
+      {result === undefined ? null : !result.ok ? (
+        <p role="alert">{t(`audit-${result.reason}`)}</p>
+      ) : result.rows.length === 0 ? (
+        <p className="muted">{t('audit-empty')}</p>
+      ) : (
+        <ul className="machines">
+          {result.rows.map((r) => (
+            <li key={r.id} className="machine">
+              <span className="muted">{new Date(r.atMs).toLocaleString()}</span>
+              <strong>{r.who}</strong>
+              <span>{actionLabel(r.action)}</span>
+              {r.node ? <span className="muted mono">{r.node}</span> : null}
+              {/* A change to the team carries the role in its outcome, which is a detail and not a result. */}
+              {r.action.startsWith('user.') && r.outcome !== 'ok' ? <span className="muted">{r.outcome}</span> : (
+                <span className={outcomeKind(r.outcome) === 'problem' ? 'mono' : 'muted'}>
+                  {outcomeKind(r.outcome) === 'problem' ? r.outcome : t(`audit-outcome-${outcomeKind(r.outcome)}`)}
+                </span>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </main>
+  );
+}
+
+function actionLabel(action: string): string {
+  const key = actionKey(action);
+  const text = t(key);
+  // A command this build has no words for is shown as the hub named it.
+  return text === key ? action : text;
 }
 
 export function SignInPage({ onSubmit, onPasskey, notice }: { onSubmit: (code: string) => void; onPasskey?: () => void; notice?: string }) {

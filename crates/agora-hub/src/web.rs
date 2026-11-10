@@ -25,6 +25,12 @@ pub trait SessionApi: Send + Sync {
     ) -> (u16, String) {
         (404, String::new())
     }
+
+    /// `GET /api/audit?since=<ms>&who=<id>&limit=<n>` (ADR-0049): the audit trail as a JSON array, for the owner only. Hubs without
+    /// sessions answer 404.
+    fn audit(&self, _bearer: Option<&str>, _query: &str) -> (u16, String) {
+        (404, String::new())
+    }
 }
 
 pub enum SignInReply {
@@ -331,6 +337,32 @@ where
             (None, _) => respond(&mut stream, 404, "text/plain", b"", false).await?,
             _ => respond(&mut stream, 400, "text/plain", b"", false).await?,
         }
+        return Ok(First::Answered);
+    }
+    if method == "GET" && path == "/api/audit" {
+        let bearer = text
+            .split("\r\n")
+            .filter_map(|l| l.split_once(':'))
+            .find(|(k, _)| k.trim().eq_ignore_ascii_case("authorization"))
+            .and_then(|(_, v)| {
+                v.trim()
+                    .strip_prefix("Bearer ")
+                    .map(|t| t.trim().to_string())
+            });
+        let query = target
+            .split_once('?')
+            .map_or("", |(_, q)| q.split('#').next().unwrap_or(""));
+        let (status, out) = sessions.map_or((404, String::new()), |api| {
+            api.audit(bearer.as_deref(), query)
+        });
+        respond(
+            &mut stream,
+            status,
+            "application/json",
+            out.as_bytes(),
+            false,
+        )
+        .await?;
         return Ok(First::Answered);
     }
     if method != "GET" && !head_only {

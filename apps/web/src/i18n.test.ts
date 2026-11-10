@@ -1,5 +1,6 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
+import { actionKey } from './net/audit';
 import { directionOf, pickLanguage, setLanguage, t } from './i18n';
 
 // Every key the UI asks for must exist in locales/en/web.ftl (a missing key would render as its id).
@@ -20,6 +21,11 @@ describe('i18n', () => {
   it('has the dynamic state and theme keys', () => {
     for (const s of ['working', 'needs-you', 'finished', 'idle', 'unknown']) expect(t(`state-${s}`)).not.toBe(`state-${s}`);
     for (const s of ['dark', 'light']) expect(t(`theme-${s}`)).not.toBe(`theme-${s}`);
+  });
+  it('has the audit trail\'s reasons and outcomes', () => {
+    for (const k of ['owner-only', 'signed-out', 'failed']) expect(t(`audit-${k}`)).not.toBe(`audit-${k}`);
+    for (const k of ['done', 'sent']) expect(t(`audit-outcome-${k}`)).not.toBe(`audit-outcome-${k}`);
+    for (const a of ['sign_in', 'user.add', 'AgentStop', 'ApprovalResolve']) expect(t(actionKey(a)), a).not.toBe(actionKey(a));
   });
   it('lays the page out right to left for the languages written that way', () => {
     for (const l of ['ar', 'he', 'fa-IR', 'ur']) expect(directionOf(l), l).toBe('rtl');

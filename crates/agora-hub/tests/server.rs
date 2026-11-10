@@ -1392,3 +1392,71 @@ async fn a_member_never_receives_another_projects_snapshot_events_or_commands() 
         matches!(&forwarded.command, Some(command_request::Command::AgentStop(s)) if s.agent_id == "a1")
     );
 }
+
+async fn get_audit(addr: std::net::SocketAddr, token: Option<&str>, query: &str) -> (u16, String) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let auth = token.map_or(String::new(), |t| format!("Authorization: Bearer {t}\r\n"));
+    let mut s = TcpStream::connect(addr).await.unwrap();
+    s.write_all(format!("GET /api/audit{query} HTTP/1.1\r\nHost: x\r\n{auth}\r\n").as_bytes())
+        .await
+        .unwrap();
+    let mut out = String::new();
+    s.read_to_string(&mut out).await.unwrap();
+    let status = out[9..12].parse().unwrap();
+    (
+        status,
+        out.split("\r\n\r\n").nth(1).unwrap_or("").to_string(),
+    )
+}
+
+#[tokio::test]
+async fn only_the_owner_can_read_the_audit_trail_over_http() {
+    use agora_hub::signin::{HubSessions, SignIn};
+    use agora_hub::users::{Role, Users};
+    let hub = Arc::new(Hub::open(SqliteStore::open_in_memory().unwrap()).unwrap());
+    let sessions = Arc::new(HubSessions::new(Arc::clone(&hub)));
+    let st = Arc::new(ServerState {
+        hub: Arc::clone(&hub),
+        support: support(),
+        ca: None,
+        lockout: Arc::new(Lockout::new()),
+        auth: Box::new(HubSessionsAuth(Arc::clone(&sessions))),
+        assets: None,
+        sessions: Some(sessions),
+    });
+    let addr = start(st).await;
+    let signin = SignIn::new(hub.store(), Arc::new(Lockout::new()));
+    let now = server::now_ms();
+    let owner = signin
+        .redeem(&signin.create_code(now).unwrap(), now)
+        .unwrap();
+    let eda = Users::new(hub.store())
+        .add("Eda", Role::Viewer, now)
+        .unwrap();
+    let viewer = signin
+        .redeem(&signin.create_code_for(Some(&eda.id), now).unwrap(), now)
+        .unwrap();
+
+    // No token and a made-up one are 401; a viewer is 403; the owner gets the rows (the sign-ins and the new person are in them).
+    assert_eq!(get_audit(addr, None, "").await.0, 401);
+    assert_eq!(get_audit(addr, Some("nope"), "").await.0, 401);
+    assert_eq!(get_audit(addr, Some(&viewer), "").await.0, 403);
+    let (status, body) = get_audit(addr, Some(&owner), "").await;
+    assert_eq!(status, 200, "{body}");
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
+    let actions: Vec<&str> = rows.iter().map(|r| r["action"].as_str().unwrap()).collect();
+    assert_eq!(actions, ["sign_in", "user.add", "sign_in"]);
+    // Filtering by person and a limit; a malformed query is refused, not guessed at.
+    let (_, body) = get_audit(addr, Some(&owner), "?who=eda").await;
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
+    assert_eq!(rows.len(), 1);
+    let (_, body) = get_audit(addr, Some(&owner), "?limit=1").await;
+    assert_eq!(
+        serde_json::from_str::<Vec<serde_json::Value>>(&body)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(get_audit(addr, Some(&owner), "?bogus=1").await.0, 400);
+    assert_eq!(get_audit(addr, Some(&owner), "?who=a%20b").await.0, 400);
+}

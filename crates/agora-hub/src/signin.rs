@@ -216,6 +216,37 @@ impl crate::web::SessionApi for HubSessions {
         self.passkey_op(op, bearer, host, body)
     }
 
+    fn audit(&self, bearer: Option<&str>, query: &str) -> (u16, String) {
+        let Some(token) = bearer else {
+            return (401, String::new());
+        };
+        let signin = SignIn::new(self.hub.store(), Arc::clone(&self.lockout));
+        match signin.access(token, crate::server::now_ms()) {
+            None => return (401, String::new()),
+            Some(a) if a.role != crate::users::Role::Owner => return (403, String::new()),
+            Some(_) => {}
+        }
+        let (mut since, mut who, mut limit) = (0u64, None, 500usize);
+        for pair in query.split('&').filter(|p| !p.is_empty()) {
+            match pair.split_once('=') {
+                Some(("since", v)) => since = v.parse().unwrap_or(0),
+                Some(("limit", v)) => limit = v.parse().unwrap_or(500).clamp(1, 5000),
+                Some(("who", v)) if v.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') => {
+                    who = Some(v);
+                }
+                _ => return (400, String::new()),
+            }
+        }
+        match crate::audit::Audit::new(self.hub.store()).list(since, who, limit) {
+            Ok(rows) => (
+                200,
+                serde_json::Value::Array(rows.iter().map(crate::audit::json_value).collect())
+                    .to_string(),
+            ),
+            Err(_) => (500, String::new()),
+        }
+    }
+
     fn sign_in(&self, code: &str) -> crate::web::SignInReply {
         use crate::web::SignInReply;
         match SignIn::new(self.hub.store(), Arc::clone(&self.lockout))
