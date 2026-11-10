@@ -1,5 +1,4 @@
-//! PTY-backed tests; the Windows backend arrives in Phase 4.
-#![cfg(unix)]
+//! PTY-backed tests, on every platform with a pseudo-terminal (ADR-0045).
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::time::{Duration, Instant};

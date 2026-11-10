@@ -32,6 +32,11 @@ fn what_an_agent_wrote_just_before_it_exited_is_still_reported() {
     if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
         return;
     }
+    // The "agent" is a POSIX shell that writes its own `$PWD` into the file; where that shell reports paths in its own form (Git's
+    // `sh` on Windows says `/d/a/...`), the directory it writes is not the worktree's native path, so the line cannot be matched.
+    if std::path::MAIN_SEPARATOR == '\\' {
+        return;
+    }
     let dir: PathBuf = std::env::temp_dir().join(format!("agora-usage-end-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let repo = dir.join("myproject");

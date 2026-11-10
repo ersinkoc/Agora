@@ -26,6 +26,12 @@ use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, ReadFile, WriteFile, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED,
     OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
 };
+use windows_sys::Win32::System::Console::{
+    GetConsoleMode, GetConsoleScreenBufferInfo, GetStdHandle, SetConsoleMode,
+    CONSOLE_SCREEN_BUFFER_INFO, ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT, ENABLE_PROCESSED_INPUT,
+    ENABLE_PROCESSED_OUTPUT, ENABLE_VIRTUAL_TERMINAL_INPUT, ENABLE_VIRTUAL_TERMINAL_PROCESSING,
+    STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+};
 use windows_sys::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, WaitNamedPipeW, PIPE_READMODE_BYTE,
     PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
@@ -456,6 +462,68 @@ impl Stream {
             None => Err(io::Error::from(io::ErrorKind::TimedOut)),
         }
     }
+}
+
+/// Raw mode for the console on stdin: no line editing, no echo, no Ctrl-C handling by the console, keys delivered as the bytes a
+/// terminal sends (virtual-terminal input). Output is switched to understand escape sequences too. Fails when stdin is not a console.
+pub(crate) fn enable_raw_mode() -> io::Result<crate::RawMode> {
+    // SAFETY: plain calls on the process's standard handles; modes are read before they are changed.
+    unsafe {
+        let stdin = GetStdHandle(STD_INPUT_HANDLE);
+        let mut saved_in = 0u32;
+        if GetConsoleMode(stdin, &mut saved_in) == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "stdin is not a console",
+            ));
+        }
+        let raw = (saved_in & !(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT | ENABLE_PROCESSED_INPUT))
+            | ENABLE_VIRTUAL_TERMINAL_INPUT;
+        if SetConsoleMode(stdin, raw) == 0 {
+            return Err(os_error(GetLastError()));
+        }
+        let stdout = GetStdHandle(STD_OUTPUT_HANDLE);
+        let mut out = 0u32;
+        let saved_out = if GetConsoleMode(stdout, &mut out) != 0 {
+            SetConsoleMode(
+                stdout,
+                out | ENABLE_PROCESSED_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING,
+            );
+            Some(out)
+        } else {
+            None
+        };
+        Ok(crate::RawMode {
+            saved_in,
+            saved_out,
+        })
+    }
+}
+
+pub(crate) fn restore_mode(saved: &crate::RawMode) {
+    // SAFETY: restoring modes read earlier from the same handles.
+    unsafe {
+        SetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), saved.saved_in);
+        if let Some(out) = saved.saved_out {
+            SetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), out);
+        }
+    }
+}
+
+/// Size of the console window on stdout.
+pub(crate) fn terminal_size() -> Option<(u16, u16)> {
+    // SAFETY: an all-zero info structure is a valid out-buffer.
+    let mut info: CONSOLE_SCREEN_BUFFER_INFO = unsafe { std::mem::zeroed() };
+    // SAFETY: the standard output handle and a valid out pointer.
+    if unsafe { GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &mut info) } == 0 {
+        return None;
+    }
+    let w = info.srWindow;
+    let (cols, rows) = (
+        i32::from(w.Right) - i32::from(w.Left) + 1,
+        i32::from(w.Bottom) - i32::from(w.Top) + 1,
+    );
+    (cols > 0 && rows > 0).then_some((cols as u16, rows as u16))
 }
 
 #[cfg(test)]

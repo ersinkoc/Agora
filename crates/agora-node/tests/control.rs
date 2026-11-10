@@ -1,5 +1,5 @@
 //! Control socket tests: a real node (supervisor + socket) driven through the protocol client, with a plain
-//! `sh` and the fake agent as the "agents". PTY and local sockets are Unix-only until Phase 4.
+//! `sh` and the fake agent as the "agents". PTY and local sockets: Unix and Windows (ADR-0045).
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::path::{Path, PathBuf};
