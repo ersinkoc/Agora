@@ -82,6 +82,8 @@ pub enum ApprovalError {
     Expired,
     /// Unknown device or a signature that does not verify.
     BadSignature,
+    /// The device is limited by the node's policy to other projects than this request's (ADR-0049).
+    Forbidden,
 }
 
 pub struct Approvals<V: Verifier> {
@@ -367,14 +369,22 @@ pub struct NodeApprovals {
     /// The file and what was last read from it. The content is compared, not only the modification time: an edit within the
     /// filesystem's timestamp granularity (or one that restores the time) must still take a revoked device out at once.
     trust_file: std::sync::Mutex<Option<(std::path::PathBuf, Option<Vec<u8>>)>>,
+    /// What each trusted device may answer (ADR-0049).
+    limits: std::sync::Mutex<Option<std::sync::Arc<crate::limits::DeviceLimits>>>,
 }
 
 impl NodeApprovals {
+    /// Limits which requests each device may answer (`device.<id>.projects` in the policy file).
+    pub fn set_limits(&self, limits: std::sync::Arc<crate::limits::DeviceLimits>) {
+        *self.limits.lock().unwrap_or_else(|e| e.into_inner()) = Some(limits);
+    }
+
     pub fn new(node_id: &str, verifier: Box<dyn Verifier + Send>) -> Self {
         Self {
             queue: std::sync::Mutex::new(Approvals::new(node_id, verifier)),
             routes: std::sync::Mutex::new(std::collections::HashMap::new()),
             trust_file: std::sync::Mutex::new(None),
+            limits: std::sync::Mutex::new(None),
         }
     }
 
@@ -447,6 +457,18 @@ impl NodeApprovals {
         now_ms: u64,
     ) -> Result<(agora_core::AgentId, String, Verdict), ApprovalError> {
         self.reload_trust_if_changed();
+        // Before anything is consumed: a device limited to other projects cannot answer this agent's request. The ids are 128
+        // random bits, so only someone who already knows one learns that it exists.
+        let limits = self
+            .limits
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let (Some(limits), Some((agent, _))) = (limits, self.r().get(&r.approval_id).cloned()) {
+            if !limits.allows_agent(&r.signer_device_id, agent.as_str()) {
+                return Err(ApprovalError::Forbidden);
+            }
+        }
         let (_, verdict) = self.q().resolve(r, now_ms)?;
         let route = self.r().remove(&r.approval_id);
         route
@@ -817,5 +839,48 @@ mod tests {
             signature: pair.sign(&rng, &m).unwrap().as_ref().to_vec(),
         };
         assert_eq!(a.resolve(&r, 1).unwrap().1, Verdict::Approved);
+    }
+
+    #[test]
+    fn a_device_limited_to_other_projects_cannot_answer_an_agents_request() {
+        let n = NodeApprovals::new(
+            "node-1",
+            Box::new(Fake(vec![("phone", "s3cret"), ("eda", "s3cret")])),
+        );
+        let limits = std::sync::Arc::new(crate::limits::DeviceLimits::new(
+            [("eda".to_string(), ["web".to_string()].into())].into(),
+        ));
+        limits.set_project_resolver(Box::new(|a| match a {
+            "agent-web" => Some("web".into()),
+            "agent-api" => Some("api".into()),
+            _ => None,
+        }));
+        n.set_limits(limits);
+        let api = n
+            .request(
+                &agora_core::AgentId::new("agent-api"),
+                "ap-1",
+                "run",
+                "x",
+                0,
+            )
+            .unwrap();
+        let web = n
+            .request(
+                &agora_core::AgentId::new("agent-web"),
+                "ap-2",
+                "run",
+                "x",
+                0,
+            )
+            .unwrap();
+        let msg = |id: &str, device: &str| resolve_msg(id, true, device, "s3cret", "node-1");
+        // The limited device is refused for the other project, and nothing is consumed: the owner's phone can still answer it.
+        assert_eq!(
+            n.resolve(&msg(&api.id, "eda"), 1).unwrap_err(),
+            ApprovalError::Forbidden
+        );
+        assert!(n.resolve(&msg(&web.id, "eda"), 1).is_ok());
+        assert!(n.resolve(&msg(&api.id, "phone"), 1).is_ok());
     }
 }

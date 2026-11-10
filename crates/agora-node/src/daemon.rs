@@ -382,6 +382,8 @@ pub struct Policy {
     pub signed_commands: crate::grants::SignedCommands,
     /// How agents are confined (`sandbox`, `sandbox.read`, `sandbox.write`; ADR-0047). Default: not at all.
     pub sandbox: crate::sandbox::SandboxPolicy,
+    /// What each trusted device may sign (`device.<id>.projects = a, b`; ADR-0049). A device not named is not limited.
+    pub device_projects: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
 }
 
 impl Default for Policy {
@@ -390,6 +392,7 @@ impl Default for Policy {
             mesh_remote: true,
             signed_commands: crate::grants::SignedCommands::default(),
             sandbox: crate::sandbox::SandboxPolicy::default(),
+            device_projects: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -417,6 +420,20 @@ pub fn read_policy(path: &std::path::Path) -> Policy {
                             .map(str::to_string)
                             .collect(),
                     );
+                }
+                key if key.starts_with("device.") && key.ends_with(".projects") => {
+                    // A named device with a value that names nothing is a device limited to nothing: a typo never widens.
+                    let id = &key["device.".len()..key.len() - ".projects".len()];
+                    if !id.is_empty() {
+                        p.device_projects.insert(
+                            id.to_string(),
+                            v.split(',')
+                                .map(str::trim)
+                                .filter(|s| !s.is_empty())
+                                .map(str::to_string)
+                                .collect(),
+                        );
+                    }
                 }
                 "sandbox" => p.sandbox.level = crate::sandbox::Level::parse(v),
                 "sandbox.read" => p.sandbox.read = paths(v),
@@ -595,17 +612,31 @@ impl Node {
             Box::new(verifier),
         ));
         approvals.follow_trust_file(&cfg.data_dir.join(crate::approvals::TRUSTED_DEVICES_FILE));
-        let grants = Arc::new(crate::grants::Grants::new(
-            &cfg.node_id,
-            Arc::clone(&approvals),
-            read_policy(&cfg.data_dir.join(POLICY_FILE)).signed_commands,
-        ));
+        let policy_now = read_policy(&cfg.data_dir.join(POLICY_FILE));
+        let limits = Arc::new(crate::limits::DeviceLimits::new(policy_now.device_projects));
+        approvals.set_limits(Arc::clone(&limits));
+        let grants = Arc::new(
+            crate::grants::Grants::new(
+                &cfg.node_id,
+                Arc::clone(&approvals),
+                policy_now.signed_commands,
+            )
+            .with_limits(Arc::clone(&limits)),
+        );
 
         let supervisor = Arc::new(Mutex::new(sup));
         {
             let sup = Arc::clone(&supervisor);
+            let sup2 = Arc::clone(&sup);
             grants.set_project_resolver(Box::new(move |agent| {
                 let s = sup.lock().unwrap_or_else(|e| e.into_inner());
+                s.list()
+                    .into_iter()
+                    .find(|v| v.id.as_str() == agent)
+                    .map(|v| v.project)
+            }));
+            limits.set_project_resolver(Box::new(move |agent| {
+                let s = sup2.lock().unwrap_or_else(|e| e.into_inner());
                 s.list()
                     .into_iter()
                     .find(|v| v.id.as_str() == agent)

@@ -84,6 +84,8 @@ pub struct Grants {
     state: Mutex<State>,
     /// Agent id to project id, for grants scoped to a project.
     project_of: Mutex<Option<Resolver>>,
+    /// What each trusted device may sign (ADR-0049).
+    limits: Arc<crate::limits::DeviceLimits>,
 }
 
 /// What a command is about, as far as a grant's scope can tell.
@@ -132,7 +134,14 @@ impl Grants {
             policy,
             state: Mutex::new(State::default()),
             project_of: Mutex::new(None),
+            limits: Arc::new(crate::limits::DeviceLimits::default()),
         }
+    }
+
+    /// Limits what each device may sign (`device.<id>.projects` in the policy file; ADR-0049).
+    pub fn with_limits(mut self, limits: Arc<crate::limits::DeviceLimits>) -> Self {
+        self.limits = limits;
+        self
     }
 
     /// Tells grants how to find an agent's project (a grant scoped to a project covers that project's agents).
@@ -181,6 +190,10 @@ impl Grants {
             .verify_device(&g.signer_device_id, &message, &g.signature)
         {
             return Err(bad());
+        }
+        // A device the policy limits to some projects cannot grant beyond them, whatever it signed.
+        if !self.limits.allows_scope(&g.signer_device_id, &g.scope) {
+            return Err(Error::new(ErrorCode::AuthForbidden).with("action", "grant.create"));
         }
         if g.expires_at_ms <= now_ms {
             return Err(
@@ -447,5 +460,44 @@ mod tests {
         ] {
             assert!(g.create(&bad, NOW).is_err());
         }
+    }
+
+    #[test]
+    fn a_device_limited_to_some_projects_cannot_grant_beyond_them() {
+        let limits = Arc::new(crate::limits::DeviceLimits::new(
+            [("dev-1".to_string(), ["p-1".to_string()].into())].into(),
+        ));
+        limits.set_project_resolver(Box::new(|a| match a {
+            "a-1" => Some("p-1".into()),
+            "a-2" => Some("p-2".into()),
+            _ => None,
+        }));
+        let approvals = Arc::new(NodeApprovals::new("node-a", Box::new(Fake)));
+        let g = Grants::new(
+            "node-a",
+            approvals,
+            SignedCommands(vec!["agent.prompt".into()]),
+        )
+        .with_limits(limits);
+        let forbidden =
+            |r: Result<(), Error>| matches!(r, Err(e) if e.code == ErrorCode::AuthForbidden);
+        for scope in ["node", "project:p-2", "agent:a-2", "agent:a-3"] {
+            assert!(
+                forbidden(g.create(&grant("g", scope, &["agent.prompt"], NOW + HOUR), NOW)),
+                "{scope}"
+            );
+        }
+        assert!(g.list(NOW).is_empty());
+        g.create(
+            &grant("g-ok1", "project:p-1", &["agent.prompt"], NOW + HOUR),
+            NOW,
+        )
+        .unwrap();
+        g.create(
+            &grant("g-ok2", "agent:a-1", &["agent.prompt"], NOW + HOUR),
+            NOW,
+        )
+        .unwrap();
+        assert_eq!(g.list(NOW).len(), 2);
     }
 }
