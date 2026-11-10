@@ -48,6 +48,12 @@ fn the_sandbox_lines_are_read_and_a_typo_is_the_strictest_level() {
     assert_eq!(p.level, Level::Worktree);
     assert_eq!(p.read.len(), 2);
     assert_eq!(p.write, vec![std::path::PathBuf::from("/c")]);
+    assert!(p.trusted_kinds.is_empty());
+    std::fs::write(&file, "sandbox.trust_manifest = claude-code, codex\n").unwrap();
+    assert_eq!(
+        read_policy(&file).sandbox.trusted_kinds,
+        ["claude-code", "codex"]
+    );
     std::fs::write(&file, "sandbox = wortree\n").unwrap();
     assert_eq!(read_policy(&file).sandbox.level, Level::WorktreeOffline);
     assert_eq!(read_policy(&dir.join("none")).sandbox.level, Level::Off);

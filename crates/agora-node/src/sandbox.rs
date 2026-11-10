@@ -40,6 +40,9 @@ pub struct SandboxPolicy {
     pub level: Level,
     pub read: Vec<PathBuf>,
     pub write: Vec<PathBuf>,
+    /// Kinds whose manifests may ask for more (`sandbox.trust_manifest = kind, kind`). Empty: no manifest widens anything, so a
+    /// community manifest can never reach `~/.ssh` by asking.
+    pub trusted_kinds: Vec<String>,
 }
 
 /// The system folders every program needs to run.
@@ -47,6 +50,19 @@ const SYSTEM_READ: &[&str] = &[
     "/usr", "/lib", "/lib32", "/lib64", "/bin", "/sbin", "/etc", "/opt", "/proc", "/sys", "/run",
     "/var",
 ];
+
+/// A manifest path: absolute, or `~/` below the home folder. Anything else (relative paths, `..`) is ignored, never guessed at.
+fn expand(p: &str) -> Option<PathBuf> {
+    let path = match p.strip_prefix("~/") {
+        Some(rest) => PathBuf::from(std::env::var_os("HOME")?).join(rest),
+        None => PathBuf::from(p),
+    };
+    (path.is_absolute()
+        && !path
+            .components()
+            .any(|c| c == std::path::Component::ParentDir))
+    .then_some(path)
+}
 
 /// A worktree's `.git` is a file naming its folder inside the main checkout's `.git`; git needs to write there (and to the shared
 /// object store and refs next to it). Returns the main `.git` folder.
@@ -59,7 +75,13 @@ pub fn common_git_dir(worktree: &Path) -> Option<PathBuf> {
 
 impl SandboxPolicy {
     /// The paths for one agent, or `None` when agents are not confined.
-    pub fn profile(&self, worktree: &Path, program: &str) -> Option<agora_platform::Sandbox> {
+    pub fn profile(
+        &self,
+        kind: &str,
+        needs: Option<&agora_adapters::manifest::SandboxNeeds>,
+        worktree: &Path,
+        program: &str,
+    ) -> Option<agora_platform::Sandbox> {
         if self.level == Level::Off {
             return None;
         }
@@ -78,6 +100,10 @@ impl SandboxPolicy {
         ];
         write.extend(common_git_dir(worktree));
         write.extend(self.write.iter().cloned());
+        if let Some(needs) = needs.filter(|_| self.trusted_kinds.iter().any(|k| k == kind)) {
+            read.extend(needs.read.iter().filter_map(|p| expand(p)));
+            write.extend(needs.write.iter().filter_map(|p| expand(p)));
+        }
         Some(agora_platform::Sandbox { read, write })
     }
 
@@ -119,15 +145,46 @@ mod tests {
             level: Level::Worktree,
             read: vec!["/home/x/.cfg".into()],
             write: vec!["/home/x/.cache/agent".into()],
+            trusted_kinds: vec![],
         };
-        let sb = p.profile(&wt, "/home/x/bin/agent").unwrap();
+        let sb = p.profile("k", None, &wt, "/home/x/bin/agent").unwrap();
         assert!(sb.write.contains(&wt) && sb.write.contains(&main.join(".git")));
         assert!(sb.write.contains(&PathBuf::from("/home/x/.cache/agent")));
         assert!(
             sb.read.contains(&PathBuf::from("/home/x/bin")) && sb.read.contains(&"/usr".into())
         );
         assert!(!sb.write.iter().any(|w| w == Path::new("/home/x")));
-        assert!(SandboxPolicy::default().profile(&wt, "agent").is_none());
+        assert!(SandboxPolicy::default()
+            .profile("k", None, &wt, "agent")
+            .is_none());
+
+        // A manifest's request is honoured only for a kind the owner trusts, and only for sane paths.
+        // Absolute on every system (a drive letter on Windows).
+        let (data, out) = (dir.join("data"), dir.join("out"));
+        let needs = agora_adapters::manifest::SandboxNeeds {
+            read: vec![
+                data.to_string_lossy().into_owned(),
+                "relative".into(),
+                format!("{}/../etc", dir.display()),
+            ],
+            write: vec![out.to_string_lossy().into_owned()],
+        };
+        let untrusted = p.profile("k", Some(&needs), &wt, "agent").unwrap();
+        assert!(!untrusted.read.contains(&data));
+        let trusting = SandboxPolicy {
+            trusted_kinds: vec!["k".into()],
+            ..p
+        };
+        let sb = trusting.profile("k", Some(&needs), &wt, "agent").unwrap();
+        assert!(sb.read.contains(&data) && sb.write.contains(&out));
+        assert!(!sb.read.iter().any(|r| r == Path::new("relative")
+            || r.components().any(|c| c == std::path::Component::ParentDir)));
+        assert!(trusting
+            .profile("other", Some(&needs), &wt, "agent")
+            .unwrap()
+            .write
+            .iter()
+            .all(|w| *w != out));
         let _ = std::fs::remove_dir_all(dir);
     }
 }

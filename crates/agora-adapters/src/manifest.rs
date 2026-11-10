@@ -206,6 +206,18 @@ pub struct Manifest {
     pub adapter: Option<AdapterSpec>,
     pub structured: Option<Structured>,
     pub usage: Option<UsageSpec>,
+    /// What the agent needs beyond its worktree when the node confines agents (ADR-0047). Requests only: the node honours them for
+    /// kinds its owner trusts.
+    pub sandbox: Option<SandboxNeeds>,
+}
+
+/// Folders an agent asks to read or write when confined; `~/` stands for the home folder.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+pub struct SandboxNeeds {
+    #[serde(default)]
+    pub read: Vec<String>,
+    #[serde(default)]
+    pub write: Vec<String>,
 }
 
 fn invalid(field: impl Into<String>) -> ManifestError {

@@ -421,6 +421,14 @@ pub fn read_policy(path: &std::path::Path) -> Policy {
                 "sandbox" => p.sandbox.level = crate::sandbox::Level::parse(v),
                 "sandbox.read" => p.sandbox.read = paths(v),
                 "sandbox.write" => p.sandbox.write = paths(v),
+                "sandbox.trust_manifest" => {
+                    p.sandbox.trusted_kinds = v
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string)
+                        .collect();
+                }
                 _ => {}
             }
         }
