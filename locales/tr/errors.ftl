@@ -18,6 +18,7 @@ worktree-unmerged = { $branch } dalındaki değişiklikler başka hiçbir yerde 
 agent-not_found = { $agent_id } ajanı bulunamadı.
 agent-kind_unknown = { $kind } ajan türü kullanılamıyor.
 agent-publisher_revoked = { $kind } bağdaştırıcısı, kayıt defterinin iptal ettiği { $publisher } yayımcısından geliyor. Kaldırın ya da başka bir yayımcıdan kurun.
+agent-sandbox_unavailable = Bu makine ajanları kısıtlayacak şekilde ayarlı ({ $level }), ancak { $kind } burada kısıtlanamıyor; bu yüzden başlatılmadı.
 agent-not_authenticated = { $kind }, { $node_id } makinesinde oturum açmamış.
 agent-blocked = { $agent_id } ajanı girdi bekliyor, bu yüzden ileti gönderilmedi.
 agent-mode_unsupported = { $kind }, { $mode } kipini desteklemiyor.

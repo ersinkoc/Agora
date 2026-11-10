@@ -11,6 +11,7 @@ pub mod files;
 pub mod git;
 pub mod grants;
 pub mod mesh_server;
+pub mod sandbox;
 pub mod supervisor;
 pub mod terminal;
 pub mod uplink;
