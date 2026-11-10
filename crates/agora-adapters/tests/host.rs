@@ -275,7 +275,13 @@ fn a_confined_adapter_writes_only_where_it_may() {
     if !allowed.join("f").exists() {
         // TEMP-DEBUG
         let o = std::process::Command::new("/usr/bin/sandbox-exec")
-            .args(["-p", "(version 1)(allow default)", "/bin/sh", "-c", "echo hi"])
+            .args([
+                "-p",
+                "(version 1)(allow default)",
+                "/bin/sh",
+                "-c",
+                "echo hi",
+            ])
             .output();
         let o2 = std::process::Command::new("/usr/bin/sandbox-exec")
             .args(["-p", "(version 1)(allow default)(deny file-read-data file-write*)(allow file-read-metadata)(allow file-read* (subpath \"/usr\") (subpath \"/bin\") (subpath \"/System\") (subpath \"/Library\") (subpath \"/dev\") (subpath \"/private/etc\") (subpath \"/private/var/db\"))", "/bin/sh", "-c", "echo hi2"])
