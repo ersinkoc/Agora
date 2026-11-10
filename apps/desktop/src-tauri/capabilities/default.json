@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The shell's own screens only. The hub's page is a remote origin and is granted nothing: no commands, no file system, no shell (ADR-0048 decision 2).",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

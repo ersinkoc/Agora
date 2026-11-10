@@ -1,0 +1,11 @@
+:root { --bg:#f5f6fa; --fg:#14151a; --muted:#5b6070; --line:#d8dbe6; --accent:#4b53d6; --surface:#fff; color-scheme: light dark; }
+@media (prefers-color-scheme: dark) { :root { --bg:#09090b; --fg:#ececf1; --muted:#9a9eae; --line:#2a2c36; --accent:#8b93ff; --surface:#131318; } }
+* { box-sizing: border-box; }
+body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.5 system-ui, sans-serif; }
+main { max-width: 34rem; margin: 0 auto; padding: 3rem 1rem; display: grid; gap: 1rem; }
+h1 { margin:0; font-size:1.5rem; } p { margin:0; } label { display:grid; gap:.25rem; margin-bottom:1rem; color:var(--muted); font-size:.875rem; }
+input, textarea { font: inherit; padding:.5rem .625rem; border:1px solid var(--line); border-radius:8px; background:var(--surface); color:var(--fg); }
+.mono { font-family: ui-monospace, Menlo, Consolas, monospace; word-break: break-all; font-size:.8125rem; padding:.625rem; border:1px solid var(--line); border-radius:8px; background:var(--surface); margin-bottom: 1rem; }
+button { font:inherit; padding:.5rem 1rem; border-radius:8px; border:0; background:var(--accent); color:#fff; cursor:pointer; }
+button:focus-visible, input:focus-visible, textarea:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+[role=alert] { color: #c0392b; }
