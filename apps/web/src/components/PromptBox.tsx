@@ -5,7 +5,7 @@ import { mergeLines, type ChatLine, type ChatSource } from '../net/chat';
 
 function Line({ line }: { line: ChatLine }) {
   if (line.role === 'user') {
-    return <div className="ml-auto max-w-[85%] rounded-m bg-accent/15 px-3 py-2 break-words whitespace-pre-wrap">{line.text}</div>;
+    return <div className="ms-auto max-w-[85%] rounded-m bg-accent/15 px-3 py-2 break-words whitespace-pre-wrap">{line.text}</div>;
   }
   if (line.kind === 'tool') {
     return <div className="max-w-[90%] rounded-s border border-line bg-surface-0 px-3 py-1.5 font-mono text-xs break-all text-muted"><span className="font-sans font-medium text-ink">{t('chat-tool')}</span> {line.text}</div>;
@@ -14,7 +14,7 @@ function Line({ line }: { line: ChatLine }) {
     return (
       <div className="max-w-[90%] rounded-s border border-line px-3 py-2 text-[13px]">
         <div className="muted mb-1">{t('chat-plan')}</div>
-        <ol className="m-0 list-decimal pl-5">{line.text.split('\n').map((p, i) => <li key={i}>{p}</li>)}</ol>
+        <ol className="m-0 list-decimal ps-5">{line.text.split('\n').map((p, i) => <li key={i}>{p}</li>)}</ol>
       </div>
     );
   }

@@ -46,6 +46,8 @@ A chat agent's conversation (ADR-0038): your requests and its answers, streamed 
 
 ![](chat-light.png)
 
+`demo-ltr-dark.png` and `demo-rtl-dark.png` show the same console left to right and with the page forced right to left (no RTL translation ships yet, so the text is English): the layout mirrors, the terminals stay left to right.
+
 ## Visual regression baselines
 `apps/web/visual/` holds the reference images that `scripts/visual-regression.mjs` compares against (gallery and sign-in, both
 themes, desktop and phone). They are the contract for how the shared components look: a pull request that changes them updates the
