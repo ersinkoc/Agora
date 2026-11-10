@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agora</title>
+  <link rel="stylesheet" href="shell.css">
+</head>
+<body>
+  <main>
+    <h1 data-t="title"></h1>
+    <p data-t="intro"></p>
+    <form id="form">
+      <label><span data-t="address"></span><input id="hub" placeholder="hub.example.com:7443" autocomplete="off" spellcheck="false" required></label>
+      <label><span data-t="ca"></span><textarea id="ca" rows="6" placeholder="-----BEGIN CERTIFICATE-----" spellcheck="false" required></textarea></label>
+      <p id="print" class="mono" hidden></p>
+      <p id="confirm" data-t="confirm" hidden></p>
+      <button type="submit" id="go" data-t="connect"></button>
+    </form>
+    <p id="error" role="alert" hidden></p>
+  </main>
+  <script src="shell.js"></script>
+</body>
+</html>
