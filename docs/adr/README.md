@@ -64,5 +64,5 @@ Date: YYYY-MM-DD
 | 0044 | Installing adapters and manifests from the registry | Accepted |
 | 0045 | The Windows node: terminals, a control channel and a process view | Accepted |
 | 0046 | Mobile is the web client, installable as a PWA | Accepted |
-| 0048 | The desktop app is a thin Tauri shell around the hub's page | Accepted |
 | 0047 | Agent sandboxing with the operating system's own profiles | Accepted |
+| 0048 | The desktop app is a thin Tauri shell around the hub's page | Accepted |
