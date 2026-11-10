@@ -124,6 +124,14 @@ impl<'a> SignIn<'a> {
             ],
         )?;
         tx.commit()?;
+        drop(conn);
+        let _ = crate::audit::Audit::new(self.store).record(
+            now_ms,
+            user.as_deref().unwrap_or("owner"),
+            "sign_in",
+            "",
+            "ok",
+        );
         self.lockout.succeeded();
         Ok(token)
     }
@@ -144,6 +152,9 @@ impl<'a> SignIn<'a> {
                 to_i64(now_ms.saturating_add(SESSION_TTL_MS))
             ],
         )?;
+        drop(conn);
+        let _ = crate::audit::Audit::new(self.store)
+            .record(now_ms, "owner", "sign_in", "passkey", "ok");
         Ok(token)
     }
 
@@ -164,11 +175,11 @@ impl<'a> SignIn<'a> {
     }
 
     /// What the holder of this session may do (ADR-0049); `None` for a session that is not live or whose person was removed.
-    pub fn role(&self, token: &str, now_ms: u64) -> Option<crate::users::Role> {
+    pub fn access(&self, token: &str, now_ms: u64) -> Option<crate::users::Access> {
         if !self.check(token, now_ms) {
             return None;
         }
-        crate::users::Users::new(self.store).role_of_session(&token_hash(token))
+        crate::users::Users::new(self.store).access_of_session(&token_hash(token))
     }
 
     /// Ends every session (the owner's "sign out everywhere").
@@ -298,12 +309,12 @@ impl HubSessions {
 
 impl crate::server::ClientAuth for HubSessions {
     fn check(&self, token: &str) -> bool {
-        self.role(token).is_some()
+        self.access(token).is_some()
     }
 
-    fn role(&self, token: &str) -> Option<crate::users::Role> {
+    fn access(&self, token: &str) -> Option<crate::users::Access> {
         SignIn::new(self.hub.store(), Arc::clone(&self.lockout))
-            .role(token, crate::server::now_ms())
+            .access(token, crate::server::now_ms())
     }
 }
 
@@ -376,14 +387,20 @@ mod tests {
         let token = signin
             .redeem(&signin.create_code_for(Some(&user.id), 10).unwrap(), 11)
             .unwrap();
-        assert_eq!(signin.role(&token, 12), Some(Role::Viewer));
+        assert_eq!(
+            signin.access(&token, 12).map(|a| a.role),
+            Some(Role::Viewer)
+        );
         // The owner's code has no person: the owner's role, as before.
         let owner = signin.redeem(&signin.create_code(10).unwrap(), 11).unwrap();
-        assert_eq!(signin.role(&owner, 12), Some(Role::Owner));
+        assert_eq!(signin.access(&owner, 12).map(|a| a.role), Some(Role::Owner));
         Users::new(&store).set_role(&user.id, Role::Member).unwrap();
-        assert_eq!(signin.role(&token, 12), Some(Role::Member));
+        assert_eq!(
+            signin.access(&token, 12).map(|a| a.role),
+            Some(Role::Member)
+        );
         Users::new(&store).remove(&user.id).unwrap();
-        assert_eq!(signin.role(&token, 12), None);
-        assert_eq!(signin.role("not-a-token", 12), None);
+        assert_eq!(signin.access(&token, 12), None);
+        assert_eq!(signin.access("not-a-token", 12), None);
     }
 }

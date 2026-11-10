@@ -601,5 +601,26 @@ fn team_members_are_added_listed_changed_and_removed_from_the_command_line() {
     assert!(!ok && err.contains("nobody"), "{err}");
     let (ok, _, _) = run(&["hub", "user", "remove", "ayse"]);
     assert!(ok);
+    // Every change to the team is in the audit trail, one JSON object per line, oldest first.
+    let (ok, out, err) = run(&["hub", "audit", "export"]);
+    assert!(ok, "{err}");
+    let actions: Vec<String> = out
+        .lines()
+        .map(|l| {
+            let v: serde_json::Value = serde_json::from_str(l).unwrap();
+            format!(
+                "{}:{}",
+                v["action"].as_str().unwrap(),
+                v["node"].as_str().unwrap()
+            )
+        })
+        .collect();
+    assert_eq!(
+        actions,
+        ["user.add:ayse", "user.role:ayse", "user.remove:ayse"],
+        "{out}"
+    );
+    let (ok, out, _) = run(&["hub", "audit", "export", "--who", "nobody"]);
+    assert!(ok && out.is_empty());
     let _ = std::fs::remove_dir_all(root);
 }
