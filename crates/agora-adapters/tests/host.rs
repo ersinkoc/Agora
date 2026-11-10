@@ -272,22 +272,6 @@ fn a_confined_adapter_writes_only_where_it_may() {
         std::thread::sleep(Duration::from_millis(30));
     }
     std::thread::sleep(Duration::from_millis(200));
-    if !allowed.join("f").exists() {
-        // TEMP-DEBUG
-        let o = std::process::Command::new("/usr/bin/sandbox-exec")
-            .args([
-                "-p",
-                "(version 1)(allow default)",
-                "/bin/sh",
-                "-c",
-                "echo hi",
-            ])
-            .output();
-        let o2 = std::process::Command::new("/usr/bin/sandbox-exec")
-            .args(["-p", "(version 1)(allow default)(deny file-read-data file-write*)(allow file-read-metadata)(allow file-read* (subpath \"/usr\") (subpath \"/bin\") (subpath \"/System\") (subpath \"/Library\") (subpath \"/dev\") (subpath \"/private/etc\") (subpath \"/private/var/db\"))", "/bin/sh", "-c", "echo hi2"])
-            .output();
-        panic!("DEBUG {o:?} || {o2:?}");
-    }
     assert!(
         allowed.join("f").exists(),
         "it could not write where it may"

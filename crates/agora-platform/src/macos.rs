@@ -106,17 +106,9 @@ pub(crate) fn children(pid: u32) -> io::Result<Vec<u32>> {
 // ---- Seatbelt (ADR-0047): the profile language `sandbox-exec` enforces on a process and everything it starts ----
 
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
-/// What every program needs to start at all; the caller's lists come on top of these.
-const SYSTEM_READ: [&str; 8] = [
-    "/System",
-    "/Library",
-    "/usr",
-    "/bin",
-    "/sbin",
-    "/private/etc",
-    "/private/var/db",
-    "/dev",
-];
+/// Where people's own files live. Reading is denied below these unless the caller lists the folder; the system folders stay readable,
+/// because every program needs them to start at all (denying them aborts the process in dyld).
+const PRIVATE: [&str; 4] = ["/Users", "/Volumes", "/private/var/folders", "/private/tmp"];
 
 /// True when `sandbox-exec` is on this machine.
 pub(crate) fn sandbox_supported() -> bool {
@@ -131,16 +123,15 @@ fn quote(p: &std::path::Path) -> String {
     format!("(subpath \"{s}\")")
 }
 
-/// The profile for `sb`: everything is allowed except reading contents and writing files, which are denied and then allowed again
-/// below the listed folders. Reading a file's metadata stays open so a path can be walked down to an allowed folder.
+/// The profile for `sb`: writing is denied everywhere except below the `write` folders, and reading contents is denied below
+/// [`PRIVATE`] except below the listed folders. Metadata stays readable so a path can be walked down to an allowed folder.
 pub(crate) fn profile(sb: &crate::Sandbox) -> String {
     let real = |p: &std::path::Path| std::fs::canonicalize(p).ok();
-    let reads: Vec<String> = SYSTEM_READ
+    let reads: Vec<String> = sb
+        .read
         .iter()
-        .map(std::path::PathBuf::from)
-        .chain(sb.read.iter().cloned())
-        .chain(sb.write.iter().cloned())
-        .filter_map(|p| real(&p))
+        .chain(sb.write.iter())
+        .filter_map(|p| real(p))
         .map(|p| quote(&p))
         .collect();
     let writes: Vec<String> = sb
@@ -149,8 +140,13 @@ pub(crate) fn profile(sb: &crate::Sandbox) -> String {
         .filter_map(|p| real(p))
         .map(|p| quote(&p))
         .collect();
-    let mut out = String::from(
-        "(version 1)\n(allow default)\n(deny file-read-data file-write*)\n(allow file-read-metadata)\n",
+    let private: Vec<String> = PRIVATE
+        .iter()
+        .map(|p| quote(std::path::Path::new(p)))
+        .collect();
+    let mut out = format!(
+        "(version 1)\n(allow default)\n(deny file-write*)\n(deny file-read-data {})\n",
+        private.join(" ")
     );
     if !reads.is_empty() {
         out.push_str(&format!("(allow file-read* {})\n", reads.join(" ")));
