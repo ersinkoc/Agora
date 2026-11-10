@@ -380,6 +380,8 @@ pub struct Policy {
     pub mesh_remote: bool,
     /// Routed commands that need a user-signed grant (`signed_commands = a, b*`; ADR-0041). Empty: none do.
     pub signed_commands: crate::grants::SignedCommands,
+    /// How agents are confined (`sandbox`, `sandbox.read`, `sandbox.write`; ADR-0047). Default: not at all.
+    pub sandbox: crate::sandbox::SandboxPolicy,
 }
 
 impl Default for Policy {
@@ -387,6 +389,7 @@ impl Default for Policy {
         Self {
             mesh_remote: true,
             signed_commands: crate::grants::SignedCommands::default(),
+            sandbox: crate::sandbox::SandboxPolicy::default(),
         }
     }
 }
@@ -415,11 +418,22 @@ pub fn read_policy(path: &std::path::Path) -> Policy {
                             .collect(),
                     );
                 }
+                "sandbox" => p.sandbox.level = crate::sandbox::Level::parse(v),
+                "sandbox.read" => p.sandbox.read = paths(v),
+                "sandbox.write" => p.sandbox.write = paths(v),
                 _ => {}
             }
         }
     }
     p
+}
+
+fn paths(v: &str) -> Vec<PathBuf> {
+    v.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .collect()
 }
 
 #[derive(Debug)]
@@ -489,6 +503,7 @@ impl Node {
             terminal: TerminalOptions::default(),
             limits: cfg.limits,
         });
+        sup.set_sandbox(read_policy(&cfg.data_dir.join(POLICY_FILE)).sandbox);
         let mut manifest_problems = Vec::new();
         if let Ok(rd) = std::fs::read_dir(&cfg.manifests_dir) {
             let mut paths: Vec<PathBuf> = rd

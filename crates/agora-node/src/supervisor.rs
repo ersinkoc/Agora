@@ -153,6 +153,8 @@ pub enum SupervisorError {
     UnknownKind(String),
     /// The adapter of this kind came from a registry publisher that was revoked (ADR-0044): `(kind, publisher)`.
     PublisherRevoked(String, String),
+    /// The node confines agents and this one cannot be confined here: `(kind, level)`. Nothing was started.
+    SandboxUnavailable(String, &'static str),
     NotFound(AgentId),
     /// The agent is still running (resume applies to stopped agents).
     StillRunning(AgentId),
@@ -175,6 +177,9 @@ impl SupervisorError {
             Self::PublisherRevoked(k, p) => Error::new(ErrorCode::AgentPublisherRevoked)
                 .with("kind", k.as_str())
                 .with("publisher", p.as_str()),
+            Self::SandboxUnavailable(k, l) => Error::new(ErrorCode::AgentSandboxUnavailable)
+                .with("kind", k.as_str())
+                .with("level", *l),
             Self::NotFound(id) => {
                 Error::new(ErrorCode::AgentNotFound).with("agent_id", id.as_str())
             }
@@ -269,6 +274,7 @@ pub struct Supervisor {
     next_id: u64,
     hook: Option<LaunchHook>,
     abort_hook: Option<AbortHook>,
+    sandbox: crate::sandbox::SandboxPolicy,
     adapters: BTreeMap<AgentId, AdapterEntry>,
 }
 
@@ -282,6 +288,7 @@ impl Supervisor {
             next_id: 1,
             hook: None,
             abort_hook: None,
+            sandbox: Default::default(),
             adapters: BTreeMap::new(),
         }
     }
@@ -289,6 +296,11 @@ impl Supervisor {
     /// Installs the hook that gives each launching agent a mesh endpoint.
     pub fn set_launch_hook(&mut self, hook: LaunchHook) {
         self.hook = Some(hook);
+    }
+
+    /// Sets how agents are confined (ADR-0047); the default is not at all.
+    pub fn set_sandbox(&mut self, sandbox: crate::sandbox::SandboxPolicy) {
+        self.sandbox = sandbox;
     }
 
     /// Installs the hook that undoes the launch hook when a start fails after it ran.
@@ -359,7 +371,17 @@ impl Supervisor {
             .kinds
             .get(&req.kind)
             .ok_or_else(|| SupervisorError::UnknownKind(req.kind.clone()))?;
-        if let Some(spec) = kind.manifest.driver(&bridge_program()) {
+        // An agent that cannot be confined is not started unconfined (ADR-0047). Adapter-hosted agents are not confined yet.
+        let driver = kind.manifest.driver(&bridge_program());
+        if !self.sandbox.enforceable()
+            || (driver.is_some() && self.sandbox.level != crate::sandbox::Level::Off)
+        {
+            return Err(SupervisorError::SandboxUnavailable(
+                req.kind.clone(),
+                self.sandbox.level.name(),
+            ));
+        }
+        if let Some(spec) = driver {
             if let Some(p) = spec.command.first().and_then(|c| {
                 agora_adapters::package::revoked_publisher_of(
                     &agora_adapters::package::agora_home(),
@@ -637,11 +659,13 @@ impl Supervisor {
     ) -> Result<TerminalHandle, SupervisorError> {
         let mut argv = argv.to_vec();
         argv.extend(extras.argv.iter().cloned());
+        let program = argv.first().cloned();
         let mut cfg = PtyConfig::new(argv);
         cfg.cwd = Some(worktree.to_path_buf());
         cfg.cols = self.cfg.terminal.size.cols;
         cfg.rows = self.cfg.terminal.size.rows;
         cfg.limits = self.cfg.limits.process;
+        cfg.sandbox = program.and_then(|p| self.sandbox.profile(worktree, &p));
         if let Some(k) = self.kinds.get(kind) {
             cfg.env = k
                 .manifest

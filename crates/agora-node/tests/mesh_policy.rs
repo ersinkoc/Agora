@@ -35,6 +35,25 @@ fn the_policy_file_defaults_to_allowed_and_a_bad_value_means_denied() {
 }
 
 #[test]
+fn the_sandbox_lines_are_read_and_a_typo_is_the_strictest_level() {
+    use agora_node::sandbox::Level;
+    let dir = tmp("sandbox");
+    let file = dir.join("policy");
+    std::fs::write(
+        &file,
+        "sandbox = worktree\nsandbox.read = /a, /b\nsandbox.write = /c\n",
+    )
+    .unwrap();
+    let p = read_policy(&file).sandbox;
+    assert_eq!(p.level, Level::Worktree);
+    assert_eq!(p.read.len(), 2);
+    assert_eq!(p.write, vec![std::path::PathBuf::from("/c")]);
+    std::fs::write(&file, "sandbox = wortree\n").unwrap();
+    assert_eq!(read_policy(&file).sandbox.level, Level::WorktreeOffline);
+    assert_eq!(read_policy(&dir.join("none")).sandbox.level, Level::Off);
+}
+
+#[test]
 fn with_remote_denied_outgoing_messages_fail_with_a_policy_notice_and_incoming_ones_are_refused() {
     if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
         return;
