@@ -159,31 +159,32 @@ mod tests {
             .is_none());
 
         // A manifest's request is honoured only for a kind the owner trusts, and only for sane paths.
+        // Absolute on every system (a drive letter on Windows).
+        let (data, out) = (dir.join("data"), dir.join("out"));
         let needs = agora_adapters::manifest::SandboxNeeds {
-            read: vec!["/srv/data".into(), "relative".into(), "/a/../etc".into()],
-            write: vec!["/srv/out".into()],
+            read: vec![
+                data.to_string_lossy().into_owned(),
+                "relative".into(),
+                format!("{}/../etc", dir.display()),
+            ],
+            write: vec![out.to_string_lossy().into_owned()],
         };
         let untrusted = p.profile("k", Some(&needs), &wt, "agent").unwrap();
-        assert!(!untrusted.read.contains(&PathBuf::from("/srv/data")));
+        assert!(!untrusted.read.contains(&data));
         let trusting = SandboxPolicy {
             trusted_kinds: vec!["k".into()],
             ..p
         };
         let sb = trusting.profile("k", Some(&needs), &wt, "agent").unwrap();
-        assert!(
-            sb.read.contains(&PathBuf::from("/srv/data"))
-                && sb.write.contains(&PathBuf::from("/srv/out"))
-        );
-        assert!(!sb
-            .read
-            .iter()
-            .any(|r| r == Path::new("relative") || r.starts_with("/a")));
+        assert!(sb.read.contains(&data) && sb.write.contains(&out));
+        assert!(!sb.read.iter().any(|r| r == Path::new("relative")
+            || r.components().any(|c| c == std::path::Component::ParentDir)));
         assert!(trusting
             .profile("other", Some(&needs), &wt, "agent")
             .unwrap()
             .write
             .iter()
-            .all(|w| w != Path::new("/srv/out")));
+            .all(|w| *w != out));
         let _ = std::fs::remove_dir_all(dir);
     }
 }
