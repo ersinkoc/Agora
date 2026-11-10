@@ -305,6 +305,10 @@ impl io::Write for LocalStream {
 pub struct RawMode {
     #[cfg(unix)]
     saved: libc::termios,
+    #[cfg(windows)]
+    saved_in: u32,
+    #[cfg(windows)]
+    saved_out: Option<u32>,
 }
 
 impl RawMode {
@@ -314,18 +318,20 @@ impl RawMode {
         {
             unix::enable_raw_mode()
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
         {
-            Err(unsupported_io("raw terminal mode"))
+            windows::enable_raw_mode()
         }
     }
 }
 
 impl Drop for RawMode {
     fn drop(&mut self) {
-        // Restores the saved terminal settings. Nothing to restore elsewhere (`enable` always fails there).
+        // Restores the saved terminal settings.
         #[cfg(unix)]
         unix::restore_mode(&self.saved);
+        #[cfg(windows)]
+        windows::restore_mode(self);
     }
 }
 
@@ -335,9 +341,9 @@ pub fn terminal_size() -> Option<(u16, u16)> {
     {
         unix::terminal_size()
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        None
+        windows::terminal_size()
     }
 }
 
