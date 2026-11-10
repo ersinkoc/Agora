@@ -28,7 +28,7 @@ use windows_sys::Win32::System::Threading::{
     CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
     InitializeProcThreadAttributeList, TerminateProcess, UpdateProcThreadAttribute,
     WaitForSingleObject, CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, INFINITE,
-    PROCESS_INFORMATION, STARTUPINFOEXW,
+    PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOEXW,
 };
 
 use crate::{ExitStatus, Pty, PtyConfig, PtyControl, PtyControlOps};
