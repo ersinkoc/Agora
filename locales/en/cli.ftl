@@ -24,7 +24,7 @@ cli-usage =
       agora node trust DEVICE_ID PUBLIC_KEY_HEX [--data DIR]
       agora tui [--hub HOST:PORT --ca FILE --code CODE] [--hub-dir DIR]
       agora update [--check] [--version X] [--release-url URL] [--release-key FILE] [--unsigned]
-      agora adapter install NAME [--registry URL] [--root-key FILE] [--yes] | list | remove NAME
+      agora adapter install NAME [--registry URL] [--root-key FILE] [--yes] | update [NAME] | list | remove NAME
       agora doctor [--data DIR] [--manifests DIR] [--socket PATH]
 cli-node-listening = Node is running. Control socket: { $socket }
 cli-agent-started = Started agent { $agent_id } in { $worktree }
@@ -121,6 +121,7 @@ cli-adapter-ask-known = Install it? [y/N]
 cli-adapter-declined = Nothing was installed.
 cli-adapter-installed = Installed { $name } { $version }. It starts only when an agent of its kind is started.
 cli-adapter-removed = Removed { $name }.
+cli-adapter-current = { $name } { $version } is already the newest version in the registry.
 cli-adapter-none = No adapters are installed.
 cli-adapter-listed = { $name } { $version } (publisher { $publisher })
 cli-adapter-listed-revoked = { $name } { $version } (publisher { $publisher }, revoked in the newest registry index: remove it or find a new publisher)

@@ -24,7 +24,7 @@ cli-usage =
       agora node trust CİHAZ_ID AÇIK_ANAHTAR_HEX [--data DİZİN]
       agora tui [--hub ADRES:PORT --ca DOSYA --code KOD] [--hub-dir DİZİN]
       agora update [--check] [--version X] [--release-url URL] [--release-key DOSYA] [--unsigned]
-      agora adapter install AD [--registry URL] [--root-key DOSYA] [--yes] | list | remove AD
+      agora adapter install AD [--registry URL] [--root-key DOSYA] [--yes] | update [AD] | list | remove AD
       agora doctor [--data DİZİN] [--manifests DİZİN] [--socket YOL]
 cli-node-listening = Düğüm çalışıyor. Denetim soketi: { $socket }
 cli-agent-started = { $agent_id } ajanı { $worktree } içinde başlatıldı
@@ -121,6 +121,7 @@ cli-adapter-ask-known = Kurulsun mu? [e/H]
 cli-adapter-declined = Hiçbir şey kurulmadı.
 cli-adapter-installed = { $name } { $version } kuruldu. Yalnızca türünden bir ajan başlatıldığında çalışır.
 cli-adapter-removed = { $name } kaldırıldı.
+cli-adapter-current = { $name } { $version } kayıt defterindeki en yeni sürüm.
 cli-adapter-none = Kurulu bağdaştırıcı yok.
 cli-adapter-listed = { $name } { $version } (yayımcı { $publisher })
 cli-adapter-listed-revoked = { $name } { $version } (yayımcı { $publisher }, en yeni dizinde iptal edilmiş: kaldırın ya da yeni bir yayımcı bulun)

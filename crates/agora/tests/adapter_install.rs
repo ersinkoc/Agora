@@ -210,6 +210,15 @@ fn a_signed_package_is_installed_after_the_users_yes_and_listed_and_removed() {
     let (ok, out, err) = agora(&home, &with_yes, "");
     assert!(ok, "{out}{err}");
 
+    // Updating what is already the newest version asks nothing and changes nothing; updating what is not installed fails.
+    let mut up = a.to_vec();
+    up[1] = "update";
+    let (ok, out, err) = agora(&home, &up, "");
+    assert!(ok && out.contains("already the newest"), "{out}{err}");
+    up[2] = "absent";
+    let (ok, _, _) = agora(&home, &up, "");
+    assert!(!ok);
+
     let (ok, out, _) = agora(&home, &["adapter", "list"], "");
     assert!(
         ok && out.contains("demo 1.0.0") && out.contains("acme") && !out.contains("revoked"),

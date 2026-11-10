@@ -102,11 +102,52 @@ fn ask() -> bool {
 }
 
 pub fn install(say: &Say, o: &Opts) -> ExitCode {
-    let h = home();
     let Some(name) = o.positional.first().cloned() else {
         say.err(key!("cli-bad-arguments"), &[]);
         return ExitCode::from(2);
     };
+    install_named(say, o, &name, false)
+}
+
+/// `agora adapter update [NAME]`: every installed package (or the named one) whose registry entry names a newer version goes
+/// through the same checks and the same question as an install; one already at the newest version is left alone.
+pub fn update(say: &Say, o: &Opts) -> ExitCode {
+    let h = home();
+    let names: Vec<String> = match o.positional.first() {
+        Some(n) => vec![n.clone()],
+        None => std::fs::read_dir(h.join("adapters"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| package::valid_name(n))
+            .collect(),
+    };
+    if names.is_empty() {
+        say.out(key!("cli-adapter-none"), &[]);
+        return ExitCode::SUCCESS;
+    }
+    let mut code = ExitCode::SUCCESS;
+    for name in names {
+        if !h.join("adapters").join(&name).exists() {
+            code = fail(
+                say,
+                key!("cli-adapter-failed"),
+                format!("{name} is not installed"),
+            );
+            continue;
+        }
+        let r = install_named(say, o, &name, true);
+        if r != ExitCode::SUCCESS {
+            code = r;
+        }
+    }
+    code
+}
+
+fn install_named(say: &Say, o: &Opts, name: &str, only_newer: bool) -> ExitCode {
+    let h = home();
+    let name = name.to_string();
     if !package::valid_name(&name) {
         return fail(
             say,
@@ -160,6 +201,13 @@ pub fn install(say: &Say, o: &Opts) -> ExitCode {
             key!("cli-adapter-failed"),
             "the index names an unsafe package".into(),
         );
+    }
+    if only_newer && package::package_dir(&h, &name, &entry.version).exists() {
+        say.out(
+            key!("cli-adapter-current"),
+            &[("name", name.into()), ("version", entry.version.into())],
+        );
+        return ExitCode::SUCCESS;
     }
     let stem = format!("{base}/packages/{}-{}", entry.name, entry.version);
     let bytes = match curl(&format!("{stem}.tar")) {
