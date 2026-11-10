@@ -16,6 +16,6 @@ Decided questions point to their Accepted ADR.
 | Q10 | License, CLA or DCO | Decided: ADR-0016 | Phase 0 |
 | Q11 | Adapter registry and signing | Decided: ADR-0018 | Phase 6 |
 | Q12 | Model price catalog source for cost estimates | Decided: models.dev (ADR-0021); quotas via quota profiles | — |
-| Q13 | Agent sandboxing approach (containers, OS sandbox profiles) | Open | Phase 7 |
+| Q13 | Agent sandboxing approach (containers, OS sandbox profiles) | Decided: ADR-0047 | Phase 7 |
 | Q14 | Mobile client: native or PWA | Decided: ADR-0046 | Phase 7 |
 | Q15 | Documentation site and its translation workflow | Open | Before public release |
