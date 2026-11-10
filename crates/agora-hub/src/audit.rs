@@ -110,12 +110,16 @@ impl<'a> Audit<'a> {
     }
 }
 
-/// One row as a JSON line (`agora hub audit export`).
-pub fn json_line(e: &Entry) -> String {
+/// One row as JSON.
+pub fn json_value(e: &Entry) -> serde_json::Value {
     serde_json::json!({
         "id": e.id, "at_ms": e.at_ms, "who": e.who, "action": e.action, "node": e.node, "outcome": e.outcome,
     })
-    .to_string()
+}
+
+/// One row as a JSON line (`agora hub audit export`).
+pub fn json_line(e: &Entry) -> String {
+    json_value(e).to_string()
 }
 
 #[cfg(test)]
