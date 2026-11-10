@@ -8,6 +8,7 @@ version = "0.1.0"
 dependencies = [
  "agora-adapters",
  "agora-core",
+ "agora-desktop-tunnel",
  "agora-hub",
  "agora-i18n",
  "agora-mesh",
@@ -59,6 +60,17 @@ dependencies = [
 [[package]]
 name = "agora-core"
 version = "0.1.0"
+
+[[package]]
+name = "agora-desktop-tunnel"
+version = "0.1.0"
+dependencies = [
+ "agora-hub",
+ "ring",
+ "rustls",
+ "tokio",
+ "tokio-rustls",
+]
 
 [[package]]
 name = "agora-fake-agent"

@@ -79,6 +79,7 @@ cli-trust-failed = Cihaza güvenilemedi: { $reason }
 cli-hub-backup = Yedek { $path } dosyasına yazıldı.
 cli-hub-restored = Veritabanı yedekten { $path } konumuna geri yüklendi. Önceki veritabanı yanında before-restore adıyla duruyor.
 cli-hub-failed = Hub komutu başarısız oldu: { $reason }
+cli-hub-fingerprint = Hub CA parmak izi (SHA-256): { $fingerprint }
 cli-hub-user-added = { $id } kullanıcısı { $role } rolüyle eklendi. Giriş kodu: { $code } (10 dakika geçerli). Hub adresini açıp kodu girsin; yenisi için `agora hub user login { $id }` çalıştırın.
 cli-hub-user-none = Henüz ekip üyesi yok. `agora hub user add AD --role member` ile ekleyin.
 cli-hub-user-line = { $id }  { $name }  { $role }
