@@ -80,15 +80,21 @@ mod embedded {
 
 /// The web app the hub serves: `--web DIR` wins, else the copy compiled into this binary (when the build had one).
 fn web_assets(o: &Opts) -> Option<Arc<dyn agora_hub::web::Assets>> {
-    if let Some(dir) = &o.web {
-        return Some(Arc::new(agora_hub::web::DirAssets::new(dir)));
-    }
-    if embedded::WEB_FILES.is_empty() {
+    let inner: Arc<dyn agora_hub::web::Assets> = if let Some(dir) = &o.web {
+        Arc::new(agora_hub::web::DirAssets::new(dir))
+    } else if embedded::WEB_FILES.is_empty() {
         return None;
-    }
-    Some(Arc::new(agora_hub::web::EmbeddedAssets(
-        embedded::WEB_FILES,
-    )))
+    } else {
+        Arc::new(agora_hub::web::EmbeddedAssets(embedded::WEB_FILES))
+    };
+    // ADR-0046: the page can be installed to a phone's home screen; its name is the locale's product string.
+    let name = agora_i18n::Catalog::for_locale(&agora_i18n::catalog::locale_from_env())
+        .render("notify-title", &[])
+        .unwrap_or_default();
+    Some(Arc::new(agora_hub::web::Installable {
+        inner,
+        manifest: agora_hub::web::manifest(&name),
+    }))
 }
 
 pub fn hub_run(say: &Say, o: &Opts) -> ExitCode {
@@ -144,6 +150,10 @@ pub fn hub_run(say: &Say, o: &Opts) -> ExitCode {
                 Arc::clone(&hub),
                 targets,
                 agora_i18n::Catalog::for_locale(&agora_i18n::catalog::locale_from_env()),
+                std::fs::read_to_string(dir.join("public-url"))
+                    .ok()
+                    .map(|u| u.trim().to_string())
+                    .filter(|u| u.starts_with("https://") || u.starts_with("http://")),
             );
         }
         let (prices, prices_at, bad_overrides) = load_prices(&dir);

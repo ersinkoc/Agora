@@ -53,8 +53,25 @@ pub fn render(catalog: &Catalog, n: &Notice, name: &str) -> String {
         .unwrap_or_else(|| n.trigger.key().to_string())
 }
 
+/// Where the owner opens a waiting approval (ADR-0046): the hub's public address and the approval's place in the page. A
+/// notification only points at it; allowing still takes the device key.
+pub fn approval_link(public_url: &str, subject: &str) -> String {
+    let encoded: String = subject
+        .chars()
+        .map(|c| match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.' => c.to_string(),
+            other => other
+                .to_string()
+                .bytes()
+                .map(|b| format!("%{b:02X}"))
+                .collect(),
+        })
+        .collect();
+    format!("{}/#/approvals/{encoded}", public_url.trim_end_matches('/'))
+}
+
 /// Watches `hub` and delivers to `targets` until the hub is gone. Returns at once when there is nothing to deliver to.
-pub fn spawn(hub: Arc<Hub>, targets: Vec<Target>, catalog: Catalog) {
+pub fn spawn(hub: Arc<Hub>, targets: Vec<Target>, catalog: Catalog, public_url: Option<String>) {
     if targets.is_empty() {
         return;
     }
@@ -77,7 +94,12 @@ pub fn spawn(hub: Arc<Hub>, targets: Vec<Target>, catalog: Catalog) {
             if !channels.contains(&Channel::Webhook) {
                 continue;
             }
-            let text = render(&catalog, &notice, &name);
+            let mut text = render(&catalog, &notice, &name);
+            if let (Trigger::ApprovalRequested, Some(base)) =
+                (notice.trigger, public_url.as_deref())
+            {
+                text = format!("{text}\n{}", approval_link(base, &notice.subject));
+            }
             for t in targets.iter().cloned() {
                 let (title, text, priority) =
                     (title.clone(), text.clone(), notice.trigger.priority());
@@ -103,6 +125,14 @@ mod tests {
             at_ms: 5,
             body: Some(body),
         }
+    }
+
+    #[test]
+    fn an_approval_link_points_into_the_page_and_keeps_the_address_safe() {
+        assert_eq!(
+            approval_link("https://hub.example/", "laptop/p 1"),
+            "https://hub.example/#/approvals/laptop%2Fp%201"
+        );
     }
 
     #[test]
@@ -160,7 +190,7 @@ mod tests {
         let hub =
             Arc::new(Hub::open(crate::store::SqliteStore::open_in_memory().unwrap()).unwrap());
         let (targets, _) = deliver::parse_targets(&format!("webhook http://127.0.0.1:{port}/hook"));
-        spawn(Arc::clone(&hub), targets, Catalog::english());
+        spawn(Arc::clone(&hub), targets, Catalog::english(), None);
         let t0 = Instant::now();
         while hub.subscriber_count() == 0 {
             assert!(
