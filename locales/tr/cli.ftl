@@ -83,6 +83,7 @@ cli-hub-user-added = { $id } kullanıcısı { $role } rolüyle eklendi. Giriş k
 cli-hub-user-none = Henüz ekip üyesi yok. `agora hub user add AD --role member` ile ekleyin.
 cli-hub-user-line = { $id }  { $name }  { $role }
 cli-hub-user-unknown = { $id } adında bir ekip üyesi yok.
+cli-hub-user-project =   { $project } projesinde çalışır
 cli-hub-code = Kayıt kodu: { $code } (10 dakika geçerli). Diğer makinede şunu çalıştırın: agora node enroll --hub wss://ADRES:PORT --ca { $ca } --code { $code } --id AD
 cli-enrolled = Bu makine { $id } adıyla kaydedildi. "agora node run" ile başlatın; hub'a kendiliğinden bağlanır. Kayıt yeri: { $dir }.
 cli-enroll-refused = Hub bu makineyi kaydetmeyi reddetti ({ $code }). Kod yanlış, süresi dolmuş veya zaten kullanılmış olabilir.

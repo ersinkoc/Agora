@@ -83,6 +83,7 @@ cli-hub-user-added = Added { $id } as { $role }. Their sign-in code: { $code } (
 cli-hub-user-none = No team members yet. Add one with `agora hub user add NAME --role member`.
 cli-hub-user-line = { $id }  { $name }  { $role }
 cli-hub-user-unknown = There is no team member called { $id }.
+cli-hub-user-project =   works in { $project }
 cli-hub-code = Enrollment code: { $code } (valid for 10 minutes). On the other machine run: agora node enroll --hub wss://HOST:PORT --ca { $ca } --code { $code } --id NAME
 cli-enrolled = This machine is enrolled as { $id }. Start it with "agora node run"; it will connect to the hub by itself. Saved in { $dir }.
 cli-enroll-refused = The hub refused to enroll this machine ({ $code }). The code may be wrong, expired or already used.

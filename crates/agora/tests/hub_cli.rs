@@ -595,6 +595,19 @@ fn team_members_are_added_listed_changed_and_removed_from_the_command_line() {
     );
     let (ok, _, _) = run(&["hub", "user", "role", "ayse", "member"]);
     assert!(ok);
+    // A person sees and works in the projects they were granted, `NODE/PROJECT`, and nothing else.
+    let (ok, _, _) = run(&["hub", "user", "grant", "ayse", "laptop/web"]);
+    assert!(ok);
+    let (ok, _, _) = run(&["hub", "user", "grant", "ayse", "no-slash"]);
+    assert!(!ok);
+    let (ok, _, _) = run(&["hub", "user", "grant", "nobody", "laptop/web"]);
+    assert!(!ok);
+    let (ok, out, _) = run(&["hub", "user", "list"]);
+    assert!(ok && out.contains("works in laptop/web"), "{out}");
+    let (ok, _, _) = run(&["hub", "user", "revoke", "ayse", "laptop/web"]);
+    assert!(ok);
+    let (ok, out, _) = run(&["hub", "user", "list"]);
+    assert!(ok && !out.contains("laptop/web"), "{out}");
     let (ok, out, _) = run(&["hub", "user", "login", "ayse"]);
     assert!(ok && out.contains("Sign-in code"), "{out}");
     let (ok, _, err) = run(&["hub", "user", "remove", "nobody"]);
@@ -617,7 +630,13 @@ fn team_members_are_added_listed_changed_and_removed_from_the_command_line() {
         .collect();
     assert_eq!(
         actions,
-        ["user.add:ayse", "user.role:ayse", "user.remove:ayse"],
+        [
+            "user.add:ayse",
+            "user.role:ayse",
+            "user.grant:ayse laptop/web",
+            "user.revoke:ayse laptop/web",
+            "user.remove:ayse"
+        ],
         "{out}"
     );
     let (ok, out, _) = run(&["hub", "audit", "export", "--who", "nobody"]);

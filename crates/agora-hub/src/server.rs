@@ -269,6 +269,7 @@ pub trait ClientAuth {
         self.check(token).then(|| crate::users::Access {
             role: crate::users::Role::Owner,
             user: "owner".into(),
+            projects: None,
         })
     }
 }
@@ -391,6 +392,7 @@ where
         Some(crate::users::Access {
             role: crate::users::Role::Owner,
             user: "owner".into(),
+            projects: None,
         })
     })
     .await
@@ -411,18 +413,29 @@ where
         return Err(invalid("frame"));
     }
     let sub = v1::Subscribe::decode(first.payload.as_slice()).map_err(|_| invalid("subscribe"))?;
-    let subscription = hub.subscribe(sub.after_pos)?;
+    let current = access().ok_or(ServeError::Refused)?;
+    // A member or viewer gets a snapshot cut to their projects, whatever position they ask from (a replay from the log would be
+    // everyone's), and from then on only the events that are theirs (ADR-0049).
+    let restricted = current.projects.is_some();
+    let subscription = hub.subscribe(if restricted { None } else { sub.after_pos })?;
+    let mut scope = None;
     if let Some((view, pos)) = &subscription.snapshot {
-        conn.send(&frame(
-            STREAM_EVENTS,
-            kinds::SNAPSHOT,
-            snapshot_of(view, *pos).encode_to_vec(),
-        ))
-        .await?;
+        let body = match &current.projects {
+            Some(projects) => {
+                let s = crate::scope::Scope::from_view(projects.clone(), view);
+                let cut = s.filter_view(view);
+                scope = Some(s);
+                snapshot_of(&cut, *pos)
+            }
+            None => snapshot_of(view, *pos),
+        };
+        conn.send(&frame(STREAM_EVENTS, kinds::SNAPSHOT, body.encode_to_vec()))
+            .await?;
     }
     for d in &subscription.backlog {
         send_positioned(&mut conn, d).await?;
     }
+    let mut checked = tokio::time::Instant::now();
     let mut inflight: Vec<Inflight> = Vec::new();
     let (relays, mut relay_frames) = hub.router().client();
     loop {
@@ -434,10 +447,21 @@ where
         for s in relays.take_closed() {
             conn.send(&frame(s, STREAM_CLOSE, Vec::new())).await?;
         }
+        // A role or a grant that changed ends this connection; the client reconnects into what it may now see.
+        if checked.elapsed() >= Duration::from_secs(1) {
+            checked = tokio::time::Instant::now();
+            if access().as_ref() != Some(&current) {
+                return Err(ServeError::Refused);
+            }
+        }
         // Push whatever is waiting; a closed channel means the hub dropped this client for being too slow.
         loop {
             match subscription.live.try_recv() {
-                Ok(d) => send_positioned(&mut conn, &d).await?,
+                Ok(d) => {
+                    if scope.as_mut().is_none_or(|s| s.admit(&d.event)) {
+                        send_positioned(&mut conn, &d).await?;
+                    }
+                }
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => return Ok(()),
             }
@@ -458,6 +482,9 @@ where
                     let Some(who) = access() else {
                         return Err(ServeError::Refused);
                     };
+                    if who != current {
+                        return Err(ServeError::Refused);
+                    }
                     forward_command(
                         &mut conn,
                         hub,
@@ -465,7 +492,10 @@ where
                         &mut inflight,
                         stream,
                         &f.payload,
-                        &who,
+                        Caller {
+                            who: &who,
+                            scope: scope.as_ref(),
+                        },
                     )
                     .await?;
                 }
@@ -498,6 +528,12 @@ struct Inflight {
     audit: Option<i64>,
 }
 
+/// Who is asking and what they may reach (ADR-0049).
+struct Caller<'a> {
+    who: &'a crate::users::Access,
+    scope: Option<&'a crate::scope::Scope>,
+}
+
 async fn forward_command<S>(
     conn: &mut Conn<S>,
     hub: &Hub,
@@ -505,7 +541,7 @@ async fn forward_command<S>(
     inflight: &mut Vec<Inflight>,
     stream_id: u32,
     payload: &[u8],
-    who: &crate::users::Access,
+    caller: Caller<'_>,
 ) -> Result<(), ServeError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -514,9 +550,12 @@ where
     let client_request_id = req.request_id.clone();
     let refuse = |e: Error| error_response(&client_request_id, &e);
     // ADR-0049: a viewer's commands stop here, before any node hears of them. (The node still decides what its devices may do.)
-    if who.role == crate::users::Role::Viewer
-        && !req.command.as_ref().is_some_and(crate::users::viewer_may)
-    {
+    let Caller { who, scope } = caller;
+    let may = req.command.as_ref().is_some_and(|c| {
+        (who.role != crate::users::Role::Viewer || crate::users::viewer_may(c))
+            && scope.is_none_or(|s| s.command_allowed(&req.target_node, c))
+    });
+    if !may {
         let action = command_name(&req);
         audit(hub, who, &action, &req.target_node, "auth.forbidden");
         conn.send(&frame(

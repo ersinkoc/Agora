@@ -78,6 +78,7 @@ impl ClientAuth for ClientTokens {
             return Some(agora_hub::users::Access {
                 role: agora_hub::users::Role::Owner,
                 user: "owner".into(),
+                projects: None,
             });
         }
         agora_hub::server::ClientAuth::access(&*self.sessions, token)
@@ -316,11 +317,14 @@ pub fn hub_user(say: &Say, o: &Opts) -> ExitCode {
                     say.out(
                         key!("cli-hub-user-line"),
                         &[
-                            ("id", u.id.into()),
+                            ("id", u.id.clone().into()),
                             ("name", u.name.into()),
                             ("role", u.role.as_str().into()),
                         ],
                     );
+                    for project in users.grants_of(&u.id).unwrap_or_default() {
+                        say.out(key!("cli-hub-user-project"), &[("project", project.into())]);
+                    }
                 }
                 ExitCode::SUCCESS
             }
@@ -331,6 +335,27 @@ pub fn hub_user(say: &Say, o: &Opts) -> ExitCode {
                 return bad();
             };
             match users.set_role(id, role) {
+                Ok(true) => ExitCode::SUCCESS,
+                Ok(false) => {
+                    say.err(key!("cli-hub-user-unknown"), &[("id", (*id).into())]);
+                    ExitCode::from(1)
+                }
+                Err(e) => fail(e.to_string()),
+            }
+        }
+        [verb @ ("grant" | "revoke"), id, project] => {
+            let Some((node, project)) = project
+                .split_once('/')
+                .filter(|(n, p)| !n.is_empty() && !p.is_empty())
+            else {
+                return bad();
+            };
+            let done = if *verb == "grant" {
+                users.grant(id, node, project)
+            } else {
+                users.revoke(id, node, project)
+            };
+            match done {
                 Ok(true) => ExitCode::SUCCESS,
                 Ok(false) => {
                     say.err(key!("cli-hub-user-unknown"), &[("id", (*id).into())]);
