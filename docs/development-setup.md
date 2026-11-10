@@ -6,7 +6,7 @@
 | --- | --- |
 | **Ubuntu** | Primary development and agent machine. The repository, builds, tests, and the coding agents (Claude Code, Codex) run here, one worktree per task. Matches the main deployment target (Linux servers). |
 | **macOS** | Second platform: macOS-specific node work and checks, later the Tauri desktop app. Can host a parallel agent if needed. |
-| **Windows** | Daily driver and client: connects to Ubuntu over SSH (terminal or editor remote), tests the web client in browsers, later the Windows node (Phase 7). |
+| **Windows** | Daily driver and client: connects to Ubuntu over SSH (terminal or editor remote), tests the web client in browsers, the Windows node (Phase 7, ADR-0045: built and tested on CI, not yet run with a real agent). |
 
 CI builds and tests all three operating systems on every pull request from day one, so platform breakage is
 caught even before Windows-specific work starts.

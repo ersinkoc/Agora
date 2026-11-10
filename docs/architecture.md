@@ -168,7 +168,7 @@ Main window layout: see `ux/main-window.md`.
 | --- | --- | --- |
 | Linux | Phase 2 | PTY, /proc for process info |
 | macOS | Phase 2 | PTY, libproc for process info |
-| Windows | Phase 7 | ConPTY, named pipes, input records; isolation boundary designed from day one |
+| Windows | Phase 7 (ADR-0045, started) | ConPTY terminals with a job object per terminal, a named-pipe control channel (owner-only), toolhelp for process names, children and stats; no working directory of another process (the PEB is undocumented). Tested on CI with test agents; not yet with a real agent on a real machine |
 
 ## 9. Persistence
 
