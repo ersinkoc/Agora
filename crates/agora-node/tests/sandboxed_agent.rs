@@ -164,14 +164,22 @@ fn an_offline_agent_works_in_its_worktree_but_reaches_no_other_machine() {
     }
     let local = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = local.local_addr().unwrap().port();
+    // A unix socket in `/tmp`, where a tmux server or an SSH agent keeps theirs: out of reach.
+    let tmp_socket = PathBuf::from(format!("/tmp/agora-tmx-{}", std::process::id()));
+    let _ = std::fs::remove_file(&tmp_socket);
+    let tmux = std::os::unix::net::UnixListener::bind(&tmp_socket).unwrap();
     let policy = SandboxPolicy {
         level: Level::WorktreeOffline,
         ..Default::default()
     };
-    // `nc` ships with macOS (the only system that enforces this level today).
+    // `nc` ships with macOS (the only system that enforces this level today). 192.0.2.1 is TEST-NET: refused at once by the
+    // sandbox, a timeout without it, so this holds with no internet too.
     let script = format!(
-        "echo in > inside; {{ nc -z -G 2 1.1.1.1 443 && echo internet-open || echo internet-closed; \
-         nc -z -G 2 127.0.0.1 {port} && echo local-open || echo local-closed; }} > net 2>/dev/null; sleep 30"
+        "echo in > inside; {{ s=$(date +%s); nc -z -G 3 192.0.2.1 443; e=$(date +%s); \
+         [ $((e - s)) -lt 2 ] && echo internet-refused || echo internet-other; \
+         nc -z -G 2 127.0.0.1 {port} && echo local-open || echo local-closed; \
+         nc -U -w 1 {tmx} </dev/null && echo tmp-socket-open || echo tmp-socket-closed; }} > net 2>/dev/null; sleep 30",
+        tmx = tmp_socket.display()
     );
     let (mut sup, req, dir) = setup_with("offline-on", &script, policy);
     sup.start(&req, Instant::now()).unwrap();
@@ -187,8 +195,10 @@ fn an_offline_agent_works_in_its_worktree_but_reaches_no_other_machine() {
         dir.join("worktrees/a/inside").exists(),
         "the agent could not write in its worktree"
     );
-    assert!(text.contains("internet-closed"), "{text}");
+    assert!(text.contains("internet-refused"), "{text}");
     assert!(text.contains("local-open"), "{text}");
-    drop((sup, local));
+    assert!(text.contains("tmp-socket-closed"), "{text}");
+    drop((sup, local, tmux));
+    let _ = std::fs::remove_file(tmp_socket);
     let _ = std::fs::remove_dir_all(dir);
 }

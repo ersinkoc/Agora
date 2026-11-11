@@ -34,8 +34,9 @@ sandbox.write = /var/folders/xx/yyyy/T, /var/folders/xx/yyyy/C, ~/.cargo/registr
 ### macOS: `worktree-offline`
 
 `sandbox = worktree-offline` takes the same `sandbox.read` / `sandbox.write` lines and also cuts the network: the agent can connect only to
-this machine (a local model on `localhost`) and to unix sockets below the node's mesh folder and its writable folders; DNS, the internet and
-other machines on the LAN are refused, and it cannot listen on a TCP port. Package managers and remote model APIs therefore fail by design;
+this machine (a local model on `localhost`), to its own mesh socket and to unix sockets in its private temp folder; DNS, the internet, other
+machines on the LAN, `/tmp`'s sockets (tmux, SSH agent) and other agents' mesh sockets are refused, and it cannot listen on a TCP port.
+Anything that listens on this machine is reachable, though: a local HTTP proxy or an SSH tunnel on `localhost` reopens the network. Package managers and remote model APIs therefore fail by design;
 use it for agents that work through a local model.
 
 ## Linux (Landlock)

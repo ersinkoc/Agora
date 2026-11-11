@@ -627,10 +627,7 @@ impl Node {
             terminal: TerminalOptions::default(),
             limits: cfg.limits,
         });
-        let mut sandbox = read_policy(&cfg.data_dir.join(POLICY_FILE)).sandbox;
-        // An offline agent keeps the node's mesh sockets (ADR-0047 `worktree-offline`).
-        sandbox.sockets = vec![mesh_dir.clone()];
-        sup.set_sandbox(sandbox);
+        sup.set_sandbox(read_policy(&cfg.data_dir.join(POLICY_FILE)).sandbox);
         let (found, manifest_problems) = load_manifests(&cfg.manifests_dir);
         for m in found {
             sup.register(m);

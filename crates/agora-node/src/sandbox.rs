@@ -43,8 +43,6 @@ pub struct SandboxPolicy {
     /// Kinds whose manifests may ask for more (`sandbox.trust_manifest = kind, kind`). Empty: no manifest widens anything, so a
     /// community manifest can never reach `~/.ssh` by asking.
     pub trusted_kinds: Vec<String>,
-    /// Folders whose unix sockets an offline agent may still use: the node's mesh folder (set by the node, not the policy file).
-    pub sockets: Vec<PathBuf>,
 }
 
 /// The system folders every program needs to run.
@@ -138,10 +136,9 @@ impl SandboxPolicy {
             return None;
         }
         let mut sb = self.files(kind, needs, worktree, program);
-        // ADR-0047 `worktree-offline`: as `worktree`, and no network but this machine and the node's own sockets.
+        // ADR-0047 `worktree-offline`: as `worktree`, and no network but this machine; the supervisor adds the agent's own sockets.
         if self.level == Level::WorktreeOffline {
             sb.offline = true;
-            sb.sockets.clone_from(&self.sockets);
         }
         Some(sb)
     }
@@ -303,7 +300,6 @@ mod tests {
             read: vec!["/home/x/.cfg".into()],
             write: vec!["/home/x/.cache/agent".into()],
             trusted_kinds: vec![],
-            sockets: vec!["/home/x/.agora/m".into()],
         };
         let sb = p.profile("k", None, &wt, "/home/x/bin/agent").unwrap();
         // `worktree` leaves the network alone; `worktree-offline` asks for it to be cut, keeping the node's sockets.
@@ -314,7 +310,7 @@ mod tests {
         }
         .profile("k", None, &wt, "/home/x/bin/agent")
         .unwrap();
-        assert!(offline.offline && offline.sockets == [PathBuf::from("/home/x/.agora/m")]);
+        assert!(offline.offline && offline.sockets.is_empty());
         assert_eq!(offline.write, sb.write);
         assert!(sb.write.contains(&wt));
         assert!(sb.write.contains(&PathBuf::from("/home/x/.cache/agent")));
