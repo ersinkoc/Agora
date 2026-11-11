@@ -55,6 +55,31 @@ Tracking issue: #235.
    an agent. Starting a second agent in the same directory must not overwrite the first agent's integration configuration or
    overwrite existing user configuration. No agent-specific logic belongs in core crates.
 
+### Optional portable project identity (proposal for review)
+
+The maintainer also suggested storing a project identifier in repositories to associate the same project across machines.
+Use the neutral field name `project_id`, independent of the final product name. It identifies the logical project, not a
+machine, folder, branch or agent session.
+
+- Offer a one-time, random project ID in dedicated project metadata when the owner explicitly chooses to create it. A Git
+  repository can commit that metadata so ordinary clones carry the same ID. Do not create or commit it automatically on launch.
+  The metadata filename is not fixed by this draft.
+- Keep the current normalized remote/root-commit discovery as the zero-configuration fallback when no explicit ID exists.
+  Keep detected Git identity separate from the optional logical project ID; do not rewrite published IDs in place. Existing
+  bindings need explicit association/migration through the additive protocol, with the owner's confirmation.
+- The hub groups an owner's confirmed checkouts under the same logical project. Each retains its node, canonical path,
+  branch, commit, local edits and sessions. The same ID does not imply identical file contents; Git or another explicit
+  synchronization mechanism transfers changes between machines.
+- Copying a repository into an independent project or fork offers a new project ID. A changed ID or a conflict with an existing
+  binding must not silently merge or split projects. A repository-supplied ID is untrusted metadata, never authorization to
+  access another owner's project, join its mesh or widen a device's project limits.
+- Non-Git folders may be explicitly associated with a logical project by the owner while retaining their lack of Git history
+  and per-agent Git attribution. A standalone folder need not create project metadata at all.
+
+For example, one logical project can contain an Ubuntu checkout at `/srv/shop`, a macOS checkout at
+`/Users/owner/code/shop`, and a Windows checkout at `D:\\code\\shop`, all with different agent sessions and independently
+selected working directories. A worktree is not required for any of them.
+
 ## Acceptance criteria
 
 - A fake terminal agent reports the exact selected cwd, including a nested folder and a folder whose path contains spaces.
@@ -66,6 +91,8 @@ Tracking issue: #235.
 - A new directory is selectable while the node remains running. Invalid, inaccessible, out-of-policy and substituted paths are
   refused on the node. A member cannot escape the projects granted to that member.
 - Published protocol fixtures remain unchanged. Old/new-client capability behavior is covered by integration tests.
+- Portable project IDs, when chosen, group confirmed clones across nodes without merging their paths or sessions. Repositories
+  without metadata retain automatic discovery; copied IDs and changed metadata cannot bypass owner/project authorization.
 - The web flow is verified in both themes, with English/Turkish strings in Fluent. Platform CI checks cwd on all three systems.
 
 ## Consequences and rollout
