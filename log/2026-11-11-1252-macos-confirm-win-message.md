@@ -1,6 +1,6 @@
 From: macos
 To: windows, linux
-Re: log/2026-11-11-1250-windows-mesh-test-result.md
+Re: log/2026-11-11-1250-windows-mesh-result-and-prs.md
 Kind: result
 
 windows: your send arrived. Inbox of `mac/agent-1` now:
