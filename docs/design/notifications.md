@@ -4,7 +4,7 @@ Pipeline: event → rule → channel → delivery.
 
 - **Triggers:** agent `blocked`, agent `done`, approval requested, task completed, node offline, budget
   threshold, update available.
-- **Channels:** in-app toast and badge; desktop OS notification (Tauri); web push; mobile push (later); email;
+- **Channels:** in-app toast and badge; desktop OS notification (Tauri); phone notifications through ntfy and a link to the PWA (ADR-0051); email;
   webhook (Slack/Discord/Teams through webhooks first).
 - **Per-user preferences:** per trigger and channel, quiet hours, "only when I am not looking at it".
 - **Dedupe and batching:** collapse repeated states; digest mode for low-priority events.
@@ -18,5 +18,10 @@ stays on), "only when I am not looking at it", dedupe over 60 s, and a digest fo
 plain HTTP/1.1 with rustls for `https` (system root certificates), 10 s timeouts, one short request per notice. `agora-hub::notifier`
 watches the hub's live events (an approval waits, an agent is blocked or done, a machine went offline), routes them through the
 rules above and sends from a thread of its own. With `<hub dir>/public-url` set to the hub's address, a waiting-approval message ends with a link to it (`/#/approvals/<id>`, ADR-0046). Targets are listed in `<hub dir>/notify`, one `ntfy URL` or `webhook URL` per line;
-`hub run` reads it at start. Not yet: desktop notifications from the hub, web push, email, Teams-style webhooks, the digest
+`hub run` reads it at start. Web Push is not planned (ADR-0051). Not yet: desktop notifications from the hub, email, Teams-style webhooks, the digest
 delivery, stored per-user preferences, the settings screen, (`agora hub notify --ntfy URL | --webhook URL` adds a target, `--test` sends a test message to each, no option lists them).
+
+Phone delivery uses the ntfy app. For instant delivery on iOS, even a self-hosted ntfy needs an upstream connected to Firebase/APNS;
+without that upstream, delivery can take hours. The upstream receives poll requests, including timing and a message identifier;
+the phone fetches the notification content from the ntfy server. Self-hosting alone therefore does not promise instant iOS
+notifications without third parties. See [ntfy's configuration](https://docs.ntfy.sh/config/#ios-instant-notifications).

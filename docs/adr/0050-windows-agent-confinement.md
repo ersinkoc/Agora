@@ -2,6 +2,30 @@
 Status: Proposed
 Date: 2026-11-11
 
+Maintainer review (2026-11-11): changes requested. The decision supplied in the working session was
+"0050 değişiklik, 0051 kabul". This ADR remains Proposed; do not implement it until the revised design is accepted.
+
+## Required revision
+
+The proposed Low token protects higher-integrity objects from writes. It does **not** select a set of writable paths:
+any other Low-labelled object allowed by the user's DACL can still be writable, including another agent's Low-labelled
+workspace. Reads, including node credentials, remain open. The claims below that writes are confined to the worktree are
+therefore not an enforceable replacement for ADR-0047's `worktree` policy.
+
+Before acceptance, revise the design to either enforce the existing path and read restrictions, or propose a separately
+named, explicitly weaker policy with its own consent and threat-model treatment. The existing `worktree` and
+`worktree-offline` settings must keep refusing startup on Windows until their stated restrictions can be enforced.
+Specify how per-agent Git metadata is separated from the checkout's common Git directory: lowering the common directory's
+integrity would expose other worktrees. Include the ownership, inheritance and restoration of labels, failure cleanup,
+and inherited writable handles in that design.
+
+Acceptance evidence must include real Windows tests for writes inside and outside the allowed paths, a second agent's
+Low-labelled workspace, protected node files, child processes and reparse points. Merely refusing a Medium-labelled file
+does not prove path confinement. This follows the distinction between integrity checks and DACL checks in
+[Microsoft's MIC documentation](https://learn.microsoft.com/en-us/windows/win32/secauthz/mandatory-integrity-control).
+
+The original proposal is retained below for review; it is not an accepted decision.
+
 ## Context
 ADR-0047 gave agents OS-level confinement and named, for Windows, "a restricted token with the job object that already exists".
 Linux (Landlock) and macOS (Seatbelt) can say "this process may write only below these folders". Windows has no equivalent in a
@@ -12,7 +36,7 @@ no ACL entry for. Both need the folders the agent may use to be prepared: a mand
 then Windows machines answer `agent.sandbox_unavailable` and start nothing under a sandbox policy, which is safe but means a Windows
 owner cannot use the feature.
 
-## Decision
+## Original proposed decision (changes requested)
 1. **Use a low-integrity token (not an AppContainer).** The node starts the agent's process (ConPTY or adapter) with a token whose
    integrity level is Low, inside the job object ADR-0045 already creates. Writes outside Low-labelled folders fail; so do writes
    to the registry's user hive and to other users' processes. Programs that expect a medium token (many CLIs read `%USERPROFILE%`
