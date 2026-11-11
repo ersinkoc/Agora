@@ -1,7 +1,9 @@
 # Desktop client
 
 A thin Tauri shell around the hub's page (ADR-0048). It asks for a hub address and the hub's CA certificate once, shows the
-certificate's fingerprint for the user to compare with `agora hub fingerprint`, and then opens the hub's own page. The connection goes
+certificate's fingerprint for the user to compare with `agora hub fingerprint`, makes one TLS handshake with the hub trusting only
+that certificate (a hub that does not answer or is not signed by it is reported on the connect screen and not remembered), and then
+opens the hub's own page. The connection goes
 through a loopback tunnel (`crates/agora-desktop-tunnel`) that trusts only that CA. The hub's page gets no access to the shell.
 
 This crate is its own Cargo workspace so that Tauri and its webview crates never enter the node, the hub or the main build.
