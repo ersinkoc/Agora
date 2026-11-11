@@ -14,6 +14,7 @@ import type { CommitItem } from '../net/history';
 import type { WorkspaceFiles } from '../net/files';
 import { AgentAddress } from './AgentAddress';
 import { StateBadge } from './StateBadge';
+import { ProjectBoard } from './ProjectBoard';
 
 const TerminalView = lazy(() => import('../terminal/TerminalView').then((m) => ({ default: m.TerminalView })));
 
@@ -247,24 +248,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
           {boards.length > 0 && (
             <section className="grid gap-2" aria-label={t('board-title')}>
               <h2>{t('board-title')}</h2>
-              {boards.map((b) => (
-                <div key={b.project} className="grid gap-1.5 rounded-s border border-line bg-surface-0 p-2.5">
-                  <strong className="text-xs">{b.project}</strong>
-                  <ul className="m-0 grid list-none gap-1 p-0 text-[13px]">
-                    {b.tasks.map((task) => (
-                      <li key={task.id} className="flex items-baseline justify-between gap-2">
-                        <span className={`min-w-0 break-words ${task.status === 'done' ? 'text-muted line-through' : ''}`}>{task.title}</span>
-                        <span className="shrink-0 text-xs text-muted">{task.status === 'open' ? t('board-open') : task.status === 'done' ? t('board-done') : task.owner}</span>
-                      </li>
-                    ))}
-                  </ul>
-                  {b.leases.length > 0 && (
-                    <ul className="m-0 grid list-none gap-1 border-t border-line p-0 pt-1.5 text-xs text-muted">
-                      {b.leases.map((l) => <li key={`${l.holder}${l.path}`} className="flex justify-between gap-2"><span className="truncate font-mono">{l.path}</span><span className="shrink-0">{l.holder}</span></li>)}
-                    </ul>
-                  )}
-                </div>
-              ))}
+              {boards.map(b => <ProjectBoard key={b.projectId} board={b} />)}
             </section>
           )}
 

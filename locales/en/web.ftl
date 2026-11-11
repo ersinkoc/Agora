@@ -230,3 +230,6 @@ address-copied = Copied
 address-copy-failed = Copy failed. Select the address and copy it manually.
 machine-identity = Machine ID: { $id }
 machine-name-id = { $name } · { $id }
+
+board-project-identity = Project identity
+board-project-folders = Machines and folders ({ $count })

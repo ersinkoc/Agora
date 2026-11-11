@@ -230,3 +230,6 @@ address-copied = Kopyalandı
 address-copy-failed = Kopyalanamadı. Adresi seçip elle kopyalayın.
 machine-identity = Makine kimliği: { $id }
 machine-name-id = { $name } · { $id }
+
+board-project-identity = Proje kimliği
+board-project-folders = Makineler ve klasörler ({ $count })
