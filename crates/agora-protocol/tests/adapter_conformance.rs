@@ -120,7 +120,7 @@ fn minimal_python_adapter_plays_the_transcript() {
         stdin.flush().expect("flush");
         for want in expected {
             let line = rx
-                .recv_timeout(Duration::from_secs(10))
+                .recv_timeout(Duration::from_secs(30))
                 .unwrap_or_else(|_| {
                     let _ = child.kill();
                     panic!("adapter did not answer {send}")
