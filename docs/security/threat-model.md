@@ -99,3 +99,9 @@ device limits. It is a size-limited regular JSON file with a validated UUID. Pre
 persisted and cannot silently switch after repository edits; an explicit signed owner confirmation is needed. Hub project
 filters group confirmed logical IDs while preserving each machine and path; role/project filters still apply to workspace
 snapshots, status events and file queries. Copying this metadata transfers identity, not source files or authorization.
+
+## Open gap: unix sockets under confinement
+
+A confined agent (`sandbox = worktree`) can connect to any unix socket it can name. A tmux server socket or `SSH_AUTH_SOCK` lets it run a command or use
+credentials outside the confinement. Landlock covers this only from ABI 9; Seatbelt needs an explicit rule. Tracked as L21 in
+`docs/backlog/lan-test-findings.md`; `worktree-offline` on macOS already allows only the agent's own mesh socket.

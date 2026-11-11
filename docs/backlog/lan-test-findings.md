@@ -23,3 +23,13 @@ branch (`docs/fordevs/`). Each row is something the run showed that no CI run ha
 | B4 | A node that crashes and restarts reuses its agent ids (`agent-1`), and the hub board still showed the dead agent's claim as the new agent's | fixed: the hub gives back the tasks and leases of a node's agents when the node announces a new process start |
 | B5 | `lease.held` carries an empty `expires_at` | fixed: the error carries the conflicting lease's end in ms, as the file-write error already did |
 
+
+## Confined agents can reach unix sockets (2026-11-11)
+
+- **L21** Under `sandbox = worktree` (and the first draft of `worktree-offline`) a confined agent can **connect to any unix socket** it can name.
+  Measured on Linux (kernel 7.0, Landlock ABI 8): a confined process connected to a socket outside every allowed folder. Landlock only governs
+  path-based socket connects from ABI 9 (`LANDLOCK_ACCESS_FS_RESOLVE_UNIX`); the node uses ABI 1 rights. Seatbelt on macOS allows them too unless a rule
+  says otherwise. Consequence: a tmux server socket (`tmux -S … new-window 'cmd'`) or the user's `SSH_AUTH_SOCK` gives the agent a command or
+  credentials outside the confinement. Needs a decision (maintainer): on macOS close it like `worktree-offline` does (own mesh socket and private temp only;
+  `git push` over SSH then needs the owner to list the agent socket's folder); on Linux use `RESOLVE_UNIX` when the kernel has it and say plainly on older
+  kernels that sockets are not confined. Until then the threat model lists it as an open gap.
