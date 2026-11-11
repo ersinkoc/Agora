@@ -68,12 +68,15 @@ made locally before stay local. So when `nb` comes online while `na` holds a loc
 1. When a project gains its second online node with a checkout, the hub sends each of those nodes a `BoardJoin { project_id }` command (hub → node, on the
    path `MeshPost` delivery uses; a new message, ADR-0006). Until every one of them has answered, or 5 seconds have passed, the hub answers lease and claim
    calls for that project with `board.unavailable` (retryable), so nothing is granted against work it has not seen.
-2. A node answering `BoardJoin` moves its unfinished local work for that project to the board, acting for each owner agent as for any board call: every live
-   lease is re-acquired with its remaining TTL, every open or claimed task is created (and claimed by its owner). Done tasks stay in the local history.
-   The board answers with its own ids; the node sends each owner agent one mesh message naming the old and new ids (`t-1 → t-4`), and from then on uses
-   the board for the project (Amendment A keeps it there while work is unfinished).
+2. A node answers `BoardJoin` with its unfinished local work for that project (`BoardJoinResult`: live leases with their end, open and claimed tasks
+   with their owner) and stops keeping it; done tasks stay in the local history. The hub, as the board's single writer, puts it on the board: every lease
+   for its holder with its remaining time, every task created anew and claimed again by its owner. The hub tells each owner agent the new id in one mesh
+   message from `hub/board` (`{"board":"task_moved","from":"t-1","to":"t-4"}`), and the node uses the board for the project from then on (Amendment A
+   keeps it there while work is unfinished). Carrying the work in the answer, rather than as board calls made for the agents, means nothing the node
+   sends during the wait can be mistaken for a new grant.
 3. A lease the board refuses (another node's agent holds an overlapping path) ends on the node, and both holders get a message naming the path and the
-   other holder; there is no silent second holder. A node that answers after the 5 seconds still moves its work; its conflicting leases end the same way.
+   other holder (`lease_refused` / `lease_conflict`); there is no silent second holder. `BoardJoin` goes only to nodes that offer the capability
+   `board.join`; an older node is not asked and not waited for. A node that answers after the 5 seconds still moves its work; its conflicting leases end the same way.
 
 **Alternatives.** (a) Separate id spaces only (board ids prefixed): removes the id mix-up but not the double lease. (b) Every project of a connected node
 uses the hub's board, one node or many, and the local broker only while the hub is unreachable: no transition while connected, but a single-node project's
