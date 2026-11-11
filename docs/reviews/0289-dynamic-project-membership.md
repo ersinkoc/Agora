@@ -59,26 +59,22 @@ With the usual built binary/fake-agent/web client and Playwright/Chromium prereq
 TMPDIR=/tmp PW_DIR=/path/to/playwright node scripts/e2e-dynamic-projects.mjs
 ```
 
-## Integration with #281
+## Production integration with #281
 
-This main-based fix covers existing eligibility. #281 adds transition discovery for moving earlier
-local work; its project enumeration must also use `project_memberships(view)` rather than checkouts
-alone, and revisit previously known projects when their last current fact disappears. Otherwise
-changing both folders' identities and exiting their old agents leaves stale members in the join
-cache; when the old project returns, one of its current nodes can be skipped.
+After #281 merged, the prepared integration was folded into `Boards::membership` itself. Discovery
+enumerates `project_memberships(view)` and revisits previously known projects when their last current
+fact disappears. Changing both folders' identities and exiting their old agents therefore clears the
+old membership; returning to that project asks every necessary current node to join.
 
-[The integration hunk](proofs/0289-board-join-membership.patch) applies to #281 at `be3438f`
-after this helper is present. It includes previous membership keys in discovery. The earlier
-helper-only hunk fails the project-disappearance regression; the updated hunk passes it.
-[Two integration tests](proofs/0289-board-join-membership.rs) can be installed as an agora-hub
-integration test when combining the branches. A temporary archive of #281 plus this helper/hunk
-passes those two tests, all five main regressions and the existing board tests. The patch also
-passes `git apply --check`. Ownership and the required change are coordinated on #281; its
-production branch and transfer/schema/node implementation are unchanged by this PR.
+The two integration regressions now live in
+[join_membership.rs](../../crates/agora-hub/tests/join_membership.rs) and run in the normal Cargo suite.
+They cover selected/session-only project discovery and a disappearing/reappearing project. The old
+helper-only discovery failed the latter case. All seven membership regressions and the existing board
+tests pass on the integrated source. The obsolete standalone patch and proof copies were removed.
 
-Moving work made before the second project member joins remains #281/B6's responsibility, including
-the separately reviewed persistence and transfer-limit defects. This change does not claim to fix
-those transfer defects or the existing node-side ten-second negative-cache transition window.
+This completes #289's eligibility and transition-discovery scope. Transfer storage restoration is
+tracked separately in #297; node-side transfer bounds were handled in #293. This PR changes no
+handover payloads, import limits or node transfer implementation.
 
 The active local Claude session remains running. The installed preview stays at its previous build;
 this fix is prepared for independent review and maintainer merge without restarting live services.

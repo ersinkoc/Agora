@@ -1,4 +1,4 @@
-// Integration regressions for #281 plus #291: copy into agora-hub/tests only in the combined source tree.
+//! BoardJoin discovery for selected project folders and changing project lifecycles.
 #![allow(clippy::unwrap_used)]
 use agora_hub::{board::Boards, projection::View};
 use agora_protocol::v1::{self as v1, event::Body};
