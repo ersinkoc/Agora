@@ -183,3 +183,25 @@ fn pathological_regexes_cannot_hang_the_node() {
     let _ = Detector::new(&m).detect(&t);
     assert!(start.elapsed() < std::time::Duration::from_secs(2));
 }
+
+#[test]
+fn a_phrase_the_agent_wraps_across_lines_on_a_narrow_screen_is_still_found() {
+    // A terminal user interface that wraps its own text puts the phrase on two rows: no row holds it whole. A narrow window must not
+    // turn "waiting for you" into Idle (the lower-priority prompt rule matches the `❯` of the first option).
+    let manifest = Manifest::parse(
+        "kind = \"wrap\"\ndisplay_name = \"Wrap\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"x\"]\n\
+         [[rules]]\nid = \"trust\"\nstate = \"blocked\"\npriority = 950\nregion = \"bottom_non_empty_lines(12)\"\n\
+         all = [{ contains = \"Yes, I trust this folder\" }]\n\
+         [[rules]]\nid = \"prompt\"\nstate = \"idle\"\npriority = 100\nregion = \"bottom_non_empty_lines(12)\"\n\
+         all = [{ regex = \"^\\\\s*❯\" }]\n",
+    )
+    .unwrap();
+    let detector = Detector::new(&manifest);
+    let wide = term_with("❯ No, exit\r\n  Yes, I trust this folder\r\n".as_bytes());
+    let narrow = term_with("❯ No, exit\r\n  Yes, I trust this\r\n  folder\r\n".as_bytes());
+    let other = term_with("❯ No, exit\r\n  Yes, I trust this\r\n  place\r\n".as_bytes());
+    assert_eq!(detector.detect(&wide).unwrap().rule_id, "trust");
+    assert_eq!(detector.detect(&narrow).unwrap().rule_id, "trust");
+    // Only whitespace is collapsed: different words still do not match.
+    assert_eq!(detector.detect(&other).unwrap().rule_id, "prompt");
+}

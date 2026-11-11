@@ -85,6 +85,9 @@ Engine details (`agora-adapters`):
   positive condition; a rule with only `not` is rejected.
 - `bottom_lines(n)` is the literal bottom `n` rows of the screen grid (agents that draw at the bottom fill it);
   `bottom_non_empty_lines(n)` is the last `n` rows that contain text. Neither ever includes scrollback.
+- A `contains` phrase of more than one word also matches when the region wraps it: runs of whitespace, line breaks included, count as one
+  space (so "Yes, I trust this folder" is found when a narrow terminal puts "folder" on the next row). Only whitespace is collapsed;
+  regexes still see the rows as they are.
 - Regexes match per line (`^`/`$` are line anchors), use a linear-time engine (no catastrophic backtracking),
   and are size-limited.
 - Ties in priority are broken by file order. No matching rule means "no opinion", not `idle`.

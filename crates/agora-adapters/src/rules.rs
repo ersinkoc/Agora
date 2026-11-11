@@ -64,8 +64,31 @@ pub(crate) fn compile(pattern: &str) -> Result<Regex, regex::Error> {
         .build()
 }
 
+/// The text of a region, and (made only when a rule needs it) the same text with every run of whitespace, line breaks included, as
+/// one space. A phrase a terminal user interface wraps at a word ("Yes, I trust this" / "folder" on a narrow screen) is then still
+/// found: a wrong Idle is the dangerous direction, an agent waiting for the user would look free.
+struct RegionText {
+    raw: String,
+    collapsed: std::cell::OnceCell<String>,
+}
+
+impl RegionText {
+    fn new(raw: String) -> Self {
+        Self {
+            raw,
+            collapsed: std::cell::OnceCell::new(),
+        }
+    }
+
+    fn collapsed(&self) -> &str {
+        self.collapsed
+            .get_or_init(|| self.raw.split_whitespace().collect::<Vec<_>>().join(" "))
+    }
+}
+
 enum Matcher {
-    Contains(String),
+    /// The phrase, and the same phrase with its whitespace collapsed when it holds more than one word.
+    Contains(String, Option<String>),
     Regex(Regex),
 }
 
@@ -76,16 +99,25 @@ impl Matcher {
 
     fn of(contains: Option<&str>, regex: Option<&str>) -> Option<Self> {
         match (contains, regex) {
-            (Some(s), None) => Some(Self::Contains(s.to_string())),
+            (Some(s), None) => {
+                let words: Vec<&str> = s.split_whitespace().collect();
+                let collapsed = (words.len() > 1).then(|| words.join(" "));
+                Some(Self::Contains(s.to_string(), collapsed))
+            }
             (None, Some(r)) => compile(r).ok().map(Self::Regex),
             _ => None,
         }
     }
 
-    fn is_match(&self, text: &str) -> bool {
+    fn is_match(&self, text: &RegionText) -> bool {
         match self {
-            Self::Contains(s) => text.contains(s.as_str()),
-            Self::Regex(r) => r.is_match(text),
+            Self::Contains(s, collapsed) => {
+                text.raw.contains(s.as_str())
+                    || collapsed
+                        .as_deref()
+                        .is_some_and(|c| text.collapsed().contains(c))
+            }
+            Self::Regex(r) => r.is_match(&text.raw),
         }
     }
 }
@@ -102,7 +134,7 @@ struct CompiledRule {
 }
 
 impl CompiledRule {
-    fn matches(&self, text: &str) -> bool {
+    fn matches(&self, text: &RegionText) -> bool {
         self.own.as_ref().is_none_or(|m| m.is_match(text))
             && self.all.iter().all(|m| m.is_match(text))
             && (self.any.is_empty() || self.any.iter().any(|m| m.is_match(text)))
@@ -142,12 +174,12 @@ impl Detector {
     /// The state the highest-priority matching rule reports, or `None` when no rule matches (the caller keeps
     /// the previous state or falls back to `Unknown`). Region text is built once per distinct region.
     pub fn detect(&self, term: &dyn Terminal) -> Option<Detection> {
-        let mut cache: Vec<(Region, String)> = Vec::new();
+        let mut cache: Vec<(Region, RegionText)> = Vec::new();
         for rule in &self.rules {
             let idx = match cache.iter().position(|(r, _)| *r == rule.region) {
                 Some(i) => i,
                 None => {
-                    cache.push((rule.region, rule.region.text(term)));
+                    cache.push((rule.region, RegionText::new(rule.region.text(term))));
                     cache.len() - 1
                 }
             };
