@@ -23,3 +23,13 @@ branch (`docs/fordevs/`). Each row is something the run showed that no CI run ha
 | B4 | A node that crashes and restarts reuses its agent ids (`agent-1`), and the hub board still showed the dead agent's claim as the new agent's | fixed: the hub gives back the tasks and leases of a node's agents when the node announces a new process start |
 | B5 | `lease.held` carries an empty `expires_at` | fixed: the error carries the conflicting lease's end in ms, as the file-write error already did |
 
+
+## Windows web window pass (2026-11-11)
+
+- **L14** The `win` node is shown under the PC's host name, not the node id. It puts a personal name in every screenshot.
+- **L15** Two boards with the same display name (different `origin` spellings) cannot be told apart in the UI.
+- **L16** The audit page cannot tell sessions apart (every row says "owner"); a device column would answer "who".
+- **L17** Audit rows "Watched a terminal … Sent, no answer yet" stay unresolved after a node restart.
+- **L18** "Recent messages" says agents have not written to each other yet after a hub restart (mesh history is not re-read).
+- **L19** The web app takes its language only from `navigator.language`; there is no in-app switch, so Turkish needs a `tr-TR` browser.
+- **L20** A refused or abandoned start leaves its `agent/<name>` branch; an agent killed from outside stays `running`.
