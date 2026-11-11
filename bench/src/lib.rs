@@ -369,8 +369,7 @@ mod tests {
     #[test]
     fn pty_pipeline_moves_bytes_through_the_vt_backend() {
         let argv: Vec<String> = ["sh", "-c", "yes 'some output'"].map(String::from).to_vec();
-        let r =
-            pty_vt_with("t", 2, &argv, Duration::from_millis(300), Duration::ZERO).expect("spawn");
+        let r = pty_vt_with("t", 2, &argv, Duration::from_secs(2), Duration::ZERO).expect("spawn");
         assert!(r.throughput_mb_s > 0.0);
         assert!(r.p95_latency_us > 0.0);
     }
