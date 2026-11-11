@@ -3,7 +3,7 @@
 cli-usage =
     Kullanım:
       agora node run [--socket YOL] [--manifests DİZİN] [--project YOL]... [--data DİZİN] [--worktrees DİZİN]
-      agora agent start TÜR [--project AD] [--name AD] [--socket YOL]
+      agora agent start TÜR [--cwd YOL] [--worktree] [--project AD] [--name AD] [--socket YOL]
       agora agent stop AJAN_KİMLİĞİ [--socket YOL]
       agora agent prompt AJAN_KİMLİĞİ METİN... [--socket YOL]
       agora agent list [--socket YOL]
@@ -133,3 +133,5 @@ cli-adapter-current = { $name } { $version } kayıt defterindeki en yeni sürüm
 cli-adapter-none = Kurulu bağdaştırıcı yok.
 cli-adapter-listed = { $name } { $version } (yayımcı { $publisher })
 cli-adapter-listed-revoked = { $name } { $version } (yayımcı { $publisher }, en yeni dizinde iptal edilmiş: kaldırın ya da yeni bir yayımcı bulun)
+
+cli-project-identity = Proje kimliği: { $id } (klasör: { $path }). .agent-project.json dosyasını projenin diğer kopyalarına taşıyın.

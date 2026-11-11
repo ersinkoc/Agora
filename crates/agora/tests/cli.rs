@@ -106,7 +106,10 @@ fn start_attach_stop_from_the_command_line() {
     let _node = start_node(&s);
 
     // Start an agent in its own worktree.
-    let (code, out, err) = cli(&s, &["agent", "start", "shell", "--project", "demo"]);
+    let (code, out, err) = cli(
+        &s,
+        &["agent", "start", "shell", "--project", "demo", "--worktree"],
+    );
     assert_eq!(code, 0, "stderr: {err}");
     assert!(out.starts_with("Started agent agent-1 in "), "{out}");
     let worktree = out.trim().rsplit(" in ").next().unwrap().to_string();
@@ -199,7 +202,10 @@ fn errors_are_rendered_from_codes_and_exit_nonzero() {
     let (code, out, _) = cli(&s, &["agent", "list"]);
     assert_eq!(code, 0);
     assert_eq!(out.trim(), "This node has no agents.");
-    let (code, _, err) = cli(&s, &["agent", "start", "shell", "--project", "demo"]);
+    let (code, _, err) = cli(
+        &s,
+        &["agent", "start", "shell", "--project", "demo", "--worktree"],
+    );
     assert_eq!(code, 0, "{err}");
     let (code, out, _) = cli(&s, &["agent", "list"]);
     assert_eq!(code, 0);
@@ -338,7 +344,10 @@ fn mesh_stdio_is_an_mcp_server_for_one_agent() {
     }
     let s = setup("mesh-stdio");
     let _node = start_node(&s);
-    let (code, out, err) = cli(&s, &["agent", "start", "shell", "--project", "demo"]);
+    let (code, out, err) = cli(
+        &s,
+        &["agent", "start", "shell", "--project", "demo", "--worktree"],
+    );
     assert_eq!(code, 0, "{out}{err}");
     // This is the command an agent's MCP configuration would run.
     let socket = s.home.join("m").join("agent-1.sock");
@@ -389,7 +398,17 @@ fn the_injected_mcp_config_launches_a_working_mesh_server() {
     )
     .unwrap();
     let _node = start_node(&s);
-    let (code, out, err) = cli(&s, &["agent", "start", "mcp-shell", "--project", "demo"]);
+    let (code, out, err) = cli(
+        &s,
+        &[
+            "agent",
+            "start",
+            "mcp-shell",
+            "--project",
+            "demo",
+            "--worktree",
+        ],
+    );
     assert_eq!(code, 0, "{out}{err}");
     let worktree = out.trim().rsplit(" in ").next().unwrap().to_string();
     let cfg: serde_json::Value = serde_json::from_str(

@@ -3,7 +3,8 @@
 cli-usage =
     Usage:
       agora node run [--socket PATH] [--manifests DIR] [--project PATH]... [--data DIR] [--worktrees DIR]
-      agora agent start KIND [--project NAME] [--name NAME] [--socket PATH]
+      agora agent start KIND [--cwd PATH] [--worktree] [--project NAME] [--name NAME] [--accept-project-id-change] [--socket PATH]
+      agora project init [--cwd PATH] [--socket PATH]
       agora agent stop AGENT_ID [--socket PATH]
       agora agent prompt AGENT_ID TEXT... [--socket PATH]
       agora agent list [--socket PATH]
@@ -133,3 +134,5 @@ cli-adapter-current = { $name } { $version } is already the newest version in th
 cli-adapter-none = No adapters are installed.
 cli-adapter-listed = { $name } { $version } (publisher { $publisher })
 cli-adapter-listed-revoked = { $name } { $version } (publisher { $publisher }, revoked in the newest registry index: remove it or find a new publisher)
+
+cli-project-identity = Project identity: { $id } (folder: { $path }). Share .agent-project.json with the other copies of this project.
