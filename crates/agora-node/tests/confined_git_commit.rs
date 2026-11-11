@@ -11,7 +11,7 @@ use agora_adapters::Manifest;
 use agora_core::NodeId;
 use agora_node::sandbox::{Level, SandboxPolicy};
 use agora_node::supervisor::{
-    NodeLimits, RestartPolicy, StartRequest, Supervisor, SupervisorConfig,
+    NodeLimits, RestartPolicy, StartRequest, Supervisor, SupervisorConfig, SupervisorError,
 };
 use agora_node::terminal::TerminalOptions;
 
@@ -64,6 +64,9 @@ fn a_confined_agent_commits_in_its_own_worktree() {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
         .join(format!("agora-confined-commit-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
+    // The target folder lies inside this repository's own checkout: git (the test's, the supervisor's and the agent's) must never
+    // search up into it.
+    std::env::set_var("GIT_CEILING_DIRECTORIES", env!("CARGO_TARGET_TMPDIR"));
     let repo = dir.join("repo");
     std::fs::create_dir_all(&repo).unwrap();
     git(&repo, &["init", "-q", "-b", "main"]);
@@ -97,7 +100,38 @@ fn a_confined_agent_commits_in_its_own_worktree() {
         name: "a".into(),
         base: None,
     };
-    sup.start(&req, Instant::now()).unwrap();
+    match sup.start(&req, Instant::now()) {
+        Ok(_) => {}
+        // A target folder where every user may create files (the inherited `Users` entries of a volume root, as on CI runners) is
+        // refused before start (ADR-0050 Amendment B, decision 4), and the refused start leaves no worktree. Do what the recipe says
+        // (keep only the user and SYSTEM) and start again.
+        Err(SupervisorError::SandboxRefused(_, _, "broad_write_grant")) => {
+            let who = Command::new("whoami").output().unwrap();
+            let who = String::from_utf8_lossy(&who.stdout).trim().to_string();
+            // On the folder only: Windows passes the new inherited entries down to everything below, which holds inherited ones only.
+            let out = Command::new("icacls")
+                .arg(&dir)
+                .args(["/inheritance:r", "/grant:r"])
+                .arg(format!("{who}:(OI)(CI)F"))
+                .args(["/grant:r", "*S-1-5-18:(OI)(CI)F", "/Q"])
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "icacls: {out:?}");
+            // The test repository must still be the one git finds (never a checkout above it).
+            let top = git(&repo, &["rev-parse", "--show-toplevel"]);
+            assert!(
+                top.trim().ends_with(&format!(
+                    "agora-confined-commit-{}/repo",
+                    std::process::id()
+                )),
+                "git finds {top}"
+            );
+            // The refused start removed its worktree but kept the branch it created (as every abandoned start does).
+            git(&repo, &["branch", "-D", "agent/a"]);
+            sup.start(&req, Instant::now()).unwrap();
+        }
+        Err(e) => panic!("start: {e:?}"),
+    }
 
     let worktree = dir.join("worktrees").join("a");
     let done = worktree.join("committed.txt");
@@ -136,5 +170,14 @@ fn a_confined_agent_commits_in_its_own_worktree() {
         .map(|p| p.display().to_string())
         .collect();
     assert!(labelled.is_empty(), "left labelled: {labelled:?}");
+    // git makes its objects read-only, and `remove_dir_all` cannot delete read-only files on Windows.
+    for p in walk(&dir) {
+        if let Ok(meta) = std::fs::metadata(&p) {
+            let mut perm = meta.permissions();
+            #[allow(clippy::permissions_set_readonly_false)]
+            perm.set_readonly(false);
+            let _ = std::fs::set_permissions(&p, perm);
+        }
+    }
     let _ = std::fs::remove_dir_all(dir);
 }

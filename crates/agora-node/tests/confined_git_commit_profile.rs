@@ -135,5 +135,14 @@ fn a_confined_agent_commits_in_a_checkout_under_the_user_profile() {
         .map(|p| p.display().to_string())
         .collect();
     assert!(labelled.is_empty(), "left labelled: {labelled:?}");
+    // git makes its objects read-only, and `remove_dir_all` cannot delete read-only files on Windows.
+    for p in walk(&dir) {
+        if let Ok(meta) = std::fs::metadata(&p) {
+            let mut perm = meta.permissions();
+            #[allow(clippy::permissions_set_readonly_false)]
+            perm.set_readonly(false);
+            let _ = std::fs::set_permissions(&p, perm);
+        }
+    }
     let _ = std::fs::remove_dir_all(dir);
 }
