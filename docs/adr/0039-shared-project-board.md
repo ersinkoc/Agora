@@ -38,7 +38,7 @@ show the board. A handoff is a task owner change plus a message to the receiving
 **What does not change.** The hub still cannot widen node policy or answer approvals; board content is untrusted text like any mesh
 content (clients render it as plain text); `mesh.remote = false` on a node (ADR-0031) also stops it from using shared boards.
 
-## Amendment A (proposed, awaiting the maintainer's decision): the board stays in use while it holds unfinished work
+## Amendment A (accepted by the maintainer 2026-11-11: "0039 Ek A kabul"): the board stays in use while it holds unfinished work
 
 Found by the shared-board test on real nodes (macos machine, `comms`, findings B1 to B3 in `docs/backlog/lan-test-findings.md`). The decision above uses the board "when the project
 has checkouts on two or more online nodes". When one of the two nodes drops, the project stops being shared: the remaining node falls back to its local broker, the hub's tasks vanish
