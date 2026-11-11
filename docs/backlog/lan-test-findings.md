@@ -39,10 +39,16 @@ branch (`docs/fordevs/`). Each row is something the run showed that no CI run ha
     not shown, so it looks as if nothing happened.
 - **L22** A confined agent started in a **selected checkout** (`agent start --project` with no `--worktree` starts in the checkout itself)
   gets the whole checkout writable, `.git` included.
-  - It can therefore write `.git/config` (for example `core.fsmonitor` or `core.hooksPath`) and `.git/hooks/*`.
-  - That code runs **unconfined**, the next time the user runs git in that checkout.
-  - The narrow profile only protects worktrees, where `.git` is a file pointing at the shared folder. That is the case it was written for (ADR-0050).
-  - Open: keep `.git/config` and `.git/hooks` out of the writable set for selected checkouts too, or refuse a confined start there.
+  - It can write `.git/config` and `.git/hooks`. This is already listed as open in T8 and ADR-0052.
+  - New here: the consequence does not wait for the user. The node itself runs `git -C <folder> status` unconfined (`agora-node/src/git.rs`)
+    whenever changes are shown. A `core.fsmonitor` command set in `.git/config` runs during `status`; I checked this with git and the
+    node's environment (`LC_ALL=C`, `GIT_OPTIONAL_LOCKS=0`).
+  - The same may hold for `git diff` drivers (`diff.external`, `textconv`). Not checked.
+  - Windows' narrow profile covers only worktrees (`.git` is a file there). On Linux and macOS, the worktree profile makes the shared git
+    folder writable (`common_git_dir`).
+  - Open:
+    - Run the node's own git with these switched off: `-c core.fsmonitor=`, `--no-ext-diff`, `--no-textconv`.
+    - Keep `.git/config` and `.git/hooks` out of the writable set.
 - **L23** Windows, real Codex under confinement (`AGORA_WINDOWS_CONFINEMENT=1`). It does not run, for three reasons.
   1. The manifest launches `codex` by bare name, and the node adds the program's folder to `read` only for a path. A per-user install is
      unreadable to the restricted token, so the agent shows as started and stops at once, with no reason shown.
