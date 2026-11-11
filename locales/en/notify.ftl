@@ -14,3 +14,8 @@ notify-digest =
     }
 notify-title = Agora
 notify-test = Agora notifications work.
+notify-desktop-approvals =
+    { $count ->
+        [one] An approval is waiting for you.
+       *[other] { $count } approvals are waiting for you.
+    }

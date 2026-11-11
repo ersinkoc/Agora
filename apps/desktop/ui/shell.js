@@ -24,6 +24,8 @@ const t = T[(navigator.language || 'en').toLowerCase().startsWith('tr') ? 'tr' :
 for (const el of document.querySelectorAll('[data-t]')) el.textContent = t[el.dataset.t];
 
 const { invoke } = window.__TAURI__.core;
+// The shell's notification for waiting approvals speaks the system's language (ADR-0048 decision 5).
+invoke('use_locale', { tag: navigator.language || 'en' }).catch(() => {});
 const $ = (id) => document.getElementById(id);
 const fail = (msg) => { $('error').textContent = msg; $('error').hidden = false; };
 // The shell's `connect` answers with a stable code; anything else is the general message.
