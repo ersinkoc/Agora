@@ -32,5 +32,5 @@ branch (`docs/fordevs/`). Each row is something the run showed that no CI run ha
 - **L16** The audit page cannot tell sessions apart (every row says "owner"); a device column would answer "who".
 - **L17** Audit rows "Watched a terminal … Sent, no answer yet" stay unresolved after a node restart.
 - **L18** "Recent messages" says agents have not written to each other yet after a hub restart (mesh history is not re-read).
-- **L19** The web app takes its language only from `navigator.language`; there is no in-app switch, so Turkish needs a `tr-TR` browser.
+- **L19** The web app takes its language only from `navigator.language`; there is no in-app switch, so Turkish needs a `tr-TR` browser. Implemented in #284: sign-in, Home and Focus offer a remembered browser-language override; live terminals and unfinished forms survive switching.
 - **L20** A refused or abandoned start leaves its `agent/<name>` branch; an agent killed from outside stays `running`.

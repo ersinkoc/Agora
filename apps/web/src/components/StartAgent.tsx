@@ -9,6 +9,7 @@ export function StartAgent({ projects, machines, loadKinds, inspect, onStart, on
   machines: readonly MachineModel[];
   loadKinds: (node: string) => Promise<KindChoice[]>;
   inspect: (node: string, path: string, createIdentity: boolean) => Promise<DirectoryInfo>;
+  // A failure is a Fluent message id, translated when rendered so an open form follows a language change.
   onStart: (node: string, info: DirectoryInfo, kind: string, separate: boolean, acceptIdentityChange: boolean) => Promise<string | undefined>;
   onClose: () => void;
 }) {
@@ -35,7 +36,7 @@ export function StartAgent({ projects, machines, loadKinds, inspect, onStart, on
   const choose = async () => {
     setBusy(true); setError(undefined);
     try { setInfo(await inspect(node, path, createIdentity)); }
-    catch (e) { setError(t((e as { code?: string }).code === 'approval.signature_invalid' ? 'approval-not-trusted' : (e as { code?: string }).code === 'protocol.capability_missing' ? 'start-directory-unsupported' : 'start-directory-failed')); }
+    catch (e) { setError((e as { code?: string }).code === 'approval.signature_invalid' ? 'approval-not-trusted' : (e as { code?: string }).code === 'protocol.capability_missing' ? 'start-directory-unsupported' : 'start-directory-failed'); }
     finally { setBusy(false); }
   };
   const go = async () => {
@@ -62,7 +63,7 @@ export function StartAgent({ projects, machines, loadKinds, inspect, onStart, on
       {info.previousProjectId && <label><span><input type="checkbox" checked={acceptIdentityChange} disabled={busy} onChange={e => setAcceptIdentityChange(e.target.checked)} /> {t('start-identity-change')}</span></label>}
       <button className="button button--primary" disabled={busy || !kind || (!!info.previousProjectId && !acceptIdentityChange)} onClick={() => void go()}>{t('start-go')}</button>
     </>}
-    {error && <p role="alert">{error}</p>}
+    {error && <p role="alert">{t(error)}</p>}
     <button className="button" disabled={busy} onClick={onClose}>{t('start-cancel')}</button>
   </section>;
 }

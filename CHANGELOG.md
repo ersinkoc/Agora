@@ -4,6 +4,8 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+### Interface language
+- Choose Türkçe, English or your browser's language on sign-in, Home or a focused agent. The choice is remembered in this browser; switching keeps terminals and unfinished forms open.
 ### Shared board
 - When a project starts being shared by a second machine, the tasks and file leases its first machine kept locally move to the shared board: no file has two holders, and each moved task's owner is told its new id (ADR-0039 amendment B).
 
