@@ -26,7 +26,8 @@ Use a worktree per task (`git worktree add ../agora-worktrees/<slug> -b claude/<
    fingerprint is refused. Native notifications, installers and signing are not done and need the maintainer's Apple account: do not
    attempt signing.
 3. **Node on a Mac**: `agora node enroll` to the Linux hub; start an agent; open its terminal from the window. Check
-   process names and the working-directory column (macOS reads them differently from Linux).
+   process names and working folders once a feature shows them: the macOS readers in `agora-platform` (`process_name`, `process_cwd`,
+   `process_tree`) pass their tests on a real Mac, but no node event or window uses them yet.
 4. **Browsers**: open the web window in Safari and report layout or WebSocket problems with a screenshot (in a pull request under
    `docs/screenshots/`).
 5. **A real agent** (Claude Code, Codex): needs a real account; ask the maintainer first.
