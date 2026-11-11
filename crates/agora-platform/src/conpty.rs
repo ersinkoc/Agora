@@ -319,7 +319,12 @@ fn start_process(config: &PtyConfig, hpc: HPCON) -> io::Result<(Handle, u32, Opt
 
     // PROTOTYPE (option 2): a confined agent gets a second attribute, its AppContainer.
     let caps = confinement.as_ref().map(Confinement::security_capabilities);
-    let count = if caps.is_some() { 2 } else { 1 };
+    // PROTOTYPE (diagnosis): Windows turns strict handle checks on for AppContainer processes; AGORA_PROTO_NOSTRICT=1 asks for
+    // PROCESS_CREATION_MITIGATION_POLICY_STRICT_HANDLE_CHECKS_ALWAYS_OFF (0x2 << 24) to see whether git's 0xC0000008 goes away.
+    let no_strict: u64 = 0x2 << 24;
+    let want_no_strict =
+        caps.is_some() && std::env::var("AGORA_PROTO_NOSTRICT").is_ok_and(|v| v == "1");
+    let count = 1 + u32::from(caps.is_some()) + u32::from(want_no_strict);
     let mut size = 0usize;
     // SAFETY: the documented size query: null list.
     unsafe { InitializeProcThreadAttributeList(null_mut(), count, 0, &mut size) };
@@ -345,6 +350,27 @@ fn start_process(config: &PtyConfig, hpc: HPCON) -> io::Result<(Handle, u32, Opt
         if ok == 0 {
             let e = last_error();
             eprintln!("PROTO-TAG: UpdateProcThreadAttribute(SECURITY_CAPABILITIES) failed: {e}");
+            // SAFETY: initialised above.
+            unsafe { DeleteProcThreadAttributeList(list) };
+            return Err(e);
+        }
+    }
+    if want_no_strict {
+        // SAFETY: `no_strict` lives until the process is started.
+        let ok = unsafe {
+            UpdateProcThreadAttribute(
+                list,
+                0,
+                0x0002_0007, // PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY
+                (&no_strict as *const u64).cast(),
+                std::mem::size_of::<u64>(),
+                null_mut(),
+                null(),
+            )
+        };
+        if ok == 0 {
+            let e = last_error();
+            eprintln!("PROTO-TAG: UpdateProcThreadAttribute(MITIGATION_POLICY) failed: {e}");
             // SAFETY: initialised above.
             unsafe { DeleteProcThreadAttributeList(list) };
             return Err(e);

@@ -436,7 +436,7 @@ fn proto_b_conpty_input_and_resize() {
     });
     let mut pty = spawn(&cfg).unwrap();
     let mut out = Vec::new();
-    let pump = |pty: &Box<dyn agora_platform::Pty>, out: &mut Vec<u8>, ms: u64| {
+    let pump = |pty: &dyn agora_platform::Pty, out: &mut Vec<u8>, ms: u64| {
         let end = Instant::now() + Duration::from_millis(ms);
         while Instant::now() < end {
             if let Ok(b) = pty.output().recv_timeout(Duration::from_millis(50)) {
@@ -444,15 +444,15 @@ fn proto_b_conpty_input_and_resize() {
             }
         }
     };
-    pump(&pty, &mut out, 1500);
+    pump(&*pty, &mut out, 1500);
     pty.write_input(b"echo TYPED-%COMPUTERNAME:~0,0%OK\r")
         .unwrap();
-    pump(&pty, &mut out, 1500);
+    pump(&*pty, &mut out, 1500);
     pty.resize(100, 30).unwrap();
     pty.write_input(b"mode con\r").unwrap();
-    pump(&pty, &mut out, 2000);
+    pump(&*pty, &mut out, 2000);
     pty.write_input(b"exit\r").unwrap();
-    pump(&pty, &mut out, 500);
+    pump(&*pty, &mut out, 500);
     drop(pty);
     let s = String::from_utf8_lossy(&out).into_owned();
     println!(
@@ -472,10 +472,13 @@ fn proto_diag_script_paths() {
     std::fs::write(allowed.join("run.cmd"), "@echo off\r\necho SCRIPT-RAN\r\n").unwrap();
     let mut cfg = PtyConfig::new(vec!["cmd.exe".into()]);
     cfg.cwd = Some(allowed.clone());
-    cfg.sandbox = Some(Sandbox { read: vec![], write: vec![allowed.clone()] });
+    cfg.sandbox = Some(Sandbox {
+        read: vec![],
+        write: vec![allowed.clone()],
+    });
     let mut pty = spawn(&cfg).unwrap();
     let mut out = Vec::new();
-    let mut pump = |pty: &Box<dyn agora_platform::Pty>, ms: u64| {
+    let mut pump = |pty: &dyn agora_platform::Pty, ms: u64| {
         let end = Instant::now() + Duration::from_millis(ms);
         while Instant::now() < end {
             if let Ok(b) = pty.output().recv_timeout(Duration::from_millis(50)) {
@@ -483,7 +486,7 @@ fn proto_diag_script_paths() {
             }
         }
     };
-    pump(&pty, 1200);
+    pump(&*pty, 1200);
     for line in [
         "echo [1] && type run.cmd".to_string(),
         "echo [2] && call run.cmd".to_string(),
@@ -494,11 +497,14 @@ fn proto_diag_script_paths() {
         "exit".to_string(),
     ] {
         pty.write_input(format!("{line}\r").as_bytes()).unwrap();
-        pump(&pty, 1200);
+        pump(&*pty, 1200);
     }
     drop(pty);
     let s = String::from_utf8_lossy(&out).into_owned();
-    let clean: String = s.chars().filter(|c| !c.is_control() || *c == '\n').collect();
+    let clean: String = s
+        .chars()
+        .filter(|c| !c.is_control() || *c == '\n')
+        .collect();
     println!("PROTO-DIAG<<{clean}>>");
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -512,25 +518,89 @@ fn proto_diag_argv() {
     let script = allowed.join("run.cmd");
     std::fs::write(&script, "@echo off\r\necho SCRIPT-RAN\r\ngit --version\r\necho GIT-WRAPPER-EL=%errorlevel%\r\n\"C:\\Program Files\\Git\\ucrt64\\bin\\git.exe\" --version\r\necho GIT-UCRT-EL=%errorlevel%\r\ngit --version > v.txt 2>&1\r\necho GIT-REDIR-EL=%errorlevel%\r\ngit --version < nul > v2.txt 2>&1\r\necho GIT-NOCONSOLE-EL=%errorlevel%\r\ngit -c core.fsmonitor=false var GIT_EDITOR > nul 2>&1\r\necho GIT-VAR-EL=%errorlevel%\r\nset GIT_TRACE=1\r\ngit --version 2> trace.txt\r\necho TRACE-EL=%errorlevel%\r\ntype trace.txt\r\n").unwrap();
     let cases: Vec<Vec<String>> = vec![
-        vec!["cmd.exe".into(), "/c".into(), "echo".into(), "ECHO-RAN".into()],
-        vec!["cmd.exe".into(), "/d".into(), "/c".into(), "echo".into(), "ECHO-D-RAN".into()],
-        vec!["cmd.exe".into(), "/c".into(), "call".into(), script.display().to_string()],
-        vec!["cmd.exe".into(), "/d".into(), "/c".into(), "call".into(), script.display().to_string()],
-        vec!["C:\\Windows\\System32\\cmd.exe".into(), "/c".into(), "call".into(), script.display().to_string()],
-        vec!["cmd.exe".into(), "/c".into(), "call".into(), script.display().to_string()],
+        vec![
+            "cmd.exe".into(),
+            "/c".into(),
+            "echo".into(),
+            "ECHO-RAN".into(),
+        ],
+        vec![
+            "cmd.exe".into(),
+            "/d".into(),
+            "/c".into(),
+            "echo".into(),
+            "ECHO-D-RAN".into(),
+        ],
+        vec![
+            "cmd.exe".into(),
+            "/c".into(),
+            "call".into(),
+            script.display().to_string(),
+        ],
+        vec![
+            "cmd.exe".into(),
+            "/d".into(),
+            "/c".into(),
+            "call".into(),
+            script.display().to_string(),
+        ],
+        vec![
+            "C:\\Windows\\System32\\cmd.exe".into(),
+            "/c".into(),
+            "call".into(),
+            script.display().to_string(),
+        ],
+        vec![
+            "cmd.exe".into(),
+            "/c".into(),
+            "call".into(),
+            script.display().to_string(),
+        ],
         vec!["cmd.exe".into(), "/c".into(), ".\\run.cmd".into()],
-        vec!["cmd.exe".into(), "/c".into(), "type".into(), script.display().to_string()],
+        vec![
+            "cmd.exe".into(),
+            "/c".into(),
+            "type".into(),
+            script.display().to_string(),
+        ],
         vec!["cmd.exe".into(), "/c".into(), "cd".into()],
-        vec!["cmd.exe".into(), "/c".into(), "git --version & echo EL=%errorlevel%".into()],
-        vec!["C:\\Program Files\\Git\\cmd\\git.exe".into(), "--version".into()],
-        vec!["cmd.exe".into(), "/c".into(), "where git & dir \"C:\\Program Files\\Git\\cmd\" /b".into()],
-        vec!["cmd.exe".into(), "/c".into(), "\"C:\\Program Files\\Git\\usr\\bin\\ls.exe\" --version & echo EL=%errorlevel%".into()],
-        vec!["cmd.exe".into(), "/c".into(), "echo".into(), "x>".into(), "w.txt".into(), "&&".into(), "echo".into(), "WROTE-OK".into()],
+        vec![
+            "cmd.exe".into(),
+            "/c".into(),
+            "git --version & echo EL=%errorlevel%".into(),
+        ],
+        vec![
+            "C:\\Program Files\\Git\\cmd\\git.exe".into(),
+            "--version".into(),
+        ],
+        vec![
+            "cmd.exe".into(),
+            "/c".into(),
+            "where git & dir \"C:\\Program Files\\Git\\cmd\" /b".into(),
+        ],
+        vec![
+            "cmd.exe".into(),
+            "/c".into(),
+            "\"C:\\Program Files\\Git\\usr\\bin\\ls.exe\" --version & echo EL=%errorlevel%".into(),
+        ],
+        vec![
+            "cmd.exe".into(),
+            "/c".into(),
+            "echo".into(),
+            "x>".into(),
+            "w.txt".into(),
+            "&&".into(),
+            "echo".into(),
+            "WROTE-OK".into(),
+        ],
     ];
     for argv in cases {
         let mut cfg = PtyConfig::new(argv.clone());
         cfg.cwd = Some(allowed.clone());
-        cfg.sandbox = Some(Sandbox { read: vec![], write: vec![allowed.clone()] });
+        cfg.sandbox = Some(Sandbox {
+            read: vec![],
+            write: vec![allowed.clone()],
+        });
         let pty = spawn(&cfg).unwrap();
         let mut out = Vec::new();
         let end = Instant::now() + Duration::from_secs(8);
@@ -542,7 +612,10 @@ fn proto_diag_argv() {
             }
         }
         drop(pty);
-        let s: String = String::from_utf8_lossy(&out).chars().filter(|c| !c.is_control()).collect();
+        let s: String = String::from_utf8_lossy(&out)
+            .chars()
+            .filter(|c| !c.is_control())
+            .collect();
         println!("PROTO-ARGV {argv:?} => {s}");
     }
     let _ = std::fs::remove_dir_all(&root);
