@@ -26,6 +26,20 @@ does not prove path confinement. This follows the distinction between integrity 
 
 Maintainer decision (2026-11-11): the revised proposal below is accepted ("0050 kabul"). The original proposal further down is superseded.
 
+## Amendment A (issue #230, proposed: awaiting the maintainer's acceptance)
+
+Decision 1 below puts `Everyone` and `Users` in the restricting SID list. That lets a folder whose ACL grants those groups (a data
+volume, `C:\ProgramData`) satisfy **both** access checks with no entry for the agent, so writes and reads outside the allowed folders
+succeed there. A Windows machine confirmed this (messages in the `comms` branch, 2026-11-11). Amended rule:
+
+- The restricting list is the agent's SID, `ALL APPLICATION PACKAGES` (`S-1-15-2-1`), `ALL RESTRICTED APPLICATION PACKAGES`
+  (`S-1-15-2-2`) and the logon SID. **Never `Everyone`, `Users` or `Authenticated Users`.** Windows grants the two package groups
+  read and execute on `C:\Windows` and `Program Files`, so the system and installed tools stay readable; nothing else is, so reads outside the
+  listed folders are refused too (decision 3's "world-readable files stay readable" no longer holds for folders outside the system and
+  `Program Files`). Tools installed elsewhere (a user's `.cargo\bin`, `scoop`) must be listed under `sandbox.read`.
+- Acceptance evidence adds: a folder whose ACL grants `Users` Modify and one granting `Everyone`, outside every allowed path, refuse writes
+  and reads; a second agent's workspace with inherited broad grants is refused.
+
 ## Revised decision
 
 The review is right: a Low integrity level only protects objects labelled higher, so it is not a path allowlist. This revision

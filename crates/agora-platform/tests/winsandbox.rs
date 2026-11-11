@@ -98,8 +98,13 @@ fn a_confined_process_writes_only_where_it_was_allowed_and_reads_no_user_secret(
     assert!(!other.join("no.txt").exists() && !other.join("child.txt").exists());
 
     // The entry is gone once the agent has ended.
+    // No explicit entry of a per-agent SID is left (inherited ones, `(I)`, belong to other tools and folders above).
     let acl = acl_text(&allowed);
-    assert!(!acl.contains("S-1-5-21-"), "{acl}");
+    assert!(
+        !acl.lines()
+            .any(|l| l.contains("S-1-5-21-") && !l.contains("(I)")),
+        "{acl}"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
 

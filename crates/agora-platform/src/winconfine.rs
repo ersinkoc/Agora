@@ -1,9 +1,12 @@
 //! Windows agent confinement (ADR-0050): a restricted token with one restricting SID per agent.
 //!
 //! Windows grants an access to a process with a restricted token only when the normal check **and** the check against the restricting
-//! SIDs both pass. The restricting list is this agent's own random SID plus `Everyone`, `Users` and the logon SID. The node adds an ACL
-//! entry for the agent's SID to exactly the folders the agent may use, so everything the user alone can reach (the profile, the node's
-//! keys, another agent's folders) is refused, while system folders that every user can read stay readable.
+//! SIDs both pass. The restricting list is this agent's own random SID, the two `ALL (RESTRICTED) APPLICATION PACKAGES` groups and the
+//! logon SID. It must **not** contain `Everyone` or `Users`: a folder whose ACL grants those groups would then satisfy both checks
+//! without any entry for the agent (issue #230). The application-package groups are what Windows itself grants on `C:\Windows` and
+//! `Program Files`, so the system and installed tools stay readable. The node adds an ACL entry for the agent's SID to exactly the
+//! folders the agent may use; everything else (the profile, other drives, the node's keys, another agent's folders, a folder that
+//! happens to be writable by every user) is refused.
 //!
 //! The entries are recorded in a ledger file *before* they are added and removed when the agent ends; [`recover_stale`] undoes what a
 //! crashed node left behind. The feature stays off ([`enabled`]) until the maintainer switches it on after real-machine checks.
@@ -261,8 +264,8 @@ impl Drop for Confinement {
     }
 }
 
-/// The current process's token, restricted: every privilege dropped, and the restricting list is the agent's SID, `Everyone`,
-/// `Users` and the logon SID (without that last one the console and desktop refuse the process).
+/// The current process's token, restricted: every privilege dropped, and the restricting list is the agent's SID, `ALL APPLICATION
+/// PACKAGES`, `ALL RESTRICTED APPLICATION PACKAGES` and the logon SID (without that last one the console and desktop refuse the process).
 fn restricted_token(agent: &Sid) -> io::Result<Token> {
     let mut own: HANDLE = null_mut();
     // SAFETY: the pseudo handle of this process and an out pointer.
@@ -278,8 +281,9 @@ fn restricted_token(agent: &Sid) -> io::Result<Token> {
     }
     let own = Token(own);
 
-    let everyone = Sid::from_string("S-1-1-0")?;
-    let users = Sid::from_string("S-1-5-32-545")?;
+    // The groups Windows grants read and execute to on the system folders and `Program Files` for sandboxed programs.
+    let packages = Sid::from_string("S-1-15-2-1")?;
+    let restricted_packages = Sid::from_string("S-1-15-2-2")?;
     // The logon SID: the one group of the token flagged as the logon session.
     let mut needed = 0u32;
     // SAFETY: the documented size query.
@@ -306,11 +310,11 @@ fn restricted_token(agent: &Sid) -> io::Result<Token> {
             Attributes: 0,
         },
         SID_AND_ATTRIBUTES {
-            Sid: everyone.0,
+            Sid: packages.0,
             Attributes: 0,
         },
         SID_AND_ATTRIBUTES {
-            Sid: users.0,
+            Sid: restricted_packages.0,
             Attributes: 0,
         },
     ];
