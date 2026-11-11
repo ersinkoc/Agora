@@ -1,9 +1,9 @@
-# 0050. Windows agent confinement: a low-integrity token with a labelled worktree
-Status: Proposed
+# 0050. Windows agent confinement: a restricted token with a per-agent SID
+Status: Accepted
 Date: 2026-11-11
 
 Maintainer review (2026-11-11): changes requested. The decision supplied in the working session was
-"0050 değişiklik, 0051 kabul". This ADR remains Proposed; do not implement it until the revised design is accepted.
+"0050 değişiklik, 0051 kabul". The revised design below was then accepted ("0050 kabul").
 
 ## Required revision
 
@@ -24,7 +24,9 @@ Low-labelled workspace, protected node files, child processes and reparse points
 does not prove path confinement. This follows the distinction between integrity checks and DACL checks in
 [Microsoft's MIC documentation](https://learn.microsoft.com/en-us/windows/win32/secauthz/mandatory-integrity-control).
 
-## Revised proposal (awaiting maintainer decision)
+Maintainer decision (2026-11-11): the revised proposal below is accepted ("0050 kabul"). The original proposal further down is superseded.
+
+## Revised decision
 
 The review is right: a Low integrity level only protects objects labelled higher, so it is not a path allowlist. This revision
 drops it as the mechanism and enforces the **path rules of ADR-0047** with the DACL check instead.
