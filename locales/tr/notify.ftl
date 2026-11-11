@@ -5,7 +5,7 @@ notify-agent-done = { $agent } işini bitirdi.
 notify-approval-requested = { $agent } onayınızı istiyor.
 notify-task-completed = Bir görev tamamlandı: { $task }.
 notify-node-offline = { $machine } çevrimdışı oldu.
-notify-budget-threshold = Harcama bütçenizin %{ $percent } düzeyine ulaştı.
+notify-budget-threshold = Harcamanız, bütçenizin %{ $percent } düzeyine ulaştı.
 notify-update-available = Bir güncelleme var: { $version }.
 notify-digest =
     { $count ->
