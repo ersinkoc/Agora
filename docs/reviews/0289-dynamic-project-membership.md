@@ -63,9 +63,18 @@ TMPDIR=/tmp PW_DIR=/path/to/playwright node scripts/e2e-dynamic-projects.mjs
 
 This main-based fix covers existing eligibility. #281 adds transition discovery for moving earlier
 local work; its project enumeration must also use `project_memberships(view)` rather than checkouts
-alone. [The integration hunk](proofs/0289-board-join-membership.patch) applies to #281 at `be3438f`
-after this helper is present; `git apply --check` was verified against that file. Ownership and the
-required change are coordinated on #281. This patch does not edit its transfer/schema/node implementation.
+alone, and revisit previously known projects when their last current fact disappears. Otherwise
+changing both folders' identities and exiting their old agents leaves stale members in the join
+cache; when the old project returns, one of its current nodes can be skipped.
+
+[The integration hunk](proofs/0289-board-join-membership.patch) applies to #281 at `be3438f`
+after this helper is present. It includes previous membership keys in discovery. The earlier
+helper-only hunk fails the project-disappearance regression; the updated hunk passes it.
+[Two integration tests](proofs/0289-board-join-membership.rs) can be installed as an agora-hub
+integration test when combining the branches. A temporary archive of #281 plus this helper/hunk
+passes those two tests, all five main regressions and the existing board tests. The patch also
+passes `git apply --check`. Ownership and the required change are coordinated on #281; its
+production branch and transfer/schema/node implementation are unchanged by this PR.
 
 Moving work made before the second project member joins remains #281/B6's responsibility, including
 the separately reviewed persistence and transfer-limit defects. This change does not claim to fix
