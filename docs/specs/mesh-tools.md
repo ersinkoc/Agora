@@ -74,6 +74,11 @@ file. `refs` travel with a cross-node message (ADR-0035, `MeshPost.refs`) and th
 
 ## Shared board (ADR-0039)
 
+Project membership includes both startup checkouts and owner-selected workspaces (`WorkspaceRegistered`, ADR-0052), so
+folders selected after a node starts participate without a daemon restart. Membership is deduplicated by enrolled node ID;
+host names and directory names do not establish shared identity. Offline and unknown nodes do not count. A single-node
+project with no unfinished shared work continues on its local broker.
+
 When a project has checkouts on two or more online nodes, `task_*`, `lease_*` and `handoff` are decided by the hub, which keeps one
 board per project and is its only writer: a claim has exactly one winner and a lease is all-or-nothing across nodes. The agent's
 tool calls do not change. The node sends each of these tools to the hub as `BoardCall{project_id, tool, arguments_json}` (the hub

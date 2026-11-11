@@ -1,0 +1,15 @@
+diff --git a/crates/agora-hub/src/board.rs b/crates/agora-hub/src/board.rs
+--- a/crates/agora-hub/src/board.rs
++++ b/crates/agora-hub/src/board.rs
+@@ -529,8 +529,9 @@
+     /// `(node, project)` pairs that must now hand over their local work: every such node when a project becomes shared (reaches
+     /// two nodes), and a node that joins an already shared project. Calls that grant something then wait (see [`JOIN_WAIT_MS`]).
+     pub fn membership(&self, view: &View, now_ms: u64) -> Vec<(String, String)> {
+-        let projects: BTreeSet<String> =
+-            view.checkouts.values().map(|(_, p, _)| p.clone()).collect();
++        let projects: BTreeSet<String> = project_memberships(view)
++            .map(|(_, project)| project.to_string())
++            .collect();
+         let mut j = self.joins.lock().unwrap_or_else(|e| e.into_inner());
+         let mut out = Vec::new();
+         for project in projects {
