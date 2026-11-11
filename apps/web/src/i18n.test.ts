@@ -1,7 +1,7 @@
 import { readFileSync, readdirSync } from 'node:fs';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { actionKey } from './net/audit';
-import { directionOf, pickLanguage, setLanguage, t } from './i18n';
+import { chooseLanguage, directionOf, getLanguage, getLanguagePreference, pickLanguage, setLanguage, subscribeLanguage, t } from './i18n';
 
 // Every key the UI asks for must exist in locales/en/web.ftl (a missing key would render as its id).
 function sources(dir: string): string[] {
@@ -50,5 +50,48 @@ describe('i18n', () => {
     const en = ids(readFileSync('../../locales/en/web.ftl', 'utf8'));
     const tr = new Set(ids(readFileSync('../../locales/tr/web.ftl', 'utf8')));
     expect(en.filter((k) => !tr.has(k as string))).toEqual([]);
+  });
+});
+
+describe('browser language preference', () => {
+  afterEach(() => {
+    chooseLanguage('system');
+    setLanguage('en');
+    vi.unstubAllGlobals();
+  });
+
+  it('uses an explicit choice until the user returns to the browser language', () => {
+    const saved = new Map<string, string>();
+    vi.stubGlobal('navigator', { language: 'tr-TR' });
+    vi.stubGlobal('localStorage', {
+      setItem: (key: string, value: string) => saved.set(key, value),
+      removeItem: (key: string) => saved.delete(key),
+    });
+    expect(chooseLanguage('en')).toBe(true);
+    expect(getLanguage()).toBe('en');
+    expect(getLanguagePreference()).toBe('en');
+    expect(saved.get('ui.language')).toBe('en');
+    expect(chooseLanguage('system')).toBe(true);
+    expect(saved.has('ui.language')).toBe(false);
+    expect(getLanguagePreference()).toBe('system');
+    expect(getLanguage()).toBe('tr');
+  });
+
+  it('updates the current page even when persistence is refused', () => {
+    vi.stubGlobal('localStorage', {
+      setItem: () => { throw new Error('storage refused'); },
+      removeItem: () => { throw new Error('storage refused'); },
+    });
+    const documentElement = { lang: '', dir: '' };
+    vi.stubGlobal('document', { documentElement });
+    const listener = vi.fn();
+    const unsubscribe = subscribeLanguage(listener);
+    expect(chooseLanguage('tr')).toBe(false);
+    expect(t('language-label')).toBe('Dil');
+    expect(documentElement).toEqual({ lang: 'tr', dir: 'ltr' });
+    expect(listener).toHaveBeenCalledOnce();
+    unsubscribe();
+    chooseLanguage('en');
+    expect(listener).toHaveBeenCalledOnce();
   });
 });

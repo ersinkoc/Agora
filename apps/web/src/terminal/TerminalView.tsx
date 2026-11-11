@@ -31,7 +31,7 @@ export function TerminalView({ source, label }: { source: TerminalSource; label:
       session.close();
       renderer.dispose();
     };
-  }, [source, label]);
+  }, [source]); // The translated ARIA label can change without disposing the renderer or reconnecting the terminal.
 
   return <div ref={host} className="terminal" role="region" aria-label={label} dir="ltr" />;
 }

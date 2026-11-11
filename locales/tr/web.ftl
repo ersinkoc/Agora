@@ -230,3 +230,9 @@ address-copied = Kopyalandı
 address-copy-failed = Kopyalanamadı. Adresi seçip elle kopyalayın.
 machine-identity = Makine kimliği: { $id }
 machine-name-id = { $name } · { $id }
+
+language-label = Dil
+language-system = Tarayıcı dili
+language-en = English
+language-tr = Türkçe
+language-not-saved = Dil bu ziyaret için değiştirildi. Tarayıcınız seçimi kaydedemedi.
