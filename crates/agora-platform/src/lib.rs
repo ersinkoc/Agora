@@ -413,10 +413,14 @@ pub fn sandbox_supported() -> bool {
 }
 
 /// Undoes the folder permissions a crashed node left behind for a confined agent (Windows, ADR-0050). Nothing to do elsewhere.
-/// Call it once when a node starts, before any agent runs.
+/// Call it once when a node starts.
 pub fn recover_sandbox_leftovers() {
+    // In the background: undoing a permission walks every file below the folder, which can take minutes, and the node must not wait
+    // for it. A ledger of a node that is still running is left alone.
     #[cfg(windows)]
-    winconfine::recover_stale();
+    let _ = std::thread::Builder::new()
+        .name("agora-acl-recovery".into())
+        .spawn(winconfine::recover_stale);
 }
 
 /// Confines `cmd` (and what it starts) the same way [`PtyConfig::sandbox`] does a PTY process. Fails with `Unsupported` where that
