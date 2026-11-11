@@ -216,6 +216,38 @@ impl Hub {
         Ok(())
     }
 
+    /// ADR-0039 amendment B: the `(node, project)` pairs that must hand over their local work now (see `Boards::membership`).
+    pub fn board_membership(&self, now_ms: u64) -> Vec<(String, String)> {
+        let g = self.lock();
+        self.boards.membership(&g.view, now_ms)
+    }
+
+    /// A node will not answer its `BoardJoin`: board calls stop waiting for it.
+    pub fn board_join_settled(&self, node: &str, project: &str) {
+        self.boards.join_settled(node, project);
+    }
+
+    /// Puts what `node` handed over for `project` on the board, publishes the board's events and returns the notices for agents.
+    pub fn board_joined(
+        &self,
+        node: &str,
+        project: &str,
+        work: &agora_protocol::v1::BoardJoinResult,
+        now_ms: u64,
+    ) -> Vec<crate::board::Notice> {
+        let mut g = self.lock();
+        let (events, notices) = self.boards.joined(&g.view, node, project, work, now_ms);
+        if !events.is_empty() {
+            if let Some(bytes) = self.boards.snapshot(project, now_ms) {
+                let _ = self.store.set_setting(&format!("board.{project}"), &bytes);
+            }
+        }
+        for body in events {
+            let _ = self.emit(&mut g, body, now_ms);
+        }
+        notices
+    }
+
     /// A handoff could not be delivered after the board accepted it: give the task back to the giver.
     pub fn board_revert(&self, h: &crate::board::Handoff, now_ms: u64) {
         let mut g = self.lock();

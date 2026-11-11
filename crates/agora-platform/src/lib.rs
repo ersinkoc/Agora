@@ -78,6 +78,51 @@ pub fn local_listen(path: &std::path::Path) -> io::Result<LocalListener> {
     }
 }
 
+/// A fresh identity for one agent that is about to be confined (ADR-0050 Amendment B on Windows: a random SID, used both for its
+/// process and its mesh endpoint), or `None` where agents are not confined that way or confinement is off. Make it before the
+/// agent's endpoint, and pass it to [`local_listen_agent`] and [`PtyConfig::identity`].
+pub fn new_agent_identity() -> Option<String> {
+    #[cfg(windows)]
+    if winconfine::enabled() {
+        return winconfine::random_sid_string().ok();
+    }
+    None
+}
+
+/// Like [`local_listen`], for one agent's own channel (its mesh endpoint). With an `identity` from [`new_agent_identity`] (Windows,
+/// ADR-0050 Amendment B), the confined agent holding exactly that identity may connect too, and no other confined agent can: the
+/// mesh binds an agent's identity to the connection it comes in on. Without one, or on other systems, the same as [`local_listen`].
+pub fn local_listen_agent(
+    path: &std::path::Path,
+    identity: Option<&str>,
+) -> io::Result<LocalListener> {
+    #[cfg(unix)]
+    {
+        let _ = identity;
+        unix::local_listen(path)
+    }
+    #[cfg(windows)]
+    {
+        Ok(LocalListener {
+            inner: windows::listen_agent(path, identity)?,
+        })
+    }
+}
+
+/// The system name of the endpoint [`local_listen`] serves for `path` (`\\.\pipe\...` on Windows), for tests and diagnostics; `None`
+/// where the endpoint is the path itself (Unix sockets).
+pub fn local_endpoint_name(path: &std::path::Path) -> Option<String> {
+    #[cfg(windows)]
+    {
+        Some(windows::pipe_name_text(path))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        None
+    }
+}
+
 /// Puts a freshly downloaded program in place of the one at `target` (which may be running): the new file is made executable and
 /// renamed over it. Windows cannot replace a running program, so the old one is moved aside to `<target>.old` first.
 pub fn replace_executable(new: &std::path::Path, target: &std::path::Path) -> io::Result<()> {
@@ -387,6 +432,9 @@ pub struct PtyConfig {
     pub limits: ProcessLimits,
     /// Confine the process to these paths (ADR-0047). `spawn` refuses, rather than ignores it, where this cannot be enforced.
     pub sandbox: Option<Sandbox>,
+    /// The agent's own identity under confinement, from [`new_agent_identity`]: the confined process runs with it, and its mesh endpoint
+    /// ([`local_listen_agent`]) admits exactly it. `None` makes a fresh one (or means nothing where agents are not confined this way).
+    pub identity: Option<String>,
 }
 
 /// File-system confinement for a process and everything it starts: it may read (and run programs from) `read` and `write`, and
@@ -395,6 +443,22 @@ pub struct PtyConfig {
 pub struct Sandbox {
     pub read: Vec<PathBuf>,
     pub write: Vec<PathBuf>,
+    /// No network but the loopback interface and the unix sockets below `sockets` and `write` (ADR-0047 `worktree-offline`).
+    /// Refused where [`offline_supported`] is false.
+    pub offline: bool,
+    /// Folders whose unix sockets stay reachable when `offline` (the node's mesh sockets).
+    pub sockets: Vec<PathBuf>,
+}
+
+impl Sandbox {
+    /// Files only: read `read`, write below `write`; the network is not restricted.
+    pub fn new(read: Vec<PathBuf>, write: Vec<PathBuf>) -> Self {
+        Self {
+            read,
+            write,
+            ..Self::default()
+        }
+    }
 }
 
 /// True where a [`Sandbox`] is enforced by per-agent folder permissions (Windows, ADR-0050) rather than by a rule list the kernel
@@ -427,6 +491,71 @@ pub fn sandbox_supported() -> bool {
     }
 }
 
+/// True when this machine can also keep a confined process off the network ([`Sandbox::offline`]): macOS (Seatbelt, loopback and
+/// the listed unix sockets stay reachable). Linux (Landlock network rules) and Windows do not yet, so `worktree-offline` is refused
+/// there.
+pub fn offline_supported() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        macos::sandbox_supported()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
+/// Whether `sb` can be enforced here as asked: confinement at all, and the network part when it asks for it.
+fn enforceable(sb: &Sandbox) -> bool {
+    sandbox_supported() && (!sb.offline || offline_supported())
+}
+
+/// Why a confined start was refused before the agent ran (ADR-0050 Amendment B). Carried inside the `PermissionDenied` error that
+/// [`spawn`] returns, read back with [`sandbox_refusal`]; `token` is the stable `reason` parameter of `agent.sandbox_unavailable`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SandboxRefusal {
+    /// A folder the agent would be given (or something below it) lets `Users` or `Everyone` write.
+    BroadWriteGrant,
+    /// A folder the agent would write could not be labelled for confined agents.
+    LabelFailed,
+}
+
+impl SandboxRefusal {
+    pub fn token(self) -> &'static str {
+        match self {
+            Self::BroadWriteGrant => "broad_write_grant",
+            Self::LabelFailed => "label_failed",
+        }
+    }
+}
+
+impl std::fmt::Display for SandboxRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.token())
+    }
+}
+
+impl std::error::Error for SandboxRefusal {}
+
+/// The refusal inside an error from [`spawn`], if that is what it was.
+pub fn sandbox_refusal(e: &io::Error) -> Option<SandboxRefusal> {
+    e.get_ref()
+        .and_then(|inner| inner.downcast_ref::<SandboxRefusal>())
+        .copied()
+}
+
+/// Checks, before anything starts, that `sandbox` can be enforced as promised (ADR-0050 Amendment B, 4): on Windows a writable folder,
+/// or anything below it, that lets `Users` or `Everyone` write would let every confined agent in, so it is refused and the first such
+/// path is returned. Always `Ok` elsewhere, and on Windows while confinement is off.
+pub fn sandbox_preflight(sandbox: &Sandbox) -> Result<(), PathBuf> {
+    #[cfg(windows)]
+    if winconfine::enabled() {
+        return winconfine::preflight(sandbox).map_err(|(path, _)| path);
+    }
+    let _ = sandbox;
+    Ok(())
+}
+
 /// Undoes the folder permissions a crashed node left behind for a confined agent (Windows, ADR-0050). Nothing to do elsewhere.
 /// Call it once when a node starts.
 pub fn recover_sandbox_leftovers() {
@@ -441,7 +570,7 @@ pub fn recover_sandbox_leftovers() {
 /// Confines `cmd` (and what it starts) the same way [`PtyConfig::sandbox`] does a PTY process. Fails with `Unsupported` where that
 /// cannot be enforced, so the caller never runs the command unconfined by accident.
 pub fn confine_command(cmd: &mut std::process::Command, sandbox: &Sandbox) -> io::Result<()> {
-    if !sandbox_supported() {
+    if !enforceable(sandbox) {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "this machine cannot confine a process",
@@ -497,6 +626,7 @@ impl PtyConfig {
             rows: 24,
             limits: ProcessLimits::default(),
             sandbox: None,
+            identity: None,
         }
     }
 }
@@ -682,7 +812,7 @@ pub fn spawn(config: &PtyConfig) -> io::Result<Box<dyn Pty>> {
     if config.argv.is_empty() {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "argv is empty"));
     }
-    if config.sandbox.is_some() && !sandbox_supported() {
+    if config.sandbox.as_ref().is_some_and(|sb| !enforceable(sb)) {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "this machine cannot confine a process",

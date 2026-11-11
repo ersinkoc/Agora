@@ -305,7 +305,11 @@ pub(crate) fn spawn(config: &PtyConfig) -> io::Result<Box<dyn Pty>> {
 }
 
 fn start_process(config: &PtyConfig, hpc: HPCON) -> io::Result<(Handle, u32, Option<Confinement>)> {
-    let confinement = config.sandbox.as_ref().map(Confinement::new).transpose()?;
+    let confinement = config
+        .sandbox
+        .as_ref()
+        .map(|s| Confinement::new(s, config.identity.as_deref()))
+        .transpose()?;
     let mut cmdline = wide(
         &config
             .argv

@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { CommandPalette, type PaletteItem } from './components/CommandPalette';
 import { demoAgents } from './fixtures';
-import { t } from './i18n';
+import { getLanguage, subscribeLanguage, t } from './i18n';
 import { nextNeedingMe, type AgentTileModel } from './model';
 import { connectLive, type CommandBody, type Live, type LinkState } from './net/live';
 import { GrantDialog } from './components/GrantDialog';
@@ -34,6 +34,7 @@ function useHash(): [string, (h: string) => void] {
 }
 
 export function App() {
+  const language = useSyncExternalStore(subscribeLanguage, getLanguage);
   const [hash, go] = useHash();
   const [palette, setPalette] = useState(false);
   // With a hub token the fleet comes from the hub; without one (development) the demo data stands in.
@@ -42,12 +43,12 @@ export function App() {
   const trySignIn = useCallback(async (code: string) => {
     const r = await signIn(code);
     if (r.ok) { setSignInNotice(undefined); setHub(hubConnection()); return; }
-    setSignInNotice(t(r.reason === 'refused' ? 'signin-refused' : r.reason === 'too-many' ? 'signin-too-many' : 'signin-failed'));
+    setSignInNotice(r.reason === 'refused' ? 'signin-refused' : r.reason === 'too-many' ? 'signin-too-many' : 'signin-failed');
   }, []);
   const trySignInPasskey = useCallback(async () => {
     const r = await signInWithPasskey();
     if (r.ok) { setSignInNotice(undefined); setHub(hubConnection()); return; }
-    if (r.reason !== 'cancelled') setSignInNotice(t(r.reason === 'too-many' ? 'signin-too-many' : 'signin-passkey-failed'));
+    if (r.reason !== 'cancelled') setSignInNotice(r.reason === 'too-many' ? 'signin-too-many' : 'signin-passkey-failed');
   }, []);
   // A code in the address (`#code=...`) signs in at once; it is removed from the address either way.
   useEffect(() => {
@@ -80,7 +81,7 @@ export function App() {
   }, [api, device]);
   const startAgent = useCallback(async (node: string, info: DirectoryInfo, kind: string, separateWorktree: boolean, acceptIdentityChange: boolean): Promise<string | undefined> => {
     try {
-      if (!api || !device) return t('approval-not-trusted');
+      if (!api || !device) return 'approval-not-trusted';
       const authorization = await signDirectory(device, node, 'launch', info.path, kind, info.projectId, separateWorktree, acceptIdentityChange);
       const ok = await api.command(node, { agentLaunch: { path: info.path, projectId: info.projectId, kind, separateWorktree, acceptIdentityChange, authorization } });
       const id = ok.agentLaunch?.agentId;
@@ -89,7 +90,7 @@ export function App() {
       return undefined;
     } catch (e) {
       const code = (e as { code?: string }).code;
-      return t(code === 'agent.mode_unsupported' ? 'start-directory-agent-unsupported' : code === 'approval.signature_invalid' ? 'approval-not-trusted' : code === 'protocol.capability_missing' ? 'start-directory-unsupported' : code === 'agent.kind_unknown' ? 'start-kind-unknown' : code === 'node.resource_limit' ? 'start-limit' : 'start-failed');
+      return code === 'agent.mode_unsupported' ? 'start-directory-agent-unsupported' : code === 'approval.signature_invalid' ? 'approval-not-trusted' : code === 'protocol.capability_missing' ? 'start-directory-unsupported' : code === 'agent.kind_unknown' ? 'start-kind-unknown' : code === 'node.resource_limit' ? 'start-limit' : 'start-failed';
     }
   }, [api, device]);
   useEffect(() => {
@@ -97,14 +98,14 @@ export function App() {
     if (store) void thisDevice(store).then(setDevice).catch(() => setDevice(undefined));
   }, []);
   const resolve = useCallback(async (a: ApprovalModel, approved: boolean) => {
-    if (!api || !device) { setNotice(t('approval-failed')); return; }
+    if (!api || !device) { setNotice('approval-failed'); return; }
     setNotice(undefined);
     try {
       const signature = await signApproval(device, a.node, a.localId, approved);
       await api.command(a.node, { approvalResolve: { approvalId: a.localId, approved, signerDeviceId: device.id, signature } });
     } catch (e) {
       const code = (e as { code?: string }).code;
-      setNotice(code === 'approval.signature_invalid' ? t('approval-not-trusted') : t('approval-failed'));
+      setNotice(code === 'approval.signature_invalid' ? 'approval-not-trusted' : 'approval-failed');
     }
   }, [api, device]);
   // The owner allowed it: sign the grant with this device's key, send it to the machine, then repeat what was refused.
@@ -254,7 +255,7 @@ export function App() {
     { id: 'machines', label: t('palette-go-machines'), run: () => go('#/machines') },
     ...(hub ? [{ id: 'device', label: t('device-link'), run: () => go('#/device') }, { id: 'audit', label: t('audit-link'), run: () => go('#/audit') }] : []),
     ...agents.map((a) => ({ id: `agent-${a.id}`, label: t('palette-open-agent', { name: a.name }), run: () => open(a.id) })),
-  ], [agents, go, hub, next, open]);
+  ], [agents, go, hub, next, open, language]);
 
   useEffect(() => {
     const on = (e: KeyboardEvent) => {
@@ -268,7 +269,7 @@ export function App() {
 
   // Served by the hub (a production build) and not signed in: ask for the code. Development keeps the demo data.
   if (!hub && !import.meta.env.DEV && hash !== '#/gallery' && hash !== '#/demo') {
-    return <SignInPage onSubmit={trySignIn} onPasskey={passkeysSupported() ? trySignInPasskey : undefined} notice={signInNotice} />;
+    return <SignInPage onSubmit={trySignIn} onPasskey={passkeysSupported() ? trySignInPasskey : undefined} notice={signInNotice ? t(signInNotice) : undefined} />;
   }
 
   return (
@@ -277,7 +278,7 @@ export function App() {
         ? <Focus agent={selectedAgent} chatSource={selectedAgent?.terminal === false ? chatOf(selectedAgent) : undefined} sendPrompt={hub && api ? sendPrompt : undefined} costMicroUsd={current ? usage?.perAgent.get(current) : undefined} source={terminal} onBack={() => go('#/')} />
         : <Console agents={agents} machines={live ? machines(live) : []} usage={usage} projects={live && usage ? costByProject(live, usage.perAgent) : []}
           approvals={live ? approvalList(live) : []} messages={live ? recentMessages(live) : []} boards={live ? boards(live) : []} terminalFor={terminalFor} chatOf={hub && api ? chatOf : undefined} sendPrompt={hub && api ? sendPrompt : undefined} loadDiff={hub && api ? loadDiff : undefined} loadHistory={hub && api ? loadHistory : undefined} filesOf={hub && api ? filesOf : undefined} onOpen={open}
-          onResolve={resolve} notice={notice} link={hub ? link : 'live'}
+          onResolve={resolve} notice={notice ? t(notice) : undefined} link={hub ? link : 'live'}
           onStart={hub && api && live ? () => setStarting(true) : undefined}
           start={starting && live ? <StartAgent projects={projectChoices(live)} machines={machines(live)} inspect={inspectDirectory} loadKinds={loadKinds} onStart={startAgent} onClose={() => setStarting(false)} /> : undefined} />}
       {grantAsk && <GrantDialog machine={live?.nodes.get(grantAsk.node)?.hostname || grantAsk.node} kind={grantAsk.ask.kind} busy={grantAsk.busy} failed={grantAsk.failed} onAllow={() => void allowGrant()} onClose={() => setGrantAsk(undefined)} />}

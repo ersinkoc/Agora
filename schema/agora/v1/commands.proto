@@ -47,6 +47,8 @@ message CommandRequest {
     ChatSubscribe chat_subscribe = 19;
     // ADR-0039: node -> hub, a mesh tool that touches a shared project's board.
     BoardCall board_call = 62;
+    // ADR-0039 amendment B: hub → node only, when a project becomes shared.
+    BoardJoin board_join = 66;
     // ADR-0041: user-signed grants for the commands a node's policy lists in `signed_commands`.
     GrantCreate grant_create = 63;
     GrantList grant_list = 64;
@@ -90,6 +92,7 @@ message CommandOk {
     GrantListResult grant_list = 17;
     DirectoryInfo directory_info = 18;
     AgentLaunchResult agent_launch = 19;
+    BoardJoinResult board_join = 20;
   }
 }
 
@@ -266,6 +269,35 @@ message BoardResult {
   bool shared = 1;
   string result_json = 2;
   bool is_error = 3;
+}
+
+// ADR-0039 amendment B. The hub sends this to each online node with a checkout of `project_id` when the project becomes shared
+// (gains its second such node). The node answers with its unfinished local work for the project and stops keeping it locally;
+// the hub puts it on the board. Only the hub sends it; a client's is refused.
+message BoardJoin {
+  string project_id = 1;
+}
+
+message BoardJoinResult {
+  repeated BoardJoinLease leases = 1;
+  repeated BoardJoinTask tasks = 2;
+}
+
+// A path an agent of the answering node holds, until `expires_at_ms`.
+message BoardJoinLease {
+  string agent_id = 1;
+  string path = 2;
+  uint64 expires_at_ms = 3;
+}
+
+// A task that is open or claimed on the answering node. `owner_agent_id` is empty for an open task; `creator_agent_id` is the agent
+// the board records as making it (any agent of the node in the project when the creator is gone).
+message BoardJoinTask {
+  string task_id = 1;
+  string title = 2;
+  string detail = 3;
+  string owner_agent_id = 4;
+  string creator_agent_id = 5;
 }
 
 message TaskUpdate {

@@ -430,6 +430,7 @@ fn node_run(say: &Say, o: &Opts) -> ExitCode {
         node.mesh.set_remote(out.clone());
         l.mesh_out = Some(out);
         l.grants = Some(Arc::clone(&node.grants));
+        l.mesh = Some(Arc::clone(&node.mesh));
         agora_node::uplink_client::spawn(Arc::clone(&node.events), l).ok()
     });
     // Run until the process is stopped; agents die with it and the socket file is replaced on next start.
