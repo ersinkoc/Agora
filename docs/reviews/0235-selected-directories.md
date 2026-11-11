@@ -40,13 +40,13 @@ Wire messages, numeric tags and signature encoding are enumerated in `../specs/p
 
 | Measurement | Observed |
 | --- | --- |
-| Keystroke to screen text (99 samples) | p50 2.6 ms, p95 14.0 ms |
+| Keystroke to screen text (99 samples) | p50 2.9 ms, p95 14.1 ms |
 | Keystroke to next animation frame | p50 13.2 ms, p95 29.9 ms |
-| 2 MB flood | 0.5 s, 4.2 MB/s; zero long tasks |
-| Select among 20 agents to terminal prompt (12 samples) | p50 50 ms, p95 114 ms |
+| 2 MB flood | 0.4 s, 4.6 MB/s; zero long tasks |
+| Select among 20 agents to terminal prompt (12 samples) | p50 50 ms, p95 97 ms |
 
 Text echo and terminal snapshot meet their respective targets in this run. Headless next-frame pacing exceeds the 16 ms
-interaction target; the flood achieved 4.2 MB/s, so this run does not establish the 10 MB/s rendering budget. Budgets are
+interaction target; the flood achieved 4.6 MB/s, so this run does not establish the 10 MB/s rendering budget. Budgets are
 unchanged. Shared-directory Git status is polled once per path; legacy and new workspace bindings receive separate events.
 
 ## Screenshots and reproduction
@@ -66,7 +66,9 @@ Both themes: [selected folder (dark)](../screenshots/selected-directories/select
 [shared sessions (dark)](../screenshots/selected-directories/shared-sessions-dark.png),
 [shared sessions (light)](../screenshots/selected-directories/shared-sessions-light.png),
 [Git option (dark)](../screenshots/selected-directories/git-folder-dark.png),
-[Git option (light)](../screenshots/selected-directories/git-folder-light.png).
+[Git option (light)](../screenshots/selected-directories/git-folder-light.png),
+[Turkish (dark)](../screenshots/selected-directories/turkish-folder-dark.png),
+[Turkish (light)](../screenshots/selected-directories/turkish-folder-light.png).
 
 ## Limits and handoff
 
