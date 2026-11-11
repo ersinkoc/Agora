@@ -218,11 +218,17 @@ mod tests {
             trusted_kinds: vec![],
         };
         let sb = p.profile("k", None, &wt, "/home/x/bin/agent").unwrap();
-        assert!(sb.write.contains(&wt) && sb.write.contains(&main.join(".git")));
+        assert!(sb.write.contains(&wt));
         assert!(sb.write.contains(&PathBuf::from("/home/x/.cache/agent")));
-        assert!(
-            sb.read.contains(&PathBuf::from("/home/x/bin")) && sb.read.contains(&"/usr".into())
-        );
+        if agora_platform::NARROW_GIT_WRITES {
+            // Folder by folder: the shared Git folder is read-only apart from `objects` and `refs`.
+            assert!(!sb.write.contains(&main.join(".git")) && sb.read.contains(&main.join(".git")));
+        } else {
+            assert!(sb.write.contains(&main.join(".git")));
+            assert!(
+                sb.read.contains(&PathBuf::from("/home/x/bin")) && sb.read.contains(&"/usr".into())
+            );
+        }
         assert!(!sb.write.iter().any(|w| w == Path::new("/home/x")));
         assert!(SandboxPolicy::default()
             .profile("k", None, &wt, "agent")
