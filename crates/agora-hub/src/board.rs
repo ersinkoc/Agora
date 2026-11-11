@@ -88,8 +88,8 @@ pub fn nodes_with(view: &View, project: &str) -> Vec<String> {
 pub const JOIN_WAIT_MS: u64 = 5_000;
 /// At most this many tasks and leases are taken from one node's answer, and a handed-over lease runs at most this long: the answer
 /// is a node's word, and it must not fill the board or hold a path forever.
-pub const MAX_JOIN_TASKS: usize = 500;
-pub const MAX_JOIN_LEASES: usize = 500;
+pub const MAX_JOIN_TASKS: usize = agora_mesh::broker::MAX_HANDOVER_TASKS;
+pub const MAX_JOIN_LEASES: usize = agora_mesh::broker::MAX_HANDOVER_LEASES;
 pub const MAX_JOIN_LEASE_MS: u64 = 60 * 60 * 1000;
 /// Who the board names as a handed-over task's creator when the node's own agent is not running any more.
 pub const BOARD_AGENT: &str = "hub/board";

@@ -209,6 +209,11 @@ struct TaskRec {
     summary: Option<String>,
 }
 
+/// At most this many tasks and leases of one project go to the shared board when it becomes shared (ADR-0039 amendment B); the hub
+/// takes no more from one node, so the rest stays on the node's broker instead of being lost.
+pub const MAX_HANDOVER_TASKS: usize = 500;
+pub const MAX_HANDOVER_LEASES: usize = 500;
+
 struct LeaseBatch {
     holder: AgentId,
     project: String,
@@ -795,7 +800,9 @@ impl Mesh {
     }
 
     /// ADR-0039 amendment B: the unfinished work of `project` on this broker, for the hub's board when the project becomes shared, and
-    /// no longer kept here: tasks that are open or claimed (done ones stay as history) and leases that have not ended.
+    /// no longer kept here: at most [`MAX_HANDOVER_TASKS`] tasks that are open or claimed (done ones stay as history) and at most
+    /// [`MAX_HANDOVER_LEASES`] leases that have not ended. Leases go by whole grant, so one granted together is never split; what does
+    /// not fit stays here, still released by its own lease id.
     pub fn take_unfinished(
         &mut self,
         project: &str,
@@ -807,17 +814,56 @@ impl Mesh {
             .filter(|(_, t)| t.project == project)
             .map(|(id, t)| self.entry(id, t))
             .filter(|e| e.status != TaskStatus::Done)
+            .take(MAX_HANDOVER_TASKS)
             .collect();
         for e in &tasks {
             self.tasks.remove(&e.id);
         }
-        let leases: Vec<(String, AgentId, u64)> = self
+        let live: Vec<(String, AgentId, u64)> = self
             .export_leases(project, now_ms)
             .into_iter()
             .filter(|(_, _, expires)| *expires > now_ms)
             .collect();
-        self.leases.remove(project);
-        self.batches.retain(|_, b| b.project != project);
+        let expiry = |path: &str, holder: &AgentId| {
+            live.iter()
+                .find(|(p, h, _)| p == path && h == holder)
+                .map(|(_, _, e)| *e)
+        };
+        let mut leases: Vec<(String, AgentId, u64)> = Vec::new();
+        let mut taken_batches = Vec::new();
+        for (id, b) in self.batches.iter().filter(|(_, b)| b.project == project) {
+            let grant: Vec<(String, AgentId, u64)> = b
+                .paths
+                .iter()
+                .filter_map(|p| expiry(p, &b.holder).map(|e| (p.clone(), b.holder.clone(), e)))
+                .collect();
+            if leases.len() + grant.len() <= MAX_HANDOVER_LEASES {
+                leases.extend(grant);
+                taken_batches.push(id.clone());
+            }
+        }
+        // A lease restored without its grant (import) has no batch: it goes alone while there is room.
+        let batched: Vec<(String, AgentId)> = self
+            .batches
+            .values()
+            .filter(|b| b.project == project)
+            .flat_map(|b| b.paths.iter().map(|p| (p.clone(), b.holder.clone())))
+            .collect();
+        for (path, holder, e) in &live {
+            if leases.len() < MAX_HANDOVER_LEASES
+                && !batched.iter().any(|(p, h)| p == path && h == holder)
+            {
+                leases.push((path.clone(), holder.clone(), *e));
+            }
+        }
+        for id in &taken_batches {
+            self.batches.remove(id);
+        }
+        if let Some(table) = self.leases.get_mut(project) {
+            for (path, holder, _) in &leases {
+                table.release(path, holder);
+            }
+        }
         (tasks, leases)
     }
 
@@ -1171,6 +1217,39 @@ mod tests {
             .lease_acquire(&id("b"), &["README.md".into()], 60_000, 2_000)
             .is_ok());
         assert_eq!(m.export_leases("other", 2_000).len(), 1);
+    }
+
+    #[test]
+    fn a_handover_takes_at_most_the_limit_and_what_is_left_still_works_here() {
+        let mut m = mesh();
+        for i in 0..=MAX_HANDOVER_TASKS {
+            m.task_create(&id("a"), &format!("t{i}"), "", &[]).unwrap();
+        }
+        let mut grants = Vec::new();
+        for i in 0..=MAX_HANDOVER_LEASES {
+            grants.push(
+                m.lease_acquire(&id("a"), &[format!("f{i}")], 60_000, 1_000)
+                    .unwrap(),
+            );
+        }
+        let (tasks, leases) = m.take_unfinished("p", 2_000);
+        assert_eq!(tasks.len(), MAX_HANDOVER_TASKS);
+        assert_eq!(leases.len(), MAX_HANDOVER_LEASES);
+        // One of each stays here: the task is still listed, and the lease still holds and is released by its own id.
+        assert_eq!(m.task_list(&id("a"), None).unwrap().len(), 1);
+        let i = (0..=MAX_HANDOVER_LEASES)
+            .find(|i| !leases.iter().any(|(p, _, _)| *p == format!("f{i}")))
+            .unwrap();
+        let kept = format!("f{i}");
+        assert!(m
+            .lease_acquire(&id("b"), std::slice::from_ref(&kept), 1_000, 2_000)
+            .is_err());
+        m.lease_release(&id("a"), &grants[i], 2_000).unwrap();
+        assert!(m.lease_acquire(&id("b"), &[kept], 1_000, 2_000).is_ok());
+        // What was handed over is free here.
+        assert!(m
+            .lease_acquire(&id("b"), std::slice::from_ref(&leases[0].0), 1_000, 2_000)
+            .is_ok());
     }
 
     #[test]
