@@ -2,7 +2,7 @@
 
 Lines for the node's `<data>/policy` that let real tools work under `sandbox = worktree` (ADR-0047). Every line widens what **every**
 confined agent on that node may touch, so add only what you use. Paths are absolute, or `~/` below the home folder (PR #244; before it,
-write the full path). A path that does not exist is skipped.
+write the full path). A path that does not exist is skipped; `agora doctor` names every policy path the node drops or cannot find yet.
 
 What is never a default, and why: `~/.gitconfig` and `~/.config/git` can hold credentials (`url.*.insteadOf` with a token, credential
 helper settings), so reading them is the owner's choice, not the node's.

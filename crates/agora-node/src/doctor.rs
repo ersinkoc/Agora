@@ -69,9 +69,8 @@ pub fn run(inputs: &Inputs) -> Vec<Check> {
     });
 
     // What the node's policy asks for, and whether this machine can do it (ADR-0047).
-    let level = crate::daemon::read_policy(&inputs.data_dir.join(crate::daemon::POLICY_FILE))
-        .sandbox
-        .level;
+    let policy_file = inputs.data_dir.join(crate::daemon::POLICY_FILE);
+    let level = crate::daemon::read_policy(&policy_file).sandbox.level;
     out.push(check(
         "sandbox",
         if agora_platform::sandbox_supported() {
@@ -81,6 +80,9 @@ pub fn run(inputs: &Inputs) -> Vec<Check> {
         },
         level.name(),
     ));
+    if level != crate::sandbox::Level::Off {
+        out.extend(policy_paths(&policy_file));
+    }
 
     out.push(match Command::new("git").arg("--version").output() {
         Ok(o) if o.status.success() => check(
@@ -105,6 +107,23 @@ pub fn run(inputs: &Inputs) -> Vec<Check> {
 
     out.extend(manifests(&inputs.manifests_dir));
     out
+}
+
+/// One note per `sandbox.read` / `sandbox.write` entry the node cannot use: dropped (`policy-path-dropped`: relative, `..`, `~` with
+/// no home folder) or not there (`policy-path-missing`: skipped until it exists). Detail: `<key> = <entry as written>`. Notes, not
+/// problems: agents still start, without that path.
+fn policy_paths(file: &Path) -> Vec<Check> {
+    crate::daemon::policy_sandbox_entries(file)
+        .into_iter()
+        .filter_map(|(key, raw)| {
+            let detail = format!("{key} = {raw}");
+            match crate::sandbox::expand(&raw) {
+                None => Some(check("policy-path-dropped", Status::Warn, detail)),
+                Some(p) if !p.exists() => Some(check("policy-path-missing", Status::Warn, detail)),
+                Some(_) => None,
+            }
+        })
+        .collect()
 }
 
 fn data_dir(dir: &Path) -> Check {
@@ -208,6 +227,58 @@ mod tests {
         let git_ok = find(&checks, "git")[0].status == Status::Ok;
         assert_eq!(healthy(&checks), git_ok && agora_platform::PTY_SUPPORTED);
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn sandbox_policy_paths_that_cannot_be_used_are_named_with_their_line() {
+        let dir = tmp("policy-paths");
+        let data = dir.join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let here = dir.join("here");
+        std::fs::create_dir_all(&here).unwrap();
+        let gone = dir.join("not-there");
+        std::fs::write(
+            data.join(crate::daemon::POLICY_FILE),
+            format!(
+                "sandbox = worktree\nsandbox.read = {}, relative/dir\nsandbox.write = {}, ../up\n",
+                here.display(),
+                gone.display()
+            ),
+        )
+        .unwrap();
+        let inputs = Inputs {
+            data_dir: data.clone(),
+            socket: dir.join("none.sock"),
+            manifests_dir: dir.join("manifests"),
+        };
+        let checks = run(&inputs);
+        let found = |id: &str| -> Vec<String> {
+            checks
+                .iter()
+                .filter(|c| c.id == id)
+                .map(|c| c.detail.clone())
+                .collect()
+        };
+        assert_eq!(
+            found("policy-path-dropped"),
+            ["sandbox.read = relative/dir", "sandbox.write = ../up"]
+        );
+        assert_eq!(
+            found("policy-path-missing"),
+            [format!("sandbox.write = {}", gone.display())]
+        );
+        assert!(checks
+            .iter()
+            .filter(|c| c.id.starts_with("policy-path"))
+            .all(|c| c.status == Status::Warn));
+        // With confinement off the paths do not matter and nothing is said.
+        std::fs::write(
+            data.join(crate::daemon::POLICY_FILE),
+            "sandbox = off\nsandbox.read = relative/dir\n",
+        )
+        .unwrap();
+        assert!(!run(&inputs).iter().any(|c| c.id.starts_with("policy-path")));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

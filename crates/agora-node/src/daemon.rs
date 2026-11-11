@@ -420,6 +420,36 @@ impl Default for Policy {
     }
 }
 
+/// The `sandbox.read` / `sandbox.write` entries exactly as written, each with its key, so `agora doctor` can say which ones the node
+/// drops (relative, `..`, a `~` with no home folder) or cannot use yet (missing). Same line rules as [`read_policy`].
+pub fn policy_sandbox_entries(path: &std::path::Path) -> Vec<(&'static str, String)> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for line in text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+    {
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        let key = match k.trim() {
+            "sandbox.read" => "sandbox.read",
+            "sandbox.write" => "sandbox.write",
+            _ => continue,
+        };
+        out.extend(
+            v.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| (key, s.to_string())),
+        );
+    }
+    out
+}
+
 /// Reads `key = value` lines (blank lines and `#` comments skipped). A known key with a value that is not `true` or `false`
 /// counts as `false`: a typo must never widen what the node allows. Unknown keys are ignored.
 pub fn read_policy(path: &std::path::Path) -> Policy {
