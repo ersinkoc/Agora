@@ -3,6 +3,9 @@
 One file per agent kind: `manifests/agents/<kind>.toml`. Manifests are data; the engine in
 `agora-adapters` interprets them. Detection rules must be evidence-based: captured from real screens and
 covered by fixtures under `manifests/agents/fixtures/<kind>/`.
+Fixtures are replayed at 120x40 unless their filename specifies the capture size:
+`<name>@<cols>x<rows>.screen`, with a matching `<name>@<cols>x<rows>.expect`.
+Keep the raw captured bytes and use the original terminal size so wrapping and clipping are tested.
 
 ```toml
 kind = "example-agent"          # stable id, lowercase, used in protocol and UI
