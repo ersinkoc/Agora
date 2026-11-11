@@ -53,6 +53,40 @@ use a project it has no checkout of.
 **Consequences.** Tasks made while a node is offline go to the one board, so ids never collide and nothing needs merging; a handoff to an offline node fails with `node.offline` and moves
 nothing; the hub's `shared` answer changes, the protocol does not. Local-only projects (one node, no board work) are untouched.
 
+## Amendment B (accepted by the maintainer 2026-11-11, "0039 Ek B kabul"): local work moves to the board when a project becomes shared
+
+Found by the macos machine (`comms`, finding B6 in `docs/backlog/lan-test-findings.md`), measured on a local hub with two nodes `na`, `nb` and clones of
+this repository. The decision above says the board is used once a project has checkouts on two online nodes, and the mesh spec adds that tasks and leases
+made locally before stay local. So when `nb` comes online while `na` holds a local lease on `README.md`, the board does not know that lease: `nb` was
+**granted `README.md` too (two holders)**; `na`'s agent no longer sees its own claimed task (its calls now go to the board), and the board's first task is
+`t-1` again, the id of a different local task.
+
+**The trigger has to come from the hub.** A node learns that a project is shared only in the answer to a board call; an idle agent on `na` makes none, so
+`nb` can lease the file before `na` ever hears that the project became shared.
+
+**Rule.**
+1. When a project gains its second online node with a checkout, the hub sends each of those nodes a `BoardJoin { project_id }` command (hub → node, on the
+   path `MeshPost` delivery uses; a new message, ADR-0006). Until every one of them has answered, or 5 seconds have passed, the hub answers lease and claim
+   calls for that project with `board.unavailable` (retryable), so nothing is granted against work it has not seen.
+2. A node answers `BoardJoin` with its unfinished local work for that project (`BoardJoinResult`: live leases with their end, open and claimed tasks
+   with their owner) and stops keeping it; done tasks stay in the local history. The hub, as the board's single writer, puts it on the board: every lease
+   for its holder with its remaining time, every task created anew and claimed again by its owner. The hub tells each owner agent the new id in one mesh
+   message from `hub/board` (`{"board":"task_moved","from":"t-1","to":"t-4"}`), and the node uses the board for the project from then on (Amendment A
+   keeps it there while work is unfinished). Carrying the work in the answer, rather than as board calls made for the agents, means nothing the node
+   sends during the wait can be mistaken for a new grant.
+3. A lease the board refuses (another node's agent holds an overlapping path) ends on the node, and both holders get a message naming the path and the
+   other holder (`lease_refused` / `lease_conflict`); there is no silent second holder. `BoardJoin` goes only to nodes that offer the capability
+   `board.join`; an older node is not asked and not waited for. A node that answers after the 5 seconds still moves its work; its conflicting leases end the same way.
+
+**Alternatives.** (a) Separate id spaces only (board ids prefixed): removes the id mix-up but not the double lease. (b) Every project of a connected node
+uses the hub's board, one node or many, and the local broker only while the hub is unreachable: no transition while connected, but a single-node project's
+board calls then depend on the hub, and the same move is still needed after a reconnect. (c) Leave it, and document that leases are advice and git is the
+final guard (as the decision says): cheapest, but the console would show one holder while two agents edit.
+
+**Consequences.** One new hub → node message and one new `board.unavailable` cause; tasks get new ids once, announced to their owners. Nodes that never
+share a project are untouched. Tests: the `na`/`nb` sequence above (local lease, second node joins, the other node's lease is refused until the move, then
+one holder) and the idle-agent case (no board call on `na`).
+
 ## Consequences
 - Hub: a board per project in the store, atomic task and lease operations, TTL expiry, a command handler on the node connection.
 - Node: the mesh server routes shared-project tool calls through the uplink (as `MeshPost` does) and renews leases; local-only
