@@ -1,5 +1,5 @@
 import { readFileSync, readdirSync } from 'node:fs';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { actionKey } from './net/audit';
 import { chooseLanguage, directionOf, getLanguage, getLanguagePreference, pickLanguage, setLanguage, subscribeLanguage, t } from './i18n';
 
@@ -10,6 +10,8 @@ function sources(dir: string): string[] {
 }
 
 describe('i18n', () => {
+  // Node exposes the system locale through navigator too; translation assertions must choose their own language.
+  beforeEach(() => setLanguage('en'));
   it('has every literal key used with t()', () => {
     const keys = new Set<string>();
     for (const f of sources('src')) {
