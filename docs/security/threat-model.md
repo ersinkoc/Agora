@@ -43,6 +43,20 @@ phase exit.
 | T13 | The hub's remote install (ADR-0034) puts a malicious binary or enrollment on a machine | Only a release asset is fetched, never an upload or a script; its SHA-256 and a signature pinned by the owner (`release-key`) are checked on the machine before it is installed, and without a pinned key the command stops unless the owner passes `--unsigned` (the project's release public key, as an `allowed_signers` line, is `docs/security/release-key.pub`; copy it to `<hub dir>/release-key`); every value in the remote commands is validated; the code travels over the SSH channel only and the CA on stdin; the new node starts with default policy and no trusted devices; the command is interactive and never triggered by a web action |
 | T13 | A node forges messages as another node's agent (ADR-0031) | The hub sets `MeshPost.origin` from the connection's certificate and overwrites the node's value; only the agent id within a node is the node's word; mesh content stays untrusted data and cannot approve anything |
 
+### Repository-configured Git execution (T8)
+
+The node runs Git outside an agent's confinement. Its own repository commands disable
+`core.fsmonitor` and hooks with command-line overrides, and tracked/untracked diff and
+status line-count queries disable external diff and text-conversion helpers. A planted
+repository setting cannot re-enable those helpers. Branch inspection uses the same
+command builder; `git --version` does not inspect a repository.
+
+This is a specific mitigation, not a sandbox for Git: clean/smudge/process filters and
+other configuration-driven behavior remain outside this guarantee. Writable Git config
+and hooks in selected checkouts remain an open confinement limitation (ADR-0052); agent
+and user Git commands retain their own configuration. Regression tests use real temporary
+repositories with marker helpers and unsafe controls, never a live user checkout.
+
 ## Kill switch
 
 Every client exposes "stop all agents" globally, per project, and per node. The node honors it even when

@@ -32,6 +32,7 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 - Distinguish same-named projects by their full identity and expandable machine/folder details. Leases from selected-folder sessions appear on their project's board.
 
 ### Confining agents
+- Node-owned Git commands disable repository fsmonitor and hooks; change previews use raw content without external diff or text-conversion helpers.
 - macOS: a confined agent can read the folders it was given (it could not read its own worktree before).
 - macOS and Windows: a confined agent gets a temp folder of its own (`TMPDIR`, `TEMP`, `TMP`). `sandbox.read` and `sandbox.write` accept `~/`.
 - A confined launch in a filesystem root, the home folder, a secret folder (`.ssh`, `.aws`, ...) or the node's own folder is refused.

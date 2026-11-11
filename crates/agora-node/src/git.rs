@@ -2,6 +2,7 @@
 //!
 //! Uses the `git` command line (stable, ubiquitous, no extra dependency). Every call runs with a clean locale,
 //! no prompts, and paths/branches after `--` or validated first, so repository content cannot inject options.
+//! Node-owned commands disable fsmonitor/hooks; diffs disable external and text-conversion helpers.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -74,14 +75,28 @@ pub struct GitStatus {
     pub head_commit: String,
 }
 
-fn git(dir: &Path, args: &[&str]) -> Result<String, GitError> {
-    let out = Command::new("git")
+/// Build a node-owned command without running repository fsmonitor or hooks with daemon privileges.
+/// This does not sandbox Git itself or suppress clean/smudge filters.
+pub(crate) fn command(dir: &Path) -> Command {
+    let mut command = Command::new("git");
+    command
+        .args([
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+        ])
         .arg("-C")
         .arg(dir)
-        .args(args)
         .env("LC_ALL", "C")
         .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_OPTIONAL_LOCKS", "0");
+    command
+}
+
+fn git(dir: &Path, args: &[&str]) -> Result<String, GitError> {
+    let out = command(dir)
+        .args(args)
         .output()
         .map_err(|e| GitError::Io(e.to_string()))?;
     if out.status.success() {
@@ -228,8 +243,16 @@ fn parse_shortstat(s: &str) -> (u32, u32) {
 pub fn status(worktree: &Path) -> Result<GitStatus, GitError> {
     let files_changed = git(worktree, &["status", "--porcelain"])?.lines().count() as u32;
     let head_commit = git(worktree, &["rev-parse", "HEAD"])?.trim().to_string();
-    let (insertions, deletions) =
-        parse_shortstat(&git(worktree, &["diff", "--shortstat", "HEAD"])?);
+    let (insertions, deletions) = parse_shortstat(&git(
+        worktree,
+        &[
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--shortstat",
+            "HEAD",
+        ],
+    )?);
     Ok(GitStatus {
         files_changed,
         insertions,
@@ -248,13 +271,8 @@ const MAX_DIFF_READ: u64 = 1024 * 1024;
 /// Like [`git`], keeping at most `cap` bytes of stdout (the process is stopped when it has produced that much).
 fn git_capped(dir: &Path, args: &[&str], cap: u64) -> Result<String, GitError> {
     use std::io::Read;
-    let mut child = Command::new("git")
-        .arg("-C")
-        .arg(dir)
+    let mut child = command(dir)
         .args(args)
-        .env("LC_ALL", "C")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_OPTIONAL_LOCKS", "0")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .spawn()
@@ -279,7 +297,13 @@ fn git_capped(dir: &Path, args: &[&str], cap: u64) -> Result<String, GitError> {
 /// Unified diff of the changes against HEAD, optionally for one path. A new file that git does not track yet is shown as
 /// all-added (what a reviewer would see), without touching the index.
 pub fn diff(worktree: &Path, path: Option<&str>) -> Result<String, GitError> {
-    let mut args = vec!["diff", "--no-color", "--no-ext-diff", "HEAD"];
+    let mut args = vec![
+        "diff",
+        "--no-color",
+        "--no-ext-diff",
+        "--no-textconv",
+        "HEAD",
+    ];
     if let Some(p) = path {
         args.extend(["--", p]);
     }
@@ -299,20 +323,17 @@ pub fn diff(worktree: &Path, path: Option<&str>) -> Result<String, GitError> {
             continue;
         }
         // `--no-index` exits 1 when the files differ, which is the normal case here.
-        let shown = Command::new("git")
-            .arg("-C")
-            .arg(worktree)
+        let shown = command(worktree)
             .args([
                 "diff",
                 "--no-index",
                 "--no-color",
                 "--no-ext-diff",
+                "--no-textconv",
                 "--",
                 "/dev/null",
                 name,
             ])
-            .env("LC_ALL", "C")
-            .env("GIT_OPTIONAL_LOCKS", "0")
             .output()
             .map_err(|e| GitError::Io(e.to_string()))?;
         out.push_str(&String::from_utf8_lossy(&shown.stdout));
@@ -364,9 +385,7 @@ pub fn log(worktree: &Path, limit: usize) -> Result<Vec<Commit>, GitError> {
 /// out of `git status` and `git add .` without touching a tracked `.gitignore`. Best effort: failure only means the
 /// file shows up as untracked.
 pub fn exclude_locally(worktree: &Path, rel: &Path) {
-    let Ok(out) = Command::new("git")
-        .arg("-C")
-        .arg(worktree)
+    let Ok(out) = command(worktree)
         .args(["rev-parse", "--git-path", "info/exclude"])
         .output()
     else {
