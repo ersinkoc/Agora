@@ -14,6 +14,11 @@ cargo check          # Linux needs: libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3
 cargo run            # a window with the connect screen
 ```
 
+On macOS, `src-tauri/Info.plist` adds `NSLocalNetworkUsageDescription` to the bundle: without it macOS refuses connections to a hub on the
+local network and never asks (seen on macOS 27 with an unsigned bundle). Its text is English only for now.
+`bundle.macOS.signingIdentity = "-"` signs the bundle ad hoc (no Apple account): a bundle that is only linker-signed has no stable
+identity, so the permission the user grants never applies to it.
+
 Not done yet: native notifications for a waiting approval while the window is hidden, installers and per-platform signing (needs the
 maintainer's Apple and Windows accounts; unsigned builds are published as such), a real icon (the name and logo are open question Q1).
 The product name appears in `src-tauri/tauri.conf.json` (`productName`, window title) and `ui/index.html`; renaming is a change to those.
