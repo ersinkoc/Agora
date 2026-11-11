@@ -1,5 +1,9 @@
 # Turkish strings: a second reader (2026-11-09)
 
+Status update (2026-11-11): the maintainer has supplied human approval for the revised Turkish strings in #227.
+The native-speaker review requirement mentioned below is complete; see [the follow-up review](2026-11-11-codex-turkish-review.md).
+The rest of this note records the state on 2026-11-09.
+
 This is **not** the native-speaker review the backlog asks for. It is a mechanical check and one pass by Codex (codex-cli 0.167.0, read-only),
 so a person who reads Turkish still has to go through `locales/tr/` before a public release.
 

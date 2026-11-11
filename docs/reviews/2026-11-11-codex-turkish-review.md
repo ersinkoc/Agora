@@ -1,7 +1,8 @@
 # Turkish wording review (2026-11-11)
 
 Scope: all six `locales/tr/*.ftl` files, compared with `locales/en/*.ftl`, the error-code specification and the UI vocabulary.
-This is a Codex language review requested by the maintainer, not a human native-speaker sign-off. That release gate remains open.
+The Codex language review below was followed by the maintainer's explicit human approval on 2026-11-11:
+"insan onayı verdim". The human native-speaker review requirement for the Turkish strings revised in #227 is complete.
 
 Forty messages were corrected. Main findings:
 
@@ -23,6 +24,7 @@ After generating the schema types with `npm run gen`, the web build and all 77 w
 at desktop and phone widths in both themes are in `docs/screenshots/turkish-review/`.
 The Fluent messages with interpolated names avoid suffixes whose pronunciation cannot be known in advance.
 
-Before release, a Turkish-speaking human must read and approve the revised strings, including the grant and signature messages.
+The maintainer's approval covers the revised Turkish strings, including the grant and signature messages. No further
+human approval is pending for this review.
 The English `cli-trusted` message still requests a restart although trusted-device reload is documented elsewhere; correcting that
 source behavior description is outside this translation pass.
