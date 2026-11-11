@@ -117,7 +117,9 @@ fn start_attach_stop_from_the_command_line() {
         Path::new(&worktree).join("README.md").exists(),
         "own worktree: {worktree}"
     );
-    assert!(worktree.starts_with(s.home.join("worktrees").to_str().unwrap()));
+    assert!(std::fs::canonicalize(&worktree)
+        .unwrap()
+        .starts_with(std::fs::canonicalize(s.home.join("worktrees")).unwrap()));
 
     // Attach in a real terminal: type a command, see its output, detach with Ctrl-].
     let mut cfg = PtyConfig::new(vec![
