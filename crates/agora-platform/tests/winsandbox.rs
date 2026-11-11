@@ -493,14 +493,21 @@ fn a_confined_agent_cannot_open_another_agents_process() {
     }
     drop(agent_b);
     drop(agent_a);
-    // Dropping the terminal took the permissions back before it returned (not later on a background thread).
-    let acl = acl_text(&a);
-    assert!(!acl.contains("Mandatory Label"), "{acl}");
-    assert!(
-        !acl.lines()
-            .any(|l| l.contains("S-1-5-21-") && !l.contains("(I)")),
-        "{acl}"
-    );
+    // The permissions go back on the terminal's waiter thread once the killed process is gone (so a node's stop does not wait for the
+    // walk): give it a moment, then nothing of agent A is left.
+    let clean = |acl: &str| {
+        !acl.contains("Mandatory Label")
+            && !acl
+                .lines()
+                .any(|l| l.contains("S-1-5-21-") && !l.contains("(I)"))
+    };
+    let end = Instant::now() + Duration::from_secs(20);
+    let mut acl = acl_text(&a);
+    while !clean(&acl) && Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(100));
+        acl = acl_text(&a);
+    }
+    assert!(clean(&acl), "{acl}");
     let out = String::from_utf8_lossy(&out).into_owned();
     for (name, _) in PROCESS_RIGHTS {
         assert!(

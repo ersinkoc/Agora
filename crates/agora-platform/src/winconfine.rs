@@ -90,6 +90,8 @@ fn self_grant_enabled() -> bool {
 const HERE_MARK: &str = "here";
 const LABEL_LINE: &str = "#label";
 const WO_LINE: &str = "#wo";
+/// The owner line of a ledger whose spawn has ended with entries it could not take back: no live process, so it is stale.
+const ENDED_OWNER: &str = "#owner\t0\t0";
 
 fn last_error() -> io::Error {
     // SAFETY: plain call.
@@ -1055,9 +1057,14 @@ impl Drop for Confinement {
                 all_removed = false;
             }
         }
-        // A failed removal keeps the ledger so the next start retries; the SID dies with the agent either way.
+        // A failed removal keeps the ledger so recovery retries; the SID dies with the agent either way. Its owner line is marked ended:
+        // this spawn no longer uses any of it, so a later spawn of the same agent does not count these entries as in use (and takes
+        // them back when it ends), and recovery treats the ledger as stale.
         if all_removed {
             let _ = std::fs::remove_file(&self.ledger);
+        } else if let Ok(text) = std::fs::read_to_string(&self.ledger) {
+            let rest = text.split_once('\n').map_or("", |(_, rest)| rest);
+            let _ = std::fs::write(&self.ledger, format!("{ENDED_OWNER}\n{rest}"));
         }
     }
 }
@@ -1410,7 +1417,8 @@ mod tests {
     }
 
     /// Review of #273, 3: a start that fails after it has changed something (the first folder granted, the second refusing the DACL
-    /// change) leaves no grant of the agent anywhere, and no ledger once everything is taken back.
+    /// change) leaves no grant of the agent anywhere, and no ledger once everything is taken back. This guards the contract; the one
+    /// step that could change a folder and still fail (the self-grant before a label) is unreachable while the self-grant is off.
     #[test]
     fn a_start_failing_halfway_leaves_no_grant_and_no_ledger() {
         let root = scratch("halfway");
@@ -1523,6 +1531,8 @@ mod tests {
         assert!(owner_alive(owner_line().trim_end()));
         // A pid nobody has, a wrong start time for a live pid, and a line that is not an owner line.
         assert!(!owner_alive("#owner\t4294967290\t1"));
+        // A ledger kept after a failed removal is marked ended, hence stale.
+        assert!(!owner_alive(ENDED_OWNER));
         let pid = std::process::id();
         assert!(!owner_alive(&format!("#owner\t{pid}\t1")));
         assert!(!owner_alive("S-1-5-21-1-2-3-4\tC:\\x"));
