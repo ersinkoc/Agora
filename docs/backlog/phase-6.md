@@ -2,6 +2,9 @@
 
 Started with the terminal client (ADR-0043). Other Phase 6 items: the install step of the adapter registry is ADR-0044 (accepted; P6-07); RTL has only its foundation (P6-06).
 
+Turkish (`locales/tr`): wording corrections merged in #227; human native-speaker approval supplied by the maintainer on
+2026-11-11. This review is complete. See [the review record](../reviews/2026-11-11-codex-turkish-review.md).
+
 | Task | State | Notes |
 | --- | --- | --- |
 | P6-01 TUI slice 1: read-only console | done | `agora tui [--hub HOST:PORT --ca FILE --code CODE] [--hub-dir DIR]`: signs in with a one-time code (made by itself on the hub's own machine), follows the hub's snapshot and draws machines, agents grouped by project with their state and the attention list; `NO_COLOR` spells states out without escape codes; text in `locales/{en,tr}/tui.ftl`; pure render with unit tests, a real hub and node in `crates/agora/tests/hub_dial.rs`. It refreshes by asking the hub for a new snapshot (at most every 500 ms after something changed); applying single events is later work |
