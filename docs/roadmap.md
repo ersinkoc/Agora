@@ -26,7 +26,7 @@ criteria are met.
 - Hub: single user, SQLite, device enrollment, event store, routing.
 - Web client: main window (projects, agents, terminal, files, changes).
 - SSH bootstrap for one remote node; onboarding and enrollment flow; review screen.
-- Notifications (in-app, desktop, web push); `agora doctor`; hub backup/restore; usage and cost view.
+- Notifications (in-app, desktop, ntfy phone notifications with PWA links; Web Push deferred by ADR-0051); `agora doctor`; hub backup/restore; usage and cost view.
 - Design tokens, component gallery, visual regression tests (before screens).
 - Home (Glance) with live tiles and attention strip; Focus view.
 - Local-first client store, GPU terminal rendering, command palette, attention flow; direct data path if ADR-0023 is accepted.
