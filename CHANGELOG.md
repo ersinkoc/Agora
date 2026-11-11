@@ -22,6 +22,8 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 - Recipes for the folders real tools need (git config, cargo, npm, compilers): `docs/security/sandbox-recipes.md`.
 - Windows confinement is written (ADR-0050) and tested on real Windows, but switched off: a real-machine check showed the first design lets a folder with a broad group permission through, and a replacement design is being measured.
 - Codex's "trust this folder" screen is now shown as needing you.
+- The shared task board no longer vanishes when one of two machines drops: while it holds unfinished work the other machine keeps using it, and a machine that restarts does not inherit its dead agents' claims.
+- A refused lease says when the holder's lease ends.
 - A manifest added while the node runs is listed and can be started without restarting the node.
 
 ## 0.2.1

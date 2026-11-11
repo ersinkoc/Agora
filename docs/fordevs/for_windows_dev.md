@@ -15,11 +15,28 @@ just check          # or: cargo fmt --all; cargo clippy --workspace --all-target
 ```
 Use a worktree per task (`git worktree add ..\agora-worktrees\<slug> -b claude/<slug> origin/main`).
 
+Things that trip a Windows checkout (all met on a real machine on 2026-11-11):
+- **`sh` on `PATH` for the tests.** Several tests start a `sh` agent. Git for Windows puts only `Git\cmd` on `PATH`, so add
+  `C:\Program Files\Git\usr\bin` for test runs (`$env:PATH = "C:\Program Files\Git\usr\bin;$env:PATH"`). `crates/agora/tests/cli.rs` skips with a note
+  without it, but `crates/agora-node/tests/control.rs` fails.
+- **A fresh `agora-fake-agent`.** `crates/agora-node/tests/directory_launch.rs` runs whatever `agora-fake-agent.exe` is in the target folder. After a pull, build it
+  (`cargo build -p agora-fake-agent`) or run `cargo test --workspace`; a stale one fails with `missing fake cwd report`.
+- **Line endings.** With `core.autocrlf=true`, git rewrites CRLF in text files. Captured agent screens (`manifests/agents/fixtures/**/*.screen`) are marked
+  `binary` in `.gitattributes` for that reason; a new kind of byte-exact fixture needs its own line there. Check the committed size (`git cat-file -s HEAD:<file>`).
+- **Paths.** `std::fs::canonicalize` answers `\\?\C:\...`, which `cmd.exe` refuses as a current folder (it silently runs in `C:\Windows`). Use
+  `agora_platform::canonicalize_plain` for any folder a process starts in or a person sees.
+
 ## What only this machine can check
 
 ### 1. Windows agent confinement (ADR-0050): the most important item
-It is written and tested on CI, and **switched off** (`ENABLED = false` in `crates/agora-platform/src/winconfine.rs`). A real-machine check
-decides whether the maintainer turns it on. Run, in order, and report each result:
+It is **switched off** (`ENABLED = false` in `crates/agora-platform/src/winconfine.rs`). Status on 2026-11-11:
+- The first real-machine pass found #230: `Users`/`Everyone` in the restricting list open every folder that grants them access (for example `C:\ProgramData`, and reads on data volumes).
+- Amendment A (application-package SIDs) cannot be built, because `CreateRestrictedToken` rejects them with error 87.
+- An AppContainer prototype (#252) breaks git on the console and msys/bash, and needs admin changes for `git commit`.
+- **Amendment B is accepted**: restricted token + Low integrity with a Low label on the allowed folders, attributes-only entries on the folders above
+  them (#253), and a refusal before start for broad write grants. Its implementation PR carries the acceptance table. Measurements and reasons are in the `comms` log.
+
+The steps below are the original check, still useful to repeat against each new build. Run, in order, and report each result:
 
 1. `cargo test -p agora-platform --test winsandbox -- --nocapture` : all three tests pass on your machine too.
 2. Run a node with confinement for one session: `$env:AGORA_WINDOWS_CONFINEMENT = "1"`, set `sandbox = worktree` in the node's

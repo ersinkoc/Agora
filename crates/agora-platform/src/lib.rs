@@ -209,6 +209,21 @@ pub fn write_private(path: &std::path::Path, contents: &[u8]) -> io::Result<()> 
     }
 }
 
+/// `std::fs::canonicalize`, spelled the way programs expect: on Windows without the verbatim `\\?\` prefix whenever the ordinary
+/// spelling names the same file (`cmd.exe` cannot start in a verbatim folder and silently uses `C:\Windows` instead). Use it for any
+/// path a process is started in or that is shown to people. Elsewhere it is `std::fs::canonicalize`.
+pub fn canonicalize_plain(path: &std::path::Path) -> io::Result<std::path::PathBuf> {
+    let canonical = std::fs::canonicalize(path)?;
+    #[cfg(windows)]
+    {
+        Ok(windows::plain_path(canonical))
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(canonical)
+    }
+}
+
 /// Creates a symbolic link at `link` pointing to `target`. Only Unix for now (Windows links need privileges and a file
 /// or directory flavour); elsewhere it returns `Unsupported`, which tests that need a link use to skip themselves.
 pub fn symlink(target: &std::path::Path, link: &std::path::Path) -> io::Result<()> {

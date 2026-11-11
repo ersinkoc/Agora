@@ -18,7 +18,8 @@ pub fn inspect(
     if path.is_empty() || path.len() > 4096 || path.contains('\0') {
         return Err(invalid("directory.path"));
     }
-    let path = std::fs::canonicalize(path).map_err(|_| invalid("directory.path"))?;
+    let path = agora_platform::canonicalize_plain(std::path::Path::new(path))
+        .map_err(|_| invalid("directory.path"))?;
     if !path.is_dir() {
         return Err(invalid("directory.path"));
     }
@@ -26,8 +27,8 @@ pub fn inspect(
     // Use canonical paths on both sides before computing a selected subdirectory's relative path.
     let checkout = match crate::git::discover_checkout(&path) {
         Ok(mut checkout) => {
-            checkout.root =
-                std::fs::canonicalize(&checkout.root).map_err(|_| invalid("directory.git_root"))?;
+            checkout.root = agora_platform::canonicalize_plain(&checkout.root)
+                .map_err(|_| invalid("directory.git_root"))?;
             Some(checkout)
         }
         Err(_) => None,
@@ -225,6 +226,14 @@ mod tests {
         assert_eq!(std::fs::read(a.join(METADATA)).unwrap(), original);
         let _ = std::fs::remove_dir_all(a);
         let _ = std::fs::remove_dir_all(b);
+    }
+    #[test]
+    fn a_selected_folder_is_reported_in_the_spelling_programs_can_start_in() {
+        // On Windows `canonicalize` answers `\\?\C:\...`, and `cmd.exe` started there runs in `C:\Windows` instead.
+        let a = temp("plain");
+        let (info, _) = inspect(a.to_str().unwrap(), "node-a", false).unwrap();
+        assert!(!info.path.starts_with(r"\\?\"), "{}", info.path);
+        let _ = std::fs::remove_dir_all(a);
     }
     #[test]
     fn an_existing_binding_never_silently_changes_identity_and_corrupt_state_fails_closed() {

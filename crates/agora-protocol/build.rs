@@ -1,9 +1,11 @@
 //! Generates Rust types from `schema/agora/v1/*.proto` without `protoc`.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let schema = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../schema");
+    // Read at run time: `env!` would bake in the folder this script was compiled in, and a build folder shared by two checkouts (or a
+    // deleted worktree) would then read, and watch, the wrong `schema/`.
+    let schema = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR")?).join("../../schema");
     let mut protos: Vec<PathBuf> = Vec::new();
     for entry in std::fs::read_dir(schema.join("agora/v1"))? {
         let path = entry?.path();

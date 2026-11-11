@@ -238,6 +238,23 @@ impl Boards {
         out
     }
 
+    /// True while the project's board has a task that is not done or a lease that has not ended.
+    fn holds_unfinished_work(&self, project: &str, now_ms: u64) -> bool {
+        use agora_mesh::broker::TaskStatus;
+        let g = self.by_project.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(mesh) = g.get(project) else {
+            return false;
+        };
+        let (_, tasks) = mesh.export_tasks();
+        tasks
+            .iter()
+            .any(|t| t.project == project && t.status != TaskStatus::Done)
+            || mesh
+                .export_leases(project, now_ms)
+                .iter()
+                .any(|(_, _, expires)| *expires > now_ms)
+    }
+
     pub fn has(&self, project: &str) -> bool {
         self.by_project
             .lock()
@@ -365,8 +382,12 @@ impl Boards {
             return bad("arguments_json");
         }
         let nodes = nodes_with(view, project);
-        // A node can only speak for a project it has a checkout of, and a board exists only when two nodes share it.
-        if nodes.len() < 2 || !nodes.iter().any(|n| n == node) {
+        // A node can only speak for a project it has a checkout of. A board is in use while two nodes share the project, and (ADR-0039
+        // amendment A) while it still holds a task that is not done or a lease that has not ended: a node that drops must not make
+        // the other one fall back to a local broker that knows nothing of the hub's tasks.
+        if !nodes.iter().any(|n| n == node)
+            || (nodes.len() < 2 && !self.holds_unfinished_work(project, now_ms))
+        {
             return answer(Verdict::NotShared);
         }
         if channel {
@@ -528,6 +549,98 @@ mod tests {
         assert!(matches!(a.verdict, Verdict::Invalid(_)));
         let a = b.call(&v, "alpha", "a", "p", "task_list", "[1]", 1);
         assert!(matches!(a.verdict, Verdict::Invalid(_)));
+    }
+
+    #[test]
+    fn the_board_stays_in_use_after_a_node_drops_while_it_holds_unfinished_work() {
+        // ADR-0039 amendment A. `alpha` and `beta` share the project and `alpha` makes a task; `beta` goes offline.
+        let b = Boards::new();
+        let both = view(&["alpha", "beta"]);
+        let made = run(
+            &b,
+            &both,
+            "alpha",
+            "task_create",
+            json!({"title": "t", "depends_on": []}),
+            1,
+        );
+        let Verdict::Done { result, .. } = made.verdict else {
+            panic!()
+        };
+        let first = agora_mesh::mcp::tool_result_value(&result).unwrap()["task_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let alone = view(&["alpha"]);
+        // Still the hub's board: the task is listed, a new one gets a new id, a handoff to the offline node says so.
+        let listed = run(&b, &alone, "alpha", "task_list", json!({}), 2);
+        assert!(
+            matches!(listed.verdict, Verdict::Done { .. }),
+            "{:?}",
+            listed.verdict
+        );
+        let again = run(
+            &b,
+            &alone,
+            "alpha",
+            "task_create",
+            json!({"title": "u", "depends_on": []}),
+            3,
+        );
+        let Verdict::Done { result, .. } = again.verdict else {
+            panic!("{:?}", again.verdict)
+        };
+        let second = agora_mesh::mcp::tool_result_value(&result).unwrap()["task_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_ne!(first, second);
+        run(
+            &b,
+            &alone,
+            "alpha",
+            "task_claim",
+            json!({"task_id": first}),
+            4,
+        );
+        let h = run(
+            &b,
+            &alone,
+            "alpha",
+            "handoff",
+            json!({"to": "beta/a", "task_id": first, "summary": "s", "refs": []}),
+            5,
+        );
+        assert_eq!(code(&h), "node.offline");
+        // Everything done and no lease: one node alone goes back to its local broker.
+        run(
+            &b,
+            &alone,
+            "alpha",
+            "task_complete",
+            json!({"task_id": first, "summary": "d"}),
+            6,
+        );
+        run(
+            &b,
+            &alone,
+            "alpha",
+            "task_claim",
+            json!({"task_id": second}),
+            7,
+        );
+        run(
+            &b,
+            &alone,
+            "alpha",
+            "task_complete",
+            json!({"task_id": second, "summary": "d"}),
+            8,
+        );
+        assert_eq!(
+            run(&b, &alone, "alpha", "task_list", json!({}), 9).verdict,
+            Verdict::NotShared
+        );
     }
 
     #[test]
