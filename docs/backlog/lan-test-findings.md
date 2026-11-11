@@ -23,6 +23,7 @@ branch (`docs/fordevs/`). Each row is something the run showed that no CI run ha
 | B4 | A node that crashes and restarts reuses its agent ids (`agent-1`), and the hub board still showed the dead agent's claim as the new agent's | fixed: the hub gives back the tasks and leases of a node's agents when the node announces a new process start |
 | B5 | `lease.held` carries an empty `expires_at` | fixed: the error carries the conflicting lease's end in ms, as the file-write error already did |
 | B6 | Local → shared: a project used on one node keeps its tasks and leases on that node's local broker; when a second node with a checkout comes online the board takes over, the first node's agents lose sight of their own claimed task, the board's first task is `t-1` again, and a lease held locally is not seen by the board: measured, `nb` was granted `README.md` while `na` still held it (two holders) | open: ADR-0039 says work made locally before sharing stays local; needs that sentence changed (move unfinished local tasks and live leases to the board when it takes over, or refuse to switch while local leases are live) |
+| B7 | Two same-identity project folders selected after both daemons start are ignored by shared-board eligibility; the peer sees no task and acquires a path already held on the first node | fixed in #291: checkout/workspace/session membership drives both eligibility and production join discovery, with a real two-node regression and project lifecycle tests |
 
 
 ## Confined agents can reach unix sockets (2026-11-11)

@@ -25,6 +25,7 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 - New directory launch needs an unrestricted owner device trusted on the node. Older clients keep their existing worktree launch behavior; fixed-file MCP manifests need explicit worktree mode.
 
 ### Machines
+- Matching project folders selected on machines that are already online use one board for new tasks and file leases.
 - A hub, a Linux node, a macOS node and a Windows node ran together on one network: terminals of all three in one window, and agent-to-agent messages in every direction (`docs/backlog/lan-test-findings.md`).
 - The desktop app checks the hub against the certificate you gave it before remembering it, says why it cannot connect, and reaches a hub by its IP address; a bundled macOS app can now reach a hub on the local network. `agora tui` reaches a hub by IP too.
 - A project is found by its id before its name, and a name two projects share is refused.
