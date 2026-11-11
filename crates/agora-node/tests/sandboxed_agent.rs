@@ -75,6 +75,11 @@ fn setup_with(
 
 #[test]
 fn a_level_that_cannot_be_enforced_starts_nothing_and_leaves_no_worktree() {
+    // `worktree-offline` is the level some machines cannot enforce (no network rules); where it can be, see the next test.
+    if agora_platform::sandbox_supported() && agora_platform::offline_supported() {
+        eprintln!("skipped: this machine enforces worktree-offline");
+        return;
+    }
     let outside = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("sbx-never");
     let policy = SandboxPolicy {
         level: Level::WorktreeOffline,
@@ -148,5 +153,42 @@ fn a_confined_agent_has_a_writable_temp_folder_of_its_own_where_the_system_one_i
     );
     assert!(tmpdir.trim().contains("agora-agent-"), "{tmpdir}");
     drop(sup);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn an_offline_agent_works_in_its_worktree_but_reaches_no_other_machine() {
+    if !agora_platform::sandbox_supported() || !agora_platform::offline_supported() {
+        eprintln!("skipped: this machine cannot keep an agent off the network");
+        return;
+    }
+    let local = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = local.local_addr().unwrap().port();
+    let policy = SandboxPolicy {
+        level: Level::WorktreeOffline,
+        ..Default::default()
+    };
+    // `nc` ships with macOS (the only system that enforces this level today).
+    let script = format!(
+        "echo in > inside; {{ nc -z -G 2 1.1.1.1 443 && echo internet-open || echo internet-closed; \
+         nc -z -G 2 127.0.0.1 {port} && echo local-open || echo local-closed; }} > net 2>/dev/null; sleep 30"
+    );
+    let (mut sup, req, dir) = setup_with("offline-on", &script, policy);
+    sup.start(&req, Instant::now()).unwrap();
+    let net = dir.join("worktrees/a/net");
+    let end = Instant::now() + Duration::from_secs(15);
+    while std::fs::read_to_string(&net).map_or(0, |t| t.lines().count()) < 2 && Instant::now() < end
+    {
+        sup.tick(Instant::now());
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let text = std::fs::read_to_string(&net).unwrap_or_default();
+    assert!(
+        dir.join("worktrees/a/inside").exists(),
+        "the agent could not write in its worktree"
+    );
+    assert!(text.contains("internet-closed"), "{text}");
+    assert!(text.contains("local-open"), "{text}");
+    drop((sup, local));
     let _ = std::fs::remove_dir_all(dir);
 }

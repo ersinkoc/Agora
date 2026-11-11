@@ -83,6 +83,7 @@ fn a_confined_process_writes_only_where_it_was_allowed_and_reads_no_user_secret(
         Sandbox {
             read: vec![],
             write: vec![allowed.clone()],
+            ..Default::default()
         },
         &allowed,
         &script,
@@ -123,6 +124,7 @@ fn a_second_agents_folder_is_out_of_reach() {
     cfg.sandbox = Some(Sandbox {
         read: vec![],
         write: vec![b.clone()],
+        ..Default::default()
     });
     let agent_b = spawn(&cfg).unwrap();
 
@@ -139,6 +141,7 @@ fn a_second_agents_folder_is_out_of_reach() {
         Sandbox {
             read: vec![],
             write: vec![a.clone()],
+            ..Default::default()
         },
         &a,
         &script,
@@ -178,6 +181,7 @@ fn a_junction_pointing_outside_is_refused() {
         Sandbox {
             read: vec![],
             write: vec![allowed.clone()],
+            ..Default::default()
         },
         &allowed,
         &script,

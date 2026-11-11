@@ -183,6 +183,32 @@ pub(crate) fn profile(sb: &crate::Sandbox) -> String {
             siblings.join(" ")
         ));
     }
+    if sb.offline {
+        // ADR-0047 `worktree-offline`: nothing leaves the machine. Seatbelt names only `localhost` (this machine's own addresses) or
+        // every host. Connections to this machine stay open (a local model); listening on a TCP port does not, because Seatbelt cannot
+        // tell a loopback-only listener from one on every interface (measured: an `inbound localhost` rule let a LAN peer in through
+        // `0.0.0.0`). Unix sockets stay reachable below the listed folders (the node's mesh) and the writable ones (an agent's own).
+        out.push_str("(deny network*)\n(allow network-outbound (remote ip \"localhost:*\"))\n");
+        let sockets: Vec<String> = sb
+            .sockets
+            .iter()
+            .chain(sb.write.iter())
+            .filter_map(|p| real(p))
+            .map(|p| format!("(remote unix-socket {})", quote(&p)))
+            .collect();
+        if !sockets.is_empty() {
+            out.push_str(&format!("(allow network-outbound {})\n", sockets.join(" ")));
+        }
+        let own: Vec<String> = sb
+            .write
+            .iter()
+            .filter_map(|p| real(p))
+            .map(|p| format!("(local unix-socket {})", quote(&p)))
+            .collect();
+        if !own.is_empty() {
+            out.push_str(&format!("(allow network-bind {})\n", own.join(" ")));
+        }
+    }
     out
 }
 
@@ -224,6 +250,7 @@ mod sandbox_tests {
         let sb = crate::Sandbox {
             read: vec!["/usr".into()],
             write: vec![std::env::temp_dir()],
+            ..Default::default()
         };
         let p = super::profile(&sb);
         let deny = p.find("(deny file-read-data").unwrap();
@@ -244,6 +271,7 @@ mod sandbox_tests {
         let sb = crate::Sandbox {
             read: vec!["/usr".into(), "/bin".into()],
             write: vec![file.clone(), "/dev".into()],
+            ..Default::default()
         };
         let p = super::profile(&sb);
         assert!(p.contains("state\\.json\\.[^/]*$"), "{p}");
@@ -264,10 +292,56 @@ mod sandbox_tests {
     }
 
     #[test]
+    fn an_offline_process_reaches_this_machine_and_its_sockets_but_nothing_else() {
+        use std::os::unix::net::UnixListener;
+        // Short paths: a unix socket path is limited to about 100 bytes.
+        let dir = std::path::PathBuf::from(format!("/tmp/agora-off-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("m")).unwrap();
+        std::fs::create_dir_all(dir.join("w")).unwrap();
+        let mesh = UnixListener::bind(dir.join("m/s")).unwrap();
+        let local = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = local.local_addr().unwrap().port();
+        let sb = crate::Sandbox {
+            read: vec!["/usr".into(), "/bin".into()],
+            write: vec![dir.join("w"), "/dev".into()],
+            offline: true,
+            sockets: vec![dir.join("m")],
+        };
+        let p = super::profile(&sb);
+        // `nc` ships with macOS: -z only connects, -G is the connect timeout; `-U -w 1` connects to a unix socket and gives up after a second of quiet.
+        let script = format!(
+            "nc -z -G 2 1.1.1.1 443 2>/dev/null && echo internet-open || echo internet-closed; \
+             nc -z -G 2 127.0.0.1 {port} && echo local-open || echo local-closed; \
+             nc -U -w 1 {d}/m/s </dev/null 2>/dev/null && echo mesh-open || echo mesh-closed",
+            d = dir.display()
+        );
+        let out = std::process::Command::new(super::SANDBOX_EXEC)
+            .args(["-p", &p, "/bin/sh", "-c", &script])
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(text.contains("internet-closed"), "{text}");
+        assert!(
+            text.contains("local-open") && text.contains("mesh-open"),
+            "{text}"
+        );
+        drop((mesh, local));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_profile_that_is_not_offline_says_nothing_about_the_network() {
+        let sb = crate::Sandbox::new(vec!["/usr".into()], vec![std::env::temp_dir()]);
+        assert!(!super::profile(&sb).contains("network"));
+    }
+
+    #[test]
     fn a_listed_parent_of_a_private_folder_does_not_open_it() {
         let sb = crate::Sandbox {
             read: vec!["/var".into(), "/usr".into()],
             write: vec![],
+            ..Default::default()
         };
         let p = super::profile(&sb);
         // `/var` is `/private/var`, which holds `/private/var/folders`; it is left out, `/usr` stays.
