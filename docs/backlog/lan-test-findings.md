@@ -33,4 +33,24 @@ branch (`docs/fordevs/`). Each row is something the run showed that no CI run ha
 - **L17** Audit rows "Watched a terminal … Sent, no answer yet" stay unresolved after a node restart.
 - **L18** "Recent messages" says agents have not written to each other yet after a hub restart (mesh history is not re-read).
 - **L19** The web app takes its language only from `navigator.language`; there is no in-app switch, so Turkish needs a `tr-TR` browser.
-- **L20** A refused or abandoned start leaves its `agent/<name>` branch; an agent killed from outside stays `running`.
+- **L20** A refused or abandoned start leaves its `agent/<name>` branch behind: `Supervisor::abandon` removes the worktree but not the branch.
+  Open.
+  - Not a bug: "an agent killed from outside stays `running`". The restart policy started it again. What is missing is UX: the restart is
+    not shown, so it looks as if nothing happened.
+- **L22** A confined agent started in a **selected checkout** (`agent start --project` with no `--worktree` starts in the checkout itself)
+  gets the whole checkout writable, `.git` included.
+  - It can therefore write `.git/config` (for example `core.fsmonitor` or `core.hooksPath`) and `.git/hooks/*`.
+  - That code runs **unconfined**, the next time the user runs git in that checkout.
+  - The narrow profile only protects worktrees, where `.git` is a file pointing at the shared folder. That is the case it was written for (ADR-0050).
+  - Open: keep `.git/config` and `.git/hooks` out of the writable set for selected checkouts too, or refuse a confined start there.
+- **L23** Windows, real Codex under confinement (`AGORA_WINDOWS_CONFINEMENT=1`). It does not run, for three reasons.
+  1. The manifest launches `codex` by bare name, and the node adds the program's folder to `read` only for a path. A per-user install is
+     unreadable to the restricted token, so the agent shows as started and stops at once, with no reason shown.
+  2. `sandbox.read` on the whole install tree (about 811k files) made the start take 232 s and the stop 256 s, and the restart policy
+     repeated the start.
+  3. Codex must read and write `%USERPROFILE%\.codex`. That folder is refused with `label_failed`, because Codex's own `.sandbox-bin` folder
+     does not give the user WRITE_OWNER.
+
+  Also measured: applying and removing a propagated grant re-derives the inherited entries of that tree from its parent, which drops stale
+  third-party entries that are not restored afterwards. Open: maintainer decisions (program folder, Codex's home, exit reason, cost of large
+  folders), see the `comms` report of 2026-11-11 19:25 UTC.
