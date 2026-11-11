@@ -22,6 +22,9 @@ message Event {
     WorktreeCreated worktree_created = 21;
     WorktreeRemoved worktree_removed = 22;
     GitStatusChanged git_status_changed = 23;
+    WorkspaceRegistered workspace_registered = 24;
+    WorkspaceStatusChanged workspace_status_changed = 25;
+    AgentWorkspaceBound agent_workspace_bound = 35;
     // agent
     AgentStarted agent_started = 30;
     AgentStateChanged agent_state_changed = 31;
@@ -201,4 +204,28 @@ message FilesChanged {
 // durably stored and may be dropped.
 message EventAck {
   uint64 up_to_seq = 1;
+}
+
+// A directory used by one or more agents. User-owned directories are never Git worktrees by implication.
+message WorkspaceRegistered {
+  string workspace_id = 1;
+  string node_id = 2;
+  string project_id = 3;
+  string path = 4;
+  string git_root = 5;
+  string branch = 6;
+  bool managed_worktree = 7;
+  uint32 files_changed = 8;
+}
+message AgentWorkspaceBound {
+  string agent_id = 1;
+  string workspace_id = 2;
+}
+
+message WorkspaceStatusChanged {
+  string workspace_id = 1;
+  uint32 files_changed = 2;
+  uint32 insertions = 3;
+  uint32 deletions = 4;
+  string head_commit = 5;
 }

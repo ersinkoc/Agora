@@ -1,0 +1,10 @@
+{
+  "path": "x",
+  "createProjectId": true,
+  "authorization": {
+    "deviceId": "x",
+    "nonce": "x",
+    "expiresAtMs": "1",
+    "signature": "AQID"
+  }
+}

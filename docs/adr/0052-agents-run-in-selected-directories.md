@@ -1,6 +1,9 @@
 # 0052. Agents run in the selected directory; separate worktrees are optional
-Status: Proposed
+Status: Accepted
 Date: 2026-11-11
+
+The maintainer reviewed the selected-directory flow and portable project identity proposal, then instructed implementation
+("devam et"). This accepts the new flow; existing published request semantics remain unchanged.
 
 ## Context
 
@@ -11,10 +14,10 @@ The implementation currently enforces the opposite: `Supervisor::start` always c
 only registered projects and agent kinds, and the CLI has no working-directory option. Published `AgentStart` also defines an
 empty `worktree_id` as a request to create a worktree. Changing a label in the UI cannot provide the requested behavior.
 
-This proposal replaces the default-isolation choice in ADR-0003 for the new launch flow. It does not reinterpret existing messages.
+This decision replaces the default-isolation choice in ADR-0003 for the new launch flow. It does not reinterpret existing messages.
 Tracking issue: #235.
 
-## Proposed decision
+## Decision
 
 1. **Launch in a directory the user chooses.** The primary flow is machine → project/folder → agent → start. An existing project
    offers its current checkout as the initial directory; the user may choose another directory or a subdirectory. Launch uses
@@ -55,7 +58,7 @@ Tracking issue: #235.
    an agent. Starting a second agent in the same directory must not overwrite the first agent's integration configuration or
    overwrite existing user configuration. No agent-specific logic belongs in core crates.
 
-### Optional portable project identity (proposal for review)
+### Optional portable project identity
 
 The maintainer also suggested storing a project identifier in repositories to associate the same project across machines.
 Use the neutral field name `project_id`, independent of the final product name. It identifies the logical project, not a
@@ -63,14 +66,14 @@ machine, folder, branch or agent session.
 
 - Offer a one-time, random project ID in dedicated project metadata when the owner explicitly chooses to create it. A Git
   repository can commit that metadata so ordinary clones carry the same ID. Do not create or commit it automatically on launch.
-  The metadata filename is not fixed by this draft.
+  The metadata file is `.agent-project.json`, containing a UUID `project_id` at the Git root or selected non-Git folder.
 - Keep the current normalized remote/root-commit discovery as the zero-configuration fallback when no explicit ID exists.
   Keep detected Git identity separate from the optional logical project ID; do not rewrite published IDs in place. Existing
   bindings need explicit association/migration through the additive protocol, with the owner's confirmation.
 - The hub groups an owner's confirmed checkouts under the same logical project. Each retains its node, canonical path,
   branch, commit, local edits and sessions. The same ID does not imply identical file contents; Git or another explicit
   synchronization mechanism transfers changes between machines.
-- Copying a repository into an independent project or fork offers a new project ID. A changed ID or a conflict with an existing
+- An independent project or fork can remove its copied metadata and explicitly run `project init` for a new ID. A changed ID or a conflict with an existing
   binding must not silently merge or split projects. A repository-supplied ID is untrusted metadata, never authorization to
   access another owner's project, join its mesh or widen a device's project limits.
 - Non-Git folders may be explicitly associated with a logical project by the owner while retaining their lack of Git history
@@ -100,9 +103,8 @@ selected working directories. A worktree is not required for any of them.
 The primary product is a session control plane over user-selected projects and folders. Git worktrees remain available for
 users who want isolation. Shared-directory changes cannot have reliable per-agent attribution, and the UI must say so.
 
-After acceptance, update `vision.md`, `architecture.md`, the glossary, launch UX and backlog in the implementing PRs. Split the
-work into protocol/domain, node supervision, and CLI/web tasks with explicit crate ownership. The schema and runtime behavior
-remain unchanged while this ADR is Proposed. No existing agent or working directory is migrated automatically.
+Implementation updates `vision.md`, `architecture.md`, the glossary, launch UX and backlog in the implementing PRs. Issue #235 owns the integrated protocol/domain, node supervision, CLI and web changes. The schema and runtime behavior
+are extended additively; the wire fields and signature format are documented in `docs/specs/protocol.md`. No existing agent or working directory is migrated automatically.
 
 ## Alternatives considered
 

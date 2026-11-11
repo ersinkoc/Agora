@@ -1,4 +1,4 @@
-//! Project identity: normalized remote URL + root commit hash (ADR-0003), independent of machine.
+//! Project identity: optional portable UUID (ADR-0052), Git discovery (ADR-0003), or node-local folder.
 
 use std::fmt;
 
@@ -10,11 +10,12 @@ pub enum ProjectError {
     InvalidRemote,
 }
 
-/// Machine-independent project identity. A project without a remote uses the root commit only.
+/// Logical project identity; Git discovery and portable UUIDs are independent of machine.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ProjectId {
     remote: Option<String>,
     root_commit: String,
+    explicit: Option<String>,
 }
 
 impl ProjectId {
@@ -27,13 +28,44 @@ impl ProjectId {
         Ok(Self {
             remote,
             root_commit: root,
+            explicit: None,
         })
+    }
+
+    /// A portable logical project id, independent of a Git repository's detected identity.
+    pub fn portable(id: &str) -> Result<Self, ProjectError> {
+        let valid = id.len() == 36
+            && id.bytes().enumerate().all(|(i, b)| {
+                if [8, 13, 18, 23].contains(&i) {
+                    b == b'-'
+                } else {
+                    b.is_ascii_hexdigit()
+                }
+            });
+        if !valid {
+            return Err(ProjectError::InvalidRemote);
+        }
+        Ok(Self {
+            remote: None,
+            root_commit: String::new(),
+            explicit: Some(format!("id:{}", id.to_ascii_lowercase())),
+        })
+    }
+
+    /// A node-local folder identity. This has no Git root commit or inferred remote.
+    pub fn directory(node: &str, path: &str) -> Self {
+        Self {
+            remote: None,
+            root_commit: String::new(),
+            explicit: Some(format!("folder:{node}:{path}")),
+        }
     }
 
     pub fn remote(&self) -> Option<&str> {
         self.remote.as_deref()
     }
 
+    /// Empty for a logical project or a non-Git folder; these do not have a Git root commit.
     pub fn root_commit(&self) -> &str {
         &self.root_commit
     }
@@ -41,6 +73,9 @@ impl ProjectId {
 
 impl fmt::Display for ProjectId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(id) = &self.explicit {
+            return f.write_str(id);
+        }
         match &self.remote {
             Some(r) => write!(f, "{r}#{}", self.root_commit),
             None => write!(f, "#{}", self.root_commit),

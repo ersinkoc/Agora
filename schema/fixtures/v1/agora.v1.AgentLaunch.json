@@ -1,0 +1,13 @@
+{
+  "path": "x",
+  "projectId": "x",
+  "kind": "x",
+  "separateWorktree": true,
+  "authorization": {
+    "deviceId": "x",
+    "nonce": "x",
+    "expiresAtMs": "1",
+    "signature": "AQID"
+  },
+  "acceptIdentityChange": true
+}

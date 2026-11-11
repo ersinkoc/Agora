@@ -175,6 +175,48 @@ the node reported in `WorktreeCreated`); a path that is absolute, climbs with `.
 all-added, at most 50 files of at most 64 KiB), and an answer is cut at 512 KiB. `files.list` hides `.git`; `files.read` refuses
 files above 512 KiB (`files.too_large`) and paths that leave the workspace, symlinks included (`files.outside_root`).
 
+### Selected directories (ADR-0052)
+
+Capability `workspace.directory` adds commands without changing `AgentStart`: its empty `worktree_id` still means
+create a worktree. New clients refuse an unavailable directory launch rather than falling back to isolation.
+
+| New command / request oneof tag | Fields and result |
+| --- | --- |
+| `directory.inspect` / `DirectoryInspect` (81) | `path`, `create_project_id`, `authorization` → `DirectoryInfo` (Ok tag 18): canonical `path`, `project_id`, `git_root`, `branch`, `portable`, `previous_project_id` |
+| `agent.launch` / `AgentLaunch` (82) | canonical `path`, expected `project_id`, `kind`, `separate_worktree`, `authorization`, `accept_identity_change` → `AgentLaunchResult` (Ok tag 19): `agent_id`, `terminal_id`, `workspace_id`, actual cwd `path` |
+| `workspace.query` / `WorkspaceQuery` (83) | `workspace_id`, `operation` (`list`, `read`, `status`, `diff`, `history`), relative `path`, `limit` → existing file/Git results |
+
+The node canonicalizes and re-inspects before launch; a path or project ID mismatch is refused. It persists confirmed
+path/identity associations; changed metadata requires `accept_identity_change`. Metadata creation is explicit, uses
+create-new semantics and never commits or overwrites `.agent-project.json`. The metadata contains `{"project_id":"UUID"}`;
+portable domain IDs use `id:<uuid>`. Without metadata, Git discovery remains unchanged; standalone folders use
+`folder:<node>:<canonical path>` without a fabricated root commit. Metadata must be a normal file, at most 4096 bytes,
+with a valid UUID. An owner confirms its association; metadata is not an access grant.
+
+`WorkspaceRegistered` (event tag 24: `workspace_id`, `node_id`, `project_id`, `path`, `git_root`, `branch`,
+`managed_worktree`, `files_changed`) and `AgentWorkspaceBound` (35: `agent_id`, `workspace_id`) precede `AgentStarted`.
+That `AgentStarted` leaves legacy `worktree_id` empty. `WorkspaceStatusChanged` (25) carries changed-file/line counts
+and HEAD for the workspace. Node workspace IDs are `directory:<canonical cwd>`; the hub qualifies IDs with the
+producer node and does not trust a supplied `node_id`. `Snapshot.workspaces` (10) and `agent_workspaces` (11) retain
+these associations through replay/reload. Published worktree messages/fixtures remain unchanged.
+
+Inspection and launch over the hub always need `DirectoryAuthorization`: trusted `device_id`, random 128-bit hex
+`nonce`, `expires_at_ms`, ECDSA P-256/SHA-256 `signature` in IEEE P1363 format. The signed UTF-8 fields are NUL-separated,
+with no trailing NUL:
+
+```
+directory-action-v1 node operation path kind project_id option identity_change nonce expires_at_ms
+```
+
+Here `operation` is `inspect` or `launch`; inspect leaves kind/project empty; `option` is `1`/`0` for metadata creation
+or separate-worktree launch respectively. `identity_change` is `0` for inspect and the confirmation flag for launch.
+No field may contain NUL. Expiry must be in the next five minutes (browser signs for two). Used device/nonce pairs
+are persisted until expiry, surviving a node restart; the bounded cache fails closed on corruption or exhaustion.
+Generic start grants cannot authorize a substituted directory. Initially only unrestricted node-trusted owner devices
+may sign these operations; scoped member devices are refused even for their projects. The local owner-only control
+socket has no extra signature requirement. Workspace queries inherit the existing file/Git path, symlink, `.git` and
+size guards and require a workspace used by a managed session. Hub members/viewers can query only granted workspaces.
+
 ### Node-local control socket
 
 A node serves the same commands on a local socket (owner-only; `agora node run`, default `$AGORA_HOME/node.sock`)
