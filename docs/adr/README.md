@@ -67,5 +67,5 @@ Date: YYYY-MM-DD
 | 0047 | Agent sandboxing with the operating system's own profiles | Accepted |
 | 0048 | The desktop app is a thin Tauri shell around the hub's page | Accepted |
 | 0049 | Team mode: users, roles and an audit trail first, Postgres only when SQLite is not enough | Accepted |
-| 0050 | Windows agent confinement: a low-integrity token with a labelled worktree | Proposed |
+| 0050 | Windows agent confinement: a restricted token with a per-agent SID | Accepted |
 | 0051 | No Web Push: ntfy and the PWA link are the push channel | Accepted |

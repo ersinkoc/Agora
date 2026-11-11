@@ -1,9 +1,9 @@
-# 0050. Windows agent confinement: a low-integrity token with a labelled worktree
-Status: Proposed
+# 0050. Windows agent confinement: a restricted token with a per-agent SID
+Status: Accepted
 Date: 2026-11-11
 
 Maintainer review (2026-11-11): changes requested. The decision supplied in the working session was
-"0050 değişiklik, 0051 kabul". This ADR remains Proposed; do not implement it until the revised design is accepted.
+"0050 değişiklik, 0051 kabul". The revised design below was then accepted ("0050 kabul").
 
 ## Required revision
 
@@ -24,7 +24,59 @@ Low-labelled workspace, protected node files, child processes and reparse points
 does not prove path confinement. This follows the distinction between integrity checks and DACL checks in
 [Microsoft's MIC documentation](https://learn.microsoft.com/en-us/windows/win32/secauthz/mandatory-integrity-control).
 
-The original proposal is retained below for review; it is not an accepted decision.
+Maintainer decision (2026-11-11): the revised proposal below is accepted ("0050 kabul"). The original proposal further down is superseded.
+
+## Revised decision
+
+The review is right: a Low integrity level only protects objects labelled higher, so it is not a path allowlist. This revision
+drops it as the mechanism and enforces the **path rules of ADR-0047** with the DACL check instead.
+
+1. **Mechanism: a restricted token with one restricting SID per agent.** The node creates a fresh SID for each agent start and
+   builds the agent's token with `CreateRestrictedToken`, restricting SIDs = that SID plus `Everyone` and the `Users` group. Windows
+   then grants an access only if *both* the normal check and the restricting check pass. The node adds an ACL entry for the agent's
+   SID on exactly the allowed folders. Everything else is writable only if its ACL names `Everyone` or `Users`, which a normal profile
+   does not. The token keeps the job object of ADR-0045 and drops all privileges.
+2. **Per agent, so a second agent cannot be reached.** Agent B's SID is on B's folders only. A's token has no entry there and the
+   restricting check refuses it. This replaces the shared Low label that made every labelled workspace writable by every confined agent.
+3. **Reads are narrowed, not closed.** Files readable by `Everyone` or `Users` (the system folders, toolchains in `Program Files`)
+   stay readable; files only the user owns (`%USERPROFILE%`, the node's keys, `.ssh`) are refused. This is stronger than "reads open" but is
+   not Landlock's explicit read list. The `worktree` policy therefore means, on Windows, *writes only below the allowed folders; reads of
+   user-private files refused*. Anything an agent legitimately needs outside (a package cache, `%APPDATA%`) must be listed by the owner
+   under the existing `sandbox` allowed-folders line, which receives the same ACL entry. `agora doctor` prints this difference.
+4. **Git metadata.** The agent gets write access to its own worktree folder and to that worktree's admin directory
+   (`.git/worktrees/<name>`), and **read-only** access to the common Git directory. Writes to the common `config`, `hooks/` and other
+   worktrees' admin directories are refused, which closes the escape that matters (a planted hook or config run later by the user).
+   Writing objects and refs needs the common `objects/` and `refs/` folders: those two subfolders get write access and nothing above
+   them. **Residual risk, stated in the threat model:** a confined agent can add objects and move branch refs in the shared repository.
+   It cannot rewrite config or hooks, and refs are recoverable from the reflog.
+5. **Lifecycle of the ACL entries.** The node records every entry it adds (folder, SID) in its state folder *before* adding it. It
+   removes them when the agent stops, when the worktree is removed, and on node start for any record left behind by a crash. A
+   removal that fails is retried and reported by `agora doctor`; it never leaves a folder writable to a SID no running token holds,
+   because the SID is random and dies with the agent. Inheritance is switched off on the added entries' scope (they are set on the
+   allowed folders with inheritance to children, and nowhere above). Handles the node holds are opened without inheritance
+   (`bInheritHandles = FALSE` with an explicit handle list), so an agent cannot receive a writable handle it should not have.
+6. **Refusal stays the default.** `worktree` and `worktree-offline` keep answering `agent.sandbox_unavailable` on Windows until the
+   tests below pass in CI and a revision of this ADR is accepted. `worktree-offline` stays refused on every OS (no network control).
+   A volume without ACLs (FAT32, some network shares) also answers `agent.sandbox_unavailable`.
+7. **Still not AppContainer**, for the reason in the original decision 4; a restricted token breaks fewer developer tools.
+
+### Acceptance evidence (real Windows CI, not Linux-only logic)
+- a confined process writes inside the worktree and is refused outside it (profile, repository root, another folder);
+- a second agent's allowed folder is refused to the first, and the reverse;
+- the node's key and state files are unreadable and unwritable;
+- a child process and a grandchild inherit the same confinement; a process started through a reparse point or junction pointing outside
+  is refused;
+- the common Git `config` and `hooks/` are not writable, `objects/` and `refs/` are, per decision 4;
+- ACL entries are gone after a normal stop, after a killed agent, and after a simulated node crash and restart;
+- Microsoft's distinction between integrity and DACL checks (MIC documentation) is why the checks above are DACL-based; a test that only
+  shows a Medium-labelled file refusing a write does not count.
+
+### Consequences of the revision
+- Windows reaches the same *write* rule as Linux and macOS, with a narrower but not explicit read rule, and says so.
+- More node code than the Low-label idea (SID and ACL bookkeeping with crash recovery), all in `agora-platform/src/windows.rs`.
+- The shared repository's `objects/` and `refs/` stay reachable to a confined agent (decision 4); this is the one disclosed weakness.
+
+The original proposal (Low integrity level) is retained below for review; it is superseded by the revised proposal above and is not an accepted decision.
 
 ## Context
 ADR-0047 gave agents OS-level confinement and named, for Windows, "a restricted token with the job object that already exists".
