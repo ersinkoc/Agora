@@ -378,6 +378,8 @@ fn node_trust(say: &Say, o: &Opts) -> ExitCode {
 }
 
 fn node_run(say: &Say, o: &Opts) -> ExitCode {
+    // A crash can leave folder permissions for a confined agent behind (Windows); nothing is running yet, so undo them.
+    agora_platform::recover_sandbox_leftovers();
     let h = home();
     // A machine enrolled with a hub reports under the id the hub's certificate names.
     let link = hubcli::load_link(socket_path(o));

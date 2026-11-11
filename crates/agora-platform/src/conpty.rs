@@ -25,12 +25,13 @@ use windows_sys::Win32::System::JobObjects::{
 };
 use windows_sys::Win32::System::Pipes::CreatePipe;
 use windows_sys::Win32::System::Threading::{
-    CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
+    CreateProcessAsUserW, CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
     InitializeProcThreadAttributeList, TerminateProcess, UpdateProcThreadAttribute,
     WaitForSingleObject, CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, INFINITE,
     PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOEXW,
 };
 
+use crate::winconfine::Confinement;
 use crate::{ExitStatus, Pty, PtyConfig, PtyControl, PtyControlOps};
 
 const CHUNK: usize = 16 * 1024;
@@ -127,6 +128,8 @@ struct Inner {
     process: Handle,
     job: Option<Handle>,
     pid: u32,
+    /// Last, so the process and job are closed before the folder permissions are taken back.
+    _confinement: Option<Confinement>,
 }
 
 // SAFETY: the pseudo-console handle is an opaque id; every use of it is a thread-safe system call.
@@ -246,7 +249,7 @@ pub(crate) fn spawn(config: &PtyConfig) -> io::Result<Box<dyn Pty>> {
     drop(out_write);
 
     let result = start_process(config, hpc);
-    let (process, pid) = match result {
+    let (process, pid, confinement) = match result {
         Ok(p) => p,
         Err(e) => {
             // SAFETY: the console was created above and is closed once.
@@ -262,6 +265,7 @@ pub(crate) fn spawn(config: &PtyConfig) -> io::Result<Box<dyn Pty>> {
         process,
         job,
         pid,
+        _confinement: confinement,
     });
     let (tx, output) = sync_channel::<Vec<u8>>(QUEUE);
     let read_handle = out_read;
@@ -300,7 +304,8 @@ pub(crate) fn spawn(config: &PtyConfig) -> io::Result<Box<dyn Pty>> {
     Ok(Box::new(ConPty { inner, output }))
 }
 
-fn start_process(config: &PtyConfig, hpc: HPCON) -> io::Result<(Handle, u32)> {
+fn start_process(config: &PtyConfig, hpc: HPCON) -> io::Result<(Handle, u32, Option<Confinement>)> {
+    let confinement = config.sandbox.as_ref().map(Confinement::new).transpose()?;
     let mut cmdline = wide(
         &config
             .argv
@@ -352,19 +357,35 @@ fn start_process(config: &PtyConfig, hpc: HPCON) -> io::Result<(Handle, u32)> {
     // SAFETY: an all-zero PROCESS_INFORMATION is a valid out-buffer.
     let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
     // SAFETY: every pointer is valid for the call; `cmdline` is mutable as the API requires.
+    let flags = EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT;
     let created = unsafe {
-        CreateProcessW(
-            null(),
-            cmdline.as_mut_ptr(),
-            null(),
-            null(),
-            0,
-            EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
-            env.as_ptr().cast(),
-            cwd.as_ref().map_or(null(), |c| c.as_ptr()),
-            &si.StartupInfo,
-            &mut pi,
-        )
+        match &confinement {
+            Some(c) => CreateProcessAsUserW(
+                c.token(),
+                null(),
+                cmdline.as_mut_ptr(),
+                null(),
+                null(),
+                0,
+                flags,
+                env.as_ptr().cast(),
+                cwd.as_ref().map_or(null(), |c| c.as_ptr()),
+                &si.StartupInfo,
+                &mut pi,
+            ),
+            None => CreateProcessW(
+                null(),
+                cmdline.as_mut_ptr(),
+                null(),
+                null(),
+                0,
+                flags,
+                env.as_ptr().cast(),
+                cwd.as_ref().map_or(null(), |c| c.as_ptr()),
+                &si.StartupInfo,
+                &mut pi,
+            ),
+        }
     };
     let error = (created == 0).then(last_error);
     // SAFETY: initialised above; the child has its copy by now.
@@ -373,7 +394,7 @@ fn start_process(config: &PtyConfig, hpc: HPCON) -> io::Result<(Handle, u32)> {
         return Err(e);
     }
     drop(Handle(pi.hThread));
-    Ok((Handle(pi.hProcess), pi.dwProcessId))
+    Ok((Handle(pi.hProcess), pi.dwProcessId, confinement))
 }
 
 /// A job that ends every process in it when it is closed, with the memory and CPU limits of the request where they are set.
