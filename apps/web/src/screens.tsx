@@ -1,3 +1,4 @@
+import { AgentAddress } from './components/AgentAddress';
 import { PromptBox } from './components/PromptBox';
 import type { ChatSource } from './net/chat';
 import { AgentTile } from './components/AgentTile';
@@ -98,6 +99,7 @@ export function Focus({ agent, source: live, costMicroUsd, chatSource, sendPromp
       <span className="muted">
         {t('agent-on-machine', { machine: agent.machine })} · {t('agent-workspace', { name: agent.workspace })}
       </span>
+      <AgentAddress agent={agent} />
       {agent.tokens ? <span className="muted">{t('agent-tokens', { count: agent.tokens })}{costMicroUsd !== undefined ? ` · ${t('agent-cost', { amount: money(costMicroUsd) })}` : ''}</span> : null}
       {agent.terminal === false ? <section className="h-[65vh] min-h-0" aria-label={t('chat-log')}><PromptBox agent={agent} source={chatSource} send={sendPrompt} /></section> : <>
         <h2>{t('focus-terminal')}</h2>
@@ -217,6 +219,7 @@ export function MachinesPage({ machines, usage, projects = [], onBack }: { machi
           {machines.map((m) => (
             <li key={m.id} className="machine">
               <strong>{m.name}</strong>
+              <code className="break-all text-xs text-muted">{t('machine-identity', { id: m.id })}</code>
               <span className="muted">{m.os}</span>
               <span>{t(m.online ? 'machine-online' : 'machine-offline')}</span>
               <span className="muted">{t('machine-agents', { count: m.agentsRunning })}</span>

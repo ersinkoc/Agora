@@ -30,7 +30,7 @@ unrelated platform I/O in this patch.
 ## Validation and UI
 
 - Rust: directory regressions (8), CLI integration (10), fresh-target directory run (8), workspace suite, fmt and Clippy.
-- Web: existing 80 tests, generated TypeScript and production build; i18n/docs checks.
+- Web: 81 tests, generated TypeScript and production build; i18n/docs checks.
 - Chromium: `e2e-directories.mjs` covers folder launch/shared identity/session reload/explicit worktree/Turkish flow;
   `e2e-directory-filters.mjs` covers filtered panes and sidebar pins with only disposable shell fixtures.
 - Measured filtered pane hide/reopen: 20 samples, p95 9.2 ms (local-render target ≤ 50 ms). This is a local navigation
@@ -47,3 +47,25 @@ PW_DIR=<playwright-core directory> node scripts/e2e-directory-filters.mjs
 
 The repository's cross-review/maintainer-merge rule still applies. Local activation backs up the executable and hub database and
 requires no real agents to be running; no user checkout, branch, configuration or active agent is cleaned or killed.
+
+## Multi-machine continuation
+
+The prior client grouped/counts machines by host name. A disposable two-node browser baseline against the previously installed
+client reproduced one machine for two enrolled IDs sharing `shared-host`. The fix carries enrollment identity into client models
+and keys navigation, status lookup and per-project machine counts by that identity. Host names remain readable display labels.
+
+Agent panes and focused views expose the exact hub-qualified routing address with a user-triggered copy action; machine details
+and launch choices show enrollment IDs. Clipboard refusal preserves the selectable address and gives manual-copy instructions.
+No broker, capability, trust, schema or permission behavior changes. Demo data has no invented live address.
+
+`e2e-multiple-machines.mjs` uses two separately enrolled node processes on Ubuntu, with cloned Git folders and explicitly copied
+portable metadata. It verifies independent cwd in both fake adapter processes/sessions, one shared project with two machines,
+distinct qualified agent IDs, successful clipboard copying, clipboard refusal, snapshot reload, independent disconnect status and English/Turkish UI. A local-only
+file stays absent from the second clone: project identity does not synchronize edits. This is two-node protocol/browser evidence,
+not a claim that the two fixture processes ran on different operating systems or physical machines.
+
+Screenshots: [dark](../screenshots/multiple-machines/multiple-machines-dark.png),
+[light](../screenshots/multiple-machines/multiple-machines-light.png),
+[Turkish dark](../screenshots/multiple-machines/multiple-machines-turkish-dark.png),
+[Turkish light](../screenshots/multiple-machines/multiple-machines-turkish-light.png).
+Filtered pane hide/reopen with the new address bars measured p95 9.0 ms over 20 samples; the 50 ms local-render target is unchanged.

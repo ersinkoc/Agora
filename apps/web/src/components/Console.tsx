@@ -1,6 +1,6 @@
 import { Suspense, lazy, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { t } from '../i18n';
-import { type AgentTileModel, needsAttention, sortFleet } from '../model';
+import { type AgentTileModel, machineKey, needsAttention, sortFleet } from '../model';
 import { money, type UsageSummary } from '../net/usage';
 import type { ApprovalModel, BoardModel, MachineModel, MessageModel, ProjectCost } from '../net/view';
 import type { TerminalSource } from '../terminal/source';
@@ -12,6 +12,7 @@ import { FilesDialog } from './FilesDialog';
 import { HistoryDialog } from './HistoryDialog';
 import type { CommitItem } from '../net/history';
 import type { WorkspaceFiles } from '../net/files';
+import { AgentAddress } from './AgentAddress';
 import { StateBadge } from './StateBadge';
 
 const TerminalView = lazy(() => import('../terminal/TerminalView').then((m) => ({ default: m.TerminalView })));
@@ -49,7 +50,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   const [projectFilter, setProjectFilter] = useState('');
   const projectOptions = useMemo(() => {
     const groups = new Map<string, { name: string; machines: Set<string> }>();
-    for (const a of fleet) if (a.projectId) { const group = groups.get(a.projectId) ?? { name: a.project || a.projectId, machines: new Set<string>() }; group.machines.add(a.machine); groups.set(a.projectId, group); }
+    for (const a of fleet) if (a.projectId) { const group = groups.get(a.projectId) ?? { name: a.project || a.projectId, machines: new Set<string>() }; group.machines.add(machineKey(a)); groups.set(a.projectId, group); }
     return [...groups.entries()];
   }, [fleet]);
   useEffect(() => {
@@ -98,11 +99,11 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
     const groups = new Map<string, Map<string, AgentTileModel[]>>();
     for (const a of fleet) {
       if (projectFilter && a.projectId !== projectFilter) continue;
-      if (q && ![a.name, a.machine, a.project ?? '', a.projectId ?? '', a.workspace].some((x) => x.toLowerCase().includes(q))) continue;
-      const projects = groups.get(a.machine) ?? new Map<string, AgentTileModel[]>();
+      if (q && ![a.name, a.id, a.machine, machineKey(a), a.project ?? '', a.projectId ?? '', a.workspace].some((x) => x.toLowerCase().includes(q))) continue;
+      const projects = groups.get(machineKey(a)) ?? new Map<string, AgentTileModel[]>();
       const key = a.projectId ?? a.project ?? '';
       projects.set(key, [...(projects.get(key) ?? []), a]);
-      groups.set(a.machine, projects);
+      groups.set(machineKey(a), projects);
     }
     return groups;
   }, [fleet, filter, projectFilter]);
@@ -137,12 +138,15 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
           {fleet.length > 1 && <input type="search" value={filter} onChange={(e) => setFilter(e.target.value)} placeholder={t('filter-placeholder')} aria-label={t('filter-placeholder')} className="w-full" />}
           {machines.length === 0 && byMachine.size === 0 && !filter && <p className="muted">{t('machines-empty')}</p>}
           {[...byMachine.entries()].map(([machine, projects]) => {
-            const m = machines.find((x) => x.name === machine);
+            const m = machines.find((x) => x.id === machine) ?? machines.find((x) => x.name === machine);
             return (
-              <section key={machine} className="grid gap-1.5">
+              <section key={machine} data-machine-id={machine} className="grid min-w-0 gap-1.5">
                 <h2 className="flex items-center gap-2">
                   <span aria-hidden className={`size-2 rounded-full ${m && !m.online ? 'bg-unknown' : 'bg-finished'}`} />
-                  {machine}
+                  <span className="sr-only">{t(m && !m.online ? 'machine-offline' : 'machine-online')}</span>
+                  <span className="min-w-0"><span className="block truncate">{m?.name ?? machine}</span>
+                    {m && m.id !== m.name && <code className="block break-all text-xs font-normal normal-case text-muted">{m.id}</code>}
+                  </span>
                 </h2>
                 {[...projects.entries()].map(([project, list]) => (
                   <div key={project} className="grid min-w-0 gap-1">
@@ -179,16 +183,16 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
                 <section key={a.id} onDragOver={(e) => { if (dragging) e.preventDefault(); }} onDrop={(e) => { e.preventDefault(); if (dragging) move(dragging, a.id); setDragging(undefined); }}
                   className={`flex h-[70vh] min-h-0 flex-col overflow-hidden rounded-l border bg-surface-1 shadow-card lg:h-auto ${a.state === 'needs-you' ? 'border-needs-you' : 'border-line'} ${dragging && dragging !== a.id ? 'ring-1 ring-accent/50' : ''}`}>
                   <header draggable onDragStart={(e) => { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', a.id); setDragging(a.id); }} onDragEnd={() => setDragging(undefined)}
-                    title={t('console-drag')} className="flex flex-none cursor-grab items-center justify-between gap-2 border-b border-line px-3 py-2 active:cursor-grabbing">
-                    <div className="flex min-w-0 items-center gap-2">
+                    title={t('console-drag')} className="flex flex-none cursor-grab flex-wrap items-center justify-between gap-2 border-b border-line px-3 py-2 active:cursor-grabbing">
+                    <div className="flex min-w-0 flex-1 basis-40 items-center gap-2">
                       <span aria-hidden className="size-2.5 flex-none rounded-full" style={{ background: a.accent }} />
-                      <strong className="truncate" title={`${a.machine} · ${a.workspace}`}>{a.name}</strong>
+                      <strong className="min-w-0 flex-1 truncate" title={`${a.machine} · ${a.workspace}`}>{a.name}</strong>
                       {(a.filesChanged ?? 0) > 0 && (loadDiff
                         ? <button type="button" className="rounded-full bg-surface-2 px-2 py-0.5 text-xs whitespace-nowrap text-needs-you hover:brightness-125" onClick={() => setReviewing(a.id)}>{t('changes-files', { count: a.filesChanged ?? 0 })}</button>
                         : <span className="rounded-full bg-surface-2 px-2 py-0.5 text-xs whitespace-nowrap text-needs-you">{t('changes-files', { count: a.filesChanged ?? 0 })}</span>)}
                       {usage?.perAgent.has(a.id) && <span className="hidden text-xs text-muted xl:inline">{t('agent-cost', { amount: money(usage.perAgent.get(a.id) ?? 0) })}</span>}
                     </div>
-                    <div className="flex flex-none items-center gap-2">
+                    <div className="ml-auto flex max-w-full flex-none flex-wrap items-center justify-end gap-2">
                       <StateBadge state={a.state} />
                       {loadHistory && a.git !== false && <button type="button" className="rounded-s px-2 py-1 text-xs text-muted hover:bg-surface-2 hover:text-ink" onClick={() => setHistory(a.id)}>{t('console-history')}</button>}
                       {filesOf && <button type="button" className="rounded-s px-2 py-1 text-xs text-muted hover:bg-surface-2 hover:text-ink" onClick={() => setBrowsing(a.id)}>{t('console-files')}</button>}
@@ -196,6 +200,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
                       <button type="button" aria-label={t('console-hide')} className="rounded-s px-2 py-1 text-xs text-muted hover:bg-surface-2 hover:text-ink" onClick={() => toggle(a.id)}>✕</button>
                     </div>
                   </header>
+                  <AgentAddress agent={a} />
                   <div className="pane min-h-0 flex-1 p-1.5">
                     {a.terminal === false ? <PromptBox agent={a} send={sendPrompt} source={chatOf?.(a)} /> : (
                       <Suspense fallback={<div className="terminal" aria-busy="true" />}>

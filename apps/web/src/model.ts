@@ -7,6 +7,7 @@ export interface AgentTileModel {
   name: string; // generated short name, e.g. "claude · amber"
   accent: string; // CSS color for this instance
   machine: string;
+  machineId?: string; // Enrollment identity; host names are display labels and need not be unique.
   workspace: string;
   state: UiState;
   preview: string; // last lines of the terminal, from a cell snapshot
@@ -59,3 +60,6 @@ export function nextNeedingMe(agents: readonly AgentTileModel[], currentId?: str
   const at = waiting.findIndex((a) => a.id === currentId);
   return waiting[(at + 1) % waiting.length];
 }
+
+// Demo models may omit identity; every wire-backed agent has it.
+export const machineKey = (agent: AgentTileModel): string => agent.machineId ?? agent.workspaceRef?.node ?? agent.machine;

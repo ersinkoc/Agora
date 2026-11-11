@@ -23,7 +23,7 @@ try {
     mkdirSync(shots,{recursive:true});
     for(const theme of ['dark','light']) {
       await page.evaluate(t=>{document.documentElement.dataset.theme=t;},theme);
-      await page.screenshot({path:join(shots,`filtered-hidden-${theme}.png`),fullPage:true});
+      await page.screenshot({path:join(shots,`filtered-hidden-${theme}.png`),fullPage:true, animations:'disabled'});
     }
   }
   await page.locator('aside button[aria-pressed=false]').first().click();

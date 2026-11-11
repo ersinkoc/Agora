@@ -222,3 +222,11 @@ start-directory-agent-unsupported = Bu ajan, ayarlarını yüklemek için ayrı 
 audit-action-directoryinspect = Bir klasör seçti
 audit-action-agentlaunch = Bir klasörde ajan başlattı
 audit-action-workspacequery = Çalışma alanının dosyalarına veya değişikliklerine baktı
+
+agent-address = Ajan adresi
+agent-address-copy = Ajan adresini kopyala
+address-copy = Kopyala
+address-copied = Kopyalandı
+address-copy-failed = Kopyalanamadı. Adresi seçip elle kopyalayın.
+machine-identity = Makine kimliği: { $id }
+machine-name-id = { $name } · { $id }
