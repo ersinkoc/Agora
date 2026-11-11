@@ -26,7 +26,7 @@ does not prove path confinement. This follows the distinction between integrity 
 
 Maintainer decision (2026-11-11): the revised proposal below is accepted ("0050 kabul"). The original proposal further down is superseded.
 
-## Amendment A (issue #230, proposed: awaiting the maintainer's acceptance)
+## Amendment A (issue #230, accepted by the maintainer 2026-11-11: "0050 Ek A kabul")
 
 Decision 1 below puts `Everyone` and `Users` in the restricting SID list. That lets a folder whose ACL grants those groups (a data
 volume, `C:\ProgramData`) satisfy **both** access checks with no entry for the agent, so writes and reads outside the allowed folders
