@@ -60,7 +60,11 @@ impl Drop for NodeProc {
 }
 
 fn start_node(s: &Setup) -> NodeProc {
+    start_node_at(s, &s.home)
+}
+fn start_node_at(s: &Setup, cwd: &Path) -> NodeProc {
     let child = Command::new(AGORA)
+        .current_dir(cwd)
         .args(["node", "run", "--project"])
         .arg(&s.repo)
         .env("AGORA_HOME", &s.home)
@@ -495,4 +499,39 @@ fn a_node_owner_can_trust_a_device_and_bad_input_trusts_nothing() {
         format!("phone {key}\n")
     );
     let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn a_registered_project_name_wins_over_same_named_folders_in_both_processes() {
+    if !agora_platform::PTY_SUPPORTED || !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return;
+    }
+    let s = setup("project-name");
+    let caller = s.home.join("caller");
+    let caller_demo = caller.join("demo");
+    std::fs::create_dir_all(&caller_demo).unwrap();
+    let _node = start_node_at(&s, &caller);
+    for (option, value, expected) in [
+        ("--project", "demo", s.repo.as_path()),
+        ("--cwd", "demo", caller_demo.as_path()),
+    ] {
+        let out = Command::new(AGORA)
+            .args(["agent", "start", "shell", option, value])
+            .current_dir(&caller)
+            .env("AGORA_HOME", &s.home)
+            .env("AGORA_LANG", "en")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        let cwd = stdout.trim().rsplit(" in ").next().unwrap();
+        assert_eq!(
+            std::fs::canonicalize(cwd).unwrap(),
+            std::fs::canonicalize(expected).unwrap()
+        );
+    }
 }

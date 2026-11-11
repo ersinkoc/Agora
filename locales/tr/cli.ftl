@@ -3,7 +3,8 @@
 cli-usage =
     Kullanım:
       agora node run [--socket YOL] [--manifests DİZİN] [--project YOL]... [--data DİZİN] [--worktrees DİZİN]
-      agora agent start TÜR [--cwd YOL] [--worktree] [--project AD] [--name AD] [--socket YOL]
+      agora agent start TÜR [--cwd YOL] [--worktree] [--project AD] [--name AD] [--accept-project-id-change] [--socket YOL]
+      agora project init [--cwd YOL] [--socket YOL]
       agora agent stop AJAN_KİMLİĞİ [--socket YOL]
       agora agent prompt AJAN_KİMLİĞİ METİN... [--socket YOL]
       agora agent list [--socket YOL]
