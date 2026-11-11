@@ -615,8 +615,6 @@ fn relay_terminal(
     }
 }
 
-/// Runs a routed command on this node's control socket and returns its answer (an error answer when it cannot).
-/// Terminal streams are not relayed by this path (they need a stream of their own), so they are refused.
 /// The node's answer to the hub's `BoardJoin`: its unfinished local work for the project, or why it gives none.
 fn board_join_answer(
     mesh: Option<&crate::mesh_server::MeshServer>,
@@ -644,6 +642,8 @@ fn board_join_answer(
     }
 }
 
+/// Runs a routed command on this node's control socket and returns its answer (an error answer when it cannot).
+/// Terminal streams are not relayed by this path (they need a stream of their own), so they are refused.
 fn run_local(
     socket: Option<&std::path::Path>,
     req: CommandRequest,
