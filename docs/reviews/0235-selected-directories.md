@@ -81,6 +81,8 @@ Both themes: [selected folder (dark)](../screenshots/selected-directories/select
 - Existing external terminal processes are not adopted. Project IDs do not synchronize edits or prevent two agents'
   shell commands from editing the same file. Leases apply to writes mediated by the node.
 - Linux checks ran locally. macOS/Windows checks are CI responsibilities; no platform implementation was changed here.
-- Four real agents are running on the installed local node. Its process must not be restarted until those sessions can
-  be stopped; the new executable is staged separately. No live sessions are migrated or killed by this rollout.
+- Local activation waited until all four existing real-agent sessions had stopped. The old executable and hub database
+  were backed up, then the release preview was installed and both services restarted. A live Turkish-browser smoke check
+  confirms sign-in, the online Ubuntu node, the selected project folder and shared-identity option, without starting an agent.
+  No running session was killed or migrated. The unmerged preview is reversible; cross-review/maintainer merge still apply.
 - PR requires cross-review and a maintainer merge under AGENTS.md. This agent does not merge it.
