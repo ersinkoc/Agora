@@ -175,6 +175,7 @@ pub fn register(
     public_key_spki: &[u8],
     client_data: &[u8],
     now_ms: u64,
+    user: Option<&str>,
 ) -> Result<(), PasskeyError> {
     let id_ok = !id.is_empty()
         && id.len() <= 1024
@@ -203,8 +204,8 @@ pub fn register(
         return Err(PasskeyError::Refused);
     }
     let added = conn.execute(
-        "INSERT OR IGNORE INTO passkeys (id, public_key, sign_count, created_ms) VALUES (?1, ?2, 0, ?3)",
-        params![id, key, i64::try_from(now_ms).unwrap_or(i64::MAX)],
+        "INSERT OR IGNORE INTO passkeys (id, public_key, sign_count, created_ms, user_id) VALUES (?1, ?2, 0, ?3, ?4)",
+        params![id, key, i64::try_from(now_ms).unwrap_or(i64::MAX), user],
     )?;
     // An id that already exists is not replaced: nobody can swap the key of a known passkey.
     if added == 1 {
@@ -233,13 +234,13 @@ pub fn login(
     client_data: &[u8],
     signature: &[u8],
     now_ms: u64,
-) -> Result<(), PasskeyError> {
-    let stored: Option<(Vec<u8>, i64)> = store
+) -> Result<Option<String>, PasskeyError> {
+    let stored: Option<(Vec<u8>, i64, Option<String>)> = store
         .lock()?
         .query_row(
-            "SELECT public_key, sign_count FROM passkeys WHERE id = ?1",
+            "SELECT public_key, sign_count, user_id FROM passkeys WHERE id = ?1",
             [id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()?;
     // The challenge is spent even when the passkey is unknown, so a miss costs the attacker the challenge too.
@@ -251,7 +252,7 @@ pub fn login(
         host,
         now_ms,
     );
-    let (Some((key, count)), true) = (stored, client_ok) else {
+    let (Some((key, count, user)), true) = (stored, client_ok) else {
         return Err(PasskeyError::Refused);
     };
     // authenticatorData: rpIdHash (32) | flags (1) | signCount (4) | ...
@@ -282,7 +283,8 @@ pub fn login(
         "UPDATE passkeys SET sign_count = ?2 WHERE id = ?1",
         params![id, new_count],
     )?;
-    Ok(())
+    // Whose passkey it is: the session that follows is that person's (None: the owner's).
+    Ok(user)
 }
 
 #[cfg(test)]
@@ -342,7 +344,7 @@ mod tests {
     fn enroll(store: &SqliteStore, ch: &Challenges, d: &Device, id: &str) {
         let c = ch.issue(Purpose::Register, 0).unwrap();
         let cd = Device::client_data("webauthn.create", &c, "https://hub.example:7443");
-        register(store, ch, HOST, id, &d.spki(), &cd, 1).unwrap();
+        register(store, ch, HOST, id, &d.spki(), &cd, 1, None).unwrap();
     }
 
     fn attempt(
@@ -358,7 +360,7 @@ mod tests {
         let cd = Device::client_data("webauthn.get", &c, origin);
         let auth = Device::auth_data(HOST, flags, count);
         let sig = d.sign(&auth, &cd);
-        login(store, ch, HOST, id, &auth, &cd, &sig, 20)
+        login(store, ch, HOST, id, &auth, &cd, &sig, 20).map(|_| ())
     }
 
     #[test]
@@ -440,9 +442,93 @@ mod tests {
         let other = Device::new();
         let c = ch.issue(Purpose::Register, 0).unwrap();
         let cd = Device::client_data("webauthn.create", &c, "https://hub.example:7443");
-        assert!(register(&store, &ch, HOST, "c", &other.spki(), &cd, 1).is_err());
+        assert!(register(&store, &ch, HOST, "c", &other.spki(), &cd, 1, None).is_err());
         let c = ch.issue(Purpose::Register, 0).unwrap();
         let cd = Device::client_data("webauthn.create", &c, "https://hub.example:7443");
-        assert!(register(&store, &ch, HOST, "d", b"not a key", &cd, 1).is_err());
+        assert!(register(&store, &ch, HOST, "d", b"not a key", &cd, 1, None).is_err());
+    }
+
+    /// A passkey belongs to the person whose session added it: signing in with it gives that person's session, never the owner's.
+    /// (An audit found that a member could add a passkey and sign in as the owner with it.)
+    #[test]
+    fn a_members_passkey_signs_in_as_that_member_and_never_as_the_owner() {
+        use crate::signin::{HubSessions, SignIn};
+        use crate::users::{Role, Users};
+        use crate::web::SessionApi;
+        use std::sync::Arc;
+        let hub = Arc::new(crate::hub::Hub::open(SqliteStore::open_in_memory().unwrap()).unwrap());
+        let api = HubSessions::new(Arc::clone(&hub));
+        let si = SignIn::new(hub.store(), Arc::new(crate::enroll::Lockout::new()));
+        let now = crate::server::now_ms();
+        let member = Users::new(hub.store())
+            .add("Eda", Role::Member, now)
+            .unwrap();
+        let tok = si
+            .redeem(&si.create_code_for(Some(&member.id), now).unwrap(), now)
+            .unwrap();
+        let owner_tok = si.redeem(&si.create_code(now).unwrap(), now).unwrap();
+        let b = |v: &[u8]| b64url_encode(v);
+        let register_with = |tok: &str, id: &str, d: &Device| {
+            let (st, out) = api.passkey("register-begin", Some(tok), HOST, &serde_json::json!({}));
+            assert_eq!(st, 200);
+            let ch = serde_json::from_str::<serde_json::Value>(&out).unwrap()["challenge"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            let cd = Device::client_data("webauthn.create", &ch, "https://hub.example:7443");
+            let (st, _) = api.passkey(
+                "register-finish",
+                Some(tok),
+                HOST,
+                &serde_json::json!({"id": id, "publicKey": b(&d.spki()), "clientDataJSON": b(&cd)}),
+            );
+            assert_eq!(st, 200);
+        };
+        let sign_in_with = |id: &str, d: &Device, count: u32| -> String {
+            let (_, out) = api.passkey("login-begin", None, HOST, &serde_json::json!({}));
+            let ch = serde_json::from_str::<serde_json::Value>(&out).unwrap()["challenge"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            let cd = Device::client_data("webauthn.get", &ch, "https://hub.example:7443");
+            let auth = Device::auth_data(HOST, 0x05, count);
+            let sig = d.sign(&auth, &cd);
+            let (st, out) = api.passkey(
+                "login-finish",
+                None,
+                HOST,
+                &serde_json::json!({"id": id, "authenticatorData": b(&auth), "clientDataJSON": b(&cd), "signature": b(&sig)}),
+            );
+            assert_eq!(st, 200);
+            serde_json::from_str::<serde_json::Value>(&out).unwrap()["token"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        let (dm, dow) = (Device::new(), Device::new());
+        register_with(&tok, "cred-member", &dm);
+        register_with(&owner_tok, "cred-owner", &dow);
+
+        let m = si
+            .access(&sign_in_with("cred-member", &dm, 1), now)
+            .unwrap();
+        assert_eq!(
+            (m.role, m.user.as_str()),
+            (Role::Member, member.id.as_str()),
+            "the member stays a member"
+        );
+        assert!(
+            m.projects.is_some(),
+            "and keeps only the projects they were given"
+        );
+        let o = si
+            .access(&sign_in_with("cred-owner", &dow, 1), now)
+            .unwrap();
+        assert_eq!((o.role, o.user.as_str()), (Role::Owner, "owner"));
+
+        // Removing the person removes their passkey with them.
+        Users::new(hub.store()).remove(&member.id).unwrap();
+        let (_, out) = api.passkey("login-begin", None, HOST, &serde_json::json!({}));
+        assert!(!out.contains("cred-member"), "{out}");
     }
 }

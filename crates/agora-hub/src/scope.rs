@@ -195,7 +195,12 @@ impl Scope {
     pub fn command_allowed(&self, node: &str, command: &C) -> bool {
         let q = |id: &str| qualified(node, id);
         match command {
-            C::AgentStart(c) => self.projects.contains(&qualified(node, &c.project_id)),
+            // An existing worktree to start in must be the person's too (a node refuses this today; the check is here for when it does not).
+            C::AgentStart(c) => {
+                self.projects.contains(&qualified(node, &c.project_id))
+                    && (c.worktree_id.is_empty()
+                        || self.granted(self.worktrees.get(&q(&c.worktree_id))))
+            }
             C::AgentStop(c) => self.granted(self.agents.get(&q(&c.agent_id))),
             C::AgentPrompt(c) => self.granted(self.agents.get(&q(&c.agent_id))),
             C::AgentSetMode(c) => self.granted(self.agents.get(&q(&c.agent_id))),
@@ -434,6 +439,17 @@ mod tests {
         };
         assert!(
             s.command_allowed("n1", &start("mine")) && !s.command_allowed("n1", &start("theirs"))
+        );
+        let in_worktree = |w: &str| {
+            Command::AgentStart(v1::AgentStart {
+                project_id: "mine".into(),
+                worktree_id: w.into(),
+                ..Default::default()
+            })
+        };
+        assert!(
+            !s.command_allowed("n1", &in_worktree("someone-elses")),
+            "a worktree it cannot place is refused"
         );
         // Anything about a whole machine is the owner's.
         assert!(!s.command_allowed("n1", &Command::NodePolicyGet(v1::NodePolicyGet::default())));

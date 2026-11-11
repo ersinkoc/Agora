@@ -138,6 +138,15 @@ impl<'a> SignIn<'a> {
 
     /// A session without a code: the caller has already proved who it is (a passkey assertion).
     pub fn start_session(&self, now_ms: u64) -> Result<String, SignInError> {
+        self.start_session_for(None, now_ms)
+    }
+
+    /// As [`Self::start_session`], for a person of the team: their passkey proved who is here (ADR-0049).
+    pub fn start_session_for(
+        &self,
+        user: Option<&str>,
+        now_ms: u64,
+    ) -> Result<String, SignInError> {
         let token = new_token()?;
         let conn = self.store.lock()?;
         conn.execute(
@@ -145,16 +154,22 @@ impl<'a> SignIn<'a> {
             [to_i64(now_ms)],
         )?;
         conn.execute(
-            "INSERT INTO sessions (token_hash, created_ms, expires_ms) VALUES (?1, ?2, ?3)",
+            "INSERT INTO sessions (token_hash, created_ms, expires_ms, user_id) VALUES (?1, ?2, ?3, ?4)",
             params![
                 token_hash(&token),
                 to_i64(now_ms),
-                to_i64(now_ms.saturating_add(SESSION_TTL_MS))
+                to_i64(now_ms.saturating_add(SESSION_TTL_MS)),
+                user
             ],
         )?;
         drop(conn);
-        let _ = crate::audit::Audit::new(self.store)
-            .record(now_ms, "owner", "sign_in", "passkey", "ok");
+        let _ = crate::audit::Audit::new(self.store).record(
+            now_ms,
+            user.unwrap_or("owner"),
+            "sign_in",
+            "passkey",
+            "ok",
+        );
         Ok(token)
     }
 
@@ -275,8 +290,11 @@ impl HubSessions {
                 .and_then(|v| v.as_str())
                 .and_then(pk::b64url_decode)
         };
-        let signed_in =
-            bearer.is_some_and(|t| SignIn::new(store, Arc::clone(&self.lockout)).check(t, now));
+        // Who is asking: a passkey belongs to the person whose session added it (ADR-0049), never to someone else.
+        let who = bearer
+            .and_then(|t| SignIn::new(store, Arc::clone(&self.lockout)).access(t, now))
+            .map(|a| (a.user != "owner").then_some(a.user));
+        let signed_in = who.is_some();
         let json = |v: serde_json::Value| (200, v.to_string());
         match op {
             // Adding a passkey needs a signed-in session: the code (or another passkey) proved who is here.
@@ -288,7 +306,16 @@ impl HubSessions {
                 let id = body.get("id").and_then(|v| v.as_str()).unwrap_or("");
                 match (field("publicKey"), field("clientDataJSON")) {
                     (Some(key), Some(cd)) => {
-                        match pk::register(store, &self.challenges, host, id, &key, &cd, now) {
+                        match pk::register(
+                            store,
+                            &self.challenges,
+                            host,
+                            id,
+                            &key,
+                            &cd,
+                            now,
+                            who.as_ref().and_then(|u| u.as_deref()),
+                        ) {
                             Ok(()) => (200, "{}".into()),
                             Err(pk::PasskeyError::Refused) => (403, String::new()),
                             Err(_) => (500, String::new()),
@@ -317,8 +344,10 @@ impl HubSessions {
                     return (400, String::new());
                 };
                 match pk::login(store, &self.challenges, host, id, &auth, &cd, &sig, now) {
-                    Ok(()) => {
-                        match SignIn::new(store, Arc::clone(&self.lockout)).start_session(now) {
+                    Ok(user) => {
+                        match SignIn::new(store, Arc::clone(&self.lockout))
+                            .start_session_for(user.as_deref(), now)
+                        {
                             Ok(t) => {
                                 self.lockout.succeeded();
                                 json(serde_json::json!({ "token": t }))
