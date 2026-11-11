@@ -99,7 +99,9 @@ Owner/Team ─┬─ Node ── Checkout ── Worktree
 
 - **Project identity:** optional `.agent-project.json` at the Git root (or selected non-Git folder) contains a random
   UUID `project_id`. Only an explicit owner action creates it; committing/copying it groups clones across nodes.
-  Otherwise use normalized remote URL + root commit (no remote: root commit alone). A standalone folder has a
+  Otherwise use normalized remote URL + root commit (no remote: root commit alone), so two clones of one repository share
+  a shared project (and its board) only when they have the same `origin`: a clone from a local path and one from GitHub are two
+  projects (`agora project init` gives them one explicit id). A standalone folder has a
   node-local identity, without a fabricated Git commit. Metadata never grants access. Changed confirmed bindings
   require explicit owner confirmation. (ADR-0003, ADR-0052)
 - **Workspace:** an owner-selected canonical directory, possibly a subdirectory or non-Git folder. Several agents
