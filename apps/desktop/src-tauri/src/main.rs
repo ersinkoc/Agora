@@ -4,7 +4,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 
 use agora_desktop_tunnel::{check, fingerprint, open, Tunnel, TunnelError};
 use serde::{Deserialize, Serialize};
@@ -21,6 +22,52 @@ struct Saved {
 
 #[derive(Default)]
 struct Tunnels(Mutex<Option<Tunnel>>);
+
+/// The language the notification is written in: the shell's own screen reports the system's at start (`use_locale`); before
+/// that, the environment's.
+struct Locale(Mutex<String>);
+
+/// The number of waiting approvals the hub's page shows in its title (`(N) …`, `apps/web/src/net/alert.ts`); 0 without one.
+/// The title is the page's own text: the shell reads nothing else from it (ADR-0048 decisions 2 and 5).
+fn waiting(title: &str) -> u32 {
+    title
+        .strip_prefix('(')
+        .and_then(|rest| rest.split_once(") "))
+        .and_then(|(n, _)| n.parse().ok())
+        .unwrap_or(0)
+}
+
+/// Shows one OS notification that `count` approvals are waiting. Clicking it brings the app forward (the system's default), where
+/// the home screen lists them; it carries no approval content.
+fn notify_waiting(app: &tauri::AppHandle, count: u32) {
+    use tauri_plugin_notification::NotificationExt;
+    let tag = app
+        .state::<Locale>()
+        .0
+        .lock()
+        .map(|l| l.clone())
+        .unwrap_or_default();
+    let words = agora_i18n::catalog::Catalog::for_locale(&tag);
+    let n = i64::from(count);
+    let (Some(title), Some(body)) = (
+        words.render("notify-title", &[]),
+        words.render(
+            "notify-desktop-approvals",
+            &[("count", agora_i18n::catalog::Arg::Num(n))],
+        ),
+    ) else {
+        return;
+    };
+    let _ = app.notification().builder().title(title).body(body).show();
+}
+
+/// The shell's own screen reports the system language once (`navigator.language`).
+#[tauri::command]
+fn use_locale(locale: State<'_, Locale>, tag: String) {
+    if let Ok(mut l) = locale.0.lock() {
+        *l = tag;
+    }
+}
 
 fn config_file(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
@@ -93,13 +140,54 @@ fn forget(app: tauri::AppHandle, tunnels: State<'_, Tunnels>) -> Result<(), Stri
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .manage(Tunnels::default())
+        .manage(Locale(Mutex::new(agora_i18n::catalog::locale_from_env())))
         .invoke_handler(tauri::generate_handler![
             ca_fingerprint,
             saved,
             connect,
-            forget
+            forget,
+            use_locale
         ])
+        .setup(|app| {
+            // The window from the configuration, plus a watch on its title: when the page's count of waiting approvals grows while
+            // the window is out of sight, one notification (ADR-0048 decision 5).
+            let config = app
+                .config()
+                .app
+                .windows
+                .iter()
+                .find(|w| w.label == "main")
+                .cloned()
+                .ok_or("no main window in tauri.conf.json")?;
+            let last = Arc::new(AtomicU32::new(0));
+            tauri::WebviewWindowBuilder::from_config(app.handle(), &config)?
+                .on_document_title_changed(move |window, title| {
+                    let now = waiting(&title);
+                    let before = last.swap(now, Ordering::Relaxed);
+                    let away = !window.is_visible().unwrap_or(true)
+                        || window.is_minimized().unwrap_or(false)
+                        || !window.is_focused().unwrap_or(true);
+                    if now > before && away {
+                        notify_waiting(window.app_handle(), now);
+                    }
+                })
+                .build()?;
+            Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("the desktop shell could not start");
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_waiting_count_is_read_from_the_title_prefix_only() {
+        assert_eq!(super::waiting("(3) Agora"), 3);
+        assert_eq!(super::waiting("Agora"), 0);
+        assert_eq!(super::waiting("(x) Agora"), 0);
+        assert_eq!(super::waiting("Agora (3)"), 0);
+        assert_eq!(super::waiting("(12) Agora — Activity"), 12);
+    }
 }

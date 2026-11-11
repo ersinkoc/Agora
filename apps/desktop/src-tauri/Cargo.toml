@@ -18,6 +18,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # The pinned-CA loopback tunnel (ADR-0048 decision 3).
 agora-desktop-tunnel = { path = "../../../crates/agora-desktop-tunnel" }
+# ADR-0048 decision 5: an OS notification for a waiting approval while the window is hidden (decision 7: Tauri crates stay here).
+tauri-plugin-notification = "2"
+# The notification's words, from `locales/` like every other text (no dependencies of its own).
+agora-i18n = { path = "../../../crates/agora-i18n" }
 
 [profile.release]
 lto = "thin"
