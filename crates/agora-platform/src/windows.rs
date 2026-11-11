@@ -113,11 +113,15 @@ unsafe impl Sync for Descriptor {}
 
 impl Descriptor {
     fn owner_only() -> io::Result<Self> {
+        Self::from_sddl(OWNER_ONLY)
+    }
+
+    fn from_sddl(sddl: &str) -> io::Result<Self> {
         let mut sd: PSECURITY_DESCRIPTOR = null_mut();
         // SAFETY: a valid NUL-terminated string and a valid out pointer.
         let ok = unsafe {
             ConvertStringSecurityDescriptorToSecurityDescriptorW(
-                wide(OWNER_ONLY).as_ptr(),
+                wide(sddl).as_ptr(),
                 SDDL_REVISION_1,
                 &mut sd,
                 null_mut(),
@@ -199,8 +203,42 @@ pub struct Listener {
 }
 
 pub fn listen(path: &Path) -> io::Result<Listener> {
+    listen_with(path, Descriptor::owner_only()?)
+}
+
+/// The listening end of one agent's own channel (its mesh endpoint). Under confinement (ADR-0050 Amendment B) the agent runs with a
+/// restricted token at Low integrity: besides the owner and SYSTEM, the pipe names exactly that agent's SID (`identity`), which only
+/// its token holds among the restricting SIDs, so no other confined agent passes the second access check; and it carries a Low label
+/// so that no-write-up lets the Low agent write to it. Without an identity it is owner-only like [`listen`].
+pub fn listen_agent(path: &Path, identity: Option<&str>) -> io::Result<Listener> {
+    match identity {
+        Some(sid)
+            if sid.starts_with("S-1-")
+                && sid[4..].chars().all(|c| c.is_ascii_digit() || c == '-') =>
+        {
+            // A restricted token passes two checks. The user's own entry carries the first one (an `OWNER RIGHTS` entry does not
+            // for a restricted token: measured), the agent's entry the second; any other confined agent fails the second.
+            let user = crate::winconfine::current_user_sid_text()?;
+            listen_with(
+                path,
+                Descriptor::from_sddl(&format!(
+                    "{OWNER_ONLY}(A;;GRGW;;;{user})(A;;GRGW;;;{sid})S:(ML;;NW;;;LW)"
+                ))?,
+            )
+        }
+        Some(_) => Err(io::Error::from(io::ErrorKind::InvalidInput)),
+        None => listen(path),
+    }
+}
+
+/// `\\.\pipe\...` for a socket path, as text (see [`crate::local_endpoint_name`]).
+pub(crate) fn pipe_name_text(path: &Path) -> String {
+    let w = pipe_name(path);
+    String::from_utf16_lossy(&w[..w.len().saturating_sub(1)])
+}
+
+fn listen_with(path: &Path, sd: Descriptor) -> io::Result<Listener> {
     let name = pipe_name(path);
-    let sd = Descriptor::owner_only()?;
     let first = create_instance(&name, &sd, true)?;
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);

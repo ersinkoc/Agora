@@ -674,15 +674,18 @@ impl Node {
             let mesh = Arc::clone(&mesh);
             sup.set_launch_hook(Box::new(move |l| {
                 let socket = mesh
-                    .register(agora_mesh::broker::AgentInfo {
-                        id: l.id.clone(),
-                        kind: l.kind.clone(),
-                        node: l.node.clone(),
-                        project: l.project.clone(),
-                        label: l.id.as_str().to_string(),
-                        worktree: l.worktree.to_string_lossy().into_owned(),
-                        state: "idle".into(),
-                    })
+                    .register_confined(
+                        agora_mesh::broker::AgentInfo {
+                            id: l.id.clone(),
+                            kind: l.kind.clone(),
+                            node: l.node.clone(),
+                            project: l.project.clone(),
+                            label: l.id.as_str().to_string(),
+                            worktree: l.worktree.to_string_lossy().into_owned(),
+                            state: "idle".into(),
+                        },
+                        l.identity.as_deref(),
+                    )
                     .ok()?;
                 let command = std::env::current_exe().ok()?;
                 Some(agora_adapters::inject::Endpoint { command, socket })

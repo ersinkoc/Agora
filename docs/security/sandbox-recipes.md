@@ -52,4 +52,44 @@ sandbox.write = ~/.cargo/registry, ~/.npm, ~/.cache
 
 ## Windows (restricted token, ADR-0050)
 
-Confinement is switched off until ADR-0050's design is settled; the windows machine adds its lines here.
+Confinement is **switched off** (`ENABLED = false`) until the maintainer turns it on. The design is ADR-0050 with Amendment B: a restricted token at
+Low integrity, Low labels on exactly the folders an agent may write, attributes-only entries on the folders above them, and a refusal before start
+when a folder the agent would be given lets `Users` or `Everyone` write. Measured on Windows 11 with a real node and probe agents
+(`AGORA_WINDOWS_CONFINEMENT=1`):
+
+```
+sandbox = worktree
+# git: the global config, plus the target of any symbolic link in it (dotfiles)
+sandbox.read = ~\.gitconfig, ~\.config\git, ~\dotfiles\git, ~\.cargo\bin, ~\.rustup
+```
+
+Works confined: `cmd` (pipes included), `git status`/`add`/`commit` (checkout on a data volume or under the profile), `node`, `python` (system-wide
+installs), editing existing files, ConPTY input, output and resize. Refused: writing `~\Documents`, reading a user-private file, writing the main
+checkout's `.git\hooks` from a worktree.
+
+**Not supported confined on Windows: `sh`, `bash` and every other msys program (Git Bash).** They stop at start with
+`NtCreateDirectoryObject(\BaseNamedObjects\msys-2.0S5-…): 0xC0000022`: msys creates a kernel object directory that a Low-integrity process may not
+create, and a directory created in advance by the (Medium) node with a Low label did not help (measured). **Consequence: Claude Code's shell tool
+on Windows runs commands through Git Bash, so a confined Claude Code agent cannot run shell commands.** Agents that run commands through `cmd` or
+PowerShell are not affected. Run such an agent with `sandbox = off` until this is solved.
+
+What differs from macOS and Linux:
+
+- **Reads are weaker** (Amendment B, 5): a file that grants `Users` or `Everyone` read (many data-volume folders, `Program Files`) stays readable to
+  the agent. User-private files (`%USERPROFILE%`, the node's keys, another agent's folders) are refused.
+- **A folder that every user may write is refused, not opened.** An allowed folder under `C:\ProgramData` (which lets `Users` add files) or with
+  an `Everyone`/`Users` write entry anywhere below it gives `agent.sandbox_unavailable` with `reason = broad_write_grant`. Move the checkout, or
+  remove the broad entry.
+- **On a data volume** (`D:` with the default ACL) the user may change a folder's permissions but not its label, so the start is refused
+  with `reason = label_failed`. The node checks every file and folder of the allowed folders for this (and for broad write entries) before it
+  changes anything, so a refusal found there changes nothing. Should labelling still fail later, the entries already added are taken back
+  before the error is returned, which takes as long as adding them did. Give your own account Full control of the checkout
+  (`icacls <folder> /grant "%USERNAME%:(OI)(CI)F"`), or keep the checkout under your profile.
+- **Every listed folder costs time at every agent start and stop**: the node adds an inheritable entry (and, for writable folders, a label) that
+  Windows writes to every file below, then removes. Measured: a clone of this repository (about 1,200 files) starts in about 5 s; `~\.rustup`
+  (about 100,000 files) in `sandbox.read` adds 20–30 s. List the narrowest folder that works, never a whole cache.
+- **A half-listed tool can fail harder than an unlisted one.** With `~\.config\git` listed but its `ignore` file a symbolic link to
+  `~\dotfiles\git\ignore`, git stops with `fatal: cannot use ...\.config\git\ignore as an exclude file`; unlisted, it only warns. List symbolic link
+  targets too (`Get-Item <file> | Select-Object Target`).
+- **rustup needs `~\.rustup` itself** (`could not create home directory ... (os error 183)` when only one toolchain folder is listed).
+- Not working yet: `cargo build` (`Access is denied` starting `rustc.exe`); npm's cache (`%LOCALAPPDATA%\npm-cache`) is too large to list per agent.
