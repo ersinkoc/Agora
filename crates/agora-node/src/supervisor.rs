@@ -530,7 +530,7 @@ impl Supervisor {
         let branch = format!("agent/{}", req.name);
         git::create_worktree(git_root, &target, &branch, None)?;
         let mut direct = req.clone();
-        let result = std::fs::canonicalize(target.join(relative))
+        let result = agora_platform::canonicalize_plain(&target.join(relative))
             .map_err(|e| SupervisorError::Spawn(e.to_string()))
             .and_then(|cwd| {
                 direct.checkout = cwd;
