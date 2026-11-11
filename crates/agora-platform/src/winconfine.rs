@@ -500,6 +500,16 @@ fn clear_explicit_low_labels(root: &Path) -> bool {
     clean
 }
 
+/// Takes the Low label of an allowed folder back, and the explicit Low labels below it. A folder whose own label was never set (the
+/// start was refused on it, or failed before) has nothing of its own to undo: removing a label it does not carry would need the very
+/// `WRITE_OWNER` that may be missing, and would keep its ledger forever.
+fn take_label_back(path: &Path) -> bool {
+    if has_explicit_low_label(path) && set_low_label(path, false).is_err() {
+        return false;
+    }
+    clear_explicit_low_labels(path)
+}
+
 /// Whether `path` carries an explicit (not inherited) mandatory label already.
 fn has_explicit_label(path: &Path) -> bool {
     let name = wide(path.as_os_str());
@@ -867,6 +877,12 @@ fn write_ledger(file: &Path, plan: &Plan) -> io::Result<()> {
     std::fs::write(file, text)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Tests only: fail a start right after a folder's label went on, like a change that went through and still reported an error.
+    static FAIL_AFTER_LABEL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// One agent's confinement: its SID, the folders that carry it, and the token to start the process with. Dropping it removes the
 /// entries again.
 pub(crate) struct Confinement {
@@ -1002,6 +1018,10 @@ impl Confinement {
                 // A folder that cannot be labelled even so is refused (Amendment B, 2).
                 set_low_label(&path, true).map_err(|_| refused(SandboxRefusal::LabelFailed))?;
             }
+            #[cfg(test)]
+            if FAIL_AFTER_LABEL.with(std::cell::Cell::get) {
+                return Err(refused(SandboxRefusal::LabelFailed));
+            }
         }
         confinement.token = restricted_token(&confinement.sid)?;
         Ok(confinement)
@@ -1020,9 +1040,7 @@ impl Drop for Confinement {
         // Labels first (setting them may need the self-grant), each only when no other live agent still uses that folder.
         for path in &self.labelled {
             let line = format!("{LABEL_LINE}\t{}", path.to_string_lossy());
-            if !line_in_use_elsewhere(&line, &self.ledger)
-                && (set_low_label(path, false).is_err() || !clear_explicit_low_labels(path))
-            {
+            if !line_in_use_elsewhere(&line, &self.ledger) && !take_label_back(path) {
                 all_removed = false;
             }
         }
@@ -1038,7 +1056,9 @@ impl Drop for Confinement {
                 }
             }
         }
-        // A relaunch of the same agent keeps its SID; while that spawn's ledger lists the same entry, it is still in use.
+        // A relaunch of the same agent keeps its SID; while that spawn's ledger lists the same entry, it is still in use. The line names
+        // no access level: if two spawns of one agent got the same folder at different levels (a policy change between them), the
+        // merged, stronger entry stays until the last of them ends. It belongs to the same agent, never to another one.
         let sid_line = |p: &Path| format!("{}\t{}", self.sid_text, p.to_string_lossy());
         for path in &self.granted {
             // A path recorded but never changed (the start failed on it) has no entry to take back.
@@ -1297,12 +1317,7 @@ pub(crate) fn recover_stale() {
             if !folder_path.exists() || line_in_use_elsewhere(line, &path) {
                 continue;
             }
-            let undone = match mark {
-                LABEL_LINE => set_low_label(folder_path, false)
-                    .map(|()| clear_explicit_low_labels(folder_path)),
-                _ => continue,
-            };
-            if !matches!(undone, Ok(true)) {
+            if mark == LABEL_LINE && !take_label_back(folder_path) {
                 clean = false;
             }
         }
@@ -1457,6 +1472,84 @@ mod tests {
         assert!(failed, "the start must fail");
         assert!(!left.contains(&identity), "left: {left}");
         assert!(!left.contains("Mandatory Label"), "left: {left}");
+        assert!(ledger_files.is_empty(), "ledgers left: {ledger_files:?}");
+    }
+
+    /// A folder the user may change but not label (Modify, no `WRITE_OWNER`: what a data volume's default ACL gives).
+    fn unlabelable(dir: &Path) -> String {
+        let user = format!("*{}", current_user_sid_text().unwrap());
+        icacls(&[
+            &dir.to_string_lossy(),
+            "/inheritance:r",
+            "/grant:r",
+            &format!("{user}:(OI)(CI)M"),
+            "/grant:r",
+            "*S-1-5-18:(OI)(CI)F",
+        ])
+    }
+
+    /// Re-review of #273, 1: a `label_failed` refusal leaves no ledger and no grant, and a label that was never set is nothing to take
+    /// back (taking it back would need the `WRITE_OWNER` that is missing, and kept the ledger forever).
+    #[test]
+    fn a_label_failed_refusal_leaves_no_ledger_and_no_grant() {
+        let root = scratch("label-failed");
+        let ledgers = root.join("ledgers");
+        let work = root.join("work");
+        std::fs::create_dir_all(work.join("sub")).unwrap();
+        unlabelable(&work);
+        let identity = random_sid_string().unwrap();
+        let sandbox = Sandbox {
+            read: vec![],
+            write: vec![work.clone()],
+        };
+        // The check that runs before any change already finds it (re-review note 2).
+        let checked = preflight(&sandbox).err().map(|(_, why)| why);
+        let err = Confinement::in_ledger_dir(&sandbox, &ledgers, Some(&identity))
+            .err()
+            .map(|e| crate::sandbox_refusal(&e));
+        let left = format!(
+            "{}{}",
+            icacls(&[&work.to_string_lossy(), "/T", "/C"]),
+            icacls(&[&root.to_string_lossy()])
+        );
+        let ledger_files = files_in(&ledgers);
+        // The label was never set here: nothing to undo, where removing one fails for want of `WRITE_OWNER`.
+        let nothing_to_undo = take_label_back(&work);
+        let removing_fails = set_low_label(&work, false).is_err();
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(checked, Some(SandboxRefusal::LabelFailed));
+        assert_eq!(err, Some(Some(SandboxRefusal::LabelFailed)));
+        assert!(!left.contains(&identity), "left: {left}");
+        assert!(ledger_files.is_empty(), "ledgers left: {ledger_files:?}");
+        assert!(nothing_to_undo);
+        assert!(removing_fails, "this folder should not be labelable");
+    }
+
+    /// Re-review of #273, 4: a change that went through and still failed the start (the label is on, then an error) is taken back,
+    /// because the folder was recorded before it was changed. Recording it after the change, as before, left the label behind.
+    #[test]
+    fn a_label_that_went_on_before_the_start_failed_is_taken_back() {
+        let root = scratch("after-label");
+        let ledgers = root.join("ledgers");
+        let work = root.join("work");
+        std::fs::create_dir_all(work.join("sub")).unwrap();
+        std::fs::write(work.join("sub").join("f.txt"), "x").unwrap();
+        let identity = random_sid_string().unwrap();
+        let sandbox = Sandbox {
+            read: vec![],
+            write: vec![work.clone()],
+        };
+        FAIL_AFTER_LABEL.with(|f| f.set(true));
+        let result = Confinement::in_ledger_dir(&sandbox, &ledgers, Some(&identity));
+        FAIL_AFTER_LABEL.with(|f| f.set(false));
+        let failed = result.is_err();
+        drop(result);
+        let left = icacls(&[&work.to_string_lossy(), "/T", "/C"]);
+        let ledger_files = files_in(&ledgers);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(failed);
+        assert!(!left.contains("Mandatory Label"), "left: {left}");
+        assert!(!left.contains(&identity), "left: {left}");
         assert!(ledger_files.is_empty(), "ledgers left: {ledger_files:?}");
     }
 

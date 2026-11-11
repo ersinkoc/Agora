@@ -74,7 +74,9 @@ What differs from macOS and Linux:
   an `Everyone`/`Users` write entry anywhere below it gives `agent.sandbox_unavailable` with `reason = broad_write_grant`. Move the checkout, or
   remove the broad entry.
 - **On a data volume** (`D:` with the default ACL) the user may change a folder's permissions but not its label, so the start is refused
-  before anything changes (`reason = label_failed`). Give your own account Full control of the checkout
+  with `reason = label_failed`. The node checks every file and folder of the allowed folders for this (and for broad write entries) before it
+  changes anything, so a refusal found there changes nothing. Should labelling still fail later, the entries already added are taken back
+  before the error is returned, which takes as long as adding them did. Give your own account Full control of the checkout
   (`icacls <folder> /grant "%USERNAME%:(OI)(CI)F"`), or keep the checkout under your profile.
 - **Every listed folder costs time at every agent start and stop**: the node adds an inheritable entry (and, for writable folders, a label) that
   Windows writes to every file below, then removes. Measured: a clone of this repository (about 1,200 files) starts in about 5 s; `~\.rustup`
