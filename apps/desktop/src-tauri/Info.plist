@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Merged into the app's Info.plist by the Tauri bundler. Without NSLocalNetworkUsageDescription, macOS refuses connections to a hub on
+     the local network (EHOSTUNREACH) and never asks the user. The text is what macOS shows in its permission prompt. -->
+<plist version="1.0">
+<dict>
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>Connects to your hub when it runs on a computer on your local network.</string>
+</dict>
+</plist>
