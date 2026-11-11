@@ -73,6 +73,15 @@ pub fn common_git_dir(worktree: &Path) -> Option<PathBuf> {
     gitdir.parent()?.parent().map(Path::to_path_buf)
 }
 
+/// The private temp folder of the agent that works in `worktree`; the node points `TEMP` and `TMP` at it where permissions are
+/// granted folder by folder.
+pub fn agent_temp(worktree: &Path) -> PathBuf {
+    let name = worktree
+        .file_name()
+        .map_or_else(|| "agent".into(), |n| n.to_string_lossy().into_owned());
+    std::env::temp_dir().join(format!("agora-agent-{name}"))
+}
+
 impl SandboxPolicy {
     /// The paths for one agent, or `None` when agents are not confined.
     pub fn profile(
@@ -87,12 +96,15 @@ impl SandboxPolicy {
         }
         let mut read: Vec<PathBuf> = SYSTEM_READ.iter().map(PathBuf::from).collect();
         // The agent's own program folder, when it is named by path.
-        if program.contains('/') {
+        if program.contains(['/', std::path::MAIN_SEPARATOR]) {
             if let Some(dir) = Path::new(program).parent() {
                 read.push(dir.to_path_buf());
             }
         }
         read.extend(self.read.iter().cloned());
+        if agora_platform::NARROW_GIT_WRITES {
+            return Some(self.narrow_profile(kind, needs, worktree, read));
+        }
         let mut write = vec![
             worktree.to_path_buf(),
             PathBuf::from("/tmp"),
@@ -105,6 +117,42 @@ impl SandboxPolicy {
             write.extend(needs.write.iter().filter_map(|p| expand(p)));
         }
         Some(agora_platform::Sandbox { read, write })
+    }
+
+    /// The profile where permissions are granted folder by folder (ADR-0050): the shared Git folder is readable, and only the parts a
+    /// commit needs are writable, so a planted hook or config cannot be left behind.
+    fn narrow_profile(
+        &self,
+        kind: &str,
+        needs: Option<&agora_adapters::manifest::SandboxNeeds>,
+        worktree: &Path,
+        mut read: Vec<PathBuf>,
+    ) -> agora_platform::Sandbox {
+        let temp = agent_temp(worktree);
+        let _ = std::fs::create_dir_all(&temp);
+        let mut write = vec![worktree.to_path_buf(), temp];
+        if let Some(text) = std::fs::read_to_string(worktree.join(".git"))
+            .ok()
+            .and_then(|t| {
+                t.trim()
+                    .strip_prefix("gitdir:")
+                    .map(|g| g.trim().to_owned())
+            })
+        {
+            // Its own admin folder (index, HEAD) is writable; the common folder is read, with `objects` and `refs` writable.
+            write.push(PathBuf::from(text));
+        }
+        if let Some(common) = common_git_dir(worktree) {
+            write.push(common.join("objects"));
+            write.push(common.join("refs"));
+            read.push(common);
+        }
+        write.extend(self.write.iter().cloned());
+        if let Some(needs) = needs.filter(|_| self.trusted_kinds.iter().any(|k| k == kind)) {
+            read.extend(needs.read.iter().filter_map(|p| expand(p)));
+            write.extend(needs.write.iter().filter_map(|p| expand(p)));
+        }
+        agora_platform::Sandbox { read, write }
     }
 
     /// Whether agents can be started under this policy on this machine.
@@ -121,6 +169,28 @@ impl SandboxPolicy {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_narrow_profile_never_makes_the_shared_git_folder_itself_writable() {
+        let root = std::env::temp_dir().join(format!("agora-narrow-{}", std::process::id()));
+        let (wt, common) = (root.join("wt"), root.join("main").join(".git"));
+        let admin = common.join("worktrees").join("wt");
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::create_dir_all(&admin).unwrap();
+        std::fs::write(wt.join(".git"), format!("gitdir: {}\n", admin.display())).unwrap();
+        let policy = SandboxPolicy {
+            level: Level::Worktree,
+            ..SandboxPolicy::default()
+        };
+        let sb = policy.narrow_profile("k", None, &wt, vec![]);
+        assert!(sb.write.contains(&wt) && sb.write.contains(&admin));
+        assert!(
+            sb.write.contains(&common.join("objects")) && sb.write.contains(&common.join("refs"))
+        );
+        assert!(!sb.write.contains(&common) && !sb.write.contains(&common.join("hooks")));
+        assert!(sb.read.contains(&common));
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn an_unknown_level_is_the_strictest_never_off() {

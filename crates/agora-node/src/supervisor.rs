@@ -700,6 +700,11 @@ impl Supervisor {
                 .collect();
         }
         cfg.env.extend(extras.env.iter().cloned());
+        if cfg.sandbox.is_some() && agora_platform::NARROW_GIT_WRITES {
+            let temp = crate::sandbox::agent_temp(worktree).display().to_string();
+            cfg.env.push(("TEMP".into(), temp.clone()));
+            cfg.env.push(("TMP".into(), temp));
+        }
         let pty = spawn(&cfg).map_err(|e| SupervisorError::Spawn(e.to_string()))?;
         TerminalHandle::start(pty, self.cfg.terminal)
             .map_err(|e| SupervisorError::Spawn(e.to_string()))

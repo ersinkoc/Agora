@@ -12,6 +12,8 @@ mod conpty;
 #[cfg(unix)]
 mod unix;
 #[cfg(windows)]
+mod winconfine;
+#[cfg(windows)]
 mod windows;
 #[cfg(windows)]
 mod winproc;
@@ -380,6 +382,11 @@ pub struct Sandbox {
     pub write: Vec<PathBuf>,
 }
 
+/// True where a [`Sandbox`] is enforced by per-agent folder permissions (Windows, ADR-0050) rather than by a rule list the kernel
+/// reads. There the node hands an agent only its worktree, its own Git admin folder, the shared `objects/` and `refs/`, and a private
+/// temp folder, and leaves the rest of the shared Git folder (config, hooks) read-only. Callers use this instead of a `cfg`.
+pub const NARROW_GIT_WRITES: bool = cfg!(windows);
+
 /// True when this machine can enforce a [`Sandbox`] (Linux with Landlock). `agora doctor` and the node ask before starting anything.
 pub fn sandbox_supported() -> bool {
     #[cfg(target_os = "linux")]
@@ -390,10 +397,21 @@ pub fn sandbox_supported() -> bool {
     {
         macos::sandbox_supported()
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(windows)]
+    {
+        winconfine::enabled()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
         false
     }
+}
+
+/// Undoes the folder permissions a crashed node left behind for a confined agent (Windows, ADR-0050). Nothing to do elsewhere.
+/// Call it once when a node starts, before any agent runs.
+pub fn recover_sandbox_leftovers() {
+    #[cfg(windows)]
+    winconfine::recover_stale();
 }
 
 /// Confines `cmd` (and what it starts) the same way [`PtyConfig::sandbox`] does a PTY process. Fails with `Unsupported` where that
