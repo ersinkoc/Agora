@@ -6,3 +6,5 @@ schema/fixtures/**/*.json text eol=lf
 *.ftl text eol=lf
 *.py text eol=lf
 *.sh text eol=lf
+# Captured agent screens are raw terminal bytes (CR included); a Windows checkout with autocrlf would rewrite them.
+manifests/agents/fixtures/**/*.screen binary
