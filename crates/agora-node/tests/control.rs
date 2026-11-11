@@ -1042,6 +1042,34 @@ fn with_no_trusted_device_every_decision_is_refused() {
 }
 
 #[test]
+fn a_manifest_added_while_the_node_runs_is_listed_and_startable_without_a_restart() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
+        return;
+    }
+    let e = env("reload");
+    let n = node(&e, NodeLimits::default());
+    let mut c = Client::connect(&e.dir.join("c.sock")).unwrap();
+    let kinds = |c: &mut Client| -> Vec<String> {
+        let r = ok(c.call(Cmd::AgentKinds(v1::AgentKinds {})));
+        let Some(Ok_::AgentKinds(list)) = r.result else {
+            panic!("not an AgentKinds result");
+        };
+        list.kinds.into_iter().map(|k| k.kind).collect()
+    };
+    assert!(!kinds(&mut c).contains(&"late".to_string()));
+    std::fs::write(
+        e.dir.join("manifests/late.toml"),
+        "kind = \"late\"\ndisplay_name = \"Late\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"sh\"]\n",
+    )
+    .unwrap();
+    assert!(kinds(&mut c).contains(&"late".to_string()));
+    let started = c.call(start_cmd("late"));
+    assert!(started.is_ok(), "{started:?}");
+    drop(n);
+    let _ = std::fs::remove_dir_all(&e.dir);
+}
+
+#[test]
 fn agent_kinds_lists_what_this_node_can_start() {
     if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
         return;

@@ -215,6 +215,29 @@ impl Boards {
         mesh.take_events()
     }
 
+    /// A node's process started again: every agent it had is gone, even if a new one will carry the same local id (`agent-1`). Gives
+    /// their tasks and leases back now, in every board in memory, and returns each project with the events that produced.
+    pub fn node_restarted(&self, node: &str, now_ms: u64) -> Vec<(String, Vec<Body>)> {
+        let prefix = format!("{node}/");
+        let mut g = self.by_project.lock().unwrap_or_else(|e| e.into_inner());
+        let mut out = Vec::new();
+        for (project, mesh) in g.iter_mut() {
+            let gone: Vec<AgentId> = mesh
+                .agent_ids()
+                .into_iter()
+                .filter(|id| id.as_str().starts_with(&prefix))
+                .collect();
+            for id in &gone {
+                mesh.unregister(id, now_ms);
+            }
+            let events = mesh.take_events();
+            if !gone.is_empty() || !events.is_empty() {
+                out.push((project.clone(), events));
+            }
+        }
+        out
+    }
+
     pub fn has(&self, project: &str) -> bool {
         self.by_project
             .lock()
@@ -548,6 +571,57 @@ mod tests {
         v.agents.get_mut("alpha/a").unwrap().running = false;
         let a = run(&b, &v, "beta", "task_claim", json!({"task_id": id}), 3);
         assert_eq!(code(&a), "");
+    }
+
+    #[test]
+    fn a_restarted_node_does_not_inherit_the_claims_of_its_dead_agents() {
+        // After a crash the node starts again and its first agent is `a` again: the claim of the one that died must not carry over.
+        let b = Boards::new();
+        let v = view(&["alpha", "beta"]);
+        let made = run(
+            &b,
+            &v,
+            "alpha",
+            "task_create",
+            json!({"title": "t", "depends_on": []}),
+            1,
+        );
+        let Verdict::Done { result, .. } = made.verdict else {
+            panic!()
+        };
+        let id = agora_mesh::mcp::tool_result_value(&result).unwrap()["task_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        run(&b, &v, "alpha", "task_claim", json!({"task_id": id}), 2);
+        assert_eq!(
+            code(&run(
+                &b,
+                &v,
+                "beta",
+                "task_claim",
+                json!({"task_id": id}),
+                3
+            )),
+            "task.not_open"
+        );
+        let released = b.node_restarted("alpha", 4);
+        assert_eq!(released.len(), 1);
+        assert!(!released[0].1.is_empty());
+        // `alpha/a` runs again in the view (the new agent), yet the task is open for anyone.
+        assert_eq!(
+            code(&run(
+                &b,
+                &v,
+                "beta",
+                "task_claim",
+                json!({"task_id": id}),
+                5
+            )),
+            ""
+        );
+        // A node that has no agent on any board changes nothing.
+        assert!(b.node_restarted("delta", 6).is_empty());
     }
 
     #[test]

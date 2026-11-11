@@ -68,6 +68,8 @@ pub struct ControlContext {
     /// Transcripts of agents without a terminal (ADR-0038).
     pub chat: Arc<crate::chat::ChatBoard>,
     directories: Mutex<crate::directory::Bindings>,
+    /// Where the agent manifests live; read again before agents are listed or started.
+    manifests_dir: Option<PathBuf>,
     names: AtomicU64,
     seen: Mutex<IdempotencyCache>,
 }
@@ -103,7 +105,28 @@ impl ControlContext {
             approvals,
             chat,
             names: AtomicU64::new(0),
+            manifests_dir: None,
             seen: Mutex::new(IdempotencyCache::default()),
+        }
+    }
+
+    /// Makes the node read its manifest folder again before it lists or starts agents.
+    #[must_use]
+    pub fn with_manifests_dir(mut self, dir: PathBuf) -> Self {
+        self.manifests_dir = Some(dir);
+        self
+    }
+
+    /// Registers manifests added or changed since the node started (a kind whose file was deleted stays until restart). A file
+    /// that does not parse is skipped; `agora doctor` names it.
+    fn reload_manifests(&self) {
+        let Some(dir) = &self.manifests_dir else {
+            return;
+        };
+        let (found, _) = crate::daemon::load_manifests(dir);
+        let mut sup = self.sup();
+        for m in found {
+            sup.register(m);
         }
     }
 
@@ -182,6 +205,12 @@ fn sup_err(e: SupervisorError) -> Error {
 /// Run one command. Terminal subscription is handled by the connection (it needs the stream).
 fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
     use v1::command_ok::Result as Ok_;
+    if matches!(
+        cmd,
+        Cmd::AgentKinds(_) | Cmd::AgentStart(_) | Cmd::AgentLaunch(_)
+    ) {
+        ctx.reload_manifests();
+    }
     match cmd {
         Cmd::ProjectList(_) => Ok(v1::CommandOk {
             result: Some(Ok_::ProjectList(v1::ProjectListResult {

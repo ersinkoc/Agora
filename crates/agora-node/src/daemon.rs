@@ -583,23 +583,9 @@ impl Node {
             limits: cfg.limits,
         });
         sup.set_sandbox(read_policy(&cfg.data_dir.join(POLICY_FILE)).sandbox);
-        let mut manifest_problems = Vec::new();
-        if let Ok(rd) = std::fs::read_dir(&cfg.manifests_dir) {
-            let mut paths: Vec<PathBuf> = rd
-                .flatten()
-                .map(|e| e.path())
-                .filter(|p| p.extension().is_some_and(|x| x == "toml"))
-                .collect();
-            paths.sort();
-            for p in paths {
-                match std::fs::read_to_string(&p)
-                    .map_err(|e| e.to_string())
-                    .and_then(|s| Manifest::parse(&s).map_err(|e| e.to_string()))
-                {
-                    Ok(m) => sup.register(m),
-                    Err(e) => manifest_problems.push((p, e)),
-                }
-            }
+        let (found, manifest_problems) = load_manifests(&cfg.manifests_dir);
+        for m in found {
+            sup.register(m);
         }
 
         let mut projects = Vec::new();
@@ -702,16 +688,19 @@ impl Node {
             }));
         }
         let chat = Arc::new(crate::chat::ChatBoard::new());
-        let ctx = Arc::new(ControlContext::new(
-            Arc::clone(&supervisor),
-            projects,
-            cfg.worktree_root.clone(),
-            cfg.node_id.clone(),
-            Some(Arc::clone(&events)),
-            Some(Arc::clone(&mesh)),
-            Some(Arc::clone(&approvals)),
-            Arc::clone(&chat),
-        ));
+        let ctx = Arc::new(
+            ControlContext::new(
+                Arc::clone(&supervisor),
+                projects,
+                cfg.worktree_root.clone(),
+                cfg.node_id.clone(),
+                Some(Arc::clone(&events)),
+                Some(Arc::clone(&mesh)),
+                Some(Arc::clone(&approvals)),
+                Arc::clone(&chat),
+            )
+            .with_manifests_dir(cfg.manifests_dir.clone()),
+        );
         let server = ControlServer::start(&cfg.socket, ctx)?;
 
         let stop = Arc::new(AtomicBool::new(false));
@@ -938,4 +927,29 @@ impl Drop for Node {
         self.events.node_offline(&self.node_id);
         // Agents die with the node's supervisor (terminal handles kill their process groups on drop).
     }
+}
+
+/// Every `*.toml` agent manifest in `dir`, in file-name order, and each file that could not be read or parsed with the reason.
+/// The node reads them at start and again before it lists or starts agents, so a manifest added later is seen without a restart.
+pub fn load_manifests(dir: &Path) -> (Vec<Manifest>, Vec<(PathBuf, String)>) {
+    let mut found = Vec::new();
+    let mut problems = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        let mut paths: Vec<PathBuf> = rd
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "toml"))
+            .collect();
+        paths.sort();
+        for p in paths {
+            match std::fs::read_to_string(&p)
+                .map_err(|e| e.to_string())
+                .and_then(|s| Manifest::parse(&s).map_err(|e| e.to_string()))
+            {
+                Ok(m) => found.push(m),
+                Err(e) => problems.push((p, e)),
+            }
+        }
+    }
+    (found, problems)
 }

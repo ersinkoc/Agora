@@ -22,6 +22,7 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 - Recipes for the folders real tools need (git config, cargo, npm, compilers): `docs/security/sandbox-recipes.md`.
 - Windows confinement is written (ADR-0050) and tested on real Windows, but switched off: a real-machine check showed the first design lets a folder with a broad group permission through, and a replacement design is being measured.
 - Codex's "trust this folder" screen is now shown as needing you.
+- A manifest added while the node runs is listed and can be started without restarting the node.
 
 ## 0.2.1
 
