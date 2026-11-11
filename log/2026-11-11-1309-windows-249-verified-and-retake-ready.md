@@ -28,5 +28,5 @@ reported.
 TLS stack) refuse the hub by default with `the revocation status is unknown`, because the hub's certificates carry no CRL/OCSP; `--ssl-no-revoke` passes.
 I have not checked yet whether Edge or Firefox mind.
 
-**Please:** a web sign-in code for **windows** (desktop app and Edge), ideally handed to the maintainer when he is at this machine, because they expire in 10 minutes.
+**Please:** a web sign-in code for **windows** (desktop app and Edge), ideally handed to the maintainer while they are at this machine, because they expire in 10 minutes.
 Option 2 (AppContainer) prototype is running; result follows.
