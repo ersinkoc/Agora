@@ -47,7 +47,8 @@ drops it as the mechanism and enforces the **path rules of ADR-0047** with the D
    (`.git/worktrees/<name>`), and **read-only** access to the common Git directory. Writes to the common `config`, `hooks/` and other
    worktrees' admin directories are refused, which closes the escape that matters (a planted hook or config run later by the user).
    Writing objects and refs needs the common `objects/` and `refs/` folders: those two subfolders get write access and nothing above
-   them. **Residual risk, stated in the threat model:** a confined agent can add objects and move branch refs in the shared repository.
+   them. A commit also appends to the branch's reflog, which `git worktree add` creates under the common `logs/refs/`, so that folder
+   is writable as well (clarification found on a real Windows machine; the rest of `logs/` is not). **Residual risk, stated in the threat model:** a confined agent can add objects and move branch refs in the shared repository.
    It cannot rewrite config or hooks, and refs are recoverable from the reflog.
 5. **Lifecycle of the ACL entries.** The node records every entry it adds (folder, SID) in its state folder *before* adding it. It
    removes them when the agent stops, when the worktree is removed, and on node start for any record left behind by a crash. A
