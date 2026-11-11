@@ -53,8 +53,8 @@ try {
   writeFileSync(join(stack.home, 'manifests/board-fixture.toml'), `kind = "board-fixture"\ndisplay_name = "Board fixture"\nversion = "1"\nmin_engine = 1\n[process]\nlaunch = ${JSON.stringify(argv)}\n`);
   // Both nodes start with the harness's unrelated project, not either newly selected folder.
   const peer = await stack.addNode({ id: 'desktop', project: stack.proj });
-  const start = (run, path) => {
-    const output = run(['agent', 'start', 'board-fixture', '--cwd', path]);
+  const start = (run, path, flags = []) => {
+    const output = run(['agent', 'start', 'board-fixture', '--cwd', path, ...flags]);
     const id = output.match(/agent-\d+/)?.[0];
     assert.ok(id, output); return id;
   };
@@ -75,6 +75,24 @@ try {
   assert.equal(peerLease.value.error.code, 'lease.held');
   assert.equal(peerLease.value.error.params.holder_agent_id, `laptop/${localId}`);
   console.log('PASS: matching folders selected after both node daemons start share tasks and refuse a second live lease on the same project path.');
+
+  // A new association of the folder must not strand an agent already running under its old project identity.
+  writeFileSync(join(paths[0], '.agent-project.json'), JSON.stringify({ project_id: '22222222-2222-4222-8222-222222222222' }));
+  const newId = start(stack.run, paths[0], ['--accept-project-id-change']);
+  await stack.page.waitForFunction(() => document.querySelectorAll('aside button[aria-pressed]').length === 3);
+  const originalTasks = await clients[0].tool('task_list', {});
+  assert.equal(originalTasks.failed, false);
+  assert.ok(originalTasks.value.some(task => task.title === 'Task made on laptop'));
+  const stillHeld = await clients[1].tool('lease_acquire', { paths: ['README.md'], ttl_s: 120 });
+  assert.equal(stillHeld.failed, true);
+  assert.equal(stillHeld.value.error.code, 'lease.held');
+  const released = await clients[0].tool('lease_release', { lease_id: localLease.value.lease_id });
+  assert.equal(released.failed, false, JSON.stringify(released));
+  clients.push(await mesh(stack.bin, stack.env, join(stack.home, 'm', `${newId}.sock`)));
+  const newTasks = await clients[2].tool('task_list', {});
+  assert.equal(newTasks.failed, false);
+  assert.deepEqual(newTasks.value, []);
+  console.log('PASS: re-associating a folder preserves the running agent\'s original tasks/lease release; the new session uses its separate project.');
 } catch (error) {
   console.error(error.stack || error); process.exitCode = 1;
 } finally {

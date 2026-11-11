@@ -106,6 +106,8 @@ Owner/Team ─┬─ Node ── Checkout ── Worktree
   require explicit owner confirmation. (ADR-0003, ADR-0052)
   The hub resolves board membership from both discovered checkouts and registered selected workspaces, by project identity
   and online node ID; selecting a directory after the daemon starts participates in the same shared board.
+  Running agents retain membership in their reported project until they exit, even if the owner confirms a new identity for
+  their folder. A metadata change does not strand their existing tasks or leases on a different broker.
 - **Workspace:** an owner-selected canonical directory, possibly a subdirectory or non-Git folder. Several agents
   may share one workspace. New `directory.inspect` / `agent.launch` commands use this directory by default;
   explicit worktree mode creates an isolated branch and preserves the selected subdirectory. Legacy `agent.start`

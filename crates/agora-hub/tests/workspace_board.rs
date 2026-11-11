@@ -151,6 +151,21 @@ fn offline_unknown_and_spoofed_nodes_do_not_make_a_single_node_project_shared() 
     online(&mut view, "alpha");
     workspace(&mut view, "alpha", "p");
     workspace(&mut view, "unknown", "p");
+    assert_eq!(nodes_with(&view, "p"), ["alpha"]);
+    // Beta is online but has no project fact: producer binding, rather than unknown-node filtering, must reject the spoof.
+    online(&mut view, "beta");
+    apply(
+        &mut view,
+        "alpha",
+        Body::AgentStarted(v1::AgentStarted {
+            agent_id: "spoof-agent".into(),
+            node_id: "beta".into(),
+            project_id: "p".into(),
+            kind: "fixture".into(),
+            ..Default::default()
+        }),
+    );
+    assert_eq!(nodes_with(&view, "p"), ["alpha"]);
     apply(
         &mut view,
         "alpha",
@@ -169,7 +184,6 @@ fn offline_unknown_and_spoofed_nodes_do_not_make_a_single_node_project_shared() 
             .verdict,
         Verdict::NotShared
     );
-    online(&mut view, "beta");
     workspace(&mut view, "beta", "p");
     apply(
         &mut view,
@@ -191,6 +205,85 @@ fn changing_a_workspace_identity_stops_membership_in_the_previous_project() {
         workspace(&mut view, node, "p");
     }
     workspace(&mut view, "beta", "other");
+    assert_eq!(nodes_with(&view, "p"), ["alpha"]);
+    assert_eq!(nodes_with(&view, "other"), ["beta"]);
+}
+
+#[test]
+fn changing_workspace_identity_keeps_existing_agents_on_their_original_board_until_exit() {
+    let mut view = View::default();
+    for node in ["alpha", "beta"] {
+        online(&mut view, node);
+        workspace(&mut view, node, "p");
+    }
+    let board = Boards::new();
+    assert!(
+        !call(
+            &board,
+            &view,
+            "alpha",
+            "p",
+            "task_create",
+            json!({"title":"original work", "depends_on":[]})
+        )
+        .0
+    );
+    let (failed, lease) = call(
+        &board,
+        &view,
+        "beta",
+        "p",
+        "lease_acquire",
+        json!({"paths":["peer.txt"], "ttl_s":120}),
+    );
+    assert!(!failed);
+    // The owner re-associates the folder, but beta/a is still running in its original project.
+    apply(
+        &mut view,
+        "beta",
+        Body::WorkspaceRegistered(v1::WorkspaceRegistered {
+            workspace_id: "w".into(),
+            node_id: "beta".into(),
+            project_id: "other".into(),
+            path: "/chosen/project".into(),
+            ..Default::default()
+        }),
+    );
+    assert_eq!(view.agents["beta/a"].project_id, "p");
+    assert_eq!(nodes_with(&view, "p"), ["alpha", "beta"]);
+    assert_eq!(nodes_with(&view, "other"), ["beta"]);
+    let (failed, tasks) = call(&board, &view, "beta", "p", "task_list", json!({}));
+    assert!(!failed);
+    assert_eq!(tasks[0]["title"], "original work");
+    let (failed, error) = call(
+        &board,
+        &view,
+        "alpha",
+        "p",
+        "lease_acquire",
+        json!({"paths":["peer.txt"], "ttl_s":120}),
+    );
+    assert!(failed);
+    assert_eq!(error["error"]["code"], "lease.held");
+    assert!(
+        !call(
+            &board,
+            &view,
+            "beta",
+            "p",
+            "lease_release",
+            json!({"lease_id":lease["lease_id"]})
+        )
+        .0
+    );
+    apply(
+        &mut view,
+        "beta",
+        Body::AgentExited(v1::AgentExited {
+            agent_id: "a".into(),
+            exit_code: 0,
+        }),
+    );
     assert_eq!(nodes_with(&view, "p"), ["alpha"]);
     assert_eq!(nodes_with(&view, "other"), ["beta"]);
 }
@@ -222,6 +315,17 @@ fn membership_projection_benchmark() {
                     ..Default::default()
                 }),
             );
+            apply(
+                &mut view,
+                &node,
+                Body::AgentStarted(v1::AgentStarted {
+                    agent_id: format!("a{directory}"),
+                    node_id: node.clone(),
+                    project_id: format!("p{}", (machine * 5 + directory) % 50),
+                    kind: "fixture".into(),
+                    ..Default::default()
+                }),
+            );
         }
     }
     let projects: Vec<String> = (0..50).map(|i| format!("p{i}")).collect();
@@ -239,5 +343,5 @@ fn membership_projection_benchmark() {
         }
     }
     samples.sort();
-    println!("Membership: 100 nodes, 500 selected workspaces, 100 legacy checkout facts; 50-project scan p95 {:?} (100 measured rounds)", samples[94]);
+    println!("Membership: 100 nodes, 500 selected workspaces, 500 running agents, 100 legacy checkout facts; 50-project scan p95 {:?} (100 measured rounds)", samples[94]);
 }

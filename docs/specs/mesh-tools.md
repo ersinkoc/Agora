@@ -78,6 +78,8 @@ Project membership includes both startup checkouts and owner-selected workspaces
 folders selected after a node starts participate without a daemon restart. Membership is deduplicated by enrolled node ID;
 host names and directory names do not establish shared identity. Offline and unknown nodes do not count. A single-node
 project with no unfinished shared work continues on its local broker.
+An agent still running under an earlier project identity retains that membership until it exits. Re-associating its folder
+does not move that session's tasks or leases to a local broker; the node's qualified agent key establishes its membership.
 
 When a project has checkouts on two or more online nodes, `task_*`, `lease_*` and `handoff` are decided by the hub, which keeps one
 board per project and is its only writer: a claim has exactly one winner and a lease is all-or-nothing across nodes. The agent's

@@ -5,14 +5,19 @@ ADR-0052 directory launches publish `WorkspaceRegistered` facts, so selecting ma
 folders after the daemons started left each node on its own broker. A peer saw no task and acquired
 `README.md` while the first node still held a live lease on that project path.
 
-`board::project_memberships` now enumerates borrowed `(node, project)` pairs from both fact types.
+`board::project_memberships` now enumerates borrowed `(node, project)` pairs from both fact types
+and the original project of each still-running agent. The latter keeps a session's board access
+when the owner re-associates its folder with another identity, and ends when that agent exits.
+The running agent's qualified key supplies its authenticated producer; a payload `node_id` cannot
+manufacture another node's membership.
 `nodes_with` filters the requested identity to online, known nodes and deduplicates enrollment IDs.
 The shared iterator retains offline facts so join discovery can still detect all members leaving;
 it does not grant policy or act as an online-node list itself. No protocol fields or error codes change.
 
 ## Verification
 
-Four public-API regression tests fail before the fix and pass afterwards:
+Five public-API regression tests pass. The first four failed before the eligibility fix; the fifth
+reproduced the re-registration gap in the first #291 revision before running-session retention:
 
 - Two selected workspaces share a task and refuse a conflicting live path lease.
 - Legacy checkouts and selected workspaces combine without counting a node twice; equal folder/
@@ -20,10 +25,17 @@ Four public-API regression tests fail before the fix and pass afterwards:
 - Unknown/offline nodes and a spoofed `node_id` do not turn one node into a shared project. The
   projection binds the workspace to its actual event producer; one-node calls remain local.
 - Re-registering a workspace under another project removes its old workspace membership.
+- A still-running agent keeps its original board's tasks and lease protection after folder
+  re-registration, can release its existing lease, and loses its session membership on exit.
+
+The spoofing target is online without a legitimate project fact. Deliberately trusting the payload's
+agent node ID or disabling workspace producer binding each makes the strengthened test fail, so
+the assertions do not pass merely because an unknown node is filtered out.
 
 Full Rust workspace tests, workspace Clippy with warnings denied, formatting, i18n and docs checks
-pass locally. The manual release benchmark covers 100 nodes, 500 selected workspaces and 100 legacy
-checkout facts: scanning all 50 projects has **p95 190.391 µs** across 100 measured rounds (20 warmups).
+pass locally. The manual release benchmark covers 100 nodes, 500 selected workspaces, 500 running
+agents and 100 legacy checkout facts: scanning all 50 projects has **p95 448.054 µs** across 100
+measured rounds (20 warmups).
 This measures membership resolution, not full hub throughput or end-to-end latency.
 
 ```sh
@@ -37,6 +49,9 @@ The real-binary browser/MCP regression uses a disposable hub, two independent no
 and its lease request fails with `lease.held`, naming `laptop/agent-1` and the original expiry.
 The previous proof against #281/main had returned `[]` and granted both leases. No real coding-agent
 accounts or installed services are used.
+The same browser/MCP regression then changes the laptop folder's metadata and explicitly accepts
+the new identity for another session. The original agent still sees its old task and can release
+its old lease; the new session has its own project task list.
 
 With the usual built binary/fake-agent/web client and Playwright/Chromium prerequisites:
 

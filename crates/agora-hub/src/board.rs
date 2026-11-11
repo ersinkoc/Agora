@@ -69,7 +69,7 @@ fn answer(verdict: Verdict) -> Answer {
     }
 }
 
-/// Known `(node, project)` memberships from legacy checkouts and owner-selected workspaces.
+/// Known `(node, project)` memberships from checkouts, selected workspaces and still-running agents.
 /// Facts can repeat and include offline nodes: transition discovery must still see a project after all its nodes disconnect.
 pub fn project_memberships(view: &View) -> impl Iterator<Item = (&str, &str)> {
     view.checkouts
@@ -80,9 +80,18 @@ pub fn project_memberships(view: &View) -> impl Iterator<Item = (&str, &str)> {
                 .values()
                 .map(|workspace| (workspace.node_id.as_str(), workspace.project_id.as_str())),
         )
+        .chain(view.agents.iter().filter_map(|(id, agent)| {
+            if !agent.running {
+                return None;
+            }
+            // Running sessions keep their original project when folder metadata changes. The qualified key names the
+            // authenticated producer; the payload's node_id must not manufacture another node's membership.
+            id.split_once('/')
+                .map(|(node, _)| (node, agent.project_id.as_str()))
+        }))
 }
 
-/// The distinct online nodes with a checkout or selected workspace of `project`.
+/// The distinct online nodes with a checkout, selected workspace or running session of `project`.
 pub fn nodes_with(view: &View, project: &str) -> Vec<String> {
     let mut nodes: Vec<String> = project_memberships(view)
         .filter(|(node, p)| *p == project && view.nodes.get(*node).is_some_and(|v| v.online))
@@ -392,7 +401,7 @@ impl Boards {
             return bad("arguments_json");
         }
         let nodes = nodes_with(view, project);
-        // A node can only speak for a project it has a checkout or selected workspace of. A board is in use while two nodes share the project, and (ADR-0039
+        // A node can only speak for a project represented by its checkout, workspace or running session. A board is in use while two nodes share the project, and (ADR-0039
         // amendment A) while it still holds a task that is not done or a lease that has not ended: a node that drops must not make
         // the other one fall back to a local broker that knows nothing of the hub's tasks.
         if !nodes.iter().any(|n| n == node)
