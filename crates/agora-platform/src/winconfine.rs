@@ -21,12 +21,14 @@ use windows_sys::Win32::Security::Cryptography::{
     BCryptGenRandom, BCRYPT_USE_SYSTEM_PREFERRED_RNG,
 };
 use windows_sys::Win32::Security::{
-    CreateRestrictedToken, GetTokenInformation, TokenLogonSid, DACL_SECURITY_INFORMATION,
-    DISABLE_MAX_PRIVILEGE, PSID, SID_AND_ATTRIBUTES, TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE,
+    CreateRestrictedToken, GetTokenInformation, InitializeSecurityDescriptor, SetFileSecurityW,
+    SetSecurityDescriptorDacl, TokenLogonSid, DACL_SECURITY_INFORMATION, DISABLE_MAX_PRIVILEGE,
+    PSID, SECURITY_DESCRIPTOR, SID_AND_ATTRIBUTES, TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE,
     TOKEN_GROUPS, TOKEN_QUERY,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     DELETE, FILE_DELETE_CHILD, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
+    FILE_READ_ATTRIBUTES, FILE_TRAVERSE,
 };
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, GetCurrentProcessId, GetExitCodeProcess, GetProcessTimes, OpenProcess,
@@ -48,6 +50,30 @@ const INHERIT_ALL: u32 = 0x3;
 const READ_MASK: u32 = FILE_GENERIC_READ | FILE_GENERIC_EXECUTE;
 const WRITE_MASK: u32 =
     FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | DELETE | FILE_DELETE_CHILD;
+/// What a folder above a granted one gets: its attributes can be read (`stat`) and it can be passed through, nothing else, and on
+/// that folder only. Tools like git `stat` every folder above a file they create; without this they fail under the user profile.
+/// `SYNCHRONIZE` (0x0010_0000) comes with every file open.
+const ANCESTOR_MASK: u32 = FILE_READ_ATTRIBUTES | FILE_TRAVERSE | 0x0010_0000;
+/// Marks a ledger line whose entry was set on that folder only (an ancestor), so it is removed the same way.
+const HERE_MARK: &str = "here";
+
+/// The folders above `paths`, without the drive root, without the paths themselves, each once.
+fn ancestors_of(paths: &[PathBuf]) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    for p in paths {
+        for a in p.ancestors().skip(1) {
+            // The drive root (`C:\`) has no parent; every user may already read its attributes.
+            if a.parent().is_none() || a.as_os_str().is_empty() {
+                continue;
+            }
+            let a = a.to_path_buf();
+            if !paths.contains(&a) && !out.contains(&a) {
+                out.push(a);
+            }
+        }
+    }
+    out
+}
 
 fn last_error() -> io::Error {
     // SAFETY: plain call.
@@ -108,6 +134,66 @@ fn random_sid_string() -> io::Result<String> {
         return Err(io::Error::other("no random numbers"));
     }
     Ok(format!("S-1-5-21-{}-{}-{}-{}", n[0], n[1], n[2], n[3]))
+}
+
+/// Adds (`grant`) or removes the SID's entry on `path` itself: not inherited by anything below, and written with
+/// `SetFileSecurityW`, which (unlike `SetNamedSecurityInfoW`) does not walk the folder's children. For the folders above a granted one.
+fn change_acl_here(path: &Path, sid: PSID, mask: u32, grant: bool) -> io::Result<()> {
+    let name = wide(path.as_os_str());
+    let mut dacl = null_mut();
+    let mut descriptor = null_mut();
+    // SAFETY: a NUL-terminated path; the out pointers receive memory we free below.
+    let err = unsafe {
+        GetNamedSecurityInfoW(
+            name.as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            null_mut(),
+            null_mut(),
+            &mut dacl,
+            null_mut(),
+            &mut descriptor,
+        )
+    };
+    if err != 0 {
+        return Err(io::Error::from_raw_os_error(err as i32));
+    }
+    // SAFETY: an all-zero EXPLICIT_ACCESS_W is a valid start.
+    let mut access: EXPLICIT_ACCESS_W = unsafe { std::mem::zeroed() };
+    access.grfAccessPermissions = mask;
+    access.grfAccessMode = if grant { GRANT_ACCESS } else { REVOKE_ACCESS };
+    access.grfInheritance = 0; // NO_INHERITANCE
+                               // SAFETY: `sid` is a valid SID that outlives the call.
+    unsafe { BuildTrusteeWithSidW(&mut access.Trustee, sid) };
+    let mut new_acl = null_mut();
+    // SAFETY: one entry, the existing DACL (kept alive by `descriptor`).
+    let err = unsafe { SetEntriesInAclW(1, &access, dacl, &mut new_acl) };
+    let result = if err != 0 {
+        Err(io::Error::from_raw_os_error(err as i32))
+    } else {
+        // SAFETY: an all-zero descriptor is initialized by the call before use.
+        let mut sd: SECURITY_DESCRIPTOR = unsafe { std::mem::zeroed() };
+        let sd_ptr = (&mut sd as *mut SECURITY_DESCRIPTOR).cast();
+        // SAFETY: `sd` lives until the end of this block; `new_acl` stays valid until freed below.
+        let ok = unsafe {
+            InitializeSecurityDescriptor(sd_ptr, 1) != 0
+                && SetSecurityDescriptorDacl(sd_ptr, 1, new_acl, 0) != 0
+                && SetFileSecurityW(name.as_ptr(), DACL_SECURITY_INFORMATION, sd_ptr) != 0
+        };
+        if ok {
+            Ok(())
+        } else {
+            Err(last_error())
+        }
+    };
+    // SAFETY: both were allocated by the calls above and are freed once.
+    unsafe {
+        if !new_acl.is_null() {
+            LocalFree(new_acl.cast());
+        }
+        LocalFree(descriptor);
+    }
+    result
 }
 
 /// Adds (`grant`) or removes the SID's entry on `path`'s DACL.
@@ -229,13 +315,16 @@ fn owner_alive(line: &str) -> bool {
     running && same
 }
 
-fn write_ledger(file: &Path, sid: &str, paths: &[PathBuf]) -> io::Result<()> {
+fn write_ledger(file: &Path, sid: &str, paths: &[PathBuf], here: &[PathBuf]) -> io::Result<()> {
     let mut text = owner_line();
     for p in paths {
         text.push_str(sid);
         text.push('\t');
         text.push_str(&p.to_string_lossy());
         text.push('\n');
+    }
+    for p in here {
+        text.push_str(&format!("{sid}\t{}\t{HERE_MARK}\n", p.to_string_lossy()));
     }
     if let Some(dir) = file.parent() {
         std::fs::create_dir_all(dir)?;
@@ -248,6 +337,8 @@ fn write_ledger(file: &Path, sid: &str, paths: &[PathBuf]) -> io::Result<()> {
 pub(crate) struct Confinement {
     sid: Sid,
     granted: Vec<PathBuf>,
+    /// Folders above the granted ones, each with an entry on that folder only.
+    granted_here: Vec<PathBuf>,
     ledger: PathBuf,
     token: Token,
 }
@@ -275,10 +366,12 @@ impl Confinement {
         }
         // Recorded before anything is changed: a crash between the two leaves a ledger that recovery can undo.
         let all: Vec<PathBuf> = wanted.iter().map(|(p, _)| p.clone()).collect();
-        write_ledger(&ledger, &sid_text, &all)?;
+        let above = ancestors_of(&all);
+        write_ledger(&ledger, &sid_text, &all, &above)?;
         let mut confinement = Self {
             sid,
             granted: Vec::new(),
+            granted_here: Vec::new(),
             ledger,
             token: Token(null_mut()),
         };
@@ -286,6 +379,15 @@ impl Confinement {
             // On failure `confinement` is dropped, which undoes what was added so far.
             change_acl(&path, confinement.sid.0, mask, true)?;
             confinement.granted.push(path);
+        }
+        for path in above {
+            // A folder whose permissions the user may not change (`C:\Users`, owned by the system) is left as it is: the user could
+            // not have opened it to the agent anyway, and such folders already let every user read their attributes.
+            match change_acl_here(&path, confinement.sid.0, ANCESTOR_MASK, true) {
+                Ok(()) => confinement.granted_here.push(path),
+                Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {}
+                Err(e) => return Err(e),
+            }
         }
         confinement.token = restricted_token(&confinement.sid)?;
         Ok(confinement)
@@ -302,6 +404,11 @@ impl Drop for Confinement {
         let mut all_removed = true;
         for path in &self.granted {
             if change_acl(path, self.sid.0, 0, false).is_err() {
+                all_removed = false;
+            }
+        }
+        for path in &self.granted_here {
+            if change_acl_here(path, self.sid.0, 0, false).is_err() {
                 all_removed = false;
             }
         }
@@ -417,9 +524,23 @@ pub(crate) fn recover_stale() {
             let Ok(sid) = Sid::from_string(sid_text) else {
                 continue;
             };
+            let (folder, here) = match folder.rsplit_once('\t') {
+                Some((f, HERE_MARK)) => (f, true),
+                _ => (folder, false),
+            };
             let folder = Path::new(folder);
             // A folder that is gone has nothing to undo.
-            if folder.exists() && change_acl(folder, sid.0, 0, false).is_err() {
+            let undone = if here {
+                // Skipped at grant time for the same reason (see `in_ledger_dir`): nothing to undo.
+                change_acl_here(folder, sid.0, 0, false).or_else(|e| {
+                    (e.kind() == io::ErrorKind::PermissionDenied)
+                        .then_some(())
+                        .ok_or(e)
+                })
+            } else {
+                change_acl(folder, sid.0, 0, false)
+            };
+            if folder.exists() && undone.is_err() {
                 clean = false;
             }
         }
