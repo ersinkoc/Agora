@@ -41,4 +41,34 @@ sandbox.write = ~/.cargo/registry, ~/.npm, ~/.cache
 
 ## Windows (restricted token, ADR-0050)
 
-Confinement is switched off until ADR-0050's design is settled; the windows machine adds its lines here.
+Confinement is **switched off** until ADR-0050's token design is settled (#230). These lines were measured on Windows 11 with a real node
+and a probe agent under the current restricted-token design (`AGORA_WINDOWS_CONFINEMENT=1`), so they show which folders tools need. They
+are not a promise about the final design.
+
+```
+sandbox = worktree
+# git: the global config, plus the target of any symbolic link in it (dotfiles)
+sandbox.read = ~\.gitconfig, ~\.config\git, ~\dotfiles\git, ~\.cargo\bin, ~\.rustup
+```
+
+Checked: `git status`/`add` (with the identity from `~\.gitconfig`), `rustc`, `node -e`, `python -c` (system-wide installs) work. Writing
+`~\Documents`, reading a file under `~`, `git config --local` and writing the main checkout's `.git\hooks` are still refused.
+
+What differs from macOS and Linux:
+
+- **Every listed folder costs time on every agent start and stop.** The node adds an inheritable permission entry for the agent, and Windows
+  writes it to every file below that folder, then removes it again when the agent ends. On the test machine `~\.rustup` has about 100,000 files,
+  `~\.cargo\registry` about 120,000, and `%APPDATA%\npm` and `%LOCALAPPDATA%\npm-cache` about 300,000 each. With `~\.rustup` listed, an agent started in
+  about a minute; with `~\.cargo` and `~\.rustup` both listed, granting took more than 5 minutes. List the narrowest folder that works, never a whole cache.
+- **A half-listed tool can fail harder than an unlisted one.** With `~\.config\git` listed but its `ignore` file a symbolic link to
+  `~\dotfiles\git\ignore`, git stops with `fatal: cannot use ...\.config\git\ignore as an exclude file`. Without the folder listed, git only
+  warns. List the targets of symbolic links too (`Get-Item <file> | Select-Object Target`).
+- **A tool that `stat`s its own home folder needs that folder itself.** rustup fails with `could not create home directory: '...\.rustup' (os error 183)`
+  when only `~\.rustup\toolchains\<version>` is listed, so `~\.rustup` must be listed whole.
+- **Not working yet:**
+  - `cargo build` stops with `could not execute process ...\rustc.exe -vV (never executed)` / `Access is denied. (os error 5)`, even though `rustc` itself runs.
+  - npm needs `%LOCALAPPDATA%\npm-cache` writable (`EPERM mkdir ...\npm-cache\_cacache\tmp` without it), which is too large to list per agent.
+  - `git commit` in a checkout under the user profile fails on the folders above `.git` (`cannot lock ref 'HEAD'`), whatever is listed.
+
+  These are reported in the `comms` log and wait for the token design.
+- A user-level npm (`%APPDATA%\npm`) that is not listed is skipped silently, and the system npm runs instead, a different version.
