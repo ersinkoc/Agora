@@ -17,9 +17,9 @@ branch (`docs/fordevs/`). Each row is something the run showed that no CI run ha
 | L10 | Windows: a confined agent's `git commit` fails when the main checkout is under the user profile (git `stat`s every folder above the ref it locks); ADR-0050 work item | open, in the Windows confinement prototype |
 | L11 | Windows: granting an agent a large `sandbox.read` folder (`~\.rustup`, about 100k files) takes 20 to 30 s per agent start because the permission is propagated to every file | open: documented in the sandbox recipes; consider non-propagating grants |
 | L12 | Messages between nodes work in all six directions over the LAN hub (`send_message` to `<node>/<agent>`; inbox `provenance.node`) | verified; tasks, leases and handoff across machines not yet tried |
-| B1 | Shared board (ADR-0039): when one of two nodes drops, the project is no longer "on two online nodes", so the remaining node falls back to its local broker and the hub's tasks vanish from its view; tasks made meanwhile stay local and are never merged | open: needs an amendment of ADR-0039's definition of shared (proposed separately) |
-| B2 | Id collision: such a local task gets `t-1`, the same id as a different task on the hub board | open, goes away with B1's fix |
-| B3 | A handoff to an offline node answers `mesh.recipient_unknown` (it ran locally) instead of `node.offline` | open, goes away with B1's fix |
+| B1 | Shared board (ADR-0039): when one of two nodes drops, the project is no longer "on two online nodes", so the remaining node falls back to its local broker and the hub's tasks vanish from its view; tasks made meanwhile stay local and are never merged | fixed: ADR-0039 amendment A (accepted): the hub keeps answering shared while the board holds a task that is not done or a live lease |
+| B2 | Id collision: such a local task gets `t-1`, the same id as a different task on the hub board | fixed with B1 |
+| B3 | A handoff to an offline node answers `mesh.recipient_unknown` (it ran locally) instead of `node.offline` | fixed with B1 |
 | B4 | A node that crashes and restarts reuses its agent ids (`agent-1`), and the hub board still showed the dead agent's claim as the new agent's | fixed: the hub gives back the tasks and leases of a node's agents when the node announces a new process start |
 | B5 | `lease.held` carries an empty `expires_at` | known and documented in the broker ("renders as later"); not changed |
 

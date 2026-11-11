@@ -78,7 +78,7 @@ When a project has checkouts on two or more online nodes, `task_*`, `lease_*` an
 board per project and is its only writer: a claim has exactly one winner and a lease is all-or-nothing across nodes. The agent's
 tool calls do not change. The node sends each of these tools to the hub as `BoardCall{project_id, tool, arguments_json}` (the hub
 writes `origin` from the certificate and names agents `<node>/<agent>`) and the hub answers `BoardResult{shared, result_json,
-is_error}`. `shared = false` means the project is not on two online nodes: nothing happened and the node runs the tool on its own
+is_error}`. `shared = false` means the project is not on two online nodes and its board holds no task that is not done and no live lease (ADR-0039 amendment A: a board in use stays in use when a node drops): nothing happened and the node runs the tool on its own
 broker, so a project that lives on one machine never needs the hub. The board's agents are the project's running agents in the
 hub's view; one that ended gives its tasks and leases back, and a lease also ends at its TTL if its node vanishes.
 
