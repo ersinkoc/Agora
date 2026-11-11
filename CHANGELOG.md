@@ -10,9 +10,18 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 - Explicitly create `.agent-project.json` (`agora project init --cwd PATH`) and carry it across machines to group project copies. Source files are not synchronized.
 - New directory launch needs an unrestricted owner device trusted on the node. Older clients keep their existing worktree launch behavior; fixed-file MCP manifests need explicit worktree mode.
 
-### Windows
-- Agent confinement for Windows is written (ADR-0050) and tested on real Windows in CI, but switched off until it is enabled after a check on a real machine.
+### Machines
+- A hub, a Linux node, a macOS node and a Windows node ran together on one network: terminals of all three in one window, and agent-to-agent messages in every direction (`docs/backlog/lan-test-findings.md`).
+- The desktop app checks the hub against the certificate you gave it before remembering it, says why it cannot connect, and reaches a hub by its IP address; a bundled macOS app can now reach a hub on the local network. `agora tui` reaches a hub by IP too.
 - A project is found by its id before its name, and a name two projects share is refused.
+
+### Confining agents
+- macOS: a confined agent can read the folders it was given (it could not read its own worktree before).
+- macOS and Windows: a confined agent gets a temp folder of its own (`TMPDIR`, `TEMP`, `TMP`). `sandbox.read` and `sandbox.write` accept `~/`.
+- A confined launch in a filesystem root, the home folder, a secret folder (`.ssh`, `.aws`, ...) or the node's own folder is refused.
+- Recipes for the folders real tools need (git config, cargo, npm, compilers): `docs/security/sandbox-recipes.md`.
+- Windows confinement is written (ADR-0050) and tested on real Windows, but switched off: a real-machine check showed the first design lets a folder with a broad group permission through, and a replacement design is being measured.
+- Codex's "trust this folder" screen is now shown as needing you.
 
 ## 0.2.1
 
