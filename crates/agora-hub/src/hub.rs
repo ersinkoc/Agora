@@ -236,10 +236,11 @@ impl Hub {
         now_ms: u64,
     ) -> Vec<crate::board::Notice> {
         let mut g = self.lock();
+        let key = self.restore_board(project, now_ms);
         let (events, notices) = self.boards.joined(&g.view, node, project, work, now_ms);
         if !events.is_empty() {
             if let Some(bytes) = self.boards.snapshot(project, now_ms) {
-                let _ = self.store.set_setting(&format!("board.{project}"), &bytes);
+                let _ = self.store.set_setting(&key, &bytes);
             }
         }
         for body in events {
@@ -273,12 +274,7 @@ impl Hub {
         now_ms: u64,
     ) -> crate::board::Answer {
         let mut g = self.lock();
-        let key = format!("board.{}", call.project_id);
-        if !self.boards.has(&call.project_id) {
-            if let Ok(Some(bytes)) = self.store.setting(&key) {
-                self.boards.load(&call.project_id, &bytes, now_ms);
-            }
-        }
+        let key = self.restore_board(&call.project_id, now_ms);
         let mut a = self.boards.call(
             &g.view,
             node,
@@ -298,6 +294,18 @@ impl Hub {
             let _ = self.emit(&mut g, body, now_ms);
         }
         a
+    }
+
+    /// Restores an uninitialized board and returns its storage key. Callers hold the hub lock so calls and joins cannot
+    /// reload over one another's newer in-memory work.
+    fn restore_board(&self, project: &str, now_ms: u64) -> String {
+        let key = format!("board.{project}");
+        if !self.boards.has(project) {
+            if let Ok(Some(bytes)) = self.store.setting(&key) {
+                self.boards.load(project, &bytes, now_ms);
+            }
+        }
+        key
     }
 
     fn publish(g: &mut Inner, d: Delivered) {
