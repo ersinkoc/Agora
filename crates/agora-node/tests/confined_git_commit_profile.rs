@@ -1,6 +1,6 @@
-//! An agent confined folder by folder (ADR-0050, the Windows profile) can commit in its own worktree: `git add` and `git commit` need
-//! the worktree, its admin folder, `objects`, `refs` and the branch reflog under `logs/refs`, and nothing else of the main `.git`.
-//! Only where the platform grants permissions folder by folder; elsewhere the test returns at once.
+//! A confined agent (ADR-0050 Amendment B on Windows) commits in a checkout that lives under the user profile: git `stat`s every folder
+//! up to the root, which the attributes-only entries on the folders above the grants make possible (decision 3). Like `confined_git_commit.rs`,
+//! with the repository under the user temp folder. Only where the platform grants permissions folder by folder.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::path::Path;
@@ -31,7 +31,7 @@ fn git(dir: &Path, args: &[&str]) -> String {
 }
 
 #[test]
-fn proto_commit_under_the_profile() {
+fn a_confined_agent_commits_in_a_checkout_under_the_user_profile() {
     if !agora_platform::NARROW_GIT_WRITES {
         return;
     }
