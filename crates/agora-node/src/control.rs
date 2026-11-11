@@ -148,16 +148,27 @@ fn invalid(field: &str) -> Error {
 }
 
 fn resolve_project<'a>(ctx: &'a ControlContext, wanted: &str) -> Result<&'a ProjectEntry, Error> {
+    resolve_in(&ctx.projects, wanted)
+}
+
+fn resolve_in<'a>(projects: &'a [ProjectEntry], wanted: &str) -> Result<&'a ProjectEntry, Error> {
     if wanted.is_empty() {
-        return match ctx.projects.as_slice() {
+        return match projects {
             [only] => Ok(only),
             _ => Err(invalid("project_id")),
         };
     }
-    ctx.projects
-        .iter()
-        .find(|p| p.id == wanted || p.name == wanted)
-        .ok_or_else(|| Error::new(ErrorCode::ProjectNotFound).with("project_id", wanted))
+    // An id always wins over a name, and a name that two projects share is refused instead of
+    // guessed: the hub checks a member's grants against this exact string.
+    if let Some(p) = projects.iter().find(|p| p.id == wanted) {
+        return Ok(p);
+    }
+    let mut named = projects.iter().filter(|p| p.name == wanted);
+    match (named.next(), named.next()) {
+        (Some(p), None) => Ok(p),
+        (Some(_), Some(_)) => Err(invalid("project_id")),
+        _ => Err(Error::new(ErrorCode::ProjectNotFound).with("project_id", wanted)),
+    }
 }
 
 fn sup_err(e: SupervisorError) -> Error {
@@ -1080,5 +1091,29 @@ impl RequestWriter {
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "request too large"))?;
         let mut g = self.stream.lock().unwrap_or_else(|e| e.into_inner());
         g.write_all(&bytes)
+    }
+}
+
+#[cfg(test)]
+mod resolve_tests {
+    use super::*;
+
+    fn entries(list: &[(&str, &str)]) -> Vec<ProjectEntry> {
+        list.iter()
+            .map(|(id, name)| ProjectEntry {
+                id: (*id).into(),
+                name: (*name).into(),
+                root: PathBuf::from("/x"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_id_beats_a_name_and_a_shared_name_is_refused() {
+        let c = entries(&[("a", "b"), ("b", "a"), ("c", "same"), ("d", "same")]);
+        assert_eq!(resolve_in(&c, "a").map(|p| p.id.as_str()).ok(), Some("a"));
+        assert_eq!(resolve_in(&c, "b").map(|p| p.id.as_str()).ok(), Some("b"));
+        assert!(resolve_in(&c, "same").is_err());
+        assert!(resolve_in(&c, "nope").is_err());
     }
 }
