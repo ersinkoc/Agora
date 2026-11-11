@@ -24,6 +24,10 @@ sandbox.write = /var/folders/xx/yyyy/T, /var/folders/xx/yyyy/C, ~/.cargo/registr
 - Rust through rustup: `~/.rustup` and `~/.cargo` (read), `~/.cargo/registry` (write) for downloads. With `cargo --offline` and a
   vendored tree the write line can go.
 - Node: the folder Node is installed in (`~/.nvm` above; Homebrew's `/opt/homebrew` is readable already) and `~/.npm` (write, cache).
+- Claude Code (installed with npm under `~/.nvm`): `sandbox.read` the Node folder, `sandbox.write = ~/.claude, ~/.claude.json`. It saves
+  `~/.claude.json` through a lock and a temporary file next to it; the node allows those siblings of a listed file (the macOS profile in `agora-platform`), so
+  its folder-trust answer and settings persist. Checked: it starts, shows the trust prompt (Needs you), saves the answer, and the next
+  start is Idle. Not checked: signing in and working under confinement (the agent here was not signed in).
 - Listing the per-user temp folder lets the agent read other programs' temp files of the same user. Without it, tools that honour
   `TMPDIR` (Python, Node, Rust) still work: the node gives each agent a temp folder of its own (PR #244).
 
