@@ -53,7 +53,7 @@ use a project it has no checkout of.
 **Consequences.** Tasks made while a node is offline go to the one board, so ids never collide and nothing needs merging; a handoff to an offline node fails with `node.offline` and moves
 nothing; the hub's `shared` answer changes, the protocol does not. Local-only projects (one node, no board work) are untouched.
 
-## Amendment B (proposed, awaiting the maintainer's decision): local work moves to the board when a project becomes shared
+## Amendment B (accepted by the maintainer 2026-11-11, asked by the macos machine and answered "accept the proposal"): local work moves to the board when a project becomes shared
 
 Found by the macos machine (`comms`, finding B6 in `docs/backlog/lan-test-findings.md`), measured on a local hub with two nodes `na`, `nb` and clones of
 this repository. The decision above says the board is used once a project has checkouts on two online nodes, and the mesh spec adds that tasks and leases
