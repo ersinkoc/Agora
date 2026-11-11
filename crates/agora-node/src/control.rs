@@ -404,7 +404,7 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
             if let Some(ev) = &ctx.events {
                 let git_root = if a.separate_worktree {
                     let root = req.worktree_root.join(&req.name);
-                    std::fs::canonicalize(&root)
+                    agora_platform::canonicalize_plain(&root)
                         .unwrap_or(root)
                         .to_string_lossy()
                         .into_owned()

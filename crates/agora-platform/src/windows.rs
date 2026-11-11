@@ -6,7 +6,7 @@
 //! `OVERLAPPED` it passed to the system are never used after they are gone.
 
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -526,11 +526,86 @@ pub(crate) fn terminal_size() -> Option<(u16, u16)> {
     (cols > 0 && rows > 0).then_some((cols as u16, rows as u16))
 }
 
+/// `std::fs::canonicalize` answers in the verbatim form (`\\?\C:\work`, `\\?\UNC\server\share`), which `cmd.exe` refuses as a current
+/// folder (it falls back to `C:\Windows`) and which some tools cannot open. Gives the ordinary spelling when it means the same file:
+/// a drive path or a UNC share, shorter than `MAX_PATH`, whose parts need no verbatim escaping. Otherwise the path is returned as it is.
+pub(crate) fn plain_path(path: PathBuf) -> PathBuf {
+    const MAX_PATH: usize = 260;
+    let Some(text) = path.to_str() else {
+        return path;
+    };
+    let plain = if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = text.strip_prefix(r"\\?\") {
+        let b = rest.as_bytes();
+        if b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] == b'\\' {
+            rest.to_owned()
+        } else {
+            return path;
+        }
+    } else {
+        return path;
+    };
+    // Parts that only the verbatim form can name: a trailing dot or space is trimmed, and a device name (`CON`, `NUL`, `COM1`)
+    // means the device, in the ordinary spelling. Those keep the verbatim form.
+    let device = |p: &str| {
+        let stem = p.split('.').next().unwrap_or(p).to_ascii_uppercase();
+        matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+            || ((stem.starts_with("COM") || stem.starts_with("LPT"))
+                && stem.len() == 4
+                && stem.as_bytes()[3].is_ascii_digit())
+    };
+    let odd = plain
+        .split('\\')
+        .filter(|p| !p.is_empty())
+        .any(|p| p.ends_with('.') || p.ends_with(' ') || device(p));
+    if plain.len() >= MAX_PATH || odd || plain.contains('/') {
+        return path;
+    }
+    PathBuf::from(plain)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use std::io::{Read, Write};
+
+    #[test]
+    fn verbatim_paths_get_their_ordinary_spelling_only_when_it_means_the_same_file() {
+        let p = |s: &str| plain_path(PathBuf::from(s));
+        assert_eq!(p(r"\\?\D:\work\repo"), PathBuf::from(r"D:\work\repo"));
+        assert_eq!(
+            p(r"\\?\UNC\server\share\x"),
+            PathBuf::from(r"\\server\share\x")
+        );
+        assert_eq!(p(r"C:\already\plain"), PathBuf::from(r"C:\already\plain"));
+        // Kept verbatim: names the ordinary form would change, a device name, a long path, a volume GUID path.
+        assert_eq!(p(r"\\?\C:\dir.\x"), PathBuf::from(r"\\?\C:\dir.\x"));
+        assert_eq!(p(r"\\?\C:\a\nul.txt"), PathBuf::from(r"\\?\C:\a\nul.txt"));
+        let long = format!(r"\\?\C:\{}", "a".repeat(300));
+        assert_eq!(p(&long), PathBuf::from(&long));
+        let guid = r"\\?\Volume{01234567-89ab-cdef-0123-456789abcdef}\x";
+        assert_eq!(p(guid), PathBuf::from(guid));
+    }
+
+    #[test]
+    fn a_canonical_folder_is_one_cmd_can_start_in() {
+        let dir = std::env::temp_dir();
+        let canon = crate::canonicalize_plain(&dir).unwrap();
+        assert!(!canon.to_string_lossy().starts_with(r"\\?\"), "{canon:?}");
+        let out = std::process::Command::new("cmd")
+            .args(["/c", "cd"])
+            .current_dir(&canon)
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            text.trim()
+                .eq_ignore_ascii_case(canon.to_string_lossy().trim_end_matches('\\')),
+            "cmd started in {text:?}, not {canon:?}"
+        );
+    }
 
     fn path(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("agora-pipe-{}-{name}.sock", std::process::id()))
