@@ -51,10 +51,12 @@ const SYSTEM_READ: &[&str] = &[
     "/var",
 ];
 
-/// A manifest path: absolute, or `~/` below the home folder. Anything else (relative paths, `..`) is ignored, never guessed at.
-fn expand(p: &str) -> Option<PathBuf> {
-    let path = match p.strip_prefix("~/") {
-        Some(rest) => PathBuf::from(std::env::var_os("HOME")?).join(rest),
+/// A path from a manifest or from the node's `policy`: absolute, or `~/` (`~\` too) below the home folder. Anything else (relative
+/// paths, `..`) is ignored, never guessed at.
+pub fn expand(p: &str) -> Option<PathBuf> {
+    let p = p.trim();
+    let path = match p.strip_prefix("~/").or_else(|| p.strip_prefix("~\\")) {
+        Some(rest) => crate::usage_files::home_dir()?.join(rest),
         None => PathBuf::from(p),
     };
     (path.is_absolute()
@@ -73,8 +75,8 @@ pub fn common_git_dir(worktree: &Path) -> Option<PathBuf> {
     gitdir.parent()?.parent().map(Path::to_path_buf)
 }
 
-/// The private temp folder of the agent that works in `worktree`; the node points `TEMP` and `TMP` at it where permissions are
-/// granted folder by folder.
+/// The private temp folder of the agent that works in `worktree`; the node points `TMPDIR`, `TEMP` and `TMP` at it where
+/// [`agora_platform::PRIVATE_TEMP`] says the system's temp folder is out of the agent's reach.
 pub fn agent_temp(worktree: &Path) -> PathBuf {
     let name = worktree
         .file_name()
@@ -110,6 +112,12 @@ impl SandboxPolicy {
             PathBuf::from("/tmp"),
             PathBuf::from("/dev"),
         ];
+        if agora_platform::PRIVATE_TEMP {
+            // It must exist before the profile is made: the platform skips folders that do not.
+            let temp = agent_temp(worktree);
+            let _ = std::fs::create_dir_all(&temp);
+            write.push(temp);
+        }
         write.extend(common_git_dir(worktree));
         write.extend(self.write.iter().cloned());
         if let Some(needs) = needs.filter(|_| self.trusted_kinds.iter().any(|k| k == kind)) {
