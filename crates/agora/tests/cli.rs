@@ -97,9 +97,29 @@ fn supported() -> bool {
     agora_platform::LOCAL_SOCKETS_SUPPORTED && agora_platform::PTY_SUPPORTED
 }
 
+/// Whether `sh` (the test agent) can be found on `PATH`. Every Unix has it; on Windows it comes with Git's `usr\bin`, which CI runners
+/// put on `PATH` and a default Git for Windows install does not.
+fn sh_on_path() -> bool {
+    std::env::var_os("PATH").is_some_and(|p| {
+        std::env::split_paths(&p).any(|d| d.join("sh").is_file() || d.join("sh.exe").is_file())
+    })
+}
+
+/// The tests that start the `sh` agent run only where it can start; elsewhere they say why they did nothing.
+fn shell_agents_supported() -> bool {
+    if !supported() {
+        return false;
+    }
+    if !sh_on_path() {
+        eprintln!("skipped: no `sh` on PATH (on Windows, add Git's usr\\bin to PATH)");
+        return false;
+    }
+    true
+}
+
 #[test]
 fn start_attach_stop_from_the_command_line() {
-    if !supported() {
+    if !shell_agents_supported() {
         return;
     }
     let s = setup("e2e");
@@ -168,7 +188,7 @@ fn start_attach_stop_from_the_command_line() {
 
 #[test]
 fn errors_are_rendered_from_codes_and_exit_nonzero() {
-    if !supported() {
+    if !shell_agents_supported() {
         return;
     }
     let s = setup("errors");
@@ -250,9 +270,13 @@ fn doctor_reports_agents_and_exits_zero_on_a_healthy_machine() {
     assert_eq!(code, expected, "{out}{err}");
     assert!(out.contains("Git is available"), "{out}");
     assert!(out.contains("1 agent description loaded."), "{out}");
-    // The manifest launches `sh`, which exists wherever this test can run on Unix; elsewhere it may not.
+    // The manifest launches `sh`: doctor says whether it is installed, and a missing one is a note, not a failure.
     if agora_platform::PTY_SUPPORTED {
-        assert!(out.contains("shell is installed."), "{out}");
+        if sh_on_path() {
+            assert!(out.contains("shell is installed."), "{out}");
+        } else {
+            assert!(out.contains("[note] shell is not installed"), "{out}");
+        }
     }
     // No node is running in this setup: a note, not a failure.
     assert!(out.contains("[note] No node is running"), "{out}");
@@ -333,7 +357,7 @@ fn node_stdio_without_a_node_says_so() {
 
 #[test]
 fn mesh_stdio_is_an_mcp_server_for_one_agent() {
-    if !supported() {
+    if !shell_agents_supported() {
         return;
     }
     let s = setup("mesh-stdio");
@@ -379,7 +403,7 @@ fn mesh_stdio_is_an_mcp_server_for_one_agent() {
 /// What an agent's MCP client does: read the config the node wrote, run the command in it, speak MCP to it.
 #[test]
 fn the_injected_mcp_config_launches_a_working_mesh_server() {
-    if !supported() {
+    if !shell_agents_supported() {
         return;
     }
     let s = setup("inject-e2e");
