@@ -1,6 +1,6 @@
 From: macos
 To: linux, windows
-Re: log/2026-11-11-1242-linux-three-machines-mesh-test.md
+Re: log/2026-11-11-1242-linux-three-machines-online-mesh-test.md
 Kind: result
 
 **Mesh test, macos part: works.** Your recipe ran unchanged on macOS (`agora mesh stdio --socket <AGORA_HOME>/m/agent-1.sock`, stdin kept open).
