@@ -22,6 +22,10 @@ pub enum TunnelError {
     BadAddress,
     /// The loopback port could not be opened.
     Listen,
+    /// Nothing answered at the hub address in time.
+    Unreachable,
+    /// The hub answered, but its certificate is not signed by the pinned CA for this address (or the TLS handshake failed).
+    Untrusted,
 }
 
 /// The SHA-256 of the CA's certificate, as upper-case hex pairs separated by colons: what the user compares on first use.
@@ -124,6 +128,26 @@ pub async fn open(hub: &str, ca_pem: &str, port: u16) -> Result<Tunnel, TunnelEr
     Ok(Tunnel { local, task })
 }
 
+/// One TLS handshake with the hub at `hub`, trusting only `ca_pem`, then the connection is closed. The shell calls it before it
+/// remembers a hub, so a wrong certificate or address is reported on the connect screen instead of being saved: `open` alone
+/// cannot tell, because it checks each connection only when the page makes one.
+pub async fn check(hub: &str, ca_pem: &str) -> Result<(), TunnelError> {
+    let name = server_name(hub)?;
+    let tls = connector(ca_pem)?;
+    let tcp = match tokio::time::timeout(Duration::from_secs(10), TcpStream::connect(hub)).await {
+        Ok(Ok(tcp)) => tcp,
+        _ => return Err(TunnelError::Unreachable),
+    };
+    match tokio::time::timeout(Duration::from_secs(10), tls.connect(name, tcp)).await {
+        Ok(Ok(mut s)) => {
+            let _ = tokio::io::AsyncWriteExt::shutdown(&mut s).await;
+            Ok(())
+        }
+        Ok(Err(_)) => Err(TunnelError::Untrusted),
+        Err(_) => Err(TunnelError::Unreachable),
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -187,6 +211,29 @@ mod tests {
         // The user pinned `real`; the server at the address is signed by someone else.
         let t = open(&addr.to_string(), real.cert_pem(), 0).await.unwrap();
         assert_eq!(ask(t.local, "page").await, "");
+    }
+
+    #[tokio::test]
+    async fn check_accepts_the_pinned_hub_and_names_what_is_wrong_otherwise() {
+        let real = Ca::generate("hub CA").unwrap();
+        let impostor = Ca::generate("other CA").unwrap();
+        let good = hub(&real).await.to_string();
+        let bad = hub(&impostor).await.to_string();
+        assert_eq!(check(&good, real.cert_pem()).await, Ok(()));
+        assert_eq!(
+            check(&bad, real.cert_pem()).await,
+            Err(TunnelError::Untrusted)
+        );
+        // A port nobody listens on: bind one, note it, close it.
+        let closed = {
+            let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            l.local_addr().unwrap().to_string()
+        };
+        assert_eq!(
+            check(&closed, real.cert_pem()).await,
+            Err(TunnelError::Unreachable)
+        );
+        assert_eq!(check(&good, "not a pem").await, Err(TunnelError::BadCa));
     }
 
     #[test]
