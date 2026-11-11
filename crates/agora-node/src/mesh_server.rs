@@ -141,6 +141,16 @@ impl Shares {
             .unwrap_or_else(|e| e.into_inner())
             .insert(project.to_string(), (shared, Instant::now()));
     }
+
+    /// "Not shared", from an answer to a question asked at `asked`: ignored when something newer (a `BoardJoin`) said it is shared
+    /// meanwhile, so a late answer cannot send the project back to the local broker.
+    fn set_not_shared_since(&self, project: &str, asked: Instant) {
+        let mut g = self.shared.lock().unwrap_or_else(|e| e.into_inner());
+        if matches!(g.get(project), Some((true, at)) if *at >= asked) {
+            return;
+        }
+        g.insert(project.to_string(), (false, Instant::now()));
+    }
 }
 
 /// A call to one of the board tools: on a shared project the hub's board answers; `None` means "use the local broker".
@@ -196,6 +206,7 @@ fn board_reply(
         return None;
     }
     let (tx, rx) = std::sync::mpsc::channel();
+    let asked = Instant::now();
     link.board(
         conn.agent().as_str(),
         &project,
@@ -218,7 +229,7 @@ fn board_reply(
             })
         }
         Ok(Ok(_)) => {
-            shares.set(&project, false);
+            shares.set_not_shared_since(&project, asked);
             None
         }
         _ => matches!(known, Some((true, _))).then(unavailable),
@@ -317,8 +328,21 @@ impl MeshServer {
 
     /// ADR-0039 amendment B: the hub says `project` became shared. Hands over this node's unfinished work for it (it is no longer
     /// kept here) and from now on asks the hub for the project's board calls instead of trusting an older "not shared".
-    pub fn board_join(&self, project: &str) -> agora_protocol::v1::BoardJoinResult {
+    pub fn board_join(
+        &self,
+        project: &str,
+    ) -> Result<agora_protocol::v1::BoardJoinResult, agora_protocol::Error> {
         use agora_protocol::v1::{BoardJoinLease, BoardJoinResult, BoardJoinTask};
+        // `mesh.remote = false`: this node's mesh does not reach other nodes, so its work does not go to a shared board either.
+        if !self.remote_allowed.load(Ordering::Acquire) {
+            return Err(
+                agora_protocol::Error::new(agora_protocol::ErrorCode::NodePolicyDenied)
+                    .with("node_id", "")
+                    .with("rule", "mesh.remote"),
+            );
+        }
+        // Shared first: a board call from now on goes to the hub, so nothing new is made locally after the work is taken.
+        self.shares.set(project, true);
         let now = now_ms();
         let (tasks, leases, any_agent) = {
             let mut mesh = self.mesh.lock().unwrap_or_else(|e| e.into_inner());
@@ -331,8 +355,7 @@ impl MeshServer {
                 .unwrap_or_default();
             (tasks, leases, any_agent)
         };
-        self.shares.set(project, true);
-        BoardJoinResult {
+        Ok(BoardJoinResult {
             leases: leases
                 .into_iter()
                 .map(|(path, holder, expires_at_ms)| BoardJoinLease {
@@ -358,7 +381,7 @@ impl MeshServer {
                     }
                 })
                 .collect(),
-        }
+        })
     }
 
     pub fn mesh(&self) -> Arc<Mutex<Mesh>> {
@@ -595,4 +618,69 @@ fn serve(
         waiting = still;
     }
     let _ = writer.shutdown();
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_late_not_shared_answer_does_not_undo_a_join() {
+        let shares = Shares::default();
+        let asked = Instant::now();
+        shares.set("p", true); // a BoardJoin, after the question was asked
+        shares.set_not_shared_since("p", asked);
+        assert!(matches!(shares.get("p"), Some((true, _))));
+        // An answer to a question asked after the join counts.
+        let later = Instant::now();
+        shares.set_not_shared_since("p", later);
+        assert!(matches!(shares.get("p"), Some((false, _))));
+    }
+
+    #[test]
+    fn board_join_respects_mesh_remote_and_hands_over_only_unfinished_work() {
+        let dir = std::env::temp_dir().join(format!("agora-bj-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let server = MeshServer::new(&dir, Limits::default()).unwrap();
+        {
+            let mesh = server.mesh();
+            let mut m = mesh.lock().unwrap();
+            m.register(AgentInfo {
+                id: AgentId::new("agent-1"),
+                kind: "shell".into(),
+                node: "n".into(),
+                project: "p".into(),
+                label: "agent-1".into(),
+                worktree: "/w".into(),
+                state: "idle".into(),
+            });
+            m.task_create(&AgentId::new("agent-1"), "open", "", &[])
+                .unwrap();
+            m.lease_acquire(
+                &AgentId::new("agent-1"),
+                &["README.md".into()],
+                600_000,
+                now_ms(),
+            )
+            .unwrap();
+        }
+        server.set_remote_allowed(false);
+        let e = server.board_join("p").unwrap_err();
+        assert_eq!(e.code, agora_protocol::ErrorCode::NodePolicyDenied);
+        // Refused: nothing was taken and the project is not marked shared.
+        assert!(server.shares.get("p").is_none());
+        server.set_remote_allowed(true);
+        let work = server.board_join("p").unwrap();
+        assert_eq!(work.tasks.len(), 1);
+        assert_eq!(work.tasks[0].creator_agent_id, "agent-1");
+        assert_eq!(work.leases.len(), 1);
+        assert!(matches!(server.shares.get("p"), Some((true, _))));
+        // Handed over once: a second ask finds nothing left.
+        let again = server.board_join("p").unwrap();
+        assert!(again.tasks.is_empty() && again.leases.is_empty());
+        drop(server);
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

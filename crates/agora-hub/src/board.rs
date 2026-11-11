@@ -86,6 +86,13 @@ pub fn nodes_with(view: &View, project: &str) -> Vec<String> {
 /// How long lease and claim calls on a project that just became shared wait for its nodes to hand over their local work
 /// (ADR-0039 amendment B). A node that answers later still hands it over.
 pub const JOIN_WAIT_MS: u64 = 5_000;
+/// At most this many tasks and leases are taken from one node's answer, and a handed-over lease runs at most this long: the answer
+/// is a node's word, and it must not fill the board or hold a path forever.
+pub const MAX_JOIN_TASKS: usize = 500;
+pub const MAX_JOIN_LEASES: usize = 500;
+pub const MAX_JOIN_LEASE_MS: u64 = 60 * 60 * 1000;
+/// Who the board names as a handed-over task's creator when the node's own agent is not running any more.
+pub const BOARD_AGENT: &str = "hub/board";
 
 /// A message the hub sends an agent about the board (ADR-0039 amendment B). The body is a small JSON object of stable codes, not
 /// prose: `{"board": "task_moved", "from": ..., "to": ...}`, `{"board": "lease_refused", "path": ..., "holder": ...}`,
@@ -505,6 +512,18 @@ impl Boards {
     }
 }
 
+/// `s` cut to at most `max` bytes on a character boundary.
+fn cut(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 impl Boards {
     /// ADR-0039 amendment B. Compares the online nodes with a checkout of each project with the last look and returns the
     /// `(node, project)` pairs that must now hand over their local work: every such node when a project becomes shared (reaches
@@ -532,7 +551,10 @@ impl Boards {
                 .pending
                 .entry(project.clone())
                 .or_insert_with(|| (0, BTreeSet::new()));
-            entry.0 = now_ms + JOIN_WAIT_MS;
+            // A hold that is still running keeps its end: joins one after another never hold grants longer than one wait.
+            if entry.0 <= now_ms {
+                entry.0 = now_ms + JOIN_WAIT_MS;
+            }
             entry.1.extend(join.iter().cloned());
             out.extend(join.into_iter().map(|n| (n, project.clone())));
         }
@@ -547,6 +569,22 @@ impl Boards {
             if nodes.is_empty() {
                 j.pending.remove(project);
             }
+        }
+    }
+
+    /// Registers [`BOARD_AGENT`] on a project's board so it can be named as a creator (the next sync removes it; tasks stay).
+    fn board_agent(mesh: &mut Mesh, project: &str) {
+        let id = AgentId::new(BOARD_AGENT);
+        if !mesh.agent_ids().contains(&id) {
+            mesh.register(AgentInfo {
+                id,
+                kind: "board".into(),
+                node: crate::ca::RESERVED_HUB_ID.into(),
+                project: project.to_string(),
+                label: BOARD_AGENT.into(),
+                worktree: String::new(),
+                state: "idle".into(),
+            });
         }
     }
 
@@ -584,7 +622,8 @@ impl Boards {
             .or_insert_with(|| Mesh::new(Limits::default()));
         Self::sync(mesh, view, project, now_ms);
         mesh.expire_leases(now_ms);
-        for l in &work.leases {
+        let max_text = mesh.limits().max_body_bytes;
+        for l in work.leases.iter().take(MAX_JOIN_LEASES) {
             if l.expires_at_ms <= now_ms {
                 continue;
             }
@@ -592,7 +631,7 @@ impl Boards {
             match mesh.lease_acquire(
                 &AgentId::new(&holder),
                 std::slice::from_ref(&l.path),
-                l.expires_at_ms - now_ms,
+                (l.expires_at_ms - now_ms).min(MAX_JOIN_LEASE_MS),
                 now_ms,
             ) {
                 Ok(_) => {}
@@ -611,22 +650,35 @@ impl Boards {
                 Err(_) => {}
             }
         }
-        for t in &work.tasks {
-            let creator = format!("{node}/{}", t.creator_agent_id);
-            let Ok(id) = mesh.task_create(&AgentId::new(&creator), &t.title, &t.detail, &[]) else {
-                continue;
-            };
-            let told = if t.owner_agent_id.is_empty() {
+        let running: BTreeSet<AgentId> = mesh.agent_ids().into_iter().collect();
+        for t in work.tasks.iter().take(MAX_JOIN_TASKS) {
+            let (title, detail) = (cut(&t.title, max_text), cut(&t.detail, max_text));
+            // The node already let the task go, so it must land: when its creator is not running (it ended, or the hub has not
+            // seen it yet) the board itself is named as the creator.
+            let creator = AgentId::new(format!("{node}/{}", t.creator_agent_id));
+            let creator = if running.contains(&creator) {
                 creator
             } else {
-                let owner = format!("{node}/{}", t.owner_agent_id);
-                let _ = mesh.task_claim(&AgentId::new(&owner), id.as_str());
-                owner
+                Self::board_agent(mesh, project);
+                AgentId::new(BOARD_AGENT)
             };
-            notices.extend(notice(
-                &told,
-                json!({"board": "task_moved", "from": t.task_id, "to": id.as_str()}),
-            ));
+            let Ok(id) = mesh.task_create(&creator, title, detail, &[]) else {
+                continue;
+            };
+            let owner = AgentId::new(format!("{node}/{}", t.owner_agent_id));
+            // A task whose owner ended is open on the board, as it would be after any agent ends.
+            let told = if !t.owner_agent_id.is_empty() && running.contains(&owner) {
+                let _ = mesh.task_claim(&owner, id.as_str());
+                Some(owner)
+            } else {
+                (creator.as_str() != BOARD_AGENT).then_some(creator)
+            };
+            if let Some(told) = told {
+                notices.extend(notice(
+                    told.as_str(),
+                    json!({"board": "task_moved", "from": t.task_id, "to": id.as_str()}),
+                ));
+            }
         }
         (mesh.take_events(), notices)
     }
@@ -864,6 +916,77 @@ mod tests {
             1_300,
         );
         assert!(text(&readme).contains("beta/a"), "{}", text(&readme));
+    }
+
+    #[test]
+    fn a_task_whose_agents_ended_still_lands_and_a_handed_over_lease_is_capped() {
+        use agora_protocol::v1::{BoardJoinLease, BoardJoinResult, BoardJoinTask};
+        let b = Boards::new();
+        let v = view(&["alpha", "beta"]);
+        b.membership(&view(&["alpha"]), 0);
+        b.membership(&v, 1_000);
+        let work = BoardJoinResult {
+            leases: vec![BoardJoinLease {
+                agent_id: "a".into(),
+                path: "far".into(),
+                expires_at_ms: u64::MAX,
+            }],
+            tasks: vec![BoardJoinTask {
+                task_id: "t-9".into(),
+                title: "x".repeat(100_000),
+                detail: String::new(),
+                // Neither runs on alpha any more.
+                owner_agent_id: "gone".into(),
+                creator_agent_id: "gone".into(),
+            }],
+        };
+        let (_, notices) = b.joined(&v, "alpha", "p", &work, 2_000);
+        // Nobody to tell: the owner ended; the task is on the board, open, made by the board, its title cut.
+        assert!(notices.is_empty(), "{notices:?}");
+        let list: Value =
+            serde_json::from_str(&text(&run(&b, &v, "beta", "task_list", json!({}), 2_100)))
+                .unwrap();
+        let t = &list[0];
+        assert_eq!(t["status"], "open");
+        assert!(t["title"].as_str().unwrap().len() < 100_000);
+        // The lease runs at most MAX_JOIN_LEASE_MS (beta answers too, so grants are decided again).
+        b.join_settled("beta", "p");
+        let held = text(&run(
+            &b,
+            &v,
+            "beta",
+            "lease_acquire",
+            json!({"paths": ["far"], "ttl_s": 1}),
+            2_100,
+        ));
+        let e: Value = serde_json::from_str(&held).unwrap();
+        assert_eq!(
+            e["error"]["params"]["expires_at"],
+            json!(2_000 + MAX_JOIN_LEASE_MS),
+            "{held}"
+        );
+    }
+
+    #[test]
+    fn joins_one_after_another_do_not_hold_grants_longer_than_one_wait() {
+        let b = Boards::new();
+        b.membership(&view(&["alpha"]), 0);
+        b.membership(&view(&["alpha", "beta"]), 1_000);
+        // gamma joins while alpha and beta still have not answered: the hold keeps its first end.
+        let v = view(&["alpha", "beta", "gamma"]);
+        assert_eq!(
+            b.membership(&v, 4_000),
+            [("gamma".to_string(), "p".to_string())]
+        );
+        let at_end = run(
+            &b,
+            &v,
+            "alpha",
+            "lease_acquire",
+            json!({"paths": ["y"], "ttl_s": 60}),
+            1_000 + JOIN_WAIT_MS,
+        );
+        assert!(text(&at_end).contains("lease_id"), "{}", text(&at_end));
     }
 
     fn run(b: &Boards, v: &View, node: &str, tool: &str, args: Value, now: u64) -> Answer {

@@ -102,7 +102,7 @@ where
 pub async fn serve_node<S>(
     mut conn: Conn<S>,
     node_id: &str,
-    hub: &Hub,
+    hub: &Arc<Hub>,
     support: &Support,
 ) -> Result<(), ServeError>
 where
@@ -142,15 +142,18 @@ where
     let result = stream_events(&mut conn, &mut session, hub, node_id, commands).await;
     // However it ended, the hub now knows this node is not connected.
     let _ = hub.node_disconnected(node_id, now_ms());
-    // Forget it as a member of its projects, so it is asked to hand over its local work when it is back (ADR-0039 amendment B).
-    let _ = hub.board_membership(now_ms());
+    // Forget it as a member of its projects, so it is asked to hand over its local work when it is back (ADR-0039 amendment B);
+    // anyone the change makes due is asked now.
+    for (node, project) in hub.board_membership(now_ms()) {
+        ask_board_join(hub, node, project);
+    }
     result
 }
 
 async fn stream_events<S>(
     conn: &mut Conn<S>,
     session: &mut NodeSession<'_, crate::store::SqliteStore>,
-    hub: &Hub,
+    hub: &Arc<Hub>,
     node_id: &str,
     mut commands: tokio::sync::mpsc::UnboundedReceiver<crate::router::ToNode>,
 ) -> Result<(), ServeError>
@@ -169,8 +172,6 @@ where
     let posts_open = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     // Handoffs the board accepted but the receiving node did not take: undone here, where the hub is at hand.
     let (revert_tx, mut reverts) = tokio::sync::mpsc::unbounded_channel::<crate::board::Handoff>();
-    // ADR-0039 amendment B: answers to `BoardJoin`, put on the board here, where the hub is at hand.
-    let (joined_tx, mut joined) = tokio::sync::mpsc::unbounded_channel::<Joined>();
     loop {
         let idle;
         let received = tokio::select! {
@@ -181,17 +182,6 @@ where
             }
             Some(handoff) = reverts.recv() => {
                 hub.board_revert(&handoff, now_ms());
-                continue;
-            }
-            Some((node, project, work)) = joined.recv() => {
-                match work {
-                    Some(work) => {
-                        for n in hub.board_joined(&node, &project, &work, now_ms()) {
-                            board_notice(hub, &n);
-                        }
-                    }
-                    None => hub.board_join_settled(&node, &project),
-                }
                 continue;
             }
             Some(to_node) = commands.recv() => {
@@ -218,7 +208,7 @@ where
                             acked = Some(a);
                             since_ack += 1;
                             for (node, project) in hub.board_membership(now_ms()) {
-                                ask_board_join(hub, node, project, joined_tx.clone());
+                                ask_board_join(hub, node, project);
                             }
                         }
                         Ingest::Duplicate { acked: a } => {
@@ -833,17 +823,10 @@ fn post_for_node(
     });
 }
 
-/// A node's answer to `BoardJoin`: the node, the project, and its work (`None` when it did not answer).
-type Joined = (String, String, Option<v1::BoardJoinResult>);
-
-/// ADR-0039 amendment B: asks `node` to hand over its local work for `project`, which just became shared. The answer (or `None`
-/// when the node is gone, too old to know `BoardJoin`, or does not answer in time) comes back on `done`.
-fn ask_board_join(
-    hub: &Hub,
-    node: String,
-    project: String,
-    done: tokio::sync::mpsc::UnboundedSender<Joined>,
-) {
+/// ADR-0039 amendment B: asks `node` to hand over its local work for `project`, which just became shared, and puts the answer on
+/// the board whenever it comes: the node let the work go when it answered, so a late answer is still applied (only the hold on
+/// grants ends after `JOIN_WAIT_MS`). A node that is gone or too old to know `BoardJoin` is simply not waited for.
+fn ask_board_join(hub: &Arc<Hub>, node: String, project: String) {
     let req = v1::CommandRequest {
         request_id: String::new(),
         idempotency_key: String::new(),
@@ -855,23 +838,27 @@ fn ask_board_join(
     let reply = match hub.router().send(&node, req) {
         Ok(r) => r,
         Err(_) => {
-            let _ = done.send((node, project, None));
+            hub.board_join_settled(&node, &project);
             return;
         }
     };
+    let hub = Arc::clone(hub);
     tokio::spawn(async move {
-        let wait = std::time::Duration::from_millis(crate::board::JOIN_WAIT_MS);
-        let work = match tokio::time::timeout(wait, reply).await {
-            Ok(Ok(v1::CommandResponse {
+        // No deadline: the reply ends when the node answers or its connection goes (the router drops the sender).
+        match reply.await {
+            Ok(v1::CommandResponse {
                 result:
                     Some(command_response::Result::Ok(v1::CommandOk {
                         result: Some(v1::command_ok::Result::BoardJoin(work)),
                     })),
                 ..
-            })) => Some(work),
-            _ => None,
-        };
-        let _ = done.send((node, project, work));
+            }) => {
+                for n in hub.board_joined(&node, &project, &work, now_ms()) {
+                    board_notice(&hub, &n);
+                }
+            }
+            _ => hub.board_join_settled(&node, &project),
+        }
     });
 }
 

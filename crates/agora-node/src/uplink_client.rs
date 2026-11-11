@@ -48,6 +48,9 @@ pub struct HubLink {
     pub mesh_out: Option<Arc<MeshOut>>,
     /// Grants for the commands this node's policy lists in `signed_commands` (ADR-0041). `None`: no routed command is gated.
     pub grants: Option<Arc<crate::grants::Grants>>,
+    /// The node's mesh, for the hub's `BoardJoin` (ADR-0039 amendment B), which is answered here and never through the control
+    /// socket. `None`: `BoardJoin` is refused.
+    pub mesh: Option<Arc<crate::mesh_server::MeshServer>>,
 }
 
 type Done = Box<dyn FnOnce(Result<Option<crate::mesh_server::BoardReply>, String>) + Send>;
@@ -292,6 +295,7 @@ pub async fn run_once(
             link.commands.as_deref(),
             link.mesh_out.as_deref(),
             link.grants.clone(),
+            link.mesh.clone(),
         )
         .await
     } else {
@@ -303,6 +307,7 @@ pub async fn run_once(
             link.commands.as_deref(),
             link.mesh_out.as_deref(),
             link.grants.clone(),
+            link.mesh.clone(),
         )
         .await
     }
@@ -315,6 +320,7 @@ async fn converse<S>(
     commands: Option<&std::path::Path>,
     mesh_out: Option<&MeshOut>,
     grants: Option<Arc<crate::grants::Grants>>,
+    mesh: Option<Arc<crate::mesh_server::MeshServer>>,
 ) -> Result<(), LinkError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -450,6 +456,17 @@ where
                     let Ok(req) = CommandRequest::decode(f.payload.as_slice()) else {
                         continue;
                     };
+                    // ADR-0039 amendment B: only the hub asks a node to hand over its local board work, so it is answered here,
+                    // where the hub's commands enter, and never through the local control socket.
+                    if let Some(command_request::Command::BoardJoin(j)) = &req.command {
+                        let mesh = mesh.clone();
+                        let tx = answers_tx.clone();
+                        let (rid, project) = (req.request_id.clone(), j.project_id.clone());
+                        tokio::task::spawn_blocking(move || {
+                            let _ = tx.send(board_join_answer(mesh.as_deref(), &rid, &project));
+                        });
+                        continue;
+                    }
                     let socket = commands.map(std::path::Path::to_path_buf);
                     let tx = answers_tx.clone();
                     // Keystrokes and resizes must reach the terminal in the order they were typed, so they share one
@@ -600,6 +617,33 @@ fn relay_terminal(
 
 /// Runs a routed command on this node's control socket and returns its answer (an error answer when it cannot).
 /// Terminal streams are not relayed by this path (they need a stream of their own), so they are refused.
+/// The node's answer to the hub's `BoardJoin`: its unfinished local work for the project, or why it gives none.
+fn board_join_answer(
+    mesh: Option<&crate::mesh_server::MeshServer>,
+    request_id: &str,
+    project: &str,
+) -> CommandResponse {
+    use agora_protocol::{Error, ErrorCode};
+    let result = match mesh {
+        _ if project.is_empty() => {
+            Err(Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "project_id"))
+        }
+        None => {
+            Err(Error::new(ErrorCode::ProtocolCapabilityMissing).with("capability", "board.join"))
+        }
+        Some(m) => m.board_join(project),
+    };
+    CommandResponse {
+        request_id: request_id.to_string(),
+        result: Some(match result {
+            Ok(work) => command_response::Result::Ok(agora_protocol::v1::CommandOk {
+                result: Some(agora_protocol::v1::command_ok::Result::BoardJoin(work)),
+            }),
+            Err(e) => command_response::Result::Err(e.to_info()),
+        }),
+    }
+}
+
 fn run_local(
     socket: Option<&std::path::Path>,
     req: CommandRequest,
