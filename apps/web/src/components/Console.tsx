@@ -5,6 +5,7 @@ import { money, type UsageSummary } from '../net/usage';
 import type { ApprovalModel, BoardModel, MachineModel, MessageModel, ProjectCost } from '../net/view';
 import type { TerminalSource } from '../terminal/source';
 import { ApprovalCard } from './ApprovalCard';
+import { ProjectBoard } from './ProjectBoard';
 import { DiffDialog } from './DiffDialog';
 import { PromptBox } from './PromptBox';
 import type { ChatSource } from '../net/chat';
@@ -14,6 +15,7 @@ import type { CommitItem } from '../net/history';
 import type { WorkspaceFiles } from '../net/files';
 import { AgentAddress } from './AgentAddress';
 import { StateBadge } from './StateBadge';
+import { LanguagePicker } from './LanguagePicker';
 
 const TerminalView = lazy(() => import('../terminal/TerminalView').then((m) => ({ default: m.TerminalView })));
 
@@ -117,13 +119,14 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
 
   return (
     <div className="flex min-h-screen flex-col lg:h-screen">
-      <header className="flex h-14 flex-none items-center justify-between gap-4 border-b border-line bg-surface-1 px-4">
+      <header className="flex min-h-14 flex-none flex-wrap items-center justify-between gap-3 border-b border-line bg-surface-1 px-4 py-2">
         <div className="flex items-center gap-3">
           <span aria-hidden className="grid size-7 place-items-center rounded-s bg-accent text-sm font-bold text-on-accent">A</span>
           <h1 className="text-base">{t('home-title')}</h1>
           {link !== 'live' && <span role="status" className="rounded-full bg-surface-2 px-2.5 py-0.5 text-xs text-muted">{t(link === 'offline' ? 'link-offline' : 'link-connecting')}</span>}
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <LanguagePicker />
           <span className="hidden text-xs text-muted md:inline">{t('palette-hint')}</span>
           <a className="button whitespace-nowrap px-3 text-[13px]" href="#/machines">{t('machines-online', { count: machines.filter((m) => m.online).length })}</a>
           <a className="button whitespace-nowrap px-3 text-[13px]" href="#/device">{t('device-link')}</a>
@@ -247,24 +250,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
           {boards.length > 0 && (
             <section className="grid gap-2" aria-label={t('board-title')}>
               <h2>{t('board-title')}</h2>
-              {boards.map((b) => (
-                <div key={b.project} className="grid gap-1.5 rounded-s border border-line bg-surface-0 p-2.5">
-                  <strong className="text-xs">{b.project}</strong>
-                  <ul className="m-0 grid list-none gap-1 p-0 text-[13px]">
-                    {b.tasks.map((task) => (
-                      <li key={task.id} className="flex items-baseline justify-between gap-2">
-                        <span className={`min-w-0 break-words ${task.status === 'done' ? 'text-muted line-through' : ''}`}>{task.title}</span>
-                        <span className="shrink-0 text-xs text-muted">{task.status === 'open' ? t('board-open') : task.status === 'done' ? t('board-done') : task.owner}</span>
-                      </li>
-                    ))}
-                  </ul>
-                  {b.leases.length > 0 && (
-                    <ul className="m-0 grid list-none gap-1 border-t border-line p-0 pt-1.5 text-xs text-muted">
-                      {b.leases.map((l) => <li key={`${l.holder}${l.path}`} className="flex justify-between gap-2"><span className="truncate font-mono">{l.path}</span><span className="shrink-0">{l.holder}</span></li>)}
-                    </ul>
-                  )}
-                </div>
-              ))}
+              {boards.map(b => <ProjectBoard key={b.projectId} board={b} />)}
             </section>
           )}
 

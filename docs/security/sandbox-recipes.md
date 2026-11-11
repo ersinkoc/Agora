@@ -31,6 +31,14 @@ sandbox.write = /var/folders/xx/yyyy/T, /var/folders/xx/yyyy/C, ~/.cargo/registr
 - Listing the per-user temp folder lets the agent read other programs' temp files of the same user. Without it, tools that honour
   `TMPDIR` (Python, Node, Rust) still work: the node gives each agent a temp folder of its own (PR #244).
 
+### macOS: `worktree-offline`
+
+`sandbox = worktree-offline` takes the same `sandbox.read` / `sandbox.write` lines and also cuts the network: the agent can connect only to
+this machine (a local model on `localhost`), to its own mesh socket and to unix sockets in its private temp folder; DNS, the internet, other
+machines on the LAN, `/tmp`'s sockets (tmux, SSH agent) and other agents' mesh sockets are refused, and it cannot listen on a TCP port.
+Anything that listens on this machine is reachable, though: a local HTTP proxy or an SSH tunnel on `localhost` reopens the network. Package managers and remote model APIs therefore fail by design;
+use it for agents that work through a local model.
+
 ## Linux (Landlock)
 
 **Not yet checked on a Linux machine**; the same tools need the same kinds of folders. Linux: please confirm or correct.

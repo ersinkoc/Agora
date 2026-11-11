@@ -337,20 +337,31 @@ export function recentMessages(v: View, limit = 5): MessageModel[] {
 
 export interface BoardTaskModel { id: string; title: string; status: 'open' | 'claimed' | 'done'; owner: string }
 export interface BoardLeaseModel { path: string; holder: string; expiresAtMs: number }
-export interface BoardModel { project: string; tasks: BoardTaskModel[]; leases: BoardLeaseModel[] }
+export interface BoardFolderModel { nodeId: string; machine: string; path: string }
+export interface BoardModel { projectId: string; project: string; folders: BoardFolderModel[]; tasks: BoardTaskModel[]; leases: BoardLeaseModel[] }
 
 // The shared boards, one per project, with agent names instead of ids. A board only exists once something happened on it.
 export function boards(v: View): BoardModel[] {
-  const names = new Map(tiles(v).map((t) => [t.id, t.name]));
-  const label = (id: string) => names.get(id) ?? id;
-  const projectName = (id: string) => {
-    for (const c of v.checkouts.values()) if (c.projectId === id) return lastSegment(c.path) || id;
-    return id;
+  const agents = new Map(tiles(v).map((t) => [t.id, t]));
+  const label = (id: string) => agents.get(id)?.name ?? id;
+  // Index once by logical identity; selected subdirectories in a Git checkout describe the same project root.
+  const contexts = new Map<string, { project: string; folders: Map<string, BoardFolderModel> }>();
+  const addFolder = (project: string, nodeId: string, path: string) => {
+    if (!project || !nodeId || !path) return;
+    let context = contexts.get(project);
+    if (!context) contexts.set(project, (context = { project: lastSegment(path) || project, folders: new Map() }));
+    context.folders.set(`${nodeId}\u0000${path}`, { nodeId, machine: v.nodes.get(nodeId)?.hostname || nodeId, path });
   };
+  for (const c of v.checkouts.values()) addFolder(c.projectId, c.nodeId, c.path);
+  for (const w of v.workspaces.values()) addFolder(w.projectId, w.nodeId, w.gitRoot || w.path);
   const by = new Map<string, BoardModel>();
   const board = (id: string) => {
     let b = by.get(id);
-    if (!b) by.set(id, (b = { project: projectName(id), tasks: [], leases: [] }));
+    if (!b) {
+      const context = contexts.get(id);
+      const folders = [...(context?.folders.values() ?? [])].sort((a, b) => a.nodeId.localeCompare(b.nodeId) || a.path.localeCompare(b.path));
+      by.set(id, (b = { projectId: id, project: context?.project || id, folders, tasks: [], leases: [] }));
+    }
     return b;
   };
   for (const [id, t] of v.tasks) {
@@ -358,12 +369,11 @@ export function boards(v: View): BoardModel[] {
   }
   // A lease belongs to its holder's project.
   for (const l of v.leases.values()) {
-    const a = v.agents.get(l.agentId);
-    const project = v.checkouts.get(v.worktrees.get(a?.worktreeId ?? '')?.checkoutId ?? '')?.projectId ?? '';
+    const project = agents.get(l.agentId)?.projectId;
     if (!project) continue; // a holder this window does not know (yet) has no project to show it under
     board(project).leases.push({ path: l.path, holder: label(l.agentId), expiresAtMs: l.expiresAtMs });
   }
-  return [...by.values()].sort((a, b) => a.project.localeCompare(b.project));
+  return [...by.values()].sort((a, b) => a.project.localeCompare(b.project) || a.projectId.localeCompare(b.projectId));
 }
 
 export interface ProjectCost { label: string; microUsd: number }

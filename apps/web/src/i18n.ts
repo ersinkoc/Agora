@@ -27,18 +27,65 @@ export function directionOf(lang: string): 'rtl' | 'ltr' {
   return RTL.has(lang.split(/[-_]/)[0]?.toLowerCase() ?? '') ? 'rtl' : 'ltr';
 }
 
+export type LanguagePreference = 'system' | 'en' | 'tr';
+const PREFERENCE_KEY = 'ui.language';
+const listeners = new Set<() => void>();
 let chain: FluentBundle[] = [];
+let language = 'en';
+
+function readPreference(): LanguagePreference {
+  try {
+    const saved = localStorage.getItem(PREFERENCE_KEY);
+    if (saved === 'en' || saved === 'tr') return saved;
+  } catch { /* Storage can be unavailable; the browser language remains a useful default. */ }
+  return 'system';
+}
+
+let preference = readPreference();
+const browserLanguage = () => typeof navigator !== 'undefined' ? navigator.language : 'en';
+
+export const getLanguage = () => language;
+export const getLanguagePreference = () => preference;
+export function subscribeLanguage(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => { listeners.delete(listener); };
+}
 
 export function setLanguage(tag: string | undefined): void {
   const lang = pickLanguage(tag);
   chain = lang === 'en' ? [bundle('en')] : [bundle(lang), bundle('en')];
+  language = lang;
   if (typeof document !== 'undefined') {
     document.documentElement.lang = lang;
     document.documentElement.dir = directionOf(lang);
   }
+  for (const listener of listeners) listener();
 }
 
-setLanguage(typeof navigator !== 'undefined' ? navigator.language : 'en');
+// Only an explicit choice writes a browser preference. Changing it never replaces application/session state.
+export function chooseLanguage(value: LanguagePreference): boolean {
+  preference = value;
+  let saved = true;
+  try {
+    if (value === 'system') localStorage.removeItem(PREFERENCE_KEY);
+    else localStorage.setItem(PREFERENCE_KEY, value);
+  } catch { saved = false; }
+  setLanguage(value === 'system' ? browserLanguage() : value);
+  return saved;
+}
+
+setLanguage(preference === 'system' ? browserLanguage() : preference);
+if (typeof window !== 'undefined') {
+  window.addEventListener('languagechange', () => {
+    if (preference === 'system') setLanguage(browserLanguage());
+  });
+  window.addEventListener('storage', (event) => {
+    if (event.key === PREFERENCE_KEY || event.key === null) {
+      preference = readPreference();
+      setLanguage(preference === 'system' ? browserLanguage() : preference);
+    }
+  });
+}
 
 export function t(id: string, args?: Record<string, FluentVariable>): string {
   for (const b of chain) {

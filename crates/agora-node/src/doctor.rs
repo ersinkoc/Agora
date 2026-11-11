@@ -70,10 +70,18 @@ pub fn run(inputs: &Inputs) -> Vec<Check> {
 
     // What the node's policy asks for, and whether this machine can do it (ADR-0047).
     let policy_file = inputs.data_dir.join(crate::daemon::POLICY_FILE);
-    let level = crate::daemon::read_policy(&policy_file).sandbox.level;
+    let sandbox = crate::daemon::read_policy(&policy_file).sandbox;
+    let level = sandbox.level;
+    // Whether the level the policy asks for can be enforced here (`worktree-offline` needs network rules too); with `off`, whether
+    // confinement would be possible at all.
+    let enforceable = if level == crate::sandbox::Level::Off {
+        agora_platform::sandbox_supported()
+    } else {
+        sandbox.enforceable()
+    };
     out.push(check(
         "sandbox",
-        if agora_platform::sandbox_supported() {
+        if enforceable {
             Status::Ok
         } else {
             Status::Warn

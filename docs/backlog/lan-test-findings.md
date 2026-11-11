@@ -25,12 +25,22 @@ branch (`docs/fordevs/`). Each row is something the run showed that no CI run ha
 | B6 | Local → shared: a project used on one node keeps its tasks and leases on that node's local broker; when a second node with a checkout comes online the board takes over, the first node's agents lose sight of their own claimed task, the board's first task is `t-1` again, and a lease held locally is not seen by the board: measured, `nb` was granted `README.md` while `na` still held it (two holders) | open: ADR-0039 says work made locally before sharing stays local; needs that sentence changed (move unfinished local tasks and live leases to the board when it takes over, or refuse to switch while local leases are live) |
 
 
+## Confined agents can reach unix sockets (2026-11-11)
+
+- **L21** Under `sandbox = worktree` (and the first draft of `worktree-offline`) a confined agent can **connect to any unix socket** it can name.
+  Measured on Linux (kernel 7.0, Landlock ABI 8): a confined process connected to a socket outside every allowed folder. Landlock only governs
+  path-based socket connects from ABI 9 (`LANDLOCK_ACCESS_FS_RESOLVE_UNIX`); the node uses ABI 1 rights. Seatbelt on macOS allows them too unless a rule
+  says otherwise. Consequence: a tmux server socket (`tmux -S … new-window 'cmd'`) or the user's `SSH_AUTH_SOCK` gives the agent a command or
+  credentials outside the confinement. Needs a decision (maintainer): on macOS close it like `worktree-offline` does (own mesh socket and private temp only;
+  `git push` over SSH then needs the owner to list the agent socket's folder); on Linux use `RESOLVE_UNIX` when the kernel has it and say plainly on older
+  kernels that sockets are not confined. Until then the threat model lists it as an open gap.
+
 ## Windows web window pass (2026-11-11)
 
 - **L14** The `win` node is shown under the PC's host name, not the node id. It puts a personal name in every screenshot.
-- **L15** Two boards with the same display name (different `origin` spellings) cannot be told apart in the UI.
+- **L15** Two boards with the same display name (different `origin` spellings) cannot be told apart in the UI. Implemented in #286: cards retain logical project IDs, expose selectable identities and expandable machine/folder context, and use identity rather than display name as their React key.
 - **L16** The audit page cannot tell sessions apart (every row says "owner"); a device column would answer "who".
 - **L17** Audit rows "Watched a terminal … Sent, no answer yet" stay unresolved after a node restart.
 - **L18** "Recent messages" says agents have not written to each other yet after a hub restart (mesh history is not re-read).
-- **L19** The web app takes its language only from `navigator.language`; there is no in-app switch, so Turkish needs a `tr-TR` browser.
+- **L19** The web app takes its language only from `navigator.language`; there is no in-app switch, so Turkish needs a `tr-TR` browser. Implemented in #284: sign-in, Home and Focus offer a remembered browser-language override; live terminals and unfinished forms survive switching.
 - **L20** A refused or abandoned start leaves its `agent/<name>` branch; an agent killed from outside stays `running`.

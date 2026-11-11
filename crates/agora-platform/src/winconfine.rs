@@ -1456,6 +1456,7 @@ mod tests {
         let sandbox = Sandbox {
             read: vec![],
             write: vec![first.clone(), locked.clone()],
+            ..Default::default()
         };
         let result = Confinement::in_ledger_dir(&sandbox, &ledgers, Some(&identity));
         let failed = result.is_err();
@@ -1507,6 +1508,7 @@ mod tests {
         let sandbox = Sandbox {
             read: vec![],
             write: vec![work.clone()],
+            ..Default::default()
         };
         // The check that runs before any change already finds it (re-review note 2).
         let checked = preflight(&sandbox).err().map(|(_, why)| why);
@@ -1544,6 +1546,7 @@ mod tests {
         let sandbox = Sandbox {
             read: vec![],
             write: vec![work.clone()],
+            ..Default::default()
         };
         FAIL_AFTER_LABEL.with(|f| f.set(true));
         let result = Confinement::in_ledger_dir(&sandbox, &ledgers, Some(&identity));
@@ -1604,6 +1607,7 @@ mod tests {
         let sandbox = Sandbox {
             read: vec![],
             write: vec![work.clone()],
+            ..Default::default()
         };
         let earlier = Confinement::in_ledger_dir(&sandbox, &ledgers, Some(&identity)).unwrap();
         let next = Confinement::in_ledger_dir(&sandbox, &ledgers, Some(&identity)).unwrap();

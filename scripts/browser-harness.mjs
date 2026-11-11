@@ -8,7 +8,7 @@ import { join, resolve } from 'node:path';
 
 export const root = resolve(new URL('..', import.meta.url).pathname);
 
-export async function startStack({ viewport = { width: 1440, height: 900 }, hostname, binary, web = join(root, 'apps/web/dist') } = {}) {
+export async function startStack({ viewport = { width: 1440, height: 900 }, hostname, binary, web = join(root, 'apps/web/dist'), projects = [] } = {}) {
   const bin = binary ?? join(root, 'target/debug/agora');
   const fake = join(root, 'target/debug/agora-fake-agent');
   const { chromium } = createRequire(join(process.env.PW_DIR ?? '.', 'x.js'))('playwright-core');
@@ -38,7 +38,7 @@ export async function startStack({ viewport = { width: 1440, height: 900 }, host
     await new Promise((r) => setTimeout(r, 2500));
     const code = run(['hub', 'code', '--hub-dir', hubDir]).match(/[A-Z0-9]{4}-[A-Z0-9]{4}/)[0];
     run(['node', 'enroll', '--hub', `wss://localhost:${port}`, '--ca', join(hubDir, 'ca.pem'), '--code', code, '--id', 'laptop']);
-    children.push(spawn(bin, ['node', 'run', '--project', proj], { env, stdio: 'ignore' }));
+    children.push(spawn(bin, ['node', 'run', '--project', proj, ...projects.flatMap(path => ['--project', path])], { env, stdio: 'ignore' }));
     await new Promise((r) => setTimeout(r, 3000));
     browser = await chromium.launch({ executablePath: exe, args: ['--no-sandbox'] });
     const page = await (await browser.newContext({ ignoreHTTPSErrors: true, viewport })).newPage();
@@ -66,7 +66,7 @@ export async function startStack({ viewport = { width: 1440, height: 900 }, host
       await page.goto(`${origin}/#/`);
     };
     // A separately enrolled node, with its own home, policy, processes and cloned project folder.
-    const addNode = async ({ id, project, hostname: host }) => {
+    const addNode = async ({ id, project, hostname: host, projects: extraProjects = [] }) => {
       const nodeHome = join(work, `node-${id}`);
       mkdirSync(nodeHome);
       cpSync(join(home, 'manifests'), join(nodeHome, 'manifests'), { recursive: true });
@@ -74,7 +74,7 @@ export async function startStack({ viewport = { width: 1440, height: 900 }, host
       const nodeRun = args => execFileSync(bin, args, { env: nodeEnv }).toString();
       const enrollment = run(['hub', 'code', '--hub-dir', hubDir]).match(/[A-Z0-9]{4}-[A-Z0-9]{4}/)[0];
       nodeRun(['node', 'enroll', '--hub', `wss://localhost:${port}`, '--ca', join(hubDir, 'ca.pem'), '--code', enrollment, '--id', id]);
-      const child = spawn(bin, ['node', 'run', '--project', project], { env: nodeEnv, stdio: 'ignore' });
+      const child = spawn(bin, ['node', 'run', '--project', project, ...extraProjects.flatMap(path => ['--project', path])], { env: nodeEnv, stdio: 'ignore' });
       children.push(child);
       await new Promise(resolve => setTimeout(resolve, 3000));
       nodeRun(['node', 'trust', trust[3], trust[4]]);
