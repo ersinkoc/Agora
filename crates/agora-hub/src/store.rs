@@ -66,7 +66,7 @@ pub trait EventStore {
     fn set_setting(&self, key: &str, value: &[u8]) -> Result<(), StoreError>;
 }
 
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 
 pub struct SqliteStore {
     conn: Mutex<Connection>,
@@ -214,6 +214,16 @@ impl SqliteStore {
                      PRIMARY KEY (user_id, node, project)
                  );
                  PRAGMA user_version = 7;
+                 COMMIT;",
+            )?;
+        }
+        if version < 8 {
+            // A passkey belongs to the person who added it, so signing in with it gives that person's session and nobody else's
+            // (ADR-0049). A passkey with no person is the owner's, as before.
+            conn.execute_batch(
+                "BEGIN;
+                 ALTER TABLE passkeys ADD COLUMN user_id TEXT;
+                 PRAGMA user_version = 8;
                  COMMIT;",
             )?;
         }
@@ -607,6 +617,15 @@ mod tests {
             .query_row("SELECT user_id FROM sessions", [], |r| r.get(0))
             .unwrap();
         assert!(user.is_none());
+        // An old passkey names no person: it is the owner's, as before.
+        let pk: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM passkeys WHERE user_id IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(pk, 0);
         for table in ["users", "audit", "grants"] {
             let n: i64 = conn
                 .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))

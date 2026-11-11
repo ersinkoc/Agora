@@ -91,13 +91,16 @@ impl<'a> Users<'a> {
             base
         };
         let conn = self.store.lock()?;
+        // The ids the hub itself writes (`owner` for the owner's sessions and audit rows, `hub` for the shared board) are never a person's.
+        let reserved = |id: &str| matches!(id, "owner" | "hub");
         let mut id = base.clone();
         let mut n = 1;
-        while conn
-            .query_row("SELECT 1 FROM users WHERE id = ?1", [&id], |_| Ok(()))
-            .optional()
-            .map_err(db)?
-            .is_some()
+        while reserved(&id)
+            || conn
+                .query_row("SELECT 1 FROM users WHERE id = ?1", [&id], |_| Ok(()))
+                .optional()
+                .map_err(db)?
+                .is_some()
         {
             n += 1;
             id = format!("{base}-{n}");
@@ -176,6 +179,8 @@ impl<'a> Users<'a> {
         conn.execute("DELETE FROM signin_codes WHERE user_id = ?1", [id])
             .map_err(db)?;
         conn.execute("DELETE FROM grants WHERE user_id = ?1", [id])
+            .map_err(db)?;
+        conn.execute("DELETE FROM passkeys WHERE user_id = ?1", [id])
             .map_err(db)?;
         let n = conn
             .execute("DELETE FROM users WHERE id = ?1", [id])
@@ -344,11 +349,15 @@ mod tests {
         let b = users.add("Ayşe K.", Role::Viewer, 2).unwrap();
         assert_ne!(a.id, b.id);
         assert!(users.add("  ", Role::Member, 3).is_err());
-        assert_eq!(users.list().unwrap().len(), 2);
+        // The ids the hub writes itself are never a person's, so nobody can write audit rows that look like the owner's.
+        let o = users.add("Owner", Role::Member, 4).unwrap();
+        let h = users.add("hub", Role::Member, 5).unwrap();
+        assert!(o.id != "owner" && h.id != "hub", "{} {}", o.id, h.id);
+        assert_eq!(users.list().unwrap().len(), 4);
         assert!(users.set_role(&b.id, Role::Member).unwrap());
         assert!(!users.set_role("nobody", Role::Member).unwrap());
         assert!(users.remove(&a.id).unwrap() && !users.remove(&a.id).unwrap());
-        assert_eq!(users.list().unwrap().len(), 1);
+        assert_eq!(users.list().unwrap().len(), 3);
     }
 
     #[test]

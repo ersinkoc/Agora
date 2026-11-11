@@ -195,7 +195,12 @@ impl Scope {
     pub fn command_allowed(&self, node: &str, command: &C) -> bool {
         let q = |id: &str| qualified(node, id);
         match command {
-            C::AgentStart(c) => self.projects.contains(&qualified(node, &c.project_id)),
+            // An existing worktree to start in must be the person's too (a node refuses this today; the check is here for when it does not).
+            C::AgentStart(c) => {
+                self.projects.contains(&qualified(node, &c.project_id))
+                    && (c.worktree_id.is_empty()
+                        || self.granted(self.worktrees.get(&q(&c.worktree_id))))
+            }
             C::AgentStop(c) => self.granted(self.agents.get(&q(&c.agent_id))),
             C::AgentPrompt(c) => self.granted(self.agents.get(&q(&c.agent_id))),
             C::AgentSetMode(c) => self.granted(self.agents.get(&q(&c.agent_id))),
