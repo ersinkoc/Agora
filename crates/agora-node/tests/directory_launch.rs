@@ -39,10 +39,24 @@ fn fake() -> String {
         .parent()
         .unwrap()
         .join(format!("agora-fake-agent{}", std::env::consts::EXE_SUFFIX));
-    assert!(
-        p.exists(),
-        "build agora-fake-agent before integration tests"
-    );
+    static BUILD: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    BUILD.get_or_init(|| {
+        if !p.exists() {
+            let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+            let mut command = Command::new(cargo);
+            command
+                .args(["build", "-q", "-p", "agora-fake-agent", "--target-dir"])
+                .arg(p.parent().unwrap().parent().unwrap());
+            if p.parent().unwrap().ends_with("release") {
+                command.arg("--release");
+            }
+            assert!(
+                command.status().unwrap().success(),
+                "building fake fixture failed"
+            );
+        }
+    });
+    assert!(p.exists(), "fake fixture is absent after build");
     p.to_string_lossy().into_owned()
 }
 struct Env {
@@ -269,6 +283,10 @@ fn an_explicit_worktree_uses_the_selected_subfolder_and_never_switches_the_origi
     assert_ne!(a.path, info.path);
     assert!(Path::new(&a.path).ends_with("sub"));
     assert!(Path::new(&a.path).join("keep").exists());
+    let created_root = Path::new(&a.path).parent().unwrap();
+    assert!(!git(created_root, &["status", "--porcelain"]).contains(".mcp.json"));
+    git(created_root, &["add", "."]);
+    assert!(!git(created_root, &["diff", "--cached", "--name-only"]).contains(".mcp.json"));
     assert_eq!(git(&repo, &["branch", "--show-current"]).trim(), "main");
 }
 
@@ -346,11 +364,209 @@ fn adapter_sessions_and_resume_keep_the_selected_non_git_directory() {
         .unwrap()
         .unwrap();
         if expected == 1 {
-            node.supervisor
-                .lock()
-                .unwrap()
+            let mut sup = node.supervisor.lock().unwrap();
+            let events = sup
                 .resume(&agora_core::AgentId::new(&a.agent_id), Instant::now())
                 .unwrap();
+            node.events.supervisor_events(&events, &sup.list());
+            drop(sup);
+            let log: Vec<_> = node
+                .events
+                .payloads_after(0)
+                .unwrap()
+                .iter()
+                .map(|b| v1::Event::decode(b.as_slice()).unwrap())
+                .collect();
+            let exited=log.iter().rposition(|e| matches!(&e.body,Some(v1::event::Body::AgentExited(x)) if x.agent_id==a.agent_id)).unwrap();
+            let started=log.iter().rposition(|e| matches!(&e.body,Some(v1::event::Body::AgentStarted(x)) if x.agent_id==a.agent_id)).unwrap();
+            assert!(
+                started > exited,
+                "resume must restore running in hub/client projections"
+            );
+            assert!(log[started+1..].iter().any(|e| matches!(&e.body,Some(v1::event::Body::AgentStateChanged(x)) if x.agent_id==a.agent_id && x.state==v1::AgentState::Unspecified as i32)));
+            assert!(log[started+1..].iter().any(|e| matches!(&e.body,Some(v1::event::Body::AgentSessionReported(x)) if x.agent_id==a.agent_id)));
+            assert!(!log[started+1..].iter().any(|e| matches!(&e.body,Some(v1::event::Body::TerminalOpened(x)) if x.agent_id==a.agent_id)));
         }
     }
+}
+
+#[test]
+fn isolated_launch_recreates_an_untracked_selected_subdirectory() {
+    if !supported() {
+        return;
+    }
+    let e = Env::new("untracked-subdir");
+    let repo = e.root.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    git(&repo, &["commit", "--allow-empty", "-qm", "initial"]);
+    let selected = repo.join("untracked/nested folder");
+    std::fs::create_dir_all(&selected).unwrap();
+    std::fs::write(selected.join("keep"), "original").unwrap();
+    let mut c = e.client();
+    let info = inspect(&mut c, &selected, false);
+    let a = launch(&mut c, &info, "probe", true);
+    assert!(Path::new(&a.path).ends_with("untracked/nested folder"));
+    assert!(!Path::new(&a.path).join("keep").exists());
+    assert_eq!(
+        std::fs::read_to_string(selected.join("keep")).unwrap(),
+        "original"
+    );
+    e.reports(1);
+}
+
+#[test]
+fn isolated_launch_rejects_a_head_symlink_and_never_creates_directories_through_it() {
+    if !supported() {
+        return;
+    }
+    let e = Env::new("head-link");
+    let repo = e.root.join("repo");
+    let outside = e.root.join("outside");
+    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    let blob_file = e.root.join("link-target");
+    std::fs::write(&blob_file, outside.to_string_lossy().as_bytes()).unwrap();
+    let blob = git(&repo, &["hash-object", "-w", blob_file.to_str().unwrap()]);
+    git(
+        &repo,
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("120000,{},nested", blob.trim()),
+        ],
+    );
+    git(&repo, &["commit", "-qm", "tracked symlink"]);
+    let selected = repo.join("nested");
+    std::fs::create_dir_all(&selected).unwrap();
+    let before = git(&repo, &["worktree", "list", "--porcelain"]);
+    let mut c = e.client();
+    let info = inspect(&mut c, &selected, false);
+    let result = c
+        .call(Cmd::AgentLaunch(v1::AgentLaunch {
+            path: info.path,
+            project_id: info.project_id,
+            kind: "probe".into(),
+            separate_worktree: true,
+            ..Default::default()
+        }))
+        .unwrap();
+    assert!(
+        result.is_err(),
+        "a restored symlink must not select another folder"
+    );
+    assert!(
+        !outside.join("missing").exists(),
+        "directory creation followed a symlink outside the worktree"
+    );
+    assert_eq!(git(&repo, &["worktree", "list", "--porcelain"]), before);
+    assert!(selected.is_dir());
+}
+
+#[test]
+fn directory_diff_cannot_show_tracked_or_untracked_changes_in_the_parent_checkout() {
+    if !supported() {
+        return;
+    }
+    let e = Env::new("diff-root");
+    let repo = e.root.join("repo");
+    let selected = repo.join("sub");
+    std::fs::create_dir_all(&selected).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("outside.txt"), "old").unwrap();
+    std::fs::write(selected.join("inside.txt"), "old").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-qm", "initial"]);
+    std::fs::write(repo.join("outside.txt"), "parent-private-change").unwrap();
+    std::fs::write(repo.join("parent-new.txt"), "parent-new-change").unwrap();
+    std::fs::write(selected.join("inside.txt"), "selected-change").unwrap();
+    std::fs::write(selected.join("new.txt"), "selected-new").unwrap();
+    let mut c = e.client();
+    let info = inspect(&mut c, &selected, false);
+    let a = launch(&mut c, &info, "probe", false);
+    let ok = c
+        .call(Cmd::WorkspaceQuery(v1::WorkspaceQuery {
+            workspace_id: a.workspace_id,
+            operation: "diff".into(),
+            ..Default::default()
+        }))
+        .unwrap()
+        .unwrap();
+    let Some(Ok_::GitDiff(diff)) = ok.result else {
+        panic!("missing diff");
+    };
+    assert!(diff.diff.contains("selected-change") && diff.diff.contains("selected-new"));
+    assert!(
+        !diff.diff.contains("parent-private-change") && !diff.diff.contains("parent-new-change"),
+        "{}",
+        diff.diff
+    );
+}
+
+#[test]
+fn confined_selected_subfolders_cannot_write_to_the_parent_checkout() {
+    if !supported() || !agora_platform::sandbox_supported() {
+        return;
+    }
+    let e = Env::new("subfolder-confinement");
+    // Outside the shared system temp folder: that folder is intentionally writable in the default profile.
+    let repo = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("selected-boundary-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&repo);
+    std::fs::create_dir_all(repo.join("sub")).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("sub/keep"), "original").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-qm", "initial"]);
+    let forbidden = repo.join("parent-write");
+    let script="printf inside > inside; if printf outside > \"$1\"; then printf escaped > result; else printf denied > result; fi; sleep 30";
+    let argv = serde_json::to_string(&vec![
+        "/bin/sh",
+        "-c",
+        script,
+        "probe",
+        forbidden.to_str().unwrap(),
+    ])
+    .unwrap();
+    {
+        let mut sup = e.node.as_ref().unwrap().supervisor.lock().unwrap();
+        sup.set_sandbox(agora_node::sandbox::SandboxPolicy {
+            level: agora_node::sandbox::Level::Worktree,
+            ..Default::default()
+        });
+        sup.register(agora_adapters::Manifest::parse(&format!("kind=\"boundary\"\ndisplay_name=\"Boundary\"\nversion=\"1\"\nmin_engine=1\n[process]\nlaunch={argv}\n")).unwrap());
+    }
+    let mut c = e.client();
+    let info = inspect(&mut c, &repo.join("sub"), false);
+    for separate in [false, true] {
+        let a = launch(&mut c, &info, "boundary", separate);
+        let cwd = Path::new(&a.path);
+        let until = Instant::now() + Duration::from_secs(10);
+        while !cwd.join("result").exists() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(
+            std::fs::read_to_string(cwd.join("result")).unwrap(),
+            "denied"
+        );
+        assert_eq!(
+            std::fs::read_to_string(cwd.join("inside")).unwrap(),
+            "inside"
+        );
+        assert!(!forbidden.exists());
+        c.call(Cmd::AgentStop(v1::AgentStop {
+            agent_id: a.agent_id,
+        }))
+        .unwrap()
+        .unwrap();
+    }
+    assert_eq!(
+        std::fs::read_to_string(repo.join("sub/keep")).unwrap(),
+        "original"
+    );
+    drop(c);
+    drop(e);
+    let _ = std::fs::remove_dir_all(repo);
 }

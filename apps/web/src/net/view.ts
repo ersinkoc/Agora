@@ -251,6 +251,7 @@ export function tiles(v: View): AgentTileModel[] {
       name: `${a.kind} · ${ACCENT_NAMES[i]}`,
       accent: ACCENTS[i] as string,
       machine: node?.hostname || a.nodeId,
+      machineId: a.nodeId,
       workspace: selected ? selected.path : wt ? workspaceName(v, wt) : '',
       shared: sharing, git: selected ? !!selected.gitRoot : true, projectId: selected?.projectId ?? (wt ? v.checkouts.get(wt.checkoutId)?.projectId : undefined),
       state,

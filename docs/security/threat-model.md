@@ -99,3 +99,10 @@ device limits. It is a size-limited regular JSON file with a validated UUID. Pre
 persisted and cannot silently switch after repository edits; an explicit signed owner confirmation is needed. Hub project
 filters group confirmed logical IDs while preserving each machine and path; role/project filters still apply to workspace
 snapshots, status events and file queries. Copying this metadata transfers identity, not source files or authorization.
+
+Selected-directory review follow-up (#257): explicit worktree launch resolves the new root and walks the selected
+relative directory without following restored symlinks. Missing directories are created only below that root; a
+non-directory or symlink is refused before launch. Workspace diffs include an explicit selected-directory pathspec
+even for an empty requested path, keeping parent-checkout changes outside the workspace review. Confinement tests
+place a selected subdirectory outside the shared system temp folder and prove inside writes succeed while parent
+checkout writes fail, in both directory and explicit-worktree modes. Explicit policy write allowances still apply.

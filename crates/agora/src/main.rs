@@ -465,6 +465,14 @@ fn call(say: &Say, c: &mut Client, cmd: Cmd) -> Result<v1::CommandOk, ExitCode> 
 }
 
 fn selected_path(o: &Opts) -> String {
+    // A registered name is resolved on the node, even if the caller has a different same-named folder.
+    if o.cwd.is_none() {
+        if let Some(project) = &o.project {
+            if !project.contains(['/', '\\']) {
+                return project.clone();
+            }
+        }
+    }
     let path = o
         .cwd
         .clone()

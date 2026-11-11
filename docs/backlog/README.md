@@ -12,5 +12,7 @@ accepted by the maintainer.
 - [Phase 7: scale out (Windows node)](phase-7.md)
 - [Research (ongoing): usage sources, quota profiles, model mapping](research.md)
 
-Current follow-up: #235 / PR #236 implements accepted ADR-0052: selected working folders, optional worktrees,
+Completed: #235 / merged PR #236 implements accepted ADR-0052: selected working folders, optional worktrees,
 and explicit portable project IDs across machines. Verification and limits: [selected-directory review](../reviews/0235-selected-directories.md).
+
+Follow-up #257 closes reproduced launch, diff-root, resume and filtered-pane findings from #236.
