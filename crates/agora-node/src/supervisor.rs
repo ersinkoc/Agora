@@ -497,8 +497,13 @@ impl Supervisor {
         let branch = format!("agent/{}", req.name);
         git::create_worktree(git_root, &target, &branch, None)?;
         let mut direct = req.clone();
-        direct.checkout = target.join(relative);
-        match self.start_directory_impl(&direct, project, now, false) {
+        let result = std::fs::canonicalize(target.join(relative))
+            .map_err(|e| SupervisorError::Spawn(e.to_string()))
+            .and_then(|cwd| {
+                direct.checkout = cwd;
+                self.start_directory_impl(&direct, project, now, false)
+            });
+        match result {
             Ok(id) => Ok(id),
             Err(e) => {
                 let _ = git::remove_worktree(git_root, &target, true);

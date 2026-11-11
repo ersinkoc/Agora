@@ -22,7 +22,16 @@ pub fn inspect(
     if !path.is_dir() {
         return Err(invalid("directory.path"));
     }
-    let checkout = crate::git::discover_checkout(&path).ok();
+    // Git and the OS may spell the same root differently (Windows extended paths, macOS temp aliases).
+    // Use canonical paths on both sides before computing a selected subdirectory's relative path.
+    let checkout = match crate::git::discover_checkout(&path) {
+        Ok(mut checkout) => {
+            checkout.root =
+                std::fs::canonicalize(&checkout.root).map_err(|_| invalid("directory.git_root"))?;
+            Some(checkout)
+        }
+        Err(_) => None,
+    };
     let root = checkout
         .as_ref()
         .map_or(path.as_path(), |c| c.root.as_path());
