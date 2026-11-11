@@ -26,7 +26,7 @@ does not prove path confinement. This follows the distinction between integrity 
 
 Maintainer decision (2026-11-11): the revised proposal below is accepted ("0050 kabul"). The original proposal further down is superseded.
 
-## Amendment B (proposed, awaiting the maintainer's decision): Low integrity, the ancestor entries, and a refusal before start
+## Amendment B (accepted by the maintainer 2026-11-11: "0050 Ek B kabul"): Low integrity, the ancestor entries, and a refusal before start
 
 **Why an amendment.** The revised decision below lists `Everyone` and `Users` among the restricting SIDs. A Windows machine showed (issue #230, messages in `comms`, 2026-11-11) that a folder whose ACL grants those
 groups then satisfies both access checks with no entry for the agent, so writes and reads outside the allowed folders succeed there (`C:\ProgramData`, a data volume). The maintainer accepted "Amendment A" ("0050 Ek A kabul"): leave
