@@ -323,6 +323,15 @@ impl Router {
             return Err(Error::new(ErrorCode::ProtocolCapabilityMissing)
                 .with("capability", "workspace.directory"));
         }
+        if matches!(
+            request.command,
+            Some(command_request::Command::BoardJoin(_))
+        ) && !link.capabilities.iter().any(|c| c == "board.join")
+        {
+            return Err(
+                Error::new(ErrorCode::ProtocolCapabilityMissing).with("capability", "board.join")
+            );
+        }
         link.tx
             .send(ToNode::Command {
                 request: Box::new(request),
@@ -340,11 +349,13 @@ pub fn forwardable(req: &v1::CommandRequest) -> Result<&str, Error> {
     match &req.command {
         None => Err(Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "command")),
         // `MeshPost` and `BoardCall` are what a node sends the hub (the hub writes `origin` from the certificate); a client
-        // forwarding one would put its own `origin` on a message, so they are not client commands.
+        // forwarding one would put its own `origin` on a message, so they are not client commands. `BoardJoin` only the hub
+        // sends (ADR-0039 amendment B): from a client it would make a node hand over its local work.
         Some(
             command_request::Command::Enroll(_)
             | command_request::Command::MeshPost(_)
-            | command_request::Command::BoardCall(_),
+            | command_request::Command::BoardCall(_)
+            | command_request::Command::BoardJoin(_),
         ) => Err(Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "command")),
         Some(_) if req.target_node.is_empty() => {
             Err(Error::new(ErrorCode::NodeUnknown).with("node_id", ""))
@@ -501,6 +512,8 @@ mod tests {
         e.command = Some(command_request::Command::MeshPost(v1::MeshPost::default()));
         assert!(forwardable(&e).is_err());
         e.command = Some(command_request::Command::BoardCall(v1::BoardCall::default()));
+        assert!(forwardable(&e).is_err());
+        e.command = Some(command_request::Command::BoardJoin(v1::BoardJoin::default()));
         assert!(forwardable(&e).is_err());
     }
 }
