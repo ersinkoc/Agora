@@ -440,6 +440,17 @@ mod tests {
         assert!(
             s.command_allowed("n1", &start("mine")) && !s.command_allowed("n1", &start("theirs"))
         );
+        let in_worktree = |w: &str| {
+            Command::AgentStart(v1::AgentStart {
+                project_id: "mine".into(),
+                worktree_id: w.into(),
+                ..Default::default()
+            })
+        };
+        assert!(
+            !s.command_allowed("n1", &in_worktree("someone-elses")),
+            "a worktree it cannot place is refused"
+        );
         // Anything about a whole machine is the owner's.
         assert!(!s.command_allowed("n1", &Command::NodePolicyGet(v1::NodePolicyGet::default())));
         assert!(!s.command_allowed("n1", &Command::ProjectList(v1::ProjectList::default())));
