@@ -130,6 +130,10 @@ fn quote(p: &std::path::Path) -> String {
 /// `(deny file-read-data ...)` (seen on macOS 27), so a wildcard allow would leave the agent unable to read its own worktree.
 /// A listed folder that holds a [`PRIVATE`] folder (`/var` is `/private/var`, which holds every user's temp folder) is left out:
 /// everything outside the private folders is readable already, and allowing the parent would open the private folder again.
+///
+/// A `write` entry that is a file also allows files next to it whose names start with its name and a dot (`.claude.json.lock`,
+/// `.claude.json.tmp.123`): programs save a file by writing a sibling and renaming it, or lock it with one, and without them the
+/// save fails while the file itself is writable. Nothing else in that folder opens up.
 pub(crate) fn profile(sb: &crate::Sandbox) -> String {
     let real = |p: &std::path::Path| std::fs::canonicalize(p).ok();
     let holds_private = |p: &std::path::Path| {
@@ -152,6 +156,13 @@ pub(crate) fn profile(sb: &crate::Sandbox) -> String {
         .filter_map(|p| real(p))
         .map(|p| quote(&p))
         .collect();
+    let siblings: Vec<String> = sb
+        .write
+        .iter()
+        .filter_map(|p| real(p))
+        .filter(|p| p.is_file())
+        .filter_map(|p| sibling_rule(&p))
+        .collect();
     let private: Vec<String> = PRIVATE
         .iter()
         .map(|p| quote(std::path::Path::new(p)))
@@ -166,7 +177,31 @@ pub(crate) fn profile(sb: &crate::Sandbox) -> String {
     if !writes.is_empty() {
         out.push_str(&format!("(allow file-write* {})\n", writes.join(" ")));
     }
+    if !siblings.is_empty() {
+        out.push_str(&format!(
+            "(allow file-read-data file-write* {})\n",
+            siblings.join(" ")
+        ));
+    }
     out
+}
+
+/// `(regex #"^<file>\.[^/]*$")`: the names next to `file` that start with its name and a dot. `None` for a path a raw string
+/// cannot hold (a `"`), which then gets no siblings.
+fn sibling_rule(file: &std::path::Path) -> Option<String> {
+    let s = file.to_str()?;
+    if s.contains('"') {
+        return None;
+    }
+    let mut re = String::from("^");
+    for c in s.chars() {
+        if "\\.^$|?*+()[]{}".contains(c) {
+            re.push('\\');
+        }
+        re.push(c);
+    }
+    re.push_str("\\.[^/]*$");
+    Some(format!("(regex #\"{re}\")"))
 }
 
 /// `program args...` rewritten to run under `sandbox-exec` with the profile for `sb`.
@@ -197,6 +232,35 @@ mod sandbox_tests {
         // The read allow names the denied operation; a wildcard does not undo a specific deny.
         let read = p.find("(allow file-read-data").unwrap();
         assert!(deny < read && !p.contains("(allow file-read*"), "{p}");
+    }
+
+    #[test]
+    fn a_listed_file_lets_its_siblings_be_saved_and_nothing_else_in_its_folder() {
+        let dir = std::env::temp_dir().join(format!("agora-sbx-sib-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("state.json");
+        std::fs::write(&file, "{}").unwrap();
+        let sb = crate::Sandbox {
+            read: vec!["/usr".into(), "/bin".into()],
+            write: vec![file.clone(), "/dev".into()],
+        };
+        let p = super::profile(&sb);
+        assert!(p.contains("state\\.json\\.[^/]*$"), "{p}");
+        // Run it: the save pattern (sibling, then rename over the file) works; another name in the folder is refused.
+        let script = format!(
+            "cd {d} && echo new > state.json.tmp.1 && mv state.json.tmp.1 state.json && echo saved; echo x > other 2>/dev/null || echo refused",
+            d = dir.display()
+        );
+        let out = std::process::Command::new(super::SANDBOX_EXEC)
+            .args(["-p", &p, "/bin/sh", "-c", &script])
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(text.contains("saved") && text.contains("refused"), "{text}");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "new\n");
+        assert!(!dir.join("other").exists());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
