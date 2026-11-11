@@ -164,7 +164,22 @@ impl Hub {
         if let Ingest::Applied { pos, .. } = outcome {
             // The session already decoded it successfully, so this cannot fail; stay defensive anyway.
             if let Ok(event) = Event::decode(payload) {
+                let restarted = match &event.body {
+                    Some(Body::NodeOnline(n)) => Some((n.node_id.clone(), event.at_ms)),
+                    _ => None,
+                };
                 Self::publish(&mut g, Delivered { pos, event });
+                // A node announces itself only when its process starts: the agents it had are gone, so their tasks and leases go back.
+                if let Some((node, at_ms)) = restarted {
+                    for (project, events) in self.boards.node_restarted(&node, at_ms) {
+                        if let Some(bytes) = self.boards.snapshot(&project, at_ms) {
+                            let _ = self.store.set_setting(&format!("board.{project}"), &bytes);
+                        }
+                        for body in events {
+                            let _ = self.emit(&mut g, body, at_ms);
+                        }
+                    }
+                }
             }
         }
         Ok(outcome)
