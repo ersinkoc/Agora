@@ -11,8 +11,8 @@ branch (`docs/fordevs/`). Each row is something the run showed that no CI run ha
 | L4 | Windows clients that use the system TLS stack (schannel: `curl.exe`, probably others) refuse the hub's certificate: `the revocation status is unknown` (it has no CRL or OCSP). `--ssl-no-revoke` passes | open: decide whether the hub certificate needs a revocation story, or document it; Edge and Firefox not yet checked |
 | L5 | The Windows node id seen in the UI is the machine's host name, while mesh addresses use the node id from enrollment (`win/agent-1`, not `WHITE/agent-1`) | implemented in #263: show enrolled machine IDs and selectable/copyable canonical agent addresses; two-node same-hostname browser check preserves distinct navigation and project counts |
 | L6 | A new manifest file is not seen by a running node until it restarts (`agent kinds`) | fixed: the node reads its manifest folder again before it lists or starts agents (a kind whose file was deleted stays until restart) |
-| L7 | Claude Code's trust prompt is reported as "Needs you" on a wide terminal and as Idle after the terminal was narrowed to about 40 columns, while the screen still shows the prompt: the rule may depend on line wrapping | open: reproduce on a node; match across wrapped lines |
-| L8 | Codex's folder-trust screen is rendered correctly but reported as Idle: the codex manifest has no rule for it | open: add a fixture and a rule |
+| L7 | Claude Code's trust prompt is reported as "Needs you" on a wide terminal and as Idle after the terminal was narrowed to about 40 columns, while the screen still shows the prompt: the rule may depend on line wrapping | fixed by #259's whitespace-aware phrase matching; #279 brings #261's real Windows 24x20 regression capture onto main. #261 was merged into the feature branch, so its fixtures were absent from main |
+| L8 | Codex's folder-trust screen is rendered correctly but reported as Idle: the codex manifest has no rule for it | wide-screen rule already shipped; #279 brings #261's short-screen rule and real Windows 24x20 capture onto main. Both trust captures detect `blocked`; on a short terminal the menu can still be below the visible screen |
 | L9 | The macOS process readers (`process_name`, `process_cwd`, `process_tree`, `process_stats`) pass their tests but nothing outside `agora-platform` calls them, so no event or UI column shows them | open |
 | L10 | Windows: a confined agent's `git commit` fails when the main checkout is under the user profile (git `stat`s every folder above the ref it locks); ADR-0050 work item | open, in the Windows confinement prototype |
 | L11 | Windows: granting an agent a large `sandbox.read` folder (`~\.rustup`, about 100k files) takes 20 to 30 s per agent start because the permission is propagated to every file | open: documented in the sandbox recipes; consider non-propagating grants |
@@ -23,7 +23,18 @@ branch (`docs/fordevs/`). Each row is something the run showed that no CI run ha
 | B4 | A node that crashes and restarts reuses its agent ids (`agent-1`), and the hub board still showed the dead agent's claim as the new agent's | fixed: the hub gives back the tasks and leases of a node's agents when the node announces a new process start |
 | B5 | `lease.held` carries an empty `expires_at` | fixed: the error carries the conflicting lease's end in ms, as the file-write error already did |
 | B6 | Local → shared: a project used on one node keeps its tasks and leases on that node's local broker; when a second node with a checkout comes online the board takes over, the first node's agents lose sight of their own claimed task, the board's first task is `t-1` again, and a lease held locally is not seen by the board: measured, `nb` was granted `README.md` while `na` still held it (two holders) | open: ADR-0039 says work made locally before sharing stays local; needs that sentence changed (move unfinished local tasks and live leases to the board when it takes over, or refuse to switch while local leases are live) |
+| B7 | Two same-identity project folders selected after both daemons start are ignored by shared-board eligibility; the peer sees no task and acquires a path already held on the first node | fixed in #291: checkout/workspace/session membership drives both eligibility and production join discovery, with a real two-node regression and project lifecycle tests |
 
+
+## Confined agents can reach unix sockets (2026-11-11)
+
+- **L21** Under `sandbox = worktree` (and the first draft of `worktree-offline`) a confined agent can **connect to any unix socket** it can name.
+  Measured on Linux (kernel 7.0, Landlock ABI 8): a confined process connected to a socket outside every allowed folder. Landlock only governs
+  path-based socket connects from ABI 9 (`LANDLOCK_ACCESS_FS_RESOLVE_UNIX`); the node uses ABI 1 rights. Seatbelt on macOS allows them too unless a rule
+  says otherwise. Consequence: a tmux server socket (`tmux -S … new-window 'cmd'`) or the user's `SSH_AUTH_SOCK` gives the agent a command or
+  credentials outside the confinement. Needs a decision (maintainer): on macOS close it like `worktree-offline` does (own mesh socket and private temp only;
+  `git push` over SSH then needs the owner to list the agent socket's folder); on Linux use `RESOLVE_UNIX` when the kernel has it and say plainly on older
+  kernels that sockets are not confined. Until then the threat model lists it as an open gap.
 
 ## Windows web window pass (2026-11-11)
 
@@ -32,7 +43,7 @@ branch (`docs/fordevs/`). Each row is something the run showed that no CI run ha
 - **L16** The audit page cannot tell sessions apart (every row says "owner"); a device column would answer "who".
 - **L17** Audit rows "Watched a terminal … Sent, no answer yet" stay unresolved after a node restart.
 - **L18** "Recent messages" says agents have not written to each other yet after a hub restart (mesh history is not re-read).
-- **L19** The web app takes its language only from `navigator.language`; there is no in-app switch, so Turkish needs a `tr-TR` browser.
+- **L19** The web app takes its language only from `navigator.language`; there is no in-app switch, so Turkish needs a `tr-TR` browser. Implemented in #284: sign-in, Home and Focus offer a remembered browser-language override; live terminals and unfinished forms survive switching.
 - **L20** A refused or abandoned start leaves its `agent/<name>` branch behind: `Supervisor::abandon` removes the worktree but not the branch.
   Open.
   - Not a bug: "an agent killed from outside stays `running`". The restart policy started it again. What is missing is UX: the restart is
@@ -46,9 +57,10 @@ branch (`docs/fordevs/`). Each row is something the run showed that no CI run ha
   - The same may hold for `git diff` drivers (`diff.external`, `textconv`). Not checked.
   - Windows' narrow profile covers only worktrees (`.git` is a file there). On Linux and macOS, the worktree profile makes the shared git
     folder writable (`common_git_dir`).
-  - Open:
-    - Run the node's own git with these switched off: `-c core.fsmonitor=`, `--no-ext-diff`, `--no-textconv`.
-    - Keep `.git/config` and `.git/hooks` out of the writable set.
+  - In review:
+    - #300 runs the node's own git with fsmonitor, hooks, external diff and textconv off.
+    - #303 keeps the shared `config` and `hooks` read-only for macOS worktrees.
+  - Still open: filter drivers, Linux worktrees and selected checkouts.
 - **L23** Windows, real Codex under confinement (`AGORA_WINDOWS_CONFINEMENT=1`). It does not run, for three reasons.
   1. The manifest launches `codex` by bare name, and the node adds the program's folder to `read` only for a path. A per-user install is
      unreadable to the restricted token, so the agent shows as started and stops at once, with no reason shown.

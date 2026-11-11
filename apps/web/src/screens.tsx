@@ -1,4 +1,5 @@
 import { AgentAddress } from './components/AgentAddress';
+import { LanguagePicker } from './components/LanguagePicker';
 import { PromptBox } from './components/PromptBox';
 import type { ChatSource } from './net/chat';
 import { AgentTile } from './components/AgentTile';
@@ -91,7 +92,7 @@ export function Focus({ agent, source: live, costMicroUsd, chatSource, sendPromp
   const why = agent.reportedBy === 'agent' ? t('focus-why-agent') : t('focus-why-screen');
   return (
     <main className="page focus">
-      <button type="button" className="link" onClick={onBack}>{t('focus-back')}</button>
+      <div className="flex flex-wrap items-center justify-between gap-3"><button type="button" className="link" onClick={onBack}>{t('focus-back')}</button><LanguagePicker /></div>
       <header className="topbar">
         <h1>{agent.name}</h1>
         <span title={`${t('focus-why')} ${why}`}><StateBadge state={agent.state} /></span>
@@ -192,6 +193,7 @@ export function SignInPage({ onSubmit, onPasskey, notice }: { onSubmit: (code: s
   const [code, setCode] = useState('');
   return (
     <main className="page">
+      <div className="flex justify-end"><LanguagePicker /></div>
       <h1>{t('signin-title')}</h1>
       <p>{t('signin-intro')}</p>
       <form onSubmit={(e) => { e.preventDefault(); if (code.trim()) onSubmit(code); }}>

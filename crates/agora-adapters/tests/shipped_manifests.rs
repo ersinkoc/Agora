@@ -1,5 +1,6 @@
 //! The manifests in `manifests/agents/` against the screens captured from the real agents in `fixtures/<kind>/`
 //! (`docs/specs/agent-manifest.md`). Each `<name>.screen` is raw terminal output; `<name>.expect` is `<state> <rule id>` or `none`.
+//! A screen captured on another size than 120x40 says so in its name: `<name>@<cols>x<rows>.screen` (and `<name>@<cols>x<rows>.expect`).
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::path::PathBuf;
@@ -9,6 +10,24 @@ use agora_vt::{AlacrittyTerminal, Size, Terminal};
 
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../manifests/agents")
+}
+
+/// The terminal size a screen was captured on, from its file name (`trust@24x20.screen`); 120x40 when the name has none.
+/// A size that does not parse fails the test rather than silently falling back.
+fn screen_size(f: &std::path::Path) -> Size {
+    let stem = f.file_stem().unwrap().to_string_lossy();
+    let Some((_, size)) = stem.split_once('@') else {
+        return Size {
+            cols: 120,
+            rows: 40,
+        };
+    };
+    let parsed = size
+        .split_once('x')
+        .and_then(|(c, r)| Some((c.parse().ok()?, r.parse().ok()?)));
+    let (cols, rows) =
+        parsed.unwrap_or_else(|| panic!("{}: size must be <cols>x<rows>", f.display()));
+    Size { cols, rows }
 }
 
 #[test]
@@ -35,11 +54,8 @@ fn every_shipped_manifest_loads_and_its_captured_screens_produce_the_expected_st
             if f.extension().is_none_or(|e| e != "screen") {
                 continue;
             }
-            // The screens were captured on a 120x40 terminal.
-            let mut term = AlacrittyTerminal::new(Size {
-                cols: 120,
-                rows: 40,
-            });
+            // A screen is replayed on the terminal size it was captured on: `<name>@<cols>x<rows>.screen`, or 120x40 without one.
+            let mut term = AlacrittyTerminal::new(screen_size(&f));
             term.feed(&std::fs::read(&f).unwrap());
             let got = detector.detect(&term).map_or_else(
                 || "none".to_string(),

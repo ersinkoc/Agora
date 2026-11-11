@@ -232,3 +232,9 @@ address-copied = Copied
 address-copy-failed = Copy failed. Select the address and copy it manually.
 machine-identity = Machine ID: { $id }
 machine-name-id = { $name } · { $id }
+
+language-label = Language
+language-system = Browser default
+language-en = English
+language-tr = Türkçe
+language-not-saved = Language changed for this visit. Your browser could not save the preference.

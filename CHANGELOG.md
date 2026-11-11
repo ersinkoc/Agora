@@ -2,10 +2,15 @@
 
 Each release lists what a person using Agora can now do. The reasons are in `docs/adr/`; the state of every task is in `docs/backlog/`.
 
-## Next
+## 0.3.0
 
+### Agent state
+- Claude Code and Codex folder-trust prompts are recognized at 24x20 as well as 120x40. Short Codex terminals may still hide the dialog's options; enlarge the terminal to see them.
+### Interface language
+- Choose Türkçe, English or your browser's language on sign-in, Home or a focused agent. The choice is remembered in this browser; switching keeps terminals and unfinished forms open.
 ### Shared board
 - When a project starts being shared by a second machine, the tasks and file leases its first machine kept locally move to the shared board: no file has two holders, and each moved task's owner is told its new id (ADR-0039 amendment B).
+- After a hub restart, incoming local work preserves the shared board's saved tasks, dependencies and live file leases.
 
 ### Selected-folder fixes
 - Machines sharing a host name stay distinct, shared-project counts use enrollment IDs, and agent panes expose their real copyable routing addresses.
@@ -20,6 +25,7 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 - New directory launch needs an unrestricted owner device trusted on the node. Older clients keep their existing worktree launch behavior; fixed-file MCP manifests need explicit worktree mode.
 
 ### Machines
+- Matching project folders selected on machines that are already online use one board for new tasks and file leases.
 - A hub, a Linux node, a macOS node and a Windows node ran together on one network: terminals of all three in one window, and agent-to-agent messages in every direction (`docs/backlog/lan-test-findings.md`).
 - The desktop app checks the hub against the certificate you gave it before remembering it, says why it cannot connect, and reaches a hub by its IP address; a bundled macOS app can now reach a hub on the local network. `agora tui` reaches a hub by IP too.
 - A project is found by its id before its name, and a name two projects share is refused.
@@ -34,6 +40,8 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 - Recipes for the folders real tools need (git config, cargo, npm, compilers): `docs/security/sandbox-recipes.md`.
 - Windows confinement is written (ADR-0050) and tested on real Windows, but switched off: a real-machine check showed the first design lets a folder with a broad group permission through, and a replacement design is being measured.
 - Codex's "trust this folder" screen is now shown as needing you.
+- macOS: `sandbox = worktree-offline` works: no internet or DNS, but localhost and the agent's own mesh socket stay reachable. Linux and Windows still refuse that level.
+- Known gap: a confined agent can still connect to unix sockets it can name (a tmux server, the SSH agent); see `docs/security/threat-model.md`.
 - The shared task board no longer vanishes when one of two machines drops: while it holds unfinished work the other machine keeps using it, and a machine that restarts does not inherit its dead agents' claims.
 - A refused lease says when the holder's lease ends.
 - A manifest added while the node runs is listed and can be started without restarting the node.
