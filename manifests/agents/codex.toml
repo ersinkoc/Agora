@@ -1,6 +1,6 @@
 kind = "codex"
 display_name = "Codex"
-version = "2026.11.11.1"
+version = "2026.11.11.2"
 min_engine = 1
 
 [process]
@@ -59,12 +59,14 @@ all = [{ contains = "t trust all" }, { contains = "enter review" }]
 
 # In a folder Codex has not seen, it first asks whether to trust it ("Trust this folder?", `› 1. Trust and continue`) and waits;
 # the `›` row would otherwise read as the idle prompt. Captured on codex-cli 0.167.1 (fixtures/codex/trust.screen).
+# On a short terminal Codex draws only the top of the dialog (no menu, no "Trust this folder?" in the bottom rows: trust@24x20),
+# so the phrases are taken from its last sentences, which are on screen at every size.
 [[rules]]
 id = "trust_prompt"
 state = "blocked"
 priority = 950
 region = "bottom_non_empty_lines(12)"
-all = [{ contains = "Trust this folder?" }, { contains = "enter continue" }]
+all = [{ contains = "trust these files" }, { contains = "trust decision" }]
 
 [[rules]]
 id = "esc_to_interrupt"
