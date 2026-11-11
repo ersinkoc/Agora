@@ -13,6 +13,8 @@ export async function startStack({ viewport = { width: 1440, height: 900 } } = {
   const fake = join(root, 'target/debug/agora-fake-agent');
   const { chromium } = createRequire(join(process.env.PW_DIR ?? '.', 'x.js'))('playwright-core');
   const exe = process.env.CHROME ?? `${process.env.HOME}/.cache/ms-playwright/chromium-1248/chrome-linux64/chrome`;
+  const port = Number(process.env.AGORA_TEST_PORT ?? 17443);
+  const origin = `https://localhost:${port}`;
   const work = mkdtempSync(join(tmpdir(), 'agt-')); // short: Unix socket paths are limited to about 100 bytes
   const home = join(work, 'h');
   const hubDir = join(work, 'hub');
@@ -32,29 +34,38 @@ export async function startStack({ viewport = { width: 1440, height: 900 } } = {
     writeFileSync(join(home, 'manifests/fake.toml'), `kind = "fake-adapter"\ndisplay_name = "Fake chat agent"\nversion = "1"\nmin_engine = 1\n[adapter]\ncommand = [${JSON.stringify(fake)}, "--adapter"]\n`);
     mkdirSync(proj);
     for (const a of [['init', '-q', '-b', 'main'], ['commit', '-q', '--allow-empty', '-m', 'init']]) execFileSync('git', ['-C', proj, ...a], { env });
-    children.push(spawn(bin, ['hub', 'run', '--listen', '127.0.0.1:7443', '--hub-dir', hubDir, '--web', join(root, 'apps/web/dist')], { env, stdio: 'ignore' }));
+    children.push(spawn(bin, ['hub', 'run', '--listen', `127.0.0.1:${port}`, '--hub-dir', hubDir, '--web', join(root, 'apps/web/dist')], { env, stdio: 'ignore' }));
     await new Promise((r) => setTimeout(r, 2500));
     const code = run(['hub', 'code', '--hub-dir', hubDir]).match(/[A-Z0-9]{4}-[A-Z0-9]{4}/)[0];
-    run(['node', 'enroll', '--hub', 'wss://localhost:7443', '--ca', join(hubDir, 'ca.pem'), '--code', code, '--id', 'laptop']);
+    run(['node', 'enroll', '--hub', `wss://localhost:${port}`, '--ca', join(hubDir, 'ca.pem'), '--code', code, '--id', 'laptop']);
     children.push(spawn(bin, ['node', 'run', '--project', proj], { env, stdio: 'ignore' }));
     await new Promise((r) => setTimeout(r, 3000));
     browser = await chromium.launch({ executablePath: exe, args: ['--no-sandbox'] });
     const page = await (await browser.newContext({ ignoreHTTPSErrors: true, viewport })).newPage();
     const errors = [];
     page.on('pageerror', (e) => errors.push(e.message));
-    await page.goto('https://localhost:7443/');
+    page.on('console', m => { if (m.type() === 'error') console.log(m.text()); });
+    await page.goto(`${origin}/`);
     await page.fill('input', run(['hub', 'login', '--hub-dir', hubDir]).match(/app: (\S+) \(/)[1]);
     await page.click('button[type=submit]');
     await page.waitForSelector('text=Start an agent', { timeout: 10000 });
+    await page.goto(`${origin}/#/device`);
+    await page.waitForSelector('.codebox');
+    const trust = (await page.locator('.codebox').innerText()).trim().split(/\s+/);
+    run(['node', 'trust', trust[3], trust[4]]);
+    await page.goto(`${origin}/#/`);
     const start = async (label) => {
       await page.click('button:has-text("Start an agent")');
       await page.waitForSelector('.start select');
-      await page.locator('.start select').nth(1).selectOption({ label });
+      await page.getByRole('button', { name: 'Use this folder', exact: true }).click();
+      await page.waitForFunction(() => !!document.querySelector('.start [role=alert]') || [...document.querySelectorAll('.start button')].some(b => b.textContent === 'Start'));
+      if (await page.locator('.start [role=alert]').count()) throw new Error(await page.locator('.start [role=alert]').innerText());
+      await page.locator('.start select').last().selectOption({ label });
       await page.click('.start button.button--primary');
       await page.waitForTimeout(2500);
-      await page.goto('https://localhost:7443/#/');
+      await page.goto(`${origin}/#/`);
     };
-    return { page, run, start, errors, close, env, bin };
+    return { page, run, start, errors, close, env, bin, origin, work, proj, home, hubDir };
   } catch (e) {
     await close();
     throw e;

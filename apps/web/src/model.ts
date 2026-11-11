@@ -15,8 +15,11 @@ export interface AgentTileModel {
   reportedBy?: 'agent' | 'screen'; // where the state came from, shown by "why?"
   branch?: string; // the workspace's branch, when it has one
   terminal?: boolean; // false for a chat agent: it has no terminal, only prompts
+  projectId?: string;
+  shared?: boolean;
+  git?: boolean;
   project?: string; // the project's folder name, to group agents by project
-  workspaceRef?: { node: string; id: string }; // where to ask the node about this workspace (`git.diff`)
+  workspaceRef?: { node: string; id: string; directory?: boolean }; // where to ask the node about this workspace (`git.diff`)
   filesChanged?: number; // files with uncommitted changes in the agent's workspace
 }
 

@@ -2,6 +2,9 @@
 Status: Accepted
 Date: 2026-11-06
 
+The default-isolation choice and identity rules below are superseded for the new launch flow by
+[ADR-0052](0052-agents-run-in-selected-directories.md). Published `AgentStart` retains its original behavior.
+
 ## Context
 The window is organized by project. One project can have several agents of different or the same kind,
 possibly on different machines, and each agent's changes must be reviewable separately.

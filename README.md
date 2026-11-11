@@ -45,13 +45,23 @@ mkdir -p ~/.agora/manifests
 printf 'kind = "shell"\ndisplay_name = "Shell"\nversion = "1"\nmin_engine = 1\n[process]\nlaunch = ["sh"]\n' > ~/.agora/manifests/shell.toml
 target/release/agora node run --project ~/code/myproject
 #    in the window, "Start an agent"; or in another terminal:
-target/release/agora agent start shell --project myproject
+target/release/agora agent start shell --cwd /path/to/myproject
 
 # 4. Open https://localhost:7443/ , accept the hub's own certificate, sign in with the code from step 2
 #    (`agora hub login` makes another). Your agents and their terminals appear in the window.
 ```
 
-What works today (see [CHANGELOG.md](CHANGELOG.md) for what each release added): agents can be confined to their worktree on Linux and macOS (`sandbox = worktree` in the node's policy; Windows is written and tested in CI but switched off until checked on a real machine), a desktop app in `apps/desktop` pins the hub's certificate,  several machines in one window (the console: machines and agents on the left, several live terminals side by side in the middle, what needs you, uncommitted changes, agent messages and spend on the right), live agent states, the real terminal of each agent through the hub, what each agent changed (diff), its commits and its files, a conversation view for agents without a terminal (adapters, and any agent that speaks ACP through `agora acp-bridge`),
+Agents start in the folder you select. In the web app, choose a machine, a project or another folder, then the agent.
+Several agents can share that folder. Choose **Create an isolated working copy** (CLI: `--worktree`) when you want a separate Git worktree.
+Folders without Git also work. Adding a folder does not require restarting the node.
+
+To group copies of a project across machines, run `agora project init --cwd /path/to/myproject`, or choose **Create a shared project ID**
+in the launch form. This explicitly adds `.agent-project.json`; commit or copy that file to the other machines. It groups the sessions;
+it does not synchronize source files. Existing repositories without metadata keep automatic Git-based discovery. An independent fork can
+remove its copied metadata and run `project init` to create a new ID; changing a previously used identity requires explicit confirmation
+at launch (`--accept-project-id-change` in the CLI).
+
+What works today (see [CHANGELOG.md](CHANGELOG.md) for what each release added): agents can be confined to their worktree on Linux and macOS (`sandbox = worktree` in the node's policy; Windows is written and tested in CI but switched off until checked on a real machine), a desktop app in `apps/desktop` pins the hub's certificate,  several machines in one window (the console: machines and agents on the left, several live terminals side by side in the middle, what needs you, uncommitted changes, agent messages and spend on the right), live agent states, the real terminal of each agent through the hub, workspace changes (shared folders have one shared diff), commits and files, a conversation view for agents without a terminal (adapters, and any agent that speaks ACP through `agora acp-bridge`),
 approvals answered with a device key (the window's "This device" page shows the command that makes a machine trust it), the
 mesh between agents (per-agent MCP endpoint), passkey sign-in, backups (`agora hub backup`), team members with roles and projects (`agora hub user add NAME --role member|viewer`, `agora hub user grant ID NODE/PROJECT`) and an audit trail (`agora hub audit export`), starting an agent from the window (machine and project, then an agent that machine has
 installed). What does not yet: installing a node on a fresh machine over SSH works through `agora hub ssh install NAME` (ADR-0034) but is only tested against a stand-in `ssh`, and needs a signed release (a signing key from the maintainer); real Claude Code, Codex and WrongStack manifests (they need real accounts to capture fixtures), machines reachable only by SSH need `agora hub ssh add` (a tunnel the hub keeps open; try it on a real host first), installing agents from the registry works (`agora adapter install`, ADR-0044) but only against a stand-in registry, and the Windows node (ConPTY terminals, a named-pipe control channel, ADR-0045) is only exercised on CI with test agents, never yet on a real Windows machine with a real agent. Details and the open items per phase: [docs/backlog/](docs/backlog/).

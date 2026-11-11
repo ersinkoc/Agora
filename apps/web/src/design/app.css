@@ -86,6 +86,8 @@
   .machines { @apply m-0 grid list-none gap-3 p-0; }
   .machine { @apply flex flex-wrap items-baseline gap-4 rounded-m border border-line bg-surface-1 px-4 py-3; }
   .start { @apply flex flex-col gap-3 rounded-m border border-line bg-surface-1 p-4; }
+  .start > label { @apply grid min-w-0 gap-1; }
+  .start input:not([type='checkbox']), .start select { @apply min-w-0 w-full; }
   .start__actions { @apply flex gap-3; }
   .messages { @apply m-0 grid list-none gap-2 p-0; }
   .messages li { @apply break-words; }

@@ -196,3 +196,29 @@ audit-action-projectlist = Projeleri listeledi
 audit-action-agentlist = Ajanları listeledi
 audit-action-agentkinds = Ajan türlerini listeledi
 audit-action-usagereport = Harcamalara baktı
+
+start-no-machines = Henüz çevrimiçi makine yok.
+start-machine = Makine
+start-project = Proje
+start-other-folder = Başka bir klasör…
+start-directory = Çalışma klasörü
+start-directory-placeholder = Seçilen makinedeki tam klasör yolu
+start-portable = Ortak proje kimliği oluştur
+start-portable-explain = Proje klasörüne .agent-project.json dosyası ekler. Projeyi diğer makinelerle aynı grupta görmek için bu dosyayı Git ile veya kopyalayarak taşıyın. Mevcut kimlik dosyası korunur.
+start-select-directory = Bu klasörü kullan
+start-in-directory = Ajan bu klasörde çalışacak. Mevcut dosyalar ve dal korunur.
+start-project-id = Proje kimliği: { $id }
+start-separate-worktree = Ayrı bir çalışma kopyası oluştur
+start-identity-change = Bu klasörü değişen proje kimliğiyle eşleştir
+start-directory-unsupported = Seçilen klasörde ajan başlatmak için bu makineyi güncelleyin.
+start-directory-failed = Klasör seçilemedi. Yolu ve erişim izinlerini kontrol edin.
+workspace-shared = Ortak klasör · değişiklikler çalışma alanına ait
+filter-project = Proje
+filter-all-projects = Tüm projeler
+filter-project-machines = { $name } · { $count } makine
+
+start-directory-agent-unsupported = Bu ajan, ayarlarını yüklemek için ayrı bir çalışma kopyası gerektiriyor.
+
+audit-action-directoryinspect = Bir klasör seçti
+audit-action-agentlaunch = Bir klasörde ajan başlattı
+audit-action-workspacequery = Çalışma alanının dosyalarına veya değişikliklerine baktı

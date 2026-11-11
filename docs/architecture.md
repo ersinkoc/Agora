@@ -90,17 +90,29 @@ prompt, or PTY input as a last resort) and is marked as such in the audit log.
 
 ```
 Owner/Team ─┬─ Node ── Checkout ── Worktree
-            └─ Project ─┬─ Agent (kind, node, worktree, level, state, session)
+            └─ Project ─┬─ Agent (kind, node, workspace, level, state, session)
                         ├─ Terminal (node, purpose: agent | shell | service)
                         ├─ Channel / Message
                         ├─ Task
                         └─ Lease
 ```
 
-- **Project identity** is machine-independent: normalized remote URL + root commit hash. A project with no
-  remote uses root commit only. (ADR-0003)
-- **Isolation:** each agent gets its own worktree and branch by default. Sharing a worktree is opt-in and
-  requires leases.
+- **Project identity:** optional `.agent-project.json` at the Git root (or selected non-Git folder) contains a random
+  UUID `project_id`. Only an explicit owner action creates it; committing/copying it groups clones across nodes.
+  Otherwise use normalized remote URL + root commit (no remote: root commit alone). A standalone folder has a
+  node-local identity, without a fabricated Git commit. Metadata never grants access. Changed confirmed bindings
+  require explicit owner confirmation. (ADR-0003, ADR-0052)
+- **Workspace:** an owner-selected canonical directory, possibly a subdirectory or non-Git folder. Several agents
+  may share one workspace. New `directory.inspect` / `agent.launch` commands use this directory by default;
+  explicit worktree mode creates an isolated branch and preserves the selected subdirectory. Legacy `agent.start`
+  keeps creating a worktree. Session resume preserves its cwd. The node never cleans or removes user-owned folders.
+- **Integration configuration:** directory-mode L1 agents receive separate per-session MCP configuration below the
+  node's worktree storage, via existing manifest CLI/environment injection. User files are preserved. Manifests
+  whose MCP support requires a fixed in-project config file need explicit worktree mode. L2/L3 hosted sessions
+  receive the selected cwd through the existing adapter interface.
+- **Shared changes:** a workspace has one diff/status, not a diff attributed to each agent. Leases govern writes
+  mediated by the node; they cannot intercept an agent's own shell writes. Project identity groups sessions across
+  machines but transfers no files.
 - **Ownership:** nodes are authoritative for runtime facts (process alive, terminal output, file contents,
   git state). The hub is authoritative for coordination facts (tasks, leases granted, approvals, messages).
 - **Event sourcing at the hub:** hub state is a projection of events from nodes and clients. This gives the

@@ -62,7 +62,7 @@ try {
   // Twenty agents on the node: how long a terminal takes to appear when you pick one (budget: snapshot <= 150 ms), and how
   // much memory the page holds with several terminals open.
   const { execFileSync } = await import('node:child_process');
-  for (let i = 0; i < 19; i++) execFileSync(stack.bin, ['agent', 'start', 'shell'], { env: stack.env });
+  for (let i = 0; i < 19; i++) execFileSync(stack.bin, ['agent', 'start', 'shell'], { env: stack.env, cwd: stack.proj });
   await page.reload();
   await page.waitForFunction(() => document.querySelectorAll('aside button[aria-pressed]').length >= 20, null, { timeout: 30000 });
   await page.waitForTimeout(1500);
