@@ -26,7 +26,8 @@ Wire messages, numeric tags and signature encoding are enumerated in `../specs/p
   sessions with distinct integration configs, manual terminal/adapter resume, non-Git folders after node startup, failed
   start cleanup, and explicit worktree creation. No real agent/accounts/tokens are used.
 - P-256 tests reject field substitution, expiry, cross-node use, absent signatures, restricted devices and replay after a
-  restart. Hub scope tests hide ungranted workspaces even when another node carries the same portable project ID.
+  restart. Mixed-version router tests refuse directory commands before forwarding when the node did not negotiate
+  `workspace.directory`, while retaining legacy requests. Hub scope tests hide ungranted workspaces even when another node carries the same portable project ID.
 - Web: 80 tests pass, including cross-node project grouping without session/path merging and workspace snapshot reload.
   TypeScript and production build pass. i18n lint, docs checks and additive-schema comparison against main pass. Existing
   protocol golden files are unchanged; new messages have new fixtures.
@@ -47,7 +48,8 @@ Wire messages, numeric tags and signature encoding are enumerated in `../specs/p
 
 Text echo and terminal snapshot meet their respective targets in this run. Headless next-frame pacing exceeds the 16 ms
 interaction target; the flood achieved 4.6 MB/s, so this run does not establish the 10 MB/s rendering budget. Budgets are
-unchanged. Shared-directory Git status is polled once per path; legacy and new workspace bindings receive separate events.
+unchanged. The later four-terminal flood completion check timed out after 180 s (zero observed long tasks, 17 MB JS
+heap); aggregate throughput is inconclusive and is not counted as a passing rendering-budget check. Shared-directory Git status is polled once per path; legacy and new workspace bindings receive separate events.
 
 ## Screenshots and reproduction
 

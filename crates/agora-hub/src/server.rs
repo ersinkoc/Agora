@@ -136,7 +136,9 @@ where
     conn.send(&frame(STREAM_CONTROL, kinds::RESUME_OK, ok.encode_to_vec()))
         .await?;
 
-    let (_registration, commands) = hub.router().register(node_id);
+    let (_registration, commands) = hub
+        .router()
+        .register_with_capabilities(node_id, welcome.capabilities);
     let result = stream_events(&mut conn, &mut session, hub, node_id, commands).await;
     // However it ended, the hub now knows this node is not connected.
     let _ = hub.node_disconnected(node_id, now_ms());
