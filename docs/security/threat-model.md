@@ -106,3 +106,9 @@ non-directory or symlink is refused before launch. Workspace diffs include an ex
 even for an empty requested path, keeping parent-checkout changes outside the workspace review. Confinement tests
 place a selected subdirectory outside the shared system temp folder and prove inside writes succeed while parent
 checkout writes fail, in both directory and explicit-worktree modes. Explicit policy write allowances still apply.
+
+## Open gap: unix sockets under confinement
+
+A confined agent (`sandbox = worktree`) can connect to any unix socket it can name. A tmux server socket or `SSH_AUTH_SOCK` lets it run a command or use
+credentials outside the confinement. Landlock covers this only from ABI 9; Seatbelt needs an explicit rule. Tracked as L21 in
+`docs/backlog/lan-test-findings.md`; `worktree-offline` on macOS already allows only the agent's own mesh socket.
