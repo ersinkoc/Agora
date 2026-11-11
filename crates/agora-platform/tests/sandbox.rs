@@ -1,4 +1,5 @@
-//! A confined process (ADR-0047) can write where it was allowed and nowhere else, and cannot read what was not listed.
+//! A confined process (ADR-0047) can write where it was allowed and nowhere else, reads what was listed, and cannot read what
+//! was not listed.
 //! Skipped, with a line saying so, on a machine that cannot confine (no Landlock).
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -29,25 +30,37 @@ fn a_confined_process_writes_only_where_it_was_allowed() {
         return;
     }
     let dir = std::env::temp_dir().join(format!("agora-sandbox-{}", std::process::id()));
-    let (allowed, denied, secret) = (dir.join("work"), dir.join("elsewhere"), dir.join("secret"));
-    for d in [&allowed, &denied, &secret] {
+    let (allowed, denied, secret, listed) = (
+        dir.join("work"),
+        dir.join("elsewhere"),
+        dir.join("secret"),
+        dir.join("listed"),
+    );
+    for d in [&allowed, &denied, &secret, &listed] {
         std::fs::create_dir_all(d).unwrap();
     }
     std::fs::write(secret.join("key"), "hunter2").unwrap();
-    let sb = Sandbox {
-        read: ["/usr", "/lib", "/lib64", "/bin", "/etc", "/dev", "/proc"]
+    std::fs::write(listed.join("note"), "listed-note").unwrap();
+    let mut read: Vec<std::path::PathBuf> =
+        ["/usr", "/lib", "/lib64", "/bin", "/etc", "/dev", "/proc"]
             .map(Into::into)
-            .to_vec(),
+            .to_vec();
+    read.push(listed.clone());
+    let sb = Sandbox {
+        read,
         write: vec![allowed.clone(), "/dev".into()],
     };
+    // The folders are below the temp folder, which macOS keeps private unless listed: the allowed ones must still be readable.
     let script = format!(
-        "echo in > {a}/ok && echo wrote-allowed; echo out > {d}/no 2>/dev/null || echo refused-write; cat {s}/key 2>/dev/null || echo refused-read",
+        "echo in > {a}/ok && cat {a}/ok && echo wrote-allowed; cat {l}/note; echo out > {d}/no 2>/dev/null || echo refused-write; cat {s}/key 2>/dev/null || echo refused-read",
         a = allowed.display(),
+        l = listed.display(),
         d = denied.display(),
         s = secret.display()
     );
     let out = run(Some(sb), &script);
     assert!(out.contains("wrote-allowed"), "{out}");
+    assert!(out.contains("listed-note"), "{out}");
     assert!(
         out.contains("refused-write") && out.contains("refused-read"),
         "{out}"
