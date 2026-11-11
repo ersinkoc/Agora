@@ -67,6 +67,7 @@ pub struct ControlContext {
     pub approvals: Option<Arc<crate::approvals::NodeApprovals>>,
     /// Transcripts of agents without a terminal (ADR-0038).
     pub chat: Arc<crate::chat::ChatBoard>,
+    directories: Mutex<crate::directory::Bindings>,
     names: AtomicU64,
     seen: Mutex<IdempotencyCache>,
 }
@@ -92,6 +93,9 @@ impl ControlContext {
         Self {
             supervisor,
             projects,
+            directories: Mutex::new(crate::directory::Bindings::load(
+                worktree_root.join(".directory-bindings.json"),
+            )),
             worktree_root,
             node_id,
             events,
@@ -273,6 +277,142 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                 .collect();
             Ok(v1::CommandOk {
                 result: Some(Ok_::AgentList(v1::AgentListResult { agents })),
+            })
+        }
+        Cmd::WorkspaceQuery(q) => {
+            let path = q
+                .workspace_id
+                .strip_prefix("directory:")
+                .ok_or_else(|| invalid("workspace_id"))?
+                .to_string();
+            let cmd = match q.operation.as_str() {
+                "list" => Cmd::FilesList(v1::FilesList {
+                    worktree_id: path,
+                    path: q.path.clone(),
+                }),
+                "read" => Cmd::FilesRead(v1::FilesRead {
+                    worktree_id: path,
+                    path: q.path.clone(),
+                }),
+                "diff" => Cmd::GitDiff(v1::GitDiff {
+                    worktree_id: path,
+                    path: q.path.clone(),
+                }),
+                "status" => Cmd::GitStatus(v1::GitStatus { worktree_id: path }),
+                "history" => Cmd::GitLog(v1::GitLog {
+                    worktree_id: path,
+                    limit: q.limit,
+                }),
+                _ => return Err(invalid("workspace.operation")),
+            };
+            execute(ctx, &cmd)
+        }
+        Cmd::DirectoryInspect(d) => {
+            let path = if Path::new(&d.path).is_dir() {
+                d.path.clone()
+            } else if !d.path.contains(['/', '\\']) {
+                resolve_project(ctx, &d.path)?
+                    .root
+                    .to_string_lossy()
+                    .into_owned()
+            } else {
+                d.path.clone()
+            };
+            let (mut info, _) =
+                crate::directory::inspect(&path, &ctx.node_id, d.create_project_id)?;
+            info.previous_project_id = ctx
+                .directories
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .previous(&info);
+            Ok(v1::CommandOk {
+                result: Some(Ok_::DirectoryInfo(info)),
+            })
+        }
+        Cmd::AgentLaunch(a) => {
+            let (info, project) = crate::directory::inspect(&a.path, &ctx.node_id, false)?;
+            if info.path != a.path || info.project_id != a.project_id {
+                return Err(invalid("directory.project_id"));
+            }
+            if a.separate_worktree && info.git_root.is_empty() {
+                return Err(invalid("directory.git_root"));
+            }
+            let mut bindings = ctx.directories.lock().unwrap_or_else(|e| e.into_inner());
+            if !bindings.previous(&info).is_empty() && !a.accept_identity_change {
+                return Err(invalid("directory.identity_changed"));
+            }
+            let n = ctx.names.fetch_add(1, Ordering::SeqCst);
+            let stamp = crate::grants::now_ms();
+            let req = StartRequest {
+                kind: a.kind.clone(),
+                checkout: PathBuf::from(&info.path),
+                worktree_root: ctx.worktree_root.clone(),
+                name: format!("{}-{stamp:x}{n}", a.kind),
+                base: None,
+            };
+            // Record only an explicitly confirmed identity. A failed process never owns or removes the existing directory.
+            bindings.confirm(&info)?;
+            drop(bindings);
+            let mut sup = ctx.sup();
+            let id = sup
+                .start_selected(
+                    &req,
+                    project,
+                    Path::new(&info.git_root),
+                    a.separate_worktree,
+                    Instant::now(),
+                )
+                .map_err(sup_err)?;
+            let view = sup
+                .list()
+                .into_iter()
+                .find(|v| v.id == id)
+                .ok_or_else(|| invalid("agent.id"))?;
+            let has_terminal = sup.terminal(&id).is_some();
+            let path = view.worktree.to_string_lossy().into_owned();
+            let workspace_id = format!("directory:{path}");
+            drop(sup);
+            if let Some(ev) = &ctx.events {
+                let git_root = if a.separate_worktree {
+                    req.worktree_root
+                        .join(&req.name)
+                        .to_string_lossy()
+                        .into_owned()
+                } else {
+                    info.git_root.clone()
+                };
+                ev.directory_agent_launched(
+                    &id,
+                    &v1::WorkspaceRegistered {
+                        workspace_id: workspace_id.clone(),
+                        node_id: ctx.node_id.clone(),
+                        project_id: info.project_id.clone(),
+                        path: path.clone(),
+                        git_root,
+                        branch: if a.separate_worktree {
+                            format!("agent/{}", req.name)
+                        } else {
+                            info.branch.clone()
+                        },
+                        managed_worktree: a.separate_worktree,
+                        files_changed: crate::git::status(Path::new(&path))
+                            .map_or(0, |s| s.files_changed),
+                    },
+                    &a.kind,
+                    has_terminal,
+                );
+            }
+            Ok(v1::CommandOk {
+                result: Some(Ok_::AgentLaunch(v1::AgentLaunchResult {
+                    agent_id: id.as_str().into(),
+                    terminal_id: if has_terminal {
+                        terminal_id_of(&id)
+                    } else {
+                        String::new()
+                    },
+                    workspace_id,
+                    path,
+                })),
             })
         }
         Cmd::AgentStart(a) => {
@@ -561,6 +701,9 @@ pub(crate) fn command_name(c: &Cmd) -> &'static str {
     match c {
         Cmd::ProjectList(_) => "project.list",
         Cmd::AgentStart(_) => "agent.start",
+        Cmd::DirectoryInspect(_) => "directory.inspect",
+        Cmd::AgentLaunch(_) => "agent.launch",
+        Cmd::WorkspaceQuery(_) => "workspace.query",
         Cmd::AgentStop(_) => "agent.stop",
         Cmd::AgentPrompt(_) => "agent.prompt",
         Cmd::AgentSetMode(_) => "agent.set_mode",

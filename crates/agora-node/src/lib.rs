@@ -18,3 +18,5 @@ pub mod terminal;
 pub mod uplink;
 pub mod uplink_client;
 pub mod usage_files;
+
+pub mod directory;

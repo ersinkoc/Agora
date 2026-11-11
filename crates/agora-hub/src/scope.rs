@@ -20,6 +20,7 @@ pub struct Scope {
     /// Hub-wide key of a checkout, worktree, agent, terminal or approval → the `node/project` it belongs to.
     checkouts: BTreeMap<String, String>,
     worktrees: BTreeMap<String, String>,
+    workspaces: BTreeMap<String, String>,
     agents: BTreeMap<String, String>,
     terminals: BTreeMap<String, String>,
     approvals: BTreeMap<String, String>,
@@ -39,6 +40,10 @@ impl Scope {
             if let Some(p) = s.checkouts.get(&w.checkout_id).cloned() {
                 s.worktrees.insert(k.clone(), p);
             }
+        }
+        for (k, w) in &view.workspaces {
+            s.workspaces
+                .insert(k.clone(), qualified(&w.node_id, &w.project_id));
         }
         for (k, a) in &view.agents {
             s.agents
@@ -85,6 +90,18 @@ impl Scope {
                 out.worktrees.insert(k.clone(), w.clone());
             }
         }
+        for (k, w) in &view.workspaces {
+            if self.granted(self.workspaces.get(k)) {
+                out.workspaces.insert(k.clone(), w.clone());
+            }
+        }
+        for (agent, workspace) in &view.agent_workspaces {
+            if self.granted(self.agents.get(agent)) && self.granted(self.workspaces.get(workspace))
+            {
+                out.agent_workspaces
+                    .insert(agent.clone(), workspace.clone());
+            }
+        }
         for (k, a) in &view.agents {
             if self.granted(self.agents.get(k)) {
                 out.agents.insert(k.clone(), a.clone());
@@ -114,6 +131,16 @@ impl Scope {
         let q = |id: &str| qualified(node, id);
         let Some(body) = &ev.body else { return false };
         match body {
+            Body::WorkspaceStatusChanged(e) => {
+                self.granted(self.workspaces.get(&q(&e.workspace_id)))
+            }
+            Body::WorkspaceRegistered(e) => {
+                let p = qualified(node, &e.project_id);
+                self.workspaces.insert(q(&e.workspace_id), p.clone());
+                self.projects.contains(&p)
+            }
+            Body::AgentWorkspaceBound(e) => self.granted(self.workspaces.get(&q(&e.workspace_id))),
+
             Body::NodeOnline(e) => self.node_visible(&e.node_id),
             Body::NodeOffline(e) => self.node_visible(&e.node_id),
             Body::NodeResources(e) => self.node_visible(&e.node_id),
@@ -196,6 +223,7 @@ impl Scope {
         let q = |id: &str| qualified(node, id);
         match command {
             // An existing worktree to start in must be the person's too (a node refuses this today; the check is here for when it does not).
+            C::WorkspaceQuery(c) => self.granted(self.workspaces.get(&q(&c.workspace_id))),
             C::AgentStart(c) => {
                 self.projects.contains(&qualified(node, &c.project_id))
                     && (c.worktree_id.is_empty()
@@ -272,6 +300,85 @@ mod tests {
             granted.iter().map(ToString::to_string).collect(),
             &View::default(),
         )
+    }
+
+    #[test]
+    fn portable_identity_does_not_grant_another_nodes_workspace_or_arbitrary_directory_launch() {
+        let mut full = View::default();
+        let mut s = scope(&["n1/id:shared"]);
+        let workspace = |node: &str, id: &str| {
+            ev(
+                node,
+                Body::WorkspaceRegistered(v1::WorkspaceRegistered {
+                    workspace_id: id.into(),
+                    node_id: "forged-node".into(),
+                    project_id: "id:shared".into(),
+                    path: "/private".into(),
+                    ..Default::default()
+                }),
+            )
+        };
+        for (event, visible) in [
+            (workspace("n1", "w1"), true),
+            (workspace("n2", "w2"), false),
+            (agent("n1", "a1", "id:shared"), true),
+            (agent("n2", "a2", "id:shared"), false),
+            (
+                ev(
+                    "n1",
+                    Body::AgentWorkspaceBound(v1::AgentWorkspaceBound {
+                        agent_id: "a1".into(),
+                        workspace_id: "w1".into(),
+                    }),
+                ),
+                true,
+            ),
+            (
+                ev(
+                    "n2",
+                    Body::AgentWorkspaceBound(v1::AgentWorkspaceBound {
+                        agent_id: "a2".into(),
+                        workspace_id: "w2".into(),
+                    }),
+                ),
+                false,
+            ),
+        ] {
+            full.apply(&event);
+            assert_eq!(s.admit(&event), visible);
+        }
+        let cut = s.filter_view(&full);
+        assert_eq!(cut.workspaces.len(), 1);
+        assert_eq!(cut.workspaces["n1/w1"].node_id, "n1");
+        assert_eq!(cut.agent_workspaces.len(), 1);
+        assert_eq!(
+            Scope::from_view(["n1/id:shared".to_string()].into(), &full).filter_view(&full),
+            cut
+        );
+        let query = |id: &str| {
+            C::WorkspaceQuery(v1::WorkspaceQuery {
+                workspace_id: id.into(),
+                operation: "read".into(),
+                ..Default::default()
+            })
+        };
+        assert!(s.command_allowed("n1", &query("w1")));
+        assert!(!s.command_allowed("n2", &query("w2")));
+        assert!(!s.command_allowed("n1", &C::DirectoryInspect(v1::DirectoryInspect::default())));
+        assert!(!s.command_allowed(
+            "n1",
+            &C::AgentLaunch(v1::AgentLaunch {
+                project_id: "id:shared".into(),
+                ..Default::default()
+            })
+        ));
+        assert!(!s.admit(&ev(
+            "n2",
+            Body::WorkspaceStatusChanged(v1::WorkspaceStatusChanged {
+                workspace_id: "w2".into(),
+                ..Default::default()
+            })
+        )));
     }
 
     #[test]

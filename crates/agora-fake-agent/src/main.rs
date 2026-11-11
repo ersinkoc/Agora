@@ -6,6 +6,21 @@ use std::process::ExitCode;
 use agora_fake_agent::{play, Script};
 
 fn main() -> ExitCode {
+    if std::env::args().nth(1).as_deref() == Some("--probe-directory") {
+        let report = std::env::args()
+            .nth(2)
+            .unwrap_or_default()
+            .replace("{pid}", &std::process::id().to_string());
+        let value = serde_json::json!({"cwd": std::env::current_dir().ok(), "args": std::env::args().collect::<Vec<_>>()});
+        if std::fs::write(report, value.to_string()).is_err() {
+            return ExitCode::from(1);
+        }
+        let mut line = String::new();
+        while std::io::stdin().read_line(&mut line).is_ok_and(|n| n != 0) {
+            line.clear();
+        }
+        return ExitCode::SUCCESS;
+    }
     let mut args = std::env::args().skip(1);
     let mut path = None;
     if std::env::args().nth(1).as_deref() == Some("--adapter") {

@@ -307,6 +307,29 @@ impl EventSink {
         }));
     }
 
+    pub fn directory_agent_launched(
+        &self,
+        agent: &AgentId,
+        workspace: &v1::WorkspaceRegistered,
+        kind: &str,
+        terminal: bool,
+    ) {
+        self.record(Body::WorkspaceRegistered(workspace.clone()));
+        self.record(Body::AgentWorkspaceBound(v1::AgentWorkspaceBound {
+            agent_id: agent.as_str().into(),
+            workspace_id: workspace.workspace_id.clone(),
+        }));
+        self.agent_started(agent, &workspace.project_id, &workspace.node_id, "", kind);
+        if terminal {
+            self.record(Body::TerminalOpened(v1::TerminalOpened {
+                terminal_id: crate::control::terminal_id_of(agent),
+                node_id: workspace.node_id.clone(),
+                purpose: v1::TerminalPurpose::Agent as i32,
+                agent_id: agent.as_str().into(),
+            }));
+        }
+    }
+
     /// Highest sequence number the hub has acknowledged (durable).
     pub fn acked(&self) -> u64 {
         self.log.lock().unwrap_or_else(|e| e.into_inner()).acked()
@@ -625,7 +648,8 @@ impl Node {
         approvals.set_limits(Arc::clone(&limits));
         let grants = Arc::new(
             crate::grants::Grants::new(&cfg.node_id, Arc::clone(&approvals), signed)
-                .with_limits(Arc::clone(&limits)),
+                .with_limits(Arc::clone(&limits))
+                .with_directory_nonce_file(cfg.data_dir.join("directory-nonces.json")),
         );
 
         let supervisor = Arc::new(Mutex::new(sup));
@@ -814,16 +838,26 @@ impl Node {
 /// [`GIT_POLL`] on its own thread so slow git calls never delay the supervisor's ticks. The first check of a
 /// workspace is reported too, so a client that connects later sees the current state from the event log.
 fn watch_git(sup: &Mutex<Supervisor>, ev: &EventSink, stop: &AtomicBool) {
-    let mut last: std::collections::HashMap<PathBuf, (u32, u32, u32, String)> =
+    let mut last: std::collections::HashMap<(PathBuf, bool), (u32, u32, u32, String)> =
         std::collections::HashMap::new();
     while !stop.load(Ordering::Acquire) {
         let views = sup.lock().unwrap_or_else(|e| e.into_inner()).list();
-        last.retain(|path, _| views.iter().any(|v| &v.worktree == path));
+        last.retain(|(path, _), _| views.iter().any(|v| &v.worktree == path));
+        // Shared sessions have one Git status call per directory. A legacy and a new binding each need their event.
+        let mut paths = std::collections::BTreeMap::<&Path, (bool, bool)>::new();
         for v in views.iter().filter(|v| v.running) {
+            let modes = paths.entry(&v.worktree).or_default();
+            if v.directory {
+                modes.0 = true;
+            } else {
+                modes.1 = true;
+            }
+        }
+        for (path, (directory, legacy)) in paths {
             if stop.load(Ordering::Acquire) {
                 return;
             }
-            let Ok(st) = git::status(&v.worktree) else {
+            let Ok(st) = git::status(path) else {
                 continue;
             };
             let now = (
@@ -832,9 +866,26 @@ fn watch_git(sup: &Mutex<Supervisor>, ev: &EventSink, stop: &AtomicBool) {
                 st.deletions,
                 st.head_commit.clone(),
             );
-            if last.get(&v.worktree) != Some(&now) {
-                last.insert(v.worktree.clone(), now);
-                ev.git_status_changed(&v.worktree.to_string_lossy(), &st);
+            for (enabled, is_directory) in [(directory, true), (legacy, false)] {
+                if !enabled {
+                    continue;
+                }
+                let key = (path.to_path_buf(), is_directory);
+                if last.get(&key) == Some(&now) {
+                    continue;
+                }
+                last.insert(key, now.clone());
+                if is_directory {
+                    ev.record(Body::WorkspaceStatusChanged(v1::WorkspaceStatusChanged {
+                        workspace_id: format!("directory:{}", path.to_string_lossy()),
+                        files_changed: st.files_changed,
+                        insertions: st.insertions,
+                        deletions: st.deletions,
+                        head_commit: st.head_commit.clone(),
+                    }));
+                } else {
+                    ev.git_status_changed(&path.to_string_lossy(), &st);
+                }
             }
         }
         let until = Instant::now() + GIT_POLL;

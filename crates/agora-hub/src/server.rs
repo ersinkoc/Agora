@@ -277,6 +277,15 @@ pub trait ClientAuth {
 /// The wire form of the hub's view (ADR-0027). Ids are the hub-wide keys.
 pub fn snapshot_of(view: &View, pos: u64) -> v1::Snapshot {
     v1::Snapshot {
+        workspaces: view.workspaces.values().cloned().collect(),
+        agent_workspaces: view
+            .agent_workspaces
+            .iter()
+            .map(|(agent, workspace)| v1::AgentWorkspaceBound {
+                agent_id: agent.clone(),
+                workspace_id: workspace.clone(),
+            })
+            .collect(),
         pos,
         nodes: view
             .nodes

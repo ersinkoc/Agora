@@ -319,7 +319,8 @@ pub fn viewer_may(command: &agora_protocol::v1::command_request::Command) -> boo
     use agora_protocol::v1::command_request::Command as C;
     matches!(
         command,
-        C::ProjectList(_)
+        C::WorkspaceQuery(_)
+            | C::ProjectList(_)
             | C::AgentList(_)
             | C::AgentKinds(_)
             | C::UsageReport(_)
