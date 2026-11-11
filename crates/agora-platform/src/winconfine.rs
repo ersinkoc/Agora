@@ -14,17 +14,22 @@ use std::ptr::{null, null_mut};
 
 use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, LocalFree, FILETIME, HANDLE};
 use windows_sys::Win32::Security::Authorization::{
-    BuildTrusteeWithSidW, ConvertStringSidToSidW, GetNamedSecurityInfoW, SetEntriesInAclW,
-    SetNamedSecurityInfoW, EXPLICIT_ACCESS_W, GRANT_ACCESS, REVOKE_ACCESS, SE_FILE_OBJECT,
+    BuildTrusteeWithSidW, ConvertSidToStringSidW, ConvertStringSidToSidW, GetNamedSecurityInfoW,
+    SetEntriesInAclW, SetNamedSecurityInfoW, EXPLICIT_ACCESS_W, GRANT_ACCESS, REVOKE_ACCESS,
+    SE_FILE_OBJECT,
 };
 use windows_sys::Win32::Security::Cryptography::{
     BCryptGenRandom, BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+};
+use windows_sys::Win32::Security::Isolation::{
+    CreateAppContainerProfile, DeleteAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
 };
 use windows_sys::Win32::Security::{
     CreateRestrictedToken, GetTokenInformation, TokenLogonSid, DACL_SECURITY_INFORMATION,
     DISABLE_MAX_PRIVILEGE, PSID, SID_AND_ATTRIBUTES, TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE,
     TOKEN_GROUPS, TOKEN_QUERY,
 };
+use windows_sys::Win32::Security::{FreeSid, SECURITY_CAPABILITIES};
 use windows_sys::Win32::Storage::FileSystem::{
     DELETE, FILE_DELETE_CHILD, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
 };
@@ -250,6 +255,62 @@ pub(crate) struct Confinement {
     granted: Vec<PathBuf>,
     ledger: PathBuf,
     token: Token,
+    /// PROTOTYPE (option 2): the agent's AppContainer profile name (NUL-terminated), deleted on drop.
+    container: Vec<u16>,
+    /// PROTOTYPE: capability SIDs (kept alive for the process start) and their attribute entries.
+    _caps: Vec<Sid>,
+    cap_attrs: Vec<SID_AND_ATTRIBUTES>,
+}
+
+/// PROTOTYPE (option 2): creates (or reuses) an AppContainer profile and returns its SID as a string; the SID from the API is freed.
+fn app_container(name: &[u16]) -> io::Result<String> {
+    let mut psid: PSID = null_mut();
+    let display = wide(std::ffi::OsStr::new("Agora agent"));
+    // SAFETY: NUL-terminated strings; `psid` receives a SID freed with FreeSid below.
+    let mut hr = unsafe {
+        CreateAppContainerProfile(
+            name.as_ptr(),
+            display.as_ptr(),
+            display.as_ptr(),
+            null(),
+            0,
+            &mut psid,
+        )
+    };
+    if hr == 0x800700B7u32 as i32 {
+        // HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS): reuse it.
+        // SAFETY: as above.
+        hr = unsafe { DeriveAppContainerSidFromAppContainerName(name.as_ptr(), &mut psid) };
+    }
+    if hr != 0 {
+        eprintln!(
+            "PROTO-TAG: CreateAppContainerProfile failed: 0x{:08X}",
+            hr as u32
+        );
+        return Err(io::Error::other(format!(
+            "app container: 0x{:08X}",
+            hr as u32
+        )));
+    }
+    let mut text: windows_sys::core::PWSTR = null_mut();
+    // SAFETY: a valid SID; `text` receives a LocalAlloc'd string.
+    let ok = unsafe { ConvertSidToStringSidW(psid, &mut text) };
+    // SAFETY: allocated by the profile API, freed once.
+    unsafe { FreeSid(psid) };
+    if ok == 0 {
+        return Err(last_error());
+    }
+    // SAFETY: a NUL-terminated wide string from the call above.
+    let s = unsafe {
+        let mut n = 0;
+        while *text.add(n) != 0 {
+            n += 1;
+        }
+        String::from_utf16_lossy(std::slice::from_raw_parts(text, n))
+    };
+    // SAFETY: LocalAlloc'd by ConvertSidToStringSidW.
+    unsafe { LocalFree(text.cast()) };
+    Ok(s)
 }
 
 impl Confinement {
@@ -258,9 +319,29 @@ impl Confinement {
     }
 
     fn in_ledger_dir(sandbox: &Sandbox, dir: &Path) -> io::Result<Self> {
-        let sid_text = random_sid_string()?;
+        // PROTOTYPE (option 2): the per-agent SID is the SID of a fresh AppContainer profile.
+        let random = random_sid_string()?;
+        let suffix: String = random
+            .chars()
+            .filter(char::is_ascii_digit)
+            .take(20)
+            .collect();
+        let container = wide(std::ffi::OsStr::new(&format!("agora.proto.{suffix}")));
+        let sid_text = app_container(&container)?;
         let sid = Sid::from_string(&sid_text)?;
         let ledger = dir.join(format!("{sid_text}.acl"));
+        // PROTOTYPE: capabilities named in AGORA_PROTO_CAPS (only `internetClient`, S-1-15-3-1, for now).
+        let mut caps = Vec::new();
+        if std::env::var("AGORA_PROTO_CAPS").is_ok_and(|v| v.contains("internetClient")) {
+            caps.push(Sid::from_string("S-1-15-3-1")?);
+        }
+        let cap_attrs = caps
+            .iter()
+            .map(|c| SID_AND_ATTRIBUTES {
+                Sid: c.0,
+                Attributes: 0x4, // SE_GROUP_ENABLED
+            })
+            .collect();
         // Folders that exist, read ones first; a folder that is also writable keeps the stronger entry.
         let mut wanted: Vec<(PathBuf, u32)> = Vec::new();
         for p in &sandbox.read {
@@ -281,19 +362,42 @@ impl Confinement {
             granted: Vec::new(),
             ledger,
             token: Token(null_mut()),
+            container,
+            _caps: caps,
+            cap_attrs,
         };
         for (path, mask) in wanted {
             // On failure `confinement` is dropped, which undoes what was added so far.
+            let t = std::time::Instant::now();
             change_acl(&path, confinement.sid.0, mask, true)?;
+            eprintln!(
+                "PROTO-TAG: granted {} in {} ms",
+                path.display(),
+                t.elapsed().as_millis()
+            );
             confinement.granted.push(path);
         }
-        confinement.token = restricted_token(&confinement.sid)?;
         Ok(confinement)
     }
 
-    /// The primary token to start the agent's process with.
+    /// The primary token to start the agent's process with (unused by the AppContainer prototype).
+    #[allow(dead_code)]
     pub(crate) fn token(&self) -> HANDLE {
         self.token.0
+    }
+
+    /// PROTOTYPE (option 2): what `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES` points at; valid while `self` lives.
+    pub(crate) fn security_capabilities(&self) -> SECURITY_CAPABILITIES {
+        SECURITY_CAPABILITIES {
+            AppContainerSid: self.sid.0,
+            Capabilities: if self.cap_attrs.is_empty() {
+                null_mut()
+            } else {
+                self.cap_attrs.as_ptr().cast_mut()
+            },
+            CapabilityCount: self.cap_attrs.len() as u32,
+            Reserved: 0,
+        }
     }
 }
 
@@ -305,6 +409,15 @@ impl Drop for Confinement {
                 all_removed = false;
             }
         }
+        // PROTOTYPE: the profile goes with the agent. (Crash recovery of profiles is not prototyped.)
+        // SAFETY: a NUL-terminated name.
+        let hr = unsafe { DeleteAppContainerProfile(self.container.as_ptr()) };
+        if hr != 0 {
+            eprintln!(
+                "PROTO-TAG: DeleteAppContainerProfile failed: 0x{:08X}",
+                hr as u32
+            );
+        }
         // A failed removal keeps the ledger so the next start retries; the SID dies with the agent either way.
         if all_removed {
             let _ = std::fs::remove_file(&self.ledger);
@@ -314,6 +427,7 @@ impl Drop for Confinement {
 
 /// The current process's token, restricted: every privilege dropped, and the restricting list is the agent's SID, `Everyone`,
 /// `Users` and the logon SID (without that last one the console and desktop refuse the process).
+#[allow(dead_code)] // PROTOTYPE (option 2): replaced by the AppContainer.
 fn restricted_token(agent: &Sid) -> io::Result<Token> {
     let mut own: HANDLE = null_mut();
     // SAFETY: the pseudo handle of this process and an out pointer.

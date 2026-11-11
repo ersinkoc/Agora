@@ -54,8 +54,8 @@ fn a_confined_agent_commits_in_its_own_worktree() {
     git(&repo, &["commit", "-q", "-m", "init"]);
 
     // The identity is given on the command line: the user's global git config is outside what the agent may read.
-    let script = "echo agent> b.txt && git add b.txt 2> add-err.txt && \
-                  git -c user.name=agent -c user.email=agent@example.com commit -q -m from-agent 2> commit-err.txt && \
+    let script = "echo agent> b.txt && git add b.txt > nul 2> add-err.txt && \
+                  git -c user.name=agent -c user.email=agent@example.com commit -q -m from-agent > nul 2> commit-err.txt && \
                   echo ok> committed.txt";
     let manifest = Manifest::parse(&format!(
         "kind = \"committer\"\ndisplay_name = \"Committer\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"cmd.exe\", \"/c\", {script:?}]\n"
