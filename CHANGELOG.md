@@ -2,6 +2,12 @@
 
 Each release lists what a person using Agora can now do. The reasons are in `docs/adr/`; the state of every task is in `docs/backlog/`.
 
+## Next
+
+### Windows
+- Agent confinement for Windows is written (ADR-0050) and tested on real Windows in CI, but switched off until it is enabled after a check on a real machine.
+- A project is found by its id before its name, and a name two projects share is refused.
+
 ## 0.2.1
 
 ### Security fix
