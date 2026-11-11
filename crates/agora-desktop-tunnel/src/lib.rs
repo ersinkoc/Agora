@@ -22,6 +22,10 @@ pub enum TunnelError {
     BadAddress,
     /// The loopback port could not be opened.
     Listen,
+    /// Nothing answered at the hub address in time.
+    Unreachable,
+    /// The hub answered, but its certificate is not signed by the pinned CA for this address (or the TLS handshake failed).
+    Untrusted,
 }
 
 /// The SHA-256 of the CA's certificate, as upper-case hex pairs separated by colons: what the user compares on first use.
@@ -38,20 +42,68 @@ pub fn fingerprint(ca_pem: &str) -> Result<String, TunnelError> {
         .join(":"))
 }
 
-/// The name the hub's certificate must carry: its host, or `localhost` when the address is an IP number (the hub's own certificate
-/// names `localhost`).
+/// The name the hub's certificate must carry: its host name, or its IP number. A hub started without `--name` has a certificate for
+/// `localhost` only; for an IP address, [`PinnedVerifier`] also accepts that one.
 fn server_name(addr: &str) -> Result<ServerName<'static>, TunnelError> {
     let (host, port) = addr.rsplit_once(':').ok_or(TunnelError::BadAddress)?;
     if host.is_empty() || port.parse::<u16>().is_err() {
         return Err(TunnelError::BadAddress);
     }
     let host = host.trim_matches(['[', ']']);
-    let name = if host.parse::<std::net::IpAddr>().is_ok() {
-        "localhost"
-    } else {
-        host
-    };
-    ServerName::try_from(name.to_string()).map_err(|_| TunnelError::BadAddress)
+    ServerName::try_from(host.to_string()).map_err(|_| TunnelError::BadAddress)
+}
+
+/// Checks the hub's certificate against the pinned CA only. For an address given as an IP number, a certificate that names that IP
+/// (a hub started with `--name <ip>`) or `localhost` (a hub started without `--name`) is accepted; either way it must chain to the
+/// pinned CA, which signs nothing but this hub's certificates.
+#[derive(Debug)]
+struct PinnedVerifier(Arc<rustls::client::WebPkiServerVerifier>);
+
+impl rustls::client::danger::ServerCertVerifier for PinnedVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        server_name: &ServerName<'_>,
+        ocsp: &[u8],
+        now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        let first = self
+            .0
+            .verify_server_cert(end_entity, intermediates, server_name, ocsp, now);
+        match (&first, server_name) {
+            (Err(_), ServerName::IpAddress(_)) => {
+                let localhost = ServerName::try_from("localhost")
+                    .map_err(|_| rustls::Error::General("localhost is a valid name".to_string()))?;
+                self.0
+                    .verify_server_cert(end_entity, intermediates, &localhost, ocsp, now)
+                    .or(first)
+            }
+            _ => first,
+        }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        self.0.verify_tls12_signature(message, cert, dss)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        self.0.verify_tls13_signature(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.0.supported_verify_schemes()
+    }
 }
 
 fn connector(ca_pem: &str) -> Result<TlsConnector, TunnelError> {
@@ -64,13 +116,19 @@ fn connector(ca_pem: &str) -> Result<TlsConnector, TunnelError> {
     if roots.is_empty() {
         return Err(TunnelError::BadCa);
     }
-    let cfg = rustls::ClientConfig::builder_with_provider(Arc::new(
-        rustls::crypto::ring::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .map_err(|_| TunnelError::BadCa)?
-    .with_root_certificates(roots)
-    .with_no_client_auth();
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let verifier = rustls::client::WebPkiServerVerifier::builder_with_provider(
+        Arc::new(roots),
+        provider.clone(),
+    )
+    .build()
+    .map_err(|_| TunnelError::BadCa)?;
+    let cfg = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|_| TunnelError::BadCa)?
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(PinnedVerifier(verifier)))
+        .with_no_client_auth();
     Ok(TlsConnector::from(Arc::new(cfg)))
 }
 
@@ -124,6 +182,26 @@ pub async fn open(hub: &str, ca_pem: &str, port: u16) -> Result<Tunnel, TunnelEr
     Ok(Tunnel { local, task })
 }
 
+/// One TLS handshake with the hub at `hub`, trusting only `ca_pem`, then the connection is closed. The shell calls it before it
+/// remembers a hub, so a wrong certificate or address is reported on the connect screen instead of being saved: `open` alone
+/// cannot tell, because it checks each connection only when the page makes one.
+pub async fn check(hub: &str, ca_pem: &str) -> Result<(), TunnelError> {
+    let name = server_name(hub)?;
+    let tls = connector(ca_pem)?;
+    let tcp = match tokio::time::timeout(Duration::from_secs(10), TcpStream::connect(hub)).await {
+        Ok(Ok(tcp)) => tcp,
+        _ => return Err(TunnelError::Unreachable),
+    };
+    match tokio::time::timeout(Duration::from_secs(10), tls.connect(name, tcp)).await {
+        Ok(Ok(mut s)) => {
+            let _ = tokio::io::AsyncWriteExt::shutdown(&mut s).await;
+            Ok(())
+        }
+        Ok(Err(_)) => Err(TunnelError::Untrusted),
+        Err(_) => Err(TunnelError::Unreachable),
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -131,9 +209,14 @@ mod tests {
     use agora_hub::ca::Ca;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    /// A TLS server that answers one line with `hello <line>`, signed by `ca`.
+    /// A TLS server that answers one line with `hello <line>`, signed by `ca`, for `localhost`.
     async fn hub(ca: &Ca) -> SocketAddr {
-        let (cert, key) = ca.issue_server(&["localhost".to_string()]).unwrap();
+        hub_named(ca, "localhost").await
+    }
+
+    /// The same, with a certificate for `name` only.
+    async fn hub_named(ca: &Ca, name: &str) -> SocketAddr {
+        let (cert, key) = ca.issue_server(&[name.to_string()]).unwrap();
         let acceptor = agora_hub::tls::acceptor_with(&cert, &key, ca.cert_pem(), true).unwrap();
         let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = l.local_addr().unwrap();
@@ -187,6 +270,47 @@ mod tests {
         // The user pinned `real`; the server at the address is signed by someone else.
         let t = open(&addr.to_string(), real.cert_pem(), 0).await.unwrap();
         assert_eq!(ask(t.local, "page").await, "");
+    }
+
+    #[tokio::test]
+    async fn check_accepts_the_pinned_hub_and_names_what_is_wrong_otherwise() {
+        let real = Ca::generate("hub CA").unwrap();
+        let impostor = Ca::generate("other CA").unwrap();
+        let good = hub(&real).await.to_string();
+        let bad = hub(&impostor).await.to_string();
+        assert_eq!(check(&good, real.cert_pem()).await, Ok(()));
+        assert_eq!(
+            check(&bad, real.cert_pem()).await,
+            Err(TunnelError::Untrusted)
+        );
+        // A port nobody listens on: bind one, note it, close it.
+        let closed = {
+            let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            l.local_addr().unwrap().to_string()
+        };
+        assert_eq!(
+            check(&closed, real.cert_pem()).await,
+            Err(TunnelError::Unreachable)
+        );
+        assert_eq!(check(&good, "not a pem").await, Err(TunnelError::BadCa));
+    }
+
+    #[tokio::test]
+    async fn an_ip_address_accepts_a_certificate_for_that_ip_or_for_localhost_and_nothing_else() {
+        let ca = Ca::generate("hub CA").unwrap();
+        // A hub started with `--name 127.0.0.1` (a LAN hub names its IP) and one started without `--name`.
+        let by_ip = hub_named(&ca, "127.0.0.1").await.to_string();
+        let by_localhost = hub(&ca).await.to_string();
+        assert_eq!(check(&by_ip, ca.cert_pem()).await, Ok(()));
+        assert_eq!(check(&by_localhost, ca.cert_pem()).await, Ok(()));
+        let t = open(&by_ip, ca.cert_pem(), 0).await.unwrap();
+        assert_eq!(ask(t.local, "page").await, "hello page");
+        // A certificate for another name, even from the pinned CA, is refused.
+        let other = hub_named(&ca, "hub.example.com").await.to_string();
+        assert_eq!(
+            check(&other, ca.cert_pem()).await,
+            Err(TunnelError::Untrusted)
+        );
     }
 
     #[test]

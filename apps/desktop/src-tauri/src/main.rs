@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use agora_desktop_tunnel::{fingerprint, open, Tunnel};
+use agora_desktop_tunnel::{check, fingerprint, open, Tunnel, TunnelError};
 use serde::{Deserialize, Serialize};
 use tauri::{Manager, State};
 
@@ -41,7 +41,9 @@ fn saved(app: tauri::AppHandle) -> Option<Saved> {
     serde_json::from_str(&text).ok()
 }
 
-/// Opens the tunnel to `hub` trusting only `ca_pem`, remembers the choice, and returns the address the page loads.
+/// Checks that the hub at `hub` presents a certificate from `ca_pem`, then opens the tunnel, remembers the choice, and returns the
+/// address the page loads. A hub that does not answer or is not signed by that CA is not remembered; the error is a stable code
+/// (`unreachable`, `untrusted`, otherwise `failed`) the connect screen turns into words.
 #[tauri::command]
 async fn connect(
     app: tauri::AppHandle,
@@ -50,6 +52,14 @@ async fn connect(
     ca_pem: String,
     port: Option<u16>,
 ) -> Result<String, String> {
+    check(&hub, &ca_pem).await.map_err(|e| {
+        match e {
+            TunnelError::Unreachable => "unreachable",
+            TunnelError::Untrusted => "untrusted",
+            _ => "failed",
+        }
+        .to_string()
+    })?;
     // The remembered port first; if something else holds it now, any free one (the page then signs in again).
     let tunnel = match open(&hub, &ca_pem, port.unwrap_or(0)).await {
         Ok(t) => t,
