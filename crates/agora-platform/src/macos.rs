@@ -125,13 +125,25 @@ fn quote(p: &std::path::Path) -> String {
 
 /// The profile for `sb`: writing is denied everywhere except below the `write` folders, and reading contents is denied below
 /// [`PRIVATE`] except below the listed folders. Metadata stays readable so a path can be walked down to an allowed folder.
+///
+/// The allow names `file-read-data` itself: Seatbelt does not let `(allow file-read* ...)` undo an earlier
+/// `(deny file-read-data ...)` (seen on macOS 27), so a wildcard allow would leave the agent unable to read its own worktree.
+/// A listed folder that holds a [`PRIVATE`] folder (`/var` is `/private/var`, which holds every user's temp folder) is left out:
+/// everything outside the private folders is readable already, and allowing the parent would open the private folder again.
 pub(crate) fn profile(sb: &crate::Sandbox) -> String {
     let real = |p: &std::path::Path| std::fs::canonicalize(p).ok();
+    let holds_private = |p: &std::path::Path| {
+        PRIVATE
+            .iter()
+            .map(std::path::Path::new)
+            .any(|private| private != p && private.starts_with(p))
+    };
     let reads: Vec<String> = sb
         .read
         .iter()
         .chain(sb.write.iter())
         .filter_map(|p| real(p))
+        .filter(|p| !holds_private(p))
         .map(|p| quote(&p))
         .collect();
     let writes: Vec<String> = sb
@@ -149,7 +161,7 @@ pub(crate) fn profile(sb: &crate::Sandbox) -> String {
         private.join(" ")
     );
     if !reads.is_empty() {
-        out.push_str(&format!("(allow file-read* {})\n", reads.join(" ")));
+        out.push_str(&format!("(allow file-read-data {})\n", reads.join(" ")));
     }
     if !writes.is_empty() {
         out.push_str(&format!("(allow file-write* {})\n", writes.join(" ")));
@@ -182,5 +194,23 @@ mod sandbox_tests {
         let deny = p.find("(deny file-read-data").unwrap();
         let allow = p.find("(allow file-write*").unwrap();
         assert!(deny < allow, "{p}");
+        // The read allow names the denied operation; a wildcard does not undo a specific deny.
+        let read = p.find("(allow file-read-data").unwrap();
+        assert!(deny < read && !p.contains("(allow file-read*"), "{p}");
+    }
+
+    #[test]
+    fn a_listed_parent_of_a_private_folder_does_not_open_it() {
+        let sb = crate::Sandbox {
+            read: vec!["/var".into(), "/usr".into()],
+            write: vec![],
+        };
+        let p = super::profile(&sb);
+        // `/var` is `/private/var`, which holds `/private/var/folders`; it is left out, `/usr` stays.
+        assert!(!p.contains("(subpath \"/private/var\")"), "{p}");
+        assert!(
+            p.contains("(allow file-read-data (subpath \"/usr\"))"),
+            "{p}"
+        );
     }
 }
