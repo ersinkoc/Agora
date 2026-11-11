@@ -39,15 +39,22 @@ fn the_sandbox_lines_are_read_and_a_typo_is_the_strictest_level() {
     use agora_node::sandbox::Level;
     let dir = tmp("sandbox");
     let file = dir.join("policy");
+    // Absolute on every system: the temp folder's own path.
+    let (a, b, c) = (dir.join("a"), dir.join("b"), dir.join("c"));
     std::fs::write(
         &file,
-        "sandbox = worktree\nsandbox.read = /a, /b\nsandbox.write = /c\n",
+        format!(
+            "sandbox = worktree\nsandbox.read = {}, {}\nsandbox.write = {}\n",
+            a.display(),
+            b.display(),
+            c.display()
+        ),
     )
     .unwrap();
     let p = read_policy(&file).sandbox;
     assert_eq!(p.level, Level::Worktree);
-    assert_eq!(p.read.len(), 2);
-    assert_eq!(p.write, vec![std::path::PathBuf::from("/c")]);
+    assert_eq!(p.read, vec![a, b]);
+    assert_eq!(p.write, vec![c]);
     assert!(p.trusted_kinds.is_empty());
     std::fs::write(&file, "sandbox.trust_manifest = claude-code, codex\n").unwrap();
     assert_eq!(
@@ -57,6 +64,21 @@ fn the_sandbox_lines_are_read_and_a_typo_is_the_strictest_level() {
     std::fs::write(&file, "sandbox = wortree\n").unwrap();
     assert_eq!(read_policy(&file).sandbox.level, Level::WorktreeOffline);
     assert_eq!(read_policy(&dir.join("none")).sandbox.level, Level::Off);
+}
+
+#[test]
+fn sandbox_paths_may_start_at_the_home_folder_and_relative_or_parent_paths_are_dropped() {
+    let dir = tmp("sandbox-home");
+    let file = dir.join("policy");
+    std::fs::write(
+        &file,
+        "sandbox.read = ~/.gitconfig, ~/.rustup, relative/dir, ~/../escape\nsandbox.write = ~/.cargo/registry, ./here\n",
+    )
+    .unwrap();
+    let home = agora_node::usage_files::home_dir().expect("a home folder");
+    let p = read_policy(&file).sandbox;
+    assert_eq!(p.read, vec![home.join(".gitconfig"), home.join(".rustup")]);
+    assert_eq!(p.write, vec![home.join(".cargo/registry")]);
 }
 
 #[test]

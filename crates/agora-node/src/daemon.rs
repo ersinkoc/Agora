@@ -453,11 +453,12 @@ pub fn read_policy(path: &std::path::Path) -> Policy {
     p
 }
 
+/// `sandbox.read` / `sandbox.write`: absolute paths or `~/` below the home folder; a relative or `..` path is dropped, never guessed at.
 fn paths(v: &str) -> Vec<PathBuf> {
     v.split(',')
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
+        .filter_map(crate::sandbox::expand)
         .collect()
 }
 

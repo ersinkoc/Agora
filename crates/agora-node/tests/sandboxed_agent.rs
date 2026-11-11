@@ -30,6 +30,19 @@ fn git(dir: &Path, args: &[&str]) {
 
 /// A repository, and a supervisor with one kind that writes a file in its worktree and one outside it.
 fn setup(name: &str, outside: &Path, policy: SandboxPolicy) -> (Supervisor, StartRequest, PathBuf) {
+    let script = format!(
+        "echo in > inside; echo out > {} 2>/dev/null; sleep 30",
+        outside.display()
+    );
+    setup_with(name, &script, policy)
+}
+
+/// A repository, and a supervisor with one kind that runs `script` in `sh` in its worktree.
+fn setup_with(
+    name: &str,
+    script: &str,
+    policy: SandboxPolicy,
+) -> (Supervisor, StartRequest, PathBuf) {
     let dir = std::env::temp_dir().join(format!("agora-sbx-agent-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let repo = dir.join("repo");
@@ -38,10 +51,6 @@ fn setup(name: &str, outside: &Path, policy: SandboxPolicy) -> (Supervisor, Star
     std::fs::write(repo.join("a.txt"), "x").unwrap();
     git(&repo, &["add", "."]);
     git(&repo, &["commit", "-q", "-m", "init"]);
-    let script = format!(
-        "echo in > inside; echo out > {} 2>/dev/null; sleep 30",
-        outside.display()
-    );
     let manifest = Manifest::parse(&format!(
         "kind = \"shy\"\ndisplay_name = \"Shy\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"/bin/sh\", \"-c\", {script:?}]\n"
     ))
@@ -106,6 +115,38 @@ fn a_confined_agent_writes_in_its_worktree_and_not_outside_it() {
     assert!(inside.exists(), "the agent could not write in its worktree");
     std::thread::sleep(Duration::from_millis(300));
     assert!(!outside.exists(), "the agent wrote outside its worktree");
+    drop(sup);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_confined_agent_has_a_writable_temp_folder_of_its_own_where_the_system_one_is_private() {
+    if !agora_platform::sandbox_supported() || !agora_platform::PRIVATE_TEMP {
+        eprintln!("skipped: no confinement, or the shared temp folder is the agent's");
+        return;
+    }
+    let policy = SandboxPolicy {
+        level: Level::Worktree,
+        ..Default::default()
+    };
+    // Tools that honour `TMPDIR` (Python, Node, Rust, `mktemp "$TMPDIR/..."`) get a folder they can write and read back. (On macOS,
+    // plain `mktemp`, `xcrun` and `cc` use the system's per-user temp folder whatever `TMPDIR` says; see the sandbox recipes.)
+    let script = r#"echo "$TMPDIR" > tmpdir; { f=$(mktemp "$TMPDIR/t.XXXXXX") && echo ok > "$f" && cp "$f" inside; } 2> err; sleep 30"#;
+    let (mut sup, req, dir) = setup_with("temp", script, policy);
+    sup.start(&req, Instant::now()).unwrap();
+    let inside = dir.join("worktrees/a/inside");
+    let end = Instant::now() + Duration::from_secs(10);
+    while !inside.exists() && Instant::now() < end {
+        sup.tick(Instant::now());
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let tmpdir = std::fs::read_to_string(dir.join("worktrees/a/tmpdir")).unwrap_or_default();
+    let err = std::fs::read_to_string(dir.join("worktrees/a/err")).unwrap_or_default();
+    assert!(
+        inside.exists(),
+        "the agent could not use its temp folder {tmpdir}: {err}"
+    );
+    assert!(tmpdir.trim().contains("agora-agent-"), "{tmpdir}");
     drop(sup);
     let _ = std::fs::remove_dir_all(dir);
 }
