@@ -75,6 +75,45 @@ pub fn common_git_dir(worktree: &Path) -> Option<PathBuf> {
     gitdir.parent()?.parent().map(Path::to_path_buf)
 }
 
+/// Folders below the home folder that hold secrets, never opened to an agent through a selected directory.
+const SECRET_HOME_FOLDERS: &[&str] = &[
+    ".ssh",
+    ".gnupg",
+    ".aws",
+    ".kube",
+    ".docker",
+    ".azure",
+    ".config/gcloud",
+    ".config/gh",
+];
+
+/// True for a directory a confined agent may not be launched in (ADR-0052 with ADR-0047): a filesystem root, the home folder or a
+/// folder that contains it, a secret folder below it, and the node's own folders (`node_home`, the folder that holds its data and
+/// keys, other than the `worktree_root` inside it) or any folder that contains them. Without this, selecting `/` or the home folder
+/// would quietly turn `sandbox = worktree` into no confinement. All paths are canonical.
+pub fn refused_directory(
+    selected: &Path,
+    home: Option<&Path>,
+    node_home: &Path,
+    worktree_root: &Path,
+) -> bool {
+    if selected.parent().is_none() {
+        return true;
+    }
+    if let Some(home) = home {
+        if home.starts_with(selected)
+            || SECRET_HOME_FOLDERS
+                .iter()
+                .any(|f| selected.starts_with(home.join(f)))
+        {
+            return true;
+        }
+    }
+    // Inside the node's folder only the worktrees it made are fine.
+    node_home.starts_with(selected)
+        || (selected.starts_with(node_home) && !selected.starts_with(worktree_root))
+}
+
 /// The private temp folder of the agent that works in `worktree`; the node points `TMPDIR`, `TEMP` and `TMP` at it where
 /// [`agora_platform::PRIVATE_TEMP`] says the system's temp folder is out of the agent's reach.
 pub fn agent_temp(worktree: &Path) -> PathBuf {
@@ -203,6 +242,20 @@ mod tests {
         assert!(!sb.write.contains(&common) && !sb.write.contains(&common.join("hooks")));
         assert!(sb.read.contains(&common));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_confined_launch_refuses_roots_the_home_folder_secret_folders_and_the_nodes_own_folder() {
+        let (home, node) = (Path::new("/home/u"), Path::new("/home/u/.agora"));
+        let wt = Path::new("/home/u/.agora/worktrees");
+        let no = |p: &str| refused_directory(Path::new(p), Some(home), node, wt);
+        assert!(no("/") && no("/home") && no("/home/u"));
+        assert!(no("/home/u/.ssh") && no("/home/u/.ssh/keys") && no("/home/u/.config/gcloud"));
+        assert!(no("/home/u/.agora") && no("/home/u/.agora/data"));
+        // A project, a subfolder of one, and a worktree the node made are fine.
+        assert!(!no("/home/u/code/app") && !no("/home/u/code/app/src"));
+        assert!(!no("/home/u/.agora/worktrees/shell-1"));
+        assert!(!no("/srv/shop"));
     }
 
     #[test]

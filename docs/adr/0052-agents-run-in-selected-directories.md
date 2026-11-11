@@ -3,7 +3,13 @@ Status: Accepted
 Date: 2026-11-11
 
 The maintainer reviewed the selected-directory flow and portable project identity proposal, then instructed implementation
-("devam et"). This accepts the new flow; existing published request semantics remain unchanged.
+("devam et"). The explicit acceptance came later in the working session: "0052 kabul" (2026-11-11). This accepts the new flow;
+existing published request semantics remain unchanged.
+
+Hardening added after review: when the node confines agents (ADR-0047), a launch in a filesystem root, the home folder or a folder that
+contains it, a secret folder below it (`.ssh`, `.gnupg`, `.aws`, `.kube`, `.docker`, `.azure`, `.config/gcloud`, `.config/gh`) or the node's
+own folder is refused with `directory.protected`. Open items: a confined agent in a user's own checkout can still write `.git/hooks` and
+`.git/config` (T8), and the Windows permission entries on a user-owned folder wait for ADR-0050's design.
 
 ## Context
 

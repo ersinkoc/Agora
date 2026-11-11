@@ -157,6 +157,9 @@ pub enum SupervisorError {
     PublisherRevoked(String, String),
     /// The node confines agents and this one cannot be confined here: `(kind, level)`. Nothing was started.
     SandboxUnavailable(String, &'static str),
+    /// The node confines agents and the selected folder is one they may never be launched in (a root, the home folder, a secret
+    /// folder, the node's own folder).
+    ProtectedDirectory,
     NotFound(AgentId),
     /// The agent is still running (resume applies to stopped agents).
     StillRunning(AgentId),
@@ -185,6 +188,9 @@ impl SupervisorError {
             Self::SandboxUnavailable(k, l) => Error::new(ErrorCode::AgentSandboxUnavailable)
                 .with("kind", k.as_str())
                 .with("level", *l),
+            Self::ProtectedDirectory => {
+                Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "directory.protected")
+            }
             Self::NotFound(id) => {
                 Error::new(ErrorCode::AgentNotFound).with("agent_id", id.as_str())
             }
@@ -317,6 +323,32 @@ impl Supervisor {
             .get(kind)
             .and_then(|k| k.manifest.sandbox.as_ref());
         self.sandbox.profile(kind, needs, worktree, program)
+    }
+
+    /// With confinement on, a launch in a folder that would make the confinement meaningless is refused before anything starts.
+    fn refuse_protected(
+        &self,
+        selected: &Path,
+        worktree_root: &Path,
+    ) -> Result<(), SupervisorError> {
+        if self.sandbox.level == crate::sandbox::Level::Off {
+            return Ok(());
+        }
+        let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        let worktrees = canon(worktree_root);
+        let node_home = worktrees
+            .parent()
+            .map_or_else(|| worktrees.clone(), Path::to_path_buf);
+        let home = crate::usage_files::home_dir().map(|h| canon(&h));
+        if crate::sandbox::refused_directory(
+            &canon(selected),
+            home.as_deref(),
+            &node_home,
+            &worktrees,
+        ) {
+            return Err(SupervisorError::ProtectedDirectory);
+        }
+        Ok(())
     }
 
     /// Sets how agents are confined (ADR-0047); the default is not at all.
@@ -480,6 +512,7 @@ impl Supervisor {
         now: Instant,
     ) -> Result<AgentId, SupervisorError> {
         if !separate {
+            self.refuse_protected(&req.checkout, &req.worktree_root)?;
             return self.start_in_directory(req, project, now);
         }
         self.check_limits()?;
