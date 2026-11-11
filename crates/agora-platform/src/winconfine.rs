@@ -12,7 +12,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
 
-use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, LocalFree, HANDLE};
+use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, LocalFree, FILETIME, HANDLE};
 use windows_sys::Win32::Security::Authorization::{
     BuildTrusteeWithSidW, ConvertStringSidToSidW, GetNamedSecurityInfoW, SetEntriesInAclW,
     SetNamedSecurityInfoW, EXPLICIT_ACCESS_W, GRANT_ACCESS, REVOKE_ACCESS, SE_FILE_OBJECT,
@@ -28,7 +28,10 @@ use windows_sys::Win32::Security::{
 use windows_sys::Win32::Storage::FileSystem::{
     DELETE, FILE_DELETE_CHILD, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
 };
-use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+use windows_sys::Win32::System::Threading::{
+    GetCurrentProcess, GetCurrentProcessId, GetExitCodeProcess, GetProcessTimes, OpenProcess,
+    OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+};
 
 use crate::Sandbox;
 
@@ -178,8 +181,56 @@ fn ledger_dir() -> PathBuf {
         .join("acl-ledger")
 }
 
+/// A process's creation time as one number (two processes never share a pid *and* a start time).
+fn start_time(process: HANDLE) -> Option<u64> {
+    let zero = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+    let (mut created, mut exited, mut kernel, mut user) = (zero, zero, zero, zero);
+    // SAFETY: a live handle with query access and four out structures.
+    let ok = unsafe { GetProcessTimes(process, &mut created, &mut exited, &mut kernel, &mut user) };
+    (ok != 0).then(|| (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))
+}
+
+/// The first line of a ledger: the node process that owns it, so another node's recovery leaves it alone while that process lives.
+fn owner_line() -> String {
+    // SAFETY: plain calls on this process.
+    let (pid, started) = unsafe {
+        (
+            GetCurrentProcessId(),
+            start_time(GetCurrentProcess()).unwrap_or(0),
+        )
+    };
+    format!("#owner\t{pid}\t{started}\n")
+}
+
+/// True while the process named by a ledger's `#owner` line is still running (same pid and same start time).
+fn owner_alive(line: &str) -> bool {
+    let mut parts = line.split('\t');
+    let (Some("#owner"), Some(pid), Some(started)) = (parts.next(), parts.next(), parts.next())
+    else {
+        return false;
+    };
+    let (Ok(pid), Ok(started)) = (pid.parse::<u32>(), started.parse::<u64>()) else {
+        return false;
+    };
+    // SAFETY: opening a process for a limited query; the handle is closed below.
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        return false;
+    }
+    let mut code = 0u32;
+    // SAFETY: a live handle and an out value.
+    let running = unsafe { GetExitCodeProcess(handle, &mut code) } != 0 && code == 259;
+    let same = start_time(handle) == Some(started);
+    // SAFETY: opened above and closed once.
+    unsafe { CloseHandle(handle) };
+    running && same
+}
+
 fn write_ledger(file: &Path, sid: &str, paths: &[PathBuf]) -> io::Result<()> {
-    let mut text = String::new();
+    let mut text = owner_line();
     for p in paths {
         text.push_str(sid);
         text.push('\t');
@@ -351,11 +402,18 @@ pub(crate) fn recover_stale() {
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
         };
+        // A ledger of a node that is still running belongs to agents that need their permissions.
+        if text.lines().next().is_some_and(owner_alive) {
+            continue;
+        }
         let mut clean = true;
         for line in text.lines() {
             let Some((sid_text, folder)) = line.split_once('\t') else {
                 continue;
             };
+            if sid_text == "#owner" {
+                continue;
+            }
             let Ok(sid) = Sid::from_string(sid_text) else {
                 continue;
             };
@@ -368,5 +426,23 @@ pub(crate) fn recover_stale() {
         if clean {
             let _ = std::fs::remove_file(&path);
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_ledger_is_alive_while_its_owner_runs_and_stale_otherwise() {
+        // This very process owns the line it just wrote.
+        assert!(owner_alive(owner_line().trim_end()));
+        // A pid nobody has, a wrong start time for a live pid, and a line that is not an owner line.
+        assert!(!owner_alive("#owner\t4294967290\t1"));
+        let pid = std::process::id();
+        assert!(!owner_alive(&format!("#owner\t{pid}\t1")));
+        assert!(!owner_alive("S-1-5-21-1-2-3-4\tC:\\x"));
+        assert!(!owner_alive(""));
     }
 }
