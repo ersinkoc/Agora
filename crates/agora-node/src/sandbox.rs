@@ -139,12 +139,14 @@ impl SandboxPolicy {
                     .map(|g| g.trim().to_owned())
             })
         {
-            // Its own admin folder (index, HEAD) is writable; the common folder is read, with `objects` and `refs` writable.
+            // Its own admin folder (index, HEAD) is writable; the common folder is read, with `objects`, `refs` and `logs/refs` writable.
             write.push(PathBuf::from(text));
         }
         if let Some(common) = common_git_dir(worktree) {
             write.push(common.join("objects"));
             write.push(common.join("refs"));
+            // A commit appends to the branch's reflog, which `git worktree add` already created under `logs/refs/heads`.
+            write.push(common.join("logs").join("refs"));
             read.push(common);
         }
         write.extend(self.write.iter().cloned());
@@ -187,6 +189,9 @@ mod tests {
         assert!(
             sb.write.contains(&common.join("objects")) && sb.write.contains(&common.join("refs"))
         );
+        // The branch reflog a commit appends to, and nothing else under `logs`.
+        assert!(sb.write.contains(&common.join("logs").join("refs")));
+        assert!(!sb.write.contains(&common.join("logs")));
         assert!(!sb.write.contains(&common) && !sb.write.contains(&common.join("hooks")));
         assert!(sb.read.contains(&common));
         let _ = std::fs::remove_dir_all(&root);
