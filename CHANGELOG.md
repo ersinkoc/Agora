@@ -6,6 +6,8 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ### Agent state
 - Claude Code and Codex folder-trust prompts are recognized at 24x20 as well as 120x40. Short Codex terminals may still hide the dialog's options; enlarge the terminal to see them.
+### Shared board
+- When a project starts being shared by a second machine, the tasks and file leases its first machine kept locally move to the shared board: no file has two holders, and each moved task's owner is told its new id (ADR-0039 amendment B).
 
 ### Selected-folder fixes
 - Machines sharing a host name stay distinct, shared-project counts use enrollment IDs, and agent panes expose their real copyable routing addresses.

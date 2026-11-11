@@ -229,14 +229,19 @@ fn a_retried_request_does_not_repeat_its_effect() {
 
 fn wait_frame(c: &mut Client, stream: u32, mut want: impl FnMut(&Frame) -> bool) -> Frame {
     let end = Instant::now() + Duration::from_secs(10);
+    // What arrived instead, so a timeout on a slow machine says which wait failed and what the terminal sent.
+    let mut seen: Vec<(u8, String)> = Vec::new();
     while Instant::now() < end {
         if let Some(f) = c.read_frame(Some(Duration::from_millis(200))).unwrap() {
             if f.stream_id == stream && want(&f) {
                 return f;
             }
+            if seen.len() < 40 {
+                seen.push((f.kind, String::from_utf8_lossy(&f.payload).into_owned()));
+            }
         }
     }
-    panic!("timed out waiting for a frame on stream {stream}");
+    panic!("timed out waiting for a frame on stream {stream}; frames seen meanwhile: {seen:?}");
 }
 
 #[test]

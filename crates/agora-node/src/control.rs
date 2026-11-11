@@ -243,6 +243,9 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                 result: Some(Ok_::Empty(v1::Empty {})),
             })
         }
+        // ADR-0039 amendment B: only the hub asks for this, and the uplink answers it where the hub's commands enter; from the
+        // local socket it would hand this node's board work to nobody.
+        Cmd::BoardJoin(_) => Err(capability_missing("board.join.local")),
         // Grants are made and judged where the hub's commands enter the node; the local socket has no use for them
         // (the person at this machine is not routed through the hub, ADR-0041).
         Cmd::GrantCreate(_) | Cmd::GrantList(_) | Cmd::GrantRevoke(_) => {
@@ -766,6 +769,7 @@ pub(crate) fn command_name(c: &Cmd) -> &'static str {
         Cmd::Enroll(_) => "enroll",
         Cmd::TaskUpdate(_) => "task.update",
         Cmd::BoardCall(_) => "board.call",
+        Cmd::BoardJoin(_) => "board.join",
         Cmd::NodePolicyGet(_) => "node.policy.get",
         Cmd::GrantCreate(_) => "grant.create",
         Cmd::GrantList(_) => "grant.list",

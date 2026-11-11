@@ -794,6 +794,33 @@ impl Mesh {
         }
     }
 
+    /// ADR-0039 amendment B: the unfinished work of `project` on this broker, for the hub's board when the project becomes shared, and
+    /// no longer kept here: tasks that are open or claimed (done ones stay as history) and leases that have not ended.
+    pub fn take_unfinished(
+        &mut self,
+        project: &str,
+        now_ms: u64,
+    ) -> (Vec<TaskEntry>, Vec<(String, AgentId, u64)>) {
+        let tasks: Vec<TaskEntry> = self
+            .tasks
+            .iter()
+            .filter(|(_, t)| t.project == project)
+            .map(|(id, t)| self.entry(id, t))
+            .filter(|e| e.status != TaskStatus::Done)
+            .collect();
+        for e in &tasks {
+            self.tasks.remove(&e.id);
+        }
+        let leases: Vec<(String, AgentId, u64)> = self
+            .export_leases(project, now_ms)
+            .into_iter()
+            .filter(|(_, _, expires)| *expires > now_ms)
+            .collect();
+        self.leases.remove(project);
+        self.batches.retain(|_, b| b.project != project);
+        (tasks, leases)
+    }
+
     /// Moves a claimed task from `from` to `to` if `from` is not the owner any more (a handoff that could not be delivered is
     /// undone this way). Returns whether it moved.
     pub fn reassign_task(&mut self, id: &str, from: &AgentId, to: &AgentId) -> bool {
@@ -1103,6 +1130,47 @@ mod tests {
 
     fn id(s: &str) -> AgentId {
         AgentId::new(s)
+    }
+
+    #[test]
+    fn unfinished_work_of_a_project_is_handed_over_and_no_longer_kept() {
+        let mut m = mesh();
+        let open = m.task_create(&id("a"), "open one", "d", &[]).unwrap();
+        let claimed = m.task_create(&id("a"), "claimed one", "", &[]).unwrap();
+        m.task_claim(&id("b"), claimed.as_str()).unwrap();
+        let done = m.task_create(&id("a"), "done one", "", &[]).unwrap();
+        m.task_claim(&id("a"), done.as_str()).unwrap();
+        m.task_complete(&id("a"), done.as_str(), "ok").unwrap();
+        let other = m.task_create(&id("c"), "other project", "", &[]).unwrap();
+        m.lease_acquire(&id("a"), &["README.md".into()], 60_000, 1_000)
+            .unwrap();
+        m.lease_acquire(&id("b"), &["old.md".into()], 10, 1_000)
+            .unwrap();
+        m.lease_acquire(&id("c"), &["README.md".into()], 60_000, 1_000)
+            .unwrap();
+
+        let (tasks, leases) = m.take_unfinished("p", 2_000);
+        let ids: Vec<&str> = tasks.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, [open.as_str(), claimed.as_str()]);
+        assert_eq!(tasks[1].owner, Some(id("b")));
+        // The lease that had already ended is not handed over.
+        assert_eq!(leases, [("README.md".to_string(), id("a"), 61_000)]);
+
+        // Gone here: the done task stays as history, the other project is untouched, and the path is free again.
+        let left: Vec<String> = m
+            .export_tasks()
+            .1
+            .iter()
+            .map(|t| t.id.as_str().to_string())
+            .collect();
+        assert_eq!(
+            left,
+            [done.as_str().to_string(), other.as_str().to_string()]
+        );
+        assert!(m
+            .lease_acquire(&id("b"), &["README.md".into()], 60_000, 2_000)
+            .is_ok());
+        assert_eq!(m.export_leases("other", 2_000).len(), 1);
     }
 
     #[test]
