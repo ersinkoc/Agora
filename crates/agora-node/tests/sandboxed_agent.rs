@@ -167,7 +167,24 @@ fn an_offline_agent_works_in_its_worktree_but_reaches_no_other_machine() {
     // A unix socket in `/tmp`, where a tmux server or an SSH agent keeps theirs: out of reach.
     let tmp_socket = PathBuf::from(format!("/tmp/agora-tmx-{}", std::process::id()));
     let _ = std::fs::remove_file(&tmp_socket);
-    let tmux = std::os::unix::net::UnixListener::bind(&tmp_socket).unwrap();
+    // Made by `nc -lkU` (not `std::os::unix`, so this file still compiles where the test skips itself).
+    let mut tmux = Command::new("nc")
+        .arg("-lkU")
+        .arg(&tmp_socket)
+        .spawn()
+        .unwrap();
+    let t0 = Instant::now();
+    while !tmp_socket.exists() && t0.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // Control: outside the sandbox the socket answers, so "closed" below can only be the sandbox.
+    let reachable = Command::new("nc")
+        .args(["-U", "-w", "1"])
+        .arg(&tmp_socket)
+        .stdin(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    assert!(reachable.success(), "the stand-in socket is not listening");
     let policy = SandboxPolicy {
         level: Level::WorktreeOffline,
         ..Default::default()
@@ -198,7 +215,9 @@ fn an_offline_agent_works_in_its_worktree_but_reaches_no_other_machine() {
     assert!(text.contains("internet-refused"), "{text}");
     assert!(text.contains("local-open"), "{text}");
     assert!(text.contains("tmp-socket-closed"), "{text}");
-    drop((sup, local, tmux));
+    drop((sup, local));
+    let _ = tmux.kill();
+    let _ = tmux.wait();
     let _ = std::fs::remove_file(tmp_socket);
     let _ = std::fs::remove_dir_all(dir);
 }
