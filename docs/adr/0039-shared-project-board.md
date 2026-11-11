@@ -53,7 +53,7 @@ use a project it has no checkout of.
 **Consequences.** Tasks made while a node is offline go to the one board, so ids never collide and nothing needs merging; a handoff to an offline node fails with `node.offline` and moves
 nothing; the hub's `shared` answer changes, the protocol does not. Local-only projects (one node, no board work) are untouched.
 
-## Amendment B (accepted by the maintainer 2026-11-11, asked by the macos machine and answered "accept the proposal"): local work moves to the board when a project becomes shared
+## Amendment B (accepted by the maintainer 2026-11-11, "0039 Ek B kabul"): local work moves to the board when a project becomes shared
 
 Found by the macos machine (`comms`, finding B6 in `docs/backlog/lan-test-findings.md`), measured on a local hub with two nodes `na`, `nb` and clones of
 this repository. The decision above says the board is used once a project has checkouts on two online nodes, and the mesh spec adds that tasks and leases
@@ -64,7 +64,7 @@ made locally before stay local. So when `nb` comes online while `na` holds a loc
 **The trigger has to come from the hub.** A node learns that a project is shared only in the answer to a board call; an idle agent on `na` makes none, so
 `nb` can lease the file before `na` ever hears that the project became shared.
 
-**Proposed rule.**
+**Rule.**
 1. When a project gains its second online node with a checkout, the hub sends each of those nodes a `BoardJoin { project_id }` command (hub → node, on the
    path `MeshPost` delivery uses; a new message, ADR-0006). Until every one of them has answered, or 5 seconds have passed, the hub answers lease and claim
    calls for that project with `board.unavailable` (retryable), so nothing is granted against work it has not seen.
