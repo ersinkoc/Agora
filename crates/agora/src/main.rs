@@ -325,6 +325,8 @@ fn doctor(say: &Say, o: &Opts) -> ExitCode {
             ("manifests", _) => key!("doctor-manifests-missing"),
             ("agent-installed", _) => key!("doctor-agent-installed"),
             ("agent-missing", _) => key!("doctor-agent-missing"),
+            ("policy-path-dropped", _) => key!("doctor-policy-path-dropped"),
+            ("policy-path-missing", _) => key!("doctor-policy-path-missing"),
             _ => key!("doctor-manifest-invalid"),
         };
         let detail: Arg = match (c.id, c.detail.parse::<i64>()) {
