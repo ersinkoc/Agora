@@ -351,7 +351,7 @@ where
     let mut up = Uplink::new(
         Arc::clone(sink),
         env!("CARGO_PKG_VERSION"),
-        &["terminal.raw", "workspace.directory"],
+        &["terminal.raw", "workspace.directory", "board.join"],
     );
     conn.send(&frame(
         STREAM_CONTROL,

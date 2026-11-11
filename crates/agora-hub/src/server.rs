@@ -142,6 +142,8 @@ where
     let result = stream_events(&mut conn, &mut session, hub, node_id, commands).await;
     // However it ended, the hub now knows this node is not connected.
     let _ = hub.node_disconnected(node_id, now_ms());
+    // Forget it as a member of its projects, so it is asked to hand over its local work when it is back (ADR-0039 amendment B).
+    let _ = hub.board_membership(now_ms());
     result
 }
 
@@ -167,6 +169,8 @@ where
     let posts_open = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     // Handoffs the board accepted but the receiving node did not take: undone here, where the hub is at hand.
     let (revert_tx, mut reverts) = tokio::sync::mpsc::unbounded_channel::<crate::board::Handoff>();
+    // ADR-0039 amendment B: answers to `BoardJoin`, put on the board here, where the hub is at hand.
+    let (joined_tx, mut joined) = tokio::sync::mpsc::unbounded_channel::<Joined>();
     loop {
         let idle;
         let received = tokio::select! {
@@ -177,6 +181,17 @@ where
             }
             Some(handoff) = reverts.recv() => {
                 hub.board_revert(&handoff, now_ms());
+                continue;
+            }
+            Some((node, project, work)) = joined.recv() => {
+                match work {
+                    Some(work) => {
+                        for n in hub.board_joined(&node, &project, &work, now_ms()) {
+                            board_notice(hub, &n);
+                        }
+                    }
+                    None => hub.board_join_settled(&node, &project),
+                }
                 continue;
             }
             Some(to_node) = commands.recv() => {
@@ -199,7 +214,14 @@ where
                 idle = false;
                 match (f.stream_id, f.kind) {
                     (STREAM_EVENTS, kinds::EVENT) => match hub.ingest(session, &f.payload)? {
-                        Ingest::Applied { acked: a, .. } | Ingest::Duplicate { acked: a } => {
+                        Ingest::Applied { acked: a, .. } => {
+                            acked = Some(a);
+                            since_ack += 1;
+                            for (node, project) in hub.board_membership(now_ms()) {
+                                ask_board_join(hub, node, project, joined_tx.clone());
+                            }
+                        }
+                        Ingest::Duplicate { acked: a } => {
                             acked = Some(a);
                             since_ack += 1;
                         }
@@ -809,6 +831,65 @@ fn post_for_node(
         open.fetch_sub(1, Ordering::Relaxed);
         let _ = answers.send(resp);
     });
+}
+
+/// A node's answer to `BoardJoin`: the node, the project, and its work (`None` when it did not answer).
+type Joined = (String, String, Option<v1::BoardJoinResult>);
+
+/// ADR-0039 amendment B: asks `node` to hand over its local work for `project`, which just became shared. The answer (or `None`
+/// when the node is gone, too old to know `BoardJoin`, or does not answer in time) comes back on `done`.
+fn ask_board_join(
+    hub: &Hub,
+    node: String,
+    project: String,
+    done: tokio::sync::mpsc::UnboundedSender<Joined>,
+) {
+    let req = v1::CommandRequest {
+        request_id: String::new(),
+        idempotency_key: String::new(),
+        target_node: String::new(),
+        command: Some(command_request::Command::BoardJoin(v1::BoardJoin {
+            project_id: project.clone(),
+        })),
+    };
+    let reply = match hub.router().send(&node, req) {
+        Ok(r) => r,
+        Err(_) => {
+            let _ = done.send((node, project, None));
+            return;
+        }
+    };
+    tokio::spawn(async move {
+        let wait = std::time::Duration::from_millis(crate::board::JOIN_WAIT_MS);
+        let work = match tokio::time::timeout(wait, reply).await {
+            Ok(Ok(v1::CommandResponse {
+                result:
+                    Some(command_response::Result::Ok(v1::CommandOk {
+                        result: Some(v1::command_ok::Result::BoardJoin(work)),
+                    })),
+                ..
+            })) => Some(work),
+            _ => None,
+        };
+        let _ = done.send((node, project, work));
+    });
+}
+
+/// Sends one board notice to its agent as a mesh message from the hub (best effort, like any mesh post).
+fn board_notice(hub: &Hub, n: &crate::board::Notice) {
+    let post = v1::CommandRequest {
+        request_id: String::new(),
+        idempotency_key: String::new(),
+        target_node: String::new(),
+        command: Some(command_request::Command::MeshPost(v1::MeshPost {
+            to: n.to_agent.clone(),
+            body: n.body.clone(),
+            origin: crate::ca::RESERVED_HUB_ID.to_string(),
+            from_agent: "board".to_string(),
+            refs: Vec::new(),
+        })),
+    };
+    let _ = hub.router().send(&n.to_node, post);
 }
 
 /// A node's `BoardCall` (ADR-0039): the board decides, the answer goes back to the node. A handoff is also passed to the

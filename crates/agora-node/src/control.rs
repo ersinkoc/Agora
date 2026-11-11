@@ -243,6 +243,18 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                 result: Some(Ok_::Empty(v1::Empty {})),
             })
         }
+        // ADR-0039 amendment B: the project became shared; hand the board this node's unfinished work for it.
+        Cmd::BoardJoin(j) => {
+            if j.project_id.is_empty() {
+                return Err(invalid("project_id"));
+            }
+            let Some(mesh) = &ctx.mesh else {
+                return Err(capability_missing("board.join"));
+            };
+            Ok(v1::CommandOk {
+                result: Some(Ok_::BoardJoin(mesh.board_join(&j.project_id))),
+            })
+        }
         // Grants are made and judged where the hub's commands enter the node; the local socket has no use for them
         // (the person at this machine is not routed through the hub, ADR-0041).
         Cmd::GrantCreate(_) | Cmd::GrantList(_) | Cmd::GrantRevoke(_) => {
@@ -766,6 +778,7 @@ pub(crate) fn command_name(c: &Cmd) -> &'static str {
         Cmd::Enroll(_) => "enroll",
         Cmd::TaskUpdate(_) => "task.update",
         Cmd::BoardCall(_) => "board.call",
+        Cmd::BoardJoin(_) => "board.join",
         Cmd::NodePolicyGet(_) => "node.policy.get",
         Cmd::GrantCreate(_) => "grant.create",
         Cmd::GrantList(_) => "grant.list",

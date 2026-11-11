@@ -315,6 +315,52 @@ impl MeshServer {
             .map_err(|e| e.to_error(&limits))
     }
 
+    /// ADR-0039 amendment B: the hub says `project` became shared. Hands over this node's unfinished work for it (it is no longer
+    /// kept here) and from now on asks the hub for the project's board calls instead of trusting an older "not shared".
+    pub fn board_join(&self, project: &str) -> agora_protocol::v1::BoardJoinResult {
+        use agora_protocol::v1::{BoardJoinLease, BoardJoinResult, BoardJoinTask};
+        let now = now_ms();
+        let (tasks, leases, any_agent) = {
+            let mut mesh = self.mesh.lock().unwrap_or_else(|e| e.into_inner());
+            let (tasks, leases) = mesh.take_unfinished(project, now);
+            // The board records a creator for every task; the original one is not kept, so any agent of the project stands in.
+            let any_agent = mesh
+                .agents_list(Some(project))
+                .first()
+                .map(|a| a.id.as_str().to_string())
+                .unwrap_or_default();
+            (tasks, leases, any_agent)
+        };
+        self.shares.set(project, true);
+        BoardJoinResult {
+            leases: leases
+                .into_iter()
+                .map(|(path, holder, expires_at_ms)| BoardJoinLease {
+                    agent_id: holder.as_str().to_string(),
+                    path,
+                    expires_at_ms,
+                })
+                .collect(),
+            tasks: tasks
+                .into_iter()
+                .map(|t| {
+                    let owner = t.owner.map(|o| o.as_str().to_string()).unwrap_or_default();
+                    BoardJoinTask {
+                        task_id: t.id.as_str().to_string(),
+                        title: t.title,
+                        detail: t.detail,
+                        creator_agent_id: if owner.is_empty() {
+                            any_agent.clone()
+                        } else {
+                            owner.clone()
+                        },
+                        owner_agent_id: owner,
+                    }
+                })
+                .collect(),
+        }
+    }
+
     pub fn mesh(&self) -> Arc<Mutex<Mesh>> {
         Arc::clone(&self.mesh)
     }

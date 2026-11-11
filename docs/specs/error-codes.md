@@ -32,7 +32,7 @@ replaced by dashes). Codes are part of the public protocol: never rename or reus
 | `approval.signature_invalid` | `approval_id` | |
 | `approval.grant_required` | `command` | ADR-0041: the node's `signed_commands` policy lists this command and no live grant covers it |
 | `lease.held` | `path`, `holder_agent_id`, `expires_at` | `expires_at` is when the conflicting lease ends, in milliseconds since the epoch |
-| `board.unavailable` | `project_id` | A shared project's board cannot be reached (hub unreachable); the agent keeps working locally (ADR-0039) |
+| `board.unavailable` | `project_id` | A shared project's board cannot be reached (hub unreachable), or a lease or claim waits while the project's nodes hand over their local work (up to 5 s, ADR-0039 amendment B); the agent keeps working locally (ADR-0039) |
 | `mesh.recipient_unknown` | `to` | |
 | `mesh.rate_limited` | — | Too many messages from this agent in the rate window |
 | `mesh.body_too_large` | `limit` | Message body over the size limit; pass a reference instead |

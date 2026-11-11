@@ -1,0 +1,18 @@
+{
+  "leases": [
+    {
+      "agentId": "x",
+      "path": "x",
+      "expiresAtMs": "1"
+    }
+  ],
+  "tasks": [
+    {
+      "taskId": "x",
+      "title": "x",
+      "detail": "x",
+      "ownerAgentId": "x",
+      "creatorAgentId": "x"
+    }
+  ]
+}
