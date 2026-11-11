@@ -2,7 +2,6 @@
 //!
 //! Uses the `git` command line (stable, ubiquitous, no extra dependency). Every call runs with a clean locale,
 //! no prompts, and paths/branches after `--` or validated first, so repository content cannot inject options.
-//! Node-owned commands disable fsmonitor/hooks; diffs disable external and text-conversion helpers.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -75,27 +74,35 @@ pub struct GitStatus {
     pub head_commit: String,
 }
 
-/// Build a node-owned command without running repository fsmonitor or hooks with daemon privileges.
-/// This does not sandbox Git itself or suppress clean/smudge filters.
-pub(crate) fn command(dir: &Path) -> Command {
-    let mut command = Command::new("git");
-    command
-        .args([
-            "-c",
-            "core.fsmonitor=false",
-            "-c",
-            "core.hooksPath=/dev/null",
-        ])
+/// Settings that would let a repository run a program when the node reads it, switched off for every git the node runs. The node's
+/// git is not confined, and an agent may write the git config and hooks a worktree uses (its checkout's `.git`): a planted
+/// `core.fsmonitor` runs on `status`, a `post-checkout` hook on `worktree add`, an external diff or a textconv on `diff`.
+/// Still open: filter drivers (`.gitattributes` + `filter.<name>.*`), which cannot be switched off by name here.
+const HARDENED: [&str; 8] = [
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    "core.hooksPath=/dev/null",
+    "-c",
+    "diff.external=",
+    "-c",
+    "core.attributesFile=/dev/null",
+];
+
+/// `git -C dir` with [`HARDENED`] and the node's environment (no prompts, no optional locks, plain English output).
+pub(crate) fn hardened(dir: &Path) -> Command {
+    let mut c = Command::new("git");
+    c.args(HARDENED)
         .arg("-C")
         .arg(dir)
         .env("LC_ALL", "C")
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_OPTIONAL_LOCKS", "0");
-    command
+    c
 }
 
 fn git(dir: &Path, args: &[&str]) -> Result<String, GitError> {
-    let out = command(dir)
+    let out = hardened(dir)
         .args(args)
         .output()
         .map_err(|e| GitError::Io(e.to_string()))?;
@@ -271,7 +278,7 @@ const MAX_DIFF_READ: u64 = 1024 * 1024;
 /// Like [`git`], keeping at most `cap` bytes of stdout (the process is stopped when it has produced that much).
 fn git_capped(dir: &Path, args: &[&str], cap: u64) -> Result<String, GitError> {
     use std::io::Read;
-    let mut child = command(dir)
+    let mut child = hardened(dir)
         .args(args)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
@@ -323,7 +330,7 @@ pub fn diff(worktree: &Path, path: Option<&str>) -> Result<String, GitError> {
             continue;
         }
         // `--no-index` exits 1 when the files differ, which is the normal case here.
-        let shown = command(worktree)
+        let shown = hardened(worktree)
             .args([
                 "diff",
                 "--no-index",
@@ -385,7 +392,7 @@ pub fn log(worktree: &Path, limit: usize) -> Result<Vec<Commit>, GitError> {
 /// out of `git status` and `git add .` without touching a tracked `.gitignore`. Best effort: failure only means the
 /// file shows up as untracked.
 pub fn exclude_locally(worktree: &Path, rel: &Path) {
-    let Ok(out) = command(worktree)
+    let Ok(out) = hardened(worktree)
         .args(["rev-parse", "--git-path", "info/exclude"])
         .output()
     else {
@@ -657,5 +664,79 @@ mod tests {
         let out = git_capped(here, &["log", "--format=%H%n%s%n%b"], 100).expect("log");
         assert!(out.len() <= 100);
         assert!(git_capped(here, &["rev-parse", "no-such-ref-xyz"], 100).is_err());
+    }
+
+    /// Planted by an agent that can write the checkout's `.git` (config, hooks) and its worktree (`.gitattributes`): each one makes
+    /// plain git run a program. The node's git must run none of them.
+    #[test]
+    fn the_nodes_git_runs_no_program_a_repository_plants() {
+        let r = Repo::new(None);
+        let mark = |n: &str| r.dir.join(format!("ran-{n}"));
+        let touch = |n: &str| {
+            format!(
+                "sh -c 'touch \"{}\"; cat \"$0\" 2>/dev/null' ",
+                mark(n).display()
+            )
+        };
+        r.git(&["config", "core.fsmonitor", &touch("fsmonitor")]);
+        r.git(&["config", "diff.external", &touch("external")]);
+        r.git(&["config", "diff.conv.textconv", &touch("textconv")]);
+        fs::write(r.dir.join(".gitattributes"), "*.txt diff=conv\n").expect("attributes");
+        let hook = r.dir.join(".git/hooks/post-checkout");
+        fs::write(
+            &hook,
+            format!("#!/bin/sh\ntouch \"{}\"\n", mark("hook").display()),
+        )
+        .expect("hook");
+        let _ = Command::new("chmod").arg("+x").arg(&hook).status();
+        fs::write(r.dir.join("a.txt"), "two\n").expect("change");
+        let planted = ["fsmonitor", "external", "textconv", "hook"];
+
+        // Plain git, as an unhardened node would run it: which plants work on this system.
+        let plain = |args: &[&str]| {
+            let _ = Command::new("git")
+                .arg("-C")
+                .arg(&r.dir)
+                .args(args)
+                .output();
+        };
+        plain(&["status", "--porcelain"]);
+        plain(&["diff", "HEAD"]);
+        plain(&[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "plain-wt",
+            "--",
+            "../plain-wt-probe",
+        ]);
+        let effective: Vec<&str> = planted
+            .iter()
+            .copied()
+            .filter(|n| mark(n).exists())
+            .collect();
+        assert!(
+            effective.contains(&"fsmonitor"),
+            "the plant itself did not work: {effective:?}"
+        );
+        for n in planted {
+            let _ = fs::remove_file(mark(n));
+        }
+
+        // The node's git.
+        status(&r.dir).expect("status");
+        diff(&r.dir, None).expect("diff");
+        let wt = r.dir.with_file_name(format!(
+            "{}-hardened-wt",
+            r.dir.file_name().expect("name").to_string_lossy()
+        ));
+        create_worktree(&r.dir, &wt, "hardened-wt", None).expect("worktree");
+        log(&r.dir, 5).expect("log");
+        for n in &effective {
+            assert!(!mark(n).exists(), "the node's git ran the planted {n}");
+        }
+        let _ = fs::remove_dir_all(wt);
+        let _ = fs::remove_dir_all(r.dir.with_file_name("plain-wt-probe"));
     }
 }
