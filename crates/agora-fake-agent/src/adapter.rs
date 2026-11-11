@@ -37,6 +37,7 @@ fn state<W: Write>(out: &mut W, sid: &str, s: &str) -> io::Result<()> {
 /// Runs until `shutdown` or end of input.
 pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
     let mut session = String::new();
+    let mut selected_cwd = Value::Null;
     let mut lines = input.lines();
     while let Some(line) = lines.next() {
         let line = line?;
@@ -61,6 +62,11 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
                        "capabilities": ["chat", "approvals", "usage", "cancel", "resume"]}),
             )?,
             "session/start" => {
+                selected_cwd = params
+                    .get("worktree")
+                    .or_else(|| params.get("cwd"))
+                    .cloned()
+                    .unwrap_or(Value::Null);
                 session = match params.get("resumeSessionId").and_then(Value::as_str) {
                     Some(r) => r.to_string(),
                     None => "s-1".to_string(),
@@ -77,6 +83,11 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
                 reply(out, json!({}))?;
                 let text = params.get("text").and_then(Value::as_str).unwrap_or("");
                 match text {
+                    "cwd" => note(
+                        out,
+                        "chat/append",
+                        json!({"sessionId": session, "text": {"text": json!({"cwd": std::env::current_dir().ok(), "session_cwd": selected_cwd}).to_string()}}),
+                    )?,
                     "crash" => std::process::exit(3),
                     "env" => {
                         let seen = std::env::var_os("AGORA_TEST_SECRET").is_some();

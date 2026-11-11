@@ -46,6 +46,12 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   const touched = useRef(false);
   const [reviewing, setReviewing] = useState<string | undefined>();
   const [filter, setFilter] = useState('');
+  const [projectFilter, setProjectFilter] = useState('');
+  const projectOptions = useMemo(() => {
+    const groups = new Map<string, { name: string; machines: Set<string> }>();
+    for (const a of fleet) if (a.projectId) { const group = groups.get(a.projectId) ?? { name: a.project || a.projectId, machines: new Set<string>() }; group.machines.add(a.machine); groups.set(a.projectId, group); }
+    return [...groups.entries()];
+  }, [fleet]);
   const [browsing, setBrowsing] = useState<string | undefined>();
   const [history, setHistory] = useState<string | undefined>();
 
@@ -82,17 +88,21 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
     const q = filter.trim().toLowerCase();
     const groups = new Map<string, Map<string, AgentTileModel[]>>();
     for (const a of fleet) {
-      if (q && ![a.name, a.machine, a.project ?? '', a.workspace].some((x) => x.toLowerCase().includes(q))) continue;
+      if (projectFilter && a.projectId !== projectFilter) continue;
+      if (q && ![a.name, a.machine, a.project ?? '', a.projectId ?? '', a.workspace].some((x) => x.toLowerCase().includes(q))) continue;
       const projects = groups.get(a.machine) ?? new Map<string, AgentTileModel[]>();
-      const key = a.project ?? '';
+      const key = a.projectId ?? a.project ?? '';
       projects.set(key, [...(projects.get(key) ?? []), a]);
       groups.set(a.machine, projects);
     }
     return groups;
-  }, [fleet, filter]);
-  const shown = pinned.map((id) => fleet.find((a) => a.id === id)).filter((a): a is AgentTileModel => !!a);
+  }, [fleet, filter, projectFilter]);
+  const picked = pinned.map((id) => fleet.find((a) => a.id === id)).filter((a): a is AgentTileModel => !!a && (!projectFilter || a.projectId === projectFilter));
+  const shown = projectFilter && picked.length === 0 ? fleet.filter(a => a.projectId === projectFilter).slice(0, MAX_AUTO_PINNED) : picked;
   const attention = needsAttention(fleet);
-  const changed = fleet.filter((a) => (a.filesChanged ?? 0) > 0).sort((a, b) => (b.filesChanged ?? 0) - (a.filesChanged ?? 0));
+  const changed = [...new Map(fleet.filter(a => (a.filesChanged ?? 0) > 0 && (!projectFilter || a.projectId === projectFilter))
+    .map(a => [a.workspaceRef ? `${a.workspaceRef.node}/${a.workspaceRef.id}` : a.id, a])).values()]
+    .sort((a, b) => (b.filesChanged ?? 0) - (a.filesChanged ?? 0));
   const cols = shown.length <= 1 ? 'lg:grid-cols-1' : 'lg:grid-cols-2';
 
   return (
@@ -114,6 +124,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
         <aside className="order-3 flex min-h-0 flex-col gap-5 overflow-y-auto border-line bg-surface-1 p-4 lg:order-1 lg:border-r" aria-label={t('console-agents')}>
           <button type="button" className="button button--primary w-full" disabled={!onStart} onClick={onStart}>{t('action-start-agent')}</button>
           {start}
+          {projectOptions.length > 0 && <label className="grid gap-1 text-xs text-muted"><span>{t('filter-project')}</span><select value={projectFilter} onChange={e => setProjectFilter(e.target.value)}><option value="">{t('filter-all-projects')}</option>{projectOptions.map(([id, p]) => <option key={id} value={id}>{t('filter-project-machines', { name: p.name, count: p.machines.size })}</option>)}</select></label>}
           {fleet.length > 1 && <input type="search" value={filter} onChange={(e) => setFilter(e.target.value)} placeholder={t('filter-placeholder')} aria-label={t('filter-placeholder')} className="w-full" />}
           {machines.length === 0 && byMachine.size === 0 && !filter && <p className="muted">{t('machines-empty')}</p>}
           {[...byMachine.entries()].map(([machine, projects]) => {
@@ -126,7 +137,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
                 </h2>
                 {[...projects.entries()].map(([project, list]) => (
                   <div key={project} className="grid gap-1">
-                    {project && <h3 className="m-0 px-1 text-[11px] font-medium tracking-wide text-muted">{project}</h3>}
+                    {project && <h3 className="m-0 px-1 text-[11px] font-medium tracking-wide text-muted">{list[0]?.project || project}</h3>}
                     <ul className="m-0 grid list-none gap-1 p-0">
                       {list.map((a) => (
                         <li key={a.id}>
@@ -134,7 +145,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
                             className={`flex w-full items-center justify-between gap-2 rounded-s border px-3 py-2 text-left transition-colors hover:bg-surface-2 ${pinned.includes(a.id) ? 'border-accent bg-surface-2' : 'border-transparent'}`}>
                             <span className="min-w-0">
                               <span className="block truncate font-medium">{a.name}</span>
-                              <span className="block truncate text-xs text-muted">{a.workspace}</span>
+                              <span className="block truncate text-xs text-muted">{a.workspace}</span>{a.shared && <span className="block text-xs text-muted">{t('workspace-shared')}</span>}
                             </span>
                             <StateBadge state={a.state} />
                           </button>
@@ -170,7 +181,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
                     </div>
                     <div className="flex flex-none items-center gap-2">
                       <StateBadge state={a.state} />
-                      {loadHistory && <button type="button" className="rounded-s px-2 py-1 text-xs text-muted hover:bg-surface-2 hover:text-ink" onClick={() => setHistory(a.id)}>{t('console-history')}</button>}
+                      {loadHistory && a.git !== false && <button type="button" className="rounded-s px-2 py-1 text-xs text-muted hover:bg-surface-2 hover:text-ink" onClick={() => setHistory(a.id)}>{t('console-history')}</button>}
                       {filesOf && <button type="button" className="rounded-s px-2 py-1 text-xs text-muted hover:bg-surface-2 hover:text-ink" onClick={() => setBrowsing(a.id)}>{t('console-files')}</button>}
                       <button type="button" className="rounded-s px-2 py-1 text-xs text-muted hover:bg-surface-2 hover:text-ink" onClick={() => onOpen(a.id)}>{t('console-maximize')}</button>
                       <button type="button" aria-label={t('console-hide')} className="rounded-s px-2 py-1 text-xs text-muted hover:bg-surface-2 hover:text-ink" onClick={() => toggle(a.id)}>✕</button>
@@ -210,7 +221,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
                 {changed.map((a) => (
                   <li key={a.id}>
                     <button type="button" className="flex w-full items-center justify-between gap-2 rounded-s border border-line px-3 py-2 text-left hover:bg-surface-2" onClick={() => (loadDiff ? setReviewing(a.id) : onOpen(a.id))}>
-                      <span className="min-w-0"><span className="block truncate font-medium">{a.name}</span><span className="block truncate text-xs text-muted">{a.machine} · {a.workspace}</span></span>
+                      <span className="min-w-0"><span className="block truncate font-medium">{a.shared ? a.workspace : a.name}</span><span className="block truncate text-xs text-muted">{a.shared ? t('workspace-shared') : a.machine} · {a.workspace}</span>{a.shared && <span className="block text-xs text-muted">{t('workspace-shared')}</span>}</span>
                       <span className="flex-none text-xs text-needs-you">{t('changes-files', { count: a.filesChanged ?? 0 })}</span>
                     </button>
                   </li>

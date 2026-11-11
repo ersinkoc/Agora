@@ -4,6 +4,12 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+### Working folders
+- Start agents in a chosen machine/project/folder; Git and separate working copies are optional. The CLI defaults to its current folder (`--cwd` to choose another, `--worktree` for isolation).
+- Several agents can share a folder with separate sessions and integration files; shared changes appear once.
+- Explicitly create `.agent-project.json` (`agora project init --cwd PATH`) and carry it across machines to group project copies. Source files are not synchronized.
+- New directory launch needs an unrestricted owner device trusted on the node. Older clients keep their existing worktree launch behavior; fixed-file MCP manifests need explicit worktree mode.
+
 ### Windows
 - Agent confinement for Windows is written (ADR-0050) and tested on real Windows in CI, but switched off until it is enabled after a check on a real machine.
 - A project is found by its id before its name, and a name two projects share is refused.

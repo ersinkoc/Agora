@@ -196,3 +196,29 @@ audit-action-projectlist = Listed projects
 audit-action-agentlist = Listed agents
 audit-action-agentkinds = Listed agent kinds
 audit-action-usagereport = Looked at spending
+
+start-no-machines = No machine is online yet.
+start-machine = Machine
+start-project = Project
+start-other-folder = Another folder…
+start-directory = Working folder
+start-directory-placeholder = Full path on the selected machine
+start-portable = Create a shared project identity
+start-portable-explain = Creates .agent-project.json in the project folder. Commit or copy it to the other machines to group this project. Existing metadata is preserved.
+start-select-directory = Use this folder
+start-in-directory = The agent will work in this folder. Existing files and the current branch are kept.
+start-project-id = Project identity: { $id }
+start-separate-worktree = Create an isolated working copy
+start-identity-change = Associate this folder with its changed project identity
+start-directory-unsupported = This machine needs an update to start agents in selected folders.
+start-directory-failed = The folder could not be selected. Check its path and permissions.
+workspace-shared = Shared folder · changes belong to the workspace
+filter-project = Project
+filter-all-projects = All projects
+filter-project-machines = { $name } · { $count } machine(s)
+
+start-directory-agent-unsupported = This agent needs an isolated working copy to load its configuration.
+
+audit-action-directoryinspect = Selected a folder
+audit-action-agentlaunch = Started an agent in a folder
+audit-action-workspacequery = Read workspace files or changes

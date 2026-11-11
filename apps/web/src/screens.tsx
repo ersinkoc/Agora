@@ -1,3 +1,5 @@
+import { PromptBox } from './components/PromptBox';
+import type { ChatSource } from './net/chat';
 import { AgentTile } from './components/AgentTile';
 import { AttentionStrip } from './components/AttentionStrip';
 import { StateBadge } from './components/StateBadge';
@@ -66,10 +68,12 @@ export function Gallery() {
 }
 
 // Focus: one agent, full size. The terminal arrives with the hub connection; until then a placeholder.
-export function Focus({ agent, source: live, costMicroUsd, onBack }: {
+export function Focus({ agent, source: live, costMicroUsd, chatSource, sendPrompt, onBack }: {
   agent: AgentTileModel | undefined;
   costMicroUsd?: number;
   source?: TerminalSource;
+  chatSource?: ChatSource;
+  sendPrompt?: (agent: AgentTileModel, text: string) => Promise<boolean>;
   onBack: () => void;
 }) {
   const preview = agent?.preview ?? '';
@@ -95,11 +99,13 @@ export function Focus({ agent, source: live, costMicroUsd, onBack }: {
         {t('agent-on-machine', { machine: agent.machine })} · {t('agent-workspace', { name: agent.workspace })}
       </span>
       {agent.tokens ? <span className="muted">{t('agent-tokens', { count: agent.tokens })}{costMicroUsd !== undefined ? ` · ${t('agent-cost', { amount: money(costMicroUsd) })}` : ''}</span> : null}
-      <h2>{t('focus-terminal')}</h2>
-      <Suspense fallback={<div className="terminal" aria-busy="true" />}>
-        <TerminalView source={source} label={t('focus-terminal')} />
-      </Suspense>
-      {!live && <p className="muted">{t('focus-terminal-placeholder')}</p>}
+      {agent.terminal === false ? <section className="h-[65vh] min-h-0" aria-label={t('chat-log')}><PromptBox agent={agent} source={chatSource} send={sendPrompt} /></section> : <>
+        <h2>{t('focus-terminal')}</h2>
+        <Suspense fallback={<div className="terminal" aria-busy="true" />}>
+          <TerminalView source={source} label={t('focus-terminal')} />
+        </Suspense>
+        {!live && <p className="muted">{t('focus-terminal-placeholder')}</p>}
+      </>}
     </main>
   );
 }

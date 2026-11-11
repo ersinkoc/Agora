@@ -86,6 +86,9 @@ pub(crate) struct Opts {
     manifests: Option<PathBuf>,
     data: Option<PathBuf>,
     worktrees: Option<PathBuf>,
+    cwd: Option<String>,
+    separate_worktree: bool,
+    accept_identity_change: bool,
     projects: Vec<PathBuf>,
     project: Option<String>,
     max_agents: Option<usize>,
@@ -125,6 +128,9 @@ fn parse(args: &[String]) -> Option<Opts> {
             "--socket" => o.socket = Some(it.next()?.into()),
             "--manifests" => o.manifests = Some(it.next()?.into()),
             "--data" => o.data = Some(it.next()?.into()),
+            "--cwd" => o.cwd = Some(it.next()?.clone()),
+            "--worktree" => o.separate_worktree = true,
+            "--accept-project-id-change" => o.accept_identity_change = true,
             "--worktrees" => o.worktrees = Some(it.next()?.into()),
             "--project" => {
                 let v = it.next()?;
@@ -203,6 +209,7 @@ fn main() -> ExitCode {
     match words.as_slice() {
         ["node", "run"] => node_run(&say, &opts),
         ["agent", "start"] => agent_start(&say, &opts),
+        ["project", "init"] => project_init(&say, &opts),
         ["agent", "stop"] => agent_stop(&say, &opts),
         ["agent", "prompt"] => agent_prompt(&say, &opts),
         ["agent", "list"] => agent_list(&say, &opts),
@@ -455,6 +462,54 @@ fn call(say: &Say, c: &mut Client, cmd: Cmd) -> Result<v1::CommandOk, ExitCode> 
     }
 }
 
+fn selected_path(o: &Opts) -> String {
+    let path = o
+        .cwd
+        .clone()
+        .or_else(|| o.project.clone())
+        .unwrap_or_else(|| {
+            std::env::current_dir().map_or(String::new(), |p| p.to_string_lossy().into_owned())
+        });
+    std::fs::canonicalize(&path).map_or(path, |p| p.to_string_lossy().into_owned())
+}
+fn inspect_directory(
+    say: &Say,
+    c: &mut Client,
+    path: &str,
+    create: bool,
+) -> Result<v1::DirectoryInfo, ExitCode> {
+    match call(
+        say,
+        c,
+        Cmd::DirectoryInspect(v1::DirectoryInspect {
+            path: path.into(),
+            create_project_id: create,
+            authorization: None,
+        }),
+    )? {
+        v1::CommandOk {
+            result: Some(Ok_::DirectoryInfo(i)),
+        } => Ok(i),
+        _ => Err(ExitCode::from(1)),
+    }
+}
+fn project_init(say: &Say, o: &Opts) -> ExitCode {
+    let mut c = match connect(say, o) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    match inspect_directory(say, &mut c, &selected_path(o), true) {
+        Ok(i) => {
+            say.out(
+                key!("cli-project-identity"),
+                &[("id", i.project_id.into()), ("path", i.path.into())],
+            );
+            ExitCode::SUCCESS
+        }
+        Err(e) => e,
+    }
+}
+
 fn agent_start(say: &Say, o: &Opts) -> ExitCode {
     let Some(kind) = o.positional.first() else {
         say.err(key!("cli-usage"), &[]);
@@ -464,31 +519,26 @@ fn agent_start(say: &Say, o: &Opts) -> ExitCode {
         Ok(c) => c,
         Err(code) => return code,
     };
-    let cmd = Cmd::AgentStart(v1::AgentStart {
-        kind: kind.clone(),
-        project_id: o.project.clone().unwrap_or_default(),
-        ..Default::default()
-    });
-    // A bare `--project NAME` is a name, not a path: the node resolves it against its registered projects.
-    let cmd = match (&o.project, cmd) {
-        (Some(p), Cmd::AgentStart(mut a)) => {
-            a.project_id = PathBuf::from(p)
-                .file_name()
-                .map_or_else(|| p.clone(), |n| n.to_string_lossy().into_owned());
-            Cmd::AgentStart(a)
-        }
-        (_, cmd) => cmd,
+    let path = selected_path(o);
+    let info = match inspect_directory(say, &mut c, &path, false) {
+        Ok(i) => i,
+        Err(e) => return e,
     };
+    let cmd = Cmd::AgentLaunch(v1::AgentLaunch {
+        kind: kind.clone(),
+        path: info.path,
+        project_id: info.project_id,
+        separate_worktree: o.separate_worktree,
+        accept_identity_change: o.accept_identity_change,
+        authorization: None,
+    });
     match call(say, &mut c, cmd) {
         Ok(v1::CommandOk {
-            result: Some(Ok_::AgentStart(r)),
+            result: Some(Ok_::AgentLaunch(r)),
         }) => {
             say.out(
                 key!("cli-agent-started"),
-                &[
-                    ("agent_id", r.agent_id.into()),
-                    ("worktree", r.worktree_id.into()),
-                ],
+                &[("agent_id", r.agent_id.into()), ("worktree", r.path.into())],
             );
             ExitCode::SUCCESS
         }

@@ -23,7 +23,8 @@ with agents that can coordinate with each other.
 2. **Central view.** All machines report to one hub. The user connects to the hub only.
 3. **Every agent, now and later.** New agents plug in without changing core code.
 4. **Project-centric.** A project can host several agents, of different or the same kind, possibly on
-   different machines. Each agent's changes are visible and reviewable separately.
+   different machines. Users choose each session's working directory; changes are reviewed per workspace.
+   A separate Git worktree is optional (ADR-0052). Shared-folder edits have no reliable per-agent attribution.
 5. **Agents coordinate.** Structured messaging, a shared task board, file leases, and handoff between agents.
 6. **Global from day one.** Every user-facing surface is localizable; protocol and SDKs are usable from
    any programming language.
@@ -39,7 +40,6 @@ with agents that can coordinate with each other.
 - Building our own coding agent. We host and connect agents; we do not compete with them.
 - Replacing the editor. The file explorer and diff view exist for supervision and review, not as a full IDE.
 - Hosting model inference or proxying LLM API traffic.
-- Sharing one checkout between agents by default (isolation via worktrees is the default).
 
 ## Differentiation
 
@@ -49,7 +49,7 @@ with agents that can coordinate with each other.
 | Structured state, permissions, diffs | Inferred from screen | Yes | Yes (L2/L3) |
 | Many machines in one view | Partial | No | Yes, hub-and-spoke |
 | Agent-to-agent messaging | Keystroke injection | No | Structured mesh |
-| Per-agent change review | No | Per session | Per agent worktree |
+| Change review | No | Per session | Per workspace; optional agent worktree |
 | New agent without a release | Remote manifests | Registry | Manifests, ACP, adapters |
 
 ## Users

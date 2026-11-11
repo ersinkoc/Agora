@@ -56,6 +56,7 @@ impl Drop for Node {
 fn agora(home: &Path, args: &[&str]) -> (i32, String) {
     let out = Command::new(AGORA)
         .args(args)
+        .current_dir(home.join("demo"))
         .env("AGORA_HOME", home)
         .env("AGORA_LANG", "en")
         .output()

@@ -84,12 +84,14 @@ pub struct TaskView {
     pub done: bool,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct View {
     /// Shared-board tasks (ADR-0040), keyed `<project>/<task id>`.
     pub tasks: BTreeMap<String, TaskView>,
     /// Held paths, keyed `<agent>\0<path>` → expiry (ms).
     pub leases: BTreeMap<String, (String, String, u64)>,
+    pub workspaces: BTreeMap<String, agora_protocol::v1::WorkspaceRegistered>,
+    pub agent_workspaces: BTreeMap<String, String>,
     pub nodes: BTreeMap<String, NodeView>,
     /// checkout id → (node id, project id, path)
     pub checkouts: BTreeMap<String, (String, String, String)>,
@@ -120,6 +122,22 @@ impl View {
             n.last_event_ms = n.last_event_ms.max(ev.at_ms);
         }
         match body {
+            Body::WorkspaceStatusChanged(e) => {
+                if let Some(w) = self.workspaces.get_mut(&q(&e.workspace_id)) {
+                    w.files_changed = e.files_changed;
+                }
+            }
+            Body::WorkspaceRegistered(e) => {
+                let mut w = e.clone();
+                w.workspace_id = q(&e.workspace_id);
+                w.node_id = producer.to_string();
+                self.workspaces.insert(w.workspace_id.clone(), w);
+            }
+            Body::AgentWorkspaceBound(e) => {
+                self.agent_workspaces
+                    .insert(q(&e.agent_id), q(&e.workspace_id));
+            }
+
             Body::NodeOnline(e) => {
                 // A node announces itself when its process starts, never when only the link to the hub comes back. So
                 // whatever it had running before is gone (agents die with the node) and its waiting approvals are lost.
@@ -193,6 +211,9 @@ impl View {
                 }
             }
             Body::AgentStarted(e) => {
+                if !e.worktree_id.is_empty() {
+                    self.agent_workspaces.remove(&q(&e.agent_id));
+                }
                 self.agents.insert(
                     q(&e.agent_id),
                     AgentView {

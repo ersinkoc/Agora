@@ -13,7 +13,7 @@ let stack;
 
 try {
   stack = await startStack();
-  const { page, run, start, errors } = stack;
+  const { page, run, start, errors, origin } = stack;
   check(true, 'signed in with a code');
 
   await start('Shell');
@@ -25,10 +25,10 @@ try {
   check(screen.split('hello-from-e2e').length > 2, 'typed text reaches the shell in order and its output comes back');
 
   // Trust this browser on the node, then the chat agent's permission request can be answered.
-  await page.goto('https://localhost:7443/#/device');
+  await page.goto(`${origin}/#/device`);
   const trust = (await page.innerText('.codebox')).trim().replace(/^agora /, '');
   run(trust.split(' '));
-  await page.goto('https://localhost:7443/#/');
+  await page.goto(`${origin}/#/`);
   await start('Fake chat agent');
   await page.waitForSelector('form textarea', { timeout: 10000 });
   await page.fill('form textarea', 'ask');

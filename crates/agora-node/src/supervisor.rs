@@ -87,6 +87,7 @@ pub type AbortHook = Box<dyn Fn(&AgentId) + Send>;
 /// What injection adds to every (re)launch of one agent.
 #[derive(Debug, Clone, Default)]
 struct Extras {
+    read: Vec<PathBuf>,
     argv: Vec<String>,
     env: Vec<(String, String)>,
 }
@@ -151,6 +152,7 @@ pub enum SupervisorEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SupervisorError {
     UnknownKind(String),
+    DirectoryUnsupported(String),
     /// The adapter of this kind came from a registry publisher that was revoked (ADR-0044): `(kind, publisher)`.
     PublisherRevoked(String, String),
     /// The node confines agents and this one cannot be confined here: `(kind, level)`. Nothing was started.
@@ -171,6 +173,9 @@ pub enum SupervisorError {
 impl SupervisorError {
     pub fn to_protocol(&self) -> Error {
         match self {
+            Self::DirectoryUnsupported(k) => Error::new(ErrorCode::AgentModeUnsupported)
+                .with("kind", k.as_str())
+                .with("mode", "directory"),
             Self::UnknownKind(k) => {
                 Error::new(ErrorCode::AgentKindUnknown).with("kind", k.as_str())
             }
@@ -212,6 +217,7 @@ impl From<GitError> for SupervisorError {
 /// A read-only view of one agent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentView {
+    pub directory: bool,
     pub id: AgentId,
     pub kind: String,
     pub state: AgentState,
@@ -263,6 +269,7 @@ struct Entry {
     restart_at: Option<Instant>,
     gave_up: bool,
     extras: Extras,
+    private_config: Option<PathBuf>,
 }
 
 pub struct Supervisor {
@@ -415,7 +422,13 @@ impl Supervisor {
 
         let id = AgentId::new(format!("agent-{}", self.next_id));
         self.next_id += 1;
-        let extras = match self.inject(&id, &req.kind, &checkout.project.to_string(), &worktree) {
+        let extras = match self.inject(
+            &id,
+            &req.kind,
+            &checkout.project.to_string(),
+            &worktree,
+            None,
+        ) {
             Ok(x) => x,
             Err(e) => {
                 self.abandon(&id, &checkout.root, &worktree);
@@ -451,8 +464,187 @@ impl Supervisor {
                 restart_at: None,
                 gave_up: false,
                 extras,
+                private_config: None,
             },
         );
+        Ok(id)
+    }
+
+    /// Explicit directory/worktree launch. Only a worktree created here is rolled back after a failed start.
+    pub fn start_selected(
+        &mut self,
+        req: &StartRequest,
+        project: agora_core::ProjectId,
+        git_root: &Path,
+        separate: bool,
+        now: Instant,
+    ) -> Result<AgentId, SupervisorError> {
+        if !separate {
+            return self.start_in_directory(req, project, now);
+        }
+        self.check_limits()?;
+        if !self.sandbox.enforceable() {
+            return Err(SupervisorError::SandboxUnavailable(
+                req.kind.clone(),
+                self.sandbox.level.name(),
+            ));
+        }
+        let target = req.worktree_root.join(&req.name);
+        let relative = req
+            .checkout
+            .strip_prefix(git_root)
+            .map_err(|e| SupervisorError::Spawn(e.to_string()))?;
+        let branch = format!("agent/{}", req.name);
+        git::create_worktree(git_root, &target, &branch, None)?;
+        let mut direct = req.clone();
+        let result = std::fs::canonicalize(target.join(relative))
+            .map_err(|e| SupervisorError::Spawn(e.to_string()))
+            .and_then(|cwd| {
+                direct.checkout = cwd;
+                self.start_directory_impl(&direct, project, now, false)
+            });
+        match result {
+            Ok(id) => Ok(id),
+            Err(e) => {
+                let _ = git::remove_worktree(git_root, &target, true);
+                Err(e)
+            }
+        }
+    }
+
+    /// Start in a user-owned directory, without creating, resetting or removing Git state.
+    pub fn start_in_directory(
+        &mut self,
+        req: &StartRequest,
+        project: agora_core::ProjectId,
+        now: Instant,
+    ) -> Result<AgentId, SupervisorError> {
+        self.start_directory_impl(req, project, now, true)
+    }
+
+    fn start_directory_impl(
+        &mut self,
+        req: &StartRequest,
+        project: agora_core::ProjectId,
+        now: Instant,
+        private: bool,
+    ) -> Result<AgentId, SupervisorError> {
+        self.check_limits()?;
+        if !self.sandbox.enforceable() {
+            return Err(SupervisorError::SandboxUnavailable(
+                req.kind.clone(),
+                self.sandbox.level.name(),
+            ));
+        }
+        let kind = self
+            .kinds
+            .get(&req.kind)
+            .ok_or_else(|| SupervisorError::UnknownKind(req.kind.clone()))?;
+        let driver = kind.manifest.driver(&bridge_program());
+        let argv = kind.manifest.process.launch.clone();
+        let id = AgentId::new(format!("agent-{}", self.next_id));
+        self.next_id += 1;
+        let worktree = req.checkout.clone();
+        if let Some(spec) = driver {
+            if spec.command.is_empty() {
+                return Err(SupervisorError::UnknownKind(req.kind.clone()));
+            }
+            if let Some(p) = agora_adapters::package::revoked_publisher_of(
+                &agora_adapters::package::agora_home(),
+                &spec.command[0],
+            ) {
+                return Err(SupervisorError::PublisherRevoked(req.kind.clone(), p));
+            }
+            let root =
+                git::discover_checkout(&worktree).map_or_else(|_| worktree.clone(), |c| c.root);
+            let (adapter, session_id) = launch_adapter(
+                &spec,
+                &root,
+                &worktree,
+                None,
+                self.sandbox_for(&req.kind, &worktree, &spec.command[0]),
+            )
+            .map_err(SupervisorError::Spawn)?;
+            let mut agent = Agent::new(
+                id.clone(),
+                project,
+                self.cfg.node.clone(),
+                None,
+                req.kind.clone(),
+                IntegrationLevel::L3Adapter,
+            );
+            agent.session = Some(session_id.clone());
+            self.adapters.insert(
+                id.clone(),
+                AdapterEntry {
+                    agent,
+                    adapter,
+                    session_id,
+                    worktree,
+                    branch: String::new(),
+                    running: true,
+                    spec,
+                    checkout_root: root,
+                    restarts: 0,
+                    restart_at: None,
+                },
+            );
+        } else {
+            if argv.is_empty() {
+                return Err(SupervisorError::UnknownKind(req.kind.clone()));
+            }
+            let private_config =
+                private.then(|| req.worktree_root.join(".sessions").join(&req.name));
+            let extras = match self.inject(
+                &id,
+                &req.kind,
+                &project.to_string(),
+                &worktree,
+                private_config.as_deref(),
+            ) {
+                Ok(e) => e,
+                Err(e) => {
+                    if let Some(hook) = &self.abort_hook {
+                        hook(&id);
+                    }
+                    return Err(e);
+                }
+            };
+            let terminal = match self.launch(&req.kind, &argv, &worktree, &extras) {
+                Ok(t) => t,
+                Err(e) => {
+                    if let Some(hook) = &self.abort_hook {
+                        hook(&id);
+                    }
+                    return Err(e);
+                }
+            };
+            let agent = Agent::new(
+                id.clone(),
+                project,
+                self.cfg.node.clone(),
+                None,
+                req.kind.clone(),
+                IntegrationLevel::L1Manifest,
+            );
+            self.agents.insert(
+                id.clone(),
+                Entry {
+                    agent,
+                    worktree,
+                    branch: String::new(),
+                    terminal: Some(terminal),
+                    pacer: Pacer::default(),
+                    next_check: now,
+                    visible: true,
+                    restarts: 0,
+                    restart_at: None,
+                    gave_up: false,
+                    extras,
+                    private_config,
+                },
+            );
+        }
         Ok(id)
     }
 
@@ -464,6 +656,7 @@ impl Supervisor {
         kind: &str,
         project: &str,
         worktree: &std::path::Path,
+        private_config: Option<&Path>,
     ) -> Result<Extras, SupervisorError> {
         let Some(hook) = &self.hook else {
             return Ok(Extras::default());
@@ -483,13 +676,39 @@ impl Supervisor {
         ) else {
             return Ok(Extras::default());
         };
-        let plan = agora_adapters::inject::plan(&spec, worktree, &endpoint)
+        let mut plan = agora_adapters::inject::plan(&spec, worktree, &endpoint)
             .map_err(|e| SupervisorError::Spawn(format!("mcp injection: {e}")))?;
-        for (path, contents) in &plan.files {
-            write_in_worktree(worktree, path, contents)
-                .map_err(|e| SupervisorError::Spawn(format!("mcp injection: {e}")))?;
+        if let Some(config_root) = private_config {
+            if !plan.files.is_empty()
+                && spec.method == agora_adapters::manifest::McpMethod::ConfigFile
+            {
+                return Err(SupervisorError::DirectoryUnsupported(kind.to_string()));
+            }
+            std::fs::create_dir_all(config_root)
+                .map_err(|e| SupervisorError::Spawn(e.to_string()))?;
+            for (path, contents) in &plan.files {
+                let relative = path
+                    .strip_prefix(worktree)
+                    .map_err(|e| SupervisorError::Spawn(e.to_string()))?;
+                let target = config_root.join(relative);
+                write_in_worktree(config_root, &target, contents)
+                    .map_err(|e| SupervisorError::Spawn(e.to_string()))?;
+                let (old, new) = (path.to_string_lossy(), target.to_string_lossy());
+                for arg in &mut plan.argv_extra {
+                    *arg = arg.replace(old.as_ref(), new.as_ref());
+                }
+                for (_, value) in &mut plan.env {
+                    *value = value.replace(old.as_ref(), new.as_ref());
+                }
+            }
+        } else {
+            for (path, contents) in &plan.files {
+                write_in_worktree(worktree, path, contents)
+                    .map_err(|e| SupervisorError::Spawn(e.to_string()))?;
+            }
         }
         Ok(Extras {
+            read: private_config.map(Path::to_path_buf).into_iter().collect(),
             argv: plan.argv_extra,
             env: plan.env,
         })
@@ -690,6 +909,9 @@ impl Supervisor {
         cfg.rows = self.cfg.terminal.size.rows;
         cfg.limits = self.cfg.limits.process;
         cfg.sandbox = program.and_then(|p| self.sandbox_for(kind, worktree, &p));
+        if let Some(profile) = &mut cfg.sandbox {
+            profile.read.extend(extras.read.iter().cloned());
+        }
         if let Some(k) = self.kinds.get(kind) {
             cfg.env = k
                 .manifest
@@ -891,6 +1113,60 @@ impl Supervisor {
         id: &AgentId,
         now: Instant,
     ) -> Result<Vec<SupervisorEvent>, SupervisorError> {
+        if let Some(entry) = self.adapters.get(id) {
+            if entry.running || entry.restart_at.is_some() {
+                return Err(SupervisorError::StillRunning(id.clone()));
+            }
+            self.check_limits()?;
+            if !self.sandbox.enforceable() {
+                return Err(SupervisorError::SandboxUnavailable(
+                    entry.agent.kind.clone(),
+                    self.sandbox.level.name(),
+                ));
+            }
+            if let Some(p) = entry.spec.command.first().and_then(|p| {
+                agora_adapters::package::revoked_publisher_of(
+                    &agora_adapters::package::agora_home(),
+                    p,
+                )
+            }) {
+                return Err(SupervisorError::PublisherRevoked(
+                    entry.agent.kind.clone(),
+                    p,
+                ));
+            }
+            let profile = entry
+                .spec
+                .command
+                .first()
+                .and_then(|p| self.sandbox_for(&entry.agent.kind, &entry.worktree, p));
+            let native = entry.agent.session.is_some();
+            let (adapter, session_id) = launch_adapter(
+                &entry.spec,
+                &entry.checkout_root,
+                &entry.worktree,
+                entry.agent.session.as_deref(),
+                profile,
+            )
+            .map_err(SupervisorError::Spawn)?;
+            let entry = self
+                .adapters
+                .get_mut(id)
+                .ok_or_else(|| SupervisorError::NotFound(id.clone()))?;
+            entry.adapter = adapter;
+            entry.session_id = session_id;
+            entry.running = true;
+            entry.restart_at = None;
+            entry.restarts = 0;
+            entry.agent.process_restarted();
+            return Ok(vec![
+                SupervisorEvent::Resumed {
+                    agent: id.clone(),
+                    native,
+                },
+                SupervisorEvent::Started { agent: id.clone() },
+            ]);
+        }
         let entry = self
             .agents
             .get(id)
@@ -907,7 +1183,8 @@ impl Supervisor {
         );
         let (argv, native) = self.argv_for_resume(&kind, session.as_deref());
         // A stopped agent left the mesh and its endpoint closed; resuming joins again with a fresh one.
-        let extras = self.inject(id, &kind, &project, &worktree)?;
+        let config = self.agents.get(id).and_then(|e| e.private_config.clone());
+        let extras = self.inject(id, &kind, &project, &worktree, config.as_deref())?;
         let terminal = self.launch(&kind, &argv, &worktree, &extras)?;
         let Some(entry) = self.agents.get_mut(id) else {
             return Err(SupervisorError::NotFound(id.clone()));
@@ -973,6 +1250,7 @@ impl Supervisor {
             .agents
             .iter()
             .map(|(id, e)| AgentView {
+                directory: e.agent.worktree.is_none(),
                 id: id.clone(),
                 kind: e.agent.kind.clone(),
                 state: e.agent.state(),
@@ -984,6 +1262,7 @@ impl Supervisor {
             })
             .collect();
         out.extend(self.adapters.iter().map(|(id, e)| AgentView {
+            directory: e.agent.worktree.is_none(),
             id: id.clone(),
             kind: e.agent.kind.clone(),
             state: e.agent.state(),

@@ -69,3 +69,4 @@ Date: YYYY-MM-DD
 | 0049 | Team mode: users, roles and an audit trail first, Postgres only when SQLite is not enough | Accepted |
 | 0050 | Windows agent confinement: a restricted token with a per-agent SID | Accepted |
 | 0051 | No Web Push: ntfy and the PWA link are the push channel | Accepted |
+| 0052 | Agents run in the selected directory; separate worktrees are optional | Accepted |

@@ -36,8 +36,8 @@ Users see plain words; internal terms stay in code and docs (`glossary.md` lists
 - Navigation is at most **two levels** deep (project → agent). Machines are a filter, not a level.
 - **Every setting must justify itself.** A setting exists only when no default works for most users;
   "settings are a failure of defaults".
-- **Zero-config start.** Agent kinds are detected, workspaces created, names generated, colors assigned.
-  The user only chooses project and agent.
+- **Zero-config start.** Agent kinds are detected, names generated, colors assigned.
+  The user chooses machine, project/folder and agent; creating a separate working copy is optional (ADR-0052).
 
 ### Measurable goals
 - **Time to first agent:** from install to a running agent in the window ≤ 60 seconds.

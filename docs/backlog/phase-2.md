@@ -104,7 +104,7 @@ cross-review by Codex of all Phase 2 PRs (AGENTS.md).
 - **Crates:** `agora-node`
 - **After:** P2-05, P2-06, P2-08
 - **Do:** start, stop, resume (native session ref, then layout-only fallback), restart policy with backoff;
-  every agent gets its own worktree by default. Never depend on a hub connection.
+  the original flow creates a worktree per agent (new selected-directory launches supersede this default in ADR-0052 / #235). Never depend on a hub connection.
 - **Done when:** integration test with `agora-fake-agent`: start in a worktree, state changes reported, stop,
   resume.
 

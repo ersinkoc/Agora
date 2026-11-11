@@ -7,6 +7,7 @@ import { connectLive, type CommandBody, type Live, type LinkState } from './net/
 import { GrantDialog } from './components/GrantDialog';
 import { grantFor, signGrant, type GrantAsk } from './net/grant';
 import type { TerminalSource } from './terminal/source';
+import { signDirectory, type DirectoryInfo } from './net/directory';
 import { StartAgent, type KindChoice } from './components/StartAgent';
 import { approvalList, boards, costByProject, projectChoices, recentMessages, machines, machinesOnline, tiles, type ApprovalModel, type View } from './net/view';
 import { freshApprovals, titleWithCount } from './net/alert';
@@ -69,18 +70,28 @@ export function App() {
     const ok = await api!.command(node, { agentKinds: {} });
     return (ok.agentKinds?.kinds ?? []).map((k) => ({ kind: k.kind ?? '', name: k.displayName || (k.kind ?? ''), installed: !!k.installed }));
   }, [api]);
-  const startAgent = useCallback(async (node: string, projectId: string, kind: string): Promise<string | undefined> => {
+  const inspectDirectory = useCallback(async (node: string, path: string, createProjectId: boolean): Promise<DirectoryInfo> => {
+    if (!api || !device) throw { code: 'approval.signature_invalid' };
+    const authorization = await signDirectory(device, node, 'inspect', path, '', '', createProjectId);
+    const ok = await api.command(node, { directoryInspect: { path, createProjectId, authorization } });
+    const i = ok.directoryInfo;
+    if (!i) throw { code: 'protocol.capability_missing' };
+    return { path: i.path ?? '', projectId: i.projectId ?? '', gitRoot: i.gitRoot ?? '', branch: i.branch ?? '', portable: !!i.portable, previousProjectId: i.previousProjectId ?? '' };
+  }, [api, device]);
+  const startAgent = useCallback(async (node: string, info: DirectoryInfo, kind: string, separateWorktree: boolean, acceptIdentityChange: boolean): Promise<string | undefined> => {
     try {
-      const ok = await api!.command(node, { agentStart: { projectId, kind } });
-      const id = ok.agentStart?.agentId;
+      if (!api || !device) return t('approval-not-trusted');
+      const authorization = await signDirectory(device, node, 'launch', info.path, kind, info.projectId, separateWorktree, acceptIdentityChange);
+      const ok = await api.command(node, { agentLaunch: { path: info.path, projectId: info.projectId, kind, separateWorktree, acceptIdentityChange, authorization } });
+      const id = ok.agentLaunch?.agentId;
       setStarting(false);
       if (id) window.location.hash = `#/agent/${encodeURIComponent(`${node}/${id}`)}`;
       return undefined;
     } catch (e) {
       const code = (e as { code?: string }).code;
-      return t(code === 'agent.kind_unknown' ? 'start-kind-unknown' : code === 'node.resource_limit' ? 'start-limit' : 'start-failed');
+      return t(code === 'agent.mode_unsupported' ? 'start-directory-agent-unsupported' : code === 'approval.signature_invalid' ? 'approval-not-trusted' : code === 'protocol.capability_missing' ? 'start-directory-unsupported' : code === 'agent.kind_unknown' ? 'start-kind-unknown' : code === 'node.resource_limit' ? 'start-limit' : 'start-failed');
     }
-  }, [api]);
+  }, [api, device]);
   useEffect(() => {
     const store = indexedDbStore();
     if (store) void thisDevice(store).then(setDevice).catch(() => setDevice(undefined));
@@ -176,7 +187,7 @@ export function App() {
 
   const loadDiff = useCallback(async (a: AgentTileModel): Promise<string> => {
     if (!api || !a.workspaceRef) return '';
-    const ok = await api.command(a.workspaceRef.node, { gitDiff: { worktreeId: a.workspaceRef.id, path: '' } });
+    const ok = await api.command(a.workspaceRef.node, a.workspaceRef.directory ? { workspaceQuery: { workspaceId: a.workspaceRef.id, operation: 'diff' } } : { gitDiff: { worktreeId: a.workspaceRef.id, path: '' } });
     return ok.gitDiff?.diff ?? '';
   }, [api]);
 
@@ -191,10 +202,10 @@ export function App() {
     if (!f) {
       f = {
         list: async (path) => {
-          const ok = await api.command(w.node, { filesList: { worktreeId: w.id, path } });
+          const ok = await api.command(w.node, w.directory ? { workspaceQuery: { workspaceId: w.id, operation: 'list', path } } : { filesList: { worktreeId: w.id, path } });
           return (ok.filesList?.entries ?? []).map((e) => ({ name: e.name ?? '', isDir: !!e.isDir, size: Number(e.sizeBytes ?? 0) }));
         },
-        read: async (path) => (await api.command(w.node, { filesRead: { worktreeId: w.id, path } })).filesRead?.data ?? new Uint8Array(),
+        read: async (path) => (await api.command(w.node, w.directory ? { workspaceQuery: { workspaceId: w.id, operation: 'read', path } } : { filesRead: { worktreeId: w.id, path } })).filesRead?.data ?? new Uint8Array(),
       };
       fileAccess.current.set(key, f);
     }
@@ -211,7 +222,7 @@ export function App() {
 
   const loadHistory = useCallback(async (a: AgentTileModel): Promise<CommitItem[]> => {
     if (!api || !a.workspaceRef) return [];
-    const ok = await api.command(a.workspaceRef.node, { gitLog: { worktreeId: a.workspaceRef.id, limit: 0 } });
+    const ok = await api.command(a.workspaceRef.node, a.workspaceRef.directory ? { workspaceQuery: { workspaceId: a.workspaceRef.id, operation: 'history' } } : { gitLog: { worktreeId: a.workspaceRef.id, limit: 0 } });
     return commitsOf(ok.gitLog?.commits);
   }, [api]);
 
@@ -227,6 +238,8 @@ export function App() {
     }
     return c;
   }, [api]);
+
+  const selectedAgent = agents.find(a => a.id === current);
 
   const open = useCallback((id: string) => go(`#/agent/${encodeURIComponent(id)}`), [go]);
   const next = useCallback(() => {
@@ -261,12 +274,12 @@ export function App() {
   return (
     <>
       {hash === '#/gallery' ? <Gallery /> : hash === '#/machines' ? <MachinesPage machines={live ? machines(live) : []} usage={usage} projects={live && usage ? costByProject(live, usage.perAgent) : []} onBack={() => go('#/')} /> : hash === '#/audit' && hub ? <AuditPage load={(who) => loadAudit(hub.token, who)} onBack={() => go('#/')} /> : hash === '#/device' ? <DevicePage device={device} onBack={() => go('#/')} onAddPasskey={hub && passkeysSupported() ? async () => (await addPasskey(hub.token)).ok : undefined} /> : current !== undefined
-        ? <Focus agent={agents.find((a) => a.id === current)} costMicroUsd={current ? usage?.perAgent.get(current) : undefined} source={terminal} onBack={() => go('#/')} />
+        ? <Focus agent={selectedAgent} chatSource={selectedAgent?.terminal === false ? chatOf(selectedAgent) : undefined} sendPrompt={hub && api ? sendPrompt : undefined} costMicroUsd={current ? usage?.perAgent.get(current) : undefined} source={terminal} onBack={() => go('#/')} />
         : <Console agents={agents} machines={live ? machines(live) : []} usage={usage} projects={live && usage ? costByProject(live, usage.perAgent) : []}
           approvals={live ? approvalList(live) : []} messages={live ? recentMessages(live) : []} boards={live ? boards(live) : []} terminalFor={terminalFor} chatOf={hub && api ? chatOf : undefined} sendPrompt={hub && api ? sendPrompt : undefined} loadDiff={hub && api ? loadDiff : undefined} loadHistory={hub && api ? loadHistory : undefined} filesOf={hub && api ? filesOf : undefined} onOpen={open}
           onResolve={resolve} notice={notice} link={hub ? link : 'live'}
           onStart={hub && api && live ? () => setStarting(true) : undefined}
-          start={starting && live ? <StartAgent projects={projectChoices(live)} loadKinds={loadKinds} onStart={startAgent} onClose={() => setStarting(false)} /> : undefined} />}
+          start={starting && live ? <StartAgent projects={projectChoices(live)} machines={machines(live)} inspect={inspectDirectory} loadKinds={loadKinds} onStart={startAgent} onClose={() => setStarting(false)} /> : undefined} />}
       {grantAsk && <GrantDialog machine={live?.nodes.get(grantAsk.node)?.hostname || grantAsk.node} kind={grantAsk.ask.kind} busy={grantAsk.busy} failed={grantAsk.failed} onAllow={() => void allowGrant()} onClose={() => setGrantAsk(undefined)} />}
       {palette && <CommandPalette items={items} onClose={() => setPalette(false)} />}
     </>

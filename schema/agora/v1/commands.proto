@@ -53,6 +53,10 @@ message CommandRequest {
     GrantRevoke grant_revoke = 65;
     // ADR-0027: sent on a TLS connection that has no client certificate yet; accepts nothing else.
     EnrollRequest enroll = 80;
+    // ADR-0052: existing published AgentStart keeps its worktree semantics.
+    DirectoryInspect directory_inspect = 81;
+    AgentLaunch agent_launch = 82;
+    WorkspaceQuery workspace_query = 83;
   }
 }
 
@@ -84,6 +88,8 @@ message CommandOk {
     GitLogResult git_log = 15;
     BoardResult board_result = 16;
     GrantListResult grant_list = 17;
+    DirectoryInfo directory_info = 18;
+    AgentLaunchResult agent_launch = 19;
   }
 }
 
@@ -436,4 +442,50 @@ message UsageReportResult {
   uint64 total_micro_usd = 2;
   // When the price table was refreshed, ms since the epoch; 0 for the table bundled with the release.
   uint64 prices_at_ms = 3;
+}
+
+// ADR-0052: signed only on the routed path; owner-only local control needs no signature.
+// Domain-separated canonical bytes are specified in docs/specs/protocol.md.
+message DirectoryAuthorization {
+  string device_id = 1;
+  string nonce = 2;
+  uint64 expires_at_ms = 3;
+  bytes signature = 4;
+}
+message DirectoryInspect {
+  string path = 1;
+  // Explicit user action: create metadata only if absent, never overwrite it or commit it.
+  bool create_project_id = 2;
+  DirectoryAuthorization authorization = 3;
+}
+message DirectoryInfo {
+  string path = 1;
+  string project_id = 2;
+  string git_root = 3;
+  string branch = 4;
+  bool portable = 5;
+  string previous_project_id = 6;
+}
+message AgentLaunch {
+  string path = 1;
+  string project_id = 2;
+  string kind = 3;
+  bool separate_worktree = 4;
+  DirectoryAuthorization authorization = 5;
+  bool accept_identity_change = 6;
+}
+message AgentLaunchResult {
+  string agent_id = 1;
+  string terminal_id = 2;
+  string workspace_id = 3;
+  string path = 4;
+}
+
+// Read-only operations over registered workspaces. Results use the existing data-only result messages.
+message WorkspaceQuery {
+  string workspace_id = 1;
+  // list, read, status, diff, history
+  string operation = 2;
+  string path = 3;
+  uint32 limit = 4;
 }

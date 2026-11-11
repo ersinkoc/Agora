@@ -184,7 +184,7 @@ pub fn hub_run(say: &Say, o: &Opts) -> ExitCode {
             hub,
             support: Support {
                 generations: vec![1],
-                capabilities: vec!["terminal.raw".into()],
+                capabilities: vec!["terminal.raw".into(), "workspace.directory".into()],
                 required: vec![],
             },
             ca: Some(ca),

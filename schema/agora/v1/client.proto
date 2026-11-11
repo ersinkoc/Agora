@@ -102,6 +102,9 @@ message Snapshot {
   // ADR-0040: the shared boards, so a window that opens or reloads sees them before the next change.
   repeated TaskSnapshot tasks = 8;
   repeated LeaseSnapshot leases = 9;
+  // ADR-0052: distinct from the legacy worktree tables.
+  repeated WorkspaceRegistered workspaces = 10;
+  repeated AgentWorkspaceBound agent_workspaces = 11;
 }
 
 // hub -> client for every live or replayed event.

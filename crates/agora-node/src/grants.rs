@@ -102,6 +102,8 @@ pub struct Grants {
     approvals: Arc<NodeApprovals>,
     policy: SignedCommands,
     state: Mutex<State>,
+    directory_nonces: Mutex<std::collections::BTreeMap<String, u64>>,
+    directory_nonce_file: Option<std::path::PathBuf>,
     /// Agent id to project id, for grants scoped to a project.
     project_of: Mutex<Option<Resolver>>,
     /// What each trusted device may sign (ADR-0049).
@@ -153,9 +155,103 @@ impl Grants {
             approvals,
             policy,
             state: Mutex::new(State::default()),
+            directory_nonces: Mutex::new(std::collections::BTreeMap::new()),
+            directory_nonce_file: None,
             project_of: Mutex::new(None),
             limits: Arc::new(crate::limits::DeviceLimits::default()),
         }
+    }
+
+    pub fn with_directory_nonce_file(mut self, path: std::path::PathBuf) -> Self {
+        self.directory_nonce_file = Some(path);
+        self
+    }
+
+    /// Directory actions are always exact-path, short-lived, owner-signed and single-use on the routed path.
+    pub fn directory_action(&self, c: &Cmd, now: u64) -> Result<(), Error> {
+        let (auth, op, path, kind, project, option, identity_change) = match c {
+            Cmd::DirectoryInspect(d) => (
+                d.authorization.as_ref(),
+                "inspect",
+                d.path.as_str(),
+                "",
+                "",
+                d.create_project_id,
+                false,
+            ),
+            Cmd::AgentLaunch(a) => (
+                a.authorization.as_ref(),
+                "launch",
+                a.path.as_str(),
+                a.kind.as_str(),
+                a.project_id.as_str(),
+                a.separate_worktree,
+                a.accept_identity_change,
+            ),
+            _ => return Ok(()),
+        };
+        let bad =
+            || Error::new(ErrorCode::ApprovalSignatureInvalid).with("approval_id", "directory");
+        let a = auth.ok_or_else(bad)?;
+        if [path, kind, project, a.nonce.as_str(), a.device_id.as_str()]
+            .iter()
+            .any(|s| s.contains('\0') || s.len() > 4096)
+            || a.nonce.len() != 32
+            || !a.nonce.bytes().all(|b| b.is_ascii_hexdigit())
+            || a.expires_at_ms <= now
+            || a.expires_at_ms > now.saturating_add(5 * 60 * 1000)
+        {
+            return Err(bad());
+        }
+        if !self.limits.allows_scope(&a.device_id, "node") {
+            return Err(Error::new(ErrorCode::AuthForbidden).with("action", "directory"));
+        }
+        let msg = crate::directory::signed_message(
+            &self.node_id,
+            op,
+            path,
+            kind,
+            project,
+            option,
+            identity_change,
+            &a.nonce,
+            a.expires_at_ms,
+        );
+        if !self
+            .approvals
+            .verify_device(&a.device_id, &msg, &a.signature)
+        {
+            return Err(bad());
+        }
+        let key = format!("{}:{}", a.device_id, a.nonce);
+        let mut used = self
+            .directory_nonces
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(path) = &self.directory_nonce_file {
+            match std::fs::read(path) {
+                Ok(bytes) => {
+                    if bytes.len() > 2 * 1024 * 1024 {
+                        return Err(bad());
+                    }
+                    let saved: std::collections::BTreeMap<String, u64> =
+                        serde_json::from_slice(&bytes).map_err(|_| bad())?;
+                    used.extend(saved);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => return Err(bad()),
+            }
+        }
+        used.retain(|_, exp| *exp >= now);
+        if used.contains_key(&key) || used.len() >= 4096 {
+            return Err(bad());
+        }
+        used.insert(key, a.expires_at_ms);
+        if let Some(path) = &self.directory_nonce_file {
+            let bytes = serde_json::to_vec(&*used).map_err(|_| bad())?;
+            agora_platform::write_private(path, &bytes).map_err(|_| bad())?;
+        }
+        Ok(())
     }
 
     /// Limits what each device may sign (`device.<id>.projects` in the policy file; ADR-0049).

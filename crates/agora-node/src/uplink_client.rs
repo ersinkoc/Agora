@@ -351,7 +351,7 @@ where
     let mut up = Uplink::new(
         Arc::clone(sink),
         env!("CARGO_PKG_VERSION"),
-        &["terminal.raw"],
+        &["terminal.raw", "workspace.directory"],
     );
     conn.send(&frame(
         STREAM_CONTROL,
@@ -622,6 +622,21 @@ fn run_local_on(
     };
     // ADR-0041: grants are made and judged here, where the hub's commands enter the node. A command the policy lists
     // runs only under a live grant; the local socket never passes through this function.
+    if grants.is_none()
+        && matches!(
+            req.command,
+            Some(
+                command_request::Command::DirectoryInspect(_)
+                    | command_request::Command::AgentLaunch(_)
+            )
+        )
+    {
+        return fail(
+            Error::new(ErrorCode::NodePolicyDenied)
+                .with("rule", "directory.authorization")
+                .with("node_id", ""),
+        );
+    }
     if let Some(g) = grants {
         let now = crate::grants::now_ms();
         let done = |r: Result<agora_protocol::v1::command_ok::Result, Error>| CommandResponse {
@@ -635,6 +650,14 @@ fn run_local_on(
         };
         use agora_protocol::v1::command_ok::Result as Ok_;
         match &req.command {
+            Some(
+                c @ (command_request::Command::DirectoryInspect(_)
+                | command_request::Command::AgentLaunch(_)),
+            ) => {
+                if let Err(e) = g.directory_action(c, now) {
+                    return fail(e);
+                }
+            }
             Some(command_request::Command::GrantCreate(c)) => {
                 return done(
                     g.create(c, now)

@@ -136,7 +136,9 @@ where
     conn.send(&frame(STREAM_CONTROL, kinds::RESUME_OK, ok.encode_to_vec()))
         .await?;
 
-    let (_registration, commands) = hub.router().register(node_id);
+    let (_registration, commands) = hub
+        .router()
+        .register_with_capabilities(node_id, welcome.capabilities);
     let result = stream_events(&mut conn, &mut session, hub, node_id, commands).await;
     // However it ended, the hub now knows this node is not connected.
     let _ = hub.node_disconnected(node_id, now_ms());
@@ -277,6 +279,15 @@ pub trait ClientAuth {
 /// The wire form of the hub's view (ADR-0027). Ids are the hub-wide keys.
 pub fn snapshot_of(view: &View, pos: u64) -> v1::Snapshot {
     v1::Snapshot {
+        workspaces: view.workspaces.values().cloned().collect(),
+        agent_workspaces: view
+            .agent_workspaces
+            .iter()
+            .map(|(agent, workspace)| v1::AgentWorkspaceBound {
+                agent_id: agent.clone(),
+                workspace_id: workspace.clone(),
+            })
+            .collect(),
         pos,
         nodes: view
             .nodes

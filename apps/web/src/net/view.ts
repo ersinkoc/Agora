@@ -14,6 +14,7 @@ export function num(x: Num): number {
 }
 
 export interface NodeV { hostname: string; os: string; online: boolean; lastEventMs: number; agentsRunning: number }
+export interface WorkspaceV { nodeId: string; projectId: string; path: string; gitRoot: string; branch: string; managed: boolean; filesChanged: number }
 export interface WorktreeV { checkoutId: string; path: string; branch: string; filesChanged: number }
 export interface AgentV {
   nodeId: string; worktreeId: string; kind: string; state: number; reported: boolean; running: boolean;
@@ -29,6 +30,8 @@ export interface MessageV { from: string; to: string; body: string; atMs: number
 
 export interface View {
   pos: number;
+  workspaces: Map<string, WorkspaceV>;
+  agentWorkspaces: Map<string, string>;
   messages: MessageV[]; // the latest agent-to-agent messages, oldest first
   nodes: Map<string, NodeV>;
   checkouts: Map<string, CheckoutV>;
@@ -43,12 +46,14 @@ export interface View {
 const MAX_MESSAGES = 50;
 
 export function emptyView(): View {
-  return { pos: 0, messages: [], nodes: new Map(), checkouts: new Map(), worktrees: new Map(), agents: new Map(), approvals: new Map(), tasks: new Map(), leases: new Map(), withTerminal: new Set() };
+  return { pos: 0, workspaces: new Map(), agentWorkspaces: new Map(), messages: [], nodes: new Map(), checkouts: new Map(), worktrees: new Map(), agents: new Map(), approvals: new Map(), tasks: new Map(), leases: new Map(), withTerminal: new Set() };
 }
 
 export function fromSnapshot(s: agora.v1.Snapshot.$Properties): View {
   const v = emptyView();
   v.pos = num(s.pos);
+  for (const w of s.workspaces ?? []) v.workspaces.set(w.workspaceId ?? '', { nodeId: w.nodeId ?? '', projectId: w.projectId ?? '', path: w.path ?? '', gitRoot: w.gitRoot ?? '', branch: w.branch ?? '', managed: !!w.managedWorktree, filesChanged: w.filesChanged ?? 0 });
+  for (const a of s.agentWorkspaces ?? []) v.agentWorkspaces.set(a.agentId ?? '', a.workspaceId ?? '');
   for (const n of s.nodes ?? []) {
     v.nodes.set(n.nodeId ?? '', {
       hostname: n.hostname ?? '', os: n.os ?? '', online: !!n.online, lastEventMs: num(n.lastEventMs),
@@ -99,6 +104,9 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
   if (node) node.lastEventMs = Math.max(node.lastEventMs, at);
   const e = ev as Record<string, any>;
   switch (ev.body) {
+    case 'workspaceRegistered': { const w = e.workspaceRegistered; v.workspaces.set(q(w.workspaceId), { nodeId: producer, projectId: w.projectId ?? '', path: w.path ?? '', gitRoot: w.gitRoot ?? '', branch: w.branch ?? '', managed: !!w.managedWorktree, filesChanged: w.filesChanged ?? 0 }); break; }
+    case 'agentWorkspaceBound': v.agentWorkspaces.set(q(e.agentWorkspaceBound.agentId), q(e.agentWorkspaceBound.workspaceId)); break;
+    case 'workspaceStatusChanged': { const w = v.workspaces.get(q(e.workspaceStatusChanged.workspaceId)); if (w) w.filesChanged = e.workspaceStatusChanged.filesChanged ?? 0; break; }
     case 'nodeOnline': {
       const b = e.nodeOnline;
       // The node's process started: what it ran before is gone, and its waiting approvals are lost.
@@ -138,6 +146,7 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
     }
     case 'agentStarted': {
       const b = e.agentStarted;
+      if (b.worktreeId) v.agentWorkspaces.delete(q(b.agentId));
       // A new run of an id: whether it has a terminal is told again by the `terminalOpened` that follows (or not at all).
       v.withTerminal.delete(q(b.agentId));
       v.agents.set(q(b.agentId), {
@@ -227,27 +236,33 @@ function workspaceName(v: View, wt: WorktreeV): string {
 // What Home renders. A waiting approval makes its agent "needs you" even if the agent has not said so.
 export function tiles(v: View): AgentTileModel[] {
   const waiting = new Set([...v.approvals.values()].map((a) => a.agentId));
+  const sharingCounts = new Map<string, number>();
+  for (const [id, agent] of v.agents) { const workspace = v.agentWorkspaces.get(id); if (agent.running && workspace) sharingCounts.set(workspace, (sharingCounts.get(workspace) ?? 0) + 1); }
   return [...v.agents.entries()].map(([id, a]) => {
     const i = hash(id) % ACCENTS.length;
     const node = v.nodes.get(a.nodeId);
     const wt = v.worktrees.get(a.worktreeId);
+    const workspaceId = v.agentWorkspaces.get(id);
+    const selected = workspaceId ? v.workspaces.get(workspaceId) : undefined;
+    const sharing = !!workspaceId && (sharingCounts.get(workspaceId) ?? 0) > 1;
     const state = waiting.has(id) ? 'needs-you' : uiState(a.state);
     return {
       id,
       name: `${a.kind} · ${ACCENT_NAMES[i]}`,
       accent: ACCENTS[i] as string,
       machine: node?.hostname || a.nodeId,
-      workspace: wt ? workspaceName(v, wt) : '',
+      workspace: selected ? selected.path : wt ? workspaceName(v, wt) : '',
+      shared: sharing, git: selected ? !!selected.gitRoot : true, projectId: selected?.projectId ?? (wt ? v.checkouts.get(wt.checkoutId)?.projectId : undefined),
       state,
       preview: '',
       since: a.sinceMs || undefined,
       tokens: a.tokens,
       reportedBy: a.reported ? 'agent' : 'screen',
-      workspaceRef: wt ? { node: a.nodeId, id: a.worktreeId.slice(a.worktreeId.indexOf('/') + 1) } : undefined,
-      project: wt ? lastSegment(v.checkouts.get(wt.checkoutId)?.path ?? '') || undefined : undefined,
+      workspaceRef: selected && workspaceId ? { node: a.nodeId, id: workspaceId.slice(workspaceId.indexOf('/') + 1), directory: true } : wt ? { node: a.nodeId, id: a.worktreeId.slice(a.worktreeId.indexOf('/') + 1) } : undefined,
+      project: selected ? lastSegment(selected.gitRoot || selected.path) : wt ? lastSegment(v.checkouts.get(wt.checkoutId)?.path ?? '') || undefined : undefined,
       terminal: v.withTerminal.has(id),
-      branch: wt?.branch || undefined,
-      filesChanged: wt?.filesChanged ?? 0,
+      branch: selected?.branch || wt?.branch || undefined,
+      filesChanged: selected?.filesChanged ?? wt?.filesChanged ?? 0,
     };
   });
 }
@@ -294,14 +309,16 @@ export function machines(v: View): MachineModel[] {
     .sort((a, b) => Number(b.online) - Number(a.online) || a.name.localeCompare(b.name));
 }
 
-export interface ProjectChoice { node: string; projectId: string; label: string }
+export interface ProjectChoice { node: string; projectId: string; label: string; path?: string }
 
 // Where an agent can be started: every project checked out on a machine that is online.
 export function projectChoices(v: View): ProjectChoice[] {
-  return [...v.checkouts.values()]
-    .filter((c) => v.nodes.get(c.nodeId)?.online)
-    .map((c) => ({ node: c.nodeId, projectId: c.projectId, label: `${v.nodes.get(c.nodeId)?.hostname || c.nodeId} · ${lastSegment(c.path) || c.projectId}` }))
-    .sort((a, b) => a.label.localeCompare(b.label));
+  const choices = new Map<string, ProjectChoice>();
+  for (const c of [...v.checkouts.values(), ...v.workspaces.values()]) {
+    if (v.nodes.get(c.nodeId)?.online) choices.set(`${c.nodeId}/${c.path}`, { node: c.nodeId, projectId: c.projectId, path: c.path,
+      label: `${v.nodes.get(c.nodeId)?.hostname || c.nodeId} · ${lastSegment(c.path) || c.projectId}` });
+  }
+  return [...choices.values()].sort((a, b) => a.label.localeCompare(b.label));
 }
 
 export interface MessageModel { from: string; to: string; body: string; atMs: number; crossMachine: boolean }

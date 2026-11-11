@@ -8,10 +8,11 @@ Use these terms exactly in code, docs, and protocol. The UI uses plain-language 
 | **Hub** | Central service. Aggregates nodes, owns identity, routing, event store, approvals, and mesh broker. Serves the web client. |
 | **Node** | Daemon on one machine. Owns terminals, agent processes, files, and git operations on that machine. |
 | **Client** | A user interface connected to the hub: web, desktop (Tauri), TUI, or CLI. |
-| **Project** | A code repository, identified independently of machine (normalized remote URL + root commit). |
+| **Project** | A logical group of sessions/checkouts across machines; optional portable `project_id`, otherwise Git remote + root commit. A standalone folder can stay node-local. |
 | **Checkout** | A project's working copy on a specific node. |
-| **Worktree** | A git worktree created for one agent inside a checkout; the default isolation unit. |
-| **Agent** | A running AI coding agent instance attached to a project, on one node, usually in its own worktree. |
+| **Workspace** | A canonical working directory on one node, selected by the owner. May be shared, a subdirectory, non-Git, or an explicitly created worktree. |
+| **Worktree** | An optional isolated Git working copy/branch created by the node on explicit request. |
+| **Agent** | A running AI coding agent instance attached to a project, on one node, in a selected workspace. |
 | **Agent kind** | The type of agent (claude-code, codex, wrongstack, gemini-cli, ...), defined by a manifest or adapter. |
 | **Terminal** | A PTY-backed process on a node (an agent in PTY mode, a shell, a server, a test runner). |
 | **Session** | An agent's own conversation identity, used for resume. |

@@ -38,6 +38,7 @@ const RELAY_QUEUE: usize = 512;
 
 struct Link {
     conn: u64,
+    capabilities: Vec<String>,
     tx: mpsc::UnboundedSender<ToNode>,
 }
 
@@ -130,12 +131,25 @@ impl Router {
         self: &Arc<Self>,
         node: &str,
     ) -> (Registration, mpsc::UnboundedReceiver<ToNode>) {
+        self.register_with_capabilities(node, vec![])
+    }
+
+    /// Registers the capabilities negotiated on this particular node connection.
+    pub fn register_with_capabilities(
+        self: &Arc<Self>,
+        node: &str,
+        capabilities: Vec<String>,
+    ) -> (Registration, mpsc::UnboundedReceiver<ToNode>) {
         let (tx, rx) = mpsc::unbounded_channel();
         let conn = self.next.fetch_add(1, Ordering::Relaxed);
-        self.nodes
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(node.to_string(), Link { conn, tx });
+        self.nodes.lock().unwrap_or_else(|e| e.into_inner()).insert(
+            node.to_string(),
+            Link {
+                conn,
+                tx,
+                capabilities,
+            },
+        );
         (
             Registration {
                 router: Arc::clone(self),
@@ -297,6 +311,18 @@ impl Router {
         let (reply, rx) = oneshot::channel();
         let g = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
         let link = g.get(node).ok_or_else(offline)?;
+        if matches!(
+            request.command,
+            Some(
+                command_request::Command::DirectoryInspect(_)
+                    | command_request::Command::AgentLaunch(_)
+                    | command_request::Command::WorkspaceQuery(_)
+            )
+        ) && !link.capabilities.iter().any(|c| c == "workspace.directory")
+        {
+            return Err(Error::new(ErrorCode::ProtocolCapabilityMissing)
+                .with("capability", "workspace.directory"));
+        }
         link.tx
             .send(ToNode::Command {
                 request: Box::new(request),
@@ -339,6 +365,32 @@ mod tests {
             target_node: target.into(),
             command: Some(command_request::Command::AgentList(v1::AgentList::default())),
         }
+    }
+
+    #[test]
+    fn directory_commands_require_the_negotiated_capability_without_a_legacy_fallback() {
+        let r = Router::new();
+        let (_old, mut old_rx) = r.register("old");
+        let (_new, mut new_rx) =
+            r.register_with_capabilities("new", vec!["workspace.directory".into()]);
+        for command in [
+            command_request::Command::DirectoryInspect(v1::DirectoryInspect::default()),
+            command_request::Command::AgentLaunch(v1::AgentLaunch::default()),
+            command_request::Command::WorkspaceQuery(v1::WorkspaceQuery::default()),
+        ] {
+            let mut request = req("old");
+            request.command = Some(command);
+            assert!(
+                matches!(r.send("old", request.clone()), Err(e) if e.code == ErrorCode::ProtocolCapabilityMissing)
+            );
+            assert!(old_rx.try_recv().is_err());
+            assert!(r.send("new", request).is_ok());
+            assert!(matches!(new_rx.try_recv(), Ok(ToNode::Command { .. })));
+        }
+        assert!(
+            r.send("old", req("old")).is_ok(),
+            "legacy requests still work"
+        );
     }
 
     #[tokio::test]
