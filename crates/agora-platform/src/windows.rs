@@ -113,11 +113,15 @@ unsafe impl Sync for Descriptor {}
 
 impl Descriptor {
     fn owner_only() -> io::Result<Self> {
+        Self::from_sddl(OWNER_ONLY)
+    }
+
+    fn from_sddl(sddl: &str) -> io::Result<Self> {
         let mut sd: PSECURITY_DESCRIPTOR = null_mut();
         // SAFETY: a valid NUL-terminated string and a valid out pointer.
         let ok = unsafe {
             ConvertStringSecurityDescriptorToSecurityDescriptorW(
-                wide(OWNER_ONLY).as_ptr(),
+                wide(sddl).as_ptr(),
                 SDDL_REVISION_1,
                 &mut sd,
                 null_mut(),
@@ -199,8 +203,24 @@ pub struct Listener {
 }
 
 pub fn listen(path: &Path) -> io::Result<Listener> {
+    listen_with(path, Descriptor::owner_only()?)
+}
+
+/// The listening end of one agent's own channel (its mesh endpoint). Under confinement (ADR-0050 Amendment B) the agent runs with a
+/// restricted token at Low integrity: the pipe must name a SID of that token for the second access check, and carry a Low label so
+/// that no-write-up lets the Low agent write to it.
+///
+/// PROTOTYPE: the extra entry is the node's logon SID, which every confined agent of this logon session holds, so one agent could
+/// reach another agent's endpoint. The real version names the agent's own restricting SID (generated before the endpoint is made).
+pub fn listen_agent(path: &Path) -> io::Result<Listener> {
+    match crate::winconfine::agent_channel_sddl(OWNER_ONLY) {
+        Some(sddl) => listen_with(path, Descriptor::from_sddl(&sddl)?),
+        None => listen(path),
+    }
+}
+
+fn listen_with(path: &Path, sd: Descriptor) -> io::Result<Listener> {
     let name = pipe_name(path);
-    let sd = Descriptor::owner_only()?;
     let first = create_instance(&name, &sd, true)?;
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);

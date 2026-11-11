@@ -19,7 +19,11 @@ worktree-unmerged = Branch { $branch } has work that is not saved anywhere else.
 agent-not_found = Agent { $agent_id } was not found.
 agent-kind_unknown = Agent type { $kind } is not available.
 agent-publisher_revoked = The adapter for { $kind } comes from { $publisher }, which the registry has revoked. Remove it or install it from another publisher.
-agent-sandbox_unavailable = This machine is set to confine agents ({ $level }), but { $kind } cannot be confined here, so it was not started.
+agent-sandbox_unavailable = This machine is set to confine agents ({ $level }), but { $kind } cannot be confined here, so it was not started.{ $reason ->
+        [broad_write_grant] {" "}A folder it would use lets every user write to it.
+        [label_failed] {" "}A folder it would use cannot be marked for confined agents.
+       *[other] {""}
+    }
 agent-not_authenticated = { $kind } is not signed in on machine { $node_id }.
 agent-blocked = Agent { $agent_id } is waiting for input, so the message was not sent.
 agent-mode_unsupported = { $kind } does not support { $mode } mode.

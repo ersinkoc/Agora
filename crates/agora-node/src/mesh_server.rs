@@ -17,7 +17,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use agora_core::AgentId;
 use agora_mesh::broker::{AgentInfo, AskStatus, Limits, Mesh};
 use agora_mesh::mcp::{McpConnection, Outcome, BOARD_TOOLS};
-use agora_platform::{local_listen, LocalStream};
+use agora_platform::{local_listen_agent, LocalStream};
 use agora_protocol::jsonrpc::{to_line, Message};
 use agora_protocol::v1::event::Body;
 use serde_json::{json, Value};
@@ -328,7 +328,7 @@ impl MeshServer {
     pub fn register(&self, info: AgentInfo) -> io::Result<PathBuf> {
         let id = info.id.clone();
         let path = self.socket_path(&id);
-        let listener = local_listen(&path)?;
+        let listener = local_listen_agent(&path)?;
         listener.set_nonblocking(true)?;
         self.mesh
             .lock()

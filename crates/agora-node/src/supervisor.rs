@@ -157,6 +157,9 @@ pub enum SupervisorError {
     PublisherRevoked(String, String),
     /// The node confines agents and this one cannot be confined here: `(kind, level)`. Nothing was started.
     SandboxUnavailable(String, &'static str),
+    /// The node confines agents and a folder this agent would be given cannot be kept closed (ADR-0050 Amendment B): `(kind, level,
+    /// reason)`, the reason a stable token (`broad_write_grant`, `label_failed`). Nothing was started.
+    SandboxRefused(String, &'static str, &'static str),
     /// The node confines agents and the selected folder is one they may never be launched in (a root, the home folder, a secret
     /// folder, the node's own folder).
     ProtectedDirectory,
@@ -187,7 +190,12 @@ impl SupervisorError {
                 .with("publisher", p.as_str()),
             Self::SandboxUnavailable(k, l) => Error::new(ErrorCode::AgentSandboxUnavailable)
                 .with("kind", k.as_str())
-                .with("level", *l),
+                .with("level", *l)
+                .with("reason", "unsupported"),
+            Self::SandboxRefused(k, l, r) => Error::new(ErrorCode::AgentSandboxUnavailable)
+                .with("kind", k.as_str())
+                .with("level", *l)
+                .with("reason", *r),
             Self::ProtectedDirectory => {
                 Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "directory.protected")
             }
@@ -961,7 +969,18 @@ impl Supervisor {
             cfg.env.push(("TEMP".into(), temp.clone()));
             cfg.env.push(("TMP".into(), temp));
         }
-        let pty = spawn(&cfg).map_err(|e| SupervisorError::Spawn(e.to_string()))?;
+        let pty = spawn(&cfg).map_err(|e| {
+            // A folder the confinement cannot keep closed (a broad write grant, ADR-0050 Amendment B, 4) or whose label cannot be set
+            // (2) is refused before the agent starts: `agent.sandbox_unavailable` with the reason, not an internal error.
+            match agora_platform::sandbox_refusal(&e) {
+                Some(why) => SupervisorError::SandboxRefused(
+                    kind.to_string(),
+                    self.sandbox.level.name(),
+                    why.token(),
+                ),
+                None => SupervisorError::Spawn(e.to_string()),
+            }
+        })?;
         TerminalHandle::start(pty, self.cfg.terminal)
             .map_err(|e| SupervisorError::Spawn(e.to_string()))
     }

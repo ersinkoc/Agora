@@ -78,6 +78,21 @@ pub fn local_listen(path: &std::path::Path) -> io::Result<LocalListener> {
     }
 }
 
+/// Like [`local_listen`], for one agent's own channel (its mesh endpoint): where agents are confined, the agent's process must be
+/// able to connect to it (ADR-0050 Amendment B on Windows). The same as [`local_listen`] elsewhere.
+pub fn local_listen_agent(path: &std::path::Path) -> io::Result<LocalListener> {
+    #[cfg(unix)]
+    {
+        unix::local_listen(path)
+    }
+    #[cfg(windows)]
+    {
+        Ok(LocalListener {
+            inner: windows::listen_agent(path)?,
+        })
+    }
+}
+
 /// Puts a freshly downloaded program in place of the one at `target` (which may be running): the new file is made executable and
 /// renamed over it. Windows cannot replace a running program, so the old one is moved aside to `<target>.old` first.
 pub fn replace_executable(new: &std::path::Path, target: &std::path::Path) -> io::Result<()> {
@@ -410,6 +425,52 @@ pub fn sandbox_supported() -> bool {
     {
         false
     }
+}
+
+/// Why a confined start was refused before the agent ran (ADR-0050 Amendment B). Carried inside the `PermissionDenied` error that
+/// [`spawn`] returns, read back with [`sandbox_refusal`]; `token` is the stable `reason` parameter of `agent.sandbox_unavailable`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SandboxRefusal {
+    /// A folder the agent would be given (or something below it) lets `Users` or `Everyone` write.
+    BroadWriteGrant,
+    /// A folder the agent would write could not be labelled for confined agents.
+    LabelFailed,
+}
+
+impl SandboxRefusal {
+    pub fn token(self) -> &'static str {
+        match self {
+            Self::BroadWriteGrant => "broad_write_grant",
+            Self::LabelFailed => "label_failed",
+        }
+    }
+}
+
+impl std::fmt::Display for SandboxRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.token())
+    }
+}
+
+impl std::error::Error for SandboxRefusal {}
+
+/// The refusal inside an error from [`spawn`], if that is what it was.
+pub fn sandbox_refusal(e: &io::Error) -> Option<SandboxRefusal> {
+    e.get_ref()
+        .and_then(|inner| inner.downcast_ref::<SandboxRefusal>())
+        .copied()
+}
+
+/// Checks, before anything starts, that `sandbox` can be enforced as promised (ADR-0050 Amendment B, 4): on Windows a writable folder,
+/// or anything below it, that lets `Users` or `Everyone` write would let every confined agent in, so it is refused and the first such
+/// path is returned. Always `Ok` elsewhere, and on Windows while confinement is off.
+pub fn sandbox_preflight(sandbox: &Sandbox) -> Result<(), PathBuf> {
+    #[cfg(windows)]
+    if winconfine::enabled() {
+        return winconfine::preflight(sandbox).map_err(|(path, _)| path);
+    }
+    let _ = sandbox;
+    Ok(())
 }
 
 /// Undoes the folder permissions a crashed node left behind for a confined agent (Windows, ADR-0050). Nothing to do elsewhere.
