@@ -102,6 +102,8 @@ usage-prices-bundled = prices from this hub's release
 board-title = Shared tasks and files
 board-open = open
 board-done = done
+board-project-identity = Project identity
+board-project-folders = Machines and folders ({ $count })
 messages-title = Recent messages
 message-cross = between machines
 usage-projects = Spent by project
@@ -230,6 +232,3 @@ address-copied = Copied
 address-copy-failed = Copy failed. Select the address and copy it manually.
 machine-identity = Machine ID: { $id }
 machine-name-id = { $name } · { $id }
-
-board-project-identity = Project identity
-board-project-folders = Machines and folders ({ $count })

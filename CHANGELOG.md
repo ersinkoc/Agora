@@ -4,9 +4,6 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
-### Shared project boards
-- Distinguish same-named projects by their full identity and expandable machine/folder details. Leases from selected-folder sessions appear on their project's board.
-
 ### Selected-folder fixes
 - Machines sharing a host name stay distinct, shared-project counts use enrollment IDs, and agent panes expose their real copyable routing addresses.
 - An isolated copy preserves a selected untracked/ignored subdirectory and refuses restored symlinks that could select another folder. Workspace diffs stay inside the selected directory.
@@ -23,6 +20,9 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 - A hub, a Linux node, a macOS node and a Windows node ran together on one network: terminals of all three in one window, and agent-to-agent messages in every direction (`docs/backlog/lan-test-findings.md`).
 - The desktop app checks the hub against the certificate you gave it before remembering it, says why it cannot connect, and reaches a hub by its IP address; a bundled macOS app can now reach a hub on the local network. `agora tui` reaches a hub by IP too.
 - A project is found by its id before its name, and a name two projects share is refused.
+
+### Shared project boards
+- Distinguish same-named projects by their full identity and expandable machine/folder details. Leases from selected-folder sessions appear on their project's board.
 
 ### Confining agents
 - macOS: a confined agent can read the folders it was given (it could not read its own worktree before).

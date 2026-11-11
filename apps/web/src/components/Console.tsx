@@ -5,6 +5,7 @@ import { money, type UsageSummary } from '../net/usage';
 import type { ApprovalModel, BoardModel, MachineModel, MessageModel, ProjectCost } from '../net/view';
 import type { TerminalSource } from '../terminal/source';
 import { ApprovalCard } from './ApprovalCard';
+import { ProjectBoard } from './ProjectBoard';
 import { DiffDialog } from './DiffDialog';
 import { PromptBox } from './PromptBox';
 import type { ChatSource } from '../net/chat';
@@ -14,7 +15,6 @@ import type { CommitItem } from '../net/history';
 import type { WorkspaceFiles } from '../net/files';
 import { AgentAddress } from './AgentAddress';
 import { StateBadge } from './StateBadge';
-import { ProjectBoard } from './ProjectBoard';
 
 const TerminalView = lazy(() => import('../terminal/TerminalView').then((m) => ({ default: m.TerminalView })));
 
