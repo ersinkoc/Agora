@@ -78,18 +78,48 @@ pub fn local_listen(path: &std::path::Path) -> io::Result<LocalListener> {
     }
 }
 
-/// Like [`local_listen`], for one agent's own channel (its mesh endpoint): where agents are confined, the agent's process must be
-/// able to connect to it (ADR-0050 Amendment B on Windows). The same as [`local_listen`] elsewhere.
-pub fn local_listen_agent(path: &std::path::Path) -> io::Result<LocalListener> {
+/// A fresh identity for one agent that is about to be confined (ADR-0050 Amendment B on Windows: a random SID, used both for its
+/// process and its mesh endpoint), or `None` where agents are not confined that way or confinement is off. Make it before the
+/// agent's endpoint, and pass it to [`local_listen_agent`] and [`PtyConfig::identity`].
+pub fn new_agent_identity() -> Option<String> {
+    #[cfg(windows)]
+    if winconfine::enabled() {
+        return winconfine::random_sid_string().ok();
+    }
+    None
+}
+
+/// Like [`local_listen`], for one agent's own channel (its mesh endpoint). With an `identity` from [`new_agent_identity`] (Windows,
+/// ADR-0050 Amendment B), the confined agent holding exactly that identity may connect too, and no other confined agent can: the
+/// mesh binds an agent's identity to the connection it comes in on. Without one, or on other systems, the same as [`local_listen`].
+pub fn local_listen_agent(
+    path: &std::path::Path,
+    identity: Option<&str>,
+) -> io::Result<LocalListener> {
     #[cfg(unix)]
     {
+        let _ = identity;
         unix::local_listen(path)
     }
     #[cfg(windows)]
     {
         Ok(LocalListener {
-            inner: windows::listen_agent(path)?,
+            inner: windows::listen_agent(path, identity)?,
         })
+    }
+}
+
+/// The system name of the endpoint [`local_listen`] serves for `path` (`\\.\pipe\...` on Windows), for tests and diagnostics; `None`
+/// where the endpoint is the path itself (Unix sockets).
+pub fn local_endpoint_name(path: &std::path::Path) -> Option<String> {
+    #[cfg(windows)]
+    {
+        Some(windows::pipe_name_text(path))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        None
     }
 }
 
@@ -387,6 +417,9 @@ pub struct PtyConfig {
     pub limits: ProcessLimits,
     /// Confine the process to these paths (ADR-0047). `spawn` refuses, rather than ignores it, where this cannot be enforced.
     pub sandbox: Option<Sandbox>,
+    /// The agent's own identity under confinement, from [`new_agent_identity`]: the confined process runs with it, and its mesh endpoint
+    /// ([`local_listen_agent`]) admits exactly it. `None` makes a fresh one (or means nothing where agents are not confined this way).
+    pub identity: Option<String>,
 }
 
 /// File-system confinement for a process and everything it starts: it may read (and run programs from) `read` and `write`, and
@@ -543,6 +576,7 @@ impl PtyConfig {
             rows: 24,
             limits: ProcessLimits::default(),
             sandbox: None,
+            identity: None,
         }
     }
 }

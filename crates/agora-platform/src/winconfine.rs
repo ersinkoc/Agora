@@ -136,7 +136,7 @@ impl Drop for Token {
 }
 
 /// A fresh SID that belongs to nothing else: four random 32-bit numbers below the domain authority.
-fn random_sid_string() -> io::Result<String> {
+pub(crate) fn random_sid_string() -> io::Result<String> {
     let mut n = [0u32; 4];
     // SAFETY: a 16-byte buffer and the system RNG.
     let status = unsafe {
@@ -402,6 +402,98 @@ fn set_low_label(path: &Path, low: bool) -> io::Result<()> {
     }
 }
 
+/// Whether `path` carries an explicit (not inherited) *Low* mandatory label: what Windows gives an object a Low process creates where no
+/// label is inherited.
+fn has_explicit_low_label(path: &Path) -> bool {
+    let name = wide(path.as_os_str());
+    let (mut sacl, mut descriptor) = (null_mut::<ACL>(), null_mut());
+    // SAFETY: a NUL-terminated path; out pointers freed below.
+    let err = unsafe {
+        GetNamedSecurityInfoW(
+            name.as_ptr(),
+            SE_FILE_OBJECT,
+            LABEL_SECURITY_INFORMATION,
+            null_mut(),
+            null_mut(),
+            null_mut(),
+            &mut sacl,
+            &mut descriptor,
+        )
+    };
+    let mut found = false;
+    if err == 0 && !sacl.is_null() {
+        if let Ok(low) = Sid::from_string("S-1-16-4096") {
+            // SAFETY: a valid ACL from the call above.
+            let count = unsafe { (*sacl).AceCount };
+            for i in 0..u32::from(count) {
+                let mut ace = null_mut();
+                // SAFETY: index within AceCount.
+                if unsafe { GetAce(sacl, i, &mut ace) } == 0 {
+                    continue;
+                }
+                // SAFETY: every ACE starts with an ACE_HEADER; a mandatory label ACE (type 0x11) has the ACCESS_ALLOWED_ACE layout.
+                let header = unsafe { &*(ace.cast::<ACE_HEADER>()) };
+                if header.AceType != 0x11 || header.AceFlags & 0x10 != 0 {
+                    continue;
+                }
+                // SAFETY: as above.
+                let label = unsafe { &*(ace.cast::<ACCESS_ALLOWED_ACE>()) };
+                let sid: PSID = (&label.SidStart as *const u32).cast_mut().cast();
+                // SAFETY: both are valid SIDs.
+                if unsafe { EqualSid(sid, low.0) } != 0 {
+                    found = true;
+                }
+            }
+        }
+    }
+    if !descriptor.is_null() {
+        // SAFETY: allocated by GetNamedSecurityInfoW.
+        unsafe { LocalFree(descriptor) };
+    }
+    found
+}
+
+/// Removes the explicit Low labels below `root` one object at a time (`SetFileSecurityW`, no walk of its own). Called after the folder's
+/// own label is gone: anything a Low agent created where no label was inherited got an explicit one, which taking back the folder's label
+/// does not reach, and which would leave it writable to later Low processes.
+fn clear_explicit_low_labels(root: &Path) -> bool {
+    // An empty SACL: no label, so the object is Medium again (or inherits what is above it).
+    let mut acl_buf = [0u32; 4];
+    let acl = acl_buf.as_mut_ptr().cast::<ACL>();
+    // SAFETY: an all-zero descriptor is initialized by the call below before use.
+    let mut sd: SECURITY_DESCRIPTOR = unsafe { std::mem::zeroed() };
+    let sd_ptr = (&mut sd as *mut SECURITY_DESCRIPTOR).cast();
+    // SAFETY: a 16-byte buffer holds an empty ACL; `acl_buf` and `sd` outlive every use below.
+    let ready = unsafe {
+        windows_sys::Win32::Security::InitializeAcl(acl, 16, 2) != 0
+            && InitializeSecurityDescriptor(sd_ptr, 1) != 0
+            && windows_sys::Win32::Security::SetSecurityDescriptorSacl(sd_ptr, 1, acl, 0) != 0
+    };
+    if !ready {
+        return false;
+    }
+    let mut clean = true;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(p) = stack.pop() {
+        if p != root && has_explicit_low_label(&p) {
+            let name = wide(p.as_os_str());
+            // SAFETY: a NUL-terminated path and the descriptor built above.
+            if unsafe { SetFileSecurityW(name.as_ptr(), LABEL_SECURITY_INFORMATION, sd_ptr) } == 0 {
+                clean = false;
+            }
+        }
+        let Ok(meta) = std::fs::symlink_metadata(&p) else {
+            continue;
+        };
+        if meta.is_dir() && !meta.file_type().is_symlink() {
+            if let Ok(entries) = std::fs::read_dir(&p) {
+                stack.extend(entries.flatten().map(|e| e.path()));
+            }
+        }
+    }
+    clean
+}
+
 /// Whether `path` carries an explicit (not inherited) mandatory label already.
 fn has_explicit_label(path: &Path) -> bool {
     let name = wide(path.as_os_str());
@@ -612,16 +704,6 @@ pub(crate) fn preflight(sandbox: &Sandbox) -> Result<(), (PathBuf, SandboxRefusa
     Ok(())
 }
 
-/// The descriptor for one agent's own channel under confinement: `base` (owner and SYSTEM) plus the logon SID, and a Low label.
-/// `None` while confinement is off, so the channel stays owner-only. PROTOTYPE: see `windows::listen_agent`.
-pub(crate) fn agent_channel_sddl(base: &str) -> Option<String> {
-    if !enabled() {
-        return None;
-    }
-    let logon = LogonSid::of_this_process().ok()?.text().ok()?;
-    Some(format!("{base}(A;;GRGW;;;{logon})S:(ML;;NW;;;LW)"))
-}
-
 /// Serializes every decision about a shared folder's label (planning and labelling at start, removal at stop and in recovery) across
 /// all nodes of this user: otherwise an agent ending while another starts in the same folder can remove a label the starting agent
 /// has just counted on.
@@ -784,17 +866,22 @@ pub(crate) struct Confinement {
 }
 
 impl Confinement {
-    pub(crate) fn new(sandbox: &Sandbox) -> io::Result<Self> {
-        Self::in_ledger_dir(sandbox, &ledger_dir())
+    /// `identity` is the agent's SID from [`crate::new_agent_identity`], made before its mesh endpoint so both name the same SID; `None`
+    /// makes a fresh one.
+    pub(crate) fn new(sandbox: &Sandbox, identity: Option<&str>) -> io::Result<Self> {
+        Self::in_ledger_dir(sandbox, &ledger_dir(), identity)
     }
 
-    fn in_ledger_dir(sandbox: &Sandbox, dir: &Path) -> io::Result<Self> {
+    fn in_ledger_dir(sandbox: &Sandbox, dir: &Path, identity: Option<&str>) -> io::Result<Self> {
         // Amendment B, 4: refused before anything changes, so there is nothing to roll back. The caller maps `PermissionDenied` to
         // `agent.sandbox_unavailable`.
         if let Err((_, why)) = preflight(sandbox) {
             return Err(io::Error::new(io::ErrorKind::PermissionDenied, why));
         }
-        let sid_text = random_sid_string()?;
+        let sid_text = match identity {
+            Some(s) => s.to_string(),
+            None => random_sid_string()?,
+        };
         let sid = Sid::from_string(&sid_text)?;
         // Held until every label of this agent is in place (see `LedgerLock`).
         let _lock = LedgerLock::acquire();
@@ -909,7 +996,9 @@ impl Drop for Confinement {
         // Labels first (setting them may need the self-grant), each only when no other live agent still uses that folder.
         for path in &self.labelled {
             let line = format!("{LABEL_LINE}\t{}", path.to_string_lossy());
-            if !line_in_use_elsewhere(&line, &self.ledger) && set_low_label(path, false).is_err() {
+            if !line_in_use_elsewhere(&line, &self.ledger)
+                && (set_low_label(path, false).is_err() || !clear_explicit_low_labels(path))
+            {
                 all_removed = false;
             }
         }
@@ -940,6 +1029,37 @@ impl Drop for Confinement {
             let _ = std::fs::remove_file(&self.ledger);
         }
     }
+}
+
+/// The SID of the user this process runs as, as text.
+pub(crate) fn current_user_sid_text() -> io::Result<String> {
+    use windows_sys::Win32::Security::{TokenUser, TOKEN_USER};
+    let mut own: HANDLE = null_mut();
+    // SAFETY: the pseudo handle of this process and an out pointer.
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut own) } == 0 {
+        return Err(last_error());
+    }
+    let own = Token(own);
+    let mut needed = 0u32;
+    // SAFETY: the documented size query.
+    unsafe { GetTokenInformation(own.0, TokenUser, null_mut(), 0, &mut needed) };
+    let mut buf = vec![0u8; (needed as usize).max(std::mem::size_of::<TOKEN_USER>())];
+    // SAFETY: `buf` is `needed` bytes.
+    if unsafe {
+        GetTokenInformation(
+            own.0,
+            TokenUser,
+            buf.as_mut_ptr().cast(),
+            buf.len() as u32,
+            &mut needed,
+        )
+    } == 0
+    {
+        return Err(last_error());
+    }
+    // SAFETY: GetTokenInformation(TokenUser) wrote a TOKEN_USER at the start of `buf`.
+    let user = unsafe { &*(buf.as_ptr().cast::<TOKEN_USER>()) };
+    sid_text(user.User.Sid)
 }
 
 /// `S-1-...` for a SID.
@@ -1148,10 +1268,11 @@ pub(crate) fn recover_stale() {
                 continue;
             }
             let undone = match mark {
-                LABEL_LINE => set_low_label(folder_path, false),
+                LABEL_LINE => set_low_label(folder_path, false)
+                    .map(|()| clear_explicit_low_labels(folder_path)),
                 _ => continue,
             };
-            if undone.is_err() {
+            if !matches!(undone, Ok(true)) {
                 clean = false;
             }
         }
@@ -1214,6 +1335,29 @@ pub(crate) fn recover_stale() {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_low_labels_below_a_folder_are_cleared() {
+        let root = std::env::temp_dir().join(format!("agora-clear-low-{}", std::process::id()));
+        let sub = root.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        let file = sub.join("f.txt");
+        std::fs::write(&file, "x").unwrap();
+        for p in [&sub, &file] {
+            let ok = std::process::Command::new("icacls")
+                .arg(p)
+                .args(["/setintegritylevel", "L"])
+                .output()
+                .unwrap()
+                .status
+                .success();
+            assert!(ok);
+            assert!(has_explicit_low_label(p));
+        }
+        assert!(clear_explicit_low_labels(&root));
+        assert!(!has_explicit_low_label(&sub) && !has_explicit_low_label(&file));
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn a_ledger_is_alive_while_its_owner_runs_and_stale_otherwise() {

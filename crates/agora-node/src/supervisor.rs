@@ -75,6 +75,9 @@ pub struct Launching {
     pub project: String,
     pub node: String,
     pub worktree: PathBuf,
+    /// The confined agent's own identity (ADR-0050 Amendment B on Windows), made before its endpoint: the endpoint must admit exactly
+    /// this agent. `None` where agents are not confined that way.
+    pub identity: Option<String>,
 }
 
 /// Called before an agent's process starts. Returns the endpoint to inject into its MCP configuration, or `None`
@@ -90,6 +93,8 @@ struct Extras {
     read: Vec<PathBuf>,
     argv: Vec<String>,
     env: Vec<(String, String)>,
+    /// The agent's identity under confinement, kept for every relaunch so the process and its mesh endpoint stay matched.
+    identity: Option<String>,
 }
 
 /// What to start.
@@ -699,8 +704,18 @@ impl Supervisor {
         worktree: &std::path::Path,
         private_config: Option<&Path>,
     ) -> Result<Extras, SupervisorError> {
+        // Made before the endpoint, so the endpoint can admit exactly the process that will hold it.
+        let identity = if self.sandbox.level == crate::sandbox::Level::Off {
+            None
+        } else {
+            agora_platform::new_agent_identity()
+        };
+        let none = || Extras {
+            identity: identity.clone(),
+            ..Extras::default()
+        };
         let Some(hook) = &self.hook else {
-            return Ok(Extras::default());
+            return Ok(none());
         };
         // The hook registers the agent with the mesh even when its manifest has no `[mcp]` (it may reach the mesh
         // some other way); only a manifest with `[mcp]` gets anything injected.
@@ -710,12 +725,13 @@ impl Supervisor {
             project: project.to_string(),
             node: self.cfg.node.as_str().to_string(),
             worktree: worktree.to_path_buf(),
+            identity: identity.clone(),
         });
         let (Some(endpoint), Some(spec)) = (
             endpoint,
             self.kinds.get(kind).and_then(|k| k.manifest.mcp.clone()),
         ) else {
-            return Ok(Extras::default());
+            return Ok(none());
         };
         let mut plan = agora_adapters::inject::plan(&spec, worktree, &endpoint)
             .map_err(|e| SupervisorError::Spawn(format!("mcp injection: {e}")))?;
@@ -752,6 +768,7 @@ impl Supervisor {
             read: private_config.map(Path::to_path_buf).into_iter().collect(),
             argv: plan.argv_extra,
             env: plan.env,
+            identity,
         })
     }
 
@@ -950,6 +967,7 @@ impl Supervisor {
         cfg.rows = self.cfg.terminal.size.rows;
         cfg.limits = self.cfg.limits.process;
         cfg.sandbox = program.and_then(|p| self.sandbox_for(kind, worktree, &p));
+        cfg.identity = extras.identity.clone();
         if let Some(profile) = &mut cfg.sandbox {
             profile.read.extend(extras.read.iter().cloned());
         }

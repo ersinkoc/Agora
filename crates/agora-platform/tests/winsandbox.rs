@@ -331,3 +331,114 @@ fn a_broad_grant_deep_inside_an_allowed_folder_is_refused() {
     assert!(!acl.contains("Mandatory Label"), "{acl}");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// The mesh binds an agent's identity to its connection: under confinement an agent's endpoint admits exactly that agent's
+/// identity, so a second confined agent cannot connect to it (ADR-0050 Amendment B on Windows).
+#[test]
+fn a_confined_agent_cannot_reach_another_agents_endpoint() {
+    enable();
+    let root = scratch("endpoint");
+    let (a, b) = (root.join("agent-a"), root.join("agent-b"));
+    for d in [&a, &b] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let id_a = agora_platform::new_agent_identity().expect("an identity under confinement");
+    let id_b = agora_platform::new_agent_identity().expect("an identity under confinement");
+    assert_ne!(id_a, id_b);
+    let endpoint = root.join("a.sock");
+    let _listener = agora_platform::local_listen_agent(&endpoint, Some(&id_a)).unwrap();
+    let pipe = agora_platform::local_endpoint_name(&endpoint).unwrap();
+    let try_connect = |dir: &Path, identity: &str, tag: &str| {
+        let script = dir.join("connect.cmd");
+        std::fs::write(
+            &script,
+            format!(
+                "@echo off\r\necho x> \"{pipe}\" && echo CONNECTED-{tag}|| echo REFUSED-{tag}\r\n"
+            ),
+        )
+        .unwrap();
+        let mut cfg = PtyConfig::new(vec![
+            "cmd.exe".into(),
+            "/c".into(),
+            script.display().to_string(),
+        ]);
+        cfg.cwd = Some(dir.to_path_buf());
+        cfg.sandbox = Some(Sandbox {
+            read: vec![],
+            write: vec![dir.to_path_buf()],
+        });
+        cfg.identity = Some(identity.to_string());
+        let pty = spawn(&cfg).unwrap();
+        let mut out = Vec::new();
+        let end = Instant::now() + Duration::from_secs(30);
+        while Instant::now() < end {
+            match pty.output().recv_timeout(Duration::from_millis(100)) {
+                Ok(bytes) => out.extend(bytes),
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(_) => {}
+            }
+        }
+        String::from_utf8_lossy(&out).into_owned()
+    };
+    // B first: a refused open leaves the pipe instance free, so A's success below shows B was refused for who it is, not a busy pipe.
+    let out_b = try_connect(&b, &id_b, "B");
+    assert!(
+        out_b.contains("REFUSED-B") && !out_b.contains("CONNECTED-B"),
+        "{out_b}"
+    );
+    let out_a = try_connect(&a, &id_a, "A");
+    assert!(out_a.contains("CONNECTED-A"), "{out_a}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// From #241 (the #230 negative tests), adapted to ADR-0050 Amendment B: a second agent's folder that inherits `Users` and `Everyone`
+/// Modify is refused before that agent starts (`broad_write_grant`), and a confined agent A still cannot write into it.
+#[test]
+fn a_second_agents_folder_under_a_broad_grant_is_out_of_reach() {
+    enable();
+    let broad = scratch("broad-two");
+    grant_everyone_and_users(&broad);
+    let b = broad.join("agent-b");
+    std::fs::create_dir_all(&b).unwrap();
+    std::fs::write(b.join("notes.txt"), "agent-b-private").unwrap();
+    let mut cfg = PtyConfig::new(vec!["cmd.exe".into(), "/c".into(), "echo started".into()]);
+    cfg.cwd = Some(b.clone());
+    cfg.sandbox = Some(Sandbox {
+        read: vec![],
+        write: vec![b.clone()],
+    });
+    let err = spawn(&cfg)
+        .err()
+        .expect("agent B must be refused before start");
+    assert_eq!(
+        agora_platform::sandbox_refusal(&err),
+        Some(agora_platform::SandboxRefusal::BroadWriteGrant),
+        "{err}"
+    );
+
+    // Agent A lives elsewhere and tries B's folder anyway.
+    let root_a = scratch("broad-two-a");
+    let a = root_a.join("agent-a");
+    std::fs::create_dir_all(&a).unwrap();
+    let script = a.join("run.cmd");
+    std::fs::write(
+        &script,
+        format!(
+            "@echo off\r\necho x> \"{b}\\from-a.txt\" && echo WROTE-B|| echo REFUSED-B\r\n",
+            b = b.display()
+        ),
+    )
+    .unwrap();
+    let out = run(
+        Sandbox {
+            read: vec![],
+            write: vec![a.clone()],
+        },
+        &a,
+        &script,
+    );
+    assert!(out.contains("REFUSED-B"), "{out}");
+    assert!(!b.join("from-a.txt").exists());
+    let _ = std::fs::remove_dir_all(&broad);
+    let _ = std::fs::remove_dir_all(&root_a);
+}

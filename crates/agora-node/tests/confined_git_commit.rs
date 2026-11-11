@@ -15,6 +15,24 @@ use agora_node::supervisor::{
 };
 use agora_node::terminal::TerminalOptions;
 
+/// Every file and folder below `root` (links not followed).
+fn walk(root: &Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(p) = stack.pop() {
+        let Ok(meta) = std::fs::symlink_metadata(&p) else {
+            continue;
+        };
+        if meta.is_dir() && !meta.file_type().is_symlink() {
+            if let Ok(entries) = std::fs::read_dir(&p) {
+                stack.extend(entries.flatten().map(|e| e.path()));
+            }
+        }
+        out.push(p);
+    }
+    out
+}
+
 fn git(dir: &Path, args: &[&str]) -> String {
     let out = Command::new("git")
         .arg("-C")
@@ -107,5 +125,16 @@ fn a_confined_agent_commits_in_its_own_worktree() {
         "init"
     );
     drop(sup);
+    // ADR-0050 Amendment B: once the agent has ended, no Low label is left anywhere below (labels taken back, and the explicit ones
+    // Windows gives what a Low process creates cleared too).
+    let labelled: Vec<String> = walk(&dir)
+        .into_iter()
+        .filter(|p| {
+            let out = Command::new("icacls").arg(p).output().unwrap();
+            String::from_utf8_lossy(&out.stdout).contains("Mandatory Label")
+        })
+        .map(|p| p.display().to_string())
+        .collect();
+    assert!(labelled.is_empty(), "left labelled: {labelled:?}");
     let _ = std::fs::remove_dir_all(dir);
 }

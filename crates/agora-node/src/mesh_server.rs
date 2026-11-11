@@ -326,9 +326,19 @@ impl MeshServer {
     /// Adds the agent to the mesh and starts serving its endpoint. Returns the socket path to put in its MCP
     /// configuration.
     pub fn register(&self, info: AgentInfo) -> io::Result<PathBuf> {
+        self.register_confined(info, None)
+    }
+
+    /// Like [`Self::register`] for an agent that will run confined with `identity` (ADR-0050 Amendment B on Windows): its endpoint
+    /// admits exactly that identity among confined processes, so one agent cannot speak on another's connection.
+    pub fn register_confined(
+        &self,
+        info: AgentInfo,
+        identity: Option<&str>,
+    ) -> io::Result<PathBuf> {
         let id = info.id.clone();
         let path = self.socket_path(&id);
-        let listener = local_listen_agent(&path)?;
+        let listener = local_listen_agent(&path, identity)?;
         listener.set_nonblocking(true)?;
         self.mesh
             .lock()
