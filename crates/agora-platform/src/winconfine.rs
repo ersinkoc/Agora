@@ -1497,6 +1497,12 @@ mod tests {
         let work = root.join("work");
         std::fs::create_dir_all(work.join("sub")).unwrap();
         unlabelable(&work);
+        if may_write_owner(&work) {
+            // An account that may relabel anything anyway (an elevated administrator, as on CI runners): nothing to refuse here.
+            eprintln!("skipped: this account may set labels on every folder");
+            let _ = std::fs::remove_dir_all(&root);
+            return;
+        }
         let identity = random_sid_string().unwrap();
         let sandbox = Sandbox {
             read: vec![],
