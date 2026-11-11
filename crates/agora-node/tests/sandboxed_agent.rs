@@ -202,7 +202,7 @@ fn an_offline_agent_works_in_its_worktree_but_reaches_no_other_machine() {
     sup.start(&req, Instant::now()).unwrap();
     let net = dir.join("worktrees/a/net");
     let end = Instant::now() + Duration::from_secs(15);
-    while std::fs::read_to_string(&net).map_or(0, |t| t.lines().count()) < 2 && Instant::now() < end
+    while std::fs::read_to_string(&net).map_or(0, |t| t.lines().count()) < 3 && Instant::now() < end
     {
         sup.tick(Instant::now());
         std::thread::sleep(Duration::from_millis(50));
