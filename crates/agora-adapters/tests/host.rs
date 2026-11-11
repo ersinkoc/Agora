@@ -264,6 +264,7 @@ fn a_confined_adapter_writes_only_where_it_may() {
                 .map(Into::into)
                 .to_vec(),
             write: vec![allowed.clone(), "/dev".into()],
+            ..Default::default()
         }),
     })
     .unwrap();

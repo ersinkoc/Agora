@@ -443,6 +443,22 @@ pub struct PtyConfig {
 pub struct Sandbox {
     pub read: Vec<PathBuf>,
     pub write: Vec<PathBuf>,
+    /// No network but the loopback interface and the unix sockets below `sockets` and `write` (ADR-0047 `worktree-offline`).
+    /// Refused where [`offline_supported`] is false.
+    pub offline: bool,
+    /// Folders whose unix sockets stay reachable when `offline` (the node's mesh sockets).
+    pub sockets: Vec<PathBuf>,
+}
+
+impl Sandbox {
+    /// Files only: read `read`, write below `write`; the network is not restricted.
+    pub fn new(read: Vec<PathBuf>, write: Vec<PathBuf>) -> Self {
+        Self {
+            read,
+            write,
+            ..Self::default()
+        }
+    }
 }
 
 /// True where a [`Sandbox`] is enforced by per-agent folder permissions (Windows, ADR-0050) rather than by a rule list the kernel
@@ -473,6 +489,25 @@ pub fn sandbox_supported() -> bool {
     {
         false
     }
+}
+
+/// True when this machine can also keep a confined process off the network ([`Sandbox::offline`]): macOS (Seatbelt, loopback and
+/// the listed unix sockets stay reachable). Linux (Landlock network rules) and Windows do not yet, so `worktree-offline` is refused
+/// there.
+pub fn offline_supported() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        macos::sandbox_supported()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
+/// Whether `sb` can be enforced here as asked: confinement at all, and the network part when it asks for it.
+fn enforceable(sb: &Sandbox) -> bool {
+    sandbox_supported() && (!sb.offline || offline_supported())
 }
 
 /// Why a confined start was refused before the agent ran (ADR-0050 Amendment B). Carried inside the `PermissionDenied` error that
@@ -535,7 +570,7 @@ pub fn recover_sandbox_leftovers() {
 /// Confines `cmd` (and what it starts) the same way [`PtyConfig::sandbox`] does a PTY process. Fails with `Unsupported` where that
 /// cannot be enforced, so the caller never runs the command unconfined by accident.
 pub fn confine_command(cmd: &mut std::process::Command, sandbox: &Sandbox) -> io::Result<()> {
-    if !sandbox_supported() {
+    if !enforceable(sandbox) {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "this machine cannot confine a process",
@@ -777,7 +812,7 @@ pub fn spawn(config: &PtyConfig) -> io::Result<Box<dyn Pty>> {
     if config.argv.is_empty() {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "argv is empty"));
     }
-    if config.sandbox.is_some() && !sandbox_supported() {
+    if config.sandbox.as_ref().is_some_and(|sb| !enforceable(sb)) {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "this machine cannot confine a process",

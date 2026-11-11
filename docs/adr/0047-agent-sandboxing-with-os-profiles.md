@@ -13,6 +13,9 @@ Agents are data, not code (AGENTS.md), so any confinement must apply to a manife
    behaviour, still the default), `worktree` (the agent may write only inside its worktree, its own state folder and a temp folder;
    it may read the system and its worktree but not the user's home outside what the manifest lists; no access to `<AGORA_HOME>`),
    and `worktree-offline` (as `worktree`, and no network except what the manifest names, for agents that work through a local model).
+   *Implementation note (macOS):* Seatbelt names only `localhost` or every host, so on macOS the level allows this machine and the
+   node's unix sockets and nothing else; manifest-named hosts are not expressible there. Linux and Windows refuse the level until they
+   have network rules.
 2. **The operating system's own mechanism, no container runtime:** Linux Landlock (kernel 5.13 or newer, applied between fork and
    exec), macOS Seatbelt profiles, Windows a restricted token with the job object that already exists (ADR-0045). The code lives in
    `agora-platform/src/<os>.rs` behind one function (`confine(command, &Policy)`); no `cfg` elsewhere.

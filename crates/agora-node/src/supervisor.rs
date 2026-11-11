@@ -95,6 +95,8 @@ struct Extras {
     env: Vec<(String, String)>,
     /// The agent's identity under confinement, kept for every relaunch so the process and its mesh endpoint stay matched.
     identity: Option<String>,
+    /// The agent's own mesh socket: the only unix socket outside its private temp folder it may reach when offline.
+    socket: Option<PathBuf>,
 }
 
 /// What to start.
@@ -734,11 +736,12 @@ impl Supervisor {
             worktree: worktree.to_path_buf(),
             identity: identity.clone(),
         });
+        let socket = endpoint.as_ref().map(|e| e.socket.clone());
         let (Some(endpoint), Some(spec)) = (
             endpoint,
             self.kinds.get(kind).and_then(|k| k.manifest.mcp.clone()),
         ) else {
-            return Ok(none());
+            return Ok(Extras { socket, ..none() });
         };
         let mut plan = agora_adapters::inject::plan(&spec, worktree, &endpoint)
             .map_err(|e| SupervisorError::Spawn(format!("mcp injection: {e}")))?;
@@ -776,6 +779,7 @@ impl Supervisor {
             argv: plan.argv_extra,
             env: plan.env,
             identity,
+            socket,
         })
     }
 
@@ -978,6 +982,14 @@ impl Supervisor {
         cfg.identity = extras.identity.clone();
         if let Some(profile) = &mut cfg.sandbox {
             profile.read.extend(extras.read.iter().cloned());
+            // Offline (ADR-0047 `worktree-offline`): only its own mesh socket and the unix sockets it makes in its private temp
+            // folder; not `/tmp` (a tmux server or an SSH agent there would hand it a way out) and not other agents' sockets.
+            if profile.offline {
+                profile.sockets = extras.socket.iter().cloned().collect();
+                if agora_platform::PRIVATE_TEMP {
+                    profile.sockets.push(crate::sandbox::agent_temp(worktree));
+                }
+            }
         }
         if let Some(k) = self.kinds.get(kind) {
             cfg.env = k

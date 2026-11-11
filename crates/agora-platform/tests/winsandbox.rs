@@ -83,6 +83,7 @@ fn a_confined_process_writes_only_where_it_was_allowed_and_reads_no_user_secret(
         Sandbox {
             read: vec![],
             write: vec![allowed.clone()],
+            ..Default::default()
         },
         &allowed,
         &script,
@@ -130,6 +131,7 @@ fn a_second_agents_folder_is_out_of_reach() {
     cfg.sandbox = Some(Sandbox {
         read: vec![],
         write: vec![b.clone()],
+        ..Default::default()
     });
     let agent_b = spawn(&cfg).unwrap();
 
@@ -146,6 +148,7 @@ fn a_second_agents_folder_is_out_of_reach() {
         Sandbox {
             read: vec![],
             write: vec![a.clone()],
+            ..Default::default()
         },
         &a,
         &script,
@@ -185,6 +188,7 @@ fn a_junction_pointing_outside_is_refused() {
         Sandbox {
             read: vec![],
             write: vec![allowed.clone()],
+            ..Default::default()
         },
         &allowed,
         &script,
@@ -231,6 +235,7 @@ fn a_folder_every_user_may_write_is_still_refused() {
         Sandbox {
             read: vec![],
             write: vec![allowed.clone()],
+            ..Default::default()
         },
         &allowed,
         &script,
@@ -261,6 +266,7 @@ fn system_tools_still_start_when_confined() {
         Sandbox {
             read: vec![],
             write: vec![allowed.clone()],
+            ..Default::default()
         },
         &allowed,
         &script,
@@ -286,6 +292,7 @@ fn an_allowed_folder_with_a_broad_write_grant_is_refused_before_start() {
     cfg.sandbox = Some(Sandbox {
         read: vec![],
         write: vec![b.clone()],
+        ..Default::default()
     });
     let err = spawn(&cfg).err().expect("must be refused");
     assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied, "{err}");
@@ -323,6 +330,7 @@ fn a_broad_grant_deep_inside_an_allowed_folder_is_refused() {
     cfg.sandbox = Some(Sandbox {
         read: vec![],
         write: vec![work.clone()],
+        ..Default::default()
     });
     let err = spawn(&cfg).err().expect("must be refused");
     assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied, "{err}");
@@ -369,6 +377,7 @@ fn a_confined_agent_cannot_reach_another_agents_endpoint() {
         cfg.sandbox = Some(Sandbox {
             read: vec![],
             write: vec![dir.to_path_buf()],
+            ..Default::default()
         });
         cfg.identity = Some(identity.to_string());
         let pty = spawn(&cfg).unwrap();
@@ -450,6 +459,7 @@ fn a_confined_agent_cannot_open_another_agents_process() {
     cfg.sandbox = Some(Sandbox {
         read: vec![],
         write: vec![a.clone()],
+        ..Default::default()
     });
     let agent_a = spawn(&cfg).unwrap();
     let pid = agent_a.pid();
@@ -480,6 +490,7 @@ fn a_confined_agent_cannot_open_another_agents_process() {
     cfg.sandbox = Some(Sandbox {
         read: vec![],
         write: vec![b.clone()],
+        ..Default::default()
     });
     let agent_b = spawn(&cfg).unwrap();
     let mut out = Vec::new();
@@ -533,6 +544,7 @@ fn a_second_agents_folder_under_a_broad_grant_is_out_of_reach() {
     cfg.sandbox = Some(Sandbox {
         read: vec![],
         write: vec![b.clone()],
+        ..Default::default()
     });
     let err = spawn(&cfg)
         .err()
@@ -560,6 +572,7 @@ fn a_second_agents_folder_under_a_broad_grant_is_out_of_reach() {
         Sandbox {
             read: vec![],
             write: vec![a.clone()],
+            ..Default::default()
         },
         &a,
         &script,
