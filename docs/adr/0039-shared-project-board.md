@@ -38,6 +38,21 @@ show the board. A handoff is a task owner change plus a message to the receiving
 **What does not change.** The hub still cannot widen node policy or answer approvals; board content is untrusted text like any mesh
 content (clients render it as plain text); `mesh.remote = false` on a node (ADR-0031) also stops it from using shared boards.
 
+## Amendment A (proposed, awaiting the maintainer's decision): the board stays in use while it holds unfinished work
+
+Found by the shared-board test on real nodes (macos machine, `comms`, findings B1 to B3 in `docs/backlog/lan-test-findings.md`). The decision above uses the board "when the project
+has checkouts on two or more online nodes". When one of the two nodes drops, the project stops being shared: the remaining node falls back to its local broker, the hub's tasks vanish
+from its view, a task it creates meanwhile stays local and is never merged, can take an id (`t-1`) that a different task on the hub board already has, and a handoff to the offline node
+answers `mesh.recipient_unknown` instead of `node.offline`.
+
+**Amended rule.** For a node that has a checkout of the project, the hub answers that the project is shared when the project has checkouts on two or more online nodes **or** its board
+holds a task that is open or claimed, or a lease that has not ended. While the hub is reachable such a node keeps using the hub's board; when it is not, the board calls fail with
+`board.unavailable` (as for any shared project). A board with no unfinished work (every task done, no live lease) and one online node goes back to the local broker. A node still cannot
+use a project it has no checkout of.
+
+**Consequences.** Tasks made while a node is offline go to the one board, so ids never collide and nothing needs merging; a handoff to an offline node fails with `node.offline` and moves
+nothing; the hub's `shared` answer changes, the protocol does not. Local-only projects (one node, no board work) are untouched.
+
 ## Consequences
 - Hub: a board per project in the store, atomic task and lease operations, TTL expiry, a command handler on the node connection.
 - Node: the mesh server routes shared-project tool calls through the uplink (as `MeshPost` does) and renews leases; local-only
