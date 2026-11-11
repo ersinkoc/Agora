@@ -174,12 +174,6 @@ impl EventSink {
                             state: proto_state(view.state) as i32,
                             reported: false,
                         }));
-                        if let Some(session) = &view.session {
-                            self.record(Body::AgentSessionReported(v1::AgentSessionReported {
-                                agent_id: agent.as_str().into(),
-                                session_id: session.clone(),
-                            }));
-                        }
                         if view.terminal {
                             self.record(Body::TerminalOpened(v1::TerminalOpened {
                                 terminal_id: crate::control::terminal_id_of(agent),
@@ -189,6 +183,12 @@ impl EventSink {
                             }));
                         }
                     }
+                }
+                SupervisorEvent::SessionReported { agent, session } => {
+                    self.record(Body::AgentSessionReported(v1::AgentSessionReported {
+                        agent_id: agent.as_str().into(),
+                        session_id: session.clone(),
+                    }));
                 }
                 SupervisorEvent::StateChanged { agent, state } => {
                     self.record(Body::AgentStateChanged(v1::AgentStateChanged {

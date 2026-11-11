@@ -1,6 +1,7 @@
 # Selected-directory review fixes — #257
 
 Follow-up to merged #236, within accepted ADR-0052. No protocol fields, existing golden fixtures, dependencies or platform implementations change.
+Native session identifiers are copied only on lifecycle transitions; ordinary supervisor tick/list views gain no session allocation.
 
 ## Findings and evidence
 

@@ -112,6 +112,11 @@ pub enum SupervisorEvent {
     Started {
         agent: AgentId,
     },
+    /// Native session retained across a resumed/restarted process; copied only on a lifecycle transition.
+    SessionReported {
+        agent: AgentId,
+        session: String,
+    },
     StateChanged {
         agent: AgentId,
         state: AgentState,
@@ -225,7 +230,6 @@ impl From<GitError> for SupervisorError {
 pub struct AgentView {
     pub directory: bool,
     pub terminal: bool,
-    pub session: Option<String>,
     pub level: IntegrationLevel,
     pub id: AgentId,
     pub kind: String,
@@ -886,6 +890,7 @@ impl Supervisor {
                 e.running = true;
                 e.agent.process_restarted();
                 events.push(SupervisorEvent::Started { agent: id.clone() });
+                events.extend(session_report(&e.agent));
             }
             Err(_) => schedule_adapter_restart(id, e, now, &policy, events),
         }
@@ -1071,6 +1076,7 @@ impl Supervisor {
                 entry.next_check = now;
                 entry.agent.process_restarted();
                 events.push(SupervisorEvent::Started { agent: id.clone() });
+                events.extend(session_report(&entry.agent));
             }
             Err(_) => {
                 // Could not even start: count it as a failed attempt and back off again.
@@ -1195,10 +1201,12 @@ impl Supervisor {
             entry.restart_at = None;
             entry.restarts = 0;
             entry.agent.process_restarted();
-            return Ok(vec![SupervisorEvent::Resumed {
+            let mut events = vec![SupervisorEvent::Resumed {
                 agent: id.clone(),
                 native,
-            }]);
+            }];
+            events.extend(session_report(&entry.agent));
+            return Ok(events);
         }
         let entry = self
             .agents
@@ -1239,6 +1247,7 @@ impl Supervisor {
                 state: AgentState::Unknown,
             });
         }
+        events.extend(session_report(&entry.agent));
         Ok(events)
     }
 
@@ -1285,7 +1294,6 @@ impl Supervisor {
             .map(|(id, e)| AgentView {
                 directory: e.agent.worktree.is_none(),
                 terminal: e.terminal.is_some(),
-                session: e.agent.session.clone(),
                 level: e.agent.level,
                 id: id.clone(),
                 kind: e.agent.kind.clone(),
@@ -1300,7 +1308,6 @@ impl Supervisor {
         out.extend(self.adapters.iter().map(|(id, e)| AgentView {
             directory: e.agent.worktree.is_none(),
             terminal: false,
-            session: e.agent.session.clone(),
             level: e.agent.level,
             id: id.clone(),
             kind: e.agent.kind.clone(),
@@ -1554,4 +1561,15 @@ fn selected_worktree_directory(root: &Path, relative: &Path) -> std::io::Result<
         ));
     }
     Ok(directory)
+}
+
+/// Session identifiers are lifecycle data; ordinary supervisor ticks/listing need no extra allocation.
+fn session_report(agent: &Agent) -> Option<SupervisorEvent> {
+    agent
+        .session
+        .as_ref()
+        .map(|session| SupervisorEvent::SessionReported {
+            agent: agent.id.clone(),
+            session: session.clone(),
+        })
 }
