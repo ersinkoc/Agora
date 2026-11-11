@@ -140,11 +140,56 @@ impl EventSink {
         }));
     }
 
-    /// Map supervisor events to protocol events. `views` is only used to find nothing today but keeps the
-    /// call site honest about needing current state when richer events are added.
-    pub fn supervisor_events(&self, events: &[SupervisorEvent], _views: &[AgentView]) {
+    /// Publish lifecycle and reported events using the supervisor's current process/session facts.
+    pub fn supervisor_events(&self, events: &[SupervisorEvent], views: &[AgentView]) {
         for e in events {
             match e {
+                SupervisorEvent::Started { agent } | SupervisorEvent::Resumed { agent, .. } => {
+                    if let Some(view) = views.iter().find(|v| v.id == *agent) {
+                        self.record(Body::AgentStarted(v1::AgentStarted {
+                            agent_id: agent.as_str().into(),
+                            project_id: view.project.clone(),
+                            node_id: self.producer.clone(),
+                            kind: view.kind.clone(),
+                            worktree_id: if view.directory {
+                                String::new()
+                            } else {
+                                view.worktree.to_string_lossy().into_owned()
+                            },
+                            level: match view.level {
+                                agora_core::IntegrationLevel::L0Generic => {
+                                    v1::IntegrationLevel::L0Generic
+                                }
+                                agora_core::IntegrationLevel::L1Manifest => {
+                                    v1::IntegrationLevel::L1Manifest
+                                }
+                                agora_core::IntegrationLevel::L2Acp => v1::IntegrationLevel::L2Acp,
+                                agora_core::IntegrationLevel::L3Adapter => {
+                                    v1::IntegrationLevel::L3Adapter
+                                }
+                            } as i32,
+                        }));
+                        self.record(Body::AgentStateChanged(v1::AgentStateChanged {
+                            agent_id: agent.as_str().into(),
+                            state: proto_state(view.state) as i32,
+                            reported: false,
+                        }));
+                        if let Some(session) = &view.session {
+                            self.record(Body::AgentSessionReported(v1::AgentSessionReported {
+                                agent_id: agent.as_str().into(),
+                                session_id: session.clone(),
+                            }));
+                        }
+                        if view.terminal {
+                            self.record(Body::TerminalOpened(v1::TerminalOpened {
+                                terminal_id: crate::control::terminal_id_of(agent),
+                                node_id: self.producer.clone(),
+                                purpose: v1::TerminalPurpose::Agent as i32,
+                                agent_id: agent.as_str().into(),
+                            }));
+                        }
+                    }
+                }
                 SupervisorEvent::StateChanged { agent, state } => {
                     self.record(Body::AgentStateChanged(v1::AgentStateChanged {
                         agent_id: agent.as_str().to_string(),

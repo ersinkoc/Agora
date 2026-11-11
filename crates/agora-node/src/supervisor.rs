@@ -224,6 +224,9 @@ impl From<GitError> for SupervisorError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentView {
     pub directory: bool,
+    pub terminal: bool,
+    pub session: Option<String>,
+    pub level: IntegrationLevel,
     pub id: AgentId,
     pub kind: String,
     pub state: AgentState,
@@ -530,7 +533,7 @@ impl Supervisor {
         let branch = format!("agent/{}", req.name);
         git::create_worktree(git_root, &target, &branch, None)?;
         let mut direct = req.clone();
-        let result = agora_platform::canonicalize_plain(&target.join(relative))
+        let result = selected_worktree_directory(&target, relative)
             .map_err(|e| SupervisorError::Spawn(e.to_string()))
             .and_then(|cwd| {
                 direct.checkout = cwd;
@@ -1192,13 +1195,10 @@ impl Supervisor {
             entry.restart_at = None;
             entry.restarts = 0;
             entry.agent.process_restarted();
-            return Ok(vec![
-                SupervisorEvent::Resumed {
-                    agent: id.clone(),
-                    native,
-                },
-                SupervisorEvent::Started { agent: id.clone() },
-            ]);
+            return Ok(vec![SupervisorEvent::Resumed {
+                agent: id.clone(),
+                native,
+            }]);
         }
         let entry = self
             .agents
@@ -1284,6 +1284,9 @@ impl Supervisor {
             .iter()
             .map(|(id, e)| AgentView {
                 directory: e.agent.worktree.is_none(),
+                terminal: e.terminal.is_some(),
+                session: e.agent.session.clone(),
+                level: e.agent.level,
                 id: id.clone(),
                 kind: e.agent.kind.clone(),
                 state: e.agent.state(),
@@ -1296,6 +1299,9 @@ impl Supervisor {
             .collect();
         out.extend(self.adapters.iter().map(|(id, e)| AgentView {
             directory: e.agent.worktree.is_none(),
+            terminal: false,
+            session: e.agent.session.clone(),
+            level: e.agent.level,
             id: id.clone(),
             kind: e.agent.kind.clone(),
             state: e.agent.state(),
@@ -1501,6 +1507,51 @@ fn write_in_worktree(
         .open(&target)?;
     f.write_all(contents.as_bytes())?;
     // Keep the injected file out of `git status`: it is the node's, not the agent's work.
-    git::exclude_locally(worktree, rel);
+    // Exclude patterns are anchored at the Git root, even when the session starts in a nested folder.
+    if let Ok(checkout) = git::discover_checkout(worktree) {
+        if let (Ok(root), Ok(file)) = (
+            agora_platform::canonicalize_plain(&checkout.root),
+            agora_platform::canonicalize_plain(&target),
+        ) {
+            if let Ok(relative) = file.strip_prefix(&root) {
+                git::exclude_locally(&root, relative);
+            }
+        }
+    }
     Ok(())
+}
+
+/// Recreate an untracked selected folder only inside the new worktree; never follow restored symlinks.
+fn selected_worktree_directory(root: &Path, relative: &Path) -> std::io::Result<PathBuf> {
+    use std::io::{Error, ErrorKind};
+    let root = agora_platform::canonicalize_plain(root)?;
+    let mut directory = root.clone();
+    for component in relative.components() {
+        if !matches!(component, std::path::Component::Normal(_)) {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "invalid worktree subdirectory",
+            ));
+        }
+        directory.push(component);
+        match std::fs::symlink_metadata(&directory) {
+            Ok(meta) if meta.file_type().is_symlink() || !meta.is_dir() => {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    "worktree subdirectory is not a real directory",
+                ))
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == ErrorKind::NotFound => std::fs::create_dir(&directory)?,
+            Err(e) => return Err(e),
+        }
+    }
+    let directory = agora_platform::canonicalize_plain(&directory)?;
+    if !directory.starts_with(root) {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "worktree subdirectory leaves its root",
+        ));
+    }
+    Ok(directory)
 }

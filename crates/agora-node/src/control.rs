@@ -325,7 +325,11 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                 }),
                 "diff" => Cmd::GitDiff(v1::GitDiff {
                     worktree_id: path,
-                    path: q.path.clone(),
+                    path: if q.path.is_empty() {
+                        ".".into()
+                    } else {
+                        q.path.clone()
+                    },
                 }),
                 "status" => Cmd::GitStatus(v1::GitStatus { worktree_id: path }),
                 "history" => Cmd::GitLog(v1::GitLog {
@@ -337,16 +341,19 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
             execute(ctx, &cmd)
         }
         Cmd::DirectoryInspect(d) => {
-            let path = if Path::new(&d.path).is_dir() {
-                d.path.clone()
-            } else if !d.path.contains(['/', '\\']) {
-                resolve_project(ctx, &d.path)?
-                    .root
-                    .to_string_lossy()
-                    .into_owned()
-            } else {
-                d.path.clone()
-            };
+            let registered = ctx
+                .projects
+                .iter()
+                .any(|p| p.id == d.path || p.name == d.path);
+            let path =
+                if registered || (!Path::new(&d.path).is_dir() && !d.path.contains(['/', '\\'])) {
+                    resolve_project(ctx, &d.path)?
+                        .root
+                        .to_string_lossy()
+                        .into_owned()
+                } else {
+                    d.path.clone()
+                };
             let (mut info, _) =
                 crate::directory::inspect(&path, &ctx.node_id, d.create_project_id)?;
             info.previous_project_id = ctx
