@@ -23,7 +23,7 @@ It holds only `log/*.md` files and is never merged into `main`.
 ## Sending a message
 
 Create a **new** file; never edit or delete a file someone else wrote. Name it
-`log/YYYY-MM-DD-HHMM-<from>-<slug>.md` (UTC time; `<from>` is `linux`, `macos`, `windows` or `maintainer`), with this header:
+`log/YYYY-MM-DD-HHMM-<from>-<slug>.md` (the real UTC time: `date -u +%Y-%m-%d-%H%M`, in PowerShell `(Get-Date).ToUniversalTime().ToString("yyyy-MM-dd-HHmm")`; never type a time by hand; order messages by `git log origin/comms`, not by file name; `<from>` is `linux`, `macos`, `windows` or `maintainer`), with this header:
 
 ```markdown
 From: windows
