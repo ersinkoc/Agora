@@ -75,6 +75,9 @@ pub struct Launching {
     pub project: String,
     pub node: String,
     pub worktree: PathBuf,
+    /// The confined agent's own identity (ADR-0050 Amendment B on Windows), made before its endpoint: the endpoint must admit exactly
+    /// this agent. `None` where agents are not confined that way.
+    pub identity: Option<String>,
 }
 
 /// Called before an agent's process starts. Returns the endpoint to inject into its MCP configuration, or `None`
@@ -90,6 +93,8 @@ struct Extras {
     read: Vec<PathBuf>,
     argv: Vec<String>,
     env: Vec<(String, String)>,
+    /// The agent's identity under confinement, kept for every relaunch so the process and its mesh endpoint stay matched.
+    identity: Option<String>,
 }
 
 /// What to start.
@@ -111,6 +116,11 @@ pub struct StartRequest {
 pub enum SupervisorEvent {
     Started {
         agent: AgentId,
+    },
+    /// Native session retained across a resumed/restarted process; copied only on a lifecycle transition.
+    SessionReported {
+        agent: AgentId,
+        session: String,
     },
     StateChanged {
         agent: AgentId,
@@ -157,6 +167,9 @@ pub enum SupervisorError {
     PublisherRevoked(String, String),
     /// The node confines agents and this one cannot be confined here: `(kind, level)`. Nothing was started.
     SandboxUnavailable(String, &'static str),
+    /// The node confines agents and a folder this agent would be given cannot be kept closed (ADR-0050 Amendment B): `(kind, level,
+    /// reason)`, the reason a stable token (`broad_write_grant`, `label_failed`). Nothing was started.
+    SandboxRefused(String, &'static str, &'static str),
     /// The node confines agents and the selected folder is one they may never be launched in (a root, the home folder, a secret
     /// folder, the node's own folder).
     ProtectedDirectory,
@@ -187,7 +200,12 @@ impl SupervisorError {
                 .with("publisher", p.as_str()),
             Self::SandboxUnavailable(k, l) => Error::new(ErrorCode::AgentSandboxUnavailable)
                 .with("kind", k.as_str())
-                .with("level", *l),
+                .with("level", *l)
+                .with("reason", "unsupported"),
+            Self::SandboxRefused(k, l, r) => Error::new(ErrorCode::AgentSandboxUnavailable)
+                .with("kind", k.as_str())
+                .with("level", *l)
+                .with("reason", *r),
             Self::ProtectedDirectory => {
                 Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "directory.protected")
             }
@@ -224,6 +242,8 @@ impl From<GitError> for SupervisorError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentView {
     pub directory: bool,
+    pub terminal: bool,
+    pub level: IntegrationLevel,
     pub id: AgentId,
     pub kind: String,
     pub state: AgentState,
@@ -530,7 +550,7 @@ impl Supervisor {
         let branch = format!("agent/{}", req.name);
         git::create_worktree(git_root, &target, &branch, None)?;
         let mut direct = req.clone();
-        let result = agora_platform::canonicalize_plain(&target.join(relative))
+        let result = selected_worktree_directory(&target, relative)
             .map_err(|e| SupervisorError::Spawn(e.to_string()))
             .and_then(|cwd| {
                 direct.checkout = cwd;
@@ -691,8 +711,18 @@ impl Supervisor {
         worktree: &std::path::Path,
         private_config: Option<&Path>,
     ) -> Result<Extras, SupervisorError> {
+        // Made before the endpoint, so the endpoint can admit exactly the process that will hold it.
+        let identity = if self.sandbox.level == crate::sandbox::Level::Off {
+            None
+        } else {
+            agora_platform::new_agent_identity()
+        };
+        let none = || Extras {
+            identity: identity.clone(),
+            ..Extras::default()
+        };
         let Some(hook) = &self.hook else {
-            return Ok(Extras::default());
+            return Ok(none());
         };
         // The hook registers the agent with the mesh even when its manifest has no `[mcp]` (it may reach the mesh
         // some other way); only a manifest with `[mcp]` gets anything injected.
@@ -702,12 +732,13 @@ impl Supervisor {
             project: project.to_string(),
             node: self.cfg.node.as_str().to_string(),
             worktree: worktree.to_path_buf(),
+            identity: identity.clone(),
         });
         let (Some(endpoint), Some(spec)) = (
             endpoint,
             self.kinds.get(kind).and_then(|k| k.manifest.mcp.clone()),
         ) else {
-            return Ok(Extras::default());
+            return Ok(none());
         };
         let mut plan = agora_adapters::inject::plan(&spec, worktree, &endpoint)
             .map_err(|e| SupervisorError::Spawn(format!("mcp injection: {e}")))?;
@@ -744,6 +775,7 @@ impl Supervisor {
             read: private_config.map(Path::to_path_buf).into_iter().collect(),
             argv: plan.argv_extra,
             env: plan.env,
+            identity,
         })
     }
 
@@ -883,6 +915,7 @@ impl Supervisor {
                 e.running = true;
                 e.agent.process_restarted();
                 events.push(SupervisorEvent::Started { agent: id.clone() });
+                events.extend(session_report(&e.agent));
             }
             Err(_) => schedule_adapter_restart(id, e, now, &policy, events),
         }
@@ -942,6 +975,7 @@ impl Supervisor {
         cfg.rows = self.cfg.terminal.size.rows;
         cfg.limits = self.cfg.limits.process;
         cfg.sandbox = program.and_then(|p| self.sandbox_for(kind, worktree, &p));
+        cfg.identity = extras.identity.clone();
         if let Some(profile) = &mut cfg.sandbox {
             profile.read.extend(extras.read.iter().cloned());
         }
@@ -961,7 +995,18 @@ impl Supervisor {
             cfg.env.push(("TEMP".into(), temp.clone()));
             cfg.env.push(("TMP".into(), temp));
         }
-        let pty = spawn(&cfg).map_err(|e| SupervisorError::Spawn(e.to_string()))?;
+        let pty = spawn(&cfg).map_err(|e| {
+            // A folder the confinement cannot keep closed (a broad write grant, ADR-0050 Amendment B, 4) or whose label cannot be set
+            // (2) is refused before the agent starts: `agent.sandbox_unavailable` with the reason, not an internal error.
+            match agora_platform::sandbox_refusal(&e) {
+                Some(why) => SupervisorError::SandboxRefused(
+                    kind.to_string(),
+                    self.sandbox.level.name(),
+                    why.token(),
+                ),
+                None => SupervisorError::Spawn(e.to_string()),
+            }
+        })?;
         TerminalHandle::start(pty, self.cfg.terminal)
             .map_err(|e| SupervisorError::Spawn(e.to_string()))
     }
@@ -1068,6 +1113,7 @@ impl Supervisor {
                 entry.next_check = now;
                 entry.agent.process_restarted();
                 events.push(SupervisorEvent::Started { agent: id.clone() });
+                events.extend(session_report(&entry.agent));
             }
             Err(_) => {
                 // Could not even start: count it as a failed attempt and back off again.
@@ -1192,13 +1238,12 @@ impl Supervisor {
             entry.restart_at = None;
             entry.restarts = 0;
             entry.agent.process_restarted();
-            return Ok(vec![
-                SupervisorEvent::Resumed {
-                    agent: id.clone(),
-                    native,
-                },
-                SupervisorEvent::Started { agent: id.clone() },
-            ]);
+            let mut events = vec![SupervisorEvent::Resumed {
+                agent: id.clone(),
+                native,
+            }];
+            events.extend(session_report(&entry.agent));
+            return Ok(events);
         }
         let entry = self
             .agents
@@ -1239,6 +1284,7 @@ impl Supervisor {
                 state: AgentState::Unknown,
             });
         }
+        events.extend(session_report(&entry.agent));
         Ok(events)
     }
 
@@ -1284,6 +1330,8 @@ impl Supervisor {
             .iter()
             .map(|(id, e)| AgentView {
                 directory: e.agent.worktree.is_none(),
+                terminal: e.terminal.is_some(),
+                level: e.agent.level,
                 id: id.clone(),
                 kind: e.agent.kind.clone(),
                 state: e.agent.state(),
@@ -1296,6 +1344,8 @@ impl Supervisor {
             .collect();
         out.extend(self.adapters.iter().map(|(id, e)| AgentView {
             directory: e.agent.worktree.is_none(),
+            terminal: false,
+            level: e.agent.level,
             id: id.clone(),
             kind: e.agent.kind.clone(),
             state: e.agent.state(),
@@ -1501,6 +1551,62 @@ fn write_in_worktree(
         .open(&target)?;
     f.write_all(contents.as_bytes())?;
     // Keep the injected file out of `git status`: it is the node's, not the agent's work.
-    git::exclude_locally(worktree, rel);
+    // Exclude patterns are anchored at the Git root, even when the session starts in a nested folder.
+    if let Ok(checkout) = git::discover_checkout(worktree) {
+        if let (Ok(root), Ok(file)) = (
+            agora_platform::canonicalize_plain(&checkout.root),
+            agora_platform::canonicalize_plain(&target),
+        ) {
+            if let Ok(relative) = file.strip_prefix(&root) {
+                git::exclude_locally(&root, relative);
+            }
+        }
+    }
     Ok(())
+}
+
+/// Recreate an untracked selected folder only inside the new worktree; never follow restored symlinks.
+fn selected_worktree_directory(root: &Path, relative: &Path) -> std::io::Result<PathBuf> {
+    use std::io::{Error, ErrorKind};
+    let root = agora_platform::canonicalize_plain(root)?;
+    let mut directory = root.clone();
+    for component in relative.components() {
+        if !matches!(component, std::path::Component::Normal(_)) {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "invalid worktree subdirectory",
+            ));
+        }
+        directory.push(component);
+        match std::fs::symlink_metadata(&directory) {
+            Ok(meta) if meta.file_type().is_symlink() || !meta.is_dir() => {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    "worktree subdirectory is not a real directory",
+                ))
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == ErrorKind::NotFound => std::fs::create_dir(&directory)?,
+            Err(e) => return Err(e),
+        }
+    }
+    let directory = agora_platform::canonicalize_plain(&directory)?;
+    if !directory.starts_with(root) {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "worktree subdirectory leaves its root",
+        ));
+    }
+    Ok(directory)
+}
+
+/// Session identifiers are lifecycle data; ordinary supervisor ticks/listing need no extra allocation.
+fn session_report(agent: &Agent) -> Option<SupervisorEvent> {
+    agent
+        .session
+        .as_ref()
+        .map(|session| SupervisorEvent::SessionReported {
+            agent: agent.id.clone(),
+            session: session.clone(),
+        })
 }

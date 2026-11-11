@@ -99,6 +99,8 @@ selected working directories. A worktree is not required for any of them.
 - Separate-worktree mode still creates an isolated worktree only when selected and never substitutes itself for directory mode.
 - A new directory is selectable while the node remains running. Invalid, inaccessible, out-of-policy and substituted paths are
   refused on the node. A member cannot escape the projects granted to that member.
+- With confinement enabled and no parent-checkout write allowance, an agent can write in its selected subdirectory
+  but cannot write in the parent checkout; test outside the shared writable temp folder in both launch modes.
 - Published protocol fixtures remain unchanged. Old/new-client capability behavior is covered by integration tests.
 - Portable project IDs, when chosen, group confirmed clones across nodes without merging their paths or sessions. Repositories
   without metadata retain automatic discovery; copied IDs and changed metadata cannot bypass owner/project authorization.

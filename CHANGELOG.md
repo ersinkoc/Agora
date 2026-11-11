@@ -4,6 +4,15 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+### Shared board
+- When a project starts being shared by a second machine, the tasks and file leases its first machine kept locally move to the shared board: no file has two holders, and each moved task's owner is told its new id (ADR-0039 amendment B).
+
+### Selected-folder fixes
+- Machines sharing a host name stay distinct, shared-project counts use enrollment IDs, and agent panes expose their real copyable routing addresses.
+- An isolated copy preserves a selected untracked/ignored subdirectory and refuses restored symlinks that could select another folder. Workspace diffs stay inside the selected directory.
+- Nested integration files stay out of Git status/staging; resumed/restarted agents become visible as running again with their current state and session.
+- Registered project names win over same-named local folders. Filtered panes stay hidden when closed, and a disappearing project filter clears itself. Turkish help lists the complete identity workflow.
+
 ### Working folders
 - Start agents in a chosen machine/project/folder; Git and separate working copies are optional. The CLI defaults to its current folder (`--cwd` to choose another, `--worktree` for isolation).
 - Several agents can share a folder with separate sessions and integration files; shared changes appear once.

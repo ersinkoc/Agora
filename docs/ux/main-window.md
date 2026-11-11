@@ -49,3 +49,13 @@ on other machines; it does not sync source files. A changed previously confirmed
 The project filter groups the same identity across machines, retaining each machine/path and its sessions. Several agents in
 one folder display **Shared folder**. If a machine lacks directory support, show an update message and keep the form open.
 Directory actions require a browser device trusted on the machine; the node verifies its exact signed selection.
+
+## Addresses and machine identity
+
+Machine host names are display labels; enrollment IDs remain the identity used for navigation, project-machine counts and
+online status. Two machines with the same host name stay separate. Their IDs appear beside the name and in the launch selector
+and machine details. A project shared by two enrolled IDs counts as two machines even when both host names match.
+
+Each live agent pane and focused view shows its hub-qualified **Agent address** (`<node>/<agent>`) with an explicit copy action.
+Copy the actual routing identifier, never construct it from the host name. The address remains selectable when clipboard access
+is unavailable and the UI explains manual copying. Demo tiles without an enrolled identity offer no fictitious address.

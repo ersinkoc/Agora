@@ -45,7 +45,7 @@ export function StartAgent({ projects, machines, loadKinds, inspect, onStart, on
   if (!online.length) return <section className="start"><p>{t('start-no-machines')}</p><button className="button" onClick={onClose}>{t('start-cancel')}</button></section>;
   return <section className="start" aria-label={t('start-title')}>
     <h2>{t('start-title')}</h2>
-    <label><span>{t('start-machine')}</span><select value={node} disabled={busy} onChange={e => { setNode(e.target.value); changePath(projects.find(p => p.node === e.target.value)?.path ?? ''); }}>{online.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}</select></label>
+    <label><span>{t('start-machine')}</span><select value={node} disabled={busy} onChange={e => { setNode(e.target.value); changePath(projects.find(p => p.node === e.target.value)?.path ?? ''); }}>{online.map(m => <option key={m.id} value={m.id}>{m.name === m.id ? m.name : t('machine-name-id', { name: m.name, id: m.id })}</option>)}</select></label>
     {projects.some(p => p.node === node) && <label><span>{t('start-project')}</span><select value={projects.some(p => p.node === node && p.path === path) ? path : ''} disabled={busy} onChange={e => changePath(e.target.value)}><option value="">{t('start-other-folder')}</option>{projects.filter(p => p.node === node).map(p => <option key={p.path} value={p.path}>{p.label}</option>)}</select></label>}
     <label><span>{t('start-directory')}</span><input value={path} disabled={busy} onChange={e => changePath(e.target.value)} placeholder={t('start-directory-placeholder')} /></label>
     {!info && <>

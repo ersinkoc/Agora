@@ -2,6 +2,7 @@ import { expect, it } from 'vitest';
 import { directoryMessage, signDirectory } from './directory';
 import { thisDevice } from './approval';
 import { applyEvent, emptyView, fromSnapshot, tiles, projectChoices } from './view';
+import { machineKey } from '../model';
 import { agora } from '../gen/agora.js';
 it('binds selected directory, node, project, launch mode and identity confirmation in the signature', async () => {
   const device = await thisDevice({ load: async () => undefined, save: async () => {} });
@@ -32,4 +33,20 @@ it('groups portable copies across machines by project without merging their sess
   expect(new Set(agents.map(a => a.id)).size).toBe(2);
   expect(new Set(agents.map(a => a.workspace)).size).toBe(2);
   expect(agents.every(a => !a.shared)).toBe(true);
+});
+
+it('preserves distinct enrolled machine identities when their host names and local agent ids match', () => {
+  const view = fromSnapshot(agora.v1.Snapshot.fromObject({ pos: 1,
+    nodes: [{ nodeId: 'laptop', hostname: 'same-host', online: true }, { nodeId: 'desktop', hostname: 'same-host', online: true }],
+    workspaces: [{ workspaceId: 'laptop/d', nodeId: 'laptop', projectId: 'id:shared', path: '/one' },
+      { workspaceId: 'desktop/d', nodeId: 'desktop', projectId: 'id:shared', path: '/two' }],
+    agentWorkspaces: [{ agentId: 'laptop/agent-1', workspaceId: 'laptop/d' }, { agentId: 'desktop/agent-1', workspaceId: 'desktop/d' }],
+    agents: [{ agentId: 'laptop/agent-1', nodeId: 'laptop', kind: 'codex', running: true },
+      { agentId: 'desktop/agent-1', nodeId: 'desktop', kind: 'codex', running: true }],
+  }));
+  const agents = tiles(view);
+  expect(new Set(agents.map(a => a.machine)).size).toBe(1);
+  expect(new Set(agents.map(machineKey)).size).toBe(2);
+  expect(agents.map(a => a.id)).toEqual(['laptop/agent-1', 'desktop/agent-1']);
+  expect(agents.map(a => a.workspace)).toEqual(['/one', '/two']);
 });

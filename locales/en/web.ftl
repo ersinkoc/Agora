@@ -222,3 +222,11 @@ start-directory-agent-unsupported = This agent needs an isolated working copy to
 audit-action-directoryinspect = Selected a folder
 audit-action-agentlaunch = Started an agent in a folder
 audit-action-workspacequery = Read workspace files or changes
+
+agent-address = Agent address
+agent-address-copy = Copy agent address
+address-copy = Copy
+address-copied = Copied
+address-copy-failed = Copy failed. Select the address and copy it manually.
+machine-identity = Machine ID: { $id }
+machine-name-id = { $name } · { $id }

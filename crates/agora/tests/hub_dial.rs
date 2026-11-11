@@ -115,6 +115,7 @@ impl Hubside {
             key_pem: self.key_pem.clone(),
             commands: None,
             grants: None,
+            mesh: None,
         }
     }
 

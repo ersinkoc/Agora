@@ -243,6 +243,9 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                 result: Some(Ok_::Empty(v1::Empty {})),
             })
         }
+        // ADR-0039 amendment B: only the hub asks for this, and the uplink answers it where the hub's commands enter; from the
+        // local socket it would hand this node's board work to nobody.
+        Cmd::BoardJoin(_) => Err(capability_missing("board.join.local")),
         // Grants are made and judged where the hub's commands enter the node; the local socket has no use for them
         // (the person at this machine is not routed through the hub, ADR-0041).
         Cmd::GrantCreate(_) | Cmd::GrantList(_) | Cmd::GrantRevoke(_) => {
@@ -325,7 +328,11 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                 }),
                 "diff" => Cmd::GitDiff(v1::GitDiff {
                     worktree_id: path,
-                    path: q.path.clone(),
+                    path: if q.path.is_empty() {
+                        ".".into()
+                    } else {
+                        q.path.clone()
+                    },
                 }),
                 "status" => Cmd::GitStatus(v1::GitStatus { worktree_id: path }),
                 "history" => Cmd::GitLog(v1::GitLog {
@@ -337,16 +344,19 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
             execute(ctx, &cmd)
         }
         Cmd::DirectoryInspect(d) => {
-            let path = if Path::new(&d.path).is_dir() {
-                d.path.clone()
-            } else if !d.path.contains(['/', '\\']) {
-                resolve_project(ctx, &d.path)?
-                    .root
-                    .to_string_lossy()
-                    .into_owned()
-            } else {
-                d.path.clone()
-            };
+            let registered = ctx
+                .projects
+                .iter()
+                .any(|p| p.id == d.path || p.name == d.path);
+            let path =
+                if registered || (!Path::new(&d.path).is_dir() && !d.path.contains(['/', '\\'])) {
+                    resolve_project(ctx, &d.path)?
+                        .root
+                        .to_string_lossy()
+                        .into_owned()
+                } else {
+                    d.path.clone()
+                };
             let (mut info, _) =
                 crate::directory::inspect(&path, &ctx.node_id, d.create_project_id)?;
             info.previous_project_id = ctx
@@ -759,6 +769,7 @@ pub(crate) fn command_name(c: &Cmd) -> &'static str {
         Cmd::Enroll(_) => "enroll",
         Cmd::TaskUpdate(_) => "task.update",
         Cmd::BoardCall(_) => "board.call",
+        Cmd::BoardJoin(_) => "board.join",
         Cmd::NodePolicyGet(_) => "node.policy.get",
         Cmd::GrantCreate(_) => "grant.create",
         Cmd::GrantList(_) => "grant.list",

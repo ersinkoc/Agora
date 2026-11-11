@@ -205,7 +205,7 @@ Inspection and launch over the hub always need `DirectoryAuthorization`: trusted
 with no trailing NUL:
 
 ```
-directory-action-v1 node operation path kind project_id option identity_change nonce expires_at_ms
+directory-action-v1\0node\0operation\0path\0kind\0project_id\0option\0identity_change\0nonce\0expires_at_ms
 ```
 
 Here `operation` is `inspect` or `launch`; inspect leaves kind/project empty; `option` is `1`/`0` for metadata creation
@@ -214,7 +214,8 @@ No field may contain NUL. Expiry must be in the next five minutes (browser signs
 are persisted until expiry, surviving a node restart; the bounded cache fails closed on corruption or exhaustion.
 Generic start grants cannot authorize a substituted directory. Initially only unrestricted node-trusted owner devices
 may sign these operations; scoped member devices are refused even for their projects. The local owner-only control
-socket has no extra signature requirement. Workspace queries inherit the existing file/Git path, symlink, `.git` and
+socket has no extra signature requirement. Workspace diffs are rooted at the selected directory, including an empty requested path; they do not include parent-checkout changes.
+Workspace queries inherit the existing file/Git path, symlink, `.git` and
 size guards and require a workspace used by a managed session. Hub members/viewers can query only granted workspaces.
 
 ### Node-local control socket
@@ -260,6 +261,8 @@ ignores an id it already holds. The text is untrusted.
 
 `BoardCall` (command 62, node → hub on the stream-1 request path like `MeshPost`) and `BoardResult` (`CommandOk` field 16), ADR-0039: a mesh tool on a shared
 project's board; see `docs/specs/mesh-tools.md#shared-board-adr-0039`. New error code `board.unavailable`.
+
+`BoardJoin` (command 66, hub → node only; a client's is refused) and `BoardJoinResult` (`CommandOk` field 20, with `BoardJoinLease` and `BoardJoinTask`), ADR-0039 amendment B: when a project becomes shared, the hub asks each node with a checkout for its unfinished local work and puts it on the board. Sent only to nodes that offer the capability `board.join`.
 
 `GrantCreate` (63), `GrantList` (64), `GrantRevoke` (65) and `GrantListResult` (`CommandOk` field 17), ADR-0041: user-signed grants for the commands a node's policy lists in `signed_commands`; see `docs/security/threat-model.md`. New error code `approval.grant_required` (`command`). The node answers them itself; the local control socket refuses them.
 
