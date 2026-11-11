@@ -25,6 +25,7 @@ fn run(sandbox: Sandbox, allowed: &Path, script: &Path) -> String {
     let mut cfg = PtyConfig::new(vec![
         "cmd.exe".into(),
         "/c".into(),
+        "call".into(),
         script.display().to_string(),
     ]);
     cfg.cwd = Some(allowed.to_path_buf());
@@ -98,8 +99,13 @@ fn a_confined_process_writes_only_where_it_was_allowed_and_reads_no_user_secret(
     assert!(!other.join("no.txt").exists() && !other.join("child.txt").exists());
 
     // The entry is gone once the agent has ended.
+    // No explicit entry of a per-agent SID is left (inherited ones, `(I)`, belong to other tools and folders above).
     let acl = acl_text(&allowed);
-    assert!(!acl.contains("S-1-5-21-"), "{acl}");
+    assert!(
+        !acl.lines()
+            .any(|l| l.contains("S-1-5-21-") && !l.contains("(I)")),
+        "{acl}"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -117,6 +123,7 @@ fn a_second_agents_folder_is_out_of_reach() {
     let mut cfg = PtyConfig::new(vec![
         "cmd.exe".into(),
         "/c".into(),
+        "call".into(),
         hold.display().to_string(),
     ]);
     cfg.cwd = Some(b.clone());
@@ -146,6 +153,139 @@ fn a_second_agents_folder_is_out_of_reach() {
     assert!(out.contains("REFUSED-B"), "{out}");
     assert!(!b.join("from-a.txt").exists());
     drop(agent_b);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Grants `Users` and `Everyone` Modify on `dir`, inherited by everything below it (issue #230: such a grant must not open the folder).
+fn grant_everyone_and_users(dir: &Path) {
+    for sid in ["*S-1-5-32-545:(OI)(CI)M", "*S-1-1-0:(OI)(CI)M"] {
+        let out = std::process::Command::new("icacls")
+            .arg(dir)
+            .args(["/grant", sid])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+    }
+}
+
+#[test]
+fn a_folder_every_user_may_write_is_still_refused() {
+    enable();
+    let root = scratch("broad");
+    let (allowed, open) = (root.join("work"), root.join("open-to-all"));
+    for d in [&allowed, &open] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    grant_everyone_and_users(&open);
+    std::fs::write(open.join("key"), "hunter2").unwrap();
+    let script = allowed.join("run.cmd");
+    std::fs::write(
+        &script,
+        format!(
+            "@echo off\r\n\
+             echo x> \"{o}\\no.txt\" && echo WROTE-OPEN|| echo REFUSED-OPEN\r\n\
+             type \"{o}\\key\" && echo READ-OPEN|| echo REFUSED-READ\r\n",
+            o = open.display()
+        ),
+    )
+    .unwrap();
+    let out = run(
+        Sandbox {
+            read: vec![],
+            write: vec![allowed.clone()],
+        },
+        &allowed,
+        &script,
+    );
+    assert!(out.contains("REFUSED-OPEN"), "{out}");
+    assert!(
+        out.contains("REFUSED-READ") && !out.contains("hunter2"),
+        "{out}"
+    );
+    assert!(!open.join("no.txt").exists());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_second_agents_folder_under_a_broad_grant_is_out_of_reach() {
+    enable();
+    // Both agents' folders inherit `Users` and `Everyone` Modify from their parent.
+    let root = scratch("broad-two");
+    grant_everyone_and_users(&root);
+    let (a, b) = (root.join("agent-a"), root.join("agent-b"));
+    for d in [&a, &b] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    std::fs::write(b.join("notes.txt"), "agent-b-private").unwrap();
+    let hold = b.join("hold.cmd");
+    std::fs::write(&hold, "@echo off\r\nping -n 20 127.0.0.1 > nul\r\n").unwrap();
+    let mut cfg = PtyConfig::new(vec![
+        "cmd.exe".into(),
+        "/c".into(),
+        "call".into(),
+        hold.display().to_string(),
+    ]);
+    cfg.cwd = Some(b.clone());
+    cfg.sandbox = Some(Sandbox {
+        read: vec![],
+        write: vec![b.clone()],
+    });
+    let agent_b = spawn(&cfg).unwrap();
+
+    let script = a.join("run.cmd");
+    std::fs::write(
+        &script,
+        format!(
+            "@echo off\r\n\
+             echo x> \"{b}\\from-a.txt\" && echo WROTE-B|| echo REFUSED-B\r\n\
+             type \"{b}\\notes.txt\" && echo READ-B|| echo REFUSED-READ-B\r\n",
+            b = b.display()
+        ),
+    )
+    .unwrap();
+    let out = run(
+        Sandbox {
+            read: vec![],
+            write: vec![a.clone()],
+        },
+        &a,
+        &script,
+    );
+    assert!(out.contains("REFUSED-B"), "{out}");
+    assert!(
+        out.contains("REFUSED-READ-B") && !out.contains("agent-b-private"),
+        "{out}"
+    );
+    assert!(!b.join("from-a.txt").exists());
+    drop(agent_b);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn system_tools_still_start_when_confined() {
+    enable();
+    let root = scratch("tools");
+    let allowed = root.join("work");
+    std::fs::create_dir_all(&allowed).unwrap();
+    // `cmd` itself and `git` from Program Files (present on every Windows CI runner).
+    let script = allowed.join("run.cmd");
+    std::fs::write(
+        &script,
+        "@echo off\r\n\
+         echo CMD-STARTED\r\n\
+         git --version && echo GIT-STARTED|| echo GIT-FAILED\r\n",
+    )
+    .unwrap();
+    let out = run(
+        Sandbox {
+            read: vec![],
+            write: vec![allowed.clone()],
+        },
+        &allowed,
+        &script,
+    );
+    assert!(out.contains("CMD-STARTED"), "{out}");
+    assert!(out.contains("GIT-STARTED"), "{out}");
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -184,5 +324,226 @@ fn a_junction_pointing_outside_is_refused() {
     );
     assert!(out.contains("REFUSED-VIA"), "{out}");
     assert!(!outside.join("via.txt").exists());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+// ---- PROTOTYPE (option 2, AppContainer) measurements; not for a real PR ----
+
+#[test]
+fn proto_c_tools_start() {
+    enable();
+    let root = scratch("proto-tools");
+    let allowed = root.join("work");
+    std::fs::create_dir_all(&allowed).unwrap();
+    let script = allowed.join("run.cmd");
+    std::fs::write(
+        &script,
+        "@echo off\r\n\
+         echo CMD-STARTED\r\n\
+         echo w> w.txt && echo CMD-WRITE-OK|| echo CMD-WRITE-FAILED\r\n\
+         git --version && echo GIT-STARTED|| echo GIT-FAILED\r\n\
+         node -e \"console.log('NODE-RAN')\" || echo NODE-FAILED\r\n\
+         python -c \"print('PY-RAN')\" || echo PY-FAILED\r\n\
+         where rustc 2>&1\r\n\
+         \"%USERPROFILE%\\.cargo\\bin\\rustc.exe\" --version && echo RUSTC-RAN|| echo RUSTC-FAILED\r\n",
+    )
+    .unwrap();
+    let out = run(
+        Sandbox {
+            read: vec![],
+            write: vec![allowed.clone()],
+        },
+        &allowed,
+        &script,
+    );
+    println!("PROTO-C-OUT<<{out}>>");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn proto_c2_profile_toolchain_with_grant() {
+    enable();
+    let root = scratch("proto-rust");
+    let allowed = root.join("work");
+    std::fs::create_dir_all(&allowed).unwrap();
+    let home = PathBuf::from(std::env::var("USERPROFILE").unwrap());
+    let script = allowed.join("run.cmd");
+    std::fs::write(
+        &script,
+        "@echo off\r\n\"%USERPROFILE%\\.cargo\\bin\\rustc.exe\" --version && echo RUSTC-RAN|| echo RUSTC-FAILED\r\n",
+    )
+    .unwrap();
+    let t = Instant::now();
+    let out = run(
+        Sandbox {
+            read: vec![home.join(".cargo").join("bin"), home.join(".rustup")],
+            write: vec![allowed.clone()],
+        },
+        &allowed,
+        &script,
+    );
+    println!("PROTO-C2-OUT<<{out}>> total {} ms", t.elapsed().as_millis());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn proto_e_network() {
+    enable();
+    let root = scratch("proto-net");
+    let allowed = root.join("work");
+    std::fs::create_dir_all(&allowed).unwrap();
+    let script = allowed.join("run.cmd");
+    std::fs::write(
+        &script,
+        "@echo off\r\ncurl.exe -s -o nul -w \"HTTP=%%{http_code}\" https://github.com > net.txt 2>&1 && echo NET-OK|| echo NET-FAILED\r\ntype net.txt\r\n",
+    )
+    .unwrap();
+    std::env::remove_var("AGORA_PROTO_CAPS");
+    let out = run(
+        Sandbox {
+            read: vec![],
+            write: vec![allowed.clone()],
+        },
+        &allowed,
+        &script,
+    );
+    println!("PROTO-E-NOCAPS<<{out}>>");
+    std::env::set_var("AGORA_PROTO_CAPS", "internetClient");
+    let out = run(
+        Sandbox {
+            read: vec![],
+            write: vec![allowed.clone()],
+        },
+        &allowed,
+        &script,
+    );
+    println!("PROTO-E-INTERNETCLIENT<<{out}>>");
+    std::env::remove_var("AGORA_PROTO_CAPS");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn proto_b_conpty_input_and_resize() {
+    enable();
+    let root = scratch("proto-pty");
+    let allowed = root.join("work");
+    std::fs::create_dir_all(&allowed).unwrap();
+    let mut cfg = PtyConfig::new(vec!["cmd.exe".into()]);
+    cfg.cwd = Some(allowed.clone());
+    cfg.sandbox = Some(Sandbox {
+        read: vec![],
+        write: vec![allowed.clone()],
+    });
+    let mut pty = spawn(&cfg).unwrap();
+    let mut out = Vec::new();
+    let pump = |pty: &Box<dyn agora_platform::Pty>, out: &mut Vec<u8>, ms: u64| {
+        let end = Instant::now() + Duration::from_millis(ms);
+        while Instant::now() < end {
+            if let Ok(b) = pty.output().recv_timeout(Duration::from_millis(50)) {
+                out.extend(b);
+            }
+        }
+    };
+    pump(&pty, &mut out, 1500);
+    pty.write_input(b"echo TYPED-%COMPUTERNAME:~0,0%OK\r")
+        .unwrap();
+    pump(&pty, &mut out, 1500);
+    pty.resize(100, 30).unwrap();
+    pty.write_input(b"mode con\r").unwrap();
+    pump(&pty, &mut out, 2000);
+    pty.write_input(b"exit\r").unwrap();
+    pump(&pty, &mut out, 500);
+    drop(pty);
+    let s = String::from_utf8_lossy(&out).into_owned();
+    println!(
+        "PROTO-B-TYPED={} PROTO-B-COLS100={}",
+        s.contains("TYPED-OK"),
+        s.contains("100")
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn proto_diag_script_paths() {
+    enable();
+    let root = scratch("proto-diag");
+    let allowed = root.join("work");
+    std::fs::create_dir_all(&allowed).unwrap();
+    std::fs::write(allowed.join("run.cmd"), "@echo off\r\necho SCRIPT-RAN\r\n").unwrap();
+    let mut cfg = PtyConfig::new(vec!["cmd.exe".into()]);
+    cfg.cwd = Some(allowed.clone());
+    cfg.sandbox = Some(Sandbox { read: vec![], write: vec![allowed.clone()] });
+    let mut pty = spawn(&cfg).unwrap();
+    let mut out = Vec::new();
+    let mut pump = |pty: &Box<dyn agora_platform::Pty>, ms: u64| {
+        let end = Instant::now() + Duration::from_millis(ms);
+        while Instant::now() < end {
+            if let Ok(b) = pty.output().recv_timeout(Duration::from_millis(50)) {
+                out.extend(b);
+            }
+        }
+    };
+    pump(&pty, 1200);
+    for line in [
+        "echo [1] && type run.cmd".to_string(),
+        "echo [2] && call run.cmd".to_string(),
+        "echo [3] && .\\run.cmd".to_string(),
+        format!("echo [4] && \"{}\"", allowed.join("run.cmd").display()),
+        format!("echo [5] && dir /b \"{}\"", root.display()),
+        "echo [6] && cd".to_string(),
+        "exit".to_string(),
+    ] {
+        pty.write_input(format!("{line}\r").as_bytes()).unwrap();
+        pump(&pty, 1200);
+    }
+    drop(pty);
+    let s = String::from_utf8_lossy(&out).into_owned();
+    let clean: String = s.chars().filter(|c| !c.is_control() || *c == '\n').collect();
+    println!("PROTO-DIAG<<{clean}>>");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn proto_diag_argv() {
+    enable();
+    let root = scratch("proto-argv");
+    let allowed = root.join("work");
+    std::fs::create_dir_all(&allowed).unwrap();
+    let script = allowed.join("run.cmd");
+    std::fs::write(&script, "@echo off\r\necho SCRIPT-RAN\r\ngit --version\r\necho GIT-WRAPPER-EL=%errorlevel%\r\n\"C:\\Program Files\\Git\\ucrt64\\bin\\git.exe\" --version\r\necho GIT-UCRT-EL=%errorlevel%\r\ngit --version > v.txt 2>&1\r\necho GIT-REDIR-EL=%errorlevel%\r\ngit --version < nul > v2.txt 2>&1\r\necho GIT-NOCONSOLE-EL=%errorlevel%\r\ngit -c core.fsmonitor=false var GIT_EDITOR > nul 2>&1\r\necho GIT-VAR-EL=%errorlevel%\r\nset GIT_TRACE=1\r\ngit --version 2> trace.txt\r\necho TRACE-EL=%errorlevel%\r\ntype trace.txt\r\n").unwrap();
+    let cases: Vec<Vec<String>> = vec![
+        vec!["cmd.exe".into(), "/c".into(), "echo".into(), "ECHO-RAN".into()],
+        vec!["cmd.exe".into(), "/d".into(), "/c".into(), "echo".into(), "ECHO-D-RAN".into()],
+        vec!["cmd.exe".into(), "/c".into(), "call".into(), script.display().to_string()],
+        vec!["cmd.exe".into(), "/d".into(), "/c".into(), "call".into(), script.display().to_string()],
+        vec!["C:\\Windows\\System32\\cmd.exe".into(), "/c".into(), "call".into(), script.display().to_string()],
+        vec!["cmd.exe".into(), "/c".into(), "call".into(), script.display().to_string()],
+        vec!["cmd.exe".into(), "/c".into(), ".\\run.cmd".into()],
+        vec!["cmd.exe".into(), "/c".into(), "type".into(), script.display().to_string()],
+        vec!["cmd.exe".into(), "/c".into(), "cd".into()],
+        vec!["cmd.exe".into(), "/c".into(), "git --version & echo EL=%errorlevel%".into()],
+        vec!["C:\\Program Files\\Git\\cmd\\git.exe".into(), "--version".into()],
+        vec!["cmd.exe".into(), "/c".into(), "where git & dir \"C:\\Program Files\\Git\\cmd\" /b".into()],
+        vec!["cmd.exe".into(), "/c".into(), "\"C:\\Program Files\\Git\\usr\\bin\\ls.exe\" --version & echo EL=%errorlevel%".into()],
+        vec!["cmd.exe".into(), "/c".into(), "echo".into(), "x>".into(), "w.txt".into(), "&&".into(), "echo".into(), "WROTE-OK".into()],
+    ];
+    for argv in cases {
+        let mut cfg = PtyConfig::new(argv.clone());
+        cfg.cwd = Some(allowed.clone());
+        cfg.sandbox = Some(Sandbox { read: vec![], write: vec![allowed.clone()] });
+        let pty = spawn(&cfg).unwrap();
+        let mut out = Vec::new();
+        let end = Instant::now() + Duration::from_secs(8);
+        while Instant::now() < end {
+            match pty.output().recv_timeout(Duration::from_millis(100)) {
+                Ok(b) => out.extend(b),
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(_) => {}
+            }
+        }
+        drop(pty);
+        let s: String = String::from_utf8_lossy(&out).chars().filter(|c| !c.is_control()).collect();
+        println!("PROTO-ARGV {argv:?} => {s}");
+    }
     let _ = std::fs::remove_dir_all(&root);
 }

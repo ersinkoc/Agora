@@ -25,7 +25,7 @@ use windows_sys::Win32::System::JobObjects::{
 };
 use windows_sys::Win32::System::Pipes::CreatePipe;
 use windows_sys::Win32::System::Threading::{
-    CreateProcessAsUserW, CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
+    CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
     InitializeProcThreadAttributeList, TerminateProcess, UpdateProcThreadAttribute,
     WaitForSingleObject, CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, INFINITE,
     PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOEXW,
@@ -317,14 +317,38 @@ fn start_process(config: &PtyConfig, hpc: HPCON) -> io::Result<(Handle, u32, Opt
     let env = environment(&config.env);
     let cwd = config.cwd.as_ref().map(|c| wide(&c.to_string_lossy()));
 
+    // PROTOTYPE (option 2): a confined agent gets a second attribute, its AppContainer.
+    let caps = confinement.as_ref().map(Confinement::security_capabilities);
+    let count = if caps.is_some() { 2 } else { 1 };
     let mut size = 0usize;
-    // SAFETY: the documented size query: null list, one attribute.
-    unsafe { InitializeProcThreadAttributeList(null_mut(), 1, 0, &mut size) };
+    // SAFETY: the documented size query: null list.
+    unsafe { InitializeProcThreadAttributeList(null_mut(), count, 0, &mut size) };
     let mut storage = vec![0u8; size];
     let list = storage.as_mut_ptr().cast::<c_void>();
     // SAFETY: `storage` is `size` bytes and outlives the list.
-    if unsafe { InitializeProcThreadAttributeList(list, 1, 0, &mut size) } == 0 {
+    if unsafe { InitializeProcThreadAttributeList(list, count, 0, &mut size) } == 0 {
         return Err(last_error());
+    }
+    if let Some(caps) = caps.as_ref() {
+        // SAFETY: `caps` and the SIDs it points to (owned by `confinement`) outlive the process start.
+        let ok = unsafe {
+            UpdateProcThreadAttribute(
+                list,
+                0,
+                0x0002_0009, // PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES
+                (caps as *const windows_sys::Win32::Security::SECURITY_CAPABILITIES).cast(),
+                std::mem::size_of::<windows_sys::Win32::Security::SECURITY_CAPABILITIES>(),
+                null_mut(),
+                null(),
+            )
+        };
+        if ok == 0 {
+            let e = last_error();
+            eprintln!("PROTO-TAG: UpdateProcThreadAttribute(SECURITY_CAPABILITIES) failed: {e}");
+            // SAFETY: initialised above.
+            unsafe { DeleteProcThreadAttributeList(list) };
+            return Err(e);
+        }
     }
     // SAFETY: the attribute value is the console handle itself, as the API wants.
     let ok = unsafe {
@@ -358,36 +382,25 @@ fn start_process(config: &PtyConfig, hpc: HPCON) -> io::Result<(Handle, u32, Opt
     let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
     // SAFETY: every pointer is valid for the call; `cmdline` is mutable as the API requires.
     let flags = EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT;
+    // PROTOTYPE (option 2): the AppContainer attribute replaces the restricted token, so both cases use CreateProcessW.
     let created = unsafe {
-        match &confinement {
-            Some(c) => CreateProcessAsUserW(
-                c.token(),
-                null(),
-                cmdline.as_mut_ptr(),
-                null(),
-                null(),
-                0,
-                flags,
-                env.as_ptr().cast(),
-                cwd.as_ref().map_or(null(), |c| c.as_ptr()),
-                &si.StartupInfo,
-                &mut pi,
-            ),
-            None => CreateProcessW(
-                null(),
-                cmdline.as_mut_ptr(),
-                null(),
-                null(),
-                0,
-                flags,
-                env.as_ptr().cast(),
-                cwd.as_ref().map_or(null(), |c| c.as_ptr()),
-                &si.StartupInfo,
-                &mut pi,
-            ),
-        }
+        CreateProcessW(
+            null(),
+            cmdline.as_mut_ptr(),
+            null(),
+            null(),
+            0,
+            flags,
+            env.as_ptr().cast(),
+            cwd.as_ref().map_or(null(), |c| c.as_ptr()),
+            &si.StartupInfo,
+            &mut pi,
+        )
     };
     let error = (created == 0).then(last_error);
+    if let (Some(e), Some(_)) = (&error, &confinement) {
+        eprintln!("PROTO-TAG: CreateProcessW in AppContainer failed: {e}");
+    }
     // SAFETY: initialised above; the child has its copy by now.
     unsafe { DeleteProcThreadAttributeList(list) };
     if let Some(e) = error {
