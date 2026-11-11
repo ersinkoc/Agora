@@ -24,7 +24,7 @@ replaced by dashes). Codes are part of the public protocol: never rename or reus
 | `agent.not_found` | `agent_id` | |
 | `agent.kind_unknown` | `kind` | No manifest or adapter for this kind |
 | `agent.publisher_revoked` | `kind`, `publisher` | The adapter of this kind was installed from a registry publisher that the registry has since revoked (ADR-0044) |
-| `agent.sandbox_unavailable` | `kind`, `level` | The node's policy confines agents (`sandbox = level`, ADR-0047) and this machine, or this kind of agent, cannot be confined that way; nothing was started |
+| `agent.sandbox_unavailable` | `kind`, `level`, `reason` | The node's policy confines agents (`sandbox = level`, ADR-0047) and this machine, or this kind of agent, cannot be confined that way; nothing was started. `reason` (added with ADR-0050 Amendment B; older nodes omit it): `unsupported` (this machine or kind cannot be confined at that level), `broad_write_grant` (a folder the agent would be given, or something below it, lets `Users` or `Everyone` write), `label_failed` (a folder the agent would write cannot be labelled for confined agents) |
 | `agent.not_authenticated` | `kind`, `node_id` | Agent account not logged in on that node |
 | `agent.blocked` | `agent_id` | Agent waits for input; prompt not sent |
 | `agent.mode_unsupported` | `kind`, `mode` | e.g. chat mode for an L1 agent |
