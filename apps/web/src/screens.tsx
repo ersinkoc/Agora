@@ -99,7 +99,7 @@ export function Focus({ agent, source: live, costMicroUsd, chatSource, sendPromp
       <span className="muted">
         {t('agent-on-machine', { machine: agent.machine })} · {t('agent-workspace', { name: agent.workspace })}
       </span>
-      <AgentAddress agent={agent} />
+      <AgentAddress key={agent.id} agent={agent} />
       {agent.tokens ? <span className="muted">{t('agent-tokens', { count: agent.tokens })}{costMicroUsd !== undefined ? ` · ${t('agent-cost', { amount: money(costMicroUsd) })}` : ''}</span> : null}
       {agent.terminal === false ? <section className="h-[65vh] min-h-0" aria-label={t('chat-log')}><PromptBox agent={agent} source={chatSource} send={sendPrompt} /></section> : <>
         <h2>{t('focus-terminal')}</h2>

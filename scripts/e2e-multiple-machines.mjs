@@ -59,6 +59,14 @@ try {
     }
   };
   await capture('multiple-machines');
+  await page.evaluate(id => { window.location.hash = `#/agent/${encodeURIComponent(id)}`; }, first);
+  await page.getByRole('button', { name: `Copy agent address ${first}`, exact: true }).click();
+  await page.waitForFunction(label => [...document.querySelectorAll('button')].some(button => button.getAttribute('aria-label') === label && button.textContent === 'Copied'), `Copy agent address ${first}`);
+  await page.evaluate(id => { window.location.hash = `#/agent/${encodeURIComponent(id)}`; }, second);
+  const nextCopy = page.getByRole('button', { name: `Copy agent address ${second}`, exact: true });
+  await nextCopy.waitFor();
+  check(await nextCopy.innerText() === 'Copy', 'switching focused agents clears the previous address copy status');
+  await page.goto(`${origin}/#/`);
   // Clipboard refusal must still leave the selectable address and useful instructions.
   await page.evaluate(() => Object.defineProperty(navigator, 'clipboard', { configurable: true,
     value: { writeText: async () => { throw new Error('test refusal'); } } }));

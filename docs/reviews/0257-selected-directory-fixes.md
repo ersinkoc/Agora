@@ -60,7 +60,7 @@ No broker, capability, trust, schema or permission behavior changes. Demo data h
 
 `e2e-multiple-machines.mjs` uses two separately enrolled node processes on Ubuntu, with cloned Git folders and explicitly copied
 portable metadata. It verifies independent cwd in both fake adapter processes/sessions, one shared project with two machines,
-distinct qualified agent IDs, successful clipboard copying, clipboard refusal, snapshot reload, independent disconnect status and English/Turkish UI. A local-only
+distinct qualified agent IDs, successful clipboard copying, copy-state reset on focused-agent changes, clipboard refusal, snapshot reload, independent disconnect status and English/Turkish UI. A local-only
 file stays absent from the second clone: project identity does not synchronize edits. This is two-node protocol/browser evidence,
 not a claim that the two fixture processes ran on different operating systems or physical machines.
 
