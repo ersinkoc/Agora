@@ -135,6 +135,22 @@ impl SandboxPolicy {
         if self.level == Level::Off {
             return None;
         }
+        let mut sb = self.files(kind, needs, worktree, program);
+        // ADR-0047 `worktree-offline`: as `worktree`, and no network but this machine; the supervisor adds the agent's own sockets.
+        if self.level == Level::WorktreeOffline {
+            sb.offline = true;
+        }
+        Some(sb)
+    }
+
+    /// The file part of an agent's profile (both confined levels).
+    fn files(
+        &self,
+        kind: &str,
+        needs: Option<&agora_adapters::manifest::SandboxNeeds>,
+        worktree: &Path,
+        program: &str,
+    ) -> agora_platform::Sandbox {
         let mut read: Vec<PathBuf> = SYSTEM_READ.iter().map(PathBuf::from).collect();
         // The agent's own program folder, when it is named by path.
         if program.contains(['/', std::path::MAIN_SEPARATOR]) {
@@ -144,7 +160,7 @@ impl SandboxPolicy {
         }
         read.extend(self.read.iter().cloned());
         if agora_platform::NARROW_GIT_WRITES {
-            return Some(self.narrow_profile(kind, needs, worktree, read));
+            return self.narrow_profile(kind, needs, worktree, read);
         }
         let mut write = vec![
             worktree.to_path_buf(),
@@ -163,7 +179,7 @@ impl SandboxPolicy {
             read.extend(needs.read.iter().filter_map(|p| expand(p)));
             write.extend(needs.write.iter().filter_map(|p| expand(p)));
         }
-        Some(agora_platform::Sandbox { read, write })
+        agora_platform::Sandbox::new(read, write)
     }
 
     /// The profile where permissions are granted folder by folder (ADR-0050): the shared Git folder is readable, and only the parts a
@@ -201,7 +217,7 @@ impl SandboxPolicy {
             read.extend(needs.read.iter().filter_map(|p| expand(p)));
             write.extend(needs.write.iter().filter_map(|p| expand(p)));
         }
-        agora_platform::Sandbox { read, write }
+        agora_platform::Sandbox::new(read, write)
     }
 
     /// Whether agents can be started under this policy on this machine.
@@ -209,7 +225,9 @@ impl SandboxPolicy {
         match self.level {
             Level::Off => true,
             Level::Worktree => agora_platform::sandbox_supported(),
-            Level::WorktreeOffline => false,
+            Level::WorktreeOffline => {
+                agora_platform::sandbox_supported() && agora_platform::offline_supported()
+            }
         }
     }
 }
@@ -284,6 +302,16 @@ mod tests {
             trusted_kinds: vec![],
         };
         let sb = p.profile("k", None, &wt, "/home/x/bin/agent").unwrap();
+        // `worktree` leaves the network alone; `worktree-offline` asks for it to be cut, keeping the node's sockets.
+        assert!(!sb.offline);
+        let offline = SandboxPolicy {
+            level: Level::WorktreeOffline,
+            ..p.clone()
+        }
+        .profile("k", None, &wt, "/home/x/bin/agent")
+        .unwrap();
+        assert!(offline.offline && offline.sockets.is_empty());
+        assert_eq!(offline.write, sb.write);
         assert!(sb.write.contains(&wt));
         assert!(sb.write.contains(&PathBuf::from("/home/x/.cache/agent")));
         if agora_platform::NARROW_GIT_WRITES {

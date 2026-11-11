@@ -365,7 +365,16 @@ mod tests {
                 assert!(t0.elapsed() < Duration::from_secs(10), "never up");
                 std::thread::sleep(Duration::from_millis(20));
             }
-            let pid: String = std::fs::read_to_string(&pid).unwrap().trim().to_string();
+            // `Up` can be reported before the fake ssh has written its pid file.
+            let t1 = Instant::now();
+            let pid: String = loop {
+                let text = std::fs::read_to_string(&pid).unwrap_or_default();
+                if text.trim().parse::<u32>().is_ok() {
+                    break text.trim().to_string();
+                }
+                assert!(t1.elapsed() < Duration::from_secs(10), "no pid file");
+                std::thread::sleep(Duration::from_millis(20));
+            };
             let alive = |p: &str| std::path::Path::new(&format!("/proc/{p}")).exists();
             drop(d);
             // The supervisor kills its child; on systems without /proc the check is skipped.

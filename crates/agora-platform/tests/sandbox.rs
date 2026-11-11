@@ -49,6 +49,7 @@ fn a_confined_process_writes_only_where_it_was_allowed() {
     let sb = Sandbox {
         read,
         write: vec![allowed.clone(), "/dev".into()],
+        ..Default::default()
     };
     // The folders are below the temp folder, which macOS keeps private unless listed: the allowed ones must still be readable.
     let script = format!(

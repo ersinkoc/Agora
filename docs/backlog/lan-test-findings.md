@@ -28,7 +28,7 @@ branch (`docs/fordevs/`). Each row is something the run showed that no CI run ha
 ## Windows web window pass (2026-11-11)
 
 - **L14** The `win` node is shown under the PC's host name, not the node id. It puts a personal name in every screenshot.
-- **L15** Two boards with the same display name (different `origin` spellings) cannot be told apart in the UI.
+- **L15** Two boards with the same display name (different `origin` spellings) cannot be told apart in the UI. Implemented in #286: cards retain logical project IDs, expose selectable identities and expandable machine/folder context, and use identity rather than display name as their React key.
 - **L16** The audit page cannot tell sessions apart (every row says "owner"); a device column would answer "who".
 - **L17** Audit rows "Watched a terminal … Sent, no answer yet" stay unresolved after a node restart.
 - **L18** "Recent messages" says agents have not written to each other yet after a hub restart (mesh history is not re-read).

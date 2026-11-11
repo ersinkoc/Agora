@@ -188,7 +188,7 @@ impl ErrorCode {
             ErrorCode::AgentNotFound => &["agent_id"],
             ErrorCode::AgentKindUnknown => &["kind"],
             ErrorCode::AgentPublisherRevoked => &["kind", "publisher"],
-            ErrorCode::AgentSandboxUnavailable => &["kind", "level"],
+            ErrorCode::AgentSandboxUnavailable => &["kind", "level", "reason"],
             ErrorCode::AgentNotAuthenticated => &["kind", "node_id"],
             ErrorCode::AgentBlocked => &["agent_id"],
             ErrorCode::AgentModeUnsupported => &["kind", "mode"],
