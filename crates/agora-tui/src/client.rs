@@ -47,19 +47,21 @@ fn runtime() -> Result<tokio::runtime::Runtime, ClientError> {
         .map_err(|_| ClientError::Unreachable)
 }
 
-/// The name the hub's certificate must carry: its host, or `localhost` when the address is an IP number (the hub's certificate
-/// always names `localhost`).
-fn server_name(addr: &str) -> Result<ServerName<'static>, ClientError> {
+/// The names the hub's certificate may carry for this address: the host itself, and for an IP number also `localhost` (a hub
+/// started with no `--name` names only that). Each is tried in turn against the pinned CA.
+fn server_names(addr: &str) -> Vec<ServerName<'static>> {
     let host = addr
         .rsplit_once(':')
         .map_or(addr, |(h, _)| h)
         .trim_matches(['[', ']']);
-    let name = if host.parse::<std::net::IpAddr>().is_ok() {
-        "localhost"
-    } else {
-        host
-    };
-    ServerName::try_from(name.to_string()).map_err(|_| ClientError::Unreachable)
+    let mut names = Vec::new();
+    if let Ok(name) = ServerName::try_from(host.to_string()) {
+        names.push(name);
+    }
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        names.extend(ServerName::try_from("localhost".to_string()).ok());
+    }
+    names
 }
 
 async fn tls(hub: &Hub) -> Result<TlsStream<TcpStream>, ClientError> {
@@ -76,17 +78,20 @@ async fn tls(hub: &Hub) -> Result<TlsStream<TcpStream>, ClientError> {
     .map_err(|_| ClientError::Unreachable)?
     .with_root_certificates(roots)
     .with_no_client_auth();
-    let tcp = tokio::time::timeout(Duration::from_secs(10), TcpStream::connect(&hub.addr))
-        .await
-        .map_err(|_| ClientError::Unreachable)?
-        .map_err(|_| ClientError::Unreachable)?;
-    tokio::time::timeout(
-        Duration::from_secs(10),
-        TlsConnector::from(Arc::new(cfg)).connect(server_name(&hub.addr)?, tcp),
-    )
-    .await
-    .map_err(|_| ClientError::Unreachable)?
-    .map_err(|_| ClientError::Unreachable)
+    let connector = TlsConnector::from(Arc::new(cfg));
+    for name in server_names(&hub.addr) {
+        let Ok(Ok(tcp)) =
+            tokio::time::timeout(Duration::from_secs(10), TcpStream::connect(&hub.addr)).await
+        else {
+            return Err(ClientError::Unreachable);
+        };
+        if let Ok(Ok(stream)) =
+            tokio::time::timeout(Duration::from_secs(10), connector.connect(name, tcp)).await
+        {
+            return Ok(stream);
+        }
+    }
+    Err(ClientError::Unreachable)
 }
 
 /// Trades a one-time sign-in code (`agora hub login`) for a session token.
@@ -685,4 +690,22 @@ pub enum ChatEvent {
     Ended,
     Quiet,
     Lost,
+}
+
+#[cfg(test)]
+mod name_tests {
+    use super::server_names;
+
+    #[test]
+    fn an_ip_address_tries_itself_then_localhost_and_a_host_only_itself() {
+        let n = |a: &str| {
+            server_names(a)
+                .iter()
+                .map(|s| format!("{s:?}"))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(n("192.168.1.2:7444").len(), 2);
+        assert_eq!(n("[::1]:7444").len(), 2);
+        assert_eq!(n("hub.example:7444").len(), 1);
+    }
 }
