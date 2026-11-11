@@ -66,6 +66,32 @@ pub fn expand(p: &str) -> Option<PathBuf> {
     .then_some(path)
 }
 
+/// The parts of the shared Git folder a commit in `worktree` needs, as `(write, read)`: its own admin folder (index, HEAD) and the
+/// common `objects`, `refs` and `logs/refs` are written; the common folder itself (`config`, `hooks`) is only read, so nothing planted
+/// there runs in the user's or the node's git.
+fn narrow_git(worktree: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let mut write = Vec::new();
+    let mut read = Vec::new();
+    if let Some(text) = std::fs::read_to_string(worktree.join(".git"))
+        .ok()
+        .and_then(|t| {
+            t.trim()
+                .strip_prefix("gitdir:")
+                .map(|g| g.trim().to_owned())
+        })
+    {
+        write.push(PathBuf::from(text));
+    }
+    if let Some(common) = common_git_dir(worktree) {
+        write.push(common.join("objects"));
+        write.push(common.join("refs"));
+        // A commit appends to the branch's reflog, which `git worktree add` already created under `logs/refs/heads`.
+        write.push(common.join("logs").join("refs"));
+        read.push(common);
+    }
+    (write, read)
+}
+
 /// A worktree's `.git` is a file naming its folder inside the main checkout's `.git`; git needs to write there (and to the shared
 /// object store and refs next to it). Returns the main `.git` folder.
 pub fn common_git_dir(worktree: &Path) -> Option<PathBuf> {
@@ -173,7 +199,13 @@ impl SandboxPolicy {
             let _ = std::fs::create_dir_all(&temp);
             write.push(temp);
         }
-        write.extend(common_git_dir(worktree));
+        if agora_platform::GIT_CONFIG_READ_ONLY {
+            let (git_write, git_read) = narrow_git(worktree);
+            write.extend(git_write);
+            read.extend(git_read);
+        } else {
+            write.extend(common_git_dir(worktree));
+        }
         write.extend(self.write.iter().cloned());
         if let Some(needs) = needs.filter(|_| self.trusted_kinds.iter().any(|k| k == kind)) {
             read.extend(needs.read.iter().filter_map(|p| expand(p)));
@@ -194,24 +226,9 @@ impl SandboxPolicy {
         let temp = agent_temp(worktree);
         let _ = std::fs::create_dir_all(&temp);
         let mut write = vec![worktree.to_path_buf(), temp];
-        if let Some(text) = std::fs::read_to_string(worktree.join(".git"))
-            .ok()
-            .and_then(|t| {
-                t.trim()
-                    .strip_prefix("gitdir:")
-                    .map(|g| g.trim().to_owned())
-            })
-        {
-            // Its own admin folder (index, HEAD) is writable; the common folder is read, with `objects`, `refs` and `logs/refs` writable.
-            write.push(PathBuf::from(text));
-        }
-        if let Some(common) = common_git_dir(worktree) {
-            write.push(common.join("objects"));
-            write.push(common.join("refs"));
-            // A commit appends to the branch's reflog, which `git worktree add` already created under `logs/refs/heads`.
-            write.push(common.join("logs").join("refs"));
-            read.push(common);
-        }
+        let (git_write, git_read) = narrow_git(worktree);
+        write.extend(git_write);
+        read.extend(git_read);
         write.extend(self.write.iter().cloned());
         if let Some(needs) = needs.filter(|_| self.trusted_kinds.iter().any(|k| k == kind)) {
             read.extend(needs.read.iter().filter_map(|p| expand(p)));
@@ -314,11 +331,15 @@ mod tests {
         assert_eq!(offline.write, sb.write);
         assert!(sb.write.contains(&wt));
         assert!(sb.write.contains(&PathBuf::from("/home/x/.cache/agent")));
-        if agora_platform::NARROW_GIT_WRITES {
-            // Folder by folder: the shared Git folder is read-only apart from `objects` and `refs`.
+        if agora_platform::GIT_CONFIG_READ_ONLY {
+            // The shared Git folder is read-only apart from `objects`, `refs` and `logs/refs`: no planted `config` or `hooks`.
             assert!(!sb.write.contains(&main.join(".git")) && sb.read.contains(&main.join(".git")));
+            assert!(sb.write.contains(&main.join(".git").join("objects")));
+            assert!(sb.write.contains(&main.join(".git").join("refs")));
         } else {
             assert!(sb.write.contains(&main.join(".git")));
+        }
+        if !agora_platform::NARROW_GIT_WRITES {
             assert!(
                 sb.read.contains(&PathBuf::from("/home/x/bin")) && sb.read.contains(&"/usr".into())
             );

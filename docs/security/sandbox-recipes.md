@@ -31,6 +31,10 @@ sandbox.write = /var/folders/xx/yyyy/T, /var/folders/xx/yyyy/C, ~/.cargo/registr
 - Listing the per-user temp folder lets the agent read other programs' temp files of the same user. Without it, tools that honour
   `TMPDIR` (Python, Node, Rust) still work: the node gives each agent a temp folder of its own (PR #244).
 
+A confined agent on macOS writes only the parts of its checkout's shared `.git` a commit needs (`objects`, `refs`, `logs/refs`, its own
+worktree admin folder); `config` and `hooks` are read-only, so nothing it plants there runs in your git or the node's. Commits, new
+branches, log and status work; commands that rewrite the shared folder itself (`git config`, `git gc`, `git pack-refs`) are refused.
+
 ### macOS: `worktree-offline`
 
 `sandbox = worktree-offline` takes the same `sandbox.read` / `sandbox.write` lines and also cuts the network: the agent can connect only to
