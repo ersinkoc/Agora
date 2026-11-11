@@ -102,10 +102,15 @@ fn a_confined_agent_commits_in_its_own_worktree() {
     };
     match sup.start(&req, Instant::now()) {
         Ok(_) => {}
-        // A target folder where every user may create files (the inherited `Users` entries of a volume root, as on CI runners) is
-        // refused before start (ADR-0050 Amendment B, decision 4), and the refused start leaves no worktree. Do what the recipe says
-        // (keep only the user and SYSTEM) and start again.
-        Err(SupervisorError::SandboxRefused(_, _, "broad_write_grant")) => {
+        // A target folder where every user may create files (the inherited `Users` entries of a volume root, as on CI runners), or whose
+        // label the user cannot set (a data volume's default ACL), is refused before start (ADR-0050 Amendment B, decisions 2 and 4), and
+        // the refused start leaves no worktree. Do what the recipe says (keep only the user, with Full control, and SYSTEM) and start again.
+        Err(SupervisorError::SandboxRefused(
+            _,
+            _,
+            why @ ("broad_write_grant" | "label_failed"),
+        )) => {
+            eprintln!("refused before start ({why}); tightening the test folder");
             let who = Command::new("whoami").output().unwrap();
             let who = String::from_utf8_lossy(&who.stdout).trim().to_string();
             // On the folder only: Windows passes the new inherited entries down to everything below, which holds inherited ones only.

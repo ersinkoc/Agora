@@ -253,6 +253,7 @@ fn system_tools_still_start_when_confined() {
         &script,
         "@echo off\r\n\
          echo CMD-STARTED\r\n\
+         echo piped| findstr piped > nul && echo PIPE-WORKS|| echo PIPE-FAILED\r\n\
          git --version && echo GIT-STARTED|| echo GIT-FAILED\r\n",
     )
     .unwrap();
@@ -265,6 +266,8 @@ fn system_tools_still_start_when_confined() {
         &script,
     );
     assert!(out.contains("CMD-STARTED"), "{out}");
+    // `cmd` opens the pipe it made for `a | b` through the token's default DACL (review of #273, 1).
+    assert!(out.contains("PIPE-WORKS"), "{out}");
     assert!(out.contains("GIT-STARTED"), "{out}");
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -388,6 +391,123 @@ fn a_confined_agent_cannot_reach_another_agents_endpoint() {
     );
     let out_a = try_connect(&a, &id_a, "A");
     assert!(out_a.contains("CONNECTED-A"), "{out_a}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The access rights tried on another agent's process, by name.
+const PROCESS_RIGHTS: [(&str, u32); 5] = [
+    ("QUERY", 0x0400),         // PROCESS_QUERY_INFORMATION
+    ("QUERY-LIMITED", 0x1000), // PROCESS_QUERY_LIMITED_INFORMATION
+    ("VM-READ", 0x0010),       // PROCESS_VM_READ
+    ("TERMINATE", 0x0001),     // PROCESS_TERMINATE
+    ("ALL", 0x001F_FFFF),      // PROCESS_ALL_ACCESS
+];
+
+/// Opens the process named by `AGORA_TEST_OPEN_PID` with each of [`PROCESS_RIGHTS`] and prints the outcome. Run by
+/// `a_confined_agent_cannot_open_another_agents_process` inside a confined agent; on its own it does nothing.
+#[test]
+#[ignore = "helper run inside a confined agent"]
+fn open_process_helper() {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::OpenProcess;
+    let Some(pid) = std::env::var("AGORA_TEST_OPEN_PID")
+        .ok()
+        .and_then(|p| p.parse::<u32>().ok())
+    else {
+        return;
+    };
+    for (name, right) in PROCESS_RIGHTS {
+        // SAFETY: a plain call; the handle is closed below.
+        let h = unsafe { OpenProcess(right, 0, pid) };
+        if h.is_null() {
+            println!("OPEN-{name}-REFUSED");
+        } else {
+            println!("OPEN-{name}-GRANTED");
+            // SAFETY: opened above, closed once.
+            unsafe { CloseHandle(h) };
+        }
+    }
+}
+
+/// Review of #273, 1: a confined agent's process (and threads) take the token's default DACL, which names the user and that agent's
+/// own SID only, so a second confined agent cannot open it for anything: no query, no memory read, no terminate.
+#[test]
+fn a_confined_agent_cannot_open_another_agents_process() {
+    enable();
+    let root = scratch("open-process");
+    let (a, b) = (root.join("agent-a"), root.join("agent-b"));
+    for d in [&a, &b] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let hold = a.join("hold.cmd");
+    std::fs::write(&hold, "@echo off\r\nping -n 30 127.0.0.1 > nul\r\n").unwrap();
+    let mut cfg = PtyConfig::new(vec![
+        "cmd.exe".into(),
+        "/c".into(),
+        hold.display().to_string(),
+    ]);
+    cfg.cwd = Some(a.clone());
+    cfg.sandbox = Some(Sandbox {
+        read: vec![],
+        write: vec![a.clone()],
+    });
+    let agent_a = spawn(&cfg).unwrap();
+    let pid = agent_a.pid();
+
+    // The node itself (not confined) can open it: the pid is right, and a refusal below is about who asks.
+    {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::OpenProcess;
+        // SAFETY: a plain call; the handle is closed below.
+        let h = unsafe { OpenProcess(0x0400, 0, pid) };
+        assert!(!h.is_null(), "the node cannot open agent A ({pid})");
+        // SAFETY: opened above, closed once.
+        unsafe { CloseHandle(h) };
+    }
+
+    let exe = std::env::current_exe().unwrap();
+    let mut cfg = PtyConfig::new(vec![
+        exe.display().to_string(),
+        "--exact".into(),
+        "open_process_helper".into(),
+        "--ignored".into(),
+        "--nocapture".into(),
+        "--test-threads=1".into(),
+    ]);
+    cfg.cwd = Some(b.clone());
+    cfg.env
+        .push(("AGORA_TEST_OPEN_PID".into(), pid.to_string()));
+    cfg.sandbox = Some(Sandbox {
+        read: vec![],
+        write: vec![b.clone()],
+    });
+    let agent_b = spawn(&cfg).unwrap();
+    let mut out = Vec::new();
+    let end = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < end {
+        match agent_b.output().recv_timeout(Duration::from_millis(100)) {
+            Ok(bytes) => out.extend(bytes),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(_) => {}
+        }
+    }
+    drop(agent_b);
+    drop(agent_a);
+    // Dropping the terminal took the permissions back before it returned (not later on a background thread).
+    let acl = acl_text(&a);
+    assert!(!acl.contains("Mandatory Label"), "{acl}");
+    assert!(
+        !acl.lines()
+            .any(|l| l.contains("S-1-5-21-") && !l.contains("(I)")),
+        "{acl}"
+    );
+    let out = String::from_utf8_lossy(&out).into_owned();
+    for (name, _) in PROCESS_RIGHTS {
+        assert!(
+            out.contains(&format!("OPEN-{name}-REFUSED")),
+            "{name}: {out}"
+        );
+    }
     let _ = std::fs::remove_dir_all(&root);
 }
 

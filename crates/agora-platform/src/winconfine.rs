@@ -76,15 +76,14 @@ const ANY_WRITE: u32 = 0x2 /* FILE_WRITE_DATA / ADD_FILE */
     | WRITE_OWNER
     | 0x1000_0000 /* GENERIC_ALL */
     | 0x4000_0000 /* GENERIC_WRITE */;
-/// The one switch between the two readings of Amendment B for a folder whose label the user cannot set (a data volume's default ACL,
-/// Modify through `Authenticated Users` only): `true` gives the node's logon SID `WRITE_OWNER` there while the label is needed (so a
-/// checkout on `D:` works); `false` refuses such a folder before start, as decision 2 reads. `AGORA_WINDOWS_NO_SELF_GRANT=1` turns it
-/// off for one run, to measure both.
-const SELF_GRANT_WRITE_OWNER: bool = true;
+/// For a folder whose label the user cannot set (a data volume's default ACL, Modify through `Authenticated Users` only). `false`, as
+/// accepted ADR-0050 Amendment B, decision 2 reads: such a folder is refused before start (`label_failed`). `true` would give the
+/// node's logon SID `WRITE_OWNER` there while the label is needed (so a checkout on `D:` works); that path is kept and was measured, but
+/// switching it on needs a maintainer-accepted amendment first.
+const SELF_GRANT_WRITE_OWNER: bool = false;
 
 fn self_grant_enabled() -> bool {
     SELF_GRANT_WRITE_OWNER
-        && !std::env::var_os("AGORA_WINDOWS_NO_SELF_GRANT").is_some_and(|v| v == "1")
 }
 
 /// Ledger line markers.
@@ -137,6 +136,11 @@ impl Drop for Token {
 
 /// A fresh SID that belongs to nothing else: four random 32-bit numbers below the domain authority.
 pub(crate) fn random_sid_string() -> io::Result<String> {
+    let n = random_numbers()?;
+    Ok(format!("S-1-5-21-{}-{}-{}-{}", n[0], n[1], n[2], n[3]))
+}
+
+fn random_numbers() -> io::Result<[u32; 4]> {
     let mut n = [0u32; 4];
     // SAFETY: a 16-byte buffer and the system RNG.
     let status = unsafe {
@@ -150,7 +154,7 @@ pub(crate) fn random_sid_string() -> io::Result<String> {
     if status != 0 {
         return Err(io::Error::other("no random numbers"));
     }
-    Ok(format!("S-1-5-21-{}-{}-{}-{}", n[0], n[1], n[2], n[3]))
+    Ok(n)
 }
 
 /// Adds (`grant`) or removes the SID's entry on `path`'s DACL.
@@ -654,7 +658,8 @@ fn grants_write_to(path: &Path, sids: &[Sid]) -> bool {
             &mut descriptor,
         )
     };
-    let mut found = false;
+    // A NULL DACL (or none) lets everyone do everything: the broadest grant there is.
+    let mut found = err == 0 && dacl.is_null();
     if err == 0 && !dacl.is_null() {
         // SAFETY: a valid ACL from the call above.
         let count = unsafe { (*dacl).AceCount };
@@ -737,7 +742,8 @@ impl Drop for LedgerLock {
 
 /// Whether another ledger whose node still runs lists exactly `line` (a shared folder's label or self-grant is still in use).
 fn line_in_use_elsewhere(line: &str, own: &Path) -> bool {
-    let Ok(dir) = std::fs::read_dir(ledger_dir()) else {
+    // The other ledgers sit next to this one.
+    let Some(Ok(dir)) = own.parent().map(std::fs::read_dir) else {
         return false;
     };
     for e in dir.flatten() {
@@ -748,14 +754,23 @@ fn line_in_use_elsewhere(line: &str, own: &Path) -> bool {
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
         };
-        if text.lines().next().is_some_and(owner_alive) && text.lines().any(|l| l == line) {
+        let wanted = line_key(line);
+        if text.lines().next().is_some_and(owner_alive)
+            && text.lines().any(|l| line_key(l) == wanted)
+        {
             return true;
         }
     }
     false
 }
 
-/// Where the ledgers live: one `<sid>.acl` file per running agent.
+/// A ledger line in the form two spellings of one folder share: paths compare without case and without the `\\?\` prefix. (8.3 short
+/// names are not resolved: the node writes every path the same way.)
+fn line_key(line: &str) -> String {
+    line.replace("\\\\?\\", "").to_lowercase()
+}
+
+/// Where the ledgers live: one `<sid>-<spawn>.acl` file per running agent process.
 fn ledger_dir() -> PathBuf {
     std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
@@ -854,6 +869,7 @@ fn write_ledger(file: &Path, plan: &Plan) -> io::Result<()> {
 /// entries again.
 pub(crate) struct Confinement {
     sid: Sid,
+    sid_text: String,
     granted: Vec<PathBuf>,
     /// Folders above the granted ones, each with an entry on that folder only.
     granted_here: Vec<PathBuf>,
@@ -873,19 +889,23 @@ impl Confinement {
     }
 
     fn in_ledger_dir(sandbox: &Sandbox, dir: &Path, identity: Option<&str>) -> io::Result<Self> {
-        // Amendment B, 4: refused before anything changes, so there is nothing to roll back. The caller maps `PermissionDenied` to
-        // `agent.sandbox_unavailable`.
-        if let Err((_, why)) = preflight(sandbox) {
-            return Err(io::Error::new(io::ErrorKind::PermissionDenied, why));
-        }
         let sid_text = match identity {
             Some(s) => s.to_string(),
             None => random_sid_string()?,
         };
         let sid = Sid::from_string(&sid_text)?;
-        // Held until every label of this agent is in place (see `LedgerLock`).
+        // Held until every label of this agent is in place (see `LedgerLock`), and over the check below, so no other agent's start or
+        // end changes these folders in between.
         let _lock = LedgerLock::acquire();
-        let ledger = dir.join(format!("{sid_text}.acl"));
+        // Amendment B, 4: refused before anything changes, so there is nothing to roll back. The caller maps `PermissionDenied` to
+        // `agent.sandbox_unavailable`.
+        if let Err((_, why)) = preflight(sandbox) {
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied, why));
+        }
+        // One ledger per spawn: a relaunch keeps the agent's SID (its mesh endpoint admits exactly that SID), and must neither
+        // overwrite a ledger an earlier spawn kept after a failed removal nor have its own deleted when that spawn ends.
+        let spawn = random_numbers()?;
+        let ledger = dir.join(format!("{sid_text}-{:08x}{:08x}.acl", spawn[0], spawn[1]));
         // Folders that exist, read ones first; a folder that is also writable keeps the stronger entry.
         let mut wanted: Vec<(PathBuf, u32)> = Vec::new();
         for p in &sandbox.read {
@@ -936,6 +956,7 @@ impl Confinement {
         )?;
         let mut confinement = Self {
             sid,
+            sid_text: sid_text.clone(),
             granted: Vec::new(),
             granted_here: Vec::new(),
             labelled: Vec::new(),
@@ -944,10 +965,11 @@ impl Confinement {
             ledger,
             token: Token(null_mut()),
         };
+        // Every path is recorded in `confinement` *before* it is changed: on failure `confinement` is dropped, which undoes whatever was
+        // added so far, including a change that went half through.
         for (path, mask) in wanted {
-            // On failure `confinement` is dropped, which undoes what was added so far.
+            confinement.granted.push(path.clone());
             change_acl(&path, confinement.sid.0, mask, true)?;
-            confinement.granted.push(path);
         }
         for path in above {
             // A folder whose permissions the user may not change (`C:\Users`) is left alone: `Users` in the restricting list covers it.
@@ -958,9 +980,10 @@ impl Confinement {
             }
         }
         for path in labels {
+            // Recorded first (see above): the label, and the self-grant that may come with it, are taken back by `drop`.
+            confinement.labelled.push(path.clone());
             if shared.contains(&path) {
                 // Already labelled by a live agent: share it, do not walk the tree again.
-                confinement.labelled.push(path);
                 continue;
             }
             if set_low_label(&path, true).is_err() {
@@ -977,7 +1000,6 @@ impl Confinement {
                 // A folder that cannot be labelled even so is refused (Amendment B, 2).
                 set_low_label(&path, true).map_err(|_| refused(SandboxRefusal::LabelFailed))?;
             }
-            confinement.labelled.push(path);
         }
         confinement.token = restricted_token(&confinement.sid)?;
         Ok(confinement)
@@ -1014,13 +1036,22 @@ impl Drop for Confinement {
                 }
             }
         }
+        // A relaunch of the same agent keeps its SID; while that spawn's ledger lists the same entry, it is still in use.
+        let sid_line = |p: &Path| format!("{}\t{}", self.sid_text, p.to_string_lossy());
         for path in &self.granted {
-            if change_acl(path, self.sid.0, 0, false).is_err() {
+            // A path recorded but never changed (the start failed on it) has no entry to take back.
+            if !line_in_use_elsewhere(&sid_line(path), &self.ledger)
+                && has_explicit_ace_for(path, self.sid.0)
+                && change_acl(path, self.sid.0, 0, false).is_err()
+            {
                 all_removed = false;
             }
         }
         for path in &self.granted_here {
-            if change_acl_here(path, self.sid.0, 0, false).is_err() {
+            let line = format!("{}\t{HERE_MARK}", sid_line(path));
+            if !line_in_use_elsewhere(&line, &self.ledger)
+                && change_acl_here(path, self.sid.0, 0, false).is_err()
+            {
                 all_removed = false;
             }
         }
@@ -1076,12 +1107,6 @@ fn sid_text(sid: PSID) -> io::Result<String> {
     // SAFETY: allocated by ConvertSidToStringSidW.
     unsafe { LocalFree(s.cast()) };
     Ok(text)
-}
-
-/// The logon SID inside a `TokenLogonSid` buffer (checked non-empty by the caller).
-fn groups_logon(buf: &[u8]) -> PSID {
-    // SAFETY: a TOKEN_GROUPS with at least one group at the start of `buf`.
-    unsafe { (*(buf.as_ptr().cast::<TOKEN_GROUPS>())).Groups[0].Sid }
 }
 
 /// Sets `token`'s default DACL (for objects its process creates without one) from an SDDL `D:` string.
@@ -1211,18 +1236,16 @@ fn restricted_token(agent: &Sid) -> io::Result<Token> {
             Attributes: 0x20, // SE_GROUP_INTEGRITY
         },
     };
-    // Objects the agent creates itself (the pipes `cmd` makes for `a | b`, events) get the token's default DACL. The user's default
-    // names the user and SYSTEM, neither of which passes the restricting check, so the agent could not open what it just made ("Not
-    // enough memory resources" from `cmd`). Name the agent's SID and the logon SID there instead.
+    // Objects the agent creates itself (its own process and threads, the pipes `cmd` makes for `a | b`, events) get the token's default
+    // DACL. The user's default names the user and SYSTEM, and the user alone does not pass the restricting check, so the agent could
+    // not open what it just made ("Not enough memory resources" from `cmd`). The user's SID passes the first check and the agent's SID
+    // the second; no other confined agent holds both, so none can open this agent's process (review of #273, 1: the logon SID, which
+    // every confined agent of the session holds in both lists, is not named).
     let agent_text = sid_text(agent.0)?;
-    let logon_ace = if groups.GroupCount > 0 {
-        format!("(A;;GA;;;{})", sid_text(groups_logon(&buf))?)
-    } else {
-        String::new()
-    };
+    let user_text = current_user_sid_text()?;
     set_default_dacl(
         restricted.0,
-        &format!("D:(A;;GA;;;SY)(A;;GA;;;{agent_text}){logon_ace}"),
+        &format!("D:(A;;GA;;;SY)(A;;GA;;;{user_text})(A;;GA;;;{agent_text})"),
     )?;
     // The size covers the structure and the 12-byte Low SID it points to.
     let size = (std::mem::size_of::<TOKEN_MANDATORY_LABEL>() + 12) as u32;
@@ -1303,6 +1326,10 @@ pub(crate) fn recover_stale() {
             let Ok(sid) = Sid::from_string(mark) else {
                 continue;
             };
+            // A live relaunch of the same agent (same SID) still uses this entry.
+            if line_in_use_elsewhere(line, &path) {
+                continue;
+            }
             let (folder, here) = match folder.rsplit_once('\t') {
                 Some((f, HERE_MARK)) => (f, true),
                 _ => (folder, false),
@@ -1357,6 +1384,137 @@ mod tests {
         assert!(clear_explicit_low_labels(&root));
         assert!(!has_explicit_low_label(&sub) && !has_explicit_low_label(&file));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn icacls(args: &[&str]) -> String {
+        let out = std::process::Command::new("icacls")
+            .args(args)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("agora-wc-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("ledgers")).unwrap();
+        root
+    }
+
+    fn files_in(dir: &Path) -> Vec<PathBuf> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .collect()
+    }
+
+    /// Review of #273, 3: a start that fails after it has changed something (the first folder granted, the second refusing the DACL
+    /// change) leaves no grant of the agent anywhere, and no ledger once everything is taken back.
+    #[test]
+    fn a_start_failing_halfway_leaves_no_grant_and_no_ledger() {
+        let root = scratch("halfway");
+        let ledgers = root.join("ledgers");
+        let (first, locked) = (root.join("first"), root.join("locked"));
+        for d in [&first, &locked] {
+            std::fs::create_dir_all(d.join("sub")).unwrap();
+        }
+        let user = format!("*{}", current_user_sid_text().unwrap());
+        let locked_s = locked.to_string_lossy().into_owned();
+        // The owner may always change a DACL unless an `OWNER RIGHTS` entry says otherwise; the deny takes the inherited grant away.
+        icacls(&[
+            &locked_s,
+            "/deny",
+            &format!("{user}:(WDAC)"),
+            "/grant",
+            "*S-1-3-4:(RX)",
+        ]);
+        let identity = random_sid_string().unwrap();
+        let sandbox = Sandbox {
+            read: vec![],
+            write: vec![first.clone(), locked.clone()],
+        };
+        let result = Confinement::in_ledger_dir(&sandbox, &ledgers, Some(&identity));
+        let failed = result.is_err();
+        drop(result);
+        let left = format!(
+            "{}{}",
+            icacls(&[&first.to_string_lossy(), "/T", "/C"]),
+            icacls(&[&locked_s, "/T", "/C"])
+        );
+        let ledger_files = files_in(&ledgers);
+        // Undo the test's own deny before asserting, so a failure does not leave the folder locked.
+        icacls(&[&locked_s, "/remove:d", &user, "/remove:g", "*S-1-3-4"]);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(failed, "the start must fail");
+        assert!(!left.contains(&identity), "left: {left}");
+        assert!(!left.contains("Mandatory Label"), "left: {left}");
+        assert!(ledger_files.is_empty(), "ledgers left: {ledger_files:?}");
+    }
+
+    /// Review of #273, 4: a NULL DACL lets everyone do everything, so it is refused like a `Users`/`Everyone` write grant.
+    #[test]
+    fn a_null_dacl_is_a_broad_write_grant() {
+        let root = scratch("null-dacl");
+        let open = root.join("work").join("open");
+        std::fs::create_dir_all(&open).unwrap();
+        let mut sd = null_mut();
+        // SAFETY: a valid NUL-terminated string and an out pointer; freed below.
+        let made = unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                wide("D:NO_ACCESS_CONTROL".as_ref()).as_ptr(),
+                SDDL_REVISION_1,
+                &mut sd,
+                null_mut(),
+            )
+        };
+        assert_ne!(made, 0);
+        // SAFETY: a NUL-terminated path and the descriptor made above.
+        let set = unsafe {
+            SetFileSecurityW(
+                wide(open.as_os_str()).as_ptr(),
+                DACL_SECURITY_INFORMATION,
+                sd,
+            )
+        };
+        // SAFETY: allocated by the conversion above.
+        unsafe { LocalFree(sd) };
+        assert_ne!(set, 0);
+        let hit = broad_writer_below(&root.join("work")).unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(hit, Some((open, SandboxRefusal::BroadWriteGrant)));
+    }
+
+    /// Review of #273, 5: a relaunch keeps the agent's identity (its mesh endpoint admits exactly that SID), so two confinements of one
+    /// identity can overlap. Each has its own ledger, and the one that ends first leaves the other's grant in place.
+    #[test]
+    fn a_late_end_of_an_earlier_spawn_leaves_the_next_spawns_grant() {
+        let root = scratch("respawn");
+        let ledgers = root.join("ledgers");
+        let work = root.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let identity = random_sid_string().unwrap();
+        let sandbox = Sandbox {
+            read: vec![],
+            write: vec![work.clone()],
+        };
+        let earlier = Confinement::in_ledger_dir(&sandbox, &ledgers, Some(&identity)).unwrap();
+        let next = Confinement::in_ledger_dir(&sandbox, &ledgers, Some(&identity)).unwrap();
+        let two_ledgers = files_in(&ledgers).len();
+        drop(earlier);
+        let after_earlier = icacls(&[&work.to_string_lossy()]);
+        let ledgers_after_earlier = files_in(&ledgers).len();
+        drop(next);
+        let after_both = icacls(&[&work.to_string_lossy()]);
+        let ledgers_after_both = files_in(&ledgers);
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(two_ledgers, 2);
+        assert!(after_earlier.contains(&identity), "{after_earlier}");
+        assert!(after_earlier.contains("Mandatory Label"), "{after_earlier}");
+        assert_eq!(ledgers_after_earlier, 1);
+        assert!(!after_both.contains(&identity), "{after_both}");
+        assert!(!after_both.contains("Mandatory Label"), "{after_both}");
+        assert!(ledgers_after_both.is_empty(), "{ledgers_after_both:?}");
     }
 
     #[test]

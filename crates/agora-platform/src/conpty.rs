@@ -128,8 +128,9 @@ struct Inner {
     process: Handle,
     job: Option<Handle>,
     pid: u32,
-    /// Last, so the process and job are closed before the folder permissions are taken back.
-    _confinement: Option<Confinement>,
+    /// Last, so the process and job are closed before the folder permissions are taken back. Taken out by `ConPty::drop` once the
+    /// process is gone, so the permissions go back on the dropping thread rather than whenever the waiter thread lets go of `Inner`.
+    confinement: Mutex<Option<Confinement>>,
 }
 
 // SAFETY: the pseudo-console handle is an opaque id; every use of it is a thread-safe system call.
@@ -265,7 +266,7 @@ pub(crate) fn spawn(config: &PtyConfig) -> io::Result<Box<dyn Pty>> {
         process,
         job,
         pid,
-        _confinement: confinement,
+        confinement: Mutex::new(confinement),
     });
     let (tx, output) = sync_channel::<Vec<u8>>(QUEUE);
     let read_handle = out_read;
@@ -492,8 +493,20 @@ impl Pty for ConPty {
 impl Drop for ConPty {
     fn drop(&mut self) {
         let _ = self.inner.kill();
-        // The reader then finds nobody listening and ends; the process is not waited for here.
+        // The reader then finds nobody listening and ends.
         self.output = sync_channel(1).1;
+        // A confined agent's folder permissions go back here, once the process just killed is gone (a bounded wait), not later on the
+        // waiter thread: a relaunch of the same agent must not race with an earlier spawn's clean-up, and a node that exits right after
+        // must not leave them to recovery (review of #273, 5). Unconfined, nothing is waited for.
+        let Ok(mut confinement) = self.inner.confinement.lock() else {
+            return;
+        };
+        if confinement.is_some()
+            // SAFETY: a live process handle (owned by `inner`).
+            && unsafe { WaitForSingleObject(self.inner.process.0, 5_000) } == WAIT_OBJECT_0
+        {
+            drop(confinement.take());
+        }
     }
 }
 

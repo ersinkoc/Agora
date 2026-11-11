@@ -73,8 +73,9 @@ What differs from macOS and Linux:
 - **A folder that every user may write is refused, not opened.** An allowed folder under `C:\ProgramData` (which lets `Users` add files) or with
   an `Everyone`/`Users` write entry anywhere below it gives `agent.sandbox_unavailable` with `reason = broad_write_grant`. Move the checkout, or
   remove the broad entry.
-- **On a data volume** (`D:` with the default ACL) the user may change a folder's permissions but not its label. The node gives its own logon
-  session `WRITE_OWNER` on the allowed folders for as long as an agent uses them, records it in its ledger and takes it back afterwards.
+- **On a data volume** (`D:` with the default ACL) the user may change a folder's permissions but not its label, so the start is refused
+  before anything changes (`reason = label_failed`). Give your own account Full control of the checkout
+  (`icacls <folder> /grant "%USERNAME%:(OI)(CI)F"`), or keep the checkout under your profile.
 - **Every listed folder costs time at every agent start and stop**: the node adds an inheritable entry (and, for writable folders, a label) that
   Windows writes to every file below, then removes. Measured: a clone of this repository (about 1,200 files) starts in about 5 s; `~\.rustup`
   (about 100,000 files) in `sandbox.read` adds 20–30 s. List the narrowest folder that works, never a whole cache.

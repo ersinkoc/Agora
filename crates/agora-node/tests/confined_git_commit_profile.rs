@@ -59,10 +59,12 @@ fn a_confined_agent_commits_in_a_checkout_under_the_user_profile() {
         eprintln!("skipped: agents cannot be confined on this machine");
         return;
     }
-    // Not under the user's temp folder: git `stat`s every folder above a ref it locks, and folders of the user profile refuse that to a
-    // confined agent, so a checkout inside the profile cannot commit yet (reported separately; this test covers the reflog only).
+    // Under the user's temp folder, inside the profile: git `stat`s every folder above a ref it locks, which the ancestor entries
+    // (decision 3) allow.
     let dir = std::env::temp_dir().join(format!("agora-confined-commit-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
+    // git (the test's, the supervisor's and the agent's) never searches above the test's own folder.
+    std::env::set_var("GIT_CEILING_DIRECTORIES", std::env::temp_dir());
     let repo = dir.join("repo");
     std::fs::create_dir_all(&repo).unwrap();
     git(&repo, &["init", "-q", "-b", "main"]);
