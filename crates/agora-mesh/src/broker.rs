@@ -103,6 +103,8 @@ pub enum MeshError {
     LeaseHeld {
         path: String,
         holder: AgentId,
+        /// When the lease that conflicts ends (ms).
+        expires_at_ms: u64,
     },
     LeaseInvalidPath(String),
     /// A lease must last at least a moment.
@@ -141,11 +143,17 @@ impl MeshError {
             Self::NotTaskOwner(t) => {
                 Error::new(ErrorCode::TaskNotOwner).with("task_id", t.as_str())
             }
-            Self::LeaseHeld { path, holder } => Error::new(ErrorCode::LeaseHeld)
+            Self::LeaseHeld {
+                path,
+                holder,
+                expires_at_ms,
+            } => Error::new(ErrorCode::LeaseHeld)
                 .with("path", path.as_str())
                 .with("holder_agent_id", holder.as_str())
-                // The lease's expiry is not tracked per conflict here; an empty value renders as "later".
-                .with("expires_at", ""),
+                .with(
+                    "expires_at",
+                    i64::try_from(*expires_at_ms).unwrap_or(i64::MAX),
+                ),
             Self::LeaseInvalidPath(p) => {
                 Error::new(ErrorCode::LeaseInvalidPath).with("path", p.as_str())
             }
@@ -921,9 +929,13 @@ impl Mesh {
                         table.release(t, by);
                     }
                     return Err(match e {
-                        LeaseError::Conflict { holder } => MeshError::LeaseHeld {
+                        LeaseError::Conflict {
+                            holder,
+                            expires_at_ms,
+                        } => MeshError::LeaseHeld {
                             path: p.clone(),
                             holder,
+                            expires_at_ms,
                         },
                         LeaseError::InvalidPath => MeshError::LeaseInvalidPath(p.clone()),
                         LeaseError::ZeroTtl => MeshError::LeaseZeroTtl,
@@ -1304,7 +1316,9 @@ mod tests {
             err,
             MeshError::LeaseHeld {
                 path: "src/b/deep.rs".into(),
-                holder: id("a")
+                holder: id("a"),
+                // `a` took `src/b` at 1000 ms for the TTL the first call gave it; the error carries when that ends.
+                expires_at_ms: 1000,
             }
         );
         assert_eq!(err.to_error(&Limits::default()).code, ErrorCode::LeaseHeld);

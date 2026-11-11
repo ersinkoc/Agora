@@ -6,7 +6,11 @@ use crate::ids::AgentId;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LeaseError {
     /// Another agent holds a lease on this path or a parent/child of it.
-    Conflict { holder: AgentId },
+    Conflict {
+        holder: AgentId,
+        /// When the conflicting lease ends (ms), so the caller can say how long to wait.
+        expires_at_ms: u64,
+    },
     /// Path is empty, absolute-escaping, or contains `..`.
     InvalidPath,
     /// A lease must last at least one millisecond.
@@ -85,6 +89,7 @@ impl LeaseTable {
         {
             return Err(LeaseError::Conflict {
                 holder: other.holder.clone(),
+                expires_at_ms: other.expires_at_ms,
             });
         }
         self.leases
@@ -150,11 +155,17 @@ mod tests {
         assert!(t.acquire("src/net", &ag("a"), 0, 100).is_ok());
         assert_eq!(
             t.acquire("src/net/tcp.rs", &ag("b"), 1, 100),
-            Err(LeaseError::Conflict { holder: ag("a") })
+            Err(LeaseError::Conflict {
+                holder: ag("a"),
+                expires_at_ms: 100
+            })
         );
         assert_eq!(
             t.acquire("src", &ag("b"), 1, 100),
-            Err(LeaseError::Conflict { holder: ag("a") })
+            Err(LeaseError::Conflict {
+                holder: ag("a"),
+                expires_at_ms: 100
+            })
         );
         // "src/network" is a different component than "src/net"
         assert!(t.acquire("src/network", &ag("b"), 1, 100).is_ok());

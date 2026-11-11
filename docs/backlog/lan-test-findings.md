@@ -21,5 +21,5 @@ branch (`docs/fordevs/`). Each row is something the run showed that no CI run ha
 | B2 | Id collision: such a local task gets `t-1`, the same id as a different task on the hub board | fixed with B1 |
 | B3 | A handoff to an offline node answers `mesh.recipient_unknown` (it ran locally) instead of `node.offline` | fixed with B1 |
 | B4 | A node that crashes and restarts reuses its agent ids (`agent-1`), and the hub board still showed the dead agent's claim as the new agent's | fixed: the hub gives back the tasks and leases of a node's agents when the node announces a new process start |
-| B5 | `lease.held` carries an empty `expires_at` | known and documented in the broker ("renders as later"); not changed |
+| B5 | `lease.held` carries an empty `expires_at` | fixed: the error carries the conflicting lease's end in ms, as the file-write error already did |
 
