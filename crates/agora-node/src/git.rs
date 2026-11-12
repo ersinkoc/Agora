@@ -420,11 +420,34 @@ pub fn remove_worktree(checkout: &Path, worktree: &Path, force: bool) -> Result<
     args.extend(["--", path.as_ref()]);
     // Before git removes it: the folder must still exist to be spelled canonically.
     let removing = agora_platform::canonicalize_plain(worktree);
+    if let Some((admin, _, work)) =
+        made_dirs(worktree).filter(|(.., w)| removing.as_ref().is_ok_and(|r| r == w))
+    {
+        restore_git_file(&work, &admin);
+    }
     git(checkout, &args)?;
     if let Ok(work) = removing {
         made().retain(|m| m.work != work);
     }
     Ok(())
+}
+
+/// Puts back the `.git` file of a worktree this node made, which its agent may have rewritten: git refuses to remove a worktree whose
+/// `.git` does not point back at its admin folder. The old entry is unlinked, not written through (it may be a link to anywhere), and
+/// the new file is created only if nothing took its place; a folder there is left for git to refuse.
+fn restore_git_file(work: &Path, admin: &Path) {
+    use std::io::Write;
+    let dot_git = work.join(".git");
+    if std::fs::symlink_metadata(&dot_git).is_ok_and(|m| !m.is_dir()) {
+        let _ = std::fs::remove_file(&dot_git);
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&dot_git)
+    {
+        let _ = writeln!(f, "gitdir: {}", admin.display());
+    }
 }
 
 fn parse_shortstat(s: &str) -> (u32, u32) {
@@ -1119,11 +1142,27 @@ mod tests {
             .output();
         assert!(mark.exists(), "the plant itself did not work");
 
-        // git refuses to remove a worktree whose `.git` does not point back at its admin folder; put the original back.
-        fs::write(wt.join(".git"), format!("gitdir: {}\n", admin.display())).expect(".git");
+        // Removing it still works: the node puts its own `.git` back first (git refuses a worktree that does not point back), and
+        // does not write through a `.git` the agent made a link to something outside.
+        let outside = wt.with_file_name(format!(
+            "{}-outside",
+            wt.file_name().expect("name").to_string_lossy()
+        ));
+        fs::write(&outside, "keep\n").expect("outside");
+        fs::remove_file(wt.join(".git")).expect("unlink");
+        if agora_platform::symlink(&outside, &wt.join(".git")).is_err() {
+            fs::write(
+                wt.join(".git"),
+                format!("gitdir: {}\n", fake_admin.display()),
+            )
+            .expect(".git");
+        }
         let work = agora_platform::canonicalize_plain(&wt).expect("wt");
         remove_worktree(&r.dir, &wt, true).expect("remove");
+        assert!(!wt.exists(), "the worktree is still there");
+        assert_eq!(fs::read_to_string(&outside).expect("outside"), "keep\n");
         assert!(made().iter().all(|m| m.work != work), "still recorded");
+        let _ = fs::remove_file(&outside);
         let _ = fs::remove_dir_all(&wt);
     }
 
