@@ -23,7 +23,8 @@ pub(crate) const DEFAULT_LISTEN: &str = "127.0.0.1:7443";
 
 /// What this hub agrees on with a node that offers it. Every capability a node offers
 /// (`agora_node::uplink_client::CAPABILITIES`) must be here, or the hub refuses each command that needs it (ADR-0053's
-/// `directory.list` was missing once, #378); `the_hub_agrees_on_every_capability_a_node_offers` checks it.
+/// `directory.list` was missing once, #378); `the_hub_agrees_on_every_capability_a_node_offers` checks it. A capability added here
+/// that no node offers (only the hub or clients use it) is not covered by that check: give it a test of its own.
 const HUB_CAPABILITIES: &[&str] = &[
     "terminal.raw",
     "workspace.directory",
