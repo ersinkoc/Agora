@@ -25,7 +25,7 @@ export function Inspector({ attention, approvals, notice, changed, boards, messa
   onReview?: (id: string) => void;
   onCollapse: () => void;
 }) {
-  const needs = attention.length + approvals.length;
+  const needs = attention.length + approvals.filter((x) => !attention.some((a) => a.id === x.agentId)).length;
   const tabs: { id: Tab; label: string; badge?: number }[] = [
     { id: 'needs', label: t('attention-title'), badge: needs },
     { id: 'changes', label: t('ide-tab-changes'), badge: changed.length },
