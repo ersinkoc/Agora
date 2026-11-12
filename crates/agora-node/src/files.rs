@@ -195,16 +195,30 @@ impl Files {
     }
 
     /// File contents, refusing files above the read limit before reading them.
+    ///
+    /// The agent working here can swap the file, or a folder above it, for a link between [`Self::resolve`]'s check and the open,
+    /// so where the open file really is is checked again on the open handle itself, and everything after reads that handle.
     pub fn read(&self, rel: &str) -> Result<Vec<u8>, FilesError> {
+        use std::io::Read;
         let path = self.resolve(rel)?;
-        let meta = fs::metadata(&path).map_err(|e| io_err(rel, &e))?;
+        let file = fs::File::open(&path).map_err(|e| io_err(rel, &e))?;
+        let real = agora_platform::opened_path(&file).map_err(|e| io_err(rel, &e))?;
+        if !real.starts_with(&self.root) {
+            return Err(FilesError::OutsideRoot(rel.to_string()));
+        }
+        let meta = file.metadata().map_err(|e| io_err(rel, &e))?;
         if meta.len() > self.max_read {
             return Err(FilesError::TooLarge {
                 path: rel.to_string(),
                 limit: self.max_read,
             });
         }
-        fs::read(&path).map_err(|e| io_err(rel, &e))
+        let mut data = Vec::with_capacity(usize::try_from(meta.len()).unwrap_or(0));
+        // Bounded by the limit too: the file can grow after its size was read.
+        file.take(self.max_read)
+            .read_to_end(&mut data)
+            .map_err(|e| io_err(rel, &e))?;
+        Ok(data)
     }
 
     /// Write a file on behalf of `agent`, unless another agent holds a live lease covering it.
@@ -423,6 +437,46 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn a_file_swapped_for_a_link_after_the_check_is_not_read() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        let (d, f) = setup();
+        let root = d.join("wt");
+        if agora_platform::symlink(&d.join("secret.txt"), &root.join("probe")).is_err() {
+            return; // no symbolic links here (Windows without the privilege)
+        }
+        let stop = Arc::new(AtomicBool::new(false));
+        // The agent flips `notes.md` between a file of its own and a link to a secret outside its worktree.
+        let flipper = {
+            let (stop, root, secret) = (Arc::clone(&stop), root.clone(), d.join("secret.txt"));
+            std::thread::spawn(move || {
+                let (file, link, name) = (
+                    root.join("n.tmp"),
+                    root.join("l.tmp"),
+                    root.join("notes.md"),
+                );
+                while !stop.load(Ordering::Relaxed) {
+                    let _ = fs::write(&file, "notes");
+                    let _ = fs::rename(&file, &name);
+                    let _ = agora_platform::symlink(&secret, &link);
+                    let _ = fs::rename(&link, &name);
+                }
+            })
+        };
+        let mut leaked = 0;
+        for _ in 0..20_000 {
+            if let Ok(data) = f.read("notes.md") {
+                if data == b"top secret" {
+                    leaked += 1;
+                }
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        flipper.join().unwrap();
+        assert_eq!(leaked, 0, "the node read the secret through a swapped link");
+    }
+
     #[test]
     fn symlinks_leading_out_are_rejected_for_read_list_and_write() {
         let (d, f) = setup();

@@ -253,6 +253,20 @@ pub(crate) fn wrap(
     (SANDBOX_EXEC.into(), v)
 }
 
+/// See [`crate::opened_path`]: `F_GETPATH`, the path the kernel has for the open vnode (firmlinks shown as `/Users/...`, as
+/// `canonicalize` shows them).
+pub(crate) fn opened_path(file: &std::fs::File) -> io::Result<PathBuf> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    let mut buf = vec![0u8; libc::PATH_MAX as usize];
+    // SAFETY: F_GETPATH writes a NUL-terminated path of at most PATH_MAX bytes into `buf`, which holds that many.
+    if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETPATH, buf.as_mut_ptr()) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    let len = buf.iter().position(|b| *b == 0).unwrap_or(buf.len());
+    Ok(PathBuf::from(std::ffi::OsStr::from_bytes(&buf[..len])))
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod sandbox_tests {

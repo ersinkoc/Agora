@@ -254,6 +254,29 @@ pub fn symlink(target: &std::path::Path, link: &std::path::Path) -> io::Result<(
     }
 }
 
+/// The path of the file `file` has open, as the kernel knows it now, with every link resolved (spelled as `std::fs::canonicalize`
+/// spells it). Checking a path and then opening it are two steps another process can change in between (a folder or the file
+/// itself swapped for a link); checking where the open handle really is happens after the open, so nothing can change it.
+pub fn opened_path(file: &std::fs::File) -> io::Result<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::opened_path(file)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        linux::opened_path(file)
+    }
+    #[cfg(windows)]
+    {
+        windows::opened_path(file)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+    {
+        let _ = file;
+        Err(unsupported_io("the path of an open file"))
+    }
+}
+
 /// Connect to a local socket.
 pub fn local_connect(path: &std::path::Path) -> io::Result<LocalStream> {
     #[cfg(unix)]
@@ -847,6 +870,26 @@ pub fn spawn(config: &PtyConfig) -> io::Result<Box<dyn Pty>> {
     #[cfg(windows)]
     {
         conpty::spawn(config)
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)] // expect is allowed in tests
+mod opened_path_tests {
+    #[test]
+    fn an_open_file_reports_where_it_really_is_even_through_a_link() {
+        let d = std::env::temp_dir().join(format!("agora-opened-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("real")).expect("dir");
+        std::fs::write(d.join("real/f.txt"), "x").expect("file");
+        let real = std::fs::canonicalize(d.join("real/f.txt")).expect("canonical");
+        let direct = std::fs::File::open(d.join("real/f.txt")).expect("open");
+        assert_eq!(super::opened_path(&direct).expect("path"), real);
+        if super::symlink(&d.join("real"), &d.join("link")).is_ok() {
+            let through = std::fs::File::open(d.join("link/f.txt")).expect("open");
+            assert_eq!(super::opened_path(&through).expect("path"), real);
+        }
+        let _ = std::fs::remove_dir_all(&d);
     }
 }
 
