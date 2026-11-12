@@ -6,6 +6,10 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ### Closed agents
 - **Remove for everyone:** a closed agent's summary can ask the hub to forget it (ADR-0053): it disappears from every window, the TUI and the desktop app. Its earlier events stay in the hub's record and its tokens and cost still count. An agent that still runs cannot be forgotten. "Remove from this list" still only hides it in this browser.
+### Agents and machines
+- Stopping an agent that runs through an adapter also ends the adapter's program; before, it kept running unseen.
+- A resume that fails no longer leaves the stopped agent reachable by other agents.
+- When the hub confirms events older than the ones a machine kept while it was offline, the machine keeps the rest instead of deleting them (or stopping its link).
 
 ## 0.3.2
 
