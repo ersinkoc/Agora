@@ -1,4 +1,4 @@
-import { Suspense, lazy, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { Suspense, lazy, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
 import { t } from '../i18n';
 import { type AgentTileModel, machineKey, needsAttention, sortFleet } from '../model';
 import { money, type UsageSummary } from '../net/usage';
@@ -22,6 +22,8 @@ import { StateBadge, StateMark } from './StateBadge';
 const TerminalView = lazy(() => import('../terminal/TerminalView').then((m) => ({ default: m.TerminalView })));
 
 const MAX_AUTO_PINNED = 4;
+// The search shortcut as the keyboard spells it: ⌘ on Apple machines (the desktop app's WebKit included), Ctrl elsewhere.
+const commandKey = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent) ? '⌘' : 'Ctrl';
 const wide = () => typeof window === 'undefined' || !window.matchMedia || window.matchMedia('(min-width: 1024px)').matches;
 
 // The one window, laid out like an editor: the agents on the left as a tree, the terminals you are watching as tabs in the
@@ -110,6 +112,30 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   };
 
   const tabs = pinned.map((id) => fleet.find((a) => a.id === id)).filter((a): a is AgentTileModel => !!a && (!projectFilter || a.projectId === projectFilter));
+  // The tab row as a tab list: arrows (mirrored right to left) and Home/End move between tabs, Delete or Backspace closes the
+  // focused one; only the selected tab is a stop for Tab, so the row is one stop on the way to the terminal.
+  const tabKey = (e: ReactKeyboardEvent<HTMLElement>, id: string) => {
+    const ids = tabs.map((x) => x.id);
+    const at = ids.indexOf(id);
+    const rtl = getComputedStyle(e.currentTarget).direction === 'rtl';
+    const step = { ArrowRight: rtl ? -1 : 1, ArrowLeft: rtl ? 1 : -1 }[e.key];
+    let to: string | undefined;
+    if (e.key === 'Enter' || e.key === ' ') to = id;
+    else if (step !== undefined) to = ids[(at + step + ids.length) % ids.length];
+    else if (e.key === 'Home') to = ids[0];
+    else if (e.key === 'End') to = ids[ids.length - 1];
+    else if (e.key === 'Delete' || e.key === 'Backspace') {
+      e.preventDefault();
+      const next = ids[at + 1] ?? ids[at - 1];
+      close(id);
+      if (next) { setActive(next); requestAnimationFrame(() => document.getElementById(`tab-${next}`)?.focus()); }
+      return;
+    } else return;
+    e.preventDefault();
+    if (!to) return;
+    setActive(to);
+    document.getElementById(`tab-${to}`)?.focus();
+  };
   const current = tabs.find((a) => a.id === active) ?? tabs[0];
   const shown = layout === 'grid' ? tabs.slice(0, MAX_AUTO_PINNED) : current ? [current] : [];
   const attention = needsAttention(fleet);
@@ -172,7 +198,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
         <h1 className="m-0 me-2 hidden text-[13px] font-semibold tracking-normal sm:block">{t('home-title')}</h1>
         {!showAgents && <button type="button" className="ide-iconbtn" onClick={() => setShowAgents(true)} aria-label={t('ide-show-agents')} title={t('ide-show-agents')}><Icon name="panelLeft" /></button>}
         <button type="button" onClick={onCommand} disabled={!onCommand} className="mx-auto flex h-7 min-w-0 max-w-md flex-1 items-center gap-2 rounded-xs border border-line bg-surface-0 px-2.5 text-start text-muted transition-colors duration-150 hover:border-accent hover:text-ink">
-          <Icon name="search" className="size-3.5" /><span className="min-w-0 flex-1 truncate">{t('ide-command')}</span><kbd className="ide-kbd hidden sm:inline">Ctrl K</kbd>
+          <Icon name="search" className="size-3.5" /><span className="min-w-0 flex-1 truncate">{t('ide-command')}</span><kbd className="ide-kbd hidden sm:inline">{commandKey} K</kbd>
         </button>
         {link !== 'live' && <span role="status" className="ide-chip">{t(link === 'offline' ? 'link-offline' : 'link-connecting')}</span>}
         <span className="hidden sm:block"><LanguagePicker compact /></span>
@@ -188,13 +214,13 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
           <div className="flex h-9 flex-none items-stretch border-b border-line bg-surface-1">
             <div role="tablist" aria-label={t('console-agents')} className="flex min-w-0 flex-1 overflow-x-auto">
               {tabs.map((a) => (
-                <div key={a.id} role="tab" aria-selected={current?.id === a.id} tabIndex={0} draggable className={`ide-tab group cursor-pointer ${dragging && dragging !== a.id ? 'ring-1 ring-inset ring-accent/50' : ''}`}
-                  onClick={() => setActive(a.id)} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setActive(a.id); } }}
+                <div key={a.id} id={`tab-${a.id}`} role="tab" aria-selected={current?.id === a.id} aria-keyshortcuts="Delete" tabIndex={current?.id === a.id ? 0 : -1} draggable className={`ide-tab group cursor-pointer ${dragging && dragging !== a.id ? 'ring-1 ring-inset ring-accent/50' : ''}`}
+                  onClick={() => setActive(a.id)} onKeyDown={(e) => tabKey(e, a.id)}
                   onDragStart={(e) => { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', a.id); setDragging(a.id); }} onDragEnd={() => setDragging(undefined)}
                   onDragOver={(e) => { if (dragging) e.preventDefault(); }} onDrop={(e) => { e.preventDefault(); if (dragging) move(dragging, a.id); setDragging(undefined); }} title={t('console-drag')}>
                   <StateMark state={a.state} />
                   <span className="min-w-0 truncate">{a.name}</span>
-                  <button type="button" tabIndex={-1} className="ide-iconbtn size-5 opacity-60 group-hover:opacity-100" onClick={(e) => { e.stopPropagation(); close(a.id); }} aria-label={t('ide-close-tab', { name: a.name })}><Icon name="close" className="size-3" /></button>
+                  <button type="button" tabIndex={-1} aria-hidden className="ide-iconbtn size-5 opacity-60 group-hover:opacity-100" onClick={(e) => { e.stopPropagation(); close(a.id); }} title={t('ide-close-tab', { name: a.name })}><Icon name="close" className="size-3" /></button>
                 </div>
               ))}
               {onStart && <button type="button" className="ide-iconbtn m-1 flex-none" onClick={() => onStart()} aria-label={t('ide-new-tab')} title={t('ide-new-tab')}><Icon name="plus" /></button>}
@@ -220,13 +246,14 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
                   </ul>}
                 </div>
                 <dl className="m-0 grid gap-1.5 text-xs text-muted">
-                  <div className="flex items-center gap-2"><dt><kbd className="ide-kbd">Ctrl K</kbd></dt><dd className="m-0">{t('ide-welcome-search')}</dd></div>
+                  <div className="flex items-center gap-2"><dt><kbd className="ide-kbd">{commandKey} K</kbd></dt><dd className="m-0">{t('ide-welcome-search')}</dd></div>
                   <div className="flex items-center gap-2"><dt><kbd className="ide-kbd">N</kbd></dt><dd className="m-0">{t('ide-welcome-next')}</dd></div>
                 </dl>
               </div>
             </div>
           ) : (
-            <div className={`grid min-h-0 flex-1 gap-px bg-line ${shown.length > 1 ? 'lg:grid-cols-2 lg:[&>*:last-child:nth-child(odd)]:col-span-2' : ''}`} style={{ gridAutoRows: 'minmax(0, 1fr)' }}>{shown.map(pane)}</div>
+            <div role={layout === 'single' ? 'tabpanel' : undefined} aria-labelledby={layout === 'single' && current ? `tab-${current.id}` : undefined}
+              className={`grid min-h-0 flex-1 gap-px bg-line ${shown.length > 1 ? 'lg:grid-cols-2 lg:[&>*:last-child:nth-child(odd)]:col-span-2' : ''}`} style={{ gridAutoRows: 'minmax(0, 1fr)' }}>{shown.map(pane)}</div>
           )}
         </main>
 

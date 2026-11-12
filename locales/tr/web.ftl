@@ -73,6 +73,7 @@ machine-agents =
        *[other] { $count } ajan çalışıyor
     }
 palette-go-machines = Makinelerimi göster
+palette-language = Dil: { $name }
 agent-tokens = { $count } token kullanıldı
 
 start-title = Ajan başlat

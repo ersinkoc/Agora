@@ -73,6 +73,7 @@ machine-agents =
        *[other] { $count } agents running
     }
 palette-go-machines = Show my machines
+palette-language = Language: { $name }
 agent-tokens = { $count } tokens used
 
 start-title = Start an agent
