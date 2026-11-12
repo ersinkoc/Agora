@@ -5,6 +5,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, PoisonError};
 
 use agora_core::{ProjectId, Worktree, WorktreeError};
 use agora_protocol::{Error, ErrorCode};
@@ -174,11 +175,56 @@ fn config_env_supported() -> bool {
     })
 }
 
-/// `git -C dir` with [`HARDENED`] and the node's environment. In a linked worktree the Git folders are pinned to the ones
-/// [`crate::sandbox::git_dirs`] verifies (`GIT_DIR`, `GIT_COMMON_DIR`, `GIT_WORK_TREE`), so the admin folder's `commondir` cannot
-/// point the node's git at a config the agent wrote; a `.git` that is a link is refused. Any other `.git` file (a submodule's, a
-/// separate git dir, or one an agent rewrote into either) is followed as git does: closing that needs the node to pin from the
-/// checkout it recorded (T8b).
+/// The Git folders of one worktree this node made, recorded by [`create_worktree`] as soon as `git worktree add` returns, before any
+/// agent runs there. Plain canonical spellings.
+struct Made {
+    work: PathBuf,
+    admin: PathBuf,
+    common: PathBuf,
+}
+
+/// Every worktree this node made and has not removed. Its `.git` file and everything it names can be rewritten by the agent working
+/// there, which can also build a whole repository inside the worktree whose `worktrees/<name>/gitdir` points back at it, so a check
+/// of the file at the time of a command proves nothing; what git said when the node made the worktree does. A node that restarts
+/// starts with none of these and falls back to [`crate::sandbox::git_dirs`].
+static MADE: Mutex<Vec<Made>> = Mutex::new(Vec::new());
+
+fn made() -> std::sync::MutexGuard<'static, Vec<Made>> {
+    // A panic while holding the lock leaves a plain list behind, still valid.
+    MADE.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Records `work`'s Git folders (see [`MADE`]); nothing when they do not check out.
+fn record_made(work: &Path) {
+    let plain = agora_platform::canonicalize_plain;
+    let Some((Ok(work), Ok(admin), Ok(common))) = crate::sandbox::git_dirs(work)
+        .map(|(admin, common)| (plain(work), plain(&admin), plain(&common)))
+    else {
+        return;
+    };
+    let mut list = made();
+    list.retain(|m| m.work != work);
+    list.push(Made {
+        work,
+        admin,
+        common,
+    });
+}
+
+/// `(GIT_DIR, GIT_COMMON_DIR, GIT_WORK_TREE)` for `dir` when it is, or is inside, a worktree this node made.
+fn made_dirs(dir: &Path) -> Option<(PathBuf, PathBuf, PathBuf)> {
+    let dir = agora_platform::canonicalize_plain(dir).ok()?;
+    made()
+        .iter()
+        .find(|m| dir.starts_with(&m.work))
+        .map(|m| (m.admin.clone(), m.common.clone(), m.work.clone()))
+}
+
+/// `git -C dir` with [`HARDENED`] and the node's environment. In a worktree this node made (or a folder below it) the Git folders are
+/// pinned (`GIT_DIR`, `GIT_COMMON_DIR`, `GIT_WORK_TREE`) to the ones recorded when it was made ([`MADE`]), so nothing the agent
+/// writes into its `.git` file or admin folder's `commondir` points the node's git at a config the agent wrote. In any other linked
+/// worktree they are pinned to the ones [`crate::sandbox::git_dirs`] verifies, and a `.git` that is a link is refused. Any other
+/// `.git` file (a submodule's, a separate git dir) is followed as git does.
 fn plain_hardened(dir: &Path) -> Command {
     let mut c = Command::new("git");
     c.args(HARDENED)
@@ -191,6 +237,12 @@ fn plain_hardened(dir: &Path) -> Command {
         .env_remove("GIT_DIR")
         .env_remove("GIT_COMMON_DIR")
         .env_remove("GIT_WORK_TREE");
+    if let Some((admin, common, work)) = made_dirs(dir) {
+        c.env("GIT_DIR", admin)
+            .env("GIT_COMMON_DIR", common)
+            .env("GIT_WORK_TREE", work);
+        return c;
+    }
     let Ok(meta) = std::fs::symlink_metadata(dir.join(".git")) else {
         return c;
     };
@@ -286,7 +338,9 @@ pub fn create_worktree(
         }
         args.push(base);
     }
-    git(checkout, &args).map(|_| ())
+    git(checkout, &args)?;
+    record_made(Path::new(path.as_ref()));
+    Ok(())
 }
 
 fn branch_exists(dir: &Path, branch: &str) -> Result<bool, GitError> {
@@ -364,7 +418,13 @@ pub fn remove_worktree(checkout: &Path, worktree: &Path, force: bool) -> Result<
         args.push("--force");
     }
     args.extend(["--", path.as_ref()]);
-    git(checkout, &args).map(|_| ())
+    // Before git removes it: the folder must still exist to be spelled canonically.
+    let removing = agora_platform::canonicalize_plain(worktree);
+    git(checkout, &args)?;
+    if let Ok(work) = removing {
+        made().retain(|m| m.work != work);
+    }
+    Ok(())
 }
 
 fn parse_shortstat(s: &str) -> (u32, u32) {
@@ -980,6 +1040,91 @@ mod tests {
         for d in [&wt, &fake, &linked] {
             let _ = fs::remove_dir_all(d);
         }
+    }
+
+    #[test]
+    fn the_nodes_git_uses_the_git_folders_recorded_when_it_made_the_worktree() {
+        let r = Repo::new(None);
+        let wt = r.dir.with_file_name(format!(
+            "{}-recorded-wt",
+            r.dir.file_name().expect("name").to_string_lossy()
+        ));
+        create_worktree(&r.dir, &wt, "recorded", None).expect("worktree");
+        let (admin, common) = crate::sandbox::git_dirs(&wt).expect("verified");
+        // The agent builds a repository inside its worktree, with an admin folder whose back-pointer names this worktree and a
+        // filter in its config, and points its `.git` file there: every check of the files on disk now agrees with it.
+        let fake = wt.join("fake");
+        let ok = Command::new("git")
+            .args(["clone", "-q", "--bare"])
+            .arg(&r.dir)
+            .arg(&fake)
+            .status()
+            .expect("clone")
+            .success();
+        assert!(ok);
+        let fake_admin = fake.join("worktrees").join("x");
+        fs::create_dir_all(&fake_admin).expect("admin");
+        for f in ["HEAD", "index"] {
+            fs::copy(admin.join(f), fake_admin.join(f)).expect("copy");
+        }
+        let own = agora_platform::canonicalize_plain(&wt)
+            .expect("wt")
+            .join(".git");
+        fs::write(fake_admin.join("gitdir"), format!("{}\n", own.display())).expect("gitdir");
+        fs::write(fake_admin.join("commondir"), "../..\n").expect("commondir");
+        let mark = wt.join("ran-fake-clean");
+        let set = Command::new("git")
+            .arg("--git-dir")
+            .arg(&fake)
+            .args(["config", "filter.ev.clean"])
+            .arg(format!("sh -c 'touch \"{}\"; cat'", mark.display()))
+            .status()
+            .expect("config")
+            .success();
+        assert!(set);
+        fs::write(
+            wt.join(".git"),
+            format!("gitdir: {}\n", fake_admin.display()),
+        )
+        .expect(".git");
+        assert!(
+            crate::sandbox::git_dirs(&wt).is_some_and(|(_, c)| c != common),
+            "the fake repository does not pass the check on disk"
+        );
+        fs::write(wt.join(".gitattributes"), "*.txt filter=ev\n").expect("attributes");
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let checked_out = fs::read_to_string(wt.join("a.txt")).expect("read");
+        fs::write(wt.join("a.txt"), checked_out.replace("one", "uno")).expect("edit");
+
+        let used = hardened(&wt)
+            .args(["rev-parse", "--git-common-dir"])
+            .output()
+            .expect("rev-parse");
+        let used = PathBuf::from(String::from_utf8_lossy(&used.stdout).trim());
+        assert_eq!(
+            agora_platform::canonicalize_plain(&used).expect("used"),
+            agora_platform::canonicalize_plain(&common).expect("common")
+        );
+        let _ = status(&wt);
+        let _ = diff(&wt, None);
+        assert!(
+            !mark.exists(),
+            "the node's git followed the agent's .git file"
+        );
+        // Control: plain git follows it.
+        let _ = Command::new("git")
+            .arg("-C")
+            .arg(&wt)
+            .args(["status", "--porcelain"])
+            .output();
+        assert!(mark.exists(), "the plant itself did not work");
+
+        // git refuses to remove a worktree whose `.git` does not point back at its admin folder; put the original back.
+        fs::write(wt.join(".git"), format!("gitdir: {}\n", admin.display())).expect(".git");
+        let work = agora_platform::canonicalize_plain(&wt).expect("wt");
+        remove_worktree(&r.dir, &wt, true).expect("remove");
+        assert!(made().iter().all(|m| m.work != work), "still recorded");
+        let _ = fs::remove_dir_all(&wt);
     }
 
     #[test]
