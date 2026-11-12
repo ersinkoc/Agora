@@ -687,6 +687,18 @@ pub(crate) fn opened_path(file: &std::fs::File) -> io::Result<PathBuf> {
     }
 }
 
+/// See [`crate::open_dir`]. Not written yet (#330: the Windows half).
+pub(crate) fn open_dir(path: &Path) -> io::Result<std::fs::File> {
+    let _ = path;
+    Err(io::Error::from(io::ErrorKind::Unsupported))
+}
+
+/// See [`crate::list_dir`]. Not written yet (#330: the Windows half).
+pub(crate) fn list_dir(dir: &std::fs::File) -> io::Result<Vec<crate::DirItem>> {
+    let _ = dir;
+    Err(io::Error::from(io::ErrorKind::Unsupported))
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
