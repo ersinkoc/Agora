@@ -63,22 +63,27 @@ fn start_node(s: &Setup) -> NodeProc {
     start_node_at(s, &s.home)
 }
 fn start_node_at(s: &Setup, cwd: &Path) -> NodeProc {
-    let child = Command::new(AGORA)
-        .current_dir(cwd)
-        .args(["node", "run", "--project"])
-        .arg(&s.repo)
-        .env("AGORA_HOME", &s.home)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("start node");
+    // Owned before the wait: a node that is slow to start is still killed when the test gives up on it (left running, it held the
+    // binary open and broke the next build).
+    let node = NodeProc(
+        Command::new(AGORA)
+            .current_dir(cwd)
+            .args(["node", "run", "--project"])
+            .arg(&s.repo)
+            .env("AGORA_HOME", &s.home)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("start node"),
+    );
     let sock = s.home.join("node.sock");
-    let end = Instant::now() + Duration::from_secs(15);
+    // A node on a busy Windows machine took up to 24 s to open its socket (measured), mostly in git.
+    let end = Instant::now() + Duration::from_secs(60);
     while !sock.exists() {
         assert!(Instant::now() < end, "node did not create its socket");
         std::thread::sleep(Duration::from_millis(50));
     }
-    NodeProc(child)
+    node
 }
 
 /// Run `agora <args>` and return (exit code, stdout, stderr).
