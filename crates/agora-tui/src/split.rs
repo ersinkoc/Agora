@@ -126,10 +126,18 @@ fn tree(v: &View<'_>, t: Text<'_>) -> Vec<Row> {
             paint: "\x1b[33;1m",
             selected: false,
         });
+        let answered =
+            crate::client::answered_approval(s, Some(v.selected)).map(|a| a.approval_id.as_str());
         for a in &s.approvals {
             let what = format!("{} {}", a.action, a.detail);
+            // The one y / n answer is marked.
+            let mark = if Some(a.approval_id.as_str()) == answered {
+                "▶"
+            } else {
+                "!"
+            };
             rows.push(Row {
-                text: format!(" ! {}: {}", local(&a.agent_id), what.trim()),
+                text: format!(" {mark} {}: {}", local(&a.agent_id), what.trim()),
                 paint: "\x1b[33m",
                 selected: false,
             });
@@ -451,9 +459,9 @@ mod tests {
         let f = frame(&v, &text);
         let rows = plain_rows(&f, 12);
         assert!(rows[0].contains("tui-attention"), "{rows:#?}");
-        // Cut at the panel's edge, with an ellipsis.
+        // Cut at the panel's edge, with an ellipsis; marked as the one y / n answer (the selected agent's).
         assert!(
-            rows[1].contains("! agent-1: files.write src/aut…│"),
+            rows[1].contains("▶ agent-1: files.write src/aut…│"),
             "{rows:#?}"
         );
         let tree: Vec<&str> = rows

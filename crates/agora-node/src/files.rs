@@ -7,6 +7,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::ops::ControlFlow;
 use std::path::{Component, Path, PathBuf};
 use std::time::SystemTime;
 
@@ -141,6 +142,27 @@ pub struct Files {
     max_read: u64,
 }
 
+/// Why [`visit_inside`] gave nothing.
+enum Inside {
+    /// The folder's handle is not below the root (a link swapped in).
+    Outside,
+    Io(std::io::Error),
+}
+
+/// The entries of `dir`, read through its own handle once that handle is known to be below `root` (canonical).
+fn visit_inside(
+    root: &Path,
+    dir: &Path,
+    visitor: impl FnMut(agora_platform::DirItem) -> ControlFlow<()>,
+) -> Result<(), Inside> {
+    let handle = agora_platform::open_dir(dir).map_err(Inside::Io)?;
+    let real = agora_platform::opened_path(&handle).map_err(Inside::Io)?;
+    if !real.starts_with(root) {
+        return Err(Inside::Outside);
+    }
+    agora_platform::visit_dir(&handle, visitor).map_err(Inside::Io)
+}
+
 impl Files {
     /// `root` must exist; `max_read` is the largest file `read` returns, in bytes.
     pub fn open(root: &Path, max_read: u64) -> Result<Self, FilesError> {
@@ -197,18 +219,24 @@ impl Files {
     }
 
     /// Entries of one directory, directories first, then by name.
+    ///
+    /// Listed through the folder's own handle after checking where that handle is, as [`Self::read`] does for a file: a folder
+    /// swapped for a link after [`Self::resolve`]'s check would otherwise be listed wherever the link leads.
     pub fn list(&self, rel: &str) -> Result<Vec<Entry>, FilesError> {
         let dir = self.resolve(rel)?;
         let mut out = Vec::new();
-        for entry in fs::read_dir(&dir).map_err(|e| io_err(rel, &e))? {
-            let Ok(entry) = entry else { continue };
-            let Ok(meta) = entry.metadata() else { continue };
+        visit_inside(&self.root, &dir, |i| {
             out.push(Entry {
-                name: entry.file_name().to_string_lossy().into_owned(),
-                is_dir: meta.is_dir(),
-                size: if meta.is_dir() { 0 } else { meta.len() },
+                name: i.name.to_string_lossy().into_owned(),
+                is_dir: i.is_dir,
+                size: if i.is_dir { 0 } else { i.len },
             });
-        }
+            ControlFlow::Continue(())
+        })
+        .map_err(|e| match e {
+            Inside::Outside => FilesError::OutsideRoot(rel.to_string()),
+            Inside::Io(e) => io_err(rel, &e),
+        })?;
         out.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.cmp(&b.name)));
         Ok(out)
     }
@@ -343,32 +371,32 @@ impl Watcher {
         let mut out = BTreeMap::new();
         let mut stack = vec![self.root.clone()];
         while let Some(dir) = stack.pop() {
-            let Ok(rd) = fs::read_dir(&dir) else { continue };
-            for entry in rd.flatten() {
-                if out.len() >= MAX_ENTRIES {
-                    return out;
-                }
-                let Ok(ft) = entry.file_type() else { continue };
-                let name = entry.file_name();
-                if ft.is_dir() {
-                    if !SKIP_DIRS.iter().any(|s| name == *s) {
-                        stack.push(entry.path());
+            if out.len() >= MAX_ENTRIES {
+                break;
+            }
+            // Through the folder's own handle, checked to be below the root: a folder found here can be a link by the time it
+            // is opened, and the walk would go on wherever it leads.
+            // Stop the handle's enumeration at the budget; collecting a directory first defeats this bound.
+            // As before, a failed directory scan does not stop watching other directories.
+            let _ = visit_inside(&self.root, &dir, |item| {
+                let path = dir.join(&item.name);
+                if item.is_dir {
+                    if !SKIP_DIRS.iter().any(|s| item.name == *s) {
+                        stack.push(path);
                     }
-                } else if let Ok(meta) = entry.metadata() {
-                    let Ok(rel) = entry.path().strip_prefix(&self.root).map(Path::to_path_buf)
-                    else {
-                        continue;
+                } else {
+                    let Ok(rel) = path.strip_prefix(&self.root).map(Path::to_path_buf) else {
+                        return ControlFlow::Continue(());
                     };
                     let rel = rel.to_string_lossy().replace('\\', "/");
-                    out.insert(
-                        rel,
-                        (
-                            meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
-                            meta.len(),
-                        ),
-                    );
+                    out.insert(rel, (item.modified, item.len));
                 }
-            }
+                if out.len() >= MAX_ENTRIES {
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
+                }
+            });
         }
         out
     }
@@ -506,14 +534,108 @@ mod tests {
         assert!(!d.join("evil.txt").exists());
     }
 
+    /// Flips `root/d` between a folder of its own and a link to `outside` until `stop`, and answers how many times `d` became the
+    /// link. The link is made once (a junction on Windows, which needs no privilege) and the flipping is renames only, so it is fast
+    /// on every system. A link that cannot be made fails the test: a race test that skips itself tests nothing.
+    fn flip_folder(
+        root: &Path,
+        outside: &Path,
+        stop: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> std::thread::JoinHandle<u64> {
+        let (name, link, spare) = (root.join("d"), root.join("d.link"), root.join("d.spare"));
+        fs::create_dir_all(&name).unwrap();
+        fs::write(name.join("MINE"), "x").unwrap();
+        agora_platform::link_dir(outside, &link).expect("a folder link (a junction on Windows)");
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            let mut flips = 0;
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                // A step that fails (the folder is open on Windows) leaves the names as they were; the next round puts them back.
+                let _ = fs::rename(&name, &spare);
+                if fs::rename(&link, &name).is_ok() {
+                    flips += 1;
+                }
+                let _ = fs::rename(&name, &link);
+                let _ = fs::rename(&spare, &name);
+            }
+            flips
+        })
+    }
+
+    #[test]
+    fn a_folder_swapped_for_a_link_after_the_check_is_not_listed() {
+        let (d, f) = setup();
+        let outside = d.join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("OUTSIDE-NAME"), "x").unwrap();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flipper = flip_folder(&d.join("wt"), &outside, &stop);
+        let mut leaked = 0;
+        for _ in 0..20_000 {
+            if f.list("d")
+                .is_ok_and(|e| e.iter().any(|e| e.name == "OUTSIDE-NAME"))
+            {
+                leaked += 1;
+            }
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let flips = flipper.join().unwrap();
+        assert!(flips > 0, "the folder was never swapped for the link");
+        assert_eq!(leaked, 0, "files.list showed a folder outside the worktree");
+    }
+
+    #[test]
+    fn the_watcher_never_walks_into_a_folder_swapped_for_a_link() {
+        let (d, f) = setup();
+        let outside = d.join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("OUTSIDE-NAME"), "x").unwrap();
+        let mut w = f.watch();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flipper = flip_folder(&d.join("wt"), &outside, &stop);
+        let mut leaked = 0;
+        for _ in 0..3_000 {
+            if w.poll().iter().any(|p| p.ends_with("OUTSIDE-NAME")) {
+                leaked += 1;
+            }
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let flips = flipper.join().unwrap();
+        assert!(flips > 0, "the folder was never swapped for the link");
+        assert_eq!(
+            leaked, 0,
+            "the watcher reported a file outside the worktree"
+        );
+    }
+
     #[test]
     fn a_file_swapped_for_a_link_after_the_check_is_not_read() {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
         let (d, f) = setup();
         let root = d.join("wt");
+        // The folder above the file swapped for a link, which every system can make (a junction on Windows).
+        let outside = d.join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("notes.md"), "top secret").unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let flipper = flip_folder(&root, &outside, &stop);
+        let mut leaked = 0;
+        for _ in 0..20_000 {
+            if f.read("d/notes.md").is_ok_and(|data| data == b"top secret") {
+                leaked += 1;
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        let flips = flipper.join().unwrap();
+        assert!(flips > 0, "the folder was never swapped for the link");
+        assert_eq!(
+            leaked, 0,
+            "the node read the secret through a swapped folder"
+        );
+        // The file itself swapped for a link: only where a file link can be made (not on Windows without the privilege).
         if agora_platform::symlink(&d.join("secret.txt"), &root.join("probe")).is_err() {
-            return; // no symbolic links here (Windows without the privilege)
+            return;
         }
         let stop = Arc::new(AtomicBool::new(false));
         // The agent flips `notes.md` between a file of its own and a link to a secret outside its worktree.

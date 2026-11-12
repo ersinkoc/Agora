@@ -41,7 +41,7 @@ export function Inspector({ attention, approvals, notice, changed, boards, messa
 
   return <aside className="flex min-h-0 flex-col border-line bg-surface-1 lg:border-s" aria-label={t('console-activity')}>
     <div className="flex h-9 flex-none items-stretch border-b border-line">
-      <div role="tablist" aria-label={t('ide-details')} className="flex min-w-0 flex-1 overflow-x-auto">
+      <div role="tablist" aria-label={t('ide-details')} className="flex min-w-0 flex-1 overflow-x-auto quiet-scroll">
         {tabs.map(x => <button key={x.id} type="button" role="tab" aria-selected={active === x.id} onClick={() => setTab(x.id)}
           className="ide-tab max-w-none border-e-0 px-2.5 text-[12px] whitespace-nowrap">
           {x.label}{!!x.badge && <span className={`rounded-full px-1.5 text-[11px] ${x.id === 'needs' ? 'bg-needs-you text-on-accent' : 'bg-surface-2 text-muted'}`}>{x.badge}</span>}

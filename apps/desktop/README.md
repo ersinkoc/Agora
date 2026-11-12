@@ -19,6 +19,12 @@ local network and never asks (seen on macOS 27 with an unsigned bundle). Its tex
 `bundle.macOS.signingIdentity = "-"` signs the bundle ad hoc (no Apple account): a bundle that is only linker-signed has no stable
 identity, so the permission the user grants never applies to it.
 
-Not done yet: native notifications for a waiting approval while the window is hidden, installers and per-platform signing (needs the
-maintainer's Apple and Windows accounts; unsigned builds are published as such), a real icon (the name and logo are open question Q1).
+The window's title follows the page's, so the number of approvals waiting that the hub's page puts in its title shows in the taskbar.
+
+An unsigned Windows installer (NSIS) is built by the `windows-installer` job in `.github/workflows/desktop.yml` and kept as that run's
+artifact; locally: `cargo tauri build --bundles nsis --config '{"bundle":{"active":true}}'` (tauri-cli 2.12). Windows SmartScreen warns
+about it because it is not signed.
+
+Not done yet: native notifications for a waiting approval while the window is hidden, signed installers and per-platform signing (needs
+the maintainer's Apple and Windows accounts; unsigned builds are published as such), a real icon (the name and logo are open question Q1).
 The product name appears in `src-tauri/tauri.conf.json` (`productName`, window title) and `ui/index.html`; renaming is a change to those.
