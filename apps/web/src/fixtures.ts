@@ -25,3 +25,15 @@ export const demoProjects = [
 
 // The demo window's one waiting approval, for the first demo agent.
 export const demoApprovals = [{ id: 'demo/1', node: 'demo', localId: '1', agentId: 'a1', agentName: 'claude · amber', action: 'Edit src/auth.rs', detail: '+12 −3', expiresAtMs: 0 }];
+
+// Development only: a small folder tree for the demo window's folder picker.
+const demoTree: Record<string, string[]> = {
+  '/home/dev': ['code', 'docs', 'Downloads', 'notes'],
+  '/home/dev/code': ['login-fix', 'api-tests', 'website', 'scripts'],
+  '/home/dev/code/login-fix': ['src', 'tests'],
+};
+export function demoList(path: string) {
+  const at = path || '/home/dev';
+  const names = demoTree[at] ?? [];
+  return { path: at, parent: at === '/' ? '' : at.slice(0, at.lastIndexOf('/')) || '/', entries: names.map((name) => ({ name, isGit: ['login-fix', 'api-tests', 'website'].includes(name) })), truncated: false };
+}

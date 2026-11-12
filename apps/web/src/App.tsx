@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { CommandPalette, type PaletteItem } from './components/CommandPalette';
-import { demoAgents, demoApprovals, demoMachines, demoProjects } from './fixtures';
+import { demoAgents, demoApprovals, demoList, demoMachines, demoProjects } from './fixtures';
 import { chooseLanguage, getLanguage, subscribeLanguage, t } from './i18n';
 import { nextNeedingMe, type AgentTileModel } from './model';
 import { connectLive, type CommandBody, type Live, type LinkState } from './net/live';
 import { GrantDialog } from './components/GrantDialog';
 import { grantFor, signGrant, type GrantAsk } from './net/grant';
 import type { TerminalSource } from './terminal/source';
-import { signDirectory, type DirectoryInfo } from './net/directory';
+import { signDirectory, type DirectoryInfo, type DirectoryListing } from './net/directory';
 import { StartAgent, type KindChoice } from './components/StartAgent';
 import { approvalList, boards, costByProject, projectChoices, recentMessages, machines, machinesOnline, tiles, type ApprovalModel, type View } from './net/view';
 import { freshApprovals, titleWithCount } from './net/alert';
@@ -78,6 +78,14 @@ export function App() {
     const i = ok.directoryInfo;
     if (!i) throw { code: 'protocol.capability_missing' };
     return { path: i.path ?? '', projectId: i.projectId ?? '', gitRoot: i.gitRoot ?? '', branch: i.branch ?? '', portable: !!i.portable, previousProjectId: i.previousProjectId ?? '' };
+  }, [api, device]);
+  const listDirectory = useCallback(async (node: string, path: string): Promise<DirectoryListing> => {
+    if (!api || !device) throw { code: 'approval.signature_invalid' };
+    const authorization = await signDirectory(device, node, 'list', path);
+    const ok = await api.command(node, { directoryList: { path, authorization } });
+    const d = ok.directoryEntries;
+    if (!d) throw { code: 'protocol.capability_missing' };
+    return { path: d.path ?? '', parent: d.parent ?? '', entries: (d.entries ?? []).map((e) => ({ name: e.name ?? '', isGit: !!e.isGit })), truncated: !!d.truncated };
   }, [api, device]);
   const startAgent = useCallback(async (node: string, info: DirectoryInfo, kind: string, separateWorktree: boolean, acceptIdentityChange: boolean): Promise<string | undefined> => {
     try {
@@ -288,7 +296,7 @@ export function App() {
           onStart={hub && api && live ? (node) => setStarting({ node }) : (!hub && import.meta.env.DEV ? (node) => setStarting({ node }) : undefined)} onCommand={() => setPalette(true)} onForget={hub && api ? forgetAgent : undefined}
           start={!hub && import.meta.env.DEV && starting ? <StartAgent initialNode={starting.node} projects={demoProjects} machines={demoMachines}
             loadKinds={async () => [{ kind: 'claude-code', name: 'Claude Code', installed: true }, { kind: 'codex', name: 'Codex', installed: true }, { kind: 'shell', name: 'Shell', installed: true }, { kind: 'gemini', name: 'Gemini CLI', installed: false }]}
-            inspect={async (_n, path) => ({ path, projectId: 'demo', gitRoot: path, branch: 'main', portable: false })} onStart={async () => { setStarting(false); return undefined; }} onClose={() => setStarting(false)} /> : starting && live ? <StartAgent initialNode={starting ? starting.node : undefined} projects={projectChoices(live)} machines={machines(live)} inspect={inspectDirectory} loadKinds={loadKinds} onStart={startAgent} onClose={() => setStarting(false)} /> : undefined} />}
+            list={async (_n, path) => demoList(path)} inspect={async (_n, path) => ({ path, projectId: 'demo', gitRoot: path, branch: 'main', portable: false })} onStart={async () => { setStarting(false); return undefined; }} onClose={() => setStarting(false)} /> : starting && live ? <StartAgent initialNode={starting ? starting.node : undefined} projects={projectChoices(live)} machines={machines(live)} inspect={inspectDirectory} list={listDirectory} loadKinds={loadKinds} onStart={startAgent} onClose={() => setStarting(false)} /> : undefined} />}
       {grantAsk && <GrantDialog machine={live?.nodes.get(grantAsk.node)?.hostname || grantAsk.node} kind={grantAsk.ask.kind} busy={grantAsk.busy} failed={grantAsk.failed} onAllow={() => void allowGrant()} onClose={() => setGrantAsk(undefined)} />}
       {palette && <CommandPalette items={items} onClose={() => setPalette(false)} />}
     </>

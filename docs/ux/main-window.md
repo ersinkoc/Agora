@@ -6,6 +6,12 @@
 ![Full size](screens/window-full-dark.png)
 ![Start an agent](screens/window-start-chosen-dark.png)
 
+## Browsing folders
+
+![Folder picker](screens/window-folder-picker-dark.png)
+
+**Browse folders** under the working-folder field opens a list of the machine's sub-folders (`directory.list`, ADR-0053; it starts in the home folder, or the typed path when there is one). Click a folder to step into it, the arrow goes up one, a Git project is marked, and **Use this folder** continues as if the path had been typed (the machine still resolves and shows it before anything starts). A machine without the command keeps the typed path.
+
 ## Closed agents
 
 ![A closed agent's summary](screens/window-closed-dark.png)
