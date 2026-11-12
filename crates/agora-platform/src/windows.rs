@@ -52,9 +52,7 @@ pub(crate) fn set_owner_only(path: &Path, inherit: bool) -> io::Result<()> {
         GetSecurityDescriptorDacl, ACL, DACL_SECURITY_INFORMATION,
         PROTECTED_DACL_SECURITY_INFORMATION,
     };
-    let user = crate::winconfine::current_user_sid_text()?;
-    let flags = if inherit { "OICI" } else { "" };
-    let sd = Descriptor::from_sddl(&format!("D:P(A;{flags};FA;;;{user})(A;{flags};FA;;;SY)"))?;
+    let sd = owner_only_descriptor(inherit)?;
     let (mut present, mut defaulted, mut dacl) = (0i32, 0i32, null_mut::<ACL>());
     // SAFETY: `sd` is a valid descriptor that outlives every use of `dacl`.
     if unsafe { GetSecurityDescriptorDacl(sd.0, &mut present, &mut dacl, &mut defaulted) } == 0 {
@@ -82,6 +80,50 @@ pub(crate) fn set_owner_only(path: &Path, inherit: bool) -> io::Result<()> {
     } else {
         Err(os_error(err))
     }
+}
+
+/// The protected descriptor of [`set_owner_only`]: the current user and SYSTEM, nothing inherited from above.
+fn owner_only_descriptor(inherit: bool) -> io::Result<Descriptor> {
+    let user = crate::winconfine::current_user_sid_text()?;
+    let flags = if inherit { "OICI" } else { "" };
+    Descriptor::from_sddl(&format!("D:P(A;{flags};FA;;;{user})(A;{flags};FA;;;SY)"))
+}
+
+/// Creates the file at `path`, which must not exist yet (`CREATE_NEW`, so a planted file or link is not followed), already owner-only:
+/// the descriptor is given at creation, so there is no moment in which the file carries what its folder passes on and another user
+/// could open it (#320). The handle is not inheritable and the file is not shared while open.
+pub(crate) fn create_private_new(path: &Path) -> io::Result<std::fs::File> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::FromRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{CREATE_NEW, FILE_ATTRIBUTE_NORMAL};
+    let sd = owner_only_descriptor(false)?;
+    let attrs = SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: sd.0,
+        bInheritHandle: 0,
+    };
+    let name: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    // SAFETY: a NUL-terminated path; `attrs` and the descriptor it points to live for the call.
+    let h = unsafe {
+        CreateFileW(
+            name.as_ptr(),
+            GENERIC_WRITE,
+            0,
+            &attrs,
+            CREATE_NEW,
+            FILE_ATTRIBUTE_NORMAL,
+            null_mut(),
+        )
+    };
+    if h == INVALID_HANDLE_VALUE {
+        return Err(os_error(unsafe { GetLastError() }));
+    }
+    // SAFETY: a fresh handle that this `File` now owns and closes.
+    Ok(unsafe { std::fs::File::from_raw_handle(h) })
 }
 
 fn wide(s: &str) -> Vec<u16> {
@@ -709,6 +751,50 @@ mod tests {
         assert_eq!(p(&long), PathBuf::from(&long));
         let guid = r"\\?\Volume{01234567-89ab-cdef-0123-456789abcdef}\x";
         assert_eq!(p(guid), PathBuf::from(guid));
+    }
+
+    #[test]
+    fn a_private_file_is_owner_only_from_its_creation_on() {
+        let dir = std::env::temp_dir().join(format!("agora-private-create-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // A parent that lets everyone change what is below it.
+        let out = std::process::Command::new("icacls")
+            .arg(&dir)
+            .args(["/grant", "*S-1-1-0:(OI)(CI)(M)"])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        let acl = |p: &Path| {
+            let out = std::process::Command::new("icacls")
+                .arg(p)
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+        // Control: a plain exclusive create here carries the parent's grant from the start, which is the window #320 is about.
+        let plain = dir.join("plain.tmp");
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&plain)
+            .unwrap();
+        assert!(
+            acl(&plain).contains("Everyone"),
+            "the parent is not permissive"
+        );
+        drop(f);
+        // Looked at while the file is still open and empty, before anything else touches it.
+        let private = dir.join("private.tmp");
+        let f = create_private_new(&private).unwrap();
+        let a = acl(&private);
+        assert!(!a.contains("Everyone"), "{a}");
+        assert!(!a.contains("(I)"), "inherited entries: {a}");
+        assert!(a.contains("SYSTEM"), "{a}");
+        drop(f);
+        // Exclusive: an existing name is never opened.
+        assert!(create_private_new(&private).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

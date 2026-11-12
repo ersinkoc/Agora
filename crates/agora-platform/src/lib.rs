@@ -232,14 +232,16 @@ pub fn write_private(path: &std::path::Path, contents: &[u8]) -> io::Result<()> 
         let tmp = std::path::PathBuf::from(tmp);
         let _ = std::fs::remove_file(&tmp);
         let result = (|| {
-            let mut options = std::fs::OpenOptions::new();
-            options.write(true).create_new(true);
             #[cfg(unix)]
-            std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-            let mut f = options.open(&tmp)?;
-            // Private before the first byte is in it.
+            let mut f = {
+                let mut options = std::fs::OpenOptions::new();
+                options.write(true).create_new(true);
+                std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+                options.open(&tmp)?
+            };
+            // Private from its creation on, not made private just after it (#320).
             #[cfg(windows)]
-            windows::set_owner_only(&tmp, false)?;
+            let mut f = windows::create_private_new(&tmp)?;
             f.write_all(contents)?;
             f.sync_all()?;
             // Windows cannot rename a file that is still open.
