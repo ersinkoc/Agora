@@ -436,7 +436,6 @@ mod tests {
         assert!(!d.join("evil.txt").exists());
     }
 
-    #[cfg(unix)]
     #[test]
     fn a_file_swapped_for_a_link_after_the_check_is_not_read() {
         use std::sync::atomic::{AtomicBool, Ordering};
@@ -477,6 +476,7 @@ mod tests {
         assert_eq!(leaked, 0, "the node read the secret through a swapped link");
     }
 
+    #[cfg(unix)]
     #[test]
     fn symlinks_leading_out_are_rejected_for_read_list_and_write() {
         let (d, f) = setup();
