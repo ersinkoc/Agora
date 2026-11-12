@@ -94,6 +94,23 @@ fn forget(app: tauri::AppHandle, tunnels: State<'_, Tunnels>) -> Result<(), Stri
 fn main() {
     tauri::Builder::default()
         .manage(Tunnels::default())
+        // The window is made here rather than from the config alone so its title follows the page's: the hub's page puts the number
+        // of approvals waiting in its title, and the taskbar shows the window's.
+        .setup(|app| {
+            let config = app
+                .config()
+                .app
+                .windows
+                .first()
+                .cloned()
+                .ok_or("tauri.conf.json has no window")?;
+            tauri::WebviewWindowBuilder::from_config(app.handle(), &config)?
+                .on_document_title_changed(|window, title| {
+                    let _ = window.set_title(&title);
+                })
+                .build()?;
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             ca_fingerprint,
             saved,
