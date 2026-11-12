@@ -5,6 +5,8 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 ## Next
 
 ### The window
+- Choose the colour scheme in the title bar: follow the system, dark or light. It is remembered in this browser, and terminals repaint at once. Terminal colours are readable in both schemes.
+- Machines, This device and Audit share the window's title bar. Alt+1…9 picks a tab, Ctrl/⌘+B hides the agent list. A long "shared folder" label no longer pushes an agent's name out of the list.
 - The window is laid out like an editor: the agents as a tree on the left (machine, folder, agent), the terminals you watch as tabs in the middle (or side by side), details in tabs on the right, a status bar at the bottom. Search and commands are one click or Ctrl+K from the title bar.
 - Starting an agent is one window: pick the machine, then a known folder in one click (or type a path), then the agent; the resolved folder is shown before anything starts.
 ### Starting agents
