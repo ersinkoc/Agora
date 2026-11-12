@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import { inputBytes } from './frames';
 import { type TerminalRenderer, XtermRenderer } from './renderer';
 import type { TerminalSource } from './source';
+import { terminalSize } from './prefs';
 
 // Binds a renderer to a source. Input goes straight to the source (it outranks output, ADR-0022); output is
 // written as it arrives; the renderer is torn down with the component.
@@ -26,7 +27,10 @@ export function TerminalView({ source, label }: { source: TerminalSource; label:
       if (s) session.resize(s.cols, s.rows);
     });
     observer.observe(el);
+    const onSize = () => { renderer.setFontSize(terminalSize()); const s = renderer.fit(); if (s) session.resize(s.cols, s.rows); };
+    window.addEventListener('agora-terminal-size', onSize);
     return () => {
+      window.removeEventListener('agora-terminal-size', onSize);
       observer.disconnect();
       session.close();
       renderer.dispose();

@@ -13,7 +13,7 @@ export function num(x: Num): number {
   return typeof x === 'number' ? x : Number(x.toString());
 }
 
-export interface NodeV { hostname: string; os: string; online: boolean; lastEventMs: number; agentsRunning: number; memoryBytes?: number }
+export interface NodeV { hostname: string; os: string; online: boolean; lastEventMs: number; agentsRunning: number; memoryBytes?: number; build?: string; terminalsOpen?: number }
 export interface WorkspaceV { nodeId: string; projectId: string; path: string; gitRoot: string; branch: string; managed: boolean; filesChanged: number }
 export interface WorktreeV { checkoutId: string; path: string; branch: string; filesChanged: number }
 export interface AgentV {
@@ -58,7 +58,7 @@ export function fromSnapshot(s: agora.v1.Snapshot.$Properties): View {
     v.nodes.set(n.nodeId ?? '', {
       hostname: n.hostname ?? '', os: n.os ?? '', online: !!n.online, lastEventMs: num(n.lastEventMs),
       agentsRunning: n.agentsRunning ?? 0,
-      memoryBytes: Number(n.memoryUsedBytes ?? 0),
+      memoryBytes: Number(n.memoryUsedBytes ?? 0), build: n.build ?? '', terminalsOpen: n.terminalsOpen ?? 0,
     });
   }
   for (const c of s.checkouts ?? []) {
@@ -129,7 +129,7 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
     }
     case 'nodeResources': {
       const n = v.nodes.get(e.nodeResources.nodeId);
-      if (n) { n.agentsRunning = e.nodeResources.agentsRunning ?? 0; n.memoryBytes = Number(e.nodeResources.memoryUsedBytes ?? 0); }
+      if (n) { n.agentsRunning = e.nodeResources.agentsRunning ?? 0; n.memoryBytes = Number(e.nodeResources.memoryUsedBytes ?? 0); n.terminalsOpen = e.nodeResources.terminalsOpen ?? n.terminalsOpen; }
       break;
     }
     case 'worktreeCreated': {
@@ -304,12 +304,12 @@ export function approvalList(v: View): ApprovalModel[] {
     .sort((a, b) => a.expiresAtMs - b.expiresAtMs);
 }
 
-export interface MachineModel { id: string; name: string; os: string; online: boolean; agentsRunning: number; lastSeenMs: number; memoryBytes?: number }
+export interface MachineModel { id: string; name: string; os: string; online: boolean; agentsRunning: number; lastSeenMs: number; memoryBytes?: number; build?: string; terminalsOpen?: number }
 
 // Online machines first, then by name.
 export function machines(v: View): MachineModel[] {
   return [...v.nodes.entries()]
-    .map(([id, n]) => ({ id, name: n.hostname || id, os: n.os, online: n.online, agentsRunning: n.agentsRunning, lastSeenMs: n.lastEventMs, memoryBytes: n.memoryBytes }))
+    .map(([id, n]) => ({ id, name: n.hostname || id, os: n.os, online: n.online, agentsRunning: n.agentsRunning, lastSeenMs: n.lastEventMs, memoryBytes: n.memoryBytes, build: n.build, terminalsOpen: n.terminalsOpen }))
     .sort((a, b) => Number(b.online) - Number(a.online) || a.name.localeCompare(b.name));
 }
 
