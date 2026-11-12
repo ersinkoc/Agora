@@ -15,6 +15,13 @@ counts, tracked/untracked preview content, suppression of all four helpers and
 successful worktree creation/removal. The production change intentionally does not
 suppress clean/smudge/process filters; #300 documents that remaining limitation.
 
+The initial Windows CI run passed all helper-suppression assertions but rejected the
+worktree content assertion: the runner's `core.autocrlf=true` converted LF to CRLF.
+The same failure was reproduced on Ubuntu with a temporary global Git configuration.
+Fixture repositories now set local `core.autocrlf=false`; all three tests also pass
+with that temporary global setting enabled. No user or machine Git configuration is
+modified, and the helper controls are unchanged.
+
 Full workspace tests, formatting, Clippy with warnings denied, locale lint and docs
 checks are run before publishing; CI and cross-review status are in the PR.
 Installed services and the active local agent are unchanged.

@@ -23,6 +23,8 @@ impl Repo {
         fs::create_dir_all(&root).unwrap();
         let repo = Self { root };
         repo.raw(&["init", "-q", "-b", "main"]);
+        // Keep content assertions independent of the runner's global checkout conversion (Windows defaults to CRLF).
+        repo.raw(&["config", "core.autocrlf", "false"]);
         fs::write(repo.root.join("a.txt"), "original\n").unwrap();
         repo.raw(&["add", "a.txt"]);
         repo.raw(&[
