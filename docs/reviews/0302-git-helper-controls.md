@@ -1,8 +1,8 @@
 # Independent helper controls for #300 (#302)
 
 Concurrent implementations in #300 and #302 were consolidated on #300's production
-command builder. This follow-up contains only public-API regressions and this note;
-it is based on `claude/node-git-hardening` until #300 merges.
+command builder. After #300 merged, this follow-up was retargeted to main. It contains
+only public-API regressions and this note.
 
 `crates/agora-node/tests/git_helpers.rs` uses separate disposable repositories for
 fsmonitor, textconv, external diff and a post-checkout hook. Every ordinary-Git
@@ -21,6 +21,7 @@ The same failure was reproduced on Ubuntu with a temporary global Git configurat
 Fixture repositories now set local `core.autocrlf=false`; all three tests also pass
 with that temporary global setting enabled. No user or machine Git configuration is
 modified, and the helper controls are unchanged.
+All CI checks then passed on `bd9566a`, including Windows, macOS and Ubuntu.
 
 Full workspace tests, formatting, Clippy with warnings denied, locale lint and docs
 checks are run before publishing; CI and cross-review status are in the PR.
