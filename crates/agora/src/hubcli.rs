@@ -187,6 +187,8 @@ pub fn hub_run(say: &Say, o: &Opts) -> ExitCode {
                 capabilities: vec![
                     "terminal.raw".into(),
                     "workspace.directory".into(),
+                    // ADR-0053: without it here the hub agrees on the capability with no node and refuses every folder listing.
+                    "directory.list".into(),
                     "board.join".into(),
                 ],
                 required: vec![],
