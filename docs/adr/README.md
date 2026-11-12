@@ -71,3 +71,4 @@ Date: YYYY-MM-DD
 | 0051 | No Web Push: ntfy and the PWA link are the push channel | Accepted |
 | 0052 | Agents run in the selected directory; separate worktrees are optional | Accepted |
 | 0053 | Browsing a machine's folders, and forgetting closed agents | Accepted |
+| 0054 | A node that lost unacknowledged events resynchronizes instead of stalling | Proposed |

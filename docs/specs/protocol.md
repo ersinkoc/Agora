@@ -46,7 +46,8 @@ Node buffer (`agora-node::event_buffer`): an append-only log of checksummed reco
 file. A torn tail from a crash is truncated on open. After a reconnect the node replays everything after the
 hub's ack, in order. The log is size-capped (oldest events dropped first); if unacknowledged events were dropped,
 a replay from the old ack is refused (`Stale`) and the hub resynchronizes from a snapshot instead of silently
-missing events. Terminal bytes never enter this log.
+missing events. Not yet: neither side implements that resync, so such a node stops delivering events until its buffer is
+cleared by hand (ADR-0054, Proposed). Terminal bytes never enter this log.
 
 Hub store (`agora-hub::store`, ADR-0014): SQLite in WAL mode behind an `EventStore` trait. `append(producer, seq, ..)`
 returns `Applied` (stored, with a global position), `Duplicate` (already applied, ignored) or `Gap { expected }` (not the
@@ -87,7 +88,7 @@ unambiguous) and uses that key in what it shows clients and when it routes a com
 Node uplink (`agora-node::uplink`): the node's state machine mirrors the hub's session: `Hello` → `Welcome` → `Resume` (carries
 the node's own idea of the ack) → `ResumeOk { from_seq }` (the hub's record decides) → events in batches from the durable buffer.
 A gap from the hub rewinds to `expected`; a `from_seq` older than the buffer keeps (dropped by the size cap) is reported as
-`Stale` so the hub resynchronizes from a snapshot. The hub's ack trims the buffer.
+`Stale` so the hub resynchronizes from a snapshot (not yet implemented: today the connection fails and is retried; ADR-0054). The hub's ack trims the buffer.
 
 Hub core (`agora-hub::hub`): store, view and subscriber fan-out are one step under one lock, so a subscriber that takes its
 snapshot (or backlog) and registers for live events together sees every event once, in order, even while several nodes
