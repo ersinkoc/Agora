@@ -353,7 +353,7 @@ export function boards(v: View): BoardModel[] {
     context.folders.set(`${nodeId}\u0000${path}`, { nodeId, machine: v.nodes.get(nodeId)?.hostname || nodeId, path });
   };
   for (const c of v.checkouts.values()) addFolder(c.projectId, c.nodeId, c.path);
-  for (const w of v.workspaces.values()) addFolder(w.projectId, w.nodeId, w.gitRoot || w.path);
+  for (const w of v.workspaces.values()) if (!w.managed) addFolder(w.projectId, w.nodeId, w.gitRoot || w.path);
   const by = new Map<string, BoardModel>();
   const board = (id: string) => {
     let b = by.get(id);
