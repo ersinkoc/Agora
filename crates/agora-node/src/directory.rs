@@ -96,7 +96,7 @@ pub fn inspect(
         .as_ref()
         .and_then(|c| crate::git::status(&c.root).ok())
         .map_or(String::new(), |_| {
-            crate::git::hardened(root)
+            crate::git::refs_only(root)
                 .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
                 .output()
                 .ok()
