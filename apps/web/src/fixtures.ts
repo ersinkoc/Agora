@@ -7,12 +7,14 @@ export const demoAgents: AgentTileModel[] = [
   { id: 'a3', name: 'claude · violet', accent: '#a78bfa', machine: 'Laptop', workspace: 'docs', state: 'finished', preview: 'Done. 3 files changed.' },
   { id: 'a4', name: 'wrongstack · rose', accent: '#fb7185', machine: 'Windows PC', workspace: 'ui-polish', state: 'idle', preview: '$' },
   { id: 'a5', name: 'agent · slate', accent: '#94a3b8', machine: 'Laptop', workspace: 'scratch', state: 'unknown', preview: '' },
+  { id: 'a6', name: 'codex · rose', accent: '#f472b6', machine: 'Laptop', workspace: 'login-fix', project: 'login-fix', branch: 'fix/login', state: 'finished', preview: '', closed: true, exitCode: 0, startedMs: Date.now() - 1_500_000, endedMs: Date.now() - 600_000, filesChanged: 3, tokens: 48200 },
+  { id: 'a7', name: 'claude · olive', accent: '#a3e635', machine: 'Build server', workspace: 'api-tests', project: 'api-tests', state: 'finished', preview: '', closed: true, exitCode: 1, startedMs: Date.now() - 400_000, endedMs: Date.now() - 90_000, filesChanged: 0, tokens: 9100 },
 ];
 
 // Development only (demo window without a hub): enough machines and folders to try the "Start an agent" window.
 export const demoMachines = [
-  { id: 'laptop', name: 'Laptop', os: 'linux', online: true, agentsRunning: 3, lastSeenMs: 0 },
-  { id: 'build', name: 'Build server', os: 'linux', online: true, agentsRunning: 1, lastSeenMs: 0 },
+  { id: 'laptop', name: 'Laptop', os: 'linux', online: true, agentsRunning: 3, lastSeenMs: Date.now() - 4000 },
+  { id: 'build', name: 'Build server', os: 'linux', online: true, agentsRunning: 1, lastSeenMs: Date.now() - 4000 },
   { id: 'winpc', name: 'Windows PC', os: 'windows', online: false, agentsRunning: 0, lastSeenMs: 0 },
 ];
 export const demoProjects = [

@@ -311,6 +311,51 @@ pub fn opened_path(file: &std::fs::File) -> io::Result<PathBuf> {
     }
 }
 
+/// One entry of a folder listed with [`list_dir`], described without following links (as `DirEntry::file_type` and
+/// `DirEntry::metadata` describe it): a link is neither a folder nor its target's size.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirItem {
+    pub name: std::ffi::OsString,
+    pub is_dir: bool,
+    pub len: u64,
+    pub modified: std::time::SystemTime,
+}
+
+/// Opens the folder at `path` for [`list_dir`] (following links, as any open does: check where it is with [`opened_path`]).
+pub fn open_dir(path: &std::path::Path) -> io::Result<std::fs::File> {
+    #[cfg(unix)]
+    {
+        unix::open_dir(path)
+    }
+    #[cfg(windows)]
+    {
+        windows::open_dir(path)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = path;
+        Err(io::Error::from(io::ErrorKind::Unsupported))
+    }
+}
+
+/// The entries of the folder `dir` holds open (from [`open_dir`]), read through that handle: `std::fs::read_dir` takes a path and
+/// opens it again, so a folder swapped for a link after its handle was checked would be listed instead. `.` and `..` are left out.
+pub fn list_dir(dir: &std::fs::File) -> io::Result<Vec<DirItem>> {
+    #[cfg(unix)]
+    {
+        unix::list_dir(dir)
+    }
+    #[cfg(windows)]
+    {
+        windows::list_dir(dir)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = dir;
+        Err(io::Error::from(io::ErrorKind::Unsupported))
+    }
+}
+
 /// Connect to a local socket.
 pub fn local_connect(path: &std::path::Path) -> io::Result<LocalStream> {
     #[cfg(unix)]
@@ -904,6 +949,42 @@ pub fn spawn(config: &PtyConfig) -> io::Result<Box<dyn Pty>> {
     #[cfg(windows)]
     {
         conpty::spawn(config)
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)] // expect is allowed in tests
+mod list_dir_tests {
+    #[test]
+    fn a_folder_lists_through_its_handle_without_following_links() {
+        let d = std::env::temp_dir().join(format!("agora-listdir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("sub")).expect("dir");
+        std::fs::write(d.join("f.txt"), "abc").expect("file");
+        let linked = super::symlink(&d.join("sub"), &d.join("link")).is_ok();
+        let handle = super::open_dir(&d).expect("open");
+        let mut items = super::list_dir(&handle).expect("list");
+        items.sort_by(|a, b| a.name.cmp(&b.name));
+        let names: Vec<_> = items
+            .iter()
+            .map(|i| i.name.to_string_lossy().into_owned())
+            .collect();
+        let mut want = vec!["f.txt", "sub"];
+        if linked {
+            want.insert(1, "link");
+        }
+        assert_eq!(names, want);
+        let get = |n: &str| items.iter().find(|i| i.name == n).expect("item");
+        assert!(get("sub").is_dir && !get("f.txt").is_dir);
+        assert_eq!(get("f.txt").len, 3);
+        if linked {
+            assert!(!get("link").is_dir, "a link to a folder is not a folder");
+        }
+        // Listing twice through the same handle gives the same entries.
+        assert_eq!(super::list_dir(&handle).expect("again").len(), items.len());
+        // A file is not a folder.
+        assert!(super::open_dir(&d.join("f.txt")).is_err());
+        let _ = std::fs::remove_dir_all(&d);
     }
 }
 

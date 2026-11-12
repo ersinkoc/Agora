@@ -376,6 +376,87 @@ impl Drop for UnixPty {
     }
 }
 
+/// See [`crate::open_dir`]: `open(O_DIRECTORY)`, close-on-exec as every std open.
+pub(crate) fn open_dir(path: &std::path::Path) -> io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY)
+        .open(path)
+}
+
+/// See [`crate::list_dir`]: `fdopendir` on a duplicate of the handle, `readdir`, and `fstatat(AT_SYMLINK_NOFOLLOW)` for each name, so
+/// every entry is described from the folder the handle holds and no link is followed.
+pub(crate) fn list_dir(dir: &File) -> io::Result<Vec<crate::DirItem>> {
+    use std::ffi::{CStr, OsStr};
+    use std::os::unix::ffi::OsStrExt;
+    // SAFETY: duplicating a live descriptor we own; the copy is owned by the `DIR` below and closed with it.
+    let fd = unsafe { libc::fcntl(dir.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `fd` is a fresh descriptor of a directory; on success `fdopendir` takes it over.
+    let stream = unsafe { libc::fdopendir(fd) };
+    if stream.is_null() {
+        let e = io::Error::last_os_error();
+        // SAFETY: `fdopendir` failed, so `fd` is still ours to close.
+        unsafe { libc::close(fd) };
+        return Err(e);
+    }
+    struct Stream(*mut libc::DIR);
+    impl Drop for Stream {
+        fn drop(&mut self) {
+            // SAFETY: a stream from `fdopendir`, closed once (with its descriptor).
+            unsafe { libc::closedir(self.0) };
+        }
+    }
+    let stream = Stream(stream);
+    // A duplicate shares its position with the original: start from the first entry whatever was read before.
+    // SAFETY: a live stream.
+    unsafe { libc::rewinddir(stream.0) };
+    let mut out = Vec::new();
+    loop {
+        // SAFETY: a live stream; the entry stays valid until the next `readdir` on it, and is copied before that.
+        let entry = unsafe { libc::readdir(stream.0) };
+        if entry.is_null() {
+            break;
+        }
+        // SAFETY: `d_name` is a NUL-terminated name inside the entry just returned.
+        let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
+        if name.to_bytes() == b"." || name.to_bytes() == b".." {
+            continue;
+        }
+        // SAFETY: zeroed `stat` is a valid out-buffer.
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: the stream's descriptor, a name from it, a live out-buffer; links are described, not followed.
+        let r = unsafe {
+            libc::fstatat(
+                libc::dirfd(stream.0),
+                name.as_ptr(),
+                &mut st,
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        if r != 0 {
+            // Gone since `readdir` returned it: like `DirEntry::metadata` failing, it is left out.
+            continue;
+        }
+        let modified = u64::try_from(st.st_mtime)
+            .ok()
+            .map_or(std::time::UNIX_EPOCH, |s| {
+                std::time::UNIX_EPOCH
+                    + std::time::Duration::new(s, u32::try_from(st.st_mtime_nsec).unwrap_or(0))
+            });
+        out.push(crate::DirItem {
+            name: OsStr::from_bytes(name.to_bytes()).to_os_string(),
+            is_dir: st.st_mode & libc::S_IFMT == libc::S_IFDIR,
+            len: u64::try_from(st.st_size).unwrap_or(0),
+            modified,
+        });
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used)] // expect is allowed in tests
 mod tests {

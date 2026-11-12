@@ -6,6 +6,18 @@
 ![Full size](screens/window-full-dark.png)
 ![Start an agent](screens/window-start-chosen-dark.png)
 
+## Closed agents
+
+![A closed agent's summary](screens/window-closed-dark.png)
+
+An agent whose process is gone moves from its folder to **Closed**, below the machines, with how long ago it ended; a failed one is marked. Opening it shows a summary (how it ended, when, for how long, folder and branch, files left behind with Review/History/Files, tokens and cost), **Start an agent** on this machine and **Remove from the list**. **Clear closed** removes them all. The choice is remembered in this browser only; the hub still has the record (forgetting an agent hub-wide would need a protocol message).
+
+## Hub and machines
+
+![Hub and machines](screens/network-dark.png)
+
+`#/machines` draws the hub with a live link to every machine it knows (animated when connected, dotted when not), a card per machine (state, system, node version, agents, terminals, memory, cost, last heard) and the agents running there as chips.
+
 ## Layout (editor-style, 2026-11-12)
 
 The window is laid out like an editor, with the terminal as the content. At most two side panels are visible (visual-language.md); each hides with its button.

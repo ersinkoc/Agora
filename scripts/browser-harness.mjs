@@ -5,12 +5,19 @@ import { cpSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-export const root = resolve(new URL('..', import.meta.url).pathname);
+// `fileURLToPath`, not `.pathname`: on Windows the latter is `/D:/...`, which `resolve` turns into `D:\D:\...`.
+export const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
+
+// The explorer, the tab bar and the empty view each have a "Start an agent" button (#332), some only an icon with a label
+// and not all of them shown at once; any visible one opens the same window.
+export const openStart = (page, name = 'Start an agent') => page.getByRole('button', { name, exact: true }).locator('visible=true').first().click();
 
 export async function startStack({ viewport = { width: 1440, height: 900 }, hostname, binary, web = join(root, 'apps/web/dist'), projects = [] } = {}) {
   const bin = binary ?? join(root, 'target/debug/agora');
-  const fake = join(root, 'target/debug/agora-fake-agent');
+  // The manifest names a file the node checks for, so it needs the `.exe` that Windows process creation would add.
+  const fake = join(root, `target/debug/agora-fake-agent${process.platform === 'win32' ? '.exe' : ''}`);
   const { chromium } = createRequire(join(process.env.PW_DIR ?? '.', 'x.js'))('playwright-core');
   const exe = process.env.CHROME ?? `${process.env.HOME}/.cache/ms-playwright/chromium-1248/chrome-linux64/chrome`;
   const port = Number(process.env.AGORA_TEST_PORT ?? 17443);
@@ -26,7 +33,8 @@ export async function startStack({ viewport = { width: 1440, height: 900 }, host
   const close = async () => {
     await browser?.close().catch(() => {});
     for (const c of children.reverse()) c.kill();
-    rmSync(work, { recursive: true, force: true });
+    // On Windows a process that was just killed still holds its files for a moment.
+    try { rmSync(work, { recursive: true, force: true, maxRetries: 10, retryDelay: 500 }); } catch (e) { console.log(`left ${work}: ${e.code}`); }
   };
   try {
     mkdirSync(join(home, 'manifests'), { recursive: true });
@@ -54,16 +62,35 @@ export async function startStack({ viewport = { width: 1440, height: 900 }, host
     const trust = (await page.locator('.codebox').innerText()).trim().split(/\s+/);
     run(['node', 'trust', trust[3], trust[4]]);
     await page.goto(`${origin}/#/`);
+    // The start window is a modal dialog (#332): the folder is filled in from the project, the agent is a radio chip.
     const start = async (label) => {
-      await page.click('button:has-text("Start an agent")');
-      await page.waitForSelector('.start select');
-      await page.getByRole('button', { name: 'Use this folder', exact: true }).click();
-      await page.waitForFunction(() => !!document.querySelector('.start [role=alert]') || [...document.querySelectorAll('.start button')].some(b => b.textContent === 'Start'));
-      if (await page.locator('.start [role=alert]').count()) throw new Error(await page.locator('.start [role=alert]').innerText());
-      await page.locator('.start select').last().selectOption({ label });
-      await page.click('.start button.button--primary');
-      await page.waitForTimeout(2500);
-      await page.goto(`${origin}/#/`);
+      // A failure names the step and what the window showed, not only the timeout.
+      const step = async (what, work) => {
+        try { return await work(); } catch (e) {
+          const shown = await page.getByRole('dialog').first().innerText({ timeout: 1000 }).catch(() => '(no window)');
+          throw new Error(`start ${label}: ${what}: ${e.message.split('\n')[0]}; window: ${shown.replace(/\s+/g, ' ')}`);
+        }
+      };
+      const dialog = page.getByRole('dialog');
+      // From Home: an agent's full-size view has no start button.
+      await step('open the window', async () => { await page.goto(`${origin}/#/`); await openStart(page); await dialog.waitFor(); });
+      // The folder field is filled in only if the node's project was in the view when the window opened; on a slow machine
+      // it arrives later and shows under "Known folders" instead, where one click chooses it.
+      await step('find the folder', async () => {
+        await page.waitForFunction(() => !!document.querySelector('[role=dialog] input:not([type])')?.value || !!document.querySelector('[role=dialog] li button'), null, { timeout: 60000 });
+        if (await dialog.locator('input:not([type])').inputValue()) await dialog.getByRole('button', { name: 'Use this folder', exact: true }).click();
+        else await dialog.locator('li button').first().click();
+      });
+      // Inspecting the folder and starting run git and processes on the node: tens of seconds on a loaded Windows machine.
+      await step('choose the folder', () => page.waitForFunction(() => !!document.querySelector('[role=dialog] [role=alert]') || [...document.querySelectorAll('[role=dialog] button')].some(b => b.textContent === 'Start'), null, { timeout: 60000 }));
+      if (await dialog.locator('[role=alert]').count()) throw new Error(`start ${label}: ${await dialog.locator('[role=alert]').innerText()}`);
+      await step('pick the agent', () => dialog.getByRole('radio', { name: label, exact: true }).click());
+      await dialog.getByRole('button', { name: 'Start', exact: true }).click();
+      // Closes on success; a refusal stays open with an alert, which is reported instead of a bare timeout.
+      await step('start', () => page.waitForFunction(() => !document.querySelector('[role=dialog]') || !!document.querySelector('[role=dialog] [role=alert]'), null, { timeout: 90000 }));
+      if (await dialog.locator('[role=alert]').count()) throw new Error(`start ${label}: ${await dialog.locator('[role=alert]').innerText()}`);
+      // The window opens the new agent in a tab of its own (#332); the caller continues there.
+      await step('open the agent', () => page.waitForURL(/#\/agent\//, { timeout: 15000 }));
     };
     // A separately enrolled node, with its own home, policy, processes and cloned project folder.
     const addNode = async ({ id, project, hostname: host, projects: extraProjects = [] }) => {

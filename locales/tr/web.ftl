@@ -278,7 +278,39 @@ ide-tab-messages = Mesajlar
 ide-tab-cost = Harcama
 theme-label = Renk düzeni
 theme-system = Sistemi izle
-theme-dark = Koyu
-theme-light = Açık
 ide-shared = Paylaşılan
 ide-memory = Bu makinedeki ajanların kullandığı bellek
+network-hub = Hub'ınız
+network-build = Bu makinede çalışan sürüm
+network-never = hiç
+network-heard = { $when } duyuldu
+network-last-seen = son duyulma: { $when }
+network-online =
+    { $total ->
+        [one] { $total } makineden { $online } tanesi çevrimiçi
+       *[other] { $total } makineden { $online } tanesi çevrimiçi
+    }
+network-terminals =
+    { $count ->
+        [one] { $count } terminal açık
+       *[other] { $count } terminal açık
+    }
+terminal-size = Terminal yazı boyutu
+terminal-smaller = Daha küçük yazı
+terminal-larger = Daha büyük yazı
+closed-section = Kapananlar
+closed-clear = Kapananları temizle
+closed-dismiss = Listeden kaldır
+closed-ok = Tamamlandı
+closed-failed = Hatayla durdu (çıkış kodu { $code })
+closed-note = Terminali artık yok. Geride bıraktıkları aşağıda.
+closed-machine = Makine
+closed-folder = Klasör
+closed-branch = Dal
+closed-ended-label = Bitti
+closed-earlier = bu pencere açılmadan önce
+closed-ran-label = Çalışma süresi
+closed-changes-label = Geride kalan
+closed-changes-none = Kaydedilmemiş değişiklik yok
+closed-tokens-label = Kullanılan
+closed-review = Değişiklikleri incele

@@ -22,6 +22,10 @@ export interface AgentTileModel {
   project?: string; // the project's folder name, to group agents by project
   workspaceRef?: { node: string; id: string; directory?: boolean }; // where to ask the node about this workspace (`git.diff`)
   filesChanged?: number; // files with uncommitted changes in the agent's workspace
+  closed?: boolean; // its process is gone; the list keeps it until the user clears it
+  exitCode?: number;
+  startedMs?: number;
+  endedMs?: number;
 }
 
 // Protocol AgentState (schema/agora/v1/common.proto) → what the user sees.

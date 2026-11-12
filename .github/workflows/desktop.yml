@@ -7,6 +7,7 @@ on:
     paths: ["apps/desktop/**", "crates/agora-desktop-tunnel/**", ".github/workflows/desktop.yml"]
   pull_request:
     paths: ["apps/desktop/**", "crates/agora-desktop-tunnel/**", ".github/workflows/desktop.yml"]
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -47,3 +48,26 @@ jobs:
           manifest-path: apps/desktop/src-tauri/Cargo.toml
           arguments: --config apps/desktop/src-tauri/deny.toml
           command: check
+
+  # An unsigned Windows installer (NSIS) for testing, kept as this run's artifact. Signing needs the maintainer's account.
+  windows-installer:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: apps/desktop/src-tauri
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+      - run: cargo install tauri-cli --version 2.12.4 --locked
+      - run: cargo tauri build --bundles nsis --config '{"bundle":{"active":true}}'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-windows-unsigned
+          path: apps/desktop/src-tauri/target/release/bundle/nsis/*-setup.exe
+          if-no-files-found: error

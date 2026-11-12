@@ -3,7 +3,7 @@
 import { mkdirSync, readFileSync, existsSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
-import { startStack } from './browser-harness.mjs';
+import { openStart, startStack } from './browser-harness.mjs';
 
 let stack;
 const check = (ok, message) => { if (!ok) throw new Error(message); console.log(`ok   ${message}`); };
@@ -16,7 +16,7 @@ try {
   mkdirSync(folder); // Appears after the node has started, and is outside Git.
   const selectFolder = async (path, create = false) => {
     await page.goto(`${origin}/#/`);
-    await page.getByRole('button', { name: 'Start an agent', exact: true }).click();
+    await openStart(page);
     await page.getByLabel('Working folder', { exact: true }).fill(path);
     if (create) await page.getByLabel('Create a shared project identity', { exact: true }).check();
     await page.getByRole('button', { name: 'Use this folder', exact: true }).click();
@@ -76,7 +76,7 @@ try {
   await page.addInitScript(() => Object.defineProperty(navigator, 'language', { get: () => 'tr-TR' }));
   await page.goto(`${origin}/#/`);
   await page.reload();
-  await page.getByRole('button', { name: 'Ajan başlat', exact: true }).click();
+  await openStart(page, 'Ajan başlat');
   await page.getByLabel('Çalışma klasörü', { exact: true }).fill(proj);
   await page.getByRole('button', { name: 'Bu klasörü kullan', exact: true }).click();
   await page.getByRole('button', { name: 'Başlat', exact: true }).waitFor();

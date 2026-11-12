@@ -729,6 +729,98 @@ pub(crate) fn opened_path(file: &std::fs::File) -> io::Result<PathBuf> {
     }
 }
 
+/// See [`crate::open_dir`]: a directory handle needs `FILE_FLAG_BACKUP_SEMANTICS`. A junction or link on the way is followed, as any
+/// open does; the caller checks where the handle is with [`crate::opened_path`].
+pub(crate) fn open_dir(path: &Path) -> io::Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;
+    let f = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)?;
+    if !f.metadata()?.is_dir() {
+        return Err(io::Error::new(io::ErrorKind::NotADirectory, "not a folder"));
+    }
+    Ok(f)
+}
+
+/// See [`crate::list_dir`].
+pub(crate) fn list_dir(dir: &std::fs::File) -> io::Result<Vec<crate::DirItem>> {
+    let mut items = Vec::new();
+    visit_dir(dir, &mut |item| {
+        items.push(item);
+        std::ops::ControlFlow::Continue(())
+    })?;
+    Ok(items)
+}
+
+/// The entries of the folder `dir` holds open, read through that handle (`GetFileInformationByHandleEx`, full directory info, the
+/// first call restarting the enumeration), each described without following links: a junction or symbolic link is not a folder
+/// here, as `DirEntry::file_type` has it. `.` and `..` are left out. `Break` from the visitor stops before the next entry.
+pub(crate) fn visit_dir(
+    dir: &std::fs::File,
+    visitor: &mut dyn FnMut(crate::DirItem) -> std::ops::ControlFlow<()>,
+) -> io::Result<()> {
+    use std::os::windows::ffi::OsStringExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::ERROR_NO_MORE_FILES;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FileFullDirectoryInfo, FileFullDirectoryRestartInfo, GetFileInformationByHandleEx,
+        FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FULL_DIR_INFO,
+    };
+    // 8-byte aligned, as the records in it are.
+    let mut buf = vec![0u64; 8192];
+    let bytes = u32::try_from(buf.len() * 8).unwrap_or(u32::MAX);
+    let mut class = FileFullDirectoryRestartInfo;
+    loop {
+        // SAFETY: a live directory handle owned by `dir`; `buf` holds `bytes` writable bytes.
+        let ok = unsafe {
+            GetFileInformationByHandleEx(dir.as_raw_handle(), class, buf.as_mut_ptr().cast(), bytes)
+        };
+        if ok == 0 {
+            let e = io::Error::last_os_error();
+            if e.raw_os_error() == Some(ERROR_NO_MORE_FILES as i32) {
+                return Ok(());
+            }
+            return Err(e);
+        }
+        class = FileFullDirectoryInfo;
+        let base = buf.as_ptr().cast::<u8>();
+        let mut offset = 0usize;
+        loop {
+            // SAFETY: the system wrote whole records into `buf`; `offset` is 0 or a `NextEntryOffset` it gave, both inside it.
+            let info = unsafe { &*base.add(offset).cast::<FILE_FULL_DIR_INFO>() };
+            let len = info.FileNameLength as usize / 2;
+            // SAFETY: the name is `FileNameLength` bytes of UTF-16 right after the fixed part of this record, inside `buf`.
+            let name = unsafe { std::slice::from_raw_parts(info.FileName.as_ptr(), len) };
+            if name != [u16::from(b'.')] && name != [u16::from(b'.'), u16::from(b'.')] {
+                let attrs = info.FileAttributes;
+                // FILETIME: 100 ns ticks since 1601.
+                let ticks = u64::try_from(info.LastWriteTime).unwrap_or(0);
+                let modified = ticks
+                    .checked_sub(116_444_736_000_000_000)
+                    .map_or(std::time::UNIX_EPOCH, |t| {
+                        std::time::UNIX_EPOCH + Duration::from_nanos(t.saturating_mul(100))
+                    });
+                let item = crate::DirItem {
+                    name: std::ffi::OsString::from_wide(name),
+                    is_dir: attrs & FILE_ATTRIBUTE_DIRECTORY != 0
+                        && attrs & FILE_ATTRIBUTE_REPARSE_POINT == 0,
+                    len: u64::try_from(info.EndOfFile).unwrap_or(0),
+                    modified,
+                };
+                if visitor(item).is_break() {
+                    return Ok(());
+                }
+            }
+            if info.NextEntryOffset == 0 {
+                break;
+            }
+            offset += info.NextEntryOffset as usize;
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
