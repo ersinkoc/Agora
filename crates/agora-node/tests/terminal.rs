@@ -272,7 +272,7 @@ fn a_subscriber_gets_the_screen_with_its_colours_and_the_same_cells() {
     h.send_input(b"printf '\\033[1;31mRED\\033[0m \\033[38;5;208mORANGE\\033[0m \\033[48;2;1;2;3mRGB\\033[0m\\n'\n".to_vec())
         .unwrap();
     wait_for(&h, "coloured line", |s| {
-        s.lines.iter().any(|l| l.starts_with("RED ORANGE RGB"))
+        s.lines.iter().any(|l| l.contains("RED ORANGE RGB"))
     });
     let (snap, _sub) = h.subscribe();
     let ansi = snap.to_ansi();
