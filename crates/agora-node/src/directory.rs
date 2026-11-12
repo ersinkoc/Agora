@@ -337,8 +337,10 @@ mod tests {
         let h = home("list-home");
         // An empty path is the home folder: no secret folder, no node folder, no file.
         let top = list("", &scope(&h)).unwrap();
-        assert_eq!(top.path, h.home.to_string_lossy());
-        assert_eq!(top.parent, h.home.parent().unwrap().to_string_lossy());
+        // Answered in the plain spelling (no `\\?\\` on Windows), as `directory.inspect` answers.
+        let plain = agora_platform::canonicalize_plain(&h.home).unwrap();
+        assert_eq!(top.path, plain.to_string_lossy());
+        assert_eq!(top.parent, plain.parent().unwrap().to_string_lossy());
         assert_eq!(
             names(&top),
             [(".config".to_string(), false), ("code".to_string(), false)]
