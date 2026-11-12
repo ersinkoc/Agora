@@ -16,6 +16,7 @@ import { Explorer } from './Explorer';
 import { Icon } from './Icon';
 import { Inspector } from './Inspector';
 import { LanguagePicker } from './LanguagePicker';
+import { ThemePicker } from './ThemePicker';
 import { StateBadge, StateMark } from './StateBadge';
 
 const TerminalView = lazy(() => import('../terminal/TerminalView').then((m) => ({ default: m.TerminalView })));
@@ -119,15 +120,27 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   const columns = showAgents && showDetails ? 'lg:grid-cols-[17rem_minmax(0,1fr)_21rem]' : showAgents ? 'lg:grid-cols-[17rem_minmax(0,1fr)]' : showDetails ? 'lg:grid-cols-[minmax(0,1fr)_21rem]' : 'lg:grid-cols-1';
   const find = (id?: string) => fleet.find((a) => a.id === id);
 
+  // Editor habits: Alt+1…9 picks a tab, Ctrl/⌘+B hides or shows the agent list.
+  useEffect(() => {
+    const on = (e: KeyboardEvent) => {
+      if (e.altKey && !e.ctrlKey && !e.metaKey && /^[1-9]$/.test(e.key)) {
+        const target = tabs[Number(e.key) - 1];
+        if (target) { e.preventDefault(); setActive(target.id); }
+      } else if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === 'b') { e.preventDefault(); setShowAgents((v) => !v); }
+    };
+    window.addEventListener('keydown', on);
+    return () => window.removeEventListener('keydown', on);
+  }, [tabs]);
+
   const pane = (a: AgentTileModel) => (
     <section key={a.id} aria-label={a.name} onDragOver={(e) => { if (dragging) e.preventDefault(); }} onDrop={(e) => { e.preventDefault(); if (dragging) move(dragging, a.id); setDragging(undefined); }}
       className={`flex min-h-0 min-w-0 flex-col bg-surface-0 ${layout === 'grid' ? `border ${a.state === 'needs-you' ? 'border-needs-you' : 'border-line'}` : ''}`}>
       <div className="flex min-h-9 flex-none flex-wrap items-center gap-x-3 gap-y-1 border-b border-line bg-surface-1 px-3 py-1">
-        <div className="flex min-w-0 flex-1 items-center gap-1.5 text-xs text-muted" title={`${a.machine} · ${a.workspace}`}>
+        <div className="flex min-w-0 flex-1 basis-56 items-center gap-1.5 text-xs text-muted" title={`${a.machine} · ${a.workspace}`}>
           <Icon name="machine" className="size-3.5" /><span className="truncate">{a.machine}</span>
           <Icon name="chevron" className="size-3 rtl:rotate-180" /><Icon name="folder" className="size-3.5" /><span className="truncate">{a.project || a.workspace}</span>
           {a.branch && <><Icon name="branch" className="ms-1 size-3.5" /><span className="truncate font-mono">{a.branch}</span></>}
-          {a.shared && <span className="ide-chip ms-1">{t('workspace-shared')}</span>}
+          {a.shared && <span className="ide-chip ms-1 flex-none" title={t('workspace-shared')}>{t('ide-shared')}</span>}
         </div>
         <div className="flex flex-none items-center gap-1">
           {(a.filesChanged ?? 0) > 0 && (loadDiff
@@ -163,6 +176,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
         </button>
         {link !== 'live' && <span role="status" className="ide-chip">{t(link === 'offline' ? 'link-offline' : 'link-connecting')}</span>}
         <span className="hidden sm:block"><LanguagePicker compact /></span>
+        <ThemePicker />
         <a className="ide-chip hidden whitespace-nowrap hover:text-ink md:inline-flex" href="#/device">{t('device-link')}</a>
         {!showDetails && <button type="button" className="ide-iconbtn" onClick={() => setShowDetails(true)} aria-label={t('ide-show-details')} title={t('ide-show-details')}><Icon name="panelRight" /></button>}
       </header>

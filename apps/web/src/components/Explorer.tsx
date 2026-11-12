@@ -76,7 +76,7 @@ export function Explorer({ fleet, machines, open, current, projects, project, on
                 <button type="button" className="ide-row" aria-current={current === a.id ? 'true' : undefined} aria-pressed={open.includes(a.id)} onClick={() => onToggle(a.id)} title={`${a.machine} · ${a.workspace}${a.branch ? ` · ${a.branch}` : ''}`}>
                   <StateMark state={a.state} />
                   <span className="min-w-0 flex-1 truncate">{a.name}</span>
-                  {a.shared && <span className="text-[11px] text-muted">{t('workspace-shared')}</span>}
+                  {a.shared && <span className="flex-none text-[11px] text-muted" title={t('workspace-shared')}>{t('ide-shared')}</span>}
                   {(a.filesChanged ?? 0) > 0 && <span className="font-mono text-[11px] text-needs-you">{a.filesChanged}</span>}
                 </button>
               </li>)}

@@ -21,6 +21,20 @@ function token(name: string): string {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 }
 
+// The 16 colours programs draw with must stay readable on the pane's background: one palette per scheme.
+const ANSI_DARK = ['#3b3b44', '#f87171', '#4ade80', '#fbbf24', '#60a5fa', '#c084fc', '#22d3ee', '#d4d4d8', '#71717a', '#fca5a5', '#86efac', '#fde68a', '#93c5fd', '#d8b4fe', '#67e8f9', '#fafafa'];
+const ANSI_LIGHT = ['#27272a', '#b91c1c', '#15803d', '#a16207', '#1d4ed8', '#7e22ce', '#0e7490', '#52525b', '#52525b', '#dc2626', '#16a34a', '#ca8a04', '#2563eb', '#9333ea', '#0891b2', '#18181b'];
+function palette() {
+  const root = document.documentElement.dataset.theme;
+  const light = root ? root === 'light' : !!window.matchMedia?.('(prefers-color-scheme: light)').matches;
+  const a = light ? ANSI_LIGHT : ANSI_DARK;
+  const [black, red, green, yellow, blue, magenta, cyan, white, brightBlack, brightRed, brightGreen, brightYellow, brightBlue, brightMagenta, brightCyan, brightWhite] = a;
+  return { black, red, green, yellow, blue, magenta, cyan, white, brightBlack, brightRed, brightGreen, brightYellow, brightBlue, brightMagenta, brightCyan, brightWhite };
+}
+function theme() {
+  return { background: token('--surface-0'), foreground: token('--text'), cursor: token('--accent'), selectionBackground: token('--surface-2'), ...palette() };
+}
+
 export class XtermRenderer implements TerminalRenderer {
   private term: Terminal;
   private fitAddon = new FitAddon();
@@ -33,10 +47,14 @@ export class XtermRenderer implements TerminalRenderer {
       cursorBlink: false,
       scrollback: 2000,
       screenReaderMode: false,
-      theme: { background: token('--surface-0'), foreground: token('--text'), cursor: token('--accent') },
+      theme: theme(),
     });
     this.term.loadAddon(this.fitAddon);
+    // A theme change repaints the terminal; the tokens have changed by the time the event fires.
+    window.addEventListener('agora-theme', this.repaint);
   }
+
+  private repaint = () => { this.term.options.theme = theme(); };
 
   mount(el: HTMLElement): void {
     this.term.open(el);
@@ -69,6 +87,7 @@ export class XtermRenderer implements TerminalRenderer {
   }
 
   dispose(): void {
+    window.removeEventListener('agora-theme', this.repaint);
     this.term.dispose();
   }
 }
