@@ -172,6 +172,14 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
       if (a) a.tokens += num(e.agentUsageReported.inputTokens) + num(e.agentUsageReported.outputTokens);
       break;
     }
+    // ADR-0053: the hub stopped listing a closed agent (its id is already the hub-wide key).
+    case 'agentForgotten': {
+      const id = e.agentForgotten.agentId ?? '';
+      v.agents.delete(id);
+      v.agentWorkspaces.delete(id);
+      v.withTerminal.delete(id);
+      break;
+    }
     case 'agentExited': {
       const a = v.agents.get(q(e.agentExited.agentId));
       if (a) { a.running = false; a.state = 4 /* done */; a.sinceMs = at; a.exitCode = e.agentExited.exitCode ?? 0; }

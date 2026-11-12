@@ -198,6 +198,42 @@ async fn a_node_streams_events_gets_acks_and_goes_offline_when_it_leaves() {
 }
 
 #[tokio::test]
+async fn a_replaced_connection_ending_late_does_not_record_the_node_offline() {
+    let st = state(None);
+    let (mut old, old_task) = node_conn(&st, "laptop").await;
+    let from = handshake(&mut old).await.from_seq;
+    old.send(&f(
+        STREAM_EVENTS,
+        kinds::EVENT,
+        event("laptop", from, online("laptop")),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(next_ack(&mut old).await, from);
+    // The machine restarted and is back while the hub still holds its old connection (half-open after a reboot).
+    let (mut new, new_task) = node_conn(&st, "laptop").await;
+    let from = handshake(&mut new).await.from_seq;
+    new.send(&f(
+        STREAM_EVENTS,
+        kinds::EVENT,
+        event("laptop", from, online("laptop")),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(next_ack(&mut new).await, from);
+    old.close().await;
+    old_task.await.unwrap();
+    assert!(st.hub.router().is_connected("laptop"));
+    assert!(
+        st.hub.view().0.nodes["laptop"].online,
+        "the live connection keeps it online"
+    );
+    new.close().await;
+    new_task.await.unwrap();
+    assert!(!st.hub.view().0.nodes["laptop"].online);
+}
+
+#[tokio::test]
 async fn a_gap_is_answered_with_where_to_resume_and_a_reconnect_starts_after_what_is_stored() {
     let st = state(None);
     let (mut c, task) = node_conn(&st, "n").await;
@@ -1459,4 +1495,126 @@ async fn only_the_owner_can_read_the_audit_trail_over_http() {
     );
     assert_eq!(get_audit(addr, Some(&owner), "?bogus=1").await.0, 400);
     assert_eq!(get_audit(addr, Some(&owner), "?who=a%20b").await.0, 400);
+}
+
+async fn forget_agent(client: &mut Conn<TcpStream>, id: &str) -> v1::CommandResponse {
+    let req = v1::CommandRequest {
+        request_id: "f".into(),
+        idempotency_key: String::new(),
+        target_node: String::new(),
+        command: Some(command_request::Command::AgentForget(v1::AgentForget {
+            agent_id: id.into(),
+        })),
+    };
+    client
+        .send(&f(STREAM_COMMANDS, 0, req.encode_to_vec()))
+        .await
+        .unwrap();
+    response(client).await
+}
+
+#[tokio::test]
+async fn a_closed_agent_is_forgotten_for_every_client_but_its_usage_still_counts() {
+    let st = state(None);
+    let addr = start(Arc::clone(&st)).await;
+    let (mut node, _t) = node_conn(&st, "n1").await;
+    handshake(&mut node).await;
+    let bodies = vec![
+        online("n1"),
+        agent("a1"),
+        Body::AgentUsageReported(v1::AgentUsageReported {
+            agent_id: "a1".into(),
+            model: "anthropic/claude-haiku-4-5".into(),
+            input_tokens: 1_000,
+            output_tokens: 2_000,
+        }),
+    ];
+    for (i, b) in bodies.into_iter().enumerate() {
+        node.send(&f(
+            STREAM_EVENTS,
+            kinds::EVENT,
+            event("n1", i as u64 + 1, b),
+        ))
+        .await
+        .unwrap();
+        next_ack(&mut node).await;
+    }
+    let mut client = dial(addr, Some("good-token")).await;
+    client
+        .send(&f(
+            STREAM_EVENTS,
+            kinds::SUBSCRIBE,
+            v1::Subscribe::default().encode_to_vec(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(recv(&mut client).await.kind, kinds::SNAPSHOT);
+    // It still runs: refused.
+    let r = forget_agent(&mut client, "n1/a1").await;
+    assert_eq!(err_code(&r), "agent.running");
+    // The node says it exited; now the hub forgets it, and says so on the event stream.
+    node.send(&f(
+        STREAM_EVENTS,
+        kinds::EVENT,
+        event(
+            "n1",
+            4,
+            Body::AgentExited(v1::AgentExited {
+                agent_id: "a1".into(),
+                exit_code: 0,
+            }),
+        ),
+    ))
+    .await
+    .unwrap();
+    next_ack(&mut node).await;
+    assert_eq!(recv(&mut client).await.kind, kinds::POSITIONED_EVENT); // the exit
+    let r = forget_agent(&mut client, "n1/a1").await;
+    assert!(
+        matches!(r.result, Some(command_response::Result::Ok(_))),
+        "{r:?}"
+    );
+    let heard = recv(&mut client).await;
+    let ev = v1::PositionedEvent::decode(heard.payload.as_slice())
+        .unwrap()
+        .event
+        .unwrap();
+    assert!(matches!(ev.body, Some(Body::AgentForgotten(ref e)) if e.agent_id == "n1/a1"));
+
+    // A client that arrives now no longer sees the agent, but the hub's usage still counts it.
+    let mut later = dial(addr, Some("good-token")).await;
+    later
+        .send(&f(
+            STREAM_EVENTS,
+            kinds::SUBSCRIBE,
+            v1::Subscribe::default().encode_to_vec(),
+        ))
+        .await
+        .unwrap();
+    let snap = recv(&mut later).await;
+    assert_eq!(snap.kind, kinds::SNAPSHOT);
+    let snapshot = v1::Snapshot::decode(snap.payload.as_slice()).unwrap();
+    assert!(snapshot.agents.is_empty(), "{:?}", snapshot.agents);
+    let req = v1::CommandRequest {
+        request_id: "u".into(),
+        idempotency_key: String::new(),
+        target_node: String::new(),
+        command: Some(command_request::Command::UsageReport(v1::UsageReport {})),
+    };
+    later
+        .send(&f(STREAM_COMMANDS, 0, req.encode_to_vec()))
+        .await
+        .unwrap();
+    let r = response(&mut later).await;
+    let Some(command_response::Result::Ok(v1::CommandOk {
+        result: Some(command_ok::Result::UsageReport(report)),
+    })) = r.result
+    else {
+        panic!("not a usage report: {r:?}");
+    };
+    assert_eq!(
+        report.agents.len(),
+        1,
+        "a forgotten agent's tokens still count"
+    );
 }

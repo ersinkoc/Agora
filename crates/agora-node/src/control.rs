@@ -70,6 +70,8 @@ pub struct ControlContext {
     directories: Mutex<crate::directory::Bindings>,
     /// Where the agent manifests live; read again before agents are listed or started.
     manifests_dir: Option<PathBuf>,
+    /// Set after an agent starts: the node's Git watcher then checks its folder at once instead of on its next round.
+    git_wake: Option<Arc<AtomicBool>>,
     names: AtomicU64,
     seen: Mutex<IdempotencyCache>,
 }
@@ -106,7 +108,22 @@ impl ControlContext {
             chat,
             names: AtomicU64::new(0),
             manifests_dir: None,
+            git_wake: None,
             seen: Mutex::new(IdempotencyCache::default()),
+        }
+    }
+
+    /// Wakes the node's Git watcher (`daemon::watch_git`) after an agent starts, so the new folder's changes are counted at once and
+    /// not up to a poll later.
+    #[must_use]
+    pub fn with_git_wake(mut self, wake: Arc<AtomicBool>) -> Self {
+        self.git_wake = Some(wake);
+        self
+    }
+
+    fn wake_git(&self) {
+        if let Some(wake) = &self.git_wake {
+            wake.store(true, Ordering::Release);
         }
     }
 
@@ -368,6 +385,31 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                 result: Some(Ok_::DirectoryInfo(info)),
             })
         }
+        Cmd::DirectoryList(d) => {
+            // The same folders a launch refuses stay out of the listing (ADR-0053); `node_home` is the folder the worktrees are in.
+            // The scope is compared with the listed folder by prefix in `std::fs::canonicalize`'s spelling: when it cannot be
+            // canonicalized the listing is refused rather than compared with a raw path that would never match (fail closed).
+            let canon = |p: &Path| std::fs::canonicalize(p).map_err(|_| invalid("directory.path"));
+            let worktrees = canon(&ctx.worktree_root)?;
+            let node_home = worktrees
+                .parent()
+                .map_or_else(|| worktrees.clone(), Path::to_path_buf);
+            let home = match crate::usage_files::home_dir() {
+                Some(h) => Some(canon(&h)?),
+                None => None,
+            };
+            let scope = crate::directory::ListScope {
+                home: home.as_deref(),
+                node_home: &node_home,
+                worktree_root: &worktrees,
+                budget: LIST_BUDGET,
+            };
+            Ok(v1::CommandOk {
+                result: Some(Ok_::DirectoryEntries(crate::directory::list(
+                    &d.path, &scope,
+                )?)),
+            })
+        }
         Cmd::AgentLaunch(a) => {
             let (info, project) = crate::directory::inspect(&a.path, &ctx.node_id, false)?;
             if info.path != a.path || info.project_id != a.project_id {
@@ -435,13 +477,15 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                             info.branch.clone()
                         },
                         managed_worktree: a.separate_worktree,
-                        files_changed: crate::git::status(Path::new(&path))
-                            .map_or(0, |s| s.files_changed),
+                        // Counted by the Git watcher, woken below, which sends it as this workspace's status right after; a
+                        // `status` here (three git processes, seconds on Windows) only made the start answer later.
+                        files_changed: 0,
                     },
                     &a.kind,
                     has_terminal,
                 );
             }
+            ctx.wake_git();
             Ok(v1::CommandOk {
                 result: Some(Ok_::AgentLaunch(v1::AgentLaunchResult {
                     agent_id: id.as_str().into(),
@@ -498,6 +542,7 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                     has_terminal,
                 );
             }
+            ctx.wake_git();
             Ok(v1::CommandOk {
                 result: Some(Ok_::AgentStart(v1::AgentStartResult {
                     terminal_id: if has_terminal {
@@ -703,6 +748,10 @@ fn is_git_dir(path: &str) -> bool {
 const MAX_TERMINAL_COLS: u16 = 1000;
 const MAX_TERMINAL_ROWS: u16 = 1000;
 
+/// Longest one `directory.list` spends reading a folder before it answers with what it has (`truncated`); well inside the
+/// routed command deadline.
+const LIST_BUDGET: Duration = Duration::from_secs(5);
+
 /// Largest file `files.read` returns.
 const MAX_READ_BYTES: u64 = 512 * 1024;
 
@@ -742,6 +791,8 @@ pub(crate) fn command_name(c: &Cmd) -> &'static str {
         Cmd::ProjectList(_) => "project.list",
         Cmd::AgentStart(_) => "agent.start",
         Cmd::DirectoryInspect(_) => "directory.inspect",
+        Cmd::DirectoryList(_) => "directory.list",
+        Cmd::AgentForget(_) => "agent.forget",
         Cmd::AgentLaunch(_) => "agent.launch",
         Cmd::WorkspaceQuery(_) => "workspace.query",
         Cmd::AgentStop(_) => "agent.stop",

@@ -1,0 +1,9 @@
+{
+  "path": "x",
+  "authorization": {
+    "deviceId": "x",
+    "nonce": "x",
+    "expiresAtMs": "1",
+    "signature": "AQID"
+  }
+}

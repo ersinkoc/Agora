@@ -136,16 +136,19 @@ where
     conn.send(&frame(STREAM_CONTROL, kinds::RESUME_OK, ok.encode_to_vec()))
         .await?;
 
-    let (_registration, commands) = hub
+    let (registration, commands) = hub
         .router()
         .register_with_capabilities(node_id, welcome.capabilities);
     let result = stream_events(&mut conn, &mut session, hub, node_id, commands).await;
-    // However it ended, the hub now knows this node is not connected.
-    let _ = hub.node_disconnected(node_id, now_ms());
-    // Forget it as a member of its projects, so it is asked to hand over its local work when it is back (ADR-0039 amendment B);
-    // anyone the change makes due is asked now.
-    for (node, project) in hub.board_membership(now_ms()) {
-        ask_board_join(hub, node, project);
+    // However it ended, the hub now knows this node is not connected, unless a newer connection of the node replaced this
+    // one: that one is live, and the node is not offline.
+    if registration.end() {
+        let _ = hub.node_disconnected(node_id, now_ms());
+        // Forget it as a member of its projects, so it is asked to hand over its local work when it is back (ADR-0039 amendment B);
+        // anyone the change makes due is asked now.
+        for (node, project) in hub.board_membership(now_ms()) {
+            ask_board_join(hub, node, project);
+        }
     }
     result
 }
@@ -343,6 +346,7 @@ pub fn snapshot_of(view: &View, pos: u64) -> v1::Snapshot {
         agents: view
             .agents
             .iter()
+            .filter(|(_, a)| !a.forgotten)
             .map(|(id, a)| v1::AgentSnapshot {
                 agent_id: id.clone(),
                 node_id: a.node_id.clone(),
@@ -588,6 +592,32 @@ where
                 .encode_to_vec(),
         ))
         .await?;
+        return Ok(());
+    }
+    // ADR-0053: the hub forgets a closed agent. It names the agent by its hub-wide key, so it names no node.
+    if let Some(command_request::Command::AgentForget(f)) = &req.command {
+        let node = f.agent_id.split('/').next().unwrap_or_default().to_string();
+        let resp = if req.target_node.is_empty() {
+            match hub.forget_agent(&f.agent_id, now_ms()) {
+                Ok(()) => {
+                    audit(hub, who, "agent.forget", &node, "ok");
+                    v1::CommandResponse {
+                        request_id: client_request_id,
+                        result: Some(command_response::Result::Ok(v1::CommandOk {
+                            result: Some(command_ok::Result::Empty(v1::Empty {})),
+                        })),
+                    }
+                }
+                Err(e) => {
+                    audit(hub, who, "agent.forget", &node, e.code.as_str());
+                    refuse(e)
+                }
+            }
+        } else {
+            refuse(Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "target_node"))
+        };
+        conn.send(&frame(STREAM_COMMANDS, 1, resp.encode_to_vec()))
+            .await?;
         return Ok(());
     }
     // Answered by the hub itself from its own view and prices (ADR-0033); it names no node.

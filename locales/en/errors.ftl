@@ -27,6 +27,7 @@ agent-sandbox_unavailable = This machine is set to confine agents ({ $level }), 
 agent-not_authenticated = { $kind } is not signed in on machine { $node_id }.
 agent-blocked = Agent { $agent_id } is waiting for input, so the message was not sent.
 agent-mode_unsupported = { $kind } does not support { $mode } mode.
+agent-running = { $agent_id } is still running. Stop it first.
 approval-expired = Approval { $approval_id } has expired.
 approval-signature_invalid = Approval { $approval_id } could not be verified.
 approval-grant_required = This machine needs your permission first: { $command }.

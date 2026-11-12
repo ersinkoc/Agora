@@ -190,6 +190,14 @@ impl Files {
         let real = loop {
             match fs::canonicalize(existing) {
                 Ok(p) => break p,
+                // Something is there although it does not resolve: a link whose target is missing. A write would follow it
+                // and create that target wherever it points, so it is refused rather than walked past.
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::NotFound
+                        && fs::symlink_metadata(existing).is_ok() =>
+                {
+                    return Err(outside())
+                }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => match existing.parent() {
                     Some(parent) if parent.starts_with(&self.root) => {
                         if let Some(name) = existing.file_name() {
@@ -691,6 +699,29 @@ mod tests {
             "top secret"
         );
         assert!(!d.join("new.txt").exists());
+    }
+
+    #[test]
+    fn a_write_never_follows_a_link_whose_target_is_missing() {
+        let (d, f) = setup();
+        let root = d.join("wt");
+        // The agent plants a link to a file that does not exist yet, outside its worktree.
+        if agora_platform::symlink(&d.join("planted.txt"), &root.join("dangling")).is_err() {
+            return; // no symbolic links here (Windows without the privilege)
+        }
+        let (agent, leases) = (AgentId::new("a"), LeaseTable::new());
+        assert!(matches!(
+            f.write("dangling", b"x", &agent, &leases, 0),
+            Err(FilesError::OutsideRoot(_))
+        ));
+        assert!(
+            !d.join("planted.txt").exists(),
+            "the node created a file outside the worktree"
+        );
+        // New files in new folders are unchanged.
+        f.write("fresh/dir/y.txt", b"y", &agent, &leases, 0)
+            .unwrap();
+        assert_eq!(f.read("fresh/dir/y.txt").unwrap(), b"y");
     }
 
     #[cfg(unix)]

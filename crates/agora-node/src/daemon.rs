@@ -754,6 +754,7 @@ impl Node {
             }));
         }
         let chat = Arc::new(crate::chat::ChatBoard::new());
+        let git_wake = Arc::new(AtomicBool::new(false));
         let ctx = Arc::new(
             ControlContext::new(
                 Arc::clone(&supervisor),
@@ -765,7 +766,8 @@ impl Node {
                 Some(Arc::clone(&approvals)),
                 Arc::clone(&chat),
             )
-            .with_manifests_dir(cfg.manifests_dir.clone()),
+            .with_manifests_dir(cfg.manifests_dir.clone())
+            .with_git_wake(Arc::clone(&git_wake)),
         );
         let server = ControlServer::start(&cfg.socket, ctx)?;
 
@@ -910,7 +912,7 @@ impl Node {
             );
             std::thread::Builder::new()
                 .name("agora-git".into())
-                .spawn(move || watch_git(&sup, &ev, &stop))?
+                .spawn(move || watch_git(&sup, &ev, &stop, &git_wake))?
         };
         Ok(Self {
             server: Some(server),
@@ -962,7 +964,8 @@ fn memory_moved(reported: u64, now: u64) -> bool {
     moved > reported / 4 || moved > 256 << 20
 }
 
-fn watch_git(sup: &Mutex<Supervisor>, ev: &EventSink, stop: &AtomicBool) {
+/// `wake` (set when an agent starts) ends the wait between rounds early, so a new folder's changes are counted at once.
+fn watch_git(sup: &Mutex<Supervisor>, ev: &EventSink, stop: &AtomicBool, wake: &AtomicBool) {
     let mut last: std::collections::HashMap<(PathBuf, bool), (u32, u32, u32, String)> =
         std::collections::HashMap::new();
     while !stop.load(Ordering::Acquire) {
@@ -1014,7 +1017,10 @@ fn watch_git(sup: &Mutex<Supervisor>, ev: &EventSink, stop: &AtomicBool) {
             }
         }
         let until = Instant::now() + GIT_POLL;
-        while Instant::now() < until && !stop.load(Ordering::Acquire) {
+        while Instant::now() < until
+            && !stop.load(Ordering::Acquire)
+            && !wake.swap(false, Ordering::AcqRel)
+        {
             std::thread::sleep(TICK);
         }
     }
@@ -1083,14 +1089,28 @@ mod memory_tests {
 
     #[test]
     fn an_agents_memory_counts_its_whole_process_tree() {
-        // A shell with a child below it, as an agent with the tools it started.
-        let mut shell = std::process::Command::new("sh")
-            .args(["-c", "sleep 5 & wait"])
-            .spawn()
-            .expect("spawn");
-        std::thread::sleep(std::time::Duration::from_millis(300));
+        // A shell with a child below it, as an agent with the tools it started. On Windows a native one: Git for Windows' `sh`
+        // starts `sleep` through a helper that exits, so `sleep`'s parent is gone and no tree leads to it.
+        let mut shell = if std::env::consts::OS == "windows" {
+            std::process::Command::new("cmd")
+                .args(["/c", "ping -n 30 127.0.0.1 >nul"])
+                .spawn()
+        } else {
+            std::process::Command::new("sh")
+                .args(["-c", "sleep 30 & wait"])
+                .spawn()
+        }
+        .expect("spawn");
         let pid = shell.id();
-        let tree = agora_platform::process_tree(pid).expect("tree");
+        // The child shows up once the shell has started it, which takes a while on a busy machine (windows' fix).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let tree = loop {
+            let tree = agora_platform::process_tree(pid).expect("tree");
+            if tree.len() >= 2 || std::time::Instant::now() > deadline {
+                break tree;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        };
         let measured = agents_memory(&[pid]);
         // Counted once, however often it is named.
         let again = agents_memory(&[pid, pid]);
@@ -1099,7 +1119,7 @@ mod memory_tests {
             .expect("stats");
         let _ = shell.kill();
         let _ = shell.wait();
-        assert!(tree.len() >= 2, "the shell and its sleep: {tree:?}");
+        assert!(tree.len() >= 2, "the shell and its child: {tree:?}");
         assert!(
             measured > own,
             "the child is counted too: {measured} vs {own}"

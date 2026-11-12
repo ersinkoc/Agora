@@ -746,6 +746,7 @@ mod tests {
                     input_tokens: 0,
                     output_tokens: 0,
                     model: String::new(),
+                    forgotten: false,
                 },
             );
         }

@@ -171,6 +171,8 @@ impl Scope {
             Body::AgentSessionReported(e) => self.granted(self.agents.get(&q(&e.agent_id))),
             Body::AgentUsageReported(e) => self.granted(self.agents.get(&q(&e.agent_id))),
             Body::AgentExited(e) => self.granted(self.agents.get(&q(&e.agent_id))),
+            // Made by the hub, which names the agent by its hub-wide key already (ADR-0053).
+            Body::AgentForgotten(e) => self.granted(self.agents.get(&e.agent_id)),
             Body::TerminalOpened(e) => {
                 let p = self.agents.get(&q(&e.agent_id)).cloned();
                 if let Some(p) = &p {
@@ -230,6 +232,8 @@ impl Scope {
                         || self.granted(self.worktrees.get(&q(&c.worktree_id))))
             }
             C::AgentStop(c) => self.granted(self.agents.get(&q(&c.agent_id))),
+            // ADR-0053: named by the hub-wide key, so it is not qualified again.
+            C::AgentForget(c) => self.granted(self.agents.get(&c.agent_id)),
             C::AgentPrompt(c) => self.granted(self.agents.get(&q(&c.agent_id))),
             C::AgentSetMode(c) => self.granted(self.agents.get(&q(&c.agent_id))),
             C::ChatSubscribe(c) => self.granted(self.agents.get(&q(&c.agent_id))),
@@ -538,6 +542,15 @@ mod tests {
             !s.command_allowed("n2", &stop("a1")),
             "the same local id on another machine is another agent"
         );
+        // Forgetting names the agent by its hub-wide key (ADR-0053): the person's own agent, not another's, on any `target_node`.
+        let forget = |id: &str| {
+            Command::AgentForget(v1::AgentForget {
+                agent_id: id.into(),
+            })
+        };
+        assert!(s.command_allowed("", &forget("n1/a1")));
+        assert!(!s.command_allowed("", &forget("n1/a2")));
+        assert!(!s.command_allowed("", &forget("a1")));
         let start = |p: &str| {
             Command::AgentStart(v1::AgentStart {
                 project_id: p.into(),

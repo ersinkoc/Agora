@@ -4,10 +4,32 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+### Starting agents
+- **Browse folders:** the start window can list a machine's folders (ADR-0053): click **Browse folders**, step into a folder or up one, see which are Git projects, and use the folder you are in. Only folder names are listed, protected folders never show, and each listing is signed by this device. A machine that has not been updated keeps the typed path.
+
+### Closed agents
+- **Remove for everyone:** a closed agent's summary can ask the hub to forget it (ADR-0053): it disappears from every window, the TUI and the desktop app. Its earlier events stay in the hub's record and its tokens and cost still count. An agent that still runs cannot be forgotten. "Remove from this list" still only hides it in this browser.
+### The window
+- Drag the dividers to resize the agent list and the details panel (or focus a divider and use the arrow keys; Shift for bigger steps). The widths are remembered in this browser.
+### Safety
+- A confined agent cannot be started in a folder that holds a secret folder (such as `~/.config`, which holds the `gh` and `gcloud` sign-ins).
+- Review in a folder that is part of a larger checkout shows only that folder's changes.
+- An answer to a request that comes after the request expired tells the agent "denied" instead of leaving it waiting.
+- Removing a working copy whose commits are on no branch is refused instead of losing them, unless forced.
+
 ### Agents and machines
 - Stopping an agent that runs through an adapter also ends the adapter's program; before, it kept running unseen.
 - A resume that fails no longer leaves the stopped agent reachable by other agents.
 - When the hub confirms events older than the ones a machine kept while it was offline, the machine keeps the rest instead of deleting them (or stopping its link).
+
+### Terminals and adapters
+- Opening a terminal that is already running shows its later output in the program's own colours, and paste and arrow keys work as the program expects.
+- An adapter that stops reading its input no longer freezes its machine; the request to it times out.
+- An ACP agent that prints a line that is not text no longer looks closed.
+
+### Hub and agents' messages
+- A machine that reconnects is no longer shown offline when its old connection ends late, and terminals opened through the old connection close so the window opens them again.
+- A file request that fails keeps the files the agent already held; an answer waiting for an agent is kept until it reads it; giving back an older hold no longer frees a file taken again since.
 
 ## 0.3.2
 

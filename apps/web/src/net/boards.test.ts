@@ -124,3 +124,22 @@ describe('closed agents', () => {
     expect(t?.state).toBe('finished');
   });
 });
+
+describe('forgotten agents', () => {
+  it('leave the view when the hub says it forgot them', () => {
+    const view = fromSnapshot({ nodes: [{ nodeId: 'n', hostname: 'M' }], agents: [{ agentId: 'n/a', nodeId: 'n', kind: 'shell', running: false }] });
+    expect(tiles(view)).toHaveLength(1);
+    applyEvent(view, 6, { producerId: 'hub', body: 'agentForgotten', agentForgotten: { agentId: 'n/a' } } as never);
+    expect(tiles(view)).toHaveLength(0);
+  });
+});
+
+import { childPath } from './directory';
+describe('childPath', () => {
+  it('joins with the separator the machine uses', () => {
+    expect(childPath('/home/dev', 'code')).toBe('/home/dev/code');
+    expect(childPath('/', 'etc')).toBe('/etc');
+    expect(childPath('C:\\Users\\dev', 'code')).toBe('C:\\Users\\dev\\code');
+    expect(childPath('C:\\', 'Users')).toBe('C:\\Users');
+  });
+});

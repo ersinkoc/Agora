@@ -292,3 +292,37 @@ fn a_subscriber_gets_the_screen_with_its_colours_and_the_same_cells() {
     assert!(h.snapshot().repaint.is_none());
     h.kill().unwrap();
 }
+
+/// A client that joins after the program set its colour and input modes draws what follows like the program's own screen, and its
+/// keys and pastes are encoded the way the program asked for (audit F040: the repaint used to leave both at their defaults).
+#[test]
+fn a_subscriber_joining_mid_stream_gets_the_programs_style_and_input_modes() {
+    let h = handle(&[
+        "sh",
+        "-c",
+        "printf '\\033[?2004h\\033[?1h\\033[1;31mred-'; read x; printf 'more'; read y",
+    ]);
+    wait_for(&h, "first output", |s| {
+        s.lines.iter().any(|l| l.contains("red-"))
+    });
+    let (snap, sub) = h.subscribe();
+    // The client had other modes and colours from earlier output; the repaint replaces them.
+    let mut mirror = AlacrittyTerminal::new(snap.size);
+    mirror.feed(b"\x1b[?2004l\x1b[?1l\x1b[32m");
+    mirror.feed(&snap.to_ansi());
+    // The program goes on only once the client has its repaint.
+    h.send_input(b"go\n".to_vec()).unwrap();
+    drain(&sub, &mut mirror, |t| {
+        lines(t).iter().any(|l| l.contains("more"))
+    });
+    wait_for(&h, "more", |s| s.lines.iter().any(|l| l.contains("more")));
+    let (row, col) = (0..mirror.size().rows)
+        .find_map(|r| mirror.line(r).find("more").map(|c| (r, c as u16)))
+        .unwrap();
+    let theirs = h.inspect(|t| t.cell(row, col).map(|c| c.style)).unwrap();
+    assert!(theirs.bold && theirs.fg == agora_vt::Color::Indexed(1));
+    assert_eq!(mirror.cell(row, col).map(|c| c.style), Some(theirs));
+    assert_eq!(mirror.modes(), h.snapshot().modes);
+    assert!(mirror.modes().bracketed_paste && mirror.modes().application_cursor);
+    h.kill().unwrap();
+}

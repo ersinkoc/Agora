@@ -2,7 +2,7 @@
 use agora_core::ProjectId;
 use agora_protocol::{v1, Error, ErrorCode};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub const METADATA: &str = ".agent-project.json";
 
@@ -161,6 +161,92 @@ impl Bindings {
     }
 }
 
+/// Most folders one `directory.list` answer carries (ADR-0053); more are reported as `truncated`.
+pub const MAX_LISTED: usize = 500;
+
+/// Where a folder listing may look and what it must keep out of sight: the user's home folder (an empty `path` means it) and the
+/// node's own folders (ADR-0052's refusals, [`crate::sandbox::private_folder`]). Canonical paths as `std::fs::canonicalize` spells
+/// them, which is how the folder being listed is compared with them.
+pub struct ListScope<'a> {
+    pub home: Option<&'a Path>,
+    pub node_home: &'a Path,
+    pub worktree_root: &'a Path,
+    /// A slow volume answers with what it listed by then (`truncated`).
+    pub budget: std::time::Duration,
+}
+
+/// The folders directly inside `requested` (ADR-0053 `directory.list`): names and whether each holds a `.git`, sorted, at most
+/// [`MAX_LISTED`], never a file, a link, a secret folder or the node's own folder. The folder is listed through the handle that was
+/// opened and checked to be the folder asked for, so a folder swapped for a link in between cannot redirect the listing (#326, #333).
+pub fn list(requested: &str, scope: &ListScope<'_>) -> Result<v1::DirectoryEntries, Error> {
+    if requested.len() > 4096 || requested.contains('\0') {
+        return Err(invalid("directory.path"));
+    }
+    let asked = if requested.is_empty() {
+        scope
+            .home
+            .map(Path::to_path_buf)
+            .ok_or_else(|| invalid("directory.path"))?
+    } else {
+        PathBuf::from(requested)
+    };
+    if !asked.is_absolute() {
+        return Err(invalid("directory.path"));
+    }
+    // Everything below is decided on the folder the open handle holds, never on a second look at the path: a link swapped in
+    // between two looks could otherwise pass the check on one folder and list another.
+    let real = std::fs::canonicalize(&asked).map_err(|_| invalid("directory.path"))?;
+    let handle = agora_platform::open_dir(&real).map_err(|_| invalid("directory.path"))?;
+    let opened = agora_platform::opened_path(&handle).map_err(|_| invalid("directory.path"))?;
+    if opened != real {
+        return Err(invalid("directory.path"));
+    }
+    if crate::sandbox::private_folder(&opened, scope.home, scope.node_home, scope.worktree_root) {
+        return Err(invalid("directory.protected"));
+    }
+    let end = std::time::Instant::now() + scope.budget;
+    let mut names = Vec::new();
+    let mut truncated = false;
+    agora_platform::visit_dir(&handle, |item: agora_platform::DirItem| {
+        if names.len() >= MAX_LISTED || std::time::Instant::now() > end {
+            truncated = true;
+            return std::ops::ControlFlow::Break(());
+        }
+        // `is_dir` does not follow links: a link to a folder is not listed.
+        if item.is_dir
+            && !crate::sandbox::private_folder(
+                &opened.join(&item.name),
+                scope.home,
+                scope.node_home,
+                scope.worktree_root,
+            )
+        {
+            names.push(item.name);
+        }
+        std::ops::ControlFlow::Continue(())
+    })
+    .map_err(|_| invalid("directory.path"))?;
+    names.sort();
+    let entries = names
+        .into_iter()
+        .map(|name| v1::DirectoryEntry {
+            is_git: std::fs::symlink_metadata(opened.join(&name).join(".git")).is_ok(),
+            name: name.to_string_lossy().into_owned(),
+        })
+        .collect();
+    // Spelled the way people and programs expect (no `\\?\\` on Windows), as `directory.inspect` answers.
+    let shown = agora_platform::canonicalize_plain(&opened).unwrap_or_else(|_| opened.clone());
+    Ok(v1::DirectoryEntries {
+        path: shown.to_string_lossy().into_owned(),
+        parent: shown
+            .parent()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        entries,
+        truncated,
+    })
+}
+
 /// Canonical signature format: domain + NUL-separated UTF-8 fields; no field may contain NUL.
 #[allow(clippy::too_many_arguments)] // The arguments are the independently bound canonical wire fields.
 pub fn signed_message(
@@ -195,7 +281,7 @@ pub fn signed_message(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     fn temp(name: &str) -> PathBuf {
@@ -204,6 +290,173 @@ mod tests {
         std::fs::create_dir_all(&p).unwrap();
         p
     }
+    /// A home folder with secret folders, the node's own folder (holding its worktrees) and ordinary folders; canonical paths.
+    struct Home {
+        home: PathBuf,
+        node: PathBuf,
+        worktrees: PathBuf,
+    }
+    fn home(name: &str) -> Home {
+        let home = std::fs::canonicalize(temp(name)).unwrap();
+        for d in [
+            ".ssh",
+            ".aws",
+            ".config/gh",
+            ".config/nvim",
+            "code/app/.git",
+            "code/notes",
+            ".agora/worktrees/agent-1",
+        ] {
+            std::fs::create_dir_all(home.join(d)).unwrap();
+        }
+        std::fs::write(home.join("code/readme.txt"), "a file").unwrap();
+        std::fs::write(home.join("plain.txt"), "a file").unwrap();
+        Home {
+            node: home.join(".agora"),
+            worktrees: home.join(".agora/worktrees"),
+            home,
+        }
+    }
+    fn scope(h: &Home) -> ListScope<'_> {
+        ListScope {
+            home: Some(&h.home),
+            node_home: &h.node,
+            worktree_root: &h.worktrees,
+            budget: std::time::Duration::from_secs(5),
+        }
+    }
+    fn names(e: &v1::DirectoryEntries) -> Vec<(String, bool)> {
+        e.entries
+            .iter()
+            .map(|x| (x.name.clone(), x.is_git))
+            .collect()
+    }
+
+    #[test]
+    fn a_listing_has_folders_only_sorted_with_git_marked_and_secrets_hidden() {
+        let h = home("list-home");
+        // An empty path is the home folder: no secret folder, no node folder, no file.
+        let top = list("", &scope(&h)).unwrap();
+        // Answered in the plain spelling (no `\\?\\` on Windows), as `directory.inspect` answers.
+        let plain = agora_platform::canonicalize_plain(&h.home).unwrap();
+        assert_eq!(top.path, plain.to_string_lossy());
+        assert_eq!(top.parent, plain.parent().unwrap().to_string_lossy());
+        assert_eq!(
+            names(&top),
+            [(".config".to_string(), false), ("code".to_string(), false)]
+        );
+        assert!(!top.truncated);
+        // One level down: only what is not secret there either; a folder holding `.git` is marked.
+        let config = list(&h.home.join(".config").to_string_lossy(), &scope(&h)).unwrap();
+        assert_eq!(names(&config), [("nvim".to_string(), false)]);
+        let code = list(&h.home.join("code").to_string_lossy(), &scope(&h)).unwrap();
+        assert_eq!(
+            names(&code),
+            [("app".to_string(), true), ("notes".to_string(), false)]
+        );
+        // A secret folder or the node's own is refused outright; its worktrees are fine.
+        for refused in [
+            h.home.join(".ssh"),
+            h.home.join(".config/gh"),
+            h.node.clone(),
+        ] {
+            let e = list(&refused.to_string_lossy(), &scope(&h)).unwrap_err();
+            assert_eq!(
+                format!("{:?}", e.params.get("field")),
+                format!(
+                    "{:?}",
+                    Some(agora_protocol::ParamValue::from("directory.protected"))
+                ),
+                "{refused:?}"
+            );
+        }
+        assert_eq!(
+            names(&list(&h.worktrees.to_string_lossy(), &scope(&h)).unwrap()),
+            [("agent-1".to_string(), false)]
+        );
+        // A relative path, a file and a missing folder are refused.
+        for bad in [
+            "code",
+            &*h.home.join("plain.txt").to_string_lossy(),
+            &*h.home.join("missing").to_string_lossy(),
+        ] {
+            assert!(list(bad, &scope(&h)).is_err(), "{bad}");
+        }
+        let _ = std::fs::remove_dir_all(&h.home);
+    }
+
+    #[test]
+    fn a_big_folder_answers_500_and_says_there_are_more() {
+        let h = home("list-big");
+        let big = h.home.join("big");
+        for i in 0..520 {
+            std::fs::create_dir_all(big.join(format!("d{i:03}"))).unwrap();
+        }
+        let e = list(&big.to_string_lossy(), &scope(&h)).unwrap();
+        assert_eq!(e.entries.len(), MAX_LISTED);
+        assert!(e.truncated);
+        let mut sorted = names(&e);
+        sorted.sort();
+        assert_eq!(names(&e), sorted);
+        let _ = std::fs::remove_dir_all(&h.home);
+    }
+
+    #[test]
+    fn a_link_is_not_listed_and_a_secret_folder_never_shows_through_one_swapped_in() {
+        let h = home("list-links");
+        let secret = h.home.join(".ssh");
+        std::fs::create_dir_all(secret.join("KEYS")).unwrap();
+        let code = h.home.join("code");
+        std::fs::create_dir_all(&code).unwrap();
+        // A junction on Windows, which needs no privilege; a link that cannot be made fails the test (windows' patch).
+        agora_platform::link_dir(&secret, &code.join("link")).expect("a folder link");
+        let e = list(&code.to_string_lossy(), &scope(&h)).unwrap();
+        assert!(!names(&e).iter().any(|(n, _)| n == "link"), "{e:?}");
+        // Asked for directly, the link resolves to the secret folder and is refused.
+        assert!(list(&code.join("link").to_string_lossy(), &scope(&h)).is_err());
+        // `d` flips between a folder of its own and a link to `.ssh`: whichever moment the listing hits, `.ssh` is never listed,
+        // whether the link is there when the path is checked (refused as secret) or swapped in after it (the open handle is not
+        // the folder that was checked). The link is made once and the flip is renames only.
+        let (name, link, spare) = (code.join("d"), code.join("d.link"), code.join("d.spare"));
+        std::fs::create_dir_all(name.join("mine")).unwrap();
+        agora_platform::link_dir(&secret, &link).expect("a folder link");
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flipper = {
+            let (stop, name, link, spare) =
+                (stop.clone(), name.clone(), link.clone(), spare.clone());
+            std::thread::spawn(move || {
+                let mut flips = 0u64;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let _ = std::fs::rename(&name, &spare);
+                    if std::fs::rename(&link, &name).is_ok() {
+                        flips += 1;
+                    }
+                    let _ = std::fs::rename(&name, &link);
+                    let _ = std::fs::rename(&spare, &name);
+                }
+                flips
+            })
+        };
+        let target = code.join("d").to_string_lossy().into_owned();
+        let (mut leaked, mut own) = (0, 0);
+        for _ in 0..3000 {
+            match list(&target, &scope(&h)) {
+                Ok(e) if names(&e).iter().any(|(n, _)| n == "KEYS") => leaked += 1,
+                Ok(_) => own += 1,
+                Err(_) => {}
+            }
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let flips = flipper.join().unwrap();
+        let _ = std::fs::remove_dir_all(&h.home);
+        assert!(flips > 0, "the folder was never swapped for the link");
+        assert_eq!(
+            leaked, 0,
+            "a listing showed a secret folder through a swapped link"
+        );
+        assert!(own > 0, "the folder of its own was never listed");
+    }
+
     #[test]
     fn portable_identity_is_opt_in_shared_across_nodes_and_existing_metadata_is_never_overwritten()
     {
