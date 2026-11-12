@@ -733,15 +733,14 @@ pub(crate) fn opened_path(file: &std::fs::File) -> io::Result<PathBuf> {
 pub(crate) fn open_dir(path: &Path) -> io::Result<std::fs::File> {
     use std::os::windows::fs::OpenOptionsExt;
     use windows_sys::Win32::Storage::FileSystem::{
-        FILE_FLAG_BACKUP_SEMANTICS, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
-        FILE_SHARE_READ, FILE_SHARE_WRITE, SYNCHRONIZE,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
     };
     let dir = std::fs::OpenOptions::new()
         .read(true)
-        .access_mode(FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE)
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-        .open(path)?;
+        .open(path)
+        .map_err(|e| io::Error::new(e.kind(), format!("open directory: {e}")))?;
     if !dir.metadata()?.is_dir() {
         return Err(io::ErrorKind::NotADirectory.into());
     }
@@ -766,8 +765,8 @@ pub(crate) fn visit_dir(
     };
     use windows_sys::Win32::Storage::FileSystem::{
         ReOpenFile, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
-        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_LIST_DIRECTORY,
-        FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, SYNCHRONIZE,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE,
     };
     use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 
@@ -776,13 +775,17 @@ pub(crate) fn visit_dir(
     let handle = unsafe {
         ReOpenFile(
             dir.as_raw_handle(),
-            FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+            GENERIC_READ,
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
             FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
         )
     };
     if handle == INVALID_HANDLE_VALUE {
-        return Err(io::Error::last_os_error());
+        let error = io::Error::last_os_error();
+        return Err(io::Error::new(
+            error.kind(),
+            format!("reopen directory: {error}"),
+        ));
     }
     let handle = Handle(handle);
     // Eight-byte aligned and large enough for a complete record plus a maximum-length UTF-16 name, with bounded memory.
@@ -813,7 +816,11 @@ pub(crate) fn visit_dir(
         }
         if status != STATUS_SUCCESS {
             // SAFETY: converting the returned NTSTATUS to a normal Win32 error code.
-            return Err(os_error(unsafe { RtlNtStatusToDosError(status) }));
+            let error = os_error(unsafe { RtlNtStatusToDosError(status) });
+            return Err(io::Error::new(
+                error.kind(),
+                format!("query directory: {error}"),
+            ));
         }
         let name_offset = offset_of!(FILE_DIRECTORY_INFORMATION, FileName);
         if result.Information < name_offset || result.Information > size_of_val(buffer.as_slice()) {
