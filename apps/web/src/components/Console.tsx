@@ -21,6 +21,7 @@ import { MAX_SIZE, MIN_SIZE, setTerminalSize, terminalSize } from '../terminal/p
 import { StateBadge, StateMark } from './StateBadge';
 import { ClosedSummary } from './ClosedSummary';
 import { dismiss, dismissedIds, subscribeDismissed } from '../net/dismissed';
+import { loadLayout, saveLayout } from '../net/layout';
 
 const TerminalView = lazy(() => import('../terminal/TerminalView').then((m) => ({ default: m.TerminalView })));
 
@@ -57,8 +58,9 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   const fleet = useMemo(() => sortFleet(agents.filter((a) => !cleared.has(a.id))), [agents, cleared]);
   const [now, setNow] = useState(Date.now());
   useEffect(() => { const id = setInterval(() => setNow(Date.now()), 15000); return () => clearInterval(id); }, []);
-  const [pinned, setPinned] = useState<string[]>([]);
-  const [active, setActive] = useState<string | undefined>();
+  const saved = useRef(loadLayout()).current;
+  const [pinned, setPinned] = useState<string[]>(saved?.pinned ?? []);
+  const [active, setActive] = useState<string | undefined>(saved?.active);
   const [projectFilter, setProjectFilter] = useState('');
   const projectOptions = useMemo(() => {
     const groups = new Map<string, { name: string; machines: Set<string> }>();
@@ -73,12 +75,12 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
     // The first view of a project gets real tabs, so closing a tab always removes what it shows.
     if (id) setPinned(cur => cur.some(key => fleet.some(a => a.id === key && a.projectId === id)) ? cur : fleet.filter(a => a.projectId === id).slice(0, MAX_AUTO_PINNED).map(a => a.id));
   };
-  const [layout, setLayout] = useState<'single' | 'grid'>('single');
+  const [layout, setLayout] = useState<'single' | 'grid'>(saved?.layout ?? 'single');
   const [, textSize] = useState(0); // the size buttons follow the stored choice
   useEffect(() => { const on = () => textSize((n) => n + 1); window.addEventListener('agora-terminal-size', on); return () => window.removeEventListener('agora-terminal-size', on); }, []);
-  const [showAgents, setShowAgents] = useState(wide);
-  const [showDetails, setShowDetails] = useState(wide);
-  const touched = useRef(false);
+  const [showAgents, setShowAgents] = useState(saved?.showAgents ?? wide());
+  const [showDetails, setShowDetails] = useState(saved?.showDetails ?? wide());
+  const touched = useRef(saved?.touched ?? false);
   const [reviewing, setReviewing] = useState<string | undefined>();
   const [browsing, setBrowsing] = useState<string | undefined>();
   const [history, setHistory] = useState<string | undefined>();
@@ -87,11 +89,14 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   // while there is room; one that is gone leaves. Nothing is reordered, so a terminal never jumps under your hands.
   useEffect(() => {
     setPinned((cur) => {
+      // Before the first snapshot there is no fleet to compare with: keep what was open rather than dropping it.
+      if (fleet.length === 0) return cur;
       const alive = cur.filter((id) => fleet.some((a) => a.id === id));
       const room = touched.current ? [] : fleet.filter((a) => !a.closed && a.state !== 'finished' && a.state !== 'unknown' && !alive.includes(a.id)).slice(0, Math.max(0, MAX_AUTO_PINNED - alive.length)).map((a) => a.id);
       return alive.length === cur.length && room.length === 0 ? cur : [...alive, ...room];
     });
   }, [fleet]);
+  useEffect(() => { saveLayout({ pinned, active, layout, touched: touched.current, showAgents, showDetails }); }, [pinned, active, layout, showAgents, showDetails]);
   useEffect(() => {
     setActive((cur) => (cur && pinned.includes(cur) ? cur : pinned[0]));
   }, [pinned]);
