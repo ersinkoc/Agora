@@ -297,7 +297,8 @@ fn git(dir: &Path, args: &[&str]) -> Result<String, GitError> {
 pub fn discover_checkout(path: &Path) -> Result<CheckoutInfo, GitError> {
     let root = git(path, &["rev-parse", "--show-toplevel"])
         .map_err(|_| GitError::NotARepository(path.to_path_buf()))?;
-    let root = PathBuf::from(root.trim());
+    // Rebuilt from its parts so it uses this system's separator: git for Windows answers `C:/...`.
+    let root: PathBuf = Path::new(root.trim()).components().collect();
     // A repository can have several root commits; the lexicographically smallest is a stable choice.
     let roots = git(&root, &["rev-list", "--max-parents=0", "HEAD"])?;
     let root_commit = roots
@@ -925,6 +926,9 @@ mod tests {
         fs::create_dir_all(&sub).expect("mkdir");
         let info = discover_checkout(&sub).expect("discover");
         assert_eq!(info.root, r.dir);
+        // Spelled as this system spells it, not only equal as a path: the web compares the text, and on Windows git answers
+        // `C:/...` where every other path the node reports is `C:\...`, so one folder showed up twice.
+        assert_eq!(info.root.as_os_str(), r.dir.as_os_str());
         assert_eq!(info.project.remote(), Some("github.com/Owner/Repo"));
         assert_eq!(info.project.root_commit().len(), 40);
     }
