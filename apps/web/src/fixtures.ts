@@ -8,3 +8,15 @@ export const demoAgents: AgentTileModel[] = [
   { id: 'a4', name: 'wrongstack · rose', accent: '#fb7185', machine: 'Windows PC', workspace: 'ui-polish', state: 'idle', preview: '$' },
   { id: 'a5', name: 'agent · slate', accent: '#94a3b8', machine: 'Laptop', workspace: 'scratch', state: 'unknown', preview: '' },
 ];
+
+// Development only (demo window without a hub): enough machines and folders to try the "Start an agent" window.
+export const demoMachines = [
+  { id: 'laptop', name: 'Laptop', os: 'linux', online: true, agentsRunning: 3, lastSeenMs: 0 },
+  { id: 'build', name: 'Build server', os: 'linux', online: true, agentsRunning: 1, lastSeenMs: 0 },
+  { id: 'winpc', name: 'Windows PC', os: 'windows', online: false, agentsRunning: 0, lastSeenMs: 0 },
+];
+export const demoProjects = [
+  { node: 'laptop', projectId: 'p1', label: 'login-fix', path: '/home/dev/login-fix' },
+  { node: 'laptop', projectId: 'p2', label: 'docs', path: '/home/dev/docs' },
+  { node: 'build', projectId: 'p3', label: 'api-tests', path: '/srv/ci/api-tests' },
+];

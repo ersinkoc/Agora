@@ -1,5 +1,24 @@
 # Main window
 
+![Window, dark](screens/window-ide-dark.png)
+![Window, light](screens/window-ide-light.png)
+![Terminals side by side](screens/window-ide-grid.png)
+![Start an agent](screens/window-start-chosen-dark.png)
+
+## Layout (editor-style, 2026-11-12)
+
+The window is laid out like an editor, with the terminal as the content. At most two side panels are visible (visual-language.md); each hides with its button.
+
+- **Title bar:** product mark, the search and command field (Ctrl+K), connection state, language, device.
+- **Left, Agents:** a tree of machine, folder, agent. A machine row has a start button (visible on hover and focus). Agents show their state shape, shared-folder label and changed-file count. The project filter and search narrow the tree. Clicking an agent opens it as a tab; clicking the one in front closes it.
+- **Middle, tabs:** one tab per watched agent (state shape, name, close). Tabs can be dragged to reorder. A toggle shows one terminal at a time or the tabs side by side. Above the terminal: machine, folder and branch, changed files, cost, state, History, Files, Full size, and the copyable agent address.
+- **Right, Details:** tabs for Needs you (opens first whenever something needs you), Changes, Board, Messages, Spent.
+- **Status bar:** machines online, agents, how many need you, cost so far.
+- **Empty state:** a start button, the agents that are running, and the two keyboard shortcuts.
+- **Phones:** side panels start hidden and open from the title bar.
+
+The older three-column description below stays valid for what each area holds.
+
 Agreed layout (2026-11-06). Three columns plus a top bar, shown in the **Focus** layer.
 
 Default state follows `visual-language.md`: the window opens on **Home** (Glance: attention strip + fleet of
@@ -38,6 +57,8 @@ permanent section. Labels below use internal terms; the UI uses the vocabulary i
 See `experience.md`. Command palette, attention flow, and fleet view are part of this window.
 
 ## Start an agent (ADR-0052)
+
+One window: **Machine** chips, then **Working folder** (a known folder in one click, or a typed path), then **Agent** chips and options. Choosing the folder shows the resolved folder, branch and the rule that nothing is changed before anything starts.
 
 Choose an online **Machine**, a known **Project** or another **Working folder** on that machine, then **Use this folder**.
 The canonical folder is shown before choosing an agent and starting it. Default launch uses exactly this folder; it does not

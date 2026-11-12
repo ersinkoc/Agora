@@ -20,17 +20,17 @@ try {
   page.on('websocket', () => { reconnects++; });
 
   await page.getByRole('button', { name: 'Start an agent', exact: true }).click();
-  const folder = page.locator('.start input:not([type=checkbox])');
+  const folder = page.locator('[role=dialog] input:not([type=checkbox])');
   await folder.fill('/some/chosen/folder');
   await choice().selectOption('tr');
   await page.getByRole('button', { name: 'Bu klasörü kullan', exact: true }).waitFor();
   assert.equal(await folder.inputValue(), '/some/chosen/folder');
   await page.getByRole('button', { name: 'Bu klasörü kullan', exact: true }).click();
-  const folderError = page.locator('.start [role=alert]');
+  const folderError = page.locator('[role=dialog] [role=alert]');
   await folderError.waitFor();
   const turkishError = await folderError.innerText();
   await choice().selectOption('en');
-  await page.waitForFunction(previous => document.querySelector('.start [role=alert]')?.textContent !== previous, turkishError);
+  await page.waitForFunction(previous => document.querySelector('[role=dialog] [role=alert]')?.textContent !== previous, turkishError);
   await choice().selectOption('tr');
   assert.equal(await folderError.innerText(), turkishError);
   assert.equal(await xterm.getAttribute('data-language-probe'), 'original-terminal');

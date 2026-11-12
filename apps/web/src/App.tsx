@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { CommandPalette, type PaletteItem } from './components/CommandPalette';
-import { demoAgents } from './fixtures';
+import { demoAgents, demoMachines, demoProjects } from './fixtures';
 import { getLanguage, subscribeLanguage, t } from './i18n';
 import { nextNeedingMe, type AgentTileModel } from './model';
 import { connectLive, type CommandBody, type Live, type LinkState } from './net/live';
@@ -64,7 +64,7 @@ export function App() {
   const [device, setDevice] = useState<Device | undefined>();
   const [usage, setUsage] = useState<UsageSummary | undefined>();
   const [notice, setNotice] = useState<string | undefined>();
-  const [starting, setStarting] = useState(false);
+  const [starting, setStarting] = useState<{ node?: string } | false>(false);
   // A machine refused a command until the owner allows it (ADR-0041): what was asked, shown as a dialog.
   const [grantAsk, setGrantAsk] = useState<{ node: string; body: CommandBody; ask: GrantAsk; busy: boolean; failed: boolean } | undefined>();
   const loadKinds = useCallback(async (node: string): Promise<KindChoice[]> => {
@@ -251,7 +251,7 @@ export function App() {
   const items: PaletteItem[] = useMemo(() => [
     { id: 'next', label: t('palette-next-attention'), run: next },
     { id: 'home', label: t('palette-go-home'), run: () => go('#/') },
-    ...(hub ? [{ id: 'start', label: t('action-start-agent'), run: () => { go('#/'); setStarting(true); } }] : []),
+    ...(hub ? [{ id: 'start', label: t('action-start-agent'), run: () => { go('#/'); setStarting({}); } }] : []),
     { id: 'machines', label: t('palette-go-machines'), run: () => go('#/machines') },
     ...(hub ? [{ id: 'device', label: t('device-link'), run: () => go('#/device') }, { id: 'audit', label: t('audit-link'), run: () => go('#/audit') }] : []),
     ...agents.map((a) => ({ id: `agent-${a.id}`, label: t('palette-open-agent', { name: a.name }), run: () => open(a.id) })),
@@ -279,8 +279,10 @@ export function App() {
         : <Console agents={agents} machines={live ? machines(live) : []} usage={usage} projects={live && usage ? costByProject(live, usage.perAgent) : []}
           approvals={live ? approvalList(live) : []} messages={live ? recentMessages(live) : []} boards={live ? boards(live) : []} terminalFor={terminalFor} chatOf={hub && api ? chatOf : undefined} sendPrompt={hub && api ? sendPrompt : undefined} loadDiff={hub && api ? loadDiff : undefined} loadHistory={hub && api ? loadHistory : undefined} filesOf={hub && api ? filesOf : undefined} onOpen={open}
           onResolve={resolve} notice={notice ? t(notice) : undefined} link={hub ? link : 'live'}
-          onStart={hub && api && live ? () => setStarting(true) : undefined}
-          start={starting && live ? <StartAgent projects={projectChoices(live)} machines={machines(live)} inspect={inspectDirectory} loadKinds={loadKinds} onStart={startAgent} onClose={() => setStarting(false)} /> : undefined} />}
+          onStart={hub && api && live ? (node) => setStarting({ node }) : (!hub && import.meta.env.DEV ? (node) => setStarting({ node }) : undefined)} onCommand={() => setPalette(true)}
+          start={!hub && import.meta.env.DEV && starting ? <StartAgent initialNode={starting.node} projects={demoProjects} machines={demoMachines}
+            loadKinds={async () => [{ kind: 'claude-code', name: 'Claude Code', installed: true }, { kind: 'codex', name: 'Codex', installed: true }, { kind: 'shell', name: 'Shell', installed: true }, { kind: 'gemini', name: 'Gemini CLI', installed: false }]}
+            inspect={async (_n, path) => ({ path, projectId: 'demo', gitRoot: path, branch: 'main', portable: false })} onStart={async () => { setStarting(false); return undefined; }} onClose={() => setStarting(false)} /> : starting && live ? <StartAgent initialNode={starting ? starting.node : undefined} projects={projectChoices(live)} machines={machines(live)} inspect={inspectDirectory} loadKinds={loadKinds} onStart={startAgent} onClose={() => setStarting(false)} /> : undefined} />}
       {grantAsk && <GrantDialog machine={live?.nodes.get(grantAsk.node)?.hostname || grantAsk.node} kind={grantAsk.ask.kind} busy={grantAsk.busy} failed={grantAsk.failed} onAllow={() => void allowGrant()} onClose={() => setGrantAsk(undefined)} />}
       {palette && <CommandPalette items={items} onClose={() => setPalette(false)} />}
     </>

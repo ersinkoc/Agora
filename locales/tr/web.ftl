@@ -238,3 +238,40 @@ language-system = Tarayıcı dili
 language-en = English
 language-tr = Türkçe
 language-not-saved = Dil bu ziyaret için değiştirildi. Tarayıcınız seçimi kaydedemedi.
+
+# IDE tarzı pencere: başlık çubuğu, ajan ağacı, sekmeler, ayrıntı paneli, durum çubuğu.
+ide-command = Ara veya bir komut çalıştır
+ide-new-tab = Ajan başlat
+ide-close-tab = { $name } sekmesini kapat
+ide-hide-panel = Bu paneli gizle
+ide-show-agents = Ajan listesini göster
+ide-show-details = Ayrıntıları göster
+ide-layout-single = Tek seferde bir terminal
+ide-layout-grid = Terminaller yan yana
+ide-details = Ayrıntılar
+ide-welcome-title = Kaldığınız yerden devam edin
+ide-welcome-running = Şu an çalışanlar
+ide-welcome-none = Henüz çalışan bir ajan yok.
+ide-welcome-search = Arama ve komutlar
+ide-welcome-next = Sizi bekleyen sıradaki ajana geç
+ide-add-here = { $machine } üzerinde ajan başlat
+ide-toggle-machine = { $name } üzerindeki ajanları göster veya gizle
+ide-status-agents =
+    { $count ->
+        [one] { $count } ajan
+       *[other] { $count } ajan
+    }
+ide-status-needs =
+    { $count ->
+        [one] { $count } ajan sizi bekliyor
+       *[other] { $count } ajan sizi bekliyor
+    }
+ide-folder-known = Bilinen klasörler
+ide-folder-change = Klasörü değiştir
+ide-folder-chosen = Çalışma klasörü
+ide-agent-pick = Ajan
+ide-options = Seçenekler
+ide-copy-address = Adresi kopyala
+ide-tab-changes = Değişiklikler
+ide-tab-messages = Mesajlar
+ide-tab-cost = Harcama
