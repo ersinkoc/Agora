@@ -134,14 +134,13 @@ impl Uplink {
         if self.phase != Phase::Streaming {
             return Err(UplinkError::OutOfOrder);
         }
-        let mut batch = match self.sink.payloads_after(self.cursor) {
+        let batch = match self.sink.payloads_after_max(self.cursor, max) {
             Ok(b) => b,
             Err(ReplayError::Stale { oldest_retained }) => {
                 return Err(UplinkError::Stale { oldest_retained })
             }
             Err(ReplayError::Io(e)) => return Err(UplinkError::Io(e.to_string())),
         };
-        batch.truncate(max);
         self.cursor += batch.len() as u64;
         Ok(batch)
     }
