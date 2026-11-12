@@ -104,8 +104,14 @@ pub struct Registration {
     conn: u64,
 }
 
-impl Drop for Registration {
-    fn drop(&mut self) {
+impl Registration {
+    /// Ends the registration now. Returns whether this was still the node's current connection: `false` when a newer
+    /// connection of the same node replaced it, which then stays registered.
+    pub fn end(self) -> bool {
+        self.release()
+    }
+
+    fn release(&self) -> bool {
         let ours = {
             let mut g = self.router.nodes.lock().unwrap_or_else(|e| e.into_inner());
             let ours = g.get(&self.node).is_some_and(|l| l.conn == self.conn);
@@ -118,6 +124,14 @@ impl Drop for Registration {
         if ours {
             self.router.end_node_relays(&self.node);
         }
+        ours
+    }
+}
+
+impl Drop for Registration {
+    fn drop(&mut self) {
+        // After `end` this finds nothing of its own left and does nothing.
+        self.release();
     }
 }
 
@@ -142,14 +156,24 @@ impl Router {
     ) -> (Registration, mpsc::UnboundedReceiver<ToNode>) {
         let (tx, rx) = mpsc::unbounded_channel();
         let conn = self.next.fetch_add(1, Ordering::Relaxed);
-        self.nodes.lock().unwrap_or_else(|e| e.into_inner()).insert(
-            node.to_string(),
-            Link {
-                conn,
-                tx,
-                capabilities,
-            },
-        );
+        let replaced = self
+            .nodes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
+                node.to_string(),
+                Link {
+                    conn,
+                    tx,
+                    capabilities,
+                },
+            )
+            .is_some();
+        // The terminals the replaced connection was relaying end now: the new connection never writes on their streams,
+        // and the clients resubscribe through it.
+        if replaced {
+            self.end_node_relays(node);
+        }
         (
             Registration {
                 router: Arc::clone(self),
@@ -442,6 +466,24 @@ mod tests {
         let (_new, _rx2) = r.register("a");
         drop(old);
         assert!(r.is_connected("a"));
+    }
+
+    #[test]
+    fn relays_of_a_replaced_connection_end_when_the_node_reconnects() {
+        let r = Router::new();
+        let (old, _rx1) = r.register("n");
+        let (client, _frames) = r.client();
+        r.open_relay("n", &client, 9);
+        // The new connection never writes on the old one's streams: the client is told at once and resubscribes.
+        let (new, _rx2) = r.register("n");
+        assert_eq!(client.take_closed(), vec![9]);
+        let s = r.open_relay("n", &client, 11);
+        assert!(!old.end(), "replaced");
+        assert!(r.is_connected("n"));
+        assert!(client.take_closed().is_empty(), "the new relay lives on");
+        r.relay_frame("n", s, 0, vec![1]);
+        assert!(new.end(), "current");
+        assert_eq!(client.take_closed(), vec![11]);
     }
 
     #[test]

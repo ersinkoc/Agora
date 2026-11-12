@@ -608,8 +608,9 @@ impl Mesh {
             return Err(MeshError::RecipientUnknown(to.to_string()));
         }
         self.caller(from)?;
+        // Forget the caller's asks that ran out unanswered; an answered one waits for its poll, which may come after this call.
         self.asks
-            .retain(|_, a| a.answer.is_none() || &a.from != from);
+            .retain(|_, a| &a.from != from || a.answer.is_some() || a.deadline_ms > now_ms);
         let open = self
             .asks
             .values()
@@ -993,6 +994,13 @@ impl Mesh {
     ) -> Result<String, MeshError> {
         let project = self.caller(by)?.project.clone();
         let table = self.leases.entry(project.clone()).or_default();
+        // What the caller already holds: acquiring a path it holds renews that lease in place, so a call that fails puts it back.
+        let held: Vec<(String, u64)> = table
+            .all()
+            .iter()
+            .filter(|l| &l.holder == by)
+            .map(|l| (l.path.clone(), l.expires_at_ms))
+            .collect();
         let mut taken: Vec<String> = Vec::new();
         for p in paths {
             match table.acquire(p, by, now_ms, ttl_ms) {
@@ -1000,6 +1008,11 @@ impl Mesh {
                 Err(e) => {
                     for t in &taken {
                         table.release(t, by);
+                        if let Some((_, expires)) =
+                            held.iter().find(|(h, until)| h == t && *until > now_ms)
+                        {
+                            let _ = table.acquire(t, by, now_ms, expires - now_ms);
+                        }
                     }
                     return Err(match e {
                         LeaseError::Conflict {
@@ -1016,6 +1029,13 @@ impl Mesh {
                 }
             }
         }
+        // A path the caller took again now belongs to this grant: releasing an older lease id must not free it.
+        for b in self.batches.values_mut() {
+            if &b.holder == by && b.project == project {
+                b.paths.retain(|p| !taken.contains(p));
+            }
+        }
+        self.batches.retain(|_, b| !b.paths.is_empty());
         let id = self.id("l");
         for p in &taken {
             self.events.push(Body::LeaseGranted(LeaseGranted {
@@ -1497,6 +1517,93 @@ mod tests {
         ));
         m.lease_acquire(&id("b"), &["f.rs".into()], 100, 100)
             .unwrap();
+    }
+
+    /// The expiry `who` would be refused with on `path` (the lease that blocks it), or `None` when the path is free.
+    fn blocked_until(m: &mut Mesh, who: &str, path: &str, now: u64) -> Option<u64> {
+        match m.lease_acquire(&id(who), &[path.into()], 1, now) {
+            Err(MeshError::LeaseHeld { expires_at_ms, .. }) => Some(expires_at_ms),
+            Ok(l) => {
+                m.lease_release(&id(who), &l, now).unwrap();
+                None
+            }
+            Err(e) => panic!("{e:?}"),
+        }
+    }
+
+    #[test]
+    fn a_failed_acquire_leaves_a_lease_the_caller_already_held_as_it_was() {
+        let mut m = mesh();
+        m.register(agent("d", "p", "laptop"));
+        m.lease_acquire(&id("a"), &["src/x.rs".into()], 60_000, 0)
+            .unwrap();
+        m.lease_acquire(&id("b"), &["src/y.rs".into()], 60_000, 0)
+            .unwrap();
+        m.take_events();
+        // All or none: the call fails on y, and x (which `a` already held) keeps its holder and its expiry.
+        assert!(matches!(
+            m.lease_acquire(
+                &id("a"),
+                &["src/x.rs".into(), "src/y.rs".into()],
+                500_000,
+                30
+            ),
+            Err(MeshError::LeaseHeld { .. })
+        ));
+        assert!(m.take_events().is_empty());
+        assert_eq!(blocked_until(&mut m, "d", "src/x.rs", 40), Some(60_000));
+        // One that had already ended by the failed call is not brought back.
+        m.lease_acquire(&id("a"), &["src/z.rs".into()], 100, 50)
+            .unwrap();
+        let _ = m.lease_acquire(&id("a"), &["src/z.rs".into(), "src/y.rs".into()], 100, 200);
+        assert_eq!(blocked_until(&mut m, "d", "src/z.rs", 210), None);
+    }
+
+    #[test]
+    fn releasing_an_older_lease_id_does_not_free_a_path_taken_again_since() {
+        let mut m = mesh();
+        // Renewed before it ended: the path moves to the newer id; the older one keeps what it still holds.
+        let old = m
+            .lease_acquire(&id("a"), &["src/x.rs".into(), "src/y.rs".into()], 60_000, 0)
+            .unwrap();
+        let new = m
+            .lease_acquire(&id("a"), &["src/x.rs".into()], 60_000, 10)
+            .unwrap();
+        m.lease_release(&id("a"), &old, 20).unwrap();
+        assert_eq!(blocked_until(&mut m, "b", "src/y.rs", 30), None);
+        assert_eq!(blocked_until(&mut m, "b", "src/x.rs", 30), Some(60_010));
+        m.lease_release(&id("a"), &new, 40).unwrap();
+        assert_eq!(blocked_until(&mut m, "b", "src/x.rs", 50), None);
+        // Ended, and taken again before the sweep saw it end.
+        let old = m
+            .lease_acquire(&id("a"), &["f.rs".into()], 1_000, 0)
+            .unwrap();
+        m.lease_acquire(&id("a"), &["f.rs".into()], 60_000, 1_200)
+            .unwrap();
+        m.expire_leases(1_300);
+        assert_eq!(
+            m.lease_release(&id("a"), &old, 1_400),
+            Err(MeshError::LeaseUnknown(old.clone()))
+        );
+        assert_eq!(blocked_until(&mut m, "b", "f.rs", 1_500), Some(61_200));
+    }
+
+    #[test]
+    fn an_answered_ask_survives_the_askers_next_ask_until_it_is_polled() {
+        let mut m = mesh();
+        let first = m.ask(&id("a"), "b", "branch?", Some(60_000), 0).unwrap();
+        m.send_message(&id("b"), "a", "main", &[], Some(&first), 10)
+            .unwrap();
+        // The asker's connection has not polled yet when its next question comes in.
+        let second = m.ask(&id("a"), "b", "test?", Some(60_000), 15).unwrap();
+        assert_eq!(
+            m.ask_status(&first, 20),
+            AskStatus::Answered {
+                reply: "main".into(),
+                from: id("b")
+            }
+        );
+        assert_eq!(m.ask_status(&second, 20), AskStatus::Pending);
     }
 
     #[test]
