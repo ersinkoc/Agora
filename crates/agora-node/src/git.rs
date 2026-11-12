@@ -77,7 +77,8 @@ pub struct GitStatus {
 /// Settings that would let a repository run a program when the node reads it, switched off for every git the node runs. The node's
 /// git is not confined, and an agent may write the git config and hooks a worktree uses (its checkout's `.git`): a planted
 /// `core.fsmonitor` runs on `status`, a `post-checkout` hook on `worktree add`, an external diff or a textconv on `diff`.
-/// Still open: filter drivers (`.gitattributes` + `filter.<name>.*`), which cannot be switched off by name here.
+/// Filter drivers (`.gitattributes` + `filter.<name>.clean`/`smudge`/`process`) have no single switch; [`hardened`] blanks each
+/// one the repository's own config defines.
 const HARDENED: [&str; 8] = [
     "-c",
     "core.fsmonitor=false",
@@ -89,20 +90,110 @@ const HARDENED: [&str; 8] = [
     "core.attributesFile=/dev/null",
 ];
 
-/// `git -C dir` with [`HARDENED`] and the node's environment (no prompts, no optional locks, plain English output).
+/// `git -C dir` with [`HARDENED`] and the node's environment (no prompts, no optional locks, plain English output), and with every
+/// filter driver defined in the repository's own config (see [`repository_filters`]) blanked.
 pub(crate) fn hardened(dir: &Path) -> Command {
+    hardened_with(dir, &Filters::of(dir))
+}
+
+/// The filter drivers to blank for one repository; ask once and reuse it for several commands in a row.
+enum Filters {
+    Blank(Vec<String>),
+    /// One of them cannot be named back to git (not UTF-8).
+    Refuse,
+    /// No git to ask: the command itself cannot start either.
+    Unknown,
+}
+
+impl Filters {
+    fn of(dir: &Path) -> Self {
+        let out = plain_hardened(dir)
+            .args([
+                "config",
+                "--show-scope",
+                "--name-only",
+                "-z",
+                "--get-regexp",
+                r"^filter\..*\.(clean|smudge|process)$",
+            ])
+            .output();
+        match out.map(|o| repository_filters(&o.stdout)) {
+            Ok(Some(keys)) => Self::Blank(keys),
+            Ok(None) => Self::Refuse,
+            Err(_) => Self::Unknown,
+        }
+    }
+}
+
+fn hardened_with(dir: &Path, filters: &Filters) -> Command {
+    let mut c = plain_hardened(dir);
+    match filters {
+        Filters::Blank(keys) if keys.is_empty() => {}
+        // Through the environment, not `-c`: a filter's name may hold a `=`, which `-c name=value` splits at, leaving it on.
+        Filters::Blank(keys) if config_env_supported() => {
+            c.env("GIT_CONFIG_COUNT", keys.len().to_string());
+            for (i, key) in keys.iter().enumerate() {
+                c.env(format!("GIT_CONFIG_KEY_{i}"), key)
+                    .env(format!("GIT_CONFIG_VALUE_{i}"), "");
+            }
+        }
+        // A filter that cannot be blanked (a name that is not UTF-8, or a git older than 2.31 that ignores `GIT_CONFIG_KEY_n`):
+        // a `-c` key with no section makes every git refuse to start, so nothing runs.
+        Filters::Blank(_) | Filters::Refuse => {
+            c.args(["-c", "refused-filter-driver"]);
+        }
+        Filters::Unknown => {}
+    }
+    c
+}
+
+/// Whether this machine's git reads `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n` (git 2.31 and later). Asked once per node run.
+fn config_env_supported() -> bool {
+    static SUPPORTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SUPPORTED.get_or_init(|| {
+        Command::new("git")
+            .args(["config", "--get", "probe.configenv"])
+            .env("GIT_CONFIG_COUNT", "1")
+            .env("GIT_CONFIG_KEY_0", "probe.configenv")
+            .env("GIT_CONFIG_VALUE_0", "yes")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .is_ok_and(|o| o.stdout.trim_ascii() == b"yes")
+    })
+}
+
+fn plain_hardened(dir: &Path) -> Command {
     let mut c = Command::new("git");
     c.args(HARDENED)
         .arg("-C")
         .arg(dir)
         .env("LC_ALL", "C")
         .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_OPTIONAL_LOCKS", "0");
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env_remove("GIT_CONFIG_COUNT");
     c
 }
 
+/// The filter-driver keys to blank, from `git config --show-scope --name-only -z` output (`scope NUL key NUL` pairs): those set in the
+/// repository's own config (`local`, `worktree`, and what they include), which an agent can write. The user's global and system
+/// filters (Git LFS) are kept. `None` when one of them is not UTF-8 and so cannot be named back to git.
+fn repository_filters(out: &[u8]) -> Option<Vec<String>> {
+    let fields: Vec<&[u8]> = out.split(|b| *b == 0).collect();
+    fields
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .filter(|[scope, _]| matches!(*scope, b"local" | b"worktree"))
+        .map(|[_, key]| std::str::from_utf8(key).ok().map(str::to_owned))
+        .collect()
+}
+
 fn git(dir: &Path, args: &[&str]) -> Result<String, GitError> {
-    let out = hardened(dir)
+    git_with(dir, &Filters::of(dir), args)
+}
+
+fn git_with(dir: &Path, filters: &Filters, args: &[&str]) -> Result<String, GitError> {
+    let out = hardened_with(dir, filters)
         .args(args)
         .output()
         .map_err(|e| GitError::Io(e.to_string()))?;
@@ -248,18 +339,17 @@ fn parse_shortstat(s: &str) -> (u32, u32) {
 }
 
 pub fn status(worktree: &Path) -> Result<GitStatus, GitError> {
-    let files_changed = git(worktree, &["status", "--porcelain"])?.lines().count() as u32;
-    let head_commit = git(worktree, &["rev-parse", "HEAD"])?.trim().to_string();
-    let (insertions, deletions) = parse_shortstat(&git(
-        worktree,
-        &[
-            "diff",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--shortstat",
-            "HEAD",
-        ],
-    )?);
+    let filters = Filters::of(worktree);
+    let git = |args: &[&str]| git_with(worktree, &filters, args);
+    let files_changed = git(&["status", "--porcelain"])?.lines().count() as u32;
+    let head_commit = git(&["rev-parse", "HEAD"])?.trim().to_string();
+    let (insertions, deletions) = parse_shortstat(&git(&[
+        "diff",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--shortstat",
+        "HEAD",
+    ])?);
     Ok(GitStatus {
         files_changed,
         insertions,
@@ -669,6 +759,44 @@ mod tests {
     /// Planted by an agent that can write the checkout's `.git` (config, hooks) and its worktree (`.gitattributes`): each one makes
     /// plain git run a program. The node's git must run none of them.
     #[test]
+    fn only_the_repositorys_own_filters_are_blanked_and_an_unnamable_one_refuses() {
+        let out = b"global\0filter.lfs.clean\0system\0filter.x.process\0local\0filter.a=b.clean\0worktree\0filter.my name.smudge\0";
+        assert_eq!(
+            repository_filters(out),
+            Some(vec![
+                "filter.a=b.clean".to_owned(),
+                "filter.my name.smudge".to_owned()
+            ])
+        );
+        assert_eq!(repository_filters(b""), Some(vec![]));
+        assert_eq!(repository_filters(b"local\0filter.\xff.clean\0"), None);
+        // A non-UTF-8 name in the user's global config is theirs, not refused.
+        assert_eq!(
+            repository_filters(b"global\0filter.\xff.clean\0"),
+            Some(vec![])
+        );
+    }
+
+    #[test]
+    fn a_filter_that_cannot_be_blanked_stops_the_nodes_git() {
+        let r = Repo::new(None);
+        let ok = |f: &Filters| {
+            hardened_with(&r.dir, f)
+                .args(["status", "--porcelain"])
+                .output()
+                .expect("git")
+                .status
+                .success()
+        };
+        assert!(ok(&Filters::Blank(vec![])));
+        assert!(ok(&Filters::Unknown));
+        assert!(!ok(&Filters::Refuse));
+        // Blanking works with this machine's git (CI runs a recent one), so a named filter does not stop it.
+        assert!(config_env_supported());
+        assert!(ok(&Filters::Blank(vec!["filter.a=b.clean".into()])));
+    }
+
+    #[test]
     fn the_nodes_git_runs_no_program_a_repository_plants() {
         let r = Repo::new(None);
         let mark = |n: &str| r.dir.join(format!("ran-{n}"));
@@ -681,7 +809,10 @@ mod tests {
         r.git(&["config", "core.fsmonitor", &touch("fsmonitor")]);
         r.git(&["config", "diff.external", &touch("external")]);
         r.git(&["config", "diff.conv.textconv", &touch("textconv")]);
-        fs::write(r.dir.join(".gitattributes"), "*.txt diff=conv\n").expect("attributes");
+        // A clean filter runs when git hashes a changed tracked file (status, diff); a `=` in the name defeats `-c name=`.
+        r.git(&["config", "filter.a=b.clean", &touch("clean")]);
+        fs::write(r.dir.join(".gitattributes"), "*.txt diff=conv filter=a=b\n")
+            .expect("attributes");
         let hook = r.dir.join(".git/hooks/post-checkout");
         fs::write(
             &hook,
@@ -690,7 +821,7 @@ mod tests {
         .expect("hook");
         let _ = Command::new("chmod").arg("+x").arg(&hook).status();
         fs::write(r.dir.join("a.txt"), "two\n").expect("change");
-        let planted = ["fsmonitor", "external", "textconv", "hook"];
+        let planted = ["fsmonitor", "external", "textconv", "hook", "clean"];
 
         // Plain git, as an unhardened node would run it: which plants work on this system.
         let plain = |args: &[&str]| {
@@ -717,7 +848,7 @@ mod tests {
             .filter(|n| mark(n).exists())
             .collect();
         assert!(
-            effective.contains(&"fsmonitor"),
+            effective.contains(&"fsmonitor") && effective.contains(&"clean"),
             "the plant itself did not work: {effective:?}"
         );
         for n in planted {
