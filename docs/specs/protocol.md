@@ -74,7 +74,8 @@ server names, authentication purposes and revocation checks are unchanged; exist
 
 Events a node emits (`agora-node::daemon::EventSink`): `NodeOnline` at start and `NodeOffline` on a clean stop; a
 `CheckoutDiscovered` per registered project; `NodeResources` when the running count changes (not on a timer, so an idle
-node is silent; `memory_used_bytes` is 0 until measured); and for each agent `WorktreeCreated`, `AgentStarted`,
+node is silent; `memory_used_bytes` is the resident memory of every running agent's process tree, measured then and every 30 s
+while agents run, and sent again only when it moved by more than a quarter or 256 MiB since the last report); and for each agent `WorktreeCreated`, `AgentStarted`,
 `TerminalOpened` in that order, then `AgentStateChanged` as the screen changes, and on the end `AgentExited` and
 `TerminalClosed` (once). A stop on request reports exit code `i32::MIN` (unknown), the same convention as the terminal
 exit frame. A reader that folds events into a view therefore always sees a workspace before the agent that uses it.
