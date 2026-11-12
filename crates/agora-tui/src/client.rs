@@ -758,6 +758,9 @@ mod answer_tests {
         assert_eq!(id(Some("m/agent-2")).as_deref(), Some("m/2"));
         assert_eq!(id(Some("m/agent-9")).as_deref(), Some("m/1"));
         assert_eq!(id(None).as_deref(), Some("m/1"));
-        assert_eq!(answered_approval(&Snapshot::default(), Some("m/agent-1")), None);
+        assert_eq!(
+            answered_approval(&Snapshot::default(), Some("m/agent-1")),
+            None
+        );
     }
 }
