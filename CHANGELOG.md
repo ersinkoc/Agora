@@ -4,6 +4,7 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+## 0.3.3
 ### Machines
 - A machine that was cut off from the hub for a long time sends what it saved much faster when the link comes back.
 
