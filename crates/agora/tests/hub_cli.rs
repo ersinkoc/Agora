@@ -670,3 +670,131 @@ fn the_hub_prints_its_ca_fingerprint_for_the_desktop_apps_first_use() {
     assert!(out.contains(&want), "{out}");
     let _ = std::fs::remove_dir_all(root);
 }
+
+/// The first `XXXX-XXXX` code in a command's output (Fluent may wrap it in isolation marks).
+fn code_in(text: &str) -> String {
+    text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+        .find(|w| w.len() == 9 && w.as_bytes()[4] == b'-')
+        .expect(text)
+        .to_string()
+}
+
+#[test]
+fn every_capability_a_node_advertises_is_one_the_real_hub_agrees_on() {
+    // The real binaries on both ends: the hub's supported list (`hubcli.rs`) and the node's advertised list (`uplink_client.rs`)
+    // must both name a capability, or the hub refuses every command that needs it (#378: `directory.list` was missing on the hub
+    // side, and no test crossed the two lists). One command per capability goes through the hub; the node may refuse it for its
+    // own reasons (no signature, no project), but the hub must not answer `protocol.capability_missing`.
+    use agora_protocol::v1::{self, command_request::Command as Cmd};
+    use agora_tui::client::{sign_in, Hub, Session};
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return;
+    }
+    let root = tmp("capabilities");
+    let (hub_dir, node_home) = (root.join("hub"), root.join("node"));
+    std::fs::create_dir_all(&node_home).unwrap();
+    let mut hub = agora(
+        &node_home,
+        &["hub", "run", "--listen", "127.0.0.1:0", "--hub-dir"],
+    )
+    .arg(&hub_dir)
+    .stdout(Stdio::piped())
+    .stderr(Stdio::null())
+    .spawn()
+    .unwrap();
+    let mut line = String::new();
+    let mut out = BufReader::new(hub.stdout.take().unwrap());
+    out.read_line(&mut line).unwrap();
+    let _hub = Proc(hub);
+    let addr = line
+        .split("running on ")
+        .nth(1)
+        .and_then(|r| r.split(". Its").next())
+        .expect(&line)
+        .trim()
+        .to_string();
+    let port = addr.rsplit(':').next().unwrap().to_string();
+    let text = agora(&node_home, &["hub", "code", "--hub-dir"])
+        .arg(&hub_dir)
+        .output()
+        .unwrap();
+    let code = code_in(&String::from_utf8_lossy(&text.stdout));
+    let enrolled = agora(
+        &node_home,
+        &[
+            "node",
+            "enroll",
+            "--hub",
+            &format!("wss://localhost:{port}"),
+            "--ca",
+        ],
+    )
+    .arg(hub_dir.join("ca.pem"))
+    .args(["--code", &code, "--id", "laptop"])
+    .output()
+    .unwrap();
+    assert!(
+        enrolled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&enrolled.stderr)
+    );
+    let node = agora(&node_home, &["node", "run"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let _node = Proc(node);
+
+    let login = agora(&node_home, &["hub", "login", "--hub-dir"])
+        .arg(&hub_dir)
+        .output()
+        .unwrap();
+    let target = Hub {
+        addr: format!("127.0.0.1:{port}"),
+        ca_pem: std::fs::read_to_string(hub_dir.join("ca.pem")).unwrap(),
+    };
+    let token = sign_in(&target, &code_in(&String::from_utf8_lossy(&login.stdout))).unwrap();
+    let mut session = Session::connect(&target, &token).unwrap();
+    let wait = Duration::from_secs(30);
+    for (capability, command) in [
+        (
+            "workspace.directory",
+            Cmd::DirectoryInspect(v1::DirectoryInspect::default()),
+        ),
+        (
+            "workspace.directory",
+            Cmd::AgentLaunch(v1::AgentLaunch::default()),
+        ),
+        (
+            "workspace.directory",
+            Cmd::WorkspaceQuery(v1::WorkspaceQuery::default()),
+        ),
+        (
+            "directory.list",
+            Cmd::DirectoryList(v1::DirectoryList::default()),
+        ),
+        // `board.join` is not here: only the hub sends it, never a client. `hubcli`'s
+        // `the_hub_agrees_on_every_capability_a_node_offers` covers it and every other capability a node offers.
+    ] {
+        // Until the node has dialed in, the hub does not know it (`node.unknown`) or has it offline.
+        let end = Instant::now() + Duration::from_secs(60);
+        let answer = loop {
+            let answer = session.command("laptop", command.clone(), wait).err();
+            let waiting = matches!(answer.as_deref(), Some("node.unknown" | "node.offline"));
+            if !waiting || Instant::now() > end {
+                break answer;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        };
+        assert!(
+            !matches!(answer.as_deref(), Some("node.unknown" | "node.offline")),
+            "{capability}: the node never came online: {answer:?}"
+        );
+        // Anything else is the node's own answer (no signature, nothing to join), so the hub routed it.
+        assert_ne!(
+            answer.as_deref(),
+            Some("protocol.capability_missing"),
+            "{capability}: the hub and the node do not agree on it"
+        );
+    }
+}
