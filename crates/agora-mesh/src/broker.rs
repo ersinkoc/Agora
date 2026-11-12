@@ -655,6 +655,17 @@ impl Mesh {
         AskStatus::Pending
     }
 
+    /// Discards an ask whose originating caller can no longer consume its answer. Another agent cannot cancel it.
+    /// Completed answers remain available to live callers until polled; their transport owns cancellation on disconnect.
+    pub fn cancel_ask(&mut self, from: &AgentId, ask_id: &str) -> bool {
+        if self.asks.get(ask_id).is_some_and(|ask| &ask.from == from) {
+            self.asks.remove(ask_id);
+            true
+        } else {
+            false
+        }
+    }
+
     /// `inbox`: messages after `since` (by id), oldest first. Reading does not remove them; `since` moves the cursor.
     pub fn inbox(
         &self,
@@ -1604,6 +1615,25 @@ mod tests {
             }
         );
         assert_eq!(m.ask_status(&second, 20), AskStatus::Pending);
+    }
+
+    #[test]
+    fn only_the_asker_can_cancel_pending_or_completed_asks() {
+        let mut m = mesh();
+        let pending = m.ask(&id("a"), "b", "pending?", None, 0).unwrap();
+        let answered = m.ask(&id("a"), "b", "answered?", None, 1).unwrap();
+        m.send_message(&id("b"), "a", "yes", &[], Some(&answered), 2)
+            .unwrap();
+        let peers = m.ask(&id("b"), "a", "other caller?", None, 3).unwrap();
+        assert!(!m.cancel_ask(&id("b"), &pending));
+        assert_eq!(m.ask_status(&pending, 4), AskStatus::Pending);
+        assert!(m.cancel_ask(&id("a"), &pending));
+        assert!(m.cancel_ask(&id("a"), &answered));
+        assert!(!m.cancel_ask(&id("a"), &pending), "already discarded");
+        assert_eq!(m.ask_status(&pending, 4), AskStatus::TimedOut);
+        assert_eq!(m.ask_status(&answered, 4), AskStatus::TimedOut);
+        assert!(!m.cancel_ask(&id("a"), &peers));
+        assert_eq!(m.ask_status(&peers, 4), AskStatus::Pending);
     }
 
     #[test]

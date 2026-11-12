@@ -225,6 +225,7 @@ start-directory-agent-unsupported = This agent needs an isolated working copy to
 audit-action-directoryinspect = Selected a folder
 audit-action-agentlaunch = Started an agent in a folder
 audit-action-workspacequery = Read workspace files or changes
+audit-action-node-resynced = Reconnected a machine; part of its history is missing
 
 agent-address = Agent address
 agent-address-copy = Copy agent address

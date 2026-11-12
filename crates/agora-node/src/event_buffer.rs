@@ -250,6 +250,12 @@ impl DiskEventLog {
 
     /// Events after `after`, in order, for replay following a reconnect (`after` is the consumer's ack).
     pub fn replay_after(&self, after: u64) -> Result<Vec<Vec<u8>>, ReplayError> {
+        self.replay_after_max(after, usize::MAX)
+    }
+
+    /// Like [`replay_after`](Self::replay_after), at most `max` events, reading only those from disk (one uplink batch
+    /// must not cost a read of the whole backlog).
+    pub fn replay_after_max(&self, after: u64, max: usize) -> Result<Vec<Vec<u8>>, ReplayError> {
         if after.saturating_add(1) < self.first_seq {
             return Err(ReplayError::Stale {
                 oldest_retained: self.first_seq,
@@ -259,10 +265,15 @@ impl DiskEventLog {
         let Some(start) = self.offsets.get(idx) else {
             return Ok(Vec::new());
         };
+        let stop = self
+            .offsets
+            .get(idx.saturating_add(max))
+            .copied()
+            .unwrap_or(self.end);
         let mut f = File::open(self.dir.join("events.log"))?;
         f.seek(SeekFrom::Start(*start))?;
-        let mut reader = io::BufReader::new(f.take(self.end - start));
-        let mut out = Vec::with_capacity(self.offsets.len() - idx);
+        let mut reader = io::BufReader::new(f.take(stop - start));
+        let mut out = Vec::with_capacity((self.offsets.len() - idx).min(max));
         while let Some(p) = read_record(&mut reader) {
             out.push(p);
         }
@@ -398,6 +409,19 @@ mod tests {
         assert_eq!(log.replay_after(3).unwrap(), evs(4..=5));
         assert!(log.replay_after(5).unwrap().is_empty());
         assert!(log.replay_after(99).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_bounded_replay_reads_at_most_max_events_with_the_same_rules() {
+        let mut log = DiskEventLog::open(&dir(), 1 << 20).unwrap();
+        for i in 1..=5 {
+            log.append(&ev(i)).unwrap();
+        }
+        assert_eq!(log.replay_after_max(0, 2).unwrap(), evs(1..=2));
+        assert_eq!(log.replay_after_max(3, 2).unwrap(), evs(4..=5));
+        assert_eq!(log.replay_after_max(3, 99).unwrap(), evs(4..=5));
+        assert!(log.replay_after_max(0, 0).unwrap().is_empty());
+        assert!(log.replay_after_max(5, 2).unwrap().is_empty());
     }
 
     #[test]

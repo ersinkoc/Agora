@@ -141,8 +141,9 @@ impl View {
             }
 
             Body::NodeOnline(e) => {
-                // A node announces itself when its process starts, never when only the link to the hub comes back. So
-                // whatever it had running before is gone (agents die with the node) and its waiting approvals are lost.
+                // A node announces itself when its process starts, never when only the link to the hub comes back, and when it
+                // re-states its present after lost events (ADR-0054). So whatever it had running before is gone (agents and their
+                // terminals die with the node) and its waiting approvals are lost; what still runs is announced right after.
                 for a in self
                     .agents
                     .values_mut()
@@ -153,6 +154,7 @@ impl View {
                 }
                 let prefix = format!("{}/", e.node_id);
                 self.approvals.retain(|k, _| !k.starts_with(&prefix));
+                self.terminals.retain(|k, _| !k.starts_with(&prefix));
                 let n = self.nodes.entry(e.node_id.clone()).or_insert(NodeView {
                     hostname: String::new(),
                     os: String::new(),
@@ -481,6 +483,91 @@ mod tests {
         assert!(v.approvals.is_empty(), "the node forgot them");
         assert!(!v.agents["n1/a"].running);
         assert_eq!(v.agents["n1/a"].state, AgentState::Done);
+    }
+
+    /// ADR-0054: a node's resync announcement (`NodeOnline`, then what still runs) ends agents and terminals that went away inside
+    /// the lost events, and keeps the ones still running with their current state, session, terminal and approval.
+    #[test]
+    fn a_resync_announcement_ends_what_went_away_and_keeps_what_still_runs() {
+        let online = || {
+            Body::NodeOnline(NodeOnline {
+                node_id: "n1".into(),
+                hostname: "laptop".into(),
+                os: "linux".into(),
+                build: "b".into(),
+            })
+        };
+        let terminal = |agent: &str| {
+            Body::TerminalOpened(TerminalOpened {
+                terminal_id: format!("t-{agent}"),
+                node_id: "n1".into(),
+                purpose: TerminalPurpose::Agent as i32,
+                agent_id: agent.into(),
+            })
+        };
+        let approval = |id: &str, agent: &str| {
+            Body::ApprovalRequested(ApprovalRequested {
+                approval_id: id.into(),
+                agent_id: agent.into(),
+                action: "run_command".into(),
+                detail: String::new(),
+                expires_at_ms: 0,
+            })
+        };
+        let mut v = View::default();
+        // What the hub last heard: two agents with terminals, one waiting on an approval; another machine with its own.
+        let before = [
+            online(),
+            started("gone"),
+            terminal("gone"),
+            approval("x", "gone"),
+            started("kept"),
+            terminal("kept"),
+            state("kept", AgentState::Working, false),
+        ];
+        for (i, b) in before.into_iter().enumerate() {
+            v.apply(&ev("n1", i as u64 + 1, b));
+        }
+        v.apply(&ev(
+            "n2",
+            1,
+            Body::AgentStarted(AgentStarted {
+                agent_id: "other".into(),
+                node_id: "n2".into(),
+                ..Default::default()
+            }),
+        ));
+        v.apply(&ev("n2", 2, terminal("other")));
+        // Lost: `gone` exited, `kept` went blocked and asked for an approval. The announcement says what is true now.
+        let announcement = [
+            online(),
+            started("kept"),
+            state("kept", AgentState::Blocked, false),
+            Body::AgentSessionReported(AgentSessionReported {
+                agent_id: "kept".into(),
+                session_id: "s-1".into(),
+            }),
+            terminal("kept"),
+            approval("y", "kept"),
+        ];
+        for (i, b) in announcement.into_iter().enumerate() {
+            v.apply(&ev("n1", 50 + i as u64, b));
+        }
+        let gone = &v.agents["n1/gone"];
+        assert!(!gone.running);
+        assert_eq!(gone.state, AgentState::Done);
+        let kept = &v.agents["n1/kept"];
+        assert!(kept.running);
+        assert_eq!(kept.state, AgentState::Blocked);
+        assert_eq!(kept.session_id.as_deref(), Some("s-1"));
+        assert_eq!(
+            v.terminals.keys().collect::<Vec<_>>(),
+            ["n1/t-kept", "n2/t-other"],
+            "the ended agent's terminal is gone, the other machine's stays"
+        );
+        assert_eq!(v.approvals.keys().collect::<Vec<_>>(), ["n1/y"]);
+        assert!(v.agents["n2/other"].running);
+        assert_eq!(v.needs_attention(), ["n1/kept"]);
     }
 
     #[test]

@@ -3,7 +3,10 @@
 //! logic is testable without sockets. The producer id comes from the authenticated identity, never from the
 //! node's own messages.
 //!
-//! Order: `hello` → `resume` → `event`*. Anything out of order is `protocol.invalid_message`.
+//! Order: `hello` → `resume` → (`event` | `snapshot_required`)*. Anything out of order is `protocol.invalid_message`.
+//!
+//! `SnapshotRequired` from the node (ADR-0054) says it cannot replay from where the hub asked: the next event above what the
+//! hub holds becomes the new base of this producer's numbering, once, and the skipped numbers are recorded as lost.
 
 use agora_protocol::handshake::{negotiate, Support};
 use agora_protocol::v1::{Event, Hello, Resume, ResumeOk, Role, Welcome};
@@ -21,6 +24,14 @@ pub enum Ingest {
     Duplicate { acked: u64 },
     /// Not the next event. Nothing was stored; the node must replay from `expected` (answer with `ResumeOk`).
     Gap { expected: u64 },
+    /// Stored as the new base after the node's `SnapshotRequired` (ADR-0054): `from_seq..=to_seq` were skipped and are recorded as
+    /// lost. Otherwise like `Applied`.
+    Resynced {
+        acked: u64,
+        pos: u64,
+        from_seq: u64,
+        to_seq: u64,
+    },
 }
 
 #[derive(Debug)]
@@ -60,6 +71,8 @@ pub struct NodeSession<'a, S: EventStore> {
     producer: String,
     support: &'a Support,
     phase: Phase,
+    /// When the node said it cannot replay (ADR-0054) and no event above the hub's ack has come since.
+    resync_at_ms: Option<u64>,
 }
 
 impl<'a, S: EventStore> NodeSession<'a, S> {
@@ -70,6 +83,7 @@ impl<'a, S: EventStore> NodeSession<'a, S> {
             producer: producer.to_string(),
             support,
             phase: Phase::New,
+            resync_at_ms: None,
         }
     }
 
@@ -98,6 +112,16 @@ impl<'a, S: EventStore> NodeSession<'a, S> {
         })
     }
 
+    /// The node cannot replay from where the hub asked (ADR-0054): its next event above the hub's ack becomes the new base. Only
+    /// after the handshake; a second one before such an event changes nothing more.
+    pub fn snapshot_required(&mut self, now_ms: u64) -> Result<(), SessionError> {
+        if self.phase != Phase::Ready {
+            return Err(invalid("snapshot_required"));
+        }
+        self.resync_at_ms.get_or_insert(now_ms);
+        Ok(())
+    }
+
     /// Decode and store one event payload from this node.
     pub fn event(&mut self, payload: &[u8]) -> Result<Ingest, SessionError> {
         if self.phase != Phase::Ready {
@@ -110,21 +134,41 @@ impl<'a, S: EventStore> NodeSession<'a, S> {
         if ev.seq == 0 {
             return Err(invalid("seq"));
         }
-        Ok(
-            match self
+        let appended = match self.resync_at_ms {
+            Some(at) => self
                 .store
-                .append(&self.producer, ev.seq, ev.at_ms, payload)?
-            {
-                Append::Applied { pos } => Ingest::Applied {
+                .append_resync(&self.producer, ev.seq, ev.at_ms, payload, at)?,
+            None => self
+                .store
+                .append(&self.producer, ev.seq, ev.at_ms, payload)?,
+        };
+        Ok(match appended {
+            Append::Applied { pos } => {
+                // The first event above the ack ends the resync, jump or not: it is allowed once.
+                self.resync_at_ms = None;
+                Ingest::Applied {
                     acked: self.store.acked(&self.producer)?,
                     pos,
-                },
-                Append::Duplicate => Ingest::Duplicate {
+                }
+            }
+            Append::Resynced {
+                pos,
+                from_seq,
+                to_seq,
+            } => {
+                self.resync_at_ms = None;
+                Ingest::Resynced {
                     acked: self.store.acked(&self.producer)?,
-                },
-                Append::Gap { expected } => Ingest::Gap { expected },
+                    pos,
+                    from_seq,
+                    to_seq,
+                }
+            }
+            Append::Duplicate => Ingest::Duplicate {
+                acked: self.store.acked(&self.producer)?,
             },
-        )
+            Append::Gap { expected } => Ingest::Gap { expected },
+        })
     }
 }
 
@@ -287,6 +331,92 @@ mod tests {
         assert_eq!(
             code(s.event(&event("n", 0)).unwrap_err()),
             ErrorCode::ProtocolInvalidMessage
+        );
+    }
+
+    #[test]
+    fn snapshot_required_before_the_handshake_is_invalid() {
+        let (store, sup) = (SqliteStore::open_in_memory().unwrap(), support());
+        let mut s = NodeSession::new(&store, "n", &sup);
+        assert_eq!(
+            code(s.snapshot_required(1).unwrap_err()),
+            ErrorCode::ProtocolInvalidMessage
+        );
+        s.hello(&node_hello(), 0).unwrap();
+        assert_eq!(
+            code(s.snapshot_required(1).unwrap_err()),
+            ErrorCode::ProtocolInvalidMessage
+        );
+    }
+
+    /// ADR-0054: a jump is accepted only right after `SnapshotRequired`, only forwards, and only once.
+    #[test]
+    fn a_jump_is_accepted_only_after_snapshot_required_only_forwards_and_once() {
+        let (store, sup) = (SqliteStore::open_in_memory().unwrap(), support());
+        let mut s = ready(&store, &sup, "n");
+        for i in 1..=3 {
+            s.event(&event("n", i)).unwrap();
+        }
+        // Without it, a jump is a gap and nothing is stored.
+        assert_eq!(
+            s.event(&event("n", 9)).unwrap(),
+            Ingest::Gap { expected: 4 }
+        );
+        s.snapshot_required(77).unwrap();
+        s.snapshot_required(78).unwrap(); // a second one changes nothing more
+                                          // Never backwards: what the hub holds stays a duplicate and does not use the resync up.
+        assert_eq!(
+            s.event(&event("n", 2)).unwrap(),
+            Ingest::Duplicate { acked: 3 }
+        );
+        assert_eq!(
+            s.event(&event("n", 9)).unwrap(),
+            Ingest::Resynced {
+                acked: 9,
+                pos: 4,
+                from_seq: 4,
+                to_seq: 8
+            }
+        );
+        assert_eq!(store.resyncs().unwrap(), [("n".to_string(), 4, 8, 77)]);
+        // Once: the next jump is a gap again.
+        assert_eq!(
+            s.event(&event("n", 20)).unwrap(),
+            Ingest::Gap { expected: 10 }
+        );
+        assert_eq!(
+            s.event(&event("n", 10)).unwrap(),
+            Ingest::Applied { acked: 10, pos: 5 }
+        );
+    }
+
+    /// A `SnapshotRequired` followed by the very next number moves nothing and records nothing, and it is used up.
+    #[test]
+    fn snapshot_required_followed_by_the_next_number_changes_nothing() {
+        let (store, sup) = (SqliteStore::open_in_memory().unwrap(), support());
+        let mut s = ready(&store, &sup, "n");
+        s.event(&event("n", 1)).unwrap();
+        s.snapshot_required(5).unwrap();
+        assert_eq!(
+            s.event(&event("n", 2)).unwrap(),
+            Ingest::Applied { acked: 2, pos: 2 }
+        );
+        assert!(store.resyncs().unwrap().is_empty());
+        assert_eq!(
+            s.event(&event("n", 7)).unwrap(),
+            Ingest::Gap { expected: 3 }
+        );
+        // And one never followed by an event (the connection ends) leaves the store as it was.
+        let mut s = ready(&store, &sup, "n");
+        s.snapshot_required(6).unwrap();
+        drop(s);
+        assert_eq!(store.acked("n").unwrap(), 2);
+        assert!(store.resyncs().unwrap().is_empty());
+        let mut s = ready(&store, &sup, "n");
+        assert_eq!(
+            s.event(&event("n", 7)).unwrap(),
+            Ingest::Gap { expected: 3 },
+            "a resync does not carry over to the next connection"
         );
     }
 }

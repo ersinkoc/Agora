@@ -8,7 +8,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use agora_i18n::{key, Arg};
-use agora_protocol::v1::{ChatEntry, Snapshot};
+use agora_protocol::v1::{param_value::Value, ChatEntry, ErrorInfo, Snapshot};
 use agora_tui::client::{sign_in, ChatEvent, ClientError, Hub, Session, TermEvent, Update};
 use agora_tui::device::Device;
 use agora_tui::preview::{Preview, Pumped};
@@ -20,6 +20,37 @@ use crate::{home, Opts, Say};
 
 /// Fewest milliseconds between two refreshes (each one is a fresh snapshot).
 const REFRESH_MS: u64 = 500;
+
+/// The hub decides whether an agent can be forgotten; keep its localized reason even when the snapshot was stale.
+fn forget_notice(say: &Say, result: Result<(), ErrorInfo>) -> String {
+    let Err(error) = result else {
+        return say.text(key!("tui-forgot"), &[]);
+    };
+    let reason = match error.code.as_str() {
+        "client.unreachable" => say.text(key!("tui-forget-disconnected"), &[]),
+        "node.timeout" if error.params.is_empty() => say.text(key!("tui-forget-timeout"), &[]),
+        _ => {
+            let args: Vec<_> = error
+                .params
+                .iter()
+                .filter_map(|(k, v)| match &v.value {
+                    Some(_) if error.code == "auth.forbidden" && k == "action" => Some((
+                        k.as_str(),
+                        Arg::Str(say.text(key!("tui-forget-action"), &[])),
+                    )),
+                    Some(Value::Str(s)) => Some((k.as_str(), Arg::Str(s.clone()))),
+                    Some(Value::Int(i)) => Some((k.as_str(), Arg::Num(*i))),
+                    None => None,
+                })
+                .collect();
+            say.0
+                .render(&error.code.replace('.', "-"), &args)
+                .unwrap_or(error.code)
+        }
+    };
+    // Error parameters come from the hub; they must not become terminal control sequences.
+    plain(&say.text(key!("tui-forget-failed"), &[("reason", Arg::Str(reason))])).replace('\n', " ")
+}
 
 /// This terminal's key, made the first time it is needed and kept in a file only its owner can read.
 fn device() -> Option<Device> {
@@ -896,13 +927,7 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                             notice = if running {
                                 say.text(key!("tui-forget-running"), &[])
                             } else {
-                                match session.forget_agent(&selected) {
-                                    Ok(()) => say.text(key!("tui-forgot"), &[]),
-                                    Err(code) => say.text(
-                                        key!("tui-forget-failed"),
-                                        &[("code", Arg::Str(code))],
-                                    ),
-                                }
+                                forget_notice(say, session.forget_agent(&selected))
                             };
                             dirty_since.get_or_insert_with(Instant::now);
                             draw(&snapshot, &selected, &notice, cost, preview.as_ref());
@@ -975,5 +1000,62 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                 last_refresh = Instant::now();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod forget_tests {
+    use super::*;
+    use agora_i18n::Catalog;
+    use agora_protocol::error::{Error, ErrorCode};
+
+    #[test]
+    fn a_remote_refusal_explains_the_reason_in_the_selected_language() {
+        let running = Error::new(ErrorCode::AgentRunning)
+            .with("agent_id", "laptop/agent-1")
+            .to_info();
+        let tr = Say(Catalog::turkish());
+        assert_eq!(
+            forget_notice(&tr, Err(running.clone())),
+            "Kaldırılamadı: laptop/agent-1 hâlâ çalışıyor. Önce durdurun."
+        );
+        let en = Say(Catalog::english());
+        let english = forget_notice(&en, Err(running));
+        assert!(english.contains("laptop/agent-1"));
+        assert!(english.contains("Stop it first"));
+        let denied = Error::new(ErrorCode::AuthForbidden)
+            .with("action", "AgentForget")
+            .to_info();
+        assert_eq!(
+            forget_notice(&tr, Err(denied)),
+            "Kaldırılamadı: Bunu yapmaya izniniz yok (ajanı kaldırma)."
+        );
+    }
+
+    #[test]
+    fn unknown_codes_and_transport_failures_remain_useful_without_control_sequences() {
+        let tr = Say(Catalog::turkish());
+        let error = |code: &str| ErrorInfo {
+            code: code.into(),
+            ..Default::default()
+        };
+        assert_eq!(forget_notice(&tr, Ok(())), "Listeden kaldırıldı.");
+        assert_eq!(
+            forget_notice(&tr, Err(error("agent.new_refusal"))),
+            "Kaldırılamadı: agent.new_refusal"
+        );
+        assert_eq!(
+            forget_notice(&tr, Err(error("client.unreachable"))),
+            "Kaldırılamadı: Bağlantı kesildi. Yeniden bağlanmasını bekleyin."
+        );
+        assert_eq!(
+            forget_notice(&tr, Err(error("node.timeout"))),
+            "Kaldırılamadı: Zamanında yanıt alınamadı. Tekrar deneyin."
+        );
+        let untrusted = Error::new(ErrorCode::AgentRunning)
+            .with("agent_id", "laptop/\u{1b}[2Jagent\n\u{202e}-1")
+            .to_info();
+        let line = forget_notice(&tr, Err(untrusted));
+        assert!(!line.contains(['\u{1b}', '\n', '\u{202e}']));
     }
 }

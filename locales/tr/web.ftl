@@ -225,6 +225,7 @@ start-directory-agent-unsupported = Bu ajan, ayarlarını yüklemek için ayrı 
 audit-action-directoryinspect = Bir klasör seçti
 audit-action-agentlaunch = Bir klasörde ajan başlattı
 audit-action-workspacequery = Çalışma alanının dosyalarına veya değişikliklerine baktı
+audit-action-node-resynced = Bir makineyi yeniden bağladı; geçmişinin bir kısmı eksik
 
 agent-address = Ajan adresi
 agent-address-copy = Ajan adresini kopyala

@@ -521,6 +521,11 @@ impl NodeApprovals {
     pub fn pending_count(&self) -> usize {
         self.q().pending().count()
     }
+
+    /// Every request still waiting for a decision, for the node to announce again (ADR-0054).
+    pub fn waiting(&self) -> Vec<Pending> {
+        self.q().pending().cloned().collect()
+    }
 }
 
 #[cfg(test)]
