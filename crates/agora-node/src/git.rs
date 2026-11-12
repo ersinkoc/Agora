@@ -96,13 +96,14 @@ pub(crate) fn hardened(dir: &Path) -> Command {
     hardened_with(dir, &Filters::of(dir))
 }
 
-/// The filter drivers to blank for one repository; ask once and reuse it for several commands in a row.
+/// The filter drivers to blank for one repository, asked right before each command. An agent that can write the config could still
+/// add one between the question and the command; [`plain_hardened`] pins a node-made worktree's Git folders so that, where the shared
+/// config is read-only to agents (macOS, Windows), there is no config it can write (T8b).
+#[derive(Debug, PartialEq, Eq)]
 enum Filters {
     Blank(Vec<String>),
-    /// One of them cannot be named back to git (not UTF-8).
+    /// One of them cannot be named back to git (not UTF-8), or git could not answer: nothing runs.
     Refuse,
-    /// No git to ask: the command itself cannot start either.
-    Unknown,
 }
 
 impl Filters {
@@ -117,10 +118,19 @@ impl Filters {
                 r"^filter\..*\.(clean|smudge|process)$",
             ])
             .output();
-        match out.map(|o| repository_filters(&o.stdout)) {
-            Ok(Some(keys)) => Self::Blank(keys),
-            Ok(None) => Self::Refuse,
-            Err(_) => Self::Unknown,
+        match out {
+            Ok(o) => Self::from_answer(o.status.code(), &o.stdout),
+            Err(_) => Self::Refuse,
+        }
+    }
+
+    /// 0 is a list, and 1 "no such key" only with nothing printed; anything else (129 for a git before 2.26 that does not know
+    /// `--show-scope`, 128 for a config it cannot read, a signal) is a refusal, not "nothing to blank".
+    fn from_answer(code: Option<i32>, out: &[u8]) -> Self {
+        match code {
+            Some(0) => repository_filters(out).map_or(Self::Refuse, Self::Blank),
+            Some(1) if out.is_empty() => Self::Blank(vec![]),
+            _ => Self::Refuse,
         }
     }
 }
@@ -140,12 +150,14 @@ fn hardened_with(dir: &Path, filters: &Filters) -> Command {
         // A filter that cannot be blanked (a name that is not UTF-8, or a git older than 2.31 that ignores `GIT_CONFIG_KEY_n`):
         // a `-c` key with no section makes every git refuse to start, so nothing runs.
         Filters::Blank(_) | Filters::Refuse => {
-            c.args(["-c", "refused-filter-driver"]);
+            c.args(REFUSED);
         }
-        Filters::Unknown => {}
     }
     c
 }
+
+/// A `-c` key with no section: every git refuses to start on it ("key does not contain a section"), so nothing runs.
+const REFUSED: [&str; 2] = ["-c", "refused-filter-driver"];
 
 /// Whether this machine's git reads `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n` (git 2.31 and later). Asked once per node run.
 fn config_env_supported() -> bool {
@@ -162,6 +174,11 @@ fn config_env_supported() -> bool {
     })
 }
 
+/// `git -C dir` with [`HARDENED`] and the node's environment. In a linked worktree the Git folders are pinned to the ones
+/// [`crate::sandbox::git_dirs`] verifies (`GIT_DIR`, `GIT_COMMON_DIR`, `GIT_WORK_TREE`), so the admin folder's `commondir` cannot
+/// point the node's git at a config the agent wrote; a `.git` that is a link is refused. Any other `.git` file (a submodule's, a
+/// separate git dir, or one an agent rewrote into either) is followed as git does: closing that needs the node to pin from the
+/// checkout it recorded (T8b).
 fn plain_hardened(dir: &Path) -> Command {
     let mut c = Command::new("git");
     c.args(HARDENED)
@@ -170,7 +187,24 @@ fn plain_hardened(dir: &Path) -> Command {
         .env("LC_ALL", "C")
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_OPTIONAL_LOCKS", "0")
-        .env_remove("GIT_CONFIG_COUNT");
+        .env_remove("GIT_CONFIG_COUNT")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_WORK_TREE");
+    let Ok(meta) = std::fs::symlink_metadata(dir.join(".git")) else {
+        return c;
+    };
+    if meta.is_symlink() {
+        c.args(REFUSED);
+    } else if meta.is_file() {
+        if let (Some((admin, common)), Ok(work)) =
+            (crate::sandbox::git_dirs(dir), std::fs::canonicalize(dir))
+        {
+            c.env("GIT_DIR", admin)
+                .env("GIT_COMMON_DIR", common)
+                .env("GIT_WORK_TREE", work);
+        }
+    }
     c
 }
 
@@ -189,11 +223,7 @@ fn repository_filters(out: &[u8]) -> Option<Vec<String>> {
 }
 
 fn git(dir: &Path, args: &[&str]) -> Result<String, GitError> {
-    git_with(dir, &Filters::of(dir), args)
-}
-
-fn git_with(dir: &Path, filters: &Filters, args: &[&str]) -> Result<String, GitError> {
-    let out = hardened_with(dir, filters)
+    let out = hardened(dir)
         .args(args)
         .output()
         .map_err(|e| GitError::Io(e.to_string()))?;
@@ -349,8 +379,7 @@ fn parse_shortstat(s: &str) -> (u32, u32) {
 }
 
 pub fn status(worktree: &Path) -> Result<GitStatus, GitError> {
-    let filters = Filters::of(worktree);
-    let git = |args: &[&str]| git_with(worktree, &filters, args);
+    let git = |args: &[&str]| git(worktree, args);
     let files_changed = git(&["status", "--porcelain", SUBMODULE_COMMITS_ONLY])?
         .lines()
         .count() as u32;
@@ -854,6 +883,96 @@ mod tests {
     }
 
     #[test]
+    fn only_a_clean_answer_from_git_means_nothing_to_blank() {
+        let keys = b"local\0filter.x.clean\0";
+        assert_eq!(
+            Filters::from_answer(Some(0), keys),
+            Filters::Blank(vec!["filter.x.clean".into()])
+        );
+        assert_eq!(Filters::from_answer(Some(1), b""), Filters::Blank(vec![]));
+        assert_eq!(Filters::from_answer(Some(1), keys), Filters::Refuse);
+        // A git before 2.26 does not know `--show-scope`; a broken config; a signal.
+        assert_eq!(Filters::from_answer(Some(129), b""), Filters::Refuse);
+        assert_eq!(Filters::from_answer(Some(128), b""), Filters::Refuse);
+        assert_eq!(Filters::from_answer(None, b""), Filters::Refuse);
+    }
+
+    #[test]
+    fn the_nodes_git_in_a_worktree_reads_only_the_verified_git_folders() {
+        let r = Repo::new(None);
+        let wt = r.dir.with_file_name(format!(
+            "{}-pinned-wt",
+            r.dir.file_name().expect("name").to_string_lossy()
+        ));
+        create_worktree(&r.dir, &wt, "pinned", None).expect("worktree");
+        let (admin, common) = crate::sandbox::git_dirs(&wt).expect("verified");
+        // The agent points its admin folder's `commondir` at a repository it built, with a filter in its config.
+        let fake = wt.with_file_name(format!(
+            "{}-fake",
+            wt.file_name().expect("name").to_string_lossy()
+        ));
+        let ok = Command::new("git")
+            .args(["clone", "-q", "--bare"])
+            .arg(&r.dir)
+            .arg(&fake)
+            .status()
+            .expect("clone")
+            .success();
+        assert!(ok);
+        let mark = wt.join("ran-fake-clean");
+        let set = Command::new("git")
+            .arg("--git-dir")
+            .arg(&fake)
+            .args(["config", "filter.ev.clean"])
+            .arg(format!("sh -c 'touch \"{}\"; cat'", mark.display()))
+            .status()
+            .expect("config")
+            .success();
+        assert!(set);
+        fs::write(admin.join("commondir"), format!("{}\n", fake.display())).expect("commondir");
+        fs::write(wt.join(".gitattributes"), "*.txt filter=ev\n").expect("attributes");
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        fs::write(wt.join("a.txt"), "uno\n").expect("edit");
+
+        // Pinned: the node's git uses the real shared folder, not the one `commondir` names. The filter blanking alone would also
+        // stop this plant, but not one added between its question and the command.
+        let used = hardened(&wt)
+            .args(["rev-parse", "--git-common-dir"])
+            .output()
+            .expect("rev-parse");
+        assert_eq!(
+            PathBuf::from(String::from_utf8_lossy(&used.stdout).trim()),
+            common
+        );
+        let _ = status(&wt);
+        let _ = diff(&wt, None);
+        assert!(
+            !mark.exists(),
+            "the node's git followed the agent's commondir"
+        );
+        // Control: plain git follows it.
+        let _ = Command::new("git")
+            .arg("-C")
+            .arg(&wt)
+            .args(["status", "--porcelain"])
+            .output();
+        assert!(mark.exists(), "the plant itself did not work");
+
+        // A `.git` that is a link is refused outright.
+        let linked = wt.with_file_name(format!(
+            "{}-linked",
+            wt.file_name().expect("name").to_string_lossy()
+        ));
+        fs::create_dir_all(&linked).expect("dir");
+        if agora_platform::symlink(&wt.join(".git"), &linked.join(".git")).is_ok() {
+            assert!(status(&linked).is_err());
+        }
+        for d in [&wt, &fake, &linked] {
+            let _ = fs::remove_dir_all(d);
+        }
+    }
+
+    #[test]
     fn a_filter_that_cannot_be_blanked_stops_the_nodes_git() {
         let r = Repo::new(None);
         let ok = |f: &Filters| {
@@ -865,7 +984,6 @@ mod tests {
                 .success()
         };
         assert!(ok(&Filters::Blank(vec![])));
-        assert!(ok(&Filters::Unknown));
         assert!(!ok(&Filters::Refuse));
         // Blanking works with this machine's git (CI runs a recent one), so a named filter does not stop it.
         assert!(config_env_supported());
