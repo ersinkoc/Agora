@@ -729,6 +729,22 @@ pub(crate) fn opened_path(file: &std::fs::File) -> io::Result<PathBuf> {
     }
 }
 
+/// See [`crate::link_dir`]: a junction, made by `cmd`'s own `mklink /J` (no privilege needed, unlike a symbolic link).
+pub(crate) fn junction(target: &Path, link: &Path) -> io::Result<()> {
+    let out = std::process::Command::new("cmd")
+        .args(["/d", "/c", "mklink", "/J"])
+        .arg(link)
+        .arg(target)
+        .output()?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other(
+            String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        ))
+    }
+}
+
 /// See [`crate::open_dir`]: a directory handle needs `FILE_FLAG_BACKUP_SEMANTICS`. A junction or link on the way is followed, as any
 /// open does; the caller checks where the handle is with [`crate::opened_path`].
 pub(crate) fn open_dir(path: &Path) -> io::Result<std::fs::File> {
