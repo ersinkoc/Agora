@@ -59,10 +59,11 @@ fn lines<R: Read + Send + 'static>(
     tx: std::sync::mpsc::Sender<Ev>,
 ) {
     std::thread::spawn(move || {
-        for line in BufReader::new(r).lines() {
+        // Lines as bytes: one that is not UTF-8 must not read as the end of the stream.
+        for line in BufReader::new(r).split(b'\n') {
             let Ok(line) = line else { break };
-            // A line that is not JSON is the agent's own noise; it is ignored like any unknown message.
-            if let Ok(v) = serde_json::from_str::<Value>(&line) {
+            // A line that is not JSON (or not UTF-8) is the agent's own noise; it is ignored like any unknown message.
+            if let Ok(v) = serde_json::from_slice::<Value>(&line) {
                 if tx.send(wrap(v)).is_err() {
                     return;
                 }
@@ -539,6 +540,24 @@ mod tests {
             n.starts_with("--- /dev/null\n+++ b/n.txt\n@@ -0,0 +1,1 @@\n+hi"),
             "{n}"
         );
+    }
+
+    /// A line that is not UTF-8 used to end the reader as if the agent had exited (audit F044).
+    #[test]
+    fn a_line_that_is_not_utf8_is_noise_not_the_end_of_the_agent() {
+        let (tx, rx) = channel();
+        let data = b"\xff\xfe noise\n{\"text\":\"\xff\"}\n{\"id\":1}\r\n{\"id\":2}".to_vec();
+        lines(std::io::Cursor::new(data), Ev::Agent, Ev::AgentGone, tx);
+        let mut ids = Vec::new();
+        loop {
+            match rx.recv_timeout(Duration::from_secs(10)) {
+                Ok(Ev::Agent(v)) => ids.push(v["id"].clone()),
+                Ok(Ev::AgentGone) => break,
+                Ok(_) => {}
+                Err(e) => panic!("reader stalled: {e}"),
+            }
+        }
+        assert_eq!(ids, vec![json!(1), json!(2)]);
     }
 
     #[test]

@@ -15,6 +15,11 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 - A resume that fails no longer leaves the stopped agent reachable by other agents.
 - When the hub confirms events older than the ones a machine kept while it was offline, the machine keeps the rest instead of deleting them (or stopping its link).
 
+### Terminals and adapters
+- Opening a terminal that is already running shows its later output in the program's own colours, and paste and arrow keys work as the program expects.
+- An adapter that stops reading its input no longer freezes its machine; the request to it times out.
+- An ACP agent that prints a line that is not text no longer looks closed.
+
 ## 0.3.2
 
 ### The window
