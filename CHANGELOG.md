@@ -10,6 +10,11 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 - An answer to a request that comes after the request expired tells the agent "denied" instead of leaving it waiting.
 - Removing a working copy whose commits are on no branch is refused instead of losing them, unless forced.
 
+### Agents and machines
+- Stopping an agent that runs through an adapter also ends the adapter's program; before, it kept running unseen.
+- A resume that fails no longer leaves the stopped agent reachable by other agents.
+- When the hub confirms events older than the ones a machine kept while it was offline, the machine keeps the rest instead of deleting them (or stopping its link).
+
 ## 0.3.2
 
 ### The window
