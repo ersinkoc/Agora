@@ -60,3 +60,6 @@ tui-folder-more = … gösterilenden fazla klasör var (ilk { $n })
 tui-folder-unsupported = Bu makine klasörlerini henüz listeleyemiyor (güncelleyin).
 tui-folder-failed = O klasör açılamadı ({ $code }).
 tui-folder-identity = Bu klasörün projesi son ajandan beri değişti. Yine de başlatmak için y, vazgeçmek için başka bir tuş.
+tui-forgot = Listeden kaldırıldı.
+tui-forget-running = Hâlâ çalışıyor: önce durdur (x).
+tui-forget-failed = Kaldırılamadı ({ $code }).

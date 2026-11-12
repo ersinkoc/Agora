@@ -1773,6 +1773,69 @@ fn a_command_the_policy_lists_needs_a_grant_signed_by_a_trusted_device_and_the_l
 }
 
 #[test]
+fn the_terminal_console_removes_a_closed_agent_from_every_list_but_not_a_running_one() {
+    use agora_tui::client::{Hub as ConsoleHub, Session};
+    let hub = hubside("laptop");
+    let addr = hub.listen("127.0.0.1:0");
+    let sink = sink_with_agent(&tmp("forget"), "laptop");
+    let _link = spawn(Arc::clone(&sink), hub.link(addr)).unwrap();
+    wait("the node to appear", || {
+        hub.state.hub.view().0.agents.contains_key("laptop/agent-1")
+    });
+    let console = ConsoleHub {
+        addr: addr.to_string(),
+        ca_pem: hub.ca_pem.clone(),
+    };
+    let mut session = Session::connect(&console, "client-token").unwrap();
+    // Running: the hub refuses, and the agent stays.
+    assert_eq!(
+        session.forget_agent("laptop/agent-1"),
+        Err("agent.running".to_string())
+    );
+    assert!(hub.state.hub.view().0.agents.contains_key("laptop/agent-1"));
+    // Once it has exited, `d` removes it for everyone.
+    sink.record_bodies(vec![agora_protocol::v1::event::Body::AgentExited(
+        agora_protocol::v1::AgentExited {
+            agent_id: "agent-1".into(),
+            exit_code: 0,
+        },
+    )]);
+    wait("the agent to stop running", || {
+        hub.state
+            .hub
+            .view()
+            .0
+            .agents
+            .get("laptop/agent-1")
+            .is_some_and(|a| !a.running)
+    });
+    assert_eq!(session.forget_agent("laptop/agent-1"), Ok(()));
+    wait("the hub to forget the agent", || {
+        hub.state
+            .hub
+            .view()
+            .0
+            .agents
+            .get("laptop/agent-1")
+            .is_some_and(|a| a.forgotten)
+    });
+    // A window that opens now does not list it.
+    let mut fresh = Session::connect(&console, "client-token").unwrap();
+    let end = Instant::now() + Duration::from_secs(20);
+    let snapshot = loop {
+        match fresh.next(Duration::from_millis(200)) {
+            agora_tui::client::Update::Snapshot(s) => break *s,
+            agora_tui::client::Update::Closed => panic!("the hub closed the connection"),
+            _ => assert!(Instant::now() < end, "no snapshot"),
+        }
+    };
+    assert!(!snapshot
+        .agents
+        .iter()
+        .any(|a| a.agent_id == "laptop/agent-1"));
+}
+
+#[test]
 fn the_terminal_console_picks_a_folder_on_a_machine_and_starts_an_agent_there() {
     use agora_tui::client::{Hub as ConsoleHub, Session};
     if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {

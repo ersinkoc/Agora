@@ -60,3 +60,6 @@ tui-folder-more = … more folders than shown (the first { $n })
 tui-folder-unsupported = That machine cannot list its folders yet (update it).
 tui-folder-failed = Could not open that folder ({ $code }).
 tui-folder-identity = This folder's project changed since an agent last ran here. Press y to start anyway, any other key to cancel.
+tui-forgot = Removed from the list.
+tui-forget-running = It is still running: stop it first (x).
+tui-forget-failed = Could not remove it ({ $code }).
