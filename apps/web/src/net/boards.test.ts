@@ -133,3 +133,13 @@ describe('forgotten agents', () => {
     expect(tiles(view)).toHaveLength(0);
   });
 });
+
+import { childPath } from './directory';
+describe('childPath', () => {
+  it('joins with the separator the machine uses', () => {
+    expect(childPath('/home/dev', 'code')).toBe('/home/dev/code');
+    expect(childPath('/', 'etc')).toBe('/etc');
+    expect(childPath('C:\\Users\\dev', 'code')).toBe('C:\\Users\\dev\\code');
+    expect(childPath('C:\\', 'Users')).toBe('C:\\Users');
+  });
+});

@@ -2,7 +2,7 @@ import * as Dialog from '@radix-ui/react-dialog';
 import { useEffect, useState } from 'react';
 import { t } from '../i18n';
 import type { MachineModel, ProjectChoice } from '../net/view';
-import type { DirectoryInfo } from '../net/directory';
+import { childPath, type DirectoryInfo, type DirectoryListing } from '../net/directory';
 import { Icon } from './Icon';
 export interface KindChoice { kind: string; name: string; installed: boolean }
 
@@ -12,12 +12,14 @@ const chipOff = 'border-line bg-surface-0 text-muted hover:bg-surface-2 hover:te
 
 // "Start an agent" in one window: the machine, the folder (a known one in a click, or any path), then the agent. Choosing the
 // folder shows the folder the node resolved before anything starts (ADR-0052); the rest is a click.
-export function StartAgent({ projects, machines, initialNode, loadKinds, inspect, onStart, onClose }: {
+export function StartAgent({ projects, machines, initialNode, loadKinds, inspect, list, onStart, onClose }: {
   projects: readonly ProjectChoice[];
   machines: readonly MachineModel[];
   initialNode?: string;
   loadKinds: (node: string) => Promise<KindChoice[]>;
   inspect: (node: string, path: string, createIdentity: boolean) => Promise<DirectoryInfo>;
+  // ADR-0053: the sub-folders of a folder on the machine (empty path: its home folder). Missing, or refused by an older machine: the path is typed.
+  list?: (node: string, path: string) => Promise<DirectoryListing>;
   // A failure is a Fluent message id, translated when rendered so an open form follows a language change.
   onStart: (node: string, info: DirectoryInfo, kind: string, separate: boolean, acceptIdentityChange: boolean) => Promise<string | undefined>;
   onClose: () => void;
@@ -35,6 +37,20 @@ export function StartAgent({ projects, machines, initialNode, loadKinds, inspect
   const [acceptIdentityChange, setAcceptIdentityChange] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
+  // The folder picker: what the machine answered for the folder being looked at.
+  const [browse, setBrowse] = useState<{ listing?: DirectoryListing; busy: boolean; failed?: boolean } | undefined>();
+  const [canBrowse, setCanBrowse] = useState(!!list);
+  const look = async (at: string) => {
+    if (!list) return;
+    setBrowse((b) => ({ listing: b?.listing, busy: true }));
+    try { setBrowse({ listing: await list(node, at), busy: false }); }
+    catch (e) {
+      // A machine without the command: keep the typed path, and do not offer the picker again.
+      if ((e as { code?: string }).code === 'protocol.capability_missing') { setCanBrowse(false); setBrowse(undefined); }
+      else setBrowse((b) => ({ listing: b?.listing, busy: false, failed: true }));
+    }
+  };
+  useEffect(() => { setBrowse(undefined); setCanBrowse(!!list); }, [node, list]);
   useEffect(() => {
     if (!node) return;
     let current = true;
@@ -92,7 +108,24 @@ export function StartAgent({ projects, machines, initialNode, loadKinds, inspect
                 <input value={path} disabled={busy} autoFocus className="min-w-0 flex-1 font-mono text-[13px]" aria-label={t('start-directory')} onChange={e => changePath(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && path.trim() && !busy) void choose(); }} placeholder={t('start-directory-placeholder')} />
                 <button type="button" className="button button--primary" disabled={!path.trim() || busy} onClick={() => void choose()}>{t('start-select-directory')}</button>
               </div>
-              {known.length > 0 && <div className="grid gap-0.5">
+              {canBrowse && !browse && <button type="button" className="button justify-self-start px-3 py-1 text-xs" disabled={busy} onClick={() => void look(path.trim().startsWith('/') || /^[A-Za-z]:[\\/]/.test(path.trim()) ? path.trim() : '')}><Icon name="folder" className="size-4" />{t('start-browse')}</button>}
+              {browse && <div className="grid gap-1 rounded-xs border border-line bg-surface-0 p-2" aria-busy={browse.busy}>
+                <div className="flex items-center gap-1.5">
+                  <button type="button" className="ide-iconbtn" disabled={!browse.listing?.parent || browse.busy} onClick={() => void look(browse.listing?.parent ?? '')} aria-label={t('start-browse-up')} title={t('start-browse-up')}><Icon name="chevron" className="size-4 rotate-180 rtl:rotate-0" /></button>
+                  <code dir="ltr" className="min-w-0 flex-1 truncate text-xs" title={browse.listing?.path}>{browse.listing?.path ?? '…'}</code>
+                  <button type="button" className="button button--primary px-2 py-1 text-xs" disabled={!browse.listing || busy} onClick={() => { const p = browse.listing?.path ?? ''; setBrowse(undefined); changePath(p); void choose(p); }}>{t('start-select-directory')}</button>
+                  <button type="button" className="ide-iconbtn" onClick={() => setBrowse(undefined)} aria-label={t('start-browse-close')} title={t('start-browse-close')}><Icon name="close" className="size-4" /></button>
+                </div>
+                {browse.failed && <p role="alert" className="m-0 text-xs text-needs-you">{t('start-browse-failed')}</p>}
+                <ul className="m-0 grid max-h-52 list-none gap-0.5 overflow-y-auto p-0">
+                  {browse.listing?.entries.length === 0 && <li className="muted px-2 py-1 text-xs">{t('start-browse-empty')}</li>}
+                  {browse.listing?.entries.map((e) => <li key={e.name}><button type="button" className="ide-row py-1" disabled={browse.busy} onClick={() => void look(childPath(browse.listing?.path ?? '', e.name))}>
+                    <Icon name="folder" className="size-4 text-muted" /><span className="min-w-0 flex-1 truncate">{e.name}</span>{e.isGit && <span className="ide-chip" title={t('start-browse-git')}><Icon name="branch" className="size-3" />git</span>}
+                  </button></li>)}
+                </ul>
+                {browse.listing?.truncated && <p className="muted m-0 text-xs">{t('start-browse-more')}</p>}
+              </div>}
+              {known.length > 0 && !browse && <div className="grid gap-0.5">
                 <span className="text-[11px] text-muted">{t('ide-folder-known')}</span>
                 <ul className="m-0 grid max-h-44 list-none gap-0.5 overflow-y-auto p-0">
                   {known.map(p => <li key={p.path}><button type="button" className="ide-row py-1.5" disabled={busy} aria-current={p.path === path ? 'true' : undefined} onClick={() => { changePath(p.path); void choose(p.path); }}>
