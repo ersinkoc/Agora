@@ -407,30 +407,34 @@ mod tests {
         let secret = h.home.join(".ssh");
         std::fs::create_dir_all(secret.join("KEYS")).unwrap();
         let code = h.home.join("code");
-        if agora_platform::symlink(&secret, &code.join("link")).is_err() {
-            let _ = std::fs::remove_dir_all(&h.home);
-            return; // no symbolic links here (Windows without the privilege)
-        }
+        std::fs::create_dir_all(&code).unwrap();
+        // A junction on Windows, which needs no privilege; a link that cannot be made fails the test (windows' patch).
+        agora_platform::link_dir(&secret, &code.join("link")).expect("a folder link");
         let e = list(&code.to_string_lossy(), &scope(&h)).unwrap();
         assert!(!names(&e).iter().any(|(n, _)| n == "link"), "{e:?}");
         // Asked for directly, the link resolves to the secret folder and is refused.
         assert!(list(&code.join("link").to_string_lossy(), &scope(&h)).is_err());
         // `d` flips between a folder of its own and a link to `.ssh`: whichever moment the listing hits, `.ssh` is never listed,
         // whether the link is there when the path is checked (refused as secret) or swapped in after it (the open handle is not
-        // the folder that was checked).
+        // the folder that was checked). The link is made once and the flip is renames only.
+        let (name, link, spare) = (code.join("d"), code.join("d.link"), code.join("d.spare"));
+        std::fs::create_dir_all(name.join("mine")).unwrap();
+        agora_platform::link_dir(&secret, &link).expect("a folder link");
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flipper = {
-            let (stop, root, secret) = (stop.clone(), code.clone(), secret.clone());
+            let (stop, name, link, spare) =
+                (stop.clone(), name.clone(), link.clone(), spare.clone());
             std::thread::spawn(move || {
-                let (real, link, name) = (root.join("d.real"), root.join("d.link"), root.join("d"));
+                let mut flips = 0u64;
                 while !stop.load(std::sync::atomic::Ordering::Relaxed) {
-                    let _ = std::fs::create_dir_all(real.join("mine"));
-                    let _ = std::fs::remove_file(&name);
-                    let _ = std::fs::rename(&real, &name);
-                    let _ = agora_platform::symlink(&secret, &link);
-                    let _ = std::fs::remove_dir_all(&name);
-                    let _ = std::fs::rename(&link, &name);
+                    let _ = std::fs::rename(&name, &spare);
+                    if std::fs::rename(&link, &name).is_ok() {
+                        flips += 1;
+                    }
+                    let _ = std::fs::rename(&name, &link);
+                    let _ = std::fs::rename(&spare, &name);
                 }
+                flips
             })
         };
         let target = code.join("d").to_string_lossy().into_owned();
@@ -443,8 +447,9 @@ mod tests {
             }
         }
         stop.store(true, std::sync::atomic::Ordering::Relaxed);
-        flipper.join().unwrap();
+        let flips = flipper.join().unwrap();
         let _ = std::fs::remove_dir_all(&h.home);
+        assert!(flips > 0, "the folder was never swapped for the link");
         assert_eq!(
             leaked, 0,
             "a listing showed a secret folder through a swapped link"

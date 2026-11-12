@@ -370,12 +370,17 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
         }
         Cmd::DirectoryList(d) => {
             // The same folders a launch refuses stay out of the listing (ADR-0053); `node_home` is the folder the worktrees are in.
-            let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-            let worktrees = canon(&ctx.worktree_root);
+            // The scope is compared with the listed folder by prefix in `std::fs::canonicalize`'s spelling: when it cannot be
+            // canonicalized the listing is refused rather than compared with a raw path that would never match (fail closed).
+            let canon = |p: &Path| std::fs::canonicalize(p).map_err(|_| invalid("directory.path"));
+            let worktrees = canon(&ctx.worktree_root)?;
             let node_home = worktrees
                 .parent()
                 .map_or_else(|| worktrees.clone(), Path::to_path_buf);
-            let home = crate::usage_files::home_dir().map(|h| canon(&h));
+            let home = match crate::usage_files::home_dir() {
+                Some(h) => Some(canon(&h)?),
+                None => None,
+            };
             let scope = crate::directory::ListScope {
                 home: home.as_deref(),
                 node_home: &node_home,
