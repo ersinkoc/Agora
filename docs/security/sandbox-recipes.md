@@ -92,5 +92,12 @@ What differs from macOS and Linux:
 - **A half-listed tool can fail harder than an unlisted one.** With `~\.config\git` listed but its `ignore` file a symbolic link to
   `~\dotfiles\git\ignore`, git stops with `fatal: cannot use ...\.config\git\ignore as an exclude file`; unlisted, it only warns. List symbolic link
   targets too (`Get-Item <file> | Select-Object Target`).
+- **git's packed refs are read-only**, so the shared `.git` folder's root stays closed (an ADR-0050 decision; widening it needs an amendment).
+  Measured with git 2.56 and a `--worktree` agent:
+  - A commit is made, but git prints `error: Unable to create '<checkout>/.git/packed-refs.lock': Permission denied`. Agents may read
+    that line as a failed commit; check with `git log`.
+  - `git branch -d` fails with the same error. Delete branches outside the agent.
+  - Without `~\.config\git` in `sandbox.read`, git also warns `unable to access '...\.config/git/ignore': Permission denied`; it is
+    harmless.
 - **rustup needs `~\.rustup` itself** (`could not create home directory ... (os error 183)` when only one toolchain folder is listed).
 - Not working yet: `cargo build` (`Access is denied` starting `rustc.exe`); npm's cache (`%LOCALAPPDATA%\npm-cache`) is too large to list per agent.
