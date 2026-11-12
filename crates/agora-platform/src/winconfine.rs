@@ -92,6 +92,44 @@ const LABEL_LINE: &str = "#label";
 const WO_LINE: &str = "#wo";
 /// The owner line of a ledger whose spawn has ended with entries it could not take back: no live process, so it is stale.
 const ENDED_OWNER: &str = "#owner\t0\t0";
+/// A ledger folder whose name is not valid Unicode is written as this mark followed by its UTF-16 units in hex. A lossy spelling would
+/// name a folder that does not exist, and recovery takes a missing folder as gone, so its label and entries would stay for good. No
+/// real path starts with `?`, so ledgers written before this read the same.
+const WIDE_MARK: &str = "?wide:";
+
+/// A folder as ledger lines spell it.
+fn ledger_path(p: &Path) -> std::borrow::Cow<'_, str> {
+    use std::os::windows::ffi::OsStrExt;
+    match p.to_str() {
+        Some(s) => s.into(),
+        None => {
+            let hex: String = p
+                .as_os_str()
+                .encode_wide()
+                .map(|u| format!("{u:04x}"))
+                .collect();
+            format!("{WIDE_MARK}{hex}").into()
+        }
+    }
+}
+
+/// The folder a ledger line names (the reverse of [`ledger_path`]).
+fn path_from_ledger(s: &str) -> PathBuf {
+    use std::os::windows::ffi::OsStringExt;
+    if let Some(hex) = s.strip_prefix(WIDE_MARK) {
+        let units: Option<Vec<u16>> = (0..hex.len())
+            .step_by(4)
+            .map(|i| {
+                hex.get(i..i + 4)
+                    .and_then(|h| u16::from_str_radix(h, 16).ok())
+            })
+            .collect();
+        if let Some(units) = units {
+            return PathBuf::from(std::ffi::OsString::from_wide(&units));
+        }
+    }
+    PathBuf::from(s)
+}
 
 fn last_error() -> io::Error {
     // SAFETY: plain call.
@@ -850,26 +888,22 @@ struct Plan<'a> {
 }
 
 fn wo_line(path: &Path, logon: &str) -> String {
-    format!("{WO_LINE}\t{}\t{logon}", path.to_string_lossy())
+    format!("{WO_LINE}\t{}\t{logon}", ledger_path(path))
 }
 
 fn write_ledger(file: &Path, plan: &Plan) -> io::Result<()> {
     let mut text = owner_line();
     for p in plan.grants {
-        text.push_str(&format!("{}\t{}\n", plan.sid, p.to_string_lossy()));
+        text.push_str(&format!("{}\t{}\n", plan.sid, ledger_path(p)));
     }
     for p in plan.above {
-        text.push_str(&format!(
-            "{}\t{}\t{HERE_MARK}\n",
-            plan.sid,
-            p.to_string_lossy()
-        ));
+        text.push_str(&format!("{}\t{}\t{HERE_MARK}\n", plan.sid, ledger_path(p)));
     }
     // A label (and the self-grant that may be needed to set it) is per folder, shared by the agents that use it.
     for p in plan.labels {
         text.push_str(&wo_line(p, plan.logon));
         text.push('\n');
-        text.push_str(&format!("{LABEL_LINE}\t{}\n", p.to_string_lossy()));
+        text.push_str(&format!("{LABEL_LINE}\t{}\n", ledger_path(p)));
     }
     if let Some(dir) = file.parent() {
         std::fs::create_dir_all(dir)?;
@@ -941,7 +975,7 @@ impl Confinement {
         let above = ancestors_of(&all);
         // A folder the user labelled on purpose is left as it is (and not undone later). One that a live agent labelled (a shared
         // `objects`, `refs`) is recorded here too, so the label stays until the last agent using it has ended.
-        let label_line = |p: &Path| format!("{LABEL_LINE}\t{}", p.to_string_lossy());
+        let label_line = |p: &Path| format!("{LABEL_LINE}\t{}", ledger_path(p));
         let mut shared: Vec<PathBuf> = Vec::new();
         let labels: Vec<PathBuf> = wanted
             .iter()
@@ -1039,7 +1073,7 @@ impl Drop for Confinement {
         let _lock = LedgerLock::acquire();
         // Labels first (setting them may need the self-grant), each only when no other live agent still uses that folder.
         for path in &self.labelled {
-            let line = format!("{LABEL_LINE}\t{}", path.to_string_lossy());
+            let line = format!("{LABEL_LINE}\t{}", ledger_path(path));
             if !line_in_use_elsewhere(&line, &self.ledger) && !take_label_back(path) {
                 all_removed = false;
             }
@@ -1059,7 +1093,7 @@ impl Drop for Confinement {
         // A relaunch of the same agent keeps its SID; while that spawn's ledger lists the same entry, it is still in use. The line names
         // no access level: if two spawns of one agent got the same folder at different levels (a policy change between them), the
         // merged, stronger entry stays until the last of them ends. It belongs to the same agent, never to another one.
-        let sid_line = |p: &Path| format!("{}\t{}", self.sid_text, p.to_string_lossy());
+        let sid_line = |p: &Path| format!("{}\t{}", self.sid_text, ledger_path(p));
         for path in &self.granted {
             // A path recorded but never changed (the start failed on it) has no entry to take back.
             if !line_in_use_elsewhere(&sid_line(path), &self.ledger)
@@ -1293,7 +1327,11 @@ fn restricted_token(agent: &Sid) -> io::Result<Token> {
 
 /// Removes the entries a crashed node left behind. Call it once when the node starts, before any agent is running.
 pub(crate) fn recover_stale() {
-    let Ok(dir) = std::fs::read_dir(ledger_dir()) else {
+    recover_in(&ledger_dir());
+}
+
+fn recover_in(ledgers: &Path) {
+    let Ok(dir) = std::fs::read_dir(ledgers) else {
         return;
     };
     for entry in dir.flatten() {
@@ -1313,7 +1351,7 @@ pub(crate) fn recover_stale() {
             let Some((mark, folder)) = line.split_once('\t') else {
                 continue;
             };
-            let folder_path = Path::new(folder);
+            let folder_path = &path_from_ledger(folder);
             if !folder_path.exists() || line_in_use_elsewhere(line, &path) {
                 continue;
             }
@@ -1330,7 +1368,7 @@ pub(crate) fn recover_stale() {
                 let Some((folder, granter)) = folder.rsplit_once('\t') else {
                     continue;
                 };
-                let folder_path = Path::new(folder);
+                let folder_path = &path_from_ledger(folder);
                 if let Ok(granter) = Sid::from_string(granter) {
                     if folder_path.exists()
                         && !line_in_use_elsewhere(line, &path)
@@ -1356,7 +1394,7 @@ pub(crate) fn recover_stale() {
                 Some((f, HERE_MARK)) => (f, true),
                 _ => (folder, false),
             };
-            let folder = Path::new(folder);
+            let folder = &path_from_ledger(folder);
             // A folder that is gone has nothing to undo; one the user may not change was skipped when granting.
             if !folder.exists() {
                 continue;
@@ -1560,6 +1598,42 @@ mod tests {
         assert!(!left.contains("Mandatory Label"), "left: {left}");
         assert!(!left.contains(&identity), "left: {left}");
         assert!(ledger_files.is_empty(), "ledgers left: {ledger_files:?}");
+    }
+
+    /// A crashed node's ledger for a folder whose name is not valid Unicode: recovery finds that folder again and undoes it (a lossy
+    /// spelling named no folder, so recovery took it as gone, dropped the ledger, and the label and entry stayed for good).
+    #[test]
+    fn recovery_undoes_a_folder_whose_name_is_not_valid_unicode() {
+        use std::os::windows::ffi::OsStringExt;
+        let root = std::env::temp_dir().join(format!("agora-wide-ledger-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let ledgers = root.join("ledgers");
+        let mut name: Vec<u16> = "odd-".encode_utf16().collect();
+        name.push(0xD800);
+        let odd = root.join("work").join(std::ffi::OsString::from_wide(&name));
+        std::fs::create_dir_all(&odd).unwrap();
+        assert_eq!(path_from_ledger(&ledger_path(&odd)), odd);
+        assert_eq!(path_from_ledger(&ledger_path(&root)), root);
+
+        let sandbox = Sandbox::new(vec![], vec![odd.clone()]);
+        let c = Confinement::in_ledger_dir(&sandbox, &ledgers, None).unwrap();
+        let sid = Sid::from_string(&c.sid_text).unwrap();
+        let ledger = c.ledger.clone();
+        // A crash: nothing is taken back, and the owner is gone.
+        std::mem::forget(c);
+        assert!(has_explicit_label(&odd) && has_explicit_ace_for(&odd, sid.0));
+        let text = std::fs::read_to_string(&ledger).unwrap();
+        let rest = text.split_once('\n').unwrap().1;
+        std::fs::write(&ledger, format!("{ENDED_OWNER}\n{rest}")).unwrap();
+
+        recover_in(&ledgers);
+        assert!(!has_explicit_label(&odd), "the Low label stayed");
+        assert!(
+            !has_explicit_ace_for(&odd, sid.0),
+            "the agent's entry stayed"
+        );
+        assert!(!ledger.exists(), "the ledger stayed although all is undone");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Review of #273, 4: a NULL DACL lets everyone do everything, so it is refused like a `Users`/`Everyone` write grant.
