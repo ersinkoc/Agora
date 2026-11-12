@@ -51,16 +51,25 @@ Node buffer (`agora-node::event_buffer`): an append-only log of checksummed reco
 file. A torn tail from a crash is truncated on open. After a reconnect the node replays everything after the
 hub's ack, in order. The log is size-capped (oldest events dropped first). If the hub asks for events the node no longer
 has (unacknowledged events dropped by the cap, or a hub restored from a backup older than what the node has trimmed), the
-node resynchronizes instead of stalling (ADR-0054): it appends a resync announcement to its buffer (`NodeOnline`, the
-`CheckoutDiscovered` and `WorkspaceRegistered` it knows, for each agent running now `AgentWorkspaceBound` where it applies,
+node resynchronizes instead of stalling (ADR-0054): it appends a resync announcement to its buffer, sends
+`SnapshotRequired`, and replays from its oldest retained event. The announcement states facts (ADR-0055): the
+`CheckoutDiscovered` and `WorkspaceRegistered` it knows; for each agent running now `AgentWorkspaceBound` where it applies,
 `AgentStarted`, `AgentStateChanged` with its current state, `AgentSessionReported` when known and `TerminalOpened` when it has
-one, then `ApprovalRequested` for every approval still waiting), sends `SnapshotRequired`, and replays from its oldest
-retained event. The hub applies the retained events and then the announcement, so it ends at the node's present state. The
-lost events stay lost and are recorded as such (store, log, audit trail), never silently. Limits: as after a node restart,
-`NodeOnline` hands the shared-board tasks and leases that node's agents held back to the board, so an agent that still runs
-must take its leases again; a managed working copy created inside the lost window (`WorktreeCreated`) stays missing from the
-hub's list, and resource reports and git status are not re-announced (the next report or change brings them back); the
-hub's usage counters for agents that still run start again from the announcement. Terminal bytes never enter this log.
+one; for each agent of this process that has ended `AgentExited` with the last exit code the node recorded for it
+(`i32::MIN` when none was) and `TerminalClosed` when it had a terminal; `ApprovalResolved` again for the last 256 approvals
+resolved in this process; then `ApprovalRequested` for every approval still waiting. It begins with `NodeOnline` only when
+the node's last `NodeOnline` (its process start, or an earlier announcement's) is in the lost range, at or after `from_seq`
+and before the oldest retained event; then the agents before it really died, and the announcement names only what runs now
+(no ended agents, no resolved approvals), as after a restart. If the hub has that `NodeOnline`, or the replay delivers it,
+the hub already reset what came before it, so the announcement leaves what the hub knows of running agents in place: their
+view never shows them as ended, and their shared-board tasks and leases stay theirs. If the announcement itself pushes that
+`NodeOnline` out of the buffer under the cap, a full announcement led by `NodeOnline` follows it. The hub applies the
+retained events and then the announcement, so it ends at the node's present state; the re-stated `AgentExited`,
+`TerminalClosed` and `ApprovalResolved` change nothing the hub already had, and the board's next call releases the work of
+agents that ended. The lost events stay lost and are recorded as such (store, log, audit trail), never silently. Limits: a
+managed working copy created inside the lost window (`WorktreeCreated`) stays missing from the hub's list, and resource
+reports and git status are not re-announced (the next report or change brings them back); the hub's usage counters for
+agents that still run start again from the announcement. Terminal bytes never enter this log.
 
 Hub store (`agora-hub::store`, ADR-0014): SQLite in WAL mode behind an `EventStore` trait. `append(producer, seq, ..)`
 returns `Applied` (stored, with a global position), `Duplicate` (already applied, ignored) or `Gap { expected }` (not the
@@ -95,8 +104,8 @@ Subject Key Identifier, including a custom identifier in a loaded CA. This suppo
 ([RFC 5280 §4.2.1.1](https://www.rfc-editor.org/rfc/rfc5280.html#section-4.2.1.1)). CA certificates/keys, node identities,
 server names, authentication purposes and revocation checks are unchanged; existing certificates remain accepted by the hub.
 
-Events a node emits (`agora-node::daemon::EventSink`): `NodeOnline` at start (and at the head of a resync announcement,
-section 3) and `NodeOffline` on a clean stop; a
+Events a node emits (`agora-node::daemon::EventSink`): `NodeOnline` at start (and at the head of a resync announcement when
+the hub lost that start, section 3) and `NodeOffline` on a clean stop; a
 `CheckoutDiscovered` per registered project; `NodeResources` when the running count changes (not on a timer, so an idle
 node is silent; `memory_used_bytes` is the resident memory of every running agent's process tree, measured then and every 30 s
 while agents run, and sent again only when it moved by more than a quarter or 256 MiB since the last report); and for each agent `WorktreeCreated`, `AgentStarted`,

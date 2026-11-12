@@ -6,7 +6,7 @@
 //! Order: `hello` → (peer's `Welcome`) → `resume` → (peer's `ResumeOk`) → `next_batch`* while the connection lasts.
 //! The hub decides where replay starts (`ResumeOk.from_seq`); the node only checks it still has those events. When it no longer
 //! does (the size cap dropped them, or the hub was restored from an older backup), the node resynchronizes (ADR-0054): it
-//! re-states its present at the tail of its buffer, tells the hub with `SnapshotRequired` and sends what it still has.
+//! re-states its present at the tail of its buffer (ADR-0055), tells the hub with `SnapshotRequired` and sends what it still has.
 
 use std::sync::Arc;
 
@@ -161,9 +161,10 @@ impl Uplink {
             self.cursor = oldest.saturating_sub(1);
             return Ok(Replay::Resumed);
         }
-        // Gone: say what is true now at the tail, then send everything still held. The announcement may push older events
-        // out under the cap, so the oldest is read after it.
-        self.sink.announce();
+        // Gone: say what is true now at the tail (ADR-0055: led by `NodeOnline` only if this process's start is among what is
+        // gone), then send everything still held. The announcement may push older events out under the cap, so the oldest is read
+        // again after it.
+        self.sink.resync(from_seq, self.sink.oldest_retained());
         let oldest = self.sink.oldest_retained();
         self.cursor = oldest.saturating_sub(1);
         self.resynced_from = Some(from_seq);
@@ -203,15 +204,41 @@ impl Uplink {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::daemon::Announce;
     use agora_protocol::v1::{event::Body, Event};
     use prost::Message;
 
-    fn sink(name: &str, cap: u64) -> Arc<EventSink> {
+    /// What the test announcer states besides `NodeOnline`: one `NodeResources` with this many agents.
+    const MARK: u32 = 777;
+
+    fn bare(name: &str, cap: u64) -> Arc<EventSink> {
         let dir = std::env::temp_dir().join(format!("agora-uplink-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let s = Arc::new(EventSink::open_with_cap(&dir, "n1", cap).unwrap());
-        s.set_announcer(Box::new(|ev| ev.node_online("n1")));
+        Arc::new(EventSink::open_with_cap(&dir, "n1", cap).unwrap())
+    }
+
+    /// A sink whose announcer says `NodeOnline` when asked to (as the node's does), then its marker.
+    fn sink(name: &str, cap: u64) -> Arc<EventSink> {
+        let s = bare(name, cap);
+        s.set_announcer(Box::new(|ev, how| {
+            if how == Announce::Restart {
+                ev.node_online("n1");
+            }
+            ev.node_resources("n1", MARK, 0, 0);
+        }));
         s
+    }
+
+    fn is_mark(b: &Body) -> bool {
+        matches!(b, Body::NodeResources(r) if r.agents_running == MARK)
+    }
+
+    /// The bodies recorded after `mark`.
+    fn said_after(s: &EventSink, mark: u64) -> Vec<Body> {
+        s.events_after(mark)
+            .into_iter()
+            .filter_map(|e| e.body)
+            .collect()
     }
 
     fn streaming(sink: &Arc<EventSink>, from_seq: u64) -> (Uplink, Replay) {
@@ -253,27 +280,129 @@ mod tests {
     #[test]
     fn a_resume_from_dropped_events_resyncs_with_the_announcement_at_the_tail() {
         let s = sink("resync", 600);
+        // The process started at 1, and the hub never got it (ADR-0055: then the announcement is led by `NodeOnline`).
+        s.node_online("n1");
         for i in 0..40 {
             s.node_resources("n1", i, i, 0);
         }
         let before = s.next_seq();
         assert!(s.oldest_retained() > 2);
-        let (mut up, replay) = streaming(&s, 2);
+        let (mut up, replay) = streaming(&s, 1);
         let oldest = s.oldest_retained();
         assert_eq!(
             replay,
             Replay::Resync {
-                from_seq: 2,
+                from_seq: 1,
                 oldest_retained: oldest
             }
         );
-        assert_eq!(s.next_seq(), before + 1, "one announcement, new numbers");
+        assert_eq!(s.next_seq(), before + 2, "one announcement, new numbers");
         let sent = decoded(&up.next_batch(1000).unwrap());
         assert_eq!(sent[0].seq, oldest, "the cursor sat at oldest_retained - 1");
-        let last = sent.last().unwrap();
-        assert_eq!(last.seq, before);
-        assert!(matches!(last.body, Some(Body::NodeOnline(_))));
+        let tail = &sent[sent.len() - 2..];
+        assert_eq!(tail[0].seq, before);
+        assert!(matches!(tail[0].body, Some(Body::NodeOnline(_))));
+        assert!(tail[1].body.as_ref().is_some_and(is_mark));
         assert!(sent.windows(2).all(|w| w[1].seq == w[0].seq + 1));
+    }
+
+    /// ADR-0055 section 1: `NodeOnline` leads the announcement exactly when this process's start is in `[from_seq,
+    /// oldest_retained)`, the range the hub lost. If the hub has it, or the replay will deliver it, the announcement states facts.
+    #[test]
+    fn node_online_leads_a_resync_only_when_the_hub_lost_this_processs_start() {
+        // (from_seq, oldest_retained, led by NodeOnline); the start is event 1.
+        for (i, (from, oldest, restart)) in [
+            (1, 3, true),
+            (1, 2, true),
+            (2, 3, false),
+            (2, 2, false),
+            (1, 1, false),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let s = sink(&format!("decide-{i}"), 1 << 20);
+            s.node_online("n1");
+            for n in 0..4 {
+                s.node_resources("n1", n, n, 0);
+            }
+            assert_eq!(s.last_online(), 1);
+            let mark = s.next_seq() - 1;
+            s.resync(from, oldest);
+            let said = said_after(&s, mark);
+            assert_eq!(
+                matches!(said.first(), Some(Body::NodeOnline(_))),
+                restart,
+                "from {from}, oldest {oldest}: {said:?}"
+            );
+            assert_eq!(said.iter().filter(|b| is_mark(b)).count(), 1, "said once");
+        }
+        // A sink that never recorded `NodeOnline` has no start to lose.
+        let s = sink("decide-none", 1 << 20);
+        s.node_resources("n1", 0, 0, 0);
+        s.resync(1, 100);
+        assert!(!said_after(&s, 1)
+            .iter()
+            .any(|b| matches!(b, Body::NodeOnline(_))));
+    }
+
+    /// ADR-0055 through the uplink: the hub already has this process's start, so the resync announcement has no `NodeOnline`.
+    #[test]
+    fn a_resync_after_a_start_the_hub_has_states_facts_without_node_online() {
+        let s = sink("facts", 600);
+        s.node_online("n1");
+        for i in 0..40 {
+            s.node_resources("n1", i, i, 0);
+        }
+        let before = s.next_seq();
+        let (mut up, replay) = streaming(&s, 2);
+        assert!(matches!(replay, Replay::Resync { from_seq: 2, .. }));
+        assert_eq!(s.next_seq(), before + 1, "only the facts");
+        let sent = decoded(&up.next_batch(1000).unwrap());
+        assert!(!sent
+            .iter()
+            .any(|e| matches!(e.body, Some(Body::NodeOnline(_)))));
+        assert!(sent.last().unwrap().body.as_ref().is_some_and(is_mark));
+    }
+
+    /// ADR-0055 section 3: the start was still held, but the facts pushed it out under the size cap. A full announcement led by
+    /// `NodeOnline` follows, and it is held.
+    #[test]
+    fn an_announcement_that_evicts_the_start_is_followed_by_a_full_one() {
+        let s = bare("evicts", 2000);
+        s.set_announcer(Box::new(|ev, how| {
+            if how == Announce::Restart {
+                ev.node_online("n1");
+            } else {
+                // The facts are larger than what the cap keeps after an eviction.
+                for _ in 0..2 {
+                    let filler = std::path::PathBuf::from(format!("/f/{}", "x".repeat(800)));
+                    ev.checkout_discovered("n1", "pad", &filler);
+                }
+            }
+            ev.node_resources("n1", MARK, 0, 0);
+        }));
+        for i in 0..150 {
+            s.node_resources("n1", i, i, 0);
+        }
+        s.node_online("n1");
+        let start = s.last_online();
+        assert!(start >= s.oldest_retained() && s.oldest_retained() > 1);
+        let (mut up, replay) = streaming(&s, 1);
+        assert!(s.oldest_retained() > start, "the facts evicted the start");
+        let restart = s.last_online();
+        assert!(restart > start && restart >= s.oldest_retained(), "held");
+        assert!(
+            matches!(replay, Replay::Resync { from_seq: 1, oldest_retained } if oldest_retained == s.oldest_retained())
+        );
+        let sent = decoded(&up.next_batch(1000).unwrap());
+        let online = sent
+            .iter()
+            .position(|e| matches!(e.body, Some(Body::NodeOnline(_))))
+            .unwrap();
+        assert_eq!(sent[online].seq, restart);
+        assert!(sent[online + 1].body.as_ref().is_some_and(is_mark));
+        assert_eq!(online + 2, sent.len(), "the full announcement is last");
     }
 
     /// A hub from before ADR-0054 ignores `SnapshotRequired` and keeps asking for the lost events: the connection ends as `Stale`
@@ -295,9 +424,7 @@ mod tests {
 
     #[test]
     fn without_an_announcer_a_resync_still_sends_what_is_held() {
-        let dir = std::env::temp_dir().join(format!("agora-uplink-{}-bare", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let s = Arc::new(EventSink::open_with_cap(&dir, "n1", 600).unwrap());
+        let s = bare("bare", 600);
         for i in 0..40 {
             s.node_resources("n1", i, i, 0);
         }

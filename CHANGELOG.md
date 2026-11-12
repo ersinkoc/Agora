@@ -3,6 +3,7 @@
 Each release lists what a person using Agora can now do. The reasons are in `docs/adr/`; the state of every task is in `docs/backlog/`.
 
 ## Next
+- After a machine resynchronizes, its agents that still run keep the tasks and files they had taken on a shared board.
 
 ## 0.3.4
 

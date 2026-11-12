@@ -11,7 +11,7 @@ use agora_core::AgentId;
 use agora_hub::projection::View;
 use agora_hub::session::{Ingest, NodeSession};
 use agora_hub::store::{EventStore, SqliteStore};
-use agora_node::daemon::EventSink;
+use agora_node::daemon::{Announce, EventSink};
 use agora_node::uplink::{Replay, Uplink, UplinkError};
 use agora_protocol::handshake::Support;
 use agora_protocol::v1::AgentState;
@@ -206,7 +206,12 @@ fn a_node_whose_cap_dropped_unacked_events_resyncs_and_delivers_its_newer_events
 fn a_gap_answer_for_lost_events_resyncs_once_mid_session() {
     let dir = tmp("gap-resync");
     let sink = Arc::new(EventSink::open_with_cap(&dir, "n1", 600).unwrap());
-    sink.set_announcer(Box::new(|ev| ev.node_online("n1")));
+    sink.set_announcer(Box::new(|ev, how| {
+        if how == Announce::Restart {
+            ev.node_online("n1");
+        }
+        ev.checkout_discovered("n1", "proj", std::path::Path::new("/work/proj"));
+    }));
     sink.node_resources("n1", 0, 0, 0);
     let store = SqliteStore::open_in_memory().unwrap();
     connect(&store, &sink, "n1", None).unwrap();
@@ -289,5 +294,371 @@ fn messages_out_of_order_are_refused_on_the_node_side_too() {
     assert_eq!(
         up.on_welcome(&bad).unwrap_err(),
         UplinkError::BadGeneration(9)
+    );
+}
+
+// ADR-0055: a resync keeps a running agent's work on a shared board. A real node (agents are agora-fake-agent processes, the event
+// buffer capped small) shares a project with a second machine through a hub, and both of its agents hold a file lease. Offline, one
+// agent is stopped and the size cap drops that before the hub sees it, so the node resynchronizes when it comes back.
+
+mod shared_board {
+    use super::{support, tmp};
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+
+    use agora_core::AgentId;
+    use agora_hub::board::Verdict;
+    use agora_hub::hub::Hub;
+    use agora_hub::session::{Ingest, NodeSession};
+    use agora_hub::store::SqliteStore;
+    use agora_node::control::Client;
+    use agora_node::daemon::{EventSink, Node, NodeConfig};
+    use agora_node::uplink::{Replay, Uplink};
+    use agora_protocol::v1::{self, command_request::Command as Cmd, event::Body};
+    use prost::Message;
+    use serde_json::{json, Value};
+
+    fn git(dir: &Path, args: &[&str]) {
+        let ok = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@example.com")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@example.com")
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "git {args:?}");
+    }
+
+    fn fake_agent() -> PathBuf {
+        let mut fake = PathBuf::from(env!("CARGO_BIN_EXE_agora"));
+        fake.pop();
+        fake.push(format!("agora-fake-agent{}", std::env::consts::EXE_SUFFIX));
+        // Built once per test binary, even when present: a binary left from an older checkout may lack newer flags.
+        static FRESH: std::sync::Once = std::sync::Once::new();
+        FRESH.call_once(|| {
+            assert!(std::process::Command::new(
+                std::env::var("CARGO").unwrap_or_else(|_| "cargo".into())
+            )
+            .args(["build", "-q", "-p", "agora-fake-agent"])
+            .status()
+            .unwrap()
+            .success());
+        });
+        fake
+    }
+
+    /// One connection of `sink` to `hub` through the hub's own ingest (so its boards see what arrives), until the node has nothing
+    /// left to send. `each` runs after every event the hub applied.
+    pub fn link(
+        hub: &Hub,
+        sink: &Arc<EventSink>,
+        node: &str,
+        mut each: impl FnMut(&Hub, &v1::Event),
+    ) {
+        let sup = support();
+        let mut session = NodeSession::new(hub.store(), node, &sup);
+        let mut up = Uplink::new(Arc::clone(sink), "test", &["terminal.raw"]);
+        let hello = up.hello().unwrap();
+        up.on_welcome(&session.hello(&hello, 0).unwrap()).unwrap();
+        let ok = session.resume(&up.resume().unwrap()).unwrap();
+        if let Replay::Resync { .. } = up.on_resume_ok(&ok).unwrap() {
+            session.snapshot_required(0).unwrap();
+        }
+        loop {
+            let batch = up.next_batch(1).unwrap();
+            if batch.is_empty() {
+                return;
+            }
+            for payload in batch {
+                match hub.ingest(&mut session, &payload).unwrap() {
+                    Ingest::Applied { acked, .. } | Ingest::Resynced { acked, .. } => {
+                        up.on_ack(acked).unwrap();
+                        each(hub, &v1::Event::decode(payload.as_slice()).unwrap());
+                    }
+                    Ingest::Duplicate { acked } => up.on_ack(acked).unwrap(),
+                    Ingest::Gap { expected } => {
+                        if let Replay::Resync { .. } = up.on_gap(expected).unwrap() {
+                            session.snapshot_required(0).unwrap();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// A board tool call as `agent` of `node`: whether it failed, and the tool's JSON answer.
+    pub fn board(
+        hub: &Hub,
+        node: &str,
+        agent: &str,
+        project: &str,
+        tool: &str,
+        args: Value,
+    ) -> (bool, Value) {
+        let call = v1::BoardCall {
+            from_agent: agent.into(),
+            project_id: project.into(),
+            tool: tool.into(),
+            arguments_json: args.to_string(),
+            ..Default::default()
+        };
+        match hub
+            .board_call(node, &call, agora_hub::server::now_ms())
+            .verdict
+        {
+            Verdict::Done { result, is_error } => (
+                is_error,
+                serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap(),
+            ),
+            other => panic!("unexpected verdict: {other:?}"),
+        }
+    }
+
+    pub fn owner(hub: &Hub, project: &str, task: &Value) -> Value {
+        let (failed, tasks) = board(hub, "beta", "b", project, "task_list", json!({}));
+        assert!(!failed, "{tasks}");
+        tasks
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["task_id"] == task["task_id"])
+            .map(|t| t["owner"].clone())
+            .unwrap()
+    }
+
+    pub struct Scene {
+        node: Option<Node>,
+        dir: PathBuf,
+        /// The hub, with the board in memory; the node has not reconnected since it lost events.
+        pub hub: Hub,
+        pub project: String,
+        /// Hub-wide keys (`alpha/<id>`) and local ids of the agent that keeps running and the one that ended in the lost window.
+        pub keeper: (String, String),
+        pub quitter: (String, String),
+        pub task: Value,
+    }
+
+    impl Scene {
+        pub fn events(&self) -> &Arc<EventSink> {
+            &self.node.as_ref().unwrap().events
+        }
+    }
+
+    impl Drop for Scene {
+        fn drop(&mut self) {
+            self.node.take(); // stops its agents
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// See the comment above this module. `None` where this platform has no terminals or local sockets.
+    pub fn scene(name: &str) -> Option<Scene> {
+        if !agora_platform::PTY_SUPPORTED || !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+            return None;
+        }
+        let dir = tmp(name);
+        let repo = dir.join("proj");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("a.txt"), "x").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-q", "-m", "init"]);
+        let manifests = dir.join("manifests");
+        std::fs::create_dir_all(&manifests).unwrap();
+        let launch = serde_json::to_string(&vec![
+            fake_agent().to_string_lossy().into_owned(),
+            "--probe-directory".into(),
+            dir.join("probe-{pid}.json").to_string_lossy().into_owned(),
+        ])
+        .unwrap();
+        std::fs::write(
+            manifests.join("probe.toml"),
+            format!("kind = \"probe\"\ndisplay_name = \"Probe\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = {launch}\n"),
+        )
+        .unwrap();
+        let cfg = NodeConfig {
+            node_id: "alpha".into(),
+            socket: dir.join("c.sock"),
+            data_dir: dir.join("data"),
+            worktree_root: dir.join("wt"),
+            manifests_dir: manifests,
+            projects: vec![repo],
+            limits: Default::default(),
+        };
+        let node = Node::start_with_event_cap(&cfg, 16 * 1024).unwrap();
+        let mut local = Client::connect(&cfg.socket).unwrap();
+        let mut start = || {
+            let ok = local
+                .call(Cmd::AgentStart(v1::AgentStart {
+                    kind: "probe".into(),
+                    ..Default::default()
+                }))
+                .unwrap()
+                .unwrap();
+            let Some(v1::command_ok::Result::AgentStart(s)) = ok.result else {
+                panic!("not started");
+            };
+            (format!("alpha/{}", s.agent_id), s.agent_id)
+        };
+        let (keeper, quitter) = (start(), start());
+        let project = node
+            .events
+            .events_after(0)
+            .into_iter()
+            .find_map(|e| match e.body {
+                Some(Body::CheckoutDiscovered(c)) => Some(c.project_id),
+                _ => None,
+            })
+            .unwrap();
+
+        // Another machine with the same project and an agent of its own.
+        let beta = Arc::new(EventSink::open(&dir.join("beta"), "beta").unwrap());
+        beta.node_online("beta");
+        beta.checkout_discovered("beta", &project, Path::new("/elsewhere/proj"));
+        beta.agent_started(&AgentId::new("b"), &project, "beta", "", "shell");
+
+        let hub = Hub::open(SqliteStore::open_in_memory().unwrap()).unwrap();
+        link(&hub, &node.events, "alpha", |_, _| {});
+        link(&hub, &beta, "beta", |_, _| {});
+        let lease = |path: &str| json!({"paths": [path], "ttl_s": 3600});
+        for (agent, path) in [(&keeper.1, "src/keep.rs"), (&quitter.1, "src/quit.rs")] {
+            let (failed, answer) =
+                board(&hub, "alpha", agent, &project, "lease_acquire", lease(path));
+            assert!(!failed, "{answer}");
+        }
+        let (failed, task) = board(
+            &hub,
+            "beta",
+            "b",
+            &project,
+            "task_create",
+            json!({"title": "keep going", "depends_on": []}),
+        );
+        assert!(!failed, "{task}");
+        let (failed, answer) = board(
+            &hub,
+            "alpha",
+            &keeper.1,
+            &project,
+            "task_claim",
+            json!({"task_id": task["task_id"]}),
+        );
+        assert!(!failed, "{answer}");
+        assert_eq!(owner(&hub, &project, &task), keeper.0.as_str());
+
+        // Offline: one agent is stopped, and so much is recorded that the size cap drops it before the hub ever sees it.
+        let acked = node.events.acked();
+        local
+            .call(Cmd::AgentStop(v1::AgentStop {
+                agent_id: quitter.1.clone(),
+            }))
+            .unwrap()
+            .unwrap();
+        let stopped_at = node.events.next_seq() - 1;
+        let long = PathBuf::from(format!("/pad/{}", "x".repeat(1000)));
+        for _ in 0..40 {
+            node.events.checkout_discovered("alpha", "pad", &long);
+        }
+        assert!(node.events.oldest_retained() > stopped_at);
+        assert!(
+            node.events.oldest_retained() > acked + 1,
+            "unacknowledged events were dropped"
+        );
+        assert!(
+            hub.view().0.agents[&quitter.0].running,
+            "the hub missed the stop"
+        );
+        Some(Scene {
+            node: Some(node),
+            dir,
+            hub,
+            project,
+            keeper,
+            quitter,
+            task,
+        })
+    }
+}
+
+/// ADR-0055: after the resync the agent that still runs keeps its lease and its claimed task; the one that ended inside the lost
+/// window shows as ended and its lease is released at the next board call.
+#[test]
+fn a_resync_keeps_a_running_agents_shared_board_work() {
+    use shared_board::{board, link, owner, scene};
+    let Some(s) = scene("board-keep") else {
+        return;
+    };
+    link(&s.hub, s.events(), "alpha", |_, _| {});
+    assert_eq!(
+        s.hub.store().resyncs().unwrap().len(),
+        1,
+        "it resynchronized"
+    );
+    let (failed, answer) = board(
+        &s.hub,
+        "beta",
+        "b",
+        &s.project,
+        "lease_acquire",
+        serde_json::json!({"paths": ["src/keep.rs"], "ttl_s": 60}),
+    );
+    assert!(failed, "the running agent lost its lease: {answer}");
+    assert_eq!(answer["error"]["code"], "lease.held");
+    assert_eq!(
+        answer["error"]["params"]["holder_agent_id"],
+        s.keeper.0.as_str()
+    );
+    assert_eq!(owner(&s.hub, &s.project, &s.task), s.keeper.0.as_str());
+    let view = s.hub.view().0;
+    assert!(view.agents[&s.keeper.0].running);
+    let ended = &view.agents[&s.quitter.0];
+    assert!(!ended.running);
+    assert_eq!(ended.exit_code, Some(i32::MIN), "stopped on request");
+    let (failed, answer) = board(
+        &s.hub,
+        "beta",
+        "b",
+        &s.project,
+        "lease_acquire",
+        serde_json::json!({"paths": ["src/quit.rs"], "ttl_s": 60}),
+    );
+    assert!(!failed, "the ended agent's lease was released: {answer}");
+}
+
+/// ADR-0055: while the hub takes in the resync, a board call from the other machine after any of its events never sees the running
+/// agent as ended, so never frees its work.
+#[test]
+fn board_calls_during_a_resync_never_free_a_running_agents_work() {
+    use shared_board::{board, link, owner, scene};
+    let Some(s) = scene("board-window") else {
+        return;
+    };
+    let (keeper, project, task) = (s.keeper.0.clone(), s.project.clone(), s.task.clone());
+    let mut seen = 0;
+    link(&s.hub, s.events(), "alpha", |hub, ev| {
+        seen += 1;
+        assert!(
+            hub.view().0.agents[&keeper].running,
+            "shown as ended after {ev:?}"
+        );
+        assert_eq!(owner(hub, &project, &task), keeper.as_str(), "after {ev:?}");
+    });
+    assert!(seen > 0);
+    let (failed, answer) = board(
+        &s.hub,
+        "beta",
+        "b",
+        &s.project,
+        "lease_acquire",
+        serde_json::json!({"paths": ["src/keep.rs"], "ttl_s": 60}),
+    );
+    assert!(failed, "{answer}");
+    assert_eq!(
+        answer["error"]["params"]["holder_agent_id"],
+        keeper.as_str()
     );
 }
