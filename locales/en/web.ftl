@@ -315,3 +315,4 @@ closed-changes-label = Left behind
 closed-changes-none = No uncommitted changes
 closed-tokens-label = Used
 closed-review = Review the changes
+ide-resize = Resize the panel

@@ -6,6 +6,8 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ### Closed agents
 - **Remove for everyone:** a closed agent's summary can ask the hub to forget it (ADR-0053): it disappears from every window, the TUI and the desktop app. Its earlier events stay in the hub's record and its tokens and cost still count. An agent that still runs cannot be forgotten. "Remove from this list" still only hides it in this browser.
+### The window
+- Drag the dividers to resize the agent list and the details panel (or focus a divider and use the arrow keys; Shift for bigger steps). The widths are remembered in this browser.
 ### Safety
 - A confined agent cannot be started in a folder that holds a secret folder (such as `~/.config`, which holds the `gh` and `gcloud` sign-ins).
 - Review in a folder that is part of a larger checkout shows only that folder's changes.
@@ -21,6 +23,10 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 - Opening a terminal that is already running shows its later output in the program's own colours, and paste and arrow keys work as the program expects.
 - An adapter that stops reading its input no longer freezes its machine; the request to it times out.
 - An ACP agent that prints a line that is not text no longer looks closed.
+
+### Hub and agents' messages
+- A machine that reconnects is no longer shown offline when its old connection ends late, and terminals opened through the old connection close so the window opens them again.
+- A file request that fails keeps the files the agent already held; an answer waiting for an agent is kept until it reads it; giving back an older hold no longer frees a file taken again since.
 
 ## 0.3.2
 
