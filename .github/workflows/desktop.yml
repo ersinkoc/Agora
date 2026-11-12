@@ -71,3 +71,25 @@ jobs:
           name: desktop-windows-unsigned
           path: apps/desktop/src-tauri/target/release/bundle/nsis/*-setup.exe
           if-no-files-found: error
+  # The same for macOS: a disk image signed ad hoc (`signingIdentity: "-"`, no Apple account), so it runs on the machine that
+  # downloads it after `xattr -d com.apple.quarantine`. Developer ID signing and notarization need the maintainer's account.
+  macos-dmg:
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: apps/desktop/src-tauri
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+      - run: cargo install tauri-cli --version 2.12.4 --locked
+      - run: cargo tauri build --bundles dmg --config '{"bundle":{"active":true}}'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-macos-unsigned
+          path: apps/desktop/src-tauri/target/release/bundle/dmg/*.dmg
+          if-no-files-found: error
