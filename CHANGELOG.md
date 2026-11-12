@@ -4,6 +4,8 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+## 0.3.1
+
 ### The window
 - **Your hub and machines** (status bar, or "Machines" in the command palette): the hub in the middle and every machine around it with live links: online or not, system, the version it runs, agents and terminals, memory, cost, when it was last heard, and its agents as chips that open them.
 - Terminal text size buttons (A−, A+), remembered in this browser. Programs' colours that would be unreadable on the pane are lifted to a readable contrast.
