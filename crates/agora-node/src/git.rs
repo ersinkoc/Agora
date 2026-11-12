@@ -668,7 +668,8 @@ fn untracked_diff(worktree: &Path, names: &[&str]) -> Result<String, GitError> {
 
 /// What `git diff --no-index /dev/null <name>` prints for a new file of `mode` holding `data` (checked against git in
 /// `new_file_diffs_match_git`): the blob id abbreviated to 7, `Binary files ... differ` when a NUL is in the first 8000 bytes,
-/// names quoted as git quotes them by default, and a tab after a `+++` name that holds a space.
+/// names quoted as git quotes them by default, and a tab after a `+++` name that holds a space. The bytes are shown as they are on
+/// disk: no `core.autocrlf`/`eol` conversion (git for Windows, `autocrlf=true` by default, would show CRLF lines without the CR).
 fn new_file_diff(name: &str, mode: &str, data: &[u8]) -> Vec<u8> {
     use std::io::Write;
     let mut blob = format!("blob {}\0", data.len()).into_bytes();
@@ -1177,7 +1178,14 @@ mod tests {
             let git_says = raw_git()
                 .arg("-C")
                 .arg(&d)
-                .args(["-c", "core.quotePath=true", "-c", "core.abbrev=7"])
+                .args([
+                    "-c",
+                    "core.quotePath=true",
+                    "-c",
+                    "core.abbrev=7",
+                    "-c",
+                    "core.autocrlf=false",
+                ])
                 .args([
                     "diff",
                     "--no-index",
@@ -1200,7 +1208,14 @@ mod tests {
             let git_says = raw_git()
                 .arg("-C")
                 .arg(&d)
-                .args(["-c", "core.quotePath=true", "-c", "core.abbrev=7"])
+                .args([
+                    "-c",
+                    "core.quotePath=true",
+                    "-c",
+                    "core.abbrev=7",
+                    "-c",
+                    "core.autocrlf=false",
+                ])
                 .args(["diff", "--no-index", "--no-color", "--", "/dev/null", "lnk"])
                 .env("GIT_CEILING_DIRECTORIES", d.parent().expect("parent"))
                 .output()
@@ -1228,10 +1243,12 @@ mod tests {
         }
         // A FIFO (where `mkfifo` exists): left out, and nothing waits on it.
         let fifo = r.dir.join("pipe");
+        // Git for Windows' `mkfifo` makes a plain file: only a real FIFO is checked.
         if Command::new("mkfifo")
             .arg(&fifo)
             .status()
             .is_ok_and(|s| s.success())
+            && fs::metadata(&fifo).is_ok_and(|m| !m.is_file())
         {
             let dir = r.dir.clone();
             let (tx, rx) = std::sync::mpsc::channel();
