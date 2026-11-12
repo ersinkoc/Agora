@@ -1,0 +1,123 @@
+{
+  "pull_request": 384,
+  "reviewed_head": "8186721648410c80ecf32184d8dfd2aac218ae08",
+  "recorded_at_utc": "2026-11-12T23:24:27.632278+00:00",
+  "reviewer": "Codex on Linux",
+  "harness": "Actual Console rendered in Chromium with controlled onForget responses and synthetic agents; no account or live agent process.",
+  "original_failure": {
+    "head": "31e839e1ecec3b3e822c23414012d7fdbdf83a68",
+    "steps": [
+      "Request global removal of the only closed n/agent-1.",
+      "Deliver a running update before the response.",
+      "Resolve the original boolean callback false, as App did on hub refusal."
+    ],
+    "observed": {
+      "running_agent_visible": false,
+      "persisted_dismissed": [
+        "n/agent-1"
+      ],
+      "other_machine_agent_visible": true,
+      "page_errors": []
+    }
+  },
+  "final_browser_matrix": [
+    {
+      "lang": "en",
+      "name": "permission",
+      "shown": true,
+      "dismissed": [],
+      "alerts": [
+        "The hub did not remove it: you are not allowed to remove it",
+        "The hub did not remove it: you are not allowed to remove it"
+      ]
+    },
+    {
+      "lang": "en",
+      "name": "running",
+      "shown": true,
+      "dismissed": [],
+      "alerts": [
+        "The hub did not remove it: it is running again"
+      ]
+    },
+    {
+      "lang": "en",
+      "name": "old-hub",
+      "shown": true,
+      "dismissed": [
+        "n/agent-1"
+      ],
+      "alerts": []
+    },
+    {
+      "lang": "en",
+      "name": "bulk-permission",
+      "shown": true,
+      "dismissed": [],
+      "alerts": [
+        "The hub did not remove it: you are not allowed to remove it",
+        "The hub did not remove it: you are not allowed to remove it"
+      ]
+    },
+    {
+      "lang": "tr",
+      "name": "permission",
+      "shown": true,
+      "dismissed": [],
+      "alerts": [
+        "Hub kaldırmadı: bunu kaldırma yetkiniz yok",
+        "Hub kaldırmadı: bunu kaldırma yetkiniz yok"
+      ]
+    },
+    {
+      "lang": "tr",
+      "name": "running",
+      "shown": true,
+      "dismissed": [],
+      "alerts": [
+        "Hub kaldırmadı: yeniden çalışıyor"
+      ]
+    },
+    {
+      "lang": "tr",
+      "name": "old-hub",
+      "shown": true,
+      "dismissed": [
+        "n/agent-1"
+      ],
+      "alerts": []
+    },
+    {
+      "lang": "tr",
+      "name": "bulk-permission",
+      "shown": true,
+      "dismissed": [],
+      "alerts": [
+        "Hub kaldırmadı: bunu kaldırma yetkiniz yok",
+        "Hub kaldırmadı: bunu kaldırma yetkiniz yok"
+      ]
+    }
+  ],
+  "validation": {
+    "typecheck": "passed",
+    "vitest_tests_passed": 95,
+    "native_ci_run": 43327911157,
+    "native_ci_platforms": [
+      "Ubuntu",
+      "macOS",
+      "Windows"
+    ],
+    "native_ci_result": "passed",
+    "benchmark_run": 43327911202,
+    "benchmark_result": "passed",
+    "page_errors": []
+  },
+  "screenshots": [
+    "../screenshots/0384-forget-refusal-dark.png",
+    "../screenshots/0384-forget-refusal-light.png"
+  ],
+  "limits": [
+    "The browser proof controls responses; it does not exercise a real user account or an older hub binary.",
+    "Backend permission enforcement is unchanged by this UI patch."
+  ]
+}
