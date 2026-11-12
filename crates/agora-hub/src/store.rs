@@ -20,6 +20,13 @@ pub enum Append {
     Duplicate,
     /// Not the next event from this producer; `expected` is the one the hub is waiting for.
     Gap { expected: u64 },
+    /// Stored as the producer's new base after it said it cannot replay (ADR-0054): `from_seq..=to_seq` were skipped and are
+    /// recorded as lost. Only [`EventStore::append_resync`] gives this.
+    Resynced {
+        pos: u64,
+        from_seq: u64,
+        to_seq: u64,
+    },
 }
 
 /// One event as stored: opaque payload (an encoded protocol `Event`) plus its coordinates.
@@ -58,6 +65,17 @@ pub trait EventStore {
         at_ms: u64,
         payload: &[u8],
     ) -> Result<Append, StoreError>;
+    /// Like [`append`](Self::append), for the producer's first event after it said it cannot replay (`SnapshotRequired`, ADR-0054):
+    /// an event above the next number is stored too, and in the same transaction the producer's numbering moves to it and the
+    /// skipped numbers are recorded as lost, at `resync_at_ms`. Never backwards: at or below what is held is a `Duplicate`.
+    fn append_resync(
+        &self,
+        producer: &str,
+        seq: u64,
+        at_ms: u64,
+        payload: &[u8],
+        resync_at_ms: u64,
+    ) -> Result<Append, StoreError>;
     /// Highest contiguous `seq` applied for the producer (0 when none): the acknowledgement to send back.
     fn acked(&self, producer: &str) -> Result<u64, StoreError>;
     /// Events with a global position greater than `after`, oldest first, at most `limit`.
@@ -66,7 +84,7 @@ pub trait EventStore {
     fn set_setting(&self, key: &str, value: &[u8]) -> Result<(), StoreError>;
 }
 
-const SCHEMA_VERSION: i64 = 8;
+const SCHEMA_VERSION: i64 = 9;
 
 pub struct SqliteStore {
     conn: Mutex<Connection>,
@@ -227,8 +245,97 @@ impl SqliteStore {
                  COMMIT;",
             )?;
         }
+        if version < 9 {
+            // Numbers a node could no longer replay and the hub skipped (ADR-0054): the loss is recorded, never silent.
+            conn.execute_batch(
+                "BEGIN;
+                 CREATE TABLE resyncs (
+                     id       INTEGER PRIMARY KEY AUTOINCREMENT,
+                     producer TEXT    NOT NULL,
+                     from_seq INTEGER NOT NULL,
+                     to_seq   INTEGER NOT NULL,
+                     at_ms    INTEGER NOT NULL
+                 );
+                 PRAGMA user_version = 9;
+                 COMMIT;",
+            )?;
+        }
         Ok(Self {
             conn: Mutex::new(conn),
+        })
+    }
+
+    /// The recorded resyncs (ADR-0054), oldest first: `(producer, from_seq, to_seq, at_ms)`.
+    pub fn resyncs(&self) -> Result<Vec<(String, u64, u64, u64)>, StoreError> {
+        let conn = self.lock()?;
+        let mut stmt =
+            conn.prepare("SELECT producer, from_seq, to_seq, at_ms FROM resyncs ORDER BY id")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get(0)?,
+                to_u64(r.get(1)?),
+                to_u64(r.get(2)?),
+                to_u64(r.get(3)?),
+            ))
+        })?;
+        rows.collect::<Result<_, _>>().map_err(Into::into)
+    }
+
+    /// Appends `seq` for `producer`. With `resync_at_ms`, an event above the next number becomes the new base (ADR-0054).
+    fn append_inner(
+        &self,
+        producer: &str,
+        seq: u64,
+        at_ms: u64,
+        payload: &[u8],
+        resync_at_ms: Option<u64>,
+    ) -> Result<Append, StoreError> {
+        let (seq_i, at_i) = (to_i64(seq)?, to_i64(at_ms)?);
+        let mut conn = self.lock()?;
+        let tx = conn.transaction()?;
+        let last: i64 = tx
+            .query_row(
+                "SELECT last_seq FROM producers WHERE producer = ?1",
+                [producer],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(0);
+        let expected = last + 1;
+        if seq_i <= last {
+            return Ok(Append::Duplicate);
+        }
+        if seq_i != expected && resync_at_ms.is_none() {
+            return Ok(Append::Gap {
+                expected: to_u64(expected),
+            });
+        }
+        // Only a real jump is a resync; the next number is an ordinary append even right after `SnapshotRequired`.
+        let skipped = resync_at_ms.filter(|_| seq_i != expected);
+        tx.execute(
+            "INSERT INTO events (producer, seq, at_ms, payload) VALUES (?1, ?2, ?3, ?4)",
+            params![producer, seq_i, at_i, payload],
+        )?;
+        let pos = to_u64(tx.last_insert_rowid());
+        tx.execute(
+            "INSERT INTO producers (producer, last_seq) VALUES (?1, ?2)
+             ON CONFLICT(producer) DO UPDATE SET last_seq = excluded.last_seq",
+            params![producer, seq_i],
+        )?;
+        if let Some(when) = skipped {
+            tx.execute(
+                "INSERT INTO resyncs (producer, from_seq, to_seq, at_ms) VALUES (?1, ?2, ?3, ?4)",
+                params![producer, expected, seq_i - 1, to_i64(when)?],
+            )?;
+        }
+        tx.commit()?;
+        Ok(match skipped {
+            Some(_) => Append::Resynced {
+                pos,
+                from_seq: to_u64(expected),
+                to_seq: seq - 1,
+            },
+            None => Append::Applied { pos },
         })
     }
 
@@ -306,38 +413,18 @@ impl EventStore for SqliteStore {
         at_ms: u64,
         payload: &[u8],
     ) -> Result<Append, StoreError> {
-        let (seq_i, at_i) = (to_i64(seq)?, to_i64(at_ms)?);
-        let mut conn = self.lock()?;
-        let tx = conn.transaction()?;
-        let last: i64 = tx
-            .query_row(
-                "SELECT last_seq FROM producers WHERE producer = ?1",
-                [producer],
-                |r| r.get(0),
-            )
-            .optional()?
-            .unwrap_or(0);
-        let expected = last + 1;
-        if seq_i <= last {
-            return Ok(Append::Duplicate);
-        }
-        if seq_i != expected {
-            return Ok(Append::Gap {
-                expected: to_u64(expected),
-            });
-        }
-        tx.execute(
-            "INSERT INTO events (producer, seq, at_ms, payload) VALUES (?1, ?2, ?3, ?4)",
-            params![producer, seq_i, at_i, payload],
-        )?;
-        let pos = tx.last_insert_rowid();
-        tx.execute(
-            "INSERT INTO producers (producer, last_seq) VALUES (?1, ?2)
-             ON CONFLICT(producer) DO UPDATE SET last_seq = excluded.last_seq",
-            params![producer, seq_i],
-        )?;
-        tx.commit()?;
-        Ok(Append::Applied { pos: to_u64(pos) })
+        self.append_inner(producer, seq, at_ms, payload, None)
+    }
+
+    fn append_resync(
+        &self,
+        producer: &str,
+        seq: u64,
+        at_ms: u64,
+        payload: &[u8],
+        resync_at_ms: u64,
+    ) -> Result<Append, StoreError> {
+        self.append_inner(producer, seq, at_ms, payload, Some(resync_at_ms))
     }
 
     fn acked(&self, producer: &str) -> Result<u64, StoreError> {
@@ -626,7 +713,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(pk, 0);
-        for table in ["users", "audit", "grants"] {
+        for table in ["users", "audit", "grants", "resyncs"] {
             let n: i64 = conn
                 .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
                 .unwrap();
@@ -637,6 +724,91 @@ mod tests {
         // And reopening an upgraded database changes nothing.
         drop(s);
         assert!(SqliteStore::open(&path).is_ok());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// ADR-0054: after `SnapshotRequired` the producer's next event above what the hub holds becomes its new base, in one
+    /// transaction with the record of the skipped numbers. Never backwards, and the next number is an ordinary append.
+    #[test]
+    fn a_resync_stores_the_event_moves_the_numbering_and_records_the_skipped_range() {
+        let s = store();
+        for i in 1..=3 {
+            s.append("n1", i, 0, &[i as u8]).unwrap();
+        }
+        // At or below what is held stays a duplicate, even as a resync.
+        assert_eq!(
+            s.append_resync("n1", 2, 0, b"x", 99).unwrap(),
+            Append::Duplicate
+        );
+        // The next number is an ordinary append: nothing was lost.
+        assert_eq!(
+            s.append_resync("n1", 4, 0, b"d", 99).unwrap(),
+            Append::Applied { pos: 4 }
+        );
+        assert!(s.resyncs().unwrap().is_empty());
+        assert_eq!(
+            s.append_resync("n1", 10, 7, b"j", 99).unwrap(),
+            Append::Resynced {
+                pos: 5,
+                from_seq: 5,
+                to_seq: 9
+            }
+        );
+        assert_eq!(s.acked("n1").unwrap(), 10);
+        assert_eq!(s.resyncs().unwrap(), [("n1".to_string(), 5, 9, 99)]);
+        let last = s.events_after(4, 10).unwrap();
+        assert_eq!((last.len(), last[0].seq, last[0].at_ms), (1, 10, 7));
+        // Ordinary appends follow the normal rules from the new base.
+        assert_eq!(s.append("n1", 10, 0, b"j").unwrap(), Append::Duplicate);
+        assert_eq!(
+            s.append("n1", 12, 0, b"l").unwrap(),
+            Append::Gap { expected: 11 }
+        );
+        // Another producer is untouched.
+        assert_eq!(s.acked("n2").unwrap(), 0);
+    }
+
+    /// The resync record and the event are one transaction: an event that cannot be stored leaves no record and no jump.
+    #[test]
+    fn a_resync_that_fails_to_store_its_event_records_nothing() {
+        let s = store();
+        s.append("n1", 1, 0, b"a").unwrap();
+        // An event time SQLite cannot hold is refused before anything is written.
+        assert!(s.append_resync("n1", 5, u64::MAX, b"e", 9).is_err());
+        assert_eq!(s.acked("n1").unwrap(), 1);
+        assert!(s.resyncs().unwrap().is_empty());
+        // A failure after the event row was written (the record's own time) rolls the event and the jump back too.
+        assert!(s.append_resync("n1", 5, 0, b"e", u64::MAX).is_err());
+        assert_eq!(s.acked("n1").unwrap(), 1);
+        assert_eq!(s.events_after(0, 10).unwrap().len(), 1);
+        assert!(s.resyncs().unwrap().is_empty());
+    }
+
+    /// A hub database from before ADR-0054 (schema 8) opens, gains an empty `resyncs` table and keeps its events.
+    #[test]
+    fn a_database_from_before_resyncs_upgrades_in_place() {
+        let d = tmpdir("upgrade8");
+        let path = d.join("hub.db");
+        {
+            let s = SqliteStore::open(&path).unwrap();
+            s.append("n1", 1, 5, b"a").unwrap();
+            let conn = s.lock().unwrap();
+            conn.execute_batch("DROP TABLE resyncs; PRAGMA user_version = 8;")
+                .unwrap();
+        }
+        assert!(verify(&path).is_ok(), "an older database is a valid backup");
+        let s = SqliteStore::open(&path).unwrap();
+        assert_eq!(s.acked("n1").unwrap(), 1);
+        assert!(s.resyncs().unwrap().is_empty());
+        assert_eq!(
+            s.append_resync("n1", 4, 0, b"d", 1).unwrap(),
+            Append::Resynced {
+                pos: 2,
+                from_seq: 2,
+                to_seq: 3
+            }
+        );
+        drop(s);
         let _ = std::fs::remove_dir_all(&d);
     }
 }

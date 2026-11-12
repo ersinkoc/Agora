@@ -30,15 +30,60 @@ const GIT_POLL: Duration = Duration::from_secs(5);
 /// Default size cap of the on-disk event buffer.
 pub const EVENT_BUFFER_BYTES: u64 = 64 * 1024 * 1024;
 
-/// Writes protocol events to the durable buffer.
-/// What a node says about itself again when the hub is ahead of it.
+/// What a node says about itself again when the hub's record of it cannot be continued (see [`EventSink::announce`]).
 type Announcer = Box<dyn Fn(&EventSink) + Send>;
 
+/// Facts the node reported that its supervisor does not keep, remembered from the events themselves so a resync announcement
+/// (ADR-0054) can say them again: the folders it registered, which agent works in which, and each agent's session.
+#[derive(Default, Clone)]
+struct Reported {
+    workspaces: std::collections::BTreeMap<String, v1::WorkspaceRegistered>,
+    bound: std::collections::BTreeMap<String, String>,
+    sessions: std::collections::BTreeMap<String, String>,
+}
+
+impl Reported {
+    fn keeps(body: &Body) -> bool {
+        matches!(
+            body,
+            Body::WorkspaceRegistered(_)
+                | Body::WorkspaceStatusChanged(_)
+                | Body::AgentWorkspaceBound(_)
+                | Body::AgentSessionReported(_)
+        )
+    }
+
+    fn note(&mut self, body: &Body) {
+        match body {
+            Body::WorkspaceRegistered(w) => {
+                self.workspaces.insert(w.workspace_id.clone(), w.clone());
+            }
+            Body::WorkspaceStatusChanged(c) => {
+                if let Some(w) = self.workspaces.get_mut(&c.workspace_id) {
+                    w.files_changed = c.files_changed;
+                }
+            }
+            Body::AgentWorkspaceBound(b) => {
+                self.bound
+                    .insert(b.agent_id.clone(), b.workspace_id.clone());
+            }
+            Body::AgentSessionReported(r) => {
+                self.sessions
+                    .insert(r.agent_id.clone(), r.session_id.clone());
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Writes protocol events to the durable buffer.
 pub struct EventSink {
     producer: String,
     log: Mutex<DiskEventLog>,
-    /// Says again what the hub must know about this node (online, its checkouts), see [`EventSink::announce`].
+    /// Says again what the hub must know about this node, see [`EventSink::announce`].
     announcer: Mutex<Option<Announcer>>,
+    /// See [`Reported`]. Never held together with `log`.
+    reported: Mutex<Reported>,
 }
 
 pub(crate) fn now_ms() -> u64 {
@@ -88,12 +133,28 @@ impl EventSink {
             producer: producer.to_string(),
             log: Mutex::new(DiskEventLog::open(dir, max_bytes)?),
             announcer: Mutex::new(None),
+            reported: Mutex::new(Reported::default()),
         })
     }
 
-    /// What this node says about itself when the hub turns out to be ahead of it (see [`announce`](Self::announce)).
+    /// What this node says about itself when the hub's record of it cannot be continued (see [`announce`](Self::announce)).
     pub fn set_announcer(&self, f: Announcer) {
         *self.announcer.lock().unwrap_or_else(|e| e.into_inner()) = Some(f);
+    }
+
+    /// Says again, at the tail of the buffer, what the hub must know about this node now: who it is, its checkouts and folders,
+    /// the agents running with their state, session and terminal, and the approvals waiting (ADR-0054 section 3). Used when the
+    /// hub cannot have what was recorded before: an empty data directory under a known name, or events lost to the size cap or
+    /// to a hub restored from an older backup. Without an announcer (a bare sink in tests) it says nothing.
+    ///
+    /// Lock order: the announcer runs under the `announcer` lock and takes the supervisor's and the approvals' locks one at a time
+    /// to read them, then `reported` and `log` one at a time to write; it never holds two of them together. Nothing that holds the
+    /// supervisor's lock ever waits for the `announcer` lock, and `log` is never held while taking another lock.
+    pub fn announce(&self) {
+        let announcer = self.announcer.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(f) = &*announcer {
+            f(self);
+        }
     }
 
     /// The hub has acknowledged numbers this buffer never produced (this machine came back under a known name with an empty data
@@ -103,14 +164,88 @@ impl EventSink {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .advance_to(next)?;
-        let announcer = self.announcer.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(f) = &*announcer {
-            f(self);
-        }
+        self.announce();
         Ok(())
     }
 
+    /// The present part of the announcement (see [`announce`](Self::announce)): the folders this node registered, then every
+    /// agent in `views` that is running, in the order a launch reports it, then `waiting` approvals. The callers' locks are
+    /// already released: `views` and `waiting` are copies.
+    pub fn announce_present(&self, views: &[AgentView], waiting: &[crate::approvals::Pending]) {
+        let known = self
+            .reported
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        for w in known.workspaces.values() {
+            self.record(Body::WorkspaceRegistered(w.clone()));
+        }
+        for v in views.iter().filter(|v| v.running) {
+            let id = v.id.as_str();
+            if v.directory {
+                if let Some(ws) = known.bound.get(id) {
+                    self.record(Body::AgentWorkspaceBound(v1::AgentWorkspaceBound {
+                        agent_id: id.to_string(),
+                        workspace_id: ws.clone(),
+                    }));
+                }
+            }
+            self.agent_up(v, known.sessions.get(id));
+        }
+        for p in waiting {
+            self.approval_requested(p);
+        }
+    }
+
+    /// An agent in `view` is up: started, its state, its session if known, and its terminal if it has one.
+    fn agent_up(&self, view: &AgentView, session: Option<&String>) {
+        let agent = view.id.as_str();
+        self.record(Body::AgentStarted(v1::AgentStarted {
+            agent_id: agent.into(),
+            project_id: view.project.clone(),
+            node_id: self.producer.clone(),
+            kind: view.kind.clone(),
+            worktree_id: if view.directory {
+                String::new()
+            } else {
+                view.worktree.to_string_lossy().into_owned()
+            },
+            level: match view.level {
+                agora_core::IntegrationLevel::L0Generic => v1::IntegrationLevel::L0Generic,
+                agora_core::IntegrationLevel::L1Manifest => v1::IntegrationLevel::L1Manifest,
+                agora_core::IntegrationLevel::L2Acp => v1::IntegrationLevel::L2Acp,
+                agora_core::IntegrationLevel::L3Adapter => v1::IntegrationLevel::L3Adapter,
+            } as i32,
+        }));
+        self.record(Body::AgentStateChanged(v1::AgentStateChanged {
+            agent_id: agent.into(),
+            state: proto_state(view.state) as i32,
+            reported: false,
+        }));
+        if let Some(session) = session {
+            self.record(Body::AgentSessionReported(v1::AgentSessionReported {
+                agent_id: agent.into(),
+                session_id: session.clone(),
+            }));
+        }
+        if view.terminal {
+            self.record(Body::TerminalOpened(v1::TerminalOpened {
+                terminal_id: crate::control::terminal_id_of(&view.id),
+                node_id: self.producer.clone(),
+                purpose: v1::TerminalPurpose::Agent as i32,
+                agent_id: agent.into(),
+            }));
+        }
+    }
+
     fn record(&self, body: Body) {
+        // Only the few kinds a resync announcement repeats take this lock; every other event goes straight to the log.
+        if Reported::keeps(&body) {
+            self.reported
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .note(&body);
+        }
         let mut log = self.log.lock().unwrap_or_else(|e| e.into_inner());
         let ev = v1::Event {
             producer_id: self.producer.clone(),
@@ -146,42 +281,7 @@ impl EventSink {
             match e {
                 SupervisorEvent::Started { agent } | SupervisorEvent::Resumed { agent, .. } => {
                     if let Some(view) = views.iter().find(|v| v.id == *agent) {
-                        self.record(Body::AgentStarted(v1::AgentStarted {
-                            agent_id: agent.as_str().into(),
-                            project_id: view.project.clone(),
-                            node_id: self.producer.clone(),
-                            kind: view.kind.clone(),
-                            worktree_id: if view.directory {
-                                String::new()
-                            } else {
-                                view.worktree.to_string_lossy().into_owned()
-                            },
-                            level: match view.level {
-                                agora_core::IntegrationLevel::L0Generic => {
-                                    v1::IntegrationLevel::L0Generic
-                                }
-                                agora_core::IntegrationLevel::L1Manifest => {
-                                    v1::IntegrationLevel::L1Manifest
-                                }
-                                agora_core::IntegrationLevel::L2Acp => v1::IntegrationLevel::L2Acp,
-                                agora_core::IntegrationLevel::L3Adapter => {
-                                    v1::IntegrationLevel::L3Adapter
-                                }
-                            } as i32,
-                        }));
-                        self.record(Body::AgentStateChanged(v1::AgentStateChanged {
-                            agent_id: agent.as_str().into(),
-                            state: proto_state(view.state) as i32,
-                            reported: false,
-                        }));
-                        if view.terminal {
-                            self.record(Body::TerminalOpened(v1::TerminalOpened {
-                                terminal_id: crate::control::terminal_id_of(agent),
-                                node_id: self.producer.clone(),
-                                purpose: v1::TerminalPurpose::Agent as i32,
-                                agent_id: agent.as_str().into(),
-                            }));
-                        }
+                        self.agent_up(view, None);
                     }
                 }
                 SupervisorEvent::SessionReported { agent, session } => {
@@ -408,6 +508,18 @@ impl EventSink {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .replay_after(after)
+    }
+
+    /// Like [`payloads_after`](Self::payloads_after), at most `max` of them: one uplink batch.
+    pub fn payloads_after_max(
+        &self,
+        after: u64,
+        max: usize,
+    ) -> Result<Vec<Vec<u8>>, crate::event_buffer::ReplayError> {
+        self.log
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .replay_after_max(after, max)
     }
 
     /// Decoded events after `after` (exclusive), oldest first; what the uplink sends and tests inspect.
@@ -657,19 +769,10 @@ impl Node {
         for p in &projects {
             events.checkout_discovered(&cfg.node_id, &p.id, &p.root);
         }
-        {
-            let node = cfg.node_id.clone();
-            let known: Vec<(String, PathBuf)> = projects
-                .iter()
-                .map(|p| (p.id.clone(), p.root.clone()))
-                .collect();
-            events.set_announcer(Box::new(move |ev| {
-                ev.node_online(&node);
-                for (id, root) in &known {
-                    ev.checkout_discovered(&node, id, root);
-                }
-            }));
-        }
+        let known_checkouts: Vec<(String, PathBuf)> = projects
+            .iter()
+            .map(|p| (p.id.clone(), p.root.clone()))
+            .collect();
 
         // Every agent that launches joins the mesh and, if its manifest has `[mcp]`, is handed its own endpoint.
         {
@@ -739,6 +842,24 @@ impl Node {
                     .into_iter()
                     .find(|v| v.id.as_str() == agent)
                     .map(|v| v.project)
+            }));
+        }
+        {
+            // What this node says when the hub's record of it cannot be continued (ADR-0054): who it is, its checkouts, and its
+            // present. Each lock is taken alone and released before the next, and before anything is recorded (see `announce`).
+            let (node, sup, approvals) = (
+                cfg.node_id.clone(),
+                Arc::clone(&supervisor),
+                Arc::clone(&approvals),
+            );
+            events.set_announcer(Box::new(move |ev| {
+                let views = sup.lock().unwrap_or_else(|e| e.into_inner()).list();
+                let waiting = approvals.waiting();
+                ev.node_online(&node);
+                for (id, root) in &known_checkouts {
+                    ev.checkout_discovered(&node, id, root);
+                }
+                ev.announce_present(&views, &waiting);
             }));
         }
         let chat = Arc::new(crate::chat::ChatBoard::new());

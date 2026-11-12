@@ -886,6 +886,67 @@ fn a_node_that_returns_under_a_known_name_with_an_empty_data_dir_is_still_heard(
     });
 }
 
+/// ADR-0054 over the real transport: a node whose size cap dropped events the hub never saw used to end every connection in
+/// `Stale` and retry forever. Now it says `SnapshotRequired`, the hub takes its oldest held event as the new base, records the
+/// lost numbers (store and audit trail) and shows what the node announced as its present.
+#[test]
+fn a_node_that_lost_unacknowledged_events_resyncs_over_the_link() {
+    let hub = hubside("burst");
+    let addr = hub.listen("127.0.0.1:0");
+    let sink = Arc::new(EventSink::open_with_cap(&tmp("burst"), "burst", 1200).unwrap());
+    sink.set_announcer(Box::new(|ev| {
+        ev.node_online("burst");
+        ev.agent_launched(
+            &AgentId::new("agent-now"),
+            "proj",
+            "burst",
+            Path::new("/work/proj"),
+            Path::new("/work/now"),
+            "agent/now",
+            "shell",
+            true,
+        );
+    }));
+    // Offline long enough that the cap dropped events the hub never saw.
+    sink.node_online("burst");
+    for i in 0..60 {
+        sink.node_resources("burst", i, 0, 0);
+    }
+    let oldest = sink.oldest_retained();
+    assert!(oldest > 1);
+    let _link = spawn(Arc::clone(&sink), hub.link(addr)).unwrap();
+    wait("the announced agent to show up", || {
+        hub.state
+            .hub
+            .view()
+            .0
+            .agents
+            .contains_key("burst/agent-now")
+    });
+    wait("everything to be acknowledged", || {
+        sink.acked() == sink.next_seq() - 1
+    });
+    let store = hub.state.hub.store();
+    let resyncs = store.resyncs().unwrap();
+    assert_eq!(resyncs.len(), 1);
+    let (producer, from, to, _) = &resyncs[0];
+    assert_eq!((producer.as_str(), *from), ("burst", 1));
+    // At least what was dropped offline; more if the announcement itself pushed older events out under the cap.
+    assert!(*to >= oldest - 1, "{to} vs {oldest}");
+    let audit = agora_hub::audit::Audit::new(store)
+        .list(0, None, 50)
+        .unwrap();
+    assert!(audit.iter().any(|e| e.action == "node.resynced"
+        && e.who == "hub"
+        && e.node == "burst"
+        && e.outcome == format!("1..={to}")));
+    // From then on the link is ordinary.
+    sink.node_resources("burst", 7, 7, 0);
+    wait("a newer event", || {
+        hub.state.hub.view().0.nodes["burst"].agents_running == 7
+    });
+}
+
 #[test]
 fn a_certificate_the_hub_does_not_know_never_gets_in() {
     let hub = hubside("honest");
@@ -1766,4 +1827,124 @@ fn a_command_the_policy_lists_needs_a_grant_signed_by_a_trusted_device_and_the_l
     let e = r.unwrap_err();
     assert_ne!(e.code, ErrorCode::ApprovalGrantRequired.as_str(), "{e:?}");
     drop(node);
+}
+
+#[test]
+fn the_terminal_console_removes_a_closed_agent_from_every_list_but_not_a_running_one() {
+    use agora_tui::client::{Hub as ConsoleHub, Session};
+    let hub = hubside("laptop");
+    let addr = hub.listen("127.0.0.1:0");
+    let sink = sink_with_agent(&tmp("forget"), "laptop");
+    let _link = spawn(Arc::clone(&sink), hub.link(addr)).unwrap();
+    wait("the node to appear", || {
+        hub.state.hub.view().0.agents.contains_key("laptop/agent-1")
+    });
+    let console = ConsoleHub {
+        addr: addr.to_string(),
+        ca_pem: hub.ca_pem.clone(),
+    };
+    let mut session = Session::connect(&console, "client-token").unwrap();
+    // Running: the hub refuses, and the agent stays.
+    let error = session.forget_agent("laptop/agent-1").unwrap_err();
+    assert_eq!(error.code, "agent.running");
+    assert_eq!(
+        error.params["agent_id"].value,
+        Some(agora_protocol::v1::param_value::Value::Str(
+            "laptop/agent-1".into()
+        ))
+    );
+    assert!(hub.state.hub.view().0.agents.contains_key("laptop/agent-1"));
+    // Once it has exited, `d` removes it for everyone.
+    sink.record_bodies(vec![agora_protocol::v1::event::Body::AgentExited(
+        agora_protocol::v1::AgentExited {
+            agent_id: "agent-1".into(),
+            exit_code: 0,
+        },
+    )]);
+    wait("the agent to stop running", || {
+        hub.state
+            .hub
+            .view()
+            .0
+            .agents
+            .get("laptop/agent-1")
+            .is_some_and(|a| !a.running)
+    });
+    assert_eq!(session.forget_agent("laptop/agent-1"), Ok(()));
+    wait("the hub to forget the agent", || {
+        hub.state
+            .hub
+            .view()
+            .0
+            .agents
+            .get("laptop/agent-1")
+            .is_some_and(|a| a.forgotten)
+    });
+    // A window that opens now does not list it.
+    let mut fresh = Session::connect(&console, "client-token").unwrap();
+    let end = Instant::now() + Duration::from_secs(20);
+    let snapshot = loop {
+        match fresh.next(Duration::from_millis(200)) {
+            agora_tui::client::Update::Snapshot(s) => break *s,
+            agora_tui::client::Update::Closed => panic!("the hub closed the connection"),
+            _ => assert!(Instant::now() < end, "no snapshot"),
+        }
+    };
+    assert!(!snapshot
+        .agents
+        .iter()
+        .any(|a| a.agent_id == "laptop/agent-1"));
+}
+
+#[test]
+fn the_terminal_console_keeps_a_forget_refusals_permission_details() {
+    use agora_hub::users::{Access, Role};
+    use agora_tui::client::{Hub as ConsoleHub, Session};
+    struct Viewer;
+    impl ClientAuth for Viewer {
+        fn check(&self, token: &str) -> bool {
+            token == "client-token"
+        }
+        fn access(&self, token: &str) -> Option<Access> {
+            self.check(token).then(|| Access {
+                role: Role::Viewer,
+                user: "viewer".into(),
+                projects: None,
+            })
+        }
+    }
+    let mut hub = hubside("laptop");
+    Arc::get_mut(&mut hub.state).unwrap().auth = Box::new(Viewer);
+    let addr = hub.listen("127.0.0.1:0");
+    let sink = sink_with_agent(&tmp("forget-viewer"), "laptop");
+    sink.record_bodies(vec![agora_protocol::v1::event::Body::AgentExited(
+        agora_protocol::v1::AgentExited {
+            agent_id: "agent-1".into(),
+            exit_code: 0,
+        },
+    )]);
+    let _link = spawn(Arc::clone(&sink), hub.link(addr)).unwrap();
+    wait("the closed agent", || {
+        hub.state
+            .hub
+            .view()
+            .0
+            .agents
+            .get("laptop/agent-1")
+            .is_some_and(|a| !a.running)
+    });
+    let console = ConsoleHub {
+        addr: addr.to_string(),
+        ca_pem: hub.ca_pem.clone(),
+    };
+    let mut session = Session::connect(&console, "client-token").unwrap();
+    let error = session.forget_agent("laptop/agent-1").unwrap_err();
+    assert_eq!(error.code, "auth.forbidden");
+    assert_eq!(
+        error.params["action"].value,
+        Some(agora_protocol::v1::param_value::Value::Str(
+            "AgentForget".into()
+        ))
+    );
+    assert!(!hub.state.hub.view().0.agents["laptop/agent-1"].forgotten);
 }

@@ -10,7 +10,7 @@ use crate::device::{approval_message, grant_message, new_grant_id, Device};
 use agora_protocol::frame::{kinds, STREAM_CLOSE, STREAM_COMMANDS, STREAM_EVENTS};
 use agora_protocol::v1::{
     command_ok, command_request, command_response, CommandOk, CommandRequest, CommandResponse,
-    Snapshot,
+    ErrorInfo, Snapshot,
 };
 use agora_protocol::ws::{connect_with_token, Conn};
 use agora_protocol::Frame;
@@ -234,6 +234,16 @@ impl Session {
         command: command_request::Command,
         wait: Duration,
     ) -> Result<CommandOk, String> {
+        self.command_info(node, command, wait).map_err(|e| e.code)
+    }
+
+    /// Keeps the peer's error parameters for actions that render the localized reason.
+    fn command_info(
+        &mut self,
+        node: &str,
+        command: command_request::Command,
+        wait: Duration,
+    ) -> Result<CommandOk, ErrorInfo> {
         self.requests += 1;
         let id = format!("t{}", self.requests);
         let req = CommandRequest {
@@ -254,14 +264,14 @@ impl Session {
                 payload: req.encode_to_vec(),
             })
             .await
-            .map_err(|_| "client.unreachable".to_string())?;
+            .map_err(|_| command_error("client.unreachable"))?;
             let end = tokio::time::Instant::now() + wait;
             loop {
                 let left = end.saturating_duration_since(tokio::time::Instant::now());
                 let f = match tokio::time::timeout(left, conn.recv()).await {
                     Ok(Ok(Some(f))) => f,
-                    Err(_) => return Err("node.timeout".to_string()),
-                    Ok(_) => return Err("client.unreachable".to_string()),
+                    Err(_) => return Err(command_error("node.timeout")),
+                    Ok(_) => return Err(command_error("client.unreachable")),
                 };
                 if (f.stream_id, f.kind) == (STREAM_COMMANDS, 1) {
                     let Ok(r) = CommandResponse::decode(f.payload.as_slice()) else {
@@ -274,7 +284,7 @@ impl Session {
                         continue;
                     }
                     return match r.result {
-                        Some(command_response::Result::Err(e)) => Err(e.code),
+                        Some(command_response::Result::Err(e)) => Err(e),
                         Some(command_response::Result::Ok(ok)) => Ok(ok),
                         None => Ok(CommandOk::default()),
                     };
@@ -624,6 +634,20 @@ impl Session {
         )
     }
 
+    /// Removes a closed agent from every client's list (ADR-0053 `agent.forget`). The hub answers it itself, so it names no machine;
+    /// `agent_id` is the hub-wide `<node>/<id>`. `agent.running` while it runs. Errors keep the hub's code and parameters for
+    /// localized messages; other command helpers retain their code-only result.
+    pub fn forget_agent(&mut self, agent_id: &str) -> Result<(), ErrorInfo> {
+        self.command_info(
+            "",
+            command_request::Command::AgentForget(agora_protocol::v1::AgentForget {
+                agent_id: agent_id.to_string(),
+            }),
+            Duration::from_secs(15),
+        )
+        .map(|_| ())
+    }
+
     /// Keys typed into the terminal (an ordinary routed command; the machine runs them in the order sent). Fire and forget.
     pub fn terminal_input(&mut self, node: &str, terminal_id: &str, data: &[u8]) {
         self.send_nowait(
@@ -678,6 +702,13 @@ impl Session {
             seq: None,
             payload: req.encode_to_vec(),
         }));
+    }
+}
+
+fn command_error(code: &str) -> ErrorInfo {
+    ErrorInfo {
+        code: code.to_string(),
+        ..Default::default()
     }
 }
 

@@ -4,6 +4,10 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+## 0.3.3
+### Machines
+- A machine that was cut off from the hub for a long time sends what it saved much faster when the link comes back.
+
 ### Starting agents
 - **Browse folders:** the start window can list a machine's folders (ADR-0053): click **Browse folders**, step into a folder or up one, see which are Git projects, and use the folder you are in. Only folder names are listed, protected folders never show, and each listing is signed by this device. A machine that has not been updated keeps the typed path.
 
@@ -21,6 +25,7 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 - Stopping an agent that runs through an adapter also ends the adapter's program; before, it kept running unseen.
 - A resume that fails no longer leaves the stopped agent reachable by other agents.
 - When the hub confirms events older than the ones a machine kept while it was offline, the machine keeps the rest instead of deleting them (or stopping its link).
+- A machine that was offline too long, or every machine after the hub is restored from a backup, reconnects on its own and shows its current agents (ADR-0054); before, it never reached the hub again. The events from the lost window are recorded as missing, and the owner's Activity page lists it.
 
 ### Terminals and adapters
 - Opening a terminal that is already running shows its later output in the program's own colours, and paste and arrow keys work as the program expects.
