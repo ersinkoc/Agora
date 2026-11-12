@@ -214,10 +214,16 @@ impl Files {
             });
         }
         let mut data = Vec::with_capacity(usize::try_from(meta.len()).unwrap_or(0));
-        // Bounded by the limit too: the file can grow after its size was read.
-        file.take(self.max_read)
+        // Bounded too: the file can grow after its size was read. One byte past the limit tells a grown file from one that fits.
+        file.take(self.max_read.saturating_add(1))
             .read_to_end(&mut data)
             .map_err(|e| io_err(rel, &e))?;
+        if data.len() as u64 > self.max_read {
+            return Err(FilesError::TooLarge {
+                path: rel.to_string(),
+                limit: self.max_read,
+            });
+        }
         Ok(data)
     }
 

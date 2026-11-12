@@ -273,7 +273,7 @@ pub fn opened_path(file: &std::fs::File) -> io::Result<PathBuf> {
     #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     {
         let _ = file;
-        Err(unsupported_io("the path of an open file"))
+        Err(io::Error::from(io::ErrorKind::Unsupported))
     }
 }
 
