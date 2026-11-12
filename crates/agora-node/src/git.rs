@@ -273,8 +273,18 @@ fn branch_exists(dir: &Path, branch: &str) -> Result<bool, GitError> {
     }
 }
 
+/// Passed to every `status` and `diff` the node runs: git looks inside a submodule with that submodule's own config, whose filter
+/// drivers [`hardened`] does not see (measured: a clean filter planted in `.git/modules/<name>/config` ran on the node's `status`).
+/// A submodule moved to another commit still shows; edits inside it do not. Removing such a worktree is refused by git itself
+/// unless forced, so [`remove_worktree`] loses nothing.
+const SUBMODULE_COMMITS_ONLY: &str = "--ignore-submodules=dirty";
+
 fn is_dirty(worktree: &Path) -> Result<bool, GitError> {
-    Ok(!git(worktree, &["status", "--porcelain"])?.trim().is_empty())
+    Ok(
+        !git(worktree, &["status", "--porcelain", SUBMODULE_COMMITS_ONLY])?
+            .trim()
+            .is_empty(),
+    )
 }
 
 /// The branch checked out in a worktree (`None` when HEAD is detached).
@@ -341,12 +351,15 @@ fn parse_shortstat(s: &str) -> (u32, u32) {
 pub fn status(worktree: &Path) -> Result<GitStatus, GitError> {
     let filters = Filters::of(worktree);
     let git = |args: &[&str]| git_with(worktree, &filters, args);
-    let files_changed = git(&["status", "--porcelain"])?.lines().count() as u32;
+    let files_changed = git(&["status", "--porcelain", SUBMODULE_COMMITS_ONLY])?
+        .lines()
+        .count() as u32;
     let head_commit = git(&["rev-parse", "HEAD"])?.trim().to_string();
     let (insertions, deletions) = parse_shortstat(&git(&[
         "diff",
         "--no-ext-diff",
         "--no-textconv",
+        SUBMODULE_COMMITS_ONLY,
         "--shortstat",
         "HEAD",
     ])?);
@@ -399,6 +412,7 @@ pub fn diff(worktree: &Path, path: Option<&str>) -> Result<String, GitError> {
         "--no-color",
         "--no-ext-diff",
         "--no-textconv",
+        SUBMODULE_COMMITS_ONLY,
         "HEAD",
     ];
     if let Some(p) = path {
@@ -775,6 +789,68 @@ mod tests {
             repository_filters(b"global\0filter.\xff.clean\0"),
             Some(vec![])
         );
+    }
+
+    #[test]
+    fn the_nodes_git_runs_no_filter_planted_in_a_submodules_config() {
+        let r = Repo::new(None);
+        let lib = r.dir.with_file_name(format!(
+            "{}-lib",
+            r.dir.file_name().expect("name").to_string_lossy()
+        ));
+        let run = |dir: &Path, args: &[&str]| {
+            let ok = Command::new("git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@e"])
+                .args(["-c", "protocol.file.allow=always"])
+                .arg("-C")
+                .arg(dir)
+                .args(args)
+                .output()
+                .expect("git")
+                .status
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+        fs::create_dir_all(&lib).expect("lib");
+        run(&lib, &["init", "-q"]);
+        fs::write(lib.join("a.txt"), "one\n").expect("a");
+        run(&lib, &["add", "a.txt"]);
+        run(&lib, &["commit", "-q", "-m", "lib"]);
+        run(
+            &r.dir,
+            &["submodule", "add", "-q", &lib.to_string_lossy(), "lib"],
+        );
+        run(&r.dir, &["commit", "-q", "-m", "sub"]);
+        let mark = r.dir.join("ran-sub-clean");
+        let modules = r.dir.join(".git/modules/lib");
+        run(
+            &r.dir,
+            &[
+                "--git-dir",
+                &modules.to_string_lossy(),
+                "config",
+                "filter.ev.clean",
+                &format!("sh -c 'touch \"{}\"; cat'", mark.display()),
+            ],
+        );
+        fs::write(r.dir.join("lib/.gitattributes"), "*.txt filter=ev\n").expect("attributes");
+        // Same size, later mtime: git must hash the file, which runs the clean filter.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        fs::write(r.dir.join("lib/a.txt"), "uno\n").expect("edit");
+
+        // The node's git.
+        status(&r.dir).expect("status");
+        diff(&r.dir, None).expect("diff");
+        assert!(is_dirty(&r.dir).is_ok());
+        assert!(!mark.exists(), "the node's git ran a submodule's filter");
+        // Control: plain git runs it, so the plant works on this system.
+        let _ = Command::new("git")
+            .arg("-C")
+            .arg(&r.dir)
+            .args(["status", "--porcelain"])
+            .output();
+        assert!(mark.exists(), "the plant itself did not work");
+        let _ = fs::remove_dir_all(&lib);
     }
 
     #[test]
