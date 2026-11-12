@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { getLanguage, t } from '../i18n';
+import { t } from '../i18n';
+import { ago } from '../net/time';
 import { machineKey, type AgentTileModel } from '../model';
 import { money, type UsageSummary } from '../net/usage';
 import { bytesLabel, type MachineModel } from '../net/view';
@@ -7,16 +8,6 @@ import { Icon } from './Icon';
 import { StateMark } from './StateBadge';
 
 const ROW = 104;
-
-function ago(ms: number, now: number): string {
-  if (!ms) return t('network-never');
-  const s = Math.max(0, Math.round((now - ms) / 1000));
-  const rtf = new Intl.RelativeTimeFormat(getLanguage(), { numeric: 'auto' });
-  if (s < 60) return rtf.format(-s, 'second');
-  if (s < 3600) return rtf.format(-Math.round(s / 60), 'minute');
-  if (s < 86400) return rtf.format(-Math.round(s / 3600), 'hour');
-  return rtf.format(-Math.round(s / 86400), 'day');
-}
 
 // The hub in the middle, every machine it knows around it: who is connected right now, what runs there, when it was last heard.
 export function NetworkView({ machines, agents, usage, hubName }: { machines: readonly MachineModel[]; agents: readonly AgentTileModel[]; usage?: UsageSummary; hubName: string }) {

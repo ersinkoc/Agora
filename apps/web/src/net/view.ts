@@ -20,6 +20,8 @@ export interface AgentV {
   nodeId: string; worktreeId: string; kind: string; state: number; reported: boolean; running: boolean;
   sinceMs: number;
   tokens: number; // input + output so far
+  startedMs?: number; // when this window saw it start (not known for agents that were already running)
+  exitCode?: number; // how it ended, once it has
 }
 export interface CheckoutV { nodeId: string; projectId: string; path: string }
 export interface ApprovalV { agentId: string; action: string; detail: string; expiresAtMs: number }
@@ -152,7 +154,7 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
       v.withTerminal.delete(q(b.agentId));
       v.agents.set(q(b.agentId), {
         nodeId: b.nodeId ?? '', worktreeId: q(b.worktreeId), kind: b.kind ?? '', state: 3 /* idle */,
-        reported: false, running: true, sinceMs: at, tokens: 0,
+        reported: false, running: true, sinceMs: at, tokens: 0, startedMs: at,
       });
       break;
     }
@@ -172,7 +174,7 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
     }
     case 'agentExited': {
       const a = v.agents.get(q(e.agentExited.agentId));
-      if (a) { a.running = false; a.state = 4 /* done */; a.sinceMs = at; }
+      if (a) { a.running = false; a.state = 4 /* done */; a.sinceMs = at; a.exitCode = e.agentExited.exitCode ?? 0; }
       break;
     }
     case 'terminalOpened':
@@ -265,6 +267,10 @@ export function tiles(v: View): AgentTileModel[] {
       terminal: v.withTerminal.has(id),
       branch: selected?.branch || wt?.branch || undefined,
       filesChanged: selected?.filesChanged ?? wt?.filesChanged ?? 0,
+      closed: !a.running,
+      exitCode: a.exitCode,
+      startedMs: a.startedMs,
+      endedMs: a.running ? undefined : a.sinceMs || undefined,
     };
   });
 }

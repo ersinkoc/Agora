@@ -1,4 +1,4 @@
-import { Suspense, lazy, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
+import { Suspense, lazy, useEffect, useMemo, useRef, useState, useSyncExternalStore, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
 import { t } from '../i18n';
 import { type AgentTileModel, machineKey, needsAttention, sortFleet } from '../model';
 import { money, type UsageSummary } from '../net/usage';
@@ -19,6 +19,8 @@ import { LanguagePicker } from './LanguagePicker';
 import { ThemePicker } from './ThemePicker';
 import { MAX_SIZE, MIN_SIZE, setTerminalSize, terminalSize } from '../terminal/prefs';
 import { StateBadge, StateMark } from './StateBadge';
+import { ClosedSummary } from './ClosedSummary';
+import { dismiss, dismissedIds, subscribeDismissed } from '../net/dismissed';
 
 const TerminalView = lazy(() => import('../terminal/TerminalView').then((m) => ({ default: m.TerminalView })));
 
@@ -51,7 +53,10 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   notice?: string;
   link: 'connecting' | 'live' | 'offline';
 }) {
-  const fleet = useMemo(() => sortFleet(agents), [agents]);
+  const cleared = useSyncExternalStore(subscribeDismissed, dismissedIds);
+  const fleet = useMemo(() => sortFleet(agents.filter((a) => !cleared.has(a.id))), [agents, cleared]);
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => { const id = setInterval(() => setNow(Date.now()), 15000); return () => clearInterval(id); }, []);
   const [pinned, setPinned] = useState<string[]>([]);
   const [active, setActive] = useState<string | undefined>();
   const [projectFilter, setProjectFilter] = useState('');
@@ -83,7 +88,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   useEffect(() => {
     setPinned((cur) => {
       const alive = cur.filter((id) => fleet.some((a) => a.id === id));
-      const room = touched.current ? [] : fleet.filter((a) => a.state !== 'finished' && a.state !== 'unknown' && !alive.includes(a.id)).slice(0, Math.max(0, MAX_AUTO_PINNED - alive.length)).map((a) => a.id);
+      const room = touched.current ? [] : fleet.filter((a) => !a.closed && a.state !== 'finished' && a.state !== 'unknown' && !alive.includes(a.id)).slice(0, Math.max(0, MAX_AUTO_PINNED - alive.length)).map((a) => a.id);
       return alive.length === cur.length && room.length === 0 ? cur : [...alive, ...room];
     });
   }, [fleet]);
@@ -178,7 +183,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
             : <span className="ide-chip text-needs-you">{t('changes-files', { count: a.filesChanged ?? 0 })}</span>)}
           {usage?.perAgent.has(a.id) && <span className="ide-chip">{t('agent-cost', { amount: money(usage.perAgent.get(a.id) ?? 0) })}</span>}
           <StateBadge state={a.state} />
-          {a.terminal !== false && <span className="flex items-center" role="group" aria-label={t('terminal-size')}>
+          {a.terminal !== false && !a.closed && <span className="flex items-center" role="group" aria-label={t('terminal-size')}>
             <button type="button" className="ide-iconbtn w-6 text-[11px] font-semibold" onClick={() => setTerminalSize(terminalSize() - 1)} disabled={terminalSize() <= MIN_SIZE} aria-label={t('terminal-smaller')} title={t('terminal-smaller')}>A−</button>
             <button type="button" className="ide-iconbtn w-6 text-[13px] font-semibold" onClick={() => setTerminalSize(terminalSize() + 1)} disabled={terminalSize() >= MAX_SIZE} aria-label={t('terminal-larger')} title={t('terminal-larger')}>A+</button>
           </span>}
@@ -197,13 +202,15 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
         </div>
       ))}
       <AgentAddress agent={a} />
-      <div className="pane min-h-0 flex-1 p-1.5">
+      {a.closed ? <ClosedSummary agent={a} now={now} cost={usage?.perAgent.has(a.id) ? money(usage.perAgent.get(a.id) ?? 0) : undefined}
+        onReview={loadDiff ? () => setReviewing(a.id) : undefined} onHistory={loadHistory && a.git !== false ? () => setHistory(a.id) : undefined} onFiles={filesOf ? () => setBrowsing(a.id) : undefined}
+        onStart={onStart ? () => onStart() : undefined} onDismiss={() => dismiss([a.id])} /> : <div className="pane min-h-0 flex-1 p-1.5">
         {a.terminal === false ? <PromptBox agent={a} send={sendPrompt} source={chatOf?.(a)} /> : (
           <Suspense fallback={<div className="terminal" aria-busy="true" />}>
             <TerminalView source={terminalFor(a.id)} label={`${t('focus-terminal')} · ${a.name}`} />
           </Suspense>
         )}
-      </div>
+      </div>}
     </section>
   );
 
@@ -224,7 +231,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
       </header>
 
       <div className={`grid min-h-0 grid-cols-1 ${columns}`}>
-        {showAgents && <Explorer fleet={projectFilter ? fleet.filter((a) => a.projectId === projectFilter) : fleet} machines={machines} projects={projectOptions} project={projectFilter} onProject={chooseProject} open={pinned} current={current?.id} onToggle={select} onStart={onStart} onCollapse={() => setShowAgents(false)} />}
+        {showAgents && <Explorer fleet={projectFilter ? fleet.filter((a) => a.projectId === projectFilter) : fleet} machines={machines} projects={projectOptions} project={projectFilter} onProject={chooseProject} open={pinned} current={current?.id} onToggle={select} onStart={onStart} onCollapse={() => setShowAgents(false)} onDismiss={dismiss} />}
 
         <main className="flex min-h-0 min-w-0 flex-col" aria-label={t('focus-terminal')}>
           <div className="flex h-9 flex-none items-stretch border-b border-line bg-surface-1">
@@ -279,7 +286,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
 
       <footer className="ide-bar h-6 flex-wrap border-t text-[11px] text-muted" aria-label={t('console-activity')}>
         <a className="inline-flex items-center gap-1.5 hover:text-ink" href="#/machines"><span aria-hidden className={`size-1.5 rounded-full ${link === 'live' ? 'bg-finished' : 'bg-needs-you'}`} />{t('machines-online', { count: machines.filter((m) => m.online).length })}</a>
-        <span>{t('ide-status-agents', { count: fleet.length })}</span>
+        <span>{t('ide-status-agents', { count: fleet.filter((a) => !a.closed).length })}</span>
         {needs > 0 && <button type="button" className="text-needs-you hover:underline" onClick={() => setShowDetails(true)}>{t('ide-status-needs', { count: needs })}</button>}
         <span className="flex-1" />
         {usage && usage.totalMicroUsd > 0 && <span>{money(usage.totalMicroUsd)}</span>}
