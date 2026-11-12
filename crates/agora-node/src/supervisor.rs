@@ -384,11 +384,11 @@ impl Supervisor {
     }
 
     /// A start that failed after the worktree and the mesh endpoint were made: give both back, so repeated failures cannot pile up.
-    fn abandon(&self, id: &AgentId, checkout: &std::path::Path, worktree: &std::path::Path) {
+    fn abandon(&self, id: &AgentId, worktree: git::StartWorktree) {
         if let Some(h) = &self.abort_hook {
             h(id);
         }
-        let _ = git::remove_worktree(checkout, worktree, true);
+        let _ = worktree.rollback();
     }
 
     /// Make an agent kind available. Replaces a previous manifest of the same kind.
@@ -472,7 +472,8 @@ impl Supervisor {
         let checkout = git::discover_checkout(&req.checkout)?;
         let worktree = req.worktree_root.join(&req.name);
         let branch = format!("agent/{}", req.name);
-        git::create_worktree(&checkout.root, &worktree, &branch, req.base.as_deref())?;
+        let created =
+            git::create_start_worktree(&checkout.root, &worktree, &branch, req.base.as_deref())?;
 
         let id = AgentId::new(format!("agent-{}", self.next_id));
         self.next_id += 1;
@@ -485,7 +486,7 @@ impl Supervisor {
         ) {
             Ok(x) => x,
             Err(e) => {
-                self.abandon(&id, &checkout.root, &worktree);
+                self.abandon(&id, created);
                 return Err(e);
             }
         };
@@ -500,7 +501,7 @@ impl Supervisor {
         let terminal = match self.launch(&req.kind, &argv, &worktree, &extras) {
             Ok(t) => t,
             Err(e) => {
-                self.abandon(&id, &checkout.root, &worktree);
+                self.abandon(&id, created);
                 return Err(e);
             }
         };
@@ -550,7 +551,7 @@ impl Supervisor {
             .strip_prefix(git_root)
             .map_err(|e| SupervisorError::Spawn(e.to_string()))?;
         let branch = format!("agent/{}", req.name);
-        git::create_worktree(git_root, &target, &branch, None)?;
+        let created = git::create_start_worktree(git_root, &target, &branch, None)?;
         let mut direct = req.clone();
         let result = selected_worktree_directory(&target, relative)
             .map_err(|e| SupervisorError::Spawn(e.to_string()))
@@ -561,7 +562,7 @@ impl Supervisor {
         match result {
             Ok(id) => Ok(id),
             Err(e) => {
-                let _ = git::remove_worktree(git_root, &target, true);
+                let _ = created.rollback();
                 Err(e)
             }
         }
@@ -792,18 +793,26 @@ impl Supervisor {
         let checkout = git::discover_checkout(&req.checkout)?;
         let worktree = req.worktree_root.join(&req.name);
         let branch = format!("agent/{}", req.name);
-        git::create_worktree(&checkout.root, &worktree, &branch, req.base.as_deref())?;
         if spec.command.is_empty() {
             return Err(SupervisorError::UnknownKind(req.kind.clone()));
         }
-        let (adapter, session_id) = launch_adapter(
+        let created =
+            git::create_start_worktree(&checkout.root, &worktree, &branch, req.base.as_deref())?;
+        let result = launch_adapter(
             spec,
             &checkout.root,
             &worktree,
             None,
             self.sandbox_for(&req.kind, &worktree, &spec.command[0]),
         )
-        .map_err(SupervisorError::Spawn)?;
+        .map_err(SupervisorError::Spawn);
+        let (adapter, session_id) = match result {
+            Ok(started) => started,
+            Err(error) => {
+                let _ = created.rollback();
+                return Err(error);
+            }
+        };
         let id = AgentId::new(format!("agent-{}", self.next_id));
         self.next_id += 1;
         let mut agent = Agent::new(
