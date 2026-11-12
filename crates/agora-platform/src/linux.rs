@@ -186,3 +186,8 @@ impl Ruleset {
         Ok(())
     }
 }
+/// See [`crate::opened_path`]: the descriptor's link in `/proc/self/fd`.
+pub(crate) fn opened_path(file: &std::fs::File) -> io::Result<PathBuf> {
+    use std::os::fd::AsRawFd;
+    fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd()))
+}

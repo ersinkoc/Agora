@@ -178,7 +178,7 @@ Implemented by the node today: `project.list`, `agent.*`, `terminal.*`, `approva
 the node reported in `WorktreeCreated`); a path that is absolute, climbs with `..` or starts with `:` or `-` is refused as
 `protocol.invalid_message`. `git.diff` is the unified diff against HEAD plus the new files git does not track yet (shown as
 all-added, at most 50 files of at most 64 KiB), and an answer is cut at 512 KiB. `files.list` hides `.git`; `files.read` refuses
-files above 512 KiB (`files.too_large`) and paths that leave the workspace, symlinks included (`files.outside_root`).
+files above 512 KiB (`files.too_large`) and paths that leave the workspace, symlinks included (`files.outside_root`), checked again on the opened file so a link swapped in after the check is still refused.
 
 ### Selected directories (ADR-0052)
 

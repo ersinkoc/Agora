@@ -664,6 +664,29 @@ pub(crate) fn plain_path(path: PathBuf) -> PathBuf {
     PathBuf::from(plain)
 }
 
+/// See [`crate::opened_path`]: `GetFinalPathNameByHandleW` (the `\\?\` spelling, as `std::fs::canonicalize` gives).
+pub(crate) fn opened_path(file: &std::fs::File) -> io::Result<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::GetFinalPathNameByHandleW;
+    let mut buf = vec![0u16; 512];
+    loop {
+        let cap = u32::try_from(buf.len()).unwrap_or(u32::MAX);
+        // SAFETY: a live handle owned by `file`; `buf` holds `cap` UTF-16 units. 0 = normalized name, DOS volume name.
+        let n =
+            unsafe { GetFinalPathNameByHandleW(file.as_raw_handle(), buf.as_mut_ptr(), cap, 0) };
+        if n == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // A buffer too small gets the size it needs (with the terminating NUL); a fitting one the length without it.
+        if n < cap {
+            buf.truncate(n as usize);
+            return Ok(PathBuf::from(std::ffi::OsString::from_wide(&buf)));
+        }
+        buf.resize(n as usize, 0);
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
