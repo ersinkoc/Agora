@@ -264,6 +264,16 @@ impl Listener {
     }
 
     pub fn accept(&self) -> io::Result<Stream> {
+        // Clients that left before they were accepted are skipped, however many there were.
+        loop {
+            if let Some(s) = self.accept_once()? {
+                return Ok(s);
+            }
+        }
+    }
+
+    /// One accept; `None` when the instance's client had already left (the instance is reset for the next one).
+    fn accept_once(&self) -> io::Result<Option<Stream>> {
         let mut st = self
             .state
             .lock()
@@ -289,8 +299,7 @@ impl Listener {
                     ERROR_NO_DATA => {
                         // SAFETY: a live pipe instance with no operation pending.
                         unsafe { DisconnectNamedPipe(inst) };
-                        drop(st);
-                        return self.accept();
+                        return Ok(None);
                     }
                     e => return Err(os_error(e)),
                 }
@@ -327,7 +336,7 @@ impl Listener {
         // A fresh instance is ready before the connected one is handed out, so the next client finds one.
         let next = create_instance(&self.name, &self.sd, false)?;
         let conn = st.instance.replace(next);
-        conn.map(Stream::from_handle)
+        conn.map(|h| Some(Stream::from_handle(h)))
             .ok_or_else(|| io::Error::other("no instance"))
     }
 }
