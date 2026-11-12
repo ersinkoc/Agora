@@ -42,6 +42,48 @@ use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED
 /// Only the owner of the pipe and the system may open it; nobody else on the machine, and nobody over the network.
 const OWNER_ONLY: &str = "D:P(A;;GA;;;OW)(A;;GA;;;SY)";
 
+/// Gives `path` a protected DACL that admits the current user and SYSTEM only, what `0600`/`0700` do on Unix (private keys and tokens,
+/// the folder of installed adapters). Nothing is inherited from above it any more, so a folder that lets other users in (a data
+/// volume's default ACL) does not reach it. `inherit` also covers what is, or will be, below a folder.
+pub(crate) fn set_owner_only(path: &Path, inherit: bool) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Security::Authorization::{SetNamedSecurityInfoW, SE_FILE_OBJECT};
+    use windows_sys::Win32::Security::{
+        GetSecurityDescriptorDacl, ACL, DACL_SECURITY_INFORMATION,
+        PROTECTED_DACL_SECURITY_INFORMATION,
+    };
+    let user = crate::winconfine::current_user_sid_text()?;
+    let flags = if inherit { "OICI" } else { "" };
+    let sd = Descriptor::from_sddl(&format!("D:P(A;{flags};FA;;;{user})(A;{flags};FA;;;SY)"))?;
+    let (mut present, mut defaulted, mut dacl) = (0i32, 0i32, null_mut::<ACL>());
+    // SAFETY: `sd` is a valid descriptor that outlives every use of `dacl`.
+    if unsafe { GetSecurityDescriptorDacl(sd.0, &mut present, &mut dacl, &mut defaulted) } == 0 {
+        return Err(os_error(unsafe { GetLastError() }));
+    }
+    let name: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    // SAFETY: a NUL-terminated path and a valid DACL.
+    let err = unsafe {
+        SetNamedSecurityInfoW(
+            name.as_ptr().cast_mut(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            null_mut(),
+            null_mut(),
+            dacl,
+            null(),
+        )
+    };
+    if err == 0 {
+        Ok(())
+    } else {
+        Err(os_error(err))
+    }
+}
+
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
@@ -644,6 +686,48 @@ mod tests {
         assert_eq!(p(&long), PathBuf::from(&long));
         let guid = r"\\?\Volume{01234567-89ab-cdef-0123-456789abcdef}\x";
         assert_eq!(p(guid), PathBuf::from(guid));
+    }
+
+    #[test]
+    fn private_files_and_folders_shut_out_a_permissive_parent() {
+        let dir = std::env::temp_dir().join(format!("agora-private-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // A parent that lets everyone change what is below it, like a data volume's default ACL lets every user.
+        let icacls = |args: &[&str]| {
+            let out = std::process::Command::new("icacls")
+                .arg(&dir)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{out:?}");
+        };
+        icacls(&["/grant", "*S-1-1-0:(OI)(CI)(M)"]);
+        let acl = |p: &Path| {
+            let out = std::process::Command::new("icacls")
+                .arg(p)
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+        let key = dir.join("key.pem");
+        crate::write_private(&key, b"one").unwrap();
+        crate::write_private(&key, b"two-longer").unwrap();
+        assert_eq!(std::fs::read(&key).unwrap(), b"two-longer");
+        let adapters = dir.join("adapters");
+        std::fs::create_dir_all(&adapters).unwrap();
+        crate::restrict_to_owner(&adapters).unwrap();
+        std::fs::write(adapters.join("tool.exe"), b"x").unwrap();
+        for p in [key.clone(), adapters.clone(), adapters.join("tool.exe")] {
+            let a = acl(&p);
+            assert!(!a.contains("Everyone"), "{}: {a}", p.display());
+            assert!(a.contains("SYSTEM"), "{}: {a}", p.display());
+        }
+        assert!(std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .all(|e| !e.file_name().to_string_lossy().contains(".tmp-")));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
