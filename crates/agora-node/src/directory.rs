@@ -163,6 +163,8 @@ impl Bindings {
 
 /// Most folders one `directory.list` answer carries (ADR-0053); more are reported as `truncated`.
 pub const MAX_LISTED: usize = 500;
+/// Most folder names one listing reads before it sorts and cuts to [`MAX_LISTED`] (`truncated` when there are more).
+const MAX_READ: usize = 50_000;
 
 /// Where a folder listing may look and what it must keep out of sight: the user's home folder (an empty `path` means it) and the
 /// node's own folders (ADR-0052's refusals, [`crate::sandbox::private_folder`]). Canonical paths as `std::fs::canonicalize` spells
@@ -210,7 +212,8 @@ pub fn list(requested: &str, scope: &ListScope<'_>) -> Result<v1::DirectoryEntri
     // Every folder is read (within the time budget) and only then sorted and cut, so the answer is the first `MAX_LISTED` by name,
     // not whichever the file system happened to give first.
     agora_platform::visit_dir(&handle, |item: agora_platform::DirItem| {
-        if std::time::Instant::now() > end {
+        // The time budget bounds the read; this bounds what a huge folder can make the node hold (same size as the watcher's budget).
+        if names.len() >= MAX_READ || std::time::Instant::now() > end {
             truncated = true;
             return std::ops::ControlFlow::Break(());
         }
