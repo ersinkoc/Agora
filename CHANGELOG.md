@@ -4,6 +4,11 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+### Terminals and adapters
+- Opening a terminal that is already running shows its later output in the program's own colours, and paste and arrow keys work as the program expects.
+- An adapter that stops reading its input no longer freezes its machine; the request to it times out.
+- An ACP agent that prints a line that is not text no longer looks closed.
+
 ## 0.3.2
 
 ### The window
