@@ -188,6 +188,8 @@ pub fn hub_run(say: &Say, o: &Opts) -> ExitCode {
                     "terminal.raw".into(),
                     "workspace.directory".into(),
                     "board.join".into(),
+                    // ADR-0053: without it here the hub never agrees on it with a node, and refuses every folder listing.
+                    "directory.list".into(),
                 ],
                 required: vec![],
             },

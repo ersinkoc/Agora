@@ -528,6 +528,67 @@ impl Session {
     }
 
     /// The agents a machine can start: `(kind, display name)` of the installed ones.
+    /// The folders inside `path` on `node` (ADR-0053 `directory.list`; empty `path` is the home folder there), with this device's
+    /// signature for exactly that folder.
+    pub fn list_folder(
+        &mut self,
+        node: &str,
+        path: &str,
+        authorization: agora_protocol::v1::DirectoryAuthorization,
+    ) -> Result<agora_protocol::v1::DirectoryEntries, String> {
+        let ok = self.command_ok(
+            node,
+            command_request::Command::DirectoryList(agora_protocol::v1::DirectoryList {
+                path: path.to_string(),
+                authorization: Some(authorization),
+            }),
+            Duration::from_secs(30),
+        )?;
+        match ok.result {
+            Some(command_ok::Result::DirectoryEntries(e)) => Ok(e),
+            _ => Err("protocol.invalid_message".into()),
+        }
+    }
+
+    /// What `node` makes of a folder before an agent starts there (ADR-0052 `directory.inspect`): its canonical path and project.
+    pub fn inspect_folder(
+        &mut self,
+        node: &str,
+        path: &str,
+        authorization: agora_protocol::v1::DirectoryAuthorization,
+    ) -> Result<agora_protocol::v1::DirectoryInfo, String> {
+        let ok = self.command_ok(
+            node,
+            command_request::Command::DirectoryInspect(agora_protocol::v1::DirectoryInspect {
+                path: path.to_string(),
+                create_project_id: false,
+                authorization: Some(authorization),
+            }),
+            Duration::from_secs(30),
+        )?;
+        match ok.result {
+            Some(command_ok::Result::DirectoryInfo(i)) => Ok(i),
+            _ => Err("protocol.invalid_message".into()),
+        }
+    }
+
+    /// Starts an agent of `launch.kind` in an inspected folder (ADR-0052 `agent.launch`); answers its hub-wide id.
+    pub fn launch_in(
+        &mut self,
+        node: &str,
+        launch: agora_protocol::v1::AgentLaunch,
+    ) -> Result<String, String> {
+        let ok = self.command_ok(
+            node,
+            command_request::Command::AgentLaunch(launch),
+            Duration::from_secs(45),
+        )?;
+        match ok.result {
+            Some(command_ok::Result::AgentLaunch(r)) => Ok(format!("{node}/{}", r.agent_id)),
+            _ => Err("protocol.invalid_message".into()),
+        }
+    }
+
     pub fn agent_kinds(&mut self, node: &str) -> Result<Vec<(String, String)>, String> {
         let ok = self.command_ok(
             node,

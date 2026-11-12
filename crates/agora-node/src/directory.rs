@@ -212,8 +212,10 @@ pub fn list(requested: &str, scope: &ListScope<'_>) -> Result<v1::DirectoryEntri
             truncated = true;
             return std::ops::ControlFlow::Break(());
         }
-        // `is_dir` does not follow links: a link to a folder is not listed.
+        // `is_dir` does not follow links: a link to a folder is not listed. A repository's own `.git` is bookkeeping, not a place to
+        // start an agent (it is shown as `is_git` on its folder instead), as `files.list` hides it.
         if item.is_dir
+            && item.name != ".git"
             && !crate::sandbox::private_folder(
                 &opened.join(&item.name),
                 scope.home,
@@ -354,6 +356,9 @@ mod tests {
             names(&code),
             [("app".to_string(), true), ("notes".to_string(), false)]
         );
+        // A repository's `.git` is not listed (it shows as `is_git` on its folder).
+        let app = list(&h.home.join("code/app").to_string_lossy(), &scope(&h)).unwrap();
+        assert!(app.entries.is_empty(), "{app:?}");
         // A secret folder or the node's own is refused outright; its worktrees are fine.
         for refused in [
             h.home.join(".ssh"),

@@ -60,7 +60,11 @@ fn hubside(node_id: &str) -> Hubside {
         hub: Arc::new(Hub::open(store).unwrap()),
         support: Support {
             generations: vec![1],
-            capabilities: vec!["terminal.raw".into()],
+            capabilities: vec![
+                "terminal.raw".into(),
+                "workspace.directory".into(),
+                "directory.list".into(),
+            ],
             required: vec![],
         },
         ca: Some(ca),
@@ -1766,4 +1770,131 @@ fn a_command_the_policy_lists_needs_a_grant_signed_by_a_trusted_device_and_the_l
     let e = r.unwrap_err();
     assert_ne!(e.code, ErrorCode::ApprovalGrantRequired.as_str(), "{e:?}");
     drop(node);
+}
+
+#[test]
+fn the_terminal_console_picks_a_folder_on_a_machine_and_starts_an_agent_there() {
+    use agora_tui::client::{Hub as ConsoleHub, Session};
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
+        return;
+    }
+    let hub = hubside("laptop");
+    let addr = hub.listen("127.0.0.1:0");
+    let dir = tmp("console-folder");
+    let manifests = dir.join("manifests");
+    std::fs::create_dir_all(&manifests).unwrap();
+    std::fs::write(
+        manifests.join("shell.toml"),
+        "kind = \"shell\"\ndisplay_name = \"Shell\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"sh\"]\n",
+    )
+    .unwrap();
+    // The folder to pick: outside the node's own folder, with a project inside it.
+    let pick = tmp("console-folder-pick");
+    std::fs::create_dir_all(pick.join("app")).unwrap();
+    std::fs::create_dir_all(pick.join("notes")).unwrap();
+    git(&pick.join("app"), &["init", "-q", "-b", "main"]);
+    let (device, _) = agora_tui::device::Device::generate().unwrap();
+    let (stranger, _) = agora_tui::device::Device::generate().unwrap();
+    let data = dir.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    agora_node::approvals::trust_device(
+        &data.join(agora_node::approvals::TRUSTED_DEVICES_FILE),
+        &device.id,
+        &device.public_key_hex(),
+    )
+    .unwrap();
+    let cfg = agora_node::daemon::NodeConfig {
+        node_id: "laptop".into(),
+        socket: dir.join("c.sock"),
+        data_dir: data,
+        worktree_root: dir.join("wt"),
+        manifests_dir: manifests,
+        projects: vec![],
+        limits: Default::default(),
+    };
+    let node = agora_node::daemon::Node::start(&cfg).unwrap();
+    let mut link = hub.link(addr);
+    link.commands = Some(cfg.socket.clone());
+    link.grants = Some(Arc::clone(&node.grants));
+    let _uplink = spawn(Arc::clone(&node.events), link).unwrap();
+    wait("the node to be online in the hub", || {
+        hub.state
+            .hub
+            .view()
+            .0
+            .nodes
+            .get("laptop")
+            .is_some_and(|n| n.online)
+    });
+    let console = ConsoleHub {
+        addr: addr.to_string(),
+        ca_pem: hub.ca_pem.clone(),
+    };
+    let mut session = Session::connect(&console, "client-token").unwrap();
+    let now = || {
+        u64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap()
+    };
+    let folder = pick.to_string_lossy().into_owned();
+    let sign = |d: &agora_tui::device::Device, op: &str, path: &str, kind: &str, project: &str| {
+        d.authorize("laptop", op, path, kind, project, false, false, now())
+            .unwrap()
+    };
+    // A device the machine does not trust cannot look.
+    assert_eq!(
+        session.list_folder("laptop", &folder, sign(&stranger, "list", &folder, "", "")),
+        Err("approval.signature_invalid".to_string())
+    );
+    // The trusted one sees the subfolders, the project marked; one level down works the same way.
+    let listed = session
+        .list_folder("laptop", &folder, sign(&device, "list", &folder, "", ""))
+        .unwrap();
+    let names: Vec<(&str, bool)> = listed
+        .entries
+        .iter()
+        .map(|e| (e.name.as_str(), e.is_git))
+        .collect();
+    assert_eq!(names, [("app", true), ("notes", false)]);
+    let app = agora_tui::picker::child(&listed.path, "app");
+    let inside = session
+        .list_folder("laptop", &app, sign(&device, "list", &app, "", ""))
+        .unwrap();
+    assert!(inside.entries.is_empty(), "{inside:?}");
+    // A signature for one folder does not list another.
+    assert_eq!(
+        session.list_folder("laptop", &folder, sign(&device, "list", &app, "", "")),
+        Err("approval.signature_invalid".to_string())
+    );
+    // Chosen: inspected, then an agent starts there.
+    let info = session
+        .inspect_folder("laptop", &app, sign(&device, "inspect", &app, "", ""))
+        .unwrap();
+    let agent = session
+        .launch_in(
+            "laptop",
+            agora_protocol::v1::AgentLaunch {
+                path: info.path.clone(),
+                project_id: info.project_id.clone(),
+                kind: "shell".into(),
+                separate_worktree: false,
+                authorization: Some(sign(
+                    &device,
+                    "launch",
+                    &info.path,
+                    "shell",
+                    &info.project_id,
+                )),
+                accept_identity_change: false,
+            },
+        )
+        .unwrap();
+    wait("the agent to appear in the hub", || {
+        hub.state.hub.view().0.agents.contains_key(&agent)
+    });
+    let _ = std::fs::remove_dir_all(&pick);
 }

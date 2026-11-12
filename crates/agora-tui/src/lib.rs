@@ -2,6 +2,7 @@
 
 pub mod client;
 pub mod device;
+pub mod picker;
 pub mod preview;
 pub mod render;
 pub mod split;

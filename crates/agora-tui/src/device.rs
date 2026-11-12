@@ -84,6 +84,82 @@ pub fn grant_message(
     m
 }
 
+/// The exact bytes a device signs for a folder action (ADR-0052 / ADR-0053: `inspect`, `list`, `launch`; `agora-node::directory::
+/// signed_message`, which a test compares against): a domain tag, then the node, the operation, the path, the agent kind, the expected
+/// project, the option and identity-change flags, the nonce and the expiry in decimal milliseconds, NUL-separated.
+#[allow(clippy::too_many_arguments)] // the fields the node binds, each on its own
+pub fn directory_message(
+    node: &str,
+    operation: &str,
+    path: &str,
+    kind: &str,
+    project: &str,
+    option: bool,
+    identity_change: bool,
+    nonce: &str,
+    expires_at_ms: u64,
+) -> Vec<u8> {
+    let mut m = b"directory-action-v1".to_vec();
+    for part in [
+        node,
+        operation,
+        path,
+        kind,
+        project,
+        if option { "1" } else { "0" },
+        if identity_change { "1" } else { "0" },
+        nonce,
+    ] {
+        m.push(0);
+        m.extend_from_slice(part.as_bytes());
+    }
+    m.push(0);
+    m.extend_from_slice(expires_at_ms.to_string().as_bytes());
+    m
+}
+
+/// How long a signed folder action stays valid (the node refuses more than five minutes ahead).
+const FOLDER_ACTION_TTL_MS: u64 = 2 * 60 * 1000;
+
+impl Device {
+    /// This device's authorization for one folder action, with a fresh nonce, valid for two minutes from `now_ms`.
+    #[allow(clippy::too_many_arguments)] // the fields the node binds, each on its own
+    pub fn authorize(
+        &self,
+        node: &str,
+        operation: &str,
+        path: &str,
+        kind: &str,
+        project: &str,
+        option: bool,
+        identity_change: bool,
+        now_ms: u64,
+    ) -> Option<agora_protocol::v1::DirectoryAuthorization> {
+        use ring::rand::SecureRandom;
+        let mut b = [0u8; 16];
+        SystemRandom::new().fill(&mut b).ok()?;
+        let nonce = hex(&b);
+        let expires_at_ms = now_ms + FOLDER_ACTION_TTL_MS;
+        let message = directory_message(
+            node,
+            operation,
+            path,
+            kind,
+            project,
+            option,
+            identity_change,
+            &nonce,
+            expires_at_ms,
+        );
+        Some(agora_protocol::v1::DirectoryAuthorization {
+            device_id: self.id.clone(),
+            nonce,
+            expires_at_ms,
+            signature: self.sign(&message)?,
+        })
+    }
+}
+
 /// A fresh grant id.
 pub fn new_grant_id() -> Option<String> {
     use ring::rand::SecureRandom;
@@ -105,6 +181,57 @@ mod tests {
                 agora_node::approvals::signed_message("laptop", "7", approved)
             );
         }
+    }
+
+    #[test]
+    fn the_folder_action_message_is_the_one_the_node_rebuilds() {
+        for (op, kind, project, option, change) in [
+            ("list", "", "", false, false),
+            ("inspect", "", "", true, false),
+            ("launch", "claude-code", "id:p", false, true),
+        ] {
+            assert_eq!(
+                directory_message(
+                    "laptop",
+                    op,
+                    "/Users/me/code",
+                    kind,
+                    project,
+                    option,
+                    change,
+                    "00ff",
+                    1_700_000_000_000
+                ),
+                agora_node::directory::signed_message(
+                    "laptop",
+                    op,
+                    "/Users/me/code",
+                    kind,
+                    project,
+                    option,
+                    change,
+                    "00ff",
+                    1_700_000_000_000
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn an_authorization_has_a_fresh_32_digit_nonce_and_a_short_life() {
+        let (d, _) = Device::generate().unwrap();
+        let a = d
+            .authorize("laptop", "list", "", "", "", false, false, 1_000)
+            .unwrap();
+        let b = d
+            .authorize("laptop", "list", "", "", "", false, false, 1_000)
+            .unwrap();
+        assert_eq!(a.nonce.len(), 32);
+        assert!(a.nonce.bytes().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(a.nonce, b.nonce);
+        assert_eq!(a.expires_at_ms, 1_000 + 120_000);
+        assert_eq!(a.device_id, d.id);
+        assert_eq!(a.signature.len(), 64);
     }
 
     #[test]
