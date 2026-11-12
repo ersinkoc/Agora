@@ -1127,8 +1127,10 @@ fn uncommitted_changes_in_an_agents_workspace_are_reported() {
     std::fs::write(Path::new(&s.worktree_id).join("new.txt"), "x").unwrap();
     std::fs::write(Path::new(&s.worktree_id).join("other.txt"), "y").unwrap();
 
-    // The watcher checks every few seconds; the latest report for this workspace must show both new files.
-    let end = Instant::now() + Duration::from_secs(20);
+    // The watcher checks every few seconds; the latest report for this workspace must show both new files. One check is six git
+    // processes (each command with its filter question): 2-6 s on an idle Windows machine and up to about 50 s while this whole
+    // file runs in parallel there (measured), so the wait is generous.
+    let end = Instant::now() + Duration::from_secs(120);
     loop {
         let latest = n
             .events
