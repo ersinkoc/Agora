@@ -67,6 +67,11 @@ its own CA. The node's id and certificate serial come from that certificate, not
 producer id is that node id. A certificate from another authority, or none, never completes the handshake. Revocation
 is checked against the device registry by serial.
 
+Newly issued hub-server and node-client certificates include a non-critical Authority Key Identifier matching the existing CA's
+Subject Key Identifier, including a custom identifier in a loaded CA. This supports strict X.509 chain validation
+([RFC 5280 §4.2.1.1](https://www.rfc-editor.org/rfc/rfc5280.html#section-4.2.1.1)). CA certificates/keys, node identities,
+server names, authentication purposes and revocation checks are unchanged; existing certificates remain accepted by the hub.
+
 Events a node emits (`agora-node::daemon::EventSink`): `NodeOnline` at start and `NodeOffline` on a clean stop; a
 `CheckoutDiscovered` per registered project; `NodeResources` when the running count changes (not on a timer, so an idle
 node is silent; `memory_used_bytes` is 0 until measured); and for each agent `WorktreeCreated`, `AgentStarted`,
