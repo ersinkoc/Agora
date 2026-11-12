@@ -368,6 +368,26 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                 result: Some(Ok_::DirectoryInfo(info)),
             })
         }
+        Cmd::DirectoryList(d) => {
+            // The same folders a launch refuses stay out of the listing (ADR-0053); `node_home` is the folder the worktrees are in.
+            let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+            let worktrees = canon(&ctx.worktree_root);
+            let node_home = worktrees
+                .parent()
+                .map_or_else(|| worktrees.clone(), Path::to_path_buf);
+            let home = crate::usage_files::home_dir().map(|h| canon(&h));
+            let scope = crate::directory::ListScope {
+                home: home.as_deref(),
+                node_home: &node_home,
+                worktree_root: &worktrees,
+                budget: LIST_BUDGET,
+            };
+            Ok(v1::CommandOk {
+                result: Some(Ok_::DirectoryEntries(crate::directory::list(
+                    &d.path, &scope,
+                )?)),
+            })
+        }
         Cmd::AgentLaunch(a) => {
             let (info, project) = crate::directory::inspect(&a.path, &ctx.node_id, false)?;
             if info.path != a.path || info.project_id != a.project_id {
@@ -702,6 +722,10 @@ fn is_git_dir(path: &str) -> bool {
 /// The largest terminal a client may ask for.
 const MAX_TERMINAL_COLS: u16 = 1000;
 const MAX_TERMINAL_ROWS: u16 = 1000;
+
+/// Longest one `directory.list` spends reading a folder before it answers with what it has (`truncated`); well inside the
+/// routed command deadline.
+const LIST_BUDGET: Duration = Duration::from_secs(5);
 
 /// Largest file `files.read` returns.
 const MAX_READ_BYTES: u64 = 512 * 1024;

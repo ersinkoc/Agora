@@ -89,6 +89,15 @@ A generic start grant cannot substitute another path. Used nonces persist across
 fails closed. See `specs/protocol.md` for the canonical encoding. Initially this new flow is restricted to unrestricted
 owner devices; node-scoped policy limits refuse it for member devices. The local owner-only socket keeps its authority.
 
+
+Folder listing (ADR-0053 `directory.list`) discloses **folder names only** (and whether each holds a `.git`), one folder per
+call, at most 500, to the same exact-request owner signature (operation `list`, node and path bound, single-use nonce); a
+device limited to projects never lists a machine. The node never lists a file, a link, a secret folder below the home folder
+or its own folder (the same set a confined launch refuses), and refuses to list one of those when asked directly. The
+decision is made on the folder the open handle holds: the path is opened once, the handle's own path must be the canonical
+folder asked for, the secret-folder check runs on that path and the entries are read through that handle, so a folder
+swapped for a link between two looks cannot show a secret folder (tested with a folder flipped against `~/.ssh`). The local
+owner-only socket keeps its authority here as well.
 The node resolves symlinks and re-inspects the canonical path/project immediately before launching. It preserves selected
 user-owned folders on stop or failure. MCP files for direct L1 sessions live in separate session folders, accessible to that
 agent's sandbox as read-only configuration; fixed-file-only MCP manifests require explicit worktree mode. Opt-in sandbox

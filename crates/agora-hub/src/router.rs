@@ -323,6 +323,15 @@ impl Router {
             return Err(Error::new(ErrorCode::ProtocolCapabilityMissing)
                 .with("capability", "workspace.directory"));
         }
+        // ADR-0053: an older node would answer `capability_missing` itself; the window shows the typed-path form instead.
+        if matches!(
+            request.command,
+            Some(command_request::Command::DirectoryList(_))
+        ) && !link.capabilities.iter().any(|c| c == "directory.list")
+        {
+            return Err(Error::new(ErrorCode::ProtocolCapabilityMissing)
+                .with("capability", "directory.list"));
+        }
         if matches!(
             request.command,
             Some(command_request::Command::BoardJoin(_))
@@ -376,6 +385,25 @@ mod tests {
             target_node: target.into(),
             command: Some(command_request::Command::AgentList(v1::AgentList::default())),
         }
+    }
+
+    #[test]
+    fn a_folder_listing_goes_only_to_a_node_that_can_list() {
+        let r = Router::new();
+        let (_old, mut old_rx) =
+            r.register_with_capabilities("old", vec!["workspace.directory".into()]);
+        let (_new, mut new_rx) = r.register_with_capabilities("new", vec!["directory.list".into()]);
+        let mut request = req("old");
+        request.command = Some(command_request::Command::DirectoryList(
+            v1::DirectoryList::default(),
+        ));
+        assert!(matches!(
+            r.send("old", request.clone()),
+            Err(e) if e.code == ErrorCode::ProtocolCapabilityMissing
+        ));
+        assert!(old_rx.try_recv().is_err());
+        assert!(r.send("new", request).is_ok());
+        assert!(matches!(new_rx.try_recv(), Ok(ToNode::Command { .. })));
     }
 
     #[test]
