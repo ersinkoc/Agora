@@ -526,26 +526,32 @@ mod tests {
         assert!(!d.join("evil.txt").exists());
     }
 
-    /// Flips `root/d` between a folder of its own and a link to `outside` until `stop`; `None` where links cannot be made.
+    /// Flips `root/d` between a folder of its own and a link to `outside` until `stop`, and answers how many times `d` became the
+    /// link. The link is made once (a junction on Windows, which needs no privilege) and the flipping is renames only, so it is fast
+    /// on every system. A link that cannot be made fails the test: a race test that skips itself tests nothing.
     fn flip_folder(
         root: &Path,
         outside: &Path,
         stop: &std::sync::Arc<std::sync::atomic::AtomicBool>,
-    ) -> Option<std::thread::JoinHandle<()>> {
-        agora_platform::symlink(outside, &root.join("probe")).ok()?;
-        fs::remove_file(root.join("probe")).ok()?;
-        let (stop, root, outside) = (stop.clone(), root.to_path_buf(), outside.to_path_buf());
-        Some(std::thread::spawn(move || {
-            let (real, link, name) = (root.join("d.real"), root.join("d.link"), root.join("d"));
+    ) -> std::thread::JoinHandle<u64> {
+        let (name, link, spare) = (root.join("d"), root.join("d.link"), root.join("d.spare"));
+        fs::create_dir_all(&name).unwrap();
+        fs::write(name.join("MINE"), "x").unwrap();
+        agora_platform::link_dir(outside, &link).expect("a folder link (a junction on Windows)");
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            let mut flips = 0;
             while !stop.load(std::sync::atomic::Ordering::Relaxed) {
-                let _ = fs::create_dir_all(&real);
-                let _ = fs::remove_file(&name);
-                let _ = fs::rename(&real, &name);
-                let _ = agora_platform::symlink(&outside, &link);
-                let _ = fs::remove_dir_all(&name);
-                let _ = fs::rename(&link, &name);
+                // A step that fails (the folder is open on Windows) leaves the names as they were; the next round puts them back.
+                let _ = fs::rename(&name, &spare);
+                if fs::rename(&link, &name).is_ok() {
+                    flips += 1;
+                }
+                let _ = fs::rename(&name, &link);
+                let _ = fs::rename(&spare, &name);
             }
-        }))
+            flips
+        })
     }
 
     #[test]
@@ -555,9 +561,7 @@ mod tests {
         fs::create_dir_all(&outside).unwrap();
         fs::write(outside.join("OUTSIDE-NAME"), "x").unwrap();
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let Some(flipper) = flip_folder(&d.join("wt"), &outside, &stop) else {
-            return; // no symbolic links here (Windows without the privilege)
-        };
+        let flipper = flip_folder(&d.join("wt"), &outside, &stop);
         let mut leaked = 0;
         for _ in 0..20_000 {
             if f.list("d")
@@ -567,7 +571,8 @@ mod tests {
             }
         }
         stop.store(true, std::sync::atomic::Ordering::Relaxed);
-        flipper.join().unwrap();
+        let flips = flipper.join().unwrap();
+        assert!(flips > 0, "the folder was never swapped for the link");
         assert_eq!(leaked, 0, "files.list showed a folder outside the worktree");
     }
 
@@ -579,9 +584,7 @@ mod tests {
         fs::write(outside.join("OUTSIDE-NAME"), "x").unwrap();
         let mut w = f.watch();
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let Some(flipper) = flip_folder(&d.join("wt"), &outside, &stop) else {
-            return;
-        };
+        let flipper = flip_folder(&d.join("wt"), &outside, &stop);
         let mut leaked = 0;
         for _ in 0..3_000 {
             if w.poll().iter().any(|p| p.ends_with("OUTSIDE-NAME")) {
@@ -589,7 +592,8 @@ mod tests {
             }
         }
         stop.store(true, std::sync::atomic::Ordering::Relaxed);
-        flipper.join().unwrap();
+        let flips = flipper.join().unwrap();
+        assert!(flips > 0, "the folder was never swapped for the link");
         assert_eq!(
             leaked, 0,
             "the watcher reported a file outside the worktree"
@@ -602,8 +606,28 @@ mod tests {
         use std::sync::Arc;
         let (d, f) = setup();
         let root = d.join("wt");
+        // The folder above the file swapped for a link, which every system can make (a junction on Windows).
+        let outside = d.join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("notes.md"), "top secret").unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let flipper = flip_folder(&root, &outside, &stop);
+        let mut leaked = 0;
+        for _ in 0..20_000 {
+            if f.read("d/notes.md").is_ok_and(|data| data == b"top secret") {
+                leaked += 1;
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        let flips = flipper.join().unwrap();
+        assert!(flips > 0, "the folder was never swapped for the link");
+        assert_eq!(
+            leaked, 0,
+            "the node read the secret through a swapped folder"
+        );
+        // The file itself swapped for a link: only where a file link can be made (not on Windows without the privilege).
         if agora_platform::symlink(&d.join("secret.txt"), &root.join("probe")).is_err() {
-            return; // no symbolic links here (Windows without the privilege)
+            return;
         }
         let stop = Arc::new(AtomicBool::new(false));
         // The agent flips `notes.md` between a file of its own and a link to a secret outside its worktree.

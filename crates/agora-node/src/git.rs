@@ -1096,25 +1096,27 @@ mod tests {
         ));
         fs::create_dir_all(&outside).expect("dir");
         fs::write(outside.join("f.txt"), "TOPSECRET\n").expect("secret");
-        if agora_platform::symlink(&outside, &r.dir.join("probe")).is_err() {
-            return; // no symbolic links here (Windows without the privilege)
-        }
-        fs::remove_file(r.dir.join("probe")).expect("unlink");
-        // The agent flips `d` between a folder of its own and a link to a folder outside its worktree, both holding `f.txt`.
+        // The agent flips `d` between a folder of its own and a link to a folder outside its worktree, both holding `f.txt`. The link
+        // is made once (a junction on Windows, which needs no privilege) and the flipping is renames only; a link that cannot be made
+        // fails the test rather than skipping it.
+        let (name, link, spare) = (r.dir.join("d"), r.dir.join("d.link"), r.dir.join("d.spare"));
+        fs::create_dir_all(&name).expect("dir");
+        fs::write(name.join("f.txt"), "mine\n").expect("mine");
+        agora_platform::link_dir(&outside, &link).expect("a folder link (a junction on Windows)");
         let stop = Arc::new(AtomicBool::new(false));
         let flipper = {
-            let (stop, root, outside) = (Arc::clone(&stop), r.dir.clone(), outside.clone());
+            let stop = Arc::clone(&stop);
             std::thread::spawn(move || {
-                let (real, link, name) = (root.join("d.real"), root.join("d.link"), root.join("d"));
+                let mut flips = 0u64;
                 while !stop.load(Ordering::Relaxed) {
-                    let _ = fs::create_dir_all(&real);
-                    let _ = fs::write(real.join("f.txt"), "mine\n");
-                    let _ = fs::remove_file(&name);
-                    let _ = fs::rename(&real, &name);
-                    let _ = agora_platform::symlink(&outside, &link);
-                    let _ = fs::remove_dir_all(&name);
-                    let _ = fs::rename(&link, &name);
+                    let _ = fs::rename(&name, &spare);
+                    if fs::rename(&link, &name).is_ok() {
+                        flips += 1;
+                    }
+                    let _ = fs::rename(&name, &link);
+                    let _ = fs::rename(&spare, &name);
                 }
+                flips
             })
         };
         let end = std::time::Instant::now() + std::time::Duration::from_secs(6);
@@ -1125,8 +1127,9 @@ mod tests {
             }
         }
         stop.store(true, Ordering::Relaxed);
-        flipper.join().expect("flipper");
+        let flips = flipper.join().expect("flipper");
         let _ = fs::remove_dir_all(&outside);
+        assert!(flips > 0, "the folder was never swapped for the link");
         assert_eq!(
             leaked, 0,
             "the node showed a file from outside the worktree"

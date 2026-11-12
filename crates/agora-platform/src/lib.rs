@@ -288,6 +288,24 @@ pub fn symlink(target: &std::path::Path, link: &std::path::Path) -> io::Result<(
     }
 }
 
+/// Creates a link at `link` to the folder `target` that any user may make: a symbolic link on Unix, a junction on Windows (where a
+/// symbolic link needs a privilege). Tests that swap a folder for a link use it, so they run on every system instead of skipping.
+pub fn link_dir(target: &std::path::Path, link: &std::path::Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, link)
+    }
+    #[cfg(windows)]
+    {
+        windows::junction(target, link)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (target, link);
+        Err(unsupported_io("folder links"))
+    }
+}
+
 /// The path of the file `file` has open, as the kernel knows it now, with every link resolved (spelled as `std::fs::canonicalize`
 /// spells it). Checking a path and then opening it are two steps another process can change in between (a folder or the file
 /// itself swapped for a link); checking where the open handle really is happens after the open, so nothing can change it.
