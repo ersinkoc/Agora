@@ -11,7 +11,9 @@ use agora_i18n::{key, Arg};
 use agora_protocol::v1::{ChatEntry, Snapshot};
 use agora_tui::client::{sign_in, ChatEvent, ClientError, Hub, Session, TermEvent, Update};
 use agora_tui::device::Device;
+use agora_tui::preview::{Preview, Pumped};
 use agora_tui::render::{plain, render, render_chat};
+use agora_tui::split::{frame, tree_order, View};
 
 use crate::hubcli::{hub_dir, new_login_code, DEFAULT_LISTEN};
 use crate::{home, Opts, Say};
@@ -378,6 +380,25 @@ fn start(
     }
 }
 
+/// Keeps the panel's terminal on the selected agent: stops watching the old one and opens the new one when it has a terminal.
+fn follow(
+    session: &mut Session,
+    snapshot: &Snapshot,
+    selected: &str,
+    preview: &mut Option<Preview>,
+) {
+    let wanted = snapshot.terminals.iter().any(|t| t.agent_id == selected);
+    if wanted && preview.as_ref().is_some_and(|p| p.agent == selected) {
+        return;
+    }
+    if let Some(p) = preview.take() {
+        p.close(session);
+    }
+    if wanted {
+        *preview = Preview::open(session, selected).ok();
+    }
+}
+
 pub fn tui(say: &Say, o: &Opts) -> ExitCode {
     let dir = hub_dir(o);
     // On the hub's own machine the directory has everything: its CA and a way to make a code. Elsewhere the user passes them.
@@ -404,6 +425,21 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
         .then(agora_platform::RawMode::enable)
         .and_then(Result::ok);
     let keys = raw.is_some();
+    // The console takes the whole window while it runs (the alternate screen) and gives the old one back when it ends.
+    struct FullScreen(bool);
+    impl Drop for FullScreen {
+        fn drop(&mut self) {
+            if self.0 {
+                let mut out = std::io::stdout();
+                let _ = write!(out, "\x1b[?25h\x1b[?1049l");
+                let _ = out.flush();
+            }
+        }
+    }
+    let _full = FullScreen(keys);
+    if keys {
+        let _ = write!(std::io::stdout(), "\x1b[?1049h");
+    }
     let (tx, rx) = mpsc::channel::<u8>();
     if keys {
         std::thread::spawn(move || {
@@ -465,20 +501,47 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
         first = false;
         let mut dirty_since: Option<Instant> = None;
         let mut last_refresh = Instant::now();
-        let draw = |snapshot: &Option<Snapshot>, selected: &str, notice: &str, cost: u64| {
+        // With a keyboard: machines and agents on the left, the selected agent's terminal on the right, a status line. Without one
+        // (output piped): the plain list, as before.
+        let draw = |snapshot: &Option<Snapshot>,
+                    selected: &str,
+                    notice: &str,
+                    cost: u64,
+                    preview: Option<&Preview>| {
             if let Some(s) = snapshot {
-                let lines = render(s, color, keys, selected, notice, cost, &text);
                 let mut out = std::io::stdout().lock();
-                let _ = write!(out, "\x1b[H\x1b[2J{}{eol}", lines.join(eol));
+                if keys {
+                    let (cols, rows) = agora_platform::terminal_size().unwrap_or((100, 30));
+                    let view = View {
+                        snapshot: s,
+                        selected,
+                        screen: preview.filter(|p| p.agent == selected).map(Preview::screen),
+                        notice,
+                        color,
+                        cols,
+                        rows,
+                    };
+                    let _ = out.write_all(frame(&view, &text).as_bytes());
+                } else {
+                    let lines = render(s, color, keys, selected, notice, cost, &text);
+                    let _ = write!(out, "\x1b[H\x1b[2J{}{eol}", lines.join(eol));
+                }
                 let _ = out.flush();
             }
         };
+        let mut preview: Option<Preview> = None;
+        let mut last_draw = Instant::now();
+        // A change that came too soon after the last frame is drawn on a later turn, never dropped.
+        let mut pending = false;
+        let mut window = agora_platform::terminal_size();
         loop {
-            match session.next(Duration::from_millis(250)) {
+            // Watching a terminal: wake often enough that its output looks live.
+            let wait = if preview.is_some() { 30 } else { 250 };
+            match session.next(Duration::from_millis(wait)) {
                 Update::Snapshot(s) => {
                     snapshot = Some(*s);
                     cost = session.usage_total().unwrap_or(cost);
-                    draw(&snapshot, &selected, &notice, cost);
+                    draw(&snapshot, &selected, &notice, cost, preview.as_ref());
                     dirty_since = None;
                 }
                 Update::Changed => {
@@ -492,21 +555,87 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                 }
             }
             let mut link_lost = false;
+            if keys {
+                let mut redraw = pending || window != agora_platform::terminal_size();
+                if let Some(s) = &snapshot {
+                    // Something is always selected while there are agents, and the panel shows the selected one.
+                    let order = tree_order(s);
+                    if !order.contains(&selected) {
+                        // First choice: an agent whose terminal can be shown.
+                        selected = order
+                            .iter()
+                            .find(|a| s.terminals.iter().any(|t| &t.agent_id == *a))
+                            .or(order.first())
+                            .cloned()
+                            .unwrap_or_default();
+                        redraw = true;
+                    }
+                    follow(&mut session, s, &selected, &mut preview);
+                }
+                window = agora_platform::terminal_size();
+                if let Some(p) = preview.as_mut() {
+                    match p.pump(&mut session) {
+                        Pumped::Nothing => {}
+                        Pumped::Changed => redraw = true,
+                        Pumped::Ended => {
+                            preview = None;
+                            redraw = true;
+                        }
+                        Pumped::Lost => link_lost = true,
+                    }
+                }
+                // At most 25 frames a second, however fast the agent writes.
+                pending = redraw && last_draw.elapsed() < Duration::from_millis(40);
+                if redraw && !pending {
+                    draw(&snapshot, &selected, &notice, cost, preview.as_ref());
+                    last_draw = Instant::now();
+                }
+            }
             while let Ok(k) = rx.try_recv() {
+                // Arrow keys and Shift-Tab arrive as `ESC [ x`.
+                let k = if k == 0x1b {
+                    match (
+                        rx.recv_timeout(Duration::from_millis(15)),
+                        rx.recv_timeout(Duration::from_millis(15)),
+                    ) {
+                        (Ok(b'['), Ok(b'A')) => b'k',
+                        (Ok(b'['), Ok(b'B')) => b'j',
+                        (Ok(b'['), Ok(b'Z')) => b'K',
+                        _ => continue,
+                    }
+                } else {
+                    k
+                };
                 match k {
+                    b'\t' | b'j' | b'k' | b'K' if keys => {
+                        if let Some(s) = &snapshot {
+                            let order = tree_order(s);
+                            let at = order.iter().position(|a| *a == selected);
+                            let len = order.len().max(1);
+                            let next = match (k, at) {
+                                (b'\t' | b'j', Some(i)) => (i + 1) % len,
+                                (_, Some(i)) => (i + len - 1) % len,
+                                (_, None) => 0,
+                            };
+                            selected = order.get(next).cloned().unwrap_or_default();
+                            follow(&mut session, s, &selected, &mut preview);
+                            draw(&snapshot, &selected, &notice, cost, preview.as_ref());
+                            last_draw = Instant::now();
+                        }
+                    }
                     3 | b'q' => return ExitCode::SUCCESS, // Ctrl-C is a plain byte in raw mode
                     b'y' | b'n' => {
                         if let Some(s) = &snapshot {
                             notice = answer(say, &mut session, s, k == b'y');
                             dirty_since.get_or_insert_with(Instant::now);
-                            draw(&snapshot, &selected, &notice, cost);
+                            draw(&snapshot, &selected, &notice, cost, preview.as_ref());
                         }
                     }
                     b's' => {
                         if let Some(sn) = &snapshot {
                             notice = start(say, &mut session, sn, &selected, &rx);
                             dirty_since.get_or_insert_with(Instant::now);
-                            draw(&snapshot, &selected, &notice, cost);
+                            draw(&snapshot, &selected, &notice, cost, preview.as_ref());
                         }
                     }
                     b'x' => {
@@ -528,28 +657,15 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                                 Tried::Line(l) => l,
                             };
                             dirty_since.get_or_insert_with(Instant::now);
-                            draw(&snapshot, &selected, &notice, cost);
-                        }
-                    }
-                    b'\t' => {
-                        if let Some(s) = &snapshot {
-                            let with_terminal: Vec<&str> = s
-                                .agents
-                                .iter()
-                                .filter(|a| a.running)
-                                .map(|a| a.agent_id.as_str())
-                                .collect();
-                            let at = with_terminal.iter().position(|a| *a == selected);
-                            let next = at.map_or(0, |i| (i + 1) % with_terminal.len().max(1));
-                            selected = with_terminal
-                                .get(next)
-                                .map(|a| (*a).to_string())
-                                .unwrap_or_default();
-                            draw(&snapshot, &selected, &notice, cost);
+                            draw(&snapshot, &selected, &notice, cost, preview.as_ref());
                         }
                     }
                     b'\r' | b'\n' => {
                         if let (Some(s), false) = (&snapshot, selected.is_empty()) {
+                            // The full-screen view reads the same terminal: stop watching it here first.
+                            if let Some(p) = preview.take() {
+                                p.close(&mut session);
+                            }
                             let has_terminal = s.terminals.iter().any(|t| t.agent_id == selected);
                             let opened = if has_terminal {
                                 attach(say, &mut session, s, &selected, &rx)
@@ -570,7 +686,7 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                                 }
                             }
                             dirty_since.get_or_insert_with(Instant::now);
-                            draw(&snapshot, &selected, &notice, cost);
+                            draw(&snapshot, &selected, &notice, cost, preview.as_ref());
                         }
                     }
                     _ => {}

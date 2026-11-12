@@ -73,6 +73,7 @@ machine-agents =
        *[other] { $count } agents running
     }
 palette-go-machines = Show my machines
+palette-language = Language: { $name }
 agent-tokens = { $count } tokens used
 
 start-title = Start an agent
@@ -238,3 +239,78 @@ language-system = Browser default
 language-en = English
 language-tr = Türkçe
 language-not-saved = Language changed for this visit. Your browser could not save the preference.
+
+# The IDE-style window: title bar, agent tree, tabs, details panel, status bar.
+ide-command = Search or run a command
+ide-new-tab = Start an agent
+ide-close-tab = Close { $name }
+ide-hide-panel = Hide this panel
+ide-show-agents = Show the agent list
+ide-show-details = Show details
+ide-layout-single = One terminal at a time
+ide-layout-grid = Terminals side by side
+ide-details = Details
+ide-welcome-title = Pick up where you left off
+ide-welcome-running = Running now
+ide-welcome-none = No agent is running yet.
+ide-welcome-search = Search and commands
+ide-welcome-next = Jump to the next agent that needs you
+ide-add-here = Start an agent on { $machine }
+ide-toggle-machine = Show or hide the agents on { $name }
+ide-status-agents =
+    { $count ->
+        [one] { $count } agent
+       *[other] { $count } agents
+    }
+ide-status-needs =
+    { $count ->
+        [one] { $count } needs you
+       *[other] { $count } need you
+    }
+ide-folder-known = Known folders
+ide-folder-change = Change folder
+ide-folder-chosen = Working folder
+ide-agent-pick = Agent
+ide-options = Options
+ide-copy-address = Copy address
+ide-tab-changes = Changes
+ide-tab-messages = Messages
+ide-tab-cost = Spent
+theme-label = Colour scheme
+theme-system = Follow the system
+ide-shared = Shared
+ide-memory = Memory used by the agents on this machine
+network-hub = Your hub
+network-build = Version running on this machine
+network-never = never
+network-heard = heard { $when }
+network-last-seen = last heard { $when }
+network-online =
+    { $total ->
+        [one] { $online } of { $total } machine online
+       *[other] { $online } of { $total } machines online
+    }
+network-terminals =
+    { $count ->
+        [one] { $count } terminal open
+       *[other] { $count } terminals open
+    }
+terminal-size = Terminal text size
+terminal-smaller = Smaller text
+terminal-larger = Larger text
+closed-section = Closed
+closed-clear = Clear closed
+closed-dismiss = Remove from the list
+closed-ok = Finished
+closed-failed = Stopped with an error (exit code { $code })
+closed-note = Its terminal is gone. This is what it left behind.
+closed-machine = Machine
+closed-folder = Folder
+closed-branch = Branch
+closed-ended-label = Ended
+closed-earlier = before this window opened
+closed-ran-label = Ran for
+closed-changes-label = Left behind
+closed-changes-none = No uncommitted changes
+closed-tokens-label = Used
+closed-review = Review the changes

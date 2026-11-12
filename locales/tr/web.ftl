@@ -73,6 +73,7 @@ machine-agents =
        *[other] { $count } ajan çalışıyor
     }
 palette-go-machines = Makinelerimi göster
+palette-language = Dil: { $name }
 agent-tokens = { $count } token kullanıldı
 
 start-title = Ajan başlat
@@ -238,3 +239,78 @@ language-system = Tarayıcı dili
 language-en = English
 language-tr = Türkçe
 language-not-saved = Dil bu ziyaret için değiştirildi. Tarayıcınız seçimi kaydedemedi.
+
+# IDE tarzı pencere: başlık çubuğu, ajan ağacı, sekmeler, ayrıntı paneli, durum çubuğu.
+ide-command = Ara veya bir komut çalıştır
+ide-new-tab = Ajan başlat
+ide-close-tab = { $name } sekmesini kapat
+ide-hide-panel = Bu paneli gizle
+ide-show-agents = Ajan listesini göster
+ide-show-details = Ayrıntıları göster
+ide-layout-single = Tek seferde bir terminal
+ide-layout-grid = Terminaller yan yana
+ide-details = Ayrıntılar
+ide-welcome-title = Kaldığınız yerden devam edin
+ide-welcome-running = Şu an çalışanlar
+ide-welcome-none = Henüz çalışan bir ajan yok.
+ide-welcome-search = Arama ve komutlar
+ide-welcome-next = Sizi bekleyen sıradaki ajana geç
+ide-add-here = { $machine } üzerinde ajan başlat
+ide-toggle-machine = { $name } üzerindeki ajanları göster veya gizle
+ide-status-agents =
+    { $count ->
+        [one] { $count } ajan
+       *[other] { $count } ajan
+    }
+ide-status-needs =
+    { $count ->
+        [one] { $count } ajan sizi bekliyor
+       *[other] { $count } ajan sizi bekliyor
+    }
+ide-folder-known = Bilinen klasörler
+ide-folder-change = Klasörü değiştir
+ide-folder-chosen = Çalışma klasörü
+ide-agent-pick = Ajan
+ide-options = Seçenekler
+ide-copy-address = Adresi kopyala
+ide-tab-changes = Değişiklikler
+ide-tab-messages = Mesajlar
+ide-tab-cost = Harcama
+theme-label = Renk düzeni
+theme-system = Sistemi izle
+ide-shared = Paylaşılan
+ide-memory = Bu makinedeki ajanların kullandığı bellek
+network-hub = Hub'ınız
+network-build = Bu makinede çalışan sürüm
+network-never = hiç
+network-heard = { $when } duyuldu
+network-last-seen = son duyulma: { $when }
+network-online =
+    { $total ->
+        [one] { $total } makineden { $online } tanesi çevrimiçi
+       *[other] { $total } makineden { $online } tanesi çevrimiçi
+    }
+network-terminals =
+    { $count ->
+        [one] { $count } terminal açık
+       *[other] { $count } terminal açık
+    }
+terminal-size = Terminal yazı boyutu
+terminal-smaller = Daha küçük yazı
+terminal-larger = Daha büyük yazı
+closed-section = Kapananlar
+closed-clear = Kapananları temizle
+closed-dismiss = Listeden kaldır
+closed-ok = Tamamlandı
+closed-failed = Hatayla durdu (çıkış kodu { $code })
+closed-note = Terminali artık yok. Geride bıraktıkları aşağıda.
+closed-machine = Makine
+closed-folder = Klasör
+closed-branch = Dal
+closed-ended-label = Bitti
+closed-earlier = bu pencere açılmadan önce
+closed-ran-label = Çalışma süresi
+closed-changes-label = Geride kalan
+closed-changes-none = Kaydedilmemiş değişiklik yok
+closed-tokens-label = Kullanılan
+closed-review = Değişiklikleri incele

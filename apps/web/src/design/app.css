@@ -18,6 +18,7 @@
   --color-unknown: var(--state-unknown);
   --font-sans: var(--font-ui);
   --font-mono: var(--font-mono);
+  --radius-xs: var(--radius-xs);
   --radius-s: var(--radius-s);
   --radius-m: var(--radius-m);
   --radius-l: var(--radius-l);
@@ -35,6 +36,18 @@
 }
 
 @layer components {
+  /* The IDE-style window: dense rows, quiet chrome, the terminal is the content. */
+  .ide { @apply grid h-screen min-h-0 overflow-hidden bg-surface-0 text-[13px]; grid-template-rows: auto minmax(0, 1fr) auto; }
+  .ide-bar { @apply flex items-center gap-2 border-line bg-surface-1 px-2; }
+  .ide-iconbtn { @apply inline-grid size-7 place-items-center rounded-xs text-muted transition-colors duration-150 hover:bg-surface-2 hover:text-ink disabled:opacity-40; }
+  .ide-iconbtn[aria-pressed='true'] { @apply bg-surface-2 text-ink; }
+  .ide-row { @apply flex w-full min-w-0 items-center gap-2 rounded-xs px-2 py-1 text-start transition-colors duration-150 hover:bg-surface-2; }
+  .ide-row[aria-current='true'] { @apply bg-surface-2; box-shadow: inset 2px 0 0 var(--accent); }
+  .ide-tab { @apply flex h-9 min-w-0 max-w-56 flex-none items-center gap-2 border-e border-line px-3 text-muted transition-colors duration-150 hover:bg-surface-2 hover:text-ink; }
+  .ide-tab[aria-selected='true'] { @apply bg-surface-0 text-ink; box-shadow: inset 0 2px 0 var(--accent); }
+  .ide-chip { @apply inline-flex items-center gap-1.5 rounded-xs border border-line bg-surface-2 px-2 py-0.5 text-xs text-muted; }
+  .ide-kbd { @apply rounded-xs border border-line bg-surface-2 px-1.5 py-0.5 font-mono text-[11px] text-muted; }
+  .ide-section { @apply px-3 pb-1 pt-3 text-[11px] font-semibold tracking-wider text-muted uppercase; }
   .page { @apply mx-auto grid max-w-3xl gap-6 px-4 py-8; }
   .topbar { @apply flex items-center justify-between gap-4; }
   .muted { @apply text-[13px] text-muted; }
@@ -94,8 +107,10 @@
   .focus { @apply grid gap-4; }
 }
 
+@keyframes flow { to { stroke-dashoffset: -24; } }
 @keyframes breathe { 50% { opacity: 0.45; } }
 @keyframes attend { 50% { transform: scale(1.25); } }
+@media (prefers-reduced-motion: no-preference) { .net-link--on { animation: flow 1.2s linear infinite; } }
 @media (prefers-reduced-motion: reduce) { .state__mark { animation: none !important; } }
 
 /* xterm paints its scroll area black by default; let the pane's own (themed) background show. */

@@ -265,3 +265,30 @@ fn dropped_subscribers_are_forgotten() {
     });
     h.kill().unwrap();
 }
+
+#[test]
+fn a_subscriber_gets_the_screen_with_its_colours_and_the_same_cells() {
+    let h = handle(&["sh"]);
+    h.send_input(b"printf '\\033[1;31mRED\\033[0m \\033[38;5;208mORANGE\\033[0m \\033[48;2;1;2;3mRGB\\033[0m\\n'\n".to_vec())
+        .unwrap();
+    wait_for(&h, "coloured line", |s| {
+        s.lines.iter().any(|l| l.contains("RED ORANGE RGB"))
+    });
+    let (snap, _sub) = h.subscribe();
+    let ansi = snap.to_ansi();
+    let text = String::from_utf8_lossy(&ansi);
+    assert!(text.contains("\x1b[0;1;31mRED"), "{text:?}");
+    assert!(text.contains("\x1b[0;38;5;208mORANGE"), "{text:?}");
+    assert!(text.contains("\x1b[0;48;2;1;2;3mRGB"), "{text:?}");
+    // Painted on a fresh terminal of the same size, the repaint gives back the node's own screen and cursor.
+    let mut mirror = AlacrittyTerminal::new(snap.size);
+    mirror.feed(&ansi);
+    assert_eq!(lines(&mirror), snap.lines);
+    assert_eq!(
+        (mirror.cursor().row, mirror.cursor().col),
+        (snap.cursor.row, snap.cursor.col)
+    );
+    // A plain snapshot (what detection reads) does not pay for the repaint.
+    assert!(h.snapshot().repaint.is_none());
+    h.kill().unwrap();
+}

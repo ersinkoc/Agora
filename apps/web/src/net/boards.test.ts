@@ -102,3 +102,25 @@ describe('board identity', () => {
     expect(boards(view)[0]?.folders.map(f => f.path)).toEqual(['/repo']);
   });
 });
+
+import { bytesLabel } from './view';
+describe('bytesLabel', () => {
+  it('writes memory the way people read it', () => {
+    expect(bytesLabel(0)).toBe('');
+    expect(bytesLabel(512)).toBe('512 B');
+    expect(bytesLabel(1536 * 1024 * 1024)).toBe('1.5 GB');
+    expect(bytesLabel(20 * 1024 * 1024)).toBe('20 MB');
+  });
+});
+
+import { tiles, applyEvent } from './view';
+describe('closed agents', () => {
+  it('are told apart from running ones, with how they ended', () => {
+    const view = fromSnapshot({ nodes: [{ nodeId: 'n', hostname: 'M' }], agents: [{ agentId: 'n/a', nodeId: 'n', kind: 'claude-code', running: true }] });
+    applyEvent(view, 5, { producerId: 'n', body: 'agentExited', agentExited: { agentId: 'a', exitCode: 2 } } as never);
+    const t = tiles(view)[0];
+    expect(t?.closed).toBe(true);
+    expect(t?.exitCode).toBe(2);
+    expect(t?.state).toBe('finished');
+  });
+});

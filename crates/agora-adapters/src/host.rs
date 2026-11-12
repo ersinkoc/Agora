@@ -294,6 +294,11 @@ fn to_event(method: &str, p: &Value) -> Option<AdapterEvent> {
 }
 
 impl Adapter {
+    /// The adapter process's id (the agent it hosts runs below it).
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
     pub fn spawn(cfg: &AdapterConfig) -> io::Result<Self> {
         let mut cmd = Command::new(&cfg.program);
         cmd.args(&cfg.args);
