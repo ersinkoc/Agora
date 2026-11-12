@@ -91,4 +91,14 @@ describe('board identity', () => {
     }).sort((a, b) => a - b);
     console.info(`Board projection: 500 agents, 50 projects, 50 samples, p95 ${samples[47]?.toFixed(2)} ms (projection only).`);
   });
+
+  it('does not list an isolated working copy as a folder of its board', () => {
+    const view = fromSnapshot({
+      nodes: [{ nodeId: 'n', hostname: 'Machine' }],
+      checkouts: [{ checkoutId: 'n/c', nodeId: 'n', projectId: 'p', path: '/repo' }],
+      tasks: [{ taskId: 't', projectId: 'p', title: 'T' }],
+      workspaces: [{ workspaceId: 'n/wt', nodeId: 'n', projectId: 'p', path: '/wt/copy', gitRoot: '/wt/copy', managedWorktree: true }],
+    });
+    expect(boards(view)[0]?.folders.map(f => f.path)).toEqual(['/repo']);
+  });
 });
