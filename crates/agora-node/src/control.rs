@@ -70,6 +70,8 @@ pub struct ControlContext {
     directories: Mutex<crate::directory::Bindings>,
     /// Where the agent manifests live; read again before agents are listed or started.
     manifests_dir: Option<PathBuf>,
+    /// Set after an agent starts: the node's Git watcher then checks its folder at once instead of on its next round.
+    git_wake: Option<Arc<AtomicBool>>,
     names: AtomicU64,
     seen: Mutex<IdempotencyCache>,
 }
@@ -106,7 +108,22 @@ impl ControlContext {
             chat,
             names: AtomicU64::new(0),
             manifests_dir: None,
+            git_wake: None,
             seen: Mutex::new(IdempotencyCache::default()),
+        }
+    }
+
+    /// Wakes the node's Git watcher (`daemon::watch_git`) after an agent starts, so the new folder's changes are counted at once and
+    /// not up to a poll later.
+    #[must_use]
+    pub fn with_git_wake(mut self, wake: Arc<AtomicBool>) -> Self {
+        self.git_wake = Some(wake);
+        self
+    }
+
+    fn wake_git(&self) {
+        if let Some(wake) = &self.git_wake {
+            wake.store(true, Ordering::Release);
         }
     }
 
@@ -435,13 +452,15 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                             info.branch.clone()
                         },
                         managed_worktree: a.separate_worktree,
-                        files_changed: crate::git::status(Path::new(&path))
-                            .map_or(0, |s| s.files_changed),
+                        // Counted by the Git watcher, woken below, which sends it as this workspace's status right after; a
+                        // `status` here (three git processes, seconds on Windows) only made the start answer later.
+                        files_changed: 0,
                     },
                     &a.kind,
                     has_terminal,
                 );
             }
+            ctx.wake_git();
             Ok(v1::CommandOk {
                 result: Some(Ok_::AgentLaunch(v1::AgentLaunchResult {
                     agent_id: id.as_str().into(),
@@ -498,6 +517,7 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                     has_terminal,
                 );
             }
+            ctx.wake_git();
             Ok(v1::CommandOk {
                 result: Some(Ok_::AgentStart(v1::AgentStartResult {
                     terminal_id: if has_terminal {

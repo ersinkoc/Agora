@@ -742,6 +742,7 @@ impl Node {
             }));
         }
         let chat = Arc::new(crate::chat::ChatBoard::new());
+        let git_wake = Arc::new(AtomicBool::new(false));
         let ctx = Arc::new(
             ControlContext::new(
                 Arc::clone(&supervisor),
@@ -753,7 +754,8 @@ impl Node {
                 Some(Arc::clone(&approvals)),
                 Arc::clone(&chat),
             )
-            .with_manifests_dir(cfg.manifests_dir.clone()),
+            .with_manifests_dir(cfg.manifests_dir.clone())
+            .with_git_wake(Arc::clone(&git_wake)),
         );
         let server = ControlServer::start(&cfg.socket, ctx)?;
 
@@ -898,7 +900,7 @@ impl Node {
             );
             std::thread::Builder::new()
                 .name("agora-git".into())
-                .spawn(move || watch_git(&sup, &ev, &stop))?
+                .spawn(move || watch_git(&sup, &ev, &stop, &git_wake))?
         };
         Ok(Self {
             server: Some(server),
@@ -950,7 +952,8 @@ fn memory_moved(reported: u64, now: u64) -> bool {
     moved > reported / 4 || moved > 256 << 20
 }
 
-fn watch_git(sup: &Mutex<Supervisor>, ev: &EventSink, stop: &AtomicBool) {
+/// `wake` (set when an agent starts) ends the wait between rounds early, so a new folder's changes are counted at once.
+fn watch_git(sup: &Mutex<Supervisor>, ev: &EventSink, stop: &AtomicBool, wake: &AtomicBool) {
     let mut last: std::collections::HashMap<(PathBuf, bool), (u32, u32, u32, String)> =
         std::collections::HashMap::new();
     while !stop.load(Ordering::Acquire) {
@@ -1002,7 +1005,10 @@ fn watch_git(sup: &Mutex<Supervisor>, ev: &EventSink, stop: &AtomicBool) {
             }
         }
         let until = Instant::now() + GIT_POLL;
-        while Instant::now() < until && !stop.load(Ordering::Acquire) {
+        while Instant::now() < until
+            && !stop.load(Ordering::Acquire)
+            && !wake.swap(false, Ordering::AcqRel)
+        {
             std::thread::sleep(TICK);
         }
     }

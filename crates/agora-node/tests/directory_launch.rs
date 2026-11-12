@@ -569,3 +569,55 @@ fn confined_selected_subfolders_cannot_write_to_the_parent_checkout() {
     drop(e);
     let _ = std::fs::remove_dir_all(repo);
 }
+
+#[test]
+fn a_launched_folders_changes_are_reported_for_its_workspace() {
+    use v1::event::Body;
+    if !supported() {
+        return;
+    }
+    // The start answers without counting the folder's changes; the node's Git watcher, woken by the start, reports them.
+    let e = Env::new("changes");
+    let repo = e.root.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("a.txt"), "committed\n").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-qm", "initial"]);
+    std::fs::write(repo.join("a.txt"), "edited\n").unwrap();
+    std::fs::write(repo.join("b.txt"), "new\n").unwrap();
+    let mut c = e.client();
+    let info = inspect(&mut c, &repo, false);
+    let a = launch(&mut c, &info, "probe", false);
+    // Generous: one status is a few git processes, which take seconds each on a busy Windows machine.
+    let end = Instant::now() + Duration::from_secs(60);
+    loop {
+        let latest = e
+            .node
+            .as_ref()
+            .unwrap()
+            .events
+            .events_after(0)
+            .into_iter()
+            .filter_map(|ev| match ev.body {
+                Some(Body::WorkspaceStatusChanged(s)) if s.workspace_id == a.workspace_id => {
+                    Some(s)
+                }
+                _ => None,
+            })
+            .next_back();
+        if latest.as_ref().is_some_and(|s| s.files_changed == 2) {
+            break;
+        }
+        assert!(
+            Instant::now() < end,
+            "no report of the two changed files: {latest:?}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    c.call(Cmd::AgentStop(v1::AgentStop {
+        agent_id: a.agent_id,
+    }))
+    .unwrap()
+    .unwrap();
+}
