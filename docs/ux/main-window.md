@@ -3,6 +3,7 @@
 ![Window, dark](screens/window-ide-dark.png)
 ![Window, light](screens/window-ide-light.png)
 ![Terminals side by side](screens/window-ide-grid.png)
+![Full size](screens/window-full-dark.png)
 ![Start an agent](screens/window-start-chosen-dark.png)
 
 ## Layout (editor-style, 2026-11-12)

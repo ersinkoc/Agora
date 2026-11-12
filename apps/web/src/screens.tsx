@@ -4,6 +4,7 @@ import { PromptBox } from './components/PromptBox';
 import type { ChatSource } from './net/chat';
 import { AgentTile } from './components/AgentTile';
 import { AttentionStrip } from './components/AttentionStrip';
+import { Icon } from './components/Icon';
 import { StateBadge } from './components/StateBadge';
 import type { MachineModel, MessageModel, ProjectCost } from './net/view';
 import type { Device } from './net/approval';
@@ -90,26 +91,30 @@ export function Focus({ agent, source: live, costMicroUsd, chatSource, sendPromp
     );
   }
   const why = agent.reportedBy === 'agent' ? t('focus-why-agent') : t('focus-why-screen');
+  // Full size: the terminal takes the whole window under one slim bar, like a maximized editor tab.
   return (
-    <main className="page focus">
-      <div className="flex flex-wrap items-center justify-between gap-3"><button type="button" className="link" onClick={onBack}>{t('focus-back')}</button><LanguagePicker /></div>
-      <header className="topbar">
-        <h1>{agent.name}</h1>
+    <div className="ide" style={{ gridTemplateRows: 'auto minmax(0, 1fr)' }}>
+      <header className="ide-bar min-h-10 flex-wrap border-b py-1">
+        <button type="button" className="ide-row w-auto flex-none text-[13px] text-muted hover:text-ink" onClick={onBack}><Icon name="chevron" className="size-3.5 rotate-180 rtl:rotate-0" />{t('focus-back')}</button>
+        <h1 className="m-0 truncate text-[13px] font-semibold tracking-normal">{agent.name}</h1>
         <span title={`${t('focus-why')} ${why}`}><StateBadge state={agent.state} /></span>
+        <span className="hidden min-w-0 items-center gap-1.5 truncate text-xs text-muted md:flex"><Icon name="machine" className="size-3.5" />{agent.machine}<Icon name="chevron" className="size-3 rtl:rotate-180" /><Icon name="folder" className="size-3.5" />{agent.project || agent.workspace}{agent.branch && <><Icon name="branch" className="ms-1 size-3.5" /><span className="font-mono">{agent.branch}</span></>}</span>
+        <span className="flex-1" />
+        {agent.tokens ? <span className="ide-chip">{t('agent-tokens', { count: agent.tokens })}{costMicroUsd !== undefined ? ` · ${t('agent-cost', { amount: money(costMicroUsd) })}` : ''}</span> : null}
+        <span className="hidden sm:block"><LanguagePicker compact /></span>
       </header>
-      <span className="muted">
-        {t('agent-on-machine', { machine: agent.machine })} · {t('agent-workspace', { name: agent.workspace })}
-      </span>
-      <AgentAddress key={agent.id} agent={agent} />
-      {agent.tokens ? <span className="muted">{t('agent-tokens', { count: agent.tokens })}{costMicroUsd !== undefined ? ` · ${t('agent-cost', { amount: money(costMicroUsd) })}` : ''}</span> : null}
-      {agent.terminal === false ? <section className="h-[65vh] min-h-0" aria-label={t('chat-log')}><PromptBox agent={agent} source={chatSource} send={sendPrompt} /></section> : <>
-        <h2>{t('focus-terminal')}</h2>
-        <Suspense fallback={<div className="terminal" aria-busy="true" />}>
-          <TerminalView source={source} label={t('focus-terminal')} />
-        </Suspense>
-        {!live && <p className="muted">{t('focus-terminal-placeholder')}</p>}
-      </>}
-    </main>
+      <main className="flex min-h-0 min-w-0 flex-col">
+        <AgentAddress key={agent.id} agent={agent} />
+        <div className="pane min-h-0 flex-1 bg-surface-0 p-1.5" aria-label={agent.terminal === false ? t('chat-log') : t('focus-terminal')}>
+          {agent.terminal === false ? <PromptBox agent={agent} source={chatSource} send={sendPrompt} /> : (
+            <Suspense fallback={<div className="terminal" aria-busy="true" />}>
+              <TerminalView source={source} label={t('focus-terminal')} />
+            </Suspense>
+          )}
+        </div>
+        {agent.terminal !== false && !live && <p className="muted m-0 border-t border-line bg-surface-1 px-3 py-1.5">{t('focus-terminal-placeholder')}</p>}
+      </main>
+    </div>
   );
 }
 
