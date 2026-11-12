@@ -6,6 +6,12 @@
 ![Full size](screens/window-full-dark.png)
 ![Start an agent](screens/window-start-chosen-dark.png)
 
+## Closed agents
+
+![A closed agent's summary](screens/window-closed-dark.png)
+
+An agent whose process is gone moves from its folder to **Closed**, below the machines, with how long ago it ended; a failed one is marked. Opening it shows a summary (how it ended, when, for how long, folder and branch, files left behind with Review/History/Files, tokens and cost), **Start an agent** on this machine and **Remove from the list**. **Clear closed** removes them all. The choice is remembered in this browser only; the hub still has the record (forgetting an agent hub-wide would need a protocol message).
+
 ## Hub and machines
 
 ![Hub and machines](screens/network-dark.png)

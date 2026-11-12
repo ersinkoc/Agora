@@ -4,6 +4,9 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+### The window
+- Agents that have closed no longer sit among the running ones. They wait in a **Closed** section (when they ended, newest first) until you clear them: one by one (✕) or **Clear closed**. Opening one shows what it left behind instead of a dead terminal: how it ended (exit code), when and for how long it ran, the folder and branch, the files it changed (with Review, History and Files), what it used. Clearing is this browser's; the hub keeps its record.
+
 ## 0.3.1
 
 ### The window

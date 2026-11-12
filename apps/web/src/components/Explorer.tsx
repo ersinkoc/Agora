@@ -2,11 +2,12 @@ import { useMemo, useState } from 'react';
 import { t } from '../i18n';
 import { machineKey, type AgentTileModel } from '../model';
 import { bytesLabel, type MachineModel } from '../net/view';
+import { ago } from '../net/time';
 import { Icon } from './Icon';
 import { StateMark } from './StateBadge';
 
 // The left panel: machine → folder → agent, like a file explorer. Opening an agent puts it in a tab.
-export function Explorer({ fleet, machines, open, current, projects, project, onProject, onToggle, onStart, onCollapse }: {
+export function Explorer({ fleet, machines, open, current, projects, project, onProject, onToggle, onStart, onCollapse, onDismiss }: {
   fleet: readonly AgentTileModel[];
   machines: readonly MachineModel[];
   open: readonly string[];
@@ -17,6 +18,7 @@ export function Explorer({ fleet, machines, open, current, projects, project, on
   onToggle: (id: string) => void;
   onStart?: (machine?: string) => void;
   onCollapse: () => void;
+  onDismiss: (ids: string[]) => void;
 }) {
   const [filter, setFilter] = useState('');
   const [folded, setFolded] = useState<ReadonlySet<string>>(new Set());
@@ -26,6 +28,7 @@ export function Explorer({ fleet, machines, open, current, projects, project, on
     const groups = new Map<string, Map<string, AgentTileModel[]>>();
     for (const m of machines) if (!q) groups.set(m.id, new Map());
     for (const a of fleet) {
+      if (a.closed) continue;
       if (q && ![a.name, a.id, a.machine, machineKey(a), a.project ?? '', a.workspace, a.branch ?? ''].some(x => x.toLowerCase().includes(q))) continue;
       const folders = groups.get(machineKey(a)) ?? new Map<string, AgentTileModel[]>();
       const key = a.projectId ?? a.project ?? a.workspace;
@@ -34,6 +37,13 @@ export function Explorer({ fleet, machines, open, current, projects, project, on
     }
     return groups;
   }, [fleet, machines, filter]);
+  // Closed agents wait in their own section until the owner clears them.
+  const closed = useMemo(() => {
+    const q = filter.trim().toLowerCase();
+    return fleet.filter((a) => a.closed && (!q || [a.name, a.machine, a.project ?? '', a.workspace].some((x) => x.toLowerCase().includes(q))))
+      .sort((a, b) => (b.endedMs ?? 0) - (a.endedMs ?? 0));
+  }, [fleet, filter]);
+  const now = Date.now();
 
   return <aside className="flex min-h-0 flex-col border-line bg-surface-1 lg:border-e" aria-label={t('console-agents')}>
     <div className="flex h-9 flex-none items-center gap-1 border-b border-line ps-3 pe-1">
@@ -85,7 +95,26 @@ export function Explorer({ fleet, machines, open, current, projects, project, on
           </div>)}
         </section>;
       })}
-      {fleet.length > 0 && tree.size === 0 && <p className="muted px-3 py-2">{t('filter-none')}</p>}
+      {closed.length > 0 && <section className="mt-2 border-t border-line pt-1" aria-label={t('closed-section')}>
+        <div className="flex items-center">
+          <button type="button" className="ide-row flex-1 font-medium" aria-expanded={!folded.has('~closed')} onClick={() => fold('~closed')}>
+            <Icon name="chevron" className={`size-3.5 text-muted transition-transform duration-150 ${folded.has('~closed') ? 'rtl:rotate-180' : 'rotate-90'}`} />
+            <span className="min-w-0 flex-1 truncate">{t('closed-section')}</span><span className="text-[11px] font-normal text-muted">{closed.length}</span>
+          </button>
+          <button type="button" className="ide-chip me-1 hover:text-ink" onClick={() => onDismiss(closed.map((a) => a.id))}>{t('closed-clear')}</button>
+        </div>
+        {!folded.has('~closed') && <ul className="m-0 list-none p-0">
+          {closed.map((a) => <li key={a.id} className="group flex items-center">
+            <button type="button" className="ide-row flex-1 opacity-80" aria-current={current === a.id ? 'true' : undefined} aria-pressed={open.includes(a.id)} onClick={() => onToggle(a.id)} title={`${a.machine} · ${a.workspace}`}>
+              <span className="[&_.state__mark]:!animate-none"><StateMark state={a.exitCode ? 'needs-you' : 'finished'} /></span>
+              <span className="min-w-0 flex-1 truncate">{a.name}</span>
+              <span className="flex-none text-[11px] text-muted">{a.endedMs ? ago(a.endedMs, now) : ''}</span>
+            </button>
+            <button type="button" className="ide-iconbtn size-6 opacity-0 focus-visible:opacity-100 group-hover:opacity-100" onClick={() => onDismiss([a.id])} aria-label={t('closed-dismiss')} title={t('closed-dismiss')}><Icon name="close" className="size-3.5" /></button>
+          </li>)}
+        </ul>}
+      </section>}
+      {fleet.length > 0 && tree.size === 0 && closed.length === 0 && <p className="muted px-3 py-2">{t('filter-none')}</p>}
       {fleet.length === 0 && machines.length > 0 && <p className="muted px-3 py-2">{t('fleet-empty')}</p>}
     </nav>
   </aside>;
