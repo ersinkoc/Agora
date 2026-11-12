@@ -167,14 +167,19 @@ pub fn set_executable(path: &std::path::Path, executable: bool) -> io::Result<()
     }
 }
 
-/// Makes a folder usable by the current user only (the folder of installed adapters). A no-op elsewhere than Unix.
+/// Makes a folder usable by the current user only (the folder of installed adapters): `0700` on Unix; on Windows a protected ACL for
+/// the user and SYSTEM, passed on to everything below. A no-op elsewhere.
 pub fn restrict_to_owner(path: &std::path::Path) -> io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        windows::set_owner_only(path, true)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = path;
         Ok(())
@@ -182,13 +187,12 @@ pub fn restrict_to_owner(path: &std::path::Path) -> io::Result<()> {
 }
 
 /// Writes `contents` to `path` readable and writable only by the current user (private keys and tokens), replacing any
-/// existing file. Elsewhere than Unix the file is written with the default permissions (Windows ACLs come with the
-/// Windows node).
+/// existing file: `0600` on Unix; on Windows a protected ACL for the user and SYSTEM, so a folder that lets other users in
+/// (a data volume's default ACL) does not reach the file.
 pub fn write_private(path: &std::path::Path, contents: &[u8]) -> io::Result<()> {
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     {
         use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
         // Written beside the target and renamed over it: a full disk or an interruption leaves the old file whole, never
         // a half-written key or token. The temporary name is exclusive (`create_new`), so a planted link is never followed.
         let mut tmp = path.as_os_str().to_owned();
@@ -196,13 +200,18 @@ pub fn write_private(path: &std::path::Path, contents: &[u8]) -> io::Result<()> 
         let tmp = std::path::PathBuf::from(tmp);
         let _ = std::fs::remove_file(&tmp);
         let result = (|| {
-            let mut f = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(&tmp)?;
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+            let mut f = options.open(&tmp)?;
+            // Private before the first byte is in it.
+            #[cfg(windows)]
+            windows::set_owner_only(&tmp, false)?;
             f.write_all(contents)?;
             f.sync_all()?;
+            // Windows cannot rename a file that is still open.
+            drop(f);
             std::fs::rename(&tmp, path)
         })();
         if result.is_err() {
@@ -210,7 +219,7 @@ pub fn write_private(path: &std::path::Path, contents: &[u8]) -> io::Result<()> 
         }
         result
     }
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     {
         std::fs::write(path, contents)
     }
