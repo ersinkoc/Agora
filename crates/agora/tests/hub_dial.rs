@@ -1845,9 +1845,13 @@ fn the_terminal_console_removes_a_closed_agent_from_every_list_but_not_a_running
     };
     let mut session = Session::connect(&console, "client-token").unwrap();
     // Running: the hub refuses, and the agent stays.
+    let error = session.forget_agent("laptop/agent-1").unwrap_err();
+    assert_eq!(error.code, "agent.running");
     assert_eq!(
-        session.forget_agent("laptop/agent-1"),
-        Err("agent.running".to_string())
+        error.params["agent_id"].value,
+        Some(agora_protocol::v1::param_value::Value::Str(
+            "laptop/agent-1".into()
+        ))
     );
     assert!(hub.state.hub.view().0.agents.contains_key("laptop/agent-1"));
     // Once it has exited, `d` removes it for everyone.
@@ -1890,4 +1894,57 @@ fn the_terminal_console_removes_a_closed_agent_from_every_list_but_not_a_running
         .agents
         .iter()
         .any(|a| a.agent_id == "laptop/agent-1"));
+}
+
+#[test]
+fn the_terminal_console_keeps_a_forget_refusals_permission_details() {
+    use agora_hub::users::{Access, Role};
+    use agora_tui::client::{Hub as ConsoleHub, Session};
+    struct Viewer;
+    impl ClientAuth for Viewer {
+        fn check(&self, token: &str) -> bool {
+            token == "client-token"
+        }
+        fn access(&self, token: &str) -> Option<Access> {
+            self.check(token).then(|| Access {
+                role: Role::Viewer,
+                user: "viewer".into(),
+                projects: None,
+            })
+        }
+    }
+    let mut hub = hubside("laptop");
+    Arc::get_mut(&mut hub.state).unwrap().auth = Box::new(Viewer);
+    let addr = hub.listen("127.0.0.1:0");
+    let sink = sink_with_agent(&tmp("forget-viewer"), "laptop");
+    sink.record_bodies(vec![agora_protocol::v1::event::Body::AgentExited(
+        agora_protocol::v1::AgentExited {
+            agent_id: "agent-1".into(),
+            exit_code: 0,
+        },
+    )]);
+    let _link = spawn(Arc::clone(&sink), hub.link(addr)).unwrap();
+    wait("the closed agent", || {
+        hub.state
+            .hub
+            .view()
+            .0
+            .agents
+            .get("laptop/agent-1")
+            .is_some_and(|a| !a.running)
+    });
+    let console = ConsoleHub {
+        addr: addr.to_string(),
+        ca_pem: hub.ca_pem.clone(),
+    };
+    let mut session = Session::connect(&console, "client-token").unwrap();
+    let error = session.forget_agent("laptop/agent-1").unwrap_err();
+    assert_eq!(error.code, "auth.forbidden");
+    assert_eq!(
+        error.params["action"].value,
+        Some(agora_protocol::v1::param_value::Value::Str(
+            "AgentForget".into()
+        ))
+    );
+    assert!(!hub.state.hub.view().0.agents["laptop/agent-1"].forgotten);
 }
