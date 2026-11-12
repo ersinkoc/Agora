@@ -647,6 +647,31 @@ mod tests {
     }
 
     #[test]
+    fn a_second_update_works_while_the_program_moved_aside_by_the_first_still_runs() {
+        let dir = std::env::temp_dir().join(format!("agora-update-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Any long-running program stands in for a node started before the first update.
+        let ping = Path::new(r"C:\Windows\System32\PING.EXE");
+        let target = dir.join("agora.exe");
+        std::fs::copy(ping, &target).unwrap();
+        let mut node = std::process::Command::new(&target)
+            .args(["-n", "30", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        for n in 1..=3 {
+            let new = dir.join(format!("new-{n}.exe"));
+            std::fs::copy(ping, &new).unwrap();
+            crate::replace_executable(&new, &target).unwrap_or_else(|e| panic!("update {n}: {e}"));
+            assert!(target.exists() && !new.exists());
+        }
+        let _ = node.kill();
+        let _ = node.wait();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_canonical_folder_is_one_cmd_can_start_in() {
         let dir = std::env::temp_dir();
         let canon = crate::canonicalize_plain(&dir).unwrap();
