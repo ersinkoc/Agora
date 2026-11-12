@@ -22,6 +22,7 @@ import { StateBadge, StateMark } from './StateBadge';
 import { ClosedSummary } from './ClosedSummary';
 import { dismiss, dismissedIds, subscribeDismissed } from '../net/dismissed';
 import { loadLayout, saveLayout } from '../net/layout';
+import { Resizer } from './Resizer';
 
 const TerminalView = lazy(() => import('../terminal/TerminalView').then((m) => ({ default: m.TerminalView })));
 
@@ -32,7 +33,7 @@ const wide = () => typeof window === 'undefined' || !window.matchMedia || window
 
 // The one window, laid out like an editor: the agents on the left as a tree, the terminals you are watching as tabs in the
 // middle (or side by side), details on the right, and a status bar. Everything is derived from props.
-export function Console({ agents, machines, usage, projects = [], approvals, messages, boards = [], terminalFor, chatOf, sendPrompt, loadDiff, loadHistory, filesOf, onOpen, onStart, onCommand, start, onResolve, notice, link }: {
+export function Console({ agents, machines, usage, projects = [], approvals, messages, boards = [], terminalFor, chatOf, sendPrompt, loadDiff, loadHistory, filesOf, onOpen, onStart, onCommand, onForget, start, onResolve, notice, link }: {
   agents: readonly AgentTileModel[];
   machines: readonly MachineModel[];
   usage?: UsageSummary;
@@ -49,6 +50,8 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   onOpen: (agentId: string) => void;
   onStart?: (machine?: string) => void;
   onCommand?: () => void;
+  // Ask the hub to forget a closed agent for every client (ADR-0053); false when it could not (an older hub), and it is only hidden here.
+  onForget?: (agentId: string) => Promise<boolean>;
   start?: ReactNode;
   onResolve: (a: ApprovalModel, approved: boolean) => void;
   notice?: string;
@@ -80,6 +83,8 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   useEffect(() => { const on = () => textSize((n) => n + 1); window.addEventListener('agora-terminal-size', on); return () => window.removeEventListener('agora-terminal-size', on); }, []);
   const [showAgents, setShowAgents] = useState(saved?.showAgents ?? wide());
   const [showDetails, setShowDetails] = useState(saved?.showDetails ?? wide());
+  const [leftWidth, setLeftWidth] = useState(saved?.leftWidth ?? 272);
+  const [rightWidth, setRightWidth] = useState(saved?.rightWidth ?? 336);
   const touched = useRef(saved?.touched ?? false);
   const [reviewing, setReviewing] = useState<string | undefined>();
   const [browsing, setBrowsing] = useState<string | undefined>();
@@ -96,7 +101,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
       return alive.length === cur.length && room.length === 0 ? cur : [...alive, ...room];
     });
   }, [fleet]);
-  useEffect(() => { saveLayout({ pinned, active, layout, touched: touched.current, showAgents, showDetails }); }, [pinned, active, layout, showAgents, showDetails]);
+  useEffect(() => { saveLayout({ pinned, active, layout, touched: touched.current, showAgents, showDetails, leftWidth, rightWidth }); }, [pinned, active, layout, showAgents, showDetails, leftWidth, rightWidth]);
   useEffect(() => {
     setActive((cur) => (cur && pinned.includes(cur) ? cur : pinned[0]));
   }, [pinned]);
@@ -157,7 +162,8 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
     .sort((a, b) => (b.filesChanged ?? 0) - (a.filesChanged ?? 0));
   // An agent that is waiting and has an approval open is one thing that needs you, not two.
   const needs = attention.length + approvals.filter((x) => !attention.some((a) => a.id === x.agentId)).length;
-  const columns = showAgents && showDetails ? 'lg:grid-cols-[17rem_minmax(0,1fr)_21rem]' : showAgents ? 'lg:grid-cols-[17rem_minmax(0,1fr)]' : showDetails ? 'lg:grid-cols-[minmax(0,1fr)_21rem]' : 'lg:grid-cols-1';
+  // Panel widths are what the user dragged them to; on a phone the panels stack and the widths do not apply.
+  const cols = `${showAgents ? `${leftWidth}px ` : ''}minmax(0,1fr)${showDetails ? ` ${rightWidth}px` : ''}`
   const find = (id?: string) => fleet.find((a) => a.id === id);
 
   // Editor habits: Alt+1…9 picks a tab, Ctrl/⌘+B hides or shows the agent list.
@@ -209,7 +215,8 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
       <AgentAddress agent={a} />
       {a.closed ? <ClosedSummary agent={a} now={now} cost={usage?.perAgent.has(a.id) ? money(usage.perAgent.get(a.id) ?? 0) : undefined}
         onReview={loadDiff ? () => setReviewing(a.id) : undefined} onHistory={loadHistory && a.git !== false ? () => setHistory(a.id) : undefined} onFiles={filesOf ? () => setBrowsing(a.id) : undefined}
-        onStart={onStart ? () => onStart() : undefined} onDismiss={() => dismiss([a.id])} /> : <div className="pane min-h-0 flex-1 p-1.5">
+        onStart={onStart ? () => onStart() : undefined} onDismiss={() => dismiss([a.id])}
+        onForget={onForget ? () => { void onForget(a.id).then((ok) => { if (!ok) dismiss([a.id]); }); } : undefined} /> : <div className="pane min-h-0 flex-1 p-1.5">
         {a.terminal === false ? <PromptBox agent={a} send={sendPrompt} source={chatOf?.(a)} /> : (
           <Suspense fallback={<div className="terminal" aria-busy="true" />}>
             <TerminalView source={terminalFor(a.id)} label={`${t('focus-terminal')} · ${a.name}`} />
@@ -235,7 +242,9 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
         {!showDetails && <button type="button" className="ide-iconbtn" onClick={() => setShowDetails(true)} aria-label={t('ide-show-details')} title={t('ide-show-details')}><Icon name="panelRight" /></button>}
       </header>
 
-      <div className={`grid min-h-0 grid-cols-1 ${columns}`}>
+      <div className="relative grid min-h-0 grid-cols-1 lg:[grid-template-columns:var(--cols)]" style={{ ['--cols' as string]: cols }}>
+        {showAgents && <div className="absolute inset-y-0 z-10 hidden lg:block" style={{ insetInlineStart: leftWidth }}><Resizer side="start" value={leftWidth} min={200} max={480} onChange={setLeftWidth} /></div>}
+        {showDetails && <div className="absolute inset-y-0 z-10 hidden lg:block" style={{ insetInlineEnd: rightWidth }}><Resizer side="end" value={rightWidth} min={260} max={560} onChange={setRightWidth} /></div>}
         {showAgents && <Explorer fleet={projectFilter ? fleet.filter((a) => a.projectId === projectFilter) : fleet} machines={machines} projects={projectOptions} project={projectFilter} onProject={chooseProject} open={pinned} current={current?.id} onToggle={select} onStart={onStart} onCollapse={() => setShowAgents(false)} onDismiss={dismiss} />}
 
         <main className="flex min-h-0 min-w-0 flex-col" aria-label={t('focus-terminal')}>

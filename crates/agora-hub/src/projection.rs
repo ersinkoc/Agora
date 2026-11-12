@@ -58,6 +58,8 @@ pub struct AgentView {
     pub output_tokens: u64,
     /// The model the agent last reported; empty until it reports one.
     pub model: String,
+    /// ADR-0053: the owner had the hub forget this closed agent. It is no longer listed to clients; its tokens and cost still count.
+    pub forgotten: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -229,6 +231,7 @@ impl View {
                         input_tokens: 0,
                         output_tokens: 0,
                         model: String::new(),
+                        forgotten: false,
                     },
                 );
             }
@@ -252,8 +255,12 @@ impl View {
                     }
                 }
             }
-            // ADR-0053: acted on by the hub once it emits the event (the next change); the schema comes first.
-            Body::AgentForgotten(_) => {}
+            // ADR-0053: the id is the hub-wide key (the hub made this event); history and usage stay.
+            Body::AgentForgotten(e) => {
+                if let Some(a) = self.agents.get_mut(&e.agent_id) {
+                    a.forgotten = true;
+                }
+            }
             Body::AgentExited(e) => {
                 if let Some(a) = self.agents.get_mut(&q(&e.agent_id)) {
                     a.running = false;

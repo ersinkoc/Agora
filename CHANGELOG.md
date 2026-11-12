@@ -4,6 +4,10 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+### Closed agents
+- **Remove for everyone:** a closed agent's summary can ask the hub to forget it (ADR-0053): it disappears from every window, the TUI and the desktop app. Its earlier events stay in the hub's record and its tokens and cost still count. An agent that still runs cannot be forgotten. "Remove from this list" still only hides it in this browser.
+### The window
+- Drag the dividers to resize the agent list and the details panel (or focus a divider and use the arrow keys; Shift for bigger steps). The widths are remembered in this browser.
 ### Safety
 - A confined agent cannot be started in a folder that holds a secret folder (such as `~/.config`, which holds the `gh` and `gcloud` sign-ins).
 - Review in a folder that is part of a larger checkout shows only that folder's changes.

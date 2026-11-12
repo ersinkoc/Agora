@@ -8,6 +8,8 @@ export interface Layout {
   touched: boolean; // the user chose the tabs themselves: stop opening agents for them
   showAgents?: boolean;
   showDetails?: boolean;
+  leftWidth?: number;
+  rightWidth?: number;
 }
 const KEY = 'agora.layout';
 let current: Layout | undefined;
@@ -24,6 +26,8 @@ export function loadLayout(): Layout | undefined {
         touched: !!v.touched,
         showAgents: typeof v.showAgents === 'boolean' ? v.showAgents : undefined,
         showDetails: typeof v.showDetails === 'boolean' ? v.showDetails : undefined,
+        leftWidth: typeof v.leftWidth === 'number' ? v.leftWidth : undefined,
+        rightWidth: typeof v.rightWidth === 'number' ? v.rightWidth : undefined,
       };
     }
   } catch { /* nothing remembered */ }
