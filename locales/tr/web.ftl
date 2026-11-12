@@ -326,3 +326,7 @@ start-browse-failed = Klasör listelenemedi.
 start-browse-git = Bir Git projesi
 closed-clear-everyone = Kapanan her ajanı herkes için kaldır
 closed-forget-failed = Hub kaldırmadı: { $reason }
+closed-reason-forbidden = bunu kaldırma yetkiniz yok
+closed-reason-running = yeniden çalışıyor
+closed-reason-gone = hub artık bunu tanımıyor
+closed-reason-other = hub'a ulaşılamadı ya da reddetti

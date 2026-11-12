@@ -1,4 +1,5 @@
 import { t } from '../i18n';
+import { forgetReasonKey } from '../net/forget';
 import type { AgentTileModel } from '../model';
 import { ago, duration } from '../net/time';
 import { Icon } from './Icon';
@@ -51,7 +52,7 @@ export function ClosedSummary({ agent, cost, now, onReview, onHistory, onFiles, 
           <button type="button" className="button" onClick={onDismiss}>{t('closed-dismiss')}</button>
           {onForget && <button type="button" className="button" onClick={onForget}>{t('closed-forget')}</button>}
         </div>
-        {forgetError && <p role="alert" className="m-0 text-needs-you">{t('closed-forget-failed', { reason: t(forgetError.replace('.', '-')) })}</p>}
+        {forgetError && <p role="alert" className="m-0 text-needs-you">{t('closed-forget-failed', { reason: t(forgetReasonKey(forgetError)) })}</p>}
       </div>
     </div>
   );

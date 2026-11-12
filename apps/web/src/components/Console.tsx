@@ -22,6 +22,7 @@ import { StateBadge, StateMark } from './StateBadge';
 import { ClosedSummary } from './ClosedSummary';
 import { dismiss, dismissedIds, subscribeDismissed } from '../net/dismissed';
 import { loadLayout, saveLayout } from '../net/layout';
+import { forgetReasonKey } from '../net/forget';
 import { Resizer } from './Resizer';
 
 const TerminalView = lazy(() => import('../terminal/TerminalView').then((m) => ({ default: m.TerminalView })));
@@ -318,6 +319,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
         <a className="inline-flex items-center gap-1.5 hover:text-ink" href="#/machines"><span aria-hidden className={`size-1.5 rounded-full ${link === 'live' ? 'bg-finished' : 'bg-needs-you'}`} />{t('machines-online', { count: machines.filter((m) => m.online).length })}</a>
         <span>{t('ide-status-agents', { count: fleet.filter((a) => !a.closed).length })}</span>
         {needs > 0 && <button type="button" className="text-needs-you hover:underline" onClick={() => setShowDetails(true)}>{t('ide-status-needs', { count: needs })}</button>}
+        {forgetError && <span role="alert" className="truncate text-needs-you">{t('closed-forget-failed', { reason: t(forgetReasonKey(forgetError)) })}</span>}
         <span className="flex-1" />
         {usage && usage.totalMicroUsd > 0 && <span>{money(usage.totalMicroUsd)}</span>}
       </footer>

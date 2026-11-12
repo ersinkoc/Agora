@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react';
 import { t } from '../i18n';
+import { forgetReasonKey } from '../net/forget';
 import { machineKey, type AgentTileModel } from '../model';
 import { bytesLabel, type MachineModel } from '../net/view';
 import { ago } from '../net/time';
@@ -106,7 +107,7 @@ export function Explorer({ fleet, machines, open, current, projects, project, on
           </button>
           <button type="button" className="ide-chip me-1 hover:text-ink" onClick={() => onDismiss(closed.map((a) => a.id))} title={everyone ? t('closed-clear-everyone') : undefined}>{t('closed-clear')}</button>
         </div>
-        {forgetError && <p role="alert" className="m-0 px-2 py-1 text-xs text-needs-you">{t('closed-forget-failed', { reason: t(forgetError.replace('.', '-')) })}</p>}
+        {forgetError && <p role="alert" className="m-0 px-2 py-1 text-xs text-needs-you">{t('closed-forget-failed', { reason: t(forgetReasonKey(forgetError)) })}</p>}
         {!folded.has('~closed') && <ul className="m-0 list-none p-0">
           {closed.map((a) => <li key={a.id} className="group flex items-center">
             <button type="button" className="ide-row flex-1 opacity-80" aria-current={current === a.id ? 'true' : undefined} aria-pressed={open.includes(a.id)} onClick={() => onToggle(a.id)} title={`${a.machine} · ${a.workspace}`}>
