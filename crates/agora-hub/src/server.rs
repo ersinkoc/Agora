@@ -136,16 +136,19 @@ where
     conn.send(&frame(STREAM_CONTROL, kinds::RESUME_OK, ok.encode_to_vec()))
         .await?;
 
-    let (_registration, commands) = hub
+    let (registration, commands) = hub
         .router()
         .register_with_capabilities(node_id, welcome.capabilities);
     let result = stream_events(&mut conn, &mut session, hub, node_id, commands).await;
-    // However it ended, the hub now knows this node is not connected.
-    let _ = hub.node_disconnected(node_id, now_ms());
-    // Forget it as a member of its projects, so it is asked to hand over its local work when it is back (ADR-0039 amendment B);
-    // anyone the change makes due is asked now.
-    for (node, project) in hub.board_membership(now_ms()) {
-        ask_board_join(hub, node, project);
+    // However it ended, the hub now knows this node is not connected, unless a newer connection of the node replaced this
+    // one: that one is live, and the node is not offline.
+    if registration.end() {
+        let _ = hub.node_disconnected(node_id, now_ms());
+        // Forget it as a member of its projects, so it is asked to hand over its local work when it is back (ADR-0039 amendment B);
+        // anyone the change makes due is asked now.
+        for (node, project) in hub.board_membership(now_ms()) {
+            ask_board_join(hub, node, project);
+        }
     }
     result
 }

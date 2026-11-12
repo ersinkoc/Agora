@@ -198,6 +198,42 @@ async fn a_node_streams_events_gets_acks_and_goes_offline_when_it_leaves() {
 }
 
 #[tokio::test]
+async fn a_replaced_connection_ending_late_does_not_record_the_node_offline() {
+    let st = state(None);
+    let (mut old, old_task) = node_conn(&st, "laptop").await;
+    let from = handshake(&mut old).await.from_seq;
+    old.send(&f(
+        STREAM_EVENTS,
+        kinds::EVENT,
+        event("laptop", from, online("laptop")),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(next_ack(&mut old).await, from);
+    // The machine restarted and is back while the hub still holds its old connection (half-open after a reboot).
+    let (mut new, new_task) = node_conn(&st, "laptop").await;
+    let from = handshake(&mut new).await.from_seq;
+    new.send(&f(
+        STREAM_EVENTS,
+        kinds::EVENT,
+        event("laptop", from, online("laptop")),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(next_ack(&mut new).await, from);
+    old.close().await;
+    old_task.await.unwrap();
+    assert!(st.hub.router().is_connected("laptop"));
+    assert!(
+        st.hub.view().0.nodes["laptop"].online,
+        "the live connection keeps it online"
+    );
+    new.close().await;
+    new_task.await.unwrap();
+    assert!(!st.hub.view().0.nodes["laptop"].online);
+}
+
+#[tokio::test]
 async fn a_gap_is_answered_with_where_to_resume_and_a_reconnect_starts_after_what_is_stored() {
     let st = state(None);
     let (mut c, task) = node_conn(&st, "n").await;
