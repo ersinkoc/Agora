@@ -1,9 +1,10 @@
 import * as Dialog from '@radix-ui/react-dialog';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { t } from '../i18n';
 import type { MachineModel, ProjectChoice } from '../net/view';
 import { childPath, type DirectoryInfo, type DirectoryListing } from '../net/directory';
 import { Icon } from './Icon';
+import { machineFor } from './startChoice';
 export interface KindChoice { kind: string; name: string; installed: boolean }
 
 const chip = 'inline-flex items-center gap-2 rounded-xs border px-2.5 py-1.5 text-[13px] transition-colors duration-150 disabled:opacity-50';
@@ -60,6 +61,22 @@ export function StartAgent({ projects, machines, initialNode, loadKinds, inspect
   }, [node, loadKinds]);
   const changePath = (value: string) => { setPath(value); setInfo(undefined); setError(undefined); setSeparate(false); setAcceptIdentityChange(false); };
   const changeNode = (id: string) => { setNode(id); changePath(projects.find(p => p.node === id)?.path ?? ''); };
+  // The machine and its project can reach the view after the window opened (a node that has just dialed in). Then the window
+  // selects that machine, and fills in its project folder unless the user has typed a path of their own.
+  const typed = useRef(false);
+  const onlineKey = online.map(m => m.id).join('\n');
+  useEffect(() => {
+    const next = machineFor(node, online.map(m => m.id), initialNode, projects);
+    if (next === node) return;
+    setNode(next);
+    if (!typed.current) changePath(projects.find(p => p.node === next)?.path ?? '');
+    // Keyed on which machines are online, not on every new array.
+  }, [onlineKey]);
+  const projectPath = projects.find(p => p.node === node)?.path ?? '';
+  useEffect(() => {
+    if (!typed.current && !path && !info && projectPath) setPath(projectPath);
+    // Only when the machine's project path appears or changes.
+  }, [projectPath]);
   const choose = async (at = path) => {
     setBusy(true); setError(undefined);
     try { setInfo(await inspect(node, at, createIdentity)); }
@@ -105,7 +122,7 @@ export function StartAgent({ projects, machines, initialNode, loadKinds, inspect
               <button type="button" className="button px-2 py-1 text-xs" disabled={busy} onClick={() => setInfo(undefined)}>{t('ide-folder-change')}</button>
             </div> : <>
               <div className="flex gap-2">
-                <input value={path} disabled={busy} autoFocus className="min-w-0 flex-1 font-mono text-[13px]" aria-label={t('start-directory')} onChange={e => changePath(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && path.trim() && !busy) void choose(); }} placeholder={t('start-directory-placeholder')} />
+                <input value={path} disabled={busy} autoFocus className="min-w-0 flex-1 font-mono text-[13px]" aria-label={t('start-directory')} onChange={e => { typed.current = true; changePath(e.target.value); }} onKeyDown={e => { if (e.key === 'Enter' && path.trim() && !busy) void choose(); }} placeholder={t('start-directory-placeholder')} />
                 <button type="button" className="button button--primary" disabled={!path.trim() || busy} onClick={() => void choose()}>{t('start-select-directory')}</button>
               </div>
               {canBrowse && !browse && <button type="button" className="button justify-self-start px-3 py-1 text-xs" disabled={busy} onClick={() => void look(path.trim().startsWith('/') || /^[A-Za-z]:[\\/]/.test(path.trim()) ? path.trim() : '')}><Icon name="folder" className="size-4" />{t('start-browse')}</button>}
