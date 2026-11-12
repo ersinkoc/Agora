@@ -124,7 +124,8 @@ pub fn local_endpoint_name(path: &std::path::Path) -> Option<String> {
 }
 
 /// Puts a freshly downloaded program in place of the one at `target` (which may be running): the new file is made executable and
-/// renamed over it. Windows cannot replace a running program, so the old one is moved aside to `<target>.old` first.
+/// renamed over it. Windows cannot replace a running program, so the old one is moved aside to `<target>.old` first; when that name is
+/// still taken by a program an earlier update moved aside and that still runs (a node not restarted since), to `<target>.old-<pid>`.
 pub fn replace_executable(new: &std::path::Path, target: &std::path::Path) -> io::Result<()> {
     #[cfg(unix)]
     {
@@ -134,10 +135,16 @@ pub fn replace_executable(new: &std::path::Path, target: &std::path::Path) -> io
     }
     #[cfg(not(unix))]
     {
-        let mut old = target.as_os_str().to_owned();
-        old.push(".old");
-        let old = std::path::PathBuf::from(old);
-        let _ = std::fs::remove_file(&old);
+        let aside = |suffix: &str| {
+            let mut old = target.as_os_str().to_owned();
+            old.push(suffix);
+            std::path::PathBuf::from(old)
+        };
+        let mut old = aside(".old");
+        if std::fs::remove_file(&old).is_err() && old.exists() {
+            old = aside(&format!(".old-{}", std::process::id()));
+            let _ = std::fs::remove_file(&old);
+        }
         std::fs::rename(target, &old)?;
         std::fs::rename(new, target).inspect_err(|_| {
             let _ = std::fs::rename(&old, target);
