@@ -537,10 +537,14 @@ fn parse_shortstat(s: &str) -> (u32, u32) {
 
 pub fn status(worktree: &Path) -> Result<GitStatus, GitError> {
     let git = |args: &[&str]| git(worktree, args);
-    let files_changed = git(&["status", "--porcelain", SUBMODULE_COMMITS_ONLY])?
-        .lines()
-        .count() as u32;
-    let head_commit = git(&["rev-parse", "HEAD"])?.trim().to_string();
+    // Each node git is two processes (the filter question, then the command), which costs about a second a pair on Windows: the
+    // commit comes from the same `status` as the changed paths (`# branch.oid`) instead of a `rev-parse` of its own.
+    let (files_changed, head_commit) = parse_status_v2(&git(&[
+        "status",
+        "--porcelain=v2",
+        "--branch",
+        SUBMODULE_COMMITS_ONLY,
+    ])?);
     let (insertions, deletions) = parse_shortstat(&git(&[
         "diff",
         "--no-ext-diff",
@@ -555,6 +559,23 @@ pub fn status(worktree: &Path) -> Result<GitStatus, GitError> {
         deletions,
         head_commit,
     })
+}
+
+/// Changed paths (every entry line; renames are one line, paths are quoted) and the commit (`# branch.oid`, empty on a branch with no
+/// commit yet, where the `diff HEAD` that follows fails anyway) from `git status --porcelain=v2 --branch`.
+fn parse_status_v2(out: &str) -> (u32, String) {
+    let mut changed = 0;
+    let mut head = String::new();
+    for line in out.lines() {
+        if let Some(oid) = line.strip_prefix("# branch.oid ") {
+            if oid != "(initial)" {
+                head = oid.to_string();
+            }
+        } else if !line.starts_with('#') && !line.is_empty() {
+            changed += 1;
+        }
+    }
+    (changed, head)
 }
 
 /// Most untracked files a diff shows, and the most bytes of one it reads.
@@ -943,7 +964,7 @@ mod tests {
             (clean.files_changed, clean.insertions, clean.deletions),
             (0, 0, 0)
         );
-        assert_eq!(clean.head_commit.len(), 40);
+        assert_eq!(clean.head_commit, r.git(&["rev-parse", "HEAD"]).trim());
         fs::write(r.dir.join("a.txt"), "one\ntwo\nthree\n").expect("write");
         fs::write(r.dir.join("untracked.txt"), "u").expect("write");
         let s = status(&r.dir).expect("status");
@@ -953,6 +974,22 @@ mod tests {
         assert!(diff(&r.dir, Some("nothing-here.txt"))
             .expect("diff")
             .is_empty());
+    }
+
+    #[test]
+    fn status_v2_parsing_counts_entries_and_reads_the_commit() {
+        let out = "# branch.oid 0123456789abcdef0123456789abcdef01234567\n# branch.head main\n\
+                   1 .M N... 100644 100644 100644 aaa bbb a.txt\n\
+                   2 R. N... 100644 100644 100644 aaa aaa R100 new.txt\told.txt\n\
+                   ? \"line\\nbreak.txt\"\n? u.txt\n";
+        assert_eq!(
+            parse_status_v2(out),
+            (4, "0123456789abcdef0123456789abcdef01234567".to_string())
+        );
+        assert_eq!(
+            parse_status_v2("# branch.oid (initial)\n# branch.head main\n? a\n"),
+            (1, String::new())
+        );
     }
 
     #[test]
