@@ -92,6 +92,9 @@ the supervisor reads the exit status without copying anything.
 - Scrollback stored compressed in memory with a configurable cap.
 - Hub projections are in memory with write-behind to storage; reads never hit disk on the hot path.
 - Event fanout uses subscription indexes (by project, node, agent) instead of filtering every event per client.
+- The file watcher stops checked-handle enumeration after recording 50,000 non-directory entries. It does not first
+  collect a whole directory into memory. This is a recorded-entry budget; traversed directories are not counted.
+  Full directory requests still collect their requested level. [Watcher measurements](../reviews/0343-bounded-directory-visits.md).
 
 ## 3. Measurement and enforcement
 - **Bench harness** (`just bench`): synthetic nodes and `agora-fake-agent` terminals producing scripted output,
