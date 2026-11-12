@@ -28,6 +28,7 @@ replaced by dashes). Codes are part of the public protocol: never rename or reus
 | `agent.not_authenticated` | `kind`, `node_id` | Agent account not logged in on that node |
 | `agent.blocked` | `agent_id` | Agent waits for input; prompt not sent |
 | `agent.mode_unsupported` | `kind`, `mode` | e.g. chat mode for an L1 agent |
+| `agent.running` | `agent_id` | the agent still runs, so it cannot be forgotten (ADR-0053) |
 | `approval.expired` | `approval_id` | |
 | `approval.signature_invalid` | `approval_id` | |
 | `approval.grant_required` | `command` | ADR-0041: the node's `signed_commands` policy lists this command and no live grant covers it |

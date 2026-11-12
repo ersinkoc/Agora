@@ -31,6 +31,8 @@ message Event {
     AgentSessionReported agent_session_reported = 32;
     AgentUsageReported agent_usage_reported = 33;
     AgentExited agent_exited = 34;
+    // ADR-0053: the hub stops listing this closed agent; earlier events stay in the store.
+    AgentForgotten agent_forgotten = 36;
     // terminal
     TerminalOpened terminal_opened = 40;
     TerminalTitleChanged terminal_title_changed = 41;
@@ -125,6 +127,10 @@ message AgentUsageReported {
 message AgentExited {
   string agent_id = 1;
   int32 exit_code = 2;
+}
+
+message AgentForgotten {
+  string agent_id = 1;
 }
 
 message TerminalOpened {
