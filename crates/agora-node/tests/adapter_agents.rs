@@ -243,6 +243,32 @@ fn stopping_an_adapter_agent_ends_its_session() {
 }
 
 #[test]
+fn stopping_an_adapter_agent_ends_its_process() {
+    let e = env("stop-process");
+    let mut s = supervisor();
+    let id = start(&mut s, &e, "adp-stop");
+    let pid = s.running_pids()[0];
+    assert!(
+        agora_platform::process_name(pid).is_ok(),
+        "the adapter runs"
+    );
+    s.stop(&id).unwrap();
+    // Like a terminal agent's process, the adapter process ends with the stop instead of running on unobserved.
+    assert!(
+        agora_platform::process_name(pid).is_err(),
+        "the adapter process outlived its stop"
+    );
+    assert!(s.running_pids().is_empty());
+    // A resume starts a fresh adapter, and stopping again ends that one too.
+    s.resume(&id, Instant::now()).unwrap();
+    let again = s.running_pids()[0];
+    assert_ne!(again, pid);
+    assert!(s.adapter_prompt(&id, "hello", false).is_ok());
+    s.stop(&id).unwrap();
+    assert!(agora_platform::process_name(again).is_err());
+}
+
+#[test]
 fn a_manifest_needs_a_real_adapter_command() {
     let bad = Manifest::parse("kind = \"x\"\ndisplay_name = \"X\"\nversion = \"1\"\nmin_engine = 1\n[adapter]\ncommand = []\n");
     assert!(bad.is_err());

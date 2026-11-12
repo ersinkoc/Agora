@@ -273,7 +273,8 @@ struct KindEntry {
 /// An agent driven through an L3 adapter process instead of a terminal.
 struct AdapterEntry {
     agent: Agent,
-    adapter: Adapter,
+    /// `None` once a user stop has ended the adapter process.
+    adapter: Option<Adapter>,
     session_id: String,
     worktree: PathBuf,
     branch: String,
@@ -634,7 +635,7 @@ impl Supervisor {
                 id.clone(),
                 AdapterEntry {
                     agent,
-                    adapter,
+                    adapter: Some(adapter),
                     session_id,
                     worktree,
                     branch: String::new(),
@@ -828,7 +829,7 @@ impl Supervisor {
             id.clone(),
             AdapterEntry {
                 agent,
-                adapter,
+                adapter: Some(adapter),
                 session_id,
                 worktree,
                 branch,
@@ -856,10 +857,11 @@ impl Supervisor {
             self.restart_adapter(&id, now, events);
         }
         for (id, e) in &mut self.adapters {
-            if !e.running {
-                continue;
-            }
-            for ev in e.adapter.poll() {
+            let polled = match &e.adapter {
+                Some(adapter) if e.running => adapter.poll(),
+                _ => continue,
+            };
+            for ev in polled {
                 match ev {
                     AdapterEvent::State { state, .. } => {
                         if e.agent.observe(state, StateSource::Reported) {
@@ -923,7 +925,7 @@ impl Supervisor {
             profile,
         ) {
             Ok((adapter, session_id)) => {
-                e.adapter = adapter;
+                e.adapter = Some(adapter);
                 e.session_id = session_id;
                 e.running = true;
                 e.agent.process_restarted();
@@ -934,10 +936,11 @@ impl Supervisor {
         }
     }
 
-    fn adapter_of(&self, id: &AgentId) -> Result<&AdapterEntry, SupervisorError> {
+    fn adapter_of(&self, id: &AgentId) -> Result<(&Adapter, &str), SupervisorError> {
         self.adapters
             .get(id)
             .filter(|e| e.running)
+            .and_then(|e| Some((e.adapter.as_ref()?, e.session_id.as_str())))
             .ok_or_else(|| SupervisorError::NotFound(id.clone()))
     }
 
@@ -948,9 +951,9 @@ impl Supervisor {
         text: &str,
         from_mesh: bool,
     ) -> Result<(), SupervisorError> {
-        let e = self.adapter_of(id)?;
-        e.adapter
-            .prompt(&e.session_id, text, from_mesh, Duration::from_secs(10))
+        let (adapter, session) = self.adapter_of(id)?;
+        adapter
+            .prompt(session, text, from_mesh, Duration::from_secs(10))
             .map_err(|e| SupervisorError::Spawn(e.to_string()))
     }
 
@@ -961,14 +964,9 @@ impl Supervisor {
         approval_id: &str,
         approved: bool,
     ) -> Result<(), SupervisorError> {
-        let e = self.adapter_of(id)?;
-        e.adapter
-            .resolve_approval(
-                &e.session_id,
-                approval_id,
-                approved,
-                Duration::from_secs(10),
-            )
+        let (adapter, session) = self.adapter_of(id)?;
+        adapter
+            .resolve_approval(session, approval_id, approved, Duration::from_secs(10))
             .map_err(|e| SupervisorError::Spawn(e.to_string()))
     }
 
@@ -1179,9 +1177,11 @@ impl Supervisor {
             let mut events = Vec::new();
             e.restart_at = None;
             if e.running {
-                let _ = e
-                    .adapter
-                    .stop_session(&e.session_id, "stop", Duration::from_secs(5));
+                // A stop ends the adapter process too (`shutdown`, then kill), as it ends a terminal agent's process.
+                if let Some(adapter) = e.adapter.take() {
+                    let _ = adapter.stop_session(&e.session_id, "stop", Duration::from_secs(5));
+                    adapter.shutdown(Duration::from_secs(1));
+                }
                 e.running = false;
             }
             if e.agent.observe(AgentState::Done, StateSource::Reported) {
@@ -1253,7 +1253,7 @@ impl Supervisor {
                 .adapters
                 .get_mut(id)
                 .ok_or_else(|| SupervisorError::NotFound(id.clone()))?;
-            entry.adapter = adapter;
+            entry.adapter = Some(adapter);
             entry.session_id = session_id;
             entry.running = true;
             entry.restart_at = None;
@@ -1283,8 +1283,19 @@ impl Supervisor {
         let (argv, native) = self.argv_for_resume(&kind, session.as_deref());
         // A stopped agent left the mesh and its endpoint closed; resuming joins again with a fresh one.
         let config = self.agents.get(id).and_then(|e| e.private_config.clone());
-        let extras = self.inject(id, &kind, &project, &worktree, config.as_deref())?;
-        let terminal = self.launch(&kind, &argv, &worktree, &extras)?;
+        // A resume that fails after the hook ran gives the endpoint back, as a failed start does.
+        let launched = self
+            .inject(id, &kind, &project, &worktree, config.as_deref())
+            .and_then(|extras| Ok((self.launch(&kind, &argv, &worktree, &extras)?, extras)));
+        let (terminal, extras) = match launched {
+            Ok(t) => t,
+            Err(e) => {
+                if let Some(hook) = &self.abort_hook {
+                    hook(id);
+                }
+                return Err(e);
+            }
+        };
         let Some(entry) = self.agents.get_mut(id) else {
             return Err(SupervisorError::NotFound(id.clone()));
         };
@@ -1354,7 +1365,7 @@ impl Supervisor {
                 self.adapters
                     .values()
                     .filter(|e| e.running)
-                    .map(|e| e.adapter.pid()),
+                    .filter_map(|e| e.adapter.as_ref().map(Adapter::pid)),
             )
             .collect()
     }
