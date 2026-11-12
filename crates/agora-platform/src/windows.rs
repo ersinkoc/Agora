@@ -745,96 +745,171 @@ pub(crate) fn junction(target: &Path, link: &Path) -> io::Result<()> {
     }
 }
 
-/// See [`crate::open_dir`]: a directory handle needs `FILE_FLAG_BACKUP_SEMANTICS`. A junction or link on the way is followed, as any
-/// open does; the caller checks where the handle is with [`crate::opened_path`].
+/// See [`crate::open_dir`]: follow the path once, then callers verify the resulting handle before enumerating it.
 pub(crate) fn open_dir(path: &Path) -> io::Result<std::fs::File> {
     use std::os::windows::fs::OpenOptionsExt;
-    use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;
-    let f = std::fs::OpenOptions::new()
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+    let dir = std::fs::OpenOptions::new()
         .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-        .open(path)?;
-    if !f.metadata()?.is_dir() {
-        return Err(io::Error::new(io::ErrorKind::NotADirectory, "not a folder"));
+        .open(path)
+        .map_err(|e| io::Error::new(e.kind(), format!("open directory: {e}")))?;
+    if !dir.metadata()?.is_dir() {
+        return Err(io::ErrorKind::NotADirectory.into());
     }
-    Ok(f)
+    Ok(dir)
 }
 
-/// See [`crate::list_dir`].
-pub(crate) fn list_dir(dir: &std::fs::File) -> io::Result<Vec<crate::DirItem>> {
-    let mut items = Vec::new();
-    visit_dir(dir, &mut |item| {
-        items.push(item);
-        std::ops::ControlFlow::Continue(())
-    })?;
-    Ok(items)
-}
-
-/// The entries of the folder `dir` holds open, read through that handle (`GetFileInformationByHandleEx`, full directory info, the
-/// first call restarting the enumeration), each described without following links: a junction or symbolic link is not a folder
-/// here, as `DirEntry::file_type` has it. `.` and `..` are left out. `Break` from the visitor stops before the next entry.
+/// See [`crate::visit_dir`]: a fresh synchronous handle to the same object, then one directory entry per query.
+/// No path is reopened, no reparse target is traversed for entry metadata, and no later entry is requested after Break.
 pub(crate) fn visit_dir(
     dir: &std::fs::File,
     visitor: &mut dyn FnMut(crate::DirItem) -> std::ops::ControlFlow<()>,
 ) -> io::Result<()> {
+    use std::ffi::OsString;
+    use std::mem::{offset_of, size_of, size_of_val};
     use std::os::windows::ffi::OsStringExt;
     use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::Foundation::ERROR_NO_MORE_FILES;
-    use windows_sys::Win32::Storage::FileSystem::{
-        FileFullDirectoryInfo, FileFullDirectoryRestartInfo, GetFileInformationByHandleEx,
-        FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FULL_DIR_INFO,
+    use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
+    use windows_sys::Wdk::Storage::FileSystem::{
+        FileDirectoryInformation, NtOpenFile, NtQueryDirectoryFile, FILE_DIRECTORY_FILE,
+        FILE_DIRECTORY_INFORMATION, FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT,
     };
-    // 8-byte aligned, as the records in it are.
-    let mut buf = vec![0u64; 8192];
-    let bytes = u32::try_from(buf.len() * 8).unwrap_or(u32::MAX);
-    let mut class = FileFullDirectoryRestartInfo;
+    use windows_sys::Win32::Foundation::{
+        RtlNtStatusToDosError, STATUS_NO_MORE_FILES, STATUS_SUCCESS, UNICODE_STRING,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_LIST_DIRECTORY,
+        FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, SYNCHRONIZE,
+    };
+    use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
+
+    let mut empty = [0u16];
+    let name = UNICODE_STRING {
+        Length: 0,
+        MaximumLength: 2,
+        Buffer: empty.as_mut_ptr(),
+    };
+    let attributes = OBJECT_ATTRIBUTES {
+        Length: size_of::<OBJECT_ATTRIBUTES>() as u32,
+        RootDirectory: dir.as_raw_handle(),
+        ObjectName: &name,
+        ..Default::default()
+    };
+    let mut handle = null_mut();
+    let mut opened = IO_STATUS_BLOCK::default();
+    // SAFETY: live input/output structures; an empty name relative to the held directory reopens that object, without a
+    // path lookup. Explicit directory and synchronous options give this enumeration its own cursor and completed queries.
+    let status = unsafe {
+        NtOpenFile(
+            &mut handle,
+            FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+            &attributes,
+            &mut opened,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            FILE_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+        )
+    };
+    if status != STATUS_SUCCESS {
+        // SAFETY: converting the open operation's returned NTSTATUS.
+        let error = os_error(unsafe { RtlNtStatusToDosError(status) });
+        return Err(io::Error::new(
+            error.kind(),
+            format!("reopen directory: {error}"),
+        ));
+    }
+    let handle = Handle(handle);
+    // Eight-byte aligned and large enough for a complete record plus a maximum-length UTF-16 name, with bounded memory.
+    let mut buffer = vec![0u64; 16 * 1024];
+    let mut first = true;
     loop {
-        // SAFETY: a live directory handle owned by `dir`; `buf` holds `bytes` writable bytes.
-        let ok = unsafe {
-            GetFileInformationByHandleEx(dir.as_raw_handle(), class, buf.as_mut_ptr().cast(), bytes)
+        let mut result = IO_STATUS_BLOCK::default();
+        // SAFETY: a synchronous owned handle, a live aligned output buffer and status block. No APC or event. Single-entry
+        // mode preserves the callback's early-stop contract; the first call restarts only this enumeration's own cursor.
+        let status = unsafe {
+            NtQueryDirectoryFile(
+                handle.0,
+                null_mut(),
+                None,
+                null(),
+                &mut result,
+                buffer.as_mut_ptr().cast(),
+                size_of_val(buffer.as_slice()) as u32,
+                FileDirectoryInformation,
+                true,
+                null(),
+                first,
+            )
         };
-        if ok == 0 {
-            let e = io::Error::last_os_error();
-            if e.raw_os_error() == Some(ERROR_NO_MORE_FILES as i32) {
-                return Ok(());
-            }
-            return Err(e);
+        first = false;
+        if status == STATUS_NO_MORE_FILES {
+            return Ok(());
         }
-        class = FileFullDirectoryInfo;
-        let base = buf.as_ptr().cast::<u8>();
-        let mut offset = 0usize;
-        loop {
-            // SAFETY: the system wrote whole records into `buf`; `offset` is 0 or a `NextEntryOffset` it gave, both inside it.
-            let info = unsafe { &*base.add(offset).cast::<FILE_FULL_DIR_INFO>() };
-            let len = info.FileNameLength as usize / 2;
-            // SAFETY: the name is `FileNameLength` bytes of UTF-16 right after the fixed part of this record, inside `buf`.
-            let name = unsafe { std::slice::from_raw_parts(info.FileName.as_ptr(), len) };
-            if name != [u16::from(b'.')] && name != [u16::from(b'.'), u16::from(b'.')] {
-                let attrs = info.FileAttributes;
-                // FILETIME: 100 ns ticks since 1601.
-                let ticks = u64::try_from(info.LastWriteTime).unwrap_or(0);
-                let modified = ticks
-                    .checked_sub(116_444_736_000_000_000)
-                    .map_or(std::time::UNIX_EPOCH, |t| {
-                        std::time::UNIX_EPOCH + Duration::from_nanos(t.saturating_mul(100))
-                    });
-                let item = crate::DirItem {
-                    name: std::ffi::OsString::from_wide(name),
-                    is_dir: attrs & FILE_ATTRIBUTE_DIRECTORY != 0
-                        && attrs & FILE_ATTRIBUTE_REPARSE_POINT == 0,
-                    len: u64::try_from(info.EndOfFile).unwrap_or(0),
-                    modified,
-                };
-                if visitor(item).is_break() {
-                    return Ok(());
-                }
-            }
-            if info.NextEntryOffset == 0 {
-                break;
-            }
-            offset += info.NextEntryOffset as usize;
+        if status != STATUS_SUCCESS {
+            // SAFETY: converting the returned NTSTATUS to a normal Win32 error code.
+            let error = os_error(unsafe { RtlNtStatusToDosError(status) });
+            return Err(io::Error::new(
+                error.kind(),
+                format!("query directory: {error}"),
+            ));
+        }
+        let name_offset = offset_of!(FILE_DIRECTORY_INFORMATION, FileName);
+        if result.Information < name_offset || result.Information > size_of_val(buffer.as_slice()) {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        // SAFETY: the buffer is aligned, initialized, and contains the fixed portion of the returned record.
+        let entry = unsafe { &*buffer.as_ptr().cast::<FILE_DIRECTORY_INFORMATION>() };
+        let bytes = entry.FileNameLength as usize;
+        if bytes == 0 || !bytes.is_multiple_of(2) || bytes > result.Information - name_offset {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        // SAFETY: the name is UTF-16 aligned; its whole byte range was checked against the completed query's output.
+        let name = unsafe {
+            std::slice::from_raw_parts(
+                buffer.as_ptr().cast::<u8>().add(name_offset).cast::<u16>(),
+                bytes / 2,
+            )
+        };
+        let name = OsString::from_wide(name);
+        if name == "." || name == ".." {
+            continue;
+        }
+        let link = entry.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+        let item = crate::DirItem {
+            name,
+            is_dir: !link && entry.FileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0,
+            len: if link {
+                0
+            } else {
+                u64::try_from(entry.EndOfFile).unwrap_or(0)
+            },
+            modified: directory_time(entry.LastWriteTime),
+        };
+        if visitor(item).is_break() {
+            return Ok(());
         }
     }
+}
+
+/// NT directory timestamps are signed 100 ns ticks since 1601; preserve dates on either side of the Unix epoch.
+fn directory_time(ticks: i64) -> std::time::SystemTime {
+    const UNIX_EPOCH_TICKS: i128 = 116_444_736_000_000_000;
+    let delta = i128::from(ticks) - UNIX_EPOCH_TICKS;
+    let magnitude = delta.unsigned_abs();
+    let duration = Duration::new(
+        (magnitude / 10_000_000) as u64,
+        ((magnitude % 10_000_000) * 100) as u32,
+    );
+    let epoch = std::time::UNIX_EPOCH;
+    if delta < 0 {
+        epoch.checked_sub(duration)
+    } else {
+        epoch.checked_add(duration)
+    }
+    .unwrap_or(epoch)
 }
 
 #[cfg(test)]

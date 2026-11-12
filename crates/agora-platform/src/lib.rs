@@ -359,17 +359,31 @@ pub fn open_dir(path: &std::path::Path) -> io::Result<std::fs::File> {
 /// The entries of the folder `dir` holds open (from [`open_dir`]), read through that handle: `std::fs::read_dir` takes a path and
 /// opens it again, so a folder swapped for a link after its handle was checked would be listed instead. `.` and `..` are left out.
 pub fn list_dir(dir: &std::fs::File) -> io::Result<Vec<DirItem>> {
+    let mut items = Vec::new();
+    visit_dir(dir, |item| {
+        items.push(item);
+        std::ops::ControlFlow::Continue(())
+    })?;
+    Ok(items)
+}
+
+/// Visits entries through the open directory handle. Returning [`std::ops::ControlFlow::Break`] stops enumeration before
+/// reading metadata for any later entry. Unlike [`list_dir`], this never collects the entire directory first.
+pub fn visit_dir(
+    dir: &std::fs::File,
+    mut visitor: impl FnMut(DirItem) -> std::ops::ControlFlow<()>,
+) -> io::Result<()> {
     #[cfg(unix)]
     {
-        unix::list_dir(dir)
+        unix::visit_dir(dir, &mut visitor)
     }
     #[cfg(windows)]
     {
-        windows::list_dir(dir)
+        windows::visit_dir(dir, &mut visitor)
     }
     #[cfg(not(any(unix, windows)))]
     {
-        let _ = dir;
+        let _ = (dir, visitor);
         Err(io::Error::from(io::ErrorKind::Unsupported))
     }
 }
@@ -973,6 +987,113 @@ pub fn spawn(config: &PtyConfig) -> io::Result<Box<dyn Pty>> {
 #[cfg(test)]
 #[allow(clippy::expect_used)] // expect is allowed in tests
 mod list_dir_tests {
+    struct Folder(std::path::PathBuf);
+
+    impl Folder {
+        fn new() -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            loop {
+                let path = std::env::temp_dir().join(format!(
+                    "agora-visitdir-{}-{}",
+                    std::process::id(),
+                    NEXT.fetch_add(1, Ordering::Relaxed)
+                ));
+                match std::fs::create_dir(&path) {
+                    Ok(()) => return Self(path),
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                    Err(e) => panic!("create fixture: {e}"),
+                }
+            }
+        }
+    }
+
+    impl Drop for Folder {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn listing_keeps_the_open_folder_after_its_path_is_replaced() {
+        let folder = Folder::new();
+        let original = folder.0.join("original");
+        let moved = folder.0.join("moved");
+        let outside = folder.0.join("outside");
+        std::fs::create_dir(&original).expect("original");
+        std::fs::create_dir(&outside).expect("outside");
+        std::fs::write(original.join("own.txt"), "own").expect("own file");
+        std::fs::write(outside.join("outside.txt"), "outside").expect("outside file");
+        let handle = super::open_dir(&original).expect("open original");
+        std::fs::rename(&original, &moved).expect("move original");
+        #[cfg(windows)]
+        {
+            // Junctions need no symbolic-link privilege: this coverage must run on an ordinary Windows CI account.
+            let result = std::process::Command::new("cmd.exe")
+                .args(["/d", "/c", "mklink", "/J"])
+                .arg(&original)
+                .arg(&outside)
+                .output()
+                .expect("junction command");
+            assert!(result.status.success(), "{result:?}");
+        }
+        #[cfg(not(windows))]
+        super::symlink(&outside, &original).expect("replace path");
+        let items = super::list_dir(&handle).expect("held directory");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].name, "own.txt");
+        let replaced = super::open_dir(&original).expect("replacement directory");
+        let items = super::list_dir(&replaced).expect("replacement listing");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].name, "outside.txt");
+    }
+
+    #[test]
+    fn visiting_a_folder_reads_metadata_lazily_and_stops_early() {
+        use std::ops::ControlFlow;
+        let folder = Folder::new();
+        let names = ["a", "b", "c"];
+        for name in names {
+            std::fs::write(folder.0.join(name), "x").expect("file");
+        }
+        let handle = super::open_dir(&folder.0).expect("open");
+        let mut visited = 0;
+        super::visit_dir(&handle, |item| {
+            if visited == 0 {
+                assert_eq!(item.len, 1);
+                // Directory order is irrelevant: change every other file after the first callback.
+                // An eager Vec would already contain stale metadata for those entries.
+                for name in names {
+                    if item.name != name {
+                        std::fs::write(folder.0.join(name), "changed").expect("update");
+                    }
+                }
+            } else {
+                assert_eq!(
+                    item.len, 7,
+                    "later metadata was read before the first callback"
+                );
+            }
+            visited += 1;
+            ControlFlow::Continue(())
+        })
+        .expect("visit");
+        assert_eq!(visited, names.len());
+
+        let mut stopped = 0;
+        super::visit_dir(&handle, |_| {
+            stopped += 1;
+            ControlFlow::Break(())
+        })
+        .expect("stop");
+        assert_eq!(stopped, 1);
+        // Early return closes only the enumeration's duplicate; the caller can list the handle again.
+        assert_eq!(
+            super::list_dir(&handle).expect("list after stop").len(),
+            names.len()
+        );
+    }
+
     #[test]
     fn a_folder_lists_through_its_handle_without_following_links() {
         let d = std::env::temp_dir().join(format!("agora-listdir-{}", std::process::id()));

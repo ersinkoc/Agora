@@ -297,7 +297,19 @@ impl Session {
         device: &Device,
         approved: bool,
     ) -> Result<bool, String> {
-        let Some(a) = snapshot.approvals.first() else {
+        self.resolve_approval(snapshot, device, approved, None)
+    }
+
+    /// Like [`Session::resolve_first_approval`], answering `agent`'s request when it has one (the agent the console points at), else
+    /// the first.
+    pub fn resolve_approval(
+        &mut self,
+        snapshot: &Snapshot,
+        device: &Device,
+        approved: bool,
+        agent: Option<&str>,
+    ) -> Result<bool, String> {
+        let Some(a) = answered_approval(snapshot, agent) else {
             return Ok(false);
         };
         // Hub-wide ids are `<node>/<local id>`; the machine knows the local one.
@@ -669,6 +681,16 @@ impl Session {
     }
 }
 
+/// The request `y` / `n` answer: `agent`'s when it has one, else the first waiting.
+pub fn answered_approval<'a>(
+    snapshot: &'a Snapshot,
+    agent: Option<&str>,
+) -> Option<&'a agora_protocol::v1::ApprovalSnapshot> {
+    agent
+        .and_then(|id| snapshot.approvals.iter().find(|a| a.agent_id == id))
+        .or_else(|| snapshot.approvals.first())
+}
+
 fn refused_for_grant(r: &CommandResponse) -> bool {
     matches!(&r.result, Some(command_response::Result::Err(e)) if e.code == "approval.grant_required")
 }
@@ -713,5 +735,32 @@ mod name_tests {
         assert_eq!(n("192.168.1.2:7444").len(), 2);
         assert_eq!(n("[::1]:7444").len(), 2);
         assert_eq!(n("hub.example:7444").len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod answer_tests {
+    use super::answered_approval;
+    use agora_protocol::v1::{ApprovalSnapshot, Snapshot};
+
+    #[test]
+    fn y_and_n_answer_the_selected_agents_request_or_else_the_first() {
+        let req = |id: &str, agent: &str| ApprovalSnapshot {
+            approval_id: id.into(),
+            agent_id: agent.into(),
+            ..Default::default()
+        };
+        let s = Snapshot {
+            approvals: vec![req("m/1", "m/agent-1"), req("m/2", "m/agent-2")],
+            ..Default::default()
+        };
+        let id = |a: Option<&str>| answered_approval(&s, a).map(|x| x.approval_id.clone());
+        assert_eq!(id(Some("m/agent-2")).as_deref(), Some("m/2"));
+        assert_eq!(id(Some("m/agent-9")).as_deref(), Some("m/1"));
+        assert_eq!(id(None).as_deref(), Some("m/1"));
+        assert_eq!(
+            answered_approval(&Snapshot::default(), Some("m/agent-1")),
+            None
+        );
     }
 }

@@ -7,6 +7,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::ops::ControlFlow;
 use std::path::{Component, Path, PathBuf};
 use std::time::SystemTime;
 
@@ -141,7 +142,7 @@ pub struct Files {
     max_read: u64,
 }
 
-/// Why [`list_inside`] gave nothing.
+/// Why [`visit_inside`] gave nothing.
 enum Inside {
     /// The folder's handle is not below the root (a link swapped in).
     Outside,
@@ -149,13 +150,17 @@ enum Inside {
 }
 
 /// The entries of `dir`, read through its own handle once that handle is known to be below `root` (canonical).
-fn list_inside(root: &Path, dir: &Path) -> Result<Vec<agora_platform::DirItem>, Inside> {
+fn visit_inside(
+    root: &Path,
+    dir: &Path,
+    visitor: impl FnMut(agora_platform::DirItem) -> ControlFlow<()>,
+) -> Result<(), Inside> {
     let handle = agora_platform::open_dir(dir).map_err(Inside::Io)?;
     let real = agora_platform::opened_path(&handle).map_err(Inside::Io)?;
     if !real.starts_with(root) {
         return Err(Inside::Outside);
     }
-    agora_platform::list_dir(&handle).map_err(Inside::Io)
+    agora_platform::visit_dir(&handle, visitor).map_err(Inside::Io)
 }
 
 impl Files {
@@ -211,18 +216,19 @@ impl Files {
     /// swapped for a link after [`Self::resolve`]'s check would otherwise be listed wherever the link leads.
     pub fn list(&self, rel: &str) -> Result<Vec<Entry>, FilesError> {
         let dir = self.resolve(rel)?;
-        let items = list_inside(&self.root, &dir).map_err(|e| match e {
-            Inside::Outside => FilesError::OutsideRoot(rel.to_string()),
-            Inside::Io(e) => io_err(rel, &e),
-        })?;
-        let mut out: Vec<Entry> = items
-            .into_iter()
-            .map(|i| Entry {
+        let mut out = Vec::new();
+        visit_inside(&self.root, &dir, |i| {
+            out.push(Entry {
                 name: i.name.to_string_lossy().into_owned(),
                 is_dir: i.is_dir,
                 size: if i.is_dir { 0 } else { i.len },
-            })
-            .collect();
+            });
+            ControlFlow::Continue(())
+        })
+        .map_err(|e| match e {
+            Inside::Outside => FilesError::OutsideRoot(rel.to_string()),
+            Inside::Io(e) => io_err(rel, &e),
+        })?;
         out.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.cmp(&b.name)));
         Ok(out)
     }
@@ -357,15 +363,14 @@ impl Watcher {
         let mut out = BTreeMap::new();
         let mut stack = vec![self.root.clone()];
         while let Some(dir) = stack.pop() {
+            if out.len() >= MAX_ENTRIES {
+                break;
+            }
             // Through the folder's own handle, checked to be below the root: a folder found here can be a link by the time it
             // is opened, and the walk would go on wherever it leads.
-            let Ok(items) = list_inside(&self.root, &dir) else {
-                continue;
-            };
-            for item in items {
-                if out.len() >= MAX_ENTRIES {
-                    return out;
-                }
+            // Stop the handle's enumeration at the budget; collecting a directory first defeats this bound.
+            // As before, a failed directory scan does not stop watching other directories.
+            let _ = visit_inside(&self.root, &dir, |item| {
                 let path = dir.join(&item.name);
                 if item.is_dir {
                     if !SKIP_DIRS.iter().any(|s| item.name == *s) {
@@ -373,12 +378,17 @@ impl Watcher {
                     }
                 } else {
                     let Ok(rel) = path.strip_prefix(&self.root).map(Path::to_path_buf) else {
-                        continue;
+                        return ControlFlow::Continue(());
                     };
                     let rel = rel.to_string_lossy().replace('\\', "/");
                     out.insert(rel, (item.modified, item.len));
                 }
-            }
+                if out.len() >= MAX_ENTRIES {
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
+                }
+            });
         }
         out
     }
