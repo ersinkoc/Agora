@@ -466,6 +466,12 @@ impl Sandbox {
 /// temp folder, and leaves the rest of the shared Git folder (config, hooks) read-only. Callers use this instead of a `cfg`.
 pub const NARROW_GIT_WRITES: bool = cfg!(windows);
 
+/// True where a confined agent may write only the parts of its checkout's shared Git folder a commit needs (`objects`, `refs`,
+/// `logs/refs`, its own worktree admin folder; on macOS also `packed-refs`) and not `config` or `hooks`: a planted config or hook would
+/// run in the user's own git and the node's. Windows (narrow profile) and macOS; Linux still gives the whole shared folder. Callers use
+/// this instead of a `cfg`.
+pub const GIT_CONFIG_READ_ONLY: bool = cfg!(any(windows, target_os = "macos"));
+
 /// True where a confined agent gets a temp folder of its own (`TMPDIR`, `TEMP`, `TMP` point at it): on macOS the per-user temp folder
 /// is private to the sandbox and on Windows the profile's is out of reach, so without one compilers and `mktemp` fail. On Linux the
 /// shared `/tmp` is writable to the agent instead. Callers use this instead of a `cfg`.
