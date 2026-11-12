@@ -1075,17 +1075,24 @@ mod memory_tests {
         // starts `sleep` through a helper that exits, so `sleep`'s parent is gone and no tree leads to it.
         let mut shell = if std::env::consts::OS == "windows" {
             std::process::Command::new("cmd")
-                .args(["/c", "ping -n 6 127.0.0.1 >nul"])
+                .args(["/c", "ping -n 30 127.0.0.1 >nul"])
                 .spawn()
         } else {
             std::process::Command::new("sh")
-                .args(["-c", "sleep 5 & wait"])
+                .args(["-c", "sleep 30 & wait"])
                 .spawn()
         }
         .expect("spawn");
-        std::thread::sleep(std::time::Duration::from_millis(300));
         let pid = shell.id();
-        let tree = agora_platform::process_tree(pid).expect("tree");
+        // The child shows up once the shell has started it, which takes a while on a busy machine (windows' fix).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let tree = loop {
+            let tree = agora_platform::process_tree(pid).expect("tree");
+            if tree.len() >= 2 || std::time::Instant::now() > deadline {
+                break tree;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        };
         let measured = agents_memory(&[pid]);
         // Counted once, however often it is named.
         let again = agents_memory(&[pid, pid]);
