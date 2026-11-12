@@ -216,7 +216,9 @@ fn made_dirs(dir: &Path) -> Option<(PathBuf, PathBuf, PathBuf)> {
     let dir = agora_platform::canonicalize_plain(dir).ok()?;
     made()
         .iter()
-        .find(|m| dir.starts_with(&m.work))
+        .filter(|m| dir.starts_with(&m.work))
+        // The innermost one, should one worktree have been made inside another.
+        .max_by_key(|m| m.work.components().count())
         .map(|m| (m.admin.clone(), m.common.clone(), m.work.clone()))
 }
 
@@ -650,6 +652,23 @@ mod tests {
 
     use super::*;
 
+    /// Plain git for the controls, with none of the repository-location variables a calling git (a hook) may have set, which would
+    /// make it ignore the `.git` a test planted.
+    fn raw_git() -> Command {
+        let mut c = Command::new("git");
+        for v in [
+            "GIT_DIR",
+            "GIT_COMMON_DIR",
+            "GIT_WORK_TREE",
+            "GIT_INDEX_FILE",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_CONFIG_COUNT",
+        ] {
+            c.env_remove(v);
+        }
+        c
+    }
+
     /// Windows canonicalizes to `\\?\C:\...`, which git cannot use; drop the verbatim prefix.
     fn plain(p: PathBuf) -> PathBuf {
         match p.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
@@ -913,7 +932,7 @@ mod tests {
             r.dir.file_name().expect("name").to_string_lossy()
         ));
         let run = |dir: &Path, args: &[&str]| {
-            let ok = Command::new("git")
+            let ok = raw_git()
                 .args(["-c", "user.name=t", "-c", "user.email=t@e"])
                 .args(["-c", "protocol.file.allow=always"])
                 .arg("-C")
@@ -961,7 +980,7 @@ mod tests {
         assert!(is_dirty(&r.dir).is_ok());
         assert!(!mark.exists(), "the node's git ran a submodule's filter");
         // Control: plain git runs it, so the plant works on this system.
-        let _ = Command::new("git")
+        let _ = raw_git()
             .arg("-C")
             .arg(&r.dir)
             .args(["status", "--porcelain"])
@@ -999,7 +1018,7 @@ mod tests {
             "{}-fake",
             wt.file_name().expect("name").to_string_lossy()
         ));
-        let ok = Command::new("git")
+        let ok = raw_git()
             .args(["clone", "-q", "--bare"])
             .arg(&r.dir)
             .arg(&fake)
@@ -1008,7 +1027,7 @@ mod tests {
             .success();
         assert!(ok);
         let mark = wt.join("ran-fake-clean");
-        let set = Command::new("git")
+        let set = raw_git()
             .arg("--git-dir")
             .arg(&fake)
             .args(["config", "filter.ev.clean"])
@@ -1037,14 +1056,14 @@ mod tests {
             agora_platform::canonicalize_plain(&used).expect("used"),
             agora_platform::canonicalize_plain(&common).expect("common")
         );
-        let _ = status(&wt);
-        let _ = diff(&wt, None);
+        status(&wt).expect("pinned status");
+        diff(&wt, None).expect("pinned diff");
         assert!(
             !mark.exists(),
             "the node's git followed the agent's commondir"
         );
         // Control: plain git follows it.
-        let _ = Command::new("git")
+        let _ = raw_git()
             .arg("-C")
             .arg(&wt)
             .args(["status", "--porcelain"])
@@ -1066,6 +1085,25 @@ mod tests {
     }
 
     #[test]
+    fn a_folder_uses_the_innermost_worktree_recorded_around_it() {
+        let r = Repo::new(None);
+        let outer = agora_platform::canonicalize_plain(&r.dir).expect("dir");
+        let inner = outer.join("inner");
+        fs::create_dir_all(inner.join("deep")).expect("dirs");
+        let entry = |work: &Path, tag: &str| Made {
+            work: work.to_path_buf(),
+            admin: work.join(format!("{tag}-admin")),
+            common: work.join(format!("{tag}-common")),
+        };
+        made().extend([entry(&outer, "outer"), entry(&inner, "inner")]);
+        let found = made_dirs(&inner.join("deep")).map(|(admin, ..)| admin);
+        let at_outer = made_dirs(&outer).map(|(admin, ..)| admin);
+        made().retain(|m| !m.work.starts_with(&outer));
+        assert_eq!(found, Some(inner.join("inner-admin")));
+        assert_eq!(at_outer, Some(outer.join("outer-admin")));
+    }
+
+    #[test]
     fn the_nodes_git_uses_the_git_folders_recorded_when_it_made_the_worktree() {
         let r = Repo::new(None);
         let wt = r.dir.with_file_name(format!(
@@ -1077,7 +1115,7 @@ mod tests {
         // The agent builds a repository inside its worktree, with an admin folder whose back-pointer names this worktree and a
         // filter in its config, and points its `.git` file there: every check of the files on disk now agrees with it.
         let fake = wt.join("fake");
-        let ok = Command::new("git")
+        let ok = raw_git()
             .args(["clone", "-q", "--bare"])
             .arg(&r.dir)
             .arg(&fake)
@@ -1096,7 +1134,7 @@ mod tests {
         fs::write(fake_admin.join("gitdir"), format!("{}\n", own.display())).expect("gitdir");
         fs::write(fake_admin.join("commondir"), "../..\n").expect("commondir");
         let mark = wt.join("ran-fake-clean");
-        let set = Command::new("git")
+        let set = raw_git()
             .arg("--git-dir")
             .arg(&fake)
             .args(["config", "filter.ev.clean"])
@@ -1128,14 +1166,14 @@ mod tests {
             agora_platform::canonicalize_plain(&used).expect("used"),
             agora_platform::canonicalize_plain(&common).expect("common")
         );
-        let _ = status(&wt);
-        let _ = diff(&wt, None);
+        status(&wt).expect("pinned status");
+        diff(&wt, None).expect("pinned diff");
         assert!(
             !mark.exists(),
             "the node's git followed the agent's .git file"
         );
         // Control: plain git follows it.
-        let _ = Command::new("git")
+        let _ = raw_git()
             .arg("-C")
             .arg(&wt)
             .args(["status", "--porcelain"])
@@ -1213,11 +1251,7 @@ mod tests {
 
         // Plain git, as an unhardened node would run it: which plants work on this system.
         let plain = |args: &[&str]| {
-            let _ = Command::new("git")
-                .arg("-C")
-                .arg(&r.dir)
-                .args(args)
-                .output();
+            let _ = raw_git().arg("-C").arg(&r.dir).args(args).output();
         };
         plain(&["status", "--porcelain"]);
         plain(&["diff", "HEAD"]);
