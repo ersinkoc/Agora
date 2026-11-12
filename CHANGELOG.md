@@ -13,7 +13,6 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 ### Fixes
 - A folder listing answers the first 500 folders by name, not the first 500 the file system returned, and never reads more than 50,000 names.
 - An MCP connection that drops no longer leaves its agent's unanswered questions behind; they are cancelled with it.
-- The hub now supports the folder-listing capability: in 0.3.3 it agreed on it with no machine and refused every listing, so Browse folders stayed hidden. Update the machine too.
 
 ## 0.3.3
 ### Machines
