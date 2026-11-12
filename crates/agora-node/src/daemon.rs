@@ -410,6 +410,18 @@ impl EventSink {
             .replay_after(after)
     }
 
+    /// Like [`payloads_after`](Self::payloads_after), at most `max` of them: one uplink batch.
+    pub fn payloads_after_max(
+        &self,
+        after: u64,
+        max: usize,
+    ) -> Result<Vec<Vec<u8>>, crate::event_buffer::ReplayError> {
+        self.log
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .replay_after_max(after, max)
+    }
+
     /// Decoded events after `after` (exclusive), oldest first; what the uplink sends and tests inspect.
     pub fn events_after(&self, after: u64) -> Vec<v1::Event> {
         let log = self.log.lock().unwrap_or_else(|e| e.into_inner());
