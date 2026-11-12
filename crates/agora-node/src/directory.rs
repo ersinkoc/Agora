@@ -207,8 +207,10 @@ pub fn list(requested: &str, scope: &ListScope<'_>) -> Result<v1::DirectoryEntri
     let end = std::time::Instant::now() + scope.budget;
     let mut names = Vec::new();
     let mut truncated = false;
+    // Every folder is read (within the time budget) and only then sorted and cut, so the answer is the first `MAX_LISTED` by name,
+    // not whichever the file system happened to give first.
     agora_platform::visit_dir(&handle, |item: agora_platform::DirItem| {
-        if names.len() >= MAX_LISTED || std::time::Instant::now() > end {
+        if std::time::Instant::now() > end {
             truncated = true;
             return std::ops::ControlFlow::Break(());
         }
@@ -227,6 +229,10 @@ pub fn list(requested: &str, scope: &ListScope<'_>) -> Result<v1::DirectoryEntri
     })
     .map_err(|_| invalid("directory.path"))?;
     names.sort();
+    if names.len() > MAX_LISTED {
+        names.truncate(MAX_LISTED);
+        truncated = true;
+    }
     let entries = names
         .into_iter()
         .map(|name| v1::DirectoryEntry {
@@ -399,6 +405,25 @@ mod tests {
         sorted.sort();
         assert_eq!(names(&e), sorted);
         let _ = std::fs::remove_dir_all(&h.home);
+    }
+
+    #[test]
+    fn a_big_folder_answers_its_first_500_by_name_not_the_first_500_it_reads() {
+        // The order a folder is read in is the file system's: hashed on ext4, case-insensitive on NTFS (`a…` before `B…`). The
+        // listing sorts by name (`B…` before `a…`), so the 500 it answers are the first 500 of that order, whatever came first.
+        let h = home("list-order");
+        let big = h.home.join("big");
+        let mut all: Vec<String> = (0..500).map(|i| format!("a{i:03}")).collect();
+        all.extend((0..20).map(|i| format!("B{i:03}")));
+        for name in &all {
+            std::fs::create_dir_all(big.join(name)).unwrap();
+        }
+        all.sort();
+        let e = list(&big.to_string_lossy(), &scope(&h)).unwrap();
+        let got: Vec<String> = e.entries.iter().map(|x| x.name.clone()).collect();
+        let _ = std::fs::remove_dir_all(&h.home);
+        assert!(e.truncated);
+        assert_eq!(got, all[..MAX_LISTED]);
     }
 
     #[test]
