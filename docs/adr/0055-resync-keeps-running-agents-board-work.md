@@ -1,6 +1,7 @@
 # 0055. A resync keeps a running agent's board work
-Status: Proposed
+Status: Accepted
 Date: 2026-11-13
+Accepted: 2026-11-13 (maintainer's explicit approval in chat: "0055'i onaylıyorum")
 
 Amends ADR-0054 §3 (the resync announcement). Everything else in ADR-0054 stands.
 
