@@ -124,3 +124,12 @@ describe('closed agents', () => {
     expect(t?.state).toBe('finished');
   });
 });
+
+describe('forgotten agents', () => {
+  it('leave the view when the hub says it forgot them', () => {
+    const view = fromSnapshot({ nodes: [{ nodeId: 'n', hostname: 'M' }], agents: [{ agentId: 'n/a', nodeId: 'n', kind: 'shell', running: false }] });
+    expect(tiles(view)).toHaveLength(1);
+    applyEvent(view, 6, { producerId: 'hub', body: 'agentForgotten', agentForgotten: { agentId: 'n/a' } } as never);
+    expect(tiles(view)).toHaveLength(0);
+  });
+});

@@ -33,7 +33,7 @@ const wide = () => typeof window === 'undefined' || !window.matchMedia || window
 
 // The one window, laid out like an editor: the agents on the left as a tree, the terminals you are watching as tabs in the
 // middle (or side by side), details on the right, and a status bar. Everything is derived from props.
-export function Console({ agents, machines, usage, projects = [], approvals, messages, boards = [], terminalFor, chatOf, sendPrompt, loadDiff, loadHistory, filesOf, onOpen, onStart, onCommand, start, onResolve, notice, link }: {
+export function Console({ agents, machines, usage, projects = [], approvals, messages, boards = [], terminalFor, chatOf, sendPrompt, loadDiff, loadHistory, filesOf, onOpen, onStart, onCommand, onForget, start, onResolve, notice, link }: {
   agents: readonly AgentTileModel[];
   machines: readonly MachineModel[];
   usage?: UsageSummary;
@@ -50,6 +50,8 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   onOpen: (agentId: string) => void;
   onStart?: (machine?: string) => void;
   onCommand?: () => void;
+  // Ask the hub to forget a closed agent for every client (ADR-0053); false when it could not (an older hub), and it is only hidden here.
+  onForget?: (agentId: string) => Promise<boolean>;
   start?: ReactNode;
   onResolve: (a: ApprovalModel, approved: boolean) => void;
   notice?: string;
@@ -213,7 +215,8 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
       <AgentAddress agent={a} />
       {a.closed ? <ClosedSummary agent={a} now={now} cost={usage?.perAgent.has(a.id) ? money(usage.perAgent.get(a.id) ?? 0) : undefined}
         onReview={loadDiff ? () => setReviewing(a.id) : undefined} onHistory={loadHistory && a.git !== false ? () => setHistory(a.id) : undefined} onFiles={filesOf ? () => setBrowsing(a.id) : undefined}
-        onStart={onStart ? () => onStart() : undefined} onDismiss={() => dismiss([a.id])} /> : <div className="pane min-h-0 flex-1 p-1.5">
+        onStart={onStart ? () => onStart() : undefined} onDismiss={() => dismiss([a.id])}
+        onForget={onForget ? () => { void onForget(a.id).then((ok) => { if (!ok) dismiss([a.id]); }); } : undefined} /> : <div className="pane min-h-0 flex-1 p-1.5">
         {a.terminal === false ? <PromptBox agent={a} send={sendPrompt} source={chatOf?.(a)} /> : (
           <Suspense fallback={<div className="terminal" aria-busy="true" />}>
             <TerminalView source={terminalFor(a.id)} label={`${t('focus-terminal')} · ${a.name}`} />

@@ -185,6 +185,29 @@ impl Hub {
         Ok(outcome)
     }
 
+    /// ADR-0053: the hub stops listing a closed agent. `agent` is the hub-wide key. Refused while it runs; its earlier events stay in
+    /// the store, and its tokens and cost still count.
+    pub fn forget_agent(&self, agent: &str, now_ms: u64) -> Result<(), agora_protocol::Error> {
+        use agora_protocol::{Error, ErrorCode};
+        let mut g = self.lock();
+        match g.view.agents.get(agent) {
+            None => return Err(Error::new(ErrorCode::AgentNotFound).with("agent_id", agent)),
+            Some(a) if a.running => {
+                return Err(Error::new(ErrorCode::AgentRunning).with("agent_id", agent))
+            }
+            Some(a) if a.forgotten => return Ok(()),
+            Some(_) => {}
+        }
+        self.emit(
+            &mut g,
+            Body::AgentForgotten(agora_protocol::v1::AgentForgotten {
+                agent_id: agent.to_string(),
+            }),
+            now_ms,
+        )
+        .map_err(|_| Error::new(ErrorCode::Internal))
+    }
+
     /// A node's connection ended without it saying goodbye: record that it is offline.
     pub fn node_disconnected(&self, node: &str, now_ms: u64) -> Result<(), StoreError> {
         let mut g = self.lock();
@@ -443,6 +466,45 @@ mod tests {
             Ingest::Duplicate { acked: 2 }
         );
         assert!(sub.live.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_closed_agent_can_be_forgotten_but_a_running_one_cannot() {
+        use agora_protocol::{v1::AgentExited, ErrorCode};
+        let (hub, sup) = (hub(), support());
+        let mut s = open_session(&hub, &sup, "n1");
+        hub.ingest(&mut s, &online("n1", 1)).unwrap();
+        hub.ingest(&mut s, &agent("n1", 2, "a")).unwrap();
+        // Running: refused, and nothing was recorded.
+        let e = hub.forget_agent("n1/a", 5).unwrap_err();
+        assert_eq!(e.code, ErrorCode::AgentRunning);
+        assert_eq!(hub.view().1, 2);
+        assert_eq!(
+            hub.forget_agent("n1/nobody", 5).unwrap_err().code,
+            ErrorCode::AgentNotFound
+        );
+        let exited = Event {
+            producer_id: "n1".into(),
+            seq: 3,
+            at_ms: 3,
+            body: Some(Body::AgentExited(AgentExited {
+                agent_id: "a".into(),
+                exit_code: 0,
+            })),
+        }
+        .encode_to_vec();
+        hub.ingest(&mut s, &exited).unwrap();
+        let sub = hub.subscribe(Some(3)).unwrap();
+        hub.forget_agent("n1/a", 6).unwrap();
+        // Clients hear of it as an event; the event is in the log, the agent's history is not rewritten, and asking again is harmless.
+        let heard = sub.live.try_recv().unwrap();
+        assert!(matches!(heard.event.body, Some(Body::AgentForgotten(_))));
+        assert_eq!(hub.view().1, 4);
+        hub.forget_agent("n1/a", 7).unwrap();
+        assert_eq!(hub.view().1, 4);
+        let (view, _) = hub.view();
+        assert!(view.agents["n1/a"].forgotten);
+        assert!(!view.agents["n1/a"].running);
     }
 
     #[test]
