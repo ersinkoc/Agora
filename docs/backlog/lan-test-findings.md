@@ -23,6 +23,7 @@ branch (`docs/fordevs/`). Each row is something the run showed that no CI run ha
 | B4 | A node that crashes and restarts reuses its agent ids (`agent-1`), and the hub board still showed the dead agent's claim as the new agent's | fixed: the hub gives back the tasks and leases of a node's agents when the node announces a new process start |
 | B5 | `lease.held` carries an empty `expires_at` | fixed: the error carries the conflicting lease's end in ms, as the file-write error already did |
 | B6 | Local → shared: a project used on one node keeps its tasks and leases on that node's local broker; when a second node with a checkout comes online the board takes over, the first node's agents lose sight of their own claimed task, the board's first task is `t-1` again, and a lease held locally is not seen by the board: measured, `nb` was granted `README.md` while `na` still held it (two holders) | open: ADR-0039 says work made locally before sharing stays local; needs that sentence changed (move unfinished local tasks and live leases to the board when it takes over, or refuse to switch while local leases are live) |
+| B7 | Two same-identity project folders selected after both daemons start are ignored by shared-board eligibility; the peer sees no task and acquires a path already held on the first node | fixed in #291: checkout/workspace/session membership drives both eligibility and production join discovery, with a real two-node regression and project lifecycle tests |
 
 
 ## Confined agents can reach unix sockets (2026-11-11)
@@ -43,4 +44,31 @@ branch (`docs/fordevs/`). Each row is something the run showed that no CI run ha
 - **L17** Audit rows "Watched a terminal … Sent, no answer yet" stay unresolved after a node restart.
 - **L18** "Recent messages" says agents have not written to each other yet after a hub restart (mesh history is not re-read).
 - **L19** The web app takes its language only from `navigator.language`; there is no in-app switch, so Turkish needs a `tr-TR` browser. Implemented in #284: sign-in, Home and Focus offer a remembered browser-language override; live terminals and unfinished forms survive switching.
-- **L20** A refused or abandoned start leaves its `agent/<name>` branch; an agent killed from outside stays `running`.
+- **L20** A refused or abandoned start leaves its `agent/<name>` branch behind: `Supervisor::abandon` removes the worktree but not the branch.
+  Open.
+  - Not a bug: "an agent killed from outside stays `running`". The restart policy started it again. What is missing is UX: the restart is
+    not shown, so it looks as if nothing happened.
+- **L22** A confined agent started in a **selected checkout** (`agent start --project` with no `--worktree` starts in the checkout itself)
+  gets the whole checkout writable, `.git` included.
+  - It can write `.git/config` and `.git/hooks`. This is already listed as open in T8 and ADR-0052.
+  - New here: the consequence does not wait for the user. The node itself runs `git -C <folder> status` unconfined (`agora-node/src/git.rs`)
+    whenever changes are shown. A `core.fsmonitor` command set in `.git/config` runs during `status`; I checked this with git and the
+    node's environment (`LC_ALL=C`, `GIT_OPTIONAL_LOCKS=0`).
+  - The same may hold for `git diff` drivers (`diff.external`, `textconv`). Not checked.
+  - Windows' narrow profile covers only worktrees (`.git` is a file there). On Linux and macOS, the worktree profile makes the shared git
+    folder writable (`common_git_dir`).
+  - In review:
+    - #300 runs the node's own git with fsmonitor, hooks, external diff and textconv off.
+    - #303 keeps the shared `config` and `hooks` read-only for macOS worktrees.
+  - Still open: filter drivers, Linux worktrees and selected checkouts.
+- **L23** Windows, real Codex under confinement (`AGORA_WINDOWS_CONFINEMENT=1`). It does not run, for three reasons.
+  1. The manifest launches `codex` by bare name, and the node adds the program's folder to `read` only for a path. A per-user install is
+     unreadable to the restricted token, so the agent shows as started and stops at once, with no reason shown.
+  2. `sandbox.read` on the whole install tree (about 811k files) made the start take 232 s and the stop 256 s, and the restart policy
+     repeated the start.
+  3. Codex must read and write `%USERPROFILE%\.codex`. That folder is refused with `label_failed`, because Codex's own `.sandbox-bin` folder
+     does not give the user WRITE_OWNER.
+
+  Also measured: applying and removing a propagated grant re-derives the inherited entries of that tree from its parent, which drops stale
+  third-party entries that are not restored afterwards. Open: maintainer decisions (program folder, Codex's home, exit reason, cost of large
+  folders), see the `comms` report of 2026-11-11 19:25 UTC.
