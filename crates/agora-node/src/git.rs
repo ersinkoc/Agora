@@ -609,18 +609,61 @@ pub fn diff(worktree: &Path, path: Option<&str>) -> Result<String, GitError> {
     if let Some(p) = path {
         ls.extend(["--", p]);
     }
-    for name in git(worktree, &ls)?
+    let listed = git(worktree, &ls)?;
+    let names: Vec<&str> = listed
         .split('\0')
         .filter(|n| !n.is_empty())
         .take(MAX_UNTRACKED)
-    {
-        let small = std::fs::metadata(worktree.join(name))
-            .is_ok_and(|m| m.is_file() && m.len() <= MAX_UNTRACKED_BYTES);
-        if !small {
-            continue;
+        .collect();
+    if !names.is_empty() {
+        out.push_str(&untracked_diff(worktree, &names)?);
+    }
+    Ok(out)
+}
+
+/// The diff of each untracked file against nothing, from a private copy. git given the path in the worktree opens it itself, and
+/// the agent working there can swap a folder above it for a link between `ls-files` and that open (measured: git follows a linked
+/// folder, though not a link in the file's own place): the node would show a file from anywhere. So each file is read the way
+/// `files.read` reads (checked on the open handle, at most [`MAX_UNTRACKED_BYTES`]), written under the same relative name into a
+/// folder only this user can open, and diffed there, outside any repository. Files that are not plain, too large, or lead out of
+/// the worktree are left out, as before.
+fn untracked_diff(worktree: &Path, names: &[&str]) -> Result<String, GitError> {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static N: AtomicU32 = AtomicU32::new(0);
+    struct Scratch(PathBuf);
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
         }
-        // `--no-index` exits 1 when the files differ, which is the normal case here.
-        let shown = hardened(worktree)
+    }
+    let io = |e: std::io::Error| GitError::Io(e.to_string());
+    let files = crate::files::Files::open(worktree, MAX_UNTRACKED_BYTES)
+        .map_err(|e| GitError::Io(format!("{e:?}")))?;
+    let scratch = Scratch(std::env::temp_dir().join(format!(
+        "agora-untracked-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    )));
+    std::fs::create_dir(&scratch.0).map_err(io)?;
+    agora_platform::restrict_to_owner(&scratch.0).map_err(io)?;
+    let mut out = String::new();
+    for name in names {
+        let Ok((data, executable)) = files.read_file(name) else {
+            continue;
+        };
+        let copy = scratch.0.join(name);
+        if let Some(parent) = copy.parent() {
+            std::fs::create_dir_all(parent).map_err(io)?;
+        }
+        agora_platform::write_private(&copy, &data).map_err(io)?;
+        agora_platform::set_executable(&copy, executable).map_err(io)?;
+        // `--no-index` exits 1 when the files differ, which is the normal case here. No repository: nothing above the scratch
+        // folder is searched for one.
+        let shown = plain_hardened(&scratch.0)
+            .env(
+                "GIT_CEILING_DIRECTORIES",
+                scratch.0.parent().unwrap_or(&scratch.0),
+            )
             .args([
                 "diff",
                 "--no-index",
@@ -632,7 +675,7 @@ pub fn diff(worktree: &Path, path: Option<&str>) -> Result<String, GitError> {
                 name,
             ])
             .output()
-            .map_err(|e| GitError::Io(e.to_string()))?;
+            .map_err(io)?;
         out.push_str(&String::from_utf8_lossy(&shown.stdout));
     }
     Ok(out)
@@ -953,6 +996,76 @@ mod tests {
         assert!(diff(&r.dir, Some("nothing-here.txt"))
             .expect("diff")
             .is_empty());
+    }
+
+    #[test]
+    fn untracked_files_show_as_new_files_with_their_mode() {
+        let r = Repo::new(None);
+        fs::create_dir_all(r.dir.join("sub")).expect("dir");
+        fs::write(r.dir.join("sub/new.txt"), "fresh\n").expect("write");
+        fs::write(r.dir.join("run.sh"), "echo\n").expect("write");
+        agora_platform::set_executable(&r.dir.join("run.sh"), true).expect("chmod");
+        let d = diff(&r.dir, None).expect("diff");
+        assert!(d.contains("diff --git a/sub/new.txt b/sub/new.txt"), "{d}");
+        assert!(d.contains("+fresh"), "{d}");
+        let meta = fs::metadata(r.dir.join("run.sh")).expect("meta");
+        let mode = if agora_platform::is_executable(&meta) {
+            "new file mode 100755"
+        } else {
+            "new file mode 100644"
+        };
+        assert!(d.contains(mode), "{d}");
+        // Only this one when asked for it.
+        let one = diff(&r.dir, Some("sub/new.txt")).expect("diff");
+        assert!(one.contains("+fresh") && !one.contains("run.sh"), "{one}");
+    }
+
+    #[test]
+    fn an_untracked_file_behind_a_folder_swapped_for_a_link_is_not_shown() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        let r = Repo::new(None);
+        let outside = r.dir.with_file_name(format!(
+            "{}-outside",
+            r.dir.file_name().expect("name").to_string_lossy()
+        ));
+        fs::create_dir_all(&outside).expect("dir");
+        fs::write(outside.join("f.txt"), "TOPSECRET\n").expect("secret");
+        if agora_platform::symlink(&outside, &r.dir.join("probe")).is_err() {
+            return; // no symbolic links here (Windows without the privilege)
+        }
+        fs::remove_file(r.dir.join("probe")).expect("unlink");
+        // The agent flips `d` between a folder of its own and a link to a folder outside its worktree, both holding `f.txt`.
+        let stop = Arc::new(AtomicBool::new(false));
+        let flipper = {
+            let (stop, root, outside) = (Arc::clone(&stop), r.dir.clone(), outside.clone());
+            std::thread::spawn(move || {
+                let (real, link, name) = (root.join("d.real"), root.join("d.link"), root.join("d"));
+                while !stop.load(Ordering::Relaxed) {
+                    let _ = fs::create_dir_all(&real);
+                    let _ = fs::write(real.join("f.txt"), "mine\n");
+                    let _ = fs::remove_file(&name);
+                    let _ = fs::rename(&real, &name);
+                    let _ = agora_platform::symlink(&outside, &link);
+                    let _ = fs::remove_dir_all(&name);
+                    let _ = fs::rename(&link, &name);
+                }
+            })
+        };
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(6);
+        let mut leaked = 0;
+        while std::time::Instant::now() < end {
+            if diff(&r.dir, None).is_ok_and(|d| d.contains("TOPSECRET")) {
+                leaked += 1;
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        flipper.join().expect("flipper");
+        let _ = fs::remove_dir_all(&outside);
+        assert_eq!(
+            leaked, 0,
+            "the node showed a file from outside the worktree"
+        );
     }
 
     #[test]

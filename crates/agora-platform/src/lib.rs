@@ -167,6 +167,20 @@ pub fn set_executable(path: &std::path::Path, executable: bool) -> io::Result<()
     }
 }
 
+/// Whether a file's owner may run it, as git records it (`100755`): the owner's execute bit on Unix; elsewhere never.
+pub fn is_executable(meta: &std::fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        meta.permissions().mode() & 0o100 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        false
+    }
+}
+
 /// Makes a folder usable by the current user only (the folder of installed adapters): `0700` on Unix; on Windows a protected ACL for
 /// the user and SYSTEM, passed on to everything below. A no-op elsewhere.
 pub fn restrict_to_owner(path: &std::path::Path) -> io::Result<()> {

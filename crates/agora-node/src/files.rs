@@ -199,6 +199,11 @@ impl Files {
     /// The agent working here can swap the file, or a folder above it, for a link between [`Self::resolve`]'s check and the open,
     /// so where the open file really is is checked again on the open handle itself, and everything after reads that handle.
     pub fn read(&self, rel: &str) -> Result<Vec<u8>, FilesError> {
+        self.read_file(rel).map(|(data, _)| data)
+    }
+
+    /// [`Self::read`], with whether the file is executable (from the same open handle).
+    pub fn read_file(&self, rel: &str) -> Result<(Vec<u8>, bool), FilesError> {
         use std::io::Read;
         let path = self.resolve(rel)?;
         let file = fs::File::open(&path).map_err(|e| io_err(rel, &e))?;
@@ -224,7 +229,7 @@ impl Files {
                 limit: self.max_read,
             });
         }
-        Ok(data)
+        Ok((data, agora_platform::is_executable(&meta)))
     }
 
     /// Write a file on behalf of `agent`, unless another agent holds a live lease covering it.
