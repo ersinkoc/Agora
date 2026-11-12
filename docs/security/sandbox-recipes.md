@@ -36,7 +36,7 @@ A confined agent on macOS writes only the parts of its checkout's shared `.git` 
 your git runs in the main checkout. Git run *inside the agent's worktree* is another matter: the agent can still rewrite that worktree's
 `.git` file and its admin folder (`commondir`, `config.worktree`), so treat git there as running the agent's settings (the node's own
 git switches off what it can, see T8b in the threat model). The node opens the shared folder only when its
-`worktrees/<name>/gitdir` points back at the worktree, so a `.git` file the agent redirected opens nothing new on the next start.
+`worktrees/<name>/gitdir` points back at the worktree and `.git` is a plain file, so a `.git` file the agent redirected or replaced with a link opens nothing new on the next start.
 
 Measured with git 2.56 in a node-made worktree: status, add, commit, log, new branches and tags, checkout, stash, fetch, `pack-refs` and
 deleting a branch work (a delete warns that it could not drop the branch's config section). Refused, because they write the shared

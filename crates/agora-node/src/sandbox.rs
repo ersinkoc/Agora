@@ -101,15 +101,23 @@ fn narrow_git(worktree: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
 /// The worktree's own admin folder and its checkout's shared Git folder, from the worktree's `.git` file, but only when they check
 /// out: the agent can rewrite that file, so its `gitdir:` alone must never decide what the profile opens. The admin folder must be
 /// `<common>/worktrees/<name>`, its `gitdir` file must point back at this worktree, and `<common>` must hold `HEAD`, `objects` and
-/// `refs`. A relative `gitdir:` is read from the worktree, as git does. `None` (no Git access) for anything else.
+/// `refs`. A relative `gitdir:` is read from the worktree, as git does. The `.git` file must be a plain file, not a link: through a
+/// link to another worktree's `.git`, that worktree's `gitdir:` and back-pointer agree and its repository would open. `None` (no
+/// Git access) for anything else.
 pub fn git_dirs(worktree: &Path) -> Option<(PathBuf, PathBuf)> {
     let real = |p: &Path| std::fs::canonicalize(p).ok();
-    let text = std::fs::read_to_string(worktree.join(".git")).ok()?;
+    let own = worktree.join(".git");
+    if !std::fs::symlink_metadata(&own).ok()?.file_type().is_file() {
+        return None;
+    }
+    // This worktree's `.git` by its real folder, never by following a link at `.git` itself.
+    let own = real(worktree)?.join(".git");
+    let text = std::fs::read_to_string(&own).ok()?;
     let named = PathBuf::from(text.trim().strip_prefix("gitdir:")?.trim());
     let admin = real(&if named.is_absolute() {
         named
     } else {
-        worktree.join(named)
+        own.with_file_name(named)
     })?;
     if admin.parent()?.file_name()? != "worktrees" {
         return None;
@@ -129,7 +137,7 @@ pub fn git_dirs(worktree: &Path) -> Option<(PathBuf, PathBuf)> {
     } else {
         admin.join(back)
     };
-    (real(&back)? == real(&worktree.join(".git"))?).then_some((admin, common))
+    (real(&back)? == own).then_some((admin, common))
 }
 
 /// A worktree's shared Git folder (`<main>/.git`), checked as [`git_dirs`] does; git needs to write there (and to the object store
@@ -313,6 +321,32 @@ mod tests {
         )
         .unwrap();
         (wt, common, admin)
+    }
+
+    #[test]
+    fn a_git_file_linked_to_another_worktrees_opens_nothing() {
+        let root = std::env::temp_dir().join(format!("agora-gitlink-{}", std::process::id()));
+        let (mine, _, _) = linked_worktree(&root.join("mine"));
+        let (theirs, their_common, their_admin) = linked_worktree(&root.join("theirs"));
+        assert!(git_dirs(&theirs).is_some());
+        // The agent swaps its `.git` file for a link to another worktree's: read through the link, that file's `gitdir:` and the
+        // back-pointer agree, so only refusing the link keeps the other repository closed.
+        std::fs::remove_file(mine.join(".git")).unwrap();
+        if agora_platform::symlink(&theirs.join(".git"), &mine.join(".git")).is_err() {
+            let _ = std::fs::remove_dir_all(&root);
+            return; // No links on this system.
+        }
+        assert_eq!(git_dirs(&mine), None);
+        let policy = SandboxPolicy {
+            level: Level::Worktree,
+            ..SandboxPolicy::default()
+        };
+        let sb = policy.profile("k", None, &mine, "agent").unwrap();
+        assert!(!sb
+            .write
+            .iter()
+            .any(|w| w.starts_with(&their_common) || w == &their_admin));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
