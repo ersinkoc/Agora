@@ -793,11 +793,23 @@ pub fn spawn(sink: Arc<EventSink>, link: HubLink) -> std::io::Result<UplinkHandl
                 };
                 rt.block_on(async {
                     let mut backoff = BACKOFF_MIN;
+                    let mut last = String::new();
                     while !stop.load(Ordering::Acquire) {
                         let started = tokio::time::Instant::now();
                         let r = run_once(&link, &sink, &stop).await;
                         if stop.load(Ordering::Acquire) {
                             break;
+                        }
+                        // Why the hub could not be reached, once per change, so a node that never connects is not silent. Codes and
+                        // transport detail only: this goes to the node's log, not to the user's screen.
+                        if let Err(e) = &r {
+                            let now = format!("{e:?}");
+                            if now != last {
+                                eprintln!("hub link: {now}");
+                                last = now;
+                            }
+                        } else {
+                            last.clear();
                         }
                         // A connection that lasted a while was healthy: start the backoff over.
                         if started.elapsed() > Duration::from_secs(30) || r.is_ok() {
