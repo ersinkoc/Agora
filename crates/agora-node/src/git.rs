@@ -278,8 +278,27 @@ fn repository_filters(out: &[u8]) -> Option<Vec<String>> {
         .collect()
 }
 
+/// [`plain_hardened`] for a command that only reads or moves refs and never reads a file's contents (`rev-parse`, `rev-list`,
+/// `log` without a patch, `show-ref`, `symbolic-ref`, `update-ref`, `remote`, `worktree list`): a filter driver runs only when git
+/// hashes or checks out a file, so these skip the filter question and cost one git process instead of two (about a second each on
+/// Windows). Anything that can touch a file's contents (`status`, `diff`, `add`, `worktree add`/`remove`, `ls-files`) goes
+/// through [`hardened`]. A `log` format must not ask for signatures (`%G?` and friends; measured: with them, or with the default
+/// format, `log.showSignature` + `gpg.program` from the repository's config runs that program).
+pub(crate) fn refs_only(dir: &Path) -> Command {
+    plain_hardened(dir)
+}
+
+/// [`git`] for the commands [`refs_only`] names.
+fn git_refs(dir: &Path, args: &[&str]) -> Result<String, GitError> {
+    run(refs_only(dir), args)
+}
+
 fn git(dir: &Path, args: &[&str]) -> Result<String, GitError> {
-    let out = hardened(dir)
+    run(hardened(dir), args)
+}
+
+fn run(mut command: Command, args: &[&str]) -> Result<String, GitError> {
+    let out = command
         .args(args)
         .output()
         .map_err(|e| GitError::Io(e.to_string()))?;
@@ -295,17 +314,17 @@ fn git(dir: &Path, args: &[&str]) -> Result<String, GitError> {
 
 /// Find the checkout containing `path` and compute its machine-independent project identity.
 pub fn discover_checkout(path: &Path) -> Result<CheckoutInfo, GitError> {
-    let root = git(path, &["rev-parse", "--show-toplevel"])
+    let root = git_refs(path, &["rev-parse", "--show-toplevel"])
         .map_err(|_| GitError::NotARepository(path.to_path_buf()))?;
     let root = PathBuf::from(root.trim());
     // A repository can have several root commits; the lexicographically smallest is a stable choice.
-    let roots = git(&root, &["rev-list", "--max-parents=0", "HEAD"])?;
+    let roots = git_refs(&root, &["rev-list", "--max-parents=0", "HEAD"])?;
     let root_commit = roots
         .lines()
         .min()
         .ok_or_else(|| GitError::NotARepository(root.clone()))?
         .to_string();
-    let remote = git(&root, &["remote", "get-url", "origin"]).ok();
+    let remote = git_refs(&root, &["remote", "get-url", "origin"]).ok();
     let project = ProjectId::new(remote.as_deref().map(str::trim), &root_commit)
         .or_else(|_| ProjectId::new(None, &root_commit))
         .map_err(|_| GitError::NotARepository(root.clone()))?;
@@ -365,7 +384,7 @@ pub(crate) fn create_start_worktree(
     if expression.starts_with('-') {
         return Err(GitError::InvalidBranch(expression.into()));
     }
-    let initial = git(
+    let initial = git_refs(
         checkout,
         &[
             "rev-parse",
@@ -392,14 +411,14 @@ impl StartWorktree {
         remove_worktree(&self.checkout, &self.worktree, true)?;
         let reference = format!("refs/heads/{}", self.branch);
         let checked_out = format!("branch {reference}");
-        if git(&self.checkout, &["worktree", "list", "--porcelain", "-z"])?
+        if git_refs(&self.checkout, &["worktree", "list", "--porcelain", "-z"])?
             .split('\0')
             .any(|field| field == checked_out)
         {
             return Ok(());
         }
         // Exit 1 means a direct ref. A symbolic ref or an inspection error must not authorize deletion.
-        let symbolic = hardened(&self.checkout)
+        let symbolic = refs_only(&self.checkout)
             .args(["symbolic-ref", "--quiet", &reference])
             .output()
             .map_err(|e| GitError::Io(e.to_string()))?;
@@ -407,7 +426,7 @@ impl StartWorktree {
             return Ok(());
         }
         // Never follow a symbolic ref even if another process rewrites it after the check above.
-        git(
+        git_refs(
             &self.checkout,
             &["update-ref", "--no-deref", "-d", &reference, &self.initial],
         )
@@ -416,7 +435,7 @@ impl StartWorktree {
 }
 
 fn branch_exists(dir: &Path, branch: &str) -> Result<bool, GitError> {
-    match git(
+    match git_refs(
         dir,
         &[
             "show-ref",
@@ -447,7 +466,7 @@ fn is_dirty(worktree: &Path) -> Result<bool, GitError> {
 
 /// The branch checked out in a worktree (`None` when HEAD is detached).
 fn current_branch(worktree: &Path) -> Result<Option<String>, GitError> {
-    let b = git(worktree, &["symbolic-ref", "--quiet", "--short", "HEAD"]).ok();
+    let b = git_refs(worktree, &["symbolic-ref", "--quiet", "--short", "HEAD"]).ok();
     Ok(b.map(|s| s.trim().to_string()))
 }
 
@@ -456,7 +475,7 @@ fn unmerged_commits(dir: &Path, branch: &str) -> Result<u32, GitError> {
     let tip = format!("refs/heads/{branch}");
     // For `--branches` the pattern is relative to refs/heads/.
     let exclude = format!("--exclude={branch}");
-    let n = git(
+    let n = git_refs(
         dir,
         &[
             "rev-list",
@@ -669,13 +688,13 @@ pub struct Commit {
 
 /// The newest `limit` commits reachable from HEAD. A workspace with no commit yet has an empty log.
 pub fn log(worktree: &Path, limit: usize) -> Result<Vec<Commit>, GitError> {
-    if git(worktree, &["rev-parse", "--verify", "-q", "HEAD"]).is_err() {
+    if git_refs(worktree, &["rev-parse", "--verify", "-q", "HEAD"]).is_err() {
         return Ok(Vec::new());
     }
     let n = format!("-n{limit}");
     // Fields are split by the ASCII unit separator and records end with the record separator: neither can occur in a
     // subject or a name, so no quoting is needed.
-    let out = git(
+    let out = git_refs(
         worktree,
         &[
             "log",
@@ -703,7 +722,7 @@ pub fn log(worktree: &Path, limit: usize) -> Result<Vec<Commit>, GitError> {
 /// out of `git status` and `git add .` without touching a tracked `.gitignore`. Best effort: failure only means the
 /// file shows up as untracked.
 pub fn exclude_locally(worktree: &Path, rel: &Path) {
-    let Ok(out) = hardened(worktree)
+    let Ok(out) = refs_only(worktree)
         .args(["rev-parse", "--git-path", "info/exclude"])
         .output()
     else {
