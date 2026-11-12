@@ -83,6 +83,17 @@ pub struct DiskUsage {
     pub truncated: bool,
 }
 
+/// What [`Files::untracked`] found.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Untracked {
+    File {
+        data: Vec<u8>,
+        executable: bool,
+    },
+    /// A symbolic link: its target as git stores it (the bytes of the path it names).
+    Link(Vec<u8>),
+}
+
 /// Total size of regular files under `root` (symlinks are not followed or counted). Includes `.git` data,
 /// which is part of what a worktree costs.
 pub fn disk_usage(root: &Path) -> std::io::Result<DiskUsage> {
@@ -228,12 +239,16 @@ impl Files {
     pub fn read_file(&self, rel: &str) -> Result<(Vec<u8>, bool), FilesError> {
         use std::io::Read;
         let path = self.resolve(rel)?;
-        let file = fs::File::open(&path).map_err(|e| io_err(rel, &e))?;
+        // Without waiting: a FIFO swapped in for the file would block the open until something writes to it.
+        let file = agora_platform::open_read(&path).map_err(|e| io_err(rel, &e))?;
         let real = agora_platform::opened_path(&file).map_err(|e| io_err(rel, &e))?;
         if !real.starts_with(&self.root) {
             return Err(FilesError::OutsideRoot(rel.to_string()));
         }
         let meta = file.metadata().map_err(|e| io_err(rel, &e))?;
+        if !meta.is_file() {
+            return Err(FilesError::NotFound(rel.to_string()));
+        }
         if meta.len() > self.max_read {
             return Err(FilesError::TooLarge {
                 path: rel.to_string(),
@@ -252,6 +267,42 @@ impl Files {
             });
         }
         Ok((data, agora_platform::is_executable(&meta)))
+    }
+
+    /// An untracked file for a diff: a link as a link (its target, as git shows one, never what it points at), anything else as
+    /// [`Self::read_file`] reads it (regular files only, checked on the open handle). The link's folder is checked before and
+    /// after reading it, so a folder swapped for a link in between gives nothing.
+    pub fn untracked(&self, rel: &str) -> Result<Untracked, FilesError> {
+        let rel_path = Path::new(rel);
+        let name = rel_path
+            .file_name()
+            .ok_or_else(|| FilesError::OutsideRoot(rel.to_string()))?;
+        let parent_rel = rel_path
+            .parent()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let parent = self.resolve(&parent_rel)?;
+        let entry = parent.join(name);
+        let is_link = fs::symlink_metadata(&entry)
+            .map_err(|e| io_err(rel, &e))?
+            .file_type()
+            .is_symlink();
+        if !is_link {
+            let (data, executable) = self.read_file(rel)?;
+            return Ok(Untracked::File { data, executable });
+        }
+        let target = fs::read_link(&entry).map_err(|e| io_err(rel, &e))?;
+        if fs::canonicalize(&parent).ok().as_deref() != Some(parent.as_path()) {
+            return Err(FilesError::OutsideRoot(rel.to_string()));
+        }
+        let bytes = target.as_os_str().as_encoded_bytes().to_vec();
+        if bytes.len() as u64 > self.max_read {
+            return Err(FilesError::TooLarge {
+                path: rel.to_string(),
+                limit: self.max_read,
+            });
+        }
+        Ok(Untracked::Link(bytes))
     }
 
     /// Write a file on behalf of `agent`, unless another agent holds a live lease covering it.

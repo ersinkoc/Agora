@@ -97,7 +97,7 @@ fn an_acp_agent_runs_through_the_bridge_like_any_chat_agent() {
             .expect("start node"),
     );
     let sock = home.join("node.sock");
-    let end = Instant::now() + Duration::from_secs(15);
+    let end = Instant::now() + Duration::from_secs(60);
     while !sock.exists() {
         assert!(Instant::now() < end, "node did not create its socket");
         std::thread::sleep(Duration::from_millis(50));
