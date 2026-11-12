@@ -62,13 +62,13 @@ export function Explorer({ fleet, machines, open, current, projects, project, on
           <div className="group flex items-center">
             <button type="button" className="ide-row flex-1 font-medium" aria-expanded={!closed} aria-label={t('ide-toggle-machine', { name })} onClick={() => fold(machine)}>
               <Icon name="chevron" className={`size-3.5 text-muted transition-transform duration-150 ${closed ? 'rtl:rotate-180' : 'rotate-90'}`} />
-              <span aria-hidden className={`size-2 flex-none rounded-full ${m && !m.online ? 'bg-unknown' : 'bg-finished'}`} />
-              <span className="sr-only">{t(m && !m.online ? 'machine-offline' : 'machine-online')}</span>
+              <span aria-hidden className={`size-2 flex-none rounded-full ${m?.online ? 'bg-finished' : 'bg-unknown'}`} />
+              <span className="sr-only">{t(m?.online ? 'machine-online' : 'machine-offline')}</span>
               <span className="min-w-0 flex-1 truncate">{name}{m && m.id !== m.name && <code className="ms-1.5 text-[11px] font-normal text-muted">{m.id}</code>}</span>
               {!!m?.memoryBytes && <span className="font-mono text-[11px] font-normal text-muted" title={t('ide-memory')}>{bytesLabel(m.memoryBytes)}</span>}
               <span className="text-[11px] font-normal text-muted">{count}</span>
             </button>
-            {onStart && m?.online && <button type="button" className="ide-iconbtn size-6 opacity-0 focus-visible:opacity-100 group-hover:opacity-100" onClick={() => onStart(machine)} aria-label={t('ide-add-here', { machine: name })} title={t('ide-add-here', { machine: name })}><Icon name="plus" className="size-3.5" /></button>}
+            {onStart && m?.online && <button type="button" className="ide-iconbtn size-6 opacity-0 focus-visible:opacity-100 group-hover:opacity-100 [@media(hover:none)]:opacity-100" onClick={() => onStart(machine)} aria-label={t('ide-add-here', { machine: name })} title={t('ide-add-here', { machine: name })}><Icon name="plus" className="size-3.5" /></button>}
           </div>
           {!closed && [...folders.entries()].map(([folder, list]) => <div key={folder} className="ms-3 border-s border-line ps-1">
             <div className="flex items-center gap-1.5 px-2 pt-1.5 pb-0.5 text-[11px] text-muted"><Icon name="folder" className="size-3.5" /><span className="truncate">{list[0]?.project || folder}</span></div>

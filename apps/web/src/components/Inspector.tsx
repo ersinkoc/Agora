@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { t } from '../i18n';
 import type { AgentTileModel } from '../model';
 import { money, type UsageSummary } from '../net/usage';
@@ -34,8 +34,9 @@ export function Inspector({ attention, approvals, notice, changed, boards, messa
     ...(usage && usage.totalMicroUsd > 0 ? [{ id: 'cost' as const, label: t('ide-tab-cost') }] : []),
   ];
   const [tab, setTab] = useState<Tab>('needs');
-  // Something that needs the user always wins over a tab that is quietly open.
-  useEffect(() => { if (needs > 0) setTab('needs'); }, [needs]);
+  // Something new that needs the user wins over a tab that is quietly open; one that goes away does not pull the user back.
+  const seen = useRef(0);
+  useEffect(() => { if (needs > seen.current) setTab('needs'); seen.current = needs; }, [needs]);
   const active = tabs.some(x => x.id === tab) ? tab : 'needs';
 
   return <aside className="flex min-h-0 flex-col border-line bg-surface-1 lg:border-s" aria-label={t('console-activity')}>
