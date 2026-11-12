@@ -264,6 +264,9 @@ fn terminal_subscription_streams_snapshot_data_resize_and_exit() {
     ));
     let snap = wait_frame(&mut c, 3, |f| f.kind == KIND_TERM_SNAPSHOT);
     assert!(snap.payload.starts_with(b"\x1b[0m\x1b[2J"));
+    // Right after it, the size it was painted at (the node's default terminal, 80x24).
+    let size = wait_frame(&mut c, 3, |f| f.kind == KIND_TERM_RESIZE);
+    assert_eq!(size.payload, [80u8, 0, 24, 0]);
 
     ok(c.call(Cmd::TerminalInput(v1::TerminalInput {
         terminal_id: s.terminal_id.clone(),
