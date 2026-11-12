@@ -159,7 +159,7 @@ const SECRET_HOME_FOLDERS: &[&str] = &[
 ];
 
 /// True for a directory a confined agent may not be launched in (ADR-0052 with ADR-0047): a filesystem root, the home folder or a
-/// folder that contains it, a secret folder below it, and the node's own folders (`node_home`, the folder that holds its data and
+/// folder that contains it, a secret folder below it or a folder that contains one, and the node's own folders (`node_home`, the folder that holds its data and
 /// keys, other than the `worktree_root` inside it) or any folder that contains them. Without this, selecting `/` or the home folder
 /// would quietly turn `sandbox = worktree` into no confinement. All paths are canonical.
 pub fn refused_directory(
@@ -169,13 +169,20 @@ pub fn refused_directory(
     worktree_root: &Path,
 ) -> bool {
     selected.parent().is_none()
-        || home.is_some_and(|h| h.starts_with(selected))
+        || home.is_some_and(|h| {
+            // The home folder or a folder that holds it, and a folder that holds a secret one (`~/.config` holds
+            // `~/.config/gh`): fine to look into, not to launch in.
+            h.starts_with(selected)
+                || SECRET_HOME_FOLDERS
+                    .iter()
+                    .any(|f| h.join(f).starts_with(selected))
+        })
         || node_home.starts_with(selected)
         || private_folder(selected, home, node_home, worktree_root)
 }
 
-/// A folder kept from agents and from folder listings (ADR-0052, ADR-0053): a secret folder below the home folder, or inside the node's
-/// own folder anything but the worktrees it made. All paths are canonical.
+/// A folder kept from agents and from folder listings (ADR-0052, ADR-0053): a secret folder below the home folder or a folder below
+/// one, or inside the node's own folder anything but the worktrees it made. All paths are canonical.
 pub fn private_folder(
     dir: &Path,
     home: Option<&Path>,

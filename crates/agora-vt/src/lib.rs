@@ -122,6 +122,8 @@ pub trait Terminal: Send {
     /// The cell at `row`, `col` of the live screen (0-based, top-left origin); `None` if out of range.
     fn cell(&self, row: u16, col: u16) -> Option<Cell>;
     fn cursor(&self) -> Cursor;
+    /// The style the program's next printed character gets (its current SGR state), so a repaint can hand it on.
+    fn pen(&self) -> Style;
     fn modes(&self) -> Modes;
     /// Window title set by the program (OSC 0/2), if any.
     fn title(&self) -> Option<String>;

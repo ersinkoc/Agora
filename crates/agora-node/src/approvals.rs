@@ -371,6 +371,9 @@ pub struct NodeApprovals {
     trust_file: std::sync::Mutex<Option<(std::path::PathBuf, Option<Vec<u8>>)>>,
     /// What each trusted device may answer (ADR-0049).
     limits: std::sync::Mutex<Option<std::sync::Arc<crate::limits::DeviceLimits>>>,
+    /// Requests a late decision took out of the queue (refused as expired before the sweep saw them): the next
+    /// [`Self::expire`] still tells their agents, which would otherwise wait for an answer forever.
+    late: std::sync::Mutex<Vec<(String, agora_core::AgentId, String)>>,
 }
 
 impl NodeApprovals {
@@ -385,7 +388,12 @@ impl NodeApprovals {
             routes: std::sync::Mutex::new(std::collections::HashMap::new()),
             trust_file: std::sync::Mutex::new(None),
             limits: std::sync::Mutex::new(None),
+            late: std::sync::Mutex::new(Vec::new()),
         }
+    }
+
+    fn l(&self) -> std::sync::MutexGuard<'_, Vec<(String, agora_core::AgentId, String)>> {
+        self.late.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Follows the trusted-devices file: when the owner changes it (`agora node trust`), the next decision is judged by
@@ -469,7 +477,18 @@ impl NodeApprovals {
                 return Err(ApprovalError::Forbidden);
             }
         }
-        let (_, verdict) = self.q().resolve(r, now_ms)?;
+        let resolved = self.q().resolve(r, now_ms);
+        let (_, verdict) = match resolved {
+            Ok(v) => v,
+            Err(ApprovalError::Expired) => {
+                // The queue dropped the request, so the sweep will not see it: hand its route to the next sweep instead.
+                if let Some((agent, id)) = self.r().remove(&r.approval_id) {
+                    self.l().push((r.approval_id.clone(), agent, id));
+                }
+                return Err(ApprovalError::Expired);
+            }
+            Err(e) => return Err(e),
+        };
         let route = self.r().remove(&r.approval_id);
         route
             .map(|(agent, id)| (agent, id, verdict))
@@ -480,14 +499,18 @@ impl NodeApprovals {
     /// adapter approval id)`.
     pub fn expire(&self, now_ms: u64) -> Vec<(String, agora_core::AgentId, String)> {
         let gone = self.q().expire(now_ms);
+        let mut out = std::mem::take(&mut *self.l());
         let mut routes = self.r();
-        gone.into_iter()
-            .filter_map(|p| routes.remove(&p.id).map(|(a, id)| (p.id, a, id)))
-            .collect()
+        out.extend(
+            gone.into_iter()
+                .filter_map(|p| routes.remove(&p.id).map(|(a, id)| (p.id, a, id))),
+        );
+        out
     }
 
     /// An agent stopped or died: nothing stays waiting on it.
     pub fn cancel_agent(&self, agent: &agora_core::AgentId) {
+        self.l().retain(|(_, a, _)| a != agent);
         let gone = self.q().cancel_agent(agent.as_str());
         let mut routes = self.r();
         for p in gone {
@@ -839,6 +862,37 @@ mod tests {
             signature: pair.sign(&rng, &m).unwrap().as_ref().to_vec(),
         };
         assert_eq!(a.resolve(&r, 1).unwrap().1, Verdict::Approved);
+    }
+
+    #[test]
+    fn a_decision_that_arrives_after_expiry_still_ends_with_the_agent_told_denied() {
+        let n = NodeApprovals::new("node-1", Box::new(Fake(vec![("phone", "s3cret")])));
+        let agent = agora_core::AgentId::new("agent-1");
+        let p = n.request(&agent, "ap-1", "run_command", "ls", 1).unwrap();
+        // Signed and valid, but at the expiry instant, before the node's sweep ran: refused, and replays stay refused.
+        let late = resolve_msg(&p.id, true, "phone", "s3cret", "node-1");
+        assert_eq!(
+            n.resolve(&late, 1 + DEFAULT_TTL_MS).unwrap_err(),
+            ApprovalError::Expired
+        );
+        assert_eq!(
+            n.resolve(&late, 2 + DEFAULT_TTL_MS).unwrap_err(),
+            ApprovalError::Unknown
+        );
+        // The sweep still tells the adapter, once.
+        let swept: Vec<(String, String, String)> = n
+            .expire(2 + DEFAULT_TTL_MS)
+            .into_iter()
+            .map(|(id, a, ad)| (id, a.as_str().to_string(), ad))
+            .collect();
+        assert_eq!(swept, [(p.id.clone(), "agent-1".into(), "ap-1".into())]);
+        assert!(n.expire(3 + DEFAULT_TTL_MS).is_empty());
+        // Unless the agent stopped in between: nothing is sent to it.
+        let p = n.request(&agent, "ap-2", "run_command", "ls", 10).unwrap();
+        let late = resolve_msg(&p.id, true, "phone", "s3cret", "node-1");
+        assert!(n.resolve(&late, 10 + DEFAULT_TTL_MS).is_err());
+        n.cancel_agent(&agent);
+        assert!(n.expire(10 + DEFAULT_TTL_MS).is_empty());
     }
 
     #[test]
