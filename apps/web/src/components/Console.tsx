@@ -178,6 +178,12 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
     return () => window.removeEventListener('keydown', on);
   }, [tabs]);
 
+  // Removing closed agents from the list: for every client when the hub can forget them, otherwise (an older hub, or a refusal) only here.
+  const removeClosed = (ids: string[]) => {
+    if (!onForget) { dismiss(ids); return; }
+    for (const id of ids) void onForget(id).then((ok) => { if (!ok) dismiss([id]); });
+  };
+
   const pane = (a: AgentTileModel) => (
     <section key={a.id} aria-label={a.name} onDragOver={(e) => { if (dragging) e.preventDefault(); }} onDrop={(e) => { e.preventDefault(); if (dragging) move(dragging, a.id); setDragging(undefined); }}
       className={`flex min-h-0 min-w-0 flex-col bg-surface-0 ${layout === 'grid' ? `border ${a.state === 'needs-you' ? 'border-needs-you' : 'border-line'}` : ''}`}>
@@ -245,7 +251,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
       <div className="relative grid min-h-0 grid-cols-1 lg:[grid-template-columns:var(--cols)]" style={{ ['--cols' as string]: cols }}>
         {showAgents && <div className="absolute inset-y-0 z-10 hidden lg:block" style={{ insetInlineStart: leftWidth }}><Resizer side="start" value={leftWidth} min={200} max={480} onChange={setLeftWidth} /></div>}
         {showDetails && <div className="absolute inset-y-0 z-10 hidden lg:block" style={{ insetInlineEnd: rightWidth }}><Resizer side="end" value={rightWidth} min={260} max={560} onChange={setRightWidth} /></div>}
-        {showAgents && <Explorer fleet={projectFilter ? fleet.filter((a) => a.projectId === projectFilter) : fleet} machines={machines} projects={projectOptions} project={projectFilter} onProject={chooseProject} open={pinned} current={current?.id} onToggle={select} onStart={onStart} onCollapse={() => setShowAgents(false)} onDismiss={dismiss} />}
+        {showAgents && <Explorer fleet={projectFilter ? fleet.filter((a) => a.projectId === projectFilter) : fleet} machines={machines} projects={projectOptions} project={projectFilter} onProject={chooseProject} open={pinned} current={current?.id} onToggle={select} onStart={onStart} onCollapse={() => setShowAgents(false)} onDismiss={removeClosed} everyone={!!onForget} />}
 
         <main className="flex min-h-0 min-w-0 flex-col" aria-label={t('focus-terminal')}>
           <div className="flex h-9 flex-none items-stretch border-b border-line bg-surface-1">

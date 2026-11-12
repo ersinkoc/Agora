@@ -324,3 +324,4 @@ start-browse-empty = Burada klasör yok.
 start-browse-more = Gösterilenden fazla klasör var. Daha ileri gitmek için yolu yazın.
 start-browse-failed = Klasör listelenemedi.
 start-browse-git = Bir Git projesi
+closed-clear-everyone = Kapanan her ajanı herkes için kaldır

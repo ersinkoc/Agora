@@ -324,3 +324,4 @@ start-browse-empty = No folders here.
 start-browse-more = There are more folders than are shown. Type the path to go further.
 start-browse-failed = The folder could not be listed.
 start-browse-git = A Git project
+closed-clear-everyone = Remove every closed agent for everyone

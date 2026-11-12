@@ -256,7 +256,8 @@ export function tiles(v: View): AgentTileModel[] {
     const workspaceId = v.agentWorkspaces.get(id);
     const selected = workspaceId ? v.workspaces.get(workspaceId) : undefined;
     const sharing = !!workspaceId && (sharingCounts.get(workspaceId) ?? 0) > 1;
-    const state = waiting.has(id) ? 'needs-you' : uiState(a.state);
+    // A closed agent is finished, whatever state it had when its machine lost it (a blocked one that ended is not waiting for anyone).
+    const state = !a.running ? 'finished' : waiting.has(id) ? 'needs-you' : uiState(a.state);
     return {
       id,
       name: `${a.kind} · ${ACCENT_NAMES[i]}`,

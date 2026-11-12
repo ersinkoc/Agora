@@ -4,6 +4,10 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+### Closed agents
+- A closed agent is always shown as finished; before, one that ended while it was waiting kept a spinning orange mark and counted as waiting for you.
+- The ✕ on a closed agent in the list and **Clear closed** now remove it for everyone when the hub can (ADR-0053), not only in this browser.
+
 ## 0.3.3
 ### Machines
 - A machine that was cut off from the hub for a long time sends what it saved much faster when the link comes back.
