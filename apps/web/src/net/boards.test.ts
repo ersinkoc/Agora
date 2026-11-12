@@ -102,3 +102,13 @@ describe('board identity', () => {
     expect(boards(view)[0]?.folders.map(f => f.path)).toEqual(['/repo']);
   });
 });
+
+import { bytesLabel } from './view';
+describe('bytesLabel', () => {
+  it('writes memory the way people read it', () => {
+    expect(bytesLabel(0)).toBe('');
+    expect(bytesLabel(512)).toBe('512 B');
+    expect(bytesLabel(1536 * 1024 * 1024)).toBe('1.5 GB');
+    expect(bytesLabel(20 * 1024 * 1024)).toBe('20 MB');
+  });
+});

@@ -20,3 +20,6 @@ export const demoProjects = [
   { node: 'laptop', projectId: 'p2', label: 'docs', path: '/home/dev/docs' },
   { node: 'build', projectId: 'p3', label: 'api-tests', path: '/srv/ci/api-tests' },
 ];
+
+// The demo window's one waiting approval, for the first demo agent.
+export const demoApprovals = [{ id: 'demo/1', node: 'demo', localId: '1', agentId: 'a1', agentName: 'claude · amber', action: 'Edit src/auth.rs', detail: '+12 −3', expiresAtMs: 0 }];
