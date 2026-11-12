@@ -94,6 +94,23 @@ fn a_loaded_ca_keeps_its_preexisting_custom_subject_key_identifier() {
 }
 
 struct Fixture(PathBuf);
+impl Fixture {
+    fn new() -> std::io::Result<Self> {
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        loop {
+            let path = std::env::temp_dir().join(format!(
+                "agora-ca-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            match fs::create_dir(&path) {
+                Ok(()) => return Ok(Self(path)),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        }
+    }
+}
 impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
@@ -114,13 +131,7 @@ fn independent_strict_verification_when_openssl_is_available() {
         eprintln!("skipped external verification: openssl command is another implementation");
         return;
     }
-    static NEXT: AtomicU32 = AtomicU32::new(0);
-    let fixture = Fixture(std::env::temp_dir().join(format!(
-        "agora-ca-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    )));
-    fs::create_dir_all(&fixture.0).unwrap();
+    let fixture = Fixture::new().unwrap();
     let ca = Ca::generate("fixture CA").unwrap();
     let loaded = Ca::from_pem(ca.cert_pem(), &ca.key_pem()).unwrap();
     let (server, _) = loaded.issue_server(&["localhost".into()]).unwrap();

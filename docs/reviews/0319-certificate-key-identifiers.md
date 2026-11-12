@@ -37,6 +37,15 @@ workspace TLS/enrollment tests also verify compatibility. Full workspace tests,
 Clippy with warnings denied, formatting, locale and docs checks pass locally;
 final CI results are recorded in the PR.
 
+A disposable upgrade smoke also starts a hub and node using the prior `bc1e0c0`
+binary. Strict Python HTTPS and the legacy client leaf reproduce the missing
+identifier. Replacing only that test hub with the patched binary makes strict
+Python HTTPS return 200 using identical CA certificate bytes. The unchanged node
+process and unchanged legacy client certificate reconnect and complete an
+authenticated directory request. No real agent is started. Code review also made
+fixture-directory creation exclusive before cleanup ownership is registered;
+pre-existing directories are skipped and never enrolled for removal.
+
 The server's next normal startup issues its new leaf using the existing CA. New or
 renewed nodes receive the identifier without forced reenrollment. This PR does not
 regenerate trust material, revoke existing certificates, restart the live node or
