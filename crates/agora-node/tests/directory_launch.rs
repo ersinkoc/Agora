@@ -41,20 +41,19 @@ fn fake() -> String {
         .join(format!("agora-fake-agent{}", std::env::consts::EXE_SUFFIX));
     static BUILD: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     BUILD.get_or_init(|| {
-        if !p.exists() {
-            let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
-            let mut command = Command::new(cargo);
-            command
-                .args(["build", "-q", "-p", "agora-fake-agent", "--target-dir"])
-                .arg(p.parent().unwrap().parent().unwrap());
-            if p.parent().unwrap().ends_with("release") {
-                command.arg("--release");
-            }
-            assert!(
-                command.status().unwrap().success(),
-                "building fake fixture failed"
-            );
+        // Even when present: a binary left from an older checkout may lack newer flags.
+        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+        let mut command = Command::new(cargo);
+        command
+            .args(["build", "-q", "-p", "agora-fake-agent", "--target-dir"])
+            .arg(p.parent().unwrap().parent().unwrap());
+        if p.parent().unwrap().ends_with("release") {
+            command.arg("--release");
         }
+        assert!(
+            command.status().unwrap().success(),
+            "building fake fixture failed"
+        );
     });
     assert!(p.exists(), "fake fixture is absent after build");
     p.to_string_lossy().into_owned()
