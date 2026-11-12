@@ -644,6 +644,27 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                             draw(&snapshot, &selected, &notice, cost, preview.as_ref());
                         }
                     }
+                    b'd' => {
+                        // A closed agent leaves every client's list; a running one is stopped first (x).
+                        let running = snapshot.as_ref().is_some_and(|s| {
+                            s.agents.iter().any(|a| a.agent_id == selected && a.running)
+                        });
+                        if !selected.is_empty() {
+                            notice = if running {
+                                say.text(key!("tui-forget-running"), &[])
+                            } else {
+                                match session.forget_agent(&selected) {
+                                    Ok(()) => say.text(key!("tui-forgot"), &[]),
+                                    Err(code) => say.text(
+                                        key!("tui-forget-failed"),
+                                        &[("code", Arg::Str(code))],
+                                    ),
+                                }
+                            };
+                            dirty_since.get_or_insert_with(Instant::now);
+                            draw(&snapshot, &selected, &notice, cost, preview.as_ref());
+                        }
+                    }
                     b'x' => {
                         if !selected.is_empty() {
                             let (node, local) = selected.split_once('/').unwrap_or(("", &selected));
