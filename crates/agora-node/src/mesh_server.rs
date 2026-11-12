@@ -6,7 +6,7 @@
 //! is concerned, so the socket is only ever handed to that agent's process (through its MCP configuration); an agent
 //! cannot reach another's socket by guessing a name in a tool call, because no call names a sender.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -542,6 +542,50 @@ fn send(w: &mut LocalStream, msg: &Message) -> io::Result<()> {
     w.flush()
 }
 
+/// Ask IDs owned by one transport, independent of its temporary polling queue. An early return while draining that queue
+/// still cancels everything this connection can no longer consume, without affecting the agent's other connections.
+struct ConnectionAsks<'a> {
+    mesh: &'a Mutex<Mesh>,
+    agent: &'a AgentId,
+    ids: HashSet<String>,
+}
+
+impl Drop for ConnectionAsks<'_> {
+    fn drop(&mut self) {
+        if !self.ids.is_empty() {
+            let mut mesh = self.mesh.lock().unwrap_or_else(|e| e.into_inner());
+            for id in &self.ids {
+                mesh.cancel_ask(self.agent, id);
+            }
+        }
+    }
+}
+
+type WaitingAsk = (Value, String, u64);
+
+fn poll_asks(
+    waiting: &mut Vec<WaitingAsk>,
+    owned: &mut ConnectionAsks<'_>,
+    conn: &McpConnection,
+    mut reply: impl FnMut(&Message) -> io::Result<()>,
+) -> io::Result<()> {
+    let mut still = Vec::new();
+    for (rid, ask_id, deadline) in waiting.drain(..) {
+        let (status, limits) = {
+            let mut m = owned.mesh.lock().unwrap_or_else(|e| e.into_inner());
+            (m.ask_status(&ask_id, now_ms()), m.limits())
+        };
+        if status == AskStatus::Pending {
+            still.push((rid, ask_id, deadline));
+        } else {
+            owned.ids.remove(&ask_id); // ask_status already consumed or expired it
+            reply(&conn.finish_ask(&rid, &status, &limits))?;
+        }
+    }
+    *waiting = still;
+    Ok(())
+}
+
 /// One connection: newline-delimited JSON-RPC in, replies out. Questions that wait for an answer are polled each
 /// time the read times out, so a pending `ask` never blocks the agent's other calls.
 fn serve(
@@ -560,9 +604,14 @@ fn serve(
     let mut reader = BufReader::new(read_half);
     let mut writer = stream;
     let mut conn = McpConnection::new(agent.clone());
+    let mut owned = ConnectionAsks {
+        mesh,
+        agent,
+        ids: HashSet::new(),
+    };
     let mut line: Vec<u8> = Vec::new();
     // (request id, ask id, deadline) of asks still waiting for an answer.
-    let mut waiting: Vec<(Value, String, u64)> = Vec::new();
+    let mut waiting: Vec<WaitingAsk> = Vec::new();
     while !stop.load(Ordering::Acquire) {
         match reader.read_until(b'\n', &mut line) {
             Ok(0) => break,
@@ -583,6 +632,9 @@ fn serve(
                     let mut m = mesh.lock().unwrap_or_else(|e| e.into_inner());
                     conn.handle(&text, &mut m, now_ms())
                 };
+                if let Outcome::Waiting { ask_id, .. } = &outcome {
+                    owned.ids.insert(ask_id.clone());
+                }
                 dispatch_outbound(mesh, remote, allowed);
                 match outcome {
                     Outcome::Reply(msg) => {
@@ -613,19 +665,13 @@ fn serve(
             break;
         }
         // Answer asks whose reply arrived or whose time ran out.
-        let mut still = Vec::new();
-        for (rid, ask_id, deadline) in waiting.drain(..) {
-            let (status, limits) = {
-                let mut m = mesh.lock().unwrap_or_else(|e| e.into_inner());
-                (m.ask_status(&ask_id, now_ms()), m.limits())
-            };
-            if status == AskStatus::Pending {
-                still.push((rid, ask_id, deadline));
-            } else if send(&mut writer, &conn.finish_ask(&rid, &status, &limits)).is_err() {
-                return;
-            }
+        if poll_asks(&mut waiting, &mut owned, &conn, |msg| {
+            send(&mut writer, msg)
+        })
+        .is_err()
+        {
+            return;
         }
-        waiting = still;
     }
     let _ = writer.shutdown();
 }
@@ -634,6 +680,99 @@ fn serve(
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    fn ask_fixture() -> (Arc<Mutex<Mesh>>, AgentId, AgentId) {
+        let mut mesh = Mesh::new(Limits::default());
+        let (a, b) = (AgentId::new("a"), AgentId::new("b"));
+        for id in [&a, &b] {
+            mesh.register(AgentInfo {
+                id: id.clone(),
+                kind: "fixture".into(),
+                node: "local".into(),
+                project: "p".into(),
+                label: String::new(),
+                worktree: String::new(),
+                state: "idle".into(),
+            });
+        }
+        (Arc::new(Mutex::new(mesh)), a, b)
+    }
+
+    #[test]
+    fn a_disconnected_connection_discards_an_answer_it_never_polled() {
+        let (mesh, a, b) = ask_fixture();
+        let now = now_ms();
+        let (completed, other) = {
+            let mut m = mesh.lock().unwrap();
+            let completed = m.ask(&a, "b", "finished?", None, now).unwrap();
+            let other = m.ask(&a, "b", "other connection", None, now).unwrap();
+            m.send_message(&b, "a", "done", &[], Some(&completed), now)
+                .unwrap();
+            (completed, other)
+        };
+        {
+            let _connection = ConnectionAsks {
+                mesh: &mesh,
+                agent: &a,
+                ids: HashSet::from([completed.clone()]),
+            };
+        }
+        let mut m = mesh.lock().unwrap();
+        assert_eq!(m.ask_status(&completed, 0), AskStatus::TimedOut);
+        assert_eq!(m.ask_status(&other, 0), AskStatus::Pending);
+    }
+
+    #[test]
+    fn a_write_error_mid_poll_cancels_both_retained_and_unvisited_asks() {
+        let (mesh, a, b) = ask_fixture();
+        let now = now_ms();
+        let (before, completed, after, other) = {
+            let mut m = mesh.lock().unwrap();
+            let before = m.ask(&a, "b", "before", None, now).unwrap();
+            let completed = m.ask(&a, "b", "completed", None, now).unwrap();
+            m.send_message(&b, "a", "done", &[], Some(&completed), now)
+                .unwrap();
+            let after = m.ask(&a, "b", "after", None, now).unwrap();
+            let other = m.ask(&a, "b", "other connection", None, now).unwrap();
+            (before, completed, after, other)
+        };
+        {
+            let mut owned = ConnectionAsks {
+                mesh: &mesh,
+                agent: &a,
+                ids: HashSet::from([before.clone(), completed.clone(), after.clone()]),
+            };
+            let mut waiting = vec![
+                (json!(1), before.clone(), u64::MAX),
+                (json!(2), completed.clone(), u64::MAX),
+                (json!(3), after.clone(), u64::MAX),
+            ];
+            let conn = McpConnection::new(a.clone());
+            let mut writes = 0;
+            let error = poll_asks(&mut waiting, &mut owned, &conn, |_| {
+                writes += 1;
+                Err(io::ErrorKind::BrokenPipe.into())
+            })
+            .unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+            assert_eq!(writes, 1);
+        }
+        let mut m = mesh.lock().unwrap();
+        for id in [&before, &completed, &after] {
+            assert_eq!(m.ask_status(id, 0), AskStatus::TimedOut);
+        }
+        // A second connection of the same agent still owns its request and can consume the reply normally.
+        assert_eq!(m.ask_status(&other, 0), AskStatus::Pending);
+        m.send_message(&b, "a", "kept", &[], Some(&other), now)
+            .unwrap();
+        assert_eq!(
+            m.ask_status(&other, 0),
+            AskStatus::Answered {
+                reply: "kept".into(),
+                from: b
+            }
+        );
+    }
 
     #[test]
     fn a_late_not_shared_answer_does_not_undo_a_join() {
