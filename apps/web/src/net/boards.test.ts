@@ -143,3 +143,10 @@ describe('childPath', () => {
     expect(childPath('C:\\', 'Users')).toBe('C:\\Users');
   });
 });
+
+describe('a closed agent is finished', () => {
+  it('whatever state its machine lost it in', () => {
+    const view = fromSnapshot({ nodes: [{ nodeId: 'n', hostname: 'M' }], agents: [{ agentId: 'n/a', nodeId: 'n', kind: 'shell', state: 2, running: false }] });
+    expect(tiles(view)[0]?.state).toBe('finished');
+  });
+});

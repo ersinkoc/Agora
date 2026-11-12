@@ -22,6 +22,7 @@ import { StateBadge, StateMark } from './StateBadge';
 import { ClosedSummary } from './ClosedSummary';
 import { dismiss, dismissedIds, subscribeDismissed } from '../net/dismissed';
 import { loadLayout, saveLayout } from '../net/layout';
+import { forgetReasonKey } from '../net/forget';
 import { Resizer } from './Resizer';
 
 const TerminalView = lazy(() => import('../terminal/TerminalView').then((m) => ({ default: m.TerminalView })));
@@ -51,14 +52,15 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   onStart?: (machine?: string) => void;
   onCommand?: () => void;
   // Ask the hub to forget a closed agent for every client (ADR-0053); false when it could not (an older hub), and it is only hidden here.
-  onForget?: (agentId: string) => Promise<boolean>;
+  onForget?: (agentId: string) => Promise<string | undefined>;
   start?: ReactNode;
   onResolve: (a: ApprovalModel, approved: boolean) => void;
   notice?: string;
   link: 'connecting' | 'live' | 'offline';
 }) {
   const cleared = useSyncExternalStore(subscribeDismissed, dismissedIds);
-  const fleet = useMemo(() => sortFleet(agents.filter((a) => !cleared.has(a.id))), [agents, cleared]);
+  // What was cleared stays hidden only while the agent is closed: one that runs again (a new run under the same id) is back in the list.
+  const fleet = useMemo(() => sortFleet(agents.filter((a) => !(a.closed && cleared.has(a.id)))), [agents, cleared]);
   const [now, setNow] = useState(Date.now());
   useEffect(() => { const id = setInterval(() => setNow(Date.now()), 15000); return () => clearInterval(id); }, []);
   const saved = useRef(loadLayout()).current;
@@ -178,6 +180,21 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
     return () => window.removeEventListener('keydown', on);
   }, [tabs]);
 
+  // Removing closed agents from the list: for every client when the hub can forget them. A hub that does not know the command can only
+  // hide them here; any other refusal (permission, the agent running again) is shown with its reason and nothing is hidden.
+  const [forgetError, setForgetError] = useState<string | undefined>();
+  const removeClosed = (ids: string[]) => {
+    if (!onForget) { dismiss(ids); return; }
+    setForgetError(undefined);
+    for (const id of ids) {
+      void onForget(id).then((code) => {
+        if (!code) return;
+        if (code === 'protocol.invalid_message' || code === 'protocol.capability_missing') dismiss([id]);
+        else setForgetError(code);
+      });
+    }
+  };
+
   const pane = (a: AgentTileModel) => (
     <section key={a.id} aria-label={a.name} onDragOver={(e) => { if (dragging) e.preventDefault(); }} onDrop={(e) => { e.preventDefault(); if (dragging) move(dragging, a.id); setDragging(undefined); }}
       className={`flex min-h-0 min-w-0 flex-col bg-surface-0 ${layout === 'grid' ? `border ${a.state === 'needs-you' ? 'border-needs-you' : 'border-line'}` : ''}`}>
@@ -216,7 +233,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
       {a.closed ? <ClosedSummary agent={a} now={now} cost={usage?.perAgent.has(a.id) ? money(usage.perAgent.get(a.id) ?? 0) : undefined}
         onReview={loadDiff ? () => setReviewing(a.id) : undefined} onHistory={loadHistory && a.git !== false ? () => setHistory(a.id) : undefined} onFiles={filesOf ? () => setBrowsing(a.id) : undefined}
         onStart={onStart ? () => onStart() : undefined} onDismiss={() => dismiss([a.id])}
-        onForget={onForget ? () => { void onForget(a.id).then((ok) => { if (!ok) dismiss([a.id]); }); } : undefined} /> : <div className="pane min-h-0 flex-1 p-1.5">
+        onForget={onForget ? () => removeClosed([a.id]) : undefined} forgetError={forgetError} /> : <div className="pane min-h-0 flex-1 p-1.5">
         {a.terminal === false ? <PromptBox agent={a} send={sendPrompt} source={chatOf?.(a)} /> : (
           <Suspense fallback={<div className="terminal" aria-busy="true" />}>
             <TerminalView source={terminalFor(a.id)} label={`${t('focus-terminal')} · ${a.name}`} />
@@ -245,7 +262,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
       <div className="relative grid min-h-0 grid-cols-1 lg:[grid-template-columns:var(--cols)]" style={{ ['--cols' as string]: cols }}>
         {showAgents && <div className="absolute inset-y-0 z-10 hidden lg:block" style={{ insetInlineStart: leftWidth }}><Resizer side="start" value={leftWidth} min={200} max={480} onChange={setLeftWidth} /></div>}
         {showDetails && <div className="absolute inset-y-0 z-10 hidden lg:block" style={{ insetInlineEnd: rightWidth }}><Resizer side="end" value={rightWidth} min={260} max={560} onChange={setRightWidth} /></div>}
-        {showAgents && <Explorer fleet={projectFilter ? fleet.filter((a) => a.projectId === projectFilter) : fleet} machines={machines} projects={projectOptions} project={projectFilter} onProject={chooseProject} open={pinned} current={current?.id} onToggle={select} onStart={onStart} onCollapse={() => setShowAgents(false)} onDismiss={dismiss} />}
+        {showAgents && <Explorer fleet={projectFilter ? fleet.filter((a) => a.projectId === projectFilter) : fleet} machines={machines} projects={projectOptions} project={projectFilter} onProject={chooseProject} open={pinned} current={current?.id} onToggle={select} onStart={onStart} onCollapse={() => setShowAgents(false)} onDismiss={removeClosed} everyone={!!onForget} forgetError={forgetError} />}
 
         <main className="flex min-h-0 min-w-0 flex-col" aria-label={t('focus-terminal')}>
           <div className="flex h-9 flex-none items-stretch border-b border-line bg-surface-1">
@@ -302,6 +319,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
         <a className="inline-flex items-center gap-1.5 hover:text-ink" href="#/machines"><span aria-hidden className={`size-1.5 rounded-full ${link === 'live' ? 'bg-finished' : 'bg-needs-you'}`} />{t('machines-online', { count: machines.filter((m) => m.online).length })}</a>
         <span>{t('ide-status-agents', { count: fleet.filter((a) => !a.closed).length })}</span>
         {needs > 0 && <button type="button" className="text-needs-you hover:underline" onClick={() => setShowDetails(true)}>{t('ide-status-needs', { count: needs })}</button>}
+        {forgetError && <span role="alert" className="truncate text-needs-you">{t('closed-forget-failed', { reason: t(forgetReasonKey(forgetError)) })}</span>}
         <span className="flex-1" />
         {usage && usage.totalMicroUsd > 0 && <span>{money(usage.totalMicroUsd)}</span>}
       </footer>

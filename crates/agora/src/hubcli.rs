@@ -21,6 +21,17 @@ use crate::{home, Opts, Say};
 
 pub(crate) const DEFAULT_LISTEN: &str = "127.0.0.1:7443";
 
+/// What this hub agrees on with a node that offers it. Every capability a node offers
+/// (`agora_node::uplink_client::CAPABILITIES`) must be here, or the hub refuses each command that needs it (ADR-0053's
+/// `directory.list` was missing once, #378); `the_hub_agrees_on_every_capability_a_node_offers` checks it. A capability added here
+/// that no node offers (only the hub or clients use it) is not covered by that check: give it a test of its own.
+const HUB_CAPABILITIES: &[&str] = &[
+    "terminal.raw",
+    "workspace.directory",
+    "directory.list",
+    "board.join",
+];
+
 pub(crate) fn hub_dir(o: &Opts) -> PathBuf {
     o.hub_dir.clone().unwrap_or_else(|| home().join("hub"))
 }
@@ -184,15 +195,7 @@ pub fn hub_run(say: &Say, o: &Opts) -> ExitCode {
             hub,
             support: Support {
                 generations: vec![1],
-                capabilities: vec![
-                    "terminal.raw".into(),
-                    "workspace.directory".into(),
-                    // ADR-0053: without it here the hub agrees on the capability with no node and refuses every folder listing.
-                    "directory.list".into(),
-                    "board.join".into(),
-                    // ADR-0053: without it here the hub never agrees on it with a node, and refuses every folder listing.
-                    "directory.list".into(),
-                ],
+                capabilities: HUB_CAPABILITIES.iter().map(|c| (*c).to_string()).collect(),
                 required: vec![],
             },
             ca: Some(ca),
@@ -1050,6 +1053,15 @@ pub fn load_link(socket: PathBuf) -> Option<(String, HubLink)> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_hub_agrees_on_every_capability_a_node_offers() {
+        // Including the ones no client can send (`board.join` goes only from the hub to nodes), which the real hub-and-node test
+        // in `tests/hub_cli.rs` cannot reach.
+        for c in agora_node::uplink_client::CAPABILITIES {
+            assert!(HUB_CAPABILITIES.contains(c), "the hub does not support {c}");
+        }
+    }
 
     #[test]
     fn only_the_newest_automatic_backups_are_kept() {

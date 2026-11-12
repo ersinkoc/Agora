@@ -26,6 +26,15 @@ use tokio::net::TcpStream;
 use crate::daemon::EventSink;
 use crate::uplink::{Replay, Uplink, UplinkError};
 
+/// What this node offers the hub when it dials in. The hub agrees only on what it supports too, so each one must also be in the
+/// hub's list (`crates/agora/src/hubcli.rs`, checked there by a test), or the hub refuses every command that needs it.
+pub const CAPABILITIES: &[&str] = &[
+    "terminal.raw",
+    "workspace.directory",
+    "board.join",
+    "directory.list",
+];
+
 /// Events sent per step; the hub acknowledges after each batch.
 const BATCH: usize = 64;
 const TICK: Duration = Duration::from_millis(50);
@@ -354,16 +363,7 @@ where
     let mut jobs = mesh_out.map(MeshOut::connect);
     let _disconnect = Disconnect(mesh_out);
     let mut posts = Posts::default();
-    let mut up = Uplink::new(
-        Arc::clone(sink),
-        env!("CARGO_PKG_VERSION"),
-        &[
-            "terminal.raw",
-            "workspace.directory",
-            "board.join",
-            "directory.list",
-        ],
-    );
+    let mut up = Uplink::new(Arc::clone(sink), env!("CARGO_PKG_VERSION"), CAPABILITIES);
     conn.send(&frame(
         STREAM_CONTROL,
         kinds::HELLO,
