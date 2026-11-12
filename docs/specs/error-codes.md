@@ -4,6 +4,10 @@ Errors are `{ code, params }`. `code` is a stable, dotted, lowercase string. `pa
 and numbers used by clients to render localized messages (`locales/<lang>/errors.ftl`, key = code with dots
 replaced by dashes). Codes are part of the public protocol: never rename or reuse one.
 
+The terminal client's remove action preserves the hub's error parameters and renders its refusal from `errors.ftl` in the
+selected language, including `agent.running` and `auth.forbidden`. Unknown codes remain visible as a fallback; a lost connection
+or a local response timeout has a localized retry message.
+
 | Code | Params | Meaning |
 | --- | --- | --- |
 | `auth.unauthenticated` | — | No or invalid credentials |

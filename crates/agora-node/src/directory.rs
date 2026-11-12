@@ -162,6 +162,8 @@ impl Bindings {
 
 /// Most folders one `directory.list` answer carries (ADR-0053); more are reported as `truncated`.
 pub const MAX_LISTED: usize = 500;
+/// Most folder names one listing reads before it sorts and cuts to [`MAX_LISTED`] (`truncated` when there are more).
+const MAX_READ: usize = 50_000;
 
 /// Where a folder listing may look and what it must keep out of sight: the user's home folder (an empty `path` means it) and the
 /// node's own folders (ADR-0052's refusals, [`crate::sandbox::private_folder`]). Canonical paths as `std::fs::canonicalize` spells
@@ -206,13 +208,18 @@ pub fn list(requested: &str, scope: &ListScope<'_>) -> Result<v1::DirectoryEntri
     let end = std::time::Instant::now() + scope.budget;
     let mut names = Vec::new();
     let mut truncated = false;
+    // Every folder is read (within the time budget) and only then sorted and cut, so the answer is the first `MAX_LISTED` by name,
+    // not whichever the file system happened to give first.
     agora_platform::visit_dir(&handle, |item: agora_platform::DirItem| {
-        if names.len() >= MAX_LISTED || std::time::Instant::now() > end {
+        // The time budget bounds the read; this bounds what a huge folder can make the node hold (same size as the watcher's budget).
+        if names.len() >= MAX_READ || std::time::Instant::now() > end {
             truncated = true;
             return std::ops::ControlFlow::Break(());
         }
-        // `is_dir` does not follow links: a link to a folder is not listed.
+        // `is_dir` does not follow links: a link to a folder is not listed. A repository's own `.git` is bookkeeping, not a place to
+        // start an agent (it is shown as `is_git` on its folder instead), as `files.list` hides it.
         if item.is_dir
+            && item.name != ".git"
             && !crate::sandbox::private_folder(
                 &opened.join(&item.name),
                 scope.home,
@@ -226,6 +233,10 @@ pub fn list(requested: &str, scope: &ListScope<'_>) -> Result<v1::DirectoryEntri
     })
     .map_err(|_| invalid("directory.path"))?;
     names.sort();
+    if names.len() > MAX_LISTED {
+        names.truncate(MAX_LISTED);
+        truncated = true;
+    }
     let entries = names
         .into_iter()
         .map(|name| v1::DirectoryEntry {
@@ -353,6 +364,9 @@ mod tests {
             names(&code),
             [("app".to_string(), true), ("notes".to_string(), false)]
         );
+        // A repository's `.git` is not listed (it shows as `is_git` on its folder).
+        let app = list(&h.home.join("code/app").to_string_lossy(), &scope(&h)).unwrap();
+        assert!(app.entries.is_empty(), "{app:?}");
         // A secret folder or the node's own is refused outright; its worktrees are fine.
         for refused in [
             h.home.join(".ssh"),
@@ -398,6 +412,25 @@ mod tests {
         sorted.sort();
         assert_eq!(names(&e), sorted);
         let _ = std::fs::remove_dir_all(&h.home);
+    }
+
+    #[test]
+    fn a_big_folder_answers_its_first_500_by_name_not_the_first_500_it_reads() {
+        // The order a folder is read in is the file system's: hashed on ext4, case-insensitive on NTFS (`a…` before `B…`). The
+        // listing sorts by name (`B…` before `a…`), so the 500 it answers are the first 500 of that order, whatever came first.
+        let h = home("list-order");
+        let big = h.home.join("big");
+        let mut all: Vec<String> = (0..500).map(|i| format!("a{i:03}")).collect();
+        all.extend((0..20).map(|i| format!("B{i:03}")));
+        for name in &all {
+            std::fs::create_dir_all(big.join(name)).unwrap();
+        }
+        all.sort();
+        let e = list(&big.to_string_lossy(), &scope(&h)).unwrap();
+        let got: Vec<String> = e.entries.iter().map(|x| x.name.clone()).collect();
+        let _ = std::fs::remove_dir_all(&h.home);
+        assert!(e.truncated);
+        assert_eq!(got, all[..MAX_LISTED]);
     }
 
     #[test]

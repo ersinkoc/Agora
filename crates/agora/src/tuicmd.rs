@@ -8,7 +8,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use agora_i18n::{key, Arg};
-use agora_protocol::v1::{ChatEntry, Snapshot};
+use agora_protocol::v1::{param_value::Value, ChatEntry, ErrorInfo, Snapshot};
 use agora_tui::client::{sign_in, ChatEvent, ClientError, Hub, Session, TermEvent, Update};
 use agora_tui::device::Device;
 use agora_tui::preview::{Preview, Pumped};
@@ -20,6 +20,37 @@ use crate::{home, Opts, Say};
 
 /// Fewest milliseconds between two refreshes (each one is a fresh snapshot).
 const REFRESH_MS: u64 = 500;
+
+/// The hub decides whether an agent can be forgotten; keep its localized reason even when the snapshot was stale.
+fn forget_notice(say: &Say, result: Result<(), ErrorInfo>) -> String {
+    let Err(error) = result else {
+        return say.text(key!("tui-forgot"), &[]);
+    };
+    let reason = match error.code.as_str() {
+        "client.unreachable" => say.text(key!("tui-forget-disconnected"), &[]),
+        "node.timeout" if error.params.is_empty() => say.text(key!("tui-forget-timeout"), &[]),
+        _ => {
+            let args: Vec<_> = error
+                .params
+                .iter()
+                .filter_map(|(k, v)| match &v.value {
+                    Some(_) if error.code == "auth.forbidden" && k == "action" => Some((
+                        k.as_str(),
+                        Arg::Str(say.text(key!("tui-forget-action"), &[])),
+                    )),
+                    Some(Value::Str(s)) => Some((k.as_str(), Arg::Str(s.clone()))),
+                    Some(Value::Int(i)) => Some((k.as_str(), Arg::Num(*i))),
+                    None => None,
+                })
+                .collect();
+            say.0
+                .render(&error.code.replace('.', "-"), &args)
+                .unwrap_or(error.code)
+        }
+    };
+    // Error parameters come from the hub; they must not become terminal control sequences.
+    plain(&say.text(key!("tui-forget-failed"), &[("reason", Arg::Str(reason))])).replace('\n', " ")
+}
 
 /// This terminal's key, made the first time it is needed and kept in a file only its owner can read.
 fn device() -> Option<Device> {
@@ -386,6 +417,238 @@ fn start(
     }
 }
 
+/// One key of the folder picker, `ESC [ x` sequences read as the arrows they are; `None` when nothing came in `wait`.
+fn read_key(rx: &mpsc::Receiver<u8>, wait: Duration) -> Option<u8> {
+    let k = rx.recv_timeout(wait).ok()?;
+    if k != 0x1b {
+        return Some(k);
+    }
+    match (
+        rx.recv_timeout(Duration::from_millis(15)),
+        rx.recv_timeout(Duration::from_millis(15)),
+    ) {
+        (Ok(b'['), Ok(b'A')) => Some(b'k'),
+        (Ok(b'['), Ok(b'B')) => Some(b'j'),
+        (Ok(b'['), Ok(b'D')) => Some(0x7f),
+        (Ok(b'['), Ok(b'C')) => Some(b'\r'),
+        _ => Some(0x1b),
+    }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+}
+
+/// Start an agent in a folder the user picks on a machine (ADR-0053): the machine's folders through `directory.list`, then the chosen
+/// one through `directory.inspect` and `agent.launch`, each signed by this terminal's key for exactly that folder (ADR-0052). Answers
+/// the line to show; empty when the user cancelled.
+#[allow(clippy::too_many_lines)] // one dialogue: browse, choose, confirm, launch
+fn start_in_folder(
+    say: &Say,
+    session: &mut Session,
+    snapshot: &Snapshot,
+    selected: &str,
+    rx: &mpsc::Receiver<u8>,
+    color: bool,
+) -> String {
+    let Some(device) = device() else {
+        return say.text(
+            key!("tui-answer-failed"),
+            &[("code", Arg::Str("device".into()))],
+        );
+    };
+    let not_trusted = |device: &Device| {
+        say.text(
+            key!("tui-not-trusted"),
+            &[
+                ("id", Arg::Str(device.id.clone())),
+                ("key", Arg::Str(device.public_key_hex())),
+            ],
+        )
+    };
+    let online: Vec<&agora_protocol::v1::NodeSnapshot> =
+        snapshot.nodes.iter().filter(|n| n.online).collect();
+    if online.is_empty() {
+        return say.text(key!("tui-start-nowhere"), &[]);
+    }
+    // The selected agent's machine when it is online, else the first online one; `m` goes to the next.
+    let mut at = snapshot
+        .agents
+        .iter()
+        .find(|a| a.agent_id == selected)
+        .and_then(|a| online.iter().position(|n| n.node_id == a.node_id))
+        .unwrap_or(0);
+    let mut path = String::new();
+    let mut notice = String::new();
+    let text = |id: &str, args: &[(&str, Arg)]| say.text(id, args);
+    let chosen = 'browse: loop {
+        let node = online[at];
+        let name = if node.hostname.is_empty() {
+            node.node_id.clone()
+        } else {
+            node.hostname.clone()
+        };
+        let Some(auth) =
+            device.authorize(&node.node_id, "list", &path, "", "", false, false, now_ms())
+        else {
+            return say.text(
+                key!("tui-answer-failed"),
+                &[("code", Arg::Str("client.sign".into()))],
+            );
+        };
+        let folder = match session.list_folder(&node.node_id, &path, auth) {
+            Ok(f) => f,
+            Err(code) if code == "approval.signature_invalid" => return not_trusted(&device),
+            Err(code) if code == "protocol.capability_missing" => {
+                return say.text(key!("tui-folder-unsupported"), &[])
+            }
+            Err(code) if !path.is_empty() => {
+                // A folder that cannot be listed (gone, a secret one): back to the home folder, saying why.
+                notice = say.text(key!("tui-folder-failed"), &[("code", Arg::Str(code))]);
+                path.clear();
+                continue;
+            }
+            Err(code) => return say.text(key!("tui-folder-failed"), &[("code", Arg::Str(code))]),
+        };
+        let mut pick = 0usize;
+        loop {
+            let (cols, rows) = agora_platform::terminal_size().unwrap_or((100, 30));
+            let view = agora_tui::picker::Picker {
+                machine: &name,
+                folder: &folder,
+                selected: pick,
+                notice: &notice,
+                color,
+                cols,
+                rows,
+            };
+            let mut out = std::io::stdout();
+            let _ = out.write_all(agora_tui::picker::frame(&view, &text).as_bytes());
+            let _ = out.flush();
+            let Some(k) = read_key(rx, Duration::from_secs(120)) else {
+                return String::new();
+            };
+            notice.clear();
+            let count = folder.entries.len();
+            match k {
+                b'j' if count > 0 => pick = (pick + 1) % count,
+                b'k' if count > 0 => pick = (pick + count - 1) % count,
+                b'\r' | b'\n' => {
+                    if let Some(e) = folder.entries.get(pick) {
+                        path = agora_tui::picker::child(&folder.path, &e.name);
+                        continue 'browse;
+                    }
+                }
+                0x7f | 0x08 | b'h' => {
+                    if !folder.parent.is_empty() {
+                        path = folder.parent.clone();
+                        continue 'browse;
+                    }
+                }
+                b'm' if online.len() > 1 => {
+                    at = (at + 1) % online.len();
+                    path.clear();
+                    continue 'browse;
+                }
+                b' ' | b'.' => break 'browse (node.node_id.clone(), folder.path.clone()),
+                0x1b | b'q' | 3 => return String::new(),
+                _ => {}
+            }
+        }
+    };
+    let (node, folder) = chosen;
+    let Some(auth) = device.authorize(&node, "inspect", &folder, "", "", false, false, now_ms())
+    else {
+        return say.text(
+            key!("tui-answer-failed"),
+            &[("code", Arg::Str("client.sign".into()))],
+        );
+    };
+    let info = match session.inspect_folder(&node, &folder, auth) {
+        Ok(i) => i,
+        Err(code) if code == "approval.signature_invalid" => return not_trusted(&device),
+        Err(code) => return say.text(key!("tui-start-failed"), &[("code", Arg::Str(code))]),
+    };
+    // Which agent: the machine's installed kinds by number, as `s` asks.
+    let machine = [("machine", Arg::Str(node.clone()))];
+    let kinds = match session.agent_kinds(&node) {
+        Ok(k) if !k.is_empty() => k,
+        Ok(_) => return say.text(key!("tui-start-none"), &machine),
+        Err(code) => return say.text(key!("tui-start-failed"), &[("code", Arg::Str(code))]),
+    };
+    let kinds: Vec<_> = kinds.into_iter().take(9).collect();
+    let mut menu = vec![
+        say.text(key!("tui-start-pick"), &machine),
+        plain(&info.path),
+        String::new(),
+    ];
+    for (i, (_, name)) in kinds.iter().enumerate() {
+        menu.push(say.text(
+            key!("tui-start-item"),
+            &[
+                ("n", Arg::Num(i as i64 + 1)),
+                ("name", Arg::Str(plain(name))),
+            ],
+        ));
+    }
+    let mut out = std::io::stdout();
+    let _ = write!(out, "\x1b[H\x1b[2J{}", menu.join("\r\n"));
+    let _ = out.flush();
+    let Some(index) = read_key(rx, Duration::from_secs(60))
+        .and_then(|k| (b'1'..=b'9').contains(&k).then(|| usize::from(k - b'1')))
+    else {
+        return String::new();
+    };
+    let Some((kind, _)) = kinds.get(index) else {
+        return String::new();
+    };
+    // A folder whose project changed since an agent last ran there needs the user's yes (ADR-0052).
+    let accept = !info.previous_project_id.is_empty();
+    if accept {
+        let _ = write!(
+            out,
+            "\x1b[H\x1b[2J{}",
+            say.text(key!("tui-folder-identity"), &[])
+        );
+        let _ = out.flush();
+        if read_key(rx, Duration::from_secs(60)) != Some(b'y') {
+            return String::new();
+        }
+    }
+    let Some(auth) = device.authorize(
+        &node,
+        "launch",
+        &info.path,
+        kind,
+        &info.project_id,
+        false,
+        accept,
+        now_ms(),
+    ) else {
+        return say.text(
+            key!("tui-answer-failed"),
+            &[("code", Arg::Str("client.sign".into()))],
+        );
+    };
+    match session.launch_in(
+        &node,
+        agora_protocol::v1::AgentLaunch {
+            path: info.path.clone(),
+            project_id: info.project_id.clone(),
+            kind: kind.clone(),
+            separate_worktree: false,
+            authorization: Some(auth),
+            accept_identity_change: accept,
+        },
+    ) {
+        Ok(agent) => say.text(key!("tui-started"), &[("agent", Arg::Str(agent))]),
+        Err(code) if code == "approval.signature_invalid" => not_trusted(&device),
+        Err(code) => say.text(key!("tui-start-failed"), &[("code", Arg::Str(code))]),
+    }
+}
+
 /// Keeps the panel's terminal on the selected agent: stops watching the old one and opens the new one when it has a terminal.
 fn follow(
     session: &mut Session,
@@ -637,6 +900,17 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                             draw(&snapshot, &selected, &notice, cost, preview.as_ref());
                         }
                     }
+                    b'f' => {
+                        if let Some(sn) = &snapshot {
+                            // The picker reads keys itself; the panel's terminal is let go meanwhile.
+                            if let Some(p) = preview.take() {
+                                p.close(&mut session);
+                            }
+                            notice = start_in_folder(say, &mut session, sn, &selected, &rx, color);
+                            dirty_since.get_or_insert_with(Instant::now);
+                            draw(&snapshot, &selected, &notice, cost, preview.as_ref());
+                        }
+                    }
                     b's' => {
                         if let Some(sn) = &snapshot {
                             notice = start(say, &mut session, sn, &selected, &rx);
@@ -653,13 +927,7 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                             notice = if running {
                                 say.text(key!("tui-forget-running"), &[])
                             } else {
-                                match session.forget_agent(&selected) {
-                                    Ok(()) => say.text(key!("tui-forgot"), &[]),
-                                    Err(code) => say.text(
-                                        key!("tui-forget-failed"),
-                                        &[("code", Arg::Str(code))],
-                                    ),
-                                }
+                                forget_notice(say, session.forget_agent(&selected))
                             };
                             dirty_since.get_or_insert_with(Instant::now);
                             draw(&snapshot, &selected, &notice, cost, preview.as_ref());
@@ -732,5 +1000,62 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                 last_refresh = Instant::now();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod forget_tests {
+    use super::*;
+    use agora_i18n::Catalog;
+    use agora_protocol::error::{Error, ErrorCode};
+
+    #[test]
+    fn a_remote_refusal_explains_the_reason_in_the_selected_language() {
+        let running = Error::new(ErrorCode::AgentRunning)
+            .with("agent_id", "laptop/agent-1")
+            .to_info();
+        let tr = Say(Catalog::turkish());
+        assert_eq!(
+            forget_notice(&tr, Err(running.clone())),
+            "Kaldırılamadı: laptop/agent-1 hâlâ çalışıyor. Önce durdurun."
+        );
+        let en = Say(Catalog::english());
+        let english = forget_notice(&en, Err(running));
+        assert!(english.contains("laptop/agent-1"));
+        assert!(english.contains("Stop it first"));
+        let denied = Error::new(ErrorCode::AuthForbidden)
+            .with("action", "AgentForget")
+            .to_info();
+        assert_eq!(
+            forget_notice(&tr, Err(denied)),
+            "Kaldırılamadı: Bunu yapmaya izniniz yok (ajanı kaldırma)."
+        );
+    }
+
+    #[test]
+    fn unknown_codes_and_transport_failures_remain_useful_without_control_sequences() {
+        let tr = Say(Catalog::turkish());
+        let error = |code: &str| ErrorInfo {
+            code: code.into(),
+            ..Default::default()
+        };
+        assert_eq!(forget_notice(&tr, Ok(())), "Listeden kaldırıldı.");
+        assert_eq!(
+            forget_notice(&tr, Err(error("agent.new_refusal"))),
+            "Kaldırılamadı: agent.new_refusal"
+        );
+        assert_eq!(
+            forget_notice(&tr, Err(error("client.unreachable"))),
+            "Kaldırılamadı: Bağlantı kesildi. Yeniden bağlanmasını bekleyin."
+        );
+        assert_eq!(
+            forget_notice(&tr, Err(error("node.timeout"))),
+            "Kaldırılamadı: Zamanında yanıt alınamadı. Tekrar deneyin."
+        );
+        let untrusted = Error::new(ErrorCode::AgentRunning)
+            .with("agent_id", "laptop/\u{1b}[2Jagent\n\u{202e}-1")
+            .to_info();
+        let line = forget_notice(&tr, Err(untrusted));
+        assert!(!line.contains(['\u{1b}', '\n', '\u{202e}']));
     }
 }

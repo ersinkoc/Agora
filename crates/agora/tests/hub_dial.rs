@@ -60,7 +60,11 @@ fn hubside(node_id: &str) -> Hubside {
         hub: Arc::new(Hub::open(store).unwrap()),
         support: Support {
             generations: vec![1],
-            capabilities: vec!["terminal.raw".into()],
+            capabilities: vec![
+                "terminal.raw".into(),
+                "workspace.directory".into(),
+                "directory.list".into(),
+            ],
             required: vec![],
         },
         ca: Some(ca),
@@ -883,6 +887,67 @@ fn a_node_that_returns_under_a_known_name_with_an_empty_data_dir_is_still_heard(
     });
     wait("everything to be acknowledged", || {
         second.acked() == second.next_seq() - 1
+    });
+}
+
+/// ADR-0054 over the real transport: a node whose size cap dropped events the hub never saw used to end every connection in
+/// `Stale` and retry forever. Now it says `SnapshotRequired`, the hub takes its oldest held event as the new base, records the
+/// lost numbers (store and audit trail) and shows what the node announced as its present.
+#[test]
+fn a_node_that_lost_unacknowledged_events_resyncs_over_the_link() {
+    let hub = hubside("burst");
+    let addr = hub.listen("127.0.0.1:0");
+    let sink = Arc::new(EventSink::open_with_cap(&tmp("burst"), "burst", 1200).unwrap());
+    sink.set_announcer(Box::new(|ev| {
+        ev.node_online("burst");
+        ev.agent_launched(
+            &AgentId::new("agent-now"),
+            "proj",
+            "burst",
+            Path::new("/work/proj"),
+            Path::new("/work/now"),
+            "agent/now",
+            "shell",
+            true,
+        );
+    }));
+    // Offline long enough that the cap dropped events the hub never saw.
+    sink.node_online("burst");
+    for i in 0..60 {
+        sink.node_resources("burst", i, 0, 0);
+    }
+    let oldest = sink.oldest_retained();
+    assert!(oldest > 1);
+    let _link = spawn(Arc::clone(&sink), hub.link(addr)).unwrap();
+    wait("the announced agent to show up", || {
+        hub.state
+            .hub
+            .view()
+            .0
+            .agents
+            .contains_key("burst/agent-now")
+    });
+    wait("everything to be acknowledged", || {
+        sink.acked() == sink.next_seq() - 1
+    });
+    let store = hub.state.hub.store();
+    let resyncs = store.resyncs().unwrap();
+    assert_eq!(resyncs.len(), 1);
+    let (producer, from, to, _) = &resyncs[0];
+    assert_eq!((producer.as_str(), *from), ("burst", 1));
+    // At least what was dropped offline; more if the announcement itself pushed older events out under the cap.
+    assert!(*to >= oldest - 1, "{to} vs {oldest}");
+    let audit = agora_hub::audit::Audit::new(store)
+        .list(0, None, 50)
+        .unwrap();
+    assert!(audit.iter().any(|e| e.action == "node.resynced"
+        && e.who == "hub"
+        && e.node == "burst"
+        && e.outcome == format!("1..={to}")));
+    // From then on the link is ordinary.
+    sink.node_resources("burst", 7, 7, 0);
+    wait("a newer event", || {
+        hub.state.hub.view().0.nodes["burst"].agents_running == 7
     });
 }
 
@@ -1784,9 +1849,13 @@ fn the_terminal_console_removes_a_closed_agent_from_every_list_but_not_a_running
     };
     let mut session = Session::connect(&console, "client-token").unwrap();
     // Running: the hub refuses, and the agent stays.
+    let error = session.forget_agent("laptop/agent-1").unwrap_err();
+    assert_eq!(error.code, "agent.running");
     assert_eq!(
-        session.forget_agent("laptop/agent-1"),
-        Err("agent.running".to_string())
+        error.params["agent_id"].value,
+        Some(agora_protocol::v1::param_value::Value::Str(
+            "laptop/agent-1".into()
+        ))
     );
     assert!(hub.state.hub.view().0.agents.contains_key("laptop/agent-1"));
     // Once it has exited, `d` removes it for everyone.
@@ -1829,4 +1898,184 @@ fn the_terminal_console_removes_a_closed_agent_from_every_list_but_not_a_running
         .agents
         .iter()
         .any(|a| a.agent_id == "laptop/agent-1"));
+}
+
+#[test]
+fn the_terminal_console_picks_a_folder_on_a_machine_and_starts_an_agent_there() {
+    use agora_tui::client::{Hub as ConsoleHub, Session};
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
+        return;
+    }
+    let hub = hubside("laptop");
+    let addr = hub.listen("127.0.0.1:0");
+    let dir = tmp("console-folder");
+    let manifests = dir.join("manifests");
+    std::fs::create_dir_all(&manifests).unwrap();
+    std::fs::write(
+        manifests.join("shell.toml"),
+        "kind = \"shell\"\ndisplay_name = \"Shell\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"sh\"]\n",
+    )
+    .unwrap();
+    // The folder to pick: outside the node's own folder, with a project inside it.
+    let pick = tmp("console-folder-pick");
+    std::fs::create_dir_all(pick.join("app")).unwrap();
+    std::fs::create_dir_all(pick.join("notes")).unwrap();
+    git(&pick.join("app"), &["init", "-q", "-b", "main"]);
+    let (device, _) = agora_tui::device::Device::generate().unwrap();
+    let (stranger, _) = agora_tui::device::Device::generate().unwrap();
+    let data = dir.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    agora_node::approvals::trust_device(
+        &data.join(agora_node::approvals::TRUSTED_DEVICES_FILE),
+        &device.id,
+        &device.public_key_hex(),
+    )
+    .unwrap();
+    let cfg = agora_node::daemon::NodeConfig {
+        node_id: "laptop".into(),
+        socket: dir.join("c.sock"),
+        data_dir: data,
+        worktree_root: dir.join("wt"),
+        manifests_dir: manifests,
+        projects: vec![],
+        limits: Default::default(),
+    };
+    let node = agora_node::daemon::Node::start(&cfg).unwrap();
+    let mut link = hub.link(addr);
+    link.commands = Some(cfg.socket.clone());
+    link.grants = Some(Arc::clone(&node.grants));
+    let _uplink = spawn(Arc::clone(&node.events), link).unwrap();
+    wait("the node to be online in the hub", || {
+        hub.state
+            .hub
+            .view()
+            .0
+            .nodes
+            .get("laptop")
+            .is_some_and(|n| n.online)
+    });
+    let console = ConsoleHub {
+        addr: addr.to_string(),
+        ca_pem: hub.ca_pem.clone(),
+    };
+    let mut session = Session::connect(&console, "client-token").unwrap();
+    let now = || {
+        u64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap()
+    };
+    let folder = pick.to_string_lossy().into_owned();
+    let sign = |d: &agora_tui::device::Device, op: &str, path: &str, kind: &str, project: &str| {
+        d.authorize("laptop", op, path, kind, project, false, false, now())
+            .unwrap()
+    };
+    // A device the machine does not trust cannot look.
+    assert_eq!(
+        session.list_folder("laptop", &folder, sign(&stranger, "list", &folder, "", "")),
+        Err("approval.signature_invalid".to_string())
+    );
+    // The trusted one sees the subfolders, the project marked; one level down works the same way.
+    let listed = session
+        .list_folder("laptop", &folder, sign(&device, "list", &folder, "", ""))
+        .unwrap();
+    let names: Vec<(&str, bool)> = listed
+        .entries
+        .iter()
+        .map(|e| (e.name.as_str(), e.is_git))
+        .collect();
+    assert_eq!(names, [("app", true), ("notes", false)]);
+    let app = agora_tui::picker::child(&listed.path, "app");
+    let inside = session
+        .list_folder("laptop", &app, sign(&device, "list", &app, "", ""))
+        .unwrap();
+    assert!(inside.entries.is_empty(), "{inside:?}");
+    // A signature for one folder does not list another.
+    assert_eq!(
+        session.list_folder("laptop", &folder, sign(&device, "list", &app, "", "")),
+        Err("approval.signature_invalid".to_string())
+    );
+    // Chosen: inspected, then an agent starts there.
+    let info = session
+        .inspect_folder("laptop", &app, sign(&device, "inspect", &app, "", ""))
+        .unwrap();
+    let agent = session
+        .launch_in(
+            "laptop",
+            agora_protocol::v1::AgentLaunch {
+                path: info.path.clone(),
+                project_id: info.project_id.clone(),
+                kind: "shell".into(),
+                separate_worktree: false,
+                authorization: Some(sign(
+                    &device,
+                    "launch",
+                    &info.path,
+                    "shell",
+                    &info.project_id,
+                )),
+                accept_identity_change: false,
+            },
+        )
+        .unwrap();
+    wait("the agent to appear in the hub", || {
+        hub.state.hub.view().0.agents.contains_key(&agent)
+    });
+    let _ = std::fs::remove_dir_all(&pick);
+}
+
+#[test]
+fn the_terminal_console_keeps_a_forget_refusals_permission_details() {
+    use agora_hub::users::{Access, Role};
+    use agora_tui::client::{Hub as ConsoleHub, Session};
+    struct Viewer;
+    impl ClientAuth for Viewer {
+        fn check(&self, token: &str) -> bool {
+            token == "client-token"
+        }
+        fn access(&self, token: &str) -> Option<Access> {
+            self.check(token).then(|| Access {
+                role: Role::Viewer,
+                user: "viewer".into(),
+                projects: None,
+            })
+        }
+    }
+    let mut hub = hubside("laptop");
+    Arc::get_mut(&mut hub.state).unwrap().auth = Box::new(Viewer);
+    let addr = hub.listen("127.0.0.1:0");
+    let sink = sink_with_agent(&tmp("forget-viewer"), "laptop");
+    sink.record_bodies(vec![agora_protocol::v1::event::Body::AgentExited(
+        agora_protocol::v1::AgentExited {
+            agent_id: "agent-1".into(),
+            exit_code: 0,
+        },
+    )]);
+    let _link = spawn(Arc::clone(&sink), hub.link(addr)).unwrap();
+    wait("the closed agent", || {
+        hub.state
+            .hub
+            .view()
+            .0
+            .agents
+            .get("laptop/agent-1")
+            .is_some_and(|a| !a.running)
+    });
+    let console = ConsoleHub {
+        addr: addr.to_string(),
+        ca_pem: hub.ca_pem.clone(),
+    };
+    let mut session = Session::connect(&console, "client-token").unwrap();
+    let error = session.forget_agent("laptop/agent-1").unwrap_err();
+    assert_eq!(error.code, "auth.forbidden");
+    assert_eq!(
+        error.params["action"].value,
+        Some(agora_protocol::v1::param_value::Value::Str(
+            "AgentForget".into()
+        ))
+    );
+    assert!(!hub.state.hub.view().0.agents["laptop/agent-1"].forgotten);
 }

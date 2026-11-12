@@ -24,7 +24,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 
 use crate::daemon::EventSink;
-use crate::uplink::{Uplink, UplinkError};
+use crate::uplink::{Replay, Uplink, UplinkError};
 
 /// What this node offers the hub when it dials in. The hub agrees only on what it supports too, so each one must also be in the
 /// hub's list (`crates/agora/src/hubcli.rs`, checked there by a test), or the hub refuses every command that needs it.
@@ -391,7 +391,8 @@ where
             .as_slice(),
     )
     .map_err(|_| LinkError::Transport("bad resume".into()))?;
-    up.on_resume_ok(&ok)?;
+    let replay = up.on_resume_ok(&ok)?;
+    send_replay(&mut conn, replay).await?;
 
     let mut last_ping = tokio::time::Instant::now();
     while !stop.load(Ordering::Acquire) {
@@ -535,7 +536,8 @@ where
                 // The hub saw a gap and says where to start again.
                 (STREAM_CONTROL, kinds::RESUME_OK) => {
                     if let Ok(r) = ResumeOk::decode(f.payload.as_slice()) {
-                        up.on_gap(r.from_seq)?;
+                        let replay = up.on_gap(r.from_seq)?;
+                        send_replay(&mut conn, replay).await?;
                     }
                 }
                 _ => {}
@@ -543,6 +545,25 @@ where
         }
     }
     conn.close().await;
+    Ok(())
+}
+
+/// After the hub said where to start: when the node no longer has those events it tells the hub before sending any more
+/// (ADR-0054). A node that can replay sends nothing here.
+async fn send_replay<S>(conn: &mut Conn<S>, replay: Replay) -> Result<(), LinkError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    if let Replay::Resync {
+        from_seq,
+        oldest_retained,
+    } = replay
+    {
+        // Codes and numbers only: this goes to the node's log, not to the user's screen.
+        eprintln!("hub link: resync, events {from_seq}..{oldest_retained} are gone");
+        conn.send(&frame(STREAM_CONTROL, kinds::SNAPSHOT_REQUIRED, Vec::new()))
+            .await?;
+    }
     Ok(())
 }
 

@@ -621,3 +621,106 @@ fn a_launched_folders_changes_are_reported_for_its_workspace() {
     .unwrap()
     .unwrap();
 }
+
+/// Waits until the node's event log holds an event that `pred` accepts.
+fn wait_for_event(node: &Node, what: &str, pred: impl Fn(&v1::event::Body) -> bool) {
+    let until = Instant::now() + Duration::from_secs(10);
+    while !node
+        .events
+        .events_after(0)
+        .iter()
+        .any(|e| e.body.as_ref().is_some_and(&pred))
+    {
+        assert!(Instant::now() < until, "no {what} in the event log");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// ADR-0054 section 3: when the hub's record of this node cannot be continued, the node says at the tail of its buffer who it
+/// is, its folders, every agent that runs now (with state, session and terminal) and every approval still waiting, and nothing
+/// about agents that ended.
+#[test]
+fn a_resync_announces_the_nodes_present() {
+    use v1::event::Body;
+    if !supported() {
+        return;
+    }
+    let e = Env::new("resync");
+    let (shared, chat) = (e.root.join("shared"), e.root.join("chat"));
+    std::fs::create_dir_all(&shared).unwrap();
+    std::fs::create_dir_all(&chat).unwrap();
+    let mut c = e.client();
+    let info = inspect(&mut c, &shared, false);
+    let kept = launch(&mut c, &info, "probe", false);
+    let ended = launch(&mut c, &info, "probe", false);
+    let chat_info = inspect(&mut c, &chat, false);
+    let talker = launch(&mut c, &chat_info, "adapter", false);
+    let node = e.node.as_ref().unwrap();
+    e.reports(2);
+    wait_for_event(
+        node,
+        "session",
+        |b| matches!(b, Body::AgentSessionReported(s) if s.agent_id == talker.agent_id),
+    );
+    c.call(Cmd::AgentPrompt(v1::AgentPrompt {
+        agent_id: talker.agent_id.clone(),
+        text: "ask".into(),
+    }))
+    .unwrap()
+    .unwrap();
+    wait_for_event(
+        node,
+        "approval",
+        |b| matches!(b, Body::ApprovalRequested(a) if a.agent_id == talker.agent_id),
+    );
+    c.call(Cmd::AgentStop(v1::AgentStop {
+        agent_id: ended.agent_id.clone(),
+    }))
+    .unwrap()
+    .unwrap();
+
+    let mark = node.events.next_seq() - 1;
+    node.events.announce();
+    let said: Vec<Body> = node
+        .events
+        .events_after(mark)
+        .into_iter()
+        .filter_map(|e| e.body)
+        .collect();
+    let at = |pred: &dyn Fn(&Body) -> bool| said.iter().position(pred);
+    let started = |id: &str| at(&|b| matches!(b, Body::AgentStarted(s) if s.agent_id == id));
+    assert!(matches!(said.first(), Some(Body::NodeOnline(n)) if n.node_id == "node-directory"));
+    // Only what runs now, each after the folder it works in and bound to it.
+    assert_eq!(
+        started(&ended.agent_id),
+        None,
+        "an ended agent is not announced"
+    );
+    for (agent, workspace) in [(&kept, &kept.workspace_id), (&talker, &talker.workspace_id)] {
+        let s = started(&agent.agent_id).expect("a running agent is announced");
+        let registered =
+            at(&|b| matches!(b, Body::WorkspaceRegistered(w) if &w.workspace_id == workspace))
+                .unwrap();
+        let bound = at(&|b| matches!(b, Body::AgentWorkspaceBound(w) if w.agent_id == agent.agent_id && &w.workspace_id == workspace)).unwrap();
+        assert!(registered < bound && bound < s);
+        assert!(said[s..]
+            .iter()
+            .any(|b| matches!(b, Body::AgentStateChanged(x) if x.agent_id == agent.agent_id)));
+    }
+    let talker_started = started(&talker.agent_id).unwrap();
+    assert!(said[talker_started..].iter().any(|b| matches!(b, Body::AgentSessionReported(x) if x.agent_id == talker.agent_id && !x.session_id.is_empty())));
+    // Only the terminal agent that runs has a terminal; the chat agent has none.
+    let terminals: Vec<&str> = said
+        .iter()
+        .filter_map(|b| match b {
+            Body::TerminalOpened(t) => Some(t.agent_id.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(terminals, [kept.agent_id.as_str()]);
+    // The approval still waiting, after the agent it belongs to.
+    let approval =
+        at(&|b| matches!(b, Body::ApprovalRequested(a) if a.agent_id == talker.agent_id)).unwrap();
+    assert!(approval > talker_started);
+    assert!(!said.iter().any(|b| matches!(b, Body::AgentExited(_))));
+}
