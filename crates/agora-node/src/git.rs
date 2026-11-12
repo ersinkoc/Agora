@@ -77,7 +77,8 @@ pub struct GitStatus {
 /// Settings that would let a repository run a program when the node reads it, switched off for every git the node runs. The node's
 /// git is not confined, and an agent may write the git config and hooks a worktree uses (its checkout's `.git`): a planted
 /// `core.fsmonitor` runs on `status`, a `post-checkout` hook on `worktree add`, an external diff or a textconv on `diff`.
-/// Still open: filter drivers (`.gitattributes` + `filter.<name>.*`), which cannot be switched off by name here.
+/// Filter drivers (`.gitattributes` + `filter.<name>.clean`/`smudge`/`process`) have no single switch; [`hardened`] blanks each
+/// one the repository's own config defines.
 const HARDENED: [&str; 8] = [
     "-c",
     "core.fsmonitor=false",
@@ -89,16 +90,138 @@ const HARDENED: [&str; 8] = [
     "core.attributesFile=/dev/null",
 ];
 
-/// `git -C dir` with [`HARDENED`] and the node's environment (no prompts, no optional locks, plain English output).
+/// `git -C dir` with [`HARDENED`] and the node's environment (no prompts, no optional locks, plain English output), and with every
+/// filter driver defined in the repository's own config (see [`repository_filters`]) blanked.
 pub(crate) fn hardened(dir: &Path) -> Command {
+    hardened_with(dir, &Filters::of(dir))
+}
+
+/// The filter drivers to blank for one repository, asked right before each command. An agent that can write the config could still
+/// add one between the question and the command; [`plain_hardened`] pins a node-made worktree's Git folders so that, where the shared
+/// config is read-only to agents (macOS, Windows), there is no config it can write (T8b).
+#[derive(Debug, PartialEq, Eq)]
+enum Filters {
+    Blank(Vec<String>),
+    /// One of them cannot be named back to git (not UTF-8), or git could not answer: nothing runs.
+    Refuse,
+}
+
+impl Filters {
+    fn of(dir: &Path) -> Self {
+        let out = plain_hardened(dir)
+            .args([
+                "config",
+                "--show-scope",
+                "--name-only",
+                "-z",
+                "--get-regexp",
+                r"^filter\..*\.(clean|smudge|process)$",
+            ])
+            .output();
+        match out {
+            Ok(o) => Self::from_answer(o.status.code(), &o.stdout),
+            Err(_) => Self::Refuse,
+        }
+    }
+
+    /// 0 is a list, and 1 "no such key" only with nothing printed; anything else (129 for a git before 2.26 that does not know
+    /// `--show-scope`, 128 for a config it cannot read, a signal) is a refusal, not "nothing to blank".
+    fn from_answer(code: Option<i32>, out: &[u8]) -> Self {
+        match code {
+            Some(0) => repository_filters(out).map_or(Self::Refuse, Self::Blank),
+            Some(1) if out.is_empty() => Self::Blank(vec![]),
+            _ => Self::Refuse,
+        }
+    }
+}
+
+fn hardened_with(dir: &Path, filters: &Filters) -> Command {
+    let mut c = plain_hardened(dir);
+    match filters {
+        Filters::Blank(keys) if keys.is_empty() => {}
+        // Through the environment, not `-c`: a filter's name may hold a `=`, which `-c name=value` splits at, leaving it on.
+        Filters::Blank(keys) if config_env_supported() => {
+            c.env("GIT_CONFIG_COUNT", keys.len().to_string());
+            for (i, key) in keys.iter().enumerate() {
+                c.env(format!("GIT_CONFIG_KEY_{i}"), key)
+                    .env(format!("GIT_CONFIG_VALUE_{i}"), "");
+            }
+        }
+        // A filter that cannot be blanked (a name that is not UTF-8, or a git older than 2.31 that ignores `GIT_CONFIG_KEY_n`):
+        // a `-c` key with no section makes every git refuse to start, so nothing runs.
+        Filters::Blank(_) | Filters::Refuse => {
+            c.args(REFUSED);
+        }
+    }
+    c
+}
+
+/// A `-c` key with no section: every git refuses to start on it ("key does not contain a section"), so nothing runs.
+const REFUSED: [&str; 2] = ["-c", "refused-filter-driver"];
+
+/// Whether this machine's git reads `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n` (git 2.31 and later). Asked once per node run.
+fn config_env_supported() -> bool {
+    static SUPPORTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SUPPORTED.get_or_init(|| {
+        Command::new("git")
+            .args(["config", "--get", "probe.configenv"])
+            .env("GIT_CONFIG_COUNT", "1")
+            .env("GIT_CONFIG_KEY_0", "probe.configenv")
+            .env("GIT_CONFIG_VALUE_0", "yes")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .is_ok_and(|o| o.stdout.trim_ascii() == b"yes")
+    })
+}
+
+/// `git -C dir` with [`HARDENED`] and the node's environment. In a linked worktree the Git folders are pinned to the ones
+/// [`crate::sandbox::git_dirs`] verifies (`GIT_DIR`, `GIT_COMMON_DIR`, `GIT_WORK_TREE`), so the admin folder's `commondir` cannot
+/// point the node's git at a config the agent wrote; a `.git` that is a link is refused. Any other `.git` file (a submodule's, a
+/// separate git dir, or one an agent rewrote into either) is followed as git does: closing that needs the node to pin from the
+/// checkout it recorded (T8b).
+fn plain_hardened(dir: &Path) -> Command {
     let mut c = Command::new("git");
     c.args(HARDENED)
         .arg("-C")
         .arg(dir)
         .env("LC_ALL", "C")
         .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_OPTIONAL_LOCKS", "0");
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env_remove("GIT_CONFIG_COUNT")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_WORK_TREE");
+    let Ok(meta) = std::fs::symlink_metadata(dir.join(".git")) else {
+        return c;
+    };
+    if meta.is_symlink() {
+        c.args(REFUSED);
+    } else if meta.is_file() {
+        // Plain spellings, as for any path a process is given (no verbatim `\\?\` prefix on Windows).
+        let plain = agora_platform::canonicalize_plain;
+        if let Some((Ok(admin), Ok(common), Ok(work))) = crate::sandbox::git_dirs(dir)
+            .map(|(admin, common)| (plain(&admin), plain(&common), plain(dir)))
+        {
+            c.env("GIT_DIR", admin)
+                .env("GIT_COMMON_DIR", common)
+                .env("GIT_WORK_TREE", work);
+        }
+    }
     c
+}
+
+/// The filter-driver keys to blank, from `git config --show-scope --name-only -z` output (`scope NUL key NUL` pairs): those set in the
+/// repository's own config (`local`, `worktree`, and what they include), which an agent can write. The user's global and system
+/// filters (Git LFS) are kept. `None` when one of them is not UTF-8 and so cannot be named back to git.
+fn repository_filters(out: &[u8]) -> Option<Vec<String>> {
+    let fields: Vec<&[u8]> = out.split(|b| *b == 0).collect();
+    fields
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .filter(|[scope, _]| matches!(*scope, b"local" | b"worktree"))
+        .map(|[_, key]| std::str::from_utf8(key).ok().map(str::to_owned))
+        .collect()
 }
 
 fn git(dir: &Path, args: &[&str]) -> Result<String, GitError> {
@@ -182,8 +305,18 @@ fn branch_exists(dir: &Path, branch: &str) -> Result<bool, GitError> {
     }
 }
 
+/// Passed to every `status` and `diff` the node runs: git looks inside a submodule with that submodule's own config, whose filter
+/// drivers [`hardened`] does not see (measured: a clean filter planted in `.git/modules/<name>/config` ran on the node's `status`).
+/// A submodule moved to another commit still shows; edits inside it do not. Removing such a worktree is refused by git itself
+/// unless forced, so [`remove_worktree`] loses nothing.
+const SUBMODULE_COMMITS_ONLY: &str = "--ignore-submodules=dirty";
+
 fn is_dirty(worktree: &Path) -> Result<bool, GitError> {
-    Ok(!git(worktree, &["status", "--porcelain"])?.trim().is_empty())
+    Ok(
+        !git(worktree, &["status", "--porcelain", SUBMODULE_COMMITS_ONLY])?
+            .trim()
+            .is_empty(),
+    )
 }
 
 /// The branch checked out in a worktree (`None` when HEAD is detached).
@@ -248,18 +381,19 @@ fn parse_shortstat(s: &str) -> (u32, u32) {
 }
 
 pub fn status(worktree: &Path) -> Result<GitStatus, GitError> {
-    let files_changed = git(worktree, &["status", "--porcelain"])?.lines().count() as u32;
-    let head_commit = git(worktree, &["rev-parse", "HEAD"])?.trim().to_string();
-    let (insertions, deletions) = parse_shortstat(&git(
-        worktree,
-        &[
-            "diff",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--shortstat",
-            "HEAD",
-        ],
-    )?);
+    let git = |args: &[&str]| git(worktree, args);
+    let files_changed = git(&["status", "--porcelain", SUBMODULE_COMMITS_ONLY])?
+        .lines()
+        .count() as u32;
+    let head_commit = git(&["rev-parse", "HEAD"])?.trim().to_string();
+    let (insertions, deletions) = parse_shortstat(&git(&[
+        "diff",
+        "--no-ext-diff",
+        "--no-textconv",
+        SUBMODULE_COMMITS_ONLY,
+        "--shortstat",
+        "HEAD",
+    ])?);
     Ok(GitStatus {
         files_changed,
         insertions,
@@ -309,6 +443,7 @@ pub fn diff(worktree: &Path, path: Option<&str>) -> Result<String, GitError> {
         "--no-color",
         "--no-ext-diff",
         "--no-textconv",
+        SUBMODULE_COMMITS_ONLY,
         "HEAD",
     ];
     if let Some(p) = path {
@@ -669,6 +804,203 @@ mod tests {
     /// Planted by an agent that can write the checkout's `.git` (config, hooks) and its worktree (`.gitattributes`): each one makes
     /// plain git run a program. The node's git must run none of them.
     #[test]
+    fn only_the_repositorys_own_filters_are_blanked_and_an_unnamable_one_refuses() {
+        let out = b"global\0filter.lfs.clean\0system\0filter.x.process\0local\0filter.a=b.clean\0worktree\0filter.my name.smudge\0";
+        assert_eq!(
+            repository_filters(out),
+            Some(vec![
+                "filter.a=b.clean".to_owned(),
+                "filter.my name.smudge".to_owned()
+            ])
+        );
+        assert_eq!(repository_filters(b""), Some(vec![]));
+        assert_eq!(repository_filters(b"local\0filter.\xff.clean\0"), None);
+        // A non-UTF-8 name in the user's global config is theirs, not refused.
+        assert_eq!(
+            repository_filters(b"global\0filter.\xff.clean\0"),
+            Some(vec![])
+        );
+    }
+
+    #[test]
+    fn the_nodes_git_runs_no_filter_planted_in_a_submodules_config() {
+        let r = Repo::new(None);
+        let lib = r.dir.with_file_name(format!(
+            "{}-lib",
+            r.dir.file_name().expect("name").to_string_lossy()
+        ));
+        let run = |dir: &Path, args: &[&str]| {
+            let ok = Command::new("git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@e"])
+                .args(["-c", "protocol.file.allow=always"])
+                .arg("-C")
+                .arg(dir)
+                .args(args)
+                .output()
+                .expect("git")
+                .status
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+        fs::create_dir_all(&lib).expect("lib");
+        run(&lib, &["init", "-q"]);
+        fs::write(lib.join("a.txt"), "one\n").expect("a");
+        run(&lib, &["add", "a.txt"]);
+        run(&lib, &["commit", "-q", "-m", "lib"]);
+        run(
+            &r.dir,
+            &["submodule", "add", "-q", &lib.to_string_lossy(), "lib"],
+        );
+        run(&r.dir, &["commit", "-q", "-m", "sub"]);
+        let mark = r.dir.join("ran-sub-clean");
+        let modules = r.dir.join(".git/modules/lib");
+        run(
+            &r.dir,
+            &[
+                "--git-dir",
+                &modules.to_string_lossy(),
+                "config",
+                "filter.ev.clean",
+                &format!("sh -c 'touch \"{}\"; cat'", mark.display()),
+            ],
+        );
+        fs::write(r.dir.join("lib/.gitattributes"), "*.txt filter=ev\n").expect("attributes");
+        // Same size, later mtime: git must hash the file, which runs the clean filter.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        // Keep the checkout's own line ending (`core.autocrlf` writes `one\r\n` on Windows): a size change lets git call the
+        // file modified without hashing it, and the clean filter would never run.
+        let checked_out = fs::read_to_string(r.dir.join("lib/a.txt")).expect("read");
+        fs::write(r.dir.join("lib/a.txt"), checked_out.replace("one", "uno")).expect("edit");
+
+        // The node's git.
+        status(&r.dir).expect("status");
+        diff(&r.dir, None).expect("diff");
+        assert!(is_dirty(&r.dir).is_ok());
+        assert!(!mark.exists(), "the node's git ran a submodule's filter");
+        // Control: plain git runs it, so the plant works on this system.
+        let _ = Command::new("git")
+            .arg("-C")
+            .arg(&r.dir)
+            .args(["status", "--porcelain"])
+            .output();
+        assert!(mark.exists(), "the plant itself did not work");
+        let _ = fs::remove_dir_all(&lib);
+    }
+
+    #[test]
+    fn only_a_clean_answer_from_git_means_nothing_to_blank() {
+        let keys = b"local\0filter.x.clean\0";
+        assert_eq!(
+            Filters::from_answer(Some(0), keys),
+            Filters::Blank(vec!["filter.x.clean".into()])
+        );
+        assert_eq!(Filters::from_answer(Some(1), b""), Filters::Blank(vec![]));
+        assert_eq!(Filters::from_answer(Some(1), keys), Filters::Refuse);
+        // A git before 2.26 does not know `--show-scope`; a broken config; a signal.
+        assert_eq!(Filters::from_answer(Some(129), b""), Filters::Refuse);
+        assert_eq!(Filters::from_answer(Some(128), b""), Filters::Refuse);
+        assert_eq!(Filters::from_answer(None, b""), Filters::Refuse);
+    }
+
+    #[test]
+    fn the_nodes_git_in_a_worktree_reads_only_the_verified_git_folders() {
+        let r = Repo::new(None);
+        let wt = r.dir.with_file_name(format!(
+            "{}-pinned-wt",
+            r.dir.file_name().expect("name").to_string_lossy()
+        ));
+        create_worktree(&r.dir, &wt, "pinned", None).expect("worktree");
+        let (admin, common) = crate::sandbox::git_dirs(&wt).expect("verified");
+        // The agent points its admin folder's `commondir` at a repository it built, with a filter in its config.
+        let fake = wt.with_file_name(format!(
+            "{}-fake",
+            wt.file_name().expect("name").to_string_lossy()
+        ));
+        let ok = Command::new("git")
+            .args(["clone", "-q", "--bare"])
+            .arg(&r.dir)
+            .arg(&fake)
+            .status()
+            .expect("clone")
+            .success();
+        assert!(ok);
+        let mark = wt.join("ran-fake-clean");
+        let set = Command::new("git")
+            .arg("--git-dir")
+            .arg(&fake)
+            .args(["config", "filter.ev.clean"])
+            .arg(format!("sh -c 'touch \"{}\"; cat'", mark.display()))
+            .status()
+            .expect("config")
+            .success();
+        assert!(set);
+        fs::write(admin.join("commondir"), format!("{}\n", fake.display())).expect("commondir");
+        fs::write(wt.join(".gitattributes"), "*.txt filter=ev\n").expect("attributes");
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        // Keep the checkout's own line ending (`core.autocrlf` writes `one\r\n` on Windows): a size change lets git call the
+        // file modified without hashing it, and the clean filter would never run.
+        let checked_out = fs::read_to_string(wt.join("a.txt")).expect("read");
+        fs::write(wt.join("a.txt"), checked_out.replace("one", "uno")).expect("edit");
+
+        // Pinned: the node's git uses the real shared folder, not the one `commondir` names. The filter blanking alone would also
+        // stop this plant, but not one added between its question and the command.
+        let used = hardened(&wt)
+            .args(["rev-parse", "--git-common-dir"])
+            .output()
+            .expect("rev-parse");
+        let used = PathBuf::from(String::from_utf8_lossy(&used.stdout).trim());
+        // git prints forward slashes on Windows; compare the folders, not the spellings.
+        assert_eq!(
+            agora_platform::canonicalize_plain(&used).expect("used"),
+            agora_platform::canonicalize_plain(&common).expect("common")
+        );
+        let _ = status(&wt);
+        let _ = diff(&wt, None);
+        assert!(
+            !mark.exists(),
+            "the node's git followed the agent's commondir"
+        );
+        // Control: plain git follows it.
+        let _ = Command::new("git")
+            .arg("-C")
+            .arg(&wt)
+            .args(["status", "--porcelain"])
+            .output();
+        assert!(mark.exists(), "the plant itself did not work");
+
+        // A `.git` that is a link is refused outright.
+        let linked = wt.with_file_name(format!(
+            "{}-linked",
+            wt.file_name().expect("name").to_string_lossy()
+        ));
+        fs::create_dir_all(&linked).expect("dir");
+        if agora_platform::symlink(&wt.join(".git"), &linked.join(".git")).is_ok() {
+            assert!(status(&linked).is_err());
+        }
+        for d in [&wt, &fake, &linked] {
+            let _ = fs::remove_dir_all(d);
+        }
+    }
+
+    #[test]
+    fn a_filter_that_cannot_be_blanked_stops_the_nodes_git() {
+        let r = Repo::new(None);
+        let ok = |f: &Filters| {
+            hardened_with(&r.dir, f)
+                .args(["status", "--porcelain"])
+                .output()
+                .expect("git")
+                .status
+                .success()
+        };
+        assert!(ok(&Filters::Blank(vec![])));
+        assert!(!ok(&Filters::Refuse));
+        // Blanking works with this machine's git (CI runs a recent one), so a named filter does not stop it.
+        assert!(config_env_supported());
+        assert!(ok(&Filters::Blank(vec!["filter.a=b.clean".into()])));
+    }
+
+    #[test]
     fn the_nodes_git_runs_no_program_a_repository_plants() {
         let r = Repo::new(None);
         let mark = |n: &str| r.dir.join(format!("ran-{n}"));
@@ -681,7 +1013,10 @@ mod tests {
         r.git(&["config", "core.fsmonitor", &touch("fsmonitor")]);
         r.git(&["config", "diff.external", &touch("external")]);
         r.git(&["config", "diff.conv.textconv", &touch("textconv")]);
-        fs::write(r.dir.join(".gitattributes"), "*.txt diff=conv\n").expect("attributes");
+        // A clean filter runs when git hashes a changed tracked file (status, diff); a `=` in the name defeats `-c name=`.
+        r.git(&["config", "filter.a=b.clean", &touch("clean")]);
+        fs::write(r.dir.join(".gitattributes"), "*.txt diff=conv filter=a=b\n")
+            .expect("attributes");
         let hook = r.dir.join(".git/hooks/post-checkout");
         fs::write(
             &hook,
@@ -690,7 +1025,7 @@ mod tests {
         .expect("hook");
         let _ = Command::new("chmod").arg("+x").arg(&hook).status();
         fs::write(r.dir.join("a.txt"), "two\n").expect("change");
-        let planted = ["fsmonitor", "external", "textconv", "hook"];
+        let planted = ["fsmonitor", "external", "textconv", "hook", "clean"];
 
         // Plain git, as an unhardened node would run it: which plants work on this system.
         let plain = |args: &[&str]| {
@@ -717,7 +1052,7 @@ mod tests {
             .filter(|n| mark(n).exists())
             .collect();
         assert!(
-            effective.contains(&"fsmonitor"),
+            effective.contains(&"fsmonitor") && effective.contains(&"clean"),
             "the plant itself did not work: {effective:?}"
         );
         for n in planted {
