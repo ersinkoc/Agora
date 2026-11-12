@@ -18,6 +18,7 @@ pub fn run_all<T: Terminal>(make: impl Fn(Size) -> T) {
     title_from_osc(&make);
     wide_characters_use_two_cells(&make);
     modes_toggle(&make);
+    styles_are_kept_per_cell(&make);
     styling_sequences_print_nothing(&make);
     malformed_input_does_not_panic(&make);
 }
@@ -139,6 +140,44 @@ fn modes_toggle<T: Terminal>(make: &impl Fn(Size) -> T) {
     t.feed(b"\x1b[?2004l\x1b[?1l");
     let m = t.modes();
     assert!(!m.bracketed_paste && !m.application_cursor);
+}
+
+fn styles_are_kept_per_cell<T: Terminal>(make: &impl Fn(Size) -> T) {
+    use crate::{Color, Style};
+    let mut t = make(size(20, 2));
+    t.feed(
+        b"\x1b[1;3;4;31mA\x1b[0m\x1b[38;5;208;48;2;10;20;30mB\x1b[0m\x1b[2;7;9mC\x1b[0mD\x1b[91mE",
+    );
+    let st = |c: u16| t.cell(0, c).map(|x| x.style).unwrap_or_default();
+    assert_eq!(
+        st(0),
+        Style {
+            fg: Color::Indexed(1),
+            bold: true,
+            italic: true,
+            underline: true,
+            ..Style::default()
+        }
+    );
+    assert_eq!(
+        st(1),
+        Style {
+            fg: Color::Indexed(208),
+            bg: Color::Rgb(10, 20, 30),
+            ..Style::default()
+        }
+    );
+    assert_eq!(
+        st(2),
+        Style {
+            dim: true,
+            inverse: true,
+            strike: true,
+            ..Style::default()
+        }
+    );
+    assert_eq!(st(3), Style::default());
+    assert_eq!(st(4).fg, Color::Indexed(9), "bright red is palette 9");
 }
 
 fn styling_sequences_print_nothing<T: Terminal>(make: &impl Fn(Size) -> T) {

@@ -25,6 +25,35 @@ pub struct Cell {
     pub ch: char,
     /// The right half of a double-width character; `ch` is a space.
     pub spacer: bool,
+    /// How the program asked for it to be drawn (SGR), for clients that paint the screen themselves.
+    pub style: Style,
+}
+
+/// A colour as the program set it. Clients map [`Color::Default`] and the 16 palette entries to their own theme.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Color {
+    /// The terminal's own foreground or background.
+    #[default]
+    Default,
+    /// A 256-colour palette index (0-15 are the classic and bright colours).
+    Indexed(u8),
+    /// 24-bit colour.
+    Rgb(u8, u8, u8),
+}
+
+/// SGR attributes of a cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Style {
+    pub fg: Color,
+    pub bg: Color,
+    pub bold: bool,
+    pub dim: bool,
+    pub italic: bool,
+    pub underline: bool,
+    /// Foreground and background swapped (SGR 7); the colours above are as set, not swapped.
+    pub inverse: bool,
+    pub strike: bool,
+    pub hidden: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
