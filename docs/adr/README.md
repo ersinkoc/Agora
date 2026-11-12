@@ -72,3 +72,4 @@ Date: YYYY-MM-DD
 | 0052 | Agents run in the selected directory; separate worktrees are optional | Accepted |
 | 0053 | Browsing a machine's folders, and forgetting closed agents | Accepted |
 | 0054 | A node that lost unacknowledged events resynchronizes instead of stalling | Accepted |
+| 0055 | A resync keeps a running agent's board work | Proposed |
