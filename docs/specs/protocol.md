@@ -59,8 +59,8 @@ retained event. The hub applies the retained events and then the announcement, s
 lost events stay lost and are recorded as such (store, log, audit trail), never silently. Limits: as after a node restart,
 `NodeOnline` hands the shared-board tasks and leases that node's agents held back to the board, so an agent that still runs
 must take its leases again; a managed working copy created inside the lost window (`WorktreeCreated`) stays missing from the
-hub's list, and resource reports and git status are not re-announced (the next report or change brings them back); the hub's usage counters for agents that still
-run start again from the announcement. Terminal bytes never enter this log.
+hub's list, and resource reports and git status are not re-announced (the next report or change brings them back); the
+hub's usage counters for agents that still run start again from the announcement. Terminal bytes never enter this log.
 
 Hub store (`agora-hub::store`, ADR-0014): SQLite in WAL mode behind an `EventStore` trait. `append(producer, seq, ..)`
 returns `Applied` (stored, with a global position), `Duplicate` (already applied, ignored) or `Gap { expected }` (not the

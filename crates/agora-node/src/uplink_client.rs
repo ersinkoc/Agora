@@ -357,7 +357,12 @@ where
     let mut up = Uplink::new(
         Arc::clone(sink),
         env!("CARGO_PKG_VERSION"),
-        &["terminal.raw", "workspace.directory", "board.join"],
+        &[
+            "terminal.raw",
+            "workspace.directory",
+            "board.join",
+            "directory.list",
+        ],
     );
     conn.send(&frame(
         STREAM_CONTROL,
@@ -692,6 +697,7 @@ fn run_local_on(
             req.command,
             Some(
                 command_request::Command::DirectoryInspect(_)
+                    | command_request::Command::DirectoryList(_)
                     | command_request::Command::AgentLaunch(_)
             )
         )
@@ -717,6 +723,7 @@ fn run_local_on(
         match &req.command {
             Some(
                 c @ (command_request::Command::DirectoryInspect(_)
+                | command_request::Command::DirectoryList(_)
                 | command_request::Command::AgentLaunch(_)),
             ) => {
                 if let Err(e) = g.directory_action(c, now) {

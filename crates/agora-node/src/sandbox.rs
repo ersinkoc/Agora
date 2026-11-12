@@ -168,23 +168,32 @@ pub fn refused_directory(
     node_home: &Path,
     worktree_root: &Path,
 ) -> bool {
-    if selected.parent().is_none() {
-        return true;
-    }
-    if let Some(home) = home {
-        // A secret folder, a folder below one, or a folder that holds one (`~/.config` holds `~/.config/gh`).
-        if home.starts_with(selected)
-            || SECRET_HOME_FOLDERS.iter().any(|f| {
-                let secret = home.join(f);
-                selected.starts_with(&secret) || secret.starts_with(selected)
-            })
-        {
-            return true;
-        }
-    }
-    // Inside the node's folder only the worktrees it made are fine.
-    node_home.starts_with(selected)
-        || (selected.starts_with(node_home) && !selected.starts_with(worktree_root))
+    selected.parent().is_none()
+        || home.is_some_and(|h| {
+            // The home folder or a folder that holds it, and a folder that holds a secret one (`~/.config` holds
+            // `~/.config/gh`): fine to look into, not to launch in.
+            h.starts_with(selected)
+                || SECRET_HOME_FOLDERS
+                    .iter()
+                    .any(|f| h.join(f).starts_with(selected))
+        })
+        || node_home.starts_with(selected)
+        || private_folder(selected, home, node_home, worktree_root)
+}
+
+/// A folder kept from agents and from folder listings (ADR-0052, ADR-0053): a secret folder below the home folder or a folder below
+/// one, or inside the node's own folder anything but the worktrees it made. All paths are canonical.
+pub fn private_folder(
+    dir: &Path,
+    home: Option<&Path>,
+    node_home: &Path,
+    worktree_root: &Path,
+) -> bool {
+    home.is_some_and(|h| {
+        SECRET_HOME_FOLDERS
+            .iter()
+            .any(|f| dir.starts_with(h.join(f)))
+    }) || (dir.starts_with(node_home) && !dir.starts_with(worktree_root))
 }
 
 /// The private temp folder of the agent that works in `worktree`; the node points `TMPDIR`, `TEMP` and `TMP` at it where

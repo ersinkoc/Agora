@@ -624,6 +624,18 @@ impl Session {
         )
     }
 
+    /// Removes a closed agent from every client's list (ADR-0053 `agent.forget`). The hub answers it itself, so it names no machine;
+    /// `agent_id` is the hub-wide `<node>/<id>`. `agent.running` while it runs.
+    pub fn forget_agent(&mut self, agent_id: &str) -> Result<(), String> {
+        self.command(
+            "",
+            command_request::Command::AgentForget(agora_protocol::v1::AgentForget {
+                agent_id: agent_id.to_string(),
+            }),
+            Duration::from_secs(15),
+        )
+    }
+
     /// Keys typed into the terminal (an ordinary routed command; the machine runs them in the order sent). Fire and forget.
     pub fn terminal_input(&mut self, node: &str, terminal_id: &str, data: &[u8]) {
         self.send_nowait(
