@@ -29,8 +29,9 @@ The `macos-dmg` job does the same for macOS: a disk image signed ad hoc, kept as
 `xattr -d com.apple.quarantine` on the app after copying it out. An ad hoc signature is different for every build, and the webview keeps
 the key that protects the page's stored keys (the device key the window signs approvals with) in the login keychain, readable only by the
 build that stored it. So the first start of a new build asks for the login keychain password ("Agora WebCrypto Master Key"); "Always
-Allow" applies to that build only. Seen with the 0.3.4 image on macOS 27; after "Deny" the hub's page still opens. A Developer ID
-signature (stable identity) removes the prompt.
+Allow" applies to that build only. Allow it: seen with the 0.3.4 image on macOS 27, after "Deny" the hub's page still opens, but
+whether the window can still sign with its stored device key (approvals, grants, folder listing) is not tested. A Developer ID signature
+(stable identity) removes the prompt. WebView2 on Windows keeps that key with the user's account and does not ask.
 
 Not done yet: native notifications for a waiting approval while the window is hidden, signed installers and per-platform signing (needs
 the maintainer's Apple and Windows accounts; unsigned builds are published as such), a real icon (the name and logo are open question Q1).
