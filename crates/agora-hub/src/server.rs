@@ -214,6 +214,28 @@ where
                                 ask_board_join(hub, node, project);
                             }
                         }
+                        // The node could not replay (ADR-0054): this event is its new base and the numbers before it are lost.
+                        // Recorded in the store with the event; said in the log and the audit trail too, so it is never silent.
+                        Ingest::Resynced {
+                            acked: a,
+                            from_seq,
+                            to_seq,
+                            ..
+                        } => {
+                            acked = Some(a);
+                            since_ack += 1;
+                            eprintln!("node resync: {node_id} skipped {from_seq}..={to_seq}");
+                            let _ = crate::audit::Audit::new(hub.store()).record(
+                                now_ms(),
+                                crate::ca::RESERVED_HUB_ID,
+                                "node.resynced",
+                                node_id,
+                                &format!("{from_seq}..={to_seq}"),
+                            );
+                            for (node, project) in hub.board_membership(now_ms()) {
+                                ask_board_join(hub, node, project);
+                            }
+                        }
                         Ingest::Duplicate { acked: a } => {
                             acked = Some(a);
                             since_ack += 1;
@@ -225,6 +247,10 @@ where
                                 .await?;
                         }
                     },
+                    // The node cannot replay from where the hub asked (ADR-0054): its next new event is the new base.
+                    (STREAM_CONTROL, kinds::SNAPSHOT_REQUIRED) => {
+                        session.snapshot_required(now_ms())?
+                    }
                     (STREAM_CONTROL, kinds::PING) => {
                         conn.send(&frame(STREAM_CONTROL, kinds::PONG, f.payload))
                             .await?;

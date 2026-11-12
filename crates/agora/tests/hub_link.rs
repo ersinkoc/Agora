@@ -1,6 +1,7 @@
 //! A node's events reach a hub's store and view through the two state machines (the node's `Uplink` and the hub's
 //! `NodeSession`), with the messages passed in memory. Transport and framing are tested where they live; this is
-//! the protocol between them: resume, replay, no duplicates, no gaps, and two machines in one view.
+//! the protocol between them: resume, replay, no duplicates, no gaps, a resync after lost events (ADR-0054), and two machines
+//! in one view.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::path::PathBuf;
@@ -11,7 +12,7 @@ use agora_hub::projection::View;
 use agora_hub::session::{Ingest, NodeSession};
 use agora_hub::store::{EventStore, SqliteStore};
 use agora_node::daemon::EventSink;
-use agora_node::uplink::{Uplink, UplinkError};
+use agora_node::uplink::{Replay, Uplink, UplinkError};
 use agora_protocol::handshake::Support;
 use agora_protocol::v1::AgentState;
 
@@ -63,7 +64,10 @@ fn connect(
     let welcome = hub.hello(&hello, 0).unwrap();
     up.on_welcome(&welcome)?;
     let ok = hub.resume(&up.resume()?).unwrap();
-    up.on_resume_ok(&ok)?;
+    // A node that no longer has what the hub asks for says so before sending more (ADR-0054), as `uplink_client` does.
+    if let Replay::Resync { .. } = up.on_resume_ok(&ok)? {
+        hub.snapshot_required(0).unwrap();
+    }
 
     let mut applied = 0;
     'send: loop {
@@ -76,12 +80,16 @@ fn connect(
                 break 'send; // the connection drops here
             }
             match hub.event(&payload).unwrap() {
-                Ingest::Applied { acked, .. } => {
+                Ingest::Applied { acked, .. } | Ingest::Resynced { acked, .. } => {
                     applied += 1;
                     up.on_ack(acked)?;
                 }
                 Ingest::Duplicate { acked } => up.on_ack(acked)?,
-                Ingest::Gap { expected } => up.on_gap(expected)?,
+                Ingest::Gap { expected } => {
+                    if let Replay::Resync { .. } = up.on_gap(expected)? {
+                        hub.snapshot_required(0).unwrap();
+                    }
+                }
             }
         }
     }
@@ -125,43 +133,129 @@ fn a_hub_restored_from_an_older_backup_gets_the_gap_replayed() {
     std::fs::create_dir_all(&dir).unwrap();
     let live = dir.join("hub.db");
     let sink = node(&dir.join("n"), "n1");
-    let total = sink.next_seq() - 1;
     {
         let store = SqliteStore::open(&live).unwrap();
         connect(&store, &sink, "n1", Some(2)).unwrap();
         store.backup_to(&dir.join("backup.db")).unwrap();
+        // Enough happens after the backup that, once acknowledged, the node's buffer is compacted past it.
+        let long = std::path::PathBuf::from(format!("/work/{}", "x".repeat(1000)));
+        for _ in 0..80 {
+            sink.checkout_discovered("n1", "proj", &long);
+        }
         connect(&store, &sink, "n1", None).unwrap();
-        assert_eq!(store.acked("n1").unwrap(), total);
+        assert_eq!(store.acked("n1").unwrap(), sink.next_seq() - 1);
     }
     // Disaster: the hub comes back from the backup, which only has 2 events.
     agora_hub::store::restore(&dir.join("backup.db"), &live).unwrap();
     let store = SqliteStore::open(&live).unwrap();
     assert_eq!(store.acked("n1").unwrap(), 2);
-    // The node had trimmed its buffer past 2 when the hub acked everything, so the old events are gone: the
-    // uplink must say so rather than send a gap (the hub then resynchronizes from a snapshot).
-    match connect(&store, &sink, "n1", None) {
-        Err(UplinkError::Stale { oldest_retained }) => assert!(oldest_retained > 3),
-        Ok(n) => assert_eq!(n as u64, total - 2, "buffer still held the gap"),
-        Err(e) => panic!("{e:?}"),
-    }
+    let oldest = sink.oldest_retained();
+    assert!(
+        oldest > 3,
+        "the node trimmed its buffer past 2 when the hub acked everything"
+    );
+    // The old events are gone from the node too: it resynchronizes (ADR-0054). Its present goes at the tail of its buffer, the hub
+    // takes the oldest event it still has as the base and records the numbers before it as lost, and from then on everything
+    // arrives. (This bare buffer has no announcer; agora-node's `a_resync_announces_the_nodes_present` covers what a real node says.)
+    let delivered = connect(&store, &sink, "n1", None).unwrap() as u64;
+    assert_eq!(delivered, sink.next_seq() - oldest);
+    assert_eq!(store.acked("n1").unwrap(), sink.next_seq() - 1);
+    assert_eq!(
+        store.resyncs().unwrap(),
+        [("n1".to_string(), 3, oldest - 1, 0)]
+    );
+    sink.node_resources("n1", 1, 1, 0);
+    assert_eq!(connect(&store, &sink, "n1", None).unwrap(), 1);
+    assert_eq!(store.resyncs().unwrap().len(), 1, "once");
 }
 
+/// F080 / ADR-0054: once the size cap dropped events the hub never acknowledged, the node used to end every connection in `Stale`
+/// and the hub never heard from it again. Now it resynchronizes: the hub gets everything the node still has and all newer events,
+/// and records the lost range.
 #[test]
-fn a_node_that_lost_old_events_to_its_size_cap_says_stale() {
-    let dir = tmp("stale");
-    // A cap so small that early events are evicted before the hub ever saw them.
+fn a_node_whose_cap_dropped_unacked_events_resyncs_and_delivers_its_newer_events() {
+    let sink = Arc::new(EventSink::open_with_cap(&tmp("f080"), "n1", 1200).unwrap());
+    for i in 0..5 {
+        sink.node_resources("n1", i, i, 0);
+    }
+    let store = SqliteStore::open_in_memory().unwrap();
+    assert_eq!(connect(&store, &sink, "n1", Some(3)).unwrap(), 3);
+    // Offline for a while: the node keeps recording, and the cap drops events the hub never saw.
+    for i in 0..60 {
+        sink.node_resources("n1", 100 + i, i, 0);
+    }
+    let oldest = sink.oldest_retained();
+    assert!(oldest > 4, "events 4.. were dropped unacknowledged");
+    let delivered = connect(&store, &sink, "n1", None).unwrap();
+    assert_eq!(delivered as u64, sink.next_seq() - oldest);
+    assert_eq!(store.acked("n1").unwrap(), sink.next_seq() - 1);
+    assert_eq!(
+        store.resyncs().unwrap(),
+        [("n1".to_string(), 4, oldest - 1, 0)]
+    );
+    // From then on the link is ordinary: newer events arrive, nothing more is skipped.
+    sink.node_resources("n1", 1000, 0, 0);
+    assert_eq!(connect(&store, &sink, "n1", None).unwrap(), 1);
+    assert_eq!(store.acked("n1").unwrap(), sink.next_seq() - 1);
+    assert_eq!(store.resyncs().unwrap().len(), 1);
+}
+
+/// A gap answer that arrives mid-session and asks for what the node no longer has resynchronizes too; a late second answer for
+/// the same point (sent by the hub before it read `SnapshotRequired`) does not announce again.
+#[test]
+fn a_gap_answer_for_lost_events_resyncs_once_mid_session() {
+    let dir = tmp("gap-resync");
     let sink = Arc::new(EventSink::open_with_cap(&dir, "n1", 600).unwrap());
+    sink.set_announcer(Box::new(|ev| ev.node_online("n1")));
+    sink.node_resources("n1", 0, 0, 0);
+    let store = SqliteStore::open_in_memory().unwrap();
+    connect(&store, &sink, "n1", None).unwrap();
     for i in 0..40 {
         sink.node_resources("n1", i, i, 0);
     }
-    assert!(sink.oldest_retained() > 1);
-    let store = SqliteStore::open_in_memory().unwrap();
-    match connect(&store, &sink, "n1", None) {
-        Err(UplinkError::Stale { oldest_retained }) => {
-            assert_eq!(oldest_retained, sink.oldest_retained());
+    let oldest = sink.oldest_retained();
+    assert!(oldest > 2);
+    let sup = support();
+    let mut hub = NodeSession::new(&store, "n1", &sup);
+    let mut up = Uplink::new(Arc::clone(&sink), "test", &[]);
+    let hello = up.hello().unwrap();
+    up.on_welcome(&hub.hello(&hello, 0).unwrap()).unwrap();
+    // The hub says 2 (its ack + 1); the node starts from what it has, as if it believed the hub were further on.
+    let ok = hub.resume(&up.resume().unwrap()).unwrap();
+    assert_eq!(ok.from_seq, 2);
+    let start = agora_protocol::v1::ResumeOk { from_seq: oldest };
+    assert_eq!(up.on_resume_ok(&start).unwrap(), Replay::Resumed);
+    let first = up.next_batch(1).unwrap();
+    assert_eq!(
+        hub.event(&first[0]).unwrap(),
+        Ingest::Gap { expected: 2 },
+        "the hub wants 2"
+    );
+    // That gap answer asks for what is gone: the node resynchronizes, once.
+    let before = sink.next_seq();
+    assert_eq!(
+        up.on_gap(2).unwrap(),
+        Replay::Resync {
+            from_seq: 2,
+            // Read after the announcement, which may push more out under the cap.
+            oldest_retained: sink.oldest_retained()
         }
-        other => panic!("expected Stale, got {other:?}"),
+    );
+    let after_first = sink.next_seq();
+    assert!(
+        after_first > before,
+        "the present was announced at the tail"
+    );
+    assert_eq!(up.on_gap(2).unwrap(), Replay::Resumed, "a late answer");
+    assert_eq!(sink.next_seq(), after_first, "announced once");
+    hub.snapshot_required(0).unwrap();
+    for p in up.next_batch(1000).unwrap() {
+        hub.event(&p).unwrap();
     }
+    assert_eq!(store.acked("n1").unwrap(), sink.next_seq() - 1);
+    // Only one event was in flight before the resync, so only one late answer could come; another means the hub ignored
+    // `SnapshotRequired` (a hub from before ADR-0054), and the connection ends instead of looping.
+    assert!(matches!(up.on_gap(2), Err(UplinkError::Stale { .. })));
 }
 
 #[test]

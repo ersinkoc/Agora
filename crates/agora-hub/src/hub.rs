@@ -161,7 +161,7 @@ impl Hub {
     ) -> Result<Ingest, SessionError> {
         let mut g = self.lock();
         let outcome = session.event(payload)?;
-        if let Ingest::Applied { pos, .. } = outcome {
+        if let Ingest::Applied { pos, .. } | Ingest::Resynced { pos, .. } = outcome {
             // The session already decoded it successfully, so this cannot fail; stay defensive anyway.
             if let Ok(event) = Event::decode(payload) {
                 let restarted = match &event.body {
@@ -466,6 +466,27 @@ mod tests {
             Ingest::Duplicate { acked: 2 }
         );
         assert!(sub.live.try_recv().is_err());
+    }
+
+    /// ADR-0054: the event a node's resync lands on goes into the view and to subscribers like any applied one.
+    #[test]
+    fn a_resynced_event_is_published_and_folded_into_the_view() {
+        let (hub, sup) = (hub(), support());
+        let mut s = open_session(&hub, &sup, "n1");
+        hub.ingest(&mut s, &online("n1", 1)).unwrap();
+        let sub = hub.subscribe(Some(1)).unwrap();
+        s.snapshot_required(9).unwrap();
+        assert_eq!(
+            hub.ingest(&mut s, &agent("n1", 7, "a")).unwrap(),
+            Ingest::Resynced {
+                acked: 7,
+                pos: 2,
+                from_seq: 2,
+                to_seq: 6
+            }
+        );
+        assert!(hub.view().0.agents.contains_key("n1/a"));
+        assert_eq!(sub.live.try_recv().map(|d| d.pos).ok(), Some(2));
     }
 
     #[test]

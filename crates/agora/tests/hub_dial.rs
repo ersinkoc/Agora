@@ -886,6 +886,67 @@ fn a_node_that_returns_under_a_known_name_with_an_empty_data_dir_is_still_heard(
     });
 }
 
+/// ADR-0054 over the real transport: a node whose size cap dropped events the hub never saw used to end every connection in
+/// `Stale` and retry forever. Now it says `SnapshotRequired`, the hub takes its oldest held event as the new base, records the
+/// lost numbers (store and audit trail) and shows what the node announced as its present.
+#[test]
+fn a_node_that_lost_unacknowledged_events_resyncs_over_the_link() {
+    let hub = hubside("burst");
+    let addr = hub.listen("127.0.0.1:0");
+    let sink = Arc::new(EventSink::open_with_cap(&tmp("burst"), "burst", 1200).unwrap());
+    sink.set_announcer(Box::new(|ev| {
+        ev.node_online("burst");
+        ev.agent_launched(
+            &AgentId::new("agent-now"),
+            "proj",
+            "burst",
+            Path::new("/work/proj"),
+            Path::new("/work/now"),
+            "agent/now",
+            "shell",
+            true,
+        );
+    }));
+    // Offline long enough that the cap dropped events the hub never saw.
+    sink.node_online("burst");
+    for i in 0..60 {
+        sink.node_resources("burst", i, 0, 0);
+    }
+    let oldest = sink.oldest_retained();
+    assert!(oldest > 1);
+    let _link = spawn(Arc::clone(&sink), hub.link(addr)).unwrap();
+    wait("the announced agent to show up", || {
+        hub.state
+            .hub
+            .view()
+            .0
+            .agents
+            .contains_key("burst/agent-now")
+    });
+    wait("everything to be acknowledged", || {
+        sink.acked() == sink.next_seq() - 1
+    });
+    let store = hub.state.hub.store();
+    let resyncs = store.resyncs().unwrap();
+    assert_eq!(resyncs.len(), 1);
+    let (producer, from, to, _) = &resyncs[0];
+    assert_eq!((producer.as_str(), *from), ("burst", 1));
+    // At least what was dropped offline; more if the announcement itself pushed older events out under the cap.
+    assert!(*to >= oldest - 1, "{to} vs {oldest}");
+    let audit = agora_hub::audit::Audit::new(store)
+        .list(0, None, 50)
+        .unwrap();
+    assert!(audit.iter().any(|e| e.action == "node.resynced"
+        && e.who == "hub"
+        && e.node == "burst"
+        && e.outcome == format!("1..={to}")));
+    // From then on the link is ordinary.
+    sink.node_resources("burst", 7, 7, 0);
+    wait("a newer event", || {
+        hub.state.hub.view().0.nodes["burst"].agents_running == 7
+    });
+}
+
 #[test]
 fn a_certificate_the_hub_does_not_know_never_gets_in() {
     let hub = hubside("honest");
