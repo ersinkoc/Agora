@@ -1,16 +1,19 @@
 import { AgentAddress } from './components/AgentAddress';
 import { LanguagePicker } from './components/LanguagePicker';
+import { ThemePicker } from './components/ThemePicker';
 import { PromptBox } from './components/PromptBox';
 import type { ChatSource } from './net/chat';
 import { AgentTile } from './components/AgentTile';
 import { AttentionStrip } from './components/AttentionStrip';
+import { Icon } from './components/Icon';
+import { NetworkView } from './components/NetworkView';
 import { StateBadge } from './components/StateBadge';
 import type { MachineModel, MessageModel, ProjectCost } from './net/view';
 import type { Device } from './net/approval';
 import { money, type UsageSummary } from './net/usage';
 import { demoAgents } from './fixtures';
 import { demoSource, type TerminalSource } from './terminal/source';
-import { Suspense, lazy, useEffect, useMemo, useState } from 'react';
+import { Suspense, lazy, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { actionKey, outcomeKind, type AuditResult } from './net/audit';
 
 // The terminal emulator is the heaviest part of the client; load it only when a Focus view needs it.
@@ -90,26 +93,46 @@ export function Focus({ agent, source: live, costMicroUsd, chatSource, sendPromp
     );
   }
   const why = agent.reportedBy === 'agent' ? t('focus-why-agent') : t('focus-why-screen');
+  // Full size: the terminal takes the whole window under one slim bar, like a maximized editor tab.
   return (
-    <main className="page focus">
-      <div className="flex flex-wrap items-center justify-between gap-3"><button type="button" className="link" onClick={onBack}>{t('focus-back')}</button><LanguagePicker /></div>
-      <header className="topbar">
-        <h1>{agent.name}</h1>
+    <div className="ide" style={{ gridTemplateRows: 'auto minmax(0, 1fr)' }}>
+      <header className="ide-bar min-h-10 flex-wrap border-b py-1">
+        <button type="button" className="ide-row w-auto flex-none text-[13px] text-muted hover:text-ink" onClick={onBack}><Icon name="chevron" className="size-3.5 rotate-180 rtl:rotate-0" />{t('focus-back')}</button>
+        <h1 className="m-0 truncate text-[13px] font-semibold tracking-normal">{agent.name}</h1>
         <span title={`${t('focus-why')} ${why}`}><StateBadge state={agent.state} /></span>
+        <span className="hidden min-w-0 items-center gap-1.5 truncate text-xs text-muted md:flex"><Icon name="machine" className="size-3.5" />{agent.machine}<Icon name="chevron" className="size-3 rtl:rotate-180" /><Icon name="folder" className="size-3.5" />{agent.project || agent.workspace}{agent.branch && <><Icon name="branch" className="ms-1 size-3.5" /><span className="font-mono">{agent.branch}</span></>}</span>
+        <span className="flex-1" />
+        {agent.tokens ? <span className="ide-chip">{t('agent-tokens', { count: agent.tokens })}{costMicroUsd !== undefined ? ` · ${t('agent-cost', { amount: money(costMicroUsd) })}` : ''}</span> : null}
+        <span className="hidden sm:block"><LanguagePicker compact /></span>
+        <ThemePicker />
       </header>
-      <span className="muted">
-        {t('agent-on-machine', { machine: agent.machine })} · {t('agent-workspace', { name: agent.workspace })}
-      </span>
-      <AgentAddress key={agent.id} agent={agent} />
-      {agent.tokens ? <span className="muted">{t('agent-tokens', { count: agent.tokens })}{costMicroUsd !== undefined ? ` · ${t('agent-cost', { amount: money(costMicroUsd) })}` : ''}</span> : null}
-      {agent.terminal === false ? <section className="h-[65vh] min-h-0" aria-label={t('chat-log')}><PromptBox agent={agent} source={chatSource} send={sendPrompt} /></section> : <>
-        <h2>{t('focus-terminal')}</h2>
-        <Suspense fallback={<div className="terminal" aria-busy="true" />}>
-          <TerminalView source={source} label={t('focus-terminal')} />
-        </Suspense>
-        {!live && <p className="muted">{t('focus-terminal-placeholder')}</p>}
-      </>}
-    </main>
+      <main className="flex min-h-0 min-w-0 flex-col">
+        <AgentAddress key={agent.id} agent={agent} />
+        <div className="pane min-h-0 flex-1 bg-surface-0 p-1.5" aria-label={agent.terminal === false ? t('chat-log') : t('focus-terminal')}>
+          {agent.terminal === false ? <PromptBox agent={agent} source={chatSource} send={sendPrompt} /> : (
+            <Suspense fallback={<div className="terminal" aria-busy="true" />}>
+              <TerminalView source={source} label={t('focus-terminal')} />
+            </Suspense>
+          )}
+        </div>
+        {agent.terminal !== false && !live && <p className="muted m-0 border-t border-line bg-surface-1 px-3 py-1.5">{t('focus-terminal-placeholder')}</p>}
+      </main>
+    </div>
+  );
+}
+
+// Pages other than the window itself (machines, this device, audit): the same title bar, content in a readable column.
+function PageFrame({ title, onBack, children, wide }: { title: string; onBack: () => void; children: ReactNode; wide?: boolean }) {
+  return (
+    <div className="min-h-screen bg-surface-0">
+      <header className="ide-bar sticky top-0 z-10 h-10 border-b">
+        <button type="button" className="ide-row w-auto flex-none text-[13px] text-muted hover:text-ink" onClick={onBack}><Icon name="chevron" className="size-3.5 rotate-180 rtl:rotate-0" />{t('focus-back')}</button>
+        <h1 className="m-0 min-w-0 flex-1 truncate text-[13px] font-semibold tracking-normal">{title}</h1>
+        <span className="hidden sm:block"><LanguagePicker compact /></span>
+        <ThemePicker />
+      </header>
+      <main className={`mx-auto grid gap-4 px-4 py-6 ${wide ? 'max-w-5xl' : 'max-w-3xl'}`}>{children}</main>
+    </div>
   );
 }
 
@@ -117,9 +140,7 @@ export function Focus({ agent, source: live, costMicroUsd, chatSource, sendPromp
 export function DevicePage({ device, onBack, onAddPasskey }: { device: Device | undefined; onBack: () => void; onAddPasskey?: () => Promise<boolean> }) {
   const [passkey, setPasskey] = useState<'added' | 'failed' | undefined>();
   return (
-    <main className="page">
-      <button type="button" className="link" onClick={onBack}>{t('focus-back')}</button>
-      <h1>{t('device-title')}</h1>
+    <PageFrame title={t('device-title')} onBack={onBack}>
       <p>{t('device-intro')}</p>
       {device && (
         <section className="stack">
@@ -134,7 +155,7 @@ export function DevicePage({ device, onBack, onAddPasskey }: { device: Device | 
           {passkey && <p role="status">{t(passkey === 'added' ? 'device-passkey-added' : 'device-passkey-failed')}</p>}
         </section>
       )}
-    </main>
+    </PageFrame>
   );
 }
 
@@ -148,9 +169,7 @@ export function AuditPage({ load, onBack }: { load: (who: string) => Promise<Aud
     return () => { live = false; clearTimeout(timer); };
   }, [who, load]);
   return (
-    <main className="page">
-      <button type="button" className="link" onClick={onBack}>{t('focus-back')}</button>
-      <h1>{t('audit-title')}</h1>
+    <PageFrame title={t('audit-title')} onBack={onBack}>
       <p className="muted">{t('audit-intro')}</p>
       <label>
         <span className="muted">{t('audit-person')}</span>{' '}
@@ -178,7 +197,7 @@ export function AuditPage({ load, onBack }: { load: (who: string) => Promise<Aud
           ))}
         </ul>
       )}
-    </main>
+    </PageFrame>
   );
 }
 
@@ -209,27 +228,10 @@ export function SignInPage({ onSubmit, onPasskey, notice }: { onSubmit: (code: s
   );
 }
 
-export function MachinesPage({ machines, usage, projects = [], onBack }: { machines: readonly MachineModel[]; usage?: UsageSummary; projects?: readonly ProjectCost[]; onBack: () => void }) {
+export function MachinesPage({ machines, agents = [], usage, projects = [], onBack }: { machines: readonly MachineModel[]; agents?: readonly AgentTileModel[]; usage?: UsageSummary; projects?: readonly ProjectCost[]; onBack: () => void }) {
   return (
-    <main className="page">
-      <button type="button" className="link" onClick={onBack}>{t('focus-back')}</button>
-      <h1>{t('machines-title')}</h1>
-      {machines.length === 0 ? (
-        <p className="muted">{t('machines-empty')}</p>
-      ) : (
-        <ul className="machines">
-          {machines.map((m) => (
-            <li key={m.id} className="machine">
-              <strong>{m.name}</strong>
-              <code className="break-all text-xs text-muted">{t('machine-identity', { id: m.id })}</code>
-              <span className="muted">{m.os}</span>
-              <span>{t(m.online ? 'machine-online' : 'machine-offline')}</span>
-              <span className="muted">{t('machine-agents', { count: m.agentsRunning })}</span>
-              {usage?.perNode.has(m.id) ? <span className="muted">{t('machine-cost', { amount: money(usage.perNode.get(m.id) ?? 0) })}</span> : null}
-            </li>
-          ))}
-        </ul>
-      )}
+    <PageFrame wide title={t('machines-title')} onBack={onBack}>
+      <NetworkView machines={machines} agents={agents} usage={usage} hubName={window.location.host} />
       {projects.length > 0 && (
         <section className="stack" aria-label={t('usage-projects')}>
           <h2>{t('usage-projects')}</h2>
@@ -243,6 +245,6 @@ export function MachinesPage({ machines, usage, projects = [], onBack }: { machi
           {t('usage-total', { amount: money(usage.totalMicroUsd) })} · {usage.pricesAtMs ? t('usage-prices-date', { date: new Date(usage.pricesAtMs).toLocaleDateString() }) : t('usage-prices-bundled')}
         </p>
       )}
-    </main>
+    </PageFrame>
   );
 }
