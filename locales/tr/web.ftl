@@ -314,3 +314,4 @@ closed-changes-label = Geride kalan
 closed-changes-none = Kaydedilmemiş değişiklik yok
 closed-tokens-label = Kullanılan
 closed-review = Değişiklikleri incele
+ide-resize = Paneli yeniden boyutlandır
