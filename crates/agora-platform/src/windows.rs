@@ -33,7 +33,7 @@ use windows_sys::Win32::System::Console::{
     STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
 };
 use windows_sys::Win32::System::Pipes::{
-    ConnectNamedPipe, CreateNamedPipeW, WaitNamedPipeW, PIPE_READMODE_BYTE,
+    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, WaitNamedPipeW, PIPE_READMODE_BYTE,
     PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
 };
 use windows_sys::Win32::System::Threading::{CreateEventW, WaitForSingleObject, INFINITE};
@@ -284,6 +284,14 @@ impl Listener {
                 match unsafe { GetLastError() } {
                     ERROR_PIPE_CONNECTED => connected = true,
                     ERROR_IO_PENDING => st.pending = Some(Pending { event, ov }),
+                    // A client connected and left before this accept: the instance stays "being closed" until it is disconnected,
+                    // and every later accept would fail on it. Reset it (the name stays served) and wait for the next client.
+                    ERROR_NO_DATA => {
+                        // SAFETY: a live pipe instance with no operation pending.
+                        unsafe { DisconnectNamedPipe(inst) };
+                        drop(st);
+                        return self.accept();
+                    }
                     e => return Err(os_error(e)),
                 }
             }
@@ -789,5 +797,29 @@ mod tests {
         drop(c);
         let mut b = [0u8; 4];
         assert_eq!(Read::read(&mut s, &mut b).unwrap(), 0);
+    }
+
+    #[test]
+    fn a_client_that_leaves_before_accept_does_not_stop_the_next_one() {
+        let p = path("early");
+        let l = listen(&p).unwrap();
+        // Connects and leaves before the server accepts (it holds the only free instance until then).
+        drop(connect(&p).unwrap());
+        let client = {
+            let p = p.clone();
+            std::thread::spawn(move || {
+                let mut c = connect(&p).unwrap();
+                c.write_all(b"hi").unwrap();
+                let mut b = [0u8; 2];
+                c.read_exact_pipe(&mut b);
+                b
+            })
+        };
+        let mut s = l.accept().unwrap();
+        let mut b = [0u8; 2];
+        s.read_exact_pipe(&mut b);
+        assert_eq!(&b, b"hi");
+        s.write_all(b"ok").unwrap();
+        assert_eq!(&client.join().unwrap(), b"ok");
     }
 }
