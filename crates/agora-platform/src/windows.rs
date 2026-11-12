@@ -33,7 +33,7 @@ use windows_sys::Win32::System::Console::{
     STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
 };
 use windows_sys::Win32::System::Pipes::{
-    ConnectNamedPipe, CreateNamedPipeW, WaitNamedPipeW, PIPE_READMODE_BYTE,
+    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, WaitNamedPipeW, PIPE_READMODE_BYTE,
     PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
 };
 use windows_sys::Win32::System::Threading::{CreateEventW, WaitForSingleObject, INFINITE};
@@ -86,9 +86,11 @@ fn overlapped(event: &Event) -> OVERLAPPED {
 }
 
 /// The pipe name for a socket path: the file name for people, a hash of the whole path so two sockets of the same name in different
-/// folders do not meet.
+/// folders do not meet. The path is hashed in one spelling (absolute, `\`, no `..`, not verbatim), so every spelling of one socket file
+/// names one pipe, as every spelling reaches one socket on Unix. A path already in that spelling hashes as before.
 fn pipe_name(path: &Path) -> Vec<u16> {
-    let full = path.to_string_lossy().to_lowercase();
+    let normal = std::path::absolute(path).map_or_else(|_| path.to_path_buf(), plain_path);
+    let full = normal.to_string_lossy().to_lowercase();
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in full.as_bytes() {
         h ^= u64::from(*b);
@@ -262,6 +264,16 @@ impl Listener {
     }
 
     pub fn accept(&self) -> io::Result<Stream> {
+        // Clients that left before they were accepted are skipped, however many there were.
+        loop {
+            if let Some(s) = self.accept_once()? {
+                return Ok(s);
+            }
+        }
+    }
+
+    /// One accept; `None` when the instance's client had already left (the instance is reset for the next one).
+    fn accept_once(&self) -> io::Result<Option<Stream>> {
         let mut st = self
             .state
             .lock()
@@ -282,6 +294,13 @@ impl Listener {
                 match unsafe { GetLastError() } {
                     ERROR_PIPE_CONNECTED => connected = true,
                     ERROR_IO_PENDING => st.pending = Some(Pending { event, ov }),
+                    // A client connected and left before this accept: the instance stays "being closed" until it is disconnected,
+                    // and every later accept would fail on it. Reset it (the name stays served) and wait for the next client.
+                    ERROR_NO_DATA => {
+                        // SAFETY: a live pipe instance with no operation pending.
+                        unsafe { DisconnectNamedPipe(inst) };
+                        return Ok(None);
+                    }
                     e => return Err(os_error(e)),
                 }
             }
@@ -317,7 +336,7 @@ impl Listener {
         // A fresh instance is ready before the connected one is handed out, so the next client finds one.
         let next = create_instance(&self.name, &self.sd, false)?;
         let conn = st.instance.replace(next);
-        conn.map(Stream::from_handle)
+        conn.map(|h| Some(Stream::from_handle(h)))
             .ok_or_else(|| io::Error::other("no instance"))
     }
 }
@@ -650,6 +669,39 @@ mod tests {
     }
 
     #[test]
+    fn every_spelling_of_one_socket_path_reaches_one_listener() {
+        let p = path("spelling");
+        let l = listen(&p).unwrap();
+        let text = p.to_string_lossy().into_owned();
+        let parent = p.parent().unwrap();
+        let spellings = [
+            PathBuf::from(text.replace('\\', "/")),
+            parent.join("x").join("..").join(p.file_name().unwrap()),
+            PathBuf::from(format!(r"\\?\{text}")),
+            PathBuf::from(text.to_uppercase()),
+        ];
+        // Pipe names compare without case, like the paths.
+        let name = |p: &Path| String::from_utf16_lossy(&pipe_name(p)).to_lowercase();
+        for s in &spellings {
+            assert_eq!(name(s), name(&p), "{}", s.display());
+            let client = connect(s);
+            assert!(client.is_ok(), "{}", s.display());
+            // Frees the instance for the next client.
+            l.accept().unwrap();
+            drop(client);
+        }
+        // Relative to the current folder: the same pipe as the absolute spelling there.
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(
+            pipe_name(Path::new("n.sock")),
+            pipe_name(&cwd.join("n.sock"))
+        );
+        // Two different socket files still get two pipes.
+        assert_ne!(pipe_name(&p), pipe_name(&path("other")));
+        drop(l);
+    }
+
+    #[test]
     fn a_client_and_a_server_talk_both_ways_and_a_second_listener_is_refused() {
         let p = path("talk");
         let l = listen(&p).unwrap();
@@ -754,5 +806,29 @@ mod tests {
         drop(c);
         let mut b = [0u8; 4];
         assert_eq!(Read::read(&mut s, &mut b).unwrap(), 0);
+    }
+
+    #[test]
+    fn a_client_that_leaves_before_accept_does_not_stop_the_next_one() {
+        let p = path("early");
+        let l = listen(&p).unwrap();
+        // Connects and leaves before the server accepts (it holds the only free instance until then).
+        drop(connect(&p).unwrap());
+        let client = {
+            let p = p.clone();
+            std::thread::spawn(move || {
+                let mut c = connect(&p).unwrap();
+                c.write_all(b"hi").unwrap();
+                let mut b = [0u8; 2];
+                c.read_exact_pipe(&mut b);
+                b
+            })
+        };
+        let mut s = l.accept().unwrap();
+        let mut b = [0u8; 2];
+        s.read_exact_pipe(&mut b);
+        assert_eq!(&b, b"hi");
+        s.write_all(b"ok").unwrap();
+        assert_eq!(&client.join().unwrap(), b"ok");
     }
 }
