@@ -291,12 +291,18 @@ impl EventSink {
         }));
     }
 
-    pub fn node_resources(&self, node: &str, agents_running: u32, terminals_open: u32) {
+    pub fn node_resources(
+        &self,
+        node: &str,
+        agents_running: u32,
+        terminals_open: u32,
+        memory_used_bytes: u64,
+    ) {
         self.record(Body::NodeResources(v1::NodeResources {
             node_id: node.to_string(),
             agents_running,
             terminals_open,
-            memory_used_bytes: 0,
+            memory_used_bytes,
         }));
     }
 
@@ -766,6 +772,8 @@ impl Node {
                 .name("agora-supervise".into())
                 .spawn(move || {
                     let mut reported = (u32::MAX, u32::MAX);
+                    let mut reported_memory = 0u64;
+                    let mut memory_checked = Instant::now();
                     let mut usage = crate::usage_files::UsageWatcher::default();
                     while !stop.load(Ordering::Acquire) {
                         let (events, views, usage_targets, ended) = {
@@ -860,12 +868,23 @@ impl Node {
                                 .adapter_resolve_approval(&agent, &adapter_id, false);
                             ev.approval_resolved(&node_approval, false, "");
                         }
-                        // Resources are reported when they change, not on a timer, so an idle node is silent.
+                        // Resources are reported when they change, not on a timer, so an idle node is silent: when the number of
+                        // running agents changes, and when their memory moved a lot since the last report (checked every
+                        // `MEMORY_CHECK`, only while agents run).
                         let running = u32::try_from(views.iter().filter(|v| v.running).count())
                             .unwrap_or(u32::MAX);
-                        if (running, running) != reported {
-                            reported = (running, running);
-                            ev.node_resources(&node_id, running, running);
+                        let count_changed = (running, running) != reported;
+                        if count_changed
+                            || (running > 0 && memory_checked.elapsed() >= MEMORY_CHECK)
+                        {
+                            memory_checked = Instant::now();
+                            let pids = sup.lock().unwrap_or_else(|e| e.into_inner()).running_pids();
+                            let memory = agents_memory(&pids);
+                            if count_changed || memory_moved(reported_memory, memory) {
+                                reported = (running, running);
+                                reported_memory = memory;
+                                ev.node_resources(&node_id, running, running, memory);
+                            }
                         }
                         std::thread::sleep(TICK);
                     }
@@ -904,6 +923,33 @@ impl Node {
 /// Reports each agent workspace's uncommitted changes whenever they change (`GitStatusChanged`), checked every
 /// [`GIT_POLL`] on its own thread so slow git calls never delay the supervisor's ticks. The first check of a
 /// workspace is reported too, so a client that connects later sees the current state from the event log.
+/// How often the memory of running agents is measured between changes in their number.
+const MEMORY_CHECK: Duration = Duration::from_secs(30);
+
+/// Resident memory of every process at or below `roots` (each running agent's own process tree), counted once each. A process that
+/// cannot be read (gone, or not ours to read) counts as nothing.
+fn agents_memory(roots: &[u32]) -> u64 {
+    let mut seen = std::collections::HashSet::new();
+    let mut total = 0u64;
+    for root in roots {
+        let Ok(tree) = agora_platform::process_tree(*root) else {
+            continue;
+        };
+        for p in tree {
+            if seen.insert(p.pid) {
+                total += agora_platform::process_stats(p.pid).map_or(0, |s| s.rss_bytes);
+            }
+        }
+    }
+    total
+}
+
+/// Whether memory moved enough since the last report to send another: by more than a quarter, or by more than 256 MiB.
+fn memory_moved(reported: u64, now: u64) -> bool {
+    let moved = reported.abs_diff(now);
+    moved > reported / 4 || moved > 256 << 20
+}
+
 fn watch_git(sup: &Mutex<Supervisor>, ev: &EventSink, stop: &AtomicBool) {
     let mut last: std::collections::HashMap<(PathBuf, bool), (u32, u32, u32, String)> =
         std::collections::HashMap::new();
@@ -1000,4 +1046,60 @@ pub fn load_manifests(dir: &Path) -> (Vec<Manifest>, Vec<(PathBuf, String)>) {
         }
     }
     (found, problems)
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)] // expect is allowed in tests
+mod memory_tests {
+    use super::{agents_memory, memory_moved};
+
+    #[test]
+    fn memory_is_reported_again_only_when_it_moved_a_lot() {
+        assert!(!memory_moved(0, 0));
+        assert!(
+            memory_moved(0, 1 << 20),
+            "the first measurement after nothing"
+        );
+        let gib = 1u64 << 30;
+        assert!(!memory_moved(gib, gib + (gib / 5)), "20% up");
+        assert!(memory_moved(gib, gib + (gib / 3)), "33% up");
+        assert!(memory_moved(gib, gib / 2), "half down");
+        let big = 8 * gib;
+        assert!(memory_moved(big, big + (300 << 20)), "300 MiB on 8 GiB");
+        assert!(!memory_moved(big, big + (200 << 20)), "200 MiB on 8 GiB");
+    }
+
+    #[test]
+    fn an_agents_memory_counts_its_whole_process_tree() {
+        // A shell with a child below it, as an agent with the tools it started.
+        let mut shell = std::process::Command::new("sh")
+            .args(["-c", "sleep 5 & wait"])
+            .spawn()
+            .expect("spawn");
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let pid = shell.id();
+        let tree = agora_platform::process_tree(pid).expect("tree");
+        let measured = agents_memory(&[pid]);
+        // Counted once, however often it is named.
+        let again = agents_memory(&[pid, pid]);
+        let own = agora_platform::process_stats(pid)
+            .map(|s| s.rss_bytes)
+            .expect("stats");
+        let _ = shell.kill();
+        let _ = shell.wait();
+        assert!(tree.len() >= 2, "the shell and its sleep: {tree:?}");
+        assert!(
+            measured > own,
+            "the child is counted too: {measured} vs {own}"
+        );
+        assert!(
+            again.abs_diff(measured) < measured / 2,
+            "{again} vs {measured}"
+        );
+        assert_eq!(
+            agents_memory(&[u32::MAX - 1]),
+            0,
+            "a process that does not exist"
+        );
+    }
 }
