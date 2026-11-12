@@ -197,8 +197,10 @@ fn plain_hardened(dir: &Path) -> Command {
     if meta.is_symlink() {
         c.args(REFUSED);
     } else if meta.is_file() {
-        if let (Some((admin, common)), Ok(work)) =
-            (crate::sandbox::git_dirs(dir), std::fs::canonicalize(dir))
+        // Plain spellings, as for any path a process is given (no verbatim `\\?\` prefix on Windows).
+        let plain = agora_platform::canonicalize_plain;
+        if let Some((Ok(admin), Ok(common), Ok(work))) = crate::sandbox::git_dirs(dir)
+            .map(|(admin, common)| (plain(&admin), plain(&common), plain(dir)))
         {
             c.env("GIT_DIR", admin)
                 .env("GIT_COMMON_DIR", common)
@@ -865,7 +867,10 @@ mod tests {
         fs::write(r.dir.join("lib/.gitattributes"), "*.txt filter=ev\n").expect("attributes");
         // Same size, later mtime: git must hash the file, which runs the clean filter.
         std::thread::sleep(std::time::Duration::from_millis(1100));
-        fs::write(r.dir.join("lib/a.txt"), "uno\n").expect("edit");
+        // Keep the checkout's own line ending (`core.autocrlf` writes `one\r\n` on Windows): a size change lets git call the
+        // file modified without hashing it, and the clean filter would never run.
+        let checked_out = fs::read_to_string(r.dir.join("lib/a.txt")).expect("read");
+        fs::write(r.dir.join("lib/a.txt"), checked_out.replace("one", "uno")).expect("edit");
 
         // The node's git.
         status(&r.dir).expect("status");
@@ -932,7 +937,10 @@ mod tests {
         fs::write(admin.join("commondir"), format!("{}\n", fake.display())).expect("commondir");
         fs::write(wt.join(".gitattributes"), "*.txt filter=ev\n").expect("attributes");
         std::thread::sleep(std::time::Duration::from_millis(1100));
-        fs::write(wt.join("a.txt"), "uno\n").expect("edit");
+        // Keep the checkout's own line ending (`core.autocrlf` writes `one\r\n` on Windows): a size change lets git call the
+        // file modified without hashing it, and the clean filter would never run.
+        let checked_out = fs::read_to_string(wt.join("a.txt")).expect("read");
+        fs::write(wt.join("a.txt"), checked_out.replace("one", "uno")).expect("edit");
 
         // Pinned: the node's git uses the real shared folder, not the one `commondir` names. The filter blanking alone would also
         // stop this plant, but not one added between its question and the command.
@@ -940,9 +948,11 @@ mod tests {
             .args(["rev-parse", "--git-common-dir"])
             .output()
             .expect("rev-parse");
+        let used = PathBuf::from(String::from_utf8_lossy(&used.stdout).trim());
+        // git prints forward slashes on Windows; compare the folders, not the spellings.
         assert_eq!(
-            PathBuf::from(String::from_utf8_lossy(&used.stdout).trim()),
-            common
+            agora_platform::canonicalize_plain(&used).expect("used"),
+            agora_platform::canonicalize_plain(&common).expect("common")
         );
         let _ = status(&wt);
         let _ = diff(&wt, None);
