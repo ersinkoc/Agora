@@ -345,6 +345,75 @@ pub fn create_worktree(
     Ok(())
 }
 
+/// Receipt for a worktree made for one pending start. Ordinary worktree removal never deletes a branch.
+pub(crate) struct StartWorktree {
+    checkout: PathBuf,
+    worktree: PathBuf,
+    branch: String,
+    initial: String,
+}
+
+/// Resolve the starting commit before creation, so a concurrent commit cannot be mistaken for disposable initial state.
+pub(crate) fn create_start_worktree(
+    checkout: &Path,
+    worktree: &Path,
+    branch: &str,
+    base: Option<&str>,
+) -> Result<StartWorktree, GitError> {
+    let base = base.unwrap_or("HEAD");
+    if base.starts_with('-') {
+        return Err(GitError::InvalidBranch(base.into()));
+    }
+    let initial = git(
+        checkout,
+        &[
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            &format!("{base}^{{commit}}"),
+        ],
+    )?
+    .trim()
+    .to_owned();
+    create_worktree(checkout, worktree, branch, Some(&initial))?;
+    Ok(StartWorktree {
+        checkout: checkout.to_path_buf(),
+        worktree: worktree.to_path_buf(),
+        branch: branch.to_owned(),
+        initial,
+    })
+}
+
+impl StartWorktree {
+    /// Remove this failed start's worktree first, then its branch only if still unused and at the initial commit.
+    /// Changed, symbolic or checked-out branches are kept; a ref lock makes the commit comparison and deletion atomic.
+    pub(crate) fn rollback(self) -> Result<(), GitError> {
+        remove_worktree(&self.checkout, &self.worktree, true)?;
+        let reference = format!("refs/heads/{}", self.branch);
+        let checked_out = format!("branch {reference}");
+        if git(&self.checkout, &["worktree", "list", "--porcelain", "-z"])?
+            .split('\0')
+            .any(|field| field == checked_out)
+        {
+            return Ok(());
+        }
+        // Exit 1 means a direct ref. A symbolic ref or an inspection error must not authorize deletion.
+        let symbolic = hardened(&self.checkout)
+            .args(["symbolic-ref", "--quiet", &reference])
+            .output()
+            .map_err(|e| GitError::Io(e.to_string()))?;
+        if symbolic.status.code() != Some(1) {
+            return Ok(());
+        }
+        // Never follow a symbolic ref even if another process rewrites it after the check above.
+        git(
+            &self.checkout,
+            &["update-ref", "--no-deref", "-d", &reference, &self.initial],
+        )
+        .map(|_| ())
+    }
+}
+
 fn branch_exists(dir: &Path, branch: &str) -> Result<bool, GitError> {
     match git(
         dir,

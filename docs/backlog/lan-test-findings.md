@@ -45,7 +45,8 @@ branch (`docs/fordevs/`). Each row is something the run showed that no CI run ha
 - **L18** "Recent messages" says agents have not written to each other yet after a hub restart (mesh history is not re-read).
 - **L19** The web app takes its language only from `navigator.language`; there is no in-app switch, so Turkish needs a `tr-TR` browser. Implemented in #284: sign-in, Home and Focus offer a remembered browser-language override; live terminals and unfinished forms survive switching.
 - **L20** A refused or abandoned start leaves its `agent/<name>` branch behind: `Supervisor::abandon` removes the worktree but not the branch.
-  Open.
+  Fixed for failures after node-owned worktree creation in #314: terminal, injection, selected-worktree and adapter failures roll back the
+  unchanged unused branch only after worktree removal succeeds. Changed, symbolic, checked-out and existing branches stay.
   - Not a bug: "an agent killed from outside stays `running`". The restart policy started it again. What is missing is UX: the restart is
     not shown, so it looks as if nothing happened.
 - **L22** A confined agent started in a **selected checkout** (`agent start --project` with no `--worktree` starts in the checkout itself)
