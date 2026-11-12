@@ -6,9 +6,12 @@ adapter launch failures also leave the new worktree itself.
 
 ## Change
 
-`git::create_start_worktree` resolves the requested starting commit before creation,
-creates the worktree at that exact commit, and returns a private receipt with its
-checkout, worktree, branch and initial commit. No destructor performs cleanup.
+`git::create_start_worktree` snapshots the requested starting commit before creation
+and returns a private receipt with its checkout, worktree, branch and expected initial
+commit. Git receives the original base expression to preserve its normal upstream
+setup. If the base moves during creation, cleanup conservatively keeps the branch.
+Repository configuration is preserved; rollback deletes only the eligible branch ref.
+No destructor performs cleanup.
 Terminal/injection failures, selected-worktree failures and adapter launch failures
 explicitly consume the receipt. Empty adapter commands are rejected before creation.
 
@@ -27,22 +30,30 @@ there are no schema, sandbox-policy, dependency or hot-path changes.
 
 ## Verification
 
-Ten public-API tests in `crates/agora-node/tests/start_rollback.rs` use disposable Git
+Eleven public-API tests in `crates/agora-node/tests/start_rollback.rs` use disposable Git
 repositories and a missing fake-agent executable, never real agents or credentials:
 
 - Failed terminal start cleans up and can retry with the same name.
 - Selected-worktree and adapter failures clean up their own worktree/branch.
 - Injection failure cleans up and calls the endpoint abort hook exactly once.
 - An explicit starting commit is compared against itself, not current checkout HEAD.
+- A remote base preserves Git's normal upstream setup, confirmed against a control worktree.
 - A new commit made during injection remains reachable on its branch.
 - A branch checked out elsewhere, a locked worktree, and a rewritten symbolic ref stay.
 - Pre-existing branches and uncommitted files in selected user directories stay.
 
 Before the fix, the original eight-test suite has three failures: terminal and selected
 launches leave their branch, and adapter failure leaves its worktree. The five retention
-tests pass already. With the fix all ten pass. Temporarily removing the expected-OID,
+tests pass already. With the fix all eleven pass. An additional control exposed the
+first revision's lost upstream setup when an OID replaced the original base expression;
+preserving that expression fixes the regression. Temporarily removing the expected-OID,
 checked-out-branch and symbolic-ref guards separately makes the corresponding retention
 test fail; each mutation is restored before final validation.
+
+The first Windows CI run exposed an old test workaround: after a refused confined
+start, `confined_git_commit` manually deleted the leaked branch. Cleanup now already
+removes it, so that deletion failed. The test now asserts branch absence and retries
+directly after tightening the test folder; it no longer relies on the old leak.
 
 Full workspace tests, Clippy with warnings denied, formatting, locale lint and docs
 checks pass locally; final CI status is recorded in the PR. No real

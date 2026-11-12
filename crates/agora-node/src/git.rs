@@ -353,16 +353,17 @@ pub(crate) struct StartWorktree {
     initial: String,
 }
 
-/// Resolve the starting commit before creation, so a concurrent commit cannot be mistaken for disposable initial state.
+/// Snapshot the base before creation, so later commits cannot be mistaken for disposable initial state.
+/// Git still receives the original base expression to preserve its upstream setup; a moving base conservatively keeps the branch.
 pub(crate) fn create_start_worktree(
     checkout: &Path,
     worktree: &Path,
     branch: &str,
     base: Option<&str>,
 ) -> Result<StartWorktree, GitError> {
-    let base = base.unwrap_or("HEAD");
-    if base.starts_with('-') {
-        return Err(GitError::InvalidBranch(base.into()));
+    let expression = base.unwrap_or("HEAD");
+    if expression.starts_with('-') {
+        return Err(GitError::InvalidBranch(expression.into()));
     }
     let initial = git(
         checkout,
@@ -370,12 +371,12 @@ pub(crate) fn create_start_worktree(
             "rev-parse",
             "--verify",
             "--end-of-options",
-            &format!("{base}^{{commit}}"),
+            &format!("{expression}^{{commit}}"),
         ],
     )?
     .trim()
     .to_owned();
-    create_worktree(checkout, worktree, branch, Some(&initial))?;
+    create_worktree(checkout, worktree, branch, base)?;
     Ok(StartWorktree {
         checkout: checkout.to_path_buf(),
         worktree: worktree.to_path_buf(),

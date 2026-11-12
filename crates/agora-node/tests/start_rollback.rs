@@ -224,6 +224,48 @@ fn an_explicit_base_is_rolled_back_against_that_commit_not_the_current_head() {
 }
 
 #[test]
+fn a_remote_base_keeps_gits_normal_upstream_setup() {
+    let repo = Repo::new();
+    raw(&repo.checkout, &["config", "branch.autoSetupMerge", "true"]);
+    raw(
+        &repo.checkout,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://example.invalid/fixture.git",
+        ],
+    );
+    raw(
+        &repo.checkout,
+        &["update-ref", "refs/remotes/origin/main", "HEAD"],
+    );
+    let control = repo.root.join("control");
+    git::create_worktree(&repo.checkout, &control, "control", Some("origin/main")).unwrap();
+    assert_eq!(
+        raw(&control, &["rev-parse", "--abbrev-ref", "@{upstream}"]).trim(),
+        "origin/main"
+    );
+    git::remove_worktree(&repo.checkout, &control, true).unwrap();
+    let mut req = repo.request();
+    req.base = Some("origin/main".into());
+    let mut supervisor = repo.supervisor(false);
+    supervisor.set_launch_hook(Box::new(|launch| {
+        assert_eq!(
+            raw(
+                &launch.worktree,
+                &["rev-parse", "--abbrev-ref", "@{upstream}"]
+            )
+            .trim(),
+            "origin/main"
+        );
+        None
+    }));
+    assert!(supervisor.start(&req, Instant::now()).is_err());
+    repo.no_branch();
+}
+
+#[test]
 fn a_commit_made_during_start_is_preserved_on_its_branch() {
     let repo = Repo::new();
     let req = repo.request();
