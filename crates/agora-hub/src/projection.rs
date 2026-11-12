@@ -252,6 +252,8 @@ impl View {
                     }
                 }
             }
+            // ADR-0053: acted on by the hub once it emits the event (the next change); the schema comes first.
+            Body::AgentForgotten(_) => {}
             Body::AgentExited(e) => {
                 if let Some(a) = self.agents.get_mut(&q(&e.agent_id)) {
                     a.running = false;

@@ -171,6 +171,8 @@ impl Scope {
             Body::AgentSessionReported(e) => self.granted(self.agents.get(&q(&e.agent_id))),
             Body::AgentUsageReported(e) => self.granted(self.agents.get(&q(&e.agent_id))),
             Body::AgentExited(e) => self.granted(self.agents.get(&q(&e.agent_id))),
+            // Made by the hub, which names the agent by its hub-wide key already (ADR-0053).
+            Body::AgentForgotten(e) => self.granted(self.agents.get(&e.agent_id)),
             Body::TerminalOpened(e) => {
                 let p = self.agents.get(&q(&e.agent_id)).cloned();
                 if let Some(p) = &p {

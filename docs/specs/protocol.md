@@ -189,6 +189,8 @@ create a worktree. New clients refuse an unavailable directory launch rather tha
 | New command / request oneof tag | Fields and result |
 | --- | --- |
 | `directory.inspect` / `DirectoryInspect` (81) | `path`, `create_project_id`, `authorization` → `DirectoryInfo` (Ok tag 18): canonical `path`, `project_id`, `git_root`, `branch`, `portable`, `previous_project_id` |
+| `directory.list` / `DirectoryList` (84) | `path` (empty: the user's home folder), `authorization` → `DirectoryEntries` (Ok tag 21): canonical `path`, `parent` (empty at a root), `entries[]` of `{name, is_git}`, `truncated`. Folders only, sorted by name, at most 500 per answer; folders ADR-0052 refuses to launch in are not listed; capability `directory.list` (ADR-0053) |
+| `agent.forget` / `AgentForget` (85) | `agent_id`; answered by the hub, which appends `AgentForgotten` (event 36, `agent_id` is the hub-wide key `<node>/<id>`) and stops listing the agent; `agent.running` while it runs; the earlier events stay in the store (ADR-0053) |
 | `agent.launch` / `AgentLaunch` (82) | canonical `path`, expected `project_id`, `kind`, `separate_worktree`, `authorization`, `accept_identity_change` → `AgentLaunchResult` (Ok tag 19): `agent_id`, `terminal_id`, `workspace_id`, actual cwd `path` |
 | `workspace.query` / `WorkspaceQuery` (83) | `workspace_id`, `operation` (`list`, `read`, `status`, `diff`, `history`), relative `path`, `limit` → existing file/Git results |
 
@@ -232,7 +234,7 @@ so it can be driven with no hub. Frames are the envelope above. `CommandRequest`
 `idempotency_key` gets the stored response (addressed to the retry) and repeats nothing. A terminal stream is
 opened by sending `TerminalSubscribe` on a dynamic stream id (3+) chosen by the client. After the response the
 node writes that terminal's frames on that stream: kind 1 snapshot (ANSI that repaints the screen, with its colours and
-attributes), each one followed by kind 2 with the size it was painted at, kind 0 raw
+attributes, then restores the program's bracketed-paste and application-cursor modes and its current style), each one followed by kind 2 with the size it was painted at, kind 0 raw
 output, kind 2 resize (cols, rows as u16 LE), kind 3 exit (i32 LE; negative = signal). A client that falls behind
 gets a fresh snapshot instead of the dropped output; it never slows the terminal. Input and resize are ordinary
 commands. Terminal ids are `t-<agent id>` (one terminal per agent). Implemented commands: `project.list`,
