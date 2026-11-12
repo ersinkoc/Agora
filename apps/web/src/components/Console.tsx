@@ -142,7 +142,8 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   const changed = [...new Map(fleet.filter((a) => (a.filesChanged ?? 0) > 0 && (!projectFilter || a.projectId === projectFilter))
     .map((a) => [a.workspaceRef ? `${a.workspaceRef.node}/${a.workspaceRef.id}` : a.id, a])).values()]
     .sort((a, b) => (b.filesChanged ?? 0) - (a.filesChanged ?? 0));
-  const needs = attention.length + approvals.length;
+  // An agent that is waiting and has an approval open is one thing that needs you, not two.
+  const needs = attention.length + approvals.filter((x) => !attention.some((a) => a.id === x.agentId)).length;
   const columns = showAgents && showDetails ? 'lg:grid-cols-[17rem_minmax(0,1fr)_21rem]' : showAgents ? 'lg:grid-cols-[17rem_minmax(0,1fr)]' : showDetails ? 'lg:grid-cols-[minmax(0,1fr)_21rem]' : 'lg:grid-cols-1';
   const find = (id?: string) => fleet.find((a) => a.id === id);
 
@@ -180,6 +181,14 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
           {layout === 'grid' && <button type="button" className="ide-iconbtn" onClick={() => close(a.id)} aria-label={t('console-hide')} title={t('console-hide')}><Icon name="close" /></button>}
         </div>
       </div>
+      {approvals.filter((x) => x.agentId === a.id).map((x) => (
+        <div key={x.id} role="alert" className="flex flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-needs-you/60 bg-surface-2 px-3 py-2">
+          <StateMark state="needs-you" />
+          <div className="min-w-0 flex-1"><strong className="block truncate">{t('approval-title', { name: x.agentName })}</strong><span className="block truncate text-xs text-muted">{x.action}{x.detail ? ` · ${x.detail}` : ''}</span></div>
+          <button type="button" className="button button--primary px-3 py-1 text-xs" onClick={() => onResolve(x, true)}>{t('approval-allow')}</button>
+          <button type="button" className="button px-3 py-1 text-xs" onClick={() => onResolve(x, false)}>{t('approval-deny')}</button>
+        </div>
+      ))}
       <AgentAddress agent={a} />
       <div className="pane min-h-0 flex-1 p-1.5">
         {a.terminal === false ? <PromptBox agent={a} send={sendPrompt} source={chatOf?.(a)} /> : (

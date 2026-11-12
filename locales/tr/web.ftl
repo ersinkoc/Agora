@@ -281,3 +281,4 @@ theme-system = Sistemi izle
 theme-dark = Koyu
 theme-light = Açık
 ide-shared = Paylaşılan
+ide-memory = Bu makinedeki ajanların kullandığı bellek

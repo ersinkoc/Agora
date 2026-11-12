@@ -281,3 +281,4 @@ theme-system = Follow the system
 theme-dark = Dark
 theme-light = Light
 ide-shared = Shared
+ide-memory = Memory used by the agents on this machine

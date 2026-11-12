@@ -198,7 +198,7 @@ fn a_node_dials_the_hub_and_its_agents_appear_in_the_view_then_new_events_follow
     });
 
     // Something new on the node shows up live.
-    sink.node_resources("laptop", 3, 3);
+    sink.node_resources("laptop", 3, 3, 0);
     wait("the resource event", || {
         hub.state.hub.view().0.nodes["laptop"].agents_running == 3
     });
@@ -828,7 +828,7 @@ fn a_node_keeps_working_without_the_hub_and_catches_up_when_it_appears() {
     let sink = sink_with_agent(&tmp("late"), "server");
     let _link = spawn(Arc::clone(&sink), hub.link(addr)).unwrap();
     // Events keep being recorded locally while nobody listens.
-    sink.node_resources("server", 1, 1);
+    sink.node_resources("server", 1, 1, 0);
     std::thread::sleep(Duration::from_millis(800));
     assert!(hub.state.hub.view().0.nodes.is_empty());
     assert_eq!(sink.acked(), 0);
@@ -850,8 +850,8 @@ fn a_node_that_returns_under_a_known_name_with_an_empty_data_dir_is_still_heard(
     let addr = hub.listen("127.0.0.1:0");
     // First life: five or more events reach the hub and are acknowledged.
     let first = sink_with_agent(&tmp("returns-1"), "vps");
-    first.node_resources("vps", 1, 1);
-    first.node_resources("vps", 2, 2);
+    first.node_resources("vps", 1, 1, 0);
+    first.node_resources("vps", 2, 2, 0);
     let link = spawn(Arc::clone(&first), hub.link(addr)).unwrap();
     wait("the first life to be acknowledged", || {
         first.acked() >= 6 && first.acked() == first.next_seq() - 1

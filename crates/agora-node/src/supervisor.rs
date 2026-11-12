@@ -1345,6 +1345,20 @@ impl Supervisor {
         self.agents.get(id)?.terminal.as_ref()
     }
 
+    /// The process ids at the top of each running agent: its terminal's process, or its adapter process.
+    pub fn running_pids(&self) -> Vec<u32> {
+        self.agents
+            .values()
+            .filter_map(|e| e.terminal.as_ref().map(TerminalHandle::pid))
+            .chain(
+                self.adapters
+                    .values()
+                    .filter(|e| e.running)
+                    .map(|e| e.adapter.pid()),
+            )
+            .collect()
+    }
+
     pub fn list(&self) -> Vec<AgentView> {
         let mut out: Vec<AgentView> = self
             .agents

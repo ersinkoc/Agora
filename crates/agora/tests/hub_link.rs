@@ -107,7 +107,7 @@ fn a_dropped_connection_resumes_without_duplicates_or_gaps() {
     let total = sink.next_seq() - 1;
     assert_eq!(connect(&store, &sink, "n1", Some(3)).unwrap(), 3);
     // More happens while disconnected: nodes keep working without the hub.
-    sink.node_resources("n1", 1, 1);
+    sink.node_resources("n1", 1, 1, 0);
     let rest = connect(&store, &sink, "n1", None).unwrap() as u64;
     assert_eq!(rest, total + 1 - 3);
     let seqs: Vec<u64> = store
@@ -152,7 +152,7 @@ fn a_node_that_lost_old_events_to_its_size_cap_says_stale() {
     // A cap so small that early events are evicted before the hub ever saw them.
     let sink = Arc::new(EventSink::open_with_cap(&dir, "n1", 600).unwrap());
     for i in 0..40 {
-        sink.node_resources("n1", i, i);
+        sink.node_resources("n1", i, i, 0);
     }
     assert!(sink.oldest_retained() > 1);
     let store = SqliteStore::open_in_memory().unwrap();

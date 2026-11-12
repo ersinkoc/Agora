@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { freshApprovals, titleWithCount } from './alert';
 import type { ApprovalModel } from './view';
 
-const a = (id: string): ApprovalModel => ({ id, node: 'n', localId: id, agentName: 'x', action: 'run', detail: '', expiresAtMs: 0 });
+const a = (id: string): ApprovalModel => ({ id, node: 'n', localId: id, agentId: 'n/a', agentName: 'x', action: 'run', detail: '', expiresAtMs: 0 });
 
 describe('alert', () => {
   it('finds only approvals not seen before', () => {

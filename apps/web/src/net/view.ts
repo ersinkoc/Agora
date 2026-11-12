@@ -13,7 +13,7 @@ export function num(x: Num): number {
   return typeof x === 'number' ? x : Number(x.toString());
 }
 
-export interface NodeV { hostname: string; os: string; online: boolean; lastEventMs: number; agentsRunning: number }
+export interface NodeV { hostname: string; os: string; online: boolean; lastEventMs: number; agentsRunning: number; memoryBytes?: number }
 export interface WorkspaceV { nodeId: string; projectId: string; path: string; gitRoot: string; branch: string; managed: boolean; filesChanged: number }
 export interface WorktreeV { checkoutId: string; path: string; branch: string; filesChanged: number }
 export interface AgentV {
@@ -58,6 +58,7 @@ export function fromSnapshot(s: agora.v1.Snapshot.$Properties): View {
     v.nodes.set(n.nodeId ?? '', {
       hostname: n.hostname ?? '', os: n.os ?? '', online: !!n.online, lastEventMs: num(n.lastEventMs),
       agentsRunning: n.agentsRunning ?? 0,
+      memoryBytes: Number(n.memoryUsedBytes ?? 0),
     });
   }
   for (const c of s.checkouts ?? []) {
@@ -128,7 +129,7 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
     }
     case 'nodeResources': {
       const n = v.nodes.get(e.nodeResources.nodeId);
-      if (n) n.agentsRunning = e.nodeResources.agentsRunning ?? 0;
+      if (n) { n.agentsRunning = e.nodeResources.agentsRunning ?? 0; n.memoryBytes = Number(e.nodeResources.memoryUsedBytes ?? 0); }
       break;
     }
     case 'worktreeCreated': {
@@ -276,6 +277,7 @@ export interface ApprovalModel {
   id: string; // hub-wide key `<node>/<local id>`
   node: string;
   localId: string;
+  agentId: string;
   agentName: string;
   action: string;
   detail: string;
@@ -292,6 +294,7 @@ export function approvalList(v: View): ApprovalModel[] {
         id,
         node: at < 0 ? '' : id.slice(0, at),
         localId: at < 0 ? id : id.slice(at + 1),
+        agentId: a.agentId,
         agentName: names.get(a.agentId) ?? a.agentId,
         action: a.action,
         detail: a.detail,
@@ -301,12 +304,12 @@ export function approvalList(v: View): ApprovalModel[] {
     .sort((a, b) => a.expiresAtMs - b.expiresAtMs);
 }
 
-export interface MachineModel { id: string; name: string; os: string; online: boolean; agentsRunning: number; lastSeenMs: number }
+export interface MachineModel { id: string; name: string; os: string; online: boolean; agentsRunning: number; lastSeenMs: number; memoryBytes?: number }
 
 // Online machines first, then by name.
 export function machines(v: View): MachineModel[] {
   return [...v.nodes.entries()]
-    .map(([id, n]) => ({ id, name: n.hostname || id, os: n.os, online: n.online, agentsRunning: n.agentsRunning, lastSeenMs: n.lastEventMs }))
+    .map(([id, n]) => ({ id, name: n.hostname || id, os: n.os, online: n.online, agentsRunning: n.agentsRunning, lastSeenMs: n.lastEventMs, memoryBytes: n.memoryBytes }))
     .sort((a, b) => Number(b.online) - Number(a.online) || a.name.localeCompare(b.name));
 }
 
@@ -392,4 +395,13 @@ export function costByProject(v: View, perAgent: ReadonlyMap<string, number>): P
     byProject.set(checkout.projectId, row);
   }
   return [...byProject.values()].sort((a, b) => b.microUsd - a.microUsd || a.label.localeCompare(b.label));
+}
+
+// "1.2 GB": what the agents on a machine hold in memory. Units are the same in every language.
+export function bytesLabel(n: number): string {
+  if (!(n > 0)) return '';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let i = 0, v = n;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return `${v >= 10 || i === 0 ? Math.round(v) : v.toFixed(1)} ${units[i]}`;
 }
