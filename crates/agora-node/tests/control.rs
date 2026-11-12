@@ -294,9 +294,11 @@ fn terminal_subscription_streams_snapshot_data_resize_and_exit() {
     let r = wait_frame(&mut c, 3, |f| f.kind == KIND_TERM_RESIZE);
     assert_eq!(r.payload, [100, 0, 30, 0]);
 
+    // A leading empty line: on Windows the msys `sh` sometimes loses the first byte typed after a ConPTY resize (about 1 run in 10,
+    // `xit 5`; never without the resize, and waiting a second does not help). Losing the newline instead is harmless.
     ok(c.call(Cmd::TerminalInput(v1::TerminalInput {
         terminal_id: s.terminal_id.clone(),
-        data: b"exit 5\n".to_vec(),
+        data: b"\nexit 5\n".to_vec(),
     })));
     let x = wait_frame(&mut c, 3, |f| f.kind == KIND_TERM_EXIT);
     assert_eq!(i32::from_le_bytes(x.payload.clone().try_into().unwrap()), 5);
