@@ -228,7 +228,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
 
         <main className="flex min-h-0 min-w-0 flex-col" aria-label={t('focus-terminal')}>
           <div className="flex h-9 flex-none items-stretch border-b border-line bg-surface-1">
-            <div role="tablist" aria-label={t('console-agents')} className="flex min-w-0 flex-1 overflow-x-auto">
+            <div role="tablist" aria-label={t('console-agents')} className="flex min-w-0 flex-1 overflow-x-auto quiet-scroll">
               {tabs.map((a) => (
                 <div key={a.id} id={`tab-${a.id}`} role="tab" aria-selected={current?.id === a.id} aria-keyshortcuts="Delete" tabIndex={current?.id === a.id ? 0 : -1} draggable className={`ide-tab group cursor-pointer ${dragging && dragging !== a.id ? 'ring-1 ring-inset ring-accent/50' : ''}`}
                   onClick={() => setActive(a.id)} onKeyDown={(e) => tabKey(e, a.id)}
