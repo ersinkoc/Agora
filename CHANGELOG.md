@@ -4,6 +4,16 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+## 0.3.4
+
+### Terminal client
+- In `agora tui`: **f** picks a folder on a machine (step into folders, Git projects marked) and starts an agent there; **d** removes a closed agent for everyone, and a refusal says why in words. Every folder action is signed with the terminal's own device key.
+### Machines
+- A machine that was offline too long, or every machine after the hub is restored from a backup, reconnects on its own and shows its current agents (ADR-0054); before, it never reached the hub again. The events from the lost window are recorded as missing, and the owner's Activity page lists it.
+### Fixes
+- A folder listing answers the first 500 folders by name, not the first 500 the file system returned, and never reads more than 50,000 names.
+- An MCP connection that drops no longer leaves its agent's unanswered questions behind; they are cancelled with it.
+
 ## 0.3.3
 ### Machines
 - A machine that was cut off from the hub for a long time sends what it saved much faster when the link comes back.
@@ -25,7 +35,6 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 - Stopping an agent that runs through an adapter also ends the adapter's program; before, it kept running unseen.
 - A resume that fails no longer leaves the stopped agent reachable by other agents.
 - When the hub confirms events older than the ones a machine kept while it was offline, the machine keeps the rest instead of deleting them (or stopping its link).
-- A machine that was offline too long, or every machine after the hub is restored from a backup, reconnects on its own and shows its current agents (ADR-0054); before, it never reached the hub again. The events from the lost window are recorded as missing, and the owner's Activity page lists it.
 
 ### Terminals and adapters
 - Opening a terminal that is already running shows its later output in the program's own colours, and paste and arrow keys work as the program expects.
