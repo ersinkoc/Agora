@@ -6,7 +6,7 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ### Closed agents
 - A closed agent is always shown as finished; before, one that ended while it was waiting kept a spinning orange mark and counted as waiting for you.
-- The ✕ on a closed agent in the list and **Clear closed** now remove it for everyone when the hub can (ADR-0053), not only in this browser.
+- The ✕ on a closed agent in the list and **Clear closed** now remove it for everyone when the hub can (ADR-0053). If the hub refuses (a permission, or the agent is running again) the reason is shown and nothing is hidden; only a hub that does not know the command hides it in this browser. What you cleared stays hidden only while the agent is closed.
 ## 0.3.4
 
 ### Terminal client

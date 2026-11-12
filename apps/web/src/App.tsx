@@ -105,9 +105,10 @@ export function App() {
     const store = indexedDbStore();
     if (store) void thisDevice(store).then(setDevice).catch(() => setDevice(undefined));
   }, []);
-  const forgetAgent = useCallback(async (agentId: string): Promise<boolean> => {
-    if (!api) return false;
-    try { await api.command('', { agentForget: { agentId } }); return true; } catch { return false; }
+  // Asks the hub to forget a closed agent for every client (ADR-0053). The answer is undefined when it did, else the error code.
+  const forgetAgent = useCallback(async (agentId: string): Promise<string | undefined> => {
+    if (!api) return 'hub.unreachable';
+    try { await api.command('', { agentForget: { agentId } }); return undefined; } catch (e) { return (e as { code?: string }).code ?? 'hub.unreachable'; }
   }, [api]);
   const resolve = useCallback(async (a: ApprovalModel, approved: boolean) => {
     if (!api || !device) { setNotice('approval-failed'); return; }

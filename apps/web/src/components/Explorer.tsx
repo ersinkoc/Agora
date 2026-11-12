@@ -7,7 +7,7 @@ import { Icon } from './Icon';
 import { StateMark } from './StateBadge';
 
 // The left panel: machine → folder → agent, like a file explorer. Opening an agent puts it in a tab.
-export function Explorer({ fleet, machines, open, current, projects, project, onProject, onToggle, onStart, onCollapse, onDismiss, everyone }: {
+export function Explorer({ fleet, machines, open, current, projects, project, onProject, onToggle, onStart, onCollapse, onDismiss, everyone, forgetError }: {
   fleet: readonly AgentTileModel[];
   machines: readonly MachineModel[];
   open: readonly string[];
@@ -21,6 +21,7 @@ export function Explorer({ fleet, machines, open, current, projects, project, on
   onDismiss: (ids: string[]) => void;
   // Removing a closed agent here asks the hub to forget it for every client (ADR-0053), not only this browser.
   everyone?: boolean;
+  forgetError?: string;
 }) {
   const [filter, setFilter] = useState('');
   const [folded, setFolded] = useState<ReadonlySet<string>>(new Set());
@@ -105,6 +106,7 @@ export function Explorer({ fleet, machines, open, current, projects, project, on
           </button>
           <button type="button" className="ide-chip me-1 hover:text-ink" onClick={() => onDismiss(closed.map((a) => a.id))} title={everyone ? t('closed-clear-everyone') : undefined}>{t('closed-clear')}</button>
         </div>
+        {forgetError && <p role="alert" className="m-0 px-2 py-1 text-xs text-needs-you">{t('closed-forget-failed', { reason: t(forgetError.replace('.', '-')) })}</p>}
         {!folded.has('~closed') && <ul className="m-0 list-none p-0">
           {closed.map((a) => <li key={a.id} className="group flex items-center">
             <button type="button" className="ide-row flex-1 opacity-80" aria-current={current === a.id ? 'true' : undefined} aria-pressed={open.includes(a.id)} onClick={() => onToggle(a.id)} title={`${a.machine} · ${a.workspace}`}>

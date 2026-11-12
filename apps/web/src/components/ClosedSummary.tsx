@@ -6,7 +6,7 @@ import { StateMark } from './StateBadge';
 
 // What a closed agent leaves behind: how it ended, how long it ran, what it changed and cost. Its terminal is gone, so this is shown
 // in its place, with the ways to look at the work and to clear it from the list.
-export function ClosedSummary({ agent, cost, now, onReview, onHistory, onFiles, onDismiss, onForget, onStart }: {
+export function ClosedSummary({ agent, cost, now, onReview, onHistory, onFiles, onDismiss, onForget, forgetError, onStart }: {
   agent: AgentTileModel;
   cost?: string;
   now: number;
@@ -15,6 +15,8 @@ export function ClosedSummary({ agent, cost, now, onReview, onHistory, onFiles, 
   onFiles?: () => void;
   onDismiss: () => void;
   onForget?: () => void;
+  // Why the hub did not forget it (an error code), shown instead of hiding the agent.
+  forgetError?: string;
   onStart?: () => void;
 }) {
   const failed = !!agent.exitCode;
@@ -49,6 +51,7 @@ export function ClosedSummary({ agent, cost, now, onReview, onHistory, onFiles, 
           <button type="button" className="button" onClick={onDismiss}>{t('closed-dismiss')}</button>
           {onForget && <button type="button" className="button" onClick={onForget}>{t('closed-forget')}</button>}
         </div>
+        {forgetError && <p role="alert" className="m-0 text-needs-you">{t('closed-forget-failed', { reason: t(forgetError.replace('.', '-')) })}</p>}
       </div>
     </div>
   );

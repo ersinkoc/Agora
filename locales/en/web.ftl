@@ -325,3 +325,4 @@ start-browse-more = There are more folders than are shown. Type the path to go f
 start-browse-failed = The folder could not be listed.
 start-browse-git = A Git project
 closed-clear-everyone = Remove every closed agent for everyone
+closed-forget-failed = The hub did not remove it: { $reason }
