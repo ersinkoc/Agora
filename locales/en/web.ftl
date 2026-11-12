@@ -278,7 +278,23 @@ ide-tab-messages = Messages
 ide-tab-cost = Spent
 theme-label = Colour scheme
 theme-system = Follow the system
-theme-dark = Dark
-theme-light = Light
 ide-shared = Shared
 ide-memory = Memory used by the agents on this machine
+network-hub = Your hub
+network-build = Version running on this machine
+network-never = never
+network-heard = heard { $when }
+network-last-seen = last heard { $when }
+network-online =
+    { $total ->
+        [one] { $online } of { $total } machine online
+       *[other] { $online } of { $total } machines online
+    }
+network-terminals =
+    { $count ->
+        [one] { $count } terminal open
+       *[other] { $count } terminals open
+    }
+terminal-size = Terminal text size
+terminal-smaller = Smaller text
+terminal-larger = Larger text

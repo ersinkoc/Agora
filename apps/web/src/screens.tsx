@@ -6,6 +6,7 @@ import type { ChatSource } from './net/chat';
 import { AgentTile } from './components/AgentTile';
 import { AttentionStrip } from './components/AttentionStrip';
 import { Icon } from './components/Icon';
+import { NetworkView } from './components/NetworkView';
 import { StateBadge } from './components/StateBadge';
 import type { MachineModel, MessageModel, ProjectCost } from './net/view';
 import type { Device } from './net/approval';
@@ -121,7 +122,7 @@ export function Focus({ agent, source: live, costMicroUsd, chatSource, sendPromp
 }
 
 // Pages other than the window itself (machines, this device, audit): the same title bar, content in a readable column.
-function PageFrame({ title, onBack, children }: { title: string; onBack: () => void; children: ReactNode }) {
+function PageFrame({ title, onBack, children, wide }: { title: string; onBack: () => void; children: ReactNode; wide?: boolean }) {
   return (
     <div className="min-h-screen bg-surface-0">
       <header className="ide-bar sticky top-0 z-10 h-10 border-b">
@@ -130,7 +131,7 @@ function PageFrame({ title, onBack, children }: { title: string; onBack: () => v
         <span className="hidden sm:block"><LanguagePicker compact /></span>
         <ThemePicker />
       </header>
-      <main className="mx-auto grid max-w-3xl gap-4 px-4 py-6">{children}</main>
+      <main className={`mx-auto grid gap-4 px-4 py-6 ${wide ? 'max-w-5xl' : 'max-w-3xl'}`}>{children}</main>
     </div>
   );
 }
@@ -227,25 +228,10 @@ export function SignInPage({ onSubmit, onPasskey, notice }: { onSubmit: (code: s
   );
 }
 
-export function MachinesPage({ machines, usage, projects = [], onBack }: { machines: readonly MachineModel[]; usage?: UsageSummary; projects?: readonly ProjectCost[]; onBack: () => void }) {
+export function MachinesPage({ machines, agents = [], usage, projects = [], onBack }: { machines: readonly MachineModel[]; agents?: readonly AgentTileModel[]; usage?: UsageSummary; projects?: readonly ProjectCost[]; onBack: () => void }) {
   return (
-    <PageFrame title={t('machines-title')} onBack={onBack}>
-      {machines.length === 0 ? (
-        <p className="muted">{t('machines-empty')}</p>
-      ) : (
-        <ul className="machines">
-          {machines.map((m) => (
-            <li key={m.id} className="machine">
-              <strong>{m.name}</strong>
-              <code className="break-all text-xs text-muted">{t('machine-identity', { id: m.id })}</code>
-              <span className="muted">{m.os}</span>
-              <span>{t(m.online ? 'machine-online' : 'machine-offline')}</span>
-              <span className="muted">{t('machine-agents', { count: m.agentsRunning })}</span>
-              {usage?.perNode.has(m.id) ? <span className="muted">{t('machine-cost', { amount: money(usage.perNode.get(m.id) ?? 0) })}</span> : null}
-            </li>
-          ))}
-        </ul>
-      )}
+    <PageFrame wide title={t('machines-title')} onBack={onBack}>
+      <NetworkView machines={machines} agents={agents} usage={usage} hubName={window.location.host} />
       {projects.length > 0 && (
         <section className="stack" aria-label={t('usage-projects')}>
           <h2>{t('usage-projects')}</h2>

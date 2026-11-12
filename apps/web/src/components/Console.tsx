@@ -17,6 +17,7 @@ import { Icon } from './Icon';
 import { Inspector } from './Inspector';
 import { LanguagePicker } from './LanguagePicker';
 import { ThemePicker } from './ThemePicker';
+import { MAX_SIZE, MIN_SIZE, setTerminalSize, terminalSize } from '../terminal/prefs';
 import { StateBadge, StateMark } from './StateBadge';
 
 const TerminalView = lazy(() => import('../terminal/TerminalView').then((m) => ({ default: m.TerminalView })));
@@ -68,6 +69,8 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
     if (id) setPinned(cur => cur.some(key => fleet.some(a => a.id === key && a.projectId === id)) ? cur : fleet.filter(a => a.projectId === id).slice(0, MAX_AUTO_PINNED).map(a => a.id));
   };
   const [layout, setLayout] = useState<'single' | 'grid'>('single');
+  const [, textSize] = useState(0); // the size buttons follow the stored choice
+  useEffect(() => { const on = () => textSize((n) => n + 1); window.addEventListener('agora-terminal-size', on); return () => window.removeEventListener('agora-terminal-size', on); }, []);
   const [showAgents, setShowAgents] = useState(wide);
   const [showDetails, setShowDetails] = useState(wide);
   const touched = useRef(false);
@@ -175,6 +178,10 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
             : <span className="ide-chip text-needs-you">{t('changes-files', { count: a.filesChanged ?? 0 })}</span>)}
           {usage?.perAgent.has(a.id) && <span className="ide-chip">{t('agent-cost', { amount: money(usage.perAgent.get(a.id) ?? 0) })}</span>}
           <StateBadge state={a.state} />
+          {a.terminal !== false && <span className="flex items-center" role="group" aria-label={t('terminal-size')}>
+            <button type="button" className="ide-iconbtn w-6 text-[11px] font-semibold" onClick={() => setTerminalSize(terminalSize() - 1)} disabled={terminalSize() <= MIN_SIZE} aria-label={t('terminal-smaller')} title={t('terminal-smaller')}>A−</button>
+            <button type="button" className="ide-iconbtn w-6 text-[13px] font-semibold" onClick={() => setTerminalSize(terminalSize() + 1)} disabled={terminalSize() >= MAX_SIZE} aria-label={t('terminal-larger')} title={t('terminal-larger')}>A+</button>
+          </span>}
           {loadHistory && a.git !== false && <button type="button" className="ide-iconbtn" onClick={() => setHistory(a.id)} aria-label={t('console-history')} title={t('console-history')}><Icon name="history" /></button>}
           {filesOf && <button type="button" className="ide-iconbtn" onClick={() => setBrowsing(a.id)} aria-label={t('console-files')} title={t('console-files')}><Icon name="files" /></button>}
           <button type="button" className="ide-iconbtn" onClick={() => onOpen(a.id)} aria-label={t('console-maximize')} title={t('console-maximize')}><Icon name="maximize" /></button>

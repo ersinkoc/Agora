@@ -6,6 +6,12 @@
 ![Full size](screens/window-full-dark.png)
 ![Start an agent](screens/window-start-chosen-dark.png)
 
+## Hub and machines
+
+![Hub and machines](screens/network-dark.png)
+
+`#/machines` draws the hub with a live link to every machine it knows (animated when connected, dotted when not), a card per machine (state, system, node version, agents, terminals, memory, cost, last heard) and the agents running there as chips.
+
 ## Layout (editor-style, 2026-11-12)
 
 The window is laid out like an editor, with the terminal as the content. At most two side panels are visible (visual-language.md); each hides with its button.

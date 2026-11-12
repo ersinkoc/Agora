@@ -107,8 +107,10 @@
   .focus { @apply grid gap-4; }
 }
 
+@keyframes flow { to { stroke-dashoffset: -24; } }
 @keyframes breathe { 50% { opacity: 0.45; } }
 @keyframes attend { 50% { transform: scale(1.25); } }
+@media (prefers-reduced-motion: no-preference) { .net-link--on { animation: flow 1.2s linear infinite; } }
 @media (prefers-reduced-motion: reduce) { .state__mark { animation: none !important; } }
 
 /* xterm paints its scroll area black by default; let the pane's own (themed) background show. */

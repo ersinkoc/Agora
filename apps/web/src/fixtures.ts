@@ -11,8 +11,8 @@ export const demoAgents: AgentTileModel[] = [
 
 // Development only (demo window without a hub): enough machines and folders to try the "Start an agent" window.
 export const demoMachines = [
-  { id: 'laptop', name: 'Laptop', os: 'linux', online: true, agentsRunning: 3, lastSeenMs: 0 },
-  { id: 'build', name: 'Build server', os: 'linux', online: true, agentsRunning: 1, lastSeenMs: 0 },
+  { id: 'laptop', name: 'Laptop', os: 'linux', online: true, agentsRunning: 3, lastSeenMs: Date.now() - 4000 },
+  { id: 'build', name: 'Build server', os: 'linux', online: true, agentsRunning: 1, lastSeenMs: Date.now() - 4000 },
   { id: 'winpc', name: 'Windows PC', os: 'windows', online: false, agentsRunning: 0, lastSeenMs: 0 },
 ];
 export const demoProjects = [
