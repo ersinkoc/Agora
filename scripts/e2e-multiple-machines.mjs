@@ -20,13 +20,13 @@ try {
   const launch = async (node, folder) => {
     await page.goto(`${origin}/#/`);
     await page.getByRole('button', { name: 'Start an agent', exact: true }).click();
-    await page.locator('.start select').first().selectOption(node);
+    await page.getByRole('radio', { name: node }).click();
     await page.getByLabel('Working folder', { exact: true }).fill(folder);
     await page.getByRole('button', { name: 'Use this folder', exact: true }).click();
     await page.getByRole('button', { name: 'Start', exact: true }).waitFor();
-    await page.locator('.start select').last().selectOption({ label: 'Fake chat agent' });
+    await page.getByRole('radio', { name: 'Fake chat agent', exact: true }).click();
     await page.getByRole('button', { name: 'Start', exact: true }).click();
-    await page.locator('.start').waitFor({ state: 'detached' });
+    await page.locator('[role=dialog]').waitFor({ state: 'detached' });
     await page.waitForURL(/#\/agent\//);
     const id = decodeURIComponent(new URL(page.url()).hash.slice('#/agent/'.length));
     await page.locator('form textarea').fill('cwd');

@@ -238,3 +238,40 @@ language-system = Browser default
 language-en = English
 language-tr = Türkçe
 language-not-saved = Language changed for this visit. Your browser could not save the preference.
+
+# The IDE-style window: title bar, agent tree, tabs, details panel, status bar.
+ide-command = Search or run a command
+ide-new-tab = Start an agent
+ide-close-tab = Close { $name }
+ide-hide-panel = Hide this panel
+ide-show-agents = Show the agent list
+ide-show-details = Show details
+ide-layout-single = One terminal at a time
+ide-layout-grid = Terminals side by side
+ide-details = Details
+ide-welcome-title = Pick up where you left off
+ide-welcome-running = Running now
+ide-welcome-none = No agent is running yet.
+ide-welcome-search = Search and commands
+ide-welcome-next = Jump to the next agent that needs you
+ide-add-here = Start an agent on { $machine }
+ide-toggle-machine = Show or hide the agents on { $name }
+ide-status-agents =
+    { $count ->
+        [one] { $count } agent
+       *[other] { $count } agents
+    }
+ide-status-needs =
+    { $count ->
+        [one] { $count } needs you
+       *[other] { $count } need you
+    }
+ide-folder-known = Known folders
+ide-folder-change = Change folder
+ide-folder-chosen = Working folder
+ide-agent-pick = Agent
+ide-options = Options
+ide-copy-address = Copy address
+ide-tab-changes = Changes
+ide-tab-messages = Messages
+ide-tab-cost = Spent
