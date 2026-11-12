@@ -997,6 +997,40 @@ mod list_dir_tests {
     }
 
     #[test]
+    fn listing_keeps_the_open_folder_after_its_path_is_replaced() {
+        let folder = Folder::new();
+        let original = folder.0.join("original");
+        let moved = folder.0.join("moved");
+        let outside = folder.0.join("outside");
+        std::fs::create_dir(&original).expect("original");
+        std::fs::create_dir(&outside).expect("outside");
+        std::fs::write(original.join("own.txt"), "own").expect("own file");
+        std::fs::write(outside.join("outside.txt"), "outside").expect("outside file");
+        let handle = super::open_dir(&original).expect("open original");
+        std::fs::rename(&original, &moved).expect("move original");
+        #[cfg(windows)]
+        {
+            // Junctions need no symbolic-link privilege: this coverage must run on an ordinary Windows CI account.
+            let result = std::process::Command::new("cmd.exe")
+                .args(["/d", "/c", "mklink", "/J"])
+                .arg(&original)
+                .arg(&outside)
+                .output()
+                .expect("junction command");
+            assert!(result.status.success(), "{result:?}");
+        }
+        #[cfg(not(windows))]
+        super::symlink(&outside, &original).expect("replace path");
+        let items = super::list_dir(&handle).expect("held directory");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].name, "own.txt");
+        let replaced = super::open_dir(&original).expect("replacement directory");
+        let items = super::list_dir(&replaced).expect("replacement listing");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].name, "outside.txt");
+    }
+
+    #[test]
     fn visiting_a_folder_reads_metadata_lazily_and_stops_early() {
         use std::ops::ControlFlow;
         let folder = Folder::new();

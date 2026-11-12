@@ -60,9 +60,24 @@ single-machine fixture measurements, not general capacity or interaction-budget 
 50,000 paths; the removed allocation is the directory-wide intermediate vector. The private fixture was removed
 after collecting evidence, without touching installed services, credentials or real agents.
 
-## Integration status
+## Windows integration
 
-This follow-up is stacked on draft #333. That draft still returns `Unsupported` for Windows directory enumeration;
-this change keeps that refusal and defines the Windows streaming visitor contract for its owner to implement.
-It does not claim Windows readiness. Native Windows integration and the parent PR's cross-review must finish
-before the combined work can merge. Codex coordinated the interface in #333 and claimed the follow-up in #343.
+The initial follow-up inherited #333's Windows `Unsupported` stubs. The integrated implementation opens a directory
+with `FILE_FLAG_BACKUP_SEMANTICS`, then verifies its handle using the existing root check. Enumeration uses
+[`ReOpenFile`](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-reopenfile) to obtain an independent
+synchronous handle to the same filesystem object; it never looks the path up again. `FILE_FLAG_OPEN_REPARSE_POINT`
+prevents that reopen from following a newly planted reparse point on the object itself.
+
+[`NtQueryDirectoryFile`](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntquerydirectoryfile)
+requests one `FILE_DIRECTORY_INFORMATION` at a time. A fixed, aligned buffer holds the record; its completed byte
+count and UTF-16 name length are checked before reading the name. A callback that stops causes no further query.
+Reparse entries are never traversed. The additional `windows-sys` WDK feature exposes the existing dependency's
+documented single-entry API; no new dependency or policy is added.
+
+A deterministic regression opens a folder, renames it, and replaces the old path with a link to an outside folder.
+The held handle still lists the original contents while a new open lists the replacement. On Windows it uses a
+junction, which does not require symbolic-link privileges, so that test cannot silently skip on an ordinary CI account.
+The lazy-metadata, early-stop and repeat-enumeration tests also run on Windows.
+
+This follow-up remains stacked on #333. Cross-compilation checks supplement native CI; they do not substitute for
+running these tests on Windows. Codex coordinated the implementation in #333 and claimed the follow-up in #343.

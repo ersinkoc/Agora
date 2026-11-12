@@ -729,19 +729,146 @@ pub(crate) fn opened_path(file: &std::fs::File) -> io::Result<PathBuf> {
     }
 }
 
-/// See [`crate::open_dir`]. Not written yet (#330: the Windows half).
+/// See [`crate::open_dir`]: follow the path once, then callers verify the resulting handle before enumerating it.
 pub(crate) fn open_dir(path: &Path) -> io::Result<std::fs::File> {
-    let _ = path;
-    Err(io::Error::from(io::ErrorKind::Unsupported))
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, SYNCHRONIZE,
+    };
+    let dir = std::fs::OpenOptions::new()
+        .read(true)
+        .access_mode(FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)?;
+    if !dir.metadata()?.is_dir() {
+        return Err(io::ErrorKind::NotADirectory.into());
+    }
+    Ok(dir)
 }
 
-/// See [`crate::visit_dir`]. Not written yet (#330: the Windows half).
+/// See [`crate::visit_dir`]: a fresh synchronous handle to the same object, then one directory entry per query.
+/// No path is reopened, no reparse target is traversed for entry metadata, and no later entry is requested after Break.
 pub(crate) fn visit_dir(
     dir: &std::fs::File,
     visitor: &mut dyn FnMut(crate::DirItem) -> std::ops::ControlFlow<()>,
 ) -> io::Result<()> {
-    let _ = (dir, visitor);
-    Err(io::Error::from(io::ErrorKind::Unsupported))
+    use std::ffi::OsString;
+    use std::mem::{offset_of, size_of_val};
+    use std::os::windows::ffi::OsStringExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Wdk::Storage::FileSystem::{
+        FileDirectoryInformation, NtQueryDirectoryFile, FILE_DIRECTORY_INFORMATION,
+    };
+    use windows_sys::Win32::Foundation::{
+        RtlNtStatusToDosError, STATUS_NO_MORE_FILES, STATUS_SUCCESS,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        ReOpenFile, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_LIST_DIRECTORY,
+        FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, SYNCHRONIZE,
+    };
+    use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
+
+    // SAFETY: a live borrowed handle. ReOpenFile addresses that object, not its path. Omitting OVERLAPPED makes all queries
+    // synchronous even if a caller supplied an asynchronous handle, so their buffers cannot outlive this function.
+    let handle = unsafe {
+        ReOpenFile(
+            dir.as_raw_handle(),
+            FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
+    }
+    let handle = Handle(handle);
+    // Eight-byte aligned and large enough for a complete record plus a maximum-length UTF-16 name, with bounded memory.
+    let mut buffer = vec![0u64; 16 * 1024];
+    let mut first = true;
+    loop {
+        let mut result = IO_STATUS_BLOCK::default();
+        // SAFETY: a synchronous owned handle, a live aligned output buffer and status block. No APC or event. Single-entry
+        // mode preserves the callback's early-stop contract; the first call restarts only this enumeration's own cursor.
+        let status = unsafe {
+            NtQueryDirectoryFile(
+                handle.0,
+                null_mut(),
+                None,
+                null(),
+                &mut result,
+                buffer.as_mut_ptr().cast(),
+                size_of_val(buffer.as_slice()) as u32,
+                FileDirectoryInformation,
+                true,
+                null(),
+                first,
+            )
+        };
+        first = false;
+        if status == STATUS_NO_MORE_FILES {
+            return Ok(());
+        }
+        if status != STATUS_SUCCESS {
+            // SAFETY: converting the returned NTSTATUS to a normal Win32 error code.
+            return Err(os_error(unsafe { RtlNtStatusToDosError(status) }));
+        }
+        let name_offset = offset_of!(FILE_DIRECTORY_INFORMATION, FileName);
+        if result.Information < name_offset || result.Information > size_of_val(buffer.as_slice()) {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        // SAFETY: the buffer is aligned, initialized, and contains the fixed portion of the returned record.
+        let entry = unsafe { &*buffer.as_ptr().cast::<FILE_DIRECTORY_INFORMATION>() };
+        let bytes = entry.FileNameLength as usize;
+        if bytes == 0 || !bytes.is_multiple_of(2) || bytes > result.Information - name_offset {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        // SAFETY: the name is UTF-16 aligned; its whole byte range was checked against the completed query's output.
+        let name = unsafe {
+            std::slice::from_raw_parts(
+                buffer.as_ptr().cast::<u8>().add(name_offset).cast::<u16>(),
+                bytes / 2,
+            )
+        };
+        let name = OsString::from_wide(name);
+        if name == "." || name == ".." {
+            continue;
+        }
+        let link = entry.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+        let item = crate::DirItem {
+            name,
+            is_dir: !link && entry.FileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0,
+            len: if link {
+                0
+            } else {
+                u64::try_from(entry.EndOfFile).unwrap_or(0)
+            },
+            modified: directory_time(entry.LastWriteTime),
+        };
+        if visitor(item).is_break() {
+            return Ok(());
+        }
+    }
+}
+
+/// NT directory timestamps are signed 100 ns ticks since 1601; preserve dates on either side of the Unix epoch.
+fn directory_time(ticks: i64) -> std::time::SystemTime {
+    const UNIX_EPOCH_TICKS: i128 = 116_444_736_000_000_000;
+    let delta = i128::from(ticks) - UNIX_EPOCH_TICKS;
+    let magnitude = delta.unsigned_abs();
+    let duration = Duration::new(
+        (magnitude / 10_000_000) as u64,
+        ((magnitude % 10_000_000) * 100) as u32,
+    );
+    let epoch = std::time::UNIX_EPOCH;
+    if delta < 0 {
+        epoch.checked_sub(duration)
+    } else {
+        epoch.checked_add(duration)
+    }
+    .unwrap_or(epoch)
 }
 
 #[cfg(test)]
