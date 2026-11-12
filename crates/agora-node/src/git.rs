@@ -642,64 +642,103 @@ pub fn diff(worktree: &Path, path: Option<&str>) -> Result<String, GitError> {
     Ok(out)
 }
 
-/// The diff of each untracked file against nothing, from a private copy. git given the path in the worktree opens it itself, and
-/// the agent working there can swap a folder above it for a link between `ls-files` and that open (measured: git follows a linked
-/// folder, though not a link in the file's own place): the node would show a file from anywhere. So each file is read the way
-/// `files.read` reads (checked on the open handle, at most [`MAX_UNTRACKED_BYTES`]), written under the same relative name into a
-/// folder only this user can open, and diffed there, outside any repository. Files that are not plain, too large, or lead out of
-/// the worktree are left out, as before.
+/// The diff of each untracked file against nothing, built here rather than by `git diff --no-index`. git given a path in the
+/// worktree opens it itself, and the agent working there can swap a folder above it for a link between `ls-files` and that open
+/// (measured: git follows a linked folder, though not a link in the file's own place), so the node would show a file from
+/// anywhere; a copy on disk to diff instead is one more place to race (a shared temporary folder is the agent's to write on
+/// Linux). Each file is read the way `files.read` reads it ([`crate::files::Files::untracked`]: checked on the open handle,
+/// regular files only, at most [`MAX_UNTRACKED_BYTES`]; a link shows as a link), and the text is git's own for a new file
+/// ([`new_file_diff`]). Files that are not plain, too large, or lead out of the worktree are left out, as before.
 fn untracked_diff(worktree: &Path, names: &[&str]) -> Result<String, GitError> {
-    use std::sync::atomic::{AtomicU32, Ordering};
-    static N: AtomicU32 = AtomicU32::new(0);
-    struct Scratch(PathBuf);
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-    let io = |e: std::io::Error| GitError::Io(e.to_string());
     let files = crate::files::Files::open(worktree, MAX_UNTRACKED_BYTES)
         .map_err(|e| GitError::Io(format!("{e:?}")))?;
-    let scratch = Scratch(std::env::temp_dir().join(format!(
-        "agora-untracked-{}-{}",
-        std::process::id(),
-        N.fetch_add(1, Ordering::Relaxed)
-    )));
-    std::fs::create_dir(&scratch.0).map_err(io)?;
-    agora_platform::restrict_to_owner(&scratch.0).map_err(io)?;
-    let mut out = String::new();
+    let mut out = Vec::new();
     for name in names {
-        let Ok((data, executable)) = files.read_file(name) else {
-            continue;
+        let (mode, data) = match files.untracked(name) {
+            Ok(crate::files::Untracked::File { data, executable }) => {
+                (if executable { "100755" } else { "100644" }, data)
+            }
+            Ok(crate::files::Untracked::Link(target)) => ("120000", target),
+            Err(_) => continue,
         };
-        let copy = scratch.0.join(name);
-        if let Some(parent) = copy.parent() {
-            std::fs::create_dir_all(parent).map_err(io)?;
-        }
-        agora_platform::write_private(&copy, &data).map_err(io)?;
-        agora_platform::set_executable(&copy, executable).map_err(io)?;
-        // `--no-index` exits 1 when the files differ, which is the normal case here. No repository: nothing above the scratch
-        // folder is searched for one.
-        let shown = plain_hardened(&scratch.0)
-            .env(
-                "GIT_CEILING_DIRECTORIES",
-                scratch.0.parent().unwrap_or(&scratch.0),
-            )
-            .args([
-                "diff",
-                "--no-index",
-                "--no-color",
-                "--no-ext-diff",
-                "--no-textconv",
-                "--",
-                "/dev/null",
-                name,
-            ])
-            .output()
-            .map_err(io)?;
-        out.push_str(&String::from_utf8_lossy(&shown.stdout));
+        out.extend(new_file_diff(name, mode, &data));
     }
-    Ok(out)
+    Ok(String::from_utf8_lossy(&out).into_owned())
+}
+
+/// What `git diff --no-index /dev/null <name>` prints for a new file of `mode` holding `data` (checked against git in
+/// `new_file_diffs_match_git`): the blob id abbreviated to 7, `Binary files ... differ` when a NUL is in the first 8000 bytes,
+/// names quoted as git quotes them by default, and a tab after a `+++` name that holds a space.
+fn new_file_diff(name: &str, mode: &str, data: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+    let mut blob = format!("blob {}\0", data.len()).into_bytes();
+    blob.extend_from_slice(data);
+    let id = ring::digest::digest(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY, &blob);
+    let abbrev: String = id.as_ref()[..4]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>()[..7]
+        .to_string();
+    let (a, b) = (
+        quote_path(&format!("a/{name}")),
+        quote_path(&format!("b/{name}")),
+    );
+    let mut out = Vec::new();
+    // Writing to a Vec cannot fail.
+    let _ = write!(
+        out,
+        "diff --git {a} {b}\nnew file mode {mode}\nindex 0000000..{abbrev}\n"
+    );
+    if data.is_empty() {
+        return out;
+    }
+    if data[..data.len().min(8000)].contains(&0) {
+        let _ = writeln!(out, "Binary files /dev/null and {b} differ");
+        return out;
+    }
+    let tab = if b.contains(' ') { "\t" } else { "" };
+    let lines: Vec<&[u8]> = data.split_inclusive(|c| *c == b'\n').collect();
+    let range = if lines.len() == 1 {
+        "1".to_string()
+    } else {
+        format!("1,{}", lines.len())
+    };
+    let _ = write!(out, "--- /dev/null\n+++ {b}{tab}\n@@ -0,0 +{range} @@\n");
+    for line in &lines {
+        out.push(b'+');
+        out.extend_from_slice(line);
+    }
+    if !data.ends_with(b"\n") {
+        out.extend_from_slice(b"\n\\ No newline at end of file\n");
+    }
+    out
+}
+
+/// A path as git prints it with `core.quotePath` at its default: in double quotes with C escapes (octal for other control bytes,
+/// DEL and every byte of a non-ASCII character) when it holds any of those, a double quote or a backslash; as is otherwise.
+fn quote_path(path: &str) -> String {
+    let needs = |c: u8| c < 0x20 || c == b'"' || c == b'\\' || c >= 0x7f;
+    if !path.bytes().any(needs) {
+        return path.to_string();
+    }
+    let mut out = String::from("\"");
+    for c in path.bytes() {
+        match c {
+            0x07 => out.push_str("\\a"),
+            0x08 => out.push_str("\\b"),
+            b'\t' => out.push_str("\\t"),
+            b'\n' => out.push_str("\\n"),
+            0x0b => out.push_str("\\v"),
+            0x0c => out.push_str("\\f"),
+            b'\r' => out.push_str("\\r"),
+            b'"' => out.push_str("\\\""),
+            b'\\' => out.push_str("\\\\"),
+            c if needs(c) => out.push_str(&format!("\\{c:03o}")),
+            c => out.push(char::from(c)),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// One commit of [`log`].
@@ -1103,6 +1142,111 @@ mod tests {
             parse_status_v2("# branch.oid (initial)\n# branch.head main\n? a\n"),
             (1, String::new())
         );
+    }
+
+    #[test]
+    fn new_file_diffs_match_git() {
+        let d = std::env::temp_dir().join(format!("agora-newfile-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).expect("dir");
+        let cases: [(&str, &[u8]); 11] = [
+            ("two", b"a\nb\n"),
+            ("nonl", b"one"),
+            ("empty", b""),
+            ("bin", b"x\0y\n"),
+            ("solo", b"solo\n"),
+            ("\u{e9}t\u{e9}", "caf\u{e9}\n".as_bytes()),
+            ("sp ace", b"q\n"),
+            ("crlf", b"r\r\nn\r\n"),
+            ("qu\"ote", b"z\n"),
+            ("back\\slash", b"w\n"),
+            ("run.sh", b"echo\n"),
+        ];
+        for (name, data) in cases {
+            // Names Windows does not allow are only checked where they can be made.
+            if fs::write(d.join(name), data).is_err() {
+                continue;
+            }
+            let mut mode = "100644";
+            if name == "run.sh" {
+                agora_platform::set_executable(&d.join(name), true).expect("chmod");
+                if agora_platform::is_executable(&fs::metadata(d.join(name)).expect("meta")) {
+                    mode = "100755";
+                }
+            }
+            let git_says = raw_git()
+                .arg("-C")
+                .arg(&d)
+                .args(["-c", "core.quotePath=true", "-c", "core.abbrev=7"])
+                .args([
+                    "diff",
+                    "--no-index",
+                    "--no-color",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                ])
+                .args(["--", "/dev/null", name])
+                .env("GIT_CEILING_DIRECTORIES", d.parent().expect("parent"))
+                .output()
+                .expect("git")
+                .stdout;
+            assert_eq!(
+                String::from_utf8_lossy(&new_file_diff(name, mode, data)),
+                String::from_utf8_lossy(&git_says),
+                "{name:?}"
+            );
+        }
+        if agora_platform::symlink(Path::new("target-text"), &d.join("lnk")).is_ok() {
+            let git_says = raw_git()
+                .arg("-C")
+                .arg(&d)
+                .args(["-c", "core.quotePath=true", "-c", "core.abbrev=7"])
+                .args(["diff", "--no-index", "--no-color", "--", "/dev/null", "lnk"])
+                .env("GIT_CEILING_DIRECTORIES", d.parent().expect("parent"))
+                .output()
+                .expect("git")
+                .stdout;
+            assert_eq!(
+                String::from_utf8_lossy(&new_file_diff("lnk", "120000", b"target-text")),
+                String::from_utf8_lossy(&git_says)
+            );
+        }
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn an_untracked_link_shows_as_a_link_and_a_fifo_does_not_stop_the_diff() {
+        let r = Repo::new(None);
+        fs::write(r.dir.join("inside.txt"), "INSIDE CONTENT\n").expect("write");
+        if agora_platform::symlink(Path::new("inside.txt"), &r.dir.join("lnk")).is_ok() {
+            let one = diff(&r.dir, Some("lnk")).expect("diff");
+            assert!(one.contains("new file mode 120000"), "{one}");
+            assert!(
+                one.contains("+inside.txt") && !one.contains("INSIDE CONTENT"),
+                "{one}"
+            );
+        }
+        // A FIFO (where `mkfifo` exists): left out, and nothing waits on it.
+        let fifo = r.dir.join("pipe");
+        if Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .is_ok_and(|s| s.success())
+        {
+            let dir = r.dir.clone();
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let d = diff(&dir, None);
+                let read = crate::files::Files::open(&dir, 1024).map(|f| f.read("pipe"));
+                let _ = tx.send((d, read));
+            });
+            let (d, read) = rx
+                .recv_timeout(std::time::Duration::from_secs(20))
+                .expect("git.diff or files.read waited on a FIFO");
+            let d = d.expect("diff");
+            assert!(!d.contains("b/pipe"), "{d}");
+            assert!(read.expect("open").is_err());
+        }
     }
 
     #[test]

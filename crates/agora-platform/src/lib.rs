@@ -167,6 +167,24 @@ pub fn set_executable(path: &std::path::Path, executable: bool) -> io::Result<()
     }
 }
 
+/// Opens `path` for reading without waiting on it: on Unix with `O_NONBLOCK` (a FIFO or a device swapped in for a file would
+/// otherwise block the open until a writer appears; regular files read as usual) and `O_NOCTTY`. Check what was opened on the handle
+/// (`metadata().is_file()`, [`opened_path`]).
+pub fn open_read(path: &std::path::Path) -> io::Result<std::fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY)
+            .open(path)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::File::open(path)
+    }
+}
+
 /// Whether a file's owner may run it, as git records it (`100755`): the owner's execute bit on Unix; elsewhere never.
 pub fn is_executable(meta: &std::fs::Metadata) -> bool {
     #[cfg(unix)]
