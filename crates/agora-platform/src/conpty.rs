@@ -3,8 +3,9 @@
 //!
 //! There is no foreground process group on Windows, so [`Pty::foreground_pid`] is the child itself.
 
-use std::ffi::c_void;
+use std::ffi::{c_void, OsString};
 use std::io;
+use std::os::windows::ffi::OsStrExt;
 use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver};
@@ -38,7 +39,6 @@ const CHUNK: usize = 16 * 1024;
 const QUEUE: usize = 64;
 /// `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`.
 const ATTR_PSEUDOCONSOLE: usize = 0x0002_0016;
-const STILL_ACTIVE: u32 = 259;
 
 fn last_error() -> io::Error {
     // SAFETY: plain call.
@@ -100,11 +100,12 @@ fn quote_arg(arg: &str) -> String {
     out
 }
 
+/// `vars_os`, not `vars`: Windows allows variables that are not valid Unicode, and `vars` panics on them.
 fn environment(extra: &[(String, String)]) -> Vec<u16> {
-    let mut vars: Vec<(String, String)> = std::env::vars().collect();
+    let mut vars: Vec<(OsString, OsString)> = std::env::vars_os().collect();
     let mut set = |k: &str, v: &str| {
         vars.retain(|(have, _)| !have.eq_ignore_ascii_case(k));
-        vars.push((k.to_string(), v.to_string()));
+        vars.push((k.into(), v.into()));
     };
     if !extra.iter().any(|(k, _)| k.eq_ignore_ascii_case("TERM")) {
         set("TERM", "xterm-256color");
@@ -114,7 +115,9 @@ fn environment(extra: &[(String, String)]) -> Vec<u16> {
     }
     let mut block: Vec<u16> = Vec::new();
     for (k, v) in vars {
-        block.extend(format!("{k}={v}").encode_utf16());
+        block.extend(k.encode_wide());
+        block.push(u16::from(b'='));
+        block.extend(v.encode_wide());
         block.push(0);
     }
     block.push(0);
@@ -144,11 +147,12 @@ impl Inner {
         }
     }
 
+    /// Only for a process that is over: its code can be 259, the value `STILL_ACTIVE` would mean for a live one.
     fn exit_code(&self) -> Option<i32> {
         let mut code = 0u32;
         // SAFETY: a live process handle.
         let ok = unsafe { GetExitCodeProcess(self.process.0, &mut code) };
-        (ok != 0 && code != STILL_ACTIVE).then_some(code as i32)
+        (ok != 0).then_some(code as i32)
     }
 
     fn exited(&self) -> bool {
@@ -319,7 +323,13 @@ fn start_process(config: &PtyConfig, hpc: HPCON) -> io::Result<(Handle, u32, Opt
             .join(" "),
     );
     let env = environment(&config.env);
-    let cwd = config.cwd.as_ref().map(|c| wide(&c.to_string_lossy()));
+    // Not lossily: a folder name need not be valid Unicode.
+    let cwd: Option<Vec<u16>> = config.cwd.as_ref().map(|c| {
+        c.as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    });
 
     let mut size = 0usize;
     // SAFETY: the documented size query: null list, one attribute.
@@ -567,6 +577,36 @@ mod tests {
         control.kill().unwrap();
         assert!(p.wait().unwrap().code.is_some());
         assert!(p.try_wait().unwrap().is_some());
+    }
+
+    #[test]
+    fn an_exit_code_of_259_is_an_exit_not_still_running() {
+        // 259 is what `GetExitCodeProcess` also answers for a live process (`STILL_ACTIVE`).
+        let mut p = cmd(&["/c", "exit 259"]);
+        assert_eq!(p.wait().unwrap().code, Some(259));
+        assert_eq!(p.try_wait().unwrap().and_then(|s| s.code), Some(259));
+    }
+
+    #[test]
+    fn a_working_folder_whose_name_is_not_valid_unicode_is_used_as_is() {
+        use std::os::windows::ffi::OsStringExt;
+        let mut name: Vec<u16> = format!("agora-conpty-{}-", std::process::id())
+            .encode_utf16()
+            .collect();
+        name.push(0xD800);
+        let dir = std::env::temp_dir().join(OsString::from_wide(&name));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("marker.txt"), "x").unwrap();
+        let mut cfg = PtyConfig::new(vec![
+            "cmd.exe".into(),
+            "/c".into(),
+            "if exist marker.txt (exit 3) else (exit 4)".into(),
+        ]);
+        cfg.cwd = Some(dir.clone());
+        let mut p = spawn(&cfg).unwrap();
+        assert_eq!(p.wait().unwrap().code, Some(3));
+        drop(p);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
