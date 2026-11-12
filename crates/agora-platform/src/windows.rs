@@ -86,9 +86,11 @@ fn overlapped(event: &Event) -> OVERLAPPED {
 }
 
 /// The pipe name for a socket path: the file name for people, a hash of the whole path so two sockets of the same name in different
-/// folders do not meet.
+/// folders do not meet. The path is hashed in one spelling (absolute, `\`, no `..`, not verbatim), so every spelling of one socket file
+/// names one pipe, as every spelling reaches one socket on Unix. A path already in that spelling hashes as before.
 fn pipe_name(path: &Path) -> Vec<u16> {
-    let full = path.to_string_lossy().to_lowercase();
+    let normal = std::path::absolute(path).map_or_else(|_| path.to_path_buf(), plain_path);
+    let full = normal.to_string_lossy().to_lowercase();
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in full.as_bytes() {
         h ^= u64::from(*b);
@@ -647,6 +649,39 @@ mod tests {
 
     fn path(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("agora-pipe-{}-{name}.sock", std::process::id()))
+    }
+
+    #[test]
+    fn every_spelling_of_one_socket_path_reaches_one_listener() {
+        let p = path("spelling");
+        let l = listen(&p).unwrap();
+        let text = p.to_string_lossy().into_owned();
+        let parent = p.parent().unwrap();
+        let spellings = [
+            PathBuf::from(text.replace('\\', "/")),
+            parent.join("x").join("..").join(p.file_name().unwrap()),
+            PathBuf::from(format!(r"\\?\{text}")),
+            PathBuf::from(text.to_uppercase()),
+        ];
+        // Pipe names compare without case, like the paths.
+        let name = |p: &Path| String::from_utf16_lossy(&pipe_name(p)).to_lowercase();
+        for s in &spellings {
+            assert_eq!(name(s), name(&p), "{}", s.display());
+            let client = connect(s);
+            assert!(client.is_ok(), "{}", s.display());
+            // Frees the instance for the next client.
+            l.accept().unwrap();
+            drop(client);
+        }
+        // Relative to the current folder: the same pipe as the absolute spelling there.
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(
+            pipe_name(Path::new("n.sock")),
+            pipe_name(&cwd.join("n.sock"))
+        );
+        // Two different socket files still get two pipes.
+        assert_ne!(pipe_name(&p), pipe_name(&path("other")));
+        drop(l);
     }
 
     #[test]
