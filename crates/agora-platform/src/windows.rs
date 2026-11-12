@@ -735,9 +735,12 @@ pub(crate) fn open_dir(path: &Path) -> io::Result<std::fs::File> {
     Err(io::Error::from(io::ErrorKind::Unsupported))
 }
 
-/// See [`crate::list_dir`]. Not written yet (#330: the Windows half).
-pub(crate) fn list_dir(dir: &std::fs::File) -> io::Result<Vec<crate::DirItem>> {
-    let _ = dir;
+/// See [`crate::visit_dir`]. Not written yet (#330: the Windows half).
+pub(crate) fn visit_dir(
+    dir: &std::fs::File,
+    visitor: &mut dyn FnMut(crate::DirItem) -> std::ops::ControlFlow<()>,
+) -> io::Result<()> {
+    let _ = (dir, visitor);
     Err(io::Error::from(io::ErrorKind::Unsupported))
 }
 
