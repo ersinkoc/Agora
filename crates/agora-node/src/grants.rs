@@ -179,6 +179,15 @@ impl Grants {
                 d.create_project_id,
                 false,
             ),
+            Cmd::DirectoryList(d) => (
+                d.authorization.as_ref(),
+                "list",
+                d.path.as_str(),
+                "",
+                "",
+                false,
+                false,
+            ),
             Cmd::AgentLaunch(a) => (
                 a.authorization.as_ref(),
                 "launch",

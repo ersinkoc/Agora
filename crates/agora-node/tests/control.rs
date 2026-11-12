@@ -1442,3 +1442,48 @@ fn a_chat_agents_conversation_streams_to_whoever_subscribes() {
         agent_id: s.agent_id,
     })));
 }
+
+#[test]
+fn the_node_lists_a_folders_subfolders_for_the_folder_picker() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return;
+    }
+    let e = env("dirlist");
+    // Outside the node's own folder (the one its worktrees are in), which is never listed.
+    let pick = std::env::temp_dir().join(format!("agora-pick-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&pick);
+    std::fs::create_dir_all(pick.join("zeta")).unwrap();
+    std::fs::create_dir_all(pick.join("alpha/.git")).unwrap();
+    std::fs::write(pick.join("file.txt"), "x").unwrap();
+    let n = node(&e, NodeLimits::default());
+    let mut c = Client::connect(n.socket().unwrap()).unwrap();
+    let r = ok(c.call(Cmd::DirectoryList(v1::DirectoryList {
+        path: pick.to_string_lossy().into_owned(),
+        authorization: None,
+    })));
+    let Some(Ok_::DirectoryEntries(list)) = r.result else {
+        panic!("not a folder listing: {r:?}");
+    };
+    let names: Vec<(&str, bool)> = list
+        .entries
+        .iter()
+        .map(|x| (x.name.as_str(), x.is_git))
+        .collect();
+    assert_eq!(names, [("alpha", true), ("zeta", false)]);
+    assert!(!list.truncated);
+    assert!(
+        list.path
+            .ends_with(&*pick.file_name().unwrap().to_string_lossy()),
+        "{}",
+        list.path
+    );
+    // The node's own folder holds its keys: never listed, and refused when asked for.
+    assert_eq!(
+        err_code(c.call(Cmd::DirectoryList(v1::DirectoryList {
+            path: e.dir.join("data").to_string_lossy().into_owned(),
+            authorization: None,
+        }))),
+        "protocol.invalid_message"
+    );
+    let _ = std::fs::remove_dir_all(&pick);
+}
