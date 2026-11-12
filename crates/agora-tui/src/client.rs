@@ -190,9 +190,15 @@ impl Session {
             return Update::Changed;
         }
         let conn = &mut self.conn;
+        let queue = &mut self.term_frames;
         self.rt.block_on(async {
             match tokio::time::timeout(wait, conn.recv()).await {
                 Err(_) => Update::Quiet,
+                // A terminal being watched alongside: kept for `terminal_next`, never dropped here.
+                Ok(Ok(Some(f))) if f.stream_id >= agora_protocol::frame::FIRST_DYNAMIC_STREAM => {
+                    queue.push_back(f);
+                    Update::Quiet
+                }
                 Ok(Ok(Some(f))) if f.stream_id == STREAM_EVENTS && f.kind == kinds::SNAPSHOT => {
                     match Snapshot::decode(f.payload.as_slice()) {
                         Ok(s) => Update::Snapshot(Box::new(s)),
