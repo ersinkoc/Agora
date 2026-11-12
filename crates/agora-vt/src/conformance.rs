@@ -19,6 +19,7 @@ pub fn run_all<T: Terminal>(make: impl Fn(Size) -> T) {
     wide_characters_use_two_cells(&make);
     modes_toggle(&make);
     styles_are_kept_per_cell(&make);
+    pen_is_the_style_of_the_next_character(&make);
     styling_sequences_print_nothing(&make);
     malformed_input_does_not_panic(&make);
 }
@@ -178,6 +179,26 @@ fn styles_are_kept_per_cell<T: Terminal>(make: &impl Fn(Size) -> T) {
     );
     assert_eq!(st(3), Style::default());
     assert_eq!(st(4).fg, Color::Indexed(9), "bright red is palette 9");
+}
+
+/// The pen is the style the next character gets: a repaint for a client that joins mid-stream hands it on (F040).
+fn pen_is_the_style_of_the_next_character<T: Terminal>(make: &impl Fn(Size) -> T) {
+    use crate::{Color, Style};
+    let mut t = make(size(20, 2));
+    assert_eq!(t.pen(), Style::default());
+    t.feed(b"\x1b[1;4;31;48;2;1;2;3mA");
+    let expected = Style {
+        fg: Color::Indexed(1),
+        bg: Color::Rgb(1, 2, 3),
+        bold: true,
+        underline: true,
+        ..Style::default()
+    };
+    assert_eq!(t.pen(), expected, "unchanged by printing");
+    t.feed(b"B");
+    assert_eq!(t.cell(0, 1).map(|c| c.style), Some(expected));
+    t.feed(b"\x1b[0m");
+    assert_eq!(t.pen(), Style::default());
 }
 
 fn styling_sequences_print_nothing<T: Terminal>(make: &impl Fn(Size) -> T) {

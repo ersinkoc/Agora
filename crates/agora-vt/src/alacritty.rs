@@ -73,6 +73,21 @@ fn color(c: AColor) -> Color {
     }
 }
 
+/// A backend cell's (or the cursor template's) colours and flags as a [`Style`].
+fn style(fg: AColor, bg: AColor, f: Flags) -> Style {
+    Style {
+        fg: color(fg),
+        bg: color(bg),
+        bold: f.contains(Flags::BOLD),
+        dim: f.contains(Flags::DIM),
+        italic: f.contains(Flags::ITALIC),
+        underline: f.intersects(Flags::ALL_UNDERLINES),
+        inverse: f.contains(Flags::INVERSE),
+        strike: f.contains(Flags::STRIKEOUT),
+        hidden: f.contains(Flags::HIDDEN),
+    }
+}
+
 pub struct AlacrittyTerminal {
     term: Term<Listener>,
     parser: Processor,
@@ -132,22 +147,16 @@ impl Terminal for AlacrittyTerminal {
         // Indexing by `Line(n)` addresses the live screen; the scrolled viewport (display offset) does not apply.
         let c = &self.term.grid()[Line(i32::from(row))][Column(usize::from(col))];
         let spacer = c.flags.contains(Flags::WIDE_CHAR_SPACER);
-        let f = c.flags;
         Some(Cell {
             ch: if spacer || c.c == '\0' { ' ' } else { c.c },
             spacer,
-            style: Style {
-                fg: color(c.fg),
-                bg: color(c.bg),
-                bold: f.contains(Flags::BOLD),
-                dim: f.contains(Flags::DIM),
-                italic: f.contains(Flags::ITALIC),
-                underline: f.intersects(Flags::ALL_UNDERLINES),
-                inverse: f.contains(Flags::INVERSE),
-                strike: f.contains(Flags::STRIKEOUT),
-                hidden: f.contains(Flags::HIDDEN),
-            },
+            style: style(c.fg, c.bg, c.flags),
         })
+    }
+
+    fn pen(&self) -> Style {
+        let t = &self.term.grid().cursor.template;
+        style(t.fg, t.bg, t.flags)
     }
 
     fn cursor(&self) -> Cursor {

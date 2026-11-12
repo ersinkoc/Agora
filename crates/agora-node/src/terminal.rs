@@ -171,7 +171,7 @@ fn snapshot_of(s: &Shared) -> Snapshot {
 }
 
 /// [`snapshot_of`] with the repaint a subscribing client is sent: every row positioned absolutely with the program's colours and
-/// attributes (so the client's own state does not matter), then the program's cursor.
+/// attributes (so the client's own state does not matter), then the program's cursor, input modes and current style.
 fn subscribed_snapshot(s: &Shared) -> Snapshot {
     let mut snap = snapshot_of(s);
     let size = s.term.size();
@@ -201,6 +201,20 @@ fn subscribed_snapshot(s: &Shared) -> Snapshot {
         c.col + 1,
         if c.visible { "\x1b[?25h" } else { "\x1b[?25l" }
     ));
+    // What the program set before the client joined and the live output after this repaint relies on: the input modes the
+    // client's keys and pastes depend on, then the style the next character is drawn in.
+    let m = snap.modes;
+    out.push_str(if m.bracketed_paste {
+        "\x1b[?2004h"
+    } else {
+        "\x1b[?2004l"
+    });
+    out.push_str(if m.application_cursor {
+        "\x1b[?1h"
+    } else {
+        "\x1b[?1l"
+    });
+    out.push_str(&s.term.pen().sgr());
     snap.repaint = Some(out.into_bytes());
     snap
 }
