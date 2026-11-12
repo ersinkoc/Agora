@@ -17,6 +17,7 @@ libc = "0.2"
 # only the groups used are enabled, and no other platform compiles it. Already in the tree through tokio and ring.
 windows-sys = { version = "0.61", features = [
   # Single-entry directory queries keep checked-handle traversal lazy on Windows.
+  "Wdk_Foundation",
   "Wdk_Storage_FileSystem",
   "Win32_Foundation",
   "Win32_Security",

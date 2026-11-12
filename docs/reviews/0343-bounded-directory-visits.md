@@ -64,9 +64,10 @@ after collecting evidence, without touching installed services, credentials or r
 
 The initial follow-up inherited #333's Windows `Unsupported` stubs. The integrated implementation opens a directory
 with `FILE_FLAG_BACKUP_SEMANTICS`, then verifies its handle using the existing root check. Enumeration uses
-[`ReOpenFile`](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-reopenfile) to obtain an independent
-synchronous handle to the same filesystem object; it never looks the path up again. `FILE_FLAG_OPEN_REPARSE_POINT`
-prevents that reopen from following a newly planted reparse point on the object itself.
+[`NtOpenFile`](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntopenfile), with an empty name
+relative to the held directory, to obtain an independent synchronous handle to the same filesystem object. Explicit
+`FILE_DIRECTORY_FILE` and `FILE_SYNCHRONOUS_IO_NONALERT` options select directory access and completed queries; the path
+is never looked up again. `FILE_OPEN_REPARSE_POINT` prevents that open from following a newly planted reparse point.
 
 [`NtQueryDirectoryFile`](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntquerydirectoryfile)
 requests one `FILE_DIRECTORY_INFORMATION` at a time. A fixed, aligned buffer holds the record; its completed byte

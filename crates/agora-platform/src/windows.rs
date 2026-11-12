@@ -754,34 +754,52 @@ pub(crate) fn visit_dir(
     visitor: &mut dyn FnMut(crate::DirItem) -> std::ops::ControlFlow<()>,
 ) -> io::Result<()> {
     use std::ffi::OsString;
-    use std::mem::{offset_of, size_of_val};
+    use std::mem::{offset_of, size_of, size_of_val};
     use std::os::windows::ffi::OsStringExt;
     use std::os::windows::io::AsRawHandle;
+    use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
     use windows_sys::Wdk::Storage::FileSystem::{
-        FileDirectoryInformation, NtQueryDirectoryFile, FILE_DIRECTORY_INFORMATION,
+        FileDirectoryInformation, NtOpenFile, NtQueryDirectoryFile, FILE_DIRECTORY_FILE,
+        FILE_DIRECTORY_INFORMATION, FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT,
     };
     use windows_sys::Win32::Foundation::{
-        RtlNtStatusToDosError, STATUS_NO_MORE_FILES, STATUS_SUCCESS,
+        RtlNtStatusToDosError, STATUS_NO_MORE_FILES, STATUS_SUCCESS, UNICODE_STRING,
     };
     use windows_sys::Win32::Storage::FileSystem::{
-        ReOpenFile, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
-        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
-        FILE_SHARE_READ, FILE_SHARE_WRITE,
+        FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_LIST_DIRECTORY,
+        FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, SYNCHRONIZE,
     };
     use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 
-    // SAFETY: a live borrowed handle. ReOpenFile addresses that object, not its path. Omitting OVERLAPPED makes all queries
-    // synchronous even if a caller supplied an asynchronous handle, so their buffers cannot outlive this function.
-    let handle = unsafe {
-        ReOpenFile(
-            dir.as_raw_handle(),
-            GENERIC_READ,
+    let mut empty = [0u16];
+    let name = UNICODE_STRING {
+        Length: 0,
+        MaximumLength: 2,
+        Buffer: empty.as_mut_ptr(),
+    };
+    let attributes = OBJECT_ATTRIBUTES {
+        Length: size_of::<OBJECT_ATTRIBUTES>() as u32,
+        RootDirectory: dir.as_raw_handle(),
+        ObjectName: &name,
+        ..Default::default()
+    };
+    let mut handle = null_mut();
+    let mut opened = IO_STATUS_BLOCK::default();
+    // SAFETY: live input/output structures; an empty name relative to the held directory reopens that object, without a
+    // path lookup. Explicit directory and synchronous options give this enumeration its own cursor and completed queries.
+    let status = unsafe {
+        NtOpenFile(
+            &mut handle,
+            FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+            &attributes,
+            &mut opened,
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            FILE_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
         )
     };
-    if handle == INVALID_HANDLE_VALUE {
-        let error = io::Error::last_os_error();
+    if status != STATUS_SUCCESS {
+        // SAFETY: converting the open operation's returned NTSTATUS.
+        let error = os_error(unsafe { RtlNtStatusToDosError(status) });
         return Err(io::Error::new(
             error.kind(),
             format!("reopen directory: {error}"),
