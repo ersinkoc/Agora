@@ -274,7 +274,9 @@ fn the_terminal_console_answers_an_approval_with_its_own_key_through_the_hub() {
     let mut fake = std::path::PathBuf::from(env!("CARGO_BIN_EXE_agora"));
     fake.pop();
     fake.push(format!("agora-fake-agent{}", std::env::consts::EXE_SUFFIX));
-    if !fake.exists() {
+    // Built once per test binary, even when present: a binary left from an older checkout may lack newer flags.
+    static FRESH: std::sync::Once = std::sync::Once::new();
+    FRESH.call_once(|| {
         assert!(std::process::Command::new(
             std::env::var("CARGO").unwrap_or_else(|_| "cargo".into())
         )
@@ -282,7 +284,7 @@ fn the_terminal_console_answers_an_approval_with_its_own_key_through_the_hub() {
         .status()
         .unwrap()
         .success());
-    }
+    });
     std::fs::write(
         manifests.join("ad.toml"),
         format!("kind = \"adapted\"\ndisplay_name = \"A\"\nversion = \"1\"\nmin_engine = 1\n[adapter]\ncommand = [{:?}, \"--adapter\"]\n", fake.to_string_lossy()),
@@ -499,7 +501,9 @@ fn the_terminal_console_follows_a_chat_agents_conversation_sends_a_request_and_s
     let mut fake = std::path::PathBuf::from(env!("CARGO_BIN_EXE_agora"));
     fake.pop();
     fake.push(format!("agora-fake-agent{}", std::env::consts::EXE_SUFFIX));
-    if !fake.exists() {
+    // Built once per test binary, even when present: a binary left from an older checkout may lack newer flags.
+    static FRESH: std::sync::Once = std::sync::Once::new();
+    FRESH.call_once(|| {
         assert!(std::process::Command::new(
             std::env::var("CARGO").unwrap_or_else(|_| "cargo".into())
         )
@@ -507,7 +511,7 @@ fn the_terminal_console_follows_a_chat_agents_conversation_sends_a_request_and_s
         .status()
         .unwrap()
         .success());
-    }
+    });
     std::fs::write(
         manifests.join("ad.toml"),
         format!("kind = \"adapted\"\ndisplay_name = \"A\"\nversion = \"1\"\nmin_engine = 1\n[adapter]\ncommand = [{:?}, \"--adapter\"]\n", fake.to_string_lossy()),

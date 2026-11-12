@@ -20,7 +20,9 @@ fn fake_agent() -> String {
     p.pop();
     p.pop();
     p.push(format!("agora-fake-agent{}", std::env::consts::EXE_SUFFIX));
-    if !p.exists() {
+    // Built once per test binary, even when present: a binary left from an older checkout may lack newer flags.
+    static FRESH: std::sync::Once = std::sync::Once::new();
+    FRESH.call_once(|| {
         let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
         let ok = Command::new(cargo)
             .args(["build", "-q", "-p", "agora-fake-agent"])
@@ -28,7 +30,7 @@ fn fake_agent() -> String {
             .expect("run cargo")
             .success();
         assert!(ok, "building agora-fake-agent failed");
-    }
+    });
     p.to_string_lossy().into_owned()
 }
 

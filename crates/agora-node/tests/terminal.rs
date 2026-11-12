@@ -38,7 +38,9 @@ fn fake_agent() -> String {
     p.pop(); // deps
     p.pop(); // debug
     p.push(format!("agora-fake-agent{}", std::env::consts::EXE_SUFFIX));
-    if !p.exists() {
+    // Built once per test binary, even when present: a binary left from an older checkout may lack newer flags.
+    static FRESH: std::sync::Once = std::sync::Once::new();
+    FRESH.call_once(|| {
         // `cargo test` only builds binaries of the package under test; build the fake agent on demand.
         let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
         let ok = std::process::Command::new(cargo)
@@ -47,7 +49,7 @@ fn fake_agent() -> String {
             .expect("run cargo")
             .success();
         assert!(ok, "building agora-fake-agent failed");
-    }
+    });
     p.to_string_lossy().into_owned()
 }
 
