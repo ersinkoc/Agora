@@ -32,6 +32,7 @@ pub enum Outcome {
     Silent,
     /// An `ask` is waiting for its answer. Poll [`Mesh::ask_status`] for `ask_id` and call
     /// [`McpConnection::finish_ask`] when it stops being pending, or when `deadline_ms` passes.
+    /// If the originating transport ends first, discard its ask with [`Mesh::cancel_ask`].
     Waiting {
         request_id: Value,
         ask_id: String,

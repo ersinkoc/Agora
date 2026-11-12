@@ -42,7 +42,8 @@ Tool errors are results with `isError: true` whose text is JSON `{"error": {"cod
 `error-codes.md` (new: `mesh.rate_limited`, `mesh.body_too_large`, `mesh.too_many_refs`, `mesh.too_many_asks`, `mesh.timeout`,
 `task.not_found`, `task.not_open`, `task.blocked`, `task.not_owner`, `lease.not_found`, `lease.invalid_path`). Bad arguments are
 JSON-RPC `-32602`. `ask` does not block the library: the connection returns `Waiting { ask_id, deadline }` and the caller polls
-the broker and calls `finish_ask`.
+the broker and calls `finish_ask`. If the originating transport ends first, its runtime calls the caller-bound
+`Mesh::cancel_ask` for the asks it owns; another agent cannot cancel them.
 
 ## Node-local server (`agora-node::mesh_server`)
 
@@ -52,7 +53,10 @@ Whatever connects to a socket is that agent as far as the broker is concerned, s
 agent's process. `agora mesh stdio --socket PATH` is what an agent's MCP client runs as its server: it carries stdin/stdout to
 that socket. The node registers the agent on start, keeps its state current for `agents_list`, and on stop or exit
 unregisters it, which gives back its tasks, leases and open asks and closes the endpoint. Pending `ask`s are answered on the
-same connection without blocking the agent's other calls. Mesh activity is written to the node's event log.
+same connection without blocking the agent's other calls. The connection owns its outstanding ask IDs independently
+of its polling queue. On EOF, input/output failure or shutdown it discards those asks (including already answered ones)
+without unregistering the agent or affecting another connection's requests. A live connection still receives a completed
+answer even if it starts another ask before polling that answer. Mesh activity is written to the node's event log.
 The socket reaches the agent through its manifest's `[mcp]` section (see `agent-manifest.md`). Messages to agents on other nodes: see below.
 
 
