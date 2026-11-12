@@ -6,7 +6,7 @@ use std::fmt::Write as _;
 
 use agora_i18n::{key, Arg};
 use agora_protocol::v1::{AgentSnapshot, AgentState, Snapshot};
-use agora_vt::{Color, Style, Terminal};
+use agora_vt::{Style, Terminal};
 
 use crate::render::Text;
 
@@ -202,44 +202,6 @@ fn bytes(b: u64) -> String {
     }
 }
 
-/// The SGR sequence that draws `s` from a reset state.
-fn sgr(s: &Style) -> String {
-    let mut out = String::from("\x1b[0");
-    for (on, code) in [
-        (s.bold, "1"),
-        (s.dim, "2"),
-        (s.italic, "3"),
-        (s.underline, "4"),
-        (s.inverse, "7"),
-        (s.hidden, "8"),
-        (s.strike, "9"),
-    ] {
-        if on {
-            out.push(';');
-            out.push_str(code);
-        }
-    }
-    let mut color = |c: Color, base: u8, bright: u8, ext: u8| match c {
-        Color::Default => {}
-        Color::Indexed(i) if i < 8 => {
-            let _ = write!(out, ";{}", base + i);
-        }
-        Color::Indexed(i) if i < 16 => {
-            let _ = write!(out, ";{}", bright + i - 8);
-        }
-        Color::Indexed(i) => {
-            let _ = write!(out, ";{ext};5;{i}");
-        }
-        Color::Rgb(r, g, b) => {
-            let _ = write!(out, ";{ext};2;{r};{g};{b}");
-        }
-    };
-    color(s.fg, 30, 90, 38);
-    color(s.bg, 40, 100, 48);
-    out.push('m');
-    out
-}
-
 /// One row of the agent's screen, cut to `width` columns, with its colours when `color` is on.
 fn screen_row(term: &dyn Terminal, row: u16, width: u16, color: bool) -> String {
     let mut out = String::new();
@@ -257,7 +219,7 @@ fn screen_row(term: &dyn Terminal, row: u16, width: u16, color: bool) -> String 
         let wide = term.cell(row, col + 1).is_some_and(|n| n.spacer);
         let w = if wide { 2 } else { 1 };
         if color && cell.style != current {
-            out.push_str(&sgr(&cell.style));
+            out.push_str(&cell.style.sgr());
             current = cell.style;
         }
         if used + w > width {

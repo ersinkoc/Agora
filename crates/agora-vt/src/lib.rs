@@ -73,6 +73,47 @@ pub struct Modes {
     pub application_cursor: bool,
 }
 
+impl Style {
+    /// The SGR sequence that draws this style from a reset state (`ESC [ 0 ; … m`): attributes, then the palette or 24-bit colours.
+    pub fn sgr(&self) -> String {
+        use std::fmt::Write as _;
+        let mut out = String::from("\x1b[0");
+        for (on, code) in [
+            (self.bold, "1"),
+            (self.dim, "2"),
+            (self.italic, "3"),
+            (self.underline, "4"),
+            (self.inverse, "7"),
+            (self.hidden, "8"),
+            (self.strike, "9"),
+        ] {
+            if on {
+                out.push(';');
+                out.push_str(code);
+            }
+        }
+        let mut color = |c: Color, base: u8, bright: u8, ext: u8| match c {
+            Color::Default => {}
+            Color::Indexed(i) if i < 8 => {
+                let _ = write!(out, ";{}", base + i);
+            }
+            Color::Indexed(i) if i < 16 => {
+                let _ = write!(out, ";{}", bright + i - 8);
+            }
+            Color::Indexed(i) => {
+                let _ = write!(out, ";{ext};5;{i}");
+            }
+            Color::Rgb(r, g, b) => {
+                let _ = write!(out, ";{ext};2;{r};{g};{b}");
+            }
+        };
+        color(self.fg, 30, 90, 38);
+        color(self.bg, 40, 100, 48);
+        out.push('m');
+        out
+    }
+}
+
 pub trait Terminal: Send {
     /// Process bytes written by the program. Never panics on malformed input.
     fn feed(&mut self, bytes: &[u8]);

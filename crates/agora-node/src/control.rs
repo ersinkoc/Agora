@@ -1002,6 +1002,13 @@ fn exit_payload(st: &agora_platform::ExitStatus) -> Vec<u8> {
     code.to_le_bytes().to_vec()
 }
 
+/// A terminal size as the resize frame carries it: columns, then rows, each a little-endian u16.
+fn size_payload(s: agora_vt::Size) -> Vec<u8> {
+    let mut p = s.cols.to_le_bytes().to_vec();
+    p.extend_from_slice(&s.rows.to_le_bytes());
+    p
+}
+
 #[allow(clippy::too_many_arguments)]
 fn pump(
     ctx: &ControlContext,
@@ -1013,17 +1020,19 @@ fn pump(
     alive: &AtomicBool,
     stop: &AtomicBool,
 ) {
-    if send(writer, stream, KIND_TERM_SNAPSHOT, snap.to_ansi()).is_err() {
+    // Each repaint is followed by the size it was made at, so a client that paints the screen itself (rather than resizing the
+    // agent to fit) knows how wide the program thinks its lines are.
+    let repaint = |snap: &Snapshot| {
+        send(writer, stream, KIND_TERM_SNAPSHOT, snap.to_ansi())
+            .and_then(|()| send(writer, stream, KIND_TERM_RESIZE, size_payload(snap.size)))
+    };
+    if repaint(snap).is_err() {
         return;
     }
     while alive.load(Ordering::Acquire) && !stop.load(Ordering::Acquire) {
         let sent = match sub.recv_timeout(POLL) {
             Ok(Output::Data(b)) => send(writer, stream, KIND_TERM_DATA, b.to_vec()),
-            Ok(Output::Resize(s)) => {
-                let mut p = s.cols.to_le_bytes().to_vec();
-                p.extend_from_slice(&s.rows.to_le_bytes());
-                send(writer, stream, KIND_TERM_RESIZE, p)
-            }
+            Ok(Output::Resize(s)) => send(writer, stream, KIND_TERM_RESIZE, size_payload(s)),
             Ok(Output::Exited(st)) => {
                 let _ = send(writer, stream, KIND_TERM_EXIT, exit_payload(&st));
                 return;
@@ -1031,7 +1040,7 @@ fn pump(
             Ok(Output::Lagged) => {
                 let snap = ctx.sup().terminal(agent).map(|h| h.resync(sub));
                 match snap {
-                    Some(s) => send(writer, stream, KIND_TERM_SNAPSHOT, s.to_ansi()),
+                    Some(s) => repaint(&s),
                     None => return,
                 }
             }

@@ -231,7 +231,8 @@ so it can be driven with no hub. Frames are the envelope above. `CommandRequest`
 `CommandResponse` comes back on stream 1 with kind 1, matched by `request_id`; a retry with the same
 `idempotency_key` gets the stored response (addressed to the retry) and repeats nothing. A terminal stream is
 opened by sending `TerminalSubscribe` on a dynamic stream id (3+) chosen by the client. After the response the
-node writes that terminal's frames on that stream: kind 1 snapshot (ANSI that repaints the screen), kind 0 raw
+node writes that terminal's frames on that stream: kind 1 snapshot (ANSI that repaints the screen, with its colours and
+attributes), each one followed by kind 2 with the size it was painted at, kind 0 raw
 output, kind 2 resize (cols, rows as u16 LE), kind 3 exit (i32 LE; negative = signal). A client that falls behind
 gets a fresh snapshot instead of the dropped output; it never slows the terminal. Input and resize are ordinary
 commands. Terminal ids are `t-<agent id>` (one terminal per agent). Implemented commands: `project.list`,

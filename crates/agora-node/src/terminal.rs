@@ -46,13 +46,20 @@ pub struct Snapshot {
     pub title: Option<String>,
     /// `Some` once the process has exited.
     pub exit: Option<ExitStatus>,
+    /// The screen with its colours and attributes, as [`Snapshot::to_ansi`] sends it; made only for a client that subscribes
+    /// (detection reads `lines` and never pays for it).
+    pub repaint: Option<Vec<u8>>,
 }
 
 impl Snapshot {
     /// The screen as bytes a terminal emulator can paint (`terminal.raw` resync): every row is positioned
     /// absolutely, so the output does not depend on the client's current cursor or size, and the cursor
-    /// ends where the program's cursor is. Colors and attributes are not carried.
+    /// ends where the program's cursor is. A subscriber's snapshot carries colours and attributes ([`Snapshot::repaint`]);
+    /// any other is plain text.
     pub fn to_ansi(&self) -> Vec<u8> {
+        if let Some(r) = &self.repaint {
+            return r.clone();
+        }
         let mut out = b"\x1b[0m\x1b[2J".to_vec();
         for (i, line) in self.lines.iter().enumerate() {
             out.extend_from_slice(format!("\x1b[{};1H{line}\x1b[K", i + 1).as_bytes());
@@ -159,7 +166,43 @@ fn snapshot_of(s: &Shared) -> Snapshot {
         modes: s.term.modes(),
         title: s.term.title(),
         exit: s.exit,
+        repaint: None,
     }
+}
+
+/// [`snapshot_of`] with the repaint a subscribing client is sent: every row positioned absolutely with the program's colours and
+/// attributes (so the client's own state does not matter), then the program's cursor.
+fn subscribed_snapshot(s: &Shared) -> Snapshot {
+    let mut snap = snapshot_of(s);
+    let size = s.term.size();
+    let mut out = String::from("\x1b[0m\x1b[2J");
+    for row in 0..size.rows {
+        out.push_str(&format!("\x1b[{};1H", row + 1));
+        let mut current = agora_vt::Style::default();
+        for col in 0..size.cols {
+            let Some(cell) = s.term.cell(row, col) else {
+                break;
+            };
+            if cell.spacer {
+                continue;
+            }
+            if cell.style != current {
+                out.push_str(&cell.style.sgr());
+                current = cell.style;
+            }
+            out.push(cell.ch);
+        }
+        out.push_str("\x1b[0m\x1b[K");
+    }
+    let c = snap.cursor;
+    out.push_str(&format!(
+        "\x1b[{};{}H{}",
+        c.row + 1,
+        c.col + 1,
+        if c.visible { "\x1b[?25h" } else { "\x1b[?25l" }
+    ));
+    snap.repaint = Some(out.into_bytes());
+    snap
 }
 
 /// Handle to a running terminal actor. Dropping it kills the process and stops the actor.
@@ -250,7 +293,7 @@ impl TerminalHandle {
         let (tx, rx) = sync_channel(SUBSCRIBER_QUEUE);
         let lagged = Arc::new(AtomicBool::new(false));
         let mut g = self.inner.lock();
-        let snap = snapshot_of(&g);
+        let snap = subscribed_snapshot(&g);
         g.subscribers.push(Subscriber {
             tx,
             lagged: Arc::clone(&lagged),
@@ -264,7 +307,7 @@ impl TerminalHandle {
         let g = self.inner.lock();
         while sub.rx.try_recv().is_ok() {}
         sub.lagged.store(false, Ordering::Release);
-        snapshot_of(&g)
+        subscribed_snapshot(&g)
     }
 
     /// How the process ended, once it has. Cheap: no screen is copied (the supervisor polls this).
