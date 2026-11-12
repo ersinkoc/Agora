@@ -111,6 +111,7 @@ impl Ca {
         p.is_ca = IsCa::ExplicitNoCa;
         p.key_usages = vec![KeyUsagePurpose::DigitalSignature];
         p.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+        p.use_authority_key_identifier_extension = true;
         p.not_before = OffsetDateTime::now_utc() - Duration::minutes(5);
         p.not_after = OffsetDateTime::now_utc() + Duration::days(DEVICE_CERT_DAYS);
         let issuer = Issuer::from_ca_cert_pem(&self.cert_pem, &self.key)?;
@@ -140,6 +141,7 @@ impl Ca {
         p.is_ca = IsCa::ExplicitNoCa;
         p.key_usages = vec![KeyUsagePurpose::DigitalSignature];
         p.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+        p.use_authority_key_identifier_extension = true;
         p.not_before = OffsetDateTime::now_utc() - Duration::minutes(5);
         p.not_after = OffsetDateTime::now_utc() + Duration::days(DEVICE_CERT_DAYS);
         let issuer = Issuer::from_ca_cert_pem(&self.cert_pem, &self.key)?;
