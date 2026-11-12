@@ -96,11 +96,8 @@ pub fn inspect(
         .as_ref()
         .and_then(|c| crate::git::status(&c.root).ok())
         .map_or(String::new(), |_| {
-            std::process::Command::new("git")
-                .args(["-C"])
-                .arg(root)
+            crate::git::hardened(root)
                 .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
-                .env("GIT_TERMINAL_PROMPT", "0")
                 .output()
                 .ok()
                 .filter(|o| o.status.success())
