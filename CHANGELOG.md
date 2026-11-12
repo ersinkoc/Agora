@@ -25,6 +25,7 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 - Stopping an agent that runs through an adapter also ends the adapter's program; before, it kept running unseen.
 - A resume that fails no longer leaves the stopped agent reachable by other agents.
 - When the hub confirms events older than the ones a machine kept while it was offline, the machine keeps the rest instead of deleting them (or stopping its link).
+- A machine that was offline too long, or every machine after the hub is restored from a backup, reconnects on its own and shows its current agents (ADR-0054); before, it never reached the hub again. The events from the lost window are recorded as missing, and the owner's Activity page lists it.
 
 ### Terminals and adapters
 - Opening a terminal that is already running shows its later output in the program's own colours, and paste and arrow keys work as the program expects.

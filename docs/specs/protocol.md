@@ -11,10 +11,15 @@ connect (WSS + mTLS for nodes, session token for clients)
   ← Welcome    { chosen_generation, capabilities[], peer_id, server_time }
   → Resume     { last_acked_seq? }         (nodes and clients reconnecting)
   ← ResumeOk   { from_seq }  |  ← SnapshotRequired
+  → SnapshotRequired                       (node only, when it no longer has from_seq; ADR-0054)
   ... streams ...
   → / ← Ping / Pong every 15 s; 3 missed = connection lost
   → / ← Goodbye { reason_code }
 ```
+
+`SnapshotRequired` (control stream 0, kind 4, empty payload) is direction-neutral (ADR-0026): the sender cannot replay from
+the requested point. From a node it means the events from the hub's `from_seq` up to its oldest retained event are gone; the
+node sends it before any further event and the hub takes the node's next new event as the new base (section 3, ADR-0054).
 
 Roles: `node`, `client`, `adapter`. Capability names are lowercase dotted strings (`terminal.raw`,
 `terminal.cells`, `acp`, `mesh`, `files.watch`, `debug.json`). Unknown capabilities are ignored.
@@ -44,21 +49,38 @@ disk while disconnected.
 
 Node buffer (`agora-node::event_buffer`): an append-only log of checksummed records plus an atomically replaced ack
 file. A torn tail from a crash is truncated on open. After a reconnect the node replays everything after the
-hub's ack, in order. The log is size-capped (oldest events dropped first); if unacknowledged events were dropped,
-a replay from the old ack is refused (`Stale`) and the hub resynchronizes from a snapshot instead of silently
-missing events. Not yet: neither side implements that resync, so such a node stops delivering events until its buffer is
-cleared by hand (ADR-0054, accepted, being implemented). Terminal bytes never enter this log.
+hub's ack, in order. The log is size-capped (oldest events dropped first). If the hub asks for events the node no longer
+has (unacknowledged events dropped by the cap, or a hub restored from a backup older than what the node has trimmed), the
+node resynchronizes instead of stalling (ADR-0054): it appends a resync announcement to its buffer (`NodeOnline`, the
+`CheckoutDiscovered` and `WorkspaceRegistered` it knows, for each agent running now `AgentWorkspaceBound` where it applies,
+`AgentStarted`, `AgentStateChanged` with its current state, `AgentSessionReported` when known and `TerminalOpened` when it has
+one, then `ApprovalRequested` for every approval still waiting), sends `SnapshotRequired`, and replays from its oldest
+retained event. The hub applies the retained events and then the announcement, so it ends at the node's present state. The
+lost events stay lost and are recorded as such (store, log, audit trail), never silently. Limits: as after a node restart,
+`NodeOnline` hands the shared-board tasks and leases that node's agents held back to the board, so an agent that still runs
+must take its leases again; a managed working copy created inside the lost window (`WorktreeCreated`) stays missing from the
+hub's list, and resource reports and git status are not re-announced (the next report or change brings them back); the
+hub's usage counters for agents that still run start again from the announcement. Terminal bytes never enter this log.
 
 Hub store (`agora-hub::store`, ADR-0014): SQLite in WAL mode behind an `EventStore` trait. `append(producer, seq, ..)`
 returns `Applied` (stored, with a global position), `Duplicate` (already applied, ignored) or `Gap { expected }` (not the
-next event; nothing stored, the node replays from `expected`). `acked(producer)` is the acknowledgement to send back.
-Clients page the log by global position. Payloads are opaque encoded events.
+next event; nothing stored, the node replays from `expected`). `append_resync(.., resync_at_ms)` is the same for a node's first
+event after `SnapshotRequired`, except that an event above the next number is stored too: in one transaction the producer's
+numbering moves to it and the skipped range `(producer, from_seq, to_seq, at_ms)` is written to the internal `resyncs` table
+(`Resynced { pos, from_seq, to_seq }`). It never moves backwards: at or below the ack is a `Duplicate`. `acked(producer)` is
+the acknowledgement to send back. Clients page the log by global position. Payloads are opaque encoded events.
 
 Hub node session (`agora-hub::session`): a state machine over decoded messages, independent of transport and framing.
 The producer id is the node's authenticated identity; an event naming another producer is `protocol.invalid_message`.
 Order is `Hello` (role must be node) → `Resume` → events. The hub answers `Resume` with `ResumeOk { from_seq }` where
 `from_seq` is one past what the hub already holds, regardless of what the node claims. Each event yields `Applied`,
-`Duplicate` or `Gap { expected }`.
+`Duplicate` or `Gap { expected }`. After the handshake the node may send `SnapshotRequired` (before it is
+`protocol.invalid_message`): then its next event with a `seq` above the hub's ack becomes the new base, once, and yields
+`Resynced` (or `Applied` when it is the next number anyway). Events at or below the ack stay `Duplicate` and do not use it up;
+a `SnapshotRequired` not followed by such an event changes nothing, and it does not carry over to the next connection. The
+hub logs a resync (`node resync: <node> skipped <from>..=<to>`) and writes an audit row (`who` = `hub`, action
+`node.resynced`, the node, outcome `<from>..=<to>`). `NodeOnline` in the hub's view ends that node's running agents and drops
+its waiting approvals and its terminals; a resync announcement then re-adds what still runs.
 
 SSH stdio transport (ADR-0011): `agora node stdio` copies the node's local-socket frames to stdin/stdout, so a hub (or
 a person) can reach a node with `ssh host agora node stdio` and no open port. Frames are exactly those of the local
@@ -73,7 +95,8 @@ Subject Key Identifier, including a custom identifier in a loaded CA. This suppo
 ([RFC 5280 §4.2.1.1](https://www.rfc-editor.org/rfc/rfc5280.html#section-4.2.1.1)). CA certificates/keys, node identities,
 server names, authentication purposes and revocation checks are unchanged; existing certificates remain accepted by the hub.
 
-Events a node emits (`agora-node::daemon::EventSink`): `NodeOnline` at start and `NodeOffline` on a clean stop; a
+Events a node emits (`agora-node::daemon::EventSink`): `NodeOnline` at start (and at the head of a resync announcement,
+section 3) and `NodeOffline` on a clean stop; a
 `CheckoutDiscovered` per registered project; `NodeResources` when the running count changes (not on a timer, so an idle
 node is silent; `memory_used_bytes` is the resident memory of every running agent's process tree, measured then and every 30 s
 while agents run, and sent again only when it moved by more than a quarter or 256 MiB since the last report); and for each agent `WorktreeCreated`, `AgentStarted`,
@@ -87,8 +110,13 @@ unambiguous) and uses that key in what it shows clients and when it routes a com
 
 Node uplink (`agora-node::uplink`): the node's state machine mirrors the hub's session: `Hello` → `Welcome` → `Resume` (carries
 the node's own idea of the ack) → `ResumeOk { from_seq }` (the hub's record decides) → events in batches from the durable buffer.
-A gap from the hub rewinds to `expected`; a `from_seq` older than the buffer keeps (dropped by the size cap) is reported as
-`Stale` so the hub resynchronizes from a snapshot (not yet implemented: today the connection fails and is retried; ADR-0054). The hub's ack trims the buffer.
+A gap from the hub rewinds to `expected`. When `from_seq` (from `ResumeOk` or a gap answer) is older than the buffer keeps, the
+uplink returns `Replay::Resync` instead of `Replay::Resumed`: it has appended the resync announcement (section 3) and moved its
+cursor to just before the oldest retained event, and `uplink_client` sends `SnapshotRequired` before the next event. A later
+gap answer for the same point was sent by the hub before it read `SnapshotRequired` and needs no second announcement; at most
+one such answer per event sent before the resync is accepted, and one more ends the connection as `Stale` (a hub from before
+ADR-0054 ignores `SnapshotRequired`; the node then retries with backoff as before). `Stale` also ends a connection whose next
+events the cap dropped while it was sending; the next connection resynchronizes. The hub's ack trims the buffer.
 
 Hub core (`agora-hub::hub`): store, view and subscriber fan-out are one step under one lock, so a subscriber that takes its
 snapshot (or backlog) and registers for live events together sees every event once, in order, even while several nodes
