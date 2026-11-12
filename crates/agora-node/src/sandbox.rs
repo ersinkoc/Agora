@@ -66,13 +66,84 @@ pub fn expand(p: &str) -> Option<PathBuf> {
     .then_some(path)
 }
 
-/// A worktree's `.git` is a file naming its folder inside the main checkout's `.git`; git needs to write there (and to the shared
-/// object store and refs next to it). Returns the main `.git` folder.
+/// `<common>/packed-refs`, made empty if it is missing (the platform skips paths that do not exist; git reads an empty file as no
+/// packed refs). Git rewrites it to delete a branch and tries to on a commit or checkout, printing an error when it cannot; it holds
+/// only refs, which a confined agent can already move. `None` if it cannot be made.
+fn packed_refs(common: &Path) -> Option<PathBuf> {
+    let path = common.join("packed-refs");
+    if !path.is_file() {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .ok()?;
+    }
+    Some(path)
+}
+
+/// The parts of the shared Git folder a commit in `worktree` needs, as `(write, read)`: its own admin folder (index, HEAD) and the
+/// common `objects`, `refs` and `logs/refs` are written; the common folder itself (`config`, `hooks`) is only read, so nothing planted
+/// there runs in the user's or the node's git.
+fn narrow_git(worktree: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let mut write = Vec::new();
+    let mut read = Vec::new();
+    if let Some((admin, common)) = git_dirs(worktree) {
+        write.push(admin);
+        write.push(common.join("objects"));
+        write.push(common.join("refs"));
+        // A commit appends to the branch's reflog, which `git worktree add` already created under `logs/refs/heads`.
+        write.push(common.join("logs").join("refs"));
+        read.push(common);
+    }
+    (write, read)
+}
+
+/// The worktree's own admin folder and its checkout's shared Git folder, from the worktree's `.git` file, but only when they check
+/// out: the agent can rewrite that file, so its `gitdir:` alone must never decide what the profile opens. The admin folder must be
+/// `<common>/worktrees/<name>`, its `gitdir` file must point back at this worktree, and `<common>` must hold `HEAD`, `objects` and
+/// `refs`. A relative `gitdir:` is read from the worktree, as git does. The `.git` file must be a plain file, not a link: through a
+/// link to another worktree's `.git`, that worktree's `gitdir:` and back-pointer agree and its repository would open. `None` (no
+/// Git access) for anything else.
+pub fn git_dirs(worktree: &Path) -> Option<(PathBuf, PathBuf)> {
+    let real = |p: &Path| std::fs::canonicalize(p).ok();
+    let own = worktree.join(".git");
+    if !std::fs::symlink_metadata(&own).ok()?.file_type().is_file() {
+        return None;
+    }
+    // This worktree's `.git` by its real folder, never by following a link at `.git` itself.
+    let own = real(worktree)?.join(".git");
+    let text = std::fs::read_to_string(&own).ok()?;
+    let named = PathBuf::from(text.trim().strip_prefix("gitdir:")?.trim());
+    let admin = real(&if named.is_absolute() {
+        named
+    } else {
+        own.with_file_name(named)
+    })?;
+    if admin.parent()?.file_name()? != "worktrees" {
+        return None;
+    }
+    let common = admin.parent()?.parent()?.to_path_buf();
+    if !(common.join("HEAD").is_file()
+        && common.join("objects").is_dir()
+        && common.join("refs").is_dir())
+    {
+        return None;
+    }
+    // The back-pointer git keeps in the admin folder: it must name this worktree's `.git`.
+    let back = std::fs::read_to_string(admin.join("gitdir")).ok()?;
+    let back = PathBuf::from(back.trim());
+    let back = if back.is_absolute() {
+        back
+    } else {
+        admin.join(back)
+    };
+    (real(&back)? == own).then_some((admin, common))
+}
+
+/// A worktree's shared Git folder (`<main>/.git`), checked as [`git_dirs`] does; git needs to write there (and to the object store
+/// and refs) where the profile is not narrowed.
 pub fn common_git_dir(worktree: &Path) -> Option<PathBuf> {
-    let text = std::fs::read_to_string(worktree.join(".git")).ok()?;
-    let gitdir = PathBuf::from(text.trim().strip_prefix("gitdir:")?.trim());
-    // `<main>/.git/worktrees/<name>` -> `<main>/.git`
-    gitdir.parent()?.parent().map(Path::to_path_buf)
+    git_dirs(worktree).map(|(_, common)| common)
 }
 
 /// Folders below the home folder that hold secrets, never opened to an agent through a selected directory.
@@ -173,7 +244,15 @@ impl SandboxPolicy {
             let _ = std::fs::create_dir_all(&temp);
             write.push(temp);
         }
-        write.extend(common_git_dir(worktree));
+        if agora_platform::GIT_CONFIG_READ_ONLY {
+            let (git_write, git_read) = narrow_git(worktree);
+            write.extend(git_write);
+            // Only reached on macOS, whose profile also opens a listed file's `<name>.*` siblings (here `packed-refs.lock`).
+            write.extend(git_read.iter().filter_map(|common| packed_refs(common)));
+            read.extend(git_read);
+        } else {
+            write.extend(common_git_dir(worktree));
+        }
         write.extend(self.write.iter().cloned());
         if let Some(needs) = needs.filter(|_| self.trusted_kinds.iter().any(|k| k == kind)) {
             read.extend(needs.read.iter().filter_map(|p| expand(p)));
@@ -194,24 +273,9 @@ impl SandboxPolicy {
         let temp = agent_temp(worktree);
         let _ = std::fs::create_dir_all(&temp);
         let mut write = vec![worktree.to_path_buf(), temp];
-        if let Some(text) = std::fs::read_to_string(worktree.join(".git"))
-            .ok()
-            .and_then(|t| {
-                t.trim()
-                    .strip_prefix("gitdir:")
-                    .map(|g| g.trim().to_owned())
-            })
-        {
-            // Its own admin folder (index, HEAD) is writable; the common folder is read, with `objects`, `refs` and `logs/refs` writable.
-            write.push(PathBuf::from(text));
-        }
-        if let Some(common) = common_git_dir(worktree) {
-            write.push(common.join("objects"));
-            write.push(common.join("refs"));
-            // A commit appends to the branch's reflog, which `git worktree add` already created under `logs/refs/heads`.
-            write.push(common.join("logs").join("refs"));
-            read.push(common);
-        }
+        let (git_write, git_read) = narrow_git(worktree);
+        write.extend(git_write);
+        read.extend(git_read);
         write.extend(self.write.iter().cloned());
         if let Some(needs) = needs.filter(|_| self.trusted_kinds.iter().any(|k| k == kind)) {
             read.extend(needs.read.iter().filter_map(|p| expand(p)));
@@ -237,14 +301,109 @@ impl SandboxPolicy {
 mod tests {
     use super::*;
 
-    #[test]
-    fn the_narrow_profile_never_makes_the_shared_git_folder_itself_writable() {
-        let root = std::env::temp_dir().join(format!("agora-narrow-{}", std::process::id()));
+    /// A linked worktree as `git worktree add` leaves it: `<root>/wt/.git` names `<root>/main/.git/worktrees/wt`, whose
+    /// `gitdir` file points back. Paths are canonical, as the profile's are. Returns (worktree, common git folder, admin folder).
+    fn linked_worktree(root: &Path) -> (PathBuf, PathBuf, PathBuf) {
+        let _ = std::fs::remove_dir_all(root);
+        std::fs::create_dir_all(root).unwrap();
+        let root = std::fs::canonicalize(root).unwrap();
         let (wt, common) = (root.join("wt"), root.join("main").join(".git"));
         let admin = common.join("worktrees").join("wt");
         std::fs::create_dir_all(&wt).unwrap();
         std::fs::create_dir_all(&admin).unwrap();
+        std::fs::create_dir_all(common.join("objects")).unwrap();
+        std::fs::create_dir_all(common.join("refs")).unwrap();
+        std::fs::write(common.join("HEAD"), "ref: refs/heads/main\n").unwrap();
         std::fs::write(wt.join(".git"), format!("gitdir: {}\n", admin.display())).unwrap();
+        std::fs::write(
+            admin.join("gitdir"),
+            format!("{}\n", wt.join(".git").display()),
+        )
+        .unwrap();
+        (wt, common, admin)
+    }
+
+    #[test]
+    fn a_git_file_linked_to_another_worktrees_opens_nothing() {
+        let root = std::env::temp_dir().join(format!("agora-gitlink-{}", std::process::id()));
+        let (mine, _, _) = linked_worktree(&root.join("mine"));
+        let (theirs, their_common, their_admin) = linked_worktree(&root.join("theirs"));
+        assert!(git_dirs(&theirs).is_some());
+        // The agent swaps its `.git` file for a link to another worktree's: read through the link, that file's `gitdir:` and the
+        // back-pointer agree, so only refusing the link keeps the other repository closed.
+        std::fs::remove_file(mine.join(".git")).unwrap();
+        if agora_platform::symlink(&theirs.join(".git"), &mine.join(".git")).is_err() {
+            let _ = std::fs::remove_dir_all(&root);
+            return; // No links on this system.
+        }
+        assert_eq!(git_dirs(&mine), None);
+        let policy = SandboxPolicy {
+            level: Level::Worktree,
+            ..SandboxPolicy::default()
+        };
+        let sb = policy.profile("k", None, &mine, "agent").unwrap();
+        assert!(!sb
+            .write
+            .iter()
+            .any(|w| w.starts_with(&their_common) || w == &their_admin));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_worktrees_git_file_alone_never_decides_what_becomes_writable() {
+        let root = std::env::temp_dir().join(format!("agora-gitdir-{}", std::process::id()));
+        let (wt, common, admin) = linked_worktree(&root);
+        assert_eq!(git_dirs(&wt), Some((admin.clone(), common.clone())));
+
+        // A relative `gitdir:` is read from the worktree, as git does.
+        std::fs::write(wt.join(".git"), "gitdir: ../main/.git/worktrees/wt\n").unwrap();
+        assert_eq!(git_dirs(&wt), Some((admin.clone(), common.clone())));
+
+        // The agent points its `.git` file somewhere else that looks like a repository's worktree folder: the back-pointer
+        // there does not name this worktree, so nothing opens.
+        let elsewhere = root.join("elsewhere").join(".git");
+        let decoy = elsewhere.join("worktrees").join("x");
+        std::fs::create_dir_all(&decoy).unwrap();
+        std::fs::create_dir_all(elsewhere.join("objects")).unwrap();
+        std::fs::create_dir_all(elsewhere.join("refs")).unwrap();
+        std::fs::write(elsewhere.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(decoy.join("gitdir"), "/somewhere/else/.git\n").unwrap();
+        std::fs::write(wt.join(".git"), format!("gitdir: {}\n", decoy.display())).unwrap();
+        assert_eq!(git_dirs(&wt), None);
+        let policy = SandboxPolicy {
+            level: Level::Worktree,
+            ..SandboxPolicy::default()
+        };
+        let sb = policy.narrow_profile("k", None, &wt, vec![]);
+        assert!(!sb.write.iter().any(|w| w.starts_with(&elsewhere)));
+        assert!(!sb.read.iter().any(|r| r.starts_with(&elsewhere)));
+
+        // Nor does a folder that is not under a `worktrees` folder, or one with no repository around it.
+        let plain = root.join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        std::fs::write(
+            plain.join("gitdir"),
+            format!("{}\n", wt.join(".git").display()),
+        )
+        .unwrap();
+        std::fs::write(wt.join(".git"), format!("gitdir: {}\n", plain.display())).unwrap();
+        assert_eq!(git_dirs(&wt), None);
+        let bare = root.join("bare").join("worktrees").join("wt");
+        std::fs::create_dir_all(&bare).unwrap();
+        std::fs::write(
+            bare.join("gitdir"),
+            format!("{}\n", wt.join(".git").display()),
+        )
+        .unwrap();
+        std::fs::write(wt.join(".git"), format!("gitdir: {}\n", bare.display())).unwrap();
+        assert_eq!(git_dirs(&wt), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_narrow_profile_never_makes_the_shared_git_folder_itself_writable() {
+        let root = std::env::temp_dir().join(format!("agora-narrow-{}", std::process::id()));
+        let (wt, common, admin) = linked_worktree(&root);
         let policy = SandboxPolicy {
             level: Level::Worktree,
             ..SandboxPolicy::default()
@@ -287,14 +446,11 @@ mod tests {
     #[test]
     fn the_profile_lets_an_agent_write_in_its_worktree_and_nowhere_listed_by_default() {
         let dir = std::env::temp_dir().join(format!("agora-sbx-{}", std::process::id()));
-        let (main, wt) = (dir.join("main"), dir.join("wt"));
-        std::fs::create_dir_all(main.join(".git/worktrees/wt")).unwrap();
-        std::fs::create_dir_all(&wt).unwrap();
-        std::fs::write(
-            wt.join(".git"),
-            format!("gitdir: {}\n", main.join(".git/worktrees/wt").display()),
-        )
-        .unwrap();
+        let (wt, _, _) = linked_worktree(&dir);
+        let (dir, main) = (
+            wt.parent().unwrap().to_path_buf(),
+            wt.parent().unwrap().join("main"),
+        );
         let p = SandboxPolicy {
             level: Level::Worktree,
             read: vec!["/home/x/.cfg".into()],
@@ -314,11 +470,20 @@ mod tests {
         assert_eq!(offline.write, sb.write);
         assert!(sb.write.contains(&wt));
         assert!(sb.write.contains(&PathBuf::from("/home/x/.cache/agent")));
-        if agora_platform::NARROW_GIT_WRITES {
-            // Folder by folder: the shared Git folder is read-only apart from `objects` and `refs`.
+        if agora_platform::GIT_CONFIG_READ_ONLY {
+            // The shared Git folder is read-only apart from `objects`, `refs` and `logs/refs`: no planted `config` or `hooks`.
             assert!(!sb.write.contains(&main.join(".git")) && sb.read.contains(&main.join(".git")));
+            assert!(sb.write.contains(&main.join(".git").join("objects")));
+            assert!(sb.write.contains(&main.join(".git").join("refs")));
+            if !agora_platform::NARROW_GIT_WRITES {
+                // macOS: made if missing, so a branch delete and a commit's ref update can rewrite it.
+                assert!(sb.write.contains(&main.join(".git").join("packed-refs")));
+                assert!(main.join(".git").join("packed-refs").is_file());
+            }
         } else {
             assert!(sb.write.contains(&main.join(".git")));
+        }
+        if !agora_platform::NARROW_GIT_WRITES {
             assert!(
                 sb.read.contains(&PathBuf::from("/home/x/bin")) && sb.read.contains(&"/usr".into())
             );
