@@ -37,14 +37,20 @@ fn device() -> Option<Device> {
 }
 
 /// Answers the first waiting approval. Returns the line to show.
-fn answer(say: &Say, session: &mut Session, snapshot: &Snapshot, approved: bool) -> String {
+fn answer(
+    say: &Say,
+    session: &mut Session,
+    snapshot: &Snapshot,
+    selected: &str,
+    approved: bool,
+) -> String {
     let Some(device) = device() else {
         return say.text(
             key!("tui-answer-failed"),
             &[("code", Arg::Str("device".into()))],
         );
     };
-    match session.resolve_first_approval(snapshot, &device, approved) {
+    match session.resolve_approval(snapshot, &device, approved, Some(selected)) {
         Ok(false) => String::new(),
         Ok(true) => say.text(
             if approved {
@@ -626,7 +632,7 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                     3 | b'q' => return ExitCode::SUCCESS, // Ctrl-C is a plain byte in raw mode
                     b'y' | b'n' => {
                         if let Some(s) = &snapshot {
-                            notice = answer(say, &mut session, s, k == b'y');
+                            notice = answer(say, &mut session, s, &selected, k == b'y');
                             dirty_since.get_or_insert_with(Instant::now);
                             draw(&snapshot, &selected, &notice, cost, preview.as_ref());
                         }
