@@ -4,6 +4,12 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+### Safety
+- A confined agent cannot be started in a folder that holds a secret folder (such as `~/.config`, which holds the `gh` and `gcloud` sign-ins).
+- Review in a folder that is part of a larger checkout shows only that folder's changes.
+- An answer to a request that comes after the request expired tells the agent "denied" instead of leaving it waiting.
+- Removing a working copy whose commits are on no branch is refused instead of losing them, unless forced.
+
 ### Agents and machines
 - Stopping an agent that runs through an adapter also ends the adapter's program; before, it kept running unseen.
 - A resume that fails no longer leaves the stopped agent reachable by other agents.

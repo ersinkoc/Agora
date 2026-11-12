@@ -472,6 +472,22 @@ fn unmerged_commits(dir: &Path, branch: &str) -> Result<u32, GitError> {
     Ok(n.trim().parse().unwrap_or(0))
 }
 
+/// Commits of the worktree's HEAD that no branch or remote has. An answer that is not a number counts as some (keep the work).
+fn detached_commits(worktree: &Path) -> Result<u32, GitError> {
+    let n = git(
+        worktree,
+        &[
+            "rev-list",
+            "--count",
+            "HEAD",
+            "--not",
+            "--branches",
+            "--remotes",
+        ],
+    )?;
+    Ok(n.trim().parse().unwrap_or(u32::MAX))
+}
+
 /// Remove a worktree. Refuses to discard uncommitted changes or unmerged commits unless `force` is set.
 /// The branch itself is never deleted.
 pub fn remove_worktree(checkout: &Path, worktree: &Path, force: bool) -> Result<(), GitError> {
@@ -479,9 +495,17 @@ pub fn remove_worktree(checkout: &Path, worktree: &Path, force: bool) -> Result<
         if is_dirty(worktree)? {
             return Err(GitError::Dirty(worktree.to_path_buf()));
         }
-        if let Some(branch) = current_branch(worktree)? {
-            if unmerged_commits(checkout, &branch)? > 0 {
-                return Err(GitError::Unmerged(branch));
+        match current_branch(worktree)? {
+            Some(branch) => {
+                if unmerged_commits(checkout, &branch)? > 0 {
+                    return Err(GitError::Unmerged(branch));
+                }
+            }
+            // A detached HEAD: commits made there are on no branch, and removing the worktree drops the only HEAD that has them.
+            None => {
+                if detached_commits(worktree)? > 0 {
+                    return Err(GitError::Unmerged("HEAD".into()));
+                }
             }
         }
     }
@@ -623,9 +647,9 @@ pub fn diff(worktree: &Path, path: Option<&str>) -> Result<String, GitError> {
         SUBMODULE_COMMITS_ONLY,
         "HEAD",
     ];
-    if let Some(p) = path {
-        args.extend(["--", p]);
-    }
+    // Always a pathspec: without one git diffs the whole checkout even when run in a folder inside it (a selected workspace),
+    // while `ls-files` below lists only that folder.
+    args.extend(["--", path.unwrap_or(".")]);
     let mut out = git_capped(worktree, &args, MAX_DIFF_READ)?;
     let mut ls = vec!["ls-files", "--others", "--exclude-standard", "-z"];
     if let Some(p) = path {
@@ -1061,6 +1085,20 @@ mod tests {
         assert!(diff(&r.dir, Some("nothing-here.txt"))
             .expect("diff")
             .is_empty());
+    }
+
+    #[test]
+    fn a_workspace_inside_a_checkout_diffs_only_its_own_folder() {
+        let r = Repo::new(None);
+        fs::create_dir_all(r.dir.join("web")).expect("dir");
+        fs::write(r.dir.join("web/w.txt"), "web\n").expect("write");
+        r.commit("web");
+        fs::write(r.dir.join("a.txt"), "one\nOUTSIDE\n").expect("write");
+        fs::write(r.dir.join("web/w.txt"), "web\nINSIDE\n").expect("write");
+        let d = diff(&r.dir.join("web"), None).expect("diff");
+        assert!(d.contains("+INSIDE") && !d.contains("OUTSIDE"), "{d}");
+        // At the checkout's root everything still shows.
+        assert!(diff(&r.dir, None).expect("diff").contains("+OUTSIDE"));
     }
 
     #[test]

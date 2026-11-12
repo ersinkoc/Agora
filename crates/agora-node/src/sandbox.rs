@@ -159,7 +159,7 @@ const SECRET_HOME_FOLDERS: &[&str] = &[
 ];
 
 /// True for a directory a confined agent may not be launched in (ADR-0052 with ADR-0047): a filesystem root, the home folder or a
-/// folder that contains it, a secret folder below it, and the node's own folders (`node_home`, the folder that holds its data and
+/// folder that contains it, a secret folder below it or a folder that contains one, and the node's own folders (`node_home`, the folder that holds its data and
 /// keys, other than the `worktree_root` inside it) or any folder that contains them. Without this, selecting `/` or the home folder
 /// would quietly turn `sandbox = worktree` into no confinement. All paths are canonical.
 pub fn refused_directory(
@@ -172,10 +172,12 @@ pub fn refused_directory(
         return true;
     }
     if let Some(home) = home {
+        // A secret folder, a folder below one, or a folder that holds one (`~/.config` holds `~/.config/gh`).
         if home.starts_with(selected)
-            || SECRET_HOME_FOLDERS
-                .iter()
-                .any(|f| selected.starts_with(home.join(f)))
+            || SECRET_HOME_FOLDERS.iter().any(|f| {
+                let secret = home.join(f);
+                selected.starts_with(&secret) || secret.starts_with(selected)
+            })
         {
             return true;
         }
