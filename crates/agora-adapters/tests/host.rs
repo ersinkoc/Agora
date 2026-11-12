@@ -216,6 +216,58 @@ fn an_adapter_that_never_answers_times_out() {
     ));
 }
 
+/// The adapter of the next test when `AGORA_TEST_STUCK_ADAPTER` is set: alive, its output open, never reading its input.
+#[test]
+fn stuck_adapter_child() {
+    if std::env::var_os("AGORA_TEST_STUCK_ADAPTER").is_none() {
+        return;
+    }
+    // Bounded, so a failing run leaves nothing behind for long.
+    std::thread::sleep(Duration::from_secs(60));
+}
+
+/// A request larger than the pipe to an adapter that stopped reading used to block the caller in the write for as long as the
+/// adapter lived (the node holds its supervisor lock there), whatever the call's timeout (audit F043).
+#[test]
+fn a_call_to_an_adapter_that_stopped_reading_still_times_out() {
+    let a = Adapter::spawn(&AdapterConfig {
+        program: std::env::current_exe().unwrap(),
+        args: [
+            "--exact",
+            "stuck_adapter_child",
+            "--nocapture",
+            "--test-threads=1",
+        ]
+        .map(String::from)
+        .to_vec(),
+        env: vec![("AGORA_TEST_STUCK_ADAPTER".into(), "1".into())],
+        cwd: None,
+        sandbox: None,
+    })
+    .unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (dropped_tx, dropped) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let big = "x".repeat(1 << 20);
+        let first = a.prompt("s", &big, false, Duration::from_millis(300));
+        // More than the write queue holds: each one still comes back.
+        let rest: Vec<_> = (0..70)
+            .map(|_| a.prompt("s", "y", false, Duration::from_millis(10)))
+            .collect();
+        let _ = tx.send((first, rest));
+        drop(a); // with lines still queued: must not hang either
+        let _ = dropped_tx.send(());
+    });
+    let (first, rest) = rx
+        .recv_timeout(T)
+        .expect("the calls returned within their timeouts");
+    assert!(matches!(first, Err(HostError::Timeout)), "{first:?}");
+    assert!(rest.iter().all(|r| matches!(r, Err(HostError::Timeout))));
+    dropped
+        .recv_timeout(T)
+        .expect("dropping the adapter killed and reaped it");
+}
+
 #[test]
 fn shutdown_ends_the_process() {
     let a = spawn();

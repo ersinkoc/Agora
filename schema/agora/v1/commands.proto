@@ -59,6 +59,9 @@ message CommandRequest {
     DirectoryInspect directory_inspect = 81;
     AgentLaunch agent_launch = 82;
     WorkspaceQuery workspace_query = 83;
+    // ADR-0053: a folder picker's one question (node), and forgetting a closed agent (hub only).
+    DirectoryList directory_list = 84;
+    AgentForget agent_forget = 85;
   }
 }
 
@@ -93,6 +96,7 @@ message CommandOk {
     DirectoryInfo directory_info = 18;
     AgentLaunchResult agent_launch = 19;
     BoardJoinResult board_join = 20;
+    DirectoryEntries directory_entries = 21;
   }
 }
 
@@ -498,6 +502,28 @@ message DirectoryInfo {
   bool portable = 5;
   string previous_project_id = 6;
 }
+// ADR-0053. Lists the sub-folders of one folder on a node: names only, never files. `path` empty means the user's home folder.
+message DirectoryList {
+  string path = 1;
+  DirectoryAuthorization authorization = 2;
+}
+message DirectoryEntry {
+  string name = 1;
+  bool is_git = 2;
+}
+message DirectoryEntries {
+  // The canonical folder the node resolved, and its parent (empty at a root).
+  string path = 1;
+  string parent = 2;
+  repeated DirectoryEntry entries = 3;
+  // More folders exist than the node answers with (at most 500 per answer).
+  bool truncated = 4;
+}
+// ADR-0053. The hub stops listing a closed agent. Answered by the hub; refused with `agent.running` while the agent runs.
+message AgentForget {
+  string agent_id = 1;
+}
+
 message AgentLaunch {
   string path = 1;
   string project_id = 2;

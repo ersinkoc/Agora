@@ -52,7 +52,7 @@ stream with `Exited`; calls have timeouts. JSON uses the proto3 mapping (lowerCa
 as strings or numbers on input). `agora-fake-agent --adapter` is the reference fake adapter used in tests.
 The supervisor restarts a crashed adapter with the same backoff and budget as a crashed terminal agent (`RestartPolicy`): the
 agent is `unknown` meanwhile, the session is resumed with `resumeSessionId` when the adapter reported a native session id,
-and after the budget is spent the agent stays stopped (`GaveUp`). A user stop cancels a pending restart. Not yet: the
+and after the budget is spent the agent stays stopped (`GaveUp`). A user stop cancels a pending restart and ends the adapter process (`session/stop`, then `shutdown`, then kill). Not yet: the
 registry of installed adapters.
 
 ## L2: ACP agents through the bridge (`agora-adapters::acp`)

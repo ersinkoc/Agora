@@ -26,6 +26,7 @@ agent-sandbox_unavailable = Bu makine ajanları kısıtlayacak şekilde ayarlı 
 agent-not_authenticated = { $kind }, { $node_id } makinesinde giriş yapmamış.
 agent-blocked = { $agent_id } ajanı girdi bekliyor, bu yüzden mesaj gönderilmedi.
 agent-mode_unsupported = { $kind }, { $mode } modunu desteklemiyor.
+agent-running = { $agent_id } hâlâ çalışıyor. Önce durdurun.
 approval-expired = { $approval_id } onayının süresi doldu.
 approval-signature_invalid = { $approval_id } onayı doğrulanamadı.
 approval-grant_required = Bu makine önce sizden izin istiyor: { $command }.

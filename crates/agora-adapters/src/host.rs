@@ -12,7 +12,7 @@ use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc::{channel, sync_channel, Receiver, Sender, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -140,9 +140,15 @@ struct PendingState {
 
 type Pending = Arc<Mutex<PendingState>>;
 
+/// Requests that may wait for the writer before a call gives up with [`HostError::Timeout`]: the pipe itself holds the
+/// first ones, so the queue only fills when the adapter has stopped reading its input.
+const WRITE_QUEUE: usize = 64;
+
 pub struct Adapter {
     child: Child,
-    stdin: Mutex<ChildStdin>,
+    /// Lines for the adapter's stdin with the id of the call each one belongs to. A thread of its own writes them, so a
+    /// caller never blocks on an adapter that stops reading (the call's timeout holds, and the caller's locks are freed).
+    writer: Option<SyncSender<(u64, String)>>,
     pending: Pending,
     events: Receiver<AdapterEvent>,
     next_id: AtomicU64,
@@ -329,6 +335,18 @@ impl Adapter {
             }
         };
         let pending: Pending = Arc::default();
+        let (writer, lines) = sync_channel(WRITE_QUEUE);
+        let spawned = {
+            let pending = Arc::clone(&pending);
+            std::thread::Builder::new()
+                .name("agora-adapter-write".into())
+                .spawn(move || write_loop(stdin, &lines, &pending))
+        };
+        if let Err(e) = spawned {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(e);
+        }
         let ignored = Arc::new(AtomicUsize::new(0));
         let (tx, events) = channel();
         let reader = {
@@ -339,21 +357,13 @@ impl Adapter {
         };
         Ok(Self {
             child,
-            stdin: Mutex::new(stdin),
+            writer: Some(writer),
             pending,
             events,
             next_id: AtomicU64::new(1),
             ignored,
             reader: Some(reader),
         })
-    }
-
-    fn write(&self, msg: &Message) -> io::Result<()> {
-        let mut line = to_line(msg);
-        line.push('\n');
-        let mut w = self.stdin.lock().unwrap_or_else(|e| e.into_inner());
-        w.write_all(line.as_bytes())?;
-        w.flush()
     }
 
     /// A request and its answer. Fails with `Exited` if the adapter dies first.
@@ -367,22 +377,28 @@ impl Adapter {
             }
             p.map.insert(id, tx);
         }
-        let sent = self.write(&Message::Request {
+        let mut line = to_line(&Message::Request {
             id: json!(id),
             method: method.to_string(),
             params,
         });
-        if let Err(e) = sent {
+        line.push('\n');
+        // Queued, never written here: a write failure comes back through `pending` like an answer.
+        let refused = match &self.writer {
+            Some(w) => match w.try_send((id, line)) {
+                Ok(()) => None,
+                Err(TrySendError::Full(_)) => Some(HostError::Timeout),
+                Err(TrySendError::Disconnected(_)) => Some(HostError::Exited),
+            },
+            None => Some(HostError::Exited),
+        };
+        if let Some(e) = refused {
             self.pending
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .map
                 .remove(&id);
-            return Err(if e.kind() == io::ErrorKind::BrokenPipe {
-                HostError::Exited
-            } else {
-                e.into()
-            });
+            return Err(e);
         }
         let out = match rx.recv_timeout(timeout) {
             Ok(r) => r,
@@ -520,7 +536,9 @@ impl Adapter {
     }
 
     fn kill_and_reap(&mut self) {
-        // Closing stdin lets a well-behaved adapter finish; kill covers the rest.
+        // Closing stdin lets a well-behaved adapter finish; kill covers the rest. The writer ends once its queue is closed
+        // and its pipe is gone; it is not waited for (a descendant still holding the pipe must not hang the caller).
+        self.writer = None;
         let _ = self.child.kill();
         let _ = self.child.wait();
         if let Some(t) = self.reader.take() {
@@ -579,6 +597,39 @@ fn read_loop<R: Read>(
         p.map.clear();
     }
     let _ = events.send(AdapterEvent::Exited);
+}
+
+/// Writes queued requests in order. When the adapter's input is gone, the call whose line failed and every call queued behind
+/// it fail at once (as the old in-line write did) instead of waiting for their timeouts.
+fn write_loop(mut stdin: ChildStdin, lines: &Receiver<(u64, String)>, pending: &Pending) {
+    while let Ok((id, line)) = lines.recv() {
+        if let Err(e) = stdin
+            .write_all(line.as_bytes())
+            .and_then(|()| stdin.flush())
+        {
+            let err = if e.kind() == io::ErrorKind::BrokenPipe {
+                HostError::Exited
+            } else {
+                HostError::Io(e)
+            };
+            fail(pending, id, err);
+            for (id, _) in lines.try_iter() {
+                fail(pending, id, HostError::Exited);
+            }
+            return;
+        }
+    }
+}
+
+fn fail(pending: &Pending, id: u64, e: HostError) {
+    let tx = pending
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .map
+        .remove(&id);
+    if let Some(tx) = tx {
+        let _ = tx.send(Err(e));
+    }
 }
 
 fn deliver(pending: &Pending, id: &Value, r: Result<Value, HostError>) {
