@@ -538,20 +538,24 @@ mod tests {
     fn concurrent_spawns_do_not_keep_each_others_terminals_open() {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
-        // A thread keeps spawning long-lived processes while we spawn short-lived ones. Before the fix, a
-        // long-lived process inherited a short-lived terminal's slave and its output never ended.
+        // A thread spawns long-lived processes while we spawn short-lived ones. Before the fix, a long-lived
+        // process inherited a short-lived terminal's slave and its output never ended. They are kept until the end,
+        // so a leaked descriptor outlives the wait below. A fixed number: each holds a terminal, and churning through
+        // them used to exhaust the machine's terminals on a busy macOS runner (`openpty` then fails with ENXIO).
+        // On Linux this catches the leak; on macOS the kernel revokes a terminal when its session leader exits, so a
+        // leaked descriptor cannot hold it open and the test only shows that concurrent spawns work.
+        const LONG_LIVED: usize = 24;
         let stop = Arc::new(AtomicBool::new(false));
         let stop2 = Arc::clone(&stop);
         let spawner = std::thread::spawn(move || {
             let mut keep = Vec::new();
-            while !stop2.load(Ordering::Relaxed) {
+            while !stop2.load(Ordering::Relaxed) && keep.len() < LONG_LIVED {
                 if let Ok(p) = spawn(&PtyConfig::new(vec!["sleep".into(), "30".into()])) {
                     keep.push(p);
                 }
-                if keep.len() > 60 {
-                    keep.clear();
-                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
             }
+            keep
         });
         for i in 0..40 {
             let p = spawn(&PtyConfig::new(vec![
@@ -577,7 +581,7 @@ mod tests {
             }
         }
         stop.store(true, Ordering::Relaxed);
-        spawner.join().expect("spawner");
+        drop(spawner.join().expect("spawner"));
     }
 
     #[test]
