@@ -141,9 +141,9 @@ impl View {
             }
 
             Body::NodeOnline(e) => {
-                // A node announces itself when its process starts, never when only the link to the hub comes back, and when it
-                // re-states its present after lost events (ADR-0054). So whatever it had running before is gone (agents and their
-                // terminals die with the node) and its waiting approvals are lost; what still runs is announced right after.
+                // A node announces itself when its process starts, never when only the link to the hub comes back. A resync
+                // announcement (ADR-0054) leads with it only when the hub missed that start (ADR-0055). So whatever it had running
+                // before is gone (agents and their terminals die with the node) and its waiting approvals are lost.
                 for a in self
                     .agents
                     .values_mut()
@@ -485,8 +485,8 @@ mod tests {
         assert_eq!(v.agents["n1/a"].state, AgentState::Done);
     }
 
-    /// ADR-0054: a node's resync announcement (`NodeOnline`, then what still runs) ends agents and terminals that went away inside
-    /// the lost events, and keeps the ones still running with their current state, session, terminal and approval.
+    /// ADR-0054: a node's resync announcement led by `NodeOnline` (a start the hub missed, ADR-0055) ends agents and terminals that
+    /// went away inside the lost events, and keeps the ones still running with their current state, session, terminal and approval.
     #[test]
     fn a_resync_announcement_ends_what_went_away_and_keeps_what_still_runs() {
         let online = || {

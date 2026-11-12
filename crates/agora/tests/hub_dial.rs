@@ -15,7 +15,7 @@ use agora_hub::hub::Hub;
 use agora_hub::server::{self, ClientAuth, ServerState};
 use agora_hub::store::SqliteStore;
 use agora_hub::tls;
-use agora_node::daemon::EventSink;
+use agora_node::daemon::{Announce, EventSink};
 use agora_node::uplink_client::{spawn, HubLink};
 use agora_protocol::handshake::Support;
 
@@ -871,8 +871,10 @@ fn a_node_that_returns_under_a_known_name_with_an_empty_data_dir_is_still_heard(
         second.next_seq() <= acked_by_hub,
         "the test needs the hub to be ahead"
     );
-    second.set_announcer(Box::new(|ev| {
-        ev.node_online("vps");
+    second.set_announcer(Box::new(|ev, how| {
+        if how == Announce::Restart {
+            ev.node_online("vps");
+        }
         ev.checkout_discovered("vps", "reborn", Path::new("/work/reborn"));
     }));
     let _link = spawn(Arc::clone(&second), hub.link(addr)).unwrap();
@@ -898,8 +900,11 @@ fn a_node_that_lost_unacknowledged_events_resyncs_over_the_link() {
     let hub = hubside("burst");
     let addr = hub.listen("127.0.0.1:0");
     let sink = Arc::new(EventSink::open_with_cap(&tmp("burst"), "burst", 1200).unwrap());
-    sink.set_announcer(Box::new(|ev| {
-        ev.node_online("burst");
+    // Its start (`NodeOnline`, the first event) is among what the cap dropped, so the announcement is led by `NodeOnline` (ADR-0055).
+    sink.set_announcer(Box::new(|ev, how| {
+        if how == Announce::Restart {
+            ev.node_online("burst");
+        }
         ev.agent_launched(
             &AgentId::new("agent-now"),
             "proj",

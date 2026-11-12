@@ -3,6 +3,7 @@
 Each release lists what a person using Agora can now do. The reasons are in `docs/adr/`; the state of every task is in `docs/backlog/`.
 
 ## Next
+- After a machine resynchronizes, its agents that still run keep the tasks and files they had taken on a shared board.
 
 ### Closed agents
 - A closed agent is always shown as finished; before, one that ended while it was waiting kept a spinning orange mark and counted as waiting for you.

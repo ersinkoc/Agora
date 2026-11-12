@@ -636,9 +636,10 @@ fn wait_for_event(node: &Node, what: &str, pred: impl Fn(&v1::event::Body) -> bo
     }
 }
 
-/// ADR-0054 section 3: when the hub's record of this node cannot be continued, the node says at the tail of its buffer who it
-/// is, its folders, every agent that runs now (with state, session and terminal) and every approval still waiting, and nothing
-/// about agents that ended.
+/// ADR-0054 section 3: when the hub's record of this node cannot be continued and this process's start is lost to the hub, the
+/// node says at the tail of its buffer who it is, its folders, every agent that runs now (with state, session and terminal) and
+/// every approval still waiting, and nothing about agents that ended. ADR-0055: otherwise it says the same without `NodeOnline`,
+/// and its ended agents as ended.
 #[test]
 fn a_resync_announces_the_nodes_present() {
     use v1::event::Body;
@@ -723,4 +724,41 @@ fn a_resync_announces_the_nodes_present() {
         at(&|b| matches!(b, Body::ApprovalRequested(a) if a.agent_id == talker.agent_id)).unwrap();
     assert!(approval > talker_started);
     assert!(!said.iter().any(|b| matches!(b, Body::AgentExited(_))));
+
+    // ADR-0055: a resync after a start the hub already has (the start is older than what it lost) states facts instead: no
+    // `NodeOnline`, the running agents as above, and the ended one as ended, with its terminal closed.
+    let start = node.events.last_online();
+    let mark = node.events.next_seq() - 1;
+    node.events.resync(start + 1, node.events.next_seq());
+    let said: Vec<Body> = node
+        .events
+        .events_after(mark)
+        .into_iter()
+        .filter_map(|e| e.body)
+        .collect();
+    let at = |pred: &dyn Fn(&Body) -> bool| said.iter().position(pred);
+    assert!(!said.iter().any(|b| matches!(b, Body::NodeOnline(_))));
+    assert_eq!(node.events.last_online(), start);
+    for agent in [&kept, &talker] {
+        assert!(
+            at(&|b| matches!(b, Body::AgentStarted(s) if s.agent_id == agent.agent_id)).is_some()
+        );
+    }
+    let exits: Vec<(&str, i32)> = said
+        .iter()
+        .filter_map(|b| match b {
+            Body::AgentExited(x) => Some((x.agent_id.as_str(), x.exit_code)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        exits,
+        [(ended.agent_id.as_str(), i32::MIN)],
+        "stopped on request"
+    );
+    let terminal = format!("t-{}", ended.agent_id);
+    assert!(at(&|b| matches!(b, Body::TerminalClosed(t) if t.terminal_id == terminal)).is_some());
+    assert!(
+        at(&|b| matches!(b, Body::ApprovalRequested(a) if a.agent_id == talker.agent_id)).is_some()
+    );
 }

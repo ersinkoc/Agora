@@ -169,7 +169,8 @@ impl Hub {
                     _ => None,
                 };
                 Self::publish(&mut g, Delivered { pos, event });
-                // A node announces itself only when its process starts: the agents it had are gone, so their tasks and leases go back.
+                // A node announces itself only when its process starts (a resync re-states it only for a start the hub missed,
+                // ADR-0055): the agents it had are gone, so their tasks and leases go back.
                 if let Some((node, at_ms)) = restarted {
                     for (project, events) in self.boards.node_restarted(&node, at_ms) {
                         if let Some(bytes) = self.boards.snapshot(&project, at_ms) {

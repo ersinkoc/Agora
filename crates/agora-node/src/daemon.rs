@@ -5,7 +5,7 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -30,16 +30,35 @@ const GIT_POLL: Duration = Duration::from_secs(5);
 /// Default size cap of the on-disk event buffer.
 pub const EVENT_BUFFER_BYTES: u64 = 64 * 1024 * 1024;
 
-/// What a node says about itself again when the hub's record of it cannot be continued (see [`EventSink::announce`]).
-type Announcer = Box<dyn Fn(&EventSink) + Send>;
+/// How an announcement begins (ADR-0055).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Announce {
+    /// With `NodeOnline`: the hub will never see this process's start, so everything it knew of the node before is reset and only
+    /// what runs now is said again (ADR-0054 section 3).
+    Restart,
+    /// Without `NodeOnline`: every agent of this process is stated once, running or ended, with the approvals that wait and those
+    /// resolved recently (ADR-0055 section 2).
+    Present,
+}
+
+/// What a node says about itself again when the hub's record of it cannot be continued (see [`EventSink::announce`] and
+/// [`EventSink::resync`]). The announcer records `NodeOnline` too, for [`Announce::Restart`] only.
+type Announcer = Box<dyn Fn(&EventSink, Announce) + Send>;
+
+/// How many resolved approvals a [`Announce::Present`] announcement says again (ADR-0055).
+pub const RESOLVED_KEPT: usize = 256;
 
 /// Facts the node reported that its supervisor does not keep, remembered from the events themselves so a resync announcement
-/// (ADR-0054) can say them again: the folders it registered, which agent works in which, and each agent's session.
+/// (ADR-0054, ADR-0055) can say them again: the folders it registered, which agent works in which, each agent's session, terminal
+/// and last exit code, and the last [`RESOLVED_KEPT`] resolved approvals.
 #[derive(Default, Clone)]
 struct Reported {
     workspaces: std::collections::BTreeMap<String, v1::WorkspaceRegistered>,
     bound: std::collections::BTreeMap<String, String>,
     sessions: std::collections::BTreeMap<String, String>,
+    exits: std::collections::BTreeMap<String, i32>,
+    terminals: std::collections::BTreeSet<String>,
+    resolved: std::collections::VecDeque<v1::ApprovalResolved>,
 }
 
 impl Reported {
@@ -50,6 +69,9 @@ impl Reported {
                 | Body::WorkspaceStatusChanged(_)
                 | Body::AgentWorkspaceBound(_)
                 | Body::AgentSessionReported(_)
+                | Body::AgentExited(_)
+                | Body::TerminalOpened(_)
+                | Body::ApprovalResolved(_)
         )
     }
 
@@ -71,6 +93,21 @@ impl Reported {
                 self.sessions
                     .insert(r.agent_id.clone(), r.session_id.clone());
             }
+            Body::AgentExited(x) => {
+                self.exits.insert(x.agent_id.clone(), x.exit_code);
+            }
+            Body::TerminalOpened(t) if !t.agent_id.is_empty() => {
+                self.terminals.insert(t.agent_id.clone());
+            }
+            // Said again by an announcement, it is already here: the ring keeps its order and never holds one twice.
+            Body::ApprovalResolved(r)
+                if !self.resolved.iter().any(|k| k.approval_id == r.approval_id) =>
+            {
+                if self.resolved.len() == RESOLVED_KEPT {
+                    self.resolved.pop_front();
+                }
+                self.resolved.push_back(r.clone());
+            }
             _ => {}
         }
     }
@@ -84,6 +121,8 @@ pub struct EventSink {
     announcer: Mutex<Option<Announcer>>,
     /// See [`Reported`]. Never held together with `log`.
     reported: Mutex<Reported>,
+    /// The `seq` of the last `NodeOnline` recorded, 0 for none (ADR-0055: a resync says `NodeOnline` only when the hub lost it).
+    last_online: AtomicU64,
 }
 
 pub(crate) fn now_ms() -> u64 {
@@ -134,6 +173,7 @@ impl EventSink {
             log: Mutex::new(DiskEventLog::open(dir, max_bytes)?),
             announcer: Mutex::new(None),
             reported: Mutex::new(Reported::default()),
+            last_online: AtomicU64::new(0),
         })
     }
 
@@ -142,19 +182,48 @@ impl EventSink {
         *self.announcer.lock().unwrap_or_else(|e| e.into_inner()) = Some(f);
     }
 
-    /// Says again, at the tail of the buffer, what the hub must know about this node now: who it is, its checkouts and folders,
-    /// the agents running with their state, session and terminal, and the approvals waiting (ADR-0054 section 3). Used when the
-    /// hub cannot have what was recorded before: an empty data directory under a known name, or events lost to the size cap or
-    /// to a hub restored from an older backup. Without an announcer (a bare sink in tests) it says nothing.
+    /// Says again, at the tail of the buffer, what the hub must know about this node now, led by `NodeOnline`: who it is, its
+    /// checkouts and folders, the agents running with their state, session and terminal, and the approvals waiting (ADR-0054
+    /// section 3, [`Announce::Restart`]). Used when the hub cannot have what was recorded before: an empty data directory under a
+    /// known name, or (see [`resync`](Self::resync)) a start of this process the hub lost. Without an announcer (a bare sink in
+    /// tests) it says nothing.
     ///
     /// Lock order: the announcer runs under the `announcer` lock and takes the supervisor's and the approvals' locks one at a time
     /// to read them, then `reported` and `log` one at a time to write; it never holds two of them together. Nothing that holds the
     /// supervisor's lock ever waits for the `announcer` lock, and `log` is never held while taking another lock.
     pub fn announce(&self) {
+        self.announce_as(Announce::Restart);
+    }
+
+    fn announce_as(&self, how: Announce) {
         let announcer = self.announcer.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(f) = &*announcer {
-            f(self);
+            f(self, how);
         }
+    }
+
+    /// The hub cannot have `from_seq..oldest_retained` (ADR-0054): say what is true now at the tail (ADR-0055). The announcement
+    /// begins with `NodeOnline` only when this process's start is in that lost range; otherwise it states facts and leaves what the
+    /// hub knows of running agents (and their work on a shared board) in place. If the announcement itself pushes the start out of
+    /// the buffer under the size cap, a full one led by `NodeOnline` follows.
+    pub fn resync(&self, from_seq: u64, oldest_retained: u64) {
+        let lost = |oldest: u64| {
+            let start = self.last_online.load(Ordering::Acquire);
+            start != 0 && start >= from_seq && start < oldest
+        };
+        if lost(oldest_retained) {
+            self.announce_as(Announce::Restart);
+            return;
+        }
+        self.announce_as(Announce::Present);
+        if lost(self.oldest_retained()) {
+            self.announce_as(Announce::Restart);
+        }
+    }
+
+    /// The `seq` of the last `NodeOnline` this sink recorded, 0 for none.
+    pub fn last_online(&self) -> u64 {
+        self.last_online.load(Ordering::Acquire)
     }
 
     /// The hub has acknowledged numbers this buffer never produced (this machine came back under a known name with an empty data
@@ -168,10 +237,17 @@ impl EventSink {
         Ok(())
     }
 
-    /// The present part of the announcement (see [`announce`](Self::announce)): the folders this node registered, then every
-    /// agent in `views` that is running, in the order a launch reports it, then `waiting` approvals. The callers' locks are
-    /// already released: `views` and `waiting` are copies.
-    pub fn announce_present(&self, views: &[AgentView], waiting: &[crate::approvals::Pending]) {
+    /// The present part of an announcement (see [`announce`](Self::announce) and [`resync`](Self::resync)): the folders this node
+    /// registered, then every agent in `views` that is running, in the order a launch reports it, then `waiting` approvals. For
+    /// [`Announce::Present`] also every agent in `views` that ended (`AgentExited` with the last exit code recorded for it, or the
+    /// stop convention `i32::MIN`, and `TerminalClosed` if it had a terminal) and the last [`RESOLVED_KEPT`] resolved approvals.
+    /// The callers' locks are already released: `views` and `waiting` are copies.
+    pub fn announce_present(
+        &self,
+        views: &[AgentView],
+        waiting: &[crate::approvals::Pending],
+        how: Announce,
+    ) {
         let known = self
             .reported
             .lock()
@@ -180,8 +256,22 @@ impl EventSink {
         for w in known.workspaces.values() {
             self.record(Body::WorkspaceRegistered(w.clone()));
         }
-        for v in views.iter().filter(|v| v.running) {
+        for v in views {
             let id = v.id.as_str();
+            if !v.running {
+                if how == Announce::Present {
+                    self.record(Body::AgentExited(v1::AgentExited {
+                        agent_id: id.to_string(),
+                        exit_code: known.exits.get(id).copied().unwrap_or(i32::MIN),
+                    }));
+                    if known.terminals.contains(id) {
+                        self.record(Body::TerminalClosed(v1::TerminalClosed {
+                            terminal_id: crate::control::terminal_id_of(&v.id),
+                        }));
+                    }
+                }
+                continue;
+            }
             if v.directory {
                 if let Some(ws) = known.bound.get(id) {
                     self.record(Body::AgentWorkspaceBound(v1::AgentWorkspaceBound {
@@ -191,6 +281,11 @@ impl EventSink {
                 }
             }
             self.agent_up(v, known.sessions.get(id));
+        }
+        if how == Announce::Present {
+            for r in known.resolved {
+                self.record(Body::ApprovalResolved(r));
+            }
         }
         for p in waiting {
             self.approval_requested(p);
@@ -246,6 +341,7 @@ impl EventSink {
                 .unwrap_or_else(|e| e.into_inner())
                 .note(&body);
         }
+        let online = matches!(body, Body::NodeOnline(_));
         let mut log = self.log.lock().unwrap_or_else(|e| e.into_inner());
         let ev = v1::Event {
             producer_id: self.producer.clone(),
@@ -254,7 +350,9 @@ impl EventSink {
             body: Some(body),
         };
         // A full disk must never stop agents: losing an event is better than losing the node.
-        let _ = log.append(&ev.encode_to_vec());
+        if let (Ok(appended), true) = (log.append(&ev.encode_to_vec()), online) {
+            self.last_online.store(appended.seq, Ordering::Release);
+        }
     }
 
     pub fn agent_started(
@@ -724,9 +822,19 @@ pub struct Node {
 
 impl Node {
     pub fn start(cfg: &NodeConfig) -> Result<Self, NodeError> {
+        Self::start_with_event_cap(cfg, EVENT_BUFFER_BYTES)
+    }
+
+    /// Like [`start`](Self::start) with an explicit size cap for the event buffer, in bytes (tests use a small one to lose events
+    /// the way a long offline burst does).
+    pub fn start_with_event_cap(cfg: &NodeConfig, max_bytes: u64) -> Result<Self, NodeError> {
         std::fs::create_dir_all(&cfg.data_dir)?;
         std::fs::create_dir_all(&cfg.worktree_root)?;
-        let events = Arc::new(EventSink::open(&cfg.data_dir.join("events"), &cfg.node_id)?);
+        let events = Arc::new(EventSink::open_with_cap(
+            &cfg.data_dir.join("events"),
+            &cfg.node_id,
+            max_bytes,
+        )?);
 
         // Short path on purpose: Unix socket paths are limited to about 100 bytes.
         let mesh_dir = cfg
@@ -845,21 +953,24 @@ impl Node {
             }));
         }
         {
-            // What this node says when the hub's record of it cannot be continued (ADR-0054): who it is, its checkouts, and its
-            // present. Each lock is taken alone and released before the next, and before anything is recorded (see `announce`).
+            // What this node says when the hub's record of it cannot be continued (ADR-0054, ADR-0055): who it is (only when the hub
+            // lost this process's start), its checkouts, and its present. Each lock is taken alone and released before the next, and
+            // before anything is recorded (see `announce`).
             let (node, sup, approvals) = (
                 cfg.node_id.clone(),
                 Arc::clone(&supervisor),
                 Arc::clone(&approvals),
             );
-            events.set_announcer(Box::new(move |ev| {
+            events.set_announcer(Box::new(move |ev, how| {
                 let views = sup.lock().unwrap_or_else(|e| e.into_inner()).list();
                 let waiting = approvals.waiting();
-                ev.node_online(&node);
+                if how == Announce::Restart {
+                    ev.node_online(&node);
+                }
                 for (id, root) in &known_checkouts {
                     ev.checkout_discovered(&node, id, root);
                 }
-                ev.announce_present(&views, &waiting);
+                ev.announce_present(&views, &waiting, how);
             }));
         }
         let chat = Arc::new(crate::chat::ChatBoard::new());
@@ -1242,5 +1353,173 @@ mod memory_tests {
             0,
             "a process that does not exist"
         );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod announce_tests {
+    use super::*;
+
+    fn sink(name: &str) -> EventSink {
+        let dir =
+            std::env::temp_dir().join(format!("agora-announce-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        EventSink::open(&dir, "n1").unwrap()
+    }
+
+    fn view(id: &str, running: bool, terminal: bool) -> AgentView {
+        AgentView {
+            directory: false,
+            terminal: terminal && running,
+            level: agora_core::IntegrationLevel::L1Manifest,
+            id: AgentId::new(id),
+            kind: "probe".into(),
+            state: AgentState::Idle,
+            worktree: PathBuf::from(format!("/wt/{id}")),
+            branch: format!("agent/{id}"),
+            project: "p".into(),
+            running,
+            restarts: 0,
+        }
+    }
+
+    fn said(s: &EventSink, mark: u64) -> Vec<Body> {
+        s.events_after(mark)
+            .into_iter()
+            .filter_map(|e| e.body)
+            .collect()
+    }
+
+    fn launched(s: &EventSink, id: &str, terminal: bool) {
+        s.agent_launched(
+            &AgentId::new(id),
+            "p",
+            "n1",
+            Path::new("/work/p"),
+            Path::new(&format!("/wt/{id}")),
+            &format!("agent/{id}"),
+            "probe",
+            terminal,
+        );
+    }
+
+    /// ADR-0055 section 2: without `NodeOnline` every agent of this process is stated once. An ended one gets `AgentExited` with
+    /// the last exit code recorded for it (the stop convention `i32::MIN` when none was) and `TerminalClosed` if it had a terminal;
+    /// a running one is announced as before. With `NodeOnline` (ADR-0054) ended agents are not mentioned.
+    #[test]
+    fn ended_agents_are_stated_with_their_recorded_exit_and_terminal() {
+        let s = sink("ended");
+        launched(&s, "crashed", true);
+        launched(&s, "stopped", true);
+        launched(&s, "chat", false);
+        launched(&s, "kept", true);
+        let views = [
+            view("crashed", false, true),
+            view("stopped", false, true),
+            view("chat", false, false),
+            view("never", false, false),
+            view("kept", true, true),
+        ];
+        s.supervisor_events(
+            &[
+                SupervisorEvent::Exited {
+                    agent: AgentId::new("crashed"),
+                    status: agora_platform::ExitStatus {
+                        code: Some(3),
+                        signal: None,
+                    },
+                },
+                SupervisorEvent::Exited {
+                    agent: AgentId::new("chat"),
+                    status: agora_platform::ExitStatus {
+                        code: None,
+                        signal: Some(9),
+                    },
+                },
+                SupervisorEvent::Stopped {
+                    agent: AgentId::new("stopped"),
+                },
+            ],
+            &views,
+        );
+        let mark = s.next_seq() - 1;
+        s.announce_present(&views, &[], Announce::Present);
+        let present = said(&s, mark);
+        let exits: Vec<(&str, i32)> = present
+            .iter()
+            .filter_map(|b| match b {
+                Body::AgentExited(x) => Some((x.agent_id.as_str(), x.exit_code)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            exits,
+            [
+                ("crashed", 3),
+                ("stopped", i32::MIN),
+                ("chat", -9),
+                ("never", i32::MIN)
+            ]
+        );
+        let closed: Vec<&str> = present
+            .iter()
+            .filter_map(|b| match b {
+                Body::TerminalClosed(t) => Some(t.terminal_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            closed,
+            ["t-crashed", "t-stopped"],
+            "only those with a terminal"
+        );
+        let started: Vec<&str> = present
+            .iter()
+            .filter_map(|b| match b {
+                Body::AgentStarted(a) => Some(a.agent_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(started, ["kept"]);
+        assert!(!present.iter().any(|b| matches!(b, Body::NodeOnline(_))));
+
+        let mark = s.next_seq() - 1;
+        s.announce_present(&views, &[], Announce::Restart);
+        assert!(!said(&s, mark)
+            .iter()
+            .any(|b| matches!(b, Body::AgentExited(_) | Body::TerminalClosed(_))));
+    }
+
+    /// ADR-0055 section 2: the last 256 resolved approvals are said again, oldest first, so one answered inside the lost window
+    /// does not stay listed as waiting. Saying them again does not change what is kept.
+    #[test]
+    fn the_last_resolved_approvals_are_said_again_and_the_ring_is_bounded() {
+        let s = sink("resolved");
+        for i in 0..300 {
+            s.approval_resolved(&format!("ap-{i}"), i % 2 == 0, "dev");
+        }
+        let restated = |how| {
+            let mark = s.next_seq() - 1;
+            s.announce_present(&[], &[], how);
+            said(&s, mark)
+                .into_iter()
+                .filter_map(|b| match b {
+                    Body::ApprovalResolved(r) => Some(r),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let first = restated(Announce::Present);
+        assert_eq!(first.len(), RESOLVED_KEPT);
+        let ids: Vec<String> = first.iter().map(|r| r.approval_id.clone()).collect();
+        assert_eq!(
+            ids,
+            (44..300).map(|i| format!("ap-{i}")).collect::<Vec<_>>()
+        );
+        assert!(first.iter().all(|r| r.signer_device_id == "dev"
+            && r.approved == r.approval_id[3..].parse::<u32>().unwrap().is_multiple_of(2)));
+        assert_eq!(restated(Announce::Present), first, "the ring did not move");
+        assert!(restated(Announce::Restart).is_empty());
     }
 }
