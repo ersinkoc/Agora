@@ -271,7 +271,8 @@ impl DiskEventLog {
 
     /// Reclaim acknowledged events once enough of the file is dead weight.
     fn compact(&mut self) -> io::Result<()> {
-        let dead = usize::try_from(self.acked + 1 - self.first_seq)
+        // The size cap may already have dropped events past the ack: then nothing retained is acknowledged.
+        let dead = usize::try_from((self.acked + 1).saturating_sub(self.first_seq))
             .unwrap_or(0)
             .min(self.offsets.len());
         if dead == 0 {
@@ -296,7 +297,8 @@ impl DiskEventLog {
         if keep_from == 0 {
             return Ok(0);
         }
-        let first_dropped_unacked = self.acked + 1;
+        // Events before `first_seq` were dropped (and counted) by an earlier eviction.
+        let first_dropped_unacked = (self.acked + 1).max(self.first_seq);
         let last_dropped = self.first_seq + keep_from as u64 - 1;
         let evicted = if last_dropped >= first_dropped_unacked {
             last_dropped - first_dropped_unacked + 1
@@ -510,6 +512,44 @@ mod tests {
         drop(log);
         let log = DiskEventLog::open(&d, rec * 10 + HEADER_LEN).unwrap();
         assert_eq!((log.oldest_retained(), log.next_seq()), (first, n));
+    }
+
+    #[test]
+    fn an_ack_older_than_what_the_size_cap_kept_drops_nothing_retained() {
+        let d = dir();
+        let cap = 200 * 1024;
+        let mut log = DiskEventLog::open(&d, cap).unwrap();
+        // Events 1..=10 are on their way to the hub when a burst overflows the cap and evicts past them.
+        for _ in 0..410 {
+            log.append(&[7u8; 1000]).unwrap();
+        }
+        let (len, oldest) = (log.len(), log.oldest_retained());
+        assert!(oldest > 11 && len * 1008 >= MIN_COMPACT as usize);
+        // Then the hub's ack for that earlier batch arrives.
+        log.ack(10).unwrap();
+        assert_eq!(
+            (log.acked(), log.len(), log.oldest_retained()),
+            (10, len, oldest)
+        );
+        assert_eq!(log.replay_after(oldest - 1).unwrap().len(), len);
+        drop(log);
+        let log = DiskEventLog::open(&d, cap).unwrap();
+        assert_eq!(
+            (log.acked(), log.len(), log.oldest_retained()),
+            (10, len, oldest)
+        );
+    }
+
+    #[test]
+    fn each_unacknowledged_event_the_size_cap_drops_is_counted_once() {
+        let mut log = DiskEventLog::open(&dir(), HEADER_LEN + 108 * 10).unwrap();
+        let mut reported = 0;
+        for _ in 0..40 {
+            reported += log.append(&[1u8; 100]).unwrap().evicted_unacked;
+        }
+        // Nothing was acknowledged, so every event before the oldest retained one was dropped unacknowledged, once.
+        assert!(log.oldest_retained() > 11);
+        assert_eq!(reported, log.oldest_retained() - 1);
     }
 
     #[test]

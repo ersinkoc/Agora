@@ -240,6 +240,49 @@ fn resume_substitutes_the_session_id_into_the_manifest_command() {
 }
 
 #[test]
+fn a_resume_that_cannot_launch_gives_its_mesh_endpoint_back() {
+    use std::collections::BTreeSet;
+    use std::sync::{Arc, Mutex};
+    let e = env("resume-abort");
+    let mut sup = supervisor(RestartPolicy::default());
+    let missing = e.dir.join(format!(
+        "missing-agora-fake-agent{}",
+        std::env::consts::EXE_SUFFIX
+    ));
+    sup.register(manifest(
+        &fake_launch(),
+        Some(&format!(
+            "[{:?}, \"{{session_id}}\"]",
+            missing.to_string_lossy()
+        )),
+    ));
+    // The node's hooks: launching registers the agent on the mesh, aborting unregisters it.
+    let mesh = Arc::new(Mutex::new(BTreeSet::new()));
+    let m = Arc::clone(&mesh);
+    sup.set_launch_hook(Box::new(move |l| {
+        m.lock().unwrap().insert(l.id.as_str().to_string());
+        None
+    }));
+    let m = Arc::clone(&mesh);
+    sup.set_abort_hook(Box::new(move |id| {
+        m.lock().unwrap().remove(id.as_str());
+    }));
+    let id = sup.start(&request(&e, "ra"), Instant::now()).unwrap();
+    sup.report_session(&id, "s-1").unwrap();
+    sup.stop(&id).unwrap();
+    // The node takes a stopped agent off the mesh.
+    mesh.lock().unwrap().remove(id.as_str());
+    for _ in 0..2 {
+        assert!(sup.resume(&id, Instant::now()).is_err());
+        assert!(
+            mesh.lock().unwrap().is_empty(),
+            "a failed resume left the stopped agent on the mesh"
+        );
+    }
+    assert!(!sup.list()[0].running);
+}
+
+#[test]
 fn reported_state_outranks_the_screen() {
     let e = env("reported");
     let mut sup = supervisor(RestartPolicy::default());
