@@ -23,6 +23,9 @@ ssh-keygen -Y verify -f docs/security/release-key.pub -I agora-release -n file -
 chmod +x $f && ./$f doctor
 ```
 
+On macOS the binary is ad-hoc signed but not notarized yet. Downloaded with `curl` or `gh release download` it runs; downloaded with a browser, macOS
+blocks it ("cannot be verified"): run `xattr -d com.apple.quarantine agora-aarch64-apple-darwin` first. Notarization needs a Developer ID (open question).
+
 `agora update` checks and installs newer releases the same way once the key is saved as `<agora dir>/release-key`.
 The web window is embedded in the binary, so steps 2 to 4 below work with a release too.
 
