@@ -580,9 +580,11 @@ fn parse_shortstat(s: &str) -> (u32, u32) {
 }
 
 pub fn status(worktree: &Path) -> Result<GitStatus, GitError> {
-    let git = |args: &[&str]| git(worktree, args);
-    // Each node git is two processes (the filter question, then the command), which costs about a second a pair on Windows: the
-    // commit comes from the same `status` as the changed paths (`# branch.oid`) instead of a `rev-parse` of its own.
+    // A git process costs about a second on a busy Windows machine. The filter question is asked once for both commands that read
+    // files, right before the first; the commit comes from the same `status` as the changed paths (`# branch.oid`) instead of a
+    // `rev-parse` of its own.
+    let filters = Filters::of(worktree);
+    let git = |args: &[&str]| run(hardened_with(worktree, &filters), args);
     let (files_changed, head_commit) = parse_status_v2(&git(&[
         "status",
         "--porcelain=v2",

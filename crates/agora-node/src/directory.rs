@@ -92,19 +92,18 @@ pub fn inspect(
             |c| c.project.clone(),
         )
     });
-    let branch = checkout
-        .as_ref()
-        .and_then(|c| crate::git::status(&c.root).ok())
-        .map_or(String::new(), |_| {
-            crate::git::refs_only(root)
-                .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
-                .output()
-                .ok()
-                .filter(|o| o.status.success())
-                .map_or(String::new(), |o| {
-                    String::from_utf8_lossy(&o.stdout).trim().to_string()
-                })
-        });
+    // Only the branch is shown, so only the branch is asked: a whole `status` here cost two to four more git processes per start (about
+    // a second each on Windows) and its answer was thrown away.
+    let branch = checkout.as_ref().map_or(String::new(), |_| {
+        crate::git::refs_only(root)
+            .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map_or(String::new(), |o| {
+                String::from_utf8_lossy(&o.stdout).trim().to_string()
+            })
+    });
     Ok((
         v1::DirectoryInfo {
             path: path.to_string_lossy().into_owned(),
