@@ -1,6 +1,7 @@
 # 0054. A node that lost unacknowledged events resynchronizes instead of stalling
-Status: Proposed
+Status: Accepted
 Date: 2026-11-13
+Accepted: 2026-11-13 (maintainer's explicit approval in chat: "0054'ü onaylıyorum")
 
 ## Context
 A node keeps its events in a size-capped buffer until the hub acknowledges them (ADR-0026, `docs/specs/protocol.md` §3).
@@ -105,5 +106,5 @@ events and then the announcement, and ends with the present state whatever the r
   change, and it matches what a node restart means.
 - `uplink_client` stops retrying a `Stale` connection forever. It now has a terminal recovery path that crates/agora tests
   cover.
-- Until this is accepted, nodes keep stalling in both situations above; the condition is logged (557c743) but not
+- Until this is implemented, nodes keep stalling in both situations above; the condition is logged (557c743) but not
   repaired.

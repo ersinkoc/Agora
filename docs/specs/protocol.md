@@ -47,7 +47,7 @@ file. A torn tail from a crash is truncated on open. After a reconnect the node 
 hub's ack, in order. The log is size-capped (oldest events dropped first); if unacknowledged events were dropped,
 a replay from the old ack is refused (`Stale`) and the hub resynchronizes from a snapshot instead of silently
 missing events. Not yet: neither side implements that resync, so such a node stops delivering events until its buffer is
-cleared by hand (ADR-0054, Proposed). Terminal bytes never enter this log.
+cleared by hand (ADR-0054, accepted, being implemented). Terminal bytes never enter this log.
 
 Hub store (`agora-hub::store`, ADR-0014): SQLite in WAL mode behind an `EventStore` trait. `append(producer, seq, ..)`
 returns `Applied` (stored, with a global position), `Duplicate` (already applied, ignored) or `Gap { expected }` (not the
