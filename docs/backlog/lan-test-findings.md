@@ -86,3 +86,18 @@ branch (`docs/fordevs/`). Each row is something the run showed that no CI run ha
   Also measured: applying and removing a propagated grant re-derives the inherited entries of that tree from its parent, which drops stale
   third-party entries that are not restored afterwards. Open: maintainer decisions (program folder, Codex's home, exit reason, cost of large
   folders), see the `comms` report of 2026-11-11 19:25 UTC.
+
+## Hub, node and window under outages (Windows, 2026-11-14)
+
+Measured with the real binaries and Chromium (`comms`: `log/2026-11-14-0115-windows-link-resilience-findings.md`). With the hub dead
+the node keeps every agent running and catches up 1.5 s after the hub is back (guarded by `crates/agora/tests/hub_dial.rs`
+`a_node_keeps_working_without_the_hub_and_catches_up_when_it_appears`; the browser scenario is `scripts/e2e-link-resilience.mjs`).
+
+- **R1** A link that goes silent (process frozen, TCP open) was never noticed: the window showed a frozen node online, and nodes and
+  windows did not reconnect to a frozen hub. Fixed: node and hub drop a link silent for 25 s (node pings every 10 s), the hub records
+  the node offline; the window pings every 15 s and starts over after 10 s without an answer (`docs/design/observability.md`).
+- **R2** The window came back up to 30 s after the hub. Fixed: at most 5 s with jitter, at once on `online`, visible, focus and "Retry now".
+- **R3** A `delivery_failed` notice did not say which message failed. Fixed: `reply_to` is the failed message's id. A resend queue after
+  reconnect is not done (a behaviour change for an ADR).
+- **R4** `agent start` after `project init` printed "The request was not valid (field: directory.identity_changed)". Fixed: the CLI names
+  `--accept-project-id-change` (`cli-invalid-directory-identity_changed`); the wire error is unchanged.

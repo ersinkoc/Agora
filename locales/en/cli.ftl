@@ -43,6 +43,7 @@ cli-ambiguous-project = More than one project is registered; choose one with --p
 cli-no-projects = This node has no projects. Start it with --project PATH.
 cli-bad-arguments = The arguments were not understood.
 cli-error = Error { $code }: { $message }
+cli-invalid-directory-identity_changed = This folder's project identity changed since an agent last started here. Add --accept-project-id-change to start one anyway.
 
 doctor-status-ok = ok
 doctor-status-warn = note
@@ -79,7 +80,7 @@ cli-hub-notify = Notifications go to { $count } target(s) from { $file }.
 cli-hub-notify-skipped = { $count } line(s) of { $file } were not understood and are ignored. Each line is `ntfy URL` or `webhook URL`.
 cli-hub-web = Web app: https://{ $addr }/ . Sign in with the code { $code } (valid for 10 minutes; `agora hub login` makes another). The hub's certificate is signed by its own CA, so the browser warns until you trust it.
 cli-hub-login = Sign-in code for the web app: { $code } (valid for 10 minutes). Open the hub's address in a browser and enter it.
-cli-trusted = Device { $id } can now answer approvals on this node. Restart the node to apply it.
+cli-trusted = Device { $id } can now answer approvals on this node.
 cli-trust-failed = Could not trust that device: { $reason }
 cli-hub-backup = Backup written to { $path }.
 cli-hub-restored = Database restored from the backup into { $path }. The previous one is kept next to it as before-restore.

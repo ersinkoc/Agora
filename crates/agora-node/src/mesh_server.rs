@@ -132,11 +132,16 @@ fn dispatch_outbound(mesh: &Arc<Mutex<Mesh>>, remote: &RemoteSlot, allowed: &Ato
     for o in out {
         let to = format!("{}/{}", o.to_node, o.to_agent);
         let failed = {
-            let (mesh, from, to) = (Arc::clone(mesh), o.from.clone(), to.clone());
+            let (mesh, from, id, to) = (
+                Arc::clone(mesh),
+                o.from.clone(),
+                o.message_id.clone(),
+                to.clone(),
+            );
             move |code: String| {
                 mesh.lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .delivery_failed(&from, &to, &code, now_ms());
+                    .delivery_failed(&from, &id, &to, &code, now_ms());
             }
         };
         match &link {

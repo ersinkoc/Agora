@@ -43,6 +43,7 @@ cli-ambiguous-project = Birden fazla proje kayıtlı; --project ile birini seçi
 cli-no-projects = Bu düğümde proje yok. --project YOL ile başlatın.
 cli-bad-arguments = Komut satırı argümanları anlaşılamadı.
 cli-error = Hata { $code }: { $message }
+cli-invalid-directory-identity_changed = Bu klasörün proje kimliği, burada son kez ajan başlatıldığından beri değişti. Yine de başlatmak için --accept-project-id-change ekleyin.
 
 doctor-status-ok = tamam
 doctor-status-warn = not
@@ -79,7 +80,7 @@ cli-hub-notify = Bildirimler { $file } dosyasındaki { $count } hedefe gidiyor.
 cli-hub-notify-skipped = { $file } dosyasının { $count } satırı anlaşılamadı ve yok sayılıyor. Her satır `ntfy URL` ya da `webhook URL` olmalı.
 cli-hub-web = Web uygulaması: https://{ $addr }/ . { $code } koduyla giriş yapın (10 dakika geçerli; yenisi için `agora hub login`). Hub sertifikasını kendi sertifika yetkilisi (CA) imzaladığı için bu yetkiliye güvenene kadar tarayıcı uyarı verir.
 cli-hub-login = Web uygulaması için giriş kodu: { $code } (10 dakika geçerli). Hub adresini tarayıcıda açıp kodu girin.
-cli-trusted = { $id } cihazı artık bu makinedeki onaylara yanıt verebilir. Uygulanması için bu makinedeki düğümü yeniden başlatın.
+cli-trusted = { $id } cihazı artık bu makinedeki onaylara yanıt verebilir.
 cli-trust-failed = Bu cihaz güvenilir olarak kaydedilemedi: { $reason }
 cli-hub-backup = Yedek { $path } dosyasına yazıldı.
 cli-hub-restored = Veritabanı yedekten { $path } konumuna geri yüklendi. Önceki veritabanı aynı klasörde before-restore adıyla saklanıyor.

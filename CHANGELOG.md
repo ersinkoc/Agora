@@ -4,6 +4,17 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+### Machines
+- A link that goes silent while the connection stays open (a frozen hub or node, a laptop that slept, a Wi-Fi switch, a NAT that forgot the connection) is now noticed. A node dials the hub again when it has heard nothing for 25 s; the hub shows a machine offline when it has heard nothing from it for 25 s (an idle machine keeps its link with a ping every 10 s and is never dropped). Before, the window showed a frozen machine as online, and nodes never dialled again, for as long as the silence lasted.
+- `agora agent start` in a folder whose project identity changed (after `agora project init`) says so and names `--accept-project-id-change`, instead of "The request was not valid (field: directory.identity_changed)".
+- `agora node trust` no longer tells you to restart the node: the node reads its trusted devices again when the file changes.
+
+### Window
+- The window notices a hub that stopped answering (it pings every 15 s and starts over when nothing comes back within 10 s) and shows "Hub unreachable". It comes back within 5 s of the hub, sooner when the browser is back online, the tab becomes visible or the window gets the focus, and the banner has a "Retry now" button. Before, it waited up to 30 s between attempts.
+
+### Agents
+- A `delivery_failed` notice for a message to another machine names the message that failed: its `reply_to` is the `message_id` that `send_message` answered with, so an agent with several messages in flight knows which one did not arrive. Nothing is resent.
+
 ## 0.3.7
 
 ### Agents

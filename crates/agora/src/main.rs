@@ -46,7 +46,24 @@ impl Say {
         eprintln!("{}", self.text(id, args));
     }
 
+    /// A refused request whose `field` names something the person can act on has a sentence of its own
+    /// (`cli-invalid-<field>`, dots as dashes), so it does not read like a protocol bug; the code stays the same.
+    fn field_reason(&self, e: &v1::ErrorInfo, args: &[(&str, Arg)]) -> Option<String> {
+        if e.code != "protocol.invalid_message" {
+            return None;
+        }
+        let Some(Value::Str(field)) = e.params.get("field").and_then(|v| v.value.as_ref()) else {
+            return None;
+        };
+        self.0
+            .render(&format!("cli-invalid-{}", field.replace('.', "-")), args)
+    }
+
     fn remote_error(&self, e: &v1::ErrorInfo) {
+        eprintln!("{}", self.remote_error_text(e));
+    }
+
+    fn remote_error_text(&self, e: &v1::ErrorInfo) -> String {
         let args: Vec<(&str, Arg)> = e
             .params
             .iter()
@@ -56,14 +73,16 @@ impl Say {
                 None => None,
             })
             .collect();
-        let message = self.text(&e.code.replace('.', "-"), &args);
-        self.err(
+        let message = self
+            .field_reason(e, &args)
+            .unwrap_or_else(|| self.text(&e.code.replace('.', "-"), &args));
+        self.text(
             key!("cli-error"),
             &[
                 ("code", e.code.as_str().into()),
                 ("message", message.into()),
             ],
-        );
+        )
     }
 }
 
@@ -821,4 +840,31 @@ fn terminal_attach(say: &Say, o: &Opts) -> ExitCode {
         &[("agent_id", agent.as_str().into())],
     );
     ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod remote_error_tests {
+    use super::*;
+    use agora_protocol::{Error, ErrorCode};
+
+    #[test]
+    fn a_changed_project_identity_says_what_to_do_instead_of_reading_like_a_protocol_bug() {
+        let e = Error::new(ErrorCode::ProtocolInvalidMessage)
+            .with("field", "directory.identity_changed")
+            .to_info();
+        let en = Say(Catalog::english()).remote_error_text(&e);
+        assert!(en.starts_with("Error protocol.invalid_message: "), "{en}");
+        assert!(en.contains("--accept-project-id-change"), "{en}");
+        assert!(!en.contains("not valid"), "{en}");
+        let tr = Say(Catalog::turkish()).remote_error_text(&e);
+        assert!(tr.contains("--accept-project-id-change"), "{tr}");
+        assert!(tr.contains("proje kimliği"), "{tr}");
+        // A field without a sentence of its own keeps the generic one.
+        let other = Error::new(ErrorCode::ProtocolInvalidMessage)
+            .with("field", "directory.project_id")
+            .to_info();
+        let en = Say(Catalog::english()).remote_error_text(&other);
+        assert!(en.contains("field: directory.project_id"), "{en}");
+    }
 }

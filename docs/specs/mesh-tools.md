@@ -76,7 +76,8 @@ node wrote. The target broker delivers it to the local agent with `provenance.fr
 `provenance.node = <origin>`; answering is a `send_message` to that address. Delivery is at most once. `send_message`
 returns once the broker accepted the message (limits and rate are checked there); if it does not arrive, the sender's inbox
 receives a notice of kind `delivery_failed` whose body is the error code (`node.offline`, `node.unknown`, `node.timeout`,
-`mesh.recipient_unknown`, `mesh.rate_limited`, ...). Plain messages cross nodes; `ask` stays node-local, and a `#channel` message on a shared project reaches every other running agent of the project on any node (below), and a node may have 64 posts waiting at the hub. Tasks, leases and
+`mesh.recipient_unknown`, `mesh.rate_limited`, ...) and whose `reply_to` is the failed message's id (the `message_id`
+`send_message` answered with), so an agent with several messages in flight knows which one failed. Nothing is resent. Plain messages cross nodes; `ask` stays node-local, and a `#channel` message on a shared project reaches every other running agent of the project on any node (below), and a node may have 64 posts waiting at the hub. Tasks, leases and
 `handoff` cross nodes through the shared board below, for a project that is on two or more online nodes. The machine's owner can turn it off:
 `<node data dir>/policy` with the line `mesh.remote = false` (default `true`; a value that is not exactly `true` or `false` counts as
 `false`, so a typo never widens the node). Then messages to other nodes fail with a `delivery_failed` notice `node.policy_denied`

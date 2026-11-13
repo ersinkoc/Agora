@@ -37,7 +37,7 @@ const wide = () => typeof window === 'undefined' || !window.matchMedia || window
 
 // The one window, laid out like an editor: the agents on the left as a tree, the terminals you are watching as tabs in the
 // middle (or side by side), details on the right, and a status bar. Everything is derived from props.
-export function Console({ agents, machines, usage, projects = [], approvals, messages, boards = [], terminalFor, chatOf, sendPrompt, chooseOption, loadDiff, loadHistory, filesOf, onOpen, onStart, onCommand, onForget, start, onResolve, helperGrants, revokeGrant, notice, link }: {
+export function Console({ agents, machines, usage, projects = [], approvals, messages, boards = [], terminalFor, chatOf, sendPrompt, chooseOption, loadDiff, loadHistory, filesOf, onOpen, onStart, onCommand, onForget, start, onResolve, helperGrants, revokeGrant, notice, link, onRetry }: {
   agents: readonly AgentTileModel[];
   machines: readonly MachineModel[];
   usage?: UsageSummary;
@@ -64,6 +64,8 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   revokeGrant?: (agent: AgentTileModel, id: string) => Promise<void>;
   notice?: string;
   link: 'connecting' | 'live' | 'offline';
+  // Try the hub now instead of after the wait, offered while it is unreachable.
+  onRetry?: () => void;
 }) {
   const cleared = useSyncExternalStore(subscribeDismissed, dismissedIds);
   // What was cleared stays hidden only while the agent is closed: one that runs again (a new run under the same id) is back in the list.
@@ -255,6 +257,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
           <Icon name="search" className="size-3.5" /><span className="min-w-0 flex-1 truncate">{t('ide-command')}</span><kbd className="ide-kbd hidden sm:inline">{commandKey} K</kbd>
         </button>
         {link !== 'live' && <span role="status" className="ide-chip">{t(link === 'offline' ? 'link-offline' : 'link-connecting')}</span>}
+        {link === 'offline' && onRetry && <button type="button" className="ide-chip whitespace-nowrap hover:border-accent hover:text-ink" onClick={onRetry}>{t('link-retry')}</button>}
         <span className="hidden sm:block"><LanguagePicker compact /></span>
         <ThemePicker />
         <a className="ide-chip hidden whitespace-nowrap hover:text-ink md:inline-flex" href="#/device">{t('device-link')}</a>
