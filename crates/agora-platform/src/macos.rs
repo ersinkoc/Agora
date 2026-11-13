@@ -267,6 +267,35 @@ pub(crate) fn opened_path(file: &std::fs::File) -> io::Result<PathBuf> {
     Ok(PathBuf::from(std::ffi::OsStr::from_bytes(&buf[..len])))
 }
 
+/// Process group and start time (microseconds since the epoch, `proc_bsdinfo`) of a running process.
+pub(crate) fn identity(pid: u32) -> io::Result<crate::ProcessIdentity> {
+    // SAFETY: an all-zero proc_bsdinfo is a valid buffer for the kernel to fill.
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as i32;
+    // SAFETY: the buffer is a live proc_bsdinfo of `size` bytes.
+    let n = unsafe {
+        libc::proc_pidinfo(
+            pid as i32,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            (&mut info as *mut libc::proc_bsdinfo).cast(),
+            size,
+        )
+    };
+    if n < size {
+        return Err(io::Error::last_os_error());
+    }
+    // SZOMB = 5: a process that ended and waits to be reaped is not running.
+    if info.pbi_status == 5 {
+        return Err(io::Error::new(io::ErrorKind::NotFound, "zombie"));
+    }
+    Ok(crate::ProcessIdentity {
+        pid,
+        group: info.pbi_pgid,
+        started: info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec,
+    })
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod sandbox_tests {
@@ -408,33 +437,4 @@ mod sandbox_tests {
             "{p}"
         );
     }
-}
-
-/// Process group and start time (microseconds since the epoch, `proc_bsdinfo`) of a running process.
-pub(crate) fn identity(pid: u32) -> io::Result<crate::ProcessIdentity> {
-    // SAFETY: an all-zero proc_bsdinfo is a valid buffer for the kernel to fill.
-    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
-    let size = std::mem::size_of::<libc::proc_bsdinfo>() as i32;
-    // SAFETY: the buffer is a live proc_bsdinfo of `size` bytes.
-    let n = unsafe {
-        libc::proc_pidinfo(
-            pid as i32,
-            libc::PROC_PIDTBSDINFO,
-            0,
-            (&mut info as *mut libc::proc_bsdinfo).cast(),
-            size,
-        )
-    };
-    if n < size {
-        return Err(io::Error::last_os_error());
-    }
-    // SZOMB = 5: a process that ended and waits to be reaped is not running.
-    if info.pbi_status == 5 {
-        return Err(io::Error::new(io::ErrorKind::NotFound, "zombie"));
-    }
-    Ok(crate::ProcessIdentity {
-        pid,
-        group: info.pbi_pgid,
-        started: info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec,
-    })
 }
