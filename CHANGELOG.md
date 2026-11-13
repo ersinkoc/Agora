@@ -41,7 +41,7 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 - `agora node trust` no longer tells you to restart the node: the node reads its trusted devices again when the file changes.
 
 ### Window
-- After a hub outage the window comes back within 5 s of the hub (it waited up to 30 s between attempts), sooner when the browser is back online, the tab becomes visible or the window gets the focus, and the "Hub unreachable" banner has a "Retry now" button.
+- After a hub outage the window comes back within 5 s of the hub (it waited up to 30 s between attempts, and an attempt made while the hub was frozen or asleep could hang for a minute after it was back: an attempt that has not connected within 8 s is now given up and tried again), sooner when the browser is back online, the tab becomes visible or the window gets the focus, and the "Hub unreachable" banner has a "Retry now" button.
 
 ### Agents
 - A `delivery_failed` notice for a message to another machine names the message that failed: its `reply_to` is the `message_id` that `send_message` answered with, so an agent with several messages in flight knows which one did not arrive. Nothing is resent.

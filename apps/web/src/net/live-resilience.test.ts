@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { agora } from '../gen/agora.js';
 import { encodeFrame, EVENT_KIND, STREAM_EVENTS } from './frame';
-import { connectLive, defaultBackoff, RETRY_CAP_MS, type LinkState, type Socket } from './live';
+import { connectLive, defaultBackoff, OPEN_WITHIN_MS, RETRY_CAP_MS, type LinkState, type Socket } from './live';
 
 class FakeSocket implements Socket {
   binaryType = '';
@@ -40,6 +40,37 @@ function setup(opts: { backoffMs?: (n: number) => number } = {}) {
 
 // The window's own ping deadline (F1) was taken out of 0.3.8 with the node and hub silence deadlines: see
 // docs/backlog/lan-test-findings.md R1. Its tests return with that design.
+
+describe('a connect attempt that never opens', () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  it('is given up within the deadline even when the browser reports nothing, and the window goes live once the hub answers', () => {
+    // A frozen hub: TCP accepted, nothing answered, and the browser never fires an error or a close.
+    const t = setup({ backoffMs: () => 1000 });
+    expect(t.states.at(-1)).toBe('connecting');
+    vi.advanceTimersByTime(OPEN_WITHIN_MS - 1);
+    expect(t.states.at(-1)).toBe('connecting');
+    vi.advanceTimersByTime(1);
+    expect(t.states.at(-1)).toBe('offline'); // "Hub unreachable"
+    expect(t.sockets[0]?.closed).toBe(true);
+    // Retried after one backoff; still frozen, so given up again: "connecting" never lasts longer than the deadline.
+    vi.advanceTimersByTime(1000);
+    expect(t.sockets).toHaveLength(2);
+    vi.advanceTimersByTime(OPEN_WITHIN_MS);
+    expect(t.states.at(-1)).toBe('offline');
+    // The hub runs again: the next attempt opens and goes live within one backoff.
+    vi.advanceTimersByTime(1000);
+    expect(t.sockets).toHaveLength(3);
+    t.goLive();
+    expect(t.states.at(-1)).toBe('live');
+    // An open connection has no deadline: hours of quiet do not drop it.
+    vi.advanceTimersByTime(3_600_000);
+    expect(t.sockets).toHaveLength(3);
+    expect(t.states.at(-1)).toBe('live');
+    t.live.close();
+  });
+});
 
 describe('coming back quickly', () => {
   beforeEach(() => { vi.useFakeTimers(); });

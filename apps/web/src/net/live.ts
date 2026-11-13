@@ -71,6 +71,10 @@ const browserSocket: SocketFactory = (url, protocols) => new WebSocket(url, prot
 
 // The longest wait between two attempts: the window is back within a few seconds of the hub.
 export const RETRY_CAP_MS = 5_000;
+// A connection that has not opened by then is given up and tried again. A hub that froze or slept accepts the TCP connection
+// and answers nothing, and the browser may never report an error for it, so without this the window would stay "Connecting"
+// long after the hub is back. Only the opening is timed: an open connection has no deadline here.
+export const OPEN_WITHIN_MS = 8_000;
 
 // Waits before reconnect attempt n (0-based): doubling from 0.5 s up to `RETRY_CAP_MS`, each wait shortened by up to a fifth at
 // random so many windows do not all dial a hub that just came back in the same instant.
@@ -103,6 +107,7 @@ export function connectLive(o: LiveOptions): Live {
   let timer: ReturnType<typeof setTimeout> | undefined;
   let isOpen = false;
   let heard = false; // has this connection delivered anything
+  let opening: ReturnType<typeof setTimeout> | undefined;
   let refusals = 0;
   let requests = 0;
   let nextStream = 3;
@@ -147,6 +152,8 @@ export function connectLive(o: LiveOptions): Live {
   const lost = (s: Socket) => {
     if (sock !== s) return; // already handled
     sock = undefined;
+    if (opening) clearTimeout(opening);
+    opening = undefined;
     // Only a connection that opened and was dropped without a word counts: an unreachable hub is not a refusal.
     const dropped = isOpen && !heard;
     isOpen = false;
@@ -167,7 +174,18 @@ export function connectLive(o: LiveOptions): Live {
     const s = open(o.url, ['agora.v1', `agora.bearer.${o.token}`]);
     sock = s;
     s.binaryType = 'arraybuffer';
+    opening = setTimeout(() => {
+      if (sock !== s || isOpen) return;
+      // Given up by the window itself: the browser's own close may come much later, or never.
+      lost(s);
+      s.onopen = null;
+      s.onmessage = null;
+      s.onclose = null;
+      try { s.close(); } catch { /* already closed */ }
+    }, OPEN_WITHIN_MS);
     s.onopen = () => {
+      if (opening) clearTimeout(opening);
+      opening = undefined;
       isOpen = true;
       heard = false;
       const sub = agora.v1.Subscribe.encode(synced ? { afterPos: view.pos } : {}).finish();
@@ -290,6 +308,7 @@ export function connectLive(o: LiveOptions): Live {
       closed = true;
       unwake();
       if (timer) clearTimeout(timer);
+      if (opening) clearTimeout(opening);
       sock?.close();
     },
   };

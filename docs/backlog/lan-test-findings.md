@@ -100,7 +100,9 @@ the node keeps every agent running and catches up 1.5 s after the hub is back (g
   earlier version recorded it offline and it then stayed offline after it reconnected), and after the hub was frozen 40 s or
   3 min the open window stayed on "Connecting to your hub…" for 45 to 60 s after the hub resumed (0.5 s on `d669d6a` and main)
   (macOS and Windows probes). Needed: a hub-owned presence event (an ADR), so a hub-closed silent link comes back Online by
-  itself; and the window's hung connect attempt must time out.
+  itself. Done in 0.3.8: the window's connect attempt made while the hub was frozen (TCP accepted, no answer, no browser error;
+  still not live 60 s after a 40 s freeze on Windows) is given up after 8 s and retried (`OPEN_WITHIN_MS`); an open connection
+  has no deadline.
 - **R2** The window came back up to 30 s after the hub. Fixed: at most 5 s with jitter, at once on `online`, visible, focus and "Retry now".
 - **R3** A `delivery_failed` notice did not say which message failed. Fixed: `reply_to` is the failed message's id. A resend queue after
   reconnect is not done (a behaviour change for an ADR).
