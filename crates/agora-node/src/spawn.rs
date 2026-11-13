@@ -183,6 +183,11 @@ fn within(child: &Path, parent: &Path) -> bool {
     child.starts_with(parent)
 }
 
+/// Whether the folder as inspected (the path that is shown, signed and launched) is the asker's folder or below it.
+fn placed_inside(inspected: &str, mine: &Path) -> bool {
+    within(Path::new(inspected), mine)
+}
+
 /// Characters that change how text is displayed without being seen: bidirectional overrides and isolates, zero-width characters and
 /// the byte order mark. In a request they could make the approval card show something other than what would run.
 fn invisible(c: char) -> bool {
@@ -384,7 +389,9 @@ impl Spawner {
         if a.worktree && info.git_root.is_empty() {
             return Err(invalid("directory.git_root"));
         }
-        let inside = within(&folder, &mine);
+        // From the one resolution that is shown, signed and launched (`info.path`), never from an earlier one: a folder swapped for a
+        // link between two resolutions cannot carry `inside` to somewhere else.
+        let inside = placed_inside(&info.path, &mine);
         // A helper below the user's agent may go outside the asker's folder only by a decision naming it; a helper's helper, whose
         // decision the user gave to its parent's chain, stays inside.
         if !inside && depth > 1 {
@@ -1012,6 +1019,27 @@ mod tests {
         assert!(recorded(&"x".repeat(MAX_RECORDED_PROMPT + 1)).starts_with("sha256:"));
         assert_eq!(cut("aé", 2), "a");
         assert_eq!(cut("abc", 10), "abc");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inside_follows_the_inspected_folder_not_an_earlier_resolution() {
+        // A subfolder that a link points outside: resolved once it looked inside, inspected it is outside. Only the inspected
+        // path decides, so the flag and the folder shown always come from the same resolution.
+        let root = std::env::temp_dir().join(format!("agora-inside-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (mine, outside) = (root.join("mine"), root.join("outside"));
+        std::fs::create_dir_all(mine.join("sub")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let mine = agora_platform::canonicalize_plain(&mine).unwrap();
+        let before = agora_platform::canonicalize_plain(&mine.join("sub")).unwrap();
+        assert!(within(&before, &mine));
+        std::fs::remove_dir(mine.join("sub")).unwrap();
+        std::os::unix::fs::symlink(&outside, mine.join("sub")).unwrap();
+        let (info, _) =
+            crate::directory::inspect(&mine.join("sub").to_string_lossy(), "n", false).unwrap();
+        assert!(!placed_inside(&info.path, &mine), "{}", info.path);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
