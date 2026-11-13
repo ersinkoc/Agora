@@ -211,9 +211,9 @@ impl Grants {
         if [path, kind, project, a.nonce.as_str(), a.device_id.as_str()]
             .iter()
             .any(|s| s.contains('\0') || s.len() > 4096)
-            || launch_options
-                .iter()
-                .any(|o| !agora_adapters::manifest::valid_option_id(o))
+            || launch_options.iter().any(|o| {
+                !agora_adapters::manifest::valid_option_id(crate::launch_options::split_marker(o).0)
+            })
             || a.nonce.len() != 32
             || !a.nonce.bytes().all(|b| b.is_ascii_hexdigit())
             || a.expires_at_ms <= now

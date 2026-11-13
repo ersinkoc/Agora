@@ -34,6 +34,7 @@ or a local response timeout has a localized retry message.
 | `agent.blocked` | `agent_id` | Agent waits for input; prompt not sent |
 | `agent.mode_unsupported` | `kind`, `mode` | e.g. chat mode for an L1 agent |
 | `agent.option_forbidden` | `kind`, `option`, `policy` | ADR-0059: a start chose a launch option (`option`, the first refused id) that may not be used; nothing was started. `policy`: `forbid` (the node's `skip_permissions` policy does not allow an option that skips permissions), `confined_only` (it allows one only for a confined agent and this one would not be confined), `signature` (a routed `AgentStart` with options: only a signed `AgentLaunch` or the node's own socket may carry them) |
+| `agent.option_unconfirmed` | `kind`, `option` | ADR-0059: the node's own manifest says `option` makes the agent act without asking, and the start named it without the confirmation marker (`<id>!`, signed with the start): the window did not show the confirmation for it, for example because a hub relabelled it as harmless. Nothing was started |
 | `agent.running` | `agent_id` | the agent still runs, so it cannot be forgotten (ADR-0053) |
 | `approval.expired` | `approval_id` | |
 | `approval.signature_invalid` | `approval_id` | |

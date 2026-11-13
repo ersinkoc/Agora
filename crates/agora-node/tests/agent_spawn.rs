@@ -981,7 +981,7 @@ fn a_helper_never_inherits_a_launch_option() {
         return;
     }
     let e = Env::new("options");
-    let parent = e.launch_with(&e.folder, "probe", &["skip-permissions"]);
+    let parent = e.launch_with(&e.folder, "probe", &["skip-permissions!"]);
     wait_until("parent report", || probe_args(&e.root).len() == 1);
     assert!(probe_args(&e.root)[0].contains(&"--fake-skip-permissions".to_string()));
     let view = |id: &str| {

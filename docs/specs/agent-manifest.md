@@ -133,7 +133,8 @@ the id, the label and `skips_permissions` (`AgentKind.launch_options`).
 
 Validation: at most 8 options; ids unique, lowercase ASCII letters, digits and `-` (at most 32); `label` a Fluent message id (the
 shipped manifests' labels must be in `locales/en/web.ftl` and `tui.ftl`, checked by `shipped_manifests.rs`); `args` from one to eight
-non-empty arguments without NUL; unknown keys are an error.
+non-empty arguments without NUL; an option whose arguments contain a known "do not ask" spelling (`--dangerously-*`, `--yolo`,
+`--yolo-*`) must say `skips_permissions = true`; unknown keys are an error.
 
 An option with `skips_permissions = true` makes the agent act without asking. The window never preselects it and asks before it is
 used; the node allows it only as its owner's `skip_permissions` policy says (`forbid`, `allow`, `confined_only`; docs/specs/protocol.md)

@@ -232,7 +232,7 @@ fn by_default_the_option_is_allowed_and_its_flag_is_on_the_command_line() {
 
     let plain = e.launch("probe", &[]).unwrap();
     let skip = e
-        .launch("probe", &["resume-last", "skip-permissions"])
+        .launch("probe", &["resume-last", "skip-permissions!"])
         .unwrap();
     let reports = e.wait_reports(2);
     let with: Vec<_> = reports
@@ -268,7 +268,7 @@ fn forbid_refuses_before_anything_starts_and_a_typo_forbids_too() {
     ] {
         let e = Env::new(name, Some(policy));
         for kind in ["probe", "adapter"] {
-            let err = e.launch(kind, &["skip-permissions"]).unwrap_err();
+            let err = e.launch(kind, &["skip-permissions!"]).unwrap_err();
             assert_eq!(forbidden(&err), "forbid");
         }
         assert_eq!(e.agents(), 0, "nothing started");
@@ -291,7 +291,7 @@ fn confined_only_needs_the_agents_confinement() {
         return;
     }
     let e = Env::new("confined-off", Some("skip_permissions = confined_only\n"));
-    let err = e.launch("probe", &["skip-permissions"]).unwrap_err();
+    let err = e.launch("probe", &["skip-permissions!"]).unwrap_err();
     assert_eq!(forbidden(&err), "confined_only");
     assert_eq!(e.agents(), 0);
     drop(e);
@@ -303,7 +303,7 @@ fn confined_only_needs_the_agents_confinement() {
         Some("skip_permissions = confined_only\nsandbox = worktree\n"),
     );
     // Confined, the same start goes through (the confined probe cannot write its report outside its folder, so the view says it).
-    let id = e.launch("probe", &["skip-permissions"]).unwrap();
+    let id = e.launch("probe", &["skip-permissions!"]).unwrap();
     let views = e.node().supervisor.lock().unwrap().list();
     assert!(views
         .iter()
@@ -318,7 +318,7 @@ fn a_structured_agent_gets_the_arguments_on_its_command() {
         return;
     }
     let e = Env::new("structured", None);
-    let id = e.launch("adapter", &["skip-permissions"]).unwrap();
+    let id = e.launch("adapter", &["skip-permissions!"]).unwrap();
     let pids = e.node().supervisor.lock().unwrap().running_pids();
     let lines: Vec<String> = pids
         .iter()
@@ -335,4 +335,26 @@ fn a_structured_agent_gets_the_arguments_on_its_command() {
     assert!(views
         .iter()
         .any(|v| v.id.as_str() == id && v.skips_permissions));
+}
+
+/// The review's case: a hub relays `agent.kinds` with `skips_permissions` turned off and a harmless label, so the window shows the
+/// option as a plain checkbox, asks nothing, and signs the bare id. The node knows from its own manifest that the option skips
+/// permissions and refuses the start without the signed confirmation marker; with it, the start goes through.
+#[test]
+fn a_hub_that_hides_a_skip_option_as_harmless_gets_the_start_refused() {
+    if !supported() {
+        return;
+    }
+    let e = Env::new("unconfirmed", None);
+    for kind in ["probe", "adapter"] {
+        let err = e.launch(kind, &["skip-permissions"]).unwrap_err();
+        assert_eq!(err.code, "agent.option_unconfirmed", "{err:?}");
+    }
+    assert_eq!(e.agents(), 0, "nothing started");
+    let id = e.launch("probe", &["skip-permissions!"]).unwrap();
+    let views = e.node().supervisor.lock().unwrap().list();
+    let v = views.iter().find(|v| v.id.as_str() == id).unwrap();
+    // The marker is the user's confirmation, not part of the id the agent carries.
+    assert!(v.skips_permissions);
+    assert_eq!(v.launch_options, ["skip-permissions"]);
 }

@@ -400,7 +400,11 @@ All additions; nothing published changed. Node capability `agent.launch_options`
 - **The choice.** `AgentStart.launch_options` (7) and `AgentLaunch.launch_options` (7) name the chosen ids (at most 8, no repeats, each
   declared by the kind; otherwise `protocol.invalid_message` `{field: launch_options}`). The node adds their arguments to the
   launch command (terminal kinds) or the ACP server command (structured kinds) for the agent's whole life, restarts and resumes
-  included. Through the hub, `AgentLaunch` with options is authorized over a second domain that also signs the ids, comma-joined in the
+  included. An option that skips permissions is sent as `<id>!` (the confirmation marker) when the window showed the confirmation and
+  the user confirmed; the node decides from its own manifest which options skip permissions and refuses one sent without the marker
+  (`agent.option_unconfirmed {kind, option}`), so a hub that relays `AgentKind.launch_options` with `skips_permissions` turned off
+  (the window would show no confirmation) gets the start refused. The window's list is a display hint only. Through the hub,
+  `AgentLaunch` with options is authorized over a second domain that also signs the ids, comma-joined in the
   order sent:
 
   ```
@@ -411,8 +415,9 @@ All additions; nothing published changed. Node capability `agent.launch_options`
   start nor remove one. A routed `AgentStart` with options carries no signature and is refused (`agent.option_forbidden` `{kind,
   option, policy: signature}`); a grant (ADR-0041) never covers one. On the node's own control socket (the owner) no signature is
   needed. An agent's `agent_start` helper (ADR-0057) never gets an option.
-- **Node policy.** `skip_permissions = forbid | allow | confined_only` in the node's own policy file (default `allow`; any other value
-  counts as `forbid`; the hub cannot change it). A start with a `skips_permissions` option that the policy does not allow is refused
+- **Node policy.** `skip_permissions = forbid | allow | confined_only` (quoted or not) in the node's own policy file (default `allow`
+  when there is no file; any other value, an unknown key, a line without `=`, or an existing file that cannot be read counts as
+  `forbid`, and the node says `node.policy_not_understood` when it starts; the hub cannot change it). A start with a `skips_permissions` option that the policy does not allow is refused
   before anything starts with `agent.option_forbidden` `{kind, option, policy}` (`policy` is `forbid`, or `confined_only` when the
   agent's confinement, ADR-0047/0050, would not be active).
 - **What everyone sees.** `AgentStarted.launch_options` (30) and `skips_permissions` (31), carried by the hub in `AgentSnapshot`

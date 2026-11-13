@@ -579,6 +579,7 @@ message AgentLaunch {
   bool accept_identity_change = 6;
   // ADR-0059: ids of the kind's `[[launch.option]]`s to start with (capability `agent.launch_options`). When not empty the
   // authorization signs them too (`directory-action-v2`, docs/specs/protocol.md), so a hub can neither add nor remove one.
+  // An option that skips permissions is named `<id>!` when the user confirmed it; the node refuses one without the marker.
   repeated string launch_options = 7;
 }
 message AgentLaunchResult {

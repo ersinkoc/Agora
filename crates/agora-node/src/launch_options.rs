@@ -55,6 +55,21 @@ pub enum Refusal {
         option: String,
         policy: &'static str,
     },
+    /// `agent.option_unconfirmed`: this node's manifest says the option skips permissions, and the start did not carry the confirmation
+    /// marker (`<id>!`): the window did not show the confirmation for it (a hub that relabelled it as harmless).
+    Unconfirmed { option: String },
+}
+
+/// The confirmation marker: a start names an option that skips permissions as `<id>!` when the user confirmed "Let the agent act
+/// without asking?" for it. The signature covers the marker; the node, not the window, knows which options skip permissions.
+pub const CONFIRMED: char = '!';
+
+/// An id as sent, split into the id and whether it carries the confirmation marker.
+pub fn split_marker(sent: &str) -> (&str, bool) {
+    match sent.strip_suffix(CONFIRMED) {
+        Some(id) => (id, true),
+        None => (sent, false),
+    }
 }
 
 /// Resolves `ids` against `manifest` and checks them against the node's policy. `confined` says whether this agent's confinement
@@ -68,18 +83,25 @@ pub fn choose(
     if ids.len() > MAX_LAUNCH_OPTIONS {
         return Err(Refusal::Invalid);
     }
-    for (i, id) in ids.iter().enumerate() {
-        if !valid_option_id(id) || ids[..i].contains(id) || manifest.launch_option(id).is_none() {
+    let sent: Vec<(&str, bool)> = ids.iter().map(|s| split_marker(s)).collect();
+    for (i, (id, _)) in sent.iter().enumerate() {
+        if !valid_option_id(id)
+            || sent[..i].iter().any(|(x, _)| x == id)
+            || manifest.launch_option(id).is_none()
+        {
             return Err(Refusal::Invalid);
         }
     }
     let mut choice = LaunchChoice::default();
-    for o in manifest
-        .launch
-        .option
-        .iter()
-        .filter(|o| ids.contains(&o.id))
-    {
+    for o in manifest.launch.option.iter() {
+        let Some((_, confirmed)) = sent.iter().find(|(id, _)| *id == o.id) else {
+            continue;
+        };
+        if o.skips_permissions && !confirmed {
+            return Err(Refusal::Unconfirmed {
+                option: o.id.clone(),
+            });
+        }
         if o.skips_permissions {
             let refused = match policy {
                 SkipPermissions::Allow => None,
@@ -134,10 +156,44 @@ mod tests {
     }
 
     #[test]
+    fn an_option_that_skips_permissions_needs_the_confirmation_marker() {
+        // A hub that relabelled it as harmless: the window showed no confirmation and signed the bare id.
+        assert_eq!(
+            choose(
+                &manifest(),
+                &ids(&["skip-permissions"]),
+                SkipPermissions::Allow,
+                true
+            ),
+            Err(Refusal::Unconfirmed {
+                option: "skip-permissions".into()
+            })
+        );
+        // A marker on a harmless option is harmless; a repeated id with and without it is a bad request.
+        let c = choose(
+            &manifest(),
+            &ids(&["resume-last!"]),
+            SkipPermissions::Forbid,
+            false,
+        )
+        .unwrap();
+        assert_eq!(c.ids, ids(&["resume-last"]));
+        assert_eq!(
+            choose(
+                &manifest(),
+                &ids(&["skip-permissions!", "skip-permissions"]),
+                SkipPermissions::Allow,
+                true
+            ),
+            Err(Refusal::Invalid)
+        );
+    }
+
+    #[test]
     fn options_add_their_arguments_in_the_manifests_order() {
         let c = choose(
             &manifest(),
-            &ids(&["resume-last", "skip-permissions"]),
+            &ids(&["resume-last", "skip-permissions!"]),
             SkipPermissions::Allow,
             false,
         )
@@ -151,7 +207,7 @@ mod tests {
 
     #[test]
     fn forbid_allow_and_confined_only_decide_only_options_that_skip_permissions() {
-        let skip = ids(&["skip-permissions"]);
+        let skip = ids(&["skip-permissions!"]);
         let forbidden = |policy| Refusal::Forbidden {
             option: "skip-permissions".into(),
             policy,
