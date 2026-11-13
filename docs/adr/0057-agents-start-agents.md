@@ -1,8 +1,7 @@
 # 0057. An agent can start and wait for other agents, with the user's approval
-Status: Proposed
+Status: Accepted
 Date: 2026-11-13
-
-Not accepted. Nothing here may be built until the maintainer accepts it in a message of their own.
+Accepted: 2026-11-13 (maintainer's explicit approval in chat: "0057'yi onaylıyorum"). The maintainer did not answer the open questions; the proposed answers below stand.
 
 ## Context
 The mesh (ADR-0031, ADR-0039) lets agents see each other, message, share tasks and hand work over, but an agent cannot start
@@ -11,7 +10,7 @@ started would be indistinguishable from one the user started. Competing tools le
 Starting an agent is sensitive: it runs a process with the user's files and accounts, so ADR-0020 applies (a user-signed
 approval verified on the node), and mesh content stays untrusted (an agent can be talked into asking).
 
-## Decision (proposed)
+## Decision
 1. **New mesh tools** (capability `mesh.spawn`; the MCP list grows, existing tools do not change):
    - `agent_start { kind, folder?, prompt?, node? }` -> `{ agent_id }` after approval. `folder` defaults to the caller's folder;
      `node` defaults to the caller's node.
@@ -34,7 +33,7 @@ approval verified on the node), and mesh content stays untrusted (an agent can b
 7. **Stopping.** Stopping a parent from the panel asks whether to stop its helpers too (default yes). A parent that exits on its
    own leaves its helpers running; they show under the closed parent until the user stops them.
 
-## Open questions for the maintainer
+## Open questions (proposed answers stand)
 - Is a scoped grant ("up to N helpers, this session") acceptable, or must every start be approved one by one? (Proposed: both.)
 - May a helper be started on another machine, or only on the caller's? (Proposed: another machine only if the approval names it.)
 - Should `agent_output` exist at all? Screen text can hold secrets; it is limited to helpers the caller started. (Proposed: yes.)
