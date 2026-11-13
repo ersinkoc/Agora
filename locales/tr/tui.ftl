@@ -69,6 +69,7 @@ tui-cost = yaklaşık { $usd } USD
 tui-grant-ask = O makine bu işlemi yapmanıza izin vermeden önce onayınızı istiyor. Bir saatliğine izin vermek için y tuşuna basın; başka bir tuşa basarsanız işlem iptal edilir.
 tui-granted = Bir saatliğine izin verildi.
 tui-split-answer = y izin verir, n ilk isteği reddeder
+tui-split-asks-start = { $kind } başlatmak istiyor
 tui-split-pick = Soldan bir ajan seç
 tui-split-no-screen = Terminali açılıyor…
 tui-split-status = { $online }/{ $total } makine · { $agents } ajan · { $waiting } seni bekliyor

@@ -69,6 +69,7 @@ tui-cost = about { $usd } USD
 tui-grant-ask = That machine wants your OK before it lets you do this. Press y to allow it for one hour, any other key to cancel.
 tui-granted = Allowed for one hour.
 tui-split-answer = y allows, n denies the first request
+tui-split-asks-start = asks to start { $kind }
 tui-split-pick = Pick an agent on the left
 tui-split-no-screen = Opening its terminal…
 tui-split-status = { $online }/{ $total } machines · { $agents } agents · { $waiting } need you
