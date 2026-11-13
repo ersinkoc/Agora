@@ -113,7 +113,7 @@ export function Focus({ agent, approvals = [], onResolve, source: live, costMicr
   source?: TerminalSource;
   chatSource?: ChatSource;
   sendPrompt?: (agent: AgentTileModel, text: string) => Promise<boolean>;
-  chooseOption?: (agent: AgentTileModel, kind: 'mode' | 'model', id: string) => Promise<boolean>;
+  chooseOption?: (agentKey: string, kind: 'mode' | 'model', id: string) => Promise<boolean>;
   onBack: () => void;
 }) {
   const preview = agent?.preview ?? '';

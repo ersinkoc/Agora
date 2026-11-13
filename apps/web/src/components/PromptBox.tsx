@@ -36,7 +36,7 @@ function Line({ line }: { line: ChatLine }) {
 }
 
 // A chat agent has no terminal: you talk to it with requests and read its answers, as a conversation the node keeps (ADR-0038).
-export function PromptBox({ agent, send, source, choose }: { agent: AgentTileModel; send?: (a: AgentTileModel, text: string) => Promise<boolean>; source?: ChatSource; choose?: (a: AgentTileModel, kind: OptionKind, id: string) => Promise<boolean> }) {
+export function PromptBox({ agent, send, source, choose }: { agent: AgentTileModel; send?: (a: AgentTileModel, text: string) => Promise<boolean>; source?: ChatSource; choose?: (agentKey: string, kind: OptionKind, id: string) => Promise<boolean> }) {
   const [text, setText] = useState('');
   const [sent, setSent] = useState<'ok' | 'failed' | undefined>();
   const [busy, setBusy] = useState(false);
@@ -62,7 +62,8 @@ export function PromptBox({ agent, send, source, choose }: { agent: AgentTileMod
   };
   return (
     <div className="flex h-full min-h-0 flex-col gap-3 rounded-m bg-surface-0 p-3">
-      {agent.session && <SessionBar session={agent.session} disabled={agent.closed} choose={choose ? (kind, id) => choose(agent, kind, id) : undefined} />}
+      {/* Keyed by the agent: another agent on screen gets a fresh bar, so nothing left open carries over; usage updates keep it. */}
+      {agent.session && <SessionBar key={agent.id} agentKey={agent.id} session={agent.session} disabled={agent.closed} choose={choose} />}
       <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto" aria-live="polite" aria-label={t('chat-log')}>
         {lines.length === 0 && <p className="muted m-0">{t(source ? 'chat-empty' : 'prompt-intro')}</p>}
         {lines.map((l) => <Line key={l.id} line={l} />)}

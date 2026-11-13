@@ -108,6 +108,50 @@ fn handshake_session_prompt_and_usage() {
 }
 
 #[test]
+fn session_start_carries_the_mcp_servers() {
+    let a = spawn();
+    a.initialize(&[], "en", T).unwrap();
+    let mesh = agora_adapters::host::McpServer {
+        name: "agora-mesh".into(),
+        command: "/usr/bin/agora".into(),
+        args: vec![
+            "mesh".into(),
+            "stdio".into(),
+            "--socket".into(),
+            "/s/a.sock".into(),
+        ],
+    };
+    let sid = a
+        .start_session_with("/p", "/p", Some("s-2"), &[mesh], T)
+        .unwrap();
+    a.prompt(&sid, "mcp-servers", false, T).unwrap();
+    let ev = until(&a, |e| matches!(e, AdapterEvent::Chat { .. }));
+    let Some(AdapterEvent::Chat {
+        item: ChatItem::Text(t),
+        ..
+    }) = ev.last()
+    else {
+        panic!("{ev:?}");
+    };
+    let got: serde_json::Value = serde_json::from_str(t).unwrap();
+    assert_eq!(
+        got,
+        serde_json::json!([{"name": "agora-mesh", "command": "/usr/bin/agora",
+                            "args": ["mesh", "stdio", "--socket", "/s/a.sock"]}])
+    );
+    // Without servers the field is left out, as before.
+    let b = spawn();
+    b.initialize(&[], "en", T).unwrap();
+    let sid = b.start_session("/p", "/p", None, T).unwrap();
+    b.prompt(&sid, "mcp-servers", false, T).unwrap();
+    let ev = until(&b, |e| matches!(e, AdapterEvent::Chat { .. }));
+    assert!(
+        matches!(ev.last(), Some(AdapterEvent::Chat { item: ChatItem::Text(t), .. }) if t == "[]"),
+        "{ev:?}"
+    );
+}
+
+#[test]
 fn resume_passes_the_session_id_through() {
     let a = spawn();
     a.initialize(&[], "en", T).unwrap();

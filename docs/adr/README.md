@@ -76,3 +76,5 @@ Date: YYYY-MM-DD
 | 0056 | One hub; every node machine can reach the hub's panel | Accepted |
 | 0057 | An agent can start and wait for other agents, with the user's approval | Accepted |
 | 0058 | Show an adapter's errors and notices, and choose its model and mode | Accepted |
+| 0059 | Launch options, including "do not ask" modes, chosen when an agent starts | Proposed |
+| 0060 | A node keeps a session ledger and offers Resume after a restart | Proposed |

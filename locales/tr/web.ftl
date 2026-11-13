@@ -173,6 +173,7 @@ notice-adapter-agent_refused = Ajan başlamayı reddetti (adım { $stage }, hata
 notice-other = Ajan bu pencerenin gösteremediği bir şey bildirdi ({ $code }).
 session-mode = Mod
 session-model = Model
+session-not-reported = Bildirilmedi
 session-mode-unasked = { $name } (sormadan)
 session-context = Bağlam %{ $percent }
 session-context-under-one = Bağlam %1'in altında

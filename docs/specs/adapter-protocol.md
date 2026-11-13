@@ -15,6 +15,20 @@ node → adapter  session/stop    { session_id, reason }
 node → adapter  shutdown
 ```
 
+### The agent's mesh server (`mcp_servers`)
+
+The node passes exactly one MCP server in `session/start` `mcpServers`, at every start, restart and resume: the agent's own mesh
+server, `{name: "agora-mesh", command: <the node's own program>, args: ["mesh", "stdio", "--socket", <the agent's mesh socket>]}`,
+the same server a terminal agent gets through its manifest's `[mcp]` (`agent-manifest.md`). The node registers the agent with the
+mesh before the adapter starts, so the socket is the agent's own, private (owner-only), and whatever connects to it speaks as that
+agent. A crash restart keeps the endpoint; a stop, a start that fails and an agent given up on take it away (the agent leaves the
+mesh, its socket is removed); a resume after a stop joins again with a fresh one. The field is left out when the node has no mesh
+endpoint for the agent (an agent never fails to start because of the mesh). An adapter hands the server to its agent in whatever
+form the agent takes MCP servers; the mesh server runs below the adapter, inside its confinement: on a node that confines agents
+offline (ADR-0047 `worktree-offline`), the adapter and what it starts may reach only that one mesh socket (and the sockets in its
+private temp folder), never another agent's. On Windows a confined adapter cannot be started yet, so an adapter agent's endpoint
+carries no confined identity.
+
 ## Capabilities an adapter may declare
 
 `chat`, `terminal` (adapter exposes a PTY the node should attach), `diff`, `approvals`, `plan`, `resume`,
@@ -97,7 +111,10 @@ towards the node, so chat items, approvals, state and cancel work as for any L3 
 | `session/update` `current_mode_update` | `session/options` again with the new current mode |
 | `agent_thought_chunk`, `available_commands_update`, other updates | dropped |
 
-Node → bridge → agent: `session/start` → `session/new` (or `session/load` when the agent said it can and a resume id is known);
+Node → bridge → agent: `session/start` → `session/new` (or `session/load` when the agent said it can and a resume id is known),
+with the node's `mcpServers` (the agent's mesh server) as ACP stdio servers `{name, command, args, env: []}` (at most 16; an entry
+without a name or command, or with an argument that is not a string, is dropped). ACP requires every agent to take stdio servers, so
+they are always sent unless the agent's `initialize` says `agentCapabilities.mcpCapabilities.stdio: false`;
 `session/prompt` → `session/prompt` with one text block; `session/cancel` → the ACP `session/cancel` notification;
 `session/set_option` → ACP `session/set_mode { sessionId, modeId }` or `session/set_model { sessionId, modelId }` for an id the
 agent offered (anything else is refused by the bridge without asking the agent), answered once the agent answered, and followed by
@@ -105,7 +122,7 @@ agent offered (anything else is refused by the bridge without asking the agent),
 `approval/resolve` → the agent's own option (`allow_once`, else `allow_always`, else the first option for an approval;
 `reject_once`, else `reject_always`, else `cancelled` for a denial). The bridge offers no capabilities: `fs/*` and `terminal/*`
 requests from the agent are refused (the agent works in its own worktree), and mesh delivery to ACP agents goes through the mesh MCP
-endpoint like for any agent. If the agent exits the bridge exits, which the node sees as the adapter exiting (restart policy as
+endpoint like for any agent (the server the bridge passed in `session/new`). If the agent exits the bridge exits, which the node sees as the adapter exiting (restart policy as
 for L3); before that the bridge reports why (below). The bridge declares `usage`, `set_mode` and `set_model` among its capabilities. The fake ACP agent (`agora-fake-agent --acp`) is the test double; real agents (Claude Code, Codex, WrongStack) need their
 manifests and fixtures from real accounts (P2-09).
 

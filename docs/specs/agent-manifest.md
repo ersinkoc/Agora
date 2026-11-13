@@ -138,6 +138,8 @@ absolute paths outside it are refused, no symlink on the path is ever followed (
 the written file is added to the worktree's private `info/exclude` so it stays out of `git status`. Flags and variables are
 added at every launch, restarts and resumes included; a resumed agent gets a fresh endpoint. An agent whose manifest has no
 `[mcp]` still joins the mesh. A manifest whose injection fails does not start (it asked for something the node refused).
+`[mcp]` is for terminal agents: a structured agent (`[adapter]` or `[structured] acp`) needs none, the node passes its mesh server in
+`session/start` (`adapter-protocol.md`).
 
 ## `[sandbox]` (ADR-0047)
 

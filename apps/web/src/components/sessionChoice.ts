@@ -46,3 +46,28 @@ export function choices(list: readonly SessionOptionModel[], current: string): S
   if (!current || list.some((o) => o.id === current)) return [...list];
   return [{ id: current, name: current, description: '', skipsPermissions: false }, ...list];
 }
+
+// A confirmation waiting for the user, bound to the agent it was opened for: its hub-wide key `<node>/<agent>` (a local id alone is
+// not unique: `n1/agent-1` and `n2/agent-1` are different agents).
+export interface PendingChoice { agentKey: string; option: SessionOptionModel }
+
+// The confirmation to show for the agent on screen now: none when it was opened for another one.
+export const pendingFor = (p: PendingChoice | undefined, agentKey: string): PendingChoice | undefined => (p && p.agentKey === agentKey ? p : undefined);
+
+// What "Switch anyway" sends: the mode to the agent the confirmation was opened for, and only while that agent is the one on screen.
+export function confirmed(p: PendingChoice | undefined, onScreen: string): { agentKey: string; kind: 'mode'; id: string } | undefined {
+  const bound = pendingFor(p, onScreen);
+  return bound ? { agentKey: bound.agentKey, kind: 'mode', id: bound.option.id } : undefined;
+}
+
+// Where a hub-wide agent key points: the node (the producer that named it) and the agent's id there.
+export function agentTarget(agentKey: string): { node: string; agentId: string } | undefined {
+  const at = agentKey.indexOf('/');
+  if (at <= 0 || at === agentKey.length - 1) return undefined;
+  return { node: agentKey.slice(0, at), agentId: agentKey.slice(at + 1) };
+}
+
+// The picker's value: the reported current id, or the "not reported" placeholder (`''`), which is never one of the agent's options and
+// sends nothing when picked. So nothing is shown as chosen that the agent did not report.
+export const NOT_REPORTED = '';
+export const needsPlaceholder = (current: string): boolean => current === NOT_REPORTED;

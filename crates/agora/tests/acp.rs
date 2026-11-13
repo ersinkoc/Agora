@@ -361,3 +361,91 @@ fn an_acp_agent_that_dies_while_starting_says_why() {
     drop(node);
     let _ = std::fs::remove_dir_all(&home);
 }
+
+/// Prompts `agent` and returns the first thing it says (after the prompt) that `want` accepts.
+fn answer(home: &Path, agent: &str, prompt: &str, want: impl Fn(&str) -> bool) -> String {
+    let mut c = Client::connect(&home.join("node.sock")).unwrap();
+    c.call_on(
+        3,
+        Cmd::ChatSubscribe(v1::ChatSubscribe {
+            agent_id: agent.into(),
+        }),
+    )
+    .unwrap()
+    .expect("subscribed");
+    let (code, out) = agora(home, &["agent", "prompt", agent, prompt]);
+    assert_eq!(code, 0, "{out}");
+    let end = Instant::now() + Duration::from_secs(20);
+    loop {
+        assert!(Instant::now() < end, "{agent} did not answer {prompt}");
+        let Some(f) = c.read_frame(Some(Duration::from_millis(200))).unwrap() else {
+            continue;
+        };
+        if f.stream_id != 3 || f.kind != KIND_CHAT_ENTRY {
+            continue;
+        }
+        let e = v1::ChatEntry::decode(f.payload.as_slice()).unwrap();
+        if e.role == v1::ChatRole::Agent as i32 && want(&e.text) {
+            return e.text;
+        }
+    }
+}
+
+/// ACP agents get the mesh: the node passes the agent's own mesh server through the bridge into ACP `session/new`, the agent starts it
+/// (`agora mesh stdio --socket ...`, a real MCP conversation), sees the other agents and is seen by them, and its `agent_start` waits for
+/// the user's decision like any agent's.
+#[test]
+fn an_acp_agent_uses_the_mesh_through_its_own_server() {
+    let Some((home, node)) = node_with_acp("mesh") else {
+        return;
+    };
+    let first = started_agent(&home);
+    let second = started_agent(&home);
+
+    let said = answer(&home, &first, "mcp-servers", |t| t.starts_with('['));
+    let servers: serde_json::Value = serde_json::from_str(&said).unwrap();
+    assert_eq!(servers.as_array().map(Vec::len), Some(1), "{servers}");
+    assert_eq!(servers[0]["name"], "agora-mesh");
+    assert_eq!(
+        std::fs::canonicalize(servers[0]["command"].as_str().unwrap()).unwrap(),
+        std::fs::canonicalize(AGORA).unwrap(),
+        "the node's own program"
+    );
+    let args: Vec<&str> = servers[0]["args"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a.as_str().unwrap())
+        .collect();
+    assert_eq!(args[..3], ["mesh", "stdio", "--socket"]);
+    assert!(
+        args[3].ends_with(&format!("{first}.sock")),
+        "its own socket: {args:?}"
+    );
+    assert_eq!(servers[0]["env"], serde_json::json!([]));
+
+    // Each sees the other through its own mesh server.
+    let list = answer(&home, &second, "mcp agents_list {}", |t| {
+        t.contains("agent_id")
+    });
+    assert!(
+        list.contains(&format!("\"agent_id\":\"{first}\""))
+            && list.contains("\"kind\":\"acp-fake\""),
+        "{list}"
+    );
+
+    // A start it asks for waits for the user (no trusted device here, so nobody can answer it yet); while it waits, a second one is
+    // refused as `pending`: the first reached the approval queue.
+    let ask = r#"mcp agent_start {"kind":"acp-fake","prompt":"hello"}"#;
+    let first_try = answer(&home, &first, ask, |t| {
+        !t.starts_with('[') && !t.contains("agent_id")
+    });
+    assert_eq!(first_try, "waiting");
+    let second_try = answer(&home, &first, ask, |t| t.starts_with("error"));
+    assert!(
+        second_try.contains("mesh.helper_limit") && second_try.contains("pending"),
+        "{second_try}"
+    );
+    drop(node);
+    let _ = std::fs::remove_dir_all(&home);
+}
