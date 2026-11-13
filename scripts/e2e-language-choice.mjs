@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { startStack } from './browser-harness.mjs';
+import { openStart, startStack } from './browser-harness.mjs';
 
 let stack;
 try {
@@ -13,31 +13,43 @@ try {
   const choice = () => page.getByRole('combobox', { name: /^(Language|Dil)$/ });
   await choice().waitFor({ timeout: 2000 });
   await start('Shell');
+  // Starting opens the agent full size; the checks below run on Home, where its pane is open.
+  await page.goto(`${origin}/#/`);
   const xterm = page.locator('.xterm').first();
   await xterm.waitFor();
   await xterm.evaluate(el => { el.dataset.languageProbe = 'original-terminal'; });
   let reconnects = 0;
   page.on('websocket', () => { reconnects++; });
 
-  await page.getByRole('button', { name: 'Start an agent', exact: true }).click();
+  // The start window is modal (#332), so the page's own language choice is out of reach while it is open: the language is
+  // changed in a second tab, which every open tab follows.
+  const other = await page.context().newPage();
+  await other.goto(origin);
+  const fromOtherTab = async lang => {
+    await other.getByRole('combobox', { name: /^(Language|Dil)$/ }).selectOption(lang);
+    await page.waitForFunction(want => document.documentElement.lang === want, lang);
+  };
+  await openStart(page);
   const folder = page.locator('[role=dialog] input:not([type=checkbox])');
   await folder.fill('/some/chosen/folder');
-  await choice().selectOption('tr');
+  await fromOtherTab('tr');
   await page.getByRole('button', { name: 'Bu klasörü kullan', exact: true }).waitFor();
   assert.equal(await folder.inputValue(), '/some/chosen/folder');
   await page.getByRole('button', { name: 'Bu klasörü kullan', exact: true }).click();
   const folderError = page.locator('[role=dialog] [role=alert]');
   await folderError.waitFor();
   const turkishError = await folderError.innerText();
-  await choice().selectOption('en');
+  await fromOtherTab('en');
   await page.waitForFunction(previous => document.querySelector('[role=dialog] [role=alert]')?.textContent !== previous, turkishError);
-  await choice().selectOption('tr');
+  await fromOtherTab('tr');
+  await other.close();
   assert.equal(await folderError.innerText(), turkishError);
   assert.equal(await xterm.getAttribute('data-language-probe'), 'original-terminal');
   assert.equal(await page.locator('html').getAttribute('lang'), 'tr');
   assert.equal(await page.locator('html').getAttribute('dir'), 'ltr');
   assert.equal(reconnects, 0, 'Language choice must not reconnect a terminal or the hub');
-  await page.getByRole('button', { name: 'Vazgeç', exact: true }).click();
+  // The text button, not the window's close icon, which has the same name.
+  await page.getByRole('dialog').getByText('Vazgeç', { exact: true }).click();
   await page.keyboard.press('Control+k');
   await page.getByRole('option', { name: 'Ana sayfaya git', exact: true }).waitFor();
   await page.keyboard.press('Escape');
