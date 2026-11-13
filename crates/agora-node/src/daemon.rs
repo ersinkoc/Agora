@@ -894,6 +894,9 @@ pub struct Policy {
     /// Whether an agent may start with a launch option that skips permissions (`skip_permissions = forbid | allow | confined_only`;
     /// ADR-0059). Default: allow.
     pub skip_permissions: crate::launch_options::SkipPermissions,
+    /// Lines of an existing policy file the node did not understand (`unreadable` when the file could not be read). Any of them sets
+    /// `skip_permissions` to `forbid`: a typo (`skip_permission = forbid`) must never leave the default `allow` in place.
+    pub problems: Vec<String>,
 }
 
 impl Default for Policy {
@@ -904,6 +907,7 @@ impl Default for Policy {
             sandbox: crate::sandbox::SandboxPolicy::default(),
             device_projects: std::collections::BTreeMap::new(),
             skip_permissions: crate::launch_options::SkipPermissions::default(),
+            problems: Vec::new(),
         }
     }
 }
@@ -942,15 +946,26 @@ pub fn policy_sandbox_entries(path: &std::path::Path) -> Vec<(&'static str, Stri
 /// counts as `false`: a typo must never widen what the node allows. Unknown keys are ignored.
 pub fn read_policy(path: &std::path::Path) -> Policy {
     let mut p = Policy::default();
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return p;
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        // No file: the defaults, `skip_permissions = allow` included (the maintainer's decision, ADR-0059).
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return p,
+        Err(_) => {
+            p.problems.push("unreadable".into());
+            p.skip_permissions = crate::launch_options::SkipPermissions::Forbid;
+            return p;
+        }
     };
     for line in text
         .lines()
         .map(str::trim)
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
     {
-        if let Some((k, v)) = line.split_once('=') {
+        let Some((k, v)) = line.split_once('=') else {
+            p.problems.push(line.chars().take(80).collect());
+            continue;
+        };
+        {
             match k.trim() {
                 "mesh.remote" => p.mesh_remote = v.trim() == "true",
                 "signed_commands" => {
@@ -978,6 +993,12 @@ pub fn read_policy(path: &std::path::Path) -> Policy {
                 }
                 "sandbox" => p.sandbox.level = crate::sandbox::Level::parse(v),
                 "skip_permissions" => {
+                    // `"forbid"` as the ADR writes it means the same as `forbid`.
+                    let v = v.trim();
+                    let v = v
+                        .strip_prefix('"')
+                        .and_then(|x| x.strip_suffix('"'))
+                        .unwrap_or(v);
                     p.skip_permissions = crate::launch_options::SkipPermissions::parse(v);
                 }
                 "sandbox.read" => p.sandbox.read = paths(v),
@@ -990,9 +1011,12 @@ pub fn read_policy(path: &std::path::Path) -> Policy {
                         .map(str::to_string)
                         .collect();
                 }
-                _ => {}
+                other => p.problems.push(other.chars().take(80).collect()),
             }
         }
+    }
+    if !p.problems.is_empty() {
+        p.skip_permissions = crate::launch_options::SkipPermissions::Forbid;
     }
     p
 }
@@ -1050,6 +1074,9 @@ pub struct Node {
     node_id: String,
     /// Manifests that could not be loaded, as `(path, reason)` for the log.
     pub manifest_problems: Vec<(PathBuf, String)>,
+    /// Policy file lines the node did not understand (see [`Policy::problems`]), for the log: they forbid launch options that skip
+    /// permissions until they are fixed.
+    pub policy_problems: Vec<String>,
     /// The event log found at start that named another node and was set aside instead of being sent to the hub, for the log.
     pub events_set_aside: Option<SetAside>,
 }
@@ -1413,6 +1440,7 @@ impl Node {
             spawner,
             node_id: cfg.node_id.clone(),
             manifest_problems,
+            policy_problems: read_policy(&cfg.data_dir.join(POLICY_FILE)).problems,
             events_set_aside,
         })
     }
@@ -1792,5 +1820,47 @@ mod announce_tests {
             && r.approved == r.approval_id[3..].parse::<u32>().unwrap().is_multiple_of(2)));
         assert_eq!(restated(Announce::Present), first, "the ring did not move");
         assert!(restated(Announce::Restart).is_empty());
+    }
+
+    #[test]
+    fn a_policy_file_that_is_not_understood_forbids_skipping_permissions() {
+        use crate::launch_options::SkipPermissions as S;
+        let dir = std::env::temp_dir().join(format!("policy-skip-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("policy");
+        let read = |text: &str| {
+            std::fs::write(&file, text).unwrap();
+            let p = read_policy(&file);
+            (p.skip_permissions, p.problems)
+        };
+        // No file: the maintainer's default.
+        assert_eq!(read_policy(&dir.join("absent")).skip_permissions, S::Allow);
+        assert_eq!(read("mesh.remote = true\n"), (S::Allow, vec![]));
+        assert_eq!(read("skip_permissions = \"forbid\"\n").0, S::Forbid);
+        assert_eq!(
+            read("skip_permissions = \"confined_only\"\n").0,
+            S::ConfinedOnly
+        );
+        assert_eq!(read("skip_permissions = \"allow\"\n").0, S::Allow);
+        // A typo'd key, a line without `=`: forbid, and said.
+        assert_eq!(
+            read("skip_permission = forbid\n"),
+            (S::Forbid, vec!["skip_permission".to_string()])
+        );
+        assert_eq!(read("skip_permissions allow\n").0, S::Forbid);
+        assert_eq!(
+            read("skip_permissions = allow\nsandbx = worktree\n").0,
+            S::Forbid
+        );
+        // An existing file that cannot be read (here: a folder): forbid.
+        std::fs::remove_file(&file).unwrap();
+        std::fs::create_dir_all(&file).unwrap();
+        let p = read_policy(&file);
+        assert_eq!(
+            (p.skip_permissions, p.problems),
+            (S::Forbid, vec!["unreadable".to_string()])
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

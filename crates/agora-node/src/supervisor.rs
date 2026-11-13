@@ -200,6 +200,8 @@ pub enum SupervisorError {
     OptionUnknown(&'static str),
     /// ADR-0059: a launch option the node's policy refuses: `(kind, option, policy)`. Nothing was started.
     OptionForbidden(String, String, &'static str),
+    /// ADR-0059: an option that skips permissions without the user's signed confirmation marker: `(kind, option)`.
+    OptionUnconfirmed(String, String),
     /// The node is at one of its limits; `resource` is `agents` or `terminals`.
     ResourceLimit {
         resource: &'static str,
@@ -249,6 +251,9 @@ impl SupervisorError {
             Self::OptionUnknown(f) => {
                 Error::new(ErrorCode::ProtocolInvalidMessage).with("field", *f)
             }
+            Self::OptionUnconfirmed(k, o) => Error::new(ErrorCode::AgentOptionUnconfirmed)
+                .with("kind", k.as_str())
+                .with("option", o.as_str()),
             Self::OptionForbidden(k, o, p) => Error::new(ErrorCode::AgentOptionForbidden)
                 .with("kind", k.as_str())
                 .with("option", o.as_str())
@@ -482,6 +487,9 @@ impl Supervisor {
         crate::launch_options::choose(&k.manifest, ids, self.skip_permissions, confined).map_err(
             |r| match r {
                 Refusal::Invalid => SupervisorError::OptionUnknown("launch_options"),
+                Refusal::Unconfirmed { option } => {
+                    SupervisorError::OptionUnconfirmed(kind.to_string(), option)
+                }
                 Refusal::Forbidden { option, policy } => {
                     SupervisorError::OptionForbidden(kind.to_string(), option, policy)
                 }

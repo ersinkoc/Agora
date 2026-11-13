@@ -420,6 +420,13 @@ fn node_run(say: &Say, o: &Opts) -> ExitCode {
     for (path, reason) in &node.manifest_problems {
         eprintln!("{}: {reason}", path.display());
     }
+    // ADR-0059: a policy line the node did not understand forbids starting agents that do not ask, until it is fixed.
+    for line in &node.policy_problems {
+        say.err(
+            key!("cli-node-policy-not-understood"),
+            &[("line", line.clone().into())],
+        );
+    }
     // Events recorded under another name (before enrollment, as `local`) are never sent to the hub, which would refuse them: kept
     // on disk under a new name, and said here so nothing is lost silently.
     if let Some(s) = &node.events_set_aside {

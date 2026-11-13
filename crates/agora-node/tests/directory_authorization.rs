@@ -226,9 +226,11 @@ fn launch_options_are_signed_so_a_hub_can_neither_add_nor_remove_one() {
         .directory_action(&Cmd::AgentLaunch(added), 100_000)
         .is_err());
     // Signed with one: the hub removes it, swaps it, or adds another.
-    let signed = sign(&["skip-permissions"], "00000000000000000000000000000002");
+    // Signed with the confirmation marker (`!`); the hub cannot strip it either.
+    let signed = sign(&["skip-permissions!"], "00000000000000000000000000000002");
     for options in [
         vec![],
+        vec!["skip-permissions".to_string()],
         vec!["resume-last".to_string()],
         vec!["skip-permissions".to_string(), "resume-last".to_string()],
     ] {
