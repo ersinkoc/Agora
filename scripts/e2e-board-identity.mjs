@@ -71,6 +71,9 @@ try {
     await clients[i].tool('task_create', { title: `Project ${i ? 'B' : 'A'} task`, depends_on: [] });
     await clients[i].tool('lease_acquire', { paths: [`src/${i ? 'b' : 'a'}.txt`], ttl_s: 120, reason: 'fixture' });
   }
+  // Boards are a tab of the details panel, shown once there is a board.
+  const openBoards = () => page.getByRole('tab', { name: /^(Shared tasks and files|Ortak görevler ve dosyalar)$/ }).click();
+  await openBoards();
   await page.getByText('Project A task', { exact: true }).waitFor();
   await page.getByText('Project B task', { exact: true }).waitFor();
   const cards = ids.map(id => page.locator(`[data-project-id="id:${id}"]`));
@@ -90,6 +93,7 @@ try {
   assert.equal(await cards[0].locator('details').getAttribute('open'), '');
   assert.equal(await cards[1].locator('details').getAttribute('open'), null);
   await page.reload();
+  await openBoards();
   await cards[0].getByText('Project A task', { exact: true }).waitFor();
   await cards[1].getByText('Second B task', { exact: true }).waitFor();
   assert.ok((await cards[0].innerText()).includes('src/a.txt'));
@@ -102,6 +106,7 @@ try {
       for (const theme of ['dark', 'light']) {
         await page.emulateMedia({ colorScheme: theme });
         await page.reload();
+        await openBoards();
         await cards[0].waitFor();
         for (const card of cards) await card.locator('summary').click();
         await page.screenshot({ path: join(screenshots, `boards-${lang}-${theme}.png`), fullPage: true, animations: 'disabled' });
@@ -120,5 +125,6 @@ try {
 } finally {
   for (const client of clients) client.close();
   await stack?.close();
-  rmSync(fixture, { recursive: true, force: true });
+  // On Windows a process that was just killed still holds its folder for a moment.
+  rmSync(fixture, { recursive: true, force: true, maxRetries: 10, retryDelay: 500 });
 }
