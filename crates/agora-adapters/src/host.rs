@@ -420,7 +420,7 @@ fn to_event(method: &str, p: &Value) -> Option<AdapterEvent> {
 /// Whether an environment variable is passed on to an adapter: `PATH`, the user's home and standard folders, the language and
 /// terminal settings and the Windows system folders, never anything that can hold a secret (API keys, tokens, `SSH_AUTH_SOCK`) and never a temporary or runtime folder (a confined
 /// agent must not be pointed at the node's own temp folder or at the folder with the node's sockets).
-fn inheritable(name: &str) -> bool {
+fn inheritable(name: &str, confined: bool) -> bool {
     const NAMES: &[&str] = &[
         "PATH",
         "PATHEXT",
@@ -458,6 +458,11 @@ fn inheritable(name: &str) -> bool {
         "OS",
     ];
     let upper = name.to_ascii_uppercase();
+    // The temporary folder: an agent that is not confined keeps the user's (without it Windows puts temp files in the profile
+    // root); a confined one gets its own private one from the node.
+    if !confined && matches!(upper.as_str(), "TMPDIR" | "TEMP" | "TMP") {
+        return true;
+    }
     NAMES.contains(&upper.as_str()) || upper.starts_with("LC_")
 }
 
@@ -483,7 +488,10 @@ impl Adapter {
         // the agent it wraps finds its own configuration and login the way it does when the user starts it.
         cmd.env_clear();
         for (name, value) in std::env::vars_os() {
-            if name.to_str().is_some_and(inheritable) {
+            if name
+                .to_str()
+                .is_some_and(|n| inheritable(n, cfg.sandbox.is_some()))
+            {
                 cmd.env(name, value);
             }
         }
@@ -843,7 +851,8 @@ mod tests {
             "LC_ALL",
             "SystemRoot",
         ] {
-            assert!(super::inheritable(ok), "{ok}");
+            assert!(super::inheritable(ok, true), "{ok}");
+            assert!(super::inheritable(ok, false), "{ok}");
         }
         for secret in [
             "OPENAI_API_KEY",
@@ -863,7 +872,18 @@ mod tests {
             "XDG_RUNTIME_DIR",
             "HTTPS_PROXY",
         ] {
-            assert!(!super::inheritable(secret), "{secret}");
+            assert!(!super::inheritable(secret, true), "{secret}");
+            assert!(
+                !super::inheritable(secret, false) || ["TMPDIR", "TEMP", "TMP"].contains(&secret),
+                "{secret}"
+            );
+        }
+        for temp in ["TMPDIR", "Temp", "TMP"] {
+            assert!(super::inheritable(temp, false), "{temp}");
+            assert!(
+                !super::inheritable(temp, true),
+                "{temp}: a confined agent gets the node's private temp, not the user's"
+            );
         }
     }
 
