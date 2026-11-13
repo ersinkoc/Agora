@@ -94,8 +94,12 @@ the node keeps every agent running and catches up 1.5 s after the hub is back (g
 `a_node_keeps_working_without_the_hub_and_catches_up_when_it_appears`; the browser scenario is `scripts/e2e-link-resilience.mjs`).
 
 - **R1** A link that goes silent (process frozen, TCP open) was never noticed: the window showed a frozen node online, and nodes and
-  windows did not reconnect to a frozen hub. Fixed: node and hub drop a link silent for 25 s (node pings every 10 s), the hub records
-  the node offline; the window pings every 15 s and starts over after 10 s without an answer (`docs/design/observability.md`).
+  windows did not reconnect to a frozen hub. Fixed: node and hub drop a link silent for 25 s (node pings every 10 s) and the node dials
+  again; the window pings every 15 s and starts over after 10 s without an answer (`docs/design/observability.md`). The first
+  version also recorded the frozen node offline: after it resumed and reconnected it stayed offline for good (only a process
+  start says `NodeOnline`; found on the 0.3.8 branch by the Windows run). Now a silent connection is closed without `NodeOffline`,
+  and an ended one is recorded offline only if the node has not reconnected within 3 s. Open: an event that says a node's link
+  is back, so the window can show a frozen machine offline and then online again (needs an ADR).
 - **R2** The window came back up to 30 s after the hub. Fixed: at most 5 s with jitter, at once on `online`, visible, focus and "Retry now".
 - **R3** A `delivery_failed` notice did not say which message failed. Fixed: `reply_to` is the failed message's id. A resend queue after
   reconnect is not done (a behaviour change for an ADR).

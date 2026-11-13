@@ -41,6 +41,10 @@ const PUSH: Duration = Duration::from_millis(20);
 /// A node pings every 10 s (`agora_node::uplink_client::PING_EVERY`), so an idle but healthy node is never dropped; the node
 /// uses the same deadline for the hub (`SILENCE_DEADLINE`). Two and a half pings: one late ping is not enough.
 pub const NODE_SILENCE: Duration = Duration::from_millis(25_000);
+/// How long after a node's connection ended the hub waits before it records the node offline. A node that dials again within it
+/// (it dropped a hub that froze or slept, and the hub reads that end only after its new connection is already waiting) is never
+/// shown offline: nothing could show it online again, since only a process start says `NodeOnline`.
+pub const RECONNECT_GRACE: Duration = Duration::from_millis(3_000);
 
 #[derive(Debug)]
 pub enum ServeError {
@@ -105,7 +109,7 @@ where
 }
 
 /// The conversation with one authenticated node, until it ends. `node_id` comes from the certificate. When the
-/// node had come online, the hub records it offline at the end. When the node broke the protocol, the connection ends with the
+/// node had come online, the hub records it offline shortly after the end unless it is back (see [`RECONNECT_GRACE`]). When the node broke the protocol, the connection ends with the
 /// error's stable code as the close reason, so the node can say why instead of seeing a bare reset; the hub's log says it too.
 pub async fn serve_node<S>(
     conn: Conn<S>,
@@ -137,8 +141,12 @@ where
             eprintln!("node refused: {node_id} {} {:?}", e.code.as_str(), e.params);
             conn.close_with(e.code.as_str()).await;
         }
-        // The node is already recorded offline; it dials again when it is back (or as soon as it notices the silence too).
-        Err(ServeError::Silent) => eprintln!("node silent: {node_id}"),
+        // Closed, so a node that was only frozen or asleep reads the end of the stream as soon as it runs again and dials at once.
+        // Bounded: a peer that reads nothing must not hold this task. It is not recorded offline (see `converse_node`).
+        Err(ServeError::Silent) => {
+            eprintln!("node silent: {node_id}");
+            let _ = tokio::time::timeout(Duration::from_secs(1), conn.close()).await;
+        }
         _ => {}
     }
     result
@@ -186,15 +194,27 @@ where
         .router()
         .register_with_capabilities(node_id, welcome.capabilities);
     let result = stream_events(conn, &mut session, hub, node_id, commands, silence).await;
-    // However it ended, the hub now knows this node is not connected, unless a newer connection of the node replaced this
-    // one: that one is live, and the node is not offline.
-    if registration.end() {
-        let _ = hub.node_disconnected(node_id, now_ms());
-        // Forget it as a member of its projects, so it is asked to hand over its local work when it is back (ADR-0039 amendment B);
-        // anyone the change makes due is asked now.
-        for (node, project) in hub.board_membership(now_ms()) {
-            ask_board_join(hub, node, project);
-        }
+    // However it ended, the router now knows this node is not connected (commands to it fail with `node.offline` at once), unless
+    // a newer connection of the node replaced this one: that one is live, and the node is not offline.
+    //
+    // The view records `NodeOffline` only for a connection that ended (not one the hub gave up for silence) and only when the node
+    // has not dialled again within `RECONNECT_GRACE`. Nothing in the protocol says "the link is back" (`NodeOnline` means the
+    // process started), so a node recorded offline that then reconnects would stay offline: a frozen or sleeping node that
+    // resumes, or a node that dropped a frozen hub, must therefore never be recorded offline.
+    if registration.end() && !matches!(result, Err(ServeError::Silent)) {
+        let (hub, node_id) = (Arc::clone(hub), node_id.to_string());
+        tokio::spawn(async move {
+            tokio::time::sleep(RECONNECT_GRACE).await;
+            if hub.router().is_connected(&node_id) {
+                return;
+            }
+            let _ = hub.node_disconnected(&node_id, now_ms());
+            // Forget it as a member of its projects, so it is asked to hand over its local work when it is back (ADR-0039
+            // amendment B); anyone the change makes due is asked now.
+            for (node, project) in hub.board_membership(now_ms()) {
+                ask_board_join(&hub, node, project);
+            }
+        });
     }
     result
 }

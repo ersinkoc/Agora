@@ -309,42 +309,65 @@ pub async fn run_once(
     stop: &AtomicBool,
 ) -> Result<(), LinkError> {
     let (tls, host, addr) = split_url(&link.url)?;
-    let tcp = TcpStream::connect(&addr)
-        .await
-        .map_err(|e| LinkError::Transport(e.to_string()))?;
-    // Keystrokes and echoes are small frames; do not let Nagle's algorithm hold them back.
-    let _ = tcp.set_nodelay(true);
-    if tls {
-        let name = ServerName::try_from(host.clone()).map_err(|e| LinkError::Bad(e.to_string()))?;
-        let stream = connector(link)?
-            .connect(name, tcp)
+    // A dial that hangs (a hub that froze or went away mid-handshake) is given up after the silence deadline and tried again, so
+    // a node never waits forever on a connection that will not finish.
+    let dial = async {
+        let tcp = TcpStream::connect(&addr)
             .await
             .map_err(|e| LinkError::Transport(e.to_string()))?;
-        let conn = ws::connect(stream, &link.url).await?;
-        converse(
-            conn,
-            sink,
-            stop,
-            link.commands.as_deref(),
-            link.mesh_out.as_deref(),
-            link.grants.clone(),
-            link.mesh.clone(),
-            Liveness::DEFAULT,
-        )
-        .await
-    } else {
-        let conn = ws::connect(tcp, &link.url).await?;
-        converse(
-            conn,
-            sink,
-            stop,
-            link.commands.as_deref(),
-            link.mesh_out.as_deref(),
-            link.grants.clone(),
-            link.mesh.clone(),
-            Liveness::DEFAULT,
-        )
-        .await
+        // Keystrokes and echoes are small frames; do not let Nagle's algorithm hold them back.
+        let _ = tcp.set_nodelay(true);
+        let stream = if tls {
+            let name =
+                ServerName::try_from(host.clone()).map_err(|e| LinkError::Bad(e.to_string()))?;
+            let s = connector(link)?
+                .connect(name, tcp)
+                .await
+                .map_err(|e| LinkError::Transport(e.to_string()))?;
+            Dialled::Tls(Box::new(s))
+        } else {
+            Dialled::Plain(tcp)
+        };
+        Ok::<_, LinkError>(stream)
+    };
+    let stream = match tokio::time::timeout(SILENCE_DEADLINE, dial).await {
+        Ok(r) => r?,
+        Err(_) => return Err(LinkError::Silent),
+    };
+    macro_rules! talk {
+        ($conn:expr) => {
+            converse(
+                $conn,
+                sink,
+                stop,
+                link.commands.as_deref(),
+                link.mesh_out.as_deref(),
+                link.grants.clone(),
+                link.mesh.clone(),
+                Liveness::DEFAULT,
+            )
+            .await
+        };
+    }
+    match stream {
+        Dialled::Tls(s) => talk!(within(SILENCE_DEADLINE, ws::connect(*s, &link.url)).await?),
+        Dialled::Plain(s) => talk!(within(SILENCE_DEADLINE, ws::connect(s, &link.url)).await?),
+    }
+}
+
+enum Dialled {
+    Tls(Box<tokio_rustls::client::TlsStream<TcpStream>>),
+    Plain(TcpStream),
+}
+
+/// The WebSocket upgrade, given up after `limit`.
+async fn within<T>(
+    limit: Duration,
+    f: impl std::future::Future<Output = Result<T, TransportError>>,
+) -> Result<T, LinkError> {
+    match tokio::time::timeout(limit, f).await {
+        Ok(r) => Ok(r?),
+        Err(_) => Err(LinkError::Silent),
     }
 }
 
