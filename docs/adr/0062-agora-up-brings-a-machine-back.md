@@ -28,6 +28,14 @@ every node machine reach the hub's panel, ADR-0059 stores launch options. Missin
    the command says what it is about to register before it does).
 6. **The hub side needs nothing more:** a hub restarts from its data folder and nodes reconnect (verified); `agora up` on the hub machine starts the hub first.
 
+## Notes from the macOS review (2026-11-13)
+- A LaunchAgent gets only launchd's minimal `PATH`, and `claude`, `codex` and `opencode` all live outside it: `agora service install` records the installing shell's `PATH` in the plist (and the equivalent on the other systems).
+- launchd's clean environment already removes the `CLAUDE_CODE_*` problem; keep it.
+- The plist uses `KeepAlive` with `SuccessfulExit = false`, a `ThrottleInterval`, and `bootstrap`/`bootout` for install/remove.
+- Login Items can turn the agent off: `agora service status` must say so.
+- macOS local-network privacy and quarantine are measured before the service is built (the launchd test is waiting for the maintainer's permission on that Mac).
+- The survivor check of ADR-0060 (an agent process that outlived a crashed node) runs **before** an automatic resume, never after.
+
 ## Open questions for the maintainer
 - Default for the first-use question: proposed **no** (ask on the first restart, offer "always" in the window), or **yes** (auto), since you said all sessions should come back?
 - Should `agora up` also start agents that were running when the machine stopped even if the user never resumed them before (the plain meaning of "bring everything back")? (Proposed: yes, with `resume = auto`.)
