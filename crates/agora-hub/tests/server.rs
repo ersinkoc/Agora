@@ -1618,3 +1618,79 @@ async fn a_closed_agent_is_forgotten_for_every_client_but_its_usage_still_counts
         "a forgotten agent's tokens still count"
     );
 }
+
+/// The audit outcome of the newest `AgentList` row, once it is no longer `sent` (or `sent` after `wait`).
+async fn agent_list_outcome(st: &ServerState, wait: Duration) -> String {
+    let end = tokio::time::Instant::now() + wait;
+    loop {
+        let rows = agora_hub::audit::Audit::new(st.hub.store())
+            .list(0, None, 100)
+            .unwrap();
+        let outcome = rows
+            .iter()
+            .rev()
+            .find(|r| r.action == "AgentList")
+            .map(|r| r.outcome.clone())
+            .unwrap_or_default();
+        if outcome != "sent" || tokio::time::Instant::now() >= end {
+            return outcome;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test]
+async fn a_command_whose_client_left_still_gets_its_outcome_in_the_audit_trail() {
+    // L17: a client that leaves (a page reload, a closed tab) while its command is on its way left the audit row `sent` for good,
+    // although the node carried the command out. The row now says how it really ended.
+    let st = state(None);
+    let addr = start(Arc::clone(&st)).await;
+    for (node_id, answers) in [("n1", true), ("n2", false)] {
+        let (mut node, task) = node_conn(&st, node_id).await;
+        handshake(&mut node).await;
+        node.send(&f(
+            STREAM_EVENTS,
+            kinds::EVENT,
+            event(node_id, 1, online(node_id)),
+        ))
+        .await
+        .unwrap();
+        next_ack(&mut node).await;
+        let mut client = dial(addr, Some("good-token")).await;
+        client
+            .send(&f(
+                STREAM_EVENTS,
+                kinds::SUBSCRIBE,
+                v1::Subscribe::default().encode_to_vec(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(recv(&mut client).await.kind, kinds::SNAPSHOT);
+        client.send(&routed("gone", node_id)).await.unwrap();
+        let got = recv(&mut node).await;
+        let forwarded = v1::CommandRequest::decode(got.payload.as_slice()).unwrap();
+        drop(client); // the client leaves before the answer
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        if answers {
+            // The node answers after the client left: the command happened.
+            let answer = v1::CommandResponse {
+                request_id: forwarded.request_id,
+                result: Some(command_response::Result::Ok(v1::CommandOk {
+                    result: Some(command_ok::Result::AgentList(v1::AgentListResult::default())),
+                })),
+            };
+            node.send(&f(STREAM_COMMANDS, 1, answer.encode_to_vec()))
+                .await
+                .unwrap();
+            assert_eq!(agent_list_outcome(&st, Duration::from_secs(10)).await, "ok");
+        } else {
+            // The node leaves too, without answering.
+            drop(node);
+            let _ = task.await;
+            assert_eq!(
+                agent_list_outcome(&st, Duration::from_secs(10)).await,
+                "node.offline"
+            );
+        }
+    }
+}

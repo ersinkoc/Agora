@@ -454,10 +454,45 @@ where
 /// [`serve_client`] for a person with a role (ADR-0049). `role` is asked for every command, so a demotion or a removed person takes
 /// effect at once; `None` ends the connection.
 pub async fn serve_client_as<S>(
+    conn: Conn<S>,
+    hub: &Hub,
+    first: Frame,
+    access: &(dyn Fn() -> Option<crate::users::Access> + Sync),
+) -> Result<(), ServeError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut inflight: Vec<Inflight> = Vec::new();
+    // The connection is moved in, so it is closed when the client's part ends, whichever way it ends.
+    let result = serve_client_loop(conn, hub, first, access, &mut inflight).await;
+    finish_unanswered(hub, inflight).await;
+    result
+}
+
+/// Commands still on their way when the client left (a reload, a closed tab) or was refused: nobody will read their answers, but
+/// the audit trail (ADR-0049) says how each one really ended, the node's answer, `node.offline` or `node.timeout`, instead of
+/// staying `sent` for good (L17).
+async fn finish_unanswered(hub: &Hub, inflight: Vec<Inflight>) {
+    for item in inflight {
+        let Some(id) = item.audit else { continue };
+        let outcome = match tokio::time::timeout_at(item.deadline, item.reply).await {
+            Ok(Ok(r)) => match r.result {
+                Some(command_response::Result::Err(info)) => info.code,
+                _ => "ok".to_string(),
+            },
+            Ok(Err(_)) => ErrorCode::NodeOffline.as_str().to_string(),
+            Err(_) => ErrorCode::NodeTimeout.as_str().to_string(),
+        };
+        let _ = crate::audit::Audit::new(hub.store()).finish(id, &outcome);
+    }
+}
+
+async fn serve_client_loop<S>(
     mut conn: Conn<S>,
     hub: &Hub,
     first: Frame,
     access: &(dyn Fn() -> Option<crate::users::Access> + Sync),
+    inflight: &mut Vec<Inflight>,
 ) -> Result<(), ServeError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -489,10 +524,9 @@ where
         send_positioned(&mut conn, d).await?;
     }
     let mut checked = tokio::time::Instant::now();
-    let mut inflight: Vec<Inflight> = Vec::new();
     let (relays, mut relay_frames) = hub.router().client();
     loop {
-        answer_ready(&mut conn, &mut inflight, hub).await?;
+        answer_ready(&mut conn, inflight, hub).await?;
         // Terminal frames from nodes, and streams the hub ended.
         while let Ok(rf) = relay_frames.try_recv() {
             conn.send(&frame(rf.stream, rf.kind, rf.payload)).await?;
@@ -542,7 +576,7 @@ where
                         &mut conn,
                         hub,
                         &relays,
-                        &mut inflight,
+                        inflight,
                         stream,
                         &f.payload,
                         Caller {
