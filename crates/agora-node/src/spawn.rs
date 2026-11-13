@@ -405,7 +405,7 @@ impl Spawner {
 
     /// Everything decided before the user is asked, with the caller's slot reserved. Returns the request (without its ticket).
     fn check(&self, caller: &AgentId, a: &StartArgs) -> Result<Request, Error> {
-        let (views, kinds, confined, trusted, grantable) = {
+        let (views, kinds, confined, trusted, grantable, markers) = {
             let sup = self.sup();
             let p = sup.sandbox_policy();
             (
@@ -414,8 +414,18 @@ impl Spawner {
                 p.level != crate::sandbox::Level::Off,
                 p.trusted_kinds.clone(),
                 sup.grantable(&a.kind),
+                sup.typed_markers(&a.kind),
             )
         };
+        // The texts the kind's screen must show around typed text (its footer): a prompt that contains one could stand in for it when
+        // a menu replaced the real one, so it is refused.
+        let lower = a.prompt.to_lowercase();
+        if markers
+            .iter()
+            .any(|m| !m.is_empty() && lower.contains(&m.to_lowercase()))
+        {
+            return Err(invalid("prompt"));
+        }
         let me = views
             .iter()
             .find(|v| v.id == *caller && v.running)

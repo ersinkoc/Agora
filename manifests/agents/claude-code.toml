@@ -87,7 +87,8 @@ id = "typed_prompt_box"
 state = "idle"
 priority = 100
 region = "bottom_non_empty_lines(12)"
-regex = '^─{20,}\n❯[^\S\n]+\S'
+# The footer is checked right under the box (the line below its closing rule, or the one after), not anywhere on screen.
+regex = '^─{20,}\n❯[^\S\n]+\S(?s:.*?)\n─{20,}\n(?:[^\n]*\n)?[^\n]*shift\+tab to cycle'
 all = [{ contains = "shift+tab to cycle" }]
 # The placeholder (`Try "…"`) is not typed text.
 not = [{ contains = "esc to interrupt" }, { contains = "Enter to confirm" }, { contains = "Esc to cancel" }, { contains = "Do you want" }, { regex = '^❯[^\S\n]*Try "' }]
