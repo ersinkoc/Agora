@@ -1,5 +1,6 @@
-import { StartApproval } from './components/StartApproval';
+import { StartApproval, type StartChoice } from './components/StartApproval';
 import { HelperGrants } from './components/HelperGrants';
+import { ApprovalBanner } from './components/ApprovalBanner';
 import { AgentAddress } from './components/AgentAddress';
 import { LanguagePicker } from './components/LanguagePicker';
 import { ThemePicker } from './components/ThemePicker';
@@ -10,7 +11,7 @@ import { AttentionStrip } from './components/AttentionStrip';
 import { Icon } from './components/Icon';
 import { NetworkView } from './components/NetworkView';
 import { StateBadge } from './components/StateBadge';
-import type { MachineModel, MessageModel, ProjectCost } from './net/view';
+import type { ApprovalModel, MachineModel, MessageModel, ProjectCost } from './net/view';
 import type { Device } from './net/approval';
 import { money, type UsageSummary } from './net/usage';
 import { demoAgents, demoHelper, demoStartApproval } from './fixtures';
@@ -79,8 +80,11 @@ export function Gallery() {
 }
 
 // Focus: one agent, full size. The terminal arrives with the hub connection; until then a placeholder.
-export function Focus({ agent, source: live, costMicroUsd, chatSource, sendPrompt, onBack }: {
+export function Focus({ agent, approvals = [], onResolve, source: live, costMicroUsd, chatSource, sendPrompt, onBack }: {
   agent: AgentTileModel | undefined;
+  // What this agent waits on, answered here as in the window (an agent shown full size must not be left waiting).
+  approvals?: readonly ApprovalModel[];
+  onResolve?: (approval: ApprovalModel, approved: boolean, choice?: StartChoice) => void;
   costMicroUsd?: number;
   source?: TerminalSource;
   chatSource?: ChatSource;
@@ -113,6 +117,7 @@ export function Focus({ agent, source: live, costMicroUsd, chatSource, sendPromp
         <ThemePicker />
       </header>
       <main className="flex min-h-0 min-w-0 flex-col">
+        {approvals.filter((x) => x.agentId === agent.id).map((x) => <ApprovalBanner key={x.id} approval={x} onResolve={onResolve} />)}
         <AgentAddress key={agent.id} agent={agent} />
         <div className="pane min-h-0 flex-1 bg-surface-0 p-1.5" aria-label={agent.terminal === false ? t('chat-log') : t('focus-terminal')}>
           {agent.terminal === false ? <PromptBox agent={agent} source={chatSource} send={sendPrompt} /> : (

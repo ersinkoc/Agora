@@ -1,3 +1,4 @@
+import { ApprovalBanner } from './ApprovalBanner';
 import { Suspense, lazy, useEffect, useMemo, useRef, useState, useSyncExternalStore, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
 import { t } from '../i18n';
 import { type AgentTileModel, machineKey, needsAttention, sortFleet } from '../model';
@@ -24,7 +25,7 @@ import { dismiss, dismissedIds, subscribeDismissed } from '../net/dismissed';
 import { loadLayout, saveLayout } from '../net/layout';
 import { forgetReasonKey } from '../net/forget';
 import { Resizer } from './Resizer';
-import { StartApproval, type StartChoice } from './StartApproval';
+import type { StartChoice } from './StartApproval';
 import { HelperGrants, type HelperGrant } from './HelperGrants';
 
 const TerminalView = lazy(() => import('../terminal/TerminalView').then((m) => ({ default: m.TerminalView })));
@@ -226,16 +227,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
           {layout === 'grid' && <button type="button" className="ide-iconbtn" onClick={() => close(a.id)} aria-label={t('console-hide')} title={t('console-hide')}><Icon name="close" /></button>}
         </div>
       </div>
-      {approvals.filter((x) => x.agentId === a.id).map((x) => x.start ? (
-        <StartApproval key={x.id} approval={x} start={x.start} onResolve={(ok, choice) => onResolve(x, ok, choice)} />
-      ) : (
-        <div key={x.id} role="alert" className="flex flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-needs-you/60 bg-surface-2 px-3 py-2">
-          <StateMark state="needs-you" />
-          <div className="min-w-0 flex-1"><strong className="block truncate">{t('approval-title', { name: x.agentName })}</strong><span className="block truncate text-xs text-muted">{x.action}{x.detail ? ` · ${x.detail}` : ''}</span></div>
-          <button type="button" className="button button--primary px-3 py-1 text-xs" onClick={() => onResolve(x, true)}>{t('approval-allow')}</button>
-          <button type="button" className="button px-3 py-1 text-xs" onClick={() => onResolve(x, false)}>{t('approval-deny')}</button>
-        </div>
-      ))}
+      {approvals.filter((x) => x.agentId === a.id).map((x) => <ApprovalBanner key={x.id} approval={x} onResolve={onResolve} />)}
       <AgentAddress agent={a} />
       {helperGrants && revokeGrant && !a.closed && fleet.some((c) => c.parentId === a.id) &&
         <HelperGrants list={() => helperGrants(a)} revoke={(id) => revokeGrant(a, id)} refresh={fleet.filter((c) => c.parentId === a.id && !c.closed).length} />}

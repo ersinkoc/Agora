@@ -107,13 +107,32 @@ impl std::fmt::Display for HostError {
             Self::Io(e) => write!(f, "{e}"),
             Self::Timeout => write!(f, "the adapter did not answer in time"),
             Self::Exited => write!(f, "the adapter exited"),
-            Self::Rpc { code, .. } => write!(f, "the adapter returned error {code}"),
+            Self::Rpc { code, .. } => match self.reason() {
+                Some((reason, _)) => write!(f, "the adapter returned error {code} ({reason})"),
+                None => write!(f, "the adapter returned error {code}"),
+            },
             Self::BadResponse(what) => write!(f, "bad response: {what}"),
         }
     }
 }
 
 impl std::error::Error for HostError {}
+
+impl HostError {
+    /// The adapter's stable reason for an error answer: `data.code` and `data.params` (docs/specs/adapter-protocol.md, "Turn and
+    /// exit reasons"), for example `adapter.agent_exited` with the stage, exit code and stderr tail when the agent behind the
+    /// bridge exited before `initialize` was answered.
+    pub fn reason(&self) -> Option<(&str, &Value)> {
+        let Self::Rpc {
+            data: Some(data), ..
+        } = self
+        else {
+            return None;
+        };
+        let code = data.get("code")?.as_str()?;
+        Some((code, data.get("params").unwrap_or(&Value::Null)))
+    }
+}
 
 impl From<io::Error> for HostError {
     fn from(e: io::Error) -> Self {
@@ -665,6 +684,26 @@ mod tests {
     fn a_last_line_without_a_newline_is_still_read() {
         let mut r = Cursor::new(b"abc".to_vec());
         assert_eq!(read_line_capped(&mut r).unwrap(), Some(Some("abc".into())));
+    }
+
+    #[test]
+    fn an_error_answer_carries_its_reason() {
+        let e = HostError::Rpc {
+            code: -32000,
+            data: Some(json!({"code": "adapter.agent_exited", "params": {"stage": "initialize"}})),
+        };
+        let (code, params) = e.reason().unwrap();
+        assert_eq!(
+            (code, params["stage"].as_str()),
+            ("adapter.agent_exited", Some("initialize"))
+        );
+        assert!(e.to_string().contains("adapter.agent_exited"));
+        let bare = HostError::Rpc {
+            code: -32000,
+            data: None,
+        };
+        assert!(bare.reason().is_none());
+        assert!(HostError::Exited.reason().is_none());
     }
 
     #[test]
