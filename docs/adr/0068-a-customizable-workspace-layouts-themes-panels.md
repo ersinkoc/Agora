@@ -1,15 +1,14 @@
 # 0068. A customizable workspace: tiled layouts, themes and replaceable panels, in every client
-Status: Proposed
+Status: Accepted
 Date: 2026-11-14
-
-Not accepted. Nothing here may be built until the maintainer accepts it in a message of their own.
+Accepted: 2026-11-14 (maintainer's explicit approval in chat: "0068'i onaylıyorum"). The open questions were not answered; the proposed answers stand (layout/theme sync through the hub is optional and later; high-contrast and large-text themes built in; the panel contract first, a loader later). Built in the six rungs, web first.
 Origin: the maintainer: "I want an interface that is very good, themable, with every part replaceable, extremely customizable; and on the screen, when needed, 2x2, 1x2, 2x1 or whatever: several terminals side by side; tabs are fine but I need to see them together."
 Applies to the web window, the terminal client (ADR-0063) and any later native client (a GPUI evaluation is under way); it changes no protocol and no hub behaviour.
 
 ## Context
 The web window has a fixed editor-like layout (Explorer | tabs | Inspector) with resizable panels, a grid of agents and a full-size mode; the TUI has a split view. Neither lets a person arrange *several terminals, conversations, diffs and approvals side by side*, save that arrangement, or restyle the parts. The maintainer watches many agents on many machines at once: the screen is the product, and it has to be arranged by its owner.
 
-## Decision (proposed)
+## Decision
 1. **One layout model, client-neutral** (`docs/ux/layout.md` is its spec): a layout is a **tree of splits, tab groups and panes**. A *split* has a direction (row or column) and ratios; a *tab group* holds panes behind tabs; a *pane* shows one **panel** bound to something (an agent, a project, a machine, nothing). The tree is plain data (TOML or JSON, versioned), so every client reads and writes the same file.
 2. **Tiling presets and free arrangement.** One keypress or click gives 1x1, 1x2, 2x1, 2x2, 3x2 and "focus + strip" (one large pane, the rest small); panes are resized by dragging or keys, swapped, split further, moved between tab groups, **maximized and restored** (zoom one pane, then back to the grid). A pane can be **pinned** to an agent, or set to **follow attention** (it shows whichever agent needs you next) or **follow selection** (it shows what is selected in the tree).
 3. **Panels are a registry, not hard-wired screens.** Every part of the window is a panel with a stable id and a small contract (inputs: the read-only state it may see; outputs: commands it may send through the same signed paths as today): terminal, conversation, approvals ("Needs you"), changes/diff, files, tasks and board, messages, usage/cost, machines map (live), agent tree, workspace/disk, log. A layout names panels by id, so **any panel can be placed, hidden or replaced** by another that implements the same contract (a custom panel is a later step; the contract is what makes it possible).
@@ -19,7 +18,7 @@ The web window has a fixed editor-like layout (Explorer | tabs | Inspector) with
 7. **Terminals stay cheap when many are shown:** only visible panes subscribe to a terminal stream; hidden tabs unsubscribe (ADR-0022 budgets); a flood in one pane never slows another or the keyboard.
 8. **Build in rungs, web first** (it already has the pieces): (1) the layout model and presets in the web window with saved layouts, (2) themes as token files with live reload and a theme editor, (3) the panel registry and moving the existing screens onto it, (4) keybindings and the palette completeness, (5) the same model in the terminal client, (6) a native client only if the evaluation says it pays.
 
-## Open questions for the maintainer
+## Open questions (proposed answers stand)
 - Layout/theme sync through the hub per user (proposed, optional) or only local files?
 - High-contrast and large-text themes built in (proposed: yes).
 - Custom panels written by users: the contract first, the loader later (proposed), or a plugin system now?
