@@ -31,6 +31,12 @@ flag = ["--mcp-config", "{config_file}"]
 [resume]
 argv = ["claude", "--resume", "{session_id}"]
 
+[session]
+# ADR-0060: the node chooses the session id at the first launch (`--session-id <uuid>`, checked on Claude Code 2.1.319), so `--resume`
+# finds it after a restart without reading any transcript. Claude Code saves no transcript when it inherits a parent session's
+# markers; the node leaves those out of an agent's environment.
+id_args = ["--session-id", "{session_id}"]
+
 [usage]
 # Claude Code writes one JSON line per message to ~/.claude/projects/<cwd>/<session>.jsonl (checked on 2.1.319, ADR-0042). A message
 # can be on several lines with the same usage, so it is counted once by `message.id`; cached prompt tokens count as input.

@@ -44,6 +44,20 @@ fn state_text(state: AgentState, t: Text<'_>) -> String {
     )
 }
 
+/// ADR-0060: what an interrupted agent's row says: it stopped with its machine, and `u` resumes it (or `U` starts it again).
+pub fn interrupted_text(a: &AgentSnapshot, t: Text<'_>) -> String {
+    t(
+        if a.still_running {
+            key!("tui-interrupted-running")
+        } else if a.resumable {
+            key!("tui-interrupted-resume")
+        } else {
+            key!("tui-interrupted-again")
+        },
+        &[],
+    )
+}
+
 /// The part of a hub-wide id after `<node>/`.
 fn local(id: &str) -> &str {
     id.split_once('/').map_or(id, |(_, rest)| rest)
@@ -211,6 +225,12 @@ pub fn render(
                         &[("agent", Arg::Str(local(&a.parent_agent_id).to_string()))],
                     )
                 )
+            };
+            // ADR-0060: stopped with its machine; the keys that bring it back.
+            let by = if a.interrupted && !a.running {
+                format!("{by}  · {}", interrupted_text(a, t))
+            } else {
+                by
             };
             // ADR-0059: an agent started so that it acts without asking says so on its row, for its whole life.
             let no_ask = if a.skips_permissions {
@@ -724,6 +744,31 @@ mod tests {
             !quiet.contains("tui-hint-answer") && quiet.contains("done!"),
             "{quiet}"
         );
+    }
+
+    #[test]
+    fn an_agent_that_stopped_with_its_machine_says_how_to_bring_it_back() {
+        let mut snap = snapshot();
+        for (id, resumable) in [("laptop/agent-3", true), ("laptop/agent-4", false)] {
+            snap.agents.push(AgentSnapshot {
+                agent_id: id.into(),
+                node_id: "laptop".into(),
+                project_id: "web".into(),
+                kind: "claude-code".into(),
+                state: AgentState::Done as i32,
+                interrupted: true,
+                resumable,
+                ..Default::default()
+            });
+        }
+        let text = render(&snap, false, true, "", "", 0, &t).join("\n");
+        let row = |id: &str| text.lines().find(|l| l.contains(id)).unwrap().to_string();
+        assert!(
+            row("agent-3").contains("tui-interrupted-resume[]"),
+            "{text}"
+        );
+        assert!(row("agent-4").contains("tui-interrupted-again[]"), "{text}");
+        assert!(!row("agent-1").contains("tui-interrupted"), "{text}");
     }
 
     #[test]

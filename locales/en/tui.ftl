@@ -76,7 +76,7 @@ tui-reader-keys = j / k or the arrows scroll · space goes a page down · q goes
 tui-split-pick = Pick an agent on the left
 tui-split-no-screen = Opening its terminal…
 tui-split-status = { $online }/{ $total } machines · { $agents } agents · { $waiting } need you
-tui-split-keys = ↑↓ choose · Enter open · s start · f folder · x stop · d remove · q quit
+tui-split-keys = ↑↓ choose · Enter open · s start · f folder · x stop · u resume · d remove · q quit
 tui-split-chat = No terminal: Enter opens its conversation
 tui-folder-title = Start an agent in a folder on { $machine }
 tui-folder-keys = ↑↓ choose · Enter open · ⌫ up · Space start here · m machine · Esc cancel
@@ -92,6 +92,17 @@ tui-forget-failed = Could not remove it: { $reason }
 tui-forget-disconnected = The connection was lost. Wait for it to reconnect.
 tui-forget-timeout = No answer arrived in time. Try again.
 tui-forget-action = removing the agent
+tui-interrupted = stopped with its machine
+tui-interrupted-resume = stopped with its machine · u resume · U start again
+tui-interrupted-again = stopped with its machine · U start again
+tui-resumed = { $agent } is running again.
+tui-resume-not-interrupted = Only an agent that stopped with its machine can be resumed (u) or started again (U).
+tui-resume-failed = It did not start: { $reason }
+tui-resume-cannot = It cannot continue its own conversation. U starts it again in its folder (a new conversation).
+tui-resume-confirm = Press u again within 5 seconds to resume { $agent }.
+tui-again-confirm = Press U again within 5 seconds to start { $agent } again in its folder (a new conversation).
+tui-interrupted-running = still running from before its machine's restart · x stops it
+tui-resume-still-running = Its process from before the restart is still running. Stop it with x first, then resume it.
 
 # ADR-0059: launch options (manifest `[[launch.option]]` labels)
 option-skip-permissions = Don't ask

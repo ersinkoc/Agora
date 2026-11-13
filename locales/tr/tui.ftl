@@ -76,7 +76,7 @@ tui-reader-keys = j / k ya da oklar kaydırır · boşluk bir sayfa iner · q ge
 tui-split-pick = Soldan bir ajan seç
 tui-split-no-screen = Terminali açılıyor…
 tui-split-status = { $online }/{ $total } makine · { $agents } ajan · { $waiting } seni bekliyor
-tui-split-keys = ↑↓ seç · Enter aç · s başlat · f klasör · x durdur · d kaldır · q çık
+tui-split-keys = ↑↓ seç · Enter aç · s başlat · f klasör · x durdur · u devam et · d kaldır · q çık
 tui-split-chat = Terminali yok: Enter konuşmasını açar
 tui-folder-title = { $machine } üzerinde bir klasörde ajan başlat
 tui-folder-keys = ↑↓ seç · Enter aç · ⌫ yukarı · Boşluk burada başlat · m makine · Esc vazgeç
@@ -92,6 +92,17 @@ tui-forget-failed = Kaldırılamadı: { $reason }
 tui-forget-disconnected = Bağlantı kesildi. Yeniden bağlanmasını bekleyin.
 tui-forget-timeout = Zamanında yanıt alınamadı. Tekrar deneyin.
 tui-forget-action = ajanı kaldırma
+tui-interrupted = makinesiyle birlikte durdu
+tui-interrupted-resume = makinesiyle birlikte durdu · u devam et · U yeniden başlat
+tui-interrupted-again = makinesiyle birlikte durdu · U yeniden başlat
+tui-resumed = { $agent } yeniden çalışıyor.
+tui-resume-not-interrupted = Yalnızca makinesiyle birlikte duran bir ajan devam ettirilebilir (u) ya da yeniden başlatılabilir (U).
+tui-resume-failed = Başlamadı: { $reason }
+tui-resume-cannot = Kendi konuşmasını sürdüremiyor. U onu klasöründe yeniden başlatır (yeni bir konuşma).
+tui-resume-confirm = { $agent } ajanını devam ettirmek için 5 saniye içinde yeniden u'ya basın.
+tui-again-confirm = { $agent } ajanını klasöründe yeniden başlatmak için 5 saniye içinde yeniden U'ya basın (yeni bir konuşma).
+tui-interrupted-running = makinesi yeniden başlamadan önceki haliyle hâlâ çalışıyor · x durdurur
+tui-resume-still-running = Yeniden başlamadan önceki işlemi hâlâ çalışıyor. Önce x ile durdurun, sonra devam ettirin.
 
 # ADR-0059: launch options (manifest `[[launch.option]]` labels)
 option-skip-permissions = Sormadan

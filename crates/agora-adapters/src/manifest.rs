@@ -90,6 +90,31 @@ pub struct Resume {
     pub argv: Vec<String>,
 }
 
+/// `[session]` (ADR-0060): how the node learns a terminal agent's own session id, which `[resume]` needs after a restart. Either the
+/// node chooses it (`id_args`) or it reads it from the file the agent writes (`[session.file]`), not both.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionSpec {
+    /// Arguments added to the first launch, with `{session_id}` replaced by an id the node chooses (a random v4 UUID) and records
+    /// before anything else is said about the agent, for example `["--session-id", "{session_id}"]`. Not added to a restart or a resume.
+    #[serde(default)]
+    pub id_args: Vec<String>,
+    pub file: Option<SessionFile>,
+}
+
+/// `[session.file]`: the session file an agent writes, whose first line names the session and its working directory.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionFile {
+    /// Starts with `{home}/`; `*` matches within one path component.
+    pub glob: String,
+    /// The first line must have this value at this path.
+    pub select: Option<UsageSelect>,
+    /// Dotted paths in the first line (a JSON object): the session id, and the working directory it was started in.
+    pub id: String,
+    pub cwd: String,
+}
+
 /// An L3 adapter process that speaks the adapter protocol for this agent kind (docs/specs/adapter-protocol.md).
 /// A kind with `[adapter]` is driven through it instead of a terminal.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -226,6 +251,8 @@ pub struct Manifest {
     #[serde(default)]
     pub process: Process,
     pub resume: Option<Resume>,
+    /// ADR-0060: how the node learns the agent's own session id (older engines ignore it).
+    pub session: Option<SessionSpec>,
     #[serde(default)]
     pub rules: Vec<Rule>,
     pub mcp: Option<McpSpec>,
@@ -380,6 +407,21 @@ impl Manifest {
             };
             if !ok || m.format.as_deref().is_some_and(|f| f != "json") {
                 return Err(invalid("mcp"));
+            }
+        }
+        if let Some(sp) = &self.session {
+            let args_ok =
+                sp.id_args.is_empty() || sp.id_args.iter().any(|a| a.contains("{session_id}"));
+            let file_ok = sp.file.as_ref().is_none_or(|f| {
+                f.glob.starts_with("{home}/")
+                    && !f.glob.split('/').any(|c| c == "..")
+                    && !f.glob.contains('\0')
+                    && !f.id.is_empty()
+                    && !f.cwd.is_empty()
+                    && f.select.as_ref().is_none_or(|s| !s.path.is_empty())
+            });
+            if !args_ok || !file_ok || (!sp.id_args.is_empty() && sp.file.is_some()) {
+                return Err(invalid("session"));
             }
         }
         for (name, list) in [("ready", &self.ready), ("typed", &self.typed)] {
@@ -577,6 +619,34 @@ mod usage_tests {
             GOOD.replace("mode = \"delta\"", "mode = \"sometimes\""),
         ] {
             assert!(Manifest::parse(&with(&bad)).is_err(), "{bad}");
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod session_tests {
+    use super::*;
+
+    const BASE: &str = "kind = \"k\"\ndisplay_name = \"K\"\nversion = \"1\"\nmin_engine = 1\n";
+    const FILE: &str =
+        "[session.file]\nglob = \"{home}/.x/*.jsonl\"\nid = \"payload.id\"\ncwd = \"payload.cwd\"\n";
+
+    #[test]
+    fn a_session_spec_names_its_id_one_way_only() {
+        let ok = Manifest::parse(&format!(
+            "{BASE}[session]\nid_args = [\"--session-id\", \"{{session_id}}\"]\n"
+        ))
+        .unwrap();
+        assert_eq!(ok.session.unwrap().id_args[1], "{session_id}");
+        assert!(Manifest::parse(&format!("{BASE}{FILE}")).is_ok());
+        for bad in [
+            "[session]\nid_args = [\"--session-id\"]\n".to_string(),
+            "[session.file]\nglob = \"/etc/*.jsonl\"\nid = \"a\"\ncwd = \"b\"\n".to_string(),
+            "[session.file]\nglob = \"{home}/../*.jsonl\"\nid = \"a\"\ncwd = \"b\"\n".to_string(),
+            format!("[session]\nid_args = [\"{{session_id}}\"]\n{FILE}"),
+        ] {
+            assert!(Manifest::parse(&format!("{BASE}{bad}")).is_err(), "{bad}");
         }
     }
 }

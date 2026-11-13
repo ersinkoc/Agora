@@ -397,7 +397,8 @@ All additions; nothing published changed.
   whole through a temporary file in the same folder and a rename; at most 512 entries, 4 MiB read). Per agent: id, kind, project,
   folder (its workspace path or its own worktree), whether it is a directory agent (ADR-0052) and its separate worktree's Git root
   and branch, parent agent (ADR-0057), the agent's own session id once reported (`AgentSessionReported`), the launch options of
-  ADR-0059 (reserved, never applied by a resume), start time, last state, whether it ended, and when it was found interrupted. Never
+  ADR-0059 (recorded from `AgentStarted`, never applied by `agent.resume`: a resumed or restarted-again agent asks before acting,
+  and its `AgentStarted` carries no options, so the "does not ask" badge goes), start time, last state, whether it ended, and when it was found interrupted. Never
   terminal contents, prompts, or secrets. It learns from the events the node records: written when an agent starts, reports its
   session and ends; a state change is written with the next write and when the node stops cleanly. The ledger also keeps the next
   agent id, so an id is never given twice across restarts. A file that cannot be read is renamed (`ledger.json.unreadable-<ms>`),
@@ -411,6 +412,13 @@ All additions; nothing published changed.
   (`running` false, state `done`, so it reads "finished") and adds `AgentSnapshot.interrupted` (40), `resumable` (41),
   `interrupted_at_ms` (42) and `folder` (43); its next `AgentStarted` clears them. An agent the hub never saw (its store was reset)
   is listed from the event alone. `agent.forget` works on it like on any closed agent.
+- **Still running.** The ledger also records each agent's pid, process group and start time. `AgentInterrupted.still_running` (10,
+  snapshot `AgentSnapshot.still_running` 44) says its process from before the restart still runs (same pid, same start time; a node
+  killed without stopping its agents). Then `agent.resume` answers `agent.still_running`, and `agent.stop` with its id ends exactly
+  that process (its group when it leads one), with `stop_helpers` also its helpers that outlived the node, and says
+  `AgentInterrupted` again without `still_running`; a pid whose start time, boot (Linux `boot_id`) or program name differs is never
+  signalled. `agent.stop` of any interrupted agent succeeds: when its old process has ended meanwhile nothing is signalled, and it is
+  announced again without `still_running`, so clients offer Resume and Start again. Not on Windows, where a node's agents end with it.
 - **Resume.** Command `agent.resume` (`AgentResume`, request field 87: `agent_id` (the node's own id), `new_session`,
   `authorization`) → `AgentLaunchResult` (Ok tag 19). Node capability `agent.resume`: the hub refuses the command with
   `protocol.capability_missing` for a node that did not offer it. Same agent id, same folder, same project, same kind. Without
@@ -425,6 +433,11 @@ All additions; nothing published changed.
   local id in the `path` field, kind and project empty, `option` the `new_session` flag, `identity_change` `0`); a hub cannot resume
   anything by itself. The local owner-only socket needs no signature. Viewers cannot send it, and the hub audits it like every routed
   command (action `AgentResume`).
+- **Session ids.** Adapter and ACP agents report theirs (`session/reported`). A terminal agent's comes from its manifest's `[session]`
+  (`docs/specs/agent-manifest.md`): an id the node chooses and passes at the first launch (Claude Code), or one read from the first line
+  of the session file the agent writes (Codex), only when that cannot be confused with another agent's. Without either, a terminal
+  agent is offered Start again only. A resumed helper keeps its parent (stopped with it, listed under it) but may not ask to start
+  helpers and none of its parent's grants cover it until a new decision is signed.
 - **Automatic resume.** The node's own `<data>/policy` may say `resume = auto` with `resume.kinds = a, b` and `resume.folders = /x,
   /y`: after a start, interrupted agents of a listed kind in a listed folder (or below it) that can resume their own session are
   resumed without anyone asking (a helper only after its parent was). The default is `resume = ask`; any other value is `ask`. The

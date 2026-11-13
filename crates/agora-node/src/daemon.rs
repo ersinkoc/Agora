@@ -612,6 +612,31 @@ impl EventSink {
         }));
     }
 
+    /// The agent's own session id (ADR-0060: chosen by the node at its first launch, or read from its session file).
+    pub fn session_reported(&self, agent: &AgentId, session: &str) {
+        self.record(Body::AgentSessionReported(v1::AgentSessionReported {
+            agent_id: agent.as_str().to_string(),
+            session_id: session.to_string(),
+        }));
+    }
+
+    /// ADR-0060: an agent the ledger holds as interrupted (it ran when the node last stopped). `resumable`: the node has its own session
+    /// id and its kind can continue one.
+    pub fn agent_interrupted(&self, e: &crate::ledger::Entry, resumable: bool) {
+        self.record(Body::AgentInterrupted(v1::AgentInterrupted {
+            agent_id: e.agent_id.clone(),
+            kind: e.kind.clone(),
+            project_id: e.project_id.clone(),
+            folder: e.folder.clone(),
+            parent_agent_id: e.parent_agent_id.clone(),
+            resumable,
+            started_at_ms: e.started_at_ms,
+            interrupted_at_ms: e.interrupted_at_ms,
+            last_state: crate::ledger::proto_state(&e.last_state) as i32,
+            still_running: e.still_running(),
+        }));
+    }
+
     /// The node refused an agent's `agent_start` before asking anyone (ADR-0057).
     pub fn agent_start_refused(&self, agent: &AgentId, kind: &str, folder: &str, code: &str) {
         self.record(Body::AgentStartRefused(v1::AgentStartRefused {
@@ -908,6 +933,32 @@ pub struct Policy {
     /// Lines of an existing policy file the node did not understand (`unreadable` when the file could not be read). Any of them sets
     /// `skip_permissions` to `forbid`: a typo (`skip_permission = forbid`) must never leave the default `allow` in place.
     pub problems: Vec<String>,
+    /// What happens to interrupted agents after the node starts (`resume`, `resume.kinds`, `resume.folders`; ADR-0060).
+    pub resume: ResumePolicy,
+}
+
+/// ADR-0060: `resume = ask | auto`. `ask` (the default, and any other value) offers Resume in the window and does nothing by itself;
+/// `auto` resumes, as the node starts, the interrupted agents that can continue their own session, of a kind in `resume.kinds`, in a
+/// folder at or below one in `resume.folders`. Both lists must name something: `auto` with an empty list resumes nothing.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ResumePolicy {
+    pub auto: bool,
+    pub kinds: Vec<String>,
+    pub folders: Vec<PathBuf>,
+}
+
+impl ResumePolicy {
+    /// Whether `auto` covers an agent of `kind` in `folder`.
+    pub fn covers(&self, kind: &str, folder: &Path) -> bool {
+        let folder =
+            agora_platform::canonicalize_plain(folder).unwrap_or_else(|_| folder.to_path_buf());
+        self.auto
+            && self.kinds.iter().any(|k| k == kind)
+            && self.folders.iter().any(|f| {
+                let listed = agora_platform::canonicalize_plain(f).unwrap_or_else(|_| f.clone());
+                folder.starts_with(&listed)
+            })
+    }
 }
 
 impl Default for Policy {
@@ -917,6 +968,7 @@ impl Default for Policy {
             signed_commands: crate::grants::SignedCommands::default(),
             sandbox: crate::sandbox::SandboxPolicy::default(),
             device_projects: std::collections::BTreeMap::new(),
+            resume: ResumePolicy::default(),
             skip_permissions: crate::launch_options::SkipPermissions::default(),
             problems: Vec::new(),
         }
@@ -1002,6 +1054,16 @@ pub fn read_policy(path: &std::path::Path) -> Policy {
                         );
                     }
                 }
+                "resume" => p.resume.auto = v.trim() == "auto",
+                "resume.kinds" => {
+                    p.resume.kinds = v
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string)
+                        .collect();
+                }
+                "resume.folders" => p.resume.folders = paths(v),
                 "sandbox" => p.sandbox.level = crate::sandbox::Level::parse(v),
                 "skip_permissions" => {
                     // `"forbid"` as the ADR writes it means the same as `forbid`.
@@ -1092,6 +1154,8 @@ pub struct Node {
     pub events_set_aside: Option<SetAside>,
     /// ADR-0060: the session ledger.
     pub ledger: Arc<crate::ledger::Ledger>,
+    /// See [`Node::crash`].
+    crashed: bool,
 }
 
 impl Node {
@@ -1155,6 +1219,10 @@ impl Node {
         events.node_online(&cfg.node_id);
         for p in &projects {
             events.checkout_discovered(&cfg.node_id, &p.id, &p.root);
+        }
+        // ADR-0060: what was running when the node last stopped, offered again (Resume, or Start again in the same folder).
+        for e in ledger.interrupted() {
+            events.agent_interrupted(&e, !e.session_id.is_empty() && sup.resumable(&e.kind));
         }
         let known_checkouts: Vec<(String, PathBuf)> = projects
             .iter()
@@ -1235,14 +1303,27 @@ impl Node {
             // What this node says when the hub's record of it cannot be continued (ADR-0054, ADR-0055): who it is (only when the hub
             // lost this process's start), its checkouts, and its present. Each lock is taken alone and released before the next, and
             // before anything is recorded (see `announce`).
-            let (node, sup, approvals) = (
+            let (node, sup, approvals, ledger) = (
                 cfg.node_id.clone(),
                 Arc::clone(&supervisor),
                 Arc::clone(&approvals),
+                Arc::clone(&ledger),
             );
             events.set_announcer(Box::new(move |ev, how| {
                 let views = sup.lock().unwrap_or_else(|e| e.into_inner()).list();
                 let waiting = approvals.waiting();
+                // ADR-0060: the agents still offered to resume, said again after the others.
+                let interrupted: Vec<(crate::ledger::Entry, bool)> = {
+                    let found = ledger.interrupted();
+                    let s = sup.lock().unwrap_or_else(|e| e.into_inner());
+                    found
+                        .into_iter()
+                        .map(|e| {
+                            let resumable = !e.session_id.is_empty() && s.resumable(&e.kind);
+                            (e, resumable)
+                        })
+                        .collect()
+                };
                 if how == Announce::Restart {
                     ev.node_online(&node);
                 }
@@ -1250,6 +1331,9 @@ impl Node {
                     ev.checkout_discovered(&node, id, root);
                 }
                 ev.announce_present(&views, &waiting, how);
+                for (e, resumable) in &interrupted {
+                    ev.agent_interrupted(e, *resumable);
+                }
             }));
         }
         let chat = Arc::new(crate::chat::ChatBoard::new());
@@ -1280,8 +1364,20 @@ impl Node {
             )
             .with_manifests_dir(cfg.manifests_dir.clone())
             .with_git_wake(Arc::clone(&git_wake))
-            .with_spawner(Arc::clone(&spawner)),
+            .with_spawner(Arc::clone(&spawner))
+            .with_ledger(Arc::clone(&ledger)),
         );
+        // ADR-0060: `resume = auto` brings back, without anyone asking, the interrupted agents of the kinds and folders the owner listed
+        // that can continue their own session. In id order, so a helper comes after its parent (a helper whose parent did not come
+        // back stays offered). A refusal leaves the agent offered as before.
+        let resume = read_policy(&cfg.data_dir.join(POLICY_FILE)).resume;
+        if resume.auto {
+            for e in ledger.interrupted() {
+                if !e.session_id.is_empty() && resume.covers(&e.kind, Path::new(&e.folder)) {
+                    let _ = crate::control::resume_agent(&ctx, &e.agent_id, false);
+                }
+            }
+        }
         let server = ControlServer::start(&cfg.socket, ctx)?;
 
         let stop = Arc::new(AtomicBool::new(false));
@@ -1296,6 +1392,7 @@ impl Node {
                 Arc::clone(&chat),
                 Arc::clone(&spawner),
             );
+            let ledger_tick = Arc::clone(&ledger);
             std::thread::Builder::new()
                 .name("agora-supervise".into())
                 .spawn(move || {
@@ -1303,8 +1400,11 @@ impl Node {
                     let mut reported_memory = 0u64;
                     let mut memory_checked = Instant::now();
                     let mut usage = crate::usage_files::UsageWatcher::default();
+                    let mut sessions = crate::session_files::SessionWatcher::default();
+                    // ADR-0060: the process each agent runs as, as last written to the ledger.
+                    let mut processes: std::collections::HashMap<AgentId, u32> = Default::default();
                     while !stop.load(Ordering::Acquire) {
-                        let (events, views, usage_targets, ended) = {
+                        let (events, views, usage_targets, ended, session_targets, pids) = {
                             let mut s = sup.lock().unwrap_or_else(|e| e.into_inner());
                             let events = s.tick(Instant::now());
                             (
@@ -1312,8 +1412,44 @@ impl Node {
                                 s.list(),
                                 s.usage_targets(),
                                 s.take_ended_usage_targets(),
+                                s.session_file_targets(),
+                                s.agent_pids(),
                             )
                         };
+                        // ADR-0060: a new process (a start, a restart, a resume) is written to the ledger with its start time, so one
+                        // that outlives a crashed node is recognised at the next start. Read only when the pid changed.
+                        for (agent, pid) in &pids {
+                            if processes.get(agent) != Some(pid) {
+                                // A read that failed (a process just starting) is tried again on the next tick.
+                                if let Ok(identity) = agora_platform::process_identity(*pid) {
+                                    processes.insert(agent.clone(), *pid);
+                                    ledger_tick.set_process(
+                                        agent.as_str(),
+                                        Some(identity),
+                                        now_ms(),
+                                    );
+                                }
+                            }
+                        }
+                        processes.retain(|a, _| pids.iter().any(|(p, _)| p == a));
+                        // ADR-0060: the session ids terminal agents write to their own files (`[session.file]`), read outside the lock.
+                        if !session_targets.is_empty() {
+                            let known = sup
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .known_sessions();
+                            for (agent, id) in
+                                sessions.poll(Instant::now(), &session_targets, &known)
+                            {
+                                let set = sup
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .report_session(&agent, &id);
+                                if set.is_ok() {
+                                    ev.session_reported(&agent, &id);
+                                }
+                            }
+                        }
                         // Usage that terminal agents wrote to their own files (ADR-0042); the files are read outside the lock.
                         let mut used = usage.finish(Instant::now(), &ended);
                         used.extend(usage.poll(Instant::now(), &usage_targets));
@@ -1460,7 +1596,15 @@ impl Node {
             policy_problems: read_policy(&cfg.data_dir.join(POLICY_FILE)).problems,
             events_set_aside,
             ledger,
+            crashed: false,
         })
+    }
+
+    /// What a node killed without warning (`kill -9`) leaves behind, for tests (ADR-0060): it stops serving and supervising and
+    /// records nothing more, and its agents' processes are not stopped (on Unix a terminal agent leads its own process group and
+    /// outlives the node that way). They are left running for good.
+    pub fn crash(mut self) {
+        self.crashed = true;
     }
 
     pub fn socket(&self) -> Option<&Path> {
@@ -1570,9 +1714,18 @@ impl Drop for Node {
         if let Some(t) = self.git_watch.take() {
             let _ = t.join();
         }
+        if self.crashed {
+            // Nothing is said and nothing is stopped: the supervisor, which owns the agents' processes, is never dropped.
+            std::mem::forget(Arc::clone(&self.supervisor));
+            return;
+        }
         self.events.node_offline(&self.node_id);
-        // The agents' last states. They die with the node's supervisor (terminal handles kill their process groups on drop) without
-        // an end in the ledger: at the next start they are interrupted (ADR-0060).
+        // The agents end with the node, now (other parts of the node may still hold the supervisor, so its own drop is not relied on).
+        self.supervisor
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .shutdown();
+        // The agents' last states. They ended without an end in the ledger: at the next start they are interrupted (ADR-0060).
         let _ = self.ledger.flush();
     }
 }

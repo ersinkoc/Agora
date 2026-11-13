@@ -360,6 +360,8 @@ impl Router {
         let switch = match request.command {
             Some(command_request::Command::AgentSetMode(_)) => Some("agent.set_mode"),
             Some(command_request::Command::AgentSetModel(_)) => Some("agent.set_model"),
+            // ADR-0060: a node that cannot resume agents is never sent the command.
+            Some(command_request::Command::AgentResume(_)) => Some("agent.resume"),
             _ => None,
         };
         if let Some(cap) = switch.filter(|cap| !link.capabilities.iter().any(|c| c == cap)) {
@@ -451,6 +453,25 @@ mod tests {
             Err(e) if e.code == ErrorCode::ProtocolCapabilityMissing
         ));
         assert!(old_rx.try_recv().is_err());
+        assert!(r.send("new", request).is_ok());
+        assert!(matches!(new_rx.try_recv(), Ok(ToNode::Command { .. })));
+    }
+
+    #[test]
+    fn a_resume_goes_only_to_a_node_that_offers_it() {
+        let r = Router::new();
+        let (_old, mut old_rx) = r.register("old");
+        let (_new, mut new_rx) = r.register_with_capabilities("new", vec!["agent.resume".into()]);
+        let resume = Some(command_request::Command::AgentResume(
+            v1::AgentResume::default(),
+        ));
+        let mut request = req("old");
+        request.command = resume.clone();
+        let refused = r.send("old", request).err().unwrap();
+        assert_eq!(refused.code, ErrorCode::ProtocolCapabilityMissing);
+        assert!(old_rx.try_recv().is_err());
+        let mut request = req("new");
+        request.command = resume;
         assert!(r.send("new", request).is_ok());
         assert!(matches!(new_rx.try_recv(), Ok(ToNode::Command { .. })));
     }

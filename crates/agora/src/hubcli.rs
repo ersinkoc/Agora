@@ -34,6 +34,8 @@ const HUB_CAPABILITIES: &[&str] = &[
     // ADR-0058
     "agent.set_mode",
     "agent.set_model",
+    // ADR-0060
+    "agent.resume",
     // ADR-0059
     "agent.launch_options",
 ];

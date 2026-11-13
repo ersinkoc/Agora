@@ -34,6 +34,8 @@ const MAX_FIELD: usize = 4096;
 /// Folders remembered between `WorkspaceRegistered` and the `AgentStarted` that uses them.
 const MAX_WORKSPACES: usize = 1024;
 const VERSION: u64 = 1;
+/// Session ids held for agents whose start is not recorded yet.
+const MAX_EARLY: usize = 64;
 
 /// One agent in the ledger.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -63,6 +65,14 @@ pub struct Entry {
     pub ended: bool,
     /// When the node found it interrupted; 0 while it runs or after it ended.
     pub interrupted_at_ms: u64,
+    /// The agent's top process (its terminal's program, or its adapter) while it runs: pid, process group and start time
+    /// (`agora_platform::ProcessIdentity`), so that one that outlived a crashed node is recognised, and a reused pid is not. 0: none.
+    pub pid: u32,
+    pub process_group: u32,
+    pub process_started: u64,
+    /// The boot it started in (Linux) and its program's name: a process is the recorded one only when both match too.
+    pub process_boot: String,
+    pub process_name: String,
 }
 
 #[derive(Debug, Clone)]
@@ -79,6 +89,9 @@ struct State {
     entries: BTreeMap<String, Entry>,
     workspaces: BTreeMap<String, Workspace>,
     bound: BTreeMap<String, String>,
+    /// Session ids reported before their agent's `AgentStarted` was recorded (an adapter reports its session while it starts, and the
+    /// node's tick can record that before the start is recorded): applied when the start comes.
+    early_sessions: BTreeMap<String, String>,
     /// Something changed that is not on disk yet.
     dirty: bool,
 }
@@ -88,6 +101,9 @@ pub struct Ledger {
     /// `None`: kept in memory only (tests, a node without a data folder).
     path: Option<PathBuf>,
     state: Mutex<State>,
+    /// Held through a whole write (snapshot, temporary file, rename): two writers never share the temporary file, and the newer
+    /// snapshot is always the one left on disk. Taken before `state`, never after it.
+    write: Mutex<()>,
 }
 
 fn field(v: &Value, k: &str) -> String {
@@ -133,6 +149,11 @@ impl Entry {
             "last_state": self.last_state,
             "ended": self.ended,
             "interrupted_at_ms": self.interrupted_at_ms,
+            "pid": self.pid,
+            "process_group": self.process_group,
+            "process_started": self.process_started,
+            "process_boot": self.process_boot,
+            "process_name": self.process_name,
         })
     }
 
@@ -147,7 +168,11 @@ impl Entry {
             git_root: field(v, "git_root"),
             branch: field(v, "branch"),
             parent_agent_id: field(v, "parent_agent_id"),
-            session_id: field(v, "session_id"),
+            // A file someone else wrote must not put an option on the agent's command line: such an id is dropped and the agent
+            // is offered Start again only.
+            session_id: Some(field(v, "session_id"))
+                .filter(|s| crate::session_files::argv_safe(s))
+                .unwrap_or_default(),
             launch_options: v
                 .get("launch_options")
                 .and_then(Value::as_array)
@@ -165,6 +190,11 @@ impl Entry {
             last_state: field(v, "last_state"),
             ended: flag(v, "ended"),
             interrupted_at_ms: number(v, "interrupted_at_ms"),
+            pid: u32::try_from(number(v, "pid")).unwrap_or(0),
+            process_group: u32::try_from(number(v, "process_group")).unwrap_or(0),
+            process_started: number(v, "process_started"),
+            process_boot: field(v, "process_boot"),
+            process_name: field(v, "process_name"),
         };
         (!e.agent_id.is_empty() && !e.kind.is_empty()).then_some(e)
     }
@@ -178,6 +208,26 @@ impl Entry {
 
     pub fn interrupted(&self) -> bool {
         !self.ended && self.interrupted_at_ms != 0
+    }
+
+    /// The process it ran as, when one was recorded.
+    pub fn process(&self) -> Option<agora_platform::ProcessIdentity> {
+        (self.pid > 1 && self.process_started != 0).then(|| agora_platform::ProcessIdentity {
+            pid: self.pid,
+            group: self.process_group,
+            started: self.process_started,
+            boot: self.process_boot.clone(),
+            name: self.process_name.clone(),
+        })
+    }
+
+    /// ADR-0060: its process outlived the node that started it (a node killed with `kill -9`: terminal agents lead their own
+    /// process group and do not die with it) and still runs: the same pid with the same start time.
+    pub fn still_running(&self) -> bool {
+        self.interrupted()
+            && self
+                .process()
+                .is_some_and(|p| agora_platform::process_still_running(&p))
     }
 }
 
@@ -216,6 +266,7 @@ impl Ledger {
                 next_id: 1,
                 ..State::default()
             }),
+            write: Mutex::new(()),
         }
     }
 
@@ -255,6 +306,9 @@ impl Ledger {
                         let mut aside = path.as_os_str().to_owned();
                         aside.push(format!(".unreadable-{now_ms}"));
                         std::fs::rename(&path, PathBuf::from(aside))?;
+                        // The ids it gave are not known any more: start above any id a node could have given until now (one a
+                        // second at most), so no agent id is given twice.
+                        state.next_id = now_ms / 1000;
                     }
                 }
             }
@@ -274,6 +328,7 @@ impl Ledger {
         let ledger = Self {
             path: Some(path),
             state: Mutex::new(state),
+            write: Mutex::new(()),
         };
         ledger.flush()?;
         Ok(ledger)
@@ -312,6 +367,51 @@ impl Ledger {
         v
     }
 
+    /// The process an agent runs as now (`None`: it has none any more). Written when it changed.
+    pub fn set_process(
+        &self,
+        agent_id: &str,
+        p: Option<agora_platform::ProcessIdentity>,
+        now_ms: u64,
+    ) {
+        let mut st = self.st();
+        let Some(e) = st.entries.get_mut(agent_id) else {
+            return;
+        };
+        let (pid, group, started, boot, name) =
+            p.map_or((0, 0, 0, String::new(), String::new()), |p| {
+                (
+                    p.pid,
+                    p.group,
+                    p.started,
+                    bounded(&p.boot),
+                    bounded(&p.name),
+                )
+            });
+        let now = (pid, group, started, boot, name);
+        let was = (
+            e.pid,
+            e.process_group,
+            e.process_started,
+            e.process_boot.clone(),
+            e.process_name.clone(),
+        );
+        if was == now {
+            return;
+        }
+        (
+            e.pid,
+            e.process_group,
+            e.process_started,
+            e.process_boot,
+            e.process_name,
+        ) = now;
+        e.updated_at_ms = now_ms;
+        st.dirty = true;
+        drop(st);
+        let _ = self.flush();
+    }
+
     /// Start again (ADR-0060): the agent's next run is a new session, so the old session id is no longer its own.
     pub fn forget_session(&self, agent_id: &str, now_ms: u64) {
         let mut st = self.st();
@@ -344,6 +444,7 @@ impl Ledger {
 
     /// Writes what changed since the last write, if anything (the node calls it when it stops cleanly).
     pub fn flush(&self) -> io::Result<()> {
+        let _writing = self.write.lock().unwrap_or_else(|e| e.into_inner());
         let Some(path) = &self.path else {
             self.st().dirty = false;
             return Ok(());
@@ -448,6 +549,9 @@ fn apply(st: &mut State, body: &Body, now: u64) -> bool {
                 // A directory agent said again without its folder (a resync of an agent the node knows) keeps what it had.
                 None => {}
             }
+            if let Some(session) = st.early_sessions.remove(&a.agent_id) {
+                e.session_id = session;
+            }
             // Running again (a restart after a crash, a resume): neither ended nor interrupted.
             e.ended = false;
             e.interrupted_at_ms = 0;
@@ -459,8 +563,22 @@ fn apply(st: &mut State, body: &Body, now: u64) -> bool {
             changed
         }
         Body::AgentSessionReported(r) => match st.entries.get_mut(&r.agent_id) {
-            Some(e) if e.session_id != r.session_id && r.session_id.len() <= MAX_FIELD => {
-                e.session_id = bounded(&r.session_id);
+            None if crate::session_files::argv_safe(&r.session_id)
+                && (st.early_sessions.len() < MAX_EARLY
+                    || st.early_sessions.contains_key(&r.agent_id)) =>
+            {
+                st.early_sessions
+                    .insert(r.agent_id.clone(), r.session_id.clone());
+                false
+            }
+            Some(e) if e.session_id != r.session_id => {
+                // Only an id that may go on a command line is kept for a resume after a restart (an adapter's own id may be any
+                // string in its JSON, but such an agent is then offered Start again only).
+                e.session_id = if crate::session_files::argv_safe(&r.session_id) {
+                    r.session_id.clone()
+                } else {
+                    String::new()
+                };
                 e.updated_at_ms = now;
                 st.dirty = true;
                 true
@@ -481,6 +599,9 @@ fn apply(st: &mut State, body: &Body, now: u64) -> bool {
             Some(e) if !e.ended => {
                 e.ended = true;
                 e.interrupted_at_ms = 0;
+                (e.pid, e.process_group, e.process_started) = (0, 0, 0);
+                e.process_boot.clear();
+                e.process_name.clear();
                 e.updated_at_ms = now;
                 st.dirty = true;
                 true
@@ -677,15 +798,109 @@ mod tests {
     }
 
     #[test]
+    fn a_session_id_that_could_be_an_option_never_survives_into_the_ledger() {
+        let long = "a".repeat(129);
+        let bad = [
+            "--dangerously-bypass-approvals-and-sandbox",
+            "-x",
+            "a b",
+            "a;b",
+            "ünï",
+            "",
+            long.as_str(),
+        ];
+        // Reported at run time (a hook, an adapter): not kept.
+        let l = Ledger::in_memory();
+        l.observe(&started("agent-1", "/wt/a", ""), 1);
+        for id in bad {
+            l.observe(
+                &Body::AgentSessionReported(v1::AgentSessionReported {
+                    agent_id: "agent-1".into(),
+                    session_id: id.into(),
+                }),
+                2,
+            );
+            assert!(l.get("agent-1").unwrap().session_id.is_empty(), "{id:?}");
+        }
+        // Written into the file by someone else: dropped when it is read; the agent is offered Start again.
+        let dir = temp("planted");
+        std::fs::create_dir_all(dir.join(LEDGER_DIR)).unwrap();
+        let entries: Vec<Value> = bad
+            .iter()
+            .enumerate()
+            .map(|(i, id)| json!({"agent_id": format!("agent-{}", i + 1), "kind": "codex", "session_id": id, "started_at_ms": 1}))
+            .chain([json!({"agent_id": "agent-9", "kind": "codex", "session_id": "0199aaaa-0000-4000-8000-000000000001", "started_at_ms": 1})])
+            .collect();
+        std::fs::write(
+            dir.join(LEDGER_DIR).join(LEDGER_FILE),
+            serde_json::to_vec(&json!({"version": 1, "next_id": 10, "entries": entries})).unwrap(),
+        )
+        .unwrap();
+        let l = Ledger::open(&dir, 5).unwrap();
+        let found = l.interrupted();
+        assert_eq!(found.len(), bad.len() + 1);
+        for e in &found {
+            let ok = e.agent_id == "agent-9";
+            assert_eq!(e.session_id.is_empty(), !ok, "{e:?}");
+        }
+    }
+
+    #[test]
+    fn concurrent_writes_leave_a_whole_ledger_with_every_agent() {
+        let dir = temp("race");
+        let l = std::sync::Arc::new(Ledger::open(&dir, 1).unwrap());
+        let threads: Vec<_> = (0..8)
+            .map(|t| {
+                let l = std::sync::Arc::clone(&l);
+                std::thread::spawn(move || {
+                    for i in 0..10 {
+                        l.observe(
+                            &started(&format!("agent-{}", t * 100 + i + 1), "/wt/a", ""),
+                            2,
+                        );
+                        l.flush().unwrap();
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        let again = Ledger::open(&dir, 3).unwrap();
+        assert_eq!(again.interrupted().len(), 80);
+        let names: Vec<_> = std::fs::read_dir(dir.join(LEDGER_DIR))
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from(LEDGER_FILE)]);
+    }
+
+    #[test]
+    fn a_session_reported_before_its_start_is_recorded_is_kept() {
+        let l = Ledger::in_memory();
+        l.observe(
+            &Body::AgentSessionReported(v1::AgentSessionReported {
+                agent_id: "agent-1".into(),
+                session_id: "native-s-1".into(),
+            }),
+            1,
+        );
+        l.observe(&started("agent-1", "/wt/a", ""), 2);
+        assert_eq!(l.get("agent-1").unwrap().session_id, "native-s-1");
+    }
+
+    #[test]
     fn an_unreadable_ledger_is_set_aside_not_deleted() {
         let dir = temp("unreadable");
         std::fs::create_dir_all(dir.join(LEDGER_DIR)).unwrap();
         std::fs::write(dir.join(LEDGER_DIR).join(LEDGER_FILE), b"{not json").unwrap();
-        let l = Ledger::open(&dir, 77).unwrap();
+        let l = Ledger::open(&dir, 1_800_000_000_000).unwrap();
         assert!(l.interrupted().is_empty());
+        // Ids continue from a floor no earlier run can have reached, not from 1.
+        assert_eq!(l.next_id(), 1_800_000_000);
         assert!(dir
             .join(LEDGER_DIR)
-            .join(format!("{LEDGER_FILE}.unreadable-77"))
+            .join(format!("{LEDGER_FILE}.unreadable-1800000000000"))
             .exists());
     }
 

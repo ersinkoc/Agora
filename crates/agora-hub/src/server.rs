@@ -415,6 +415,7 @@ pub fn snapshot_of(view: &View, pos: u64) -> v1::Snapshot {
                     .as_ref()
                     .map(|i| i.folder.clone())
                     .unwrap_or_default(),
+                still_running: a.interrupted.as_ref().is_some_and(|i| i.still_running),
                 launch_options: a.launch_options.clone(),
                 skips_permissions: a.skips_permissions,
                 ..session_snapshot(&a.session)

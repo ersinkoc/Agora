@@ -41,6 +41,7 @@ or a local response timeout has a localized retry message.
 | `agent.session_missing` | `agent_id` | ADR-0060: Resume needs the agent's own session id and a kind that can resume one; the node has neither, so only Start again (`new_session`) is possible |
 | `agent.folder_changed` | `agent_id`, `path` | ADR-0060: the agent's folder is gone or now has another project identity (ADR-0052); nothing was started |
 | `agent.parent_not_running` | `agent_id`, `parent_agent_id` | ADR-0060: a helper (ADR-0057) is resumed only while the agent that started it runs |
+| `agent.still_running` | `agent_id` | ADR-0060: the agent's process from before the node's restart still runs (a node killed without stopping its agents); stop it first (`agent.stop` ends exactly that process), then resume |
 | `approval.expired` | `approval_id` | |
 | `approval.signature_invalid` | `approval_id` | |
 | `approval.grant_required` | `command` | ADR-0041: the node's `signed_commands` policy lists this command and no live grant covers it |
