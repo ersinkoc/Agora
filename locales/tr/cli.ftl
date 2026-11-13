@@ -22,10 +22,10 @@ cli-usage =
       agora hub backup [DOSYA] [--keep N] [--hub-dir DİZİN]
       agora hub restore DOSYA [--hub-dir DİZİN]
       agora hub devices [forget CİHAZ_ID] [--hub-dir DİZİN]
-      agora node enroll --hub URL --ca FILE --code CODE --id NAME [--yes --fingerprint PARMAK_İZİ]...
+      agora node enroll --hub URL --ca FILE --code CODE --id NAME [--yes --fingerprint PARMAK_İZİ]... [--include-others] [--replace]
       agora panel
       agora node trust CİHAZ_ID AÇIK_ANAHTAR_HEX [--data DİZİN]
-      agora node trust --from-hub [--yes --fingerprint PARMAK_İZİ]... [--data DİZİN]
+      agora node trust --from-hub [--yes --fingerprint PARMAK_İZİ]... [--include-others] [--replace] [--data DİZİN]
       agora node untrust CİHAZ_ID [--data DİZİN]
       agora tui [--hub ADRES:PORT --ca DOSYA --code KOD] [--hub-dir DİZİN]
       agora update [--check] [--version X] [--release-url URL] [--release-key DOSYA] [--unsigned]
@@ -88,8 +88,14 @@ cli-devices-offer = Hub, bu makinenin henüz güvenmediği { $count ->
         [one] bir cihaz
        *[other] { $count } cihaz
     } listeliyor. Her parmak izini, pencerede "Bu cihaz" altında gösterilenle karşılaştırın:
-cli-devices-line =   { $name } · { $fingerprint } · kayıt { $when }
-cli-devices-line-user =   { $name } · { $fingerprint } · kayıt { $when } · { $user }
+cli-devices-line =   { $name } ({ $id }) · kayıt { $when }
+cli-devices-line-user =   { $name } ({ $id }) · { $user } kişisinin · kayıt { $when }
+cli-devices-fingerprint =     parmak izi { $fingerprint }
+cli-devices-replaces =     Bu makine { $id } cihazına başka bir anahtarla zaten güveniyor: buna güvenmek onu değiştirir (yalnızca --replace ile).
+cli-devices-unproven = Hub { $id } cihazını kendi imzası olmadan (anahtarın elde tutulduğunun kanıtı) listeliyor; önerilmiyor.
+cli-devices-others = Bu hub'daki başka kişilerin cihazları ({ $count }); yalnızca --include-others ve parmak izleriyle güvenilir:
+cli-devices-others-need-flag = Hiçbir cihaza güvenilmedi: bu cihazlar hub sahibinin değil. Birine güvenmek için --yes --include-others --fingerprint PARMAK_İZİ verin.
+cli-devices-replace-refused = Güvenilmedi: { $id } cihazına burada başka bir anahtarla zaten güveniliyor. Değiştirmek için --replace verin.
 cli-devices-question = Bu cihazlara bu makinede güvenilsin mi? [e/H]
 cli-devices-yes = e, evet, y, yes
 cli-devices-trusted = { $name } ({ $id }, { $fingerprint }) bu makinede güvenilir oldu.

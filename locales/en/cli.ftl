@@ -22,10 +22,10 @@ cli-usage =
       agora hub backup [FILE] [--keep N] [--hub-dir DIR]
       agora hub restore FILE [--hub-dir DIR]
       agora hub devices [forget DEVICE_ID] [--hub-dir DIR]
-      agora node enroll --hub URL --ca FILE --code CODE --id NAME [--yes --fingerprint FP]...
+      agora node enroll --hub URL --ca FILE --code CODE --id NAME [--yes --fingerprint FP]... [--include-others] [--replace]
       agora panel
       agora node trust DEVICE_ID PUBLIC_KEY_HEX [--data DIR]
-      agora node trust --from-hub [--yes --fingerprint FP]... [--data DIR]
+      agora node trust --from-hub [--yes --fingerprint FP]... [--include-others] [--replace] [--data DIR]
       agora node untrust DEVICE_ID [--data DIR]
       agora tui [--hub HOST:PORT --ca FILE --code CODE] [--hub-dir DIR]
       agora update [--check] [--version X] [--release-url URL] [--release-key FILE] [--unsigned]
@@ -88,8 +88,14 @@ cli-devices-offer = The hub lists { $count ->
         [one] a device
        *[other] { $count } devices
     } this machine does not trust yet. Compare each fingerprint with the one the window shows under "This device":
-cli-devices-line =   { $name } · { $fingerprint } · registered { $when }
-cli-devices-line-user =   { $name } · { $fingerprint } · registered { $when } · { $user }
+cli-devices-line =   { $name } ({ $id }) · registered { $when }
+cli-devices-line-user =   { $name } ({ $id }) · of { $user } · registered { $when }
+cli-devices-fingerprint =     fingerprint { $fingerprint }
+cli-devices-replaces =     This machine already trusts { $id } with another key: trusting this one replaces it (only with --replace).
+cli-devices-unproven = The hub lists { $id } without its own signature (proof that its key is held); it is not offered.
+cli-devices-others = Devices of other people on this hub ({ $count }), trusted only with --include-others and their fingerprints:
+cli-devices-others-need-flag = Nothing was trusted: these devices are not the hub owner's. To trust one, pass --yes --include-others --fingerprint FP.
+cli-devices-replace-refused = Not trusted: { $id } is already trusted here with another key. Pass --replace to replace it.
 cli-devices-question = Trust these devices on this machine? [y/N]
 cli-devices-yes = y, yes
 cli-devices-trusted = Trusted { $name } ({ $id }, { $fingerprint }) on this machine.

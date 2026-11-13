@@ -335,10 +335,14 @@ impl P256Verifier {
     pub fn load(path: &std::path::Path) -> (Self, usize) {
         let mut v = Self::new();
         let (entries, skipped) = crate::device_trust::read_entries(path);
-        for e in entries {
+        for e in &entries {
+            // An endorsed device lasts no longer than its endorsers up the chain; a broken chain trusts nothing.
+            let Some(end) = crate::device_trust::effective_expiry(&entries, e) else {
+                continue;
+            };
             if v.trust(&e.id, &e.key) {
-                if let Some(at) = e.expires_ms {
-                    v.expires.insert(e.id, at);
+                if let Some(at) = end {
+                    v.expires.insert(e.id.clone(), at);
                 }
             }
         }

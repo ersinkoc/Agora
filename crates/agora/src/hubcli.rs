@@ -1086,7 +1086,7 @@ pub fn node_enroll(say: &Say, o: &Opts) -> ExitCode {
         return ExitCode::from(2);
     };
     // ADR-0061: `--yes` covers exactly the devices whose fingerprints are given; checked before anything is enrolled.
-    if o.yes != !o.fingerprints.is_empty() {
+    if o.yes != !o.fingerprints.is_empty() || (o.include_others && !o.yes) {
         say.err(key!("cli-bad-arguments"), &[]);
         say.err(key!("cli-usage"), &[]);
         return ExitCode::from(2);

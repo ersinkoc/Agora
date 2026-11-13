@@ -20,7 +20,14 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
   not expired: it lasts at most 90 days, is renewed each time the device is used there, and never outlasts the device that approved
   it. A removal signed by a trusted device takes effect at once and an older approval cannot bring the device back. Each one the
   machine applies or refuses is written to `<data>/device-trust.log`. The trusted-devices file keeps its format (owner-only, one
-  device per line; an approved device's line adds `expires=` and `via=`).
+  device per line; lines add `since=`, and an approved device's line `expires=` and `via=`).
+- What the machine shows before you say yes cannot be faked by the hub: names are shown without control, escape, bidi or hidden
+  characters and cut at 40 characters, and each device's fingerprint (now 96 bits, `f947-3cb5-e304-81be-ecf2-64cd`) is computed on
+  the machine and printed on its own line; `--fingerprint` takes the whole fingerprint. Only devices registered with their own
+  signature are offered, only the hub owner's by default (other people's need `--include-others` and their fingerprints), and a
+  device whose id the machine already trusts with another key needs `--replace`. Removing a device also removes the devices it
+  approved; approvals are at most two deep and never outlast the approving device; a removal the hub sends again never undoes a
+  newer approval or `agora node trust`; changes to the trusted-devices file wait for each other across processes.
 
 ## 0.3.7
 
