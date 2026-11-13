@@ -600,7 +600,9 @@ fn git(dir: &Path, args: &[&str]) {
 
 /// LAN L10: a confined agent commits in its worktree when the checkout lives under the user profile (here `%TEMP%`), with the
 /// node's narrow Windows profile: the worktree, a private temp folder, its own admin folder, the shared `objects/`, `refs/` and
-/// `logs/refs/` to write, and the shared Git folder to read (`agora-node/src/sandbox.rs`, `narrow_profile`).
+/// `logs/refs/` to write, and the shared Git folder to read (`agora-node/src/sandbox.rs`, `narrow_profile`). The profile is written
+/// out here because this crate cannot depend on `agora-node`; the same commit without `refs/` must be refused, so the test is not
+/// passing only because nothing is confined.
 #[test]
 fn a_confined_agent_commits_in_its_worktree_under_the_profile() {
     enable();
@@ -625,23 +627,36 @@ fn a_confined_agent_commits_in_its_worktree_under_the_profile() {
          git -c user.name=agent -c user.email=agent@x commit -q -m work && echo COMMIT-OK|| echo COMMIT-FAILED\r\n",
     )
     .unwrap();
-    let out = run(
+    let profile = |with_refs: bool| {
+        let mut write = vec![
+            wt.clone(),
+            temp.clone(),
+            common.join("worktrees").join("wt"),
+            common.join("objects"),
+            common.join("logs").join("refs"),
+        ];
+        if with_refs {
+            write.push(common.join("refs"));
+        }
         Sandbox {
             read: vec![common.clone()],
-            write: vec![
-                wt.clone(),
-                temp,
-                common.join("worktrees").join("wt"),
-                common.join("objects"),
-                common.join("refs"),
-                common.join("logs").join("refs"),
-            ],
+            write,
             ..Default::default()
-        },
-        &wt,
-        &script,
+        }
+    };
+    let branch = common.join("refs").join("heads").join("agent").join("one");
+    let before = std::fs::read_to_string(&branch).unwrap();
+    // Without `refs/` the branch cannot move: the confinement is what decides.
+    let out = run(profile(false), &wt, &script);
+    assert!(
+        out.contains("ADD-OK") && out.contains("COMMIT-FAILED"),
+        "{out}"
     );
+    assert_eq!(std::fs::read_to_string(&branch).unwrap(), before);
+    // With the node's profile the same commit goes through.
+    let out = run(profile(true), &wt, &script);
     assert!(out.contains("ADD-OK"), "{out}");
     assert!(out.contains("COMMIT-OK"), "{out}");
+    assert_ne!(std::fs::read_to_string(&branch).unwrap(), before);
     let _ = std::fs::remove_dir_all(&root);
 }
