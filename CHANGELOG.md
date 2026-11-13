@@ -4,6 +4,10 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+### Signing in
+- A screen password (ADR-0067): `agora password set|clear|status` on the hub's machine, or This device in the window. A sign-in from another machine then needs its code and the password; the browser on the hub's own machine is never asked, and a passkey replaces the password on its device. Wrong codes and passwords are limited per address and for the whole hub with a lockout that grows up to an hour (never more than a minute on the hub's own machine), and every attempt is in the Activity page with its address and browser. Setting or changing the password signs out every other window.
+- **Lock** in the title bar signs the window out; agents keep running. This device can also lock the window after 5 to 60 minutes idle (off by default); the screen password opens it again. See `docs/ux/screen-password.md`.
+
 ## 0.3.7
 
 ### Agents

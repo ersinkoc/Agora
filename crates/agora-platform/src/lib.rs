@@ -547,6 +547,18 @@ impl Drop for RawMode {
     }
 }
 
+/// Reads one line from the terminal on stdin without showing what is typed (a password), without its line ending. Fails with
+/// `Unsupported` when stdin is not a terminal: a secret is never read from a pipe or a file by accident.
+pub fn read_secret_line() -> io::Result<String> {
+    #[cfg(unix)]
+    let line = unix::read_secret_line();
+    #[cfg(windows)]
+    let line = windows::read_secret_line();
+    #[cfg(not(any(unix, windows)))]
+    let line: io::Result<String> = Err(unsupported_io("reading a password"));
+    line.map(|l| l.trim_end_matches(['\r', '\n']).to_string())
+}
+
 /// Size of the terminal on stdout as `(cols, rows)`, or `None` when stdout is not a terminal.
 pub fn terminal_size() -> Option<(u16, u16)> {
     #[cfg(unix)]

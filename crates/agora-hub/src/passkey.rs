@@ -459,6 +459,11 @@ mod tests {
         let hub = Arc::new(crate::hub::Hub::open(SqliteStore::open_in_memory().unwrap()).unwrap());
         let api = HubSessions::new(Arc::clone(&hub));
         let si = SignIn::new(hub.store(), Arc::new(crate::enroll::Lockout::new()));
+        // From another machine, with a screen password set: a passkey assertion stands in for the password (ADR-0067).
+        crate::password::ScreenPassword::with_iterations(hub.store(), 1_000)
+            .set("a long screen password")
+            .unwrap();
+        let away = crate::password::Client::new(Some([198, 51, 100, 7].into()), "");
         let now = crate::server::now_ms();
         let member = Users::new(hub.store())
             .add("Eda", Role::Member, now)
@@ -469,7 +474,13 @@ mod tests {
         let owner_tok = si.redeem(&si.create_code(now).unwrap(), now).unwrap();
         let b = |v: &[u8]| b64url_encode(v);
         let register_with = |tok: &str, id: &str, d: &Device| {
-            let (st, out) = api.passkey("register-begin", Some(tok), HOST, &serde_json::json!({}));
+            let (st, out) = api.passkey(
+                "register-begin",
+                Some(tok),
+                HOST,
+                &away,
+                &serde_json::json!({}),
+            );
             assert_eq!(st, 200);
             let ch = serde_json::from_str::<serde_json::Value>(&out).unwrap()["challenge"]
                 .as_str()
@@ -480,12 +491,13 @@ mod tests {
                 "register-finish",
                 Some(tok),
                 HOST,
+                &away,
                 &serde_json::json!({"id": id, "publicKey": b(&d.spki()), "clientDataJSON": b(&cd)}),
             );
             assert_eq!(st, 200);
         };
         let sign_in_with = |id: &str, d: &Device, count: u32| -> String {
-            let (_, out) = api.passkey("login-begin", None, HOST, &serde_json::json!({}));
+            let (_, out) = api.passkey("login-begin", None, HOST, &away, &serde_json::json!({}));
             let ch = serde_json::from_str::<serde_json::Value>(&out).unwrap()["challenge"]
                 .as_str()
                 .unwrap()
@@ -497,6 +509,7 @@ mod tests {
                 "login-finish",
                 None,
                 HOST,
+                &away,
                 &serde_json::json!({"id": id, "authenticatorData": b(&auth), "clientDataJSON": b(&cd), "signature": b(&sig)}),
             );
             assert_eq!(st, 200);
@@ -528,7 +541,7 @@ mod tests {
 
         // Removing the person removes their passkey with them.
         Users::new(hub.store()).remove(&member.id).unwrap();
-        let (_, out) = api.passkey("login-begin", None, HOST, &serde_json::json!({}));
+        let (_, out) = api.passkey("login-begin", None, HOST, &away, &serde_json::json!({}));
         assert!(!out.contains("cred-member"), "{out}");
     }
 }

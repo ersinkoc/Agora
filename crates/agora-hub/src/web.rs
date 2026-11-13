@@ -10,9 +10,41 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 
-/// What `POST /api/session` needs from the hub: trade a one-time sign-in code for a session token.
+pub use crate::password::Client;
+
+/// A sign-in: the one-time code, the screen password when the client gave one (ADR-0067), and who is asking.
+pub struct SignInRequest<'a> {
+    pub code: &'a str,
+    pub password: Option<&'a str>,
+    pub client: &'a Client,
+}
+
+/// What the sign-in routes need from the hub: `POST /api/session` trades a one-time code (and, from another machine, the screen
+/// password) for a session token; `GET /api/session` says whether the password is needed; `DELETE /api/session` signs out.
 pub trait SessionApi: Send + Sync {
-    fn sign_in(&self, code: &str) -> SignInReply;
+    fn sign_in(&self, req: &SignInRequest<'_>) -> SignInReply;
+
+    /// `GET /api/session`: what the sign-in screen needs to know before it asks (`passwordRequired`, `passwordSet`). Additive JSON.
+    fn info(&self, _client: &Client) -> serde_json::Value {
+        serde_json::json!({})
+    }
+
+    /// `DELETE /api/session`: ends the session `bearer` (sign out, "Lock"). Returns the status.
+    fn end(&self, _bearer: &str) -> u16 {
+        404
+    }
+
+    /// `POST /api/password` (`op` = `password`: set or change the screen password) and `POST /api/unlock` (`op` = `unlock`: open
+    /// a window that locked itself). Returns the status and the JSON body.
+    fn account(
+        &self,
+        _op: &str,
+        _bearer: Option<&str>,
+        _client: &Client,
+        _body: &serde_json::Value,
+    ) -> (u16, String) {
+        (404, String::new())
+    }
 
     /// `POST /api/passkey/<op>` (WebAuthn, ADR-0015): `bearer` is the session token of the request, `host` its `Host`
     /// header. Returns the status and the JSON body. Hubs without passkeys answer 404.
@@ -21,6 +53,7 @@ pub trait SessionApi: Send + Sync {
         _op: &str,
         _bearer: Option<&str>,
         _host: &str,
+        _client: &Client,
         _body: &serde_json::Value,
     ) -> (u16, String) {
         (404, String::new())
@@ -35,11 +68,16 @@ pub trait SessionApi: Send + Sync {
 
 pub enum SignInReply {
     Token(String),
-    /// A wrong, expired or used code.
+    /// A wrong, expired or used code, or a wrong or missing password: one answer on purpose.
     Refused,
-    /// Too many wrong guesses; try later.
+    /// Too many wrong tries from here (or from everywhere); try later.
     TooMany,
+    /// The hub could not do it (its store failed).
+    Failed,
 }
+
+/// How long a refused sign-in waits before it is answered: a fixed cost for every wrong guess, the same for each kind.
+pub const FAILURE_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// Largest body of the sign-in request.
 const MAX_BODY: usize = 8 * 1024;
@@ -243,6 +281,7 @@ pub enum First<S> {
 /// Reads the request head. A WebSocket upgrade is handed back untouched; other requests are answered here.
 pub async fn route<S>(
     mut stream: S,
+    peer: Option<std::net::IpAddr>,
     assets: Option<&dyn Assets>,
     sessions: Option<&dyn SessionApi>,
 ) -> io::Result<First<S>>
@@ -280,14 +319,45 @@ where
     let (method, target) = (parts.next().unwrap_or(""), parts.next().unwrap_or("/"));
     let path = target.split(['?', '#']).next().unwrap_or("/");
     let head_only = method == "HEAD";
-    let passkey_op = path.strip_prefix("/api/passkey/");
-    if method == "POST" && (path == "/api/session" || passkey_op.is_some()) {
-        let header = |name: &str| {
-            text.split("\r\n")
-                .filter_map(|l| l.split_once(':'))
-                .find(|(k, _)| k.trim().eq_ignore_ascii_case(name))
-                .map(|(_, v)| v.trim().to_string())
+    let header = |name: &str| {
+        text.split("\r\n")
+            .skip(1)
+            .filter_map(|l| l.split_once(':'))
+            .find(|(k, _)| k.trim().eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.trim().to_string())
+    };
+    let bearer = || {
+        header("authorization")
+            .and_then(|v| v.strip_prefix("Bearer ").map(|t| t.trim().to_string()))
+    };
+    let client = Client::new(peer, &header("user-agent").unwrap_or_default());
+    if path == "/api/session" && (method == "GET" || method == "DELETE") {
+        let (status, out) = match (sessions, method) {
+            (None, _) => (404, String::new()),
+            (Some(api), "GET") => (200, api.info(&client).to_string()),
+            (Some(api), _) => match bearer() {
+                Some(t) => (api.end(&t), "{}".to_string()),
+                None => (401, String::new()),
+            },
         };
+        respond(
+            &mut stream,
+            status,
+            "application/json",
+            out.as_bytes(),
+            false,
+        )
+        .await?;
+        return Ok(First::Answered);
+    }
+    let passkey_op = path.strip_prefix("/api/passkey/");
+    let account_op = match path {
+        "/api/password" => Some("password"),
+        "/api/unlock" => Some("unlock"),
+        _ => None,
+    };
+    if method == "POST" && (path == "/api/session" || passkey_op.is_some() || account_op.is_some())
+    {
         let length = header("content-length")
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(usize::MAX);
@@ -305,50 +375,60 @@ where
         }
         body.truncate(length);
         let json = serde_json::from_slice::<serde_json::Value>(&body).ok();
-        if let Some(op) = passkey_op {
-            let bearer = header("authorization")
-                .and_then(|v| v.strip_prefix("Bearer ").map(|t| t.trim().to_string()));
-            let host = header("host").unwrap_or_default();
-            let (status, out) = match (sessions, json) {
-                (Some(api), Some(j)) => api.passkey(op, bearer.as_deref(), &host, &j),
+        let (status, out) = if let Some(op) = passkey_op.or(account_op) {
+            match (sessions, json) {
+                (Some(api), Some(j)) if account_op.is_some() => {
+                    api.account(op, bearer().as_deref(), &client, &j)
+                }
+                (Some(api), Some(j)) => {
+                    let host = header("host").unwrap_or_default();
+                    api.passkey(op, bearer().as_deref(), &host, &client, &j)
+                }
                 (None, _) => (404, String::new()),
                 _ => (400, String::new()),
+            }
+        } else {
+            let field = |k: &str| {
+                json.as_ref()
+                    .and_then(|v| v.get(k))
+                    .and_then(|c| c.as_str())
             };
-            respond(
-                &mut stream,
-                status,
-                "application/json",
-                out.as_bytes(),
-                false,
-            )
-            .await?;
-            return Ok(First::Answered);
-        }
-        let code = json.and_then(|v| v.get("code").and_then(|c| c.as_str()).map(str::to_string));
-        match (sessions, code) {
-            (Some(api), Some(code)) => match api.sign_in(&code) {
-                SignInReply::Token(t) => {
-                    let json = serde_json::json!({ "token": t }).to_string();
-                    respond(&mut stream, 200, "application/json", json.as_bytes(), false).await?
+            match (sessions, field("code")) {
+                (Some(api), Some(code)) => {
+                    let req = SignInRequest {
+                        code,
+                        password: field("password"),
+                        client: &client,
+                    };
+                    match api.sign_in(&req) {
+                        SignInReply::Token(t) => {
+                            (200, serde_json::json!({ "token": t }).to_string())
+                        }
+                        SignInReply::Refused => (401, String::new()),
+                        SignInReply::TooMany => (429, String::new()),
+                        SignInReply::Failed => (500, String::new()),
+                    }
                 }
-                SignInReply::Refused => respond(&mut stream, 401, "text/plain", b"", false).await?,
-                SignInReply::TooMany => respond(&mut stream, 429, "text/plain", b"", false).await?,
-            },
-            (None, _) => respond(&mut stream, 404, "text/plain", b"", false).await?,
-            _ => respond(&mut stream, 400, "text/plain", b"", false).await?,
+                (None, _) => (404, String::new()),
+                _ => (400, String::new()),
+            }
+        };
+        // Every refusal costs the same short wait, whatever was wrong.
+        if status == 401 || status == 429 {
+            tokio::time::sleep(FAILURE_DELAY).await;
         }
+        respond(
+            &mut stream,
+            status,
+            "application/json",
+            out.as_bytes(),
+            false,
+        )
+        .await?;
         return Ok(First::Answered);
     }
     if method == "GET" && path == "/api/audit" {
-        let bearer = text
-            .split("\r\n")
-            .filter_map(|l| l.split_once(':'))
-            .find(|(k, _)| k.trim().eq_ignore_ascii_case("authorization"))
-            .and_then(|(_, v)| {
-                v.trim()
-                    .strip_prefix("Bearer ")
-                    .map(|t| t.trim().to_string())
-            });
+        let bearer = bearer();
         let query = target
             .split_once('?')
             .map_or("", |(_, q)| q.split('#').next().unwrap_or(""));
@@ -392,6 +472,8 @@ async fn respond<S: AsyncWrite + Unpin>(
         400 => "Bad Request",
         401 => "Unauthorized",
         403 => "Forbidden",
+        409 => "Conflict",
+        500 => "Internal Server Error",
         404 => "Not Found",
         405 => "Method Not Allowed",
         413 => "Payload Too Large",
@@ -499,7 +581,7 @@ mod tests {
         }
         let (mut c, s) = tokio::io::duplex(4096);
         let task = tokio::spawn(async move {
-            route(s, Some(&One), None)
+            route(s, None, Some(&One), None)
                 .await
                 .map(|f| matches!(f, First::Answered))
         });
@@ -515,7 +597,7 @@ mod tests {
 
         let (mut c, s) = tokio::io::duplex(4096);
         let task = tokio::spawn(async move {
-            match route(s, None, None).await.unwrap() {
+            match route(s, None, None, None).await.unwrap() {
                 First::WebSocket(mut r) => {
                     let mut buf = vec![0u8; 22];
                     r.read_exact(&mut buf).await.unwrap();
@@ -528,5 +610,95 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(task.await.unwrap().unwrap(), b"GET / HTTP/1.1\r\nUpgrad");
+    }
+
+    async fn ask(
+        api: &dyn SessionApi,
+        peer: &str,
+        request: String,
+    ) -> (String, std::time::Duration) {
+        let (mut c, s) = tokio::io::duplex(64 * 1024);
+        c.write_all(request.as_bytes()).await.unwrap();
+        let started = std::time::Instant::now();
+        route(s, Some(peer.parse().unwrap()), None, Some(api))
+            .await
+            .unwrap();
+        let mut out = String::new();
+        c.read_to_string(&mut out).await.unwrap();
+        (out, started.elapsed())
+    }
+
+    fn post(path: &str, body: &serde_json::Value) -> String {
+        let body = body.to_string();
+        format!(
+            "POST {path} HTTP/1.1\r\nHost: h\r\nUser-Agent: curl/8.5\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    #[tokio::test]
+    async fn the_screen_password_is_asked_of_another_machine_over_http_and_not_of_this_one() {
+        let hub = Arc::new(
+            crate::hub::Hub::open(crate::store::SqliteStore::open_in_memory().unwrap()).unwrap(),
+        );
+        let api = crate::signin::HubSessions::new(Arc::clone(&hub)).with_password_rounds(1_000);
+        crate::password::ScreenPassword::with_iterations(hub.store(), 1_000)
+            .set("long enough")
+            .unwrap();
+        let code = || {
+            crate::signin::SignIn::new(hub.store(), Arc::new(crate::enroll::Lockout::new()))
+                .create_code(crate::server::now_ms())
+                .unwrap()
+        };
+        let info = "GET /api/session HTTP/1.1\r\nHost: h\r\n\r\n".to_string();
+        let (out, _) = ask(&api, "192.0.2.8", info.clone()).await;
+        assert!(
+            out.ends_with(r#"{"passwordRequired":true,"passwordSet":true}"#),
+            "{out}"
+        );
+        let (out, _) = ask(&api, "127.0.0.1", info).await;
+        assert!(out.contains(r#""passwordRequired":false"#), "{out}");
+
+        let c = code();
+        let (out, took) = ask(
+            &api,
+            "192.0.2.8",
+            post("/api/session", &serde_json::json!({ "code": c })),
+        )
+        .await;
+        assert!(out.starts_with("HTTP/1.1 401"), "{out}");
+        assert!(took >= FAILURE_DELAY, "a refusal waits");
+        let (out, _) = ask(
+            &api,
+            "192.0.2.8",
+            post(
+                "/api/session",
+                &serde_json::json!({ "code": c, "password": "long enough" }),
+            ),
+        )
+        .await;
+        assert!(out.starts_with("HTTP/1.1 200"), "{out}");
+        let token =
+            serde_json::from_str::<serde_json::Value>(out.split("\r\n\r\n").nth(1).unwrap())
+                .unwrap()["token"]
+                .as_str()
+                .unwrap()
+                .to_string();
+        let (out, _) = ask(
+            &api,
+            "127.0.0.1",
+            post("/api/session", &serde_json::json!({ "code": code() })),
+        )
+        .await;
+        assert!(
+            out.starts_with("HTTP/1.1 200"),
+            "the hub's own machine: {out}"
+        );
+
+        let end = format!("DELETE /api/session HTTP/1.1\r\nAuthorization: Bearer {token}\r\n\r\n");
+        let (out, _) = ask(&api, "192.0.2.8", end.clone()).await;
+        assert!(out.starts_with("HTTP/1.1 200"), "{out}");
+        let (out, _) = ask(&api, "192.0.2.8", end).await;
+        assert!(out.starts_with("HTTP/1.1 401"), "{out}");
     }
 }

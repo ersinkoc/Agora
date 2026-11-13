@@ -651,6 +651,37 @@ pub(crate) fn restore_mode(saved: &crate::RawMode) {
     }
 }
 
+/// One line from the console on stdin with echo off. The mode is restored even when reading fails.
+pub(crate) fn read_secret_line() -> io::Result<String> {
+    struct Restore(u32);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            // SAFETY: restoring the mode read earlier from the same handle.
+            unsafe { SetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), self.0) };
+        }
+    }
+    let mut saved = 0u32;
+    // SAFETY: plain calls on the process's standard input handle; the mode is read before it is changed.
+    unsafe {
+        let stdin = GetStdHandle(STD_INPUT_HANDLE);
+        if GetConsoleMode(stdin, &mut saved) == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "stdin is not a console",
+            ));
+        }
+        if SetConsoleMode(stdin, saved & !ENABLE_ECHO_INPUT) == 0 {
+            return Err(os_error(GetLastError()));
+        }
+    }
+    let _restore = Restore(saved);
+    let mut line = String::new();
+    io::stdin().read_line(&mut line)?;
+    // The typed newline was not echoed either.
+    eprintln!();
+    Ok(line)
+}
+
 /// Size of the console window on stdout.
 pub(crate) fn terminal_size() -> Option<(u16, u16)> {
     // SAFETY: an all-zero info structure is a valid out-buffer.

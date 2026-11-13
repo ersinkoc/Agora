@@ -172,8 +172,9 @@ function PageFrame({ title, onBack, children, wide }: { title: string; onBack: (
   );
 }
 
-// How an owner makes a machine trust this browser: the key is public, the command is for a terminal.
-export function DevicePage({ device, onBack, onAddPasskey }: { device: Device | undefined; onBack: () => void; onAddPasskey?: () => Promise<boolean> }) {
+// How an owner makes a machine trust this browser: the key is public, the command is for a terminal. The screen password and the
+// idle lock live here too (ADR-0067).
+export function DevicePage({ device, onBack, onAddPasskey, security }: { device: Device | undefined; onBack: () => void; onAddPasskey?: () => Promise<boolean>; security?: ReactNode }) {
   const [passkey, setPasskey] = useState<'added' | 'failed' | undefined>();
   return (
     <PageFrame title={t('device-title')} onBack={onBack}>
@@ -191,6 +192,7 @@ export function DevicePage({ device, onBack, onAddPasskey }: { device: Device | 
           {passkey && <p role="status">{t(passkey === 'added' ? 'device-passkey-added' : 'device-passkey-failed')}</p>}
         </section>
       )}
+      {security}
     </PageFrame>
   );
 }
@@ -245,20 +247,31 @@ function actionLabel(action: string): string {
   return text === key ? action : text;
 }
 
-export function SignInPage({ onSubmit, onPasskey, notice }: { onSubmit: (code: string) => void; onPasskey?: () => void; notice?: string }) {
+// `passwordRequired`: the hub asks this browser for the screen password too (ADR-0067; never on the hub's own machine).
+export function SignInPage({ onSubmit, onPasskey, notice, passwordRequired = false }: { onSubmit: (code: string, password?: string) => void; onPasskey?: () => void; notice?: string; passwordRequired?: boolean }) {
   const [code, setCode] = useState('');
+  const [password, setPassword] = useState('');
   return (
     <main className="page">
       <div className="flex justify-end"><LanguagePicker /></div>
       <h1>{t('signin-title')}</h1>
       <p>{t('signin-intro')}</p>
-      <form onSubmit={(e) => { e.preventDefault(); if (code.trim()) onSubmit(code); }}>
+      <form onSubmit={(e) => { e.preventDefault(); if (code.trim() && (!passwordRequired || password)) onSubmit(code, passwordRequired ? password : undefined); }}>
         <label>
           <span className="muted">{t('signin-code')}</span>{' '}
           <input value={code} onChange={(e) => setCode(e.target.value)} autoComplete="off" autoCapitalize="characters" spellCheck={false} />
         </label>{' '}
+        {passwordRequired && (
+          <>
+            <label>
+              <span className="muted">{t('signin-password')}</span>{' '}
+              <input type="password" name="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" />
+            </label>{' '}
+          </>
+        )}
         <button type="submit" className="button button--primary">{t('signin-action')}</button>
       </form>
+      {passwordRequired && <p className="muted">{t('signin-password-hint')}</p>}
       {onPasskey && <p><button type="button" className="button" onClick={onPasskey}>{t('signin-passkey')}</button></p>}
       {notice && <p role="alert">{notice}</p>}
     </main>

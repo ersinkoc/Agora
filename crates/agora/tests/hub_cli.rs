@@ -798,3 +798,98 @@ fn every_capability_a_node_advertises_is_one_the_real_hub_agrees_on() {
         );
     }
 }
+
+#[test]
+fn the_screen_password_is_typed_twice_unseen_and_never_read_from_a_pipe() {
+    use agora_hub::password::ScreenPassword;
+    let root = tmp("password");
+    let run = |args: &[&str]| {
+        let o = agora(&root, args)
+            .arg("--hub-dir")
+            .arg(&root)
+            .stdin(Stdio::piped())
+            .output()
+            .unwrap();
+        (
+            o.status.code(),
+            String::from_utf8_lossy(&o.stdout).into_owned(),
+        )
+    };
+    let (code, out) = run(&["password", "status"]);
+    assert_eq!(code, Some(0));
+    assert!(out.contains("No screen password"), "{out}");
+    // Not a terminal: refused, nothing set.
+    assert_eq!(run(&["password", "set"]).0, Some(2));
+    assert!(!ScreenPassword::new(&SqliteStore::open(&root.join("hub.db")).unwrap()).is_set());
+
+    // A live session, to see it end when the password changes.
+    let store = SqliteStore::open(&root.join("hub.db")).unwrap();
+    let signin = agora_hub::signin::SignIn::new(
+        &store,
+        std::sync::Arc::new(agora_hub::enroll::Lockout::new()),
+    );
+    let now = agora_hub::server::now_ms();
+    let token = signin
+        .redeem(&signin.create_code(now).unwrap(), now)
+        .unwrap();
+
+    if agora_platform::PTY_SUPPORTED {
+        let mut pty = agora_platform::spawn(&agora_platform::PtyConfig {
+            argv: vec![
+                AGORA.into(),
+                "password".into(),
+                "set".into(),
+                "--hub-dir".into(),
+                root.display().to_string(),
+            ],
+            cwd: None,
+            env: vec![
+                ("AGORA_HOME".into(), root.display().to_string()),
+                ("AGORA_LANG".into(), "en".into()),
+            ],
+            cols: 120,
+            rows: 30,
+            limits: agora_platform::ProcessLimits::default(),
+            sandbox: None,
+            identity: None,
+        })
+        .unwrap();
+        let mut seen = String::new();
+        let mut wait_for = |pty: &mut Box<dyn agora_platform::Pty>, text: &str| {
+            let deadline = Instant::now() + Duration::from_secs(60);
+            while !seen.contains(text) {
+                assert!(Instant::now() < deadline, "waited for {text:?}: {seen}");
+                if let Ok(b) = pty.output().recv_timeout(Duration::from_millis(100)) {
+                    seen.push_str(&String::from_utf8_lossy(&b));
+                }
+            }
+        };
+        wait_for(&mut pty, "New screen password");
+        pty.write_input(b"open sesame 42\r").unwrap();
+        wait_for(&mut pty, "Type it again");
+        pty.write_input(b"open sesame 42\r").unwrap();
+        wait_for(&mut pty, "open sessions were signed out");
+        assert!(pty.wait().unwrap().success(), "{seen}");
+        assert!(
+            !seen.contains("open sesame"),
+            "the password is never shown: {seen}"
+        );
+        let password = ScreenPassword::new(&store);
+        assert!(password.verify("open sesame 42"));
+        assert!(
+            !signin.check(&token, agora_hub::server::now_ms()),
+            "every session ends"
+        );
+        assert!(run(&["password", "status"])
+            .1
+            .contains("A screen password is set"));
+    }
+
+    let (code, out) = run(&["password", "clear"]);
+    assert_eq!(code, Some(0), "{out}");
+    assert!(!ScreenPassword::new(&store).is_set());
+    let rows = agora_hub::audit::Audit::new(&store)
+        .list(0, None, 50)
+        .unwrap();
+    assert!(rows.iter().any(|r| r.action == "password_clear"));
+}

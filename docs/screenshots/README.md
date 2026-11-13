@@ -14,6 +14,12 @@ The sign-in page (unauthenticated routes redirect to it):
 
 ![](signin-desktop-dark.png) ![](signin-desktop-light.png)
 
+From another machine, once the owner set a screen password (ADR-0067), it asks for the password too; the title bar has **Lock**
+and This device sets the password and the idle lock (`screen-password/`):
+
+![](screen-password/signin-password-dark.png) ![](screen-password/signin-password-light.png)
+![](screen-password/window-lock-button-dark.png) ![](screen-password/device-password-dark.png)
+
 ## The console (Home)
 One window: machines and agents on the left, the terminals of the agents being watched in the middle (several at once), and
 what needs you, uncommitted changes, agent messages and spend on the right.

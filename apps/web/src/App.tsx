@@ -16,7 +16,9 @@ import type { StartChoice } from './components/StartApproval';
 import type { HelperGrant } from './components/HelperGrants';
 import { addPasskey, passkeysSupported, signInWithPasskey } from './net/passkey';
 import { summarize, type UsageSummary } from './net/usage';
-import { forgetToken, hubConnection, readCode, signIn } from './net/session';
+import { endSession, forgetToken, hubConnection, readCode, rememberToken, setPassword, signIn, signInInfo, unlock, type SignInInfo } from './net/session';
+import { idleMinutes, setIdleMinutes, watchIdle, type IdleMinutes } from './net/idle';
+import { LockScreen, ScreenPasswordSettings } from './components/Locks';
 import { Console } from './components/Console';
 import type { ChatSource } from './net/chat';
 import { commitsOf, type CommitItem } from './net/history';
@@ -43,11 +45,18 @@ export function App() {
   // With a hub token the fleet comes from the hub; without one (development) the demo data stands in.
   const [hub, setHub] = useState(hubConnection);
   const [signInNotice, setSignInNotice] = useState<string | undefined>();
-  const trySignIn = useCallback(async (code: string) => {
-    const r = await signIn(code);
+  // Whether the hub asks this browser for the screen password (ADR-0067), and whether one is set.
+  const [info, setInfo] = useState<SignInInfo>({ passwordRequired: false, passwordSet: false });
+  const refreshInfo = useCallback(() => { void signInInfo().then(setInfo); }, []);
+  useEffect(refreshInfo, [refreshInfo]);
+  const trySignIn = useCallback(async (code: string, password?: string) => {
+    const r = await signIn(code, password);
     if (r.ok) { setSignInNotice(undefined); setHub(hubConnection()); return; }
-    setSignInNotice(r.reason === 'refused' ? 'signin-refused' : r.reason === 'too-many' ? 'signin-too-many' : 'signin-failed');
+    setSignInNotice(r.reason === 'refused' ? (password ? 'signin-refused-password' : 'signin-refused') : r.reason === 'too-many' ? 'signin-too-many' : 'signin-failed');
   }, []);
+  // A window that locked itself after sitting idle keeps its session token here, and nowhere else, until the password opens it.
+  const [locked, setLocked] = useState<string | undefined>();
+  const [idle, setIdle] = useState<IdleMinutes>(() => idleMinutes());
   const trySignInPasskey = useCallback(async () => {
     const r = await signInWithPasskey();
     if (r.ok) { setSignInNotice(undefined); setHub(hubConnection()); return; }
@@ -197,6 +206,24 @@ export function App() {
     setApi(c);
     return () => { c.close(); setApi(undefined); };
   }, [hub]);
+  // "Lock" in the title bar: this window's session ends at the hub and the sign-in screen comes back. Agents keep running.
+  const lockNow = useCallback(() => {
+    if (!hub) return;
+    void endSession(hub.token);
+    setLive(undefined);
+    setHub(undefined);
+  }, [hub]);
+  // The idle lock: with a screen password the window locks and the password opens it; without one it signs out.
+  useEffect(() => {
+    if (!hub || idle === 0) return;
+    return watchIdle(idle, () => {
+      if (!info.passwordSet) { lockNow(); return; }
+      setLocked(hub.token);
+      forgetToken();
+      setLive(undefined);
+      setHub(undefined);
+    }, window);
+  }, [hub, idle, info.passwordSet, lockNow]);
   const agents = useMemo(() => (hub ? (live ? tiles(live) : []) : demoAgents), [hub, live]);
   const current = hash.startsWith('#/agent/') ? decodeURIComponent(hash.slice('#/agent/'.length)) : undefined;
 
@@ -315,19 +342,31 @@ export function App() {
     return () => window.removeEventListener('keydown', on);
   }, [next]);
 
+  if (locked) {
+    return <LockScreen
+      onUnlock={async (password) => {
+        const r = await unlock(locked, password);
+        if (r.ok) { rememberToken(locked); setLocked(undefined); setHub(hubConnection()); }
+        return r;
+      }}
+      onSignOut={() => { void endSession(locked); setLocked(undefined); refreshInfo(); }} />;
+  }
+
   // Served by the hub (a production build) and not signed in: ask for the code. Development keeps the demo data.
   if (!hub && !import.meta.env.DEV && hash !== '#/gallery' && hash !== '#/demo') {
-    return <SignInPage onSubmit={trySignIn} onPasskey={passkeysSupported() ? trySignInPasskey : undefined} notice={signInNotice ? t(signInNotice) : undefined} />;
+    return <SignInPage onSubmit={trySignIn} onPasskey={passkeysSupported() ? trySignInPasskey : undefined} notice={signInNotice ? t(signInNotice) : undefined} passwordRequired={info.passwordRequired} />;
   }
 
   return (
     <>
-      {hash === '#/gallery' ? <Gallery /> : hash === '#/machines' ? <MachinesPage machines={live ? machines(live) : hub ? [] : demoMachines} agents={agents} usage={usage} projects={live && usage ? costByProject(live, usage.perAgent) : []} onBack={() => go('#/')} /> : hash === '#/audit' && hub ? <AuditPage load={(who) => loadAudit(hub.token, who)} onBack={() => go('#/')} /> : hash === '#/device' ? <DevicePage device={device} onBack={() => go('#/')} onAddPasskey={hub && passkeysSupported() ? async () => (await addPasskey(hub.token)).ok : undefined} /> : current !== undefined
+      {hash === '#/gallery' ? <Gallery /> : hash === '#/machines' ? <MachinesPage machines={live ? machines(live) : hub ? [] : demoMachines} agents={agents} usage={usage} projects={live && usage ? costByProject(live, usage.perAgent) : []} onBack={() => go('#/')} /> : hash === '#/audit' && hub ? <AuditPage load={(who) => loadAudit(hub.token, who)} onBack={() => go('#/')} /> : hash === '#/device' ? <DevicePage device={device} onBack={() => go('#/')} onAddPasskey={hub && passkeysSupported() ? async () => (await addPasskey(hub.token)).ok : undefined}
+          security={hub ? <ScreenPasswordSettings passwordSet={info.passwordSet} idle={idle} onIdle={(m) => { setIdleMinutes(m); setIdle(m); }}
+            onSet={async (password, current) => { const r = await setPassword(hub.token, password, current); if (r.ok) refreshInfo(); return r; }} /> : undefined} /> : current !== undefined
         ? <Focus agent={selectedAgent} approvals={live ? approvalList(live) : hub ? [] : demoApprovals} onResolve={resolve} chatSource={selectedAgent?.terminal === false ? chatOf(selectedAgent) : undefined} sendPrompt={hub && api ? sendPrompt : undefined} chooseOption={hub && api ? chooseOption : undefined} costMicroUsd={current ? usage?.perAgent.get(current) : undefined} source={terminal} onBack={() => go('#/')} />
         : <Console agents={agents} machines={live ? machines(live) : []} usage={usage} projects={live && usage ? costByProject(live, usage.perAgent) : []}
           approvals={live ? approvalList(live) : hub ? [] : demoApprovals} messages={live ? recentMessages(live) : []} boards={live ? boards(live) : []} terminalFor={terminalFor} chatOf={hub && api ? chatOf : undefined} sendPrompt={hub && api ? sendPrompt : undefined} chooseOption={hub && api ? chooseOption : undefined} loadDiff={hub && api ? loadDiff : undefined} loadHistory={hub && api ? loadHistory : undefined} filesOf={hub && api ? filesOf : undefined} onOpen={open}
           onResolve={resolve} helperGrants={hub && api ? helperGrants : undefined} revokeGrant={hub && api ? revokeGrant : undefined} notice={notice ? t(notice) : undefined} link={hub ? link : 'live'}
-          onStart={hub && api && live ? (node) => setStarting({ node }) : (!hub && import.meta.env.DEV ? (node) => setStarting({ node }) : undefined)} onCommand={() => setPalette(true)} onForget={hub && api ? forgetAgent : undefined}
+          onStart={hub && api && live ? (node) => setStarting({ node }) : (!hub && import.meta.env.DEV ? (node) => setStarting({ node }) : undefined)} onCommand={() => setPalette(true)} onForget={hub && api ? forgetAgent : undefined} onLock={hub ? lockNow : undefined}
           start={!hub && import.meta.env.DEV && starting ? <StartAgent initialNode={starting.node} projects={demoProjects} machines={demoMachines}
             loadKinds={async () => [{ kind: 'claude-code', name: 'Claude Code', installed: true }, { kind: 'codex', name: 'Codex', installed: true }, { kind: 'shell', name: 'Shell', installed: true }, { kind: 'gemini', name: 'Gemini CLI', installed: false }]}
             list={async (_n, path) => demoList(path)} inspect={async (_n, path) => ({ path, projectId: 'demo', gitRoot: path, branch: 'main', portable: false })} onStart={async () => { setStarting(false); return undefined; }} onClose={() => setStarting(false)} /> : starting && live ? <StartAgent initialNode={starting ? starting.node : undefined} projects={projectChoices(live)} machines={machines(live)} inspect={inspectDirectory} list={listDirectory} loadKinds={loadKinds} onStart={startAgent} onClose={() => setStarting(false)} /> : undefined} />}

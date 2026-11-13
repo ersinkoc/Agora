@@ -34,13 +34,13 @@ export function hubConnection(): HubConnection | undefined {
 
 export type SignInResult = { ok: true; token: string } | { ok: false; reason: 'refused' | 'too-many' | 'failed' };
 
-// Trades a one-time code for a session token and remembers it for this tab.
-export async function signIn(code: string, fetcher: typeof fetch = fetch): Promise<SignInResult> {
+// Trades a one-time code (and, from another machine, the screen password: ADR-0067) for a session token and remembers it for this tab.
+export async function signIn(code: string, password?: string, fetcher: typeof fetch = fetch): Promise<SignInResult> {
   try {
     const r = await fetcher('/api/session', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ code: code.trim() }),
+      body: JSON.stringify(password ? { code: code.trim(), password } : { code: code.trim() }),
     });
     if (r.status === 401) return { ok: false, reason: 'refused' };
     if (r.status === 429) return { ok: false, reason: 'too-many' };
@@ -69,3 +69,65 @@ export function readCode(hash: string): { code?: string; rest: string } {
   if (!m) return { rest: hash };
   return { code: decodeURIComponent(m[1] as string), rest: m[2] ? `#${m[2]}` : '' };
 }
+
+// What the sign-in screen needs to know before it asks: does this hub want the screen password from here (it never does from its own
+// machine), and is one set at all. An older hub answers with the page itself or nothing: then no password is asked.
+export interface SignInInfo { passwordRequired: boolean; passwordSet: boolean }
+
+export async function signInInfo(fetcher: typeof fetch = fetch): Promise<SignInInfo> {
+  try {
+    const r = await fetcher('/api/session', { method: 'GET', headers: { accept: 'application/json' } });
+    if (!r.ok) return { passwordRequired: false, passwordSet: false };
+    const body = (await r.json()) as { passwordRequired?: unknown; passwordSet?: unknown };
+    return { passwordRequired: body.passwordRequired === true, passwordSet: body.passwordSet === true };
+  } catch {
+    return { passwordRequired: false, passwordSet: false };
+  }
+}
+
+// Ends this session at the hub ("Lock" in the window, or sign out from the lock screen) and forgets it here. Agents are not touched.
+export async function endSession(token: string, fetcher: typeof fetch = fetch): Promise<void> {
+  forgetToken();
+  try {
+    await fetcher('/api/session', { method: 'DELETE', headers: { authorization: `Bearer ${token}` } });
+  } catch { /* the hub is unreachable: the session ends when it expires */ }
+}
+
+export type PasswordResult = { ok: true } | { ok: false; reason: 'refused' | 'too-many' | 'too-short' | 'failed' };
+
+const passwordReply = async (r: Response): Promise<PasswordResult> => {
+  if (r.ok) return { ok: true };
+  if (r.status === 401) return { ok: false, reason: 'refused' };
+  if (r.status === 429) return { ok: false, reason: 'too-many' };
+  if (r.status === 400) return { ok: false, reason: 'too-short' };
+  return { ok: false, reason: 'failed' };
+};
+
+// Opens a window that locked itself after it sat idle: its session is still live, the screen password proves it is the owner.
+export async function unlock(token: string, password: string, fetcher: typeof fetch = fetch): Promise<PasswordResult> {
+  try {
+    return await passwordReply(await fetcher('/api/unlock', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+      body: JSON.stringify({ password }),
+    }));
+  } catch {
+    return { ok: false, reason: 'failed' };
+  }
+}
+
+// Sets or changes the screen password (owner only; `current` when one is set). Every other session of the hub ends.
+export async function setPassword(token: string, password: string, current?: string, fetcher: typeof fetch = fetch): Promise<PasswordResult> {
+  try {
+    return await passwordReply(await fetcher('/api/password', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+      body: JSON.stringify(current ? { password, current } : { password }),
+    }));
+  } catch {
+    return { ok: false, reason: 'failed' };
+  }
+}
+
+// The shortest screen password the hub accepts (crates/agora-hub/src/password.rs MIN_CHARS).
+export const MIN_PASSWORD = 8;
