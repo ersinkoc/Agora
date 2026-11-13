@@ -854,6 +854,7 @@ pub(crate) fn command_name(c: &Cmd) -> &'static str {
         Cmd::DirectoryList(_) => "directory.list",
         Cmd::AgentForget(_) => "agent.forget",
         Cmd::AgentLaunch(_) => "agent.launch",
+        Cmd::AgentResume(_) => "agent.resume",
         Cmd::WorkspaceQuery(_) => "workspace.query",
         Cmd::AgentStop(_) => "agent.stop",
         Cmd::AgentPrompt(_) => "agent.prompt",

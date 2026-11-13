@@ -439,6 +439,11 @@ impl Supervisor {
         }
     }
 
+    /// ADR-0060: agent ids start at `next` (the session ledger's), so an id is never given twice across the node's restarts.
+    pub fn reserve_ids(&mut self, next: u64) {
+        self.next_id = self.next_id.max(next);
+    }
+
     /// ADR-0057: `child` was started by `parent` (an agent's `agent_start`). Carried in every view of `child`.
     pub fn set_parent(&mut self, child: &AgentId, parent: &AgentId) {
         self.parents.insert(child.clone(), parent.clone());

@@ -167,6 +167,15 @@ impl Scope {
                 self.agents.insert(q(&e.agent_id), p.clone());
                 self.projects.contains(&p)
             }
+            // ADR-0060: the agent may be one the hub never saw start (its store was reset), so it teaches the project too.
+            Body::AgentInterrupted(e) => {
+                let p = self
+                    .agents
+                    .entry(q(&e.agent_id))
+                    .or_insert_with(|| qualified(node, &e.project_id))
+                    .clone();
+                self.projects.contains(&p)
+            }
             Body::AgentStateChanged(e) => self.granted(self.agents.get(&q(&e.agent_id))),
             Body::AgentSessionReported(e) => self.granted(self.agents.get(&q(&e.agent_id))),
             Body::AgentUsageReported(e) => self.granted(self.agents.get(&q(&e.agent_id))),

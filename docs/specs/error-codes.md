@@ -34,6 +34,10 @@ or a local response timeout has a localized retry message.
 | `agent.blocked` | `agent_id` | Agent waits for input; prompt not sent |
 | `agent.mode_unsupported` | `kind`, `mode` | e.g. chat mode for an L1 agent |
 | `agent.running` | `agent_id` | the agent still runs, so it cannot be forgotten (ADR-0053) |
+| `agent.not_interrupted` | `agent_id` | ADR-0060: `agent.resume` names an agent the node does not hold as interrupted (never seen, running, resumed already, or no longer kept after 14 days) |
+| `agent.session_missing` | `agent_id` | ADR-0060: Resume needs the agent's own session id and a kind that can resume one; the node has neither, so only Start again (`new_session`) is possible |
+| `agent.folder_changed` | `agent_id`, `path` | ADR-0060: the agent's folder is gone or now has another project identity (ADR-0052); nothing was started |
+| `agent.parent_not_running` | `agent_id`, `parent_agent_id` | ADR-0060: a helper (ADR-0057) is resumed only while the agent that started it runs |
 | `approval.expired` | `approval_id` | |
 | `approval.signature_invalid` | `approval_id` | |
 | `approval.grant_required` | `command` | ADR-0041: the node's `signed_commands` policy lists this command and no live grant covers it |

@@ -388,3 +388,45 @@ All additions; nothing published changed.
   in US dollars as its `micro_usd`, and estimates from the price table only for agents that reported none.
 - **Start failures.** `agent.start` of an adapter agent whose adapter failed with a stable reason answers with that code instead of
   `internal`: `adapter.agent_exited` `{stage, exit_code, stderr_tail}` or `adapter.agent_refused` `{stage}` (`error-codes.md`).
+
+### Session ledger and Resume (ADR-0060)
+
+All additions; nothing published changed.
+
+- **Ledger.** A node keeps `<data>/sessions/ledger.json` (folder `0700`, file `0600` on Unix, an owner-only ACL on Windows; replaced
+  whole through a temporary file in the same folder and a rename; at most 512 entries, 4 MiB read). Per agent: id, kind, project,
+  folder (its workspace path or its own worktree), whether it is a directory agent (ADR-0052) and its separate worktree's Git root
+  and branch, parent agent (ADR-0057), the agent's own session id once reported (`AgentSessionReported`), the launch options of
+  ADR-0059 (reserved, never applied by a resume), start time, last state, whether it ended, and when it was found interrupted. Never
+  terminal contents, prompts, or secrets. It learns from the events the node records: written when an agent starts, reports its
+  session and ends; a state change is written with the next write and when the node stops cleanly. The ledger also keeps the next
+  agent id, so an id is never given twice across restarts. A file that cannot be read is renamed (`ledger.json.unreadable-<ms>`),
+  never deleted. Entries are dropped 14 days after they were last touched (an interrupted one 14 days after it was found).
+- **Interrupted.** An agent whose entry had not ended when the node started again was interrupted by the node stopping. Event
+  `AgentInterrupted` (`Event` field 38: `agent_id`, `kind`, `project_id`, `folder`, `parent_agent_id`, `resumable`, `started_at_ms`,
+  `interrupted_at_ms`, `last_state`) says so after the node's `NodeOnline`, and again in every resync announcement, until the agent
+  is resumed or started again (its next `AgentStarted`) or no longer kept. `resumable` is true when the node has the agent's own
+  session id and its kind can resume one (a manifest `[resume]` argv, or an adapter or ACP agent, whose bridge asks the agent for
+  `session/load` when it offers `loadSession` and opens a new session otherwise). The hub keeps the agent with the closed ones
+  (`running` false, state `done`, so it reads "finished") and adds `AgentSnapshot.interrupted` (40), `resumable` (41),
+  `interrupted_at_ms` (42) and `folder` (43); its next `AgentStarted` clears them. An agent the hub never saw (its store was reset)
+  is listed from the event alone. `agent.forget` works on it like on any closed agent.
+- **Resume.** Command `agent.resume` (`AgentResume`, request field 87: `agent_id` (the node's own id), `new_session`,
+  `authorization`) → `AgentLaunchResult` (Ok tag 19). Node capability `agent.resume`: the hub refuses the command with
+  `protocol.capability_missing` for a node that did not offer it. Same agent id, same folder, same project, same kind. Without
+  `new_session` the node runs the kind's `[resume]` argv with `{session_id}` replaced, or starts the adapter with the session to
+  load; `agent.session_missing` when it has no session id or the kind cannot resume one. With `new_session` (Start again) it starts
+  a new session of the same kind in the same folder and forgets the old session id. Refusals: `agent.not_interrupted` (not held as
+  interrupted), `agent.folder_changed` (the folder is gone, or a directory agent's folder now has another project identity,
+  ADR-0052), `agent.parent_not_running` (a helper is resumed only while the agent that started it runs; its grants and approvals are
+  not restored), and the same node policy and limits as a start (`agent.sandbox_unavailable`, `node.resource_limit`, ...). Over the
+  hub it is signed like `agent.launch`, with the same `DirectoryAuthorization` and message:
+  `directory-action-v1\0node\0resume\0agent_id\0\0\0new_session\00\0nonce\0expires_at_ms` (operation `resume`, the agent's
+  local id in the `path` field, kind and project empty, `option` the `new_session` flag, `identity_change` `0`); a hub cannot resume
+  anything by itself. The local owner-only socket needs no signature. Viewers cannot send it, and the hub audits it like every routed
+  command (action `AgentResume`).
+- **Automatic resume.** The node's own `<data>/policy` may say `resume = auto` with `resume.kinds = a, b` and `resume.folders = /x,
+  /y`: after a start, interrupted agents of a listed kind in a listed folder (or below it) that can resume their own session are
+  resumed without anyone asking (a helper only after its parent was). The default is `resume = ask`; any other value is `ask`. The
+  hub cannot change it.
+

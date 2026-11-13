@@ -64,6 +64,8 @@ message CommandRequest {
     AgentForget agent_forget = 85;
     // ADR-0058: sent only to a node with the capability `agent.set_model`.
     AgentSetModel agent_set_model = 86;
+    // ADR-0060: sent only to a node with the capability `agent.resume`.
+    AgentResume agent_resume = 87;
   }
 }
 
@@ -554,6 +556,17 @@ message DirectoryEntries {
 // ADR-0053. The hub stops listing a closed agent. Answered by the hub; refused with `agent.running` while the agent runs.
 message AgentForget {
   string agent_id = 1;
+}
+
+// ADR-0060. Brings back an agent the node reported interrupted (`AgentInterrupted`): same agent id, same folder, same project. The
+// node runs the manifest's `[resume]` argv or the adapter's session load with the agent's own session id; with `new_session` it starts
+// a new session of the same kind in the same folder instead ("Start again"). Signed like `agent.launch` on the routed path (operation
+// `resume`, see docs/specs/protocol.md); the node answers with `AgentLaunchResult`.
+message AgentResume {
+  // The node's own id of the agent (`agent-7`), not the hub-wide key.
+  string agent_id = 1;
+  bool new_session = 2;
+  DirectoryAuthorization authorization = 3;
 }
 
 message AgentLaunch {

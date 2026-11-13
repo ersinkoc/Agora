@@ -4,6 +4,9 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+### Agents
+- A machine now remembers its agents across its own restart (ADR-0060): kind, folder, project, the agent that started it, its own session id once it reports one, and whether it ended. The record stays on that machine, readable by its owner only, holds no prompts, terminal contents or secrets, and forgets an agent after 14 days. An agent id is never given twice, so an agent that was running when the machine stopped keeps its place in the window.
+
 ## 0.3.7
 
 ### Agents
