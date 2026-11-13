@@ -11,7 +11,9 @@ import { signDirectory, type DirectoryInfo, type DirectoryListing } from './net/
 import { StartAgent, type KindChoice } from './components/StartAgent';
 import { approvalList, boards, costByProject, projectChoices, recentMessages, machines, machinesOnline, tiles, type ApprovalModel, type View } from './net/view';
 import { freshApprovals, titleWithCount } from './net/alert';
-import { indexedDbStore, signApproval, thisDevice, type Device } from './net/approval';
+import { indexedDbStore, signApproval, signStart, thisDevice, type Device } from './net/approval';
+import type { StartChoice } from './components/StartApproval';
+import type { HelperGrant } from './components/HelperGrants';
 import { addPasskey, passkeysSupported, signInWithPasskey } from './net/passkey';
 import { summarize, type UsageSummary } from './net/usage';
 import { forgetToken, hubConnection, readCode, signIn } from './net/session';
@@ -110,17 +112,35 @@ export function App() {
     if (!api) return 'hub.unreachable';
     try { await api.command('', { agentForget: { agentId } }); return undefined; } catch (e) { return (e as { code?: string }).code ?? 'hub.unreachable'; }
   }, [api]);
-  const resolve = useCallback(async (a: ApprovalModel, approved: boolean) => {
+  const resolve = useCallback(async (a: ApprovalModel, approved: boolean, choice?: StartChoice) => {
     if (!api || !device) { setNotice('approval-failed'); return; }
     setNotice(undefined);
     try {
-      const signature = await signApproval(device, a.node, a.localId, approved);
-      await api.command(a.node, { approvalResolve: { approvalId: a.localId, approved, signerDeviceId: device.id, signature } });
+      // ADR-0057: a start is decided over the request exactly as shown, with the grant chosen.
+      const helperGrant = a.start && approved ? choice?.grant ?? 0 : 0;
+      const helpersMayStart = !!(a.start && approved && choice?.nested);
+      const signature = a.start
+        ? await signStart(device, a.node, a.localId, approved, helperGrant, helpersMayStart, a.detail)
+        : await signApproval(device, a.node, a.localId, approved);
+      await api.command(a.node, { approvalResolve: { approvalId: a.localId, approved, signerDeviceId: device.id, signature, helperGrant, helpersMayStart } });
     } catch (e) {
       const code = (e as { code?: string }).code;
       setNotice(code === 'approval.signature_invalid' ? 'approval-not-trusted' : 'approval-failed');
     }
   }, [api, device]);
+  // ADR-0057: an agent's live helper grants, as its machine lists them, and revoking one (no signature: ending access is always allowed).
+  const helperGrants = useCallback(async (agent: AgentTileModel): Promise<HelperGrant[]> => {
+    if (!api || !agent.machineId) return [];
+    const local = agent.id.slice(agent.id.indexOf('/') + 1);
+    const ok = await api.command(agent.machineId, { grantList: {} });
+    return (ok.grantList?.grants ?? [])
+      .filter((g) => g.scope === `agent:${local}` && (g.commands ?? []).includes('mesh.agent_start'))
+      .map((g) => ({ id: g.grantId ?? '', kind: g.kind ?? '', folder: g.folder ?? '', remaining: g.remaining ?? 0 }));
+  }, [api]);
+  const revokeGrant = useCallback(async (agent: AgentTileModel, id: string) => {
+    if (!api || !agent.machineId) return;
+    await api.command(agent.machineId, { grantRevoke: { grantId: id } });
+  }, [api]);
   // The owner allowed it: sign the grant with this device's key, send it to the machine, then repeat what was refused.
   const allowGrant = useCallback(async () => {
     const g = grantAsk;
@@ -293,7 +313,7 @@ export function App() {
         ? <Focus agent={selectedAgent} approvals={live ? approvalList(live) : hub ? [] : demoApprovals} onResolve={resolve} chatSource={selectedAgent?.terminal === false ? chatOf(selectedAgent) : undefined} sendPrompt={hub && api ? sendPrompt : undefined} costMicroUsd={current ? usage?.perAgent.get(current) : undefined} source={terminal} onBack={() => go('#/')} />
         : <Console agents={agents} machines={live ? machines(live) : []} usage={usage} projects={live && usage ? costByProject(live, usage.perAgent) : []}
           approvals={live ? approvalList(live) : hub ? [] : demoApprovals} messages={live ? recentMessages(live) : []} boards={live ? boards(live) : []} terminalFor={terminalFor} chatOf={hub && api ? chatOf : undefined} sendPrompt={hub && api ? sendPrompt : undefined} loadDiff={hub && api ? loadDiff : undefined} loadHistory={hub && api ? loadHistory : undefined} filesOf={hub && api ? filesOf : undefined} onOpen={open}
-          onResolve={resolve} notice={notice ? t(notice) : undefined} link={hub ? link : 'live'}
+          onResolve={resolve} helperGrants={hub && api ? helperGrants : undefined} revokeGrant={hub && api ? revokeGrant : undefined} notice={notice ? t(notice) : undefined} link={hub ? link : 'live'}
           onStart={hub && api && live ? (node) => setStarting({ node }) : (!hub && import.meta.env.DEV ? (node) => setStarting({ node }) : undefined)} onCommand={() => setPalette(true)} onForget={hub && api ? forgetAgent : undefined}
           start={!hub && import.meta.env.DEV && starting ? <StartAgent initialNode={starting.node} projects={demoProjects} machines={demoMachines}
             loadKinds={async () => [{ kind: 'claude-code', name: 'Claude Code', installed: true }, { kind: 'codex', name: 'Codex', installed: true }, { kind: 'shell', name: 'Shell', installed: true }, { kind: 'gemini', name: 'Gemini CLI', installed: false }]}

@@ -16,5 +16,6 @@ export function AgentAddress({ agent }: { agent: AgentTileModel }) {
     <code dir="ltr" className="min-w-0 select-all break-all">{address}</code>
     <button type="button" className="button px-2 py-1 text-xs" aria-label={`${t('agent-address-copy')} ${address}`} onClick={() => void copy()}>{t(state === 'copied' ? 'address-copied' : 'address-copy')}</button>
     <span role="status" className={state === 'failed' ? 'text-muted' : 'sr-only'}>{state ? t(state === 'copied' ? 'address-copied' : 'address-copy-failed') : ''}</span>
+    {agent.parentName && <span className="ms-auto text-muted">{t('helper-started-by', { name: agent.parentName })}</span>}
   </div>;
 }

@@ -1,9 +1,12 @@
 import { t } from '../i18n';
 import type { ApprovalModel } from '../net/view';
 import { StateMark } from './StateBadge';
+import { StartApproval, type StartChoice } from './StartApproval';
 
 // What one agent waits on, with Allow and Deny: the same row in the window and in the full-size view.
-export function ApprovalBanner({ approval: x, onResolve }: { approval: ApprovalModel; onResolve?: (approval: ApprovalModel, approved: boolean) => void }) {
+export function ApprovalBanner({ approval: x, onResolve }: { approval: ApprovalModel; onResolve?: (approval: ApprovalModel, approved: boolean, choice?: StartChoice) => void }) {
+  // ADR-0057: a request to start an agent shows everything it asks for (read-only where it cannot be answered).
+  if (x.start) return <StartApproval approval={x} start={x.start} busy={!onResolve} onResolve={(ok, choice) => onResolve?.(x, ok, choice)} />;
   return (
     <div role="alert" className="flex flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-needs-you/60 bg-surface-2 px-3 py-2">
       <StateMark state="needs-you" />

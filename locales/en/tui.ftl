@@ -8,6 +8,15 @@ tui-header = Agora · { $online } of { $total } machines online · { $agents } a
 tui-attention = Needs you
 tui-nothing-waiting = Nothing is waiting for you.
 tui-asks = { $agent } asks: { $action }
+tui-asks-start = { $agent } ({ $agent_kind }) on { $node } asks to start { $kind } in { $folder }{ $worktree ->
+        [true] , in its own worktree
+       *[other] {""}
+    } (depth { $depth }). Its first prompt:
+tui-asks-start-outside = { $agent } ({ $agent_kind }) on { $node } asks to start { $kind } in { $folder }, outside its own folder{ $worktree ->
+        [true] , in its own worktree
+       *[other] {""}
+    } (depth { $depth }). Its first prompt:
+tui-started-by = started by { $agent }
 tui-blocked = { $agent } is waiting for you
 tui-machines = Machines
 tui-online = online
@@ -36,6 +45,7 @@ tui-chat-input = ›
 tui-chat-hint = Type a request and press Enter · Ctrl-] goes back
 tui-stopped = Stopped.
 tui-stop-failed = Could not stop it ({ $code }).
+tui-stop-helpers = It started { $count } helpers that still run. Stop them too? Press n to keep them, any other key stops them.
 tui-send-failed = Could not send it ({ $code }).
 tui-start-pick = Start which agent on { $machine }? Press its number, any other key cancels.
 tui-start-item = { $n }  { $name }

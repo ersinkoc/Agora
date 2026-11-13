@@ -14,6 +14,24 @@ export function signedMessage(nodeId: string, approvalId: string, approved: bool
   return Uint8Array.from(out);
 }
 
+// ADR-0057: a decision on an agent's request to start another is signed over the request exactly as it was shown (a SHA-256 of its
+// detail) and the grant that comes with it, so a hub can neither swap the prompt nor add or strip a grant
+// (crates/agora-node/src/approvals.rs `start_signed_message`).
+export async function startSignedMessage(
+  nodeId: string, approvalId: string, approved: boolean, helperGrant: number, helpersMayStart: boolean, detail: string,
+  subtle: SubtleCrypto = crypto.subtle,
+): Promise<Uint8Array> {
+  const enc = new TextEncoder();
+  const hash = toHex(new Uint8Array(await subtle.digest('SHA-256', enc.encode(detail) as BufferSource)));
+  const parts = ['agora-approval-start-v1', nodeId, approvalId, approved ? '1' : '0', String(helperGrant), helpersMayStart ? '1' : '0', hash];
+  const out: number[] = [];
+  parts.forEach((p, i) => {
+    if (i > 0) out.push(0);
+    out.push(...enc.encode(p));
+  });
+  return Uint8Array.from(out);
+}
+
 export function toHex(bytes: Uint8Array): string {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
 }
@@ -58,6 +76,15 @@ export async function signApproval(
     signedMessage(nodeId, approvalId, approved) as BufferSource,
   );
   return new Uint8Array(sig);
+}
+
+// The signature of a decision on a start request (ADR-0057).
+export async function signStart(
+  device: Device, nodeId: string, approvalId: string, approved: boolean, helperGrant: number, helpersMayStart: boolean, detail: string,
+  subtle: SubtleCrypto = crypto.subtle,
+): Promise<Uint8Array> {
+  const message = await startSignedMessage(nodeId, approvalId, approved, helperGrant, helpersMayStart, detail, subtle);
+  return new Uint8Array(await subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, device.keys.privateKey, message as BufferSource));
 }
 
 export function indexedDbStore(): KeyStore | undefined {

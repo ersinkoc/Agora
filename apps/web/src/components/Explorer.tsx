@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { t } from '../i18n';
 import { forgetReasonKey } from '../net/forget';
-import { machineKey, type AgentTileModel } from '../model';
+import { helperTree, machineKey, type AgentTileModel } from '../model';
 import { bytesLabel, type MachineModel } from '../net/view';
 import { ago } from '../net/time';
 import { Icon } from './Icon';
@@ -87,10 +87,10 @@ export function Explorer({ fleet, machines, open, current, projects, project, on
           {!closed && [...folders.entries()].map(([folder, list]) => <div key={folder} className="ms-3 border-s border-line ps-1">
             <div className="flex items-center gap-1.5 px-2 pt-1.5 pb-0.5 text-[11px] text-muted"><Icon name="folder" className="size-3.5" /><span className="truncate">{list[0]?.project || folder}</span></div>
             <ul className="m-0 list-none p-0">
-              {list.map(a => <li key={a.id}>
-                <button type="button" className="ide-row" aria-current={current === a.id ? 'true' : undefined} aria-pressed={open.includes(a.id)} onClick={() => onToggle(a.id)} title={`${a.machine} · ${a.workspace}${a.branch ? ` · ${a.branch}` : ''}`}>
+              {helperTree(list).map(({ agent: a, depth }) => <li key={a.id} className={depth === 0 ? undefined : depth === 1 ? 'ms-3' : 'ms-6'}>
+                <button type="button" className="ide-row" aria-current={current === a.id ? 'true' : undefined} aria-pressed={open.includes(a.id)} onClick={() => onToggle(a.id)} title={`${a.machine} · ${a.workspace}${a.branch ? ` · ${a.branch}` : ''}${a.parentName ? ` · ${t('helper-started-by', { name: a.parentName })}` : ''}`}>
                   <StateMark state={a.state} />
-                  <span className="min-w-0 flex-1 truncate">{a.name}</span>
+                  <span className="min-w-0 flex-1 truncate">{a.name}{a.parentName && <span className="ms-1.5 text-[11px] text-muted">{t('helper-started-by', { name: a.parentName })}</span>}</span>
                   {a.shared && <span className="flex-none text-[11px] text-muted" title={t('workspace-shared')}>{t('ide-shared')}</span>}
                   {(a.filesChanged ?? 0) > 0 && <span className="font-mono text-[11px] text-needs-you">{a.filesChanged}</span>}
                 </button>

@@ -30,6 +30,8 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 - An agent can ask to start a helper agent for a piece of work (ADR-0057). Nothing starts until you approve the request, which shows the asking agent, the kind, the folder and the whole first prompt. You can allow a few more helpers of that kind in that folder while the agent runs, and revoke that permission at any time.
 - The asking agent can wait for its helper and read the last lines of its screen. A helper works only in its parent's folder (or a worktree of it) unless you approve another folder.
 - Limits: 3 running helpers per agent; by default a helper cannot start helpers of its own.
+- On a machine that offers this, an agent's mesh instructions tell it about `agent_start` instead of saying it cannot start agents. A helper's first prompt is typed only once its screen is idle, never into a trust or permission question, and a prompt that would run a command in the agent itself (`!`, `/`, `#`) is refused. No "more like this" permission is offered for a shell.
+- The web window and the terminal client show helpers under the agent that started them ("started by …"); the web window lists what an agent may still start without asking, with a Revoke button. In the terminal client, stopping an agent with helpers asks whether they stop too.
 
 ## 0.3.6
 

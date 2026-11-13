@@ -26,6 +26,24 @@ export interface AgentTileModel {
   exitCode?: number;
   startedMs?: number;
   endedMs?: number;
+  parentId?: string; // ADR-0057: the agent that started this one (hub-wide key)
+  parentName?: string;
+}
+
+// ADR-0057: each helper right after the agent that started it, with how deep it sits. A helper whose parent is not in `list` stays in
+// its place at depth 0.
+export function helperTree<T extends { id: string; parentId?: string }>(list: readonly T[]): { agent: T; depth: number }[] {
+  const out: { agent: T; depth: number }[] = [];
+  const seen = new Set<string>();
+  const add = (a: T, depth: number) => {
+    if (seen.has(a.id) || depth > 8) return;
+    seen.add(a.id);
+    out.push({ agent: a, depth });
+    for (const c of list) if (c.parentId === a.id) add(c, depth + 1);
+  };
+  for (const a of list) if (!a.parentId || !list.some((p) => p.id === a.parentId)) add(a, 0);
+  for (const a of list) if (!seen.has(a.id)) out.push({ agent: a, depth: 0 });
+  return out;
 }
 
 // Protocol AgentState (schema/agora/v1/common.proto) → what the user sees.
