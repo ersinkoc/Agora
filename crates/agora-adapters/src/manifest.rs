@@ -4,8 +4,12 @@ use std::collections::{BTreeMap, HashSet};
 
 use serde::Deserialize;
 
-/// Highest manifest `min_engine` this engine can run.
-pub const ENGINE_VERSION: u32 = 1;
+/// Highest manifest `min_engine` this engine can run. 2: `[[launch.option]]` (ADR-0059).
+pub const ENGINE_VERSION: u32 = 2;
+
+/// Most `[[launch.option]]`s one manifest may declare, and most arguments one option may add.
+pub const MAX_LAUNCH_OPTIONS: usize = 8;
+const MAX_OPTION_ARGS: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ManifestError {
@@ -106,6 +110,28 @@ pub struct AcpSpec {
     pub argv: Vec<String>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+}
+
+/// ADR-0059: one `[[launch.option]]`, a named choice made when an agent starts. Its `args` are added to the launch command (a terminal
+/// kind) or to the ACP server command (`[structured] acp`); `label` is a Fluent message id the clients show.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaunchOption {
+    pub id: String,
+    pub label: String,
+    pub args: Vec<String>,
+    /// The option makes the agent act without asking (a permission-skipping flag). Never preselected, confirmed in the window,
+    /// signed, audited and badged; the node's `skip_permissions` policy decides whether it may be used at all.
+    #[serde(default)]
+    pub skips_permissions: bool,
+}
+
+/// `[launch]`: what may be chosen when an agent starts (ADR-0059).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Launch {
+    #[serde(default)]
+    pub option: Vec<LaunchOption>,
 }
 
 /// `[structured]`: the ways an agent can be driven without a terminal. Keys this engine does not know yet (`adapter` as a registry
@@ -221,6 +247,9 @@ pub struct Manifest {
     /// ADR-0057: a regex over `bottom_non_empty_lines(12)` (multi-line) whose first capture group is the input box's text. Enter is pressed
     /// only when it holds exactly the typed prompt (whitespace ignored, so a wrapped line still counts).
     pub input_box: Option<String>,
+    /// ADR-0059: `[[launch.option]]`s, in the order the start window lists them.
+    #[serde(default)]
+    pub launch: Launch,
 }
 
 /// Folders an agent asks to read or write when confined; `~/` stands for the home folder.
@@ -238,7 +267,28 @@ fn invalid(field: impl Into<String>) -> ManifestError {
     }
 }
 
+/// A Fluent message id: an ASCII letter, then letters, digits, `-` or `_`.
+fn fluent_id(s: &str) -> bool {
+    let mut c = s.chars();
+    c.next().is_some_and(|c| c.is_ascii_alphabetic())
+        && c.all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        && s.len() <= 64
+}
+
+/// A launch option id: what a start names and a device signs (comma-joined), so lowercase ASCII, digits and `-` only.
+pub fn valid_option_id(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 32
+        && s.chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
 impl Manifest {
+    /// ADR-0059: the declared option with this id.
+    pub fn launch_option(&self, id: &str) -> Option<&LaunchOption> {
+        self.launch.option.iter().find(|o| o.id == id)
+    }
+
     /// What drives this kind without a terminal, as an adapter command: its own `[adapter]`, or the ACP bridge (`bridge` is the
     /// program that runs `acp-bridge`, the `agora` binary) around `[structured] acp`. `None` for a kind that runs in a terminal.
     pub fn driver(&self, bridge: &std::path::Path) -> Option<AdapterSpec> {
@@ -335,12 +385,39 @@ impl Manifest {
                 return Err(invalid("input_box"));
             }
         }
+        self.validate_launch()?;
         for (name, list) in [
             ("rules", &self.rules),
             ("ready", &self.ready),
             ("typed", &self.typed),
         ] {
             Self::validate_rules(name, list)?;
+        }
+        Ok(())
+    }
+
+    fn validate_launch(&self) -> Result<(), ManifestError> {
+        let options = &self.launch.option;
+        if options.len() > MAX_LAUNCH_OPTIONS {
+            return Err(invalid("launch.option"));
+        }
+        let mut ids = HashSet::new();
+        for (i, o) in options.iter().enumerate() {
+            let at = |f: &str| invalid(format!("launch.option[{i}].{f}"));
+            if !valid_option_id(&o.id) || !ids.insert(o.id.as_str()) {
+                return Err(at("id"));
+            }
+            if !fluent_id(&o.label) {
+                return Err(at("label"));
+            }
+            let args_ok = !o.args.is_empty()
+                && o.args.len() <= MAX_OPTION_ARGS
+                && o.args
+                    .iter()
+                    .all(|a| !a.trim().is_empty() && a.len() <= 256 && !a.contains('\0'));
+            if !args_ok {
+                return Err(at("args"));
+            }
         }
         Ok(())
     }
@@ -380,6 +457,65 @@ impl Manifest {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod launch_tests {
+    use super::*;
+
+    fn with(launch: &str) -> String {
+        format!("kind = \"k\"\ndisplay_name = \"K\"\nversion = \"1\"\nmin_engine = 2\n[process]\nlaunch = [\"k\"]\n{launch}")
+    }
+
+    const SKIP: &str = "[[launch.option]]\nid = \"skip-permissions\"\nlabel = \"option-skip-permissions\"\nargs = [\"--yes\"]\nskips_permissions = true\n";
+
+    #[test]
+    fn launch_options_are_read_in_order_and_harmless_by_default() {
+        let src = format!("{SKIP}[[launch.option]]\nid = \"resume-last\"\nlabel = \"option-resume-last\"\nargs = [\"--continue\"]\n");
+        let m = Manifest::parse(&with(&src)).unwrap();
+        let ids: Vec<_> = m.launch.option.iter().map(|o| o.id.as_str()).collect();
+        assert_eq!(ids, ["skip-permissions", "resume-last"]);
+        assert!(
+            m.launch_option("skip-permissions")
+                .unwrap()
+                .skips_permissions
+        );
+        assert!(!m.launch_option("resume-last").unwrap().skips_permissions);
+        assert!(m.launch_option("other").is_none());
+        assert!(Manifest::parse(&with("")).unwrap().launch.option.is_empty());
+    }
+
+    #[test]
+    fn a_bad_launch_option_is_refused() {
+        for bad in [
+            format!("{SKIP}{SKIP}"),
+            SKIP.replace("skip-permissions\"", "Skip_Permissions\""),
+            SKIP.replace("id = \"skip-permissions\"", "id = \"\""),
+            SKIP.replace("[\"--yes\"]", "[]"),
+            SKIP.replace("[\"--yes\"]", "[\" \"]"),
+            SKIP.replace("option-skip-permissions", "Don't ask"),
+            SKIP.replace("option-skip-permissions", ""),
+            format!("{SKIP}extra = 1\n"),
+            (0..=MAX_LAUNCH_OPTIONS)
+                .map(|i| SKIP.replace("\"skip-permissions\"", &format!("\"o{i}\"")))
+                .collect::<String>(),
+        ] {
+            assert!(Manifest::parse(&with(&bad)).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn launch_options_need_engine_2() {
+        let src = with(SKIP).replace("min_engine = 2", "min_engine = 3");
+        assert!(matches!(
+            Manifest::parse(&src),
+            Err(ManifestError::EngineTooOld {
+                required: 3,
+                supported: 2
+            })
+        ));
     }
 }
 

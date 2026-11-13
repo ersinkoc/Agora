@@ -493,6 +493,8 @@ mod tests {
             kind: "codex".into(),
             level: 1,
             parent_agent_id: "a".into(),
+            launch_options: Vec::new(),
+            skips_permissions: false,
         }));
         let row = spawn_audit(&view, &started).unwrap();
         assert_eq!((row.0.as_str(), row.3.as_str()), ("n1/a", "ok:n1/b"));
@@ -558,6 +560,8 @@ mod tests {
                 kind: "shell".into(),
                 level: 2,
                 parent_agent_id: String::new(),
+                launch_options: Vec::new(),
+                skips_permissions: false,
             })),
         }
         .encode_to_vec()

@@ -27,6 +27,11 @@ agent-sandbox_unavailable = Bu makine ajanları kısıtlayacak şekilde ayarlı 
 agent-not_authenticated = { $kind }, { $node_id } makinesinde giriş yapmamış.
 agent-blocked = { $agent_id } ajanı girdi bekliyor, bu yüzden mesaj gönderilmedi.
 agent-mode_unsupported = { $kind }, { $mode } modunu desteklemiyor.
+agent-option_forbidden = { $kind }, { $option } seçeneğiyle başlatılmadı: { $policy ->
+        [confined_only] bu makine bir ajanın sormadan çalışmasına yalnızca klasörüyle sınırlıyken izin veriyor ve burada sınırlanamazdı.
+        [signature] böyle başlatmak için başlatma isteğinin cihazınızca imzalanması gerekir.
+       *[other] bu makine ajanların sormadan çalışmasına izin vermiyor.
+    }
 agent-running = { $agent_id } hâlâ çalışıyor. Önce durdurun.
 approval-expired = { $approval_id } onayının süresi doldu.
 approval-signature_invalid = { $approval_id } onayı doğrulanamadı.
