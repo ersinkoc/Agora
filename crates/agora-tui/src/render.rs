@@ -249,13 +249,19 @@ pub fn notice_text(e: &ChatEntry, t: Text<'_>) -> String {
     match e.code.as_str() {
         "adapter.turn_failed" => t(
             key!("tui-notice-turn_failed"),
-            &[("rpc_code", p("rpc_code"))],
+            &[
+                ("rpc_code", p("rpc_code")),
+                ("stderr_tail", p("stderr_tail")),
+            ],
         ),
         "adapter.turn_stopped" => t(
             key!("tui-notice-turn_stopped"),
             &[("stop_reason", p("stop_reason"))],
         ),
-        "adapter.turn_empty" => t(key!("tui-notice-turn_empty"), &[]),
+        "adapter.turn_empty" => t(
+            key!("tui-notice-turn_empty"),
+            &[("stderr_tail", p("stderr_tail"))],
+        ),
         "adapter.agent_exited" => t(
             key!("tui-notice-agent_exited"),
             &[

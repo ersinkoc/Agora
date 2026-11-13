@@ -22,6 +22,9 @@ describe('chat lines', () => {
     const exited = chatLine(agora.v1.ChatEntry.create({ kind: agora.v1.ChatKind.CHAT_KIND_NOTICE, code: 'adapter.agent_exited', params: { stage: 'turn', stderr_tail: '<b>x</b>' } }));
     expect(noticeText(exited, t)).toContain('exit code ?');
     expect(noticeText(exited, t)).toContain('<b>x</b>'); // shown as text by React, never as HTML
+    const empty = chatLine(agora.v1.ChatEntry.create({ kind: agora.v1.ChatKind.CHAT_KIND_NOTICE, code: 'adapter.turn_empty', params: { stderr_tail: 'invalid x-api-key (auth)' } }));
+    expect(noticeText(empty, t)).toContain('invalid x-api-key (auth)');
+    expect(noticeText(chatLine(agora.v1.ChatEntry.create({ kind: agora.v1.ChatKind.CHAT_KIND_NOTICE, code: 'adapter.turn_empty' })), t)).not.toContain('{');
     const unknown = chatLine(agora.v1.ChatEntry.create({ kind: agora.v1.ChatKind.CHAT_KIND_NOTICE, code: 'future.thing' }));
     expect(noticeText(unknown, t)).toContain('future.thing');
   });

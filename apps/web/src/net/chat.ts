@@ -29,10 +29,10 @@ export function chatLine(e: agora.v1.ChatEntry.$Properties): ChatLine {
 export const noticeKey = (code: string): string => `notice-${code.replace(/\./g, '-')}`;
 
 // What a notice says, in words: its own message when the window knows the code, a general one naming the code otherwise. Parameters
-// are passed as plain strings (a stderr tail is the agent's text, shown as text). `exit_code` is optional on the wire.
+// are passed as plain strings (a stderr tail is the agent's text, shown as text). `exit_code` and `stderr_tail` are optional on the wire.
 export function noticeText(line: ChatLine, tr: (id: string, args?: Record<string, string>) => string): string {
   const code = line.code ?? '';
-  const args = { exit_code: '?', ...(line.params ?? {}) };
+  const args = { exit_code: '?', stderr_tail: '', ...(line.params ?? {}) };
   const id = noticeKey(code);
   const said = tr(id, args);
   return said === id ? tr('notice-other', { code }) : said;
