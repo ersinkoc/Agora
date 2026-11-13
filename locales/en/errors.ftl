@@ -39,6 +39,14 @@ mesh-body_too_large = The message is too large (limit: { $limit }). Send a refer
 mesh-too_many_refs = Too many references (limit: { $limit }).
 mesh-too_many_asks = Too many questions are waiting for answers (limit: { $limit }).
 mesh-timeout = No answer arrived in time.
+mesh-folder_not_allowed = A helper can only work in the asking agent's own folder: { $folder } is outside it.
+mesh-helper_limit = The agent cannot start another helper now (limit: { $limit }). { $rule ->
+        [depth] A helper cannot start helpers of its own.
+        [pending] Another start is still waiting for your answer.
+        [prompt] Its first prompt is too long.
+       *[other] It already runs as many helpers as allowed.
+    }
+mesh-start_denied = The start was refused ({ $approval_id }).
 task-not_found = Task { $task_id } was not found.
 task-not_open = Task { $task_id } is already taken or done.
 task-blocked = Task { $task_id } waits for { $depends_on }.

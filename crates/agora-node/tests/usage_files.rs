@@ -147,7 +147,10 @@ mode = "delta"
         })
         .sum();
     assert_eq!(sum, 15);
-    let _ = c.call(Cmd::AgentStop(v1::AgentStop { agent_id: agent }));
+    let _ = c.call(Cmd::AgentStop(v1::AgentStop {
+        agent_id: agent,
+        stop_helpers: false,
+    }));
     drop(n);
     let _ = std::fs::remove_dir_all(dir);
 }

@@ -68,6 +68,8 @@ message AgentSnapshot {
   uint64 context_window = 19;
   optional uint64 cost_micros = 20;
   string currency = 21;
+  // ADR-0057: `AgentStarted.parent_agent_id`.
+  string parent_agent_id = 13;
 }
 
 message TerminalSnapshot {

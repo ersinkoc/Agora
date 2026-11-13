@@ -197,6 +197,7 @@ fn two_sessions_use_the_selected_dirty_subfolder_and_preserve_user_configuration
     for id in [&a.agent_id, &b.agent_id] {
         c.call(Cmd::AgentStop(v1::AgentStop {
             agent_id: id.to_string(),
+            stop_helpers: false,
         }))
         .unwrap()
         .unwrap();
@@ -359,6 +360,7 @@ fn adapter_sessions_and_resume_keep_the_selected_non_git_directory() {
         }
         c.call(Cmd::AgentStop(v1::AgentStop {
             agent_id: a.agent_id.clone(),
+            stop_helpers: false,
         }))
         .unwrap()
         .unwrap();
@@ -557,6 +559,7 @@ fn confined_selected_subfolders_cannot_write_to_the_parent_checkout() {
         assert!(!forbidden.exists());
         c.call(Cmd::AgentStop(v1::AgentStop {
             agent_id: a.agent_id,
+            stop_helpers: false,
         }))
         .unwrap()
         .unwrap();
@@ -617,6 +620,7 @@ fn a_launched_folders_changes_are_reported_for_its_workspace() {
     }
     c.call(Cmd::AgentStop(v1::AgentStop {
         agent_id: a.agent_id,
+        stop_helpers: false,
     }))
     .unwrap()
     .unwrap();
@@ -676,6 +680,7 @@ fn a_resync_announces_the_nodes_present() {
     );
     c.call(Cmd::AgentStop(v1::AgentStop {
         agent_id: ended.agent_id.clone(),
+        stop_helpers: false,
     }))
     .unwrap()
     .unwrap();

@@ -582,3 +582,66 @@ fn a_second_agents_folder_under_a_broad_grant_is_out_of_reach() {
     let _ = std::fs::remove_dir_all(&broad);
     let _ = std::fs::remove_dir_all(&root_a);
 }
+
+fn git(dir: &Path, args: &[&str]) {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["-c", "user.name=t", "-c", "user.email=t@x"])
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// LAN L10: a confined agent commits in its worktree when the checkout lives under the user profile (here `%TEMP%`), with the
+/// node's narrow Windows profile: the worktree, a private temp folder, its own admin folder, the shared `objects/`, `refs/` and
+/// `logs/refs/` to write, and the shared Git folder to read (`agora-node/src/sandbox.rs`, `narrow_profile`).
+#[test]
+fn a_confined_agent_commits_in_its_worktree_under_the_profile() {
+    enable();
+    let root = scratch("commit");
+    let main = root.join("main");
+    std::fs::create_dir_all(&main).unwrap();
+    git(&main, &["init", "-q", "-b", "main"]);
+    git(&main, &["commit", "-q", "--allow-empty", "-m", "init"]);
+    git(
+        &main,
+        &["worktree", "add", "-q", "-b", "agent/one", "../wt"],
+    );
+    let (wt, common) = (root.join("wt"), main.join(".git"));
+    let temp = root.join("temp");
+    std::fs::create_dir_all(&temp).unwrap();
+    let script = wt.join("run.cmd");
+    std::fs::write(
+        &script,
+        "@echo off\r\n\
+         echo change> change.txt\r\n\
+         git add change.txt && echo ADD-OK|| echo ADD-FAILED\r\n\
+         git -c user.name=agent -c user.email=agent@x commit -q -m work && echo COMMIT-OK|| echo COMMIT-FAILED\r\n",
+    )
+    .unwrap();
+    let out = run(
+        Sandbox {
+            read: vec![common.clone()],
+            write: vec![
+                wt.clone(),
+                temp,
+                common.join("worktrees").join("wt"),
+                common.join("objects"),
+                common.join("refs"),
+                common.join("logs").join("refs"),
+            ],
+            ..Default::default()
+        },
+        &wt,
+        &script,
+    );
+    assert!(out.contains("ADD-OK"), "{out}");
+    assert!(out.contains("COMMIT-OK"), "{out}");
+    let _ = std::fs::remove_dir_all(&root);
+}
