@@ -1410,7 +1410,12 @@ fn give_device_changes(hub: &Hub, node_id: &str) {
 /// ADR-0061: a node's one question on a connection of its own (made with its certificate, before any `Hello`): `DeviceList`, so the
 /// owner at the machine can choose which registered devices it trusts (`agora node trust --from-hub`) while the node's own connection
 /// stays as it is. One answer, then the connection ends; nothing else is accepted this way.
-async fn serve_node_query<S>(mut conn: Conn<S>, hub: &Hub, first: Frame) -> Result<(), ServeError>
+async fn serve_node_query<S>(
+    mut conn: Conn<S>,
+    hub: &Hub,
+    node_id: &str,
+    first: Frame,
+) -> Result<(), ServeError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -1418,7 +1423,7 @@ where
         v1::CommandRequest::decode(first.payload.as_slice()).map_err(|_| invalid("request"))?;
     let resp = match req.command {
         Some(command_request::Command::DeviceList(_)) => {
-            match crate::devices::Devices::new(hub.store()).list_all() {
+            match crate::devices::Devices::new(hub.store()).list_for_node(node_id) {
                 Ok(devices) => v1::CommandResponse {
                     request_id: req.request_id.clone(),
                     result: Some(command_response::Result::Ok(v1::CommandOk {
@@ -1519,7 +1524,7 @@ where
                     not_after_ms: now_ms() + crate::ca::DEVICE_CERT_DAYS as u64 * 86_400_000,
                     // ADR-0061: candidates only; the owner at the machine says which ones it trusts.
                     devices: crate::devices::Devices::new(hub.store())
-                        .list_all()
+                        .list_for_node(&e.node_id)
                         .unwrap_or_default(),
                 })),
             })),
@@ -1634,7 +1639,7 @@ async fn handle(
             };
             // ADR-0061: a one-shot question on a connection of its own.
             if (first.stream_id, first.kind) == (STREAM_COMMANDS, 0) {
-                return serve_node_query(conn, &state.hub, first).await;
+                return serve_node_query(conn, &state.hub, &id.node_id, first).await;
             }
             // Revoking a node ends its connection, not only its next one.
             tokio::select! {

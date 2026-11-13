@@ -50,6 +50,9 @@ pub struct Entry {
     pub via: Option<String>,
     /// When its trust here began; `None` on a line written before ADR-0061's review (counts as the beginning of time).
     pub since: Option<u64>,
+    /// ADR-0049 limits it inherited from a limited endorser (`projects=a,b`; empty: none): it may act only in these projects, like
+    /// the device that endorsed it. `None`: no inherited limit (the policy file may still name it).
+    pub projects: Option<std::collections::BTreeSet<String>>,
 }
 
 impl Entry {
@@ -63,6 +66,10 @@ impl Entry {
         }
         if let Some(v) = &self.via {
             l.push_str(&format!(" via={v}"));
+        }
+        if let Some(p) = &self.projects {
+            l.push_str(" projects=");
+            l.push_str(&p.iter().cloned().collect::<Vec<_>>().join(","));
         }
         l
     }
@@ -152,6 +159,7 @@ pub fn parse_line(line: &str) -> Option<Option<Entry>> {
         expires_ms: None,
         via: None,
         since: None,
+        projects: None,
     };
     for w in words {
         match w.split_once('=') {
@@ -163,6 +171,14 @@ pub fn parse_line(line: &str) -> Option<Option<Entry>> {
                 Ok(ms) => entry.since = Some(ms),
                 Err(_) => return Some(None),
             },
+            Some(("projects", v)) if entry.projects.is_none() => {
+                entry.projects = Some(
+                    v.split(',')
+                        .filter(|p| !p.is_empty())
+                        .map(str::to_string)
+                        .collect(),
+                );
+            }
             Some(("via", v)) if entry.via.is_none() && valid_device_id(v) => {
                 entry.via = Some(v.to_string());
             }
@@ -336,6 +352,7 @@ pub fn confirm(file: &Path, id: &str, key: &[u8]) -> Result<(), String> {
         expires_ms: None,
         via: None,
         since: Some(now()),
+        projects: None,
     });
     write_entries(file, &entries).map_err(|e| e.to_string())?;
     forget_revocation(&file.with_file_name(REVOCATIONS_FILE), id).map_err(|e| e.to_string())
@@ -549,6 +566,8 @@ pub struct DeviceTrust {
     file: PathBuf,
     /// One change at a time from this process (other processes wait on the lock file).
     lock: Mutex<()>,
+    /// The node policy's `device.<id>.projects` lines (ADR-0049).
+    policy: Mutex<std::collections::BTreeMap<String, std::collections::BTreeSet<String>>>,
 }
 
 impl DeviceTrust {
@@ -558,7 +577,32 @@ impl DeviceTrust {
             node_id: node_id.to_string(),
             file: file.to_path_buf(),
             lock: Mutex::new(()),
+            policy: Mutex::new(std::collections::BTreeMap::new()),
         }
+    }
+
+    /// The node policy's per-device project limits (ADR-0049), which endorsements and revocations respect.
+    pub fn set_policy_limits(
+        &self,
+        limits: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+    ) {
+        *self.policy.lock().unwrap_or_else(|p| p.into_inner()) = limits;
+    }
+
+    /// What `id` may act in here: the policy file's line for it, else what it inherited from a limited endorser; `None`: anything.
+    fn limits_of(&self, entries: &[Entry], id: &str) -> Option<std::collections::BTreeSet<String>> {
+        if let Some(p) = self
+            .policy
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(id)
+        {
+            return Some(p.clone());
+        }
+        entries
+            .iter()
+            .find(|e| e.id == id)
+            .and_then(|e| e.projects.clone())
     }
 
     pub fn file(&self) -> &Path {
@@ -671,6 +715,8 @@ impl DeviceTrust {
                 .with("device_id", e.device_id.as_str())
                 .with("node_id", self.node_id.as_str()));
         }
+        // Trust starts no later than now, whatever the signer's clock said: a revocation signed now always wins over it.
+        let began = e.issued_at_ms.min(now_ms);
         if now_ms >= e.expires_at_ms
             || e.expires_at_ms <= e.issued_at_ms
             || e.issued_at_ms > now_ms.saturating_add(SKEW_MS)
@@ -681,7 +727,7 @@ impl DeviceTrust {
         }
         if read_revocations(&self.revocations())
             .iter()
-            .any(|(d, at)| *d == e.device_id && *at >= e.issued_at_ms)
+            .any(|(d, at)| *d == e.device_id && *at >= began)
         {
             return Err(
                 Error::new(ErrorCode::DeviceRevoked).with("device_id", e.device_id.as_str())
@@ -707,7 +753,9 @@ impl DeviceTrust {
                     key: e.public_key.clone(),
                     expires_ms: Some(expires),
                     via: Some(e.endorser_device_id.clone()),
-                    since: Some(e.issued_at_ms),
+                    since: Some(began),
+                    // ADR-0049: a limited endorser vouches only within its own projects; the device it endorses carries them.
+                    projects: self.limits_of(&entries, &e.endorser_device_id),
                 };
                 let mut all: Vec<Entry> = entries
                     .iter()
@@ -752,6 +800,10 @@ impl DeviceTrust {
         if !valid_device_id(&r.revoker_device_id) {
             return Err(invalid("revoker_device_id"));
         }
+        // A revocation dated ahead of this clock would outlive every bound on what is remembered.
+        if r.issued_at_ms > now_ms.saturating_add(SKEW_MS) {
+            return Err(invalid("issued_at_ms"));
+        }
         let _lock = FileLock::take(&self.file).map_err(Self::io)?;
         let (entries, _) = read_entries(&self.file);
         self.signer(
@@ -762,6 +814,20 @@ impl DeviceTrust {
             &r.signature,
             now_ms,
         )?;
+        // ADR-0049: a limited device removes only itself or a device limited to projects it has too (never the owner's).
+        if r.device_id != r.revoker_device_id {
+            if let Some(mine) = self.limits_of(&entries, &r.revoker_device_id) {
+                let within = entries.iter().any(|e| e.id == r.device_id)
+                    && self
+                        .limits_of(&entries, &r.device_id)
+                        .is_some_and(|theirs| theirs.is_subset(&mine));
+                if !within {
+                    return Err(
+                        Error::new(ErrorCode::AuthForbidden).with("action", "device.revoke")
+                    );
+                }
+            }
+        }
         remember_revocation(&self.revocations(), &r.device_id, r.issued_at_ms, now_ms)
             .map_err(Self::io)?;
         // Only trust that began at or before the revocation was signed: one the hub sends again later cannot undo a newer decision.

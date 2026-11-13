@@ -535,7 +535,9 @@ or when a device it already trusts signs an **endorsement** of it. The hub only 
   asks too, on a TLS connection made with its certificate whose first frame is that `CommandRequest` (stream 2, kind 0, before any
   `Hello`): the hub answers once with every registered device and closes it, so the node's own connection is not replaced. Nothing
   else is answered on such a connection (`protocol.invalid_message`); without a certificate it is refused like anything but
-  enrollment. The hub offers the capability `device.list`. `EnrollResponse.devices` (4) carries the same list at enrollment.
+  enrollment. The hub offers the capability `device.list`. `EnrollResponse.devices` (4) carries the same list at enrollment. A node is
+  sent only the devices of the people who may act on it: the owner (sessions without a person and people with the owner role) and
+  every person with a grant on one of its projects (ADR-0049).
 - **Asking.** `DeviceAskApproval` (request field 92: `device_id`, `signed_at_ms`, `signature`) marks one of the caller's devices as
   waiting for another of their devices (`approval_asked_ms`). It is signed by that device's registered key over
   `"agora-device-ask-v1" 0x00 F(device_id) F(signed_at_ms)`, at most 5 minutes from the hub's clock, so only the device itself can ask; the person's other devices list it and show a card. The first endorsement of it the hub carries
@@ -556,7 +558,12 @@ or when a device it already trusts signs an **endorsement** of it. The hub only 
   verifies (`device.signature_invalid`), this node is in `nodes` or `nodes` is empty (`device.not_in_scope`), now is before
   `expires_at_ms`, `issued_at_ms` is at most 5 minutes ahead of the node's clock and `expires_at_ms - issued_at_ms` is at most 90 days
   (`device.endorsement_expired`), no revocation of the device was signed at or after `issued_at_ms` (`device.revoked`), and the node
-  does not already trust that id with another key (`device.key_mismatch`). It then trusts the device until `expires_at_ms` (never
+  does not already trust that id with another key (`device.key_mismatch`). Its trust there begins at the earlier of `issued_at_ms`
+  and the node's clock (a revocation signed now always wins over an endorsement dated ahead). A device the node's policy limits to
+  some projects (ADR-0049) endorses only within them: the new device is limited to the same projects (written as `projects=` on its
+  line, so it survives restarts), and a limited device revokes only itself or devices whose limits are within its own
+  (`auth.forbidden` otherwise). A revocation dated more than 5 minutes ahead of the node's or the hub's clock is refused. It then
+  trusts the device until `expires_at_ms` (never
   longer than its endorser's own trust there), and each use of the device on that node renews it to 90 days from the use.
 - **Revocation.** `DeviceRevoke { revocation }` (request field 91): both devices must be the caller's; the hub keeps it and sends it to
   every node with `device.trust`, now and whenever one connects. Signed bytes:

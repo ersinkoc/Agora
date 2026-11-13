@@ -28,6 +28,10 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
   device whose id the machine already trusts with another key needs `--replace`. Removing a device also removes the devices it
   approved; approvals are at most two deep and never outlast the approving device; a removal the hub sends again never undoes a
   newer approval or `agora node trust`; changes to the trusted-devices file wait for each other across processes.
+- A device limited to some projects on a machine (`device.<id>.projects`) can approve only a device limited to the same projects,
+  and can remove only itself or such devices. A removal signed right after an approval always wins, even if the approval was dated
+  a few minutes ahead, and approvals or removals dated in the future are refused. A machine is offered only the devices of the
+  people who may work on it.
 - The window registers this browser with the hub when it connects. "This device" shows its fingerprint, which machines trust it,
   "Ask another device to approve" for the ones that do not (the command to run on the machine stays as the fallback), and your
   other devices with their fingerprints, where they are trusted, and Remove. On a device the machines already trust, a card shows

@@ -1300,7 +1300,10 @@ impl Node {
             } else {
                 policy_now.signed_commands
             };
+        devices.set_policy_limits(policy_now.device_projects.clone());
         let limits = Arc::new(crate::limits::DeviceLimits::new(policy_now.device_projects));
+        // ADR-0061: a device endorsed by a limited device is limited the same way (kept in the trusted-devices file).
+        limits.follow_trust_file(&cfg.data_dir.join(crate::approvals::TRUSTED_DEVICES_FILE));
         approvals.set_limits(Arc::clone(&limits));
         let grants = Arc::new(
             crate::grants::Grants::new(&cfg.node_id, Arc::clone(&approvals), signed)

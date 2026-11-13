@@ -252,9 +252,29 @@ fn the_hub_offers_devices_the_owner_decides_and_endorsements_and_revocations_are
 
     // Someone else's device on the same hub: never trusted by the owner's fingerprints alone, only with --include-others.
     let eda = Key::new();
+    // A person with no project on this machine: their device is never even offered to it.
+    let users = agora_hub::users::Users::new(state.hub.store());
+    let stranger = users
+        .add("Stranger", agora_hub::users::Role::Member, server::now_ms())
+        .unwrap();
+    let theirs = Key::new();
     devices
         .register(
-            "eda",
+            &stranger.id,
+            &theirs.registration("web-stranger", "Stranger's laptop"),
+            server::now_ms(),
+        )
+        .unwrap();
+    let (_, out, _) = agora(&home, &["node", "trust", "--from-hub", "--data", data_arg]);
+    assert!(!out.contains(&fingerprint(&theirs.public())), "{out}");
+    // A person who works on a project of this machine.
+    let eda_user = users
+        .add("Eda", agora_hub::users::Role::Member, server::now_ms())
+        .unwrap();
+    users.grant(&eda_user.id, "laptop", "proj").unwrap();
+    devices
+        .register(
+            &eda_user.id,
             &eda.registration("web-eda", "Eda's laptop"),
             server::now_ms(),
         )

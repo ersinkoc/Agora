@@ -273,7 +273,33 @@ impl<'a> Devices<'a> {
         self.rows(Some(user))
     }
 
-    /// Every registered device: what a machine is offered at enrollment or `agora node trust --from-hub`, and `agora hub devices`.
+    /// The devices a machine is offered (enrollment, `agora node trust --from-hub`): those of the people who may act on `node`, the
+    /// hub's owner (sessions without a person, and people with the owner role) and every person with a grant on a project of that node
+    /// (ADR-0049). Other people's devices are never sent to it.
+    pub fn list_for_node(&self, node: &str) -> Result<Vec<DeviceInfo>, Error> {
+        let users = crate::users::Users::new(self.store);
+        let people = users.list().map_err(store_error)?;
+        let prefix = format!("{node}/");
+        let mut relevant: Vec<String> = vec!["owner".to_string()];
+        for u in people {
+            let works_here = u.role == crate::users::Role::Owner
+                || users
+                    .grants_of(&u.id)
+                    .map_err(store_error)?
+                    .iter()
+                    .any(|g| g.starts_with(&prefix));
+            if works_here {
+                relevant.push(u.id);
+            }
+        }
+        Ok(self
+            .rows(None)?
+            .into_iter()
+            .filter(|d| d.user_id.is_empty() || relevant.contains(&d.user_id))
+            .collect())
+    }
+
+    /// Every registered device: `agora hub devices`.
     pub fn list_all(&self) -> Result<Vec<DeviceInfo>, Error> {
         self.rows(None)
     }
@@ -343,7 +369,8 @@ impl<'a> Devices<'a> {
         if e.nodes.len() > MAX_SCOPE || e.nodes.iter().any(|n| n.is_empty() || n.len() > 64) {
             return Err(invalid("nodes"));
         }
-        if e.expires_at_ms <= now_ms
+        if e.issued_at_ms > now_ms.saturating_add(ASK_SKEW_MS)
+            || e.expires_at_ms <= now_ms
             || e.expires_at_ms <= e.issued_at_ms
             || e.expires_at_ms - e.issued_at_ms > MAX_ENDORSEMENT_MS
         {
@@ -399,6 +426,10 @@ impl<'a> Devices<'a> {
         }
         if r.signature.len() != 64 {
             return Err(invalid("signature"));
+        }
+        // Never dated ahead of this clock (beyond the usual skew): a record from the future would outlive every bound.
+        if r.issued_at_ms > now_ms.saturating_add(ASK_SKEW_MS) {
+            return Err(invalid("issued_at_ms"));
         }
         self.own(user, &r.device_id)?;
         let revoker = self.own(user, &r.revoker_device_id)?;
@@ -819,5 +850,56 @@ pub(crate) mod tests {
                 .code,
             ErrorCode::NodeResourceLimit
         );
+    }
+
+    #[test]
+    fn a_machine_is_offered_only_the_devices_of_people_who_work_on_it() {
+        use crate::users::{Role, Users};
+        let store = SqliteStore::open_in_memory().unwrap();
+        let d = Devices::new(&store);
+        let users = Users::new(&store);
+        let eda = users.add("Eda", Role::Member, 1).unwrap();
+        let ali = users.add("Ali", Role::Member, 1).unwrap();
+        let boss = users.add("Boss", Role::Owner, 1).unwrap();
+        users.grant(&eda.id, "laptop", "web").unwrap();
+        users.grant(&ali.id, "vps", "api").unwrap();
+        for (user, id) in [
+            ("owner", "o"),
+            (eda.id.as_str(), "e"),
+            (ali.id.as_str(), "a"),
+            (boss.id.as_str(), "b"),
+        ] {
+            d.register(user, &Key::new().register(id, "x", 1), 1)
+                .unwrap();
+        }
+        let ids = |node: &str| -> Vec<String> {
+            d.list_for_node(node)
+                .unwrap()
+                .into_iter()
+                .map(|x| x.device_id)
+                .collect()
+        };
+        assert_eq!(ids("laptop"), ["o", "e", "b"]);
+        assert_eq!(ids("vps"), ["o", "a", "b"]);
+        assert_eq!(ids("pi"), ["o", "b"]);
+    }
+
+    #[test]
+    fn records_dated_in_the_future_are_refused() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let d = Devices::new(&store);
+        let (a, b) = (Key::new(), Key::new());
+        d.register("owner", &a.register("a", "A", 1), 1).unwrap();
+        d.register("owner", &b.register("b", "B", 1), 1).unwrap();
+        let far = u64::MAX / 2;
+        assert_eq!(
+            d.record_revocation("owner", &a.revoke("a", "b", far), 10)
+                .unwrap_err()
+                .code,
+            ErrorCode::ProtocolInvalidMessage
+        );
+        assert!(d.for_machines(10).unwrap().1.is_empty());
+        let e = a.endorse("a", "b", &b.public(), 10 + ASK_SKEW_MS + 1, 86_400_000);
+        assert!(d.record_endorsement("owner", &e, 10).is_err());
     }
 }
