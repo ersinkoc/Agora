@@ -171,9 +171,9 @@ impl Grants {
 
     /// Directory actions are always exact-path, short-lived, owner-signed and single-use on the routed path.
     pub fn directory_action(&self, c: &Cmd, now: u64) -> Result<(), Error> {
-        let launch_options: &[String] = match c {
-            Cmd::AgentLaunch(a) => &a.launch_options,
-            _ => &[],
+        let (launch_options, confirmed): (&[String], &[String]) = match c {
+            Cmd::AgentLaunch(a) => (&a.launch_options, &a.confirmed_launch_options),
+            _ => (&[], &[]),
         };
         let (auth, op, path, kind, project, option, identity_change) = match c {
             Cmd::DirectoryInspect(d) => (
@@ -211,9 +211,11 @@ impl Grants {
         if [path, kind, project, a.nonce.as_str(), a.device_id.as_str()]
             .iter()
             .any(|s| s.contains('\0') || s.len() > 4096)
-            || launch_options.iter().any(|o| {
-                !agora_adapters::manifest::valid_option_id(crate::launch_options::split_marker(o).0)
-            })
+            // The lists are signed length-prefixed, so their contents cannot be confused; the node checks each id afterwards
+            // (`agent.option_invalid`). Only their size is bounded here.
+            || launch_options.len() > 16
+            || confirmed.len() > 16
+            || launch_options.iter().chain(confirmed).any(|o| o.len() > 64)
             || a.nonce.len() != 32
             || !a.nonce.bytes().all(|b| b.is_ascii_hexdigit())
             || a.expires_at_ms <= now
@@ -225,7 +227,7 @@ impl Grants {
             return Err(Error::new(ErrorCode::AuthForbidden).with("action", "directory"));
         }
         // ADR-0059: chosen launch options are signed too, under their own domain (a hub can neither add nor remove one).
-        let msg = if launch_options.is_empty() {
+        let msg = if launch_options.is_empty() && confirmed.is_empty() {
             crate::directory::signed_message(
                 &self.node_id,
                 op,
@@ -246,6 +248,7 @@ impl Grants {
                 option,
                 identity_change,
                 launch_options,
+                confirmed,
                 &a.nonce,
                 a.expires_at_ms,
             )

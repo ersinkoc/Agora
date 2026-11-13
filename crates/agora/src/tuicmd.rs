@@ -757,6 +757,7 @@ fn start_in_folder(
             authorization: Some(auth),
             accept_identity_change: accept,
             launch_options: Vec::new(),
+            confirmed_launch_options: Vec::new(),
         },
     ) {
         Ok(agent) => say.text(key!("tui-started"), &[("agent", Arg::Str(agent))]),

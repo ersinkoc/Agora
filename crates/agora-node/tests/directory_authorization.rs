@@ -191,13 +191,14 @@ fn a_folder_listing_needs_the_owners_signature_for_that_folder() {
         .is_err());
 }
 
-/// ADR-0059: a launch that chose options is signed over them (`directory-action-v2`); a hub can neither add one to a launch signed
-/// without, nor remove or change one.
+/// ADR-0059: a launch that chose options is signed over them and over which of them the user confirmed (`directory-action-v3`,
+/// two length-prefixed lists); a hub can neither add, remove or swap an option nor add or strip a confirmation.
 #[test]
 fn launch_options_are_signed_so_a_hub_can_neither_add_nor_remove_one() {
     let key = key();
-    let sign = |options: &[&str], nonce: &str| {
-        let options: Vec<String> = options.iter().map(|o| (*o).to_string()).collect();
+    let strs = |v: &[&str]| v.iter().map(|o| (*o).to_string()).collect::<Vec<String>>();
+    let sign = |options: &[&str], confirmed: &[&str], nonce: &str| {
+        let (options, confirmed) = (strs(options), strs(confirmed));
         let message = agora_node::directory::launch_signed_message(
             "node-a",
             "/selected",
@@ -206,11 +207,13 @@ fn launch_options_are_signed_so_a_hub_can_neither_add_nor_remove_one() {
             false,
             false,
             &options,
+            &confirmed,
             nonce,
             101_000,
         );
         let mut a = launch(&key, nonce);
         a.launch_options = options;
+        a.confirmed_launch_options = confirmed;
         a.authorization.as_mut().unwrap().signature = key
             .sign(&SystemRandom::new(), &message)
             .unwrap()
@@ -219,47 +222,53 @@ fn launch_options_are_signed_so_a_hub_can_neither_add_nor_remove_one() {
         a
     };
     let g = grants(&key);
-    // Signed without options: the hub adds one.
+    // Signed without options: the hub adds one, or a confirmation.
     let mut added = launch(&key, "00000000000000000000000000000001");
-    added.launch_options = vec!["skip-permissions".into()];
+    added.launch_options = strs(&["skip-permissions"]);
+    assert!(g
+        .directory_action(&Cmd::AgentLaunch(added.clone()), 100_000)
+        .is_err());
+    added.confirmed_launch_options = strs(&["skip-permissions"]);
     assert!(g
         .directory_action(&Cmd::AgentLaunch(added), 100_000)
         .is_err());
-    // Signed with one: the hub removes it, swaps it, or adds another.
-    // Signed with the confirmation marker (`!`); the hub cannot strip it either.
-    let signed = sign(&["skip-permissions!"], "00000000000000000000000000000002");
-    for options in [
-        vec![],
-        vec!["skip-permissions".to_string()],
-        vec!["resume-last".to_string()],
-        vec!["skip-permissions".to_string(), "resume-last".to_string()],
+    let signed = sign(
+        &["skip-permissions"],
+        &["skip-permissions"],
+        "00000000000000000000000000000002",
+    );
+    for (options, confirmed) in [
+        (vec![], vec![]),
+        (strs(&["skip-permissions"]), vec![]),
+        (strs(&["resume-last"]), strs(&["skip-permissions"])),
+        (
+            strs(&["skip-permissions", "resume-last"]),
+            strs(&["skip-permissions"]),
+        ),
+        (strs(&["skip-permissions!"]), vec![]),
     ] {
         let mut b = signed.clone();
         b.launch_options = options;
+        b.confirmed_launch_options = confirmed;
         assert!(g.directory_action(&Cmd::AgentLaunch(b), 100_000).is_err());
     }
-    // An id that could not be signed unambiguously is refused before the signature is checked.
-    let comma = sign(&["a,b"], "00000000000000000000000000000003");
+    // A signature over the unconfirmed option does not confirm it: the hub cannot add the confirmation afterwards.
+    let mut unconfirmed = sign(
+        &["skip-permissions"],
+        &[],
+        "00000000000000000000000000000003",
+    );
+    unconfirmed.confirmed_launch_options = strs(&["skip-permissions"]);
+    assert!(g
+        .directory_action(&Cmd::AgentLaunch(unconfirmed), 100_000)
+        .is_err());
+    // One id `a,b` is not the two ids `a` and `b`.
+    let mut comma = sign(&["a,b"], &[], "00000000000000000000000000000004");
+    comma.launch_options = strs(&["a", "b"]);
     assert!(g
         .directory_action(&Cmd::AgentLaunch(comma), 100_000)
         .is_err());
     assert!(g
         .directory_action(&Cmd::AgentLaunch(signed), 100_000)
         .is_ok());
-    // The v2 bytes: the v1 fields, then the ids, comma-joined.
-    let m = agora_node::directory::launch_signed_message(
-        "n",
-        "/p",
-        "k",
-        "id",
-        false,
-        true,
-        &["skip-permissions".into(), "resume-last".into()],
-        "nonce",
-        5,
-    );
-    assert_eq!(
-        m,
-        b"directory-action-v2\0n\0launch\0/p\0k\0id\x000\x001\0skip-permissions,resume-last\0nonce\x005".to_vec()
-    );
 }

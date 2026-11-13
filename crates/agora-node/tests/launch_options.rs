@@ -115,7 +115,26 @@ impl Env {
         self.node.as_ref().unwrap()
     }
 
+    /// A start as the window sends it: `id!` stands for "the user confirmed id" (sent in the separate confirmed list, never in the id).
     fn launch(&self, kind: &str, options: &[&str]) -> Result<String, v1::ErrorInfo> {
+        let ids = options
+            .iter()
+            .map(|o| o.trim_end_matches('!').to_string())
+            .collect();
+        let confirmed = options
+            .iter()
+            .filter_map(|o| o.strip_suffix('!').map(str::to_string))
+            .collect();
+        self.launch_raw(kind, ids, confirmed)
+    }
+
+    /// The ids and confirmations exactly as given.
+    fn launch_raw(
+        &self,
+        kind: &str,
+        ids: Vec<String>,
+        confirmed: Vec<String>,
+    ) -> Result<String, v1::ErrorInfo> {
         let mut c = Client::connect(self.node().socket().unwrap()).unwrap();
         let info = match c
             .call(Cmd::DirectoryInspect(v1::DirectoryInspect {
@@ -134,7 +153,8 @@ impl Env {
                 path: info.path,
                 project_id: info.project_id,
                 kind: kind.into(),
-                launch_options: options.iter().map(|o| (*o).to_string()).collect(),
+                launch_options: ids,
+                confirmed_launch_options: confirmed,
                 ..Default::default()
             }))
             .unwrap()?;
@@ -275,11 +295,11 @@ fn forbid_refuses_before_anything_starts_and_a_typo_forbids_too() {
         // A harmless option is not the policy's business; an unknown one is a bad request.
         e.launch("probe", &["resume-last"]).unwrap();
         let err = e.launch("probe", &["no-such-option"]).unwrap_err();
-        assert_eq!(err.code, "protocol.invalid_message");
+        assert_eq!(err.code, "agent.option_invalid");
         let err = e
             .launch("probe", &["resume-last", "resume-last"])
             .unwrap_err();
-        assert_eq!(err.code, "protocol.invalid_message");
+        assert_eq!(err.code, "agent.option_invalid");
         let reports = e.wait_reports(1);
         assert!(reports.iter().all(|a| !a.contains(&FLAG.to_string())));
     }
@@ -357,4 +377,38 @@ fn a_hub_that_hides_a_skip_option_as_harmless_gets_the_start_refused() {
     // The marker is the user's confirmation, not part of the id the agent carries.
     assert!(v.skips_permissions);
     assert_eq!(v.launch_options, ["skip-permissions"]);
+}
+
+/// The second review's case: a hub advertises `skip-permissions!` as a harmless option, the window's checkbox would sign exactly that
+/// id. A `!` is never a confirmation and never part of an id: the node refuses it (`agent.option_invalid`) and nothing starts; an id
+/// with a comma is refused the same way.
+#[test]
+fn an_advertised_id_with_a_bang_or_a_comma_is_refused() {
+    if !supported() {
+        return;
+    }
+    let e = Env::new("bang", None);
+    for kind in ["probe", "adapter"] {
+        for id in ["skip-permissions!", "a,b", "Skip-Permissions"] {
+            let err = e.launch_raw(kind, vec![id.into()], Vec::new()).unwrap_err();
+            assert_eq!(err.code, "agent.option_invalid", "{id}: {err:?}");
+        }
+    }
+    // A confirmation for an id that was not chosen is not a way in either.
+    let err = e
+        .launch_raw(
+            "probe",
+            vec!["resume-last".into()],
+            vec!["skip-permissions".into()],
+        )
+        .unwrap_err();
+    assert_eq!(err.code, "agent.option_invalid");
+    assert_eq!(e.agents(), 0, "nothing started");
+    // The legitimate confirmed start still works.
+    e.launch_raw(
+        "probe",
+        vec!["skip-permissions".into()],
+        vec!["skip-permissions".into()],
+    )
+    .unwrap();
 }
