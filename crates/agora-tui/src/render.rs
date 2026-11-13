@@ -212,8 +212,14 @@ pub fn render(
                     )
                 )
             };
+            // ADR-0059: an agent started so that it acts without asking says so on its row, for its whole life.
+            let no_ask = if a.skips_permissions {
+                format!("  [{}]", t(key!("tui-badge-no-ask"), &[]))
+            } else {
+                String::new()
+            };
             out.push(format!(
-                "{pointer} {indent}{on}{marker} {word:<10}{off} {}  {dim}{}  {}{by}{reset}",
+                "{pointer} {indent}{on}{marker} {word:<10}{off} {}  {dim}{}  {}{by}{reset}{no_ask}",
                 local(&a.agent_id),
                 a.kind,
                 a.node_id,
@@ -933,6 +939,34 @@ mod tests {
             chat_command("/mode plan", None, None),
             ChatCommand::Unknown { .. }
         ));
+    }
+
+    #[test]
+    fn an_agent_that_does_not_ask_says_so_on_its_row() {
+        let mut snap = snapshot();
+        snap.agents.insert(
+            0,
+            AgentSnapshot {
+                agent_id: "laptop/agent-9".into(),
+                node_id: "laptop".into(),
+                kind: "codex".into(),
+                running: true,
+                launch_options: vec!["skip-permissions".into()],
+                skips_permissions: true,
+                ..Default::default()
+            },
+        );
+        let lines = render(&snap, false, false, "", "", 0, &t);
+        let row = lines.iter().find(|l| l.contains("agent-9")).expect("row");
+        assert!(row.contains("[tui-badge-no-ask[]]"), "{row}");
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|l| l.contains("tui-badge-no-ask"))
+                .count(),
+            1,
+            "{lines:?}"
+        );
     }
 
     #[test]
