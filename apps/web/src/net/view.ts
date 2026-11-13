@@ -25,6 +25,7 @@ export interface AgentV {
   session?: SessionModel; // ADR-0058: options, context and its own cost, once reported
   parentId?: string; // ADR-0057: the hub-wide key of the agent that started it
   interrupted?: InterruptedV; // ADR-0060: it was running when its machine stopped; cleared by its next start
+  skipsPermissions?: boolean; // ADR-0059: started with an option that skips permissions, for its whole life
 }
 export interface InterruptedV { resumable: boolean; atMs: number; folder: string; stillRunning?: boolean }
 
@@ -101,6 +102,7 @@ export function fromSnapshot(s: agora.v1.Snapshot.$Properties): View {
       tokens: num(a.inputTokens) + num(a.outputTokens),
       parentId: a.parentAgentId || undefined,
       ...(a.interrupted ? { interrupted: { resumable: !!a.resumable, atMs: num(a.interruptedAtMs), folder: a.folder ?? '', stillRunning: !!a.stillRunning }, sinceMs: num(a.interruptedAtMs) } : {}),
+      skipsPermissions: !!a.skipsPermissions,
     });
     const modes = optionsOf(a.modes, true), models = optionsOf(a.models, false);
     const reported = a.costMicros !== undefined && a.costMicros !== null && !!a.currency;
@@ -191,6 +193,7 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
         nodeId: b.nodeId ?? '', worktreeId: q(b.worktreeId), kind: b.kind ?? '', state: 3 /* idle */,
         reported: false, running: true, sinceMs: at, tokens: 0, startedMs: at,
         parentId: b.parentAgentId ? q(b.parentAgentId) : undefined,
+        skipsPermissions: !!b.skipsPermissions,
       });
       break;
     }
@@ -343,6 +346,7 @@ export function tiles(v: View): AgentTileModel[] {
       session: a.session,
       parentId: a.parentId,
       interrupted: a.interrupted ? { resumable: a.interrupted.resumable, stillRunning: !!a.interrupted.stillRunning } : undefined,
+      skipsPermissions: !!a.skipsPermissions,
     } as AgentTileModel;
   });
   const names = new Map(list.map((t) => [t.id, t.name]));

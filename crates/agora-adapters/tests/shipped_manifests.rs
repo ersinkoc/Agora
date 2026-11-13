@@ -151,3 +151,39 @@ fn the_usage_fixtures_add_up_to_what_the_files_say() {
         "claude-code, codex and wrongstack read usage files"
     );
 }
+
+/// ADR-0059: every shipped `[[launch.option]]` label is a message the windows can show: it is in the English web and terminal-client
+/// locale files (the clients that list the options), so no window shows a bare id.
+#[test]
+fn every_shipped_launch_option_label_is_in_the_english_locales() {
+    let locales = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../locales/en");
+    let ids = |file: &str| -> Vec<String> {
+        std::fs::read_to_string(locales.join(file))
+            .unwrap()
+            .lines()
+            .filter(|l| !l.starts_with(char::is_whitespace))
+            .filter_map(|l| l.split_once('=').map(|(id, _)| id.trim().to_string()))
+            .collect()
+    };
+    let (web, tui) = (ids("web.ftl"), ids("tui.ftl"));
+    let mut options = 0;
+    for entry in std::fs::read_dir(root()).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_none_or(|e| e != "toml") {
+            continue;
+        }
+        let manifest = Manifest::parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        for o in &manifest.launch.option {
+            options += 1;
+            for (file, have) in [("web.ftl", &web), ("tui.ftl", &tui)] {
+                assert!(
+                    have.contains(&o.label),
+                    "{}: label {} is not in locales/en/{file}",
+                    path.display(),
+                    o.label
+                );
+            }
+        }
+    }
+    assert!(options > 0, "no shipped manifest declares a launch option");
+}

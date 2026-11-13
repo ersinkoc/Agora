@@ -25,6 +25,13 @@ import { demoSource } from './terminal/source';
 import { AuditPage, DevicePage, Focus, Gallery, MachinesPage, SignInPage } from './screens';
 import { loadAudit } from './net/audit';
 import { agentTarget } from './components/sessionChoice';
+import { usableId } from './components/launchChoice';
+
+// ADR-0059: why the machine refused the chosen launch option, as a message id (its `policy` parameter, a stable value).
+function optionForbidden(e: unknown): string {
+  const policy = (e as { params?: Record<string, string> }).params?.policy;
+  return policy === 'confined_only' ? 'start-option-confined-only' : 'start-option-forbidden';
+}
 
 function useHash(): [string, (h: string) => void] {
   const [hash, setHash] = useState(window.location.hash);
@@ -72,7 +79,11 @@ export function App() {
   const [grantAsk, setGrantAsk] = useState<{ node: string; body: CommandBody; ask: GrantAsk; busy: boolean; failed: boolean } | undefined>();
   const loadKinds = useCallback(async (node: string): Promise<KindChoice[]> => {
     const ok = await api!.command(node, { agentKinds: {} });
-    return (ok.agentKinds?.kinds ?? []).map((k) => ({ kind: k.kind ?? '', name: k.displayName || (k.kind ?? ''), installed: !!k.installed }));
+    return (ok.agentKinds?.kinds ?? []).map((k) => ({
+      kind: k.kind ?? '', name: k.displayName || (k.kind ?? ''), installed: !!k.installed,
+      // ADR-0059: the kind's launch options (the machine keeps their arguments).
+      options: (k.launchOptions ?? []).filter((o) => usableId(o.id ?? '')).map((o) => ({ id: o.id ?? '', label: o.label ?? '', skipsPermissions: !!o.skipsPermissions })),
+    }));
   }, [api]);
   const inspectDirectory = useCallback(async (node: string, path: string, createProjectId: boolean): Promise<DirectoryInfo> => {
     if (!api || !device) throw { code: 'approval.signature_invalid' };
@@ -90,17 +101,22 @@ export function App() {
     if (!d) throw { code: 'protocol.capability_missing' };
     return { path: d.path ?? '', parent: d.parent ?? '', entries: (d.entries ?? []).map((e) => ({ name: e.name ?? '', isGit: !!e.isGit })), truncated: !!d.truncated };
   }, [api, device]);
-  const startAgent = useCallback(async (node: string, info: DirectoryInfo, kind: string, separateWorktree: boolean, acceptIdentityChange: boolean): Promise<string | undefined> => {
+  const startAgent = useCallback(async (node: string, info: DirectoryInfo, kind: string, separateWorktree: boolean, acceptIdentityChange: boolean, launch: { ids: string[]; confirmed: string[] }): Promise<string | undefined> => {
     try {
       if (!api || !device) return 'approval-not-trusted';
-      const authorization = await signDirectory(device, node, 'launch', info.path, kind, info.projectId, separateWorktree, acceptIdentityChange);
-      const ok = await api.command(node, { agentLaunch: { path: info.path, projectId: info.projectId, kind, separateWorktree, acceptIdentityChange, authorization } });
+      // ADR-0059: the device signs the chosen launch options too, so the hub can neither add nor remove one.
+      const authorization = await signDirectory(device, node, 'launch', info.path, kind, info.projectId, separateWorktree, acceptIdentityChange, launch.ids, launch.confirmed);
+      const ok = await api.command(node, { agentLaunch: { path: info.path, projectId: info.projectId, kind, separateWorktree, acceptIdentityChange, authorization, launchOptions: launch.ids, confirmedLaunchOptions: launch.confirmed } });
       const id = ok.agentLaunch?.agentId;
       setStarting(false);
       if (id) window.location.hash = `#/agent/${encodeURIComponent(`${node}/${id}`)}`;
       return undefined;
     } catch (e) {
       const code = (e as { code?: string }).code;
+      if (code === 'agent.option_forbidden') return optionForbidden(e);
+      if (code === 'agent.option_unconfirmed') return 'start-option-unconfirmed';
+      if (code === 'agent.option_invalid') return 'start-option-invalid';
+      if (code === 'protocol.capability_missing' && launch.ids.length > 0) return 'start-options-unsupported';
       return code === 'agent.mode_unsupported' ? 'start-directory-agent-unsupported' : code === 'approval.signature_invalid' ? 'approval-not-trusted' : code === 'protocol.capability_missing' ? 'start-directory-unsupported' : code === 'agent.kind_unknown' ? 'start-kind-unknown' : code === 'node.resource_limit' ? 'start-limit' : 'start-failed';
     }
   }, [api, device]);

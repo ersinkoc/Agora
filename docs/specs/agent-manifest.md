@@ -11,12 +11,19 @@ Keep the raw captured bytes and use the original terminal size so wrapping and c
 kind = "example-agent"          # stable id, lowercase, used in protocol and UI
 display_name = "Example Agent"  # brand name, not translated
 version = "2026.11.06.1"        # manifest version
-min_engine = 1
+min_engine = 2                  # 2 when the manifest has [[launch.option]] (ADR-0059); 1 otherwise
 
 [process]
 names = ["example-agent", "exa"]        # foreground process names
 launch = ["example-agent"]              # default argv
 env = { EXAMPLE_NO_UPDATE_CHECK = "1" }
+
+# ADR-0059: choices made when an agent starts (see "Launch options" below).
+[[launch.option]]
+id = "skip-permissions"                 # what a start names and a device signs: a-z, 0-9, `-`, at most 32
+label = "option-skip-permissions"       # Fluent message id the windows show
+args = ["--dangerously-skip-permissions"]   # added to the launch command (or the ACP server command)
+skips_permissions = true                # the agent acts without asking; default false
 
 [accounts]
 config_dir_env = "EXAMPLE_HOME"         # lets the node isolate multiple accounts
@@ -123,6 +130,24 @@ require (`contains` in the rule, `all` or `any`), and the top-level
 Enter on a helper's first prompt the node needs both, with the box holding exactly that prompt. The `typed.screen` fixtures are
 constructed from the captured idle screens with text in the box (a capture of that moment is not kept); the test checks that
 `[[typed]]` matches them and nothing else and that `input_box` reads exactly the typed text.
+
+## Launch options (ADR-0059)
+
+`[[launch.option]]` (engine 2, so a manifest with one says `min_engine = 2`) declares named choices the start window offers. A start
+names the ids it chose (`AgentStart`/`AgentLaunch.launch_options`); the node adds each option's `args`, in the manifest's order, after
+the launch command (`[process] launch`, or `[resume] argv` when the agent is resumed) and before the `[mcp]` flags; for a structured
+kind they are added to the end of `[structured] acp.argv`, the ACP server command. The arguments never leave the node: the window gets
+the id, the label and `skips_permissions` (`AgentKind.launch_options`).
+
+Validation: at most 8 options; ids unique, lowercase ASCII letters, digits and `-` (at most 32); `label` a Fluent message id (the
+shipped manifests' labels must be in `locales/en/web.ftl` and `tui.ftl`, checked by `shipped_manifests.rs`); `args` from one to eight
+non-empty arguments without NUL; an option whose arguments contain a known "do not ask" spelling (`--dangerously-*`, `--yolo`,
+`--yolo-*`) must say `skips_permissions = true`; unknown keys are an error.
+
+An option with `skips_permissions = true` makes the agent act without asking. The window never preselects it and asks before it is
+used; the node allows it only as its owner's `skip_permissions` policy says (`forbid`, `allow`, `confined_only`; docs/specs/protocol.md)
+and refuses it for helpers an agent starts (ADR-0057). A shipped manifest declares only a flag checked on a real version of the
+agent, with that version in a comment; a flag that was not checked is not declared.
 
 Manifests in this repository: `claude-code` and `codex` (screens captured from the real agents, `manifests/agents/fixtures/`); `wrongstack` is planned and not shipped yet (it needs a machine that has it). `crates/agora-adapters/tests/shipped_manifests.rs` checks every shipped manifest against its captured screens.
 

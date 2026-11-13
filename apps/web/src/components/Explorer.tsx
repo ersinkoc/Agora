@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react';
 import { t } from '../i18n';
+import { NoAskBadge } from './NoAskBadge';
 import { forgetReasonKey } from '../net/forget';
 import { resumeReasonKey } from '../net/directory';
 import { helperTree, machineKey, type AgentTileModel, type ResumeAction } from '../model';
@@ -109,6 +110,7 @@ export function Explorer({ fleet, machines, open, current, projects, project, on
                 <button type="button" className="ide-row" aria-current={current === a.id ? 'true' : undefined} aria-pressed={open.includes(a.id)} onClick={() => onToggle(a.id)} title={`${a.machine} · ${a.workspace}${a.branch ? ` · ${a.branch}` : ''}${a.parentName ? ` · ${t('helper-started-by', { name: a.parentName })}` : ''}`}>
                   <StateMark state={a.state} />
                   <span className="min-w-0 flex-1 truncate">{a.name}{a.parentName && <span className="ms-1.5 text-[11px] text-muted">{t('helper-started-by', { name: a.parentName })}</span>}</span>
+                  <NoAskBadge agent={a} compact />
                   {a.shared && <span className="flex-none text-[11px] text-muted" title={t('workspace-shared')}>{t('ide-shared')}</span>}
                   {(a.filesChanged ?? 0) > 0 && <span className="font-mono text-[11px] text-needs-you">{a.filesChanged}</span>}
                 </button>

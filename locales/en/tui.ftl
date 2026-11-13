@@ -103,3 +103,10 @@ tui-resume-confirm = Press u again within 5 seconds to resume { $agent }.
 tui-again-confirm = Press U again within 5 seconds to start { $agent } again in its folder (a new conversation).
 tui-interrupted-running = still running from before its machine's restart · x stops it
 tui-resume-still-running = Its process from before the restart is still running. Stop it with x first, then resume it.
+
+# ADR-0059: launch options (manifest `[[launch.option]]` labels)
+option-skip-permissions = Don't ask
+option-ask = Ask before acting
+tui-start-acts = How should it act? Press its number; Enter or any other key asks before acting.
+tui-start-confirm-skip = Let the agent act without asking? With "{ $name }" it runs commands and changes files without asking you first, for as long as it runs. Press y to start without asking; any other key keeps asking.
+tui-badge-no-ask = does not ask

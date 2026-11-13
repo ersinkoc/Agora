@@ -384,3 +384,18 @@ resume-failed-gone = That machine no longer offers it.
 resume-failed-unsupported = That machine cannot resume agents yet. Update it.
 resume-failed-still-running = Its process from before the restart is still running. Stop it first.
 resume-failed-offline = That machine is offline.
+
+# ADR-0059: launch options (manifest `[[launch.option]]` labels)
+option-skip-permissions = Don't ask
+option-ask = Ask before acting
+start-how-it-acts = How it acts
+start-confirm-skip-body = With "{ $name }" chosen, the agent runs commands and changes files without asking you first, for as long as it runs.
+start-confirm-skip-yes = Start without asking
+start-does-not-ask-note = This agent will act without asking you.
+start-option-forbidden = This machine does not let agents act without asking. Choose "Ask before acting".
+start-option-confined-only = This machine lets an agent act without asking only while it is confined to its folder, and it would not be here.
+start-options-unsupported = This machine is too old for start options. Update it, or choose "Ask before acting".
+agent-does-not-ask = Does not ask
+agent-does-not-ask-explain = Started so that it acts without asking you first
+start-option-unconfirmed = This machine says that option lets the agent act without asking, and this window did not ask you first. Nothing was started; open the start window again.
+start-option-invalid = This machine does not offer that start option. Nothing was started; open the start window again.

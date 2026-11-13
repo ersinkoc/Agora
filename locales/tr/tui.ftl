@@ -103,3 +103,10 @@ tui-resume-confirm = { $agent } ajanını devam ettirmek için 5 saniye içinde 
 tui-again-confirm = { $agent } ajanını klasöründe yeniden başlatmak için 5 saniye içinde yeniden U'ya basın (yeni bir konuşma).
 tui-interrupted-running = makinesi yeniden başlamadan önceki haliyle hâlâ çalışıyor · x durdurur
 tui-resume-still-running = Yeniden başlamadan önceki işlemi hâlâ çalışıyor. Önce x ile durdurun, sonra devam ettirin.
+
+# ADR-0059: launch options (manifest `[[launch.option]]` labels)
+option-skip-permissions = Sormadan
+option-ask = Önce sorsun
+tui-start-acts = Nasıl çalışsın? Numarasına basın; Enter ya da başka bir tuş önce sordurur.
+tui-start-confirm-skip = Ajan sormadan çalışsın mı? "{ $name }" seçiliyken çalıştığı sürece komut çalıştırır ve dosyaları size sormadan değiştirir. Sormadan başlatmak için y'ye basın; başka bir tuş sormaya devam ettirir.
+tui-badge-no-ask = sormuyor

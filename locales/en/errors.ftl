@@ -28,6 +28,13 @@ agent-sandbox_unavailable = This machine is set to confine agents ({ $level }), 
 agent-not_authenticated = { $kind } is not signed in on machine { $node_id }.
 agent-blocked = Agent { $agent_id } is waiting for input, so the message was not sent.
 agent-mode_unsupported = { $kind } does not support { $mode } mode.
+agent-option_forbidden = { $kind } was not started with option { $option }: { $policy ->
+        [confined_only] this machine lets an agent act without asking only while it is confined to its folder, and it would not be confined here.
+        [signature] starting it that way needs your device's signature on the start.
+       *[other] this machine does not let agents act without asking.
+    }
+agent-option_invalid = { $kind } was not started: the launch option "{ $option }" is not one it offers (or there are too many).
+agent-option_unconfirmed = { $kind } was not started with option { $option }: it lets the agent act without asking, and the start did not carry your confirmation for that.
 agent-running = { $agent_id } is still running. Stop it first.
 agent-not_interrupted = { $agent_id } was not interrupted, or it is no longer offered to resume.
 agent-session_missing = { $agent_id } cannot continue its own session. Start it again instead.

@@ -36,6 +36,8 @@ const HUB_CAPABILITIES: &[&str] = &[
     "agent.set_model",
     // ADR-0060
     "agent.resume",
+    // ADR-0059
+    "agent.launch_options",
 ];
 
 pub(crate) fn hub_dir(o: &Opts) -> PathBuf {
