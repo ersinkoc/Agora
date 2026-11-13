@@ -125,7 +125,8 @@ impl<'a> SignIn<'a> {
         )?;
         tx.commit()?;
         drop(conn);
-        let _ = crate::audit::Audit::new(self.store).record(
+        let _ = crate::audit::Audit::new(self.store).record_in(
+            &crate::audit::session_id(&token_hash(&token)),
             now_ms,
             user.as_deref().unwrap_or("owner"),
             "sign_in",
@@ -163,7 +164,8 @@ impl<'a> SignIn<'a> {
             ],
         )?;
         drop(conn);
-        let _ = crate::audit::Audit::new(self.store).record(
+        let _ = crate::audit::Audit::new(self.store).record_in(
+            &crate::audit::session_id(&token_hash(&token)),
             now_ms,
             user.unwrap_or("owner"),
             "sign_in",
@@ -401,6 +403,49 @@ mod tests {
             s.redeem(&code, 3_000),
             Err(SignInError::BadCode),
             "single use"
+        );
+    }
+
+    #[test]
+    fn each_session_has_its_own_id_in_the_audit_trail() {
+        // L16: two windows of the same person are told apart by their session's short id, on the sign-in row and on what they do.
+        let store = SqliteStore::open_in_memory().unwrap();
+        let s = si(&store);
+        let a = s.redeem(&s.create_code(0).unwrap(), 1_000).unwrap();
+        let b = s.start_session(1_100).unwrap();
+        let (ida, idb) = (
+            s.access(&a, 2_000).unwrap().session,
+            s.access(&b, 2_000).unwrap().session,
+        );
+        assert_eq!(ida.len(), 6);
+        assert!(ida.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(ida, idb);
+        assert!(!a.contains(&ida), "the id is not part of the token");
+        let audit = crate::audit::Audit::new(&store);
+        audit
+            .record_in(&ida, 3_000, "owner", "AgentStop", "n1", "sent")
+            .unwrap();
+        let rows = audit.list(0, None, 10).unwrap();
+        let sessions: Vec<(&str, &str)> = rows
+            .iter()
+            .map(|r| (r.action.as_str(), r.session.as_str()))
+            .collect();
+        assert_eq!(
+            sessions,
+            [
+                ("sign_in", ida.as_str()),
+                ("sign_in", idb.as_str()),
+                ("AgentStop", ida.as_str())
+            ]
+        );
+        let conn = store.lock().unwrap();
+        assert!(
+            conn.execute(
+                "UPDATE audit SET session = 'x' WHERE action = 'AgentStop'",
+                []
+            )
+            .is_err(),
+            "the session of a row is as fixed as the rest of it"
         );
     }
 

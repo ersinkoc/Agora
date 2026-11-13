@@ -90,6 +90,7 @@ impl ClientAuth for ClientTokens {
                 role: agora_hub::users::Role::Owner,
                 user: "owner".into(),
                 projects: None,
+                session: String::new(),
             });
         }
         agora_hub::server::ClientAuth::access(&*self.sessions, token)

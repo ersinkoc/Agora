@@ -190,6 +190,7 @@ export function AuditPage({ load, onBack }: { load: (who: string) => Promise<Aud
             <li key={r.id} className="machine">
               <span className="muted">{new Date(r.atMs).toLocaleString()}</span>
               <strong>{r.who}</strong>
+              {r.session ? <span className="muted mono" title={t('audit-session-hint')}>{t('audit-session', { id: r.session })}</span> : null}
               <span>{actionLabel(r.action)}</span>
               {r.node ? <span className="muted mono">{r.node}</span> : null}
               {/* A change to the team carries the role in its outcome, which is a detail and not a result. */}
