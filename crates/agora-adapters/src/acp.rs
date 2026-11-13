@@ -469,7 +469,19 @@ pub fn stderr_tail(raw: &[u8], home: Option<&str>) -> String {
             redact(&replace_any_home(&l))
         })
         .collect();
-    let tail = lines[lines.len().saturating_sub(STDERR_LINES)..].join("\n");
+    // An agent that logs at INFO as well (opencode with `--print-logs`) would bury its error under routine lines: when some lines name
+    // a level of ERROR, FATAL or WARN or a failing HTTP status, those are the ones kept; otherwise the last lines are.
+    let serious: Vec<&String> = lines.iter().filter(|l| names_a_problem(l)).collect();
+    let kept: Vec<&String> = if serious.is_empty() {
+        lines.iter().collect()
+    } else {
+        serious
+    };
+    let tail = kept[kept.len().saturating_sub(STDERR_LINES)..]
+        .iter()
+        .map(|l| l.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
     if tail.len() <= STDERR_TAIL {
         return tail;
     }
@@ -560,6 +572,24 @@ pub fn replace_any_home(line: &str) -> String {
         i += c.len_utf8();
     }
     out
+}
+
+/// Whether a log line names a level that means something went wrong (`ERROR`, `FATAL`, `WARN`, `WARNING`) as a whole word in capitals.
+fn names_a_problem(line: &str) -> bool {
+    line.split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|w| matches!(w, "ERROR" | "FATAL" | "WARN" | "WARNING"))
+        || has_failing_http_status(line)
+}
+
+/// `http.status=503` or `status=404` in a log line: opencode 2.x logs a failure as an INFO line carrying only such a status.
+fn has_failing_http_status(line: &str) -> bool {
+    line.match_indices("status=").any(|(at, key)| {
+        let digits: String = line[at + key.len()..]
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect();
+        digits.len() == 3 && matches!(digits.as_bytes()[0], b'4' | b'5')
+    })
 }
 
 /// Replaces the home folder with `~` in every spelling a tool may print: as given, with `/` instead of `\\`, as the Git Bash form
@@ -1468,6 +1498,26 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_error_line_is_kept_among_routine_ones() {
+        let raw = b"INFO service=default providers=2\nINFO service=config path=/config/providers\nERROR service=llm provider rejected: auth\nINFO service=session idle\nINFO service=bus done\nINFO service=x y\nINFO service=z w\n";
+        let tail = super::stderr_tail(raw, None);
+        assert!(tail.contains("ERROR service=llm"), "{tail}");
+        assert!(!tail.contains("INFO"), "{tail}");
+        // Without a line naming a problem the last lines are kept as before.
+        let plain = super::stderr_tail(b"one\ntwo\nthree\n", None);
+        assert_eq!(plain, "one\ntwo\nthree");
+        // A word that only contains the level is not one.
+        assert!(!super::names_a_problem("TERRORIST warned"));
+        assert!(super::names_a_problem("2026 WARN: slow"));
+        // opencode 2.x: a failure is only an INFO line with an HTTP status.
+        assert!(super::names_a_problem(
+            "INFO message=\"Sent HTTP response\" http.url=/api/model/default http.status=503"
+        ));
+        assert!(!super::names_a_problem("INFO http.status=200 ok"));
+        assert!(!super::names_a_problem("INFO status=5 x"));
+    }
+
     #[test]
     fn the_home_folder_is_hidden_in_every_spelling() {
         let home = "C:\\Users\\someone";
