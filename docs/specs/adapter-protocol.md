@@ -70,7 +70,7 @@ The node-side host runs an adapter as a child process and speaks this protocol o
 spec text: an adapter starts with a **cleared environment** plus `PATH`, the variables that say where the user's own folders are
 (`HOME`, `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`, `XDG_*`, the language, terminal and Windows system-folder variables) and what the
 node passes, so the agent it wraps finds its own configuration and login (it never inherits the node's secrets by accident:
-API keys, tokens and `SSH_AUTH_SOCK` are not on the list); lines longer than 4 MiB are discarded whole; malformed lines, unknown notifications and unexpected
+API keys, tokens, `SSH_AUTH_SOCK`, the temporary and runtime folders (`TMPDIR`, `TEMP`, `XDG_RUNTIME_DIR`) and proxy and CA variables are not on the list; a manifest passes what its agent needs through `process.env`); lines longer than 4 MiB are discarded whole; malformed lines, unknown notifications and unexpected
 requests are ignored and counted (`ignored_lines`), never fatal; a crash fails calls in flight with `Exited` and ends the event
 stream with `Exited`; calls have timeouts. JSON uses the proto3 mapping (lowerCamelCase, enum names or numbers, 64-bit integers
 as strings or numbers on input). `agora-fake-agent --adapter` is the reference fake adapter used in tests.

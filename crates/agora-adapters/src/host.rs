@@ -418,7 +418,8 @@ fn to_event(method: &str, p: &Value) -> Option<AdapterEvent> {
 }
 
 /// Whether an environment variable is passed on to an adapter: `PATH`, the user's home and standard folders, the language and
-/// terminal settings and the Windows system folders, never anything that can hold a secret (API keys, tokens, `SSH_AUTH_SOCK`).
+/// terminal settings and the Windows system folders, never anything that can hold a secret (API keys, tokens, `SSH_AUTH_SOCK`) and never a temporary or runtime folder (a confined
+/// agent must not be pointed at the node's own temp folder or at the folder with the node's sockets).
 fn inheritable(name: &str) -> bool {
     const NAMES: &[&str] = &[
         "PATH",
@@ -431,14 +432,10 @@ fn inheritable(name: &str) -> bool {
         "LANGUAGE",
         "TERM",
         "TZ",
-        "TMPDIR",
-        "TEMP",
-        "TMP",
         "XDG_CONFIG_HOME",
         "XDG_DATA_HOME",
         "XDG_CACHE_HOME",
         "XDG_STATE_HOME",
-        "XDG_RUNTIME_DIR",
         "USERPROFILE",
         "USERNAME",
         "USERDOMAIN",
@@ -845,7 +842,6 @@ mod tests {
             "LANG",
             "LC_ALL",
             "SystemRoot",
-            "TMPDIR",
         ] {
             assert!(super::inheritable(ok), "{ok}");
         }
@@ -861,6 +857,11 @@ mod tests {
             "HOME_SECRET",
             "LCX",
             "",
+            "TMPDIR",
+            "TEMP",
+            "TMP",
+            "XDG_RUNTIME_DIR",
+            "HTTPS_PROXY",
         ] {
             assert!(!super::inheritable(secret), "{secret}");
         }
