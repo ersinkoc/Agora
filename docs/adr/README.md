@@ -79,3 +79,4 @@ Date: YYYY-MM-DD
 | 0059 | Launch options, including "do not ask" modes, chosen when an agent starts | Accepted |
 | 0060 | A node keeps a session ledger and offers Resume after a restart | Accepted |
 | 0061 | Trusting your devices on a machine in one step | Accepted |
+| 0065 | Pairing: find a hub, enter a number, connected | Proposed |
