@@ -4,6 +4,9 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+### Agents
+- When a structured agent fails or says nothing in a turn, the notice carries the lines of its stderr that name an ERROR, FATAL or WARN level when there are any, so an agent that also logs at INFO (opencode) no longer buries the reason under routine lines.
+
 ### Modes and models
 - A confirmation to let an agent act without asking stays with the agent it was opened for: switching to another agent closes it, and "Switch anyway" can no longer reach a different agent (two machines' `agent-1` included).
 - A mode or model the agent did not report as current shows "Not reported" instead of preselecting the first one in the list.
