@@ -73,6 +73,7 @@ impl SignedCommands {
                 "agent.stop",
                 "agent.prompt",
                 "agent.set_mode",
+                "agent.set_model",
                 "terminal.open",
                 "terminal.input",
                 "files.write",
@@ -124,6 +125,7 @@ fn subject(c: &Cmd) -> Subject {
         Cmd::AgentStop(a) => s.agent = Some(a.agent_id.clone()),
         Cmd::AgentPrompt(a) => s.agent = Some(a.agent_id.clone()),
         Cmd::AgentSetMode(a) => s.agent = Some(a.agent_id.clone()),
+        Cmd::AgentSetModel(a) => s.agent = Some(a.agent_id.clone()),
         Cmd::TerminalInput(t) => {
             s.agent = agent_of_terminal(&t.terminal_id).map(|a| a.as_str().to_string());
         }

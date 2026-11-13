@@ -58,6 +58,16 @@ message AgentSnapshot {
   optional int32 exit_code = 10;
   uint64 input_tokens = 11;
   uint64 output_tokens = 12;
+  // ADR-0058: the last `AgentSessionOptions`, and from `AgentUsageReported` the context level and the sum of the reported cost.
+  // (13 is taken by ADR-0057.)
+  repeated SessionOption modes = 14;
+  repeated SessionOption models = 15;
+  string current_mode = 16;
+  string current_model = 17;
+  uint64 context_tokens = 18;
+  uint64 context_window = 19;
+  optional uint64 cost_micros = 20;
+  string currency = 21;
   // ADR-0057: `AgentStarted.parent_agent_id`.
   string parent_agent_id = 13;
 }

@@ -42,7 +42,21 @@ pub struct WorktreeView {
     pub head_commit: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// ADR-0058: what an agent's adapter reported about its session beyond tokens.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SessionView {
+    /// The last `AgentSessionOptions` (its `agent_id` is the node's local id).
+    pub options: Option<agora_protocol::v1::AgentSessionOptions>,
+    /// The context's level and size as last reported; 0 when never reported.
+    pub context_tokens: u64,
+    pub context_window: u64,
+    /// The sum of the cost the agent reported itself, in micro-units of `currency`; `None` when it reported none. A report in
+    /// another currency starts the sum again.
+    pub cost_micros: Option<u64>,
+    pub currency: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct AgentView {
     pub node_id: String,
     pub project_id: String,
@@ -60,6 +74,8 @@ pub struct AgentView {
     pub model: String,
     /// ADR-0053: the owner had the hub forget this closed agent. It is no longer listed to clients; its tokens and cost still count.
     pub forgotten: bool,
+    /// ADR-0058.
+    pub session: SessionView,
     /// ADR-0057: the hub-wide key (`<node>/<agent>`) of the agent that started this one; empty when the user did.
     pub parent_agent_id: String,
 }
@@ -236,6 +252,7 @@ impl View {
                         output_tokens: 0,
                         model: String::new(),
                         forgotten: false,
+                        session: SessionView::default(),
                         parent_agent_id: if e.parent_agent_id.is_empty() {
                             String::new()
                         } else {
@@ -243,6 +260,11 @@ impl View {
                         },
                     },
                 );
+            }
+            Body::AgentSessionOptions(e) => {
+                if let Some(a) = self.agents.get_mut(&q(&e.agent_id)) {
+                    a.session.options = Some(e.clone());
+                }
             }
             Body::AgentStateChanged(e) => {
                 if let Some(a) = self.agents.get_mut(&q(&e.agent_id)) {
@@ -261,6 +283,18 @@ impl View {
                     a.output_tokens = a.output_tokens.saturating_add(e.output_tokens);
                     if !e.model.is_empty() {
                         a.model.clone_from(&e.model);
+                    }
+                    let s = &mut a.session;
+                    if e.context_tokens > 0 || e.context_window > 0 {
+                        s.context_tokens = e.context_tokens;
+                        s.context_window = e.context_window;
+                    }
+                    if let Some(c) = e.cost_micros.filter(|_| !e.currency.is_empty()) {
+                        if s.currency != e.currency {
+                            s.currency.clone_from(&e.currency);
+                            s.cost_micros = None;
+                        }
+                        s.cost_micros = Some(s.cost_micros.unwrap_or(0).saturating_add(c));
                     }
                 }
             }
@@ -583,6 +617,49 @@ mod tests {
     }
 
     #[test]
+    fn an_agents_options_context_and_own_cost_are_kept() {
+        let mut v = View::default();
+        v.apply(&ev("n1", 1, started("a")));
+        let options = AgentSessionOptions {
+            agent_id: "a".into(),
+            modes: vec![SessionOption {
+                id: "plan".into(),
+                ..SessionOption::default()
+            }],
+            current_mode: "plan".into(),
+            ..AgentSessionOptions::default()
+        };
+        v.apply(&ev("n1", 2, Body::AgentSessionOptions(options.clone())));
+        let usage = |cost: Option<u64>, currency: &str, ctx: u64| {
+            Body::AgentUsageReported(AgentUsageReported {
+                agent_id: "a".into(),
+                cost_micros: cost,
+                currency: currency.into(),
+                context_tokens: ctx,
+                context_window: if ctx > 0 { 1000 } else { 0 },
+                ..AgentUsageReported::default()
+            })
+        };
+        v.apply(&ev("n1", 3, usage(Some(10), "USD", 100)));
+        v.apply(&ev("n1", 4, usage(Some(5), "USD", 0)));
+        let s = &v.agents["n1/a"].session;
+        assert_eq!(s.options.as_ref(), Some(&options));
+        assert_eq!(
+            (s.context_tokens, s.context_window),
+            (100, 1000),
+            "a report without a level keeps the last one"
+        );
+        assert_eq!((s.cost_micros, s.currency.as_str()), (Some(15), "USD"));
+        v.apply(&ev("n1", 5, usage(Some(7), "EUR", 0)));
+        let s = &v.agents["n1/a"].session;
+        assert_eq!(
+            (s.cost_micros, s.currency.as_str()),
+            (Some(7), "EUR"),
+            "another currency starts again"
+        );
+    }
+
+    #[test]
     fn a_helper_names_its_parent_by_hub_wide_key() {
         let mut v = View::default();
         v.apply(&ev("n1", 1, started("a")));
@@ -611,6 +688,7 @@ mod tests {
                     model: "m".into(),
                     input_tokens: 5,
                     output_tokens: 7,
+                    ..Default::default()
                 }),
             ));
         }

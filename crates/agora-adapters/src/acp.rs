@@ -14,9 +14,12 @@
 //! - A prompt turn: `session/prompt` → state `working`, and the agent's answer (its stop reason) → state `idle`. A turn that failed,
 //!   was stopped by the agent (`refusal`, `max_tokens`, ...) or ended with nothing said carries a stable reason code in the state's
 //!   `message` and in a `log` line (docs/specs/adapter-protocol.md "Turn and exit reasons"); never text.
-//! - `usage_update` with a cost → `usage/report` with the cost's growth since the last report.
+//! - `usage_update` → `usage/report` with the cost's growth since the last report and the context's level and size.
 //! - The agent exiting: requests the node still waits for are answered with an error whose `data` is `adapter.agent_exited` with the
 //!   stage, the exit code and a short tail of the agent's stderr with anything that looks like a secret removed.
+//! - ADR-0058: a failed, stopped or empty turn and the agent exiting are also a notice in the conversation (`chat/append` notice);
+//!   the `modes` and `models` of `session/new` (and `current_mode_update`) become `session/options`, and the node's
+//!   `session/set_option` becomes ACP `session/set_mode` or `session/set_model`.
 
 use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -54,6 +57,33 @@ const SECRET_WORDS: &[&str] = &[
 ];
 /// How long the agent gets to finish exiting after its output ended, before it is killed.
 const EXIT_WAIT: Duration = Duration::from_secs(2);
+/// How long a failed or empty turn waits for the stderr lines the agent wrote just before it answered.
+const STDERR_SETTLE: Duration = Duration::from_millis(100);
+/// How long a bridge whose agent died before the node asked anything waits for the node's first request, to answer it with the
+/// reason.
+const LATE_REQUEST_WAIT: Duration = Duration::from_secs(2);
+/// ADR-0058: the most modes or models passed on, and the longest id, name and description kept. An option whose id is longer is
+/// dropped (a cut id would name another option).
+const OPTIONS_MAX: usize = 200;
+const OPTION_ID_MAX: usize = 200;
+const OPTION_NAME_MAX: usize = 200;
+const OPTION_DESCRIPTION_MAX: usize = 500;
+/// ADR-0058: words in a mode's id or name (lowercase, letters and digits only) that mark a mode in which the agent acts without
+/// asking. ACP has no field for it, so the bridge errs on the side of asking the user to confirm.
+const SKIPS_PERMISSIONS: &[&str] = &[
+    "bypass",
+    "yolo",
+    "danger",
+    "skippermission",
+    "nopermission",
+    "noapproval",
+    "fullaccess",
+    "autoapprove",
+    "autoaccept",
+    "acceptedits",
+    "acceptall",
+    "unsafe",
+];
 
 enum Ev {
     Node(Value),
@@ -72,6 +102,12 @@ enum Waiting {
         node_id: Value,
     },
     Prompt,
+    /// ADR-0058: the node's `session/set_option`, until the agent answered `session/set_mode` or `session/set_model`.
+    SetOption {
+        node_id: Value,
+        mode: bool,
+        id: String,
+    },
 }
 
 struct Permission {
@@ -207,6 +243,62 @@ fn turn_outcome(answer: &Value, said: bool) -> Option<(&'static str, Value)> {
             Some(("adapter.turn_stopped", json!({"stop_reason": reason})))
         }
     }
+}
+
+/// ADR-0058: whether a mode's id or name says the agent acts without asking in it.
+fn skips_permissions(id: &str, name: &str) -> bool {
+    let squash = |s: &str| -> String {
+        s.chars()
+            .filter(char::is_ascii_alphanumeric)
+            .map(|c| c.to_ascii_lowercase())
+            .collect()
+    };
+    let (id, name) = (squash(id), squash(name));
+    SKIPS_PERMISSIONS
+        .iter()
+        .any(|w| id.contains(w) || name.contains(w))
+}
+
+/// ADR-0058: an ACP mode list (`availableModes` of `{id, name, description}`) or model list (`availableModels` of `{modelId, name,
+/// description}`) as adapter-protocol options, bounded.
+fn acp_options(list: Option<&Value>, id_key: &str, mode: bool) -> Vec<Value> {
+    let text =
+        |o: &Value, k: &str, max: usize| clip(o.get(k).and_then(Value::as_str).unwrap_or(""), max);
+    list.and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|o| {
+                    let id = o.get(id_key)?.as_str()?;
+                    if id.is_empty() || id.len() > OPTION_ID_MAX {
+                        return None;
+                    }
+                    let name = text(o, "name", OPTION_NAME_MAX);
+                    let mut v = json!({"id": id, "name": name,
+                                       "description": text(o, "description", OPTION_DESCRIPTION_MAX)});
+                    if mode && skips_permissions(id, &name) {
+                        v["skipsPermissions"] = json!(true);
+                    }
+                    Some(v)
+                })
+                .take(OPTIONS_MAX)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A notice's parameters: a reason's parameters with every value as a string.
+fn notice_params(params: &Value) -> Value {
+    let mut out = serde_json::Map::new();
+    if let Some(m) = params.as_object() {
+        for (k, v) in m {
+            let v = match v {
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            out.insert(k.clone(), Value::String(v));
+        }
+    }
+    Value::Object(out)
 }
 
 /// Replaces anything in `s` that looks like a secret: a long run of letters and digits (a key, a token, an id), and the word after
@@ -360,7 +452,8 @@ pub fn stderr_tail(raw: &[u8], home: Option<&str>) -> String {
                 Some(h) => replace_home(l, h),
                 None => l.to_string(),
             };
-            redact(&l)
+            // The bridge runs without `HOME` under a node (its environment is cleared), so any user's home folder is replaced too.
+            redact(&replace_any_home(&l))
         })
         .collect();
     let tail = lines[lines.len().saturating_sub(STDERR_LINES)..].join("\n");
@@ -372,6 +465,88 @@ pub fn stderr_tail(raw: &[u8], home: Option<&str>) -> String {
         start += 1;
     }
     format!("…{}", &tail[start..])
+}
+
+/// Characters that end a user name in a path when no `/` or `\` follows it.
+const NAME_END: &[char] = &[
+    '"', '\'', '<', '>', '|', ':', ';', ',', '(', ')', '[', ']', '`',
+];
+
+/// The length of the user name at the start of `rest` (after `/Users/`, `/home/`, `C:\Users\` ...), or 0 when there is none. The
+/// name runs to the next `/` or `\`; one with spaces (macOS and Windows allow them) only when that separator follows within 40 bytes and
+/// 3 words; without a separator after it, the name ends at a space or punctuation.
+fn user_name_len(rest: &str, spaces: bool) -> usize {
+    let stop = |c: char| c == '/' || c == '\\';
+    if let Some(sep) = rest.find(stop) {
+        let seg = &rest[..sep];
+        let ok = !seg.is_empty()
+            && !seg.contains(NAME_END)
+            && (!seg.contains(' ')
+                || (spaces
+                    && seg.len() <= 40
+                    && seg.split(' ').count() <= 3
+                    && !seg.starts_with(' ')));
+        if ok {
+            return sep;
+        }
+    }
+    rest.find(|c: char| c.is_whitespace() || stop(c) || NAME_END.contains(&c))
+        .unwrap_or(rest.len())
+}
+
+/// Replaces any user's home folder with `~`, whatever the bridge's own `HOME` is: `/Users/<name>`, `/home/<name>`, `/root`,
+/// `C:\Users\<name>`, `C:/Users/<name>` and `/c/Users/<name>` (drive and `Users` in any case).
+pub fn replace_any_home(line: &str) -> String {
+    let lower = line.to_ascii_lowercase();
+    let b = lower.as_bytes();
+    let mut out = String::with_capacity(line.len());
+    let mut i = 0;
+    let boundary = |at: usize| {
+        at == 0 || !(b[at - 1].is_ascii_alphanumeric() || matches!(b[at - 1], b'_' | b'.' | b'-'))
+    };
+    while i < line.len() {
+        if !line.is_char_boundary(i) {
+            i += 1;
+            continue;
+        }
+        let at = &lower[i..];
+        // (prefix length, whether the name may hold spaces); a drive letter form first, so `C:/Users/` is not read as `/Users/`.
+        let drive = b[i].is_ascii_alphabetic()
+            && (at[1..].starts_with(":\\users\\") || at[1..].starts_with(":/users/"));
+        let git_bash = at.starts_with('/')
+            && b.get(i + 1).is_some_and(u8::is_ascii_alphabetic)
+            && at[2..].starts_with("/users/");
+        let prefix = if boundary(i) && (drive || git_bash) {
+            Some((9, true))
+        } else if at.starts_with("/users/") && boundary(i) {
+            Some((7, true))
+        } else if at.starts_with("/home/") && boundary(i) {
+            Some((6, false))
+        } else if at.starts_with("/root")
+            && boundary(i)
+            && !b
+                .get(i + 5)
+                .is_some_and(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'.' | b'-'))
+        {
+            out.push('~');
+            i += 5;
+            continue;
+        } else {
+            None
+        };
+        if let Some((len, spaces)) = prefix {
+            let name = user_name_len(&line[i + len..], spaces);
+            if name > 0 {
+                out.push('~');
+                i += len + name;
+                continue;
+            }
+        }
+        let c = line[i..].chars().next().unwrap_or(' ');
+        out.push(c);
+        i += c.len_utf8();
+    }
+    out
 }
 
 /// Replaces the home folder with `~` in every spelling a tool may print: as given, with `/` instead of `\\`, as the Git Bash form
@@ -420,7 +595,22 @@ fn replace_ignoring_ascii_case(text: &str, needle: &str, with: &str) -> String {
 
 /// Copies the agent's stderr to the bridge's own (diagnostics for whoever runs the node, as before) and keeps its last bytes. The
 /// receiver hears when the stream ended.
-fn keep_stderr(r: ChildStderr, kept: Arc<Mutex<Vec<u8>>>) -> Receiver<()> {
+/// The last bytes of the agent's stderr and how many it wrote in all (so a turn can take what was written during it).
+#[derive(Default)]
+struct Kept {
+    buf: Vec<u8>,
+    total: u64,
+}
+
+impl Kept {
+    /// What was written since `mark` (a `total` taken earlier), as far as it is still kept.
+    fn since(&self, mark: u64) -> &[u8] {
+        let new = usize::try_from(self.total.saturating_sub(mark)).unwrap_or(usize::MAX);
+        &self.buf[self.buf.len().saturating_sub(new)..]
+    }
+}
+
+fn keep_stderr(r: ChildStderr, kept: Arc<Mutex<Kept>>) -> Receiver<()> {
     let (tx, rx) = channel();
     std::thread::spawn(move || {
         let mut r = r;
@@ -432,9 +622,10 @@ fn keep_stderr(r: ChildStderr, kept: Arc<Mutex<Vec<u8>>>) -> Receiver<()> {
             };
             let _ = io::stderr().write_all(&buf[..n]);
             let mut k = kept.lock().unwrap_or_else(|e| e.into_inner());
-            k.extend_from_slice(&buf[..n]);
-            let over = k.len().saturating_sub(STDERR_KEEP);
-            k.drain(..over);
+            k.buf.extend_from_slice(&buf[..n]);
+            k.total = k.total.saturating_add(n as u64);
+            let over = k.buf.len().saturating_sub(STDERR_KEEP);
+            k.buf.drain(..over);
         }
         let _ = tx.send(());
     });
@@ -473,9 +664,27 @@ struct Bridge<W: Write> {
     model: String,
     /// The agent's cumulative session cost as last reported: (currency, micro-units).
     cost: Option<(String, u64)>,
+    /// The context's level and size as last reported (ADR-0058).
+    context: (u64, u64),
+    /// ADR-0058: the modes and models the agent offers (adapter-protocol options) and the ones in use.
+    modes: Vec<Value>,
+    models: Vec<Value>,
+    current_mode: String,
+    /// The agent's stderr, how much of it there was when the current turn began, and the bridge's own home folder (if it has one).
+    stderr: Arc<Mutex<Kept>>,
+    turn_mark: u64,
+    home: Option<String>,
 }
 
 impl<W: Write> Bridge<W> {
+    /// What the agent wrote to stderr during the current turn, as a report (scrubbed and size-limited like an exit's tail). Its
+    /// stderr is read by another thread, so a moment is given for the lines written just before the answer.
+    fn turn_stderr(&self) -> String {
+        std::thread::sleep(STDERR_SETTLE);
+        let k = self.stderr.lock().unwrap_or_else(|e| e.into_inner());
+        stderr_tail(k.since(self.turn_mark), self.home.as_deref())
+    }
+
     fn send_node(&mut self, v: &Value) -> io::Result<()> {
         write_line(&mut self.out, v)
     }
@@ -509,6 +718,29 @@ impl<W: Write> Bridge<W> {
         self.note(
             "log",
             json!({"level": format!("LOG_LEVEL_{level}"), "message": message}),
+        )
+    }
+
+    /// ADR-0058: a reason as a notice in the conversation. It does not count as the agent saying something.
+    fn notice(&mut self, code: &str, params: &Value) -> io::Result<()> {
+        let sid = self.session.clone().unwrap_or_default();
+        self.note(
+            "chat/append",
+            json!({"sessionId": sid, "notice": {"code": code, "params": notice_params(params)}}),
+        )
+    }
+
+    /// ADR-0058: what the agent offers and uses, sent whenever it changes.
+    fn options(&mut self) -> io::Result<()> {
+        if self.modes.is_empty() && self.models.is_empty() {
+            return Ok(());
+        }
+        let sid = self.session.clone().unwrap_or_default();
+        let (modes, models) = (self.modes.clone(), self.models.clone());
+        let (mode, model) = (self.current_mode.clone(), self.model.clone());
+        self.note(
+            "session/options",
+            json!({"sessionId": sid, "modes": modes, "models": models, "currentMode": mode, "currentModel": model}),
         )
     }
 
@@ -556,6 +788,7 @@ impl<W: Write> Bridge<W> {
             Waiting::Initialize { .. } => "initialize",
             Waiting::NewSession { .. } => "session",
             Waiting::Prompt => "turn",
+            Waiting::SetOption { .. } => "option",
         };
         let stage = ["initialize", "session", "turn"]
             .into_iter()
@@ -573,7 +806,10 @@ impl<W: Write> Bridge<W> {
             p
         };
         for (_, w) in &waiting {
-            if let Waiting::Initialize { node_id } | Waiting::NewSession { node_id } = w {
+            if let Waiting::Initialize { node_id }
+            | Waiting::NewSession { node_id }
+            | Waiting::SetOption { node_id, .. } = w
+            {
                 if !node_id.is_null() {
                     let data =
                         json!({"code": "adapter.agent_exited", "params": params(stage_of(w))});
@@ -582,7 +818,75 @@ impl<W: Write> Bridge<W> {
                 }
             }
         }
+        self.notice("adapter.agent_exited", &params(stage))?;
         self.log_reason("ERROR", "adapter.agent_exited", &params(stage))
+    }
+
+    /// A request the node sent after the agent was gone, answered with `adapter.agent_exited` for the stage it asks for. True once
+    /// a request was answered.
+    fn answer_late(&mut self, msg: &Value, exit_code: Option<i32>, tail: &str) -> io::Result<bool> {
+        let Some(id) = msg.get("id").filter(|id| !id.is_null()).cloned() else {
+            return Ok(false);
+        };
+        let stage = match msg.get("method").and_then(Value::as_str) {
+            Some("initialize") => "initialize",
+            Some("session/start") => "session",
+            _ => "start",
+        };
+        let mut p = json!({"stage": stage, "stderr_tail": tail});
+        if let Some(c) = exit_code {
+            p["exit_code"] = json!(c.to_string());
+        }
+        let data = json!({"code": "adapter.agent_exited", "params": p});
+        self.send_node(&json!({"jsonrpc": "2.0", "id": id,
+            "error": {"code": -32000, "message": "the agent exited", "data": data}}))?;
+        Ok(true)
+    }
+
+    /// ADR-0058: the node's `session/set_option`. Only an id the agent offered is passed on; anything else is refused here.
+    fn set_option(&mut self, id: Option<Value>, params: &Value) -> io::Result<()> {
+        let node_id = id.unwrap_or(Value::Null);
+        let mode = match params.get("kind") {
+            Some(Value::String(k)) if k == "SESSION_OPTION_KIND_MODE" => Some(true),
+            Some(Value::String(k)) if k == "SESSION_OPTION_KIND_MODEL" => Some(false),
+            Some(Value::Number(n)) if n.as_u64() == Some(1) => Some(true),
+            Some(Value::Number(n)) if n.as_u64() == Some(2) => Some(false),
+            _ => None,
+        };
+        let want = params
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let offered = |list: &[Value]| list.iter().any(|o| o["id"].as_str() == Some(want.as_str()));
+        let ok = match mode {
+            Some(true) => offered(&self.modes),
+            Some(false) => offered(&self.models),
+            None => false,
+        };
+        let (Some(mode), Some(sid), true) = (mode, self.session.clone(), ok) else {
+            if !node_id.is_null() {
+                let data = json!({"code": "adapter.option_refused", "params": {"id": want}});
+                self.send_node(&json!({"jsonrpc": "2.0", "id": node_id,
+                    "error": {"code": -32602, "message": "not offered", "data": data}}))?;
+            }
+            return Ok(());
+        };
+        let (method, key) = if mode {
+            ("session/set_mode", "modeId")
+        } else {
+            ("session/set_model", "modelId")
+        };
+        self.ask_agent(
+            method,
+            json!({"sessionId": sid, key: want}),
+            Waiting::SetOption {
+                node_id,
+                mode,
+                id: want.clone(),
+            },
+        );
+        Ok(())
     }
 
     /// A request or notification from the node.
@@ -645,6 +949,7 @@ impl<W: Write> Bridge<W> {
                 };
                 done(self)?;
                 self.said = false;
+                self.turn_mark = self.stderr.lock().unwrap_or_else(|e| e.into_inner()).total;
                 self.state("WORKING")?;
                 self.ask_agent(
                     "session/prompt",
@@ -690,6 +995,7 @@ impl<W: Write> Bridge<W> {
                     }
                 }
             }
+            "session/set_option" => self.set_option(id, &params)?,
             "session/stop" | "shutdown" => {
                 done(self)?;
                 return Ok(true);
@@ -741,32 +1047,52 @@ impl<W: Write> Bridge<W> {
                 self.chat(json!({"plan": {"steps": steps}}))?;
             }
             "usage_update" => self.usage(u)?,
-            _ => {} // agent_thought_chunk, user_message_chunk, available_commands_update, current_mode_update, ...
+            "current_mode_update" => {
+                let id = u.get("currentModeId").and_then(Value::as_str).unwrap_or("");
+                if !id.is_empty() && id != self.current_mode && id.len() <= OPTION_ID_MAX {
+                    self.current_mode = id.to_string();
+                    self.options()?;
+                }
+            }
+            _ => {} // agent_thought_chunk, user_message_chunk, available_commands_update, ...
         }
         Ok(())
     }
 
-    /// ACP `usage_update`: `used` and `size` (the context window) have no place in `usage/report` and are dropped; the cost is the
-    /// session's running total, so the report carries its growth since the last one (like tokens, which are reported as they grow).
+    /// ACP `usage_update`: the cost is the session's running total, so the report carries its growth since the last one (like
+    /// tokens, which are reported as they grow); `used` and `size` are the context's level and size (ADR-0058), passed on as they
+    /// are. Nothing is sent when neither changed.
     fn usage(&mut self, u: &Value) -> io::Result<()> {
-        let Some((currency, micros)) = u.get("cost").and_then(cost_micros) else {
-            return Ok(());
-        };
-        let grew = match &self.cost {
-            Some((c, last)) if *c == currency => micros.saturating_sub(*last),
-            _ => micros,
-        };
-        self.cost = Some((currency.clone(), micros));
-        if grew == 0 {
+        let cost = u.get("cost").and_then(cost_micros);
+        let grew = cost.as_ref().map(|(currency, micros)| match &self.cost {
+            Some((c, last)) if c == currency => micros.saturating_sub(*last),
+            _ => *micros,
+        });
+        let context = (
+            u.get("used").and_then(Value::as_u64).unwrap_or(0),
+            u.get("size").and_then(Value::as_u64).unwrap_or(0),
+        );
+        let context_moved = context != (0, 0) && context != self.context;
+        if context != (0, 0) {
+            self.context = context;
+        }
+        let currency = cost.as_ref().map(|(c, _)| c.clone());
+        if let Some(c) = cost {
+            self.cost = Some(c);
+        }
+        let grew = grew.filter(|g| *g > 0);
+        if grew.is_none() && !context_moved {
             return Ok(());
         }
         let sid = self.session.clone().unwrap_or_default();
         let model = self.model.clone();
-        self.note(
-            "usage/report",
-            json!({"sessionId": sid, "model": model, "inputTokens": 0, "outputTokens": 0,
-                   "costMicros": grew, "currency": currency}),
-        )
+        let mut p = json!({"sessionId": sid, "model": model, "inputTokens": 0, "outputTokens": 0,
+                           "contextTokens": self.context.0, "contextWindow": self.context.1});
+        if let (Some(g), Some(c)) = (grew, currency) {
+            p["costMicros"] = json!(g);
+            p["currency"] = json!(c);
+        }
+        self.note("usage/report", p)
     }
 
     fn diffs_in(&mut self, u: &Value) -> io::Result<()> {
@@ -847,7 +1173,8 @@ impl<W: Write> Bridge<W> {
                 match self.waiting.remove(&n) {
                     Some(Waiting::Initialize { node_id }) => {
                         if msg.get("error").is_some() {
-                            self.send_node(&json!({"jsonrpc": "2.0", "id": node_id, "error": {"code": -32000, "message": "the agent refused to initialize"}}))?;
+                            let data = json!({"code": "adapter.agent_refused", "params": {"stage": "initialize"}});
+                            self.send_node(&json!({"jsonrpc": "2.0", "id": node_id, "error": {"code": -32000, "message": "the agent refused to initialize", "data": data}}))?;
                         } else {
                             self.can_load = msg
                                 .pointer("/result/agentCapabilities/loadSession")
@@ -857,7 +1184,7 @@ impl<W: Write> Bridge<W> {
                                 self.reply(
                                     &node_id,
                                     json!({"adapterName": "acp-bridge", "version": "1", "agentKind": "acp",
-                                           "capabilities": ["chat", "approvals", "plan", "diff", "cancel", "usage"]}),
+                                           "capabilities": ["chat", "approvals", "plan", "diff", "cancel", "usage", "set_mode", "set_model"]}),
                                 )?;
                             }
                         }
@@ -877,22 +1204,71 @@ impl<W: Write> Bridge<W> {
                                 {
                                     self.model = clip(m, MODEL_MAX);
                                 }
+                                self.models = acp_options(
+                                    msg.pointer("/result/models/availableModels"),
+                                    "modelId",
+                                    false,
+                                );
+                                self.modes = acp_options(
+                                    msg.pointer("/result/modes/availableModes"),
+                                    "id",
+                                    true,
+                                );
+                                if let Some(m) = msg
+                                    .pointer("/result/modes/currentModeId")
+                                    .and_then(Value::as_str)
+                                    .filter(|m| m.len() <= OPTION_ID_MAX)
+                                {
+                                    self.current_mode = m.to_string();
+                                }
                                 self.reply(&node_id, json!({"sessionId": sid}))?;
-                                self.note("session/reported", json!({"sessionId": sid, "nativeSessionId": sid}))?;
+                                self.note(
+                                    "session/reported",
+                                    json!({"sessionId": sid, "nativeSessionId": sid}),
+                                )?;
+                                self.options()?;
                                 self.state("IDLE")?;
                             }
-                            _ => self.send_node(&json!({"jsonrpc": "2.0", "id": node_id, "error": {"code": -32000, "message": "the agent refused the session"}}))?,
+                            _ => {
+                                let data = json!({"code": "adapter.agent_refused", "params": {"stage": "session"}});
+                                self.send_node(&json!({"jsonrpc": "2.0", "id": node_id, "error": {"code": -32000, "message": "the agent refused the session", "data": data}}))?;
+                            }
                         }
                     }
                     Some(Waiting::Prompt) => {
                         self.flush_text()?;
                         self.perms.clear();
                         match turn_outcome(msg, self.said) {
-                            Some((code, params)) => {
+                            Some((code, mut params)) => {
+                                // A failed or empty turn says nothing about why; what the agent wrote to stderr meanwhile often does
+                                // (an expired login, a provider's refusal).
+                                if code != "adapter.turn_stopped" {
+                                    let tail = self.turn_stderr();
+                                    if !tail.is_empty() {
+                                        params["stderr_tail"] = json!(tail);
+                                    }
+                                }
+                                self.notice(code, &params)?;
                                 self.log_reason("WARN", code, &params)?;
                                 self.state_because("IDLE", code)?;
                             }
                             None => self.state("IDLE")?,
+                        }
+                    }
+                    Some(Waiting::SetOption { node_id, mode, id }) => {
+                        if msg.get("error").is_some() {
+                            let data =
+                                json!({"code": "adapter.option_refused", "params": {"id": id}});
+                            self.send_node(&json!({"jsonrpc": "2.0", "id": node_id,
+                                "error": {"code": -32000, "message": "the agent refused", "data": data}}))?;
+                        } else {
+                            if mode {
+                                self.current_mode = id;
+                            } else {
+                                self.model = clip(&id, MODEL_MAX);
+                            }
+                            self.reply(&node_id, json!({}))?;
+                            self.options()?;
                         }
                     }
                     None => {}
@@ -927,7 +1303,7 @@ where
                 return Err(io::Error::other("agent pipes missing"));
             }
         };
-    let kept = Arc::new(Mutex::new(Vec::new()));
+    let kept = Arc::new(Mutex::new(Kept::default()));
     let stderr_done = keep_stderr(stderr, Arc::clone(&kept));
     let (tx, rx) = channel();
     lines(input, Ev::Node, Ev::NodeGone, tx.clone());
@@ -945,6 +1321,15 @@ where
         said: false,
         model: String::new(),
         cost: None,
+        context: (0, 0),
+        modes: Vec::new(),
+        models: Vec::new(),
+        current_mode: String::new(),
+        stderr: Arc::clone(&kept),
+        turn_mark: 0,
+        home: std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .ok(),
     };
     let result = (|| -> io::Result<()> {
         loop {
@@ -960,11 +1345,28 @@ where
                     let code = wait_briefly(&mut child);
                     // The rest of its stderr, unless something it started still holds the stream open.
                     let _ = stderr_done.recv_timeout(Duration::from_millis(500));
-                    let raw = kept.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                    let raw = kept.lock().unwrap_or_else(|e| e.into_inner()).buf.clone();
                     let home = std::env::var("HOME")
                         .or_else(|_| std::env::var("USERPROFILE"))
                         .ok();
-                    b.agent_gone(code, &stderr_tail(&raw, home.as_deref()))?;
+                    let tail = stderr_tail(&raw, home.as_deref());
+                    b.agent_gone(code, &tail)?;
+                    // An agent that died before the node asked anything: the node's `initialize` may still be on its way. It is
+                    // answered with the reason too, instead of with the bridge's exit (which the node could only call `internal`).
+                    if b.session.is_none() {
+                        let end = Instant::now() + LATE_REQUEST_WAIT;
+                        while let Some(left) = end.checked_duration_since(Instant::now()) {
+                            match rx.recv_timeout(left) {
+                                Ok(Ev::Node(m)) => {
+                                    if b.answer_late(&m, code, &tail)? {
+                                        break;
+                                    }
+                                }
+                                Ok(_) => {}
+                                Err(_) => break,
+                            }
+                        }
+                    }
                     return Err(io::Error::other("the agent exited"));
                 }
                 Err(RecvTimeoutError::Timeout) => {}
@@ -1090,6 +1492,47 @@ mod tests {
     }
 
     #[test]
+    fn any_users_home_folder_is_replaced_without_knowing_home() {
+        for (line, want) in [
+            (
+                "at /Users/jane/.config/opencode/x.js:3",
+                "at ~/.config/opencode/x.js:3",
+            ),
+            ("at /Users/Jane Doe/proj/a.ts", "at ~/proj/a.ts"),
+            ("at /users/j.doe/x", "at ~/x"),
+            (
+                "open /home/ali.veli/.cache/y failed",
+                "open ~/.cache/y failed",
+            ),
+            ("open /home/bob failed", "open ~ failed"),
+            ("in /root/.npm and /root", "in ~/.npm and ~"),
+            ("C:\\Users\\John Smith\\AppData\\x", "~\\AppData\\x"),
+            ("c:/users/john.smith/AppData", "~/AppData"),
+            ("/c/Users/john/AppData", "~/AppData"),
+            ("/D/users/x.y/z", "~/z"),
+            ("\"/Users/jane\": no such file", "\"~\": no such file"),
+            (
+                "/rootless and /var/home2/x and x/home/y",
+                "/rootless and /var/home2/x and x/home/y",
+            ),
+            (
+                "/usr/lib/node_modules/opencode",
+                "/usr/lib/node_modules/opencode",
+            ),
+            ("/home/ is empty", "/home/ is empty"),
+        ] {
+            assert_eq!(replace_any_home(line), want, "{line}");
+        }
+        // Through the whole report, with no home given.
+        let t = stderr_tail(
+            b"Error: /Users/someone.else/.local/share/opencode/auth.json missing\n",
+            None,
+        );
+        assert_eq!(t, "Error: ~/.local/share/opencode/auth.json missing");
+        assert!(!stderr_tail(b"x /home/user name/y\n", None).contains("user"));
+    }
+
+    #[test]
     fn a_stderr_tail_is_short_plain_and_without_the_home_folder() {
         let raw = b"one\ntwo\n\x1b[31mthree\x1b[0m\n\nfour /home/me/.config/x\nfive\nsix\x07\n";
         assert_eq!(
@@ -1149,6 +1592,37 @@ mod tests {
         assert_eq!(
             turn_outcome(&json!({"error": {"code": -32603, "message": "x"}}), true),
             Some(("adapter.turn_failed", json!({"rpc_code": "-32603"})))
+        );
+    }
+
+    #[test]
+    fn modes_that_act_without_asking_are_marked_and_others_are_not() {
+        assert!(skips_permissions("bypassPermissions", "Bypass Permissions"));
+        assert!(skips_permissions("full", "Full Access"));
+        assert!(skips_permissions("acceptEdits", ""));
+        assert!(!skips_permissions("build", "Build"));
+        assert!(!skips_permissions("plan", "Plan"));
+        assert!(!skips_permissions("default", "Always Ask"));
+    }
+
+    #[test]
+    fn option_lists_are_bounded_and_ids_are_never_cut() {
+        let long = "m".repeat(OPTION_ID_MAX + 1);
+        let list = json!([{"modelId": "a", "name": "A"}, {"modelId": long}, {"modelId": ""}, {"name": "no id"},
+                          {"modelId": "b", "description": "é".repeat(400)}]);
+        let o = acp_options(Some(&list), "modelId", false);
+        assert_eq!(o.len(), 2);
+        assert_eq!(o[1]["id"], "b");
+        assert!(o[1]["description"].as_str().map_or(0, str::len) <= OPTION_DESCRIPTION_MAX);
+        assert!(o.iter().all(|v| v.get("skipsPermissions").is_none()));
+        let many: Vec<Value> = (0..300).map(|i| json!({"id": format!("m{i}")})).collect();
+        assert_eq!(
+            acp_options(Some(&json!(many)), "id", true).len(),
+            OPTIONS_MAX
+        );
+        assert_eq!(
+            notice_params(&json!({"a": "x", "b": 3})),
+            json!({"a": "x", "b": "3"})
         );
     }
 

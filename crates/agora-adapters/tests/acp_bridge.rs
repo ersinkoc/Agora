@@ -33,6 +33,20 @@ fn acp_child_fails_at_start() {
     std::process::exit(code);
 }
 
+/// The fake agent that refuses `session/new`.
+#[test]
+fn acp_child_refuses_session() {
+    if std::env::var_os("AGORA_TEST_ACP").is_none()
+        || !std::env::args().any(|a| a == "acp_child_refuses_session")
+    {
+        return;
+    }
+    println!();
+    // Set in this child process only, so no other test's agent refuses.
+    std::env::set_var("AGORA_FAKE_ACP_REFUSE_SESSION", "1");
+    let _ = agora_fake_agent::acp::run(std::io::stdin().lock(), &mut std::io::stdout().lock());
+}
+
 struct ChanReader(Receiver<Vec<u8>>, Vec<u8>);
 impl Read for ChanReader {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
@@ -426,4 +440,223 @@ fn a_running_cost_becomes_usage_reports_of_what_it_grew_by() {
             (Some(0), Some(0))
         );
     }
+}
+
+#[test]
+fn the_context_level_and_size_ride_along_with_the_cost() {
+    let mut n = started();
+    n.call(
+        "session/prompt",
+        json!({"sessionId": "acp-s1", "text": "usage"}),
+    );
+    n.wait(|m| m["method"] == "chat/append" && m["params"]["text"]["text"] == "counted");
+    for r in n
+        .messages()
+        .into_iter()
+        .filter(|m| m["method"] == "usage/report")
+    {
+        assert_eq!(r["params"]["contextTokens"], 1200, "{r:#}");
+        assert_eq!(r["params"]["contextWindow"], 1_000_000, "{r:#}");
+    }
+}
+
+fn notices(n: &Node) -> Vec<Value> {
+    chats(n)
+        .into_iter()
+        .filter_map(|c| c.get("notice").cloned())
+        .collect()
+}
+
+#[test]
+fn a_failed_stopped_or_empty_turn_is_a_notice_in_the_conversation() {
+    let mut n = started();
+    turn_end(&mut n, "hi");
+    assert!(notices(&n).is_empty(), "a normal turn has no notice");
+    turn_end(&mut n, "silent");
+    turn_end(&mut n, "refuse");
+    turn_end(&mut n, "fail");
+    assert_eq!(
+        notices(&n),
+        vec![
+            json!({"code": "adapter.turn_empty", "params": {}}),
+            json!({"code": "adapter.turn_stopped", "params": {"stop_reason": "refusal"}}),
+            json!({"code": "adapter.turn_failed", "params": {"rpc_code": "-32603"}}),
+        ]
+    );
+    // A notice is not the agent saying something: the next silent turn is still empty.
+    assert_eq!(turn_end(&mut n, "silent"), "adapter.turn_empty");
+}
+
+#[test]
+fn an_agent_that_exits_mid_turn_leaves_a_notice_with_its_reason() {
+    let mut n = started();
+    n.call(
+        "session/prompt",
+        json!({"sessionId": "acp-s1", "text": "crash-loud"}),
+    );
+    assert!(n.done.take().unwrap().join().unwrap().is_err());
+    let all = notices(&n);
+    let gone = all
+        .iter()
+        .find(|e| e["code"] == "adapter.agent_exited")
+        .unwrap_or_else(|| panic!("{all:#?}"));
+    assert_eq!(gone["params"]["stage"], "turn");
+    assert_eq!(gone["params"]["exit_code"], "4");
+    let tail = gone["params"]["stderr_tail"].as_str().unwrap();
+    assert!(tail.contains("free usage limit reached"), "{tail}");
+    assert!(!tail.contains("fake0123456789"), "a secret leaked: {tail}");
+}
+
+fn options(n: &Node) -> Vec<Value> {
+    n.messages()
+        .into_iter()
+        .filter(|m| m["method"] == "session/options")
+        .map(|m| m["params"].clone())
+        .collect()
+}
+
+#[test]
+fn the_agents_modes_and_models_are_reported_and_can_be_switched() {
+    std::env::set_var("AGORA_FAKE_ACP_BYPASS_MODE", "1");
+    std::env::set_var("AGORA_FAKE_ACP_REFUSE_MODEL", "1");
+    let mut n = Node::start();
+    let init = n.call("initialize", json!({}));
+    let caps = init["result"]["capabilities"].as_array().unwrap().clone();
+    assert!(caps.contains(&json!("set_mode")) && caps.contains(&json!("set_model")));
+    n.call(
+        "session/start",
+        json!({"projectRoot": ".", "worktree": "."}),
+    );
+    let first = n.wait(|m| m["method"] == "session/options")["params"].clone();
+    assert_eq!(first["currentMode"], "build");
+    assert_eq!(first["currentModel"], "fake/model-1");
+    let ids = |l: &Value| -> Vec<String> {
+        l.as_array()
+            .unwrap()
+            .iter()
+            .map(|o| o["id"].as_str().unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(ids(&first["models"]), ["fake/model-1", "fake/model-2"]);
+    assert_eq!(ids(&first["modes"]), ["build", "plan", "bypassPermissions"]);
+    let skips: Vec<bool> = first["modes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o["skipsPermissions"] == true)
+        .collect();
+    assert_eq!(
+        skips,
+        [false, false, true],
+        "only the bypass mode is marked"
+    );
+
+    // A mode the agent offers: the agent takes it and the new current mode is reported.
+    let ok = n.call(
+        "session/set_option",
+        json!({"sessionId": "acp-s1", "kind": "SESSION_OPTION_KIND_MODE", "id": "plan"}),
+    );
+    assert!(ok.get("result").is_some(), "{ok:#}");
+    let now = options(&n);
+    assert_eq!(now.last().unwrap()["currentMode"], "plan");
+
+    // A model the agent offers.
+    n.call(
+        "session/set_option",
+        json!({"sessionId": "acp-s1", "kind": 2, "id": "fake/model-1"}),
+    );
+    // One it does not offer never reaches it; one it refuses comes back refused. Neither changes what is reported.
+    let before = options(&n).len();
+    for (kind, id) in [
+        ("SESSION_OPTION_KIND_MODEL", "fake/model-9"),
+        ("SESSION_OPTION_KIND_MODEL", "fake/model-2"),
+        ("SESSION_OPTION_KIND_MODE", "fake/model-1"),
+        ("SESSION_OPTION_KIND_UNSPECIFIED", "plan"),
+    ] {
+        let r = n.call(
+            "session/set_option",
+            json!({"sessionId": "acp-s1", "kind": kind, "id": id}),
+        );
+        assert_eq!(
+            r["error"]["data"]["code"], "adapter.option_refused",
+            "{r:#}"
+        );
+        assert_eq!(r["error"]["data"]["params"]["id"], id);
+    }
+    assert_eq!(options(&n).len(), before);
+    assert_eq!(options(&n).last().unwrap()["currentModel"], "fake/model-1");
+
+    // The agent switching its own mode is reported too.
+    n.call(
+        "session/set_option",
+        json!({"sessionId": "acp-s1", "kind": "SESSION_OPTION_KIND_MODE", "id": "build"}),
+    );
+    turn_end(&mut n, "auto");
+    assert_eq!(options(&n).last().unwrap()["currentMode"], "plan");
+}
+
+#[test]
+fn an_agent_that_refuses_the_session_says_so_with_a_code() {
+    let mut n = Node::start_with("acp_child_refuses_session");
+    n.call("initialize", json!({}));
+    let r = n.call(
+        "session/start",
+        json!({"projectRoot": ".", "worktree": "."}),
+    );
+    assert_eq!(
+        r["error"]["data"],
+        json!({"code": "adapter.agent_refused", "params": {"stage": "session"}}),
+        "{r:#}"
+    );
+}
+
+#[test]
+fn an_agent_that_died_before_the_node_asked_still_answers_initialize_with_its_reason() {
+    let n = Node::start_with("acp_child_fails_at_start");
+    // The agent is gone (and reported as `start`) before the node's `initialize` arrives.
+    n.wait(|m| m["method"] == "log");
+    n.to_bridge
+        .send(
+            format!(
+                "{}\n",
+                json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+            )
+            .into_bytes(),
+        )
+        .unwrap();
+    let reply = n.wait(|m| m.get("id") == Some(&json!(1)));
+    let data = &reply["error"]["data"];
+    assert_eq!(data["code"], "adapter.agent_exited", "{reply:#}");
+    assert_eq!(data["params"]["stage"], "initialize");
+    assert_eq!(data["params"]["exit_code"], "5");
+}
+
+#[test]
+fn an_empty_turn_carries_what_the_agent_wrote_to_stderr_during_it() {
+    let mut n = started();
+    assert_eq!(turn_end(&mut n, "silent"), "adapter.turn_empty");
+    assert_eq!(turn_end(&mut n, "silent-loud"), "adapter.turn_empty");
+    let all = notices(&n);
+    assert_eq!(
+        all[0],
+        json!({"code": "adapter.turn_empty", "params": {}}),
+        "nothing written, nothing added"
+    );
+    let tail = all[1]["params"]["stderr_tail"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{all:#?}"));
+    assert!(tail.contains("invalid x-api-key (auth)"), "{tail}");
+    assert!(
+        !tail.contains("/Users/someone") && !tail.contains("sk-fake"),
+        "{tail}"
+    );
+    if let Ok(home) = std::env::var("HOME") {
+        assert!(home.len() < 2 || !tail.contains(&home), "{tail}");
+    }
+    // The next turn starts clean: an empty one without stderr adds nothing.
+    turn_end(&mut n, "silent");
+    assert_eq!(
+        notices(&n)[2],
+        json!({"code": "adapter.turn_empty", "params": {}})
+    );
 }

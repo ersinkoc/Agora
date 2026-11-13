@@ -125,6 +125,11 @@ pub struct EventSink {
     last_online: AtomicU64,
 }
 
+/// ADR-0058: an adapter's currency as an upper-case three-letter code, or `None` for anything else.
+fn currency_code(c: &str) -> Option<String> {
+    (c.len() == 3 && c.bytes().all(|b| b.is_ascii_alphabetic())).then(|| c.to_ascii_uppercase())
+}
+
 pub(crate) fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -414,13 +419,42 @@ impl EventSink {
                         model,
                         input_tokens,
                         output_tokens,
+                        cost_micros,
+                        currency,
+                        context_tokens,
+                        context_window,
                         ..
                     } => self.record(Body::AgentUsageReported(v1::AgentUsageReported {
                         agent_id: agent.as_str().to_string(),
                         model: model.clone(),
                         input_tokens: *input_tokens,
                         output_tokens: *output_tokens,
+                        // ADR-0058: the agent's own cost, only with a currency the hub can tell apart (three letters).
+                        cost_micros: cost_micros.filter(|_| currency_code(currency).is_some()),
+                        currency: currency_code(currency).unwrap_or_default(),
+                        context_tokens: *context_tokens,
+                        context_window: *context_window,
                     })),
+                    // ADR-0058: the supervisor passes these on checked and bounded, and only when they changed.
+                    AdapterEvent::Options { options, .. } => {
+                        let list = |l: &[agora_adapters::host::SessionOption]| {
+                            l.iter()
+                                .map(|o| v1::SessionOption {
+                                    id: o.id.clone(),
+                                    name: o.name.clone(),
+                                    description: o.description.clone(),
+                                    skips_permissions: o.skips_permissions,
+                                })
+                                .collect()
+                        };
+                        self.record(Body::AgentSessionOptions(v1::AgentSessionOptions {
+                            agent_id: agent.as_str().to_string(),
+                            modes: list(&options.modes),
+                            models: list(&options.models),
+                            current_mode: options.current_mode.clone(),
+                            current_model: options.current_model.clone(),
+                        }));
+                    }
                     AdapterEvent::SessionReported {
                         native_session_id, ..
                     } => self.record(Body::AgentSessionReported(v1::AgentSessionReported {
@@ -1036,6 +1070,7 @@ impl Node {
                                             model: s.model,
                                             input_tokens: s.input,
                                             output_tokens: s.output,
+                                            ..Default::default()
                                         })
                                     })
                                     .collect(),

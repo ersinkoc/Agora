@@ -5,7 +5,7 @@ import { agora } from '../gen/agora.js';
 export interface ChatLine { id: number; atMs: number; role: 'agent' | 'user'; kind: 'text' | 'tool' | 'plan' | 'diff'; text: string; path: string }
 export interface ChatSource { connect(onLines: (lines: ChatLine[], replace: boolean) => void): { close(): void } }
 
-const KINDS = ['text', 'text', 'tool', 'plan', 'diff'] as const;
+const KINDS: readonly ChatLine['kind'][] = ['text', 'text', 'tool', 'plan', 'diff'];
 
 export function chatLine(e: agora.v1.ChatEntry.$Properties): ChatLine {
   return {

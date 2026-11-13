@@ -173,3 +173,191 @@ fn an_acp_agent_runs_through_the_bridge_like_any_chat_agent() {
     drop(node);
     let _ = std::fs::remove_dir_all(&home);
 }
+
+/// A node with two ACP kinds: `acp-fake` (the fake agent) and `acp-broken` (one that dies before `initialize`).
+fn node_with_acp(tag: &str) -> Option<(std::path::PathBuf, Node)> {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return None;
+    }
+    let home = std::env::temp_dir().join(format!("agora-acp-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    let repo = home.join("demo");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    git(&repo, &["commit", "-q", "--allow-empty", "-m", "init"]);
+    std::fs::create_dir_all(home.join("manifests")).unwrap();
+    for (kind, extra) in [("acp-fake", ""), ("acp-broken", ", \"--fail-at-start\"")] {
+        std::fs::write(
+            home.join(format!("manifests/{kind}.toml")),
+            format!("kind = \"{kind}\"\ndisplay_name = \"Fake ACP\"\nversion = \"1\"\nmin_engine = 1\n[structured]\nacp = {{ argv = [{:?}, \"--acp\"{extra}] }}\n", fake_agent()),
+        )
+        .unwrap();
+    }
+    let node = Node(
+        Command::new(AGORA)
+            .args(["node", "run", "--project"])
+            .arg(&repo)
+            .env("AGORA_HOME", &home)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("start node"),
+    );
+    let sock = home.join("node.sock");
+    let end = Instant::now() + Duration::from_secs(60);
+    while !sock.exists() {
+        assert!(Instant::now() < end, "node did not create its socket");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    Some((home, node))
+}
+
+fn started_agent(home: &Path) -> String {
+    let (code, started) = agora(home, &["agent", "start", "acp-fake"]);
+    assert_eq!(code, 0, "{started}");
+    started
+        .split_whitespace()
+        .find(|w| w.starts_with("agent-"))
+        .expect("an agent id")
+        .trim_matches(|c: char| !c.is_alphanumeric() && c != '-')
+        .to_string()
+}
+
+/// ADR-0058: a turn that ends in silence is a notice in the conversation, with a code and no text.
+#[test]
+fn a_silent_turn_reaches_the_conversation_as_a_notice() {
+    let Some((home, node)) = node_with_acp("notice") else {
+        return;
+    };
+    let id = started_agent(&home);
+    let mut c = Client::connect(&home.join("node.sock")).unwrap();
+    c.call_on(
+        3,
+        Cmd::ChatSubscribe(v1::ChatSubscribe {
+            agent_id: id.clone(),
+        }),
+    )
+    .unwrap()
+    .expect("subscribed");
+    let (code, out) = agora(&home, &["agent", "prompt", &id, "silent"]);
+    assert_eq!(code, 0, "{out}");
+    let end = Instant::now() + Duration::from_secs(15);
+    let notice = loop {
+        assert!(Instant::now() < end, "no notice arrived");
+        let Some(f) = c.read_frame(Some(Duration::from_millis(200))).unwrap() else {
+            continue;
+        };
+        if f.stream_id != 3 {
+            continue;
+        }
+        let entries = match f.kind {
+            KIND_CHAT_SNAPSHOT => {
+                v1::ChatSnapshot::decode(f.payload.as_slice())
+                    .unwrap()
+                    .entries
+            }
+            KIND_CHAT_ENTRY => vec![v1::ChatEntry::decode(f.payload.as_slice()).unwrap()],
+            _ => continue,
+        };
+        if let Some(n) = entries
+            .into_iter()
+            .find(|e| e.kind == v1::ChatKind::Notice as i32)
+        {
+            break n;
+        }
+    };
+    assert_eq!(notice.code, "adapter.turn_empty");
+    assert!(notice.text.is_empty());
+    drop(node);
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// ADR-0058: the user switches the agent's mode and model among what it offered; anything else is refused before it reaches the
+/// agent.
+#[test]
+fn the_user_switches_an_acp_agents_mode_and_model() {
+    let Some((home, node)) = node_with_acp("modes") else {
+        return;
+    };
+    let id = started_agent(&home);
+    let mut c = Client::connect(&home.join("node.sock")).unwrap();
+    let set_mode = |c: &mut Client, mode: &str| {
+        c.call(Cmd::AgentSetMode(v1::AgentSetMode {
+            agent_id: id.clone(),
+            mode: mode.into(),
+        }))
+        .unwrap()
+    };
+    // The options arrive just after the start; until then nothing is offered.
+    let end = Instant::now() + Duration::from_secs(15);
+    while set_mode(&mut c, "plan").is_err() {
+        assert!(Instant::now() < end, "the mode was never accepted");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let refused = set_mode(&mut c, "nope").unwrap_err();
+    assert_eq!(refused.code, "protocol.invalid_message");
+    let model = |c: &mut Client, model: &str| {
+        c.call(Cmd::AgentSetModel(v1::AgentSetModel {
+            agent_id: id.clone(),
+            model: model.into(),
+        }))
+        .unwrap()
+    };
+    assert!(model(&mut c, "fake/model-2").is_ok());
+    assert_eq!(
+        model(&mut c, "fake/model-9").unwrap_err().code,
+        "protocol.invalid_message"
+    );
+    let unknown = c
+        .call(Cmd::AgentSetModel(v1::AgentSetModel {
+            agent_id: "agent-99".into(),
+            model: "fake/model-2".into(),
+        }))
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(unknown.code, "agent.not_found");
+    drop(node);
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// ADR-0058: an agent that dies while starting is reported with its reason, not as `internal`.
+#[test]
+fn an_acp_agent_that_dies_while_starting_says_why() {
+    let Some((home, node)) = node_with_acp("dies") else {
+        return;
+    };
+    let mut c = Client::connect(&home.join("node.sock")).unwrap();
+    let projects = match c
+        .call(Cmd::ProjectList(v1::ProjectList {}))
+        .unwrap()
+        .unwrap()
+        .result
+    {
+        Some(v1::command_ok::Result::ProjectList(p)) => p.projects,
+        other => panic!("{other:?}"),
+    };
+    let err = c
+        .call(Cmd::AgentStart(v1::AgentStart {
+            project_id: projects[0].project_id.clone(),
+            kind: "acp-broken".into(),
+            ..Default::default()
+        }))
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(err.code, "adapter.agent_exited", "{err:?}");
+    let param = |k: &str| match err.params.get(k).and_then(|p| p.value.clone()) {
+        Some(v1::param_value::Value::Str(s)) => s,
+        other => panic!("{k}: {other:?}"),
+    };
+    assert_eq!(param("stage"), "initialize");
+    assert_eq!(param("exit_code"), "5");
+    let tail = param("stderr_tail");
+    assert!(tail.contains("plugin failed"), "{tail}");
+    assert!(!tail.contains("sk-fake"), "a secret leaked: {tail}");
+    // The command line shows it in words, from the locale files.
+    let (code, out) = agora(&home, &["agent", "start", "acp-broken"]);
+    assert_ne!(code, 0);
+    assert!(out.contains("exited before it was ready"), "{out}");
+    drop(node);
+    let _ = std::fs::remove_dir_all(&home);
+}
