@@ -214,7 +214,17 @@ fn r4_orphan_and_confirmed() {
     let p = pol(&[("m", &["web"])]);
     let t = DeviceTrust::new("laptop", &file);
     t.set_policy_limits(p.clone());
-    t.endorse(&e_ttl(&m, "m", "x", &x.public(), now, DAY), now)
+    // Fifth review: an orphan is taken over only with an endorsement signed after its own expiry (its chain broke at an unknown
+    // time), so not now...
+    assert_eq!(
+        t.endorse(&e_ttl(&m, "m", "x", &x.public(), now, DAY), now)
+            .unwrap_err()
+            .code
+            .as_str(),
+        "auth.forbidden"
+    );
+    // ...but once it ran out, within m's own limits.
+    t.endorse(&e_ttl(&m, "m", "x", &x.public(), far, DAY), far)
         .unwrap();
     let l = limits(&file, p.clone());
     assert!(l.allows_project("x", "web") && !l.allows_project("x", "api"));
