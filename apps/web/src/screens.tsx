@@ -8,7 +8,7 @@ import { AgentTile } from './components/AgentTile';
 import { AttentionStrip } from './components/AttentionStrip';
 import { Icon } from './components/Icon';
 import { NetworkView } from './components/NetworkView';
-import { StateBadge, StateMark } from './components/StateBadge';
+import { StateBadge } from './components/StateBadge';
 import type { ApprovalModel, MachineModel, MessageModel, ProjectCost } from './net/view';
 import type { Device } from './net/approval';
 import { money, type UsageSummary } from './net/usage';
