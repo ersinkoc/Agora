@@ -897,6 +897,7 @@ fn the_screen_password_is_typed_twice_unseen_and_ctrl_c_stops_it() {
         limits: agora_platform::ProcessLimits::default(),
         sandbox: None,
         identity: None,
+        env_remove: Vec::new(),
     })
     .unwrap();
     let mut seen = String::new();
@@ -931,6 +932,7 @@ fn the_screen_password_is_typed_twice_unseen_and_ctrl_c_stops_it() {
         limits: agora_platform::ProcessLimits::default(),
         sandbox: None,
         identity: None,
+        env_remove: Vec::new(),
     })
     .unwrap();
     let deadline = Instant::now() + Duration::from_secs(60);
