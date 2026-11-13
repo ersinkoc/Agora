@@ -1,0 +1,188 @@
+{
+  "pull_request": 418,
+  "reviewed_head": "72f428f51fe928008e3c244c86c73457d92f9dec",
+  "original_pull_request": 411,
+  "original_head": "4463a1d2bbc7b2c93c7d0e0e66f6f4454afbe488",
+  "recorded_at_utc": "2026-11-13T11:12:40.305121+00:00",
+  "reviewer": "Codex on Linux",
+  "harness": "Actual Focus, PromptBox and SessionBar in Chromium; synthetic agents on two machines with the same local agent-1. Controlled chooseOption callback, no real account or agent process.",
+  "original_failures": {
+    "cross_agent_confirmation": {
+      "steps": [
+        "Choose Auto for Agent A (n/agent-1), leaving confirmation open.",
+        "Render Agent B (m/agent-1) in the same Focus component.",
+        "Click the surviving Switch anyway button."
+      ],
+      "observed_callback": {
+        "agent": "m/agent-1",
+        "kind": "mode",
+        "id": "auto"
+      }
+    },
+    "unreported_current": {
+      "reported_current_mode": "",
+      "offered_modes": [
+        "auto (skips permissions)",
+        "plan"
+      ],
+      "displayed_selection": "auto",
+      "command_calls": []
+    },
+    "model_grant_scope": {
+      "command": {
+        "agentSetModel": {
+          "agentId": "agent-1",
+          "model": "m1"
+        }
+      },
+      "actual": "node",
+      "expected": "agent:agent-1"
+    }
+  },
+  "final_case_assertions": {
+    "cancel": "Keep asking closes the confirmation, reports no command and keeps the reported Plan mode.",
+    "other-agent": "The A confirmation disappears on switching to B with no command. Only a new selection and confirmation made for B emits the B callback shown in the matrix.",
+    "usage-update": "Usage/context updates for A preserve A pending confirmation; confirming still targets A.",
+    "unknown-current": "Mode and model both show localized Not reported placeholders and no command. Choosing Auto then opens confirmation before any command.",
+    "reported-auto": "An explicitly reported Auto current mode displays accurately without a new selection or command.",
+    "safe-mode": "Selecting Plan sends exactly one command to A, without a permission-skipping confirmation.",
+    "model": "Selecting Model Two sends exactly one model command to A, without a mode confirmation."
+  },
+  "final_browser_matrix": [
+    {
+      "lang": "en",
+      "name": "cancel",
+      "calls": []
+    },
+    {
+      "lang": "en",
+      "name": "other-agent",
+      "calls": [
+        {
+          "agent": "m/agent-1",
+          "kind": "mode",
+          "id": "auto"
+        }
+      ]
+    },
+    {
+      "lang": "en",
+      "name": "usage-update",
+      "calls": [
+        {
+          "agent": "n/agent-1",
+          "kind": "mode",
+          "id": "auto"
+        }
+      ]
+    },
+    {
+      "lang": "en",
+      "name": "unknown-current",
+      "calls": []
+    },
+    {
+      "lang": "en",
+      "name": "reported-auto",
+      "calls": []
+    },
+    {
+      "lang": "en",
+      "name": "safe-mode",
+      "calls": [
+        {
+          "agent": "n/agent-1",
+          "kind": "mode",
+          "id": "plan"
+        }
+      ]
+    },
+    {
+      "lang": "en",
+      "name": "model",
+      "calls": [
+        {
+          "agent": "n/agent-1",
+          "kind": "model",
+          "id": "m2"
+        }
+      ]
+    },
+    {
+      "lang": "tr",
+      "name": "cancel",
+      "calls": []
+    },
+    {
+      "lang": "tr",
+      "name": "other-agent",
+      "calls": [
+        {
+          "agent": "m/agent-1",
+          "kind": "mode",
+          "id": "auto"
+        }
+      ]
+    },
+    {
+      "lang": "tr",
+      "name": "usage-update",
+      "calls": [
+        {
+          "agent": "n/agent-1",
+          "kind": "mode",
+          "id": "auto"
+        }
+      ]
+    },
+    {
+      "lang": "tr",
+      "name": "unknown-current",
+      "calls": []
+    },
+    {
+      "lang": "tr",
+      "name": "reported-auto",
+      "calls": []
+    },
+    {
+      "lang": "tr",
+      "name": "safe-mode",
+      "calls": [
+        {
+          "agent": "n/agent-1",
+          "kind": "mode",
+          "id": "plan"
+        }
+      ]
+    },
+    {
+      "lang": "tr",
+      "name": "model",
+      "calls": [
+        {
+          "agent": "n/agent-1",
+          "kind": "model",
+          "id": "m2"
+        }
+      ]
+    }
+  ],
+  "model_grant_after": "agent:agent-1",
+  "local_validation": {
+    "web_typecheck": "passed",
+    "web_build": "passed",
+    "tracked_web_tests": 113,
+    "tui_unit_tests": 26,
+    "independent_grant_scope_test": "passed",
+    "browser_page_errors": []
+  },
+  "screenshots": [
+    "../screenshots/0418-session-choice-dark.png",
+    "../screenshots/0418-session-choice-light.png"
+  ],
+  "limits": [
+    "Controlled callback responses; these checks do not launch a real ACP agent or sign a real node grant.",
+    "Native CI status is recorded separately in the PR review."
+  ]
+}
