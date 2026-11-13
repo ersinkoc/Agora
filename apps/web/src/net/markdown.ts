@@ -31,7 +31,8 @@ export function inlines(text: string): Inline[] {
   return out;
 }
 
-const FENCE = /^\s*(```|~~~)\s*([\w+.-]*)\s*$/;
+const FENCE = /^\s*(`{3,}|~{3,})\s*([\w+.-]*)\s*$/;
+const CLOSE = /^\s*(`{3,}|~{3,})\s*$/;
 const HEADING = /^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$/;
 const ITEM = /^(\s*)([-*+]|(\d+)[.)])\s+(.*)$/;
 const QUOTE = /^\s*>\s?(.*)$/;
@@ -52,7 +53,10 @@ export function blocks(text: string): Block[] {
       endPara();
       const body: string[] = [];
       // A block still being written has no closing fence yet: everything after the opening one is code.
-      for (i++; i < lines.length && !(lines[i] as string).trim().startsWith(fence[1] as string); i++) body.push(lines[i] as string);
+      // It closes on a line that is only a fence of the same character, at least as long as the opening one.
+      const open = fence[1] as string;
+      const closes = (l: string) => { const m = CLOSE.exec(l)?.[1]; return !!m && m[0] === open[0] && m.length >= open.length; };
+      for (i++; i < lines.length && !closes(lines[i] as string); i++) body.push(lines[i] as string);
       out.push({ kind: 'code', lang: fence[2] ?? '', text: body.join('\n') });
       continue;
     }

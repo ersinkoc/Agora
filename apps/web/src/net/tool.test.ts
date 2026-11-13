@@ -23,8 +23,12 @@ describe('tool calls in words', () => {
     expect(toolView(call('WebFetch', '{"url":"https://example.com"}'))).toMatchObject({ action: 'fetch', subject: 'https://example.com' });
   });
   it('shows arguments that are not an object as they are', () => {
-    expect(toolView(call('echo', '"hi"'))).toMatchObject({ subject: 'hi', details: [] });
+    expect(toolView(call('echo', '"hi"'))).toMatchObject({ subject: 'hi', details: [['', 'hi']] });
     expect(toolView(call('many', '[1,2]')).details).toEqual([['', '[\n  1,\n  2\n]']]);
+  });
+  it('keeps every argument whole for the folded part', () => {
+    const long = 'z'.repeat(5000);
+    expect(toolView(call('Write', `{"file_path":"a.txt","content":"${long}"}`)).details).toEqual([['file_path', 'a.txt'], ['content', long]]);
   });
   it('reads a call the node cut short', () => {
     const cut = call('Write file', `{"file_path":"big.txt","content":"${'x'.repeat(200)}`).slice(0, 120);

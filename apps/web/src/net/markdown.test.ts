@@ -18,6 +18,11 @@ describe('agent markdown', () => {
     expect(b[3]).toMatchObject({ ordered: false });
     expect(b[5]).toEqual({ kind: 'code', lang: 'rust', text: 'fn main() {}' });
   });
+  it('closes a code block only on a whole fence of the same kind and length', () => {
+    expect(blocks('````md\n```not-a-close\n```\n~~~~\n````\nafter')).toEqual([
+      { kind: 'code', lang: 'md', text: '```not-a-close\n```\n~~~~' }, { kind: 'p', inlines: [{ kind: 'text', text: 'after' }] },
+    ]);
+  });
   it('treats a code block still being written as code to the end', () => {
     expect(blocks('look:\n```\nline 1\nline 2')).toEqual([{ kind: 'p', inlines: [{ kind: 'text', text: 'look:' }] }, { kind: 'code', lang: '', text: 'line 1\nline 2' }]);
   });
