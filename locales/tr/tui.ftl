@@ -112,3 +112,14 @@ option-ask = Önce sorsun
 tui-start-acts = Nasıl çalışsın? Numarasına basın; Enter ya da başka bir tuş önce sordurur.
 tui-start-confirm-skip = Ajan sormadan çalışsın mı? "{ $name }" seçiliyken çalıştığı sürece komut çalıştırır ve dosyaları size sormadan değiştirir. Sormadan başlatmak için y'ye basın; başka bir tuş sormaya devam ettirir.
 tui-badge-no-ask = sormuyor
+
+## A chat agent's tool call in words (as the web window says it)
+tui-tool-read = Okuma
+tui-tool-edit = Düzenleme
+tui-tool-run = Komut
+tui-tool-search = Arama
+tui-tool-fetch = Web sayfası
+tui-tool-delete = Silme
+tui-tool-move = Taşıma
+tui-tool-think = Düşünme
+tui-tool-other = Adım

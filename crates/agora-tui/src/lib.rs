@@ -6,3 +6,4 @@ pub mod picker;
 pub mod preview;
 pub mod render;
 pub mod split;
+pub mod tool;

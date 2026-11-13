@@ -112,3 +112,14 @@ option-ask = Ask before acting
 tui-start-acts = How should it act? Press its number; Enter or any other key asks before acting.
 tui-start-confirm-skip = Let the agent act without asking? With "{ $name }" it runs commands and changes files without asking you first, for as long as it runs. Press y to start without asking; any other key keeps asking.
 tui-badge-no-ask = does not ask
+
+## A chat agent's tool call in words (as the web window says it)
+tui-tool-read = Read
+tui-tool-edit = Edit
+tui-tool-run = Command
+tui-tool-search = Search
+tui-tool-fetch = Web page
+tui-tool-delete = Delete
+tui-tool-move = Move
+tui-tool-think = Thinking
+tui-tool-other = Step
