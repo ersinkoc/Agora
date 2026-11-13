@@ -388,3 +388,63 @@ All additions; nothing published changed.
   in US dollars as its `micro_usd`, and estimates from the price table only for agents that reported none.
 - **Start failures.** `agent.start` of an adapter agent whose adapter failed with a stable reason answers with that code instead of
   `internal`: `adapter.agent_exited` `{stage, exit_code, stderr_tail}` or `adapter.agent_refused` `{stage}` (`error-codes.md`).
+
+### Devices (ADR-0061)
+
+All additions; nothing published changed. A device is a signing key a person uses (a browser's WebCrypto key, the terminal client's
+key; ES256, ADR-0028). The hub keeps each person's **registered** devices; a node trusts devices. The hub's list is only a list of
+candidates: no message from the hub makes a node trust a device. A node trusts a device when its owner says yes on the machine
+(`agora node trust ID KEY`, or the question `agora node enroll` and `agora node trust --from-hub` ask about the registered devices),
+or when a device it already trusts signs an **endorsement** of it. The hub only carries endorsements and revocations.
+
+- **Registration.** `DeviceRegister` (request field 88: `device_id`, `name`, `public_key`) is sent by a signed-in client when it
+  connects; the hub answers it itself and keeps the device under the session's person (`id`, name, key, created, last used). A device id
+  matches `[A-Za-z0-9._-]{1,64}`, a name is at most 64 characters with no control characters, a key is a 65-byte uncompressed P-256
+  point. A device id stays bound to its key and its person: another key or another person under a registered id is refused with
+  `device.key_mismatch`; sending it again updates the name and the time it was last used. At most 64 devices per person
+  (`node.resource_limit` `{resource: devices}`).
+- **Listing.** `DeviceList` (request field 89) answers `DeviceListResult` (`CommandOk` field 22) with the caller's own devices
+  (`DeviceInfo`: id, name, key, `created_ms`, `last_used_ms`, `user_id`, `approval_asked_ms`, `endorsed_by[]`, `revoked_ms`). A node
+  asks too, on a TLS connection made with its certificate whose first frame is that `CommandRequest` (stream 2, kind 0, before any
+  `Hello`): the hub answers once with every registered device and closes it, so the node's own connection is not replaced. Nothing
+  else is answered on such a connection (`protocol.invalid_message`); without a certificate it is refused like anything but
+  enrollment. The hub offers the capability `device.list`. `EnrollResponse.devices` (4) carries the same list at enrollment.
+- **Asking.** `DeviceAskApproval` (request field 92: `device_id`) marks one of the caller's devices as waiting for another of their
+  devices (`approval_asked_ms`); the person's other devices list it and show a card. The first endorsement of it the hub carries
+  clears the mark.
+- **Endorsement.** `DeviceEndorse { endorsement }` (request field 90) from a client: the hub checks that both devices are the caller's,
+  that the key is the registered one (`device.key_mismatch`), that it lasts at most 90 days and has not expired
+  (`device.endorsement_expired`), keeps it, and sends the same message to every connected node with the capability `device.trust`
+  (for an endorsement that names machines, only to those), and again to each such node when it connects while it has not expired.
+  A viewer cannot send it (`auth.forbidden`). The signed bytes (`DeviceEndorsement.signature`, ES256 r || s) are
+
+  ```
+  "agora-device-endorse-v1" 0x00 F(device_id) F(hex(public_key)) F(name) F(count of nodes) F(node)... F(issued_at_ms) F(expires_at_ms) F(endorser_device_id)
+  ```
+
+  where `F(x)` is the decimal byte length of `x`, `:`, then `x` in UTF-8; numbers are decimal and the key is lowercase hex. A node
+  accepts it only when: the endorser is a device it trusts there (and that trust has not expired; `device.untrusted`), the signature
+  verifies (`device.signature_invalid`), this node is in `nodes` or `nodes` is empty (`device.not_in_scope`), now is before
+  `expires_at_ms`, `issued_at_ms` is at most 5 minutes ahead of the node's clock and `expires_at_ms - issued_at_ms` is at most 90 days
+  (`device.endorsement_expired`), no revocation of the device was signed at or after `issued_at_ms` (`device.revoked`), and the node
+  does not already trust that id with another key (`device.key_mismatch`). It then trusts the device until `expires_at_ms` (never
+  longer than its endorser's own trust there), and each use of the device on that node renews it to 90 days from the use.
+- **Revocation.** `DeviceRevoke { revocation }` (request field 91): both devices must be the caller's; the hub keeps it and sends it to
+  every node with `device.trust`, now and whenever one connects. Signed bytes:
+
+  ```
+  "agora-device-revoke-v1" 0x00 F(device_id) F(issued_at_ms) F(revoker_device_id)
+  ```
+
+  A node applies one signed by a device it trusts at once: the device is no longer trusted there, however it came to be, and
+  endorsements of it signed at or before `issued_at_ms` are refused from then on. Trusting it again on the machine
+  (`agora node trust ID KEY`) clears that.
+- **Fingerprint.** What people compare: the first 8 bytes of the SHA-256 of the 65-byte key, lowercase hex in groups of 2 bytes joined
+  by `-` (`3f9a-07c2-11be-d4e0`). Every client shows it wherever a device is named.
+- **Trusted devices.** Event `NodeTrustedDevices` (`Event` field 13: `device_ids[]`, sorted, never keys), produced by a node when it
+  starts and whenever the set changes; the hub keeps the last one per node in `NodeSnapshot.trusted_device_ids` (10), so a window can
+  tell which machines trust its device. Node capability `device.trust`: the node verifies `DeviceEndorse` and `DeviceRevoke` and reports
+  `NodeTrustedDevices`; the hub never sends either message to a node without it.
+
+Shared vectors for both signed messages and the fingerprint, checked by the node, the terminal client and the web window:
+`schema/fixtures/signing/device-trust-v1.json`.

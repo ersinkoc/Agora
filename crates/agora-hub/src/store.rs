@@ -84,7 +84,7 @@ pub trait EventStore {
     fn set_setting(&self, key: &str, value: &[u8]) -> Result<(), StoreError>;
 }
 
-const SCHEMA_VERSION: i64 = 10;
+const SCHEMA_VERSION: i64 = 11;
 
 pub struct SqliteStore {
     conn: Mutex<Connection>,
@@ -272,6 +272,41 @@ impl SqliteStore {
                       OR NEW.action != OLD.action OR NEW.node != OLD.node OR NEW.session != OLD.session
                  BEGIN SELECT RAISE(ABORT, 'the audit trail is append-only'); END;
                  PRAGMA user_version = 10;
+                 COMMIT;",
+            )?;
+        }
+        if version < 11 {
+            // ADR-0061: each person's registered devices (candidates a machine may come to trust; never trust by themselves), and the
+            // endorsements and revocations the hub carries to machines, kept so a machine that connects later still gets them. The
+            // hub cannot make either: they are signed by a device and verified on the machine.
+            conn.execute_batch(
+                "BEGIN;
+                 CREATE TABLE IF NOT EXISTS user_devices (
+                     device_id         TEXT PRIMARY KEY,
+                     user_id           TEXT NOT NULL,
+                     name              TEXT NOT NULL,
+                     public_key        BLOB NOT NULL,
+                     created_ms        INTEGER NOT NULL,
+                     last_used_ms      INTEGER NOT NULL,
+                     approval_asked_ms INTEGER NOT NULL DEFAULT 0,
+                     revoked_ms        INTEGER NOT NULL DEFAULT 0
+                 );
+                 CREATE TABLE IF NOT EXISTS device_endorsements (
+                     id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                     device_id  TEXT NOT NULL,
+                     endorser   TEXT NOT NULL,
+                     issued_ms  INTEGER NOT NULL,
+                     expires_ms INTEGER NOT NULL,
+                     payload    BLOB NOT NULL
+                 );
+                 CREATE TABLE IF NOT EXISTS device_revocations (
+                     id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                     device_id TEXT NOT NULL,
+                     revoker   TEXT NOT NULL,
+                     issued_ms INTEGER NOT NULL,
+                     payload   BLOB NOT NULL
+                 );
+                 PRAGMA user_version = 11;
                  COMMIT;",
             )?;
         }

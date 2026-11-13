@@ -1,0 +1,93 @@
+syntax = "proto3";
+
+package agora.v1;
+
+// ADR-0061: the devices a person signs with (a browser, the terminal client) and how a machine comes to trust them.
+//
+// The hub keeps a list of each person's registered devices. That list is only a list of candidates: a node never trusts a device
+// because the hub lists it. A node trusts a device when its owner says yes on the machine itself (`agora node enroll`,
+// `agora node trust --from-hub`, `agora node trust ID KEY`), or when a device it already trusts signs an endorsement of it. The hub
+// only carries endorsements and revocations; it cannot make or change one (docs/specs/protocol.md, "Devices").
+
+// client -> hub, answered by the hub. Sent by a signed-in client when it connects: this device, under this session's person. A device
+// id is bound to its key for good: the same id with another key is refused (`device.key_mismatch`). Sending it again updates the name
+// and the time it was last used.
+message DeviceRegister {
+  // `[A-Za-z0-9._-]{1,64}`, what the node's trusted-devices file knows it by (`web-3fa9c1`, `tui-04a1b2`).
+  string device_id = 1;
+  // What the person calls it (the browser and system, or a name they gave it). Untrusted text, at most 64 characters.
+  string name = 2;
+  // The 65-byte uncompressed P-256 point the device signs with (ADR-0028).
+  bytes public_key = 3;
+}
+
+// A registered device as the hub knows it.
+message DeviceInfo {
+  string device_id = 1;
+  string name = 2;
+  bytes public_key = 3;
+  // Milliseconds since the Unix epoch, hub clock.
+  uint64 created_ms = 4;
+  uint64 last_used_ms = 5;
+  // The person it was registered under (`owner` on a hub with one person).
+  string user_id = 6;
+  // When this device asked to be approved by another device of the person (`DeviceAskApproval`); 0 when it is not waiting. Cleared by
+  // the first endorsement of it the hub carries.
+  uint64 approval_asked_ms = 7;
+  // The devices whose endorsements of this one the hub carried, newest first.
+  repeated string endorsed_by = 8;
+  // When a signed revocation of it was carried; 0 when none was.
+  uint64 revoked_ms = 9;
+}
+
+// client -> hub, answered by the hub with `DeviceListResult`: the caller's own devices. A node may send it too, on a connection made
+// with its certificate (docs/specs/protocol.md, "Devices"; capability `device.list`): it gets every registered device.
+message DeviceList {}
+
+message DeviceListResult {
+  repeated DeviceInfo devices = 1;
+}
+
+// A trusted device vouches for another device of the same person (ADR-0061). Signed by the endorser's key over the canonical bytes in
+// docs/specs/protocol.md ("Devices", domain `agora-device-endorse-v1`; test vectors in `schema/fixtures/signing/device-trust-v1.json`).
+// A node accepts it only when the endorser is a device it trusts and has not expired there, the signature verifies, this node is in
+// `nodes` (or `nodes` is empty), it has not expired, it lasts at most 90 days from `issued_at_ms`, and the device was not revoked at or
+// after `issued_at_ms`.
+message DeviceEndorsement {
+  string device_id = 1;
+  bytes public_key = 2;
+  string name = 3;
+  // The machines (node ids) it is for; empty means every machine of the person.
+  repeated string nodes = 4;
+  // Milliseconds since the Unix epoch, endorser's clock.
+  uint64 issued_at_ms = 5;
+  uint64 expires_at_ms = 6;
+  string endorser_device_id = 7;
+  // ES256, fixed 64 bytes (r || s).
+  bytes signature = 8;
+}
+
+// client -> hub: carry this endorsement to the person's machines. hub -> node: the same message, which the node verifies.
+message DeviceEndorse {
+  DeviceEndorsement endorsement = 1;
+}
+
+// A trusted device withdraws trust from a device (another one, or itself). Signed over the canonical bytes in docs/specs/protocol.md
+// (domain `agora-device-revoke-v1`). A node applies it at once when the signer is a device it trusts; it never widens trust.
+message DeviceRevocation {
+  string device_id = 1;
+  uint64 issued_at_ms = 2;
+  string revoker_device_id = 3;
+  bytes signature = 4;
+}
+
+// client -> hub: carry this revocation to every machine. hub -> node: the same message.
+message DeviceRevoke {
+  DeviceRevocation revocation = 1;
+}
+
+// client -> hub, answered by the hub: this device of the caller's asks to be approved by another device of theirs. The hub marks it
+// (`DeviceInfo.approval_asked_ms`) so the person's other devices show a card for it; nothing else changes.
+message DeviceAskApproval {
+  string device_id = 1;
+}

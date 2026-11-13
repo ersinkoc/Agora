@@ -17,6 +17,8 @@ message Event {
     NodeOnline node_online = 10;
     NodeOffline node_offline = 11;
     NodeResources node_resources = 12;
+    // ADR-0061: the devices this node trusts now.
+    NodeTrustedDevices node_trusted_devices = 13;
     // project
     CheckoutDiscovered checkout_discovered = 20;
     WorktreeCreated worktree_created = 21;
@@ -71,6 +73,12 @@ message NodeResources {
   uint32 agents_running = 2;
   uint32 terminals_open = 3;
   uint64 memory_used_bytes = 4;
+}
+
+// ADR-0061. Said when the node starts and whenever the set changes (the owner trusted or removed a device on the machine, an endorsement
+// or a revocation was applied, an endorsement expired). The node is the event's producer. Ids only, sorted; never keys.
+message NodeTrustedDevices {
+  repeated string device_ids = 1;
 }
 
 message CheckoutDiscovered {

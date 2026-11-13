@@ -229,6 +229,7 @@ fn main() -> ExitCode {
         ["hub", "login"] => hubcli::hub_login(&say, &opts),
         ["hub", "user"] => hubcli::hub_user(&say, &opts),
         ["hub", "audit"] => hubcli::hub_audit(&say, &opts),
+        ["hub", "devices"] => hubcli::hub_devices(&say, &opts),
         ["hub", "ssh"] => hubcli::hub_ssh(&say, &opts),
         ["hub", "prices"] => hubcli::hub_prices(&say, &opts),
         ["hub", "notify"] => hubcli::hub_notify(&say, &opts),

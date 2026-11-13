@@ -101,7 +101,7 @@ where
 /// node had come online, the hub records it offline at the end. When the node broke the protocol, the connection ends with the
 /// error's stable code as the close reason, so the node can say why instead of seeing a bare reset; the hub's log says it too.
 pub async fn serve_node<S>(
-    mut conn: Conn<S>,
+    conn: Conn<S>,
     node_id: &str,
     hub: &Arc<Hub>,
     support: &Support,
@@ -109,7 +109,21 @@ pub async fn serve_node<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let result = converse_node(&mut conn, node_id, hub, support).await;
+    serve_node_from(conn, None, node_id, hub, support).await
+}
+
+/// [`serve_node`] when the connection's first frame was already read (it must be the node's `Hello`).
+async fn serve_node_from<S>(
+    mut conn: Conn<S>,
+    first: Option<Frame>,
+    node_id: &str,
+    hub: &Arc<Hub>,
+    support: &Support,
+) -> Result<(), ServeError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let result = converse_node(&mut conn, first, node_id, hub, support).await;
     if let Err(ServeError::Protocol(e)) = &result {
         // Codes and parameters only: this is the hub's log, not a user's screen.
         eprintln!("node refused: {node_id} {} {:?}", e.code.as_str(), e.params);
@@ -120,6 +134,7 @@ where
 
 async fn converse_node<S>(
     conn: &mut Conn<S>,
+    first: Option<Frame>,
     node_id: &str,
     hub: &Arc<Hub>,
     support: &Support,
@@ -129,13 +144,12 @@ where
 {
     let mut session = NodeSession::new(hub.store(), node_id, support);
 
-    let hello = v1::Hello::decode(
-        expect(conn, STREAM_CONTROL, kinds::HELLO)
-            .await?
-            .payload
-            .as_slice(),
-    )
-    .map_err(|_| invalid("hello"))?;
+    let hello_frame = match first {
+        Some(f) if (f.stream_id, f.kind) == (STREAM_CONTROL, kinds::HELLO) => f,
+        Some(_) => return Err(invalid("frame")),
+        None => expect(conn, STREAM_CONTROL, kinds::HELLO).await?,
+    };
+    let hello = v1::Hello::decode(hello_frame.payload.as_slice()).map_err(|_| invalid("hello"))?;
     let welcome = session.hello(&hello, now_ms())?;
     conn.send(&frame(
         STREAM_CONTROL,
@@ -155,9 +169,14 @@ where
     conn.send(&frame(STREAM_CONTROL, kinds::RESUME_OK, ok.encode_to_vec()))
         .await?;
 
+    let verifies_devices = welcome.capabilities.iter().any(|c| c == "device.trust");
     let (registration, commands) = hub
         .router()
         .register_with_capabilities(node_id, welcome.capabilities);
+    // ADR-0061: a node that verifies endorsements gets every one it may have missed while it was away, and every revocation.
+    if verifies_devices {
+        give_device_changes(hub, node_id);
+    }
     let result = stream_events(conn, &mut session, hub, node_id, commands).await;
     // However it ended, the hub now knows this node is not connected, unless a newer connection of the node replaced this
     // one: that one is live, and the node is not offline.
@@ -363,6 +382,7 @@ pub fn snapshot_of(view: &View, pos: u64) -> v1::Snapshot {
                 terminals_open: n.terminals_open,
                 memory_used_bytes: n.memory_used_bytes,
                 last_event_ms: n.last_event_ms,
+                trusted_device_ids: view.trusted_devices.get(id).cloned().unwrap_or_default(),
             })
             .collect(),
         checkouts: view
@@ -680,8 +700,14 @@ where
     let req = v1::CommandRequest::decode(payload).map_err(|_| invalid("request"))?;
     let client_request_id = req.request_id.clone();
     let refuse = |e: Error| error_response(&client_request_id, &e);
-    // ADR-0049: a viewer's commands stop here, before any node hears of them. (The node still decides what its devices may do.)
     let Caller { who, scope } = caller;
+    // ADR-0061: a person's own devices, answered (or carried) by the hub; a node decides for itself what it trusts.
+    if let Some(resp) = device_command(hub, who, &req) {
+        conn.send(&frame(STREAM_COMMANDS, 1, resp.encode_to_vec()))
+            .await?;
+        return Ok(());
+    }
+    // ADR-0049: a viewer's commands stop here, before any node hears of them. (The node still decides what its devices may do.)
     let may = req.command.as_ref().is_some_and(|c| {
         (who.role != crate::users::Role::Viewer || crate::users::viewer_may(c))
             && scope.is_none_or(|s| s.command_allowed(&req.target_node, c))
@@ -1154,6 +1180,175 @@ fn session_snapshot(s: &crate::projection::SessionView) -> v1::AgentSnapshot {
     }
 }
 
+/// ADR-0061: the device commands a client sends, answered here; `None` for any other command. Registering and listing are open to
+/// every signed-in person for their own devices; a viewer, who cannot act on a machine, cannot endorse or revoke.
+fn device_command(
+    hub: &Hub,
+    who: &crate::users::Access,
+    req: &v1::CommandRequest,
+) -> Option<v1::CommandResponse> {
+    use command_request::Command as C;
+    let devices = crate::devices::Devices::new(hub.store());
+    let now = now_ms();
+    let empty = || command_ok::Result::Empty(v1::Empty {});
+    let viewer = who.role == crate::users::Role::Viewer;
+    let aimed = !req.target_node.is_empty();
+    let (action, result): (&str, Result<command_ok::Result, Error>) = match &req.command {
+        // Nothing is registered, kept or carried for a request that names a node: device commands are the hub's.
+        Some(
+            C::DeviceRegister(_)
+            | C::DeviceList(_)
+            | C::DeviceAskApproval(_)
+            | C::DeviceEndorse(_)
+            | C::DeviceRevoke(_),
+        ) if aimed => (
+            "",
+            Err(Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "target_node")),
+        ),
+        Some(C::DeviceRegister(r)) => ("", devices.register(&who.user, r, now).map(|()| empty())),
+        Some(C::DeviceList(_)) => (
+            "",
+            devices
+                .list_for(&who.user)
+                .map(|devices| command_ok::Result::DeviceList(v1::DeviceListResult { devices })),
+        ),
+        Some(C::DeviceAskApproval(a)) => (
+            "device.ask_approval",
+            devices
+                .ask_approval(&who.user, &a.device_id, now)
+                .map(|()| empty()),
+        ),
+        Some(C::DeviceEndorse(_) | C::DeviceRevoke(_)) if viewer => (
+            "device.endorse",
+            Err(Error::new(ErrorCode::AuthForbidden).with("action", command_name(req).as_str())),
+        ),
+        Some(C::DeviceEndorse(d)) => (
+            "device.endorse",
+            match &d.endorsement {
+                None => {
+                    Err(Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "endorsement"))
+                }
+                Some(e) => devices.record_endorsement(&who.user, e, now).map(|()| {
+                    carry_device_change(hub, C::DeviceEndorse(d.clone()), &e.nodes);
+                    empty()
+                }),
+            },
+        ),
+        Some(C::DeviceRevoke(d)) => (
+            "device.revoke",
+            match &d.revocation {
+                None => {
+                    Err(Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "revocation"))
+                }
+                Some(r) => devices.record_revocation(&who.user, r, now).map(|()| {
+                    carry_device_change(hub, C::DeviceRevoke(d.clone()), &[]);
+                    empty()
+                }),
+            },
+        ),
+        _ => return None,
+    };
+    if !action.is_empty() {
+        let outcome = match &result {
+            Ok(_) => "ok",
+            Err(e) => e.code.as_str(),
+        };
+        audit(hub, who, action, "", outcome);
+    }
+    Some(match result {
+        Ok(ok) => v1::CommandResponse {
+            request_id: req.request_id.clone(),
+            result: Some(command_response::Result::Ok(v1::CommandOk {
+                result: Some(ok),
+            })),
+        },
+        Err(e) => error_response(&req.request_id, &e),
+    })
+}
+
+/// ADR-0061: hands an endorsement or revocation to every connected node that verifies them (for an endorsement that names machines,
+/// only those). A node that is not connected gets it when it connects ([`give_device_changes`]). The answers are not waited for: what
+/// a node did shows in its next `NodeTrustedDevices`, and the node keeps its own record of every one it refused.
+fn carry_device_change(hub: &Hub, command: command_request::Command, nodes: &[String]) {
+    for node in hub.router().nodes_with("device.trust") {
+        if nodes.is_empty() || nodes.contains(&node) {
+            let req = v1::CommandRequest {
+                request_id: String::new(),
+                idempotency_key: String::new(),
+                target_node: String::new(),
+                command: Some(command.clone()),
+            };
+            let _ = hub.router().send(&node, req);
+        }
+    }
+}
+
+/// ADR-0061: everything a node that just connected may have missed: endorsements that have not expired (for it), then revocations.
+/// Applying one twice changes nothing on the node.
+fn give_device_changes(hub: &Hub, node_id: &str) {
+    let Ok((endorsements, revocations)) =
+        crate::devices::Devices::new(hub.store()).for_machines(now_ms())
+    else {
+        return;
+    };
+    let commands = endorsements
+        .into_iter()
+        .filter(|e| e.nodes.is_empty() || e.nodes.iter().any(|n| n == node_id))
+        .map(|e| {
+            command_request::Command::DeviceEndorse(v1::DeviceEndorse {
+                endorsement: Some(e),
+            })
+        })
+        .chain(revocations.into_iter().map(|r| {
+            command_request::Command::DeviceRevoke(v1::DeviceRevoke {
+                revocation: Some(r),
+            })
+        }));
+    for command in commands {
+        let req = v1::CommandRequest {
+            request_id: String::new(),
+            idempotency_key: String::new(),
+            target_node: String::new(),
+            command: Some(command),
+        };
+        let _ = hub.router().send(node_id, req);
+    }
+}
+
+/// ADR-0061: a node's one question on a connection of its own (made with its certificate, before any `Hello`): `DeviceList`, so the
+/// owner at the machine can choose which registered devices it trusts (`agora node trust --from-hub`) while the node's own connection
+/// stays as it is. One answer, then the connection ends; nothing else is accepted this way.
+async fn serve_node_query<S>(mut conn: Conn<S>, hub: &Hub, first: Frame) -> Result<(), ServeError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let req =
+        v1::CommandRequest::decode(first.payload.as_slice()).map_err(|_| invalid("request"))?;
+    let resp = match req.command {
+        Some(command_request::Command::DeviceList(_)) => {
+            match crate::devices::Devices::new(hub.store()).list_all() {
+                Ok(devices) => v1::CommandResponse {
+                    request_id: req.request_id.clone(),
+                    result: Some(command_response::Result::Ok(v1::CommandOk {
+                        result: Some(command_ok::Result::DeviceList(v1::DeviceListResult {
+                            devices,
+                        })),
+                    })),
+                },
+                Err(e) => error_response(&req.request_id, &e),
+            }
+        }
+        _ => error_response(
+            &req.request_id,
+            &Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "command"),
+        ),
+    };
+    conn.send(&frame(STREAM_COMMANDS, 1, resp.encode_to_vec()))
+        .await?;
+    conn.close().await;
+    Ok(())
+}
+
 /// Appends a row to the audit trail. A failure to write is not allowed to take the hub down with it.
 fn audit(
     hub: &Hub,
@@ -1215,6 +1410,10 @@ where
                     cert_pem: issued.cert_pem,
                     ca_pem: ca.cert_pem().to_string(),
                     not_after_ms: now_ms() + crate::ca::DEVICE_CERT_DAYS as u64 * 86_400_000,
+                    // ADR-0061: candidates only; the owner at the machine says which ones it trusts.
+                    devices: crate::devices::Devices::new(hub.store())
+                        .list_all()
+                        .unwrap_or_default(),
                 })),
             })),
         },
@@ -1315,9 +1514,17 @@ async fn handle(
                     Error::new(ErrorCode::AuthDeviceRevoked).with("device_id", id.node_id.as_str()),
                 ));
             }
+            let mut conn = conn;
+            let Some(first) = conn.recv().await? else {
+                return Ok(());
+            };
+            // ADR-0061: a one-shot question on a connection of its own.
+            if (first.stream_id, first.kind) == (STREAM_COMMANDS, 0) {
+                return serve_node_query(conn, &state.hub, first).await;
+            }
             // Revoking a node ends its connection, not only its next one.
             tokio::select! {
-                r = serve_node(conn, &id.node_id, &state.hub, &state.support) => r,
+                r = serve_node_from(conn, Some(first), &id.node_id, &state.hub, &state.support) => r,
                 () = still(|| Enrollment::new(state.hub.store()).is_active(&id.serial_hex).unwrap_or(false)) => {
                     Err(ServeError::Protocol(
                         Error::new(ErrorCode::AuthDeviceRevoked).with("device_id", id.node_id.as_str()),

@@ -1,0 +1,13 @@
+{
+  "deviceId": "x",
+  "name": "x",
+  "publicKey": "AQID",
+  "createdMs": "1",
+  "lastUsedMs": "1",
+  "userId": "x",
+  "approvalAskedMs": "1",
+  "endorsedBy": [
+    "x"
+  ],
+  "revokedMs": "1"
+}

@@ -4,6 +4,13 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+### Devices
+- The hub keeps a list of each person's devices (ADR-0061): a browser or the terminal client registers its key and name when it signs
+  in, and `agora hub devices` lists them with the fingerprint people compare, the person, and when each was registered and last used.
+  The list is only a list of candidates: a machine trusts none of them because the hub lists it. A device can ask another device of
+  the same person to approve it, and the hub carries the signed approval (an endorsement) or removal to the machines, which verify it
+  themselves; machines report which devices they trust, so the window can show it.
+
 ## 0.3.7
 
 ### Agents

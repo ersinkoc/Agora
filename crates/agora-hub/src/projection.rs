@@ -120,6 +120,8 @@ pub struct View {
     pub terminals: BTreeMap<String, TerminalView>,
     /// Approvals still waiting for an answer.
     pub approvals: BTreeMap<String, ApprovalView>,
+    /// ADR-0061: node id → the devices it said it trusts (its last `NodeTrustedDevices`).
+    pub trusted_devices: BTreeMap<String, Vec<String>>,
 }
 
 /// The hub-wide key of an entity a producer named with a local id.
@@ -142,6 +144,10 @@ impl View {
             n.last_event_ms = n.last_event_ms.max(ev.at_ms);
         }
         match body {
+            Body::NodeTrustedDevices(e) => {
+                self.trusted_devices
+                    .insert(producer.to_string(), e.device_ids.clone());
+            }
             Body::WorkspaceStatusChanged(e) => {
                 if let Some(w) = self.workspaces.get_mut(&q(&e.workspace_id)) {
                     w.files_changed = e.files_changed;

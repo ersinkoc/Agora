@@ -305,6 +305,20 @@ impl Router {
         }
     }
 
+    /// The connected nodes that negotiated `capability`, sorted.
+    pub fn nodes_with(&self, capability: &str) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .nodes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|(_, l)| l.capabilities.iter().any(|c| c == capability))
+            .map(|(n, _)| n.clone())
+            .collect();
+        out.sort();
+        out
+    }
+
     pub fn is_connected(&self, node: &str) -> bool {
         self.nodes
             .lock()
@@ -365,6 +379,19 @@ impl Router {
         if let Some(cap) = switch.filter(|cap| !link.capabilities.iter().any(|c| c == cap)) {
             return Err(Error::new(ErrorCode::ProtocolCapabilityMissing).with("capability", cap));
         }
+        // ADR-0061: endorsements and revocations go only to a node that verifies them.
+        if matches!(
+            request.command,
+            Some(
+                command_request::Command::DeviceEndorse(_)
+                    | command_request::Command::DeviceRevoke(_)
+            )
+        ) && !link.capabilities.iter().any(|c| c == "device.trust")
+        {
+            return Err(
+                Error::new(ErrorCode::ProtocolCapabilityMissing).with("capability", "device.trust")
+            );
+        }
         if matches!(
             request.command,
             Some(command_request::Command::BoardJoin(_))
@@ -397,7 +424,13 @@ pub fn forwardable(req: &v1::CommandRequest) -> Result<&str, Error> {
             command_request::Command::Enroll(_)
             | command_request::Command::MeshPost(_)
             | command_request::Command::BoardCall(_)
-            | command_request::Command::BoardJoin(_),
+            | command_request::Command::BoardJoin(_)
+            // ADR-0061: answered or carried by the hub itself, never forwarded as a client's command.
+            | command_request::Command::DeviceRegister(_)
+            | command_request::Command::DeviceList(_)
+            | command_request::Command::DeviceEndorse(_)
+            | command_request::Command::DeviceRevoke(_)
+            | command_request::Command::DeviceAskApproval(_),
         ) => Err(Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "command")),
         Some(_) if req.target_node.is_empty() => {
             Err(Error::new(ErrorCode::NodeUnknown).with("node_id", ""))
