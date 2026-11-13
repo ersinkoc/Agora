@@ -470,7 +470,7 @@ pub fn stderr_tail(raw: &[u8], home: Option<&str>) -> String {
         })
         .collect();
     // An agent that logs at INFO as well (opencode with `--print-logs`) would bury its error under routine lines: when some lines name
-    // a level of ERROR, FATAL or WARN, those are the ones kept; otherwise the last lines are.
+    // a level of ERROR, FATAL or WARN or a failing HTTP status, those are the ones kept; otherwise the last lines are.
     let serious: Vec<&String> = lines.iter().filter(|l| names_a_problem(l)).collect();
     let kept: Vec<&String> = if serious.is_empty() {
         lines.iter().collect()
@@ -578,6 +578,18 @@ pub fn replace_any_home(line: &str) -> String {
 fn names_a_problem(line: &str) -> bool {
     line.split(|c: char| !c.is_ascii_alphanumeric())
         .any(|w| matches!(w, "ERROR" | "FATAL" | "WARN" | "WARNING"))
+        || has_failing_http_status(line)
+}
+
+/// `http.status=503` or `status=404` in a log line: opencode 2.x logs a failure as an INFO line carrying only such a status.
+fn has_failing_http_status(line: &str) -> bool {
+    line.match_indices("status=").any(|(at, key)| {
+        let digits: String = line[at + key.len()..]
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect();
+        digits.len() == 3 && matches!(digits.as_bytes()[0], b'4' | b'5')
+    })
 }
 
 /// Replaces the home folder with `~` in every spelling a tool may print: as given, with `/` instead of `\\`, as the Git Bash form
@@ -1498,6 +1510,12 @@ mod tests {
         // A word that only contains the level is not one.
         assert!(!super::names_a_problem("TERRORIST warned"));
         assert!(super::names_a_problem("2026 WARN: slow"));
+        // opencode 2.x: a failure is only an INFO line with an HTTP status.
+        assert!(super::names_a_problem(
+            "INFO message=\"Sent HTTP response\" http.url=/api/model/default http.status=503"
+        ));
+        assert!(!super::names_a_problem("INFO http.status=200 ok"));
+        assert!(!super::names_a_problem("INFO status=5 x"));
     }
 
     #[test]

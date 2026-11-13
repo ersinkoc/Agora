@@ -5,7 +5,7 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 ## Next
 
 ### Agents
-- When a structured agent fails or says nothing in a turn, the notice carries the lines of its stderr that name an ERROR, FATAL or WARN level when there are any, so an agent that also logs at INFO (opencode) no longer buries the reason under routine lines.
+- When a structured agent fails or says nothing in a turn, the notice carries the lines of its stderr that name an ERROR, FATAL or WARN level or a failing HTTP status (opencode 2.x logs a failure only that way) when there are any, so an agent that also logs at INFO (opencode) no longer buries the reason under routine lines. A structured agent now has 30 s to initialize and 60 s to open a session (it was 10 s each; opencode 2.x needs up to 12 s, which ended the start as a bare `internal` error).
 
 ### Modes and models
 - A confirmation to let an agent act without asking stays with the agent it was opened for: switching to another agent closes it, and "Switch anyway" can no longer reach a different agent (two machines' `agent-1` included).
