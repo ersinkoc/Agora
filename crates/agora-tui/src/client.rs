@@ -651,6 +651,16 @@ impl Session {
     }
 
     pub fn agent_kinds(&mut self, node: &str) -> Result<Vec<(String, String)>, String> {
+        Ok(self
+            .agent_kinds_all(node)?
+            .into_iter()
+            .filter(|(_, _, installed)| *installed)
+            .map(|(kind, name, _)| (kind, name))
+            .collect())
+    }
+
+    /// Every agent a machine offers: `(kind, display name, installed)`, the ones whose program the machine cannot find included.
+    pub fn agent_kinds_all(&mut self, node: &str) -> Result<Vec<(String, String, bool)>, String> {
         let ok = self.command_ok(
             node,
             command_request::Command::AgentKinds(agora_protocol::v1::AgentKinds {}),
@@ -661,14 +671,13 @@ impl Session {
         };
         Ok(k.kinds
             .into_iter()
-            .filter(|k| k.installed)
             .map(|k| {
                 let name = if k.display_name.is_empty() {
                     k.kind.clone()
                 } else {
                     k.display_name
                 };
-                (k.kind, name)
+                (k.kind, name, k.installed)
             })
             .collect())
     }

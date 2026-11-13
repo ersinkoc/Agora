@@ -322,8 +322,7 @@ fn doctor(say: &Say, o: &Opts) -> ExitCode {
             ("data-dir", _) => key!("doctor-data-dir-unwritable"),
             ("node", Status::Ok) => key!("doctor-node"),
             ("node", _) => key!("doctor-node-not-running"),
-            ("manifests", Status::Ok) => key!("doctor-manifests"),
-            ("manifests", _) => key!("doctor-manifests-missing"),
+            ("manifests", _) => key!("doctor-manifests"),
             ("agent-installed", _) => key!("doctor-agent-installed"),
             ("agent-missing", _) => key!("doctor-agent-missing"),
             ("policy-path-dropped", _) => key!("doctor-policy-path-dropped"),
@@ -334,7 +333,9 @@ fn doctor(say: &Say, o: &Opts) -> ExitCode {
             ("manifests", Ok(n)) => Arg::Num(n),
             _ => c.detail.as_str().into(),
         };
-        let text = say.text(sentence, &[("detail", detail)]);
+        let mut args = vec![("detail", detail)];
+        args.extend(c.args.iter().map(|(k, v)| (*k, Arg::from(v.as_str()))));
+        let text = say.text(sentence, &args);
         let status = say.text(
             match c.status {
                 Status::Ok => key!("doctor-status-ok"),

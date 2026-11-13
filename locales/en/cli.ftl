@@ -65,9 +65,14 @@ doctor-manifests = { $detail ->
         [one] 1 agent description loaded.
        *[other] { $detail } agent descriptions loaded.
     }
-doctor-manifests-missing = No agent descriptions folder at { $detail }.
-doctor-agent-installed = { $detail } is installed.
-doctor-agent-missing = { $detail } is not installed on this machine.
+doctor-agent-installed = { $detail } ({ $from ->
+        [built-in] built in
+       *[folder] from the manifests folder
+    }): `{ $program }` is found.
+doctor-agent-missing = { $detail } ({ $from ->
+        [built-in] built in
+       *[folder] from the manifests folder
+    }): this machine cannot find `{ $program }` in its PATH. Install it there, or start the node from a terminal where `{ $program }` runs.
 doctor-policy-path-dropped = The node's policy line "{ $detail }" names a path the node cannot use (relative, "..", or "~" without a home folder); agents start without it. Write a full path or one starting with "~/".
 doctor-policy-path-missing = The node's policy line "{ $detail }" names a path that does not exist yet; agents start without it until it does.
 doctor-manifest-invalid = The agent description { $detail } could not be read.
@@ -79,7 +84,7 @@ cli-hub-notify = Notifications go to { $count } target(s) from { $file }.
 cli-hub-notify-skipped = { $count } line(s) of { $file } were not understood and are ignored. Each line is `ntfy URL` or `webhook URL`.
 cli-hub-web = Web app: https://{ $addr }/ . Sign in with the code { $code } (valid for 10 minutes; `agora hub login` makes another). The hub's certificate is signed by its own CA, so the browser warns until you trust it.
 cli-hub-login = Sign-in code for the web app: { $code } (valid for 10 minutes). Open the hub's address in a browser and enter it.
-cli-trusted = Device { $id } can now answer approvals on this node. Restart the node to apply it.
+cli-trusted = Device { $id } can now answer approvals on this node.
 cli-trust-failed = Could not trust that device: { $reason }
 cli-hub-backup = Backup written to { $path }.
 cli-hub-restored = Database restored from the backup into { $path }. The previous one is kept next to it as before-restore.
