@@ -120,6 +120,7 @@ try {
     notice = (Array.isArray(inbox.value) ? inbox.value : []).find(m => m.kind === 'delivery_failed');
   }
   check(notice?.body === 'node.offline', `its sender is told it was not delivered (${notice ? `${notice.kind}: ${notice.body}` : 'no notice'})`);
+  check(!!notice && notice.reply_to === away.value?.message_id, `the notice names the message that failed (reply_to ${notice?.reply_to} = ${away.value?.message_id})`);
 
   // 3. The hub comes back on the same data and port.
   await wait(Math.max(0, Number(process.env.HUB_DOWN_MS ?? 15000) - (Date.now() - down)));
