@@ -1,37 +1,41 @@
 import { useState } from 'react';
 import { t } from '../i18n';
 import type { SessionModel, SessionOptionModel } from '../model';
-import { choices, contextFill, contextLabel, contextPercent, needsConfirm, ownCost, shortCount, type OptionKind } from './sessionChoice';
+import { choices, confirmed, contextFill, contextLabel, contextPercent, needsConfirm, needsPlaceholder, NOT_REPORTED, ownCost, pendingFor, shortCount, type OptionKind, type PendingChoice } from './sessionChoice';
 
 // ADR-0058: the mode and model a chat agent runs with, how full its context is, and what it says it cost. The pickers appear only
-// for what the agent reported; a mode in which the agent acts without asking is chosen only after the user confirms it.
-export function SessionBar({ session, choose, disabled }: { session: SessionModel; choose?: (kind: OptionKind, id: string) => Promise<boolean>; disabled?: boolean }) {
-  const [pending, setPending] = useState<SessionOptionModel | undefined>();
+// for what the agent reported; a mode in which the agent acts without asking is chosen only after the user confirms it. Every choice
+// names the agent (`agentKey`, hub-wide) it was made for, so a confirmation left open never reaches another agent.
+export function SessionBar({ agentKey, session, choose, disabled }: { agentKey: string; session: SessionModel; choose?: (agentKey: string, kind: OptionKind, id: string) => Promise<boolean>; disabled?: boolean }) {
+  const [held, setPending] = useState<PendingChoice | undefined>();
+  const pending = pendingFor(held, agentKey);
   const [failed, setFailed] = useState(false);
   const [busy, setBusy] = useState(false);
   const pct = contextPercent(session);
   const label = contextLabel(session);
   const said = label ? t(label.key, { percent: label.percent }) : '';
   const cost = ownCost(session);
-  const apply = async (kind: OptionKind, id: string) => {
+  const apply = async (target: string, kind: OptionKind, id: string) => {
     if (!choose) return;
     setBusy(true);
-    const ok = await choose(kind, id);
+    const ok = await choose(target, kind, id);
     setBusy(false);
     setFailed(!ok);
   };
   const pick = (kind: OptionKind, list: readonly SessionOptionModel[], id: string) => {
+    if (id === NOT_REPORTED) return; // the placeholder is not a choice
     const option = list.find((o) => o.id === id);
     setFailed(false);
-    if (needsConfirm(kind, option)) { setPending(option); return; }
+    if (option && needsConfirm(kind, option)) { setPending({ agentKey, option }); return; }
     setPending(undefined);
-    void apply(kind, id);
+    void apply(agentKey, kind, id);
   };
   const picker = (kind: OptionKind, list: readonly SessionOptionModel[], current: string) => list.length > 0 && (
     <label className="flex min-w-0 items-center gap-1.5 text-xs text-muted">
       <span>{t(kind === 'mode' ? 'session-mode' : 'session-model')}</span>
       <select className="min-w-0 max-w-48 truncate rounded-xs border border-line bg-surface-1 px-1.5 py-0.5 text-xs text-ink"
         value={current} disabled={disabled || busy || !choose} onChange={(e) => pick(kind, list, e.target.value)}>
+        {needsPlaceholder(current) && <option value={NOT_REPORTED}>{t('session-not-reported')}</option>}
         {choices(list, current).map((o) => <option key={o.id} value={o.id} title={o.description || undefined}>
           {o.skipsPermissions ? t('session-mode-unasked', { name: o.name || o.id }) : (o.name || o.id)}
         </option>)}
@@ -59,8 +63,8 @@ export function SessionBar({ session, choose, disabled }: { session: SessionMode
       {pending && (
         <div role="alertdialog" aria-label={t('session-confirm-title')} className="flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-s border border-needs-you/60 bg-surface-2 px-3 py-2">
           <div className="min-w-0 flex-1 basis-64 text-xs"><strong className="block">{t('session-confirm-title')}</strong>
-            <span className="text-muted">{t('session-confirm-body', { name: pending.name || pending.id })}</span></div>
-          <button type="button" className="button px-3 py-1 text-xs" onClick={() => { const id = pending.id; setPending(undefined); void apply('mode', id); }}>{t('session-confirm-yes')}</button>
+            <span className="text-muted">{t('session-confirm-body', { name: pending.option.name || pending.option.id })}</span></div>
+          <button type="button" className="button px-3 py-1 text-xs" onClick={() => { const c = confirmed(held, agentKey); setPending(undefined); if (c) void apply(c.agentKey, c.kind, c.id); }}>{t('session-confirm-yes')}</button>
           <button type="button" className="button button--primary px-3 py-1 text-xs" onClick={() => setPending(undefined)}>{t('session-confirm-no')}</button>
         </div>
       )}

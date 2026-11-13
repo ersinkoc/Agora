@@ -24,6 +24,7 @@ import type { WorkspaceFiles } from './net/files';
 import { demoSource } from './terminal/source';
 import { AuditPage, DevicePage, Focus, Gallery, MachinesPage, SignInPage } from './screens';
 import { loadAudit } from './net/audit';
+import { agentTarget } from './components/sessionChoice';
 
 function useHash(): [string, (h: string) => void] {
   const [hash, setHash] = useState(window.location.hash);
@@ -255,11 +256,13 @@ export function App() {
   }, [api]);
 
   // ADR-0058: the user's own switch of a chat agent's mode or model, among what the agent offered.
-  const chooseOption = useCallback(async (a: AgentTileModel, kind: 'mode' | 'model', id: string): Promise<boolean> => {
-    if (!api || !a.workspaceRef) return false;
-    const agentId = a.id.slice(a.id.indexOf('/') + 1);
+  // ADR-0058: the user's own switch of a chat agent's mode or model, among what the agent offered. Addressed by the hub-wide key the
+  // choice was made for (never by whichever agent is on screen when the request goes out).
+  const chooseOption = useCallback(async (agentKey: string, kind: 'mode' | 'model', id: string): Promise<boolean> => {
+    const to = agentTarget(agentKey);
+    if (!api || !to) return false;
     try {
-      await api.command(a.workspaceRef.node, kind === 'mode' ? { agentSetMode: { agentId, mode: id } } : { agentSetModel: { agentId, model: id } });
+      await api.command(to.node, kind === 'mode' ? { agentSetMode: { agentId: to.agentId, mode: id } } : { agentSetModel: { agentId: to.agentId, model: id } });
       return true;
     } catch { return false; }
   }, [api]);
