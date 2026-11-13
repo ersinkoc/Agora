@@ -93,3 +93,6 @@ tui-forget-failed = Kaldırılamadı: { $reason }
 tui-forget-disconnected = Bağlantı kesildi. Yeniden bağlanmasını bekleyin.
 tui-forget-timeout = Zamanında yanıt alınamadı. Tekrar deneyin.
 tui-forget-action = ajanı kaldırma
+
+# ADR-0059: launch options (manifest `[[launch.option]]` labels)
+option-skip-permissions = Sormadan

@@ -373,6 +373,8 @@ impl EventSink {
                 .as_ref()
                 .map(|p| p.as_str().to_string())
                 .unwrap_or_default(),
+            launch_options: Vec::new(),
+            skips_permissions: false,
         }));
         self.record(Body::AgentStateChanged(v1::AgentStateChanged {
             agent_id: agent.into(),
@@ -446,6 +448,8 @@ impl EventSink {
             kind: kind.to_string(),
             level: v1::IntegrationLevel::L1Manifest as i32,
             parent_agent_id: parent.to_string(),
+            launch_options: Vec::new(),
+            skips_permissions: false,
         }));
     }
 

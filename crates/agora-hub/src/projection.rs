@@ -453,6 +453,8 @@ mod tests {
             kind: "claude-code".into(),
             level: 2,
             parent_agent_id: String::new(),
+            launch_options: Vec::new(),
+            skips_permissions: false,
         })
     }
 

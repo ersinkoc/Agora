@@ -388,3 +388,33 @@ All additions; nothing published changed.
   in US dollars as its `micro_usd`, and estimates from the price table only for agents that reported none.
 - **Start failures.** `agent.start` of an adapter agent whose adapter failed with a stable reason answers with that code instead of
   `internal`: `adapter.agent_exited` `{stage, exit_code, stderr_tail}` or `adapter.agent_refused` `{stage}` (`error-codes.md`).
+
+### Launch options (ADR-0059)
+
+All additions; nothing published changed. Node capability `agent.launch_options`.
+
+- **What may be chosen.** `AgentKind.launch_options` (5) lists a kind's `[[launch.option]]`s as `LaunchOption { id, label,
+  skips_permissions }` (the manifest's order; the arguments stay on the node). A window offers them only for a node with the
+  capability; "Ask before acting" (no option) is always the default and a `skips_permissions` option is never preselected and needs the
+  user's confirmation (the ADR-0058 dialog, Keep asking as the primary button).
+- **The choice.** `AgentStart.launch_options` (7) and `AgentLaunch.launch_options` (7) name the chosen ids (at most 8, no repeats, each
+  declared by the kind; otherwise `protocol.invalid_message` `{field: launch_options}`). The node adds their arguments to the
+  launch command (terminal kinds) or the ACP server command (structured kinds) for the agent's whole life, restarts and resumes
+  included. Through the hub, `AgentLaunch` with options is authorized over a second domain that also signs the ids, comma-joined in the
+  order sent:
+
+  ```
+  directory-action-v2\0node\0launch\0path\0kind\0project_id\0option\0identity_change\0launch_options\0nonce\0expires_at_ms
+  ```
+
+  An `AgentLaunch` without options keeps `directory-action-v1` exactly as published, so a hub can neither add an option to a signed
+  start nor remove one. A routed `AgentStart` with options carries no signature and is refused (`agent.option_forbidden` `{kind,
+  option, policy: signature}`); a grant (ADR-0041) never covers one. On the node's own control socket (the owner) no signature is
+  needed. An agent's `agent_start` helper (ADR-0057) never gets an option.
+- **Node policy.** `skip_permissions = forbid | allow | confined_only` in the node's own policy file (default `allow`; any other value
+  counts as `forbid`; the hub cannot change it). A start with a `skips_permissions` option that the policy does not allow is refused
+  before anything starts with `agent.option_forbidden` `{kind, option, policy}` (`policy` is `forbid`, or `confined_only` when the
+  agent's confinement, ADR-0047/0050, would not be active).
+- **What everyone sees.** `AgentStarted.launch_options` (30) and `skips_permissions` (31), carried by the hub in `AgentSnapshot`
+  fields 30 and 31 (30-39 are kept for ADR-0059): a "does not ask" badge on the agent in every client for its whole life. The hub's
+  audit row for such a start names the options (action `AgentLaunch[skip-permissions]`).

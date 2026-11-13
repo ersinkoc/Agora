@@ -116,6 +116,9 @@ message AgentStart {
   string worktree_id = 4;
   IntegrationLevel level = 5;
   string prompt = 6;
+  // ADR-0059: ids of the kind's `[[launch.option]]`s to start with (capability `agent.launch_options`). Accepted only on the
+  // node's own control socket; routed through the hub such a start is refused (it carries no signature), use `AgentLaunch`.
+  repeated string launch_options = 7;
 }
 
 message AgentStop {
@@ -484,6 +487,17 @@ message AgentKind {
   IntegrationLevel level = 3;
   // Whether the launch program is found on this node.
   bool installed = 4;
+  // ADR-0059: the options a start may choose (the manifest's `[[launch.option]]`s, in its order). Old nodes send none.
+  repeated LaunchOption launch_options = 5;
+}
+
+// ADR-0059: one `[[launch.option]]` of a kind. The arguments it adds stay on the node.
+message LaunchOption {
+  string id = 1;
+  // A Fluent message id; a client without it shows `id`.
+  string label = 2;
+  // The agent acts without asking (a permission-skipping flag): never preselected, confirmed, signed, audited, badged.
+  bool skips_permissions = 3;
 }
 
 message AgentKindsResult {
@@ -563,6 +577,9 @@ message AgentLaunch {
   bool separate_worktree = 4;
   DirectoryAuthorization authorization = 5;
   bool accept_identity_change = 6;
+  // ADR-0059: ids of the kind's `[[launch.option]]`s to start with (capability `agent.launch_options`). When not empty the
+  // authorization signs them too (`directory-action-v2`, docs/specs/protocol.md), so a hub can neither add nor remove one.
+  repeated string launch_options = 7;
 }
 message AgentLaunchResult {
   string agent_id = 1;

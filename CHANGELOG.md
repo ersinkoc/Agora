@@ -11,6 +11,9 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 ### Trust
 - The command that makes a machine trust your device says what to do when `agora` is not found on that machine (a downloaded release is not on PATH): run it in the folder of the agora program (`./agora`, or `.\agora.exe` on Windows). `agora node trust` no longer tells you to restart the node: the node picks the change up by itself.
 
+### Launch options (ADR-0059)
+- Agent manifests can declare launch options (`[[launch.option]]`, manifest engine 2), such as a flag that lets the agent act without asking. The shipped manifests declare the flag of the version it was checked on: Claude Code `--dangerously-skip-permissions` (2.1.323), Codex `--dangerously-bypass-approvals-and-sandbox` (0.167.1), WrongStack `--yolo` (1.6.0) and Antigravity's `agy acp --dangerously-skip-permissions` (1.5.6). The protocol carries the choice (`launch_options` on `AgentStart`, `AgentLaunch`, `AgentKind`, `AgentStarted` and the agent snapshot) and the error `agent.option_forbidden`; nothing uses them yet.
+
 ## 0.3.7
 
 ### Agents
