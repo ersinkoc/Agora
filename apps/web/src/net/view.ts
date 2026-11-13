@@ -309,7 +309,16 @@ export interface ApprovalModel {
 
 // An agent's request to start another (ADR-0057), read from the approval's detail. Every field is the asking agent's text: shown, never
 // interpreted. The detail itself is what the decision is signed over, so it is kept as it came.
-export interface StartRequest { kind: string; folder: string; prompt: string; inside: boolean; worktree: boolean; depth: number; grantAllowed: boolean }
+export interface StartRequest { agent: string; agentKind: string; node: string; kind: string; folder: string; prompt: string; inside: boolean; worktree: boolean; depth: number; grantAllowed: boolean }
+
+// Characters that are invisible or change how text around them looks (crates/agora-core/src/text.rs `is_hidden`): every format
+// character, the tag block, variation selectors and fillers. The node refuses them in a start request; anything that reaches a card
+// is shown as a visible escape, with control characters other than line breaks and tabs, so what is shown is what is signed.
+const HIDDEN = /[\u00ad\u0600-\u0605\u061c\u06dd\u070f\u0890\u0891\u08e2\u115f\u1160\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u206f\u3164\ufe00-\ufe0f\ufeff\uffa0\ufff9-\ufffb\u{110bd}\u{110cd}\u{13430}-\u{1343f}\u{1bca0}-\u{1bca3}\u{1d173}-\u{1d17a}\u{e0000}-\u{e007f}\u{e0100}-\u{e01ef}]|[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/gu;
+
+export function visible(text: string): string {
+  return text.replace(HIDDEN, (c) => `\\u{${(c.codePointAt(0) ?? 0).toString(16)}}`);
+}
 
 export function startRequest(action: string, detail: string): StartRequest | undefined {
   if (action !== 'agent.start') return undefined;
@@ -317,7 +326,7 @@ export function startRequest(action: string, detail: string): StartRequest | und
     const d = JSON.parse(detail) as Record<string, unknown>;
     const s = (k: string) => (typeof d[k] === 'string' ? (d[k] as string) : '');
     // `grant_allowed` (a scoped grant may be given: not for a shell or plain terminal program); a node that does not say so offers none.
-    return { kind: s('kind'), folder: s('folder'), prompt: s('prompt'), inside: d.inside === true, worktree: d.worktree === true, depth: typeof d.depth === 'number' ? d.depth : 1, grantAllowed: d.grant_allowed === true };
+    return { agent: s('agent'), agentKind: s('agent_kind'), node: s('node'), kind: s('kind'), folder: s('folder'), prompt: s('prompt'), inside: d.inside === true, worktree: d.worktree === true, depth: typeof d.depth === 'number' ? d.depth : 1, grantAllowed: d.grant_allowed === true };
   } catch {
     return undefined;
   }

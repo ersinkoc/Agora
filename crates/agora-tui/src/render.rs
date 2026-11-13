@@ -125,14 +125,20 @@ pub fn render(
                 } else {
                     key!("tui-asks-start-outside")
                 },
+                // Everything from the signed request itself, never from what the hub says around it, and every hidden or control
+                // character as a visible escape: what is shown is what the answer is signed over.
                 &[
-                    ("agent", Arg::Str(local(&a.agent_id).to_string())),
-                    ("kind", Arg::Str(plain(&start.kind))),
-                    ("folder", Arg::Str(plain(&start.folder))),
+                    ("agent", Arg::Str(visible(&start.agent))),
+                    ("agent_kind", Arg::Str(visible(&start.agent_kind))),
+                    ("node", Arg::Str(visible(&start.node))),
+                    ("kind", Arg::Str(visible(&start.kind))),
+                    ("folder", Arg::Str(visible(&start.folder))),
+                    ("worktree", Arg::Str(start.worktree.to_string())),
+                    ("depth", Arg::Num(start.depth)),
                 ],
             );
             out.push(format!("  {on}!{off} {line}"));
-            for l in plain(&start.prompt).lines() {
+            for l in visible(&start.prompt).lines() {
                 out.push(format!("      {dim}{l}{reset}"));
             }
             continue;
@@ -264,10 +270,15 @@ pub fn render(
 
 /// What an `agent.start` request asks for (ADR-0057), from its detail; `None` for any other request or a detail that does not parse.
 struct StartRequest {
+    agent: String,
+    agent_kind: String,
+    node: String,
     kind: String,
     folder: String,
     prompt: String,
     inside: bool,
+    worktree: bool,
+    depth: i64,
 }
 
 fn start_request(action: &str, detail: &str) -> Option<StartRequest> {
@@ -281,14 +292,24 @@ fn start_request(action: &str, detail: &str) -> Option<StartRequest> {
             .unwrap_or("")
             .to_string()
     };
+    let flag = |k: &str| {
+        v.get(k)
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+    };
     Some(StartRequest {
+        agent: s("agent"),
+        agent_kind: s("agent_kind"),
+        node: s("node"),
         kind: s("kind"),
         folder: s("folder"),
         prompt: s("prompt"),
-        inside: v
-            .get("inside")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false),
+        inside: flag("inside"),
+        worktree: flag("worktree"),
+        depth: v
+            .get("depth")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(1),
     })
 }
 
@@ -325,6 +346,11 @@ fn helper_order<'a>(agents: &[&'a AgentSnapshot]) -> Vec<(&'a AgentSnapshot, usi
     out
 }
 
+/// `agora_core::text::visible`, with each line break kept (a prompt's lines are shown as lines).
+fn visible(text: &str) -> String {
+    agora_core::text::visible(text)
+}
+
 /// Text an agent or a person wrote is shown as plain text: control characters (escape sequences that could move the cursor, change the
 /// title or paste into the prompt) and bidirectional overrides are dropped, a tab becomes spaces.
 pub fn plain(text: &str) -> String {
@@ -335,6 +361,14 @@ pub fn plain(text: &str) -> String {
             c if c.is_control() => None,
             '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' => None,
             c => Some(c),
+        })
+        // Other invisible characters (zero-width, tags, fillers) are shown as escapes rather than passed through unseen.
+        .map(|c| {
+            if agora_core::text::is_hidden(c) {
+                format!("\\u{{{:x}}}", u32::from(c))
+            } else {
+                c.to_string()
+            }
         })
         .collect()
 }
@@ -582,16 +616,18 @@ mod tests {
         );
         snap.approvals[0].action = "agent.start".into();
         snap.approvals[0].detail =
-            r#"{"kind":"claude-code","folder":"/w","inside":true,"prompt":"line one\nline \u001b[2Jtwo"}"#
+            r#"{"agent":"agent-1","agent_kind":"codex","node":"laptop","kind":"claude-code","folder":"/w","inside":true,"worktree":true,"depth":1,"prompt":"line one\nline \u001b[2Jtwo\u200b"}"#
                 .into();
         let lines = render(&snap, false, false, "", "", 0, &t);
         let text = lines.join("\n");
         assert!(
-            text.contains("tui-asks-start[agent=agent-1,kind=claude-code,folder=/w]"),
+            text.contains("tui-asks-start[agent=agent-1,agent_kind=codex,node=laptop,kind=claude-code,folder=/w,worktree=true,depth=1]"),
             "{text}"
         );
         assert!(
-            text.contains("line one") && text.contains("line [2Jtwo") && !text.contains('\u{1b}'),
+            text.contains("line one")
+                && text.contains("line \\u{1b}[2Jtwo\\u{200b}")
+                && !text.contains('\u{1b}'),
             "{text}"
         );
         let parent = lines

@@ -8,8 +8,14 @@ tui-header = Agora · { $online } of { $total } machines online · { $agents } a
 tui-attention = Needs you
 tui-nothing-waiting = Nothing is waiting for you.
 tui-asks = { $agent } asks: { $action }
-tui-asks-start = { $agent } asks to start { $kind } in { $folder }. Its first prompt:
-tui-asks-start-outside = { $agent } asks to start { $kind } in { $folder }, outside its own folder. Its first prompt:
+tui-asks-start = { $agent } ({ $agent_kind }) on { $node } asks to start { $kind } in { $folder }{ $worktree ->
+        [true] , in its own worktree
+       *[other] {""}
+    } (depth { $depth }). Its first prompt:
+tui-asks-start-outside = { $agent } ({ $agent_kind }) on { $node } asks to start { $kind } in { $folder }, outside its own folder{ $worktree ->
+        [true] , in its own worktree
+       *[other] {""}
+    } (depth { $depth }). Its first prompt:
 tui-started-by = started by { $agent }
 tui-blocked = { $agent } is waiting for you
 tui-machines = Machines

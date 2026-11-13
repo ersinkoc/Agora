@@ -8,8 +8,14 @@ tui-header = Agora · { $total } makineden { $online } tanesi çevrimiçi · { $
 tui-attention = Sizi bekliyor
 tui-nothing-waiting = Sizi bekleyen bir şey yok.
 tui-asks = { $agent } soruyor: { $action }
-tui-asks-start = { $agent }, { $folder } klasöründe { $kind } başlatmak istiyor. İlk istemi:
-tui-asks-start-outside = { $agent }, kendi klasörünün dışında, { $folder } klasöründe { $kind } başlatmak istiyor. İlk istemi:
+tui-asks-start = { $node } üzerindeki { $agent } ({ $agent_kind }), { $folder } klasöründe{ $worktree ->
+        [true] , kendi çalışma ağacında
+       *[other] {""}
+    } { $kind } başlatmak istiyor (derinlik { $depth }). İlk istemi:
+tui-asks-start-outside = { $node } üzerindeki { $agent } ({ $agent_kind }), kendi klasörünün dışında, { $folder } klasöründe{ $worktree ->
+        [true] , kendi çalışma ağacında
+       *[other] {""}
+    } { $kind } başlatmak istiyor (derinlik { $depth }). İlk istemi:
 tui-started-by = { $agent } tarafından başlatıldı
 tui-blocked = { $agent } sizi bekliyor
 tui-machines = Makineler

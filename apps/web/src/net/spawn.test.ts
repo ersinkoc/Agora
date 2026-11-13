@@ -2,7 +2,7 @@
 import { describe, expect, it } from 'vitest';
 import { helperTree } from '../model';
 import { signStart, startSignedMessage, thisDevice, toHex, type KeyStore } from './approval';
-import { applyEvent, approvalList, emptyView, fromSnapshot, startRequest, tiles } from './view';
+import { applyEvent, approvalList, emptyView, fromSnapshot, startRequest, tiles, visible } from './view';
 
 function memoryStore(): KeyStore {
   let saved: Awaited<ReturnType<KeyStore['load']>>;
@@ -24,6 +24,11 @@ describe('agents that start agents', () => {
     expect(tiles(s).find((x) => x.id === 'n/b')?.parentId).toBe('n/a');
   });
 
+  it('shows hidden and control characters as visible escapes, the same set the node refuses', () => {
+    expect(visible('a\u200bb\u202ec\u{e0041}d\ufe0fe\u3164f\u00adg\u001bh\nk\tl')).toBe('a\\u{200b}b\\u{202e}c\\u{e0041}d\\u{fe0f}e\\u{3164}f\\u{ad}g\\u{1b}h\nk\tl');
+    expect(visible('Grüße 🚀 çalış')).toBe('Grüße 🚀 çalış');
+  });
+
   it('puts helpers right under their parent', () => {
     const list = [{ id: 'c', parentId: 'b' }, { id: 'x' }, { id: 'b', parentId: 'a' }, { id: 'a' }, { id: 'orphan', parentId: 'gone' }];
     expect(helperTree(list).map((e) => `${e.agent.id}:${e.depth}`)).toEqual(['x:0', 'a:0', 'b:1', 'c:2', 'orphan:0']);
@@ -31,7 +36,7 @@ describe('agents that start agents', () => {
 
   it('reads a start request and leaves other approvals alone', () => {
     const detail = JSON.stringify({ kind: 'codex', folder: '/w', prompt: 'fix it', inside: true, worktree: false, depth: 1, grant_allowed: true });
-    expect(startRequest('agent.start', detail)).toEqual({ kind: 'codex', folder: '/w', prompt: 'fix it', inside: true, worktree: false, depth: 1, grantAllowed: true });
+    expect(startRequest('agent.start', detail)).toEqual({ agent: '', agentKind: '', node: '', kind: 'codex', folder: '/w', prompt: 'fix it', inside: true, worktree: false, depth: 1, grantAllowed: true });
     // A shell (or an older node) offers no grant.
     expect(startRequest('agent.start', JSON.stringify({ kind: 'shell', inside: true }))?.grantAllowed).toBe(false);
     expect(startRequest('shell', detail)).toBeUndefined();
