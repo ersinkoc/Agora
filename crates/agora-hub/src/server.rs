@@ -493,7 +493,10 @@ where
 /// Commands still on their way when the client left (a reload, a closed tab) or was refused: nobody will read their answers, but
 /// the audit trail (ADR-0049) says how each one really ended, the node's answer, `node.offline` or `node.timeout`, instead of
 /// staying `sent` for good (L17).
-async fn finish_unanswered(hub: &Hub, inflight: Vec<Inflight>) {
+async fn finish_unanswered(hub: &Hub, mut inflight: Vec<Inflight>) {
+    // answer_ready's swap_remove can put a newer request before an older one. Waiting on the later deadline first would let
+    // an older request's late reply queue up and beat its expired timeout when we finally poll it. Visit the earliest deadline first.
+    inflight.sort_unstable_by_key(|item| item.deadline);
     for item in inflight {
         let Some(id) = item.audit else { continue };
         let outcome = match tokio::time::timeout_at(item.deadline, item.reply).await {
@@ -1336,5 +1339,51 @@ pub async fn run(
         // ACK holds one back for up to 40 ms.
         let _ = tcp.set_nodelay(true);
         tokio::spawn(handle_connection(Arc::clone(&state), tcp, tls.clone()));
+    }
+}
+
+#[cfg(test)]
+mod audit_cleanup_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn an_older_command_must_time_out_while_cleanup_waits_for_a_newer_one(
+    ) -> Result<(), crate::store::StoreError> {
+        let hub = Hub::open(crate::store::SqliteStore::open_in_memory()?)?;
+        let audit = crate::audit::Audit::new(hub.store());
+        let older_id = audit.record(0, "owner", "AgentList", "n", "sent")?;
+        let newer_id = audit.record(1, "owner", "AgentList", "n", "sent")?;
+        let now = tokio::time::Instant::now();
+        let older_deadline = now + Duration::from_millis(10);
+        let (older_send, older_reply) = tokio::sync::oneshot::channel();
+        let (newer_send, newer_reply) = tokio::sync::oneshot::channel();
+        let pending = |audit, reply, deadline| Inflight {
+            client_request_id: String::new(),
+            node: "n".into(),
+            relay: None,
+            audit: Some(audit),
+            reply,
+            deadline,
+        };
+        // answer_ready uses swap_remove: a completed first request moves the newest one in front of an older pending request.
+        let inflight = vec![
+            pending(newer_id, newer_reply, now + Duration::from_secs(1)),
+            pending(older_id, older_reply, older_deadline),
+        ];
+        let send_late = async {
+            tokio::time::sleep_until(older_deadline + Duration::from_millis(50)).await;
+            assert!(tokio::time::Instant::now() > older_deadline);
+            let ok = || v1::CommandResponse {
+                request_id: String::new(),
+                result: Some(command_response::Result::Ok(v1::CommandOk::default())),
+            };
+            let _ = older_send.send(ok());
+            let _ = newer_send.send(ok());
+        };
+        // Poll cleanup first even if a busy test runner wakes after both timers: the timely timeout must precede the late reply.
+        tokio::join!(biased; finish_unanswered(&hub, inflight), send_late);
+        assert_eq!(audit.outcome(newer_id).as_deref(), Some("ok"));
+        assert_eq!(audit.outcome(older_id).as_deref(), Some("node.timeout"));
+        Ok(())
     }
 }
