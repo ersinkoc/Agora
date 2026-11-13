@@ -211,6 +211,14 @@ mod tests {
 
     #[test]
     fn the_start_message_is_the_one_the_node_rebuilds() {
+        // The vector the node and the web client test too: non-ASCII, a raw line break and an emoji, hashed byte for byte.
+        let detail = "{\"prompt\":\"Grüße\nçalış 🚀\"}";
+        let m = start_message("node-1", "ap-1", true, 3, false, detail);
+        assert!(m.ends_with(b"2705e6e894314e40e3938d6e7780386d393351c5d33a5826ed13948b56d8c076"));
+        assert_eq!(
+            m,
+            agora_node::approvals::start_signed_message("node-1", "ap-1", true, 3, false, detail)
+        );
         for (approved, grant, nested) in [(true, 0, false), (true, 3, true), (false, 0, false)] {
             assert_eq!(
                 start_message("laptop", "7", approved, grant, nested, "{\"prompt\":\"x\"}"),

@@ -58,6 +58,7 @@ start-approval-prompt = Its first prompt
 start-approval-no-prompt = No prompt: it starts and waits.
 start-approval-scope = What to allow
 start-approval-once = Only this one
+start-approval-no-grant = Only this one can be allowed: this kind runs any program it is given, so it is never started without asking.
 start-approval-more = Up to { $count } { $kind } agents in this folder while { $name } runs, without asking again
 start-approval-nested = Its helpers may ask to start helpers too (you answer each)
 helper-started-by = started by { $name }

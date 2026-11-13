@@ -30,8 +30,10 @@ describe('agents that start agents', () => {
   });
 
   it('reads a start request and leaves other approvals alone', () => {
-    const detail = JSON.stringify({ kind: 'codex', folder: '/w', prompt: 'fix it', inside: true, worktree: false, depth: 1 });
-    expect(startRequest('agent.start', detail)).toEqual({ kind: 'codex', folder: '/w', prompt: 'fix it', inside: true, worktree: false, depth: 1 });
+    const detail = JSON.stringify({ kind: 'codex', folder: '/w', prompt: 'fix it', inside: true, worktree: false, depth: 1, grant_allowed: true });
+    expect(startRequest('agent.start', detail)).toEqual({ kind: 'codex', folder: '/w', prompt: 'fix it', inside: true, worktree: false, depth: 1, grantAllowed: true });
+    // A shell (or an older node) offers no grant.
+    expect(startRequest('agent.start', JSON.stringify({ kind: 'shell', inside: true }))?.grantAllowed).toBe(false);
     expect(startRequest('shell', detail)).toBeUndefined();
     expect(startRequest('agent.start', 'not json')).toBeUndefined();
     const v = emptyView();
@@ -39,6 +41,13 @@ describe('agents that start agents', () => {
     const [a] = approvalList(v);
     expect(a?.start?.prompt).toBe('fix it');
     expect(a?.detail).toBe(detail); // kept byte for byte: the decision is signed over it
+  });
+
+  it('hashes the announced detail byte for byte (the vector the node and the TUI test too)', async () => {
+    // crates/agora-node/src/approvals.rs START_VECTOR_DETAIL / START_VECTOR_HASH: non-ASCII, a raw line break and an emoji.
+    const detail = '{"prompt":"Grüße\nçalış 🚀"}';
+    const m = await startSignedMessage('node-1', 'ap-1', true, 3, false, detail);
+    expect(new TextDecoder().decode(m)).toBe(['agora-approval-start-v1', 'node-1', 'ap-1', '1', '3', '0', '2705e6e894314e40e3938d6e7780386d393351c5d33a5826ed13948b56d8c076'].join('\u0000'));
   });
 
   it('signs the bytes the node rebuilds, bound to the request and the grant', async () => {

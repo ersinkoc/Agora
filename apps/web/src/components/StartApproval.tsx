@@ -20,7 +20,8 @@ export function StartApproval({ approval, start, busy, onResolve }: {
   const [nested, setNested] = useState(false);
   // The same request can show in two places at once (its pane and the details panel): each has its own radio group.
   const group = useId();
-  const choice = (): StartChoice => (start.inside ? { grant: more ? GRANT_SIZE : 0, nested: nested && start.depth < 2 } : { grant: 0, nested: false });
+  // The node gives a grant only when the request says it may (inside the asker's folder, not a shell); the choice is not offered otherwise.
+  const choice = (): StartChoice => (start.grantAllowed ? { grant: more ? GRANT_SIZE : 0, nested: nested && start.depth < 2 } : { grant: 0, nested: false });
   return (
     <article role="alert" aria-label={t('start-approval-title', { name: approval.agentName, kind: start.kind })}
       className="flex flex-col gap-2 border-b border-needs-you/60 bg-surface-2 px-3 py-2">
@@ -39,7 +40,8 @@ export function StartApproval({ approval, start, busy, onResolve }: {
           ? <pre className="m-0 mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-xs border border-line bg-surface-0 p-2 font-mono text-xs">{start.prompt}</pre>
           : <p className="m-0 mt-1 text-muted">{t('start-approval-no-prompt')}</p>}
       </div>
-      {start.inside && <fieldset className="m-0 flex flex-col gap-1 border-0 p-0 text-xs">
+      {start.inside && !start.grantAllowed && <p className="m-0 text-xs text-muted">{t('start-approval-no-grant')}</p>}
+      {start.grantAllowed && <fieldset className="m-0 flex flex-col gap-1 border-0 p-0 text-xs">
         <legend className="sr-only">{t('start-approval-scope')}</legend>
         <label className="flex items-center gap-2"><input type="radio" name={group} checked={!more} onChange={() => setMore(false)} />{t('start-approval-once')}</label>
         <label className="flex items-center gap-2"><input type="radio" name={group} checked={more} onChange={() => setMore(true)} />{t('start-approval-more', { count: GRANT_SIZE, kind: start.kind, name: approval.agentName })}</label>

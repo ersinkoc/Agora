@@ -58,6 +58,7 @@ start-approval-prompt = İlk istemi
 start-approval-no-prompt = İstem yok: başlar ve bekler.
 start-approval-scope = Neye izin verilsin
 start-approval-once = Yalnızca bu
+start-approval-no-grant = Yalnızca bu başlatmaya izin verilebilir: bu tür kendisine verilen her programı çalıştırır, bu yüzden hiçbir zaman sormadan başlatılmaz.
 start-approval-more = { $name } çalıştığı sürece bu klasörde, yeniden sormadan en fazla { $count } { $kind } ajanı
 start-approval-nested = Yardımcıları da yardımcı başlatmak isteyebilir (her birini siz yanıtlarsınız)
 helper-started-by = { $name } tarafından başlatıldı
