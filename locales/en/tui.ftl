@@ -92,3 +92,10 @@ tui-forget-failed = Could not remove it: { $reason }
 tui-forget-disconnected = The connection was lost. Wait for it to reconnect.
 tui-forget-timeout = No answer arrived in time. Try again.
 tui-forget-action = removing the agent
+
+# ADR-0059: launch options (manifest `[[launch.option]]` labels)
+option-skip-permissions = Don't ask
+option-ask = Ask before acting
+tui-start-acts = How should it act? Press its number; Enter or any other key asks before acting.
+tui-start-confirm-skip = Let the agent act without asking? With "{ $name }" it runs commands and changes files without asking you first, for as long as it runs. Press y to start without asking; any other key keeps asking.
+tui-badge-no-ask = does not ask
