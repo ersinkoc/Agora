@@ -419,6 +419,16 @@ pub fn notice_text(e: &ChatEntry, t: Text<'_>) -> String {
 }
 
 /// ADR-0058: the line above a chat agent's conversation: its mode, model and how full its context is, when it reported them.
+/// Records in `a` a switch the agent accepted (ADR-0058), so the line [`session_line`] makes shows it at once instead of what it ran
+/// with when the conversation was opened.
+pub fn switched(a: &mut AgentSnapshot, model: bool, id: &str) {
+    if model {
+        a.current_model = id.to_string();
+    } else {
+        a.current_mode = id.to_string();
+    }
+}
+
 pub fn session_line(a: &AgentSnapshot, t: Text<'_>) -> Option<String> {
     let name = |list: &[agora_protocol::v1::SessionOption], id: &str| {
         list.iter()
@@ -716,6 +726,29 @@ mod tests {
         assert!(lines.join("\n").contains("tui-hint-open[]"));
         let other = render(&snap, false, true, "nobody/agent-9", "", 0, &t).join("\n");
         assert!(!other.contains("tui-hint-open"), "{other}");
+    }
+
+    #[test]
+    fn a_switch_shows_on_the_session_line_at_once() {
+        let opt = |id: &str, name: &str| agora_protocol::v1::SessionOption {
+            id: id.into(),
+            name: name.into(),
+            ..Default::default()
+        };
+        let mut a = AgentSnapshot {
+            modes: vec![opt("build", "Build"), opt("plan", "Plan")],
+            models: vec![opt("m1", "One"), opt("m2", "Two")],
+            current_mode: "build".into(),
+            current_model: "m1".into(),
+            ..Default::default()
+        };
+        switched(&mut a, false, "plan");
+        switched(&mut a, true, "m2");
+        let line = session_line(&a, &t).unwrap();
+        assert!(
+            line.contains("mode=Plan") && line.contains("model=Two"),
+            "{line}"
+        );
     }
 
     #[test]
