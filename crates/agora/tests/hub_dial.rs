@@ -120,6 +120,7 @@ impl Hubside {
             commands: None,
             grants: None,
             mesh: None,
+            devices: None,
         }
     }
 

@@ -54,7 +54,8 @@ export async function thisDevice(store: KeyStore, subtle: SubtleCrypto = crypto.
   let saved = await store.load();
   if (!saved) {
     const keys = await subtle.generateKey(ALGORITHM, false, ['sign', 'verify']);
-    const suffix = toHex(crypto.getRandomValues(new Uint8Array(3)));
+    // 64 random bits (ids made before ADR-0061's review have 24 and stay valid: they are read back as stored).
+    const suffix = toHex(crypto.getRandomValues(new Uint8Array(8)));
     saved = { id: `web-${suffix}`, keys };
     await store.save(saved);
   }

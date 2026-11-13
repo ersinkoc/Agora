@@ -26,9 +26,12 @@ cli-usage =
       agora hub ssh [add AD HEDEF [--port N]] [--hub-dir DIR]
       agora hub backup [DOSYA] [--keep N] [--hub-dir DİZİN]
       agora hub restore DOSYA [--hub-dir DİZİN]
-      agora node enroll --hub URL --ca FILE --code CODE --id NAME
+      agora hub devices [forget CİHAZ_ID] [--hub-dir DİZİN]
+      agora node enroll --hub URL --ca FILE --code CODE --id NAME [--yes --fingerprint PARMAK_İZİ]... [--include-others] [--replace]
       agora panel
       agora node trust CİHAZ_ID AÇIK_ANAHTAR_HEX [--data DİZİN]
+      agora node trust --from-hub [--yes --fingerprint PARMAK_İZİ]... [--include-others] [--replace] [--data DİZİN]
+      agora node untrust CİHAZ_ID [--data DİZİN]
       agora tui [--hub ADRES:PORT --ca DOSYA --code KOD] [--hub-dir DİZİN]
       agora update [--check] [--version X] [--release-url URL] [--release-key DOSYA] [--unsigned]
       agora adapter install AD [--registry URL] [--root-key DOSYA] [--yes] | update [AD] | list | remove AD
@@ -102,6 +105,36 @@ cli-password-on = Ekran parolası ayarlı: başka makinelerden girişler bu paro
 cli-password-off = Ekran parolası ayarlı değil: giriş kodu tek başına yeterli.
 cli-trusted = { $id } cihazı artık bu makinedeki onaylara yanıt verebilir.
 cli-trust-failed = Bu cihaz güvenilir olarak kaydedilemedi: { $reason }
+cli-devices-offer = Hub, bu makinenin henüz güvenmediği { $count ->
+        [one] bir cihaz
+       *[other] { $count } cihaz
+    } listeliyor. Her parmak izini, pencerede "Bu cihaz" altında gösterilenle karşılaştırın:
+cli-devices-line =   { $name } ({ $id }) · kayıt { $when }
+cli-devices-line-user =   { $name } ({ $id }) · { $user } kişisinin · kayıt { $when }
+cli-devices-fingerprint =     parmak izi { $fingerprint }
+cli-devices-replaces =     Bu makine { $id } cihazına başka bir anahtarla zaten güveniyor: buna güvenmek onu değiştirir (yalnızca --replace ile).
+cli-devices-unproven = Hub { $id } cihazını kendi imzası olmadan (anahtarın elde tutulduğunun kanıtı) listeliyor; önerilmiyor.
+cli-devices-others = Bu hub'daki başka kişilerin cihazları ({ $count }); yalnızca --include-others ve parmak izleriyle güvenilir:
+cli-devices-others-need-flag = Hiçbir cihaza güvenilmedi: bu cihazlar hub sahibinin değil. Birine güvenmek için --yes --include-others --fingerprint PARMAK_İZİ verin.
+cli-devices-replace-refused = Güvenilmedi: { $id } cihazına burada başka bir anahtarla zaten güveniliyor. Değiştirmek için --replace verin.
+cli-devices-question = Bu cihazlara bu makinede güvenilsin mi? [e/H]
+cli-devices-yes = e, evet, y, yes
+cli-devices-trusted = { $name } ({ $id }, { $fingerprint }) bu makinede güvenilir oldu.
+cli-devices-none = Hub'da henüz kayıtlı cihaz yok. Pencereden oturum açın, sonra burada "agora node trust --from-hub" çalıştırın.
+cli-devices-none-new = Hub'da kayıtlı her cihaza bu makinede zaten güveniliyor.
+cli-devices-declined = Hiçbir cihaza güvenilmedi.
+cli-devices-not-asked = Hiçbir cihaza güvenilmedi: bu etkileşimli bir terminal değil. Bu makinede "agora node trust --from-hub" çalıştırın ya da her cihaz için --yes ile --fingerprint verin.
+cli-devices-unmatched = Hub'ın listelediği hiçbir cihazın parmak izi { $fingerprint } değil; güvenilmedi.
+cli-devices-not-enrolled = Bu makine bir hub'a kayıtlı değil. Önce "agora node enroll" çalıştırın.
+cli-devices-failed = Cihazlar hub'dan alınamadı ({ $reason }).
+cli-untrusted = { $id } cihazına artık bu makinede güvenilmiyor.
+cli-untrust-unknown = { $id } cihazına bu makinede zaten güvenilmiyordu. Hub onun daha önceki bir onayını getirse de reddedilir.
+cli-hub-device-forgotten = { $id } cihazı artık listelenmiyor. Makineler onu reddetmeye devam eder.
+cli-hub-device-not-forgotten = { $id } bu hub'da kaldırılmış bir cihaz değil; yalnızca kaldırılmış cihazlar unutulabilir.
+cli-hub-devices-none = Henüz kayıtlı cihaz yok. Bir tarayıcı ya da terminal istemcisi oturum açtığında kendini kaydeder.
+cli-hub-device-line = { $name } · { $fingerprint } · { $id } · { $user } · kayıt { $created } · son kullanım { $used }{ $state }
+cli-device-state-revoked = {" "}· kaldırıldı
+cli-device-state-waiting = {" "}· onay bekliyor
 cli-hub-backup = Yedek { $path } dosyasına yazıldı.
 cli-hub-restored = Veritabanı yedekten { $path } konumuna geri yüklendi. Önceki veritabanı aynı klasörde before-restore adıyla saklanıyor.
 cli-hub-failed = Hub komutu başarısız oldu: { $reason }

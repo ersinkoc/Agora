@@ -1,5 +1,6 @@
 import { StartApproval, type StartChoice } from './components/StartApproval';
 import { HelperGrants } from './components/HelperGrants';
+import { DeviceRequest } from './components/DeviceRequest';
 import { ApprovalBanner } from './components/ApprovalBanner';
 import { AgentAddress } from './components/AgentAddress';
 import { LanguagePicker } from './components/LanguagePicker';
@@ -96,6 +97,8 @@ function Themed({ theme, onStart }: { theme: 'dark' | 'light'; onStart?: () => v
       <AgentAddress agent={{ ...demoHelper, machineId: 'laptop', id: 'laptop/a8' }} />
       <StartApproval approval={demoStartApproval} start={demoStartApproval.start} onResolve={() => {}} />
       <HelperGrants list={async () => [{ id: 'ap-1', kind: 'codex', folder: '/home/dev/code/login-fix', remaining: 2 }]} revoke={async () => {}} refresh={0} />
+      <DeviceRequest inline request={{ id: 'web-3fa9c1d24e5b6a70', name: 'Firefox · Linux', fingerprint: 'f947-3cb5-e304-81be-ecf2-64cd' }}
+        machines={[{ id: 'laptop', name: 'laptop' }, { id: 'vps-1', name: 'vps-1' }]} onApprove={async () => true} onLater={() => {}} />
       <div className="gallery__row">
         <button type="button" className="button button--primary" onClick={onStart}>{t('action-start-agent')}</button>
         <button type="button" className="button">{t('action-open')}</button>
@@ -187,19 +190,86 @@ function PageFrame({ title, onBack, children, wide }: { title: string; onBack: (
   );
 }
 
-// How an owner makes a machine trust this browser: the key is public, the command is for a terminal. The screen password and the
-// idle lock live here too (ADR-0067).
-// `passkeyNeedsPassword`: this browser is on another machine and a screen password is set, so adding a passkey needs it (ADR-0067).
-export function DevicePage({ device, onBack, onAddPasskey, passkeyNeedsPassword = false, security }: { device: Device | undefined; onBack: () => void; onAddPasskey?: (password?: string) => Promise<boolean>; passkeyNeedsPassword?: boolean; security?: ReactNode }) {
+// ADR-0061: one of the person's devices as "This device" lists it.
+export interface MyDevice { id: string; name: string; fingerprint: string; lastUsedMs: number; trustedOn: string[]; waiting: boolean; removed: boolean }
+
+// How an owner makes a machine trust this browser (ADR-0061): which machines trust it, asking another device of theirs to approve it,
+// or the command to run on the machine. Fingerprints are what people compare, so every device is shown with its own. The screen
+// password and the idle lock live here too (ADR-0067). `passkeyNeedsPassword`: this browser is on another machine and a screen
+// password is set, so adding a passkey needs it (ADR-0067).
+export function DevicePage({ device, onBack, onAddPasskey, passkeyNeedsPassword = false, security, fingerprint, machines, trustedOn, others, asked, onAsk, onRemove }: {
+  device: Device | undefined;
+  onBack: () => void;
+  onAddPasskey?: (password?: string) => Promise<boolean>;
+  passkeyNeedsPassword?: boolean;
+  security?: ReactNode;
+  fingerprint?: string;
+  // Every machine, and the ids of the ones that trust this browser.
+  machines?: readonly MachineModel[];
+  trustedOn?: readonly string[];
+  // The person's other devices.
+  others?: readonly MyDevice[];
+  asked?: boolean;
+  onAsk?: () => Promise<boolean>;
+  onRemove?: (id: string) => Promise<boolean>;
+}) {
   const [passkey, setPasskey] = useState<'added' | 'failed' | undefined>();
   const [password, setPassword] = useState('');
+  const [ask, setAsk] = useState<'asked' | 'failed' | undefined>();
+  const [removing, setRemoving] = useState<{ id: string; failed?: boolean } | undefined>();
+  const name = (id: string) => machines?.find((m) => m.id === id)?.name ?? id;
+  const missing = (machines ?? []).filter((m) => !trustedOn?.includes(m.id));
+  const canVouch = (trustedOn?.length ?? 0) > 0;
   return (
     <PageFrame title={t('device-title')} onBack={onBack}>
       <p>{t('device-intro')}</p>
       {device && (
         <section className="stack">
           <p><span className="muted">{t('device-name')}</span> <span className="mono">{device.id}</span></p>
-          <p className="mono codebox">agora node trust {device.id} {device.publicKeyHex}</p>
+          {fingerprint && <p><span className="muted">{t('device-fingerprint')}</span> <span className="mono text-base tracking-wide">{fingerprint}</span></p>}
+          {machines && machines.length > 0 && (
+            <ul className="machines">
+              {machines.map((m) => (
+                <li key={m.id} className="machine">
+                  <strong>{m.name}</strong>
+                  <span className={trustedOn?.includes(m.id) ? 'muted' : 'text-needs-you'}>{t(trustedOn?.includes(m.id) ? 'device-trusted-here' : 'device-not-trusted-here')}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+          {onAsk && missing.length > 0 && (
+            <div className="stack">
+              <h2 className="m-0">{t('device-add-title')}</h2>
+              <p className="muted m-0">{t('device-add-intro', { fingerprint: fingerprint ?? '' })}</p>
+              <p className="m-0"><button type="button" className="button button--primary" onClick={() => { void onAsk().then((ok) => setAsk(ok ? 'asked' : 'failed')); }}>{t('device-ask')}</button></p>
+              {(ask === 'asked' || (asked && ask === undefined)) && <p role="status" className="m-0">{t('device-asked', { fingerprint: fingerprint ?? '' })}</p>}
+              {ask === 'failed' && <p role="alert" className="m-0">{t('device-ask-failed')}</p>}
+            </div>
+          )}
+          {(missing.length > 0 || !machines?.length) && <>
+            <p className="m-0 muted">{t('device-command-intro')}</p>
+            <p className="mono codebox">agora node trust {device.id} {device.publicKeyHex}</p>
+          </>}
+        </section>
+      )}
+      {others && others.length > 0 && (
+        <section className="stack">
+          <h2 className="m-0">{t('device-others')}</h2>
+          <ul className="machines">
+            {others.map((d) => (
+              <li key={d.id} className="machine">
+                <strong>{d.name || d.id}</strong>
+                <span className="mono">{d.fingerprint}</span>
+                <span className="muted">{d.removed ? t('device-removed') : d.waiting ? t('device-waiting') : d.trustedOn.length ? t('device-trusted-on', { machines: d.trustedOn.map(name).join(', ') }) : t('device-trusted-nowhere')}</span>
+                {d.lastUsedMs > 0 && <span className="muted">{t('device-last-used', { when: new Date(d.lastUsedMs).toLocaleString() })}</span>}
+                {onRemove && canVouch && !d.removed && (
+                  <button type="button" className="button px-2 py-1 text-xs" disabled={removing?.id === d.id && !removing.failed}
+                    onClick={() => { setRemoving({ id: d.id }); void onRemove(d.id).then((ok) => setRemoving(ok ? undefined : { id: d.id, failed: true })); }}>{t('device-remove')}</button>
+                )}
+                {removing?.id === d.id && removing.failed && <span role="alert">{t('device-remove-failed')}</span>}
+              </li>
+            ))}
+          </ul>
         </section>
       )}
       {onAddPasskey && (

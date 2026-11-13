@@ -680,6 +680,13 @@ impl EventSink {
         }));
     }
 
+    /// ADR-0061: the devices this node trusts now (ids only, sorted).
+    pub fn node_trusted_devices(&self, device_ids: Vec<String>) {
+        self.record(Body::NodeTrustedDevices(v1::NodeTrustedDevices {
+            device_ids,
+        }));
+    }
+
     /// Recorded on a clean shutdown. A crash records nothing; the hub notices the dropped connection instead.
     pub fn node_offline(&self, node: &str) {
         self.record(Body::NodeOffline(v1::NodeOffline {
@@ -1157,6 +1164,9 @@ pub struct Node {
     pub grants: Arc<crate::grants::Grants>,
     /// Agents that start agents (ADR-0057).
     pub spawner: Arc<crate::spawn::Spawner>,
+    /// The devices this machine trusts and the endorsements and revocations the hub carries (ADR-0061).
+    pub devices: Arc<crate::device_trust::DeviceTrust>,
+    devices_watch: Option<JoinHandle<()>>,
     node_id: String,
     /// Manifests that could not be loaded, as `(path, reason)` for the log.
     pub manifest_problems: Vec<(PathBuf, String)>,
@@ -1277,6 +1287,11 @@ impl Node {
             Box::new(verifier),
         ));
         approvals.follow_trust_file(&cfg.data_dir.join(crate::approvals::TRUSTED_DEVICES_FILE));
+        let devices = Arc::new(crate::device_trust::DeviceTrust::new(
+            &cfg.node_id,
+            &cfg.data_dir.join(crate::approvals::TRUSTED_DEVICES_FILE),
+        ));
+        approvals.set_device_trust(Arc::clone(&devices));
         let policy_now = read_policy(&cfg.data_dir.join(POLICY_FILE));
         // Limited devices only mean something if the commands they could sign are the ones that need a signature.
         let signed =
@@ -1285,7 +1300,10 @@ impl Node {
             } else {
                 policy_now.signed_commands
             };
+        devices.set_policy_limits(policy_now.device_projects.clone());
         let limits = Arc::new(crate::limits::DeviceLimits::new(policy_now.device_projects));
+        // ADR-0061: a device endorsed by a limited device is limited the same way (kept in the trusted-devices file).
+        limits.follow_trust_file(&cfg.data_dir.join(crate::approvals::TRUSTED_DEVICES_FILE));
         approvals.set_limits(Arc::clone(&limits));
         let grants = Arc::new(
             crate::grants::Grants::new(&cfg.node_id, Arc::clone(&approvals), signed)
@@ -1602,6 +1620,30 @@ impl Node {
                 .name("agora-git".into())
                 .spawn(move || watch_git(&sup, &ev, &mesh, &stop, &git_wake))?
         };
+        // ADR-0061: what this machine trusts, said at start and whenever it changes (the owner's CLI, an endorsement, a revocation, an
+        // expiry), so a window can tell whether this machine trusts its device. The file is small and read every 2 s off every hot path.
+        let devices_watch = {
+            let (ev, stop, devices) =
+                (Arc::clone(&events), Arc::clone(&stop), Arc::clone(&devices));
+            std::thread::Builder::new()
+                .name("agora-devices".into())
+                .spawn(move || {
+                    let mut said: Option<Vec<String>> = None;
+                    while !stop.load(Ordering::Acquire) {
+                        let now = devices.trusted_ids(crate::grants::now_ms());
+                        if said.as_ref() != Some(&now) {
+                            ev.node_trusted_devices(now.clone());
+                            said = Some(now);
+                        }
+                        for _ in 0..20 {
+                            if stop.load(Ordering::Acquire) {
+                                return;
+                            }
+                            std::thread::sleep(Duration::from_millis(100));
+                        }
+                    }
+                })?
+        };
         let events_set_aside = events.set_aside().cloned();
         Ok(Self {
             server: Some(server),
@@ -1614,6 +1656,8 @@ impl Node {
             approvals,
             grants,
             spawner,
+            devices,
+            devices_watch: Some(devices_watch),
             node_id: cfg.node_id.clone(),
             manifest_problems,
             policy_problems: read_policy(&cfg.data_dir.join(POLICY_FILE)).problems,
@@ -1743,6 +1787,9 @@ impl Drop for Node {
             let _ = t.join();
         }
         if let Some(t) = self.git_watch.take() {
+            let _ = t.join();
+        }
+        if let Some(t) = self.devices_watch.take() {
             let _ = t.join();
         }
         if self.crashed {
