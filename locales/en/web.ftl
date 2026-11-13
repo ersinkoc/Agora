@@ -369,6 +369,22 @@ closed-reason-forbidden = you are not allowed to remove it
 closed-reason-running = it is running again
 closed-reason-gone = the hub no longer knows it
 closed-reason-other = the hub could not be reached or refused
+interrupted-section = Stopped with the machine
+interrupted-hint = These were running when the machine stopped.
+interrupted-note = It was running when its machine stopped. Resume continues its conversation in the same folder.
+interrupted-note-new = It was running when its machine stopped. Its conversation cannot be continued; Start again opens a new one in the same folder.
+interrupted-note-running = Its process from before the machine's restart is still running. Stop it first; then it can be resumed. Or leave it running.
+action-stop-old = Stop it
+action-resume = Resume
+action-start-again = Start again
+resume-failed = It did not start. Try again.
+resume-failed-folder = Its folder is gone or now belongs to another project, so it was not started.
+resume-failed-parent = The agent that started it is not running. Resume that one first.
+resume-failed-session = Its conversation cannot be continued. Use Start again.
+resume-failed-gone = That machine no longer offers it.
+resume-failed-unsupported = That machine cannot resume agents yet. Update it.
+resume-failed-still-running = Its process from before the restart is still running. Stop it first.
+resume-failed-offline = That machine is offline.
 
 # ADR-0059: launch options (manifest `[[launch.option]]` labels)
 option-skip-permissions = Don't ask

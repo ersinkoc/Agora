@@ -230,6 +230,11 @@ pub(crate) fn spawn(config: &PtyConfig) -> io::Result<Box<dyn Pty>> {
     if let Some(cwd) = &config.cwd {
         cmd.current_dir(cwd);
     }
+    for (name, _) in std::env::vars_os() {
+        if crate::env_removed(&name, &config.env_remove) {
+            cmd.env_remove(name);
+        }
+    }
     if !config.env.iter().any(|(k, _)| k == "TERM") {
         cmd.env("TERM", "xterm-256color");
     }
@@ -758,6 +763,24 @@ mod tests {
     }
 
     #[test]
+    fn inherited_variables_named_in_env_remove_are_left_out_and_set_ones_kept() {
+        // A name no other test uses: set for this process, so every child inherits it unless it is removed.
+        std::env::set_var("AGORA_TEST_DROP_ME_1", "inherited");
+        std::env::set_var("AGORA_TEST_KEEP_ME", "kept");
+        let mut cfg = PtyConfig::new(vec![
+            "sh".into(),
+            "-c".into(),
+            "echo \"[${AGORA_TEST_DROP_ME_1:-gone}|$AGORA_TEST_KEEP_ME|$AGORA_TEST_DROP_SET]\"; sleep 0.2".into(),
+        ]);
+        cfg.env_remove = vec!["AGORA_TEST_DROP_*".into()];
+        cfg.env.push(("AGORA_TEST_DROP_SET".into(), "set".into()));
+        let mut p = spawn(&cfg).expect("spawn");
+        let seen = read_until(&*p, "]");
+        assert!(seen.contains("[gone|kept|set]"), "{seen:?}");
+        let _ = p.wait();
+    }
+
+    #[test]
     fn spawning_a_missing_program_is_an_error() {
         let err = spawn(&PtyConfig::new(vec!["/definitely/not/a/program".into()]));
         assert!(err.is_err());
@@ -790,5 +813,50 @@ mod tests {
         );
         assert_eq!(std::fs::read_dir(&dir).expect("io").count(), 1);
         let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod identity_tests {
+    use crate::{kill_process_if_same, process_identity, process_still_running};
+
+    #[test]
+    fn a_process_is_known_by_its_start_and_a_reused_pid_is_never_killed() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let id = process_identity(child.id()).unwrap();
+        assert!(process_still_running(&id));
+        // The same pid with another start time is another process: left alone.
+        // Another start time, another boot, another program, or no program named: another process, left alone.
+        let others = [
+            crate::ProcessIdentity {
+                started: id.started + 1,
+                ..id.clone()
+            },
+            crate::ProcessIdentity {
+                boot: format!("{}x", id.boot),
+                ..id.clone()
+            },
+            crate::ProcessIdentity {
+                name: "victim".into(),
+                ..id.clone()
+            },
+            crate::ProcessIdentity {
+                name: String::new(),
+                ..id.clone()
+            },
+        ];
+        for other in &others {
+            assert!(!process_still_running(other), "{other:?}");
+            assert!(!kill_process_if_same(other).unwrap(), "{other:?}");
+        }
+        assert!(child.try_wait().unwrap().is_none());
+        // Its own group is the test's: only the process itself is ended.
+        assert!(kill_process_if_same(&id).unwrap());
+        assert!(!child.wait().unwrap().success());
+        assert!(!process_still_running(&id));
     }
 }

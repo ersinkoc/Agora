@@ -70,6 +70,15 @@ message AgentSnapshot {
   string currency = 21;
   // ADR-0057: `AgentStarted.parent_agent_id`.
   string parent_agent_id = 13;
+  // ADR-0060 (30-39 are ADR-0059's): from `AgentInterrupted`, cleared by the next `AgentStarted` of this agent. An interrupted agent
+  // is not running; it is listed with the closed agents and offers Resume (`resumable`) or Start again.
+  bool interrupted = 40;
+  bool resumable = 41;
+  uint64 interrupted_at_ms = 42;
+  // The folder from `AgentInterrupted`, for an agent the hub has no workspace for.
+  string folder = 43;
+  // `AgentInterrupted.still_running`.
+  bool still_running = 44;
   // ADR-0059: `AgentStarted.launch_options` and `skips_permissions` (fields 30-39 are kept for ADR-0059).
   repeated string launch_options = 30;
   bool skips_permissions = 31;

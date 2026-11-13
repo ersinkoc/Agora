@@ -369,6 +369,22 @@ closed-reason-forbidden = bunu kaldırma yetkiniz yok
 closed-reason-running = yeniden çalışıyor
 closed-reason-gone = hub artık bunu tanımıyor
 closed-reason-other = hub'a ulaşılamadı ya da reddetti
+interrupted-section = Makineyle birlikte durdu
+interrupted-hint = Bunlar makine durduğunda çalışıyordu.
+interrupted-note = Makinesi durduğunda çalışıyordu. Devam Et, konuşmasını aynı klasörde sürdürür.
+interrupted-note-new = Makinesi durduğunda çalışıyordu. Konuşması sürdürülemiyor; Yeniden Başlat aynı klasörde yeni bir konuşma açar.
+interrupted-note-running = Makinenin yeniden başlamasından önceki işlemi hâlâ çalışıyor. Önce durdurun; sonra devam ettirilebilir. Ya da çalışmaya bırakın.
+action-stop-old = Durdur
+action-resume = Devam Et
+action-start-again = Yeniden Başlat
+resume-failed = Başlamadı. Yeniden deneyin.
+resume-failed-folder = Klasörü yok ya da artık başka bir projeye ait, bu yüzden başlatılmadı.
+resume-failed-parent = Onu başlatan ajan çalışmıyor. Önce onu devam ettirin.
+resume-failed-session = Konuşması sürdürülemiyor. Yeniden Başlat'ı kullanın.
+resume-failed-gone = O makine artık bunu sunmuyor.
+resume-failed-unsupported = O makine henüz ajanları devam ettiremiyor. Güncelleyin.
+resume-failed-still-running = Yeniden başlamadan önceki işlemi hâlâ çalışıyor. Önce durdurun.
+resume-failed-offline = O makine çevrimdışı.
 
 # ADR-0059: launch options (manifest `[[launch.option]]` labels)
 option-skip-permissions = Sormadan

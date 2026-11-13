@@ -585,6 +585,31 @@ pub struct PtyConfig {
     /// The agent's own identity under confinement, from [`new_agent_identity`]: the confined process runs with it, and its mesh endpoint
     /// ([`local_listen_agent`]) admits exactly it. `None` makes a fresh one (or means nothing where agents are not confined this way).
     pub identity: Option<String>,
+    /// Inherited environment variables the process must not get: exact names, or a prefix ending in `*` (`CLAUDE_CODE_*`). Variables
+    /// in `env` are set whatever this says.
+    pub env_remove: Vec<String>,
+}
+
+/// Whether an inherited variable `name` is one [`PtyConfig::env_remove`] leaves out (on Windows names compare without case).
+pub fn env_removed(name: &std::ffi::OsStr, patterns: &[String]) -> bool {
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    let eq = |a: &str, b: &str| {
+        if cfg!(windows) {
+            a.eq_ignore_ascii_case(b)
+        } else {
+            a == b
+        }
+    };
+    patterns.iter().any(|p| match p.strip_suffix('*') {
+        Some(prefix) => {
+            name.len() >= prefix.len()
+                && name.is_char_boundary(prefix.len())
+                && eq(&name[..prefix.len()], prefix)
+        }
+        None => eq(name, p),
+    })
 }
 
 /// File-system confinement for a process and everything it starts: it may read (and run programs from) `read` and `write`, and
@@ -783,6 +808,7 @@ impl PtyConfig {
             limits: ProcessLimits::default(),
             sandbox: None,
             identity: None,
+            env_remove: Vec::new(),
         }
     }
 }
@@ -891,6 +917,73 @@ pub fn process_name(pid: u32) -> io::Result<String> {
     #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
         let _ = pid;
+        Err(unsupported())
+    }
+}
+
+/// What tells a running process apart from a later one that got the same pid (ADR-0060): its process group, its start time in a
+/// unit of the system's own (compared, never shown), the boot it started in (Linux `boot_id`; empty where the start time already
+/// tells boots apart) and its program's name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessIdentity {
+    pub pid: u32,
+    pub group: u32,
+    pub started: u64,
+    pub boot: String,
+    pub name: String,
+}
+
+/// The [`ProcessIdentity`] of a running process. `Unsupported` on Windows, where a node's agents are in a job object that ends them
+/// with the node, so none can outlive it to be found again.
+pub fn process_identity(pid: u32) -> io::Result<ProcessIdentity> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        procinfo::identity(pid)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = pid;
+        Err(unsupported())
+    }
+}
+
+/// Whether the process `id` names still runs: the same pid with the same start time, in the same boot, running the same program (a
+/// reused pid is not it, and neither is a record that names nothing: an empty name never matches).
+pub fn process_still_running(id: &ProcessIdentity) -> bool {
+    id.pid > 1
+        && !id.name.is_empty()
+        && process_identity(id.pid).is_ok_and(|now| {
+            now.started == id.started && now.boot == id.boot && now.name == id.name
+        })
+}
+
+/// Ends the process `id` names (ADR-0060), and with it its process group when it leads one (an agent's terminal does), only if it
+/// still runs with the same start time: a pid that was given to another process is never touched. `Ok(false)` when it was not
+/// running. Never this process's own group.
+pub fn kill_process_if_same(id: &ProcessIdentity) -> io::Result<bool> {
+    if !process_still_running(id) {
+        return Ok(false);
+    }
+    #[cfg(unix)]
+    {
+        let pid =
+            i32::try_from(id.pid).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+        // SAFETY: getpgrp has no preconditions.
+        let own = unsafe { libc::getpgrp() };
+        let group = i32::try_from(id.group).unwrap_or(0);
+        // SAFETY: plain signals to a process group, or a process, checked to be the recorded one just above.
+        let r = if group == pid && group > 1 && group != own {
+            unsafe { libc::killpg(group, libc::SIGKILL) }
+        } else {
+            unsafe { libc::kill(pid, libc::SIGKILL) }
+        };
+        if r != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(true)
+    }
+    #[cfg(not(unix))]
+    {
         Err(unsupported())
     }
 }

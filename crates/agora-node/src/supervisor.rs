@@ -120,6 +120,22 @@ pub struct StartRequest {
     pub base: Option<String>,
 }
 
+/// ADR-0060: an interrupted agent as the node's session ledger holds it, for [`Supervisor::restore`].
+#[derive(Debug, Clone)]
+pub struct Restore {
+    pub id: AgentId,
+    pub kind: String,
+    pub project: agora_core::ProjectId,
+    pub folder: PathBuf,
+    /// A selected folder (ADR-0052) rather than a worktree the node made for it.
+    pub directory: bool,
+    pub branch: String,
+    /// The agent's own session to continue; `None` starts a new one.
+    pub session: Option<String>,
+    /// Where its injected configuration goes when it may not be written into the folder (a directory agent in the user's own folder).
+    pub private_config: Option<PathBuf>,
+}
+
 /// Something that happened to an agent. Plain data, ready to become protocol events.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SupervisorEvent {
@@ -471,6 +487,11 @@ impl Supervisor {
         }
     }
 
+    /// ADR-0060: agent ids start at `next` (the session ledger's), so an id is never given twice across the node's restarts.
+    pub fn reserve_ids(&mut self, next: u64) {
+        self.next_id = self.next_id.max(next);
+    }
+
     /// ADR-0059: the owner's `skip_permissions` policy (from the node's policy file; the default allows).
     pub fn set_skip_permissions(&mut self, policy: SkipPermissions) {
         self.skip_permissions = policy;
@@ -603,7 +624,7 @@ impl Supervisor {
     }
 
     /// With confinement on, a launch in a folder that would make the confinement meaningless is refused before anything starts.
-    fn refuse_protected(
+    pub(crate) fn refuse_protected(
         &self,
         selected: &Path,
         worktree_root: &Path,
@@ -771,7 +792,7 @@ impl Supervisor {
                 return Err(e);
             }
         };
-        let agent = Agent::new(
+        let mut agent = Agent::new(
             id.clone(),
             checkout.project,
             self.cfg.node.clone(),
@@ -779,8 +800,11 @@ impl Supervisor {
             req.kind.clone(),
             IntegrationLevel::L1Manifest,
         );
-        let terminal = match self.launch(&req.kind, &argv, &worktree, &extras) {
-            Ok(t) => t,
+        let terminal = match self.first_launch(&req.kind, &argv, &worktree, &extras) {
+            Ok((t, session)) => {
+                agent.session = session;
+                t
+            }
             Err(e) => {
                 self.abandon(&id, created);
                 return Err(e);
@@ -992,7 +1016,8 @@ impl Supervisor {
                     return Err(e);
                 }
             };
-            let terminal = match self.launch(&req.kind, &argv, &worktree, &extras) {
+            let (terminal, session) = match self.first_launch(&req.kind, &argv, &worktree, &extras)
+            {
                 Ok(t) => t,
                 Err(e) => {
                     if let Some(hook) = &self.abort_hook {
@@ -1001,7 +1026,7 @@ impl Supervisor {
                     return Err(e);
                 }
             };
-            let agent = Agent::new(
+            let mut agent = Agent::new(
                 id.clone(),
                 project,
                 self.cfg.node.clone(),
@@ -1009,6 +1034,7 @@ impl Supervisor {
                 req.kind.clone(),
                 IntegrationLevel::L1Manifest,
             );
+            agent.session = session;
             self.agents.insert(
                 id.clone(),
                 Entry {
@@ -1381,6 +1407,70 @@ impl Supervisor {
             .map_err(|e| SupervisorError::Spawn(e.to_string()))
     }
 
+    /// ADR-0060: an agent's first launch. A kind whose manifest has `[session] id_args` gets a session id the node chooses (a random
+    /// v4 UUID), returned so the caller reports it before anything else of the agent; restarts and resumes use `[resume]` with it.
+    fn first_launch(
+        &self,
+        kind: &str,
+        argv: &[String],
+        worktree: &Path,
+        extras: &Extras,
+    ) -> Result<(TerminalHandle, Option<String>), SupervisorError> {
+        let id_args = self
+            .kinds
+            .get(kind)
+            .and_then(|k| k.manifest.session.as_ref())
+            .map(|s| s.id_args.clone())
+            .unwrap_or_default();
+        if id_args.is_empty() {
+            return Ok((self.launch(kind, argv, worktree, extras)?, None));
+        }
+        let session = new_session_id().map_err(|e| SupervisorError::Spawn(e.to_string()))?;
+        let mut argv = argv.to_vec();
+        argv.extend(id_args.iter().map(|a| a.replace("{session_id}", &session)));
+        Ok((self.launch(kind, &argv, worktree, extras)?, Some(session)))
+    }
+
+    /// A terminal agent's own session id, as chosen at its launch or reported (ADR-0060). `None` for an adapter agent: what it holds
+    /// right after its start is the adapter's session, not the agent's own, which its adapter reports itself (`session/reported`).
+    pub fn session_of(&self, id: &AgentId) -> Option<String> {
+        self.agents.get(id).and_then(|e| e.agent.session.clone())
+    }
+
+    /// Every session id the node's agents have (ADR-0060): a session file naming one of these is never another agent's.
+    pub fn known_sessions(&self) -> std::collections::HashSet<String> {
+        self.agents
+            .values()
+            .map(|e| &e.agent)
+            .chain(self.adapters.values().map(|e| &e.agent))
+            .filter_map(|a| a.session.clone())
+            .collect()
+    }
+
+    /// Terminal agents that run without a known session id and whose kind says which file names it (`[session.file]`, ADR-0060).
+    pub fn session_file_targets(&self) -> Vec<crate::session_files::Target> {
+        self.agents
+            .iter()
+            .filter(|(_, e)| e.terminal.is_some() && e.agent.session.is_none())
+            .filter_map(|(id, e)| {
+                let spec = self
+                    .kinds
+                    .get(&e.agent.kind)?
+                    .manifest
+                    .session
+                    .as_ref()?
+                    .file
+                    .clone()?;
+                Some(crate::session_files::Target {
+                    agent: id.clone(),
+                    kind: e.agent.kind.clone(),
+                    folder: e.worktree.clone(),
+                    spec,
+                })
+            })
+            .collect()
+    }
+
     fn launch(
         &self,
         kind: &str,
@@ -1399,6 +1489,7 @@ impl Supervisor {
         cfg.limits = self.cfg.limits.process;
         cfg.sandbox = program.and_then(|p| self.sandbox_for(kind, worktree, &p));
         cfg.identity = extras.identity.clone();
+        cfg.env_remove = inherited_session_markers(std::env::vars_os().map(|(k, _)| k));
         if let Some(profile) = &mut cfg.sandbox {
             profile.read.extend(extras.read.iter().cloned());
             offline_sockets(profile, extras.socket.as_deref(), worktree);
@@ -1523,7 +1614,7 @@ impl Supervisor {
             entry.agent.session.clone(),
             entry.extras.clone(),
         );
-        let (argv, _native) = self.argv_for_resume(&kind, session.as_deref());
+        let (argv, native, fresh) = self.argv_for_resume(&kind, session.as_deref());
         let result = self.launch(&kind, &argv, &worktree, &extras);
         let Some(entry) = self.agents.get_mut(id) else {
             return;
@@ -1536,6 +1627,10 @@ impl Supervisor {
                 entry.pacer = Pacer::default();
                 entry.next_check = now;
                 entry.agent.process_restarted();
+                // A new session when its own could not be continued (ADR-0060): that one is its session now.
+                if !native {
+                    entry.agent.session = fresh;
+                }
                 events.push(SupervisorEvent::Started { agent: id.clone() });
                 events.extend(session_report(&entry.agent));
             }
@@ -1559,19 +1654,43 @@ impl Supervisor {
 
     /// Native resume when the manifest has a resume command and the agent reported a session id; otherwise
     /// the plain launch command (layout-only fallback). The bool is true for the native case.
-    fn argv_for_resume(&self, kind: &str, session: Option<&str>) -> (Vec<String>, bool) {
+    ///
+    /// ADR-0060: only an id [`argv_safe`](crate::session_files::argv_safe) allows goes on the command line (whatever reported it, an id
+    /// that could be read as an option never does). Without one, a kind with `[session] id_args` gets a new id the node chooses, as at a
+    /// first launch, so it can be resumed later; that new id is the third value (the agent's session from then on).
+    fn argv_for_resume(
+        &self,
+        kind: &str,
+        session: Option<&str>,
+    ) -> (Vec<String>, bool, Option<String>) {
         let Some(k) = self.kinds.get(kind) else {
-            return (Vec::new(), false);
+            return (Vec::new(), false, None);
         };
-        match (&k.manifest.resume, session) {
-            (Some(r), Some(sid)) => (
-                r.argv
-                    .iter()
-                    .map(|a| a.replace("{session_id}", sid))
-                    .collect(),
-                true,
-            ),
-            _ => (k.manifest.process.launch.clone(), false),
+        let safe = session.filter(|s| crate::session_files::argv_safe(s));
+        if let (Some(r), Some(sid)) = (&k.manifest.resume, safe) {
+            let argv = r
+                .argv
+                .iter()
+                .map(|a| a.replace("{session_id}", sid))
+                .collect();
+            return (argv, true, None);
+        }
+        let mut argv = k.manifest.process.launch.clone();
+        let id_args = k
+            .manifest
+            .session
+            .as_ref()
+            .map(|s| s.id_args.clone())
+            .unwrap_or_default();
+        if id_args.is_empty() {
+            return (argv, false, None);
+        }
+        match new_session_id() {
+            Ok(new) => {
+                argv.extend(id_args.iter().map(|a| a.replace("{session_id}", &new)));
+                (argv, false, Some(new))
+            }
+            Err(_) => (argv, false, None),
         }
     }
 
@@ -1610,6 +1729,105 @@ impl Supervisor {
         set_state(entry, AgentState::Done, StateSource::Reported, &mut events);
         events.push(SupervisorEvent::Stopped { agent: id.clone() });
         Ok(events)
+    }
+
+    /// ADR-0060: whether an agent of `kind` can continue its own session: its manifest has a `[resume]` argv, or it runs through an
+    /// adapter (an ACP bridge loads the session when the agent offers `loadSession`, and opens a new one otherwise).
+    pub fn resumable(&self, kind: &str) -> bool {
+        self.kinds.get(kind).is_some_and(|k| {
+            k.manifest.resume.is_some() || k.manifest.driver(&bridge_program()).is_some()
+        })
+    }
+
+    /// ADR-0060: puts an agent the node's session ledger holds as interrupted back as a stopped agent, so [`resume`](Self::resume)
+    /// starts it under the same id, in the same folder and project. Nothing runs yet. `session` is the agent's own session id to
+    /// continue, `None` for a new session.
+    pub fn restore(&mut self, r: Restore) -> Result<(), SupervisorError> {
+        if self.agents.contains_key(&r.id) || self.adapters.contains_key(&r.id) {
+            return Err(SupervisorError::StillRunning(r.id));
+        }
+        let kind = self
+            .kinds
+            .get(&r.kind)
+            .ok_or_else(|| SupervisorError::UnknownKind(r.kind.clone()))?;
+        let worktree = (!r.directory).then(|| WorktreeId::new(r.folder.to_string_lossy()));
+        if let Some(spec) = kind.manifest.driver(&bridge_program()) {
+            let mut agent = Agent::new(
+                r.id.clone(),
+                r.project,
+                self.cfg.node.clone(),
+                worktree,
+                r.kind.clone(),
+                IntegrationLevel::L3Adapter,
+            );
+            agent.session = r.session;
+            let checkout_root =
+                git::discover_checkout(&r.folder).map_or_else(|_| r.folder.clone(), |c| c.root);
+            self.adapters.insert(
+                r.id,
+                AdapterEntry {
+                    agent,
+                    adapter: None,
+                    session_id: String::new(),
+                    worktree: r.folder,
+                    branch: r.branch,
+                    running: false,
+                    spec,
+                    checkout_root,
+                    restarts: 0,
+                    restart_at: None,
+                    capabilities: Vec::new(),
+                    options: SessionOptions::default(),
+                    mesh: None,
+                    // ADR-0060: a resumed agent gets none of its launch options back (a resumed agent asks before acting again).
+                    launch: LaunchChoice::default(),
+                },
+            );
+            return Ok(());
+        }
+        if kind.manifest.process.launch.is_empty() {
+            return Err(SupervisorError::UnknownKind(r.kind));
+        }
+        let mut agent = Agent::new(
+            r.id.clone(),
+            r.project,
+            self.cfg.node.clone(),
+            worktree,
+            r.kind,
+            IntegrationLevel::L1Manifest,
+        );
+        agent.session = r.session;
+        self.agents.insert(
+            r.id,
+            Entry {
+                agent,
+                worktree: r.folder,
+                branch: r.branch,
+                terminal: None,
+                pacer: Pacer::default(),
+                next_check: Instant::now(),
+                visible: true,
+                restarts: 0,
+                restart_at: None,
+                gave_up: false,
+                extras: Extras::default(),
+                private_config: r.private_config,
+                // ADR-0060: no launch option comes back with a resume.
+                launch: LaunchChoice::default(),
+            },
+        );
+        Ok(())
+    }
+
+    /// ADR-0060: takes back a [`restore`](Self::restore) whose resume failed, so the agent stays only in the ledger.
+    pub fn unrestore(&mut self, id: &AgentId) {
+        if self.agents.get(id).is_some_and(|e| e.terminal.is_none()) {
+            self.agents.remove(id);
+        }
+        if self.adapters.get(id).is_some_and(|e| !e.running) {
+            self.adapters.remove(id);
+        }
+        self.parents.remove(id);
     }
 
     /// Start a stopped (or given-up) agent again in its worktree.
@@ -1703,7 +1921,7 @@ impl Supervisor {
             entry.agent.session.clone(),
             entry.agent.project.to_string(),
         );
-        let (argv, native) = self.argv_for_resume(&kind, session.as_deref());
+        let (argv, native, fresh) = self.argv_for_resume(&kind, session.as_deref());
         // A stopped agent left the mesh and its endpoint closed; resuming joins again with a fresh one.
         let config = self.agents.get(id).and_then(|e| e.private_config.clone());
         // ADR-0059: a resumed agent keeps the options it was started with.
@@ -1735,6 +1953,9 @@ impl Supervisor {
         entry.next_check = now;
         entry.restarts = 0;
         entry.gave_up = false;
+        if !native {
+            entry.agent.session = fresh;
+        }
         let mut events = vec![SupervisorEvent::Resumed {
             agent: id.clone(),
             native,
@@ -1766,7 +1987,13 @@ impl Supervisor {
     }
 
     /// The agent's own session id, used by [`resume`](Self::resume).
+    ///
+    /// ADR-0060: a terminal agent's id goes on its command line at a restart (`[resume]`), so only an id
+    /// [`argv_safe`](crate::session_files::argv_safe) allows is taken (`protocol.invalid_message`, `session_id`, otherwise).
     pub fn report_session(&mut self, id: &AgentId, session: &str) -> Result<(), SupervisorError> {
+        if !crate::session_files::argv_safe(session) {
+            return Err(SupervisorError::OptionUnknown("session_id"));
+        }
         let entry = self
             .agents
             .get_mut(id)
@@ -1784,6 +2011,37 @@ impl Supervisor {
 
     pub fn terminal(&self, id: &AgentId) -> Option<&TerminalHandle> {
         self.agents.get(id)?.terminal.as_ref()
+    }
+
+    /// The node is stopping: every agent's process ends now (terminal process groups killed, adapters shut down), without an end
+    /// recorded anywhere, so the session ledger finds them interrupted at the next start (ADR-0060). Nothing is restarted.
+    pub fn shutdown(&mut self) {
+        for e in self.agents.values_mut() {
+            e.restart_at = None;
+            // Dropping the handle kills the process group and joins the actor.
+            e.terminal = None;
+        }
+        for e in self.adapters.values_mut() {
+            e.restart_at = None;
+            e.running = false;
+            if let Some(adapter) = e.adapter.take() {
+                adapter.shutdown(Duration::from_secs(1));
+            }
+        }
+    }
+
+    /// ADR-0060: each running agent's top process (its terminal's program, or its adapter), for the session ledger.
+    pub fn agent_pids(&self) -> Vec<(AgentId, u32)> {
+        self.agents
+            .iter()
+            .filter_map(|(id, e)| Some((id.clone(), e.terminal.as_ref()?.pid())))
+            .chain(
+                self.adapters
+                    .iter()
+                    .filter(|(_, e)| e.running)
+                    .filter_map(|(id, e)| Some((id.clone(), e.adapter.as_ref()?.pid()))),
+            )
+            .collect()
     }
 
     /// The process ids at the top of each running agent: its terminal's process, or its adapter process.
@@ -1902,6 +2160,39 @@ impl Supervisor {
     pub fn terminal_size(&self) -> Size {
         self.cfg.terminal.size
     }
+}
+
+/// ADR-0060: when the node itself runs inside a Claude Code session (started from one, or from a terminal one opened), it inherits that
+/// session's markers (`CLAUDECODE`, `CLAUDE_CODE_CHILD_SESSION`, other `CLAUDE_CODE_*`). An agent started with them takes itself for a
+/// child session and Claude Code then saves no transcript, so its session can never be resumed (seen on Claude Code 2.1.319: "Transcript
+/// saving is off — inherited CLAUDE_CODE_CHILD_SESSION marker"). Only then are they left out of every terminal agent's environment; a
+/// node started normally passes `CLAUDE_CODE_*` settings the user made (`CLAUDE_CODE_USE_BEDROCK`, ...) on as before.
+fn inherited_session_markers(names: impl Iterator<Item = std::ffi::OsString>) -> Vec<String> {
+    let inside = names
+        .filter_map(|n| n.into_string().ok())
+        .any(|n| n == "CLAUDECODE" || n == "CLAUDE_CODE_CHILD_SESSION");
+    if inside {
+        vec!["CLAUDECODE".into(), "CLAUDE_CODE_*".into()]
+    } else {
+        Vec::new()
+    }
+}
+
+/// A random version 4 UUID, lower-case.
+fn new_session_id() -> Result<String, getrandom::Error> {
+    let mut b = [0u8; 16];
+    getrandom::getrandom(&mut b)?;
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    let h: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    Ok(format!(
+        "{}-{}-{}-{}-{}",
+        &h[..8],
+        &h[8..12],
+        &h[12..16],
+        &h[16..20],
+        &h[20..]
+    ))
 }
 
 /// The program that runs `acp-bridge` for ACP agents: this node's own binary (`agora`), unless `AGORA_ACP_BRIDGE` names another
@@ -2229,6 +2520,34 @@ fn session_report(agent: &Agent) -> Option<SupervisorEvent> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod adapter_option_tests {
     use super::*;
+
+    #[test]
+    fn claude_code_session_markers_are_left_out_only_when_the_node_runs_inside_a_session() {
+        let names = |l: &[&str]| {
+            l.iter()
+                .map(std::ffi::OsString::from)
+                .collect::<Vec<_>>()
+                .into_iter()
+        };
+        assert!(inherited_session_markers(names(&["PATH", "CLAUDE_CODE_USE_BEDROCK"])).is_empty());
+        for marker in ["CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION"] {
+            let removed = inherited_session_markers(names(&["PATH", marker]));
+            assert!(agora_platform::env_removed("CLAUDECODE".as_ref(), &removed));
+            assert!(agora_platform::env_removed(
+                "CLAUDE_CODE_CHILD_SESSION".as_ref(),
+                &removed
+            ));
+            assert!(agora_platform::env_removed(
+                "CLAUDE_CODE_ENTRYPOINT".as_ref(),
+                &removed
+            ));
+            assert!(!agora_platform::env_removed("PATH".as_ref(), &removed));
+            assert!(!agora_platform::env_removed(
+                "CLAUDE_CONFIG_DIR".as_ref(),
+                &removed
+            ));
+        }
+    }
 
     #[test]
     fn a_grant_needs_an_agent_program_from_launch_acp_or_adapter() {

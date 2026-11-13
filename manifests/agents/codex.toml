@@ -36,6 +36,15 @@ flag = [
 [resume]
 argv = ["codex", "resume", "{session_id}"]
 
+[session.file]
+# ADR-0060: no flag sets Codex's session id. The first line of ~/.codex/sessions/YYYY/MM/DD/rollout-<time>-<id>.jsonl is
+# `{"type":"session_meta","payload":{"id":...,"cwd":...}}` (checked on codex-cli 0.167.0 and 0.167.1); the node takes the newest one
+# written after the agent started in its folder, and none when two Codex agents started in that folder at about the same time.
+glob = "{home}/.codex/sessions/*/*/*/rollout-*.jsonl"
+select = { path = "type", equals = "session_meta" }
+id = "payload.id"
+cwd = "payload.cwd"
+
 [usage]
 # Codex appends `token_count` events with the running total of the session to ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl
 # (checked on codex-cli 0.167.0, ADR-0042); the model comes from the `turn_context` line before them. `input_tokens` already
