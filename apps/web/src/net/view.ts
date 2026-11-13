@@ -2,7 +2,7 @@
 // positioned events. Keys are hub-wide `<producer>/<local id>`. Pure: no sockets, no React.
 
 import { agora } from '../gen/agora.js';
-import { type AgentTileModel, uiState } from '../model';
+import { type AgentTileModel, type SessionModel, type SessionOptionModel, uiState } from '../model';
 
 type Ev = agora.v1.Event.$Properties;
 type Num = number | bigint | { toString(): string } | null | undefined;
@@ -22,7 +22,27 @@ export interface AgentV {
   tokens: number; // input + output so far
   startedMs?: number; // when this window saw it start (not known for agents that were already running)
   exitCode?: number; // how it ended, once it has
+  session?: SessionModel; // ADR-0058: options, context and its own cost, once reported
   parentId?: string; // ADR-0057: the hub-wide key of the agent that started it
+}
+
+type OptionWire = { id?: string | null; name?: string | null; description?: string | null; skipsPermissions?: boolean | null };
+const optionsOf = (l: readonly OptionWire[] | null | undefined, modes: boolean): SessionOptionModel[] =>
+  (l ?? []).map((o) => ({ id: o.id ?? '', name: o.name ?? '', description: o.description ?? '', skipsPermissions: modes && !!o.skipsPermissions })).filter((o) => o.id);
+const emptySession = (): SessionModel => ({ modes: [], models: [], currentMode: '', currentModel: '', contextTokens: 0, contextWindow: 0 });
+
+// ADR-0058: a usage report's context level and the agent's own cost, folded like the hub does (a new currency starts the sum again).
+function addUsage(a: AgentV, u: Record<string, any>): void {
+  const ctx = num(u.contextTokens), size = num(u.contextWindow);
+  const hasCost = u.costMicros !== undefined && u.costMicros !== null && !!u.currency;
+  if (!ctx && !size && !hasCost) return;
+  const s = a.session ?? emptySession();
+  if (ctx || size) { s.contextTokens = ctx; s.contextWindow = size; }
+  if (hasCost) {
+    if (s.currency !== u.currency) { s.currency = u.currency; s.costMicros = 0; }
+    s.costMicros = (s.costMicros ?? 0) + num(u.costMicros);
+  }
+  a.session = s;
 }
 export interface CheckoutV { nodeId: string; projectId: string; path: string }
 export interface ApprovalV { agentId: string; action: string; detail: string; expiresAtMs: number }
@@ -79,6 +99,16 @@ export function fromSnapshot(s: agora.v1.Snapshot.$Properties): View {
       tokens: num(a.inputTokens) + num(a.outputTokens),
       parentId: a.parentAgentId || undefined,
     });
+    const modes = optionsOf(a.modes, true), models = optionsOf(a.models, false);
+    const reported = a.costMicros !== undefined && a.costMicros !== null && !!a.currency;
+    if (modes.length || models.length || num(a.contextTokens) || num(a.contextWindow) || reported) {
+      const agent = v.agents.get(a.agentId ?? '');
+      if (agent) agent.session = {
+        modes, models, currentMode: a.currentMode ?? '', currentModel: a.currentModel ?? '',
+        contextTokens: num(a.contextTokens), contextWindow: num(a.contextWindow),
+        ...(reported ? { costMicros: num(a.costMicros), currency: a.currency ?? '' } : {}),
+      };
+    }
   }
   for (const tm of s.terminals ?? []) if (tm.agentId) v.withTerminal.add(tm.agentId);
   for (const t of s.tasks ?? []) {
@@ -172,7 +202,16 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
     }
     case 'agentUsageReported': {
       const a = v.agents.get(q(e.agentUsageReported.agentId));
-      if (a) a.tokens += num(e.agentUsageReported.inputTokens) + num(e.agentUsageReported.outputTokens);
+      if (a) { a.tokens += num(e.agentUsageReported.inputTokens) + num(e.agentUsageReported.outputTokens); addUsage(a, e.agentUsageReported); }
+      break;
+    }
+    case 'agentSessionOptions': {
+      const b = e.agentSessionOptions;
+      const a = v.agents.get(q(b.agentId));
+      if (a) {
+        const s = a.session ?? emptySession();
+        a.session = { ...s, modes: optionsOf(b.modes, true), models: optionsOf(b.models, false), currentMode: b.currentMode ?? '', currentModel: b.currentModel ?? '' };
+      }
       break;
     }
     // ADR-0053: the hub stopped listing a closed agent (its id is already the hub-wide key).
@@ -283,6 +322,7 @@ export function tiles(v: View): AgentTileModel[] {
       exitCode: a.exitCode,
       startedMs: a.startedMs,
       endedMs: a.running ? undefined : a.sinceMs || undefined,
+      session: a.session,
       parentId: a.parentId,
     } as AgentTileModel;
   });

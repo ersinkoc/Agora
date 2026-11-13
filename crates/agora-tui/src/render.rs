@@ -373,6 +373,142 @@ pub fn plain(text: &str) -> String {
         .collect()
 }
 
+/// ADR-0058: a notice in the conversation, in words. The code picks the message; parameters are the agent's text, shown plain.
+pub fn notice_text(e: &ChatEntry, t: Text<'_>) -> String {
+    let p = |k: &str| Arg::Str(plain(e.params.get(k).map_or("", String::as_str)));
+    match e.code.as_str() {
+        "adapter.turn_failed" => t(
+            key!("tui-notice-turn_failed"),
+            &[
+                ("rpc_code", p("rpc_code")),
+                ("stderr_tail", p("stderr_tail")),
+            ],
+        ),
+        "adapter.turn_stopped" => t(
+            key!("tui-notice-turn_stopped"),
+            &[("stop_reason", p("stop_reason"))],
+        ),
+        "adapter.turn_empty" => t(
+            key!("tui-notice-turn_empty"),
+            &[("stderr_tail", p("stderr_tail"))],
+        ),
+        "adapter.agent_exited" => t(
+            key!("tui-notice-agent_exited"),
+            &[
+                ("stage", p("stage")),
+                (
+                    "exit_code",
+                    Arg::Str(plain(e.params.get("exit_code").map_or("?", String::as_str))),
+                ),
+                ("stderr_tail", p("stderr_tail")),
+            ],
+        ),
+        "adapter.agent_refused" => t(
+            key!("tui-notice-agent_refused"),
+            &[
+                ("stage", p("stage")),
+                ("rpc_code", p("rpc_code")),
+                ("detail", p("detail")),
+            ],
+        ),
+        other => t(
+            key!("tui-notice-other"),
+            &[("code", Arg::Str(plain(other)))],
+        ),
+    }
+}
+
+/// ADR-0058: the line above a chat agent's conversation: its mode, model and how full its context is, when it reported them.
+pub fn session_line(a: &AgentSnapshot, t: Text<'_>) -> Option<String> {
+    let name = |list: &[agora_protocol::v1::SessionOption], id: &str| {
+        list.iter()
+            .find(|o| o.id == id)
+            .map_or(id, |o| {
+                if o.name.is_empty() {
+                    id
+                } else {
+                    o.name.as_str()
+                }
+            })
+            .to_string()
+    };
+    let mut parts = Vec::new();
+    if !a.current_mode.is_empty() {
+        parts.push(t(
+            key!("tui-chat-mode"),
+            &[("mode", Arg::Str(plain(&name(&a.modes, &a.current_mode))))],
+        ));
+    }
+    if !a.current_model.is_empty() {
+        parts.push(t(
+            key!("tui-chat-model"),
+            &[("model", Arg::Str(plain(&name(&a.models, &a.current_model))))],
+        ));
+    }
+    if let Some(pct) = a
+        .context_tokens
+        .saturating_mul(100)
+        .checked_div(a.context_window)
+    {
+        parts.push(t(
+            key!("tui-chat-context"),
+            &[(
+                "percent",
+                Arg::Num(i64::try_from(pct.min(100)).unwrap_or(100)),
+            )],
+        ));
+    }
+    (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
+/// ADR-0058: what a typed chat line asks for when it starts with `/mode ` or `/model `.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChatCommand {
+    /// Not a switch: send the line as a request.
+    Prompt,
+    /// Switch to this id (`model` false for a mode).
+    Switch { model: bool, id: String },
+    /// The agent did not offer this id; the ids it offers.
+    Unknown { id: String, offered: Vec<String> },
+    /// A mode in which the agent acts without asking: the same line again confirms it.
+    Confirm { id: String },
+}
+
+/// Reads a typed line. `confirming` is the line that asked for confirmation last time, if any: typing it again switches.
+pub fn chat_command(
+    line: &str,
+    agent: Option<&AgentSnapshot>,
+    confirming: Option<&str>,
+) -> ChatCommand {
+    let (model, id) = match (line.strip_prefix("/mode "), line.strip_prefix("/model ")) {
+        (Some(id), _) => (false, id.trim()),
+        (_, Some(id)) => (true, id.trim()),
+        _ => return ChatCommand::Prompt,
+    };
+    let list = agent.map_or(
+        &[][..],
+        |a| if model { &a.models[..] } else { &a.modes[..] },
+    );
+    let Some(option) = list
+        .iter()
+        .find(|o| o.id == id || (!o.name.is_empty() && o.name == id))
+    else {
+        return ChatCommand::Unknown {
+            id: id.to_string(),
+            offered: list.iter().map(|o| o.id.clone()).collect(),
+        };
+    };
+    if !model && option.skips_permissions && confirming != Some(line) {
+        return ChatCommand::Confirm {
+            id: option.id.clone(),
+        };
+    }
+    ChatCommand::Switch {
+        model,
+        id: option.id.clone(),
+    }
+}
+
 /// The conversation of an agent that has no terminal, as the last lines that fit `rows` x `cols`, then the line being typed.
 pub fn render_chat(
     entries: &[ChatEntry],
@@ -401,6 +537,7 @@ pub fn render_chat(
             ChatKind::ToolCall => t(key!("tui-chat-tool"), &[("text", Arg::Str(plain(&e.text)))]),
             ChatKind::Plan => format!("{}\n{}", t(key!("tui-chat-plan"), &[]), plain(&e.text)),
             ChatKind::Diff => t(key!("tui-chat-diff"), &[("path", Arg::Str(plain(&e.path)))]),
+            ChatKind::Notice => notice_text(e, t),
             _ => plain(&e.text),
         };
         for (i, row) in body.split('\n').enumerate() {
@@ -587,6 +724,39 @@ mod tests {
         assert!(text.contains("hi]0;owned there"), "{text}");
         assert!(text.contains("tui-chat-tool[text="), "{text}");
         assert!(lines.last().is_some_and(|l| l.contains("typed")));
+        // ADR-0058: a notice is said from its code; its parameters are plain text; an unknown code is named.
+        let mut notice = entry(ChatRole::Agent, ChatKind::Notice, "");
+        notice.code = "adapter.agent_exited".into();
+        notice
+            .params
+            .insert("stderr_tail".into(), "boom\x1b[2J".into());
+        let mut other = entry(ChatRole::Agent, ChatKind::Notice, "");
+        other.code = "future.thing".into();
+        let said = render_chat(&[notice, other], "a", "", (80, 24), false, &t).join("\n");
+        assert!(
+            said.contains("tui-notice-agent_exited[stage=,exit_code=?,stderr_tail=boom[2J]"),
+            "{said}"
+        );
+        assert!(
+            said.contains("tui-notice-other[code=future.thing]"),
+            "{said}"
+        );
+        let a = AgentSnapshot {
+            modes: vec![agora_protocol::v1::SessionOption {
+                id: "plan".into(),
+                name: "Plan".into(),
+                ..Default::default()
+            }],
+            current_mode: "plan".into(),
+            context_tokens: 50,
+            context_window: 200,
+            ..Default::default()
+        };
+        assert_eq!(
+            session_line(&a, &t).as_deref(),
+            Some("tui-chat-mode[mode=Plan] · tui-chat-context[percent=25]")
+        );
+        assert!(session_line(&AgentSnapshot::default(), &t).is_none());
         // Only what fits is kept.
         let many: Vec<ChatEntry> = (0..50)
             .map(|i| entry(ChatRole::Agent, ChatKind::Text, &format!("line {i}")))
@@ -597,6 +767,58 @@ mod tests {
             short.iter().any(|l| l.contains("line 49"))
                 && !short.iter().any(|l| l.contains("line 0"))
         );
+    }
+
+    #[test]
+    fn a_typed_switch_needs_an_offered_id_and_a_mode_that_does_not_ask_needs_it_twice() {
+        let opt = |id: &str, skips: bool| agora_protocol::v1::SessionOption {
+            id: id.into(),
+            name: id.to_uppercase(),
+            skips_permissions: skips,
+            ..Default::default()
+        };
+        let a = AgentSnapshot {
+            modes: vec![opt("plan", false), opt("yolo", true)],
+            models: vec![opt("m1", false)],
+            ..Default::default()
+        };
+        assert_eq!(chat_command("fix it", Some(&a), None), ChatCommand::Prompt);
+        assert_eq!(
+            chat_command("/mode PLAN", Some(&a), None),
+            ChatCommand::Switch {
+                model: false,
+                id: "plan".into()
+            }
+        );
+        assert_eq!(
+            chat_command("/model m1", Some(&a), None),
+            ChatCommand::Switch {
+                model: true,
+                id: "m1".into()
+            }
+        );
+        assert_eq!(
+            chat_command("/model m9", Some(&a), None),
+            ChatCommand::Unknown {
+                id: "m9".into(),
+                offered: vec!["m1".into()]
+            }
+        );
+        assert_eq!(
+            chat_command("/mode yolo", Some(&a), None),
+            ChatCommand::Confirm { id: "yolo".into() }
+        );
+        assert_eq!(
+            chat_command("/mode yolo", Some(&a), Some("/mode yolo")),
+            ChatCommand::Switch {
+                model: false,
+                id: "yolo".into()
+            }
+        );
+        assert!(matches!(
+            chat_command("/mode plan", None, None),
+            ChatCommand::Unknown { .. }
+        ));
     }
 
     #[test]

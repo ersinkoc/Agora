@@ -9,5 +9,8 @@ min_engine = 1
 # chat items and approvals. opencode's own terminal screen would be a separate L1 kind once its screens are captured.
 # opencode writes its errors (a provider's refusal, an expired login) to stderr only with `--print-logs --log-level ERROR`; the bridge
 # passes what it wrote during a failed or empty turn along with the notice (ADR-0058), so they are asked for.
+# opencode 2.x (seen with 2.2.6 on Windows) runs sessions in a background service: `opencode acp` initializes, but `session/new`
+# fails with -32603 `ServiceUnavailableError` unless `opencode service` is running. The start then fails as `adapter.agent_refused`
+# (stage `session`) and the bridge's notice carries the agent's message. Start the service first, or use opencode 1.x.
 [structured]
 acp = { argv = ["opencode", "acp", "--print-logs", "--log-level", "ERROR"] }

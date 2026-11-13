@@ -12,7 +12,7 @@ use agora_protocol::v1::{param_value::Value, ChatEntry, ErrorInfo, Snapshot};
 use agora_tui::client::{sign_in, ChatEvent, ClientError, Hub, Session, TermEvent, Update};
 use agora_tui::device::Device;
 use agora_tui::preview::{Preview, Pumped};
-use agora_tui::render::{plain, render, render_chat};
+use agora_tui::render::{chat_command, plain, render, render_chat, session_line, ChatCommand};
 use agora_tui::split::{frame, tree_order, View};
 
 use crate::hubcli::{hub_dir, new_login_code, DEFAULT_LISTEN};
@@ -260,6 +260,7 @@ fn chat(
     agent: &str,
     rx: &mpsc::Receiver<u8>,
     color: bool,
+    snapshot: Option<agora_protocol::v1::AgentSnapshot>,
 ) -> Result<bool, String> {
     let (node, local) = agent.split_once('/').unwrap_or(("", agent));
     let stream = session.chat_open(node, local)?;
@@ -269,6 +270,8 @@ fn chat(
     let mut note = String::new();
     let mut lost = false;
     let mut dirty = true;
+    // ADR-0058: the line that asked to confirm a mode that does not ask; typing it again switches.
+    let mut confirming: Option<String> = None;
     'watch: loop {
         match session.chat_next(stream, Duration::from_millis(100)) {
             ChatEvent::Lines(lines, replace) => {
@@ -293,6 +296,35 @@ fn chat(
                 b'\r' | b'\n' => {
                     let line = String::from_utf8_lossy(&typed).trim().to_string();
                     typed.clear();
+                    let asked = chat_command(&line, snapshot.as_ref(), confirming.as_deref());
+                    confirming = None;
+                    match asked {
+                        ChatCommand::Prompt => {}
+                        ChatCommand::Unknown { id, offered } => {
+                            note = say.text(
+                                key!("tui-option-unknown"),
+                                &[("id", Arg::Str(id)), ("ids", Arg::Str(offered.join(", ")))],
+                            );
+                            dirty = true;
+                            continue;
+                        }
+                        ChatCommand::Confirm { id } => {
+                            note = say.text(key!("tui-option-confirm"), &[("id", Arg::Str(id))]);
+                            confirming = Some(line);
+                            dirty = true;
+                            continue;
+                        }
+                        ChatCommand::Switch { model, id } => {
+                            note = match session.set_option(node, local, model, &id) {
+                                Ok(()) => say.text(key!("tui-option-switched"), &[]),
+                                Err(code) => {
+                                    say.text(key!("tui-send-failed"), &[("code", Arg::Str(code))])
+                                }
+                            };
+                            dirty = true;
+                            continue;
+                        }
+                    }
                     if !line.is_empty() {
                         let scope = format!("agent:{local}");
                         note = match with_grant(say, session, rx, (node, &scope, &TYPING), |s| {
@@ -333,6 +365,10 @@ fn chat(
             );
             if !note.is_empty() {
                 lines.insert(lines.len().saturating_sub(1), plain(&note));
+            }
+            // What the agent runs with, as it was when the conversation was opened (ADR-0058).
+            if let Some(s) = snapshot.as_ref().and_then(|a| session_line(a, &text)) {
+                lines.insert(0, plain(&s));
             }
             let mut out = std::io::stdout();
             let _ = write!(out, "\x1b[H\x1b[2J{}", lines.join("\r\n"));
@@ -985,7 +1021,9 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                             let opened = if has_terminal {
                                 attach(say, &mut session, s, &selected, &rx)
                             } else {
-                                chat(say, &mut session, &selected, &rx, color)
+                                let agent =
+                                    s.agents.iter().find(|a| a.agent_id == selected).cloned();
+                                chat(say, &mut session, &selected, &rx, color, agent)
                             };
                             match opened {
                                 Ok(true) => {

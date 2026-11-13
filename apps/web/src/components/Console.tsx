@@ -37,7 +37,7 @@ const wide = () => typeof window === 'undefined' || !window.matchMedia || window
 
 // The one window, laid out like an editor: the agents on the left as a tree, the terminals you are watching as tabs in the
 // middle (or side by side), details on the right, and a status bar. Everything is derived from props.
-export function Console({ agents, machines, usage, projects = [], approvals, messages, boards = [], terminalFor, chatOf, sendPrompt, loadDiff, loadHistory, filesOf, onOpen, onStart, onCommand, onForget, start, onResolve, helperGrants, revokeGrant, notice, link }: {
+export function Console({ agents, machines, usage, projects = [], approvals, messages, boards = [], terminalFor, chatOf, sendPrompt, chooseOption, loadDiff, loadHistory, filesOf, onOpen, onStart, onCommand, onForget, start, onResolve, helperGrants, revokeGrant, notice, link }: {
   agents: readonly AgentTileModel[];
   machines: readonly MachineModel[];
   usage?: UsageSummary;
@@ -48,6 +48,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   terminalFor: (agentId: string) => TerminalSource;
   chatOf?: (agent: AgentTileModel) => ChatSource | undefined;
   sendPrompt?: (agent: AgentTileModel, text: string) => Promise<boolean>;
+  chooseOption?: (agent: AgentTileModel, kind: 'mode' | 'model', id: string) => Promise<boolean>;
   loadDiff?: (agent: AgentTileModel) => Promise<string>;
   loadHistory?: (agent: AgentTileModel) => Promise<CommitItem[]>;
   filesOf?: (agent: AgentTileModel) => WorkspaceFiles | undefined;
@@ -235,7 +236,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
         onReview={loadDiff ? () => setReviewing(a.id) : undefined} onHistory={loadHistory && a.git !== false ? () => setHistory(a.id) : undefined} onFiles={filesOf ? () => setBrowsing(a.id) : undefined}
         onStart={onStart ? () => onStart() : undefined} onDismiss={() => dismiss([a.id])}
         onForget={onForget ? () => removeClosed([a.id]) : undefined} forgetError={forgetError} /> : <div className="pane min-h-0 flex-1 p-1.5">
-        {a.terminal === false ? <PromptBox agent={a} send={sendPrompt} source={chatOf?.(a)} /> : (
+        {a.terminal === false ? <PromptBox agent={a} send={sendPrompt} source={chatOf?.(a)} choose={chooseOption} /> : (
           <Suspense fallback={<div className="terminal" aria-busy="true" />}>
             <TerminalView source={terminalFor(a.id)} label={`${t('focus-terminal')} · ${a.name}`} />
           </Suspense>

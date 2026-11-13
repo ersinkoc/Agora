@@ -608,6 +608,17 @@ fn an_agent_that_refuses_the_session_says_so_with_a_code() {
         json!({"code": "adapter.agent_refused", "params": {"stage": "session"}}),
         "{r:#}"
     );
+    // The same as a notice, with the agent's code and its message (home folder scrubbed).
+    let all = notices(&n);
+    assert_eq!(all.len(), 1, "{all:#?}");
+    assert_eq!(all[0]["code"], "adapter.agent_refused");
+    assert_eq!(all[0]["params"]["stage"], "session");
+    assert_eq!(all[0]["params"]["rpc_code"], "-32603");
+    let detail = all[0]["params"]["detail"].as_str().unwrap();
+    assert!(
+        detail.contains("ServiceUnavailableError") && !detail.contains("someone"),
+        "{detail}"
+    );
 }
 
 #[test]
