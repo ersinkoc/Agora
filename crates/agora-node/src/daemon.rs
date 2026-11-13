@@ -381,6 +381,8 @@ impl EventSink {
                 .as_ref()
                 .map(|p| p.as_str().to_string())
                 .unwrap_or_default(),
+            launch_options: view.launch_options.clone(),
+            skips_permissions: view.skips_permissions,
         }));
         self.record(Body::AgentStateChanged(v1::AgentStateChanged {
             agent_id: agent.into(),
@@ -449,6 +451,22 @@ impl EventSink {
         kind: &str,
         parent: &str,
     ) {
+        let none = crate::launch_options::LaunchChoice::default();
+        self.agent_started_with(agent, project, node, worktree, kind, parent, &none);
+    }
+
+    /// [`Self::agent_started_by`] with the launch options the agent was started with (ADR-0059).
+    #[allow(clippy::too_many_arguments)]
+    fn agent_started_with(
+        &self,
+        agent: &AgentId,
+        project: &str,
+        node: &str,
+        worktree: &str,
+        kind: &str,
+        parent: &str,
+        launch: &crate::launch_options::LaunchChoice,
+    ) {
         self.record(Body::AgentStarted(v1::AgentStarted {
             agent_id: agent.as_str().to_string(),
             project_id: project.to_string(),
@@ -457,6 +475,8 @@ impl EventSink {
             kind: kind.to_string(),
             level: v1::IntegrationLevel::L1Manifest as i32,
             parent_agent_id: parent.to_string(),
+            launch_options: launch.ids.clone(),
+            skips_permissions: launch.skips_permissions,
         }));
     }
 
@@ -702,6 +722,34 @@ impl EventSink {
         kind: &str,
         has_terminal: bool,
     ) {
+        let none = crate::launch_options::LaunchChoice::default();
+        self.agent_launched_with(
+            agent,
+            project,
+            node,
+            checkout,
+            worktree,
+            branch,
+            kind,
+            has_terminal,
+            &none,
+        );
+    }
+
+    /// [`Self::agent_launched`] with the launch options the agent was started with (ADR-0059).
+    #[allow(clippy::too_many_arguments)]
+    pub fn agent_launched_with(
+        &self,
+        agent: &AgentId,
+        project: &str,
+        node: &str,
+        checkout: &Path,
+        worktree: &Path,
+        branch: &str,
+        kind: &str,
+        has_terminal: bool,
+        launch: &crate::launch_options::LaunchChoice,
+    ) {
         let worktree_id = worktree.to_string_lossy().into_owned();
         self.record(Body::WorktreeCreated(v1::WorktreeCreated {
             worktree_id: worktree_id.clone(),
@@ -709,7 +757,7 @@ impl EventSink {
             path: worktree_id.clone(),
             branch: branch.to_string(),
         }));
-        self.agent_started(agent, project, node, &worktree_id, kind);
+        self.agent_started_with(agent, project, node, &worktree_id, kind, "", launch);
         if !has_terminal {
             return; // an adapter agent has no terminal
         }
@@ -731,6 +779,18 @@ impl EventSink {
         self.helper_launched(agent, workspace, kind, terminal, "");
     }
 
+    /// [`Self::directory_agent_launched`] with the launch options the agent was started with (ADR-0059).
+    pub fn directory_agent_launched_with(
+        &self,
+        agent: &AgentId,
+        workspace: &v1::WorkspaceRegistered,
+        kind: &str,
+        terminal: bool,
+        launch: &crate::launch_options::LaunchChoice,
+    ) {
+        self.workspace_agent_launched(agent, workspace, kind, terminal, "", launch);
+    }
+
     /// [`Self::directory_agent_launched`] for a helper `parent` started (ADR-0057); `parent` empty means the user.
     pub fn helper_launched(
         &self,
@@ -740,18 +800,33 @@ impl EventSink {
         terminal: bool,
         parent: &str,
     ) {
+        // ADR-0059: a helper never has launch options.
+        let none = crate::launch_options::LaunchChoice::default();
+        self.workspace_agent_launched(agent, workspace, kind, terminal, parent, &none);
+    }
+
+    fn workspace_agent_launched(
+        &self,
+        agent: &AgentId,
+        workspace: &v1::WorkspaceRegistered,
+        kind: &str,
+        terminal: bool,
+        parent: &str,
+        launch: &crate::launch_options::LaunchChoice,
+    ) {
         self.record(Body::WorkspaceRegistered(workspace.clone()));
         self.record(Body::AgentWorkspaceBound(v1::AgentWorkspaceBound {
             agent_id: agent.as_str().into(),
             workspace_id: workspace.workspace_id.clone(),
         }));
-        self.agent_started_by(
+        self.agent_started_with(
             agent,
             &workspace.project_id,
             &workspace.node_id,
             "",
             kind,
             parent,
+            launch,
         );
         if terminal {
             self.record(Body::TerminalOpened(v1::TerminalOpened {
@@ -852,6 +927,12 @@ pub struct Policy {
     pub sandbox: crate::sandbox::SandboxPolicy,
     /// What each trusted device may sign (`device.<id>.projects = a, b`; ADR-0049). A device not named is not limited.
     pub device_projects: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+    /// Whether an agent may start with a launch option that skips permissions (`skip_permissions = forbid | allow | confined_only`;
+    /// ADR-0059). Default: allow.
+    pub skip_permissions: crate::launch_options::SkipPermissions,
+    /// Lines of an existing policy file the node did not understand (`unreadable` when the file could not be read). Any of them sets
+    /// `skip_permissions` to `forbid`: a typo (`skip_permission = forbid`) must never leave the default `allow` in place.
+    pub problems: Vec<String>,
     /// What happens to interrupted agents after the node starts (`resume`, `resume.kinds`, `resume.folders`; ADR-0060).
     pub resume: ResumePolicy,
 }
@@ -888,6 +969,8 @@ impl Default for Policy {
             sandbox: crate::sandbox::SandboxPolicy::default(),
             device_projects: std::collections::BTreeMap::new(),
             resume: ResumePolicy::default(),
+            skip_permissions: crate::launch_options::SkipPermissions::default(),
+            problems: Vec::new(),
         }
     }
 }
@@ -926,15 +1009,26 @@ pub fn policy_sandbox_entries(path: &std::path::Path) -> Vec<(&'static str, Stri
 /// counts as `false`: a typo must never widen what the node allows. Unknown keys are ignored.
 pub fn read_policy(path: &std::path::Path) -> Policy {
     let mut p = Policy::default();
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return p;
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        // No file: the defaults, `skip_permissions = allow` included (the maintainer's decision, ADR-0059).
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return p,
+        Err(_) => {
+            p.problems.push("unreadable".into());
+            p.skip_permissions = crate::launch_options::SkipPermissions::Forbid;
+            return p;
+        }
     };
     for line in text
         .lines()
         .map(str::trim)
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
     {
-        if let Some((k, v)) = line.split_once('=') {
+        let Some((k, v)) = line.split_once('=') else {
+            p.problems.push(line.chars().take(80).collect());
+            continue;
+        };
+        {
             match k.trim() {
                 "mesh.remote" => p.mesh_remote = v.trim() == "true",
                 "signed_commands" => {
@@ -971,6 +1065,15 @@ pub fn read_policy(path: &std::path::Path) -> Policy {
                 }
                 "resume.folders" => p.resume.folders = paths(v),
                 "sandbox" => p.sandbox.level = crate::sandbox::Level::parse(v),
+                "skip_permissions" => {
+                    // `"forbid"` as the ADR writes it means the same as `forbid`.
+                    let v = v.trim();
+                    let v = v
+                        .strip_prefix('"')
+                        .and_then(|x| x.strip_suffix('"'))
+                        .unwrap_or(v);
+                    p.skip_permissions = crate::launch_options::SkipPermissions::parse(v);
+                }
                 "sandbox.read" => p.sandbox.read = paths(v),
                 "sandbox.write" => p.sandbox.write = paths(v),
                 "sandbox.trust_manifest" => {
@@ -981,9 +1084,12 @@ pub fn read_policy(path: &std::path::Path) -> Policy {
                         .map(str::to_string)
                         .collect();
                 }
-                _ => {}
+                other => p.problems.push(other.chars().take(80).collect()),
             }
         }
+    }
+    if !p.problems.is_empty() {
+        p.skip_permissions = crate::launch_options::SkipPermissions::Forbid;
     }
     p
 }
@@ -1041,6 +1147,9 @@ pub struct Node {
     node_id: String,
     /// Manifests that could not be loaded, as `(path, reason)` for the log.
     pub manifest_problems: Vec<(PathBuf, String)>,
+    /// Policy file lines the node did not understand (see [`Policy::problems`]), for the log: they forbid launch options that skip
+    /// permissions until they are fixed.
+    pub policy_problems: Vec<String>,
     /// The event log found at start that named another node and was set aside instead of being sent to the hub, for the log.
     pub events_set_aside: Option<SetAside>,
     /// ADR-0060: the session ledger.
@@ -1087,6 +1196,7 @@ impl Node {
         });
         sup.set_sandbox(read_policy(&cfg.data_dir.join(POLICY_FILE)).sandbox);
         sup.reserve_ids(ledger.next_id());
+        sup.set_skip_permissions(read_policy(&cfg.data_dir.join(POLICY_FILE)).skip_permissions);
         let (found, manifest_problems) = load_manifests(&cfg.manifests_dir);
         for m in found {
             sup.register(m);
@@ -1483,6 +1593,7 @@ impl Node {
             spawner,
             node_id: cfg.node_id.clone(),
             manifest_problems,
+            policy_problems: read_policy(&cfg.data_dir.join(POLICY_FILE)).problems,
             events_set_aside,
             ledger,
             crashed: false,
@@ -1740,6 +1851,8 @@ mod announce_tests {
             running,
             restarts: 0,
             parent: None,
+            launch_options: Vec::new(),
+            skips_permissions: false,
         }
     }
 
@@ -1880,5 +1993,47 @@ mod announce_tests {
             && r.approved == r.approval_id[3..].parse::<u32>().unwrap().is_multiple_of(2)));
         assert_eq!(restated(Announce::Present), first, "the ring did not move");
         assert!(restated(Announce::Restart).is_empty());
+    }
+
+    #[test]
+    fn a_policy_file_that_is_not_understood_forbids_skipping_permissions() {
+        use crate::launch_options::SkipPermissions as S;
+        let dir = std::env::temp_dir().join(format!("policy-skip-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("policy");
+        let read = |text: &str| {
+            std::fs::write(&file, text).unwrap();
+            let p = read_policy(&file);
+            (p.skip_permissions, p.problems)
+        };
+        // No file: the maintainer's default.
+        assert_eq!(read_policy(&dir.join("absent")).skip_permissions, S::Allow);
+        assert_eq!(read("mesh.remote = true\n"), (S::Allow, vec![]));
+        assert_eq!(read("skip_permissions = \"forbid\"\n").0, S::Forbid);
+        assert_eq!(
+            read("skip_permissions = \"confined_only\"\n").0,
+            S::ConfinedOnly
+        );
+        assert_eq!(read("skip_permissions = \"allow\"\n").0, S::Allow);
+        // A typo'd key, a line without `=`: forbid, and said.
+        assert_eq!(
+            read("skip_permission = forbid\n"),
+            (S::Forbid, vec!["skip_permission".to_string()])
+        );
+        assert_eq!(read("skip_permissions allow\n").0, S::Forbid);
+        assert_eq!(
+            read("skip_permissions = allow\nsandbx = worktree\n").0,
+            S::Forbid
+        );
+        // An existing file that cannot be read (here: a folder): forbid.
+        std::fs::remove_file(&file).unwrap();
+        std::fs::create_dir_all(&file).unwrap();
+        let p = read_policy(&file);
+        assert_eq!(
+            (p.skip_permissions, p.problems),
+            (S::Forbid, vec!["unreadable".to_string()])
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

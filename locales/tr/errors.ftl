@@ -27,6 +27,13 @@ agent-sandbox_unavailable = Bu makine ajanları kısıtlayacak şekilde ayarlı 
 agent-not_authenticated = { $kind }, { $node_id } makinesinde giriş yapmamış.
 agent-blocked = { $agent_id } ajanı girdi bekliyor, bu yüzden mesaj gönderilmedi.
 agent-mode_unsupported = { $kind }, { $mode } modunu desteklemiyor.
+agent-option_forbidden = { $kind }, { $option } seçeneğiyle başlatılmadı: { $policy ->
+        [confined_only] bu makine bir ajanın sormadan çalışmasına yalnızca klasörüyle sınırlıyken izin veriyor ve burada sınırlanamazdı.
+        [signature] böyle başlatmak için başlatma isteğinin cihazınızca imzalanması gerekir.
+       *[other] bu makine ajanların sormadan çalışmasına izin vermiyor.
+    }
+agent-option_invalid = { $kind } başlatılmadı: "{ $option }" başlatma seçeneği onun sunduğu bir seçenek değil (ya da çok fazla seçenek var).
+agent-option_unconfirmed = { $kind }, { $option } seçeneğiyle başlatılmadı: bu seçenek ajanın sormadan çalışmasını sağlar ve başlatma isteğinde bunun için onayınız yoktu.
 agent-running = { $agent_id } hâlâ çalışıyor. Önce durdurun.
 agent-not_interrupted = { $agent_id } yarıda kalmadı ya da artık devam ettirilmek üzere sunulmuyor.
 agent-session_missing = { $agent_id } kendi oturumuna devam edemiyor. Bunun yerine yeniden başlatın.

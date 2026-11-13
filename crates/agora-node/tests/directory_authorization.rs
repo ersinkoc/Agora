@@ -236,3 +236,85 @@ fn a_resume_is_signed_for_that_agent_and_that_choice_only() {
         .is_ok());
     assert!(g.directory_action(&Cmd::AgentResume(a), 100_000).is_err());
 }
+
+/// ADR-0059: a launch that chose options is signed over them and over which of them the user confirmed (`directory-action-v3`,
+/// two length-prefixed lists); a hub can neither add, remove or swap an option nor add or strip a confirmation.
+#[test]
+fn launch_options_are_signed_so_a_hub_can_neither_add_nor_remove_one() {
+    let key = key();
+    let strs = |v: &[&str]| v.iter().map(|o| (*o).to_string()).collect::<Vec<String>>();
+    let sign = |options: &[&str], confirmed: &[&str], nonce: &str| {
+        let (options, confirmed) = (strs(options), strs(confirmed));
+        let message = agora_node::directory::launch_signed_message(
+            "node-a",
+            "/selected",
+            "probe",
+            "id:project",
+            false,
+            false,
+            &options,
+            &confirmed,
+            nonce,
+            101_000,
+        );
+        let mut a = launch(&key, nonce);
+        a.launch_options = options;
+        a.confirmed_launch_options = confirmed;
+        a.authorization.as_mut().unwrap().signature = key
+            .sign(&SystemRandom::new(), &message)
+            .unwrap()
+            .as_ref()
+            .to_vec();
+        a
+    };
+    let g = grants(&key);
+    // Signed without options: the hub adds one, or a confirmation.
+    let mut added = launch(&key, "00000000000000000000000000000001");
+    added.launch_options = strs(&["skip-permissions"]);
+    assert!(g
+        .directory_action(&Cmd::AgentLaunch(added.clone()), 100_000)
+        .is_err());
+    added.confirmed_launch_options = strs(&["skip-permissions"]);
+    assert!(g
+        .directory_action(&Cmd::AgentLaunch(added), 100_000)
+        .is_err());
+    let signed = sign(
+        &["skip-permissions"],
+        &["skip-permissions"],
+        "00000000000000000000000000000002",
+    );
+    for (options, confirmed) in [
+        (vec![], vec![]),
+        (strs(&["skip-permissions"]), vec![]),
+        (strs(&["resume-last"]), strs(&["skip-permissions"])),
+        (
+            strs(&["skip-permissions", "resume-last"]),
+            strs(&["skip-permissions"]),
+        ),
+        (strs(&["skip-permissions!"]), vec![]),
+    ] {
+        let mut b = signed.clone();
+        b.launch_options = options;
+        b.confirmed_launch_options = confirmed;
+        assert!(g.directory_action(&Cmd::AgentLaunch(b), 100_000).is_err());
+    }
+    // A signature over the unconfirmed option does not confirm it: the hub cannot add the confirmation afterwards.
+    let mut unconfirmed = sign(
+        &["skip-permissions"],
+        &[],
+        "00000000000000000000000000000003",
+    );
+    unconfirmed.confirmed_launch_options = strs(&["skip-permissions"]);
+    assert!(g
+        .directory_action(&Cmd::AgentLaunch(unconfirmed), 100_000)
+        .is_err());
+    // One id `a,b` is not the two ids `a` and `b`.
+    let mut comma = sign(&["a,b"], &[], "00000000000000000000000000000004");
+    comma.launch_options = strs(&["a", "b"]);
+    assert!(g
+        .directory_action(&Cmd::AgentLaunch(comma), 100_000)
+        .is_err());
+    assert!(g
+        .directory_action(&Cmd::AgentLaunch(signed), 100_000)
+        .is_ok());
+}

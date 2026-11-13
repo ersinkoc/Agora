@@ -75,8 +75,8 @@ impl Env {
         std::fs::write(
             root.join("manifests/probe.toml"),
             format!(
-                "{}[process]\nlaunch = {}\n[resume]\nargv = {}\n[session]\nid_args = [\"--session-id\", \"{{session_id}}\"]\n",
-                head("probe"),
+                "{}[process]\nlaunch = {}\n[resume]\nargv = {}\n[session]\nid_args = [\"--session-id\", \"{{session_id}}\"]\n[[launch.option]]\nid = \"skip\"\nlabel = \"option-skip-permissions\"\nargs = [\"--yolo\"]\nskips_permissions = true\n",
+                head("probe").replace("min_engine = 1", "min_engine = 2"),
                 q(probe("start-{pid}.json")),
                 q(resume)
             ),
@@ -136,6 +136,10 @@ impl Env {
     }
 
     fn launch(&self, kind: &str) -> String {
+        self.launch_with(kind, &[])
+    }
+
+    fn launch_with(&self, kind: &str, options: &[&str]) -> String {
         let mut c = self.client();
         let info = match c
             .call(Cmd::DirectoryInspect(v1::DirectoryInspect {
@@ -154,6 +158,8 @@ impl Env {
                 path: info.path,
                 project_id: info.project_id,
                 kind: kind.into(),
+                launch_options: options.iter().map(|o| o.to_string()).collect(),
+                confirmed_launch_options: options.iter().map(|o| o.to_string()).collect(),
                 ..Default::default()
             }))
             .unwrap()
@@ -398,6 +404,7 @@ fn a_helper_is_resumed_only_while_its_parent_runs() {
             kind: "plain".into(),
             level: 2,
             parent_agent_id: parent.clone(),
+            ..Default::default()
         })]);
     e.start();
     assert_eq!(
@@ -637,4 +644,37 @@ fn review_a_survivor_that_ended_after_announcement_can_be_cleared_by_stop() {
     e.resume(&probe, false).unwrap();
     // Unknown agents are still refused.
     assert!(stop(&e, "agent-77", false).is_err());
+}
+
+/// ADR-0060 with ADR-0059: a resumed agent asks before acting again; the options it was started with are kept in the ledger, never
+/// applied again.
+#[test]
+fn a_resumed_agent_never_gets_its_dont_ask_option_back() {
+    if !supported() {
+        return;
+    }
+    let mut e = Env::new("options");
+    let probe = e.launch_with("probe", &["skip"]);
+    e.wait("the probe's start", |e| !e.reports("start-").is_empty());
+    assert!(args(&e.reports("start-")[0]).iter().any(|a| a == "--yolo"));
+    e.wait("the options in the ledger", |e| {
+        e.node()
+            .ledger
+            .get(&probe)
+            .is_some_and(|x| x.launch_options == ["skip"])
+    });
+    e.start();
+    e.resume(&probe, false).unwrap();
+    e.wait("the resume", |e| !e.reports("resume-").is_empty());
+    assert!(!args(&e.reports("resume-")[0]).iter().any(|a| a == "--yolo"));
+    // Start again does not bring it back either.
+    e.start();
+    e.resume(&probe, true).unwrap();
+    e.wait("the second start", |e| e.reports("start-").len() >= 2);
+    let yolo = e
+        .reports("start-")
+        .iter()
+        .filter(|r| args(r).iter().any(|a| a == "--yolo"))
+        .count();
+    assert_eq!(yolo, 1);
 }
