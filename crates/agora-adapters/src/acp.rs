@@ -38,6 +38,8 @@ const STDERR_TAIL: usize = 400;
 const STDERR_LINES: usize = 5;
 /// What stands in for a run of text that looks like a secret.
 const REDACTED: &str = "[redacted]";
+/// An unbroken run of token characters this long that is not a path is taken for a secret.
+const LONG_RUN: usize = 32;
 /// Words after which (and `=` or `:`) the next word is taken for a secret.
 const SECRET_WORDS: &[&str] = &[
     "key",
@@ -210,6 +212,67 @@ fn turn_outcome(answer: &Value, said: bool) -> Option<(&'static str, Value)> {
 /// Replaces anything in `s` that looks like a secret: a long run of letters and digits (a key, a token, an id), and the word after
 /// `key=`, `token:`, `Bearer ` and the like.
 fn redact(s: &str) -> String {
+    redact_words(&redact_runs(&redact_userinfo(s)))
+}
+
+/// `scheme://user:password@host` → `scheme://[redacted]@host`.
+fn redact_userinfo(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(i) = rest.find("://") {
+        let (head, tail) = rest.split_at(i + 3);
+        out.push_str(head);
+        let end = tail
+            .find(|c: char| c == '/' || c == '?' || c == '#' || c.is_whitespace())
+            .unwrap_or(tail.len());
+        match tail[..end].rfind('@') {
+            Some(at) => {
+                out.push_str(REDACTED);
+                out.push_str(&tail[at..end]);
+            }
+            None => out.push_str(&tail[..end]),
+        }
+        rest = &tail[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// A token character: what base64, base64url, hex and most API keys are made of (and paths, which are kept).
+fn is_token_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '+' | '/' | '=' | '.')
+}
+
+/// Replaces every unbroken run of `LONG_RUN` or more token characters that is not a path, whatever letters it is made of: a
+/// secret need not contain a digit. A path starts with `/`, `~` or `.`, or has `/` between parts all shorter than `LONG_RUN`
+/// and no `+` or `=` (which base64 has and paths rarely do).
+fn redact_runs(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(c) = rest.chars().next() {
+        if !is_token_char(c) {
+            out.push(c);
+            rest = &rest[c.len_utf8()..];
+            continue;
+        }
+        let end = rest.find(|c: char| !is_token_char(c)).unwrap_or(rest.len());
+        let run = &rest[..end];
+        let path = run.starts_with(['/', '~', '.'])
+            || (run.contains('/')
+                && !run.contains(['+', '='])
+                && run.split('/').all(|p| p.len() < LONG_RUN));
+        out.push_str(if run.len() >= LONG_RUN && !path {
+            REDACTED
+        } else {
+            run
+        });
+        rest = &rest[end..];
+    }
+    out
+}
+
+/// Long words with letters and digits, and the word after `key=`, `token:`, `Bearer ` and the like.
+fn redact_words(s: &str) -> String {
     let is_word = |c: char| c.is_alphanumeric() || matches!(c, '_' | '-' | '+');
     let mut out = String::with_capacity(s.len());
     let (mut keyword, mut armed) = (false, false);
@@ -247,17 +310,38 @@ pub fn stderr_tail(raw: &[u8], home: Option<&str>) -> String {
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
-            // ESC [ ... final byte, or ESC and one more character.
-            '\u{1b}' => {
-                if chars.peek() == Some(&'[') {
-                    chars.next();
-                    for c in chars.by_ref() {
-                        if ('@'..='~').contains(&c) {
-                            break;
+            // ESC [ ... final byte (CSI); ESC ] (OSC), ESC P, ESC _ and ESC ^ with their whole payload, up to BEL or ESC \;
+            // otherwise ESC and one more character. The 8-bit forms (CSI U+009B, OSC U+009D) are read the same way.
+            '\u{1b}' | '\u{9b}' | '\u{9d}' => {
+                let kind = if c == '\u{1b}' {
+                    chars.next()
+                } else if c == '\u{9b}' {
+                    Some('[')
+                } else {
+                    Some(']')
+                };
+                match kind {
+                    Some('[') => {
+                        for c in chars.by_ref() {
+                            if ('@'..='~').contains(&c) {
+                                break;
+                            }
                         }
                     }
-                } else {
-                    chars.next();
+                    Some(']' | 'P' | '_' | '^') => {
+                        while let Some(c) = chars.next() {
+                            if c == '\u{7}' || c == '\u{9c}' {
+                                break;
+                            }
+                            if c == '\u{1b}' {
+                                if chars.peek() == Some(&'\\') {
+                                    chars.next();
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
             '\n' => plain.push('\n'),
@@ -970,6 +1054,39 @@ mod tests {
             redact("exit 3 at /usr/lib/node_modules/opencode"),
             "exit 3 at /usr/lib/node_modules/opencode"
         );
+    }
+
+    #[test]
+    fn url_passwords_long_tokens_and_osc_payloads_are_removed() {
+        assert_eq!(
+            redact("fetch https://bob:hunter2@git.example.com/x.git failed"),
+            "fetch https://[redacted]@git.example.com/x.git failed"
+        );
+        assert_eq!(
+            redact("see http://example.com/a@b"),
+            "see http://example.com/a@b"
+        );
+        // Letters only, and base64 with + / =: no digit needed.
+        let letters = "abcdefghijklmnopqrstuvwxyzABCDEFGH";
+        assert_eq!(
+            redact(&format!("token {letters} end")),
+            "token [redacted] end"
+        );
+        assert_eq!(
+            redact("blob aGVsbG8+d29ybGQ/aGVsbG8gd29ybGQgaGVsbG8= ok"),
+            "blob [redacted] ok"
+        );
+        // Paths stay, also long ones.
+        let path = "/Users/me/projects/some-really-long-folder-name/src/main.ts";
+        assert_eq!(redact(path), path);
+        assert_eq!(
+            redact("at node_modules/@opencode-ai/plugin/dist/index.js:12"),
+            "at node_modules/@opencode-ai/plugin/dist/index.js:12"
+        );
+        let raw =
+            b"a\x1b]8;;https://u:p@x/secretlink\x07link\x1b]8;;\x07 b\x1b]0;title sk\x1b\\ c\n";
+        assert_eq!(stderr_tail(raw, None), "alink b c");
+        assert_eq!(stderr_tail("x\u{9d}0;hidden\u{7}y".as_bytes(), None), "xy");
     }
 
     #[test]
