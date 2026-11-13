@@ -1,8 +1,7 @@
 # 0061. Trusting your devices on a machine in one step
-Status: Proposed
+Status: Accepted
 Date: 2026-11-13
-
-Not accepted. Nothing here may be built until the maintainer accepts it in a message of their own.
+Accepted: 2026-11-13 (maintainer's explicit approval in chat: "0061'i onaylıyorum"). The maintainer did not answer the open questions; the proposed answers stand (endorsement lifetime 90 days renewable by use, scope all of the user's machines narrowable by the owner; first device confirmed at enrollment on the machine; WebCrypto stays; names and fingerprints both shown).
 Origin: the maintainer, after using the window end to end for the first time: other machines are connected, but starting an agent on any of them stops at
 "This device is not trusted by that machine yet", and every machine needs a command typed on it.
 
@@ -12,7 +11,7 @@ node to verify a signature it must know the device's public key, and today the o
 machine and per browser. With three machines and a new browser profile that is three commands with a 130-character key each; in practice a person never gets to start
 an agent on another machine. The window's first screen offers "Start an agent" and the first real use ends in a dead end (the start window now at least shows the command with a Copy button).
 
-## Decision (proposed)
+## Decision
 1. **Devices are registered at sign-in.** When a browser signs in (code or passkey) it sends its public key and a name to the hub, which keeps a per-user list of registered devices
    (id, name, public key, created, last used). The hub's list is **only a list of candidates**: it never makes a node trust anything by itself.
 2. **A node trusts the owner's devices at a moment the owner is at the machine.** `agora node enroll` (the owner types the enrollment code on that machine) and a new
@@ -28,7 +27,7 @@ an agent on another machine. The window's first screen offers "Start an agent" a
 5. **The window says what is missing.** "This device" shows which machines trust it (a node reports its trusted device ids; the window compares), and the start window offers
    "Ask another device to approve" instead of a command when an endorsement route exists; the command with Copy stays as the fallback.
 
-## Open questions for the maintainer
+## Open questions (proposed answers stand)
 - Endorsement lifetime (proposed: 90 days, renewable by use) and scope (proposed: all of the user's machines, the owner may narrow).
 - First device on a first machine: proposed answer 2 above (confirm at enrollment on the machine).
 - Should the passkey (WebAuthn) be the device identity instead of a WebCrypto key (ADR-0020 chose WebCrypto)? (Proposed: keep WebCrypto; revisit separately.)
