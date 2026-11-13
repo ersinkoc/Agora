@@ -254,6 +254,8 @@ pub struct AgentView {
     pub project: String,
     pub running: bool,
     pub restarts: u32,
+    /// ADR-0057: the agent on this node that started this one through the mesh.
+    pub parent: Option<AgentId>,
 }
 
 /// One startable agent kind, as reported by [`Supervisor::kinds`].
@@ -312,6 +314,8 @@ pub struct Supervisor {
     abort_hook: Option<AbortHook>,
     sandbox: crate::sandbox::SandboxPolicy,
     adapters: BTreeMap<AgentId, AdapterEntry>,
+    /// ADR-0057: helper -> the agent that started it.
+    parents: BTreeMap<AgentId, AgentId>,
 }
 
 impl Supervisor {
@@ -326,7 +330,18 @@ impl Supervisor {
             abort_hook: None,
             sandbox: Default::default(),
             adapters: BTreeMap::new(),
+            parents: BTreeMap::new(),
         }
+    }
+
+    /// ADR-0057: `child` was started by `parent` (an agent's `agent_start`). Carried in every view of `child`.
+    pub fn set_parent(&mut self, child: &AgentId, parent: &AgentId) {
+        self.parents.insert(child.clone(), parent.clone());
+    }
+
+    /// The node's confinement settings (ADR-0047), for checks that compare two agents' confinement.
+    pub fn sandbox_policy(&self) -> &crate::sandbox::SandboxPolicy {
+        &self.sandbox
     }
 
     /// Installs the hook that gives each launching agent a mesh endpoint.
@@ -1386,6 +1401,7 @@ impl Supervisor {
                 project: e.agent.project.to_string(),
                 running: e.terminal.is_some(),
                 restarts: e.restarts,
+                parent: self.parents.get(id).cloned(),
             })
             .collect();
         out.extend(self.adapters.iter().map(|(id, e)| AgentView {
@@ -1400,6 +1416,7 @@ impl Supervisor {
             project: e.agent.project.to_string(),
             running: e.running,
             restarts: e.restarts,
+            parent: self.parents.get(id).cloned(),
         }));
         out.sort_by(|a, b| a.id.cmp(&b.id));
         out

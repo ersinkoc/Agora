@@ -30,6 +30,7 @@ const HUB_CAPABILITIES: &[&str] = &[
     "workspace.directory",
     "directory.list",
     "board.join",
+    "mesh.spawn",
 ];
 
 pub(crate) fn hub_dir(o: &Opts) -> PathBuf {

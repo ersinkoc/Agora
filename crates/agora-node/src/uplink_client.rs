@@ -32,6 +32,7 @@ pub const CAPABILITIES: &[&str] = &[
     "terminal.raw",
     "workspace.directory",
     "board.join",
+    "mesh.spawn",
     "directory.list",
 ];
 

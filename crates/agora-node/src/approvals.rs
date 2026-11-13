@@ -41,6 +41,37 @@ pub fn signed_message(node_id: &str, approval_id: &str, approved: bool) -> Vec<u
     m
 }
 
+/// The action of an agent's request to start another agent (ADR-0057).
+pub const START_ACTION: &str = "agent.start";
+
+/// What a device signs to decide an `agent.start` request (ADR-0057): the decision, the grant that comes with it, and a hash of the
+/// request exactly as it was announced, so the decision binds what the user was shown (a hub cannot swap the prompt, the folder or
+/// the kind, nor add or strip a grant).
+pub fn start_signed_message(
+    node_id: &str,
+    approval_id: &str,
+    approved: bool,
+    helper_grant: u32,
+    helpers_may_start: bool,
+    detail: &str,
+) -> Vec<u8> {
+    let digest = ring::digest::digest(&ring::digest::SHA256, detail.as_bytes());
+    let hash: String = digest.as_ref().iter().map(|b| format!("{b:02x}")).collect();
+    let mut m = b"agora-approval-start-v1".to_vec();
+    for part in [
+        node_id,
+        approval_id,
+        if approved { "1" } else { "0" },
+        &helper_grant.to_string(),
+        if helpers_may_start { "1" } else { "0" },
+        &hash,
+    ] {
+        m.push(0);
+        m.extend_from_slice(part.as_bytes());
+    }
+    m
+}
+
 /// Which actions need a person. Patterns are exact action names, or a prefix ending in `*`; `*` alone is everything.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Policy {
@@ -160,7 +191,21 @@ impl<V: Verifier> Approvals<V> {
         };
         // Verify before anything changes, and before saying whether the request expired: a peer without a trusted
         // key cannot learn the state of a request it can name (ids are 128 random bits, so it cannot guess one).
-        let msg = signed_message(&self.node_id, &r.approval_id, r.approved);
+        let msg = if p.action == START_ACTION {
+            start_signed_message(
+                &self.node_id,
+                &r.approval_id,
+                r.approved,
+                r.helper_grant,
+                r.helpers_may_start,
+                &p.detail,
+            )
+        } else if r.helper_grant != 0 || r.helpers_may_start {
+            // A grant means something only for a start; on any other request nothing would bind it, so it is refused.
+            return Err(ApprovalError::BadSignature);
+        } else {
+            signed_message(&self.node_id, &r.approval_id, r.approved)
+        };
         if !self
             .verifier
             .verify(&r.signer_device_id, &msg, &r.signature)
@@ -216,6 +261,13 @@ impl<V: Verifier> Approvals<V> {
                 self.pending.remove(&id)
             })
             .collect()
+    }
+
+    /// Withdraws one request (its asker no longer waits for it); the id is spent, so a late decision is refused.
+    pub fn withdraw(&mut self, id: &str) -> Option<Pending> {
+        let p = self.pending.remove(id)?;
+        self.spend(id);
+        Some(p)
     }
 
     fn spend(&mut self, id: &str) {
@@ -374,9 +426,96 @@ pub struct NodeApprovals {
     /// Requests a late decision took out of the queue (refused as expired before the sweep saw them): the next
     /// [`Self::expire`] still tells their agents, which would otherwise wait for an answer forever.
     late: std::sync::Mutex<Vec<(String, agora_core::AgentId, String)>>,
+    /// ADR-0057: live helper grants, kept here beside the approvals that made them so grant listing and revocation (which only
+    /// have the approvals) see them too.
+    helper_grants: std::sync::Mutex<Vec<HelperGrant>>,
+}
+
+/// "This agent may start up to `remaining` more helpers of `kind` in `folder`" (ADR-0057), from a signed decision. It lives in memory
+/// and ends when the asking agent exits or is stopped, or when it is revoked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HelperGrant {
+    /// The approval id that carried it.
+    pub id: String,
+    pub agent: agora_core::AgentId,
+    pub kind: String,
+    pub folder: String,
+    pub remaining: u32,
+    pub helpers_may_start: bool,
+    pub signer_device_id: String,
+}
+
+/// A decision on a request, as [`NodeApprovals::resolve_request`] gives it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Resolution {
+    pub agent: agora_core::AgentId,
+    pub adapter_approval_id: String,
+    pub verdict: Verdict,
+    pub request: Pending,
 }
 
 impl NodeApprovals {
+    /// ADR-0057: records a helper grant (made from a verified decision).
+    pub fn add_helper_grant(&self, g: HelperGrant) {
+        if g.remaining > 0 {
+            self.hg().push(g);
+        }
+    }
+
+    /// Uses one start of a live grant of `agent` for `kind` in `folder`: `Some(helpers_may_start)` if one covered it.
+    pub fn use_helper_grant(
+        &self,
+        agent: &agora_core::AgentId,
+        kind: &str,
+        folder: &str,
+    ) -> Option<bool> {
+        let mut grants = self.hg();
+        let g = grants.iter_mut().find(|g| {
+            g.agent == *agent && g.kind == kind && g.folder == folder && g.remaining > 0
+        })?;
+        g.remaining -= 1;
+        let nested = g.helpers_may_start;
+        grants.retain(|g| g.remaining > 0);
+        Some(nested)
+    }
+
+    /// Every live helper grant, as `GrantList` shows them.
+    pub fn helper_grants(&self) -> Vec<HelperGrant> {
+        self.hg().clone()
+    }
+
+    /// Ends one helper grant (`GrantRevoke`); `false` if there was none with that id.
+    pub fn revoke_helper_grant(&self, id: &str) -> bool {
+        let mut grants = self.hg();
+        let before = grants.len();
+        grants.retain(|g| g.id != id);
+        grants.len() != before
+    }
+
+    /// The agent exited or was stopped: its grants end with it.
+    pub fn end_helper_grants(&self, agent: &agora_core::AgentId) {
+        self.hg().retain(|g| g.agent != *agent);
+    }
+
+    fn hg(&self) -> std::sync::MutexGuard<'_, Vec<HelperGrant>> {
+        self.helper_grants.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// An agent asks to start another (ADR-0057). Returns the pending request to announce, or `None` if no safe id could be made.
+    pub fn request_start(
+        &self,
+        agent: &agora_core::AgentId,
+        detail: &str,
+        now_ms: u64,
+    ) -> Option<Pending> {
+        let p = self
+            .q()
+            .request(agent.as_str(), START_ACTION, detail, now_ms, 0)?;
+        self.r()
+            .insert(p.id.clone(), (agent.clone(), String::new()));
+        Some(p)
+    }
+
     /// Limits which requests each device may answer (`device.<id>.projects` in the policy file).
     pub fn set_limits(&self, limits: std::sync::Arc<crate::limits::DeviceLimits>) {
         *self.limits.lock().unwrap_or_else(|e| e.into_inner()) = Some(limits);
@@ -389,6 +528,7 @@ impl NodeApprovals {
             trust_file: std::sync::Mutex::new(None),
             limits: std::sync::Mutex::new(None),
             late: std::sync::Mutex::new(Vec::new()),
+            helper_grants: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -464,6 +604,16 @@ impl NodeApprovals {
         r: &ApprovalResolve,
         now_ms: u64,
     ) -> Result<(agora_core::AgentId, String, Verdict), ApprovalError> {
+        self.resolve_request(r, now_ms)
+            .map(|x| (x.agent, x.adapter_approval_id, x.verdict))
+    }
+
+    /// Like [`Self::resolve`], with the request that was decided (its action and detail).
+    pub fn resolve_request(
+        &self,
+        r: &ApprovalResolve,
+        now_ms: u64,
+    ) -> Result<Resolution, ApprovalError> {
         self.reload_trust_if_changed();
         // Before anything is consumed: a device limited to other projects cannot answer this agent's request. The ids are 128
         // random bits, so only someone who already knows one learns that it exists.
@@ -478,7 +628,7 @@ impl NodeApprovals {
             }
         }
         let resolved = self.q().resolve(r, now_ms);
-        let (_, verdict) = match resolved {
+        let (request, verdict) = match resolved {
             Ok(v) => v,
             Err(ApprovalError::Expired) => {
                 // The queue dropped the request, so the sweep will not see it: hand its route to the next sweep instead.
@@ -491,7 +641,12 @@ impl NodeApprovals {
         };
         let route = self.r().remove(&r.approval_id);
         route
-            .map(|(agent, id)| (agent, id, verdict))
+            .map(|(agent, adapter_approval_id)| Resolution {
+                agent,
+                adapter_approval_id,
+                verdict,
+                request,
+            })
             .ok_or(ApprovalError::Unknown)
     }
 
@@ -516,6 +671,13 @@ impl NodeApprovals {
         for p in gone {
             routes.remove(&p.id);
         }
+    }
+
+    /// Withdraws one request (ADR-0057: the agent that asked to start a helper stopped waiting).
+    pub fn withdraw(&self, id: &str) {
+        self.l().retain(|(i, _, _)| i != id);
+        self.q().withdraw(id);
+        self.r().remove(id);
     }
 
     pub fn pending_count(&self) -> usize {
@@ -590,6 +752,71 @@ mod tests {
         // The same signed message again is a replay: refused.
         assert_eq!(a.resolve(&r, 2001), Err(ApprovalError::Unknown));
         assert!(a.was_spent(&p.id));
+    }
+
+    #[test]
+    fn a_start_decision_binds_the_request_and_the_grant() {
+        let mut a = approvals();
+        let detail = r#"{"kind":"codex","prompt":"fix the tests"}"#;
+        let p = a.request("agent-1", START_ACTION, detail, 0, 0).unwrap();
+        let mut r = resolve_msg(&p.id, true, "phone", "s3cret", "node-1");
+        // The plain approval message does not decide a start.
+        assert_eq!(a.resolve(&r, 1), Err(ApprovalError::BadSignature));
+        // A decision over another request (a swapped prompt), or with another grant, does not either.
+        let swapped = start_signed_message("node-1", &p.id, true, 0, false, "{}");
+        r.signature = sign("s3cret", &swapped);
+        assert_eq!(a.resolve(&r, 1), Err(ApprovalError::BadSignature));
+        r.signature = sign(
+            "s3cret",
+            &start_signed_message("node-1", &p.id, true, 2, false, detail),
+        );
+        assert_eq!(a.resolve(&r, 1), Err(ApprovalError::BadSignature));
+        r.helper_grant = 2;
+        r.helpers_may_start = true;
+        assert_eq!(a.resolve(&r, 1), Err(ApprovalError::BadSignature));
+        r.helpers_may_start = false;
+        assert_eq!(a.resolve(&r, 1).unwrap().1, Verdict::Approved);
+    }
+
+    #[test]
+    fn a_grant_on_another_kind_of_request_is_refused() {
+        let mut a = approvals();
+        let p = a.request("agent-1", "write_file", "x", 0, 0).unwrap();
+        let mut r = resolve_msg(&p.id, true, "phone", "s3cret", "node-1");
+        r.helper_grant = 3;
+        assert_eq!(a.resolve(&r, 1), Err(ApprovalError::BadSignature));
+        assert_eq!(a.pending().count(), 1);
+    }
+
+    #[test]
+    fn helper_grants_are_used_up_revoked_and_end_with_their_agent() {
+        let n = NodeApprovals::new("node-1", Box::new(DenyAll));
+        let me = agora_core::AgentId::new("a");
+        let grant = |id: &str| HelperGrant {
+            id: id.into(),
+            agent: me.clone(),
+            kind: "codex".into(),
+            folder: "/w".into(),
+            remaining: 2,
+            helpers_may_start: false,
+            signer_device_id: "phone".into(),
+        };
+        n.add_helper_grant(grant("g1"));
+        assert_eq!(n.use_helper_grant(&me, "codex", "/other"), None);
+        assert_eq!(n.use_helper_grant(&me, "claude", "/w"), None);
+        assert_eq!(
+            n.use_helper_grant(&agora_core::AgentId::new("b"), "codex", "/w"),
+            None
+        );
+        assert_eq!(n.use_helper_grant(&me, "codex", "/w"), Some(false));
+        assert_eq!(n.use_helper_grant(&me, "codex", "/w"), Some(false));
+        assert_eq!(n.use_helper_grant(&me, "codex", "/w"), None);
+        n.add_helper_grant(grant("g2"));
+        assert!(n.revoke_helper_grant("g2"));
+        assert!(n.helper_grants().is_empty());
+        n.add_helper_grant(grant("g3"));
+        n.end_helper_grants(&me);
+        assert!(n.helper_grants().is_empty());
     }
 
     #[test]

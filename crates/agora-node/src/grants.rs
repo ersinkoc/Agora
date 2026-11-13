@@ -350,15 +350,36 @@ impl Grants {
         Ok(())
     }
 
+    /// Live grants, then live helper grants (ADR-0057: `mesh.agent_start` for one agent, ending with it).
     pub fn list(&self, now_ms: u64) -> Vec<v1::GrantInfo> {
-        let mut st = self.st();
-        st.live.retain(|x| x.expires_at_ms > now_ms);
-        st.live.clone()
+        let mut out = {
+            let mut st = self.st();
+            st.live.retain(|x| x.expires_at_ms > now_ms);
+            st.live.clone()
+        };
+        out.extend(
+            self.approvals
+                .helper_grants()
+                .into_iter()
+                .map(|g| v1::GrantInfo {
+                    grant_id: g.id,
+                    scope: format!("agent:{}", g.agent.as_str()),
+                    commands: vec!["mesh.agent_start".into()],
+                    expires_at_ms: 0,
+                    signer_device_id: g.signer_device_id,
+                    kind: g.kind,
+                    folder: g.folder,
+                    remaining: g.remaining,
+                }),
+        );
+        out
     }
 
-    /// Ends a grant. An id that is not live is not an error (ending access is always allowed and idempotent).
+    /// Ends a grant, or a helper grant by its approval id. An id that is not live is not an error (ending access is always allowed
+    /// and idempotent).
     pub fn revoke(&self, grant_id: &str) {
         self.st().live.retain(|x| x.grant_id != grant_id);
+        self.approvals.revoke_helper_grant(grant_id);
     }
 
     /// Lets a routed command through, or refuses it with `approval.grant_required`. Commands the policy does not list pass.
