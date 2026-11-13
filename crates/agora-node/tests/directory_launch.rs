@@ -687,6 +687,12 @@ fn a_resync_announces_the_nodes_present() {
     }))
     .unwrap()
     .unwrap();
+    // The stop is asynchronous: an agent that has not exited yet still runs, and is rightly announced. Wait for its end.
+    wait_for_event(
+        node,
+        "exit",
+        |b| matches!(b, Body::AgentExited(x) if x.agent_id == ended.agent_id),
+    );
 
     let mark = node.events.next_seq() - 1;
     node.events.announce();
