@@ -3,6 +3,7 @@
 //! Events go to the durable buffer (`event_buffer`) as protocol `Event`s; with no hub connected they are
 //! simply retained (size-capped) until one acknowledges them. Agents never depend on any of this succeeding.
 
+use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -27,6 +28,8 @@ use crate::terminal::TerminalOptions;
 const TICK: Duration = Duration::from_millis(100);
 /// How often each agent's workspace is checked for uncommitted changes.
 const GIT_POLL: Duration = Duration::from_secs(5);
+/// In the event buffer's folder: the producer (node id) whose events the log holds.
+const PRODUCER_FILE: &str = "producer";
 /// Default size cap of the on-disk event buffer.
 pub const EVENT_BUFFER_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -123,6 +126,18 @@ pub struct EventSink {
     reported: Mutex<Reported>,
     /// The `seq` of the last `NodeOnline` recorded, 0 for none (ADR-0055: a resync says `NodeOnline` only when the hub lost it).
     last_online: AtomicU64,
+    /// See [`EventSink::set_aside`].
+    set_aside: Option<SetAside>,
+}
+
+/// An event log found at start whose unacknowledged events name another producer (for example `local`, from runs before the node
+/// was enrolled). It was renamed, never deleted, and is not sent to the hub.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetAside {
+    /// The producer its events name.
+    pub old_id: String,
+    /// Where the old log is now.
+    pub path: PathBuf,
 }
 
 /// ADR-0058: an adapter's currency as an upper-case three-letter code, or `None` for anything else.
@@ -172,14 +187,51 @@ impl EventSink {
     }
 
     /// Like [`open`](Self::open) with an explicit size cap for the buffer, in bytes.
+    ///
+    /// One log holds the events of one producer. When events not yet acknowledged name another producer (the node ran as
+    /// `local` before it was enrolled, or under another name), they must never be replayed: the hub refuses events that name
+    /// another node than the certificate. The old log is set aside (renamed, never deleted, see [`DiskEventLog::set_aside`]) and
+    /// a fresh one starts; [`set_aside`](Self::set_aside) says so.
     pub fn open_with_cap(dir: &Path, producer: &str, max_bytes: u64) -> io::Result<Self> {
+        let mut log = DiskEventLog::open(dir, max_bytes)?;
+        // Whose log this is: the `producer` file says so (its events may all be acknowledged and compacted away, but the numbering
+        // still belongs to that name); a log from before the file existed is judged by any event it still holds.
+        let recorded = fs::read_to_string(dir.join(PRODUCER_FILE))
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty() && s != producer);
+        let foreign = match recorded {
+            Some(old) => Some(old),
+            None => log
+                .find_retained(|p| v1::Event::decode(p).is_ok_and(|e| e.producer_id != producer))?
+                .and_then(|p| v1::Event::decode(p.as_slice()).ok())
+                .map(|e| e.producer_id),
+        };
+        let mut set_aside = None;
+        if let Some(old_id) = foreign.filter(|_| !log.is_pristine()) {
+            let secs = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs());
+            let path = log.set_aside(&old_id, secs)?;
+            log = DiskEventLog::open(dir, max_bytes)?;
+            set_aside = Some(SetAside { old_id, path });
+        }
+        let tmp = dir.join(format!("{PRODUCER_FILE}.tmp"));
+        fs::write(&tmp, producer)?;
+        fs::rename(&tmp, dir.join(PRODUCER_FILE))?;
         Ok(Self {
             producer: producer.to_string(),
-            log: Mutex::new(DiskEventLog::open(dir, max_bytes)?),
+            log: Mutex::new(log),
             announcer: Mutex::new(None),
             reported: Mutex::new(Reported::default()),
             last_online: AtomicU64::new(0),
+            set_aside,
         })
+    }
+
+    /// The log this sink found at open and set aside because its events name another producer, if it did.
+    pub fn set_aside(&self) -> Option<&SetAside> {
+        self.set_aside.as_ref()
     }
 
     /// What this node says about itself when the hub's record of it cannot be continued (see [`announce`](Self::announce)).
@@ -916,6 +968,8 @@ pub struct Node {
     node_id: String,
     /// Manifests that could not be loaded, as `(path, reason)` for the log.
     pub manifest_problems: Vec<(PathBuf, String)>,
+    /// The event log found at start that named another node and was set aside instead of being sent to the hub, for the log.
+    pub events_set_aside: Option<SetAside>,
 }
 
 impl Node {
@@ -1262,6 +1316,7 @@ impl Node {
                 .name("agora-git".into())
                 .spawn(move || watch_git(&sup, &ev, &stop, &git_wake))?
         };
+        let events_set_aside = events.set_aside().cloned();
         Ok(Self {
             server: Some(server),
             stop,
@@ -1275,6 +1330,7 @@ impl Node {
             spawner,
             node_id: cfg.node_id.clone(),
             manifest_problems,
+            events_set_aside,
         })
     }
 

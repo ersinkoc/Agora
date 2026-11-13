@@ -420,6 +420,18 @@ fn node_run(say: &Say, o: &Opts) -> ExitCode {
     for (path, reason) in &node.manifest_problems {
         eprintln!("{}: {reason}", path.display());
     }
+    // Events recorded under another name (before enrollment, as `local`) are never sent to the hub, which would refuse them: kept
+    // on disk under a new name, and said here so nothing is lost silently.
+    if let Some(s) = &node.events_set_aside {
+        say.err(
+            key!("cli-node-events-set-aside"),
+            &[
+                ("node_id", cfg.node_id.clone().into()),
+                ("old_id", s.old_id.clone().into()),
+                ("path", s.path.display().to_string().into()),
+            ],
+        );
+    }
     say.out(
         key!("cli-node-listening"),
         &[("socket", cfg.socket.display().to_string().into())],

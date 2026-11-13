@@ -29,6 +29,7 @@ cli-usage =
       agora adapter install AD [--registry URL] [--root-key DOSYA] [--yes] | update [AD] | list | remove AD
       agora doctor [--data DİZİN] [--manifests DİZİN] [--socket YOL]
 cli-node-listening = Düğüm çalışıyor. Denetim soketi: { $socket }
+cli-node-events-set-aside = Bu makine { $node_id } olarak bağlanmadan önce ({ $old_id } adıyla) kaydedilen olaylar bir kenara ayrıldı ve hub'a gönderilmeyecek: { $path }
 cli-agent-started = { $agent_id } ajanı { $worktree } içinde başlatıldı
 cli-agent-stopped = { $agent_id } ajanı durduruldu
 cli-agent-prompted = İstem { $agent_id } ajanına gönderildi

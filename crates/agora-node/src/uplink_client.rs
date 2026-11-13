@@ -208,7 +208,11 @@ pub enum LinkError {
 
 impl From<TransportError> for LinkError {
     fn from(e: TransportError) -> Self {
-        Self::Transport(e.to_string())
+        match e {
+            // The hub ended the connection saying why (for example `protocol.producer_mismatch`): logged as that code.
+            TransportError::Refused(code) => Self::Refused(code),
+            e => Self::Transport(e.to_string()),
+        }
     }
 }
 

@@ -4,6 +4,8 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+### Machines
+- A machine whose node ran before it was enrolled now links to the hub. Before, the node sent the hub the events it had recorded under the name `local`, the hub dropped the connection without a word, and the node only logged "connection reset", forever. Now the node sets those events aside whenever it starts under another name than the one its log was recorded under (enrolled after running as `local`, enrolled again under a new name, or running un-enrolled again) (the old log is renamed to `events.<old name>.<time>.log` beside the new one, never deleted, and the node says so when it starts), and a hub that refuses events naming another machine closes the connection with the code `protocol.producer_mismatch`, which the node logs (`hub link: Refused("protocol.producer_mismatch")`).
 ### Modes and models
 - A confirmation to let an agent act without asking stays with the agent it was opened for: switching to another agent closes it, and "Switch anyway" can no longer reach a different agent (two machines' `agent-1` included).
 - A mode or model the agent did not report as current shows "Not reported" instead of preselecting the first one in the list.

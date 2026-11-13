@@ -3,7 +3,8 @@
 //! logic is testable without sockets. The producer id comes from the authenticated identity, never from the
 //! node's own messages.
 //!
-//! Order: `hello` → `resume` → (`event` | `snapshot_required`)*. Anything out of order is `protocol.invalid_message`.
+//! Order: `hello` → `resume` → (`event` | `snapshot_required`)*. Anything out of order is `protocol.invalid_message`; an event that
+//! names another producer than the certificate is `protocol.producer_mismatch`.
 //!
 //! `SnapshotRequired` from the node (ADR-0054) says it cannot replay from where the hub asked: the next event above what the
 //! hub holds becomes the new base of this producer's numbering, once, and the skipped numbers are recorded as lost.
@@ -128,8 +129,14 @@ impl<'a, S: EventStore> NodeSession<'a, S> {
             return Err(invalid("event"));
         }
         let ev = Event::decode(payload).map_err(|_| invalid("event"))?;
+        // Its own name or nothing: a node's buffer from before enrollment (`local`) or under another name is refused with a code
+        // that says so, which the transport sends as its close reason.
         if ev.producer_id != self.producer {
-            return Err(invalid("producer_id"));
+            let shown: String = ev.producer_id.chars().take(64).collect();
+            return Err(Error::new(ErrorCode::ProtocolProducerMismatch)
+                .with("node_id", self.producer.as_str())
+                .with("producer_id", shown.as_str())
+                .into());
         }
         if ev.seq == 0 {
             return Err(invalid("seq"));
@@ -315,7 +322,7 @@ mod tests {
         let mut s = ready(&store, &sup, "n");
         assert_eq!(
             code(s.event(&event("other", 1)).unwrap_err()),
-            ErrorCode::ProtocolInvalidMessage
+            ErrorCode::ProtocolProducerMismatch
         );
         assert_eq!(store.acked("other").unwrap(), 0);
     }
