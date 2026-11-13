@@ -225,8 +225,9 @@ mod tests {
         assert_eq!(by["antigravity-acp"], Some("agy"));
         // The embedded text is the whole file: ADR-0059 launch options come along.
         for l in &loaded {
-            let file = std::fs::read_to_string(shipped_dir().join(format!("{}.toml", l.manifest.kind)))
-                .unwrap_or_default();
+            let file =
+                std::fs::read_to_string(shipped_dir().join(format!("{}.toml", l.manifest.kind)))
+                    .unwrap_or_default();
             if file.contains("[[launch.option]]") {
                 assert!(!l.manifest.launch.option.is_empty(), "{}", l.manifest.kind);
             }
