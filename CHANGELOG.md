@@ -5,12 +5,39 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 ## Next
 
 ### Agents
+- A structured (ACP) agent that is not confined keeps the user's temporary folder (on Windows it no longer drops temp files in the profile root); a confined one gets its own private one. A terminal resized to the size it already has is left alone, which stops a fresh Git `sh` on Windows from sometimes losing the first key typed.
+
+### Agents
+- Agents started in structured (ACP) mode now find their own configuration and login: the node passes on the variables that name the user's folders (`HOME`, `USERPROFILE`, `APPDATA`, `XDG_*`, language and terminal settings) and still passes no API key or token. Before, they ran with only `PATH`.
+
+### Activity
+- Each row on the Activity page names the session that did it (`session 6ee82d`), so two windows or devices of the same person can be told apart. The sign-in row has the same id, so you can see how that session signed in.
+
+### ACP agents
+- The ACP bridge no longer ends a failed turn as a silent success: a turn the agent answered with an error, stopped itself (for example a refusal), or ended without saying anything carries a reason code (`adapter.turn_failed`, `adapter.turn_stopped`, `adapter.turn_empty`) in its closing state and in a log line. Showing it in the conversation still needs a protocol addition.
+- An ACP agent that exits is reported with the stage it was in, its exit code and a short tail of its error output with secrets removed (`adapter.agent_exited`). One that dies before it is initialized answers the node's `initialize` with that reason instead of just ending.
+- The running cost an ACP agent reports (`usage_update`) becomes a usage report of how much it grew, with the agent's model; the bridge declares `usage`.
+- ADR-0058, protocol and node: those reasons now reach the conversation as notices (a code and parameters, rendered by the clients in your language). An ACP agent that dies or refuses while starting makes `agent start` fail with that reason (`adapter.agent_exited` with the step, exit code and a short, secret-free tail of its errors; `adapter.agent_refused`) instead of "Something went wrong". The modes and models an agent offers are recorded, and a node switches between them on `agent.set_mode` / `agent.set_model` (only ids the agent offered; never sent to a node or agent that cannot). Usage reports carry how full the agent's context is and its own cost, which the cost view uses in place of an estimate. The windows do not show these yet.
+- A failed or empty ACP turn's notice carries what the agent wrote to its error output during that turn (an expired login, a provider's refusal); `opencode-acp` now asks opencode for those errors (`--print-logs --log-level ERROR`). Error output no longer shows your home folder's path even though the bridge runs without `HOME`: any `/Users/<name>`, `/home/<name>`, `/root` or `C:\Users\<name>` becomes `~`.
+
+### Approvals
+- An agent shown full size now shows what it waits on with Allow and Deny right there; before, it said "Needs you" and the answer could only be given from the window.
+
+### Agents
 - New `opencode-acp` and `antigravity-acp` kinds start opencode and Antigravity (`agy acp`) as structured (ACP) agents. Both were written from the programs' own `--help` and still need a run against the real programs.
 
 ### Machines
 - `agora panel` on a machine that runs a node says where the hub's panel is and which certificate to trust, so the panel is reachable from every machine of the hub (ADR-0056). You still sign in with a code from `agora hub login`.
+
 ### Agents working together
 - An agent connected to the mesh is now told what the mesh is for: who it can see (`agents_list`), how to message and ask others, share tasks and hand work over, and lease files before editing them. It is also told it cannot start other agents from there.
+
+### Agents that start agents
+- An agent can ask to start a helper agent for a piece of work (ADR-0057). Nothing starts until you approve the request, which shows the asking agent, the kind, the folder and the whole first prompt. You can allow a few more helpers of that kind in that folder while the agent runs, and revoke that permission at any time.
+- The asking agent can wait for its helper and read the last lines of its screen. A helper works only in its parent's folder (or a worktree of it) unless you approve another folder.
+- Limits: 3 running helpers per agent; by default a helper cannot start helpers of its own.
+- On a machine that offers this, an agent's mesh instructions tell it about `agent_start` instead of saying it cannot start agents. A helper's first prompt is typed only once its screen is idle, never into a trust or permission question, and a prompt that would run a command in the agent itself (`!`, `/`, `#`) is refused. No "more like this" permission is offered for a shell.
+- The web window and the terminal client show helpers under the agent that started them ("started by …"); the web window lists what an agent may still start without asking, with a Revoke button. In the terminal client, stopping an agent with helpers asks whether they stop too.
 
 ## 0.3.6
 

@@ -38,6 +38,14 @@ mesh-body_too_large = Mesaj çok büyük (sınır: { $limit }). Bunun yerine bir
 mesh-too_many_refs = Çok fazla referans var (sınır: { $limit }).
 mesh-too_many_asks = Yanıt bekleyen çok fazla soru var (sınır: { $limit }).
 mesh-timeout = Zamanında yanıt gelmedi.
+mesh-folder_not_allowed = Yardımcı yalnızca isteyen ajanın kendi klasöründe çalışabilir: { $folder } bunun dışında.
+mesh-helper_limit = Ajan şu anda başka bir yardımcı başlatamaz (sınır: { $limit }). { $rule ->
+        [depth] Bir yardımcı kendi yardımcılarını başlatamaz.
+        [pending] Başka bir başlatma hâlâ yanıtınızı bekliyor.
+        [prompt] İlk istemi çok uzun.
+       *[other] Zaten izin verilen sayıda yardımcı çalıştırıyor.
+    }
+mesh-start_denied = Başlatma reddedildi ({ $approval_id }).
 task-not_found = { $task_id } görevi bulunamadı.
 task-not_open = { $task_id } görevi zaten alınmış veya bitmiş.
 task-blocked = { $task_id } görevi { $depends_on } görevini bekliyor.
@@ -49,4 +57,7 @@ files-too_large = { $path } çok büyük (sınır: { $limit }).
 files-outside_root = { $path } proje klasörünün dışında.
 adapter-signature_invalid = { $package } paketi doğrulanamadı.
 adapter-crashed = { $kind } beklenmedik şekilde durdu (çıkış kodu { $exit_code }).
+adapter-agent_exited = Ajan hazır olmadan kapandı (adım { $stage }, çıkış kodu { $exit_code }). Son çıktısı: { $stderr_tail }
+adapter-agent_refused = Ajan başlamayı reddetti (adım { $stage }).
+adapter-option_refused = Ajan { $id } seçeneğine geçmedi.
 internal = Bir şeyler ters gitti. Olay numarası: { $incident_id }.

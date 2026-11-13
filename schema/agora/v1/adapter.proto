@@ -21,7 +21,8 @@ message InitializeResult {
   string adapter_name = 1;
   string version = 2;
   string agent_kind = 3;
-  // chat, terminal, diff, approvals, plan, resume, usage, cancel, mesh.deliver
+  // chat, terminal, diff, approvals, plan, resume, usage, cancel, mesh.deliver; set_mode and set_model (ADR-0058: the adapter
+  // takes "session/set_option" for that kind)
   repeated string capabilities = 4;
 }
 
@@ -86,6 +87,22 @@ message MeshDeliverParams {
   string body = 4;
 }
 
+// ADR-0058.
+enum SessionOptionKind {
+  SESSION_OPTION_KIND_UNSPECIFIED = 0;
+  SESSION_OPTION_KIND_MODE = 1;
+  SESSION_OPTION_KIND_MODEL = 2;
+}
+
+// method "session/set_option" (ADR-0058): switch the session to one of the modes or models the adapter reported in
+// "session/options". Sent only to an adapter that declared `set_mode` (for a mode) or `set_model` (for a model). The answer is an
+// empty result once the agent took it, or an error whose `data` is `{code, params}` (docs/specs/adapter-protocol.md).
+message SessionSetOptionParams {
+  string session_id = 1;
+  SessionOptionKind kind = 2;
+  string id = 3;
+}
+
 // ---- adapter -> node ----
 
 // method "state/update" (notification)
@@ -115,6 +132,13 @@ message DiffItem {
   string unified_diff = 2;
 }
 
+// ADR-0058: something a person should know about the conversation (a turn that failed, the agent exiting). Never text: a stable
+// `code` (`adapter.turn_failed`, ...) and string `params`; clients render it from their locale files.
+message NoticeItem {
+  string code = 1;
+  map<string, string> params = 2;
+}
+
 // method "chat/append" (notification): one structured transcript item.
 message ChatAppendParams {
   string session_id = 1;
@@ -123,6 +147,8 @@ message ChatAppendParams {
     ToolCallItem tool_call = 3;
     PlanItem plan = 4;
     DiffItem diff = 5;
+    // ADR-0058
+    NoticeItem notice = 6;
   }
 }
 
@@ -144,6 +170,20 @@ message UsageReportParams {
   // Reported cost in micro-units of `currency`, when the agent reports one.
   optional uint64 cost_micros = 5;
   string currency = 6;
+  // ADR-0058: how many tokens the agent's context holds now, and how many it can hold; 0 when not reported. A level, not a
+  // growth like the token counts above.
+  uint64 context_tokens = 7;
+  uint64 context_window = 8;
+}
+
+// method "session/options" (notification, ADR-0058): the modes and models the agent offers and the ones in use. Sent when the
+// session starts and whenever one of them changes; each one replaces the last.
+message SessionOptionsParams {
+  string session_id = 1;
+  repeated SessionOption modes = 2;
+  repeated SessionOption models = 3;
+  string current_mode = 4;
+  string current_model = 5;
 }
 
 // method "session/reported" (notification): the agent's own session id, for resume.

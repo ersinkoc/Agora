@@ -1,3 +1,6 @@
+import { StartApproval, type StartChoice } from './components/StartApproval';
+import { HelperGrants } from './components/HelperGrants';
+import { ApprovalBanner } from './components/ApprovalBanner';
 import { AgentAddress } from './components/AgentAddress';
 import { LanguagePicker } from './components/LanguagePicker';
 import { ThemePicker } from './components/ThemePicker';
@@ -8,10 +11,10 @@ import { AttentionStrip } from './components/AttentionStrip';
 import { Icon } from './components/Icon';
 import { NetworkView } from './components/NetworkView';
 import { StateBadge } from './components/StateBadge';
-import type { MachineModel, MessageModel, ProjectCost } from './net/view';
+import type { ApprovalModel, MachineModel, MessageModel, ProjectCost } from './net/view';
 import type { Device } from './net/approval';
 import { money, type UsageSummary } from './net/usage';
-import { demoAgents } from './fixtures';
+import { demoAgents, demoHelper, demoStartApproval } from './fixtures';
 import { demoSource, type TerminalSource } from './terminal/source';
 import { Suspense, lazy, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { actionKey, outcomeKind, type AuditResult } from './net/audit';
@@ -53,6 +56,10 @@ function Themed({ theme }: { theme: 'dark' | 'light' }) {
       <AttentionStrip agents={needsAttention(demoAgents)} />
       <div className="fleet">{demoAgents.map((a) => <AgentTile key={a.id} agent={a} />)}</div>
       <Messages messages={demoMessages} />
+      <div className="fleet"><AgentTile agent={demoHelper} /></div>
+      <AgentAddress agent={{ ...demoHelper, machineId: 'laptop', id: 'laptop/a8' }} />
+      <StartApproval approval={demoStartApproval} start={demoStartApproval.start} onResolve={() => {}} />
+      <HelperGrants list={async () => [{ id: 'ap-1', kind: 'codex', folder: '/home/dev/code/login-fix', remaining: 2 }]} revoke={async () => {}} refresh={0} />
       <div className="gallery__row">
         <button type="button" className="button button--primary">{t('action-start-agent')}</button>
         <button type="button" className="button">{t('action-open')}</button>
@@ -73,8 +80,11 @@ export function Gallery() {
 }
 
 // Focus: one agent, full size. The terminal arrives with the hub connection; until then a placeholder.
-export function Focus({ agent, source: live, costMicroUsd, chatSource, sendPrompt, onBack }: {
+export function Focus({ agent, approvals = [], onResolve, source: live, costMicroUsd, chatSource, sendPrompt, onBack }: {
   agent: AgentTileModel | undefined;
+  // What this agent waits on, answered here as in the window (an agent shown full size must not be left waiting).
+  approvals?: readonly ApprovalModel[];
+  onResolve?: (approval: ApprovalModel, approved: boolean, choice?: StartChoice) => void;
   costMicroUsd?: number;
   source?: TerminalSource;
   chatSource?: ChatSource;
@@ -107,6 +117,7 @@ export function Focus({ agent, source: live, costMicroUsd, chatSource, sendPromp
         <ThemePicker />
       </header>
       <main className="flex min-h-0 min-w-0 flex-col">
+        {approvals.filter((x) => x.agentId === agent.id).map((x) => <ApprovalBanner key={x.id} approval={x} onResolve={onResolve} />)}
         <AgentAddress key={agent.id} agent={agent} />
         <div className="pane min-h-0 flex-1 bg-surface-0 p-1.5" aria-label={agent.terminal === false ? t('chat-log') : t('focus-terminal')}>
           {agent.terminal === false ? <PromptBox agent={agent} source={chatSource} send={sendPrompt} /> : (
@@ -185,6 +196,7 @@ export function AuditPage({ load, onBack }: { load: (who: string) => Promise<Aud
             <li key={r.id} className="machine">
               <span className="muted">{new Date(r.atMs).toLocaleString()}</span>
               <strong>{r.who}</strong>
+              {r.session ? <span className="muted mono" title={t('audit-session-hint')}>{t('audit-session', { id: r.session })}</span> : null}
               <span>{actionLabel(r.action)}</span>
               {r.node ? <span className="muted mono">{r.node}</span> : null}
               {/* A change to the team carries the role in its outcome, which is a detail and not a result. */}

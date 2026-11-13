@@ -11,6 +11,8 @@ pub struct Entry {
     pub id: i64,
     pub at_ms: u64,
     pub who: String,
+    /// The session that did it (L16): a short id of its token, `""` for the hub itself and for rows written before.
+    pub session: String,
     pub action: String,
     pub node: String,
     pub outcome: String,
@@ -33,7 +35,8 @@ impl<'a> Audit<'a> {
         Self { store }
     }
 
-    /// Appends a row and returns its id. `outcome` is `sent` for a command still on its way (see [`Self::finish`]), else what ended it.
+    /// Appends a row that no session made (the hub itself, the command line) and returns its id. `outcome` is `sent` for a command
+    /// still on its way (see [`Self::finish`]), else what ended it.
     pub fn record(
         &self,
         at_ms: u64,
@@ -42,10 +45,23 @@ impl<'a> Audit<'a> {
         node: &str,
         outcome: &str,
     ) -> Result<i64, StoreError> {
+        self.record_in("", at_ms, who, action, node, outcome)
+    }
+
+    /// [`Self::record`] for a row a session made: `session` is its [`session_id`].
+    pub fn record_in(
+        &self,
+        session: &str,
+        at_ms: u64,
+        who: &str,
+        action: &str,
+        node: &str,
+        outcome: &str,
+    ) -> Result<i64, StoreError> {
         let conn = self.store.lock()?;
         conn.execute(
-            "INSERT INTO audit (at_ms, who, action, node, outcome) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![to_i64(at_ms), who, action, node, outcome],
+            "INSERT INTO audit (at_ms, who, session, action, node, outcome) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![to_i64(at_ms), who, session, action, node, outcome],
         )
         .map_err(db)?;
         Ok(conn.last_insert_rowid())
@@ -72,7 +88,7 @@ impl<'a> Audit<'a> {
         let conn = self.store.lock()?;
         let mut st = conn
             .prepare(
-                "SELECT id, at_ms, who, action, node, outcome FROM (
+                "SELECT id, at_ms, who, session, action, node, outcome FROM (
                      SELECT * FROM audit WHERE at_ms >= ?1 AND (?2 IS NULL OR who = ?2) ORDER BY id DESC LIMIT ?3
                  ) ORDER BY id",
             )
@@ -89,9 +105,10 @@ impl<'a> Audit<'a> {
                         id: r.get(0)?,
                         at_ms: u64::try_from(r.get::<_, i64>(1)?).unwrap_or(0),
                         who: r.get(2)?,
-                        action: r.get(3)?,
-                        node: r.get(4)?,
-                        outcome: r.get(5)?,
+                        session: r.get(3)?,
+                        action: r.get(4)?,
+                        node: r.get(5)?,
+                        outcome: r.get(6)?,
                     })
                 },
             )
@@ -111,9 +128,19 @@ impl<'a> Audit<'a> {
 }
 
 /// One row as JSON.
+/// A short id of a session for the audit trail: the first 6 hex digits of its token's hash. It tells two sessions apart on the page
+/// and says nothing about the token (L16).
+pub fn session_id(token_hash: &[u8]) -> String {
+    token_hash
+        .iter()
+        .take(3)
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
 pub fn json_value(e: &Entry) -> serde_json::Value {
     serde_json::json!({
-        "id": e.id, "at_ms": e.at_ms, "who": e.who, "action": e.action, "node": e.node, "outcome": e.outcome,
+        "id": e.id, "at_ms": e.at_ms, "who": e.who, "session": e.session, "action": e.action, "node": e.node, "outcome": e.outcome,
     })
 }
 

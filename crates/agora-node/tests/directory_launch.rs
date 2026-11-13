@@ -197,6 +197,7 @@ fn two_sessions_use_the_selected_dirty_subfolder_and_preserve_user_configuration
     for id in [&a.agent_id, &b.agent_id] {
         c.call(Cmd::AgentStop(v1::AgentStop {
             agent_id: id.to_string(),
+            stop_helpers: false,
         }))
         .unwrap()
         .unwrap();
@@ -359,6 +360,7 @@ fn adapter_sessions_and_resume_keep_the_selected_non_git_directory() {
         }
         c.call(Cmd::AgentStop(v1::AgentStop {
             agent_id: a.agent_id.clone(),
+            stop_helpers: false,
         }))
         .unwrap()
         .unwrap();
@@ -543,7 +545,10 @@ fn confined_selected_subfolders_cannot_write_to_the_parent_checkout() {
         let a = launch(&mut c, &info, "boundary", separate);
         let cwd = Path::new(&a.path);
         let until = Instant::now() + Duration::from_secs(10);
-        while !cwd.join("result").exists() && Instant::now() < until {
+        // `printf … > result` creates the file before it writes it: wait for the content, not for the file.
+        while std::fs::read_to_string(cwd.join("result")).map_or(true, |s| s.is_empty())
+            && Instant::now() < until
+        {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert_eq!(
@@ -557,6 +562,7 @@ fn confined_selected_subfolders_cannot_write_to_the_parent_checkout() {
         assert!(!forbidden.exists());
         c.call(Cmd::AgentStop(v1::AgentStop {
             agent_id: a.agent_id,
+            stop_helpers: false,
         }))
         .unwrap()
         .unwrap();
@@ -617,6 +623,7 @@ fn a_launched_folders_changes_are_reported_for_its_workspace() {
     }
     c.call(Cmd::AgentStop(v1::AgentStop {
         agent_id: a.agent_id,
+        stop_helpers: false,
     }))
     .unwrap()
     .unwrap();
@@ -676,6 +683,7 @@ fn a_resync_announces_the_nodes_present() {
     );
     c.call(Cmd::AgentStop(v1::AgentStop {
         agent_id: ended.agent_id.clone(),
+        stop_helpers: false,
     }))
     .unwrap()
     .unwrap();

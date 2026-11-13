@@ -13,6 +13,7 @@ pub mod grants;
 pub mod limits;
 pub mod mesh_server;
 pub mod sandbox;
+pub mod spawn;
 pub mod supervisor;
 pub mod terminal;
 pub mod uplink;

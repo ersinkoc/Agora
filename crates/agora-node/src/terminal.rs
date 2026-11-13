@@ -280,6 +280,11 @@ impl TerminalHandle {
     pub fn resize(&self, size: Size) -> io::Result<()> {
         let control = self.control()?;
         let mut g = self.inner.lock();
+        // The same size again changes nothing; a console that is resized needlessly can drop input typed at that moment (Git `sh`
+        // on Windows lost the first key this way).
+        if g.term.size() == size {
+            return Ok(());
+        }
         control.resize(size.cols, size.rows)?;
         g.term.resize(size);
         broadcast(&mut g, &Output::Resize(size));

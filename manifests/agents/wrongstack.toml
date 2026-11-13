@@ -2,6 +2,8 @@ kind = "wrongstack"
 display_name = "WrongStack"
 version = "2026.11.09.1"
 min_engine = 1
+# ADR-0057: before Enter, the input box under the idle header must hold the typed prompt (and only it), with no approval on screen.
+input_box = 'idle ─╮[^\n]*\n│[^\S\n]*❯[^\S\n]?([^│\n]*?)[^\S\n]*│'
 
 [process]
 names = ["wstack", "wrongstack"]
@@ -59,3 +61,24 @@ state = "idle"
 priority = 100
 region = "bottom_non_empty_lines(24)"
 regex = 'WRONGSTACK v[0-9.]+ .*idle ─╮'
+
+# ADR-0057: the input box under the idle header is empty: only then does the node type a helper's first prompt.
+[[ready]]
+id = "empty_prompt_box"
+state = "idle"
+priority = 100
+region = "bottom_non_empty_lines(12)"
+regex = 'WRONGSTACK v[0-9.]+ .*idle ─╮[^\n]*\n│[^\S\n]+❯[^\S\n]+│'
+all = [{ contains = "Enter send" }]
+not = [{ contains = "APPROVAL REQUIRED" }]
+
+
+[[typed]]
+id = "typed_prompt_box"
+state = "idle"
+priority = 100
+region = "bottom_non_empty_lines(12)"
+# The `Enter send` hint is checked on the box's own bottom border, not anywhere on screen.
+regex = 'WRONGSTACK v[0-9.]+ .*idle ─╮[^\n]*\n│[^\S\n]+❯[^\S\n]+[^\s│][^\n]*\n╰─[^\n]*Enter send'
+all = [{ contains = "Enter send" }]
+not = [{ contains = "APPROVAL REQUIRED" }]

@@ -2046,6 +2046,7 @@ fn the_terminal_console_keeps_a_forget_refusals_permission_details() {
                 role: Role::Viewer,
                 user: "viewer".into(),
                 projects: None,
+                session: String::new(),
             })
         }
     }

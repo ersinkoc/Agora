@@ -45,6 +45,54 @@ pub enum ChatItem {
         path: String,
         unified_diff: String,
     },
+    /// ADR-0058: something a person should know (a failed turn, the agent exiting), as a stable code and string parameters.
+    /// Untrusted like every item: the node checks the code's shape and bounds the parameters before it keeps one.
+    Notice {
+        code: String,
+        params: Vec<(String, String)>,
+    },
+}
+
+/// ADR-0058: one mode or model the agent offers.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SessionOption {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub skips_permissions: bool,
+}
+
+/// ADR-0058: the modes and models the agent offers and the ones in use (`session/options`).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SessionOptions {
+    pub modes: Vec<SessionOption>,
+    pub models: Vec<SessionOption>,
+    pub current_mode: String,
+    pub current_model: String,
+}
+
+/// ADR-0058: which of the two `session/set_option` switches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OptionKind {
+    Mode,
+    Model,
+}
+
+impl OptionKind {
+    /// The adapter capability that says the adapter takes `session/set_option` for this kind.
+    pub fn capability(self) -> &'static str {
+        match self {
+            Self::Mode => "set_mode",
+            Self::Model => "set_model",
+        }
+    }
+
+    fn wire(self) -> &'static str {
+        match self {
+            Self::Mode => "SESSION_OPTION_KIND_MODE",
+            Self::Model => "SESSION_OPTION_KIND_MODEL",
+        }
+    }
 }
 
 /// What an adapter tells the node (docs/specs/adapter-protocol.md "Methods", adapter → node).
@@ -72,6 +120,14 @@ pub enum AdapterEvent {
         output_tokens: u64,
         cost_micros: Option<u64>,
         currency: String,
+        /// ADR-0058: the context's level now and its size; 0 when not reported.
+        context_tokens: u64,
+        context_window: u64,
+    },
+    /// ADR-0058: `session/options`.
+    Options {
+        session_id: String,
+        options: SessionOptions,
     },
     SessionReported {
         session_id: String,
@@ -107,13 +163,32 @@ impl std::fmt::Display for HostError {
             Self::Io(e) => write!(f, "{e}"),
             Self::Timeout => write!(f, "the adapter did not answer in time"),
             Self::Exited => write!(f, "the adapter exited"),
-            Self::Rpc { code, .. } => write!(f, "the adapter returned error {code}"),
+            Self::Rpc { code, .. } => match self.reason() {
+                Some((reason, _)) => write!(f, "the adapter returned error {code} ({reason})"),
+                None => write!(f, "the adapter returned error {code}"),
+            },
             Self::BadResponse(what) => write!(f, "bad response: {what}"),
         }
     }
 }
 
 impl std::error::Error for HostError {}
+
+impl HostError {
+    /// The adapter's stable reason for an error answer: `data.code` and `data.params` (docs/specs/adapter-protocol.md, "Turn and
+    /// exit reasons"), for example `adapter.agent_exited` with the stage, exit code and stderr tail when the agent behind the
+    /// bridge exited before `initialize` was answered.
+    pub fn reason(&self) -> Option<(&str, &Value)> {
+        let Self::Rpc {
+            data: Some(data), ..
+        } = self
+        else {
+            return None;
+        };
+        let code = data.get("code")?.as_str()?;
+        Some((code, data.get("params").unwrap_or(&Value::Null)))
+    }
+}
 
 impl From<io::Error> for HostError {
     fn from(e: io::Error) -> Self {
@@ -233,6 +308,25 @@ fn agent_state(v: Option<&Value>) -> AgentState {
     }
 }
 
+fn options(v: Option<&Value>) -> Vec<SessionOption> {
+    v.and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter(|o| o.is_object())
+                .map(|o| SessionOption {
+                    id: s(o, "id"),
+                    name: s(o, "name"),
+                    description: s(o, "description"),
+                    skips_permissions: o
+                        .get("skipsPermissions")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Notification → event. `None` for methods this host does not know: adapters must be free to send more than the
 /// node understands (forward compatibility), so that is not an error.
 fn to_event(method: &str, p: &Value) -> Option<AdapterEvent> {
@@ -261,11 +355,24 @@ fn to_event(method: &str, p: &Value) -> Option<AdapterEvent> {
                         })
                         .unwrap_or_default(),
                 )
-            } else {
-                let t = p.get("diff")?;
+            } else if let Some(t) = p.get("diff") {
                 ChatItem::Diff {
                     path: s(t, "path"),
                     unified_diff: s(t, "unifiedDiff"),
+                }
+            } else {
+                let t = p.get("notice")?;
+                ChatItem::Notice {
+                    code: s(t, "code"),
+                    params: t
+                        .get("params")
+                        .and_then(Value::as_object)
+                        .map(|m| {
+                            m.iter()
+                                .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
                 }
             };
             AdapterEvent::Chat {
@@ -286,6 +393,17 @@ fn to_event(method: &str, p: &Value) -> Option<AdapterEvent> {
             output_tokens: u(p, "outputTokens"),
             cost_micros: p.get("costMicros").map(|_| u(p, "costMicros")),
             currency: s(p, "currency"),
+            context_tokens: u(p, "contextTokens"),
+            context_window: u(p, "contextWindow"),
+        },
+        "session/options" => AdapterEvent::Options {
+            session_id: s(p, "sessionId"),
+            options: SessionOptions {
+                modes: options(p.get("modes")),
+                models: options(p.get("models")),
+                current_mode: s(p, "currentMode"),
+                current_model: s(p, "currentModel"),
+            },
         },
         "session/reported" => AdapterEvent::SessionReported {
             session_id: s(p, "sessionId"),
@@ -297,6 +415,55 @@ fn to_event(method: &str, p: &Value) -> Option<AdapterEvent> {
         },
         _ => return None,
     })
+}
+
+/// Whether an environment variable is passed on to an adapter: `PATH`, the user's home and standard folders, the language and
+/// terminal settings and the Windows system folders, never anything that can hold a secret (API keys, tokens, `SSH_AUTH_SOCK`) and never a temporary or runtime folder (a confined
+/// agent must not be pointed at the node's own temp folder or at the folder with the node's sockets).
+fn inheritable(name: &str, confined: bool) -> bool {
+    const NAMES: &[&str] = &[
+        "PATH",
+        "PATHEXT",
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "SHELL",
+        "LANG",
+        "LANGUAGE",
+        "TERM",
+        "TZ",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_STATE_HOME",
+        "USERPROFILE",
+        "USERNAME",
+        "USERDOMAIN",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "PROGRAMDATA",
+        "HOMEDRIVE",
+        "HOMEPATH",
+        "SYSTEMROOT",
+        "SYSTEMDRIVE",
+        "WINDIR",
+        "COMSPEC",
+        "COMPUTERNAME",
+        "PROGRAMFILES",
+        "PROGRAMFILES(X86)",
+        "PROGRAMW6432",
+        "COMMONPROGRAMFILES",
+        "NUMBER_OF_PROCESSORS",
+        "PROCESSOR_ARCHITECTURE",
+        "OS",
+    ];
+    let upper = name.to_ascii_uppercase();
+    // The temporary folder: an agent that is not confined keeps the user's (without it Windows puts temp files in the profile
+    // root); a confined one gets its own private one from the node.
+    if !confined && matches!(upper.as_str(), "TMPDIR" | "TEMP" | "TMP") {
+        return true;
+    }
+    NAMES.contains(&upper.as_str()) || upper.starts_with("LC_")
 }
 
 impl Adapter {
@@ -317,10 +484,16 @@ impl Adapter {
             // The adapter's own stderr is diagnostics for whoever runs the node; it is not parsed.
             .stderr(Stdio::inherit());
         // An adapter starts with a clean environment plus what the node chose: it never inherits the node's
-        // secrets by accident. PATH is kept so it can find the tools it wraps.
+        // secrets by accident. PATH and the variables that say where the user's own folders are (`inheritable`) are kept, so
+        // the agent it wraps finds its own configuration and login the way it does when the user starts it.
         cmd.env_clear();
-        if let Some(path) = std::env::var_os("PATH") {
-            cmd.env("PATH", path);
+        for (name, value) in std::env::vars_os() {
+            if name
+                .to_str()
+                .is_some_and(|n| inheritable(n, cfg.sandbox.is_some()))
+            {
+                cmd.env(name, value);
+            }
         }
         cmd.envs(cfg.env.iter().map(|(k, v)| (k, v)));
         if let Some(dir) = &cfg.cwd {
@@ -500,6 +673,23 @@ impl Adapter {
         .map(drop)
     }
 
+    /// ADR-0058: switches the session to one of the modes or models the adapter reported. The caller checks the adapter declared
+    /// [`OptionKind::capability`] first.
+    pub fn set_option(
+        &self,
+        session: &str,
+        kind: OptionKind,
+        id: &str,
+        timeout: Duration,
+    ) -> Result<(), HostError> {
+        self.call(
+            "session/set_option",
+            json!({"sessionId": session, "kind": kind.wire(), "id": id}),
+            timeout,
+        )
+        .map(drop)
+    }
+
     pub fn stop_session(
         &self,
         session: &str,
@@ -647,6 +837,56 @@ fn deliver(pending: &Pending, id: &Value, r: Result<Value, HostError>) {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    #[test]
+    fn an_adapter_gets_the_users_folders_and_never_a_secret() {
+        for ok in [
+            "PATH",
+            "Path",
+            "HOME",
+            "USERPROFILE",
+            "APPDATA",
+            "LocalAppData",
+            "XDG_CONFIG_HOME",
+            "LANG",
+            "LC_ALL",
+            "SystemRoot",
+        ] {
+            assert!(super::inheritable(ok, true), "{ok}");
+            assert!(super::inheritable(ok, false), "{ok}");
+        }
+        for secret in [
+            "OPENAI_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "GITHUB_TOKEN",
+            "AWS_SECRET_ACCESS_KEY",
+            "SSH_AUTH_SOCK",
+            "AGORA_HUB_TOKEN",
+            "DATABASE_URL",
+            "NPM_TOKEN",
+            "HOME_SECRET",
+            "LCX",
+            "",
+            "TMPDIR",
+            "TEMP",
+            "TMP",
+            "XDG_RUNTIME_DIR",
+            "HTTPS_PROXY",
+        ] {
+            assert!(!super::inheritable(secret, true), "{secret}");
+            assert!(
+                !super::inheritable(secret, false) || ["TMPDIR", "TEMP", "TMP"].contains(&secret),
+                "{secret}"
+            );
+        }
+        for temp in ["TMPDIR", "Temp", "TMP"] {
+            assert!(super::inheritable(temp, false), "{temp}");
+            assert!(
+                !super::inheritable(temp, true),
+                "{temp}: a confined agent gets the node's private temp, not the user's"
+            );
+        }
+    }
+
     use super::*;
     use std::io::Cursor;
 
@@ -665,6 +905,26 @@ mod tests {
     fn a_last_line_without_a_newline_is_still_read() {
         let mut r = Cursor::new(b"abc".to_vec());
         assert_eq!(read_line_capped(&mut r).unwrap(), Some(Some("abc".into())));
+    }
+
+    #[test]
+    fn an_error_answer_carries_its_reason() {
+        let e = HostError::Rpc {
+            code: -32000,
+            data: Some(json!({"code": "adapter.agent_exited", "params": {"stage": "initialize"}})),
+        };
+        let (code, params) = e.reason().unwrap();
+        assert_eq!(
+            (code, params["stage"].as_str()),
+            ("adapter.agent_exited", Some("initialize"))
+        );
+        assert!(e.to_string().contains("adapter.agent_exited"));
+        let bare = HostError::Rpc {
+            code: -32000,
+            data: None,
+        };
+        assert!(bare.reason().is_none());
+        assert!(HostError::Exited.reason().is_none());
     }
 
     #[test]
@@ -692,8 +952,37 @@ mod tests {
                 input_tokens: 7,
                 output_tokens: 9,
                 cost_micros: Some(5),
-                currency: "USD".into()
+                currency: "USD".into(),
+                context_tokens: 0,
+                context_window: 0,
             })
+        );
+        let e = to_event(
+            "chat/append",
+            &json!({"sessionId": "s", "notice": {"code": "adapter.turn_empty", "params": {"a": "1", "b": 2}}}),
+        );
+        assert_eq!(
+            e,
+            Some(AdapterEvent::Chat {
+                session_id: "s".into(),
+                item: ChatItem::Notice {
+                    code: "adapter.turn_empty".into(),
+                    params: vec![("a".into(), "1".into())]
+                }
+            })
+        );
+        let e = to_event(
+            "session/options",
+            &json!({"sessionId": "s", "modes": [{"id": "yolo", "name": "Yolo", "skipsPermissions": true}, 3],
+                    "models": [{"id": "m"}], "currentMode": "yolo", "currentModel": "m"}),
+        );
+        let Some(AdapterEvent::Options { options, .. }) = e else {
+            panic!("{e:?}")
+        };
+        assert!(options.modes.len() == 1 && options.modes[0].skips_permissions);
+        assert_eq!(
+            (options.models[0].id.as_str(), options.current_mode.as_str()),
+            ("m", "yolo")
         );
         assert!(to_event("future/method", &json!({})).is_none());
         assert!(to_event("chat/append", &json!({"sessionId": "s"})).is_none());

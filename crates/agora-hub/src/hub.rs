@@ -65,6 +65,51 @@ fn decode(e: &crate::store::StoredEvent) -> Option<Delivered> {
         .map(|event| Delivered { pos: e.pos, event })
 }
 
+/// ADR-0057: the audit row an event about agents starting agents makes, as `(who, action, node, outcome, at_ms)`. `who` is the asking
+/// agent as `<node>/<agent>`. A start is recorded once (an `AgentStarted` said again for an agent the hub knows is not a new start).
+fn spawn_audit(
+    view: &crate::projection::View,
+    event: &Event,
+) -> Option<(String, String, String, String, u64)> {
+    let node = event.producer_id.clone();
+    let q = |id: &str| format!("{node}/{id}");
+    let row = |who: String, action: &str, outcome: String| {
+        Some((who, action.to_string(), node.clone(), outcome, event.at_ms))
+    };
+    match event.body.as_ref()? {
+        Body::ApprovalRequested(a) if a.action == "agent.start" => {
+            row(q(&a.agent_id), "agent.start.asked", a.approval_id.clone())
+        }
+        Body::ApprovalResolved(r) => {
+            let asked = view.approvals.get(&q(&r.approval_id))?;
+            if asked.action != "agent.start" {
+                return None;
+            }
+            let outcome = match (r.approved, r.signer_device_id.is_empty()) {
+                (true, _) => format!(
+                    "approved:{}:grant={}:nested={}",
+                    r.signer_device_id, r.helper_grant, r.helpers_may_start
+                ),
+                (false, false) => format!("denied:{}", r.signer_device_id),
+                (false, true) => "withdrawn".to_string(),
+            };
+            // The view keeps the asking agent by its hub-wide key already.
+            row(asked.agent_id.clone(), "agent.start.decided", outcome)
+        }
+        Body::AgentStartRefused(r) => row(q(&r.agent_id), "agent.start", r.code.clone()),
+        Body::AgentStarted(s)
+            if !s.parent_agent_id.is_empty() && !view.agents.contains_key(&q(&s.agent_id)) =>
+        {
+            row(
+                q(&s.parent_agent_id),
+                "agent.start",
+                format!("ok:{}", q(&s.agent_id)),
+            )
+        }
+        _ => None,
+    }
+}
+
 impl Hub {
     /// Opens the hub on a store, rebuilding the view from the log.
     pub fn open(store: SqliteStore) -> Result<Self, StoreError> {
@@ -92,7 +137,8 @@ impl Hub {
         }
     }
 
-    /// Tokens and estimated cost per agent (ADR-0033). An agent whose model has no price has no estimate.
+    /// Tokens and estimated cost per agent (ADR-0033). An agent whose model has no price has no estimate; an agent that reported its
+    /// own cost in US dollars (ADR-0058) has that instead.
     pub fn usage_report(&self) -> agora_protocol::v1::UsageReportResult {
         use crate::usage::{Cost, Usage};
         let (catalog, prices_at_ms) = match self.prices.read() {
@@ -110,7 +156,13 @@ impl Hub {
                     output_tokens: a.output_tokens,
                     ..Usage::default()
                 };
-                let micro_usd = catalog.cost(&a.model, &usage, None).map(Cost::micro_usd);
+                // ADR-0058: a cost the agent reported itself in US dollars is what it cost; only without one is it estimated.
+                let reported = a
+                    .session
+                    .cost_micros
+                    .filter(|_| a.session.currency == "USD");
+                let micro_usd =
+                    reported.or_else(|| catalog.cost(&a.model, &usage, None).map(Cost::micro_usd));
                 total = total.saturating_add(micro_usd.unwrap_or(0));
                 agora_protocol::v1::AgentUsage {
                     agent_id: id.clone(),
@@ -168,7 +220,13 @@ impl Hub {
                     Some(Body::NodeOnline(n)) => Some((n.node_id.clone(), event.at_ms)),
                     _ => None,
                 };
+                // Read before the event is folded in: whether an agent is new, and what a decision was about.
+                let audit = spawn_audit(&g.view, &event);
                 Self::publish(&mut g, Delivered { pos, event });
+                if let Some((who, action, node, outcome, at_ms)) = audit {
+                    let _ = crate::audit::Audit::new(&self.store)
+                        .record(at_ms, &who, &action, &node, &outcome);
+                }
                 // A node announces itself only when its process starts (a resync re-states it only for a start the hub missed,
                 // ADR-0055): the agents it had are gone, so their tasks and leases go back.
                 if let Some((node, at_ms)) = restarted {
@@ -385,6 +443,64 @@ mod tests {
     use agora_protocol::handshake::Support;
     use agora_protocol::v1::{AgentStarted, Hello, NodeOnline, Resume, Role};
 
+    #[test]
+    fn agent_starts_are_audited_once_with_the_asking_agent() {
+        use agora_protocol::v1::{AgentStartRefused, ApprovalRequested, ApprovalResolved};
+        let mut view = View::default();
+        let at = |body: Body| Event {
+            producer_id: "n1".into(),
+            seq: 1,
+            at_ms: 5,
+            body: Some(body),
+        };
+        let asked = at(Body::ApprovalRequested(ApprovalRequested {
+            approval_id: "ap-1".into(),
+            agent_id: "a".into(),
+            action: "agent.start".into(),
+            detail: "{}".into(),
+            expires_at_ms: 9,
+        }));
+        let row = spawn_audit(&view, &asked).unwrap();
+        assert_eq!(
+            (row.0.as_str(), row.1.as_str(), row.3.as_str()),
+            ("n1/a", "agent.start.asked", "ap-1")
+        );
+        view.apply(&asked);
+        let decided = at(Body::ApprovalResolved(ApprovalResolved {
+            approval_id: "ap-1".into(),
+            approved: true,
+            signer_device_id: "phone".into(),
+            helper_grant: 3,
+            helpers_may_start: false,
+        }));
+        let row = spawn_audit(&view, &decided).unwrap();
+        assert_eq!(
+            (row.0.as_str(), row.3.as_str()),
+            ("n1/a", "approved:phone:grant=3:nested=false")
+        );
+        let refused = at(Body::AgentStartRefused(AgentStartRefused {
+            agent_id: "a".into(),
+            kind: "codex".into(),
+            folder: "/w".into(),
+            code: "mesh.helper_limit".into(),
+        }));
+        assert_eq!(spawn_audit(&view, &refused).unwrap().3, "mesh.helper_limit");
+        let started = at(Body::AgentStarted(AgentStarted {
+            agent_id: "b".into(),
+            project_id: "p".into(),
+            node_id: "n1".into(),
+            worktree_id: String::new(),
+            kind: "codex".into(),
+            level: 1,
+            parent_agent_id: "a".into(),
+        }));
+        let row = spawn_audit(&view, &started).unwrap();
+        assert_eq!((row.0.as_str(), row.3.as_str()), ("n1/a", "ok:n1/b"));
+        view.apply(&started);
+        // Said again (a restart or a resync): not a new start.
+        assert!(spawn_audit(&view, &started).is_none());
+    }
+
     fn support() -> Support {
         Support {
             generations: vec![1],
@@ -441,6 +557,7 @@ mod tests {
                 worktree_id: "w".into(),
                 kind: "shell".into(),
                 level: 2,
+                parent_agent_id: String::new(),
             })),
         }
         .encode_to_vec()

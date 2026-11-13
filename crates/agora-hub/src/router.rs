@@ -356,6 +356,15 @@ impl Router {
             return Err(Error::new(ErrorCode::ProtocolCapabilityMissing)
                 .with("capability", "directory.list"));
         }
+        // ADR-0058: a node that cannot switch an agent's mode or model is never sent the command.
+        let switch = match request.command {
+            Some(command_request::Command::AgentSetMode(_)) => Some("agent.set_mode"),
+            Some(command_request::Command::AgentSetModel(_)) => Some("agent.set_model"),
+            _ => None,
+        };
+        if let Some(cap) = switch.filter(|cap| !link.capabilities.iter().any(|c| c == cap)) {
+            return Err(Error::new(ErrorCode::ProtocolCapabilityMissing).with("capability", cap));
+        }
         if matches!(
             request.command,
             Some(command_request::Command::BoardJoin(_))
@@ -428,6 +437,38 @@ mod tests {
         assert!(old_rx.try_recv().is_err());
         assert!(r.send("new", request).is_ok());
         assert!(matches!(new_rx.try_recv(), Ok(ToNode::Command { .. })));
+    }
+
+    #[test]
+    fn a_mode_or_model_switch_goes_only_to_a_node_that_offers_it() {
+        let r = Router::new();
+        let (_old, mut old_rx) = r.register("old");
+        let (_new, mut new_rx) = r.register_with_capabilities(
+            "new",
+            vec!["agent.set_mode".into(), "agent.set_model".into()],
+        );
+        for (command, cap) in [
+            (
+                command_request::Command::AgentSetMode(v1::AgentSetMode::default()),
+                "agent.set_mode",
+            ),
+            (
+                command_request::Command::AgentSetModel(v1::AgentSetModel::default()),
+                "agent.set_model",
+            ),
+        ] {
+            let mut request = req("old");
+            request.command = Some(command);
+            let refused = r.send("old", request.clone()).err().unwrap();
+            assert_eq!(refused.code, ErrorCode::ProtocolCapabilityMissing);
+            assert_eq!(
+                refused.params.get("capability"),
+                Some(&agora_protocol::ParamValue::Str(cap.into()))
+            );
+            assert!(old_rx.try_recv().is_err());
+            assert!(r.send("new", request).is_ok());
+            assert!(matches!(new_rx.try_recv(), Ok(ToNode::Command { .. })));
+        }
     }
 
     #[test]

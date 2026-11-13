@@ -1,3 +1,4 @@
+import { ApprovalBanner } from './ApprovalBanner';
 import { Suspense, lazy, useEffect, useMemo, useRef, useState, useSyncExternalStore, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
 import { t } from '../i18n';
 import { type AgentTileModel, machineKey, needsAttention, sortFleet } from '../model';
@@ -24,6 +25,8 @@ import { dismiss, dismissedIds, subscribeDismissed } from '../net/dismissed';
 import { loadLayout, saveLayout } from '../net/layout';
 import { forgetReasonKey } from '../net/forget';
 import { Resizer } from './Resizer';
+import type { StartChoice } from './StartApproval';
+import { HelperGrants, type HelperGrant } from './HelperGrants';
 
 const TerminalView = lazy(() => import('../terminal/TerminalView').then((m) => ({ default: m.TerminalView })));
 
@@ -34,7 +37,7 @@ const wide = () => typeof window === 'undefined' || !window.matchMedia || window
 
 // The one window, laid out like an editor: the agents on the left as a tree, the terminals you are watching as tabs in the
 // middle (or side by side), details on the right, and a status bar. Everything is derived from props.
-export function Console({ agents, machines, usage, projects = [], approvals, messages, boards = [], terminalFor, chatOf, sendPrompt, loadDiff, loadHistory, filesOf, onOpen, onStart, onCommand, onForget, start, onResolve, notice, link }: {
+export function Console({ agents, machines, usage, projects = [], approvals, messages, boards = [], terminalFor, chatOf, sendPrompt, loadDiff, loadHistory, filesOf, onOpen, onStart, onCommand, onForget, start, onResolve, helperGrants, revokeGrant, notice, link }: {
   agents: readonly AgentTileModel[];
   machines: readonly MachineModel[];
   usage?: UsageSummary;
@@ -54,7 +57,10 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   // Ask the hub to forget a closed agent for every client (ADR-0053); false when it could not (an older hub), and it is only hidden here.
   onForget?: (agentId: string) => Promise<string | undefined>;
   start?: ReactNode;
-  onResolve: (a: ApprovalModel, approved: boolean) => void;
+  onResolve: (a: ApprovalModel, approved: boolean, choice?: StartChoice) => void;
+  // ADR-0057: what an agent may still start without asking, and taking that back.
+  helperGrants?: (agent: AgentTileModel) => Promise<HelperGrant[]>;
+  revokeGrant?: (agent: AgentTileModel, id: string) => Promise<void>;
   notice?: string;
   link: 'connecting' | 'live' | 'offline';
 }) {
@@ -221,15 +227,10 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
           {layout === 'grid' && <button type="button" className="ide-iconbtn" onClick={() => close(a.id)} aria-label={t('console-hide')} title={t('console-hide')}><Icon name="close" /></button>}
         </div>
       </div>
-      {approvals.filter((x) => x.agentId === a.id).map((x) => (
-        <div key={x.id} role="alert" className="flex flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-needs-you/60 bg-surface-2 px-3 py-2">
-          <StateMark state="needs-you" />
-          <div className="min-w-0 flex-1"><strong className="block truncate">{t('approval-title', { name: x.agentName })}</strong><span className="block truncate text-xs text-muted">{x.action}{x.detail ? ` · ${x.detail}` : ''}</span></div>
-          <button type="button" className="button button--primary px-3 py-1 text-xs" onClick={() => onResolve(x, true)}>{t('approval-allow')}</button>
-          <button type="button" className="button px-3 py-1 text-xs" onClick={() => onResolve(x, false)}>{t('approval-deny')}</button>
-        </div>
-      ))}
+      {approvals.filter((x) => x.agentId === a.id).map((x) => <ApprovalBanner key={x.id} approval={x} onResolve={onResolve} />)}
       <AgentAddress agent={a} />
+      {helperGrants && revokeGrant && !a.closed && fleet.some((c) => c.parentId === a.id) &&
+        <HelperGrants list={() => helperGrants(a)} revoke={(id) => revokeGrant(a, id)} refresh={fleet.filter((c) => c.parentId === a.id && !c.closed).length} />}
       {a.closed ? <ClosedSummary agent={a} now={now} cost={usage?.perAgent.has(a.id) ? money(usage.perAgent.get(a.id) ?? 0) : undefined}
         onReview={loadDiff ? () => setReviewing(a.id) : undefined} onHistory={loadHistory && a.git !== false ? () => setHistory(a.id) : undefined} onFiles={filesOf ? () => setBrowsing(a.id) : undefined}
         onStart={onStart ? () => onStart() : undefined} onDismiss={() => dismiss([a.id])}

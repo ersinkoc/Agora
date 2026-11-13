@@ -125,6 +125,11 @@ pub struct EventSink {
     last_online: AtomicU64,
 }
 
+/// ADR-0058: an adapter's currency as an upper-case three-letter code, or `None` for anything else.
+fn currency_code(c: &str) -> Option<String> {
+    (c.len() == 3 && c.bytes().all(|b| b.is_ascii_alphabetic())).then(|| c.to_ascii_uppercase())
+}
+
 pub(crate) fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -311,6 +316,11 @@ impl EventSink {
                 agora_core::IntegrationLevel::L2Acp => v1::IntegrationLevel::L2Acp,
                 agora_core::IntegrationLevel::L3Adapter => v1::IntegrationLevel::L3Adapter,
             } as i32,
+            parent_agent_id: view
+                .parent
+                .as_ref()
+                .map(|p| p.as_str().to_string())
+                .unwrap_or_default(),
         }));
         self.record(Body::AgentStateChanged(v1::AgentStateChanged {
             agent_id: agent.into(),
@@ -363,6 +373,19 @@ impl EventSink {
         worktree: &str,
         kind: &str,
     ) {
+        self.agent_started_by(agent, project, node, worktree, kind, "");
+    }
+
+    /// [`Self::agent_started`] for a helper another agent started (ADR-0057); `parent` is empty when the user started it.
+    pub fn agent_started_by(
+        &self,
+        agent: &AgentId,
+        project: &str,
+        node: &str,
+        worktree: &str,
+        kind: &str,
+        parent: &str,
+    ) {
         self.record(Body::AgentStarted(v1::AgentStarted {
             agent_id: agent.as_str().to_string(),
             project_id: project.to_string(),
@@ -370,6 +393,7 @@ impl EventSink {
             worktree_id: worktree.to_string(),
             kind: kind.to_string(),
             level: v1::IntegrationLevel::L1Manifest as i32,
+            parent_agent_id: parent.to_string(),
         }));
     }
 
@@ -412,13 +436,42 @@ impl EventSink {
                         model,
                         input_tokens,
                         output_tokens,
+                        cost_micros,
+                        currency,
+                        context_tokens,
+                        context_window,
                         ..
                     } => self.record(Body::AgentUsageReported(v1::AgentUsageReported {
                         agent_id: agent.as_str().to_string(),
                         model: model.clone(),
                         input_tokens: *input_tokens,
                         output_tokens: *output_tokens,
+                        // ADR-0058: the agent's own cost, only with a currency the hub can tell apart (three letters).
+                        cost_micros: cost_micros.filter(|_| currency_code(currency).is_some()),
+                        currency: currency_code(currency).unwrap_or_default(),
+                        context_tokens: *context_tokens,
+                        context_window: *context_window,
                     })),
+                    // ADR-0058: the supervisor passes these on checked and bounded, and only when they changed.
+                    AdapterEvent::Options { options, .. } => {
+                        let list = |l: &[agora_adapters::host::SessionOption]| {
+                            l.iter()
+                                .map(|o| v1::SessionOption {
+                                    id: o.id.clone(),
+                                    name: o.name.clone(),
+                                    description: o.description.clone(),
+                                    skips_permissions: o.skips_permissions,
+                                })
+                                .collect()
+                        };
+                        self.record(Body::AgentSessionOptions(v1::AgentSessionOptions {
+                            agent_id: agent.as_str().to_string(),
+                            modes: list(&options.modes),
+                            models: list(&options.models),
+                            current_mode: options.current_mode.clone(),
+                            current_model: options.current_model.clone(),
+                        }));
+                    }
                     AdapterEvent::SessionReported {
                         native_session_id, ..
                     } => self.record(Body::AgentSessionReported(v1::AgentSessionReported {
@@ -455,10 +508,34 @@ impl EventSink {
     }
 
     pub fn approval_resolved(&self, approval_id: &str, approved: bool, signer_device_id: &str) {
+        self.start_resolved(approval_id, approved, signer_device_id, 0, false);
+    }
+
+    /// The decision on an `agent.start` request (ADR-0057), with the grant that was signed.
+    pub fn start_resolved(
+        &self,
+        approval_id: &str,
+        approved: bool,
+        signer_device_id: &str,
+        helper_grant: u32,
+        helpers_may_start: bool,
+    ) {
         self.record(Body::ApprovalResolved(v1::ApprovalResolved {
             approval_id: approval_id.to_string(),
             approved,
             signer_device_id: signer_device_id.to_string(),
+            helper_grant,
+            helpers_may_start,
+        }));
+    }
+
+    /// The node refused an agent's `agent_start` before asking anyone (ADR-0057).
+    pub fn agent_start_refused(&self, agent: &AgentId, kind: &str, folder: &str, code: &str) {
+        self.record(Body::AgentStartRefused(v1::AgentStartRefused {
+            agent_id: agent.as_str().to_string(),
+            kind: kind.to_string(),
+            folder: folder.to_string(),
+            code: code.to_string(),
         }));
     }
 
@@ -563,12 +640,31 @@ impl EventSink {
         kind: &str,
         terminal: bool,
     ) {
+        self.helper_launched(agent, workspace, kind, terminal, "");
+    }
+
+    /// [`Self::directory_agent_launched`] for a helper `parent` started (ADR-0057); `parent` empty means the user.
+    pub fn helper_launched(
+        &self,
+        agent: &AgentId,
+        workspace: &v1::WorkspaceRegistered,
+        kind: &str,
+        terminal: bool,
+        parent: &str,
+    ) {
         self.record(Body::WorkspaceRegistered(workspace.clone()));
         self.record(Body::AgentWorkspaceBound(v1::AgentWorkspaceBound {
             agent_id: agent.as_str().into(),
             workspace_id: workspace.workspace_id.clone(),
         }));
-        self.agent_started(agent, &workspace.project_id, &workspace.node_id, "", kind);
+        self.agent_started_by(
+            agent,
+            &workspace.project_id,
+            &workspace.node_id,
+            "",
+            kind,
+            parent,
+        );
         if terminal {
             self.record(Body::TerminalOpened(v1::TerminalOpened {
                 terminal_id: crate::control::terminal_id_of(agent),
@@ -815,6 +911,8 @@ pub struct Node {
     pub approvals: Arc<crate::approvals::NodeApprovals>,
     /// User-signed grants for commands the hub routes here (ADR-0041).
     pub grants: Arc<crate::grants::Grants>,
+    /// Agents that start agents (ADR-0057).
+    pub spawner: Arc<crate::spawn::Spawner>,
     node_id: String,
     /// Manifests that could not be loaded, as `(path, reason)` for the log.
     pub manifest_problems: Vec<(PathBuf, String)>,
@@ -975,6 +1073,19 @@ impl Node {
         }
         let chat = Arc::new(crate::chat::ChatBoard::new());
         let git_wake = Arc::new(AtomicBool::new(false));
+        // ADR-0057: agents may ask to start helpers; every start needs a decision a trusted device signed.
+        let spawner = Arc::new(
+            crate::spawn::Spawner::new(
+                &cfg.node_id,
+                &cfg.worktree_root,
+                Arc::clone(&supervisor),
+                Arc::clone(&approvals),
+                Some(Arc::clone(&events)),
+                Arc::clone(&chat),
+            )
+            .with_git_wake(Arc::clone(&git_wake)),
+        );
+        mesh.set_helpers(Arc::clone(&spawner) as Arc<dyn crate::mesh_server::Helpers>);
         let ctx = Arc::new(
             ControlContext::new(
                 Arc::clone(&supervisor),
@@ -987,13 +1098,14 @@ impl Node {
                 Arc::clone(&chat),
             )
             .with_manifests_dir(cfg.manifests_dir.clone())
-            .with_git_wake(Arc::clone(&git_wake)),
+            .with_git_wake(Arc::clone(&git_wake))
+            .with_spawner(Arc::clone(&spawner)),
         );
         let server = ControlServer::start(&cfg.socket, ctx)?;
 
         let stop = Arc::new(AtomicBool::new(false));
         let ticker = {
-            let (sup, ev, stop, node_id, mesh, approvals, chat) = (
+            let (sup, ev, stop, node_id, mesh, approvals, chat, spawner) = (
                 Arc::clone(&supervisor),
                 Arc::clone(&events),
                 Arc::clone(&stop),
@@ -1001,6 +1113,7 @@ impl Node {
                 Arc::clone(&mesh),
                 Arc::clone(&approvals),
                 Arc::clone(&chat),
+                Arc::clone(&spawner),
             );
             std::thread::Builder::new()
                 .name("agora-supervise".into())
@@ -1032,6 +1145,7 @@ impl Node {
                                             model: s.model,
                                             input_tokens: s.input,
                                             output_tokens: s.output,
+                                            ..Default::default()
                                         })
                                     })
                                     .collect(),
@@ -1051,7 +1165,15 @@ impl Node {
                                 SupervisorEvent::GaveUp { agent } => mesh.unregister(agent),
                                 _ => {}
                             }
+                            // ADR-0057: an agent's helper grants and waiting start end when it exits or is stopped.
+                            if let SupervisorEvent::Exited { agent, .. }
+                            | SupervisorEvent::GaveUp { agent }
+                            | SupervisorEvent::Stopped { agent } = e
+                            {
+                                spawner.agent_ended(agent);
+                            }
                         }
+                        spawner.tick();
                         for v in views.iter().filter(|v| v.running) {
                             mesh.set_state(&v.id, state_word(v.state));
                         }
@@ -1090,12 +1212,18 @@ impl Node {
                                 }
                                 SupervisorEvent::Stopped { agent }
                                 | SupervisorEvent::AdapterCrashed { agent } => {
+                                    // The spawner first: a start the agent waited for is withdrawn and its slot released, before
+                                    // the queue drops the request.
+                                    spawner.agent_ended(agent);
                                     approvals.cancel_agent(agent);
                                 }
                                 _ => {}
                             }
                         }
                         for (node_approval, agent, adapter_id) in approvals.expire(now) {
+                            if spawner.expired(&node_approval) {
+                                continue;
+                            }
                             let _ = sup
                                 .lock()
                                 .unwrap_or_else(|e| e.into_inner())
@@ -1144,6 +1272,7 @@ impl Node {
             mesh,
             approvals,
             grants,
+            spawner,
             node_id: cfg.node_id.clone(),
             manifest_problems,
         })
@@ -1381,6 +1510,7 @@ mod announce_tests {
             project: "p".into(),
             running,
             restarts: 0,
+            parent: None,
         }
     }
 

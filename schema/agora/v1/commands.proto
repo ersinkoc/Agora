@@ -62,6 +62,8 @@ message CommandRequest {
     // ADR-0053: a folder picker's one question (node), and forgetting a closed agent (hub only).
     DirectoryList directory_list = 84;
     AgentForget agent_forget = 85;
+    // ADR-0058: sent only to a node with the capability `agent.set_model`.
+    AgentSetModel agent_set_model = 86;
   }
 }
 
@@ -118,6 +120,8 @@ message AgentStart {
 
 message AgentStop {
   string agent_id = 1;
+  // ADR-0057: also stop the helpers this agent started (and theirs). Old nodes ignore it and stop only this agent.
+  bool stop_helpers = 2;
 }
 
 message AgentPrompt {
@@ -125,9 +129,17 @@ message AgentPrompt {
   string text = 2;
 }
 
+// ADR-0058: `mode` is the id of one of the modes the agent reported (`AgentSessionOptions`). Sent only to a node with the
+// capability `agent.set_mode`.
 message AgentSetMode {
   string agent_id = 1;
   string mode = 2;
+}
+
+// ADR-0058: `model` is the id of one of the models the agent reported (`AgentSessionOptions`).
+message AgentSetModel {
+  string agent_id = 1;
+  string model = 2;
 }
 
 message TerminalOpen {
@@ -208,6 +220,16 @@ message ApprovalResolve {
   bool approved = 2;
   string signer_device_id = 3;
   bytes signature = 4;
+  // ADR-0057, only for an approved `agent.start`: allow the asking agent up to this many helpers of the same kind in the same
+  // folder while it runs, this start included (0: this start only). Revoked with `GrantRevoke { grant_id: approval_id }`.
+  uint32 helper_grant = 5;
+  // ADR-0057, only for an approved `agent.start`: the helpers started under this decision may themselves ask to start helpers
+  // (each such start still needs its own approval; never deeper than that).
+  bool helpers_may_start = 6;
+  // For an `agent.start` approval the signature is not over the ADR-0028 message but over
+  // `agora-approval-start-v1 NUL node_id NUL approval_id NUL verdict NUL helper_grant NUL helpers_may_start NUL
+  // sha256(detail)` (verdict and helpers_may_start as ASCII `0`/`1`, helper_grant in decimal, the hash of the request's `detail` in lowercase hex): the decision binds what the user saw (kind, node, folder, asking agent,
+  // the first prompt), so a hub can neither swap the prompt nor add or remove a grant.
 }
 
 // ADR-0041. Signed by a trusted device (the same ES256 scheme as ApprovalResolve) over
@@ -235,6 +257,11 @@ message GrantInfo {
   repeated string commands = 3;
   uint64 expires_at_ms = 4;
   string signer_device_id = 5;
+  // ADR-0057: a helper grant (`commands` is `mesh.agent_start`, `scope` is `agent:<asking agent>`, `grant_id` the approval id,
+  // `expires_at_ms` 0: it ends when the asking agent exits or is stopped). The kind and folder it covers and the starts it has left.
+  string kind = 6;
+  string folder = 7;
+  uint32 remaining = 8;
 }
 
 message GrantListResult {
@@ -374,6 +401,8 @@ enum ChatKind {
   CHAT_KIND_TOOL_CALL = 2;
   CHAT_KIND_PLAN = 3;
   CHAT_KIND_DIFF = 4;
+  // ADR-0058: `code` and `params` say what happened; `text` is empty.
+  CHAT_KIND_NOTICE = 5;
 }
 
 // One line of an agent's conversation (ADR-0038). Untrusted text: a model or a person wrote it.
@@ -387,6 +416,9 @@ message ChatEntry {
   string text = 5;
   // For a diff: the file.
   string path = 6;
+  // ADR-0058, for a notice: a stable code (`adapter.turn_failed`, ...) and its parameters, rendered from the client's locale files.
+  string code = 7;
+  map<string, string> params = 8;
 }
 
 message ChatSnapshot {

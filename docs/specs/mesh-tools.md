@@ -16,6 +16,9 @@ the node per MCP connection; agents cannot impersonate each other.
 | `lease_acquire` | `{ paths: [glob], ttl_s: number, reason }` | `{ lease_id, expires_at }` or `lease.held` |
 | `lease_release` | `{ lease_id }` | `{ ok }` |
 | `handoff` | `{ to, task_id?, summary, refs }` | `{ handoff_id }` |
+| `agent_start` | `{ kind, prompt?, folder?, worktree?: bool, node? }` | `{ agent_id }` after the user's decision (ADR-0057) |
+| `agent_wait` | `{ agent_id, state: "idle"\|"working"\|"blocked"\|"done"\|"exited", timeout_s?: number (default 600, at most 3600) }` | `{ agent_id, state }` or `mesh.timeout` |
+| `agent_output` | `{ agent_id, lines?: number (default 40, at most 200) }` | `{ agent_id, source: "screen"\|"transcript", lines }` |
 
 ## Safety rules
 
@@ -100,6 +103,67 @@ shared stays on the local broker. When a project becomes shared (gains its secon
 keep their tasks in the hub's SQLite file (settings key `board.<project>`, so they are in its backup); leases are stored with them (ADR-0040) and a restart keeps those whose TTL has not passed (a restored lease has no id, so it ends at its TTL), a task claimed by an agent that is gone after a restart is given back, a message to a
 `#channel` is sent as `BoardCall{tool: "send_message"}`; the hub makes one copy per other running agent of the project (any online node), each arriving as a message from the sender with the channel name in front of the text (`[#dev] ...`), best effort and at most once, within the usual body and ref limits (the tool returns `{ delivered_to }` instead of `{ message_id }` in this case). Channel history is not kept and `inbox` on the receiver is how it is read. The web console shows each project's board (tasks with their owner, held paths) in its right column, built from the hub's
 `TaskChanged`/`LeaseGranted`/`LeaseReleased` events; a window that opens or reloads gets the boards in its `Snapshot` (`tasks`, `leases`, ADR-0040).
+
+## Agents that start agents (ADR-0057)
+
+A node offers `agent_start`, `agent_wait` and `agent_output` (capability `mesh.spawn`); they appear in `tools/list` only there, and
+the node answers them itself (`agora-node::spawn`), not the broker. The caller is the connection's agent, as for every tool.
+
+- **Every start needs the user's decision.** `agent_start` announces an `ApprovalRequested` with action `agent.start` whose detail
+  shows the asking agent and machine, the kind, the folder and the whole prompt (see `protocol.md`), and answers only once a trusted
+  device's signed decision has been verified on this node: `{ agent_id }`, `mesh.start_denied` (refused, or withdrawn) or
+  `approval.expired`. The decision is signed over a hash of the request as announced, so a hub cannot change what starts. The call
+  does not block the agent's other calls; if the connection ends first, the request is withdrawn.
+- **A grant.** The decision may allow "up to N helpers of this kind in this folder" (N at most 10, this start included) and, separately,
+  that the helpers it starts may ask in turn. Later starts that match the grant (same asking agent, kind, folder and `worktree`
+  choice) start at once. A grant ends when the asking agent exits or is stopped, or when revoked (`GrantRevoke` with the approval id;
+  `GrantList` shows it). No grant is given for a kind without an agent integration (a mesh section, an adapter or a structured mode), nor for
+  kind `shell` or a kind whose program (`process.launch`, else `structured.acp.argv`, else `adapter.command`; its file name lower-cased,
+  without `.exe`/`.cmd`/`.bat`/`.com` and without a version) is a shell, a wrapper (`env`, `nice`, `nohup`, `setsid`, `timeout`,
+  `stdbuf`, `xargs`, `sudo`, `doas`, `su`, `ssh`, `wsl`, `docker`, `podman`) or an interpreter or runner (`python`, `pypy`, `perl`,
+  `ruby`, `node`, `deno`, `bun`, `npx`, `uvx`, `bunx`, `php`, `lua`), whatever screen rules it has: there it would mean "run any N programs
+  without asking". The
+  request's `grant_allowed` says whether one may be given.
+- **Never wider than the asker.** The folder defaults to the asker's own; one below it is allowed (a relative `folder` is taken below
+  the asker's own); `worktree: true` makes the helper its own worktree of it. Another folder is asked about with `inside: false`
+  shown to the user, never covered by a grant, and a helper started there cannot ask for helpers. A helper's helper must stay
+  inside. Folder rules of ADR-0052 apply. On a node that confines agents (ADR-0047), a helper of another kind whose manifest the
+  owner trusts to widen confinement is refused (`node.policy_denied`, rule `sandbox.trust_manifest`). Another machine is not
+  supported yet (`protocol.capability_missing`, `mesh.spawn.remote`).
+- **Limits** (`mesh.helper_limit` with `rule`): a helper cannot start helpers unless the decision that started it allowed it, and a
+  helper's helper never can (`depth`); 3 running helpers per agent (`helpers`); one start in progress or waiting for the user per
+  agent (`pending`; the slot is taken before the limits are checked and held until the start ends, so concurrent calls cannot pass
+  them together); a first prompt over 16 KiB (`prompt`). Six `agent_start` calls a minute per agent (`mesh.rate_limited`), and the
+  node's own agent limit (`node.resource_limit`). A refusal before asking is an `AgentStartRefused` event (rate refusals at most one a
+  minute per agent; agent-written fields cut to 256 bytes).
+- **Prompt rules** (`protocol.invalid_message`, `field = prompt`): no control characters other than line breaks and tabs; no
+  invisible characters (the list in `crates/agora-core/src/hidden-characters.txt`: Default_Ignorable_Code_Point and every format
+  character, the line and paragraph separators and the private use areas; also refused in the requested `folder` and in the folder
+  it resolves to); no leading `!`, `/`, `#`, `&`, `$` or `?` (a shell escape, a slash command, a memory edit, a background send, a
+  skill form or the shortcuts key in common agents); and no text the kind's `[[typed]]` rules require on screen (its footer,
+  compared case-insensitively), which could stand in for the real footer; and no last word starting with `@` (a file picker would take the
+  Enter). Clients show any such character that reaches them as a visible `\u{…}` escape.
+- **Following.** `agent_wait` and `agent_output` answer only for helpers the caller started (anything else is `agent.not_found`).
+  `agent_wait` ends when the helper reaches the state or exits (`state: "exited"`); a connection may have 8 waits open
+  (`mesh.too_many_asks`), all read from one view of the node per poll. `agent_output` is the bottom of the live screen (never
+  scrollback) or, for a chat agent without a terminal, the end of its transcript; at most 16 KiB. It is untrusted text.
+- **The first prompt** is typed into a terminal helper only after two fresh looks in a row at its live screen (taken then, not the
+  paced detection's last result) show the kind's empty input box (`[[ready]]`) and an idle state; line breaks and tabs are typed as
+  spaces. Enter follows only after two later fresh looks in a row show the input box (`input_box`) holding exactly the typed prompt
+  and nothing else, with no dialog or menu on screen (`[[typed]]`), see `agent-manifest.md`. A blocked screen, keys someone else typed
+  into the box, or text that does not show within a second leave it for the user. A kind without these rules never gets its first
+  prompt typed, and a prompt long enough to wrap where the kind's `input_box` reads one row is left for the user too. When it is not
+  typed within 120 seconds, or not sent, that is recorded as an `AgentStartRefused` with `code = agent.blocked` (its `folder` holds
+  the helper's id). A chat agent gets it as its first request once it reports idle. Every helper's first prompt, granted starts
+  included, is recorded as a `MessagePosted` from the parent to the helper (the text, or `sha256:<hex>` above 4 KiB). Later messages
+  from the parent are ordinary mesh messages (information, not authority).
+- **Stopping.** `AgentStop { stop_helpers: true }` stops the agent's running helpers and theirs too. A parent that exits on its own leaves
+  its helpers running.
+- **Restart.** Which helper an agent started is kept in the node's memory (the supervisor's parent links and the spawner's record of
+  what each decision allowed) for as long as the supervisor lists the agent, which is the node process's life: a helper that crashes
+  and is restarted, or is resumed, is still the same helper. Agents end with the node process, so a restarted node starts with no
+  helpers. An agent the supervisor knows as a helper but whose decision record is missing may not ask for helpers, and helper counts
+  use the supervisor's links, so a missing record never widens the limits.
 
 ## Implementation status
 `agora-mesh::broker::Mesh` implements the tools' logic as deterministic in-memory state: registry, messages with

@@ -43,7 +43,10 @@ or a local response timeout has a localized retry message.
 | `mesh.body_too_large` | `limit` | Message body over the size limit; pass a reference instead |
 | `mesh.too_many_refs` | `limit` | Too many references on one message |
 | `mesh.too_many_asks` | `limit` | Too many unanswered `ask`s from this agent |
-| `mesh.timeout` | — | An `ask` got no reply in time |
+| `mesh.timeout` | — | An `ask` got no reply in time, or an `agent_wait` ended before the helper reached the state |
+| `mesh.folder_not_allowed` | `folder` | ADR-0057: a helper's folder must be the asking agent's own folder or below it; an outside folder only with the user's single approval naming it (never a grant), and another machine is not offered |
+| `mesh.helper_limit` | `rule`, `limit` | ADR-0057: `rule` is `depth` (a helper cannot start helpers unless the decision that started it allowed it, and a helper of a helper never can), `helpers` (running helpers per agent), `pending` (one start waits for the user at a time) or `prompt` (first prompt over the size limit) |
+| `mesh.start_denied` | `approval_id` | ADR-0057: the user refused the start, or it was withdrawn |
 | `task.not_found` | `task_id` | No such task in the caller's project |
 | `task.not_open` | `task_id` | The task is already claimed or done |
 | `task.blocked` | `task_id`, `depends_on` | A dependency of the task is not done |
@@ -55,4 +58,7 @@ or a local response timeout has a localized retry message.
 | `files.outside_root` | `path` | Path escapes the worktree (`..`, absolute, or a symlink leading out) |
 | `adapter.signature_invalid` | `package` | |
 | `adapter.crashed` | `kind`, `exit_code` | |
+| `adapter.agent_exited` | `stage`, `exit_code`, `stderr_tail` | ADR-0058: the agent behind an adapter (an ACP agent behind the bridge) exited before it was ready. `stage` is `initialize` or `session`; `exit_code` is its exit code, `?` when it had none; `stderr_tail` the last lines of its error output with secrets removed (docs/specs/adapter-protocol.md), possibly empty |
+| `adapter.agent_refused` | `stage` | ADR-0058: the agent behind an adapter answered `initialize` or the new session (`stage`) with an error |
+| `adapter.option_refused` | `id` | ADR-0058: the agent did not switch to that mode or model |
 | `internal` | `incident_id` | Unexpected failure; details only in logs |

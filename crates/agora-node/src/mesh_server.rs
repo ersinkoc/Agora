@@ -64,6 +64,46 @@ pub trait RemoteLink: Send + Sync {
     }
 }
 
+/// What an agent asked `agent_start` for (ADR-0057), parsed; the node decides everything else.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartArgs {
+    pub kind: String,
+    pub prompt: String,
+    pub folder: Option<String>,
+    pub worktree: bool,
+    pub node: Option<String>,
+}
+
+/// The helper a start produced, or why it did not.
+pub type StartOutcome = Result<String, agora_protocol::Error>;
+
+/// The node's side of the spawn tools (ADR-0057), implemented by `crate::spawn::Spawner`. Calls must not block: a start waits for the
+/// user, so it returns a ticket the connection polls.
+pub trait Helpers: Send + Sync {
+    /// Checks the request and either starts the helper under a grant or asks the user. The ticket is polled with [`Self::started`].
+    fn start(&self, caller: &AgentId, args: &StartArgs) -> Result<u64, agora_protocol::Error>;
+    /// `None` while the user has not decided.
+    fn started(&self, ticket: u64) -> Option<StartOutcome>;
+    /// The connection that asked went away: the ticket is dropped and its request, if still waiting, withdrawn.
+    fn abandon(&self, ticket: u64);
+    /// The state words of helpers `caller` started (`idle`, `working`, `blocked`, `done`, `unknown`, or `exited` once it ended), one
+    /// per name, read from one view of the node.
+    fn states(
+        &self,
+        caller: &AgentId,
+        helpers: &[String],
+    ) -> Vec<Result<String, agora_protocol::Error>>;
+    /// The last `lines` of a helper `caller` started, as the tool result's JSON.
+    fn output(
+        &self,
+        caller: &AgentId,
+        helper: &str,
+        lines: usize,
+    ) -> Result<Value, agora_protocol::Error>;
+}
+
+type HelpersSlot = Mutex<Option<Arc<dyn Helpers>>>;
+
 /// The hub's answer to a board call (ADR-0039): not shared (run it locally) or the tool's MCP result as JSON.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoardReply {
@@ -243,6 +283,8 @@ struct AgentServer {
 }
 
 pub struct MeshServer {
+    /// ADR-0057: answers `agent_start`, `agent_wait` and `agent_output`; without it those tools are not listed.
+    helpers: Arc<HelpersSlot>,
     /// Whether messages may cross to and from other nodes (node policy `mesh.remote`, ADR-0031).
     remote_allowed: Arc<AtomicBool>,
     remote: Arc<RemoteSlot>,
@@ -275,6 +317,7 @@ impl MeshServer {
                 })?
         };
         Ok(Self {
+            helpers: Arc::new(Mutex::new(None)),
             remote_allowed: Arc::new(AtomicBool::new(true)),
             remote: Arc::new(Mutex::new(None)),
             shares: Arc::new(Shares::default()),
@@ -284,6 +327,11 @@ impl MeshServer {
             stop,
             ticker: Some(ticker),
         })
+    }
+
+    /// ADR-0057: who answers the spawn tools. Connections made after this list them.
+    pub fn set_helpers(&self, helpers: Arc<dyn Helpers>) {
+        *self.helpers.lock().unwrap_or_else(|e| e.into_inner()) = Some(helpers);
     }
 
     /// Where messages for agents on other nodes go (the hub uplink). Without one they fail with `node.offline`.
@@ -415,13 +463,14 @@ impl MeshServer {
             .register(info);
         let stop = Arc::new(AtomicBool::new(false));
         let thread = {
-            let (mesh, stop, agent, remote, allowed, shares) = (
+            let (mesh, stop, agent, remote, allowed, shares, helpers) = (
                 Arc::clone(&self.mesh),
                 Arc::clone(&stop),
                 id.clone(),
                 Arc::clone(&self.remote),
                 Arc::clone(&self.remote_allowed),
                 Arc::clone(&self.shares),
+                Arc::clone(&self.helpers),
             );
             std::thread::Builder::new()
                 .name("agora-mesh-agent".into())
@@ -438,11 +487,21 @@ impl MeshServer {
                                     Arc::clone(&allowed),
                                     Arc::clone(&shares),
                                 );
+                                let helpers =
+                                    helpers.lock().unwrap_or_else(|e| e.into_inner()).clone();
                                 if let Ok(h) = std::thread::Builder::new()
                                     .name("agora-mesh-conn".into())
                                     .spawn(move || {
                                         serve(
-                                            stream, &agent, &mesh, &remote, &allowed, &shares,
+                                            stream,
+                                            &agent,
+                                            &mesh,
+                                            &Links {
+                                                remote: &remote,
+                                                allowed: &allowed,
+                                                shares: &shares,
+                                                helpers,
+                                            },
                                             &stop,
                                         )
                                     })
@@ -586,17 +645,294 @@ fn poll_asks(
     Ok(())
 }
 
+/// What a connection reaches besides its broker.
+struct Links<'a> {
+    remote: &'a RemoteSlot,
+    allowed: &'a AtomicBool,
+    shares: &'a Shares,
+    helpers: Option<Arc<dyn Helpers>>,
+}
+
+/// The longest `agent_wait`, and the one used when none is given.
+const WAIT_MAX_MS: u64 = 3_600_000;
+const WAIT_DEFAULT_MS: u64 = 600_000;
+/// `agent_wait` calls one connection may have open at once.
+const MAX_WAITS: usize = 8;
+
+/// A spawn tool call that waits: a start until the user decides, or a wait until the helper's state.
+enum SpawnWait {
+    Start {
+        request_id: Value,
+        ticket: u64,
+    },
+    State {
+        request_id: Value,
+        helper: String,
+        wanted: String,
+        deadline_ms: u64,
+    },
+}
+
+/// Tickets of starts this connection is waiting for; dropped with it, so a request nobody will read is withdrawn.
+struct ConnectionStarts {
+    helpers: Option<Arc<dyn Helpers>>,
+    tickets: HashSet<u64>,
+}
+
+impl Drop for ConnectionStarts {
+    fn drop(&mut self) {
+        if let Some(h) = &self.helpers {
+            for t in &self.tickets {
+                h.abandon(*t);
+            }
+        }
+    }
+}
+
+fn tool_reply(id: &Value, result: Value) -> Message {
+    Message::Response {
+        id: id.clone(),
+        result,
+    }
+}
+
+fn reached(state: &str, wanted: &str) -> bool {
+    // A wait ends at the state asked for, or when the helper exited (it will reach nothing else).
+    state == wanted || state == "exited"
+}
+
+/// ADR-0057: a call to one of the spawn tools. `None` when the line is not one (or no helpers are offered), so the broker handles it.
+fn spawn_call(
+    conn: &McpConnection,
+    line: &str,
+    helpers: &Arc<dyn Helpers>,
+    waits: &mut Vec<SpawnWait>,
+    starts: &mut ConnectionStarts,
+) -> Option<Option<Message>> {
+    if !conn.initialized() {
+        return None;
+    }
+    let Ok(Message::Request { id, method, params }) = agora_protocol::jsonrpc::parse_line(line)
+    else {
+        return None;
+    };
+    let name = params.get("name").and_then(Value::as_str)?;
+    if method != "tools/call" || !agora_mesh::mcp::SPAWN_TOOLS.contains(&name) {
+        return None;
+    }
+    let args = params.get("arguments").cloned().unwrap_or(json!({}));
+    let bad = || {
+        Some(Some(Message::ErrorResponse {
+            id: id.clone(),
+            code: agora_mesh::mcp::invalid_params_error(),
+            data: None,
+        }))
+    };
+    if !args.is_object() {
+        return bad();
+    }
+    let s = |k: &str| args.get(k).and_then(Value::as_str);
+    let opt = |k: &str| -> Result<Option<String>, ()> {
+        match args.get(k) {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::String(v)) => Ok(Some(v.clone())),
+            Some(_) => Err(()),
+        }
+    };
+    let me = conn.agent();
+    let err = |e: agora_protocol::Error| {
+        Some(Some(tool_reply(
+            &id,
+            agora_mesh::mcp::protocol_error_result(&e),
+        )))
+    };
+    match name {
+        "agent_start" => {
+            let (Some(kind), Ok(prompt), Ok(folder), Ok(node)) =
+                (s("kind"), opt("prompt"), opt("folder"), opt("node"))
+            else {
+                return bad();
+            };
+            let worktree = match args.get("worktree") {
+                None | Some(Value::Null) => false,
+                Some(Value::Bool(b)) => *b,
+                Some(_) => return bad(),
+            };
+            let a = StartArgs {
+                kind: kind.to_string(),
+                prompt: prompt.unwrap_or_default(),
+                folder,
+                worktree,
+                node,
+            };
+            match helpers.start(me, &a) {
+                Ok(ticket) => {
+                    starts.tickets.insert(ticket);
+                    waits.push(SpawnWait::Start {
+                        request_id: id,
+                        ticket,
+                    });
+                    Some(None)
+                }
+                Err(e) => err(e),
+            }
+        }
+        "agent_wait" => {
+            let (Some(helper), Some(wanted)) = (s("agent_id"), s("state")) else {
+                return bad();
+            };
+            if !["idle", "working", "blocked", "done", "exited"].contains(&wanted) {
+                return bad();
+            }
+            let timeout = match args.get("timeout_s") {
+                None | Some(Value::Null) => WAIT_DEFAULT_MS,
+                Some(v) => match v.as_f64() {
+                    Some(n) if n.is_finite() && n >= 0.0 => ((n * 1000.0) as u64).min(WAIT_MAX_MS),
+                    _ => return bad(),
+                },
+            };
+            let open = waits
+                .iter()
+                .filter(|w| matches!(w, SpawnWait::State { .. }))
+                .count();
+            if open >= MAX_WAITS {
+                return err(
+                    agora_protocol::Error::new(agora_protocol::ErrorCode::MeshTooManyAsks)
+                        .with("limit", MAX_WAITS as i64),
+                );
+            }
+            let state = helpers
+                .states(me, &[helper.to_string()])
+                .pop()
+                .unwrap_or_else(|| {
+                    Err(agora_protocol::Error::new(
+                        agora_protocol::ErrorCode::Internal,
+                    ))
+                });
+            match state {
+                Ok(state) if reached(&state, wanted) => Some(Some(tool_reply(
+                    &id,
+                    agora_mesh::mcp::ok_tool_result(&json!({"agent_id": helper, "state": state})),
+                ))),
+                Ok(_) => {
+                    waits.push(SpawnWait::State {
+                        request_id: id,
+                        helper: helper.to_string(),
+                        wanted: wanted.to_string(),
+                        deadline_ms: now_ms().saturating_add(timeout),
+                    });
+                    Some(None)
+                }
+                Err(e) => err(e),
+            }
+        }
+        "agent_output" => {
+            let Some(helper) = s("agent_id") else {
+                return bad();
+            };
+            let lines = match args.get("lines") {
+                None | Some(Value::Null) => 40,
+                Some(v) => match v.as_u64() {
+                    Some(n) => usize::try_from(n).unwrap_or(usize::MAX).clamp(1, 200),
+                    None => return bad(),
+                },
+            };
+            match helpers.output(me, helper, lines) {
+                Ok(v) => Some(Some(tool_reply(&id, agora_mesh::mcp::ok_tool_result(&v)))),
+                Err(e) => err(e),
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Answers spawn calls whose start was decided, whose helper reached the state, or whose time ran out.
+fn poll_spawn(
+    waits: &mut Vec<SpawnWait>,
+    starts: &mut ConnectionStarts,
+    caller: &AgentId,
+    mut reply: impl FnMut(&Message) -> io::Result<()>,
+) -> io::Result<()> {
+    let Some(helpers) = starts.helpers.clone() else {
+        return Ok(());
+    };
+    // Every waiting helper's state from one view of the node, not one per wait.
+    let names: Vec<String> = waits
+        .iter()
+        .filter_map(|w| match w {
+            SpawnWait::State { helper, .. } => Some(helper.clone()),
+            SpawnWait::Start { .. } => None,
+        })
+        .collect();
+    let mut states = if names.is_empty() {
+        Vec::new()
+    } else {
+        helpers.states(caller, &names)
+    }
+    .into_iter();
+    let mut still = Vec::new();
+    for w in waits.drain(..) {
+        match w {
+            SpawnWait::Start { request_id, ticket } => match helpers.started(ticket) {
+                None => still.push(SpawnWait::Start { request_id, ticket }),
+                Some(outcome) => {
+                    starts.tickets.remove(&ticket);
+                    let result = match outcome {
+                        Ok(agent) => agora_mesh::mcp::ok_tool_result(&json!({"agent_id": agent})),
+                        Err(e) => agora_mesh::mcp::protocol_error_result(&e),
+                    };
+                    reply(&tool_reply(&request_id, result))?;
+                }
+            },
+            SpawnWait::State {
+                request_id,
+                helper,
+                wanted,
+                deadline_ms,
+            } => {
+                let state = states.next().unwrap_or_else(|| {
+                    Err(agora_protocol::Error::new(
+                        agora_protocol::ErrorCode::Internal,
+                    ))
+                });
+                let result = match state {
+                    Ok(state) if reached(&state, &wanted) => Some(agora_mesh::mcp::ok_tool_result(
+                        &json!({"agent_id": helper, "state": state}),
+                    )),
+                    Ok(_) if now_ms() >= deadline_ms => {
+                        Some(agora_mesh::mcp::protocol_error_result(
+                            &agora_protocol::Error::new(agora_protocol::ErrorCode::MeshTimeout),
+                        ))
+                    }
+                    Ok(_) => None,
+                    Err(e) => Some(agora_mesh::mcp::protocol_error_result(&e)),
+                };
+                match result {
+                    Some(r) => reply(&tool_reply(&request_id, r))?,
+                    None => still.push(SpawnWait::State {
+                        request_id,
+                        helper,
+                        wanted,
+                        deadline_ms,
+                    }),
+                }
+            }
+        }
+    }
+    *waits = still;
+    Ok(())
+}
+
 /// One connection: newline-delimited JSON-RPC in, replies out. Questions that wait for an answer are polled each
 /// time the read times out, so a pending `ask` never blocks the agent's other calls.
 fn serve(
     stream: LocalStream,
     agent: &AgentId,
     mesh: &Arc<Mutex<Mesh>>,
-    remote: &RemoteSlot,
-    allowed: &AtomicBool,
-    shares: &Shares,
+    links: &Links<'_>,
     stop: &AtomicBool,
 ) {
+    let (remote, allowed, shares) = (links.remote, links.allowed, links.shares);
     let Ok(read_half) = stream.try_clone() else {
         return;
     };
@@ -604,6 +940,14 @@ fn serve(
     let mut reader = BufReader::new(read_half);
     let mut writer = stream;
     let mut conn = McpConnection::new(agent.clone());
+    if links.helpers.is_some() {
+        conn.enable_spawn();
+    }
+    let mut spawn_waits: Vec<SpawnWait> = Vec::new();
+    let mut starts = ConnectionStarts {
+        helpers: links.helpers.clone(),
+        tickets: HashSet::new(),
+    };
     let mut owned = ConnectionAsks {
         mesh,
         agent,
@@ -620,6 +964,18 @@ fn serve(
                 line.clear();
                 if text.is_empty() {
                     continue;
+                }
+                // ADR-0057: starting and following helpers is the node's, not the broker's.
+                if let Some(h) = &links.helpers {
+                    if let Some(answer) = spawn_call(&conn, &text, h, &mut spawn_waits, &mut starts)
+                    {
+                        if let Some(msg) = answer {
+                            if send(&mut writer, &msg).is_err() {
+                                break;
+                            }
+                        }
+                        continue;
+                    }
                 }
                 // A shared project's tasks, leases and handoffs are decided on the hub's board (ADR-0039).
                 if let Some(msg) = board_reply(&conn, &text, mesh, remote, shares) {
@@ -666,6 +1022,13 @@ fn serve(
         }
         // Answer asks whose reply arrived or whose time ran out.
         if poll_asks(&mut waiting, &mut owned, &conn, |msg| {
+            send(&mut writer, msg)
+        })
+        .is_err()
+        {
+            return;
+        }
+        if poll_spawn(&mut spawn_waits, &mut starts, agent, |msg| {
             send(&mut writer, msg)
         })
         .is_err()
