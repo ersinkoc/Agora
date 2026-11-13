@@ -5,6 +5,9 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 ## Next
 
 ### Agents
+- A structured (ACP) agent that is not confined keeps the user's temporary folder (on Windows it no longer drops temp files in the profile root); a confined one gets its own private one. A terminal resized to the size it already has is left alone, which stops a fresh Git `sh` on Windows from sometimes losing the first key typed.
+
+### Agents
 - Agents started in structured (ACP) mode now find their own configuration and login: the node passes on the variables that name the user's folders (`HOME`, `USERPROFILE`, `APPDATA`, `XDG_*`, language and terminal settings) and still passes no API key or token. Before, they ran with only `PATH`.
 
 ### Activity
