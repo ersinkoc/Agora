@@ -7,6 +7,18 @@ Fixtures are replayed at 120x40 unless their filename specifies the capture size
 `<name>@<cols>x<rows>.screen`, with a matching `<name>@<cols>x<rows>.expect`.
 Keep the raw captured bytes and use the original terminal size so wrapping and clipping are tested.
 
+**Where agent kinds come from.** The `agora` binary carries every `manifests/agents/*.toml` of the repository it was built from
+as built-in defaults (`agora-node::manifests::BUILT_IN`, compiled in with `include_str!`; fixtures are not), so a fresh install
+offers every shipped agent with nothing copied. The node then reads its manifests folder (`<AGORA_HOME>/manifests`, or
+`agora node run --manifests DIR`; `agora adapter install` writes there too): a file whose `kind` matches a built-in one replaces
+it, a file with a new `kind` adds one. A built-in kind cannot be removed, only replaced. A file that does not parse is skipped
+and named by `agora doctor`, and the built-in kind it meant to replace stays. The folder is read again before agents are listed
+or started, so a new or changed file needs no restart. `agora doctor` lists each kind with where it came from (built in, or the
+folder) and the program it looks for. A kind is "installed" when that program (the L3 adapter command, else the ACP `argv[0]`,
+else `process.launch[0]`) is found in the node's own `PATH` (the environment the node was started in, not the user's current
+shell) or, when the manifest names a path, exists there. A new shipped manifest must be added to `BUILT_IN`; a test fails until
+it is.
+
 ```toml
 kind = "example-agent"          # stable id, lowercase, used in protocol and UI
 display_name = "Example Agent"  # brand name, not translated

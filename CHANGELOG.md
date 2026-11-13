@@ -4,6 +4,13 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+### Agents
+- A new machine offers every shipped agent (Claude Code, Codex, WrongStack, opencode, Antigravity) without copying any file: the `agora` program now carries the shipped agent descriptions built in. A file in the node's manifests folder with the same kind replaces the built-in one, a new kind adds one, and a file that cannot be read is named by `agora doctor` while the built-in kind stays. `agora doctor` lists every agent with where it came from (built in or the folder) and the program it looks for, and says when this machine cannot find that program in its PATH.
+- The start window and the terminal client say why an agent is greyed out: the machine cannot find its program in its PATH, so install it there or start the node from a terminal where it runs. The terminal client now lists those agents too instead of leaving them out.
+
+### Trust
+- The command that makes a machine trust your device says what to do when `agora` is not found on that machine (a downloaded release is not on PATH): run it in the folder of the agora program (`./agora`, or `.\agora.exe` on Windows). `agora node trust` no longer tells you to restart the node: the node picks the change up by itself.
+
 ## 0.3.7
 
 ### Agents

@@ -1446,29 +1446,12 @@ impl Drop for Node {
     }
 }
 
-/// Every `*.toml` agent manifest in `dir`, in file-name order, and each file that could not be read or parsed with the reason.
+/// The node's agent kinds: the built-in manifests, then every `*.toml` in `dir` (a file there replaces the built-in kind of the same
+/// name or adds one; see `crate::manifests`), and each file that could not be read or parsed with the reason.
 /// The node reads them at start and again before it lists or starts agents, so a manifest added later is seen without a restart.
 pub fn load_manifests(dir: &Path) -> (Vec<Manifest>, Vec<(PathBuf, String)>) {
-    let mut found = Vec::new();
-    let mut problems = Vec::new();
-    if let Ok(rd) = std::fs::read_dir(dir) {
-        let mut paths: Vec<PathBuf> = rd
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|x| x == "toml"))
-            .collect();
-        paths.sort();
-        for p in paths {
-            match std::fs::read_to_string(&p)
-                .map_err(|e| e.to_string())
-                .and_then(|s| Manifest::parse(&s).map_err(|e| e.to_string()))
-            {
-                Ok(m) => found.push(m),
-                Err(e) => problems.push((p, e)),
-            }
-        }
-    }
-    (found, problems)
+    let (loaded, problems) = crate::manifests::load(dir);
+    (loaded.into_iter().map(|l| l.manifest).collect(), problems)
 }
 
 #[cfg(test)]

@@ -486,11 +486,14 @@ fn start(
         return say.text(key!("tui-start-nowhere"), &[]);
     };
     let machine = [("machine", Arg::Str(node.clone()))];
-    let kinds = match session.agent_kinds(&node) {
-        Ok(k) if !k.is_empty() => k,
-        Ok(_) => return say.text(key!("tui-start-none"), &machine),
+    let (kinds, missing) = match session.agent_kinds_all(&node) {
+        Ok(all) => split_kinds(say, all),
         Err(code) => return say.text(key!("tui-start-failed"), &[("code", Arg::Str(code))]),
     };
+    if kinds.is_empty() {
+        let none = say.text(key!("tui-start-none"), &machine);
+        return missing.map_or(none.clone(), |m| format!("{none} {m}"));
+    }
     let kinds: Vec<_> = kinds.into_iter().take(9).collect();
     let mut menu = vec![say.text(key!("tui-start-pick"), &machine), String::new()];
     for (i, (_, name)) in kinds.iter().enumerate() {
@@ -501,6 +504,10 @@ fn start(
                 ("name", Arg::Str(plain(name))),
             ],
         ));
+    }
+    if let Some(m) = missing {
+        menu.push(String::new());
+        menu.push(m);
     }
     let mut out = std::io::stdout();
     let _ = write!(out, "\x1b[H\x1b[2J{}", menu.join("\r\n"));
@@ -688,11 +695,14 @@ fn start_in_folder(
     };
     // Which agent: the machine's installed kinds by number, as `s` asks.
     let machine = [("machine", Arg::Str(node.clone()))];
-    let kinds = match session.agent_kinds(&node) {
-        Ok(k) if !k.is_empty() => k,
-        Ok(_) => return say.text(key!("tui-start-none"), &machine),
+    let (kinds, missing) = match session.agent_kinds_all(&node) {
+        Ok(all) => split_kinds(say, all),
         Err(code) => return say.text(key!("tui-start-failed"), &[("code", Arg::Str(code))]),
     };
+    if kinds.is_empty() {
+        let none = say.text(key!("tui-start-none"), &machine);
+        return missing.map_or(none.clone(), |m| format!("{none} {m}"));
+    }
     let kinds: Vec<_> = kinds.into_iter().take(9).collect();
     let mut menu = vec![
         say.text(key!("tui-start-pick"), &machine),
@@ -707,6 +717,10 @@ fn start_in_folder(
                 ("name", Arg::Str(plain(name))),
             ],
         ));
+    }
+    if let Some(m) = missing {
+        menu.push(String::new());
+        menu.push(m);
     }
     let mut out = std::io::stdout();
     let _ = write!(out, "\x1b[H\x1b[2J{}", menu.join("\r\n"));
@@ -1189,6 +1203,30 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
             }
         }
     }
+}
+
+/// A machine's agents split into the ones it can start (numbered in the menu) and one line naming the others: the machine cannot
+/// find their program in its `PATH`. The program names are not in the kinds answer yet, so the line names the agents.
+fn split_kinds(
+    say: &Say,
+    all: Vec<(String, String, bool)>,
+) -> (Vec<(String, String)>, Option<String>) {
+    let mut installed = Vec::new();
+    let mut missing = Vec::new();
+    for (kind, name, ok) in all {
+        if ok {
+            installed.push((kind, name));
+        } else {
+            missing.push(plain(&name));
+        }
+    }
+    let line = (!missing.is_empty()).then(|| {
+        say.text(
+            key!("tui-start-missing"),
+            &[("names", Arg::Str(missing.join(", ")))],
+        )
+    });
+    (installed, line)
 }
 
 #[cfg(test)]

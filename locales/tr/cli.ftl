@@ -65,9 +65,14 @@ doctor-manifests = { $detail ->
         [one] 1 ajan tanımı yüklendi.
        *[other] { $detail } ajan tanımı yüklendi.
     }
-doctor-manifests-missing = { $detail } adresinde ajan tanımları klasörü yok.
-doctor-agent-installed = { $detail } kurulu.
-doctor-agent-missing = { $detail } bu makinede kurulu değil.
+doctor-agent-installed = { $detail } ({ $from ->
+        [built-in] yerleşik
+       *[folder] tanımlar klasöründen
+    }): `{ $program }` bulundu.
+doctor-agent-missing = { $detail } ({ $from ->
+        [built-in] yerleşik
+       *[folder] tanımlar klasöründen
+    }): bu makine `{ $program }` programını PATH içinde bulamıyor. Programı oraya kurun ya da düğümü `{ $program }` komutunun çalıştığı bir terminalden başlatın.
 doctor-policy-path-dropped = Node politikasındaki "{ $detail }" satırı node'un kullanamayacağı bir yol içeriyor (göreli, ".." ya da ev klasörü olmayan "~"); ajanlar bu yol olmadan başlar. Tam bir yol ya da "~/" ile başlayan bir yol yazın.
 doctor-policy-path-missing = Node politikasındaki "{ $detail }" satırı henüz var olmayan bir yol içeriyor; yol oluşana kadar ajanlar onsuz başlar.
 doctor-manifest-invalid = { $detail } ajan tanımı okunamadı.
@@ -79,7 +84,7 @@ cli-hub-notify = Bildirimler { $file } dosyasındaki { $count } hedefe gidiyor.
 cli-hub-notify-skipped = { $file } dosyasının { $count } satırı anlaşılamadı ve yok sayılıyor. Her satır `ntfy URL` ya da `webhook URL` olmalı.
 cli-hub-web = Web uygulaması: https://{ $addr }/ . { $code } koduyla giriş yapın (10 dakika geçerli; yenisi için `agora hub login`). Hub sertifikasını kendi sertifika yetkilisi (CA) imzaladığı için bu yetkiliye güvenene kadar tarayıcı uyarı verir.
 cli-hub-login = Web uygulaması için giriş kodu: { $code } (10 dakika geçerli). Hub adresini tarayıcıda açıp kodu girin.
-cli-trusted = { $id } cihazı artık bu makinedeki onaylara yanıt verebilir. Uygulanması için bu makinedeki düğümü yeniden başlatın.
+cli-trusted = { $id } cihazı artık bu makinedeki onaylara yanıt verebilir.
 cli-trust-failed = Bu cihaz güvenilir olarak kaydedilemedi: { $reason }
 cli-hub-backup = Yedek { $path } dosyasına yazıldı.
 cli-hub-restored = Veritabanı yedekten { $path } konumuna geri yüklendi. Önceki veritabanı aynı klasörde before-restore adıyla saklanıyor.

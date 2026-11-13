@@ -347,6 +347,9 @@ pub struct KindInfo {
     pub display_name: String,
     pub level: IntegrationLevel,
     pub installed: bool,
+    /// The program looked for in the node's `PATH` (or the path the manifest names); empty when the manifest names none. Only the
+    /// name: never the node's `PATH` itself.
+    pub program: String,
 }
 
 struct KindEntry {
@@ -1752,16 +1755,18 @@ impl Supervisor {
             .map(|k| {
                 let m = &k.manifest;
                 let acp = m.structured.as_ref().and_then(|s| s.acp.as_ref());
-                let (level, program) = match (&m.adapter, acp) {
-                    (Some(a), _) => (IntegrationLevel::L3Adapter, a.command.first()),
-                    (None, Some(a)) => (IntegrationLevel::L2Acp, a.argv.first()),
-                    (None, None) => (IntegrationLevel::L1Manifest, m.process.launch.first()),
+                let level = match (&m.adapter, acp) {
+                    (Some(_), _) => IntegrationLevel::L3Adapter,
+                    (None, Some(_)) => IntegrationLevel::L2Acp,
+                    (None, None) => IntegrationLevel::L1Manifest,
                 };
+                let program = crate::manifests::program(m);
                 KindInfo {
                     kind: m.kind.clone(),
                     display_name: m.display_name.clone(),
                     level,
-                    installed: program.is_some_and(|p| crate::doctor::on_path(p)),
+                    installed: program.is_some_and(crate::doctor::on_path),
+                    program: program.unwrap_or_default().to_string(),
                 }
             })
             .collect()
