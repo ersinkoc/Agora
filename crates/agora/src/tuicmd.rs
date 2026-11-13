@@ -52,6 +52,73 @@ fn forget_notice(say: &Say, result: Result<(), ErrorInfo>) -> String {
     plain(&say.text(key!("tui-forget-failed"), &[("reason", Arg::Str(reason))])).replace('\n', " ")
 }
 
+/// ADR-0060: Resume (or, with `fresh` or for an agent that cannot continue its own session, Start again) the selected agent, which
+/// its machine reported interrupted. Signed by this terminal's key for exactly that agent and choice.
+fn resume(
+    say: &Say,
+    session: &mut Session,
+    snapshot: &Snapshot,
+    selected: &str,
+    fresh: bool,
+) -> String {
+    let Some(a) = snapshot
+        .agents
+        .iter()
+        .find(|a| a.agent_id == selected && a.interrupted && !a.running)
+    else {
+        return say.text(key!("tui-resume-not-interrupted"), &[]);
+    };
+    let fresh = fresh || !a.resumable;
+    let (node, local) = selected.split_once('/').unwrap_or(("", selected));
+    let fail = |code: &str| {
+        say.text(
+            key!("tui-answer-failed"),
+            &[("code", Arg::Str(code.into()))],
+        )
+    };
+    let Some(device) = device() else {
+        return fail("device");
+    };
+    let Some(auth) = device.authorize(node, "resume", local, "", "", fresh, false, now_ms()) else {
+        return fail("client.sign");
+    };
+    let asked = agora_protocol::v1::AgentResume {
+        agent_id: local.to_string(),
+        new_session: fresh,
+        authorization: Some(auth),
+    };
+    match session.resume_in(node, asked) {
+        Ok(agent) => say.text(key!("tui-resumed"), &[("agent", Arg::Str(agent))]),
+        Err(e) if e.code == "approval.signature_invalid" => say.text(
+            key!("tui-not-trusted"),
+            &[
+                ("id", Arg::Str(device.id.clone())),
+                ("key", Arg::Str(device.public_key_hex())),
+            ],
+        ),
+        Err(e) => resume_notice(say, &e),
+    }
+}
+
+/// Why a resume did not happen, in the selected language (the node's code and parameters, rendered from `errors.ftl`).
+fn resume_notice(say: &Say, error: &ErrorInfo) -> String {
+    let args: Vec<_> = error
+        .params
+        .iter()
+        .filter_map(|(k, v)| match &v.value {
+            Some(Value::Str(s)) => Some((k.as_str(), Arg::Str(s.clone()))),
+            Some(Value::Int(i)) => Some((k.as_str(), Arg::Num(*i))),
+            None => None,
+        })
+        .collect();
+    let reason = say
+        .0
+        .render(&error.code.replace('.', "-"), &args)
+        .unwrap_or_else(|| error.code.clone());
+    // Parameters come from the node; they must not become terminal control sequences.
+    plain(&say.text(key!("tui-resume-failed"), &[("reason", Arg::Str(reason))])).replace('\n', " ")
+}
+
 /// This terminal's key, made the first time it is needed and kept in a file only its owner can read.
 fn device() -> Option<Device> {
     let path = home().join("tui-device.p8");
@@ -1051,6 +1118,14 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                             draw(&snapshot, &selected, &notice, cost, preview.as_ref());
                         }
                     }
+                    // ADR-0060: an agent that stopped with its machine comes back (u) or starts again in its folder (U).
+                    b'u' | b'U' => {
+                        if let Some(sn) = &snapshot {
+                            notice = resume(say, &mut session, sn, &selected, k == b'U');
+                            dirty_since.get_or_insert_with(Instant::now);
+                            draw(&snapshot, &selected, &notice, cost, preview.as_ref());
+                        }
+                    }
                     b'd' => {
                         // A closed agent leaves every client's list; a running one is stopped first (x).
                         let running = snapshot.as_ref().is_some_and(|s| {
@@ -1277,6 +1352,24 @@ mod forget_tests {
             forget_notice(&tr, Err(denied)),
             "Kaldırılamadı: Bunu yapmaya izniniz yok (ajanı kaldırma)."
         );
+    }
+
+    #[test]
+    fn a_resume_refusal_is_said_in_the_selected_language() {
+        let tr = Say(Catalog::turkish());
+        let changed = Error::new(ErrorCode::AgentFolderChanged)
+            .with("agent_id", "agent-3")
+            .with("path", "/work/\x1b[2Ja")
+            .to_info();
+        let line = resume_notice(&tr, &changed);
+        assert!(line.starts_with("Başlamadı: "), "{line}");
+        assert!(line.contains("agent-3") && !line.contains('\x1b'), "{line}");
+        let en = Say(Catalog::english());
+        let parent = Error::new(ErrorCode::AgentParentNotRunning)
+            .with("agent_id", "agent-4")
+            .with("parent_agent_id", "agent-3")
+            .to_info();
+        assert!(resume_notice(&en, &parent).contains("Resume that agent first"));
     }
 
     #[test]

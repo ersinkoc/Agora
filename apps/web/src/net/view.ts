@@ -24,7 +24,9 @@ export interface AgentV {
   exitCode?: number; // how it ended, once it has
   session?: SessionModel; // ADR-0058: options, context and its own cost, once reported
   parentId?: string; // ADR-0057: the hub-wide key of the agent that started it
+  interrupted?: InterruptedV; // ADR-0060: it was running when its machine stopped; cleared by its next start
 }
+export interface InterruptedV { resumable: boolean; atMs: number; folder: string }
 
 type OptionWire = { id?: string | null; name?: string | null; description?: string | null; skipsPermissions?: boolean | null };
 const optionsOf = (l: readonly OptionWire[] | null | undefined, modes: boolean): SessionOptionModel[] =>
@@ -98,6 +100,7 @@ export function fromSnapshot(s: agora.v1.Snapshot.$Properties): View {
       reported: !!a.reported, running: !!a.running, sinceMs: 0,
       tokens: num(a.inputTokens) + num(a.outputTokens),
       parentId: a.parentAgentId || undefined,
+      ...(a.interrupted ? { interrupted: { resumable: !!a.resumable, atMs: num(a.interruptedAtMs), folder: a.folder ?? '' }, sinceMs: num(a.interruptedAtMs) } : {}),
     });
     const modes = optionsOf(a.modes, true), models = optionsOf(a.models, false);
     const reported = a.costMicros !== undefined && a.costMicros !== null && !!a.currency;
@@ -222,6 +225,21 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
       v.withTerminal.delete(id);
       break;
     }
+    // ADR-0060: kept with the closed agents, offering Resume (its own session) or Start again; one never seen is listed from the event.
+    case 'agentInterrupted': {
+      const b = e.agentInterrupted;
+      const key = q(b.agentId);
+      const a: AgentV = v.agents.get(key) ?? {
+        nodeId: producer, worktreeId: q(''), kind: b.kind ?? '', state: 4, reported: false, running: false, sinceMs: 0, tokens: 0,
+        parentId: b.parentAgentId ? q(b.parentAgentId) : undefined,
+      };
+      a.running = false;
+      a.state = 4 /* done */;
+      a.sinceMs = num(b.interruptedAtMs) || at;
+      a.interrupted = { resumable: !!b.resumable, atMs: num(b.interruptedAtMs), folder: b.folder ?? '' };
+      v.agents.set(key, a);
+      break;
+    }
     case 'agentExited': {
       const a = v.agents.get(q(e.agentExited.agentId));
       if (a) { a.running = false; a.state = 4 /* done */; a.sinceMs = at; a.exitCode = e.agentExited.exitCode ?? 0; }
@@ -306,7 +324,7 @@ export function tiles(v: View): AgentTileModel[] {
       accent: ACCENTS[i] as string,
       machine: node?.hostname || a.nodeId,
       machineId: a.nodeId,
-      workspace: selected ? selected.path : wt ? workspaceName(v, wt) : '',
+      workspace: selected ? selected.path : wt ? workspaceName(v, wt) : a.interrupted?.folder ?? '',
       shared: sharing, git: selected ? !!selected.gitRoot : true, projectId: selected?.projectId ?? (wt ? v.checkouts.get(wt.checkoutId)?.projectId : undefined),
       state,
       preview: '',
@@ -324,6 +342,7 @@ export function tiles(v: View): AgentTileModel[] {
       endedMs: a.running ? undefined : a.sinceMs || undefined,
       session: a.session,
       parentId: a.parentId,
+      interrupted: a.interrupted ? { resumable: a.interrupted.resumable } : undefined,
     } as AgentTileModel;
   });
   const names = new Map(list.map((t) => [t.id, t.name]));

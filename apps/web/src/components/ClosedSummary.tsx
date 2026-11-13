@@ -1,5 +1,6 @@
 import { t } from '../i18n';
 import { forgetReasonKey } from '../net/forget';
+import { resumeReasonKey } from '../net/directory';
 import type { AgentTileModel } from '../model';
 import { ago, duration } from '../net/time';
 import { Icon } from './Icon';
@@ -7,7 +8,7 @@ import { StateMark } from './StateBadge';
 
 // What a closed agent leaves behind: how it ended, how long it ran, what it changed and cost. Its terminal is gone, so this is shown
 // in its place, with the ways to look at the work and to clear it from the list.
-export function ClosedSummary({ agent, cost, now, onReview, onHistory, onFiles, onDismiss, onForget, forgetError, onStart }: {
+export function ClosedSummary({ agent, cost, now, onReview, onHistory, onFiles, onDismiss, onForget, forgetError, onStart, onResume, resuming, resumeError }: {
   agent: AgentTileModel;
   cost?: string;
   now: number;
@@ -19,6 +20,10 @@ export function ClosedSummary({ agent, cost, now, onReview, onHistory, onFiles, 
   // Why the hub did not forget it (an error code), shown instead of hiding the agent.
   forgetError?: string;
   onStart?: () => void;
+  // ADR-0060, for an agent that was running when its machine stopped: Resume (its own session) or Start again (a new one there).
+  onResume?: (newSession: boolean) => void;
+  resuming?: boolean;
+  resumeError?: string;
 }) {
   // A non-zero exit code is also what stopping an agent leaves, so it is stated, not judged: the mark is the same either way.
   const code = agent.exitCode;
@@ -34,7 +39,12 @@ export function ClosedSummary({ agent, cost, now, onReview, onHistory, onFiles, 
             <p className="m-0 text-finished">{code ? t('closed-failed', { code }) : t('closed-ok')}</p>
           </div>
         </div>
-        <p className="muted m-0">{t('closed-note')}</p>
+        <p className="muted m-0">{t(agent.interrupted ? (agent.interrupted.resumable ? 'interrupted-note' : 'interrupted-note-new') : 'closed-note')}</p>
+        {agent.interrupted && onResume && <div className="flex flex-wrap gap-2">
+          {agent.interrupted.resumable && <button type="button" className="button button--primary" disabled={resuming} onClick={() => onResume(false)}><Icon name="play" className="size-4" />{t('action-resume')}</button>}
+          <button type="button" className={agent.interrupted.resumable ? 'button' : 'button button--primary'} disabled={resuming} onClick={() => onResume(true)}>{t('action-start-again')}</button>
+        </div>}
+        {resumeError && <p role="alert" className="m-0 text-needs-you">{t(resumeReasonKey(resumeError))}</p>}
         <dl className="m-0 grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1.5 rounded-m border border-line bg-surface-1 p-4 text-[13px]">
           <dt className="text-muted">{t('closed-machine')}</dt><dd className="m-0 truncate">{agent.machine}</dd>
           <dt className="text-muted">{t('closed-folder')}</dt><dd className="m-0 break-all font-mono text-xs">{agent.workspace || agent.project || '—'}</dd>

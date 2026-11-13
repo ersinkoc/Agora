@@ -44,6 +44,9 @@ export interface AgentTileModel {
   session?: SessionModel; // ADR-0058, for agents whose adapter reported it
   parentId?: string; // ADR-0057: the agent that started this one (hub-wide key)
   parentName?: string;
+  // ADR-0060: it was running when its machine stopped. `resumable`: it can continue its own conversation (Resume); otherwise only Start
+  // again (a new session in the same folder).
+  interrupted?: { resumable: boolean };
 }
 
 // ADR-0057: each helper right after the agent that started it, with how deep it sits. A helper whose parent is not in `list` stays in

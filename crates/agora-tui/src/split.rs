@@ -260,8 +260,13 @@ fn tree(v: &View<'_>, t: Text<'_>) -> Vec<Row> {
             } else {
                 format!("{}↳ ", "  ".repeat(depth - 1))
             };
+            let note = if a.interrupted && !a.running {
+                format!("  · {}", t(key!("tui-interrupted"), &[]))
+            } else {
+                String::new()
+            };
             rows.push(Row {
-                text: format!("  {lead}{m} {}  {}", local(&a.agent_id), a.kind),
+                text: format!("  {lead}{m} {}  {}{note}", local(&a.agent_id), a.kind),
                 paint,
                 selected: a.agent_id == v.selected,
             });
@@ -382,6 +387,11 @@ pub fn frame(v: &View<'_>, t: Text<'_>) -> String {
                         &[("agent", Arg::Str(local(&a.parent_agent_id).to_string()))]
                     )
                 )
+            };
+            let by = if a.interrupted && !a.running {
+                format!("{by}  · {}", crate::render::interrupted_text(a, t))
+            } else {
+                by
             };
             format!(
                 " {}  {}  {}  {}{by}",

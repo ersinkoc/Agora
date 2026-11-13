@@ -629,6 +629,27 @@ impl Session {
         }
     }
 
+    /// ADR-0060: brings back an interrupted agent (`agent.resume`, signed by this terminal's key for that agent and choice); answers
+    /// its hub-wide id. Errors keep the node's code and parameters for a localized reason.
+    pub fn resume_in(
+        &mut self,
+        node: &str,
+        resume: agora_protocol::v1::AgentResume,
+    ) -> Result<String, ErrorInfo> {
+        let ok = self.command_info(
+            node,
+            command_request::Command::AgentResume(resume),
+            Duration::from_secs(45),
+        )?;
+        match ok.result {
+            Some(command_ok::Result::AgentLaunch(r)) => Ok(format!("{node}/{}", r.agent_id)),
+            _ => Err(ErrorInfo {
+                code: "protocol.invalid_message".into(),
+                ..Default::default()
+            }),
+        }
+    }
+
     pub fn agent_kinds(&mut self, node: &str) -> Result<Vec<(String, String)>, String> {
         let ok = self.command_ok(
             node,

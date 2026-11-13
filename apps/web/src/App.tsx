@@ -108,6 +108,17 @@ export function App() {
     const store = indexedDbStore();
     if (store) void thisDevice(store).then(setDevice).catch(() => setDevice(undefined));
   }, []);
+  // ADR-0060: brings back an interrupted agent under the same id, with its own session or (`newSession`) a new one in the same folder.
+  // Signed by this browser for exactly that agent and choice; the answer is undefined when it started, else the error code.
+  const resumeAgent = useCallback(async (agent: AgentTileModel, newSession: boolean): Promise<string | undefined> => {
+    if (!api || !device || !agent.machineId) return 'approval.signature_invalid';
+    const local = agent.id.slice(agent.id.indexOf('/') + 1);
+    try {
+      const authorization = await signDirectory(device, agent.machineId, 'resume', local, '', '', newSession);
+      await api.command(agent.machineId, { agentResume: { agentId: local, newSession, authorization } });
+      return undefined;
+    } catch (e) { return (e as { code?: string }).code ?? 'internal'; }
+  }, [api, device]);
   // Asks the hub to forget a closed agent for every client (ADR-0053). The answer is undefined when it did, else the error code.
   const forgetAgent = useCallback(async (agentId: string): Promise<string | undefined> => {
     if (!api) return 'hub.unreachable';
@@ -327,7 +338,7 @@ export function App() {
         : <Console agents={agents} machines={live ? machines(live) : []} usage={usage} projects={live && usage ? costByProject(live, usage.perAgent) : []}
           approvals={live ? approvalList(live) : hub ? [] : demoApprovals} messages={live ? recentMessages(live) : []} boards={live ? boards(live) : []} terminalFor={terminalFor} chatOf={hub && api ? chatOf : undefined} sendPrompt={hub && api ? sendPrompt : undefined} chooseOption={hub && api ? chooseOption : undefined} loadDiff={hub && api ? loadDiff : undefined} loadHistory={hub && api ? loadHistory : undefined} filesOf={hub && api ? filesOf : undefined} onOpen={open}
           onResolve={resolve} helperGrants={hub && api ? helperGrants : undefined} revokeGrant={hub && api ? revokeGrant : undefined} notice={notice ? t(notice) : undefined} link={hub ? link : 'live'}
-          onStart={hub && api && live ? (node) => setStarting({ node }) : (!hub && import.meta.env.DEV ? (node) => setStarting({ node }) : undefined)} onCommand={() => setPalette(true)} onForget={hub && api ? forgetAgent : undefined}
+          onStart={hub && api && live ? (node) => setStarting({ node }) : (!hub && import.meta.env.DEV ? (node) => setStarting({ node }) : undefined)} onCommand={() => setPalette(true)} onForget={hub && api ? forgetAgent : undefined} onResume={hub && api ? resumeAgent : (!hub && import.meta.env.DEV ? async () => undefined : undefined)}
           start={!hub && import.meta.env.DEV && starting ? <StartAgent initialNode={starting.node} projects={demoProjects} machines={demoMachines}
             loadKinds={async () => [{ kind: 'claude-code', name: 'Claude Code', installed: true }, { kind: 'codex', name: 'Codex', installed: true }, { kind: 'shell', name: 'Shell', installed: true }, { kind: 'gemini', name: 'Gemini CLI', installed: false }]}
             list={async (_n, path) => demoList(path)} inspect={async (_n, path) => ({ path, projectId: 'demo', gitRoot: path, branch: 'main', portable: false })} onStart={async () => { setStarting(false); return undefined; }} onClose={() => setStarting(false)} /> : starting && live ? <StartAgent initialNode={starting ? starting.node : undefined} projects={projectChoices(live)} machines={machines(live)} inspect={inspectDirectory} list={listDirectory} loadKinds={loadKinds} onStart={startAgent} onClose={() => setStarting(false)} /> : undefined} />}
