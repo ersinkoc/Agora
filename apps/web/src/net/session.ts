@@ -22,7 +22,7 @@ export function readToken(hash: string, store: Pick<Storage, 'getItem' | 'setIte
 
 export function hubConnection(): HubConnection | undefined {
   let store: Storage | undefined;
-  try { store = window.sessionStorage; } catch { store = undefined; }
+  try { store = window.localStorage; } catch { store = undefined; }
   const { token, rest } = readToken(window.location.hash, store);
   if (!token) return undefined;
   if (rest !== window.location.hash) {
@@ -34,7 +34,7 @@ export function hubConnection(): HubConnection | undefined {
 
 export type SignInResult = { ok: true; token: string } | { ok: false; reason: 'refused' | 'too-many' | 'failed' };
 
-// Trades a one-time code for a session token and remembers it for this tab.
+// Trades a one-time code for a session token and remembers it in this browser.
 export async function signIn(code: string, fetcher: typeof fetch = fetch): Promise<SignInResult> {
   try {
     const r = await fetcher('/api/session', {
@@ -54,13 +54,13 @@ export async function signIn(code: string, fetcher: typeof fetch = fetch): Promi
   }
 }
 
-// Keeps a session token for this tab.
+// Keeps a session token in this browser (30 days, extended on use; sign out forgets it).
 export function rememberToken(token: string): void {
-  try { window.sessionStorage.setItem(KEY, token); } catch { /* private mode: lasts until reload */ }
+  try { window.localStorage.setItem(KEY, token); } catch { /* private mode: lasts until reload */ }
 }
 
 export function forgetToken(): void {
-  try { window.sessionStorage.removeItem(KEY); } catch { /* unavailable */ }
+  try { window.localStorage.removeItem(KEY); } catch { /* unavailable */ }
 }
 
 // `#code=XXXX-XXXX` in the address: returns the code and the rest of the fragment.
