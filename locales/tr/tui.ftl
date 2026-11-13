@@ -22,6 +22,12 @@ tui-blocked = { $agent } sizi bekliyor
 tui-machines = Makineler
 tui-online = çevrimiçi
 tui-offline = çevrimdışı
+tui-last-seen = son görülme { $unit ->
+        [s] { $n } sn
+        [min] { $n } dk
+        [h] { $n } sa
+       *[d] { $n } gün
+    } önce
 tui-no-agents = Henüz ajan yok. Web uygulamasından ya da "agora agent start" ile bir tane başlatın.
 tui-state-working = Çalışıyor
 tui-state-needs-you = Sizi bekliyor

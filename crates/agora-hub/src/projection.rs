@@ -28,7 +28,28 @@ pub struct NodeView {
     pub agents_running: u32,
     pub terminals_open: u32,
     pub memory_used_bytes: u64,
+    /// When the node was last heard from: its latest event (node clock), or the hub's record of its link (ADR-0070, hub clock).
+    /// What the window shows as "last seen" for a machine that is offline.
     pub last_event_ms: u64,
+    /// The generation of the node's latest `NodeLink { up }` (ADR-0070); 0 when none was seen. A `NodeLink` with a lower one is
+    /// about a connection that was already replaced and changes nothing.
+    pub link_generation: u64,
+}
+
+impl NodeView {
+    fn unknown(online: bool) -> Self {
+        Self {
+            hostname: String::new(),
+            os: String::new(),
+            build: String::new(),
+            online,
+            agents_running: 0,
+            terminals_open: 0,
+            memory_used_bytes: 0,
+            last_event_ms: 0,
+            link_generation: 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -189,16 +210,10 @@ impl View {
                 let prefix = format!("{}/", e.node_id);
                 self.approvals.retain(|k, _| !k.starts_with(&prefix));
                 self.terminals.retain(|k, _| !k.starts_with(&prefix));
-                let n = self.nodes.entry(e.node_id.clone()).or_insert(NodeView {
-                    hostname: String::new(),
-                    os: String::new(),
-                    build: String::new(),
-                    online: true,
-                    agents_running: 0,
-                    terminals_open: 0,
-                    memory_used_bytes: 0,
-                    last_event_ms: 0,
-                });
+                let n = self
+                    .nodes
+                    .entry(e.node_id.clone())
+                    .or_insert_with(|| NodeView::unknown(true));
                 n.hostname = e.hostname.clone();
                 n.os = e.os.clone();
                 n.build = e.build.clone();
@@ -210,6 +225,32 @@ impl View {
                     n.online = false;
                 }
             }
+            // ADR-0070: the hub's record of a node's connection. Only the hub writes it; one that claims to come from a node is
+            // ignored (the session refuses it too). It never touches the node's agents: a link that goes down and up is not a
+            // process start.
+            Body::NodeLink(e) if producer == RESERVED_HUB_ID => {
+                let n = match self.nodes.get_mut(&e.node_id) {
+                    Some(n) => n,
+                    // A link that opens before the node's first `NodeOnline` arrives: the node is known from here on.
+                    None if e.up => self
+                        .nodes
+                        .entry(e.node_id.clone())
+                        .or_insert_with(|| NodeView::unknown(true)),
+                    None => return,
+                };
+                n.last_event_ms = n.last_event_ms.max(e.last_heard_ms);
+                // About a connection older than the latest one that opened: stale. A replaced connection's end never makes the
+                // node offline either, since the newer connection is up.
+                let stale = e.generation < n.link_generation
+                    || e.reason == agora_protocol::v1::NodeLinkReason::Replaced as i32;
+                if !stale {
+                    n.online = e.up;
+                    if e.up {
+                        n.link_generation = e.generation;
+                    }
+                }
+            }
+            Body::NodeLink(_) => {}
             Body::NodeResources(e) => {
                 if let Some(n) = self.nodes.get_mut(&e.node_id) {
                     n.agents_running = e.agents_running;
@@ -588,6 +629,157 @@ mod tests {
             (b.kind.as_str(), b.project_id.as_str()),
             ("claude-code", "p")
         );
+    }
+
+    fn link(node: &str, up: bool, reason: NodeLinkReason, generation: u64, heard: u64) -> Body {
+        Body::NodeLink(NodeLink {
+            node_id: node.into(),
+            up,
+            reason: reason as i32,
+            generation,
+            last_heard_ms: heard,
+        })
+    }
+
+    fn node_online(node: &str) -> Body {
+        Body::NodeOnline(NodeOnline {
+            node_id: node.into(),
+            hostname: "h".into(),
+            os: "linux".into(),
+            build: "b".into(),
+        })
+    }
+
+    /// ADR-0070: the hub's `NodeLink` decides `online`, a reconnect touches nothing the node runs, and "last seen" is when the hub
+    /// last heard from it.
+    #[test]
+    fn a_link_that_goes_down_and_up_changes_presence_only() {
+        let mut v = View::default();
+        v.apply(&ev(
+            "hub",
+            1,
+            link("n1", true, NodeLinkReason::Opened, 1, 5),
+        ));
+        v.apply(&ev("n1", 1, node_online("n1")));
+        v.apply(&ev("n1", 2, started("a1")));
+        assert!(v.nodes["n1"].online);
+        v.apply(&ev(
+            "hub",
+            2,
+            link("n1", false, NodeLinkReason::Silent, 1, 900),
+        ));
+        assert!(!v.nodes["n1"].online);
+        assert_eq!(v.nodes["n1"].last_event_ms, 900);
+        assert!(v.agents["n1/a1"].running, "offline is not finished");
+        v.apply(&ev(
+            "hub",
+            3,
+            link("n1", true, NodeLinkReason::Opened, 2, 2000),
+        ));
+        assert!(v.nodes["n1"].online);
+        assert!(v.agents["n1/a1"].running, "a reconnect resets nothing");
+        assert_eq!(v.nodes["n1"].link_generation, 2);
+    }
+
+    /// A late `up: false` about a connection that a newer one replaced never overrides the newer `up`.
+    #[test]
+    fn a_late_down_from_a_replaced_connection_is_ignored() {
+        let mut v = View::default();
+        v.apply(&ev(
+            "hub",
+            1,
+            link("n1", true, NodeLinkReason::Opened, 1, 1),
+        ));
+        v.apply(&ev(
+            "hub",
+            2,
+            link("n1", true, NodeLinkReason::Opened, 2, 2),
+        ));
+        v.apply(&ev(
+            "hub",
+            3,
+            link("n1", false, NodeLinkReason::Closed, 1, 3),
+        ));
+        assert!(v.nodes["n1"].online, "stale generation");
+        v.apply(&ev(
+            "hub",
+            4,
+            link("n1", false, NodeLinkReason::Replaced, 2, 4),
+        ));
+        assert!(v.nodes["n1"].online, "replaced never means offline");
+        v.apply(&ev(
+            "hub",
+            5,
+            link("n1", false, NodeLinkReason::Closed, 2, 5),
+        ));
+        assert!(!v.nodes["n1"].online);
+        // The time it was last heard still counts from any of them.
+        assert_eq!(v.nodes["n1"].last_event_ms, 5);
+    }
+
+    /// Old data (an older hub wrote only `NodeOnline` / `NodeOffline`) and new facts mix: the latest presence fact by position wins.
+    #[test]
+    fn old_and_new_presence_facts_mix_and_the_latest_wins() {
+        let mut v = View::default();
+        // Old hub: online from the node's start, offline from the hub.
+        v.apply(&ev("n1", 1, node_online("n1")));
+        v.apply(&ev(
+            "hub",
+            1,
+            Body::NodeOffline(NodeOffline {
+                node_id: "n1".into(),
+            }),
+        ));
+        assert!(!v.nodes["n1"].online);
+        // The hub was upgraded: the next connection says up.
+        v.apply(&ev(
+            "hub",
+            2,
+            link("n1", true, NodeLinkReason::Opened, 1, 50),
+        ));
+        assert!(v.nodes["n1"].online);
+        // A new hub also writes `NodeOffline` for older clients; it agrees with the `NodeLink` after it.
+        v.apply(&ev(
+            "hub",
+            3,
+            Body::NodeOffline(NodeOffline {
+                node_id: "n1".into(),
+            }),
+        ));
+        v.apply(&ev(
+            "hub",
+            4,
+            link("n1", false, NodeLinkReason::Closed, 1, 60),
+        ));
+        assert!(!v.nodes["n1"].online);
+        // A process start (the node's own `NodeOnline`) still says online, and resets what it ran (ADR-0055).
+        v.apply(&ev("n1", 2, started("a1")));
+        v.apply(&ev("n1", 3, node_online("n1")));
+        assert!(v.nodes["n1"].online);
+        assert!(!v.agents["n1/a1"].running);
+    }
+
+    /// Only the hub writes presence: a `NodeLink` that a node produced (the session refuses it too) changes nothing.
+    #[test]
+    fn a_node_cannot_claim_presence() {
+        let mut v = View::default();
+        v.apply(&ev(
+            "evil",
+            1,
+            link("victim", true, NodeLinkReason::Opened, 9, 1),
+        ));
+        assert!(!v.nodes.contains_key("victim"));
+        v.apply(&ev(
+            "hub",
+            1,
+            link("victim", true, NodeLinkReason::Opened, 1, 1),
+        ));
+        v.apply(&ev(
+            "evil",
+            2,
+            link("victim", false, NodeLinkReason::Closed, 1, 2),
+        ));
+        assert!(v.nodes["victim"].online);
     }
 
     #[test]

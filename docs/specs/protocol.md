@@ -13,8 +13,9 @@ connect (WSS + mTLS for nodes, session token for clients)
   ← ResumeOk   { from_seq }  |  ← SnapshotRequired
   → SnapshotRequired                       (node only, when it no longer has from_seq; ADR-0054)
   ... streams ...
-  → / ← Ping / Pong: a node pings every 15 s; the hub answers each Ping (a node's or a window's) at once with a Pong carrying
-           the same payload. No deadline is enforced yet (silence detection needs a hub-owned presence event, an ADR)
+  → / ← Ping / Pong: a node pings every 10 s (15 s before ADR-0070), a window every 15 s; the hub answers each Ping at once
+           with a Pong carrying the same payload. Deadlines (ADR-0070, docs/design/observability.md): the hub closes a node
+           connection silent for 25 s; a node drops a hub link silent for 25 s; a window one with no answer within 10 s
   → / ← Goodbye { reason_code }
 ```
 
@@ -146,6 +147,17 @@ position it saw and gets the backlog, or a snapshot when that position is ahead 
 backup). When a node's connection ends without a goodbye the hub records `NodeOffline` itself as producer `hub` (a name no
 node certificate can carry), in the same log, so live and rebuilt views agree.
 
+Presence (ADR-0070): the hub also records `NodeLink { node_id, up, reason, generation, last_heard_ms }` as producer `hub`, from
+the certificate-authenticated connection only: `up` with reason `opened` when a node's connection is open after the handshake
+(a first connect or a reconnect; it resets nothing, unlike the node's `NodeOnline`), and `up = false` with `closed`, `silent`
+(nothing for 25 s; the hub closed it) or `replaced` (a newer connection of that node was already registered) when it ends.
+`generation` counts the node's connections (1, 2, …, kept across hub restarts); `last_heard_ms` is the hub's clock when it last
+received anything on that connection. A reader takes a machine's `online` from its latest presence fact by log position (this
+event, or `NodeOnline`/`NodeOffline` from an older hub), ignores a `NodeLink` whose generation is below the node's latest `up`,
+never takes `replaced` as offline, and ignores a `NodeLink` from any producer but `hub`; a node that sends one is refused
+(`protocol.invalid_message`, field `node_link`). For clients that predate it the hub keeps writing `NodeOffline` when the
+current connection ends. The snapshot's `NodeSnapshot.last_event_ms` includes `last_heard_ms`, so it is "last seen".
+
 Schema additions (ADR-0025/0026/0027, all new messages, nothing published changed): `agent.list` (`AgentList` -> `AgentListResult` of
 `AgentSummary`; implemented on the node and as `agora agent list`), `EventAck` (hub -> producer, cumulative), `client.proto`
 (`Subscribe`, `Snapshot` with `*Snapshot` tables mirroring the hub view, `PositionedEvent`; named `*Snapshot` because
@@ -218,7 +230,7 @@ Initial event families:
 
 | Family | Examples |
 | --- | --- |
-| node | `NodeOnline`, `NodeOffline`, `NodeResources` |
+| node | `NodeOnline`, `NodeOffline`, `NodeResources`, `NodeLink` (hub-written presence, ADR-0070) |
 | project | `CheckoutDiscovered`, `WorktreeCreated`, `WorktreeRemoved`, `GitStatusChanged` (the node checks each running agent's workspace every 5 s and reports when the changed-file count, line counts or HEAD differ from the last report) |
 | agent | `AgentStarted`, `AgentStateChanged`, `AgentSessionReported`, `AgentUsageReported`, `AgentExited` |
 | terminal | `TerminalOpened`, `TerminalTitleChanged`, `TerminalClosed` |

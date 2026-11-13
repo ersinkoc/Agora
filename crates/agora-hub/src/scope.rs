@@ -143,6 +143,7 @@ impl Scope {
 
             Body::NodeOnline(e) => self.node_visible(&e.node_id),
             Body::NodeOffline(e) => self.node_visible(&e.node_id),
+            Body::NodeLink(e) => self.node_visible(&e.node_id),
             Body::NodeResources(e) => self.node_visible(&e.node_id),
             Body::CheckoutDiscovered(e) => {
                 let p = qualified(&e.node_id, &e.project_id);
