@@ -373,8 +373,8 @@ impl EventSink {
                 .as_ref()
                 .map(|p| p.as_str().to_string())
                 .unwrap_or_default(),
-            launch_options: Vec::new(),
-            skips_permissions: false,
+            launch_options: view.launch_options.clone(),
+            skips_permissions: view.skips_permissions,
         }));
         self.record(Body::AgentStateChanged(v1::AgentStateChanged {
             agent_id: agent.into(),
@@ -440,6 +440,22 @@ impl EventSink {
         kind: &str,
         parent: &str,
     ) {
+        let none = crate::launch_options::LaunchChoice::default();
+        self.agent_started_with(agent, project, node, worktree, kind, parent, &none);
+    }
+
+    /// [`Self::agent_started_by`] with the launch options the agent was started with (ADR-0059).
+    #[allow(clippy::too_many_arguments)]
+    fn agent_started_with(
+        &self,
+        agent: &AgentId,
+        project: &str,
+        node: &str,
+        worktree: &str,
+        kind: &str,
+        parent: &str,
+        launch: &crate::launch_options::LaunchChoice,
+    ) {
         self.record(Body::AgentStarted(v1::AgentStarted {
             agent_id: agent.as_str().to_string(),
             project_id: project.to_string(),
@@ -448,8 +464,8 @@ impl EventSink {
             kind: kind.to_string(),
             level: v1::IntegrationLevel::L1Manifest as i32,
             parent_agent_id: parent.to_string(),
-            launch_options: Vec::new(),
-            skips_permissions: false,
+            launch_options: launch.ids.clone(),
+            skips_permissions: launch.skips_permissions,
         }));
     }
 
@@ -670,6 +686,34 @@ impl EventSink {
         kind: &str,
         has_terminal: bool,
     ) {
+        let none = crate::launch_options::LaunchChoice::default();
+        self.agent_launched_with(
+            agent,
+            project,
+            node,
+            checkout,
+            worktree,
+            branch,
+            kind,
+            has_terminal,
+            &none,
+        );
+    }
+
+    /// [`Self::agent_launched`] with the launch options the agent was started with (ADR-0059).
+    #[allow(clippy::too_many_arguments)]
+    pub fn agent_launched_with(
+        &self,
+        agent: &AgentId,
+        project: &str,
+        node: &str,
+        checkout: &Path,
+        worktree: &Path,
+        branch: &str,
+        kind: &str,
+        has_terminal: bool,
+        launch: &crate::launch_options::LaunchChoice,
+    ) {
         let worktree_id = worktree.to_string_lossy().into_owned();
         self.record(Body::WorktreeCreated(v1::WorktreeCreated {
             worktree_id: worktree_id.clone(),
@@ -677,7 +721,7 @@ impl EventSink {
             path: worktree_id.clone(),
             branch: branch.to_string(),
         }));
-        self.agent_started(agent, project, node, &worktree_id, kind);
+        self.agent_started_with(agent, project, node, &worktree_id, kind, "", launch);
         if !has_terminal {
             return; // an adapter agent has no terminal
         }
@@ -699,6 +743,18 @@ impl EventSink {
         self.helper_launched(agent, workspace, kind, terminal, "");
     }
 
+    /// [`Self::directory_agent_launched`] with the launch options the agent was started with (ADR-0059).
+    pub fn directory_agent_launched_with(
+        &self,
+        agent: &AgentId,
+        workspace: &v1::WorkspaceRegistered,
+        kind: &str,
+        terminal: bool,
+        launch: &crate::launch_options::LaunchChoice,
+    ) {
+        self.workspace_agent_launched(agent, workspace, kind, terminal, "", launch);
+    }
+
     /// [`Self::directory_agent_launched`] for a helper `parent` started (ADR-0057); `parent` empty means the user.
     pub fn helper_launched(
         &self,
@@ -708,18 +764,33 @@ impl EventSink {
         terminal: bool,
         parent: &str,
     ) {
+        // ADR-0059: a helper never has launch options.
+        let none = crate::launch_options::LaunchChoice::default();
+        self.workspace_agent_launched(agent, workspace, kind, terminal, parent, &none);
+    }
+
+    fn workspace_agent_launched(
+        &self,
+        agent: &AgentId,
+        workspace: &v1::WorkspaceRegistered,
+        kind: &str,
+        terminal: bool,
+        parent: &str,
+        launch: &crate::launch_options::LaunchChoice,
+    ) {
         self.record(Body::WorkspaceRegistered(workspace.clone()));
         self.record(Body::AgentWorkspaceBound(v1::AgentWorkspaceBound {
             agent_id: agent.as_str().into(),
             workspace_id: workspace.workspace_id.clone(),
         }));
-        self.agent_started_by(
+        self.agent_started_with(
             agent,
             &workspace.project_id,
             &workspace.node_id,
             "",
             kind,
             parent,
+            launch,
         );
         if terminal {
             self.record(Body::TerminalOpened(v1::TerminalOpened {
@@ -820,6 +891,9 @@ pub struct Policy {
     pub sandbox: crate::sandbox::SandboxPolicy,
     /// What each trusted device may sign (`device.<id>.projects = a, b`; ADR-0049). A device not named is not limited.
     pub device_projects: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+    /// Whether an agent may start with a launch option that skips permissions (`skip_permissions = forbid | allow | confined_only`;
+    /// ADR-0059). Default: allow.
+    pub skip_permissions: crate::launch_options::SkipPermissions,
 }
 
 impl Default for Policy {
@@ -829,6 +903,7 @@ impl Default for Policy {
             signed_commands: crate::grants::SignedCommands::default(),
             sandbox: crate::sandbox::SandboxPolicy::default(),
             device_projects: std::collections::BTreeMap::new(),
+            skip_permissions: crate::launch_options::SkipPermissions::default(),
         }
     }
 }
@@ -902,6 +977,9 @@ pub fn read_policy(path: &std::path::Path) -> Policy {
                     }
                 }
                 "sandbox" => p.sandbox.level = crate::sandbox::Level::parse(v),
+                "skip_permissions" => {
+                    p.skip_permissions = crate::launch_options::SkipPermissions::parse(v);
+                }
                 "sandbox.read" => p.sandbox.read = paths(v),
                 "sandbox.write" => p.sandbox.write = paths(v),
                 "sandbox.trust_manifest" => {
@@ -1010,6 +1088,7 @@ impl Node {
             limits: cfg.limits,
         });
         sup.set_sandbox(read_policy(&cfg.data_dir.join(POLICY_FILE)).sandbox);
+        sup.set_skip_permissions(read_policy(&cfg.data_dir.join(POLICY_FILE)).skip_permissions);
         let (found, manifest_problems) = load_manifests(&cfg.manifests_dir);
         for m in found {
             sup.register(m);
@@ -1571,6 +1650,8 @@ mod announce_tests {
             running,
             restarts: 0,
             parent: None,
+            launch_options: Vec::new(),
+            skips_permissions: false,
         }
     }
 

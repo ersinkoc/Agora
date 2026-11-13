@@ -171,6 +171,10 @@ impl Grants {
 
     /// Directory actions are always exact-path, short-lived, owner-signed and single-use on the routed path.
     pub fn directory_action(&self, c: &Cmd, now: u64) -> Result<(), Error> {
+        let launch_options: &[String] = match c {
+            Cmd::AgentLaunch(a) => &a.launch_options,
+            _ => &[],
+        };
         let (auth, op, path, kind, project, option, identity_change) = match c {
             Cmd::DirectoryInspect(d) => (
                 d.authorization.as_ref(),
@@ -207,6 +211,9 @@ impl Grants {
         if [path, kind, project, a.nonce.as_str(), a.device_id.as_str()]
             .iter()
             .any(|s| s.contains('\0') || s.len() > 4096)
+            || launch_options
+                .iter()
+                .any(|o| !agora_adapters::manifest::valid_option_id(o))
             || a.nonce.len() != 32
             || !a.nonce.bytes().all(|b| b.is_ascii_hexdigit())
             || a.expires_at_ms <= now
@@ -217,17 +224,32 @@ impl Grants {
         if !self.limits.allows_scope(&a.device_id, "node") {
             return Err(Error::new(ErrorCode::AuthForbidden).with("action", "directory"));
         }
-        let msg = crate::directory::signed_message(
-            &self.node_id,
-            op,
-            path,
-            kind,
-            project,
-            option,
-            identity_change,
-            &a.nonce,
-            a.expires_at_ms,
-        );
+        // ADR-0059: chosen launch options are signed too, under their own domain (a hub can neither add nor remove one).
+        let msg = if launch_options.is_empty() {
+            crate::directory::signed_message(
+                &self.node_id,
+                op,
+                path,
+                kind,
+                project,
+                option,
+                identity_change,
+                &a.nonce,
+                a.expires_at_ms,
+            )
+        } else {
+            crate::directory::launch_signed_message(
+                &self.node_id,
+                path,
+                kind,
+                project,
+                option,
+                identity_change,
+                launch_options,
+                &a.nonce,
+                a.expires_at_ms,
+            )
+        };
         if !self
             .approvals
             .verify_device(&a.device_id, &msg, &a.signature)

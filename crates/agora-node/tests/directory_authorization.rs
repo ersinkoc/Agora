@@ -190,3 +190,74 @@ fn a_folder_listing_needs_the_owners_signature_for_that_folder() {
         )
         .is_err());
 }
+
+/// ADR-0059: a launch that chose options is signed over them (`directory-action-v2`); a hub can neither add one to a launch signed
+/// without, nor remove or change one.
+#[test]
+fn launch_options_are_signed_so_a_hub_can_neither_add_nor_remove_one() {
+    let key = key();
+    let sign = |options: &[&str], nonce: &str| {
+        let options: Vec<String> = options.iter().map(|o| (*o).to_string()).collect();
+        let message = agora_node::directory::launch_signed_message(
+            "node-a",
+            "/selected",
+            "probe",
+            "id:project",
+            false,
+            false,
+            &options,
+            nonce,
+            101_000,
+        );
+        let mut a = launch(&key, nonce);
+        a.launch_options = options;
+        a.authorization.as_mut().unwrap().signature = key
+            .sign(&SystemRandom::new(), &message)
+            .unwrap()
+            .as_ref()
+            .to_vec();
+        a
+    };
+    let g = grants(&key);
+    // Signed without options: the hub adds one.
+    let mut added = launch(&key, "00000000000000000000000000000001");
+    added.launch_options = vec!["skip-permissions".into()];
+    assert!(g
+        .directory_action(&Cmd::AgentLaunch(added), 100_000)
+        .is_err());
+    // Signed with one: the hub removes it, swaps it, or adds another.
+    let signed = sign(&["skip-permissions"], "00000000000000000000000000000002");
+    for options in [
+        vec![],
+        vec!["resume-last".to_string()],
+        vec!["skip-permissions".to_string(), "resume-last".to_string()],
+    ] {
+        let mut b = signed.clone();
+        b.launch_options = options;
+        assert!(g.directory_action(&Cmd::AgentLaunch(b), 100_000).is_err());
+    }
+    // An id that could not be signed unambiguously is refused before the signature is checked.
+    let comma = sign(&["a,b"], "00000000000000000000000000000003");
+    assert!(g
+        .directory_action(&Cmd::AgentLaunch(comma), 100_000)
+        .is_err());
+    assert!(g
+        .directory_action(&Cmd::AgentLaunch(signed), 100_000)
+        .is_ok());
+    // The v2 bytes: the v1 fields, then the ids, comma-joined.
+    let m = agora_node::directory::launch_signed_message(
+        "n",
+        "/p",
+        "k",
+        "id",
+        false,
+        true,
+        &["skip-permissions".into(), "resume-last".into()],
+        "nonce",
+        5,
+    );
+    assert_eq!(
+        m,
+        b"directory-action-v2\0n\0launch\0/p\0k\0id\x000\x001\0skip-permissions,resume-last\0nonce\x005".to_vec()
+    );
+}

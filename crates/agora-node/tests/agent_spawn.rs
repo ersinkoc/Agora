@@ -73,7 +73,8 @@ impl Env {
         std::fs::write(
             root.join("manifests/probe.toml"),
             // An agent (it has a mesh section), so a grant may cover it; `screen` is a plain terminal program, which no grant covers.
-            format!("kind = \"probe\"\ndisplay_name = \"Probe\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = {launch}\n[mcp]\nmethod = \"cli_flag\"\npath = \".mcp.json\"\nflag = [\"--mcp-config\", \"{{config_file}}\"]\n[[typed]]\nid = \"t\"\nstate = \"idle\"\npriority = 1\nregion = \"bottom_non_empty_lines(12)\"\nregex = \"^> \"\nall = [{{ contains = \"PROBE-FOOTER\" }}]\n"),
+            // ADR-0059: it declares an option that skips permissions; a helper must never get it.
+            format!("kind = \"probe\"\ndisplay_name = \"Probe\"\nversion = \"1\"\nmin_engine = 2\n[process]\nlaunch = {launch}\n[[launch.option]]\nid = \"skip-permissions\"\nlabel = \"option-skip-permissions\"\nargs = [\"--fake-skip-permissions\"]\nskips_permissions = true\n[mcp]\nmethod = \"cli_flag\"\npath = \".mcp.json\"\nflag = [\"--mcp-config\", \"{{config_file}}\"]\n[[typed]]\nid = \"t\"\nstate = \"idle\"\npriority = 1\nregion = \"bottom_non_empty_lines(12)\"\nregex = \"^> \"\nall = [{{ contains = \"PROBE-FOOTER\" }}]\n"),
         )
         .unwrap();
         std::fs::write(
@@ -141,6 +142,11 @@ impl Env {
 
     /// A user-started agent in `folder`.
     fn launch(&self, folder: &Path, kind: &str) -> String {
+        self.launch_with(folder, kind, &[])
+    }
+
+    /// [`Self::launch`] with launch options (ADR-0059).
+    fn launch_with(&self, folder: &Path, kind: &str, options: &[&str]) -> String {
         let mut c = self.client();
         let info = match c
             .call(Cmd::DirectoryInspect(v1::DirectoryInspect {
@@ -160,6 +166,7 @@ impl Env {
                 path: info.path.clone(),
                 project_id: info.project_id.clone(),
                 kind: kind.into(),
+                launch_options: options.iter().map(|o| (*o).to_string()).collect(),
                 ..Default::default()
             }))
             .unwrap()
@@ -945,4 +952,71 @@ fn an_adapter_agent_is_in_the_mesh_and_its_start_waits_for_the_user() {
     let said = agent_says(&e, &structured, "mcp-servers", |t| t.starts_with('['));
     let servers: Value = serde_json::from_str(&said).unwrap();
     assert_eq!(servers[0]["args"][3], own.to_string_lossy().as_ref());
+}
+
+/// The command lines the probe agents reported, by the folder each ran in.
+fn probe_args(root: &Path) -> Vec<Vec<String>> {
+    std::fs::read_dir(root)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("probe-"))
+        .filter_map(|e| serde_json::from_slice::<Value>(&std::fs::read(e.path()).ok()?).ok())
+        .map(|v| {
+            v["args"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|a| a.as_str().unwrap().to_string())
+                .collect()
+        })
+        .collect()
+}
+
+/// ADR-0059: an agent started with an option that skips permissions starts helpers without it. The helper is started from its plain
+/// manifest command (no option, no badge) even though the parent has one, its `AgentStarted` names none, and a grant (the decision's
+/// "up to N like this") does not change that.
+#[test]
+fn a_helper_never_inherits_a_launch_option() {
+    if !supported() {
+        return;
+    }
+    let e = Env::new("options");
+    let parent = e.launch_with(&e.folder, "probe", &["skip-permissions"]);
+    wait_until("parent report", || probe_args(&e.root).len() == 1);
+    assert!(probe_args(&e.root)[0].contains(&"--fake-skip-permissions".to_string()));
+    let view = |id: &str| {
+        e.node()
+            .supervisor
+            .lock()
+            .unwrap()
+            .list()
+            .into_iter()
+            .find(|v| v.id.as_str() == id)
+            .unwrap()
+    };
+    assert!(view(&parent).skips_permissions);
+    assert_eq!(view(&parent).launch_options, ["skip-permissions"]);
+
+    let mut m = e.mcp(&parent);
+    // An extra argument naming the option is no way in either.
+    let call = m.call(
+        "agent_start",
+        json!({"kind": "probe", "launch_options": ["skip-permissions"]}),
+    );
+    let p = e.request_of(&parent);
+    e.decide(&p, true, 2, false).unwrap();
+    let (v, is_error) = m.result(call);
+    assert!(!is_error, "{v}");
+    let helper = v["agent_id"].as_str().unwrap().to_string();
+    wait_until("helper report", || probe_args(&e.root).len() == 2);
+    let with_flag = probe_args(&e.root)
+        .iter()
+        .filter(|a| a.contains(&"--fake-skip-permissions".to_string()))
+        .count();
+    assert_eq!(with_flag, 1, "only the parent runs with the flag");
+    assert!(!view(&helper).skips_permissions);
+    assert!(view(&helper).launch_options.is_empty());
+    let events = e.node().events.events_after(0);
+    assert!(events.iter().any(|ev| matches!(&ev.body, Some(Body::AgentStarted(s)) if s.agent_id == parent && s.skips_permissions && s.launch_options == ["skip-permissions"])));
+    assert!(events.iter().any(|ev| matches!(&ev.body, Some(Body::AgentStarted(s)) if s.agent_id == helper && !s.skips_permissions && s.launch_options.is_empty())));
 }

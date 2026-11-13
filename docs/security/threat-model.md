@@ -70,6 +70,21 @@ restart ends them), refuses a grant id it has seen, a wrong signer, another node
 need no signature. Commands that name a worktree or open a new terminal (`files.write`, `worktree.*`, `terminal.open`) name no agent, so only
 a `node` grant covers them. Recommended for a machine that is not a throwaway: `signed_commands = agent.start, terminal.input, files.write` (reading stays free). Typos in the line cannot widen anything: an unknown name simply matches no command. Tests: `crates/agora-node/src/grants.rs` and `crates/agora/tests/hub_dial.rs`.
 
+### Launch options that skip permissions (ADR-0059, T15)
+Policy line in `<data>/policy`: `skip_permissions = forbid | allow | confined_only` (absent: `allow`, the maintainer's default; any
+other value counts as `forbid`). It is read when the node starts and never changes over the hub. `agora-node::launch_options` resolves a
+start's option ids against the kind's manifest (unknown, repeated or more than 8: `protocol.invalid_message`) and refuses a
+`skips_permissions` option the policy does not allow with `agent.option_forbidden` before any worktree, mesh endpoint or process
+exists; `confined_only` allows it only when the node confines agents (`sandbox` not `off`) and can here. Through the hub, an
+`AgentLaunch` with options is verified over `directory-action-v2` (the option ids are signed); a routed `AgentStart` with options is
+refused at the uplink (`policy: signature`) whatever grant is live; the hub refuses to forward options to a node without the
+capability `agent.launch_options`. Helpers (`agent_start`) are started through the supervisor's option-less calls, so they never
+get one. The arguments are kept for the agent's whole life (crash restarts and resumes use them too); `AgentStarted` carries the ids
+and `skips_permissions`, the hub keeps them in the snapshot (the badge) and writes an audit row `agent.launch_options` for every such
+start, local ones included, besides the routed command's row (`AgentLaunch[skip-permissions]`). Tests:
+`crates/agora-node/tests/launch_options.rs`, `agent_spawn.rs` (`a_helper_never_inherits_a_launch_option`),
+`directory_authorization.rs`, `uplink_client.rs` and `router.rs` unit tests.
+
 ### Approvals: node wiring
 Adapter approval requests enter the node's queue under a random node-minted id (the adapter's own id is only used to answer it),
 are announced as `ApprovalRequested`, and wait. `approval.resolve` verifies the device signature on the node and relays the verdict

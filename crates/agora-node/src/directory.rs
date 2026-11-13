@@ -290,6 +290,43 @@ pub fn signed_message(
     out
 }
 
+/// ADR-0059: what a device signs for an `agent.launch` that chose launch options: the `directory-action-v1` fields under the domain
+/// `directory-action-v2`, with the option ids, comma-joined in the order sent, between `identity_change` and `nonce`. A launch without
+/// options keeps [`signed_message`], so a signature can neither gain nor lose an option.
+#[allow(clippy::too_many_arguments)]
+pub fn launch_signed_message(
+    node: &str,
+    path: &str,
+    kind: &str,
+    project: &str,
+    separate_worktree: bool,
+    identity_change: bool,
+    launch_options: &[String],
+    nonce: &str,
+    expires: u64,
+) -> Vec<u8> {
+    let options = launch_options.join(",");
+    let fields = [
+        node,
+        "launch",
+        path,
+        kind,
+        project,
+        if separate_worktree { "1" } else { "0" },
+        if identity_change { "1" } else { "0" },
+        options.as_str(),
+        nonce,
+    ];
+    let mut out = b"directory-action-v2".to_vec();
+    for f in fields {
+        out.push(0);
+        out.extend_from_slice(f.as_bytes());
+    }
+    out.push(0);
+    out.extend_from_slice(expires.to_string().as_bytes());
+    out
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
