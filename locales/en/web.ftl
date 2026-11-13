@@ -221,8 +221,35 @@ history-failed = Could not read the history from that machine.
 history-no-subject = (no message)
 chat-empty = Nothing said yet. Tell it what to do below.
 chat-log = Conversation
-chat-tool = Tool
 chat-plan = Plan
+chat-plan-steps =
+    { $count ->
+        [one] Plan · { $count } step
+       *[other] Plan · { $count } steps
+    }
+chat-plan-earlier =
+    { $count ->
+        [one] Earlier plan · { $count } step
+       *[other] Earlier plan · { $count } steps
+    }
+chat-steps-earlier =
+    { $count ->
+        [one] { $count } earlier step
+       *[other] { $count } earlier steps
+    }
+chat-working = Working…
+chat-copy = Copy
+chat-copied = Copied
+# What an agent did, when it gave no title of its own.
+tool-read = Read a file
+tool-edit = Edited a file
+tool-run = Ran a command
+tool-search = Searched
+tool-fetch = Opened a web page
+tool-delete = Deleted
+tool-move = Moved
+tool-think = Thought it over
+tool-other = Took a step
 notice-adapter-turn_failed = The agent's turn failed (error { $rpc_code }). Its provider may have refused the request; try again or choose another model. { $stderr_tail }
 notice-adapter-turn_stopped = The agent stopped its turn ({ $stop_reason }).
 notice-adapter-turn_empty = The agent ended its turn without saying anything. Its provider may have refused the request. { $stderr_tail }

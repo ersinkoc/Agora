@@ -27,6 +27,13 @@ const PATHS = {
   restore: 'M6 3v3H3M10 3v3h3M6 13v-3H3M10 13v-3h3',
   layout: 'M2.5 3.5h11v9h-11zM7 3.5v9M7 8h6.5',
   more: 'M3.5 8h.5M7.75 8h.5M12 8h.5',
+  // What an agent did in a conversation: edit, fetch, delete, move, think, and a step of any other kind.
+  pencil: 'M10.5 3l2.5 2.5-7 7H3.5V10zM9 4.5l2.5 2.5',
+  globe: 'M8 14a6 6 0 1 0 0-12 6 6 0 0 0 0 12zM2 8h12M8 2c-2 2.2-2 9.8 0 12M8 2c2 2.2 2 9.8 0 12',
+  trash: 'M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.7 9h5.6l.7-9',
+  move: 'M2.5 8h10M9.5 5l3 3-3 3',
+  think: 'M6 12.5h4M6.5 14h3M8 2a4 4 0 0 0-2.3 7.3c.5.4.8.9.8 1.5V11h3v-.2c0-.6.3-1.1.8-1.5A4 4 0 0 0 8 2z',
+  step: 'M8 10a2 2 0 1 0 0-4 2 2 0 0 0 0 4z',
 } as const;
 export type IconName = keyof typeof PATHS;
 

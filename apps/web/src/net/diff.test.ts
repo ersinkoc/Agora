@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseDiff } from './diff';
+import { parseDiff, parseHunks } from './diff';
 
 const SAMPLE = `diff --git a/a.txt b/a.txt
 index 1..2 100644
@@ -25,4 +25,17 @@ describe('parseDiff', () => {
     expect(f[1]?.lines[1]).toEqual({ kind: 'add', text: 'brand new' });
   });
   it('is empty for no diff', () => expect(parseDiff('')).toEqual([]));
+});
+
+describe('parseHunks', () => {
+  it('reads a chat agent\'s diff, which has no `diff --git` line', () => {
+    // As the ACP bridge writes it (crates/agora-adapters/src/acp.rs `replace_diff`).
+    const h = parseHunks('--- a/a.rs\n+++ b/a.rs\n@@ -1,1 +1,2 @@\n-old\n+new\n+more\n');
+    expect([h.added, h.removed]).toEqual([2, 1]);
+    expect(h.lines.map((l) => l.kind)).toEqual(['hunk', 'del', 'add', 'add']);
+  });
+  it('reads git\'s output too, and nothing without a hunk', () => {
+    expect(parseHunks(SAMPLE).added).toBe(2);
+    expect(parseHunks('just text')).toEqual({ added: 0, removed: 0, lines: [] });
+  });
 });

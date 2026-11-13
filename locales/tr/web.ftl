@@ -221,8 +221,35 @@ history-failed = Geçmiş o makineden okunamadı.
 history-no-subject = (mesaj yok)
 chat-empty = Henüz bir şey söylenmedi. Aşağıdan ona ne yapacağını söyleyin.
 chat-log = Konuşma
-chat-tool = Araç
 chat-plan = Plan
+chat-plan-steps =
+    { $count ->
+        [one] Plan · { $count } adım
+       *[other] Plan · { $count } adım
+    }
+chat-plan-earlier =
+    { $count ->
+        [one] Önceki plan · { $count } adım
+       *[other] Önceki plan · { $count } adım
+    }
+chat-steps-earlier =
+    { $count ->
+        [one] { $count } önceki adım
+       *[other] { $count } önceki adım
+    }
+chat-working = Çalışıyor…
+chat-copy = Kopyala
+chat-copied = Kopyalandı
+# Ajanın yaptığı iş, kendi başlığını vermediğinde.
+tool-read = Dosya okudu
+tool-edit = Dosya düzenledi
+tool-run = Komut çalıştırdı
+tool-search = Arama yaptı
+tool-fetch = Web sayfası açtı
+tool-delete = Sildi
+tool-move = Taşıdı
+tool-think = Düşündü
+tool-other = Bir adım attı
 notice-adapter-turn_failed = Ajanın sırası başarısız oldu (hata { $rpc_code }). Sağlayıcısı isteği reddetmiş olabilir; yeniden deneyin ya da başka bir model seçin. { $stderr_tail }
 notice-adapter-turn_stopped = Ajan sırasını kendisi bitirdi ({ $stop_reason }).
 notice-adapter-turn_empty = Ajan hiçbir şey söylemeden sırasını bitirdi. Sağlayıcısı isteği reddetmiş olabilir. { $stderr_tail }
