@@ -13,6 +13,7 @@ import { HistoryDialog } from './HistoryDialog';
 import type { CommitItem } from '../net/history';
 import type { WorkspaceFiles } from '../net/files';
 import { AgentAddress } from './AgentAddress';
+import { NoAskBadge } from './NoAskBadge';
 import { Explorer } from './Explorer';
 import { Icon } from './Icon';
 import { Inspector } from './Inspector';
@@ -211,6 +212,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
           <Icon name="chevron" className="size-3 rtl:rotate-180" /><Icon name="folder" className="size-3.5" /><span className="truncate">{a.project || a.workspace}</span>
           {a.branch && <><Icon name="branch" className="ms-1 size-3.5" /><span className="truncate font-mono">{a.branch}</span></>}
           {a.shared && <span className="ide-chip ms-1 flex-none" title={t('workspace-shared')}>{t('ide-shared')}</span>}
+          <NoAskBadge agent={a} />
         </div>
         <div className="flex flex-none items-center gap-1">
           {(a.filesChanged ?? 0) > 0 && (loadDiff

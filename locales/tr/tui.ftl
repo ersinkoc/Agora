@@ -92,3 +92,10 @@ tui-forget-failed = Kaldırılamadı: { $reason }
 tui-forget-disconnected = Bağlantı kesildi. Yeniden bağlanmasını bekleyin.
 tui-forget-timeout = Zamanında yanıt alınamadı. Tekrar deneyin.
 tui-forget-action = ajanı kaldırma
+
+# ADR-0059: launch options (manifest `[[launch.option]]` labels)
+option-skip-permissions = Sormadan
+option-ask = Önce sorsun
+tui-start-acts = Nasıl çalışsın? Numarasına basın; Enter ya da başka bir tuş önce sordurur.
+tui-start-confirm-skip = Ajan sormadan çalışsın mı? "{ $name }" seçiliyken çalıştığı sürece komut çalıştırır ve dosyaları size sormadan değiştirir. Sormadan başlatmak için y'ye basın; başka bir tuş sormaya devam ettirir.
+tui-badge-no-ask = sormuyor
