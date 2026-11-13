@@ -4,6 +4,9 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+### Starting agents
+- When a machine does not trust your browser yet, the start window now shows the exact command to run on that machine, with a Copy button, instead of pointing to another page. The same folder spelled several ways on Windows (`D:\x`, `D:/x`, `\\?\D:\x`) is listed once.
+
 ## 0.3.7
 
 ### Agents

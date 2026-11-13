@@ -368,3 +368,7 @@ closed-reason-forbidden = bunu kaldırma yetkiniz yok
 closed-reason-running = yeniden çalışıyor
 closed-reason-gone = hub artık bunu tanımıyor
 closed-reason-other = hub'a ulaşılamadı ya da reddetti
+
+trust-hint = Bu makine ({ $machine }) bu cihaza henüz güvenmiyor. Bu komutu o makinede bir kez çalıştırın, sonra yeniden Başlat'a basın:
+trust-copy = Kopyala
+trust-copied = Kopyalandı

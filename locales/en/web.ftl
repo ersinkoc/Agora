@@ -368,3 +368,7 @@ closed-reason-forbidden = you are not allowed to remove it
 closed-reason-running = it is running again
 closed-reason-gone = the hub no longer knows it
 closed-reason-other = the hub could not be reached or refused
+
+trust-hint = This machine ({ $machine }) does not trust this device yet. Run this command once on that machine, then press Start again:
+trust-copy = Copy
+trust-copied = Copied
