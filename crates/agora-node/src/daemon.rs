@@ -161,6 +161,19 @@ pub fn checkout_id(root: &Path) -> String {
     format!("co-{h:016x}")
 }
 
+/// The kind of a chat agent's item in the fixed words other agents see (`agora_mesh::awareness`); `None` for an item that says
+/// nothing about what it is doing (a notice).
+fn activity_word(item: &agora_adapters::host::ChatItem) -> Option<&'static str> {
+    use agora_adapters::host::ChatItem;
+    match item {
+        ChatItem::Text(_) => Some("writing a reply"),
+        ChatItem::ToolCall { tool, .. } => Some(agora_mesh::awareness::tool_word(tool)),
+        ChatItem::Plan(_) => Some("planning"),
+        ChatItem::Diff { .. } => Some("editing files"),
+        ChatItem::Notice { .. } => None,
+    }
+}
+
 fn state_word(s: AgentState) -> &'static str {
     match s {
         AgentState::Working => "working",
@@ -1214,9 +1227,11 @@ impl Node {
                         for e in &events {
                             match e {
                                 SupervisorEvent::Exited { agent, status } if status.success() => {
-                                    mesh.unregister(agent);
+                                    mesh.unregister_because(agent, "finished");
                                 }
-                                SupervisorEvent::GaveUp { agent } => mesh.unregister(agent),
+                                SupervisorEvent::GaveUp { agent } => {
+                                    mesh.unregister_because(agent, "crashed");
+                                }
                                 _ => {}
                             }
                             // ADR-0057: an agent's helper grants and waiting start end when it exits or is stopped.
@@ -1229,7 +1244,7 @@ impl Node {
                         }
                         spawner.tick();
                         for v in views.iter().filter(|v| v.running) {
-                            mesh.set_state(&v.id, state_word(v.state));
+                            mesh.observe(&v.id, state_word(v.state), v.parent.as_ref());
                         }
                         ev.record_bodies(mesh.take_events());
                         // Adapter approval requests enter the queue and are announced; stopped or dead agents leave
@@ -1241,7 +1256,13 @@ impl Node {
                                 SupervisorEvent::Adapter {
                                     agent,
                                     event: AdapterEvent::Chat { item, .. },
-                                } => chat.push_item(agent, item, now),
+                                } => {
+                                    // Other agents see the kind of this item in fixed words (`workspace_status`), never its text.
+                                    if let Some(word) = activity_word(item) {
+                                        mesh.set_activity(agent, word);
+                                    }
+                                    chat.push_item(agent, item, now);
+                                }
                                 SupervisorEvent::Adapter {
                                     agent,
                                     event:
@@ -1252,6 +1273,7 @@ impl Node {
                                             ..
                                         },
                                 } => {
+                                    mesh.set_activity(agent, "asking the user");
                                     if let Some(p) =
                                         approvals.request(agent, approval_id, action, detail, now)
                                     {
@@ -1307,14 +1329,15 @@ impl Node {
                 })?
         };
         let git_watch = {
-            let (sup, ev, stop) = (
+            let (sup, ev, stop, mesh) = (
                 Arc::clone(&supervisor),
                 Arc::clone(&events),
                 Arc::clone(&stop),
+                Arc::clone(&mesh),
             );
             std::thread::Builder::new()
                 .name("agora-git".into())
-                .spawn(move || watch_git(&sup, &ev, &stop, &git_wake))?
+                .spawn(move || watch_git(&sup, &ev, &mesh, &stop, &git_wake))?
         };
         let events_set_aside = events.set_aside().cloned();
         Ok(Self {
@@ -1370,7 +1393,13 @@ fn memory_moved(reported: u64, now: u64) -> bool {
 }
 
 /// `wake` (set when an agent starts) ends the wait between rounds early, so a new folder's changes are counted at once.
-fn watch_git(sup: &Mutex<Supervisor>, ev: &EventSink, stop: &AtomicBool, wake: &AtomicBool) {
+fn watch_git(
+    sup: &Mutex<Supervisor>,
+    ev: &EventSink,
+    mesh: &crate::mesh_server::MeshServer,
+    stop: &AtomicBool,
+    wake: &AtomicBool,
+) {
     let mut last: std::collections::HashMap<(PathBuf, bool), (u32, u32, u32, String)> =
         std::collections::HashMap::new();
     while !stop.load(Ordering::Acquire) {
@@ -1393,6 +1422,8 @@ fn watch_git(sup: &Mutex<Supervisor>, ev: &EventSink, stop: &AtomicBool, wake: &
             let Ok(st) = git::status(path) else {
                 continue;
             };
+            // Agents see how many files are changed in each other's workspace (`workspace_status`).
+            mesh.set_files_changed(path, st.files_changed);
             let now = (
                 st.files_changed,
                 st.insertions,

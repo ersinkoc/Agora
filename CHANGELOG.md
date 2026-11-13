@@ -4,6 +4,9 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+### Agents
+- Agents know who else is here. A new mesh tool, `workspace_status`, tells an agent how many agents work in its workspace and project, on which machines (other machines through the hub when the project is shared; marked partial when the hub cannot be asked), who is working, waiting for approval or idle, what each is doing in a few words (its claimed task, or the kind of its latest step, or its state; never its prompt or screen), how many files each has changed, who holds which paths and which tasks are open, with a one-line summary. `agents_list` rows carry the same facts. When an agent on the same machine starts or ends, the other agents of the project get a short `presence` note in their inbox (at most 10 a minute). Agents are told to check `workspace_status` when they start and before editing shared files.
+
 ## 0.3.7
 
 ### Agents

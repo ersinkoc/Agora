@@ -582,7 +582,7 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
             }
             for (id, events) in stopped {
                 if let Some(mesh) = &ctx.mesh {
-                    mesh.unregister(&id);
+                    mesh.unregister_because(&id, "stopped");
                 }
                 if let Some(s) = &ctx.spawn {
                     s.agent_ended(&id);
