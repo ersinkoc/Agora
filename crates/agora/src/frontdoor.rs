@@ -35,6 +35,23 @@ pub(crate) enum Ui {
 }
 
 impl Ui {
+    /// What a machine without a saved choice opens: the browser window on a desktop, the terminal client when there is no screen
+    /// to open a browser on (an SSH session, or Linux with no display).
+    pub(crate) fn default_for(env: &dyn Fn(&str) -> bool) -> Ui {
+        let ssh = env("SSH_CONNECTION") || env("SSH_TTY");
+        let headless_linux =
+            std::env::consts::OS == "linux" && !env("DISPLAY") && !env("WAYLAND_DISPLAY");
+        if ssh || headless_linux {
+            Ui::Tui
+        } else {
+            Ui::Web
+        }
+    }
+
+    fn system_default() -> Ui {
+        Ui::default_for(&|k| std::env::var_os(k).is_some_and(|v| !v.is_empty()))
+    }
+
     fn parse(s: &str) -> Option<Ui> {
         match s {
             "tui" => Some(Ui::Tui),
@@ -119,7 +136,7 @@ impl Machine {
     /// Reads the file `to_toml` writes (a small subset of TOML: one `key = "string"` or `key = ["string", ...]` per line).
     pub(crate) fn parse(text: &str) -> Option<Machine> {
         let mut roles = None;
-        let mut ui = Ui::Tui;
+        let mut ui = Ui::system_default();
         let mut hub_listen = None;
         let mut hub_names = Vec::new();
         let mut hub_dir = None;
@@ -459,7 +476,7 @@ pub fn front_door(say: &Say, o: &Opts) -> ExitCode {
                 &mut std::io::stdout(),
                 &h,
                 &cwd,
-                ui.filter(|_| o.save).unwrap_or(Ui::Tui),
+                ui.filter(|_| o.save).unwrap_or_else(Ui::system_default),
             );
             match asked {
                 Ok(Some(m)) => {
@@ -1013,6 +1030,19 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn the_default_interface_is_the_browser_unless_there_is_no_screen() {
+        let none = |_: &str| false;
+        let ssh = |k: &str| k == "SSH_CONNECTION";
+        assert_eq!(Ui::default_for(&ssh), Ui::Tui);
+        if std::env::consts::OS == "linux" {
+            assert_eq!(Ui::default_for(&none), Ui::Tui);
+            assert_eq!(Ui::default_for(&|k: &str| k == "DISPLAY"), Ui::Web);
+        } else {
+            assert_eq!(Ui::default_for(&none), Ui::Web);
+        }
     }
 
     #[test]
