@@ -103,6 +103,12 @@ Rule semantics: highest-priority matching rule wins; `all` = AND, `any` = OR, `n
 `title`, `bottom_lines(n)`, `bottom_non_empty_lines(n)`. Reported state (hooks, ACP, adapter) always overrides
 rule results.
 
+`[[ready]]` (ADR-0057, optional): rules of the same shape with `state = "idle"` that match only an empty input box waiting for a
+request, stricter than an `idle` rule (whose prompt marker can also be the selected row of a menu or dialog). The node types a helper's
+first prompt only when a fresh look at the live screen matches them and the kind's rules detect idle; a kind without them never gets
+a first prompt typed for it (the prompt is left for the user). Every shipped terminal manifest has them, and the fixture test checks
+that they match the captured idle and answered screens and nothing else (including a `menu.screen` that an `idle` rule matches).
+
 Manifests in this repository: `claude-code` and `codex` (screens captured from the real agents, `manifests/agents/fixtures/`); `wrongstack` is planned and not shipped yet (it needs a machine that has it). `crates/agora-adapters/tests/shipped_manifests.rs` checks every shipped manifest against its captured screens.
 
 ## Usage files (ADR-0042)

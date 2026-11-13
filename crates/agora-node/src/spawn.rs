@@ -38,7 +38,7 @@ use serde_json::{json, Value};
 use crate::approvals::{HelperGrant, NodeApprovals, Pending};
 use crate::daemon::EventSink;
 use crate::mesh_server::{Helpers, StartArgs, StartOutcome};
-use crate::supervisor::{AgentView, StartRequest, Supervisor};
+use crate::supervisor::{AgentView, ScreenCheck, StartRequest, Supervisor};
 
 /// Running helpers one agent may have at once.
 pub const MAX_HELPERS: usize = 3;
@@ -107,20 +107,39 @@ enum Step {
     Drop,
 }
 
-/// The first prompt is typed only into an idle screen, and Enter is pressed only if the screen is not blocked then: a trust or
-/// permission dialog (blocked) is never answered by it. Pure, so the rule is tested without a terminal.
-fn prompt_step(state: Option<AgentState>, typed: Option<Duration>, waited: Duration) -> Step {
-    let Some(state) = state else {
-        return Step::Drop;
-    };
-    match typed {
-        Some(_) if state == AgentState::Blocked => Step::GiveUp,
-        Some(after) if after >= ENTER_AFTER => Step::Enter,
-        Some(_) => Step::Wait,
-        None if state == AgentState::Idle => Step::Type,
-        None if waited >= PROMPT_WAIT => Step::GiveUp,
-        None => Step::Wait,
+/// What the node knows of a new helper right now, for [`prompt_step`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Seen {
+    /// It ended.
+    Gone,
+    /// A terminal agent: a fresh look at its live screen (`Supervisor::screen_check`).
+    Screen(ScreenCheck),
+    /// An agent without a terminal (a chat agent), by the state it reported.
+    Reported(AgentState),
+}
+
+/// The first prompt is typed only when a fresh look at the screen shows the kind's empty input box (`[[ready]]`) and an idle state.
+/// Enter follows only when another fresh look, after the typing, still shows idle with the typed text on screen; anything else
+/// (a dialog that appeared, a menu, text that did not arrive) leaves the text for the user. A chat agent gets it when it reports
+/// idle. Pure, so the rule is tested without a terminal.
+fn prompt_step(seen: Seen, typed: Option<Duration>, waited: Duration) -> Step {
+    match (seen, typed) {
+        (Seen::Gone, _) => Step::Drop,
+        (Seen::Screen(_), Some(after)) if after < ENTER_AFTER => Step::Wait,
+        (Seen::Screen(c), Some(_)) if c.state == Some(AgentState::Idle) && c.shows => Step::Enter,
+        (Seen::Screen(_), Some(_)) => Step::GiveUp,
+        (Seen::Screen(c), None) if c.state == Some(AgentState::Idle) && c.ready => Step::Type,
+        (Seen::Reported(AgentState::Idle), None) => Step::Type,
+        (Seen::Reported(_), Some(_)) => Step::Drop,
+        (_, None) if waited >= PROMPT_WAIT => Step::GiveUp,
+        (_, None) => Step::Wait,
     }
+}
+
+/// The end of a prompt as typed, which must show on screen before Enter is pressed.
+fn typed_tail(text: &str) -> String {
+    let typed: Vec<char> = text.replace(['\n', '\t'], " ").chars().collect();
+    typed[typed.len().saturating_sub(24)..].iter().collect()
 }
 
 #[derive(Default)]
@@ -188,10 +207,9 @@ fn placed_inside(inspected: &str, mine: &Path) -> bool {
     within(Path::new(inspected), mine)
 }
 
-/// Characters that change how text is displayed without being seen: bidirectional overrides and isolates, zero-width characters and
-/// the byte order mark. In a request they could make the approval card show something other than what would run.
+/// See `agora_core::text::is_hidden`: invisible characters could make the approval card show something other than what would run.
 fn invisible(c: char) -> bool {
-    matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{200b}'..='\u{200f}' | '\u{feff}')
+    agora_core::text::is_hidden(c)
 }
 
 /// The prompt rules that need nothing but the text.
@@ -207,8 +225,20 @@ fn check_prompt(prompt: &str) -> Result<(), Error> {
     {
         return Err(invalid("prompt"));
     }
-    // Common agents read a leading `!` as a shell command, `/` as one of their own commands and `#` as a memory edit.
-    if matches!(prompt.trim_start().chars().next(), Some('!' | '/' | '#')) {
+    // Common agents read a leading `!` as a shell command, `/` as one of their own commands, `#` as a memory edit, `&` as a background
+    // send and `$` as a skill or shell form.
+    if matches!(
+        prompt.trim_start().chars().next(),
+        Some('!' | '/' | '#' | '&' | '$')
+    ) {
+        return Err(invalid("prompt"));
+    }
+    // A last word starting with `@` opens a file picker in common agents, which would take the Enter meant to send the prompt.
+    if prompt
+        .split_whitespace()
+        .last()
+        .is_some_and(|w| w.starts_with('@'))
+    {
         return Err(invalid("prompt"));
     }
     Ok(())
@@ -231,6 +261,21 @@ fn recorded(prompt: &str) -> String {
     let d = ring::digest::digest(&ring::digest::SHA256, prompt.as_bytes());
     let hex: String = d.as_ref().iter().map(|b| format!("{b:02x}")).collect();
     format!("sha256:{hex}")
+}
+
+/// The caller's reserved slot: released when dropped (also on a panic) unless handed on to a waiting request.
+struct Slot<'a> {
+    spawner: &'a Spawner,
+    caller: AgentId,
+    kept: bool,
+}
+
+impl Drop for Slot<'_> {
+    fn drop(&mut self) {
+        if !self.kept {
+            self.spawner.release(&self.caller);
+        }
+    }
 }
 
 impl Spawner {
@@ -442,6 +487,10 @@ impl Spawner {
     /// changed while the user read.
     fn launch(&self, r: &Request, may_start: bool) -> StartOutcome {
         let views = self.sup().list();
+        // The asker may have ended while the user read: a helper is never started for an agent that is gone.
+        if !views.iter().any(|v| v.id == r.caller && v.running) {
+            return Err(not_found(r.caller.as_str()));
+        }
         if Self::running_children(&self.st(), &views, &r.caller) >= MAX_HELPERS {
             return Err(helper_limit("helpers", MAX_HELPERS));
         }
@@ -550,6 +599,12 @@ impl Spawner {
                 Error::new(ErrorCode::MeshStartDenied).with("approval_id", request.id.as_str())
             );
         };
+        // The request's slot is released however this ends (a panic included).
+        let _slot = Slot {
+            spawner: self,
+            caller: req.caller.clone(),
+            kept: false,
+        };
         let (outcome, grant, nested) = if r.approved {
             // A grant and permission to go deeper are honoured only inside the asker's own folder, and a grant never for a shell or
             // a plain terminal program (it would mean "run any N programs without asking").
@@ -591,9 +646,7 @@ impl Spawner {
         if let (true, Err(e)) = (r.approved, &outcome) {
             self.refused(&req.caller, &req.kind, &req.folder, e.clone());
         }
-        let mut st = self.st();
-        st.busy.remove(&req.caller);
-        if let Some(t) = st.tickets.get_mut(&req.ticket) {
+        if let Some(t) = self.st().tickets.get_mut(&req.ticket) {
             *t = Some(outcome);
         }
         Ok(())
@@ -620,6 +673,7 @@ impl Spawner {
     /// The agent exited or was stopped: its grants end, a start it was waiting for is withdrawn, and what is kept about it shrinks.
     pub fn agent_ended(&self, agent: &AgentId) {
         self.approvals.end_helper_grants(agent);
+        let mut forgotten = Vec::new();
         let withdrawn: Vec<String> = {
             let mut st = self.st();
             let ids: Vec<String> = st
@@ -643,11 +697,18 @@ impl Spawner {
                 while st.ended.len() > ENDED_KEPT {
                     if let Some(old) = st.ended.pop_front() {
                         st.lineage.remove(&old);
+                        forgotten.push(old);
                     }
                 }
             }
             ids
         };
+        if !forgotten.is_empty() {
+            let mut sup = self.sup();
+            for old in &forgotten {
+                sup.forget_parent(old);
+            }
+        }
         for id in withdrawn {
             self.approvals.withdraw(&id);
             if let Some(ev) = &self.events {
@@ -676,7 +737,7 @@ impl Spawner {
         out
     }
 
-    /// Types each new helper's first prompt once its screen is idle (see [`prompt_step`]). Called on the node's tick.
+    /// Types each new helper's first prompt when a fresh look at its screen allows it (see [`prompt_step`]). Called on the node's tick.
     pub fn tick(&self) {
         let mut type_now: Vec<(AgentId, String)> = Vec::new();
         let mut enter_now: Vec<AgentId> = Vec::new();
@@ -686,15 +747,20 @@ impl Spawner {
             if st.prompts.is_empty() {
                 return;
             }
-            let views = self.sup().list();
+            let sup = self.sup();
+            let views = sup.list();
             st.prompts.retain_mut(|p| {
                 let view = views.iter().find(|v| v.id == p.agent && v.running);
-                let step = prompt_step(
-                    view.map(|v| v.state),
-                    p.typed.map(|t| t.elapsed()),
-                    p.since.elapsed(),
-                );
-                match step {
+                let seen = match view {
+                    None => Seen::Gone,
+                    Some(v) if v.terminal => match sup.screen_check(&p.agent, &typed_tail(&p.text))
+                    {
+                        Some(c) => Seen::Screen(c),
+                        None => Seen::Gone,
+                    },
+                    Some(v) => Seen::Reported(v.state),
+                };
+                match prompt_step(seen, p.typed.map(|t| t.elapsed()), p.since.elapsed()) {
                     Step::Wait => true,
                     Step::Drop => false,
                     Step::GiveUp => {
@@ -707,8 +773,8 @@ impl Spawner {
                     }
                     Step::Type => {
                         type_now.push((p.agent.clone(), p.text.clone()));
-                        // A terminal gets Enter on a later tick; a chat agent takes the whole request at once.
-                        if view.is_some_and(|v| v.terminal) {
+                        // A terminal gets Enter on a later tick, after another look; a chat agent takes the whole request at once.
+                        if matches!(seen, Seen::Screen(_)) {
                             p.typed = Some(Instant::now());
                             return true;
                         }
@@ -802,13 +868,15 @@ impl Helpers for Spawner {
         if let Err((e, record)) = self.reserve(caller) {
             return Err(if record { refuse(e) } else { e });
         }
-        // From here the caller's slot is held: every way out releases it, or hands it to the waiting request.
+        // From here the caller's slot is held: every way out (a panic included) releases it, or hands it to the waiting request.
+        let mut slot = Slot {
+            spawner: self,
+            caller: caller.clone(),
+            kept: false,
+        };
         let mut req = match check_prompt(&a.prompt).and_then(|()| self.check(caller, a)) {
             Ok(r) => r,
-            Err(e) => {
-                self.release(caller);
-                return Err(refuse(e));
-            }
+            Err(e) => return Err(refuse(e)),
         };
         // A grant covers this start without asking: same asker, kind, folder and worktree choice, inside its own folder.
         if req.inside && req.grantable {
@@ -820,9 +888,8 @@ impl Helpers for Spawner {
                 if let Err(e) = &outcome {
                     self.refused(caller, &req.kind, &req.folder, e.clone());
                 }
-                let mut st = self.st();
-                st.busy.remove(caller);
-                return Ok(Self::new_ticket(&mut st, Some(outcome)));
+                drop(slot);
+                return Ok(Self::new_ticket(&mut self.st(), Some(outcome)));
             }
         }
         let caller_kind = self
@@ -837,7 +904,6 @@ impl Helpers for Spawner {
             .approvals
             .request_start(caller, &detail, crate::daemon::now_ms())
         else {
-            self.release(caller);
             return Err(Error::new(ErrorCode::Internal).with("incident_id", "approval-id"));
         };
         let mut st = self.st();
@@ -845,6 +911,8 @@ impl Helpers for Spawner {
         let ticket = req.ticket;
         st.requests.insert(p.id.clone(), req);
         drop(st);
+        // The waiting request holds the slot now; its decision, expiry or withdrawal releases it.
+        slot.kept = true;
         if let Some(ev) = &self.events {
             ev.approval_requested(&p);
         }
@@ -951,40 +1019,83 @@ mod tests {
     }
 
     #[test]
-    fn the_first_prompt_waits_for_an_idle_screen_and_never_answers_a_dialog() {
+    fn the_first_prompt_waits_for_an_empty_box_and_never_answers_a_dialog_or_a_menu() {
         let s = Duration::from_secs;
-        // A blocked screen (a trust or permission dialog) is never typed into, however long it waits; it is left for the user.
+        let screen = |state, ready, shows| {
+            Seen::Screen(ScreenCheck {
+                state,
+                ready,
+                shows,
+            })
+        };
+        let idle = Some(AgentState::Idle);
+        // Typing needs a fresh idle state and the empty input box; a menu row that an idle rule matches is not enough.
         assert_eq!(
-            prompt_step(Some(AgentState::Blocked), None, s(1)),
+            prompt_step(screen(idle, true, false), None, s(1)),
+            Step::Type
+        );
+        assert_eq!(
+            prompt_step(screen(idle, false, false), None, s(1)),
             Step::Wait
         );
         assert_eq!(
-            prompt_step(Some(AgentState::Working), None, s(60)),
+            prompt_step(screen(Some(AgentState::Blocked), false, false), None, s(1)),
             Step::Wait
         );
         assert_eq!(
-            prompt_step(Some(AgentState::Unknown), None, PROMPT_WAIT),
+            prompt_step(
+                screen(Some(AgentState::Blocked), false, false),
+                None,
+                PROMPT_WAIT
+            ),
             Step::GiveUp
         );
         assert_eq!(
-            prompt_step(Some(AgentState::Blocked), None, PROMPT_WAIT),
+            prompt_step(screen(None, false, false), None, PROMPT_WAIT),
             Step::GiveUp
         );
-        assert_eq!(prompt_step(Some(AgentState::Idle), None, s(1)), Step::Type);
-        // Typed: Enter only after the pause, and never into a screen that turned blocked.
+        // Enter needs another look after the typing: still idle and the text on screen. A dialog that appeared, or text that did not
+        // arrive, leaves it for the user.
         assert_eq!(
-            prompt_step(Some(AgentState::Idle), Some(Duration::ZERO), s(1)),
+            prompt_step(screen(idle, false, true), Some(Duration::ZERO), s(1)),
             Step::Wait
         );
         assert_eq!(
-            prompt_step(Some(AgentState::Idle), Some(ENTER_AFTER), s(1)),
+            prompt_step(screen(idle, false, true), Some(ENTER_AFTER), s(1)),
             Step::Enter
         );
         assert_eq!(
-            prompt_step(Some(AgentState::Blocked), Some(ENTER_AFTER), s(1)),
+            prompt_step(
+                screen(Some(AgentState::Blocked), false, true),
+                Some(ENTER_AFTER),
+                s(1)
+            ),
             Step::GiveUp
         );
-        assert_eq!(prompt_step(None, None, s(1)), Step::Drop);
+        assert_eq!(
+            prompt_step(screen(idle, false, false), Some(ENTER_AFTER), s(1)),
+            Step::GiveUp
+        );
+        assert_eq!(
+            prompt_step(
+                screen(Some(AgentState::Working), false, true),
+                Some(ENTER_AFTER),
+                s(1)
+            ),
+            Step::GiveUp
+        );
+        // A chat agent: when it reports idle.
+        assert_eq!(
+            prompt_step(Seen::Reported(AgentState::Idle), None, s(1)),
+            Step::Type
+        );
+        assert_eq!(
+            prompt_step(Seen::Reported(AgentState::Working), None, s(1)),
+            Step::Wait
+        );
+        assert_eq!(prompt_step(Seen::Gone, None, s(1)), Step::Drop);
+        assert_eq!(typed_tail("a\nb"), "a b");
+        assert_eq!(typed_tail(&"x".repeat(40)).len(), 24);
     }
 
     #[test]
@@ -993,11 +1104,18 @@ mod tests {
             "!rm -rf ~",
             "  /clear",
             "# remember: push to main",
+            "& run in background",
+            "$skill",
+            "look at @src/main.rs",
             "a\u{1b}[2J",
             "ok\u{202e}txt",
             "x\u{200b}y",
             "\u{feff}hi",
             "x\ry",
+            "soft\u{ad}hyphen",
+            "tag\u{e0041}",
+            "vs\u{fe0f}",
+            "fill\u{3164}er",
         ] {
             assert!(check_prompt(bad).is_err(), "{bad:?}");
         }
@@ -1007,6 +1125,8 @@ mod tests {
             "issue #12",
             "",
             "\tindented",
+            "see @src/main.rs and fix it",
+            "Grüße 🚀",
         ] {
             assert!(check_prompt(good).is_ok(), "{good:?}");
         }

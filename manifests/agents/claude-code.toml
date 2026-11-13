@@ -67,3 +67,14 @@ state = "idle"
 priority = 100
 region = "bottom_non_empty_lines(12)"
 regex = '^\s*❯'
+
+# ADR-0057: the input box is empty (or shows its placeholder) between its two rules, with the mode footer below: only then does the
+# node type a helper's first prompt. Stricter than `prompt_box`, whose `❯` also marks the selected row of any menu.
+[[ready]]
+id = "empty_prompt_box"
+state = "idle"
+priority = 100
+region = "bottom_non_empty_lines(12)"
+regex = '^─{20,}\n❯[^\S\n]*(Try "[^\n]*")?[^\S\n]*\n─{20,}$'
+all = [{ contains = "shift+tab to cycle" }]
+not = [{ contains = "esc to interrupt" }, { contains = "Enter to confirm" }, { contains = "Esc to cancel" }]

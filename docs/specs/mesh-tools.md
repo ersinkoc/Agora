@@ -117,8 +117,9 @@ the node answers them itself (`agora-node::spawn`), not the broker. The caller i
 - **A grant.** The decision may allow "up to N helpers of this kind in this folder" (N at most 10, this start included) and, separately,
   that the helpers it starts may ask in turn. Later starts that match the grant (same asking agent, kind, folder and `worktree`
   choice) start at once. A grant ends when the asking agent exits or is stopped, or when revoked (`GrantRevoke` with the approval id;
-  `GrantList` shows it). No grant is given for a shell or a plain terminal program (kind `shell`, a known shell as the program, or a
-  manifest with no screen rules, mesh, adapter or structured mode): there it would mean "run any N programs without asking". The
+  `GrantList` shows it). No grant is given for a kind without an agent integration (a mesh section, an adapter or a structured mode), nor for
+  kind `shell` or a known shell (or `env`) as the program, whatever screen rules it has: there it would mean "run any N programs
+  without asking". The
   request's `grant_allowed` says whether one may be given.
 - **Never wider than the asker.** The folder defaults to the asker's own; one below it is allowed (a relative `folder` is taken below
   the asker's own); `worktree: true` makes the helper its own worktree of it. Another folder is asked about with `inside: false`
@@ -132,19 +133,25 @@ the node answers them itself (`agora-node::spawn`), not the broker. The caller i
   them together); a first prompt over 16 KiB (`prompt`). Six `agent_start` calls a minute per agent (`mesh.rate_limited`), and the
   node's own agent limit (`node.resource_limit`). A refusal before asking is an `AgentStartRefused` event (rate refusals at most one a
   minute per agent; agent-written fields cut to 256 bytes).
-- **Prompt rules** (`protocol.invalid_message`, `field = prompt`): no control characters other than line breaks and tabs, no
-  bidirectional override or isolate and no zero-width characters (U+202A-202E, U+2066-2069, U+200B-200F, U+FEFF; also refused in
-  `folder`), and no leading `!`, `/` or `#` (a shell escape, a slash command or a memory edit in common agents).
+- **Prompt rules** (`protocol.invalid_message`, `field = prompt`): no control characters other than line breaks and tabs; no
+  invisible characters (`agora_core::text::is_hidden`: every Unicode format character such as U+00AD, U+061C, U+180E,
+  U+200B-200F, U+202A-202E, U+2060-2064 and U+2066-206F, the tag block U+E0000-E007F, variation selectors and the fillers U+115F,
+  U+1160, U+3164, U+FFA0; also refused in `folder`); no leading `!`, `/`, `#`, `&` or `$` (a shell escape, a slash command, a
+  memory edit, a background send or a skill form in common agents); and no last word starting with `@` (a file picker would take the
+  Enter). Clients show any such character that reaches them as a visible `\u{…}` escape.
 - **Following.** `agent_wait` and `agent_output` answer only for helpers the caller started (anything else is `agent.not_found`).
   `agent_wait` ends when the helper reaches the state or exits (`state: "exited"`); a connection may have 8 waits open
   (`mesh.too_many_asks`), all read from one view of the node per poll. `agent_output` is the bottom of the live screen (never
   scrollback) or, for a chat agent without a terminal, the end of its transcript; at most 16 KiB. It is untrusted text.
-- **The first prompt** is typed into the helper only when its screen is idle (line breaks and tabs as spaces), and Enter follows
-  150 ms later only if the screen is not blocked: a trust or permission dialog (blocked) is never answered by it. If the screen
-  is not idle within 120 seconds, the prompt is not typed and is left for the user, recorded as an `AgentStartRefused` with
-  `code = agent.blocked` (its `folder` holds the helper's id). A chat agent gets it as its first request once idle. Every helper's
-  first prompt, granted starts included, is recorded as a `MessagePosted` from the parent to the helper (the text, or
-  `sha256:<hex>` above 4 KiB). Later messages from the parent are ordinary mesh messages (information, not authority).
+- **The first prompt** is typed into a terminal helper only when a fresh look at its live screen (taken then, not the paced
+  detection's last result) shows the kind's empty input box (`[[ready]]` in its manifest, see `agent-manifest.md`) and an idle
+  state; line breaks and tabs are typed as spaces. Enter follows only after another fresh look, 150 ms or more after the typing,
+  still detects idle and shows the typed text on screen; a dialog or menu that appeared, or text that did not arrive, leaves the text
+  for the user. A kind without `[[ready]]` rules never gets its first prompt typed. When it is not typed within 120 seconds, or not
+  sent, that is recorded as an `AgentStartRefused` with `code = agent.blocked` (its `folder` holds the helper's id). A chat agent gets
+  it as its first request once it reports idle. Every helper's first prompt, granted starts included, is recorded as a
+  `MessagePosted` from the parent to the helper (the text, or `sha256:<hex>` above 4 KiB). Later messages from the parent are
+  ordinary mesh messages (information, not authority).
 - **Stopping.** `AgentStop { stop_helpers: true }` stops the agent's running helpers and theirs too. A parent that exits on its own leaves
   its helpers running.
 - **Restart.** Which helper an agent started is kept in the node's memory (the supervisor's parent links and the spawner's record of

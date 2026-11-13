@@ -1175,6 +1175,9 @@ impl Node {
                                 }
                                 SupervisorEvent::Stopped { agent }
                                 | SupervisorEvent::AdapterCrashed { agent } => {
+                                    // The spawner first: a start the agent waited for is withdrawn and its slot released, before
+                                    // the queue drops the request.
+                                    spawner.agent_ended(agent);
                                     approvals.cancel_agent(agent);
                                 }
                                 _ => {}
