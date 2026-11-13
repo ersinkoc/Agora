@@ -5,7 +5,7 @@ import type { MachineModel, ProjectChoice } from '../net/view';
 import { childPath, type DirectoryInfo, type DirectoryListing } from '../net/directory';
 import { Icon } from './Icon';
 import { machineFor } from './startChoice';
-import { ASK, chosenIds, confirmSkip, harmless, initialLaunch, keepAsking, labelOf, pickPermission, skipping, toggleHarmless, type LaunchOptionChoice } from './launchChoice';
+import { ASK, chosenIds, confirmedIds, confirmSkip, harmless, initialLaunch, keepAsking, labelOf, pickPermission, skipping, toggleHarmless, usableOptions, type LaunchOptionChoice } from './launchChoice';
 // ADR-0059: `options` are the kind's launch options as the machine lists them (none from an older machine).
 export interface KindChoice { kind: string; name: string; installed: boolean; options?: LaunchOptionChoice[] }
 
@@ -24,7 +24,7 @@ export function StartAgent({ projects, machines, initialNode, loadKinds, inspect
   // ADR-0053: the sub-folders of a folder on the machine (empty path: its home folder). Missing, or refused by an older machine: the path is typed.
   list?: (node: string, path: string) => Promise<DirectoryListing>;
   // A failure is a Fluent message id, translated when rendered so an open form follows a language change.
-  onStart: (node: string, info: DirectoryInfo, kind: string, separate: boolean, acceptIdentityChange: boolean, launchOptions: string[]) => Promise<string | undefined>;
+  onStart: (node: string, info: DirectoryInfo, kind: string, separate: boolean, acceptIdentityChange: boolean, launch: { ids: string[]; confirmed: string[] }) => Promise<string | undefined>;
   onClose: () => void;
 }) {
   const online = machines.filter(m => m.online);
@@ -90,9 +90,10 @@ export function StartAgent({ projects, machines, initialNode, loadKinds, inspect
   };
   const go = async () => {
     if (!info) return;
-    setBusy(true); setError(await onStart(node, info, kind, separate, acceptIdentityChange, chosenIds(launch, offered))); setBusy(false);
+    setBusy(true); setError(await onStart(node, info, kind, separate, acceptIdentityChange, { ids: chosenIds(launch, offered), confirmed: confirmedIds(launch, offered) })); setBusy(false);
   };
-  const offered: LaunchOptionChoice[] = (kinds !== 'loading' && kinds !== 'failed' ? kinds.find((k) => k.kind === kind)?.options : undefined) ?? [];
+  // Ids outside `[a-z0-9-]` are never offered (the hub relays the list; the machine decides).
+  const offered: LaunchOptionChoice[] = usableOptions((kinds !== 'loading' && kinds !== 'failed' ? kinds.find((k) => k.kind === kind)?.options : undefined) ?? []);
   const skips = skipping(offered), plain = harmless(offered);
   const pendingOption = offered.find((o) => o.id === launch.pending);
   const known = projects.flatMap(p => (p.node === node && p.path ? [{ ...p, path: p.path }] : []));

@@ -563,6 +563,7 @@ fn agent_start(say: &Say, o: &Opts) -> ExitCode {
         accept_identity_change: o.accept_identity_change,
         authorization: None,
         launch_options: Vec::new(),
+        confirmed_launch_options: Vec::new(),
     });
     match call(say, &mut c, cmd) {
         Ok(v1::CommandOk {

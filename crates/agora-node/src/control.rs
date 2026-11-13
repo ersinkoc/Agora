@@ -469,7 +469,10 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                     project,
                     Path::new(&info.git_root),
                     a.separate_worktree,
-                    &a.launch_options,
+                    &crate::launch_options::Requested {
+                        ids: a.launch_options.clone(),
+                        confirmed: a.confirmed_launch_options.clone(),
+                    },
                     Instant::now(),
                 )
                 .map_err(sup_err)?;
@@ -548,7 +551,14 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
             };
             let mut sup = ctx.sup();
             let id = sup
-                .start_with_options(&req, &a.launch_options, Instant::now())
+                .start_with_options(
+                    &req,
+                    &crate::launch_options::Requested {
+                        ids: a.launch_options.clone(),
+                        confirmed: a.confirmed_launch_options.clone(),
+                    },
+                    Instant::now(),
+                )
                 .map_err(sup_err)?;
             let view = sup.list().into_iter().find(|v| v.id == id);
             let launch = view.as_ref().map(launch_of).unwrap_or_default();

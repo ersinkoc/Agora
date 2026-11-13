@@ -741,6 +741,8 @@ fn start_in_folder(
         .take(8)
         .collect();
     let mut launch_options = Vec::new();
+    // Only what this window itself asked about and the user accepted (a separate signed list, never part of an id).
+    let mut confirmed_launch_options = Vec::new();
     if !skips.is_empty() {
         let label = |o: &agora_protocol::v1::LaunchOption| {
             let said = say.text(&o.label, &[]);
@@ -782,9 +784,10 @@ fn start_in_folder(
                 )
             );
             let _ = out.flush();
-            // The confirmation marker (`<id>!`): signed with the start; the node refuses an option that skips permissions without it.
+            // Confirmed here: signed with the start; the node refuses an option that skips permissions without it.
             if read_key(rx, Duration::from_secs(60)) == Some(b'y') {
-                launch_options.push(format!("{}!", o.id));
+                launch_options.push(o.id.clone());
+                confirmed_launch_options.push(o.id.clone());
             }
         }
     }
@@ -796,6 +799,7 @@ fn start_in_folder(
         false,
         accept,
         &launch_options,
+        &confirmed_launch_options,
         now_ms(),
     ) else {
         return say.text(
@@ -813,6 +817,7 @@ fn start_in_folder(
             authorization: Some(auth),
             accept_identity_change: accept,
             launch_options,
+            confirmed_launch_options,
         },
     ) {
         Ok(agent) => say.text(key!("tui-started"), &[("agent", Arg::Str(agent))]),

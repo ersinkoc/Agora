@@ -20,7 +20,7 @@ use agora_protocol::{Error, ErrorCode};
 use agora_vt::Size;
 
 use crate::git::{self, GitError};
-use crate::launch_options::{LaunchChoice, Refusal, SkipPermissions};
+use crate::launch_options::{LaunchChoice, Refusal, Requested, SkipPermissions};
 use crate::terminal::{TerminalHandle, TerminalOptions};
 
 /// Restart policy for agents that die on their own (crash, non-zero exit, signal). A user stop is never
@@ -200,7 +200,9 @@ pub enum SupervisorError {
     OptionUnknown(&'static str),
     /// ADR-0059: a launch option the node's policy refuses: `(kind, option, policy)`. Nothing was started.
     OptionForbidden(String, String, &'static str),
-    /// ADR-0059: an option that skips permissions without the user's signed confirmation marker: `(kind, option)`.
+    /// ADR-0059: a launch option id that is malformed, unknown, repeated or too many: `(kind, option)`.
+    OptionInvalid(String, String),
+    /// ADR-0059: an option that skips permissions without the user's signed confirmation: `(kind, option)`.
     OptionUnconfirmed(String, String),
     /// The node is at one of its limits; `resource` is `agents` or `terminals`.
     ResourceLimit {
@@ -251,6 +253,9 @@ impl SupervisorError {
             Self::OptionUnknown(f) => {
                 Error::new(ErrorCode::ProtocolInvalidMessage).with("field", *f)
             }
+            Self::OptionInvalid(k, o) => Error::new(ErrorCode::AgentOptionInvalid)
+                .with("kind", k.as_str())
+                .with("option", o.as_str()),
             Self::OptionUnconfirmed(k, o) => Error::new(ErrorCode::AgentOptionUnconfirmed)
                 .with("kind", k.as_str())
                 .with("option", o.as_str()),
@@ -474,8 +479,8 @@ impl Supervisor {
     /// ADR-0059: resolves a start's launch options and checks them against the owner's policy, before anything is created.
     /// `confined_only` needs this agent's confinement to be active (the node confines agents and can here: a start that cannot be
     /// confined is refused on its own before this).
-    fn launch_choice(&self, kind: &str, ids: &[String]) -> Result<LaunchChoice, SupervisorError> {
-        if ids.is_empty() {
+    fn launch_choice(&self, kind: &str, req: &Requested) -> Result<LaunchChoice, SupervisorError> {
+        if req.is_empty() {
             return Ok(LaunchChoice::default());
         }
         let k = self
@@ -484,9 +489,11 @@ impl Supervisor {
             .ok_or_else(|| SupervisorError::UnknownKind(kind.to_string()))?;
         let confined =
             self.sandbox.level != crate::sandbox::Level::Off && self.sandbox.enforceable();
-        crate::launch_options::choose(&k.manifest, ids, self.skip_permissions, confined).map_err(
+        crate::launch_options::choose(&k.manifest, req, self.skip_permissions, confined).map_err(
             |r| match r {
-                Refusal::Invalid => SupervisorError::OptionUnknown("launch_options"),
+                Refusal::Invalid { option } => {
+                    SupervisorError::OptionInvalid(kind.to_string(), option)
+                }
                 Refusal::Unconfirmed { option } => {
                     SupervisorError::OptionUnconfirmed(kind.to_string(), option)
                 }
@@ -697,7 +704,7 @@ impl Supervisor {
 
     /// Create the agent's own worktree and start it there.
     pub fn start(&mut self, req: &StartRequest, now: Instant) -> Result<AgentId, SupervisorError> {
-        self.start_with_options(req, &[], now)
+        self.start_with_options(req, &Requested::default(), now)
     }
 
     /// [`Self::start`] with the launch options a person chose (ADR-0059). Only the person's own start passes options: a helper an agent
@@ -705,7 +712,7 @@ impl Supervisor {
     pub fn start_with_options(
         &mut self,
         req: &StartRequest,
-        options: &[String],
+        options: &Requested,
         now: Instant,
     ) -> Result<AgentId, SupervisorError> {
         // Checked first: a refused start must not leave a worktree behind.
@@ -809,7 +816,14 @@ impl Supervisor {
         separate: bool,
         now: Instant,
     ) -> Result<AgentId, SupervisorError> {
-        self.start_selected_with_options(req, project, git_root, separate, &[], now)
+        self.start_selected_with_options(
+            req,
+            project,
+            git_root,
+            separate,
+            &Requested::default(),
+            now,
+        )
     }
 
     /// [`Self::start_selected`] with the launch options a person chose (ADR-0059); see [`Self::start_with_options`].
@@ -819,7 +833,7 @@ impl Supervisor {
         project: agora_core::ProjectId,
         git_root: &Path,
         separate: bool,
-        options: &[String],
+        options: &Requested,
         now: Instant,
     ) -> Result<AgentId, SupervisorError> {
         // Refused before anything is created.
@@ -865,7 +879,7 @@ impl Supervisor {
         project: agora_core::ProjectId,
         now: Instant,
     ) -> Result<AgentId, SupervisorError> {
-        self.start_directory_impl(req, project, now, true, &[])
+        self.start_directory_impl(req, project, now, true, &Requested::default())
     }
 
     fn start_directory_impl(
@@ -874,7 +888,7 @@ impl Supervisor {
         project: agora_core::ProjectId,
         now: Instant,
         private: bool,
-        options: &[String],
+        options: &Requested,
     ) -> Result<AgentId, SupervisorError> {
         self.check_limits()?;
         let choice = self.launch_choice(&req.kind, options)?;

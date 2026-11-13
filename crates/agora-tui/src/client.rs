@@ -666,11 +666,13 @@ impl Session {
         let Some(command_ok::Result::AgentKinds(k)) = ok.result else {
             return Ok(Vec::new());
         };
-        Ok(k.kinds
-            .into_iter()
-            .find(|k| k.kind == kind)
-            .map(|k| k.launch_options)
-            .unwrap_or_default())
+        Ok(usable_options(
+            k.kinds
+                .into_iter()
+                .find(|k| k.kind == kind)
+                .map(|k| k.launch_options)
+                .unwrap_or_default(),
+        ))
     }
 
     /// Starts an agent of `kind` in a project (its hub-wide id) on a machine; returns the agent's own id.
@@ -916,5 +918,46 @@ mod answer_tests {
             answered_approval(&Snapshot::default(), Some("m/agent-1")),
             None
         );
+    }
+}
+
+/// ADR-0059: the options a hub relayed that this window may offer: ids outside `[a-z0-9-]{1,32}` (a `!` or `,` in one, which a hub
+/// could use to make a signed id look like a confirmation or like two ids) are dropped before anything is shown or signed. The list
+/// is a display hint; the node decides which options skip permissions.
+pub fn usable_options(
+    options: Vec<agora_protocol::v1::LaunchOption>,
+) -> Vec<agora_protocol::v1::LaunchOption> {
+    options
+        .into_iter()
+        .filter(|o| {
+            !o.id.is_empty()
+                && o.id.len() <= 32
+                && o.id
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod launch_option_tests {
+    use super::usable_options;
+    use agora_protocol::v1::LaunchOption;
+
+    #[test]
+    fn ids_a_hub_could_abuse_are_never_offered() {
+        let o = |id: &str, skips| LaunchOption {
+            id: id.into(),
+            label: "option-skip-permissions".into(),
+            skips_permissions: skips,
+        };
+        let kept = usable_options(vec![
+            o("skip-permissions!", false),
+            o("a,b", false),
+            o("Skip", true),
+            o("", true),
+            o("skip-permissions", true),
+        ]);
+        assert_eq!(kept, vec![o("skip-permissions", true)]);
     }
 }

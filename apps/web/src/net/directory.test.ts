@@ -50,15 +50,20 @@ it('preserves distinct enrolled machine identities when their host names and loc
   expect(agents.map(a => a.id)).toEqual(['laptop/agent-1', 'desktop/agent-1']);
   expect(agents.map(a => a.workspace)).toEqual(['/one', '/two']);
 });
-it('signs chosen launch options under their own domain so a hub can neither add nor remove one (ADR-0059)', async () => {
+it('signs chosen launch options and the confirmed ones as separate length-prefixed lists (ADR-0059)', async () => {
   const { launchMessage } = await import('./directory');
+  const { readFileSync } = await import('node:fs');
+  const vectors = JSON.parse(readFileSync('../../schema/fixtures/signing/directory-action-v3.json', 'utf8')) as { cases: { name: string; node: string; path: string; kind: string; project: string; separate: boolean; identity_change: boolean; options: string[]; confirmed: string[]; nonce: string; expires: number; hex: string }[] };
+  const hex = (b: Uint8Array) => Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
+  for (const c of vectors.cases) expect(hex(launchMessage(c.node, c.path, c.kind, c.project, c.separate, c.identity_change, c.options, c.confirmed, c.nonce, c.expires)), c.name).toBe(c.hex);
   const device = await thisDevice({ load: async () => undefined, save: async () => {} });
-  const a = await signDirectory(device, 'node', 'launch', '/selected', 'codex', 'id:p', false, false, ['skip-permissions']);
+  const a = await signDirectory(device, 'node', 'launch', '/selected', 'codex', 'id:p', false, false, ['skip-permissions'], ['skip-permissions']);
   const verify = (m: Uint8Array) => crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, device.keys.publicKey, a.signature as BufferSource, m as BufferSource);
-  expect(await verify(launchMessage('node', '/selected', 'codex', 'id:p', false, false, ['skip-permissions'], a.nonce, a.expiresAtMs))).toBe(true);
-  expect(await verify(launchMessage('node', '/selected', 'codex', 'id:p', false, false, [], a.nonce, a.expiresAtMs))).toBe(false);
+  expect(await verify(launchMessage('node', '/selected', 'codex', 'id:p', false, false, ['skip-permissions'], ['skip-permissions'], a.nonce, a.expiresAtMs))).toBe(true);
+  expect(await verify(launchMessage('node', '/selected', 'codex', 'id:p', false, false, ['skip-permissions'], [], a.nonce, a.expiresAtMs))).toBe(false);
   expect(await verify(directoryMessage('node', 'launch', '/selected', 'codex', 'id:p', false, false, a.nonce, a.expiresAtMs))).toBe(false);
-  expect(new TextDecoder().decode(launchMessage('n', '/p', 'k', 'id', false, true, ['skip-permissions', 'resume-last'], 'nonce', 5))).toBe('directory-action-v2\0n\0launch\0/p\0k\0id\x000\x001\0skip-permissions,resume-last\0nonce\x005');
+  // One id `a,b` never signs like the two ids `a` and `b`.
+  expect(hex(launchMessage('n', '/p', 'k', 'id', false, false, ['a,b'], [], 'x', 1))).not.toBe(hex(launchMessage('n', '/p', 'k', 'id', false, false, ['a', 'b'], [], 'x', 1)));
   // Without options a launch keeps the published v1 bytes.
   const plain = await signDirectory(device, 'node', 'launch', '/selected', 'codex', 'id:p');
   expect(await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, device.keys.publicKey, plain.signature as BufferSource, directoryMessage('node', 'launch', '/selected', 'codex', 'id:p', false, false, plain.nonce, plain.expiresAtMs) as BufferSource)).toBe(true);

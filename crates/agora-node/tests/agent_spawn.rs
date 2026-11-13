@@ -166,7 +166,15 @@ impl Env {
                 path: info.path.clone(),
                 project_id: info.project_id.clone(),
                 kind: kind.into(),
-                launch_options: options.iter().map(|o| (*o).to_string()).collect(),
+                launch_options: options
+                    .iter()
+                    .map(|o| o.trim_end_matches('!').to_string())
+                    .collect(),
+                // `id!` in these tests: the user confirmed it (a separate signed list, never part of the id).
+                confirmed_launch_options: options
+                    .iter()
+                    .filter_map(|o| o.strip_suffix('!').map(str::to_string))
+                    .collect(),
                 ..Default::default()
             }))
             .unwrap()

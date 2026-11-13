@@ -45,64 +45,74 @@ pub struct LaunchChoice {
     pub skips_permissions: bool,
 }
 
+/// What a start asked for: the chosen ids, and the ids whose "act without asking" confirmation the window showed and the user
+/// accepted. Both are signed (`directory-action-v3`); the confirmation is never read out of an id.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Requested {
+    pub ids: Vec<String>,
+    pub confirmed: Vec<String>,
+}
+
+impl Requested {
+    pub fn is_empty(&self) -> bool {
+        self.ids.is_empty() && self.confirmed.is_empty()
+    }
+}
+
 /// Why a choice was refused before anything started.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Refusal {
-    /// Too many ids, a repeated one, or one the kind does not declare: `protocol.invalid_message`.
-    Invalid,
+    /// `agent.option_invalid`: too many ids, one that is not `[a-z0-9-]{1,32}` (a `!` or `,` in it included), a repeated one, one the
+    /// kind does not declare, or a confirmation for an id that was not chosen. `option` is the first such id (empty for too many).
+    Invalid { option: String },
     /// `agent.option_forbidden`: the first refused id and the policy that refused it (`forbid`, `confined_only`).
     Forbidden {
         option: String,
         policy: &'static str,
     },
-    /// `agent.option_unconfirmed`: this node's manifest says the option skips permissions, and the start did not carry the confirmation
-    /// marker (`<id>!`): the window did not show the confirmation for it (a hub that relabelled it as harmless).
+    /// `agent.option_unconfirmed`: this node's manifest says the option skips permissions, and the start did not name it among the
+    /// confirmed ids (the window did not show the confirmation for it, for example because a hub relabelled it as harmless).
     Unconfirmed { option: String },
 }
 
-/// The confirmation marker: a start names an option that skips permissions as `<id>!` when the user confirmed "Let the agent act
-/// without asking?" for it. The signature covers the marker; the node, not the window, knows which options skip permissions.
-pub const CONFIRMED: char = '!';
-
-/// An id as sent, split into the id and whether it carries the confirmation marker.
-pub fn split_marker(sent: &str) -> (&str, bool) {
-    match sent.strip_suffix(CONFIRMED) {
-        Some(id) => (id, true),
-        None => (sent, false),
-    }
-}
-
-/// Resolves `ids` against `manifest` and checks them against the node's policy. `confined` says whether this agent's confinement
-/// would be active (only `confined_only` asks).
+/// Resolves a start's ids against `manifest` and checks them against the node's policy. Which options skip permissions is this node's
+/// manifest's word, never the window's. `confined` says whether this agent's confinement would be active (only `confined_only` asks).
 pub fn choose(
     manifest: &Manifest,
-    ids: &[String],
+    req: &Requested,
     policy: SkipPermissions,
     confined: bool,
 ) -> Result<LaunchChoice, Refusal> {
-    if ids.len() > MAX_LAUNCH_OPTIONS {
-        return Err(Refusal::Invalid);
+    let invalid = |option: &str| Refusal::Invalid {
+        option: option.to_string(),
+    };
+    if req.ids.len() > MAX_LAUNCH_OPTIONS || req.confirmed.len() > MAX_LAUNCH_OPTIONS {
+        return Err(invalid(""));
     }
-    let sent: Vec<(&str, bool)> = ids.iter().map(|s| split_marker(s)).collect();
-    for (i, (id, _)) in sent.iter().enumerate() {
-        if !valid_option_id(id)
-            || sent[..i].iter().any(|(x, _)| x == id)
-            || manifest.launch_option(id).is_none()
+    for (i, id) in req.ids.iter().enumerate() {
+        if !valid_option_id(id) || req.ids[..i].contains(id) || manifest.launch_option(id).is_none()
         {
-            return Err(Refusal::Invalid);
+            return Err(invalid(id));
+        }
+    }
+    for (i, id) in req.confirmed.iter().enumerate() {
+        if !req.ids.contains(id) || req.confirmed[..i].contains(id) {
+            return Err(invalid(id));
         }
     }
     let mut choice = LaunchChoice::default();
-    for o in manifest.launch.option.iter() {
-        let Some((_, confirmed)) = sent.iter().find(|(id, _)| *id == o.id) else {
-            continue;
-        };
-        if o.skips_permissions && !confirmed {
-            return Err(Refusal::Unconfirmed {
-                option: o.id.clone(),
-            });
-        }
+    for o in manifest
+        .launch
+        .option
+        .iter()
+        .filter(|o| req.ids.contains(&o.id))
+    {
         if o.skips_permissions {
+            if !req.confirmed.contains(&o.id) {
+                return Err(Refusal::Unconfirmed {
+                    option: o.id.clone(),
+                });
+            }
             let refused = match policy {
                 SkipPermissions::Allow => None,
                 SkipPermissions::Forbid => Some("forbid"),
@@ -142,6 +152,15 @@ mod tests {
         v.iter().map(|s| (*s).to_string()).collect()
     }
 
+    fn req(chosen: &[&str], confirmed: &[&str]) -> Requested {
+        Requested {
+            ids: ids(chosen),
+            confirmed: ids(confirmed),
+        }
+    }
+
+    const SKIP: &[&str] = &["skip-permissions"];
+
     #[test]
     fn the_policy_reads_three_values_and_anything_else_forbids() {
         assert_eq!(SkipPermissions::default(), SkipPermissions::Allow);
@@ -156,44 +175,60 @@ mod tests {
     }
 
     #[test]
-    fn an_option_that_skips_permissions_needs_the_confirmation_marker() {
-        // A hub that relabelled it as harmless: the window showed no confirmation and signed the bare id.
+    fn an_option_that_skips_permissions_needs_its_signed_confirmation() {
+        // A hub that relabelled it as harmless: the window asked nothing, so nothing is confirmed.
         assert_eq!(
-            choose(
-                &manifest(),
-                &ids(&["skip-permissions"]),
-                SkipPermissions::Allow,
-                true
-            ),
+            choose(&manifest(), &req(SKIP, &[]), SkipPermissions::Allow, true),
             Err(Refusal::Unconfirmed {
                 option: "skip-permissions".into()
             })
         );
-        // A marker on a harmless option is harmless; a repeated id with and without it is a bad request.
+        // A hub that advertised `skip-permissions!`: that is not an id, and a `!` never confirms anything.
+        assert_eq!(
+            choose(
+                &manifest(),
+                &req(&["skip-permissions!"], &[]),
+                SkipPermissions::Allow,
+                true
+            ),
+            Err(Refusal::Invalid {
+                option: "skip-permissions!".into()
+            })
+        );
+        // A confirmation for an id that was not chosen, or repeated, is a bad request; one on a harmless option is harmless.
+        assert!(matches!(
+            choose(
+                &manifest(),
+                &req(&["resume-last"], SKIP),
+                SkipPermissions::Allow,
+                true
+            ),
+            Err(Refusal::Invalid { .. })
+        ));
+        assert!(matches!(
+            choose(
+                &manifest(),
+                &req(SKIP, &["skip-permissions", "skip-permissions"]),
+                SkipPermissions::Allow,
+                true
+            ),
+            Err(Refusal::Invalid { .. })
+        ));
         let c = choose(
             &manifest(),
-            &ids(&["resume-last!"]),
+            &req(&["resume-last"], &["resume-last"]),
             SkipPermissions::Forbid,
             false,
         )
         .unwrap();
         assert_eq!(c.ids, ids(&["resume-last"]));
-        assert_eq!(
-            choose(
-                &manifest(),
-                &ids(&["skip-permissions!", "skip-permissions"]),
-                SkipPermissions::Allow,
-                true
-            ),
-            Err(Refusal::Invalid)
-        );
     }
 
     #[test]
     fn options_add_their_arguments_in_the_manifests_order() {
         let c = choose(
             &manifest(),
-            &ids(&["resume-last", "skip-permissions!"]),
+            &req(&["resume-last", "skip-permissions"], SKIP),
             SkipPermissions::Allow,
             false,
         )
@@ -201,13 +236,19 @@ mod tests {
         assert_eq!(c.ids, ids(&["skip-permissions", "resume-last"]));
         assert_eq!(c.args, ids(&["--yes", "--really", "--continue"]));
         assert!(c.skips_permissions);
-        let none = choose(&manifest(), &[], SkipPermissions::Forbid, false).unwrap();
+        let none = choose(
+            &manifest(),
+            &Requested::default(),
+            SkipPermissions::Forbid,
+            false,
+        )
+        .unwrap();
         assert_eq!(none, LaunchChoice::default());
     }
 
     #[test]
     fn forbid_allow_and_confined_only_decide_only_options_that_skip_permissions() {
-        let skip = ids(&["skip-permissions!"]);
+        let skip = req(SKIP, SKIP);
         let forbidden = |policy| Refusal::Forbidden {
             option: "skip-permissions".into(),
             policy,
@@ -222,10 +263,9 @@ mod tests {
         );
         assert!(choose(&manifest(), &skip, SkipPermissions::ConfinedOnly, true).is_ok());
         assert!(choose(&manifest(), &skip, SkipPermissions::Allow, false).is_ok());
-        // A harmless option is never refused by the policy.
         let harmless = choose(
             &manifest(),
-            &ids(&["resume-last"]),
+            &req(&["resume-last"], &[]),
             SkipPermissions::Forbid,
             false,
         )
@@ -234,17 +274,24 @@ mod tests {
     }
 
     #[test]
-    fn unknown_repeated_or_too_many_ids_are_invalid() {
+    fn unknown_repeated_malformed_or_too_many_ids_are_invalid() {
         for bad in [
             ids(&["other"]),
             ids(&["resume-last", "resume-last"]),
             ids(&["Skip-Permissions"]),
             ids(&["a,b"]),
+            ids(&["skip-permissions!"]),
             vec!["resume-last".to_string(); MAX_LAUNCH_OPTIONS + 1],
         ] {
-            assert_eq!(
-                choose(&manifest(), &bad, SkipPermissions::Allow, true),
-                Err(Refusal::Invalid),
+            let r = Requested {
+                ids: bad.clone(),
+                confirmed: Vec::new(),
+            };
+            assert!(
+                matches!(
+                    choose(&manifest(), &r, SkipPermissions::Allow, true),
+                    Err(Refusal::Invalid { .. })
+                ),
                 "{bad:?}"
             );
         }

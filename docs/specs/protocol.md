@@ -397,24 +397,26 @@ All additions; nothing published changed. Node capability `agent.launch_options`
   skips_permissions }` (the manifest's order; the arguments stay on the node). A window offers them only for a node with the
   capability; "Ask before acting" (no option) is always the default and a `skips_permissions` option is never preselected and needs the
   user's confirmation (the ADR-0058 dialog, Keep asking as the primary button).
-- **The choice.** `AgentStart.launch_options` (7) and `AgentLaunch.launch_options` (7) name the chosen ids (at most 8, no repeats, each
-  declared by the kind; otherwise `protocol.invalid_message` `{field: launch_options}`). The node adds their arguments to the
-  launch command (terminal kinds) or the ACP server command (structured kinds) for the agent's whole life, restarts and resumes
-  included. An option that skips permissions is sent as `<id>!` (the confirmation marker) when the window showed the confirmation and
-  the user confirmed; the node decides from its own manifest which options skip permissions and refuses one sent without the marker
-  (`agent.option_unconfirmed {kind, option}`), so a hub that relays `AgentKind.launch_options` with `skips_permissions` turned off
-  (the window would show no confirmation) gets the start refused. The window's list is a display hint only. Through the hub,
-  `AgentLaunch` with options is authorized over a second domain that also signs the ids, comma-joined in the
-  order sent:
+- **The choice.** `AgentStart.launch_options` (7) and `AgentLaunch.launch_options` (7) name the chosen ids; `confirmed_launch_options`
+  (8 on both) names those whose "Let the agent act without asking?" confirmation the window showed and the user accepted. Every id must
+  be `[a-z0-9-]{1,32}` and declared by the node's manifest for the kind, at most 8, no repeats, and each confirmed id must be chosen;
+  otherwise `agent.option_invalid {kind, option}` and nothing starts (so a `!` or `,` in an advertised id gets nowhere). Which options
+  skip permissions is the node's own manifest's word: one not listed as confirmed is refused with `agent.option_unconfirmed {kind,
+  option}`, so a hub that relays `AgentKind.launch_options` relabelled as harmless (the window asks nothing) gets the start refused.
+  The window's list is a display hint only; windows drop advertised ids outside `[a-z0-9-]{1,32}` before offering them. The node adds
+  the arguments to the launch command (terminal kinds) or the ACP server command (structured kinds) for the agent's whole life,
+  restarts and resumes included. Through the hub, `AgentLaunch` with options or confirmations is authorized over its own domain,
+  with both lists length-prefixed (`<count>` then `:<byte length>:<id>` per id: `["a","b"]` is `2:1:a:1:b`, `["a,b"]` is `1:3:a,b`):
 
   ```
-  directory-action-v2\0node\0launch\0path\0kind\0project_id\0option\0identity_change\0launch_options\0nonce\0expires_at_ms
+  directory-action-v3\0node\0launch\0path\0kind\0project_id\0option\0identity_change\0launch_options\0confirmed\0nonce\0expires_at_ms
   ```
 
-  An `AgentLaunch` without options keeps `directory-action-v1` exactly as published, so a hub can neither add an option to a signed
-  start nor remove one. A routed `AgentStart` with options carries no signature and is refused (`agent.option_forbidden` `{kind,
-  option, policy: signature}`); a grant (ADR-0041) never covers one. On the node's own control socket (the owner) no signature is
-  needed. An agent's `agent_start` helper (ADR-0057) never gets an option.
+  Shared vectors checked by the node, the terminal client and the web window: `schema/fixtures/signing/directory-action-v3.json`.
+  An `AgentLaunch` without either list keeps `directory-action-v1` exactly as published, so a hub can neither add, remove or swap an
+  option nor add or strip a confirmation. A routed `AgentStart` with options carries no signature and is refused
+  (`agent.option_forbidden` `{kind, option, policy: signature}`); a grant (ADR-0041) never covers one. On the node's own control
+  socket (the owner) no signature is needed. An agent's `agent_start` helper (ADR-0057) never gets an option.
 - **Node policy.** `skip_permissions = forbid | allow | confined_only` (quoted or not) in the node's own policy file (default `allow`
   when there is no file; any other value, an unknown key, a line without `=`, or an existing file that cannot be read counts as
   `forbid`, and the node says `node.policy_not_understood` when it starts; the hub cannot change it). A start with a `skips_permissions` option that the policy does not allow is refused

@@ -33,6 +33,8 @@ pub enum ErrorCode {
     AgentModeUnsupported,
     /// ADR-0059: a launch option the node's policy does not allow, or that cannot be used this way.
     AgentOptionForbidden,
+    /// ADR-0059: a launch option id that is malformed (`[a-z0-9-]{1,32}`), unknown, repeated, or too many.
+    AgentOptionInvalid,
     /// ADR-0059: an option that skips permissions was sent without the user's signed confirmation marker.
     AgentOptionUnconfirmed,
     AgentRunning,
@@ -96,6 +98,7 @@ impl ErrorCode {
         ErrorCode::AgentBlocked,
         ErrorCode::AgentModeUnsupported,
         ErrorCode::AgentOptionForbidden,
+        ErrorCode::AgentOptionInvalid,
         ErrorCode::AgentOptionUnconfirmed,
         ErrorCode::AgentRunning,
         ErrorCode::ApprovalExpired,
@@ -155,6 +158,7 @@ impl ErrorCode {
             ErrorCode::AgentBlocked => "agent.blocked",
             ErrorCode::AgentModeUnsupported => "agent.mode_unsupported",
             ErrorCode::AgentOptionForbidden => "agent.option_forbidden",
+            ErrorCode::AgentOptionInvalid => "agent.option_invalid",
             ErrorCode::AgentOptionUnconfirmed => "agent.option_unconfirmed",
             ErrorCode::AgentRunning => "agent.running",
             ErrorCode::ApprovalExpired => "approval.expired",
@@ -226,6 +230,7 @@ impl ErrorCode {
             ErrorCode::AgentBlocked => &["agent_id"],
             ErrorCode::AgentModeUnsupported => &["kind", "mode"],
             ErrorCode::AgentOptionForbidden => &["kind", "option", "policy"],
+            ErrorCode::AgentOptionInvalid => &["kind", "option"],
             ErrorCode::AgentOptionUnconfirmed => &["kind", "option"],
             ErrorCode::AgentRunning => &["agent_id"],
             ErrorCode::ApprovalExpired => &["approval_id"],

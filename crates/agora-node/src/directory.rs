@@ -290,9 +290,23 @@ pub fn signed_message(
     out
 }
 
-/// ADR-0059: what a device signs for an `agent.launch` that chose launch options: the `directory-action-v1` fields under the domain
-/// `directory-action-v2`, with the option ids, comma-joined in the order sent, between `identity_change` and `nonce`. A launch without
-/// options keeps [`signed_message`], so a signature can neither gain nor lose an option.
+/// ADR-0059: a list as signed: its count, then each item as `:<byte length>:<bytes>` (`["a","b"]` is `2:1:a:1:b`, `["a,b"]` is
+/// `1:3:a,b`), so no two different lists sign the same bytes whatever their items contain.
+pub fn signed_list(items: &[String]) -> String {
+    let mut out = items.len().to_string();
+    for i in items {
+        out.push(':');
+        out.push_str(&i.len().to_string());
+        out.push(':');
+        out.push_str(i);
+    }
+    out
+}
+
+/// ADR-0059: what a device signs for an `agent.launch` that chose launch options: the `directory-action-v1` launch fields under the
+/// domain `directory-action-v3`, then the chosen ids and the ids whose "act without asking" confirmation the window showed and the
+/// user accepted, as two [`signed_list`]s, before the nonce. A launch without either keeps [`signed_message`], so a signature can
+/// neither gain nor lose an option or a confirmation. Shared test vectors: `schema/fixtures/signing/directory-action-v3.json`.
 #[allow(clippy::too_many_arguments)]
 pub fn launch_signed_message(
     node: &str,
@@ -302,10 +316,11 @@ pub fn launch_signed_message(
     separate_worktree: bool,
     identity_change: bool,
     launch_options: &[String],
+    confirmed: &[String],
     nonce: &str,
     expires: u64,
 ) -> Vec<u8> {
-    let options = launch_options.join(",");
+    let (options, confirmed) = (signed_list(launch_options), signed_list(confirmed));
     let fields = [
         node,
         "launch",
@@ -315,9 +330,10 @@ pub fn launch_signed_message(
         if separate_worktree { "1" } else { "0" },
         if identity_change { "1" } else { "0" },
         options.as_str(),
+        confirmed.as_str(),
         nonce,
     ];
-    let mut out = b"directory-action-v2".to_vec();
+    let mut out = b"directory-action-v3".to_vec();
     for f in fields {
         out.push(0);
         out.extend_from_slice(f.as_bytes());
@@ -325,6 +341,47 @@ pub fn launch_signed_message(
     out.push(0);
     out.extend_from_slice(expires.to_string().as_bytes());
     out
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod launch_vector_tests {
+    /// The vectors the web window and the terminal client check too (one file, three implementations).
+    #[test]
+    fn the_shared_launch_signing_vectors_match() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../schema/fixtures/signing/directory-action-v3.json");
+        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let list = |x: &serde_json::Value| -> Vec<String> {
+            x.as_array()
+                .unwrap()
+                .iter()
+                .map(|s| s.as_str().unwrap().to_string())
+                .collect()
+        };
+        let mut seen = std::collections::HashSet::new();
+        for c in v["cases"].as_array().unwrap() {
+            let m = super::launch_signed_message(
+                c["node"].as_str().unwrap(),
+                c["path"].as_str().unwrap(),
+                c["kind"].as_str().unwrap(),
+                c["project"].as_str().unwrap(),
+                c["separate"].as_bool().unwrap(),
+                c["identity_change"].as_bool().unwrap(),
+                &list(&c["options"]),
+                &list(&c["confirmed"]),
+                c["nonce"].as_str().unwrap(),
+                c["expires"].as_u64().unwrap(),
+            );
+            let hex: String = m.iter().map(|b| format!("{b:02x}")).collect();
+            assert_eq!(hex, c["hex"].as_str().unwrap(), "{}", c["name"]);
+            assert!(
+                seen.insert(hex),
+                "two cases sign the same bytes: {}",
+                c["name"]
+            );
+        }
+    }
 }
 
 #[cfg(test)]

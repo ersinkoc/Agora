@@ -382,3 +382,4 @@ start-options-unsupported = This machine is too old for start options. Update it
 agent-does-not-ask = Does not ask
 agent-does-not-ask-explain = Started so that it acts without asking you first
 start-option-unconfirmed = This machine says that option lets the agent act without asking, and this window did not ask you first. Nothing was started; open the start window again.
+start-option-invalid = This machine does not offer that start option. Nothing was started; open the start window again.

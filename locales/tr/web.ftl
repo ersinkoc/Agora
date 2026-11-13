@@ -382,3 +382,4 @@ start-options-unsupported = Bu makine başlatma seçenekleri için fazla eski. G
 agent-does-not-ask = Sormuyor
 agent-does-not-ask-explain = Size önce sormadan çalışacak şekilde başlatıldı
 start-option-unconfirmed = Bu makineye göre o seçenek ajanın sormadan çalışmasını sağlıyor ve bu pencere önce size sormadı. Hiçbir şey başlatılmadı; başlatma penceresini yeniden açın.
+start-option-invalid = Bu makine o başlatma seçeneğini sunmuyor. Hiçbir şey başlatılmadı; başlatma penceresini yeniden açın.
