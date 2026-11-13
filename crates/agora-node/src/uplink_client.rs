@@ -46,16 +46,7 @@ pub const CAPABILITIES: &[&str] = &[
 /// Events sent per step; the hub acknowledges after each batch.
 const BATCH: usize = 64;
 const TICK: Duration = Duration::from_millis(50);
-/// How often the node pings the hub. A healthy hub answers every `PING` with a `PONG`, so even a node with nothing to say hears
-/// from the hub at least this often, and neither side ever takes a quiet link for a dead one.
-pub const PING_EVERY: Duration = Duration::from_secs(10);
-/// A link on which nothing at all (a `PONG` or any other frame) arrived for this long is dropped and dialled again, although
-/// the operating system may still call it open: a frozen hub, a laptop that slept, a Wi-Fi switch or a NAT that forgot the
-/// connection all look like that. Two and a half pings, so one late or lost `PONG` is not enough. The hub uses the same
-/// deadline for its side (`agora_hub::server::NODE_SILENCE`).
-pub const SILENCE_DEADLINE: Duration = Duration::from_millis(25_000);
-// One lost or late `PONG` must never drop a healthy link.
-const _: () = assert!(SILENCE_DEADLINE.as_millis() >= 2 * PING_EVERY.as_millis());
+const PING_EVERY: Duration = Duration::from_secs(15);
 const BACKOFF_MIN: Duration = Duration::from_millis(500);
 const BACKOFF_MAX: Duration = Duration::from_secs(30);
 
@@ -215,9 +206,6 @@ pub enum LinkError {
     Uplink(UplinkError),
     /// The hub closed the connection.
     Closed,
-    /// Nothing arrived from the hub for [`SILENCE_DEADLINE`], or a frame could not be sent for as long: the link is dead
-    /// even if the connection still looks open.
-    Silent,
     /// The hub answered with this error code (for enrollment: a wrong, expired or used code is `auth.unauthenticated`).
     Refused(String),
 }
@@ -309,95 +297,43 @@ pub async fn run_once(
     stop: &AtomicBool,
 ) -> Result<(), LinkError> {
     let (tls, host, addr) = split_url(&link.url)?;
-    // A dial that hangs (a hub that froze or went away mid-handshake) is given up after the silence deadline and tried again, so
-    // a node never waits forever on a connection that will not finish.
-    let dial = async {
-        let tcp = TcpStream::connect(&addr)
+    let tcp = TcpStream::connect(&addr)
+        .await
+        .map_err(|e| LinkError::Transport(e.to_string()))?;
+    // Keystrokes and echoes are small frames; do not let Nagle's algorithm hold them back.
+    let _ = tcp.set_nodelay(true);
+    if tls {
+        let name = ServerName::try_from(host.clone()).map_err(|e| LinkError::Bad(e.to_string()))?;
+        let stream = connector(link)?
+            .connect(name, tcp)
             .await
             .map_err(|e| LinkError::Transport(e.to_string()))?;
-        // Keystrokes and echoes are small frames; do not let Nagle's algorithm hold them back.
-        let _ = tcp.set_nodelay(true);
-        let stream = if tls {
-            let name =
-                ServerName::try_from(host.clone()).map_err(|e| LinkError::Bad(e.to_string()))?;
-            let s = connector(link)?
-                .connect(name, tcp)
-                .await
-                .map_err(|e| LinkError::Transport(e.to_string()))?;
-            Dialled::Tls(Box::new(s))
-        } else {
-            Dialled::Plain(tcp)
-        };
-        Ok::<_, LinkError>(stream)
-    };
-    let stream = match tokio::time::timeout(SILENCE_DEADLINE, dial).await {
-        Ok(r) => r?,
-        Err(_) => return Err(LinkError::Silent),
-    };
-    macro_rules! talk {
-        ($conn:expr) => {
-            converse(
-                $conn,
-                sink,
-                stop,
-                link.commands.as_deref(),
-                link.mesh_out.as_deref(),
-                link.grants.clone(),
-                link.mesh.clone(),
-                Liveness::DEFAULT,
-            )
-            .await
-        };
-    }
-    match stream {
-        Dialled::Tls(s) => talk!(within(SILENCE_DEADLINE, ws::connect(*s, &link.url)).await?),
-        Dialled::Plain(s) => talk!(within(SILENCE_DEADLINE, ws::connect(s, &link.url)).await?),
+        let conn = ws::connect(stream, &link.url).await?;
+        converse(
+            conn,
+            sink,
+            stop,
+            link.commands.as_deref(),
+            link.mesh_out.as_deref(),
+            link.grants.clone(),
+            link.mesh.clone(),
+        )
+        .await
+    } else {
+        let conn = ws::connect(tcp, &link.url).await?;
+        converse(
+            conn,
+            sink,
+            stop,
+            link.commands.as_deref(),
+            link.mesh_out.as_deref(),
+            link.grants.clone(),
+            link.mesh.clone(),
+        )
+        .await
     }
 }
 
-enum Dialled {
-    Tls(Box<tokio_rustls::client::TlsStream<TcpStream>>),
-    Plain(TcpStream),
-}
-
-/// The WebSocket upgrade, given up after `limit`.
-async fn within<T>(
-    limit: Duration,
-    f: impl std::future::Future<Output = Result<T, TransportError>>,
-) -> Result<T, LinkError> {
-    match tokio::time::timeout(limit, f).await {
-        Ok(r) => Ok(r?),
-        Err(_) => Err(LinkError::Silent),
-    }
-}
-
-/// How a connection tells a live hub from a silent one: [`PING_EVERY`] and [`SILENCE_DEADLINE`] in production, shorter in tests.
-#[derive(Clone, Copy, Debug)]
-struct Liveness {
-    ping_every: Duration,
-    deadline: Duration,
-}
-
-impl Liveness {
-    const DEFAULT: Self = Self {
-        ping_every: PING_EVERY,
-        deadline: SILENCE_DEADLINE,
-    };
-}
-
-/// Sends one frame, but never waits longer than `limit` for it: a hub that stopped reading (frozen, or gone without a word)
-/// fills the socket's buffer, and a send that waits forever would keep this connection from noticing that it is dead.
-async fn put<S>(conn: &mut Conn<S>, f: &Frame, limit: Duration) -> Result<(), LinkError>
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-{
-    match tokio::time::timeout(limit, conn.send(f)).await {
-        Ok(r) => Ok(r?),
-        Err(_) => Err(LinkError::Silent),
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
 async fn converse<S>(
     mut conn: Conn<S>,
     sink: &Arc<EventSink>,
@@ -406,7 +342,6 @@ async fn converse<S>(
     mesh_out: Option<&MeshOut>,
     grants: Option<Arc<crate::grants::Grants>>,
     mesh: Option<Arc<crate::mesh_server::MeshServer>>,
-    live: Liveness,
 ) -> Result<(), LinkError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -471,39 +406,25 @@ where
     let replay = up.on_resume_ok(&ok)?;
     send_replay(&mut conn, replay).await?;
 
-    let limit = live.deadline;
     let mut last_ping = tokio::time::Instant::now();
-    // When the hub was last heard from: any frame counts, a `PONG` is only what an idle hub sends.
-    let mut last_heard = tokio::time::Instant::now();
     while !stop.load(Ordering::Acquire) {
-        if last_heard.elapsed() >= live.deadline {
-            return Err(LinkError::Silent);
-        }
         for payload in up.next_batch(BATCH)? {
-            put(
-                &mut conn,
-                &frame(STREAM_EVENTS, kinds::EVENT, payload),
-                limit,
-            )
-            .await?;
+            conn.send(&frame(STREAM_EVENTS, kinds::EVENT, payload))
+                .await?;
         }
-        if last_ping.elapsed() >= live.ping_every {
-            put(
-                &mut conn,
-                &frame(STREAM_CONTROL, kinds::PING, Vec::new()),
-                limit,
-            )
-            .await?;
+        if last_ping.elapsed() >= PING_EVERY {
+            conn.send(&frame(STREAM_CONTROL, kinds::PING, Vec::new()))
+                .await?;
             last_ping = tokio::time::Instant::now();
         }
         let received = tokio::select! {
             r = tokio::time::timeout(TICK, conn.recv()) => r,
             Some(answer) = answers.recv() => {
-                put(&mut conn, &frame(STREAM_COMMANDS, 1, answer.encode_to_vec()), limit).await?;
+                conn.send(&frame(STREAM_COMMANDS, 1, answer.encode_to_vec())).await?;
                 continue;
             }
             Some(f) = relay_rx.recv() => {
-                put(&mut conn, &f, limit).await?;
+                conn.send(&f).await?;
                 continue;
             }
             Some(job) = async { match jobs.as_mut() { Some(j) => j.recv().await, None => std::future::pending().await } } => {
@@ -534,13 +455,10 @@ where
                     }),
                 };
                 posts.waiting.insert(id, done);
-                put(&mut conn, &frame(STREAM_COMMANDS, 0, req.encode_to_vec()), limit).await?;
+                conn.send(&frame(STREAM_COMMANDS, 0, req.encode_to_vec())).await?;
                 continue;
             }
         };
-        if let Ok(Ok(Some(_))) = &received {
-            last_heard = tokio::time::Instant::now();
-        }
         match received {
             Err(_) => {}
             Ok(Ok(None)) => return Err(LinkError::Closed),
@@ -1066,100 +984,6 @@ mod tests {
         );
         assert!(split_url("http://x").is_err());
         assert!(split_url("wss://").is_err());
-    }
-
-    /// What the fake hub does once the handshake is over.
-    #[derive(Clone, Copy)]
-    enum Hub {
-        /// Answers every `PING` with a `PONG` and says nothing else: an idle but healthy hub.
-        Answers,
-        /// Keeps the connection open and never sends or reads anything again: a frozen hub, a sleeping laptop, a dead NAT entry.
-        Stalls,
-    }
-
-    const FAST: Liveness = Liveness {
-        ping_every: Duration::from_millis(50),
-        deadline: Duration::from_millis(400),
-    };
-
-    /// Runs a node's conversation against a fake hub on loopback until it ends or `stop_after` passes; returns how it ended
-    /// and how long it took.
-    fn talk(name: &str, hub: Hub, stop_after: Duration) -> (Result<(), LinkError>, Duration) {
-        let dir = std::env::temp_dir().join(format!("agora-link-{}-{name}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let sink = Arc::new(EventSink::open(&dir, "n1").unwrap());
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        rt.block_on(async {
-            let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let addr = l.local_addr().unwrap();
-            tokio::spawn(async move {
-                let (s, _) = l.accept().await.unwrap();
-                let mut c = ws::accept(s).await.unwrap();
-                let hello = c.recv().await.unwrap().unwrap();
-                assert_eq!(hello.kind, kinds::HELLO);
-                let welcome = Welcome {
-                    chosen_generation: 1,
-                    ..Default::default()
-                };
-                c.send(&frame(
-                    STREAM_CONTROL,
-                    kinds::WELCOME,
-                    welcome.encode_to_vec(),
-                ))
-                .await
-                .unwrap();
-                let resume = c.recv().await.unwrap().unwrap();
-                assert_eq!(resume.kind, kinds::RESUME);
-                let ok = ResumeOk { from_seq: 1 };
-                c.send(&frame(STREAM_CONTROL, kinds::RESUME_OK, ok.encode_to_vec()))
-                    .await
-                    .unwrap();
-                match hub {
-                    Hub::Answers => {
-                        while let Ok(Some(f)) = c.recv().await {
-                            if (f.stream_id, f.kind) == (STREAM_CONTROL, kinds::PING) {
-                                let _ =
-                                    c.send(&frame(STREAM_CONTROL, kinds::PONG, f.payload)).await;
-                            }
-                        }
-                    }
-                    Hub::Stalls => {
-                        tokio::time::sleep(Duration::from_secs(60)).await;
-                        drop(c);
-                    }
-                }
-            });
-            let tcp = TcpStream::connect(addr).await.unwrap();
-            let conn = ws::connect(tcp, &format!("ws://{addr}/")).await.unwrap();
-            let stop = Arc::new(AtomicBool::new(false));
-            let stopper = Arc::clone(&stop);
-            tokio::spawn(async move {
-                tokio::time::sleep(stop_after).await;
-                stopper.store(true, Ordering::Release);
-            });
-            let started = std::time::Instant::now();
-            let r = converse(conn, &sink, &stop, None, None, None, None, FAST).await;
-            (r, started.elapsed())
-        })
-    }
-
-    #[test]
-    fn a_hub_that_goes_silent_is_dropped_after_the_deadline_so_the_node_dials_again() {
-        let (r, took) = talk("stalls", Hub::Stalls, Duration::from_secs(10));
-        assert!(matches!(r, Err(LinkError::Silent)), "{r:?}");
-        assert!(took >= FAST.deadline, "{took:?}");
-        assert!(took < Duration::from_secs(5), "{took:?}");
-    }
-
-    #[test]
-    fn an_idle_hub_that_answers_pings_is_never_dropped() {
-        // Five deadlines with nothing but pings and pongs on the link.
-        let (r, took) = talk("answers", Hub::Answers, FAST.deadline * 5);
-        assert!(r.is_ok(), "{r:?}");
-        assert!(took >= FAST.deadline * 5, "{took:?}");
     }
 
     /// ADR-0059: a routed `AgentStart` that chose launch options carries no signature over them, so it is refused where the hub's

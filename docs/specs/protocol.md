@@ -13,8 +13,8 @@ connect (WSS + mTLS for nodes, session token for clients)
   ← ResumeOk   { from_seq }  |  ← SnapshotRequired
   → SnapshotRequired                       (node only, when it no longer has from_seq; ADR-0054)
   ... streams ...
-  → / ← Ping / Pong: a node pings every 10 s, a window every 15 s; the peer answers each at once with a Pong carrying the
-           same payload. Nothing at all received for 25 s (node and hub) or 10 s after a ping (window) = connection lost
+  → / ← Ping / Pong: a node pings every 15 s; the hub answers each Ping (a node's or a window's) at once with a Pong carrying
+           the same payload. No deadline is enforced yet (silence detection needs a hub-owned presence event, an ADR)
   → / ← Goodbye { reason_code }
 ```
 
@@ -144,9 +144,7 @@ snapshot (or backlog) and registers for live events together sees every event on
 ingest. A subscriber that falls more than 1024 events behind is dropped, never waited for; it reconnects with the last
 position it saw and gets the backlog, or a snapshot when that position is ahead of the log (a hub restored from an older
 backup). When a node's connection ends without a goodbye the hub records `NodeOffline` itself as producer `hub` (a name no
-node certificate can carry), in the same log, so live and rebuilt views agree: 3 s after the end, and only if the node has not
-connected again by then; never for a connection the hub closed because nothing arrived on it for 25 s (section 1). No event
-says that a node's link came back, so a node recorded offline stays offline until its process starts again.
+node certificate can carry), in the same log, so live and rebuilt views agree.
 
 Schema additions (ADR-0025/0026/0027, all new messages, nothing published changed): `agent.list` (`AgentList` -> `AgentListResult` of
 `AgentSummary`; implemented on the node and as `agora agent list`), `EventAck` (hub -> producer, cumulative), `client.proto`
