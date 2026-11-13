@@ -39,7 +39,7 @@ not must be sure no agent can be started that way by accident, by the hub, or by
   once this ADR is accepted.
 
 ## Open questions (answers as decided above)
-- Default node policy `forbid` (proposed) or `allow`? A fresh machine that forbids means the choice is greyed out until the owner changes the node's configuration.
+- Default node policy: **`allow`** (decided by the maintainer; `forbid` and `confined_only` stay available per machine).
 - May a structured (ACP) agent's *mode* that skips permissions also be chosen at start (not only switched later)? (Proposed: yes, same confirmation.)
 - Should the "does not ask" badge also require the node's confinement to be reported to the window? (Proposed: show both.)
 
