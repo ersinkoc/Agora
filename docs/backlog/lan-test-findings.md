@@ -61,13 +61,18 @@ branch (`docs/fordevs/`). Each row is something the run showed that no CI run ha
   - New here: the consequence does not wait for the user. The node itself runs `git -C <folder> status` unconfined (`agora-node/src/git.rs`)
     whenever changes are shown. A `core.fsmonitor` command set in `.git/config` runs during `status`; I checked this with git and the
     node's environment (`LC_ALL=C`, `GIT_OPTIONAL_LOCKS=0`).
-  - The same may hold for `git diff` drivers (`diff.external`, `textconv`). Not checked.
+  - The same held for `git diff` drivers (`diff.external`, `textconv`); #300 turns them off for the node's git too.
   - Windows' narrow profile covers only worktrees (`.git` is a file there). On Linux and macOS, the worktree profile makes the shared git
     folder writable (`common_git_dir`).
-  - In review:
+  - Done:
     - #300 runs the node's own git with fsmonitor, hooks, external diff and textconv off.
     - #303 keeps the shared `config` and `hooks` read-only for macOS worktrees.
-  - Still open: filter drivers, Linux worktrees and selected checkouts.
+    - #307 blanks the filter drivers the repository's own config defines.
+    - #310 pins the node's git to the Git folders recorded when the node made the worktree.
+  - Still open (T8b in the threat model):
+    - On Linux, a worktree agent can still write the shared `config` and `hooks`.
+    - A selected checkout's `.git` stays writable to its agent (T8, ADR-0052), so git that the user runs there follows what the agent
+      wrote.
 - **L23** Windows, real Codex under confinement (`AGORA_WINDOWS_CONFINEMENT=1`). It does not run, for three reasons.
   1. The manifest launches `codex` by bare name, and the node adds the program's folder to `read` only for a path. A per-user install is
      unreadable to the restricted token, so the agent shows as started and stops at once, with no reason shown.

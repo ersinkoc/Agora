@@ -7,6 +7,11 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 ### Activity
 - Each row on the Activity page names the session that did it (`session 6ee82d`), so two windows or devices of the same person can be told apart. The sign-in row has the same id, so you can see how that session signed in.
 
+## 0.3.6
+
+### Audit
+- A command whose client disconnected before the answer still gets its outcome in the audit trail.
+
 ### Closed agents
 - A closed agent is shown as finished the same way whatever its exit code; before, one stopped while the window was open (which leaves a non-zero code) showed the orange "Needs you" mark until the next reload. The summary states the exit code ("Ended with exit code 143") instead of calling it an error.
 
