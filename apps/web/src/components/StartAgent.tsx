@@ -172,6 +172,7 @@ export function StartAgent({ projects, machines, initialNode, loadKinds, inspect
                     {k.name}{!k.installed && <span className="text-[11px]">— {t('start-not-installed')}</span>}
                   </button>)}
                 </div>}
+              {Array.isArray(kinds) && kinds.some(k => !k.installed) && <p className="m-0 text-xs text-muted">{t('start-not-installed-why')}</p>}
             </div>
             {(info.gitRoot || info.previousProjectId) && <div className="grid gap-1.5">
               <h2 className="m-0">{t('ide-options')}</h2>

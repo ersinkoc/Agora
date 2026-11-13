@@ -1,6 +1,7 @@
 # The terminal client (ADR-0043). UI vocabulary: machines, "Needs you", "Finished" (docs/ux/visual-language.md).
 tui-connecting = Connecting to { $hub }…
 tui-lost = The connection to { $hub } was lost. Trying again…
+tui-signin-failed-local = Could not sign in to this machine's hub. Run `agora` again; `agora status` shows whether it is running and where its log is.
 tui-signin-failed = The hub did not accept the code. Make a new one with "agora hub login".
 tui-need-hub = Tell me where your hub is: run this on the hub's machine, or pass --hub HOST:PORT --ca FILE --code CODE.
 tui-quit-hint = Ctrl-C to quit
@@ -31,7 +32,7 @@ tui-no-project = (no project)
 tui-hint-answer = Press y to allow, n to deny the first request above.
 tui-allowed = Allowed.
 tui-denied = Denied.
-tui-not-trusted = This device is not trusted by that machine yet. On that machine run: agora node trust { $id } { $key }
+tui-not-trusted = This device is not trusted by that machine yet. On that machine run: agora node trust { $id } { $key }   (if `agora` is not found there, run it in the folder of the agora program: ./agora, or .\agora.exe on Windows)
 tui-answer-failed = Could not send your answer ({ $code }).
 tui-hint-open = Tab: next agent · Enter: open it · x: stop it · s: start one (Ctrl-] comes back)
 tui-opening-failed = Could not open that terminal ({ $code }).
@@ -62,6 +63,7 @@ tui-send-failed = Could not send it ({ $code }).
 tui-start-pick = Start which agent on { $machine }? Press its number, any other key cancels.
 tui-start-item = { $n }  { $name }
 tui-start-none = No agent is installed on { $machine }.
+tui-start-missing = Not found on this machine: { $names }. The machine cannot find their programs in its PATH. Install them there, or start the node from a terminal where they run.
 tui-start-nowhere = No machine with a project is online.
 tui-started = Started { $agent }.
 tui-start-failed = Could not start it ({ $code }).

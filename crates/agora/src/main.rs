@@ -25,6 +25,7 @@ const DETACH: u8 = 0x1d;
 const TERMINAL_STREAM: u32 = 3;
 
 mod adaptercmd;
+mod frontdoor;
 mod hubcli;
 mod tuicmd;
 mod update;
@@ -46,7 +47,24 @@ impl Say {
         eprintln!("{}", self.text(id, args));
     }
 
+    /// A refused request whose `field` names something the person can act on has a sentence of its own
+    /// (`cli-invalid-<field>`, dots as dashes), so it does not read like a protocol bug; the code stays the same.
+    fn field_reason(&self, e: &v1::ErrorInfo, args: &[(&str, Arg)]) -> Option<String> {
+        if e.code != "protocol.invalid_message" {
+            return None;
+        }
+        let Some(Value::Str(field)) = e.params.get("field").and_then(|v| v.value.as_ref()) else {
+            return None;
+        };
+        self.0
+            .render(&format!("cli-invalid-{}", field.replace('.', "-")), args)
+    }
+
     fn remote_error(&self, e: &v1::ErrorInfo) {
+        eprintln!("{}", self.remote_error_text(e));
+    }
+
+    fn remote_error_text(&self, e: &v1::ErrorInfo) -> String {
         let args: Vec<(&str, Arg)> = e
             .params
             .iter()
@@ -56,14 +74,16 @@ impl Say {
                 None => None,
             })
             .collect();
-        let message = self.text(&e.code.replace('.', "-"), &args);
-        self.err(
+        let message = self
+            .field_reason(e, &args)
+            .unwrap_or_else(|| self.text(&e.code.replace('.', "-"), &args));
+        self.text(
             key!("cli-error"),
             &[
                 ("code", e.code.as_str().into()),
                 ("message", message.into()),
             ],
-        );
+        )
     }
 }
 
@@ -117,6 +137,8 @@ pub(crate) struct Opts {
     since: Option<u64>,
     who: Option<String>,
     root_key: Option<PathBuf>,
+    ui: Option<String>,
+    save: bool,
     positional: Vec<String>,
 }
 
@@ -163,6 +185,8 @@ fn parse(args: &[String]) -> Option<Opts> {
             "--who" => o.who = Some(it.next()?.clone()),
             "--role" => o.role = Some(it.next()?.clone()),
             "--root-key" => o.root_key = Some(it.next()?.into()),
+            "--ui" => o.ui = Some(it.next()?.clone()),
+            "--save" => o.save = true,
             s if s.starts_with("--") => return None,
             _ => o.positional.push(a.clone()),
         }
@@ -194,6 +218,13 @@ fn main() -> ExitCode {
     }
     let say = Say(Catalog::for_locale(&agora_i18n::catalog::locale_from_env()));
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if matches!(
+        args.first().map(String::as_str),
+        Some("--help" | "-h" | "help")
+    ) {
+        say.out(key!("cli-usage"), &[]);
+        return ExitCode::SUCCESS;
+    }
     let words: Vec<&str> = args
         .iter()
         .map(String::as_str)
@@ -207,6 +238,11 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     };
     match words.as_slice() {
+        // ADR-0062: plain `agora` brings this machine's Agora up and opens it.
+        [] => frontdoor::front_door(&say, &opts),
+        ["web"] => frontdoor::web(&say),
+        ["status"] => frontdoor::status(&say),
+        ["down"] => frontdoor::down(&say),
         ["node", "run"] => node_run(&say, &opts),
         ["agent", "start"] => agent_start(&say, &opts),
         ["project", "init"] => project_init(&say, &opts),
@@ -223,6 +259,7 @@ fn main() -> ExitCode {
         ["adapter", "list"] => adaptercmd::list(&say, &opts),
         ["adapter", "remove"] => adaptercmd::remove(&say, &opts),
         ["adapter", "update"] => adaptercmd::update(&say, &opts),
+        ["password", op @ ("set" | "clear" | "status")] => hubcli::password(&say, &opts, op),
         ["hub", "run"] => hubcli::hub_run(&say, &opts),
         ["hub", "code"] => hubcli::hub_code(&say, &opts),
         ["hub", "fingerprint"] => hubcli::hub_fingerprint(&say, &opts),
@@ -322,8 +359,7 @@ fn doctor(say: &Say, o: &Opts) -> ExitCode {
             ("data-dir", _) => key!("doctor-data-dir-unwritable"),
             ("node", Status::Ok) => key!("doctor-node"),
             ("node", _) => key!("doctor-node-not-running"),
-            ("manifests", Status::Ok) => key!("doctor-manifests"),
-            ("manifests", _) => key!("doctor-manifests-missing"),
+            ("manifests", _) => key!("doctor-manifests"),
             ("agent-installed", _) => key!("doctor-agent-installed"),
             ("agent-missing", _) => key!("doctor-agent-missing"),
             ("policy-path-dropped", _) => key!("doctor-policy-path-dropped"),
@@ -334,7 +370,9 @@ fn doctor(say: &Say, o: &Opts) -> ExitCode {
             ("manifests", Ok(n)) => Arg::Num(n),
             _ => c.detail.as_str().into(),
         };
-        let text = say.text(sentence, &[("detail", detail)]);
+        let mut args = vec![("detail", detail)];
+        args.extend(c.args.iter().map(|(k, v)| (*k, Arg::from(v.as_str()))));
+        let text = say.text(sentence, &args);
         let status = say.text(
             match c.status {
                 Status::Ok => key!("doctor-status-ok"),
@@ -830,4 +868,31 @@ fn terminal_attach(say: &Say, o: &Opts) -> ExitCode {
         &[("agent_id", agent.as_str().into())],
     );
     ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod remote_error_tests {
+    use super::*;
+    use agora_protocol::{Error, ErrorCode};
+
+    #[test]
+    fn a_changed_project_identity_says_what_to_do_instead_of_reading_like_a_protocol_bug() {
+        let e = Error::new(ErrorCode::ProtocolInvalidMessage)
+            .with("field", "directory.identity_changed")
+            .to_info();
+        let en = Say(Catalog::english()).remote_error_text(&e);
+        assert!(en.starts_with("Error protocol.invalid_message: "), "{en}");
+        assert!(en.contains("--accept-project-id-change"), "{en}");
+        assert!(!en.contains("not valid"), "{en}");
+        let tr = Say(Catalog::turkish()).remote_error_text(&e);
+        assert!(tr.contains("--accept-project-id-change"), "{tr}");
+        assert!(tr.contains("proje kimliği"), "{tr}");
+        // A field without a sentence of its own keeps the generic one.
+        let other = Error::new(ErrorCode::ProtocolInvalidMessage)
+            .with("field", "directory.project_id")
+            .to_info();
+        let en = Say(Catalog::english()).remote_error_text(&other);
+        assert!(en.contains("field: directory.project_id"), "{en}");
+    }
 }

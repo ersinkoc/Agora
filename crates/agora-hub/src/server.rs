@@ -642,6 +642,11 @@ where
                     .await?;
                 }
                 (stream, STREAM_CLOSE) if stream >= FIRST_DYNAMIC_STREAM => relays.close(stream),
+                // A window checks that the hub is still there (protocol section 1): answered at once, whatever else is queued.
+                (STREAM_CONTROL, kinds::PING) => {
+                    conn.send(&frame(STREAM_CONTROL, kinds::PONG, f.payload))
+                        .await?;
+                }
                 _ => {}
             },
             Err(_) => {}
@@ -1314,9 +1319,11 @@ async fn handle(
     tcp: tokio::net::TcpStream,
     tls: Option<tokio_rustls::TlsAcceptor>,
 ) -> Result<(), ServeError> {
+    // Who is on the other end: a sign-in from another machine needs the screen password (ADR-0067), the hub's own does not.
+    let peer = tcp.peer_addr().ok().map(|a| a.ip());
     let Some(acceptor) = tls else {
         // Without TLS nothing can prove it is a node: only the token path exists (development and tests).
-        let Some(tcp) = websocket_only(tcp, state).await? else {
+        let Some(tcp) = websocket_only(tcp, peer, state).await? else {
             return Ok(());
         };
         let (conn, token) = agora_protocol::ws::accept_with_token(tcp).await?;
@@ -1327,7 +1334,7 @@ async fn handle(
         .await
         .map_err(|e| ServeError::Transport(TransportError::Ws(e.to_string())))?;
     let identity = crate::tls::identity(stream.get_ref().1.peer_certificates());
-    let Some(stream) = websocket_only(stream, state).await? else {
+    let Some(stream) = websocket_only(stream, peer, state).await? else {
         return Ok(());
     };
     let (conn, token) = agora_protocol::ws::accept_with_token(stream).await?;
@@ -1376,14 +1383,20 @@ async fn still(valid: impl Fn() -> bool) {
 /// Answers plain HTTP requests from the assets; returns the stream (replaying what was read) when it is a WebSocket.
 async fn websocket_only<S>(
     stream: S,
+    peer: Option<std::net::IpAddr>,
     state: &ServerState,
 ) -> Result<Option<crate::web::Rewind<S>>, ServeError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    match crate::web::route(stream, state.assets.as_deref(), state.sessions.as_deref())
-        .await
-        .map_err(|e| ServeError::Transport(TransportError::Ws(e.to_string())))?
+    match crate::web::route(
+        stream,
+        peer,
+        state.assets.as_deref(),
+        state.sessions.as_deref(),
+    )
+    .await
+    .map_err(|e| ServeError::Transport(TransportError::Ws(e.to_string())))?
     {
         crate::web::First::WebSocket(s) => Ok(Some(s)),
         crate::web::First::Answered => Ok(None),

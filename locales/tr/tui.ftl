@@ -1,6 +1,7 @@
 # Terminal istemcisi (ADR-0043). Arayüz sözlüğü: makine, "Sizi bekliyor", "Bitti" (docs/ux/visual-language.md).
 tui-connecting = { $hub } adresine bağlanılıyor…
 tui-lost = { $hub } ile bağlantı koptu. Yeniden deneniyor…
+tui-signin-failed-local = Bu makinenin hub'ında oturum açılamadı. `agora` komutunu yeniden çalıştırın; `agora status` çalışıp çalışmadığını ve günlüğünün yerini gösterir.
 tui-signin-failed = Hub kodu kabul etmedi. "agora hub login" ile yeni bir kod alın.
 tui-need-hub = Hub'ınızın adresini belirtin: bu komutu hub'ın çalıştığı makinede çalıştırın ya da --hub ADRES:PORT --ca DOSYA --code KOD verin.
 tui-quit-hint = Çıkmak için Ctrl-C
@@ -31,7 +32,7 @@ tui-no-project = (proje yok)
 tui-hint-answer = Yukarıdaki ilk isteğe izin vermek için y, reddetmek için n tuşuna basın.
 tui-allowed = İzin verildi.
 tui-denied = Reddedildi.
-tui-not-trusted = Bu cihaza o makine henüz güvenmiyor. O makinede şunu çalıştırın: agora node trust { $id } { $key }
+tui-not-trusted = Bu cihaza o makine henüz güvenmiyor. O makinede şunu çalıştırın: agora node trust { $id } { $key }   (`agora` orada bulunamazsa komutu agora programının klasöründe çalıştırın: ./agora, Windows'ta .\agora.exe)
 tui-answer-failed = Yanıtınız gönderilemedi ({ $code }).
 tui-hint-open = Tab: sonraki ajan · Enter: aç · x: durdur · s: yeni başlat (Ctrl-] geri döner)
 tui-opening-failed = Bu terminal açılamadı ({ $code }).
@@ -62,6 +63,7 @@ tui-send-failed = Gönderilemedi ({ $code }).
 tui-start-pick = { $machine } makinesinde hangi ajan başlatılsın? Numarasına basın; başka bir tuşa basarsanız işlem iptal edilir.
 tui-start-item = { $n }  { $name }
 tui-start-none = { $machine } makinesinde kurulu bir ajan yok.
+tui-start-missing = Bu makinede bulunamadı: { $names }. Makine bu programları PATH içinde bulamıyor. Onları oraya kurun ya da düğümü bu programların çalıştığı bir terminalden başlatın.
 tui-start-nowhere = Projesi olan çevrimiçi bir makine yok.
 tui-started = { $agent } başlatıldı.
 tui-start-failed = Başlatılamadı ({ $code }).

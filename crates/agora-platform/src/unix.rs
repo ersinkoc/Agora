@@ -161,6 +161,41 @@ pub(crate) fn restore_mode(saved: &libc::termios) {
     unsafe { libc::tcsetattr(0, libc::TCSANOW, saved) };
 }
 
+/// Terminal settings for typing a secret: no echo, no line editing by the terminal and no signals (Ctrl-C arrives as a byte, so the
+/// reader can restore the settings before it stops). Restored when dropped, on every path. With `discard_pending`, input that is
+/// waiting unread is dropped as the settings change (`TCSAFLUSH`), so what was typed before the prompt never joins the secret.
+pub(crate) struct SecretMode(libc::termios);
+
+impl Drop for SecretMode {
+    fn drop(&mut self) {
+        restore_mode(&self.0);
+    }
+}
+
+pub(crate) fn secret_mode(discard_pending: bool) -> io::Result<SecretMode> {
+    // SAFETY: an all-zero termios is a valid buffer for tcgetattr to fill.
+    let mut saved: libc::termios = unsafe { std::mem::zeroed() };
+    // SAFETY: fd 0 is stdin; `saved` is a valid out-pointer. Fails (ENOTTY) when stdin is not a terminal.
+    if unsafe { libc::tcgetattr(0, &mut saved) } != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "stdin is not a terminal",
+        ));
+    }
+    let mut quiet = saved;
+    quiet.c_lflag &= !(libc::ECHO | libc::ICANON | libc::ISIG);
+    quiet.c_cc[libc::VMIN] = 1;
+    quiet.c_cc[libc::VTIME] = 0;
+    let when = if discard_pending {
+        libc::TCSAFLUSH
+    } else {
+        libc::TCSANOW
+    };
+    // SAFETY: fd 0 is stdin; `quiet` is a valid termios.
+    cvt(unsafe { libc::tcsetattr(0, when, &quiet) })?;
+    Ok(SecretMode(saved))
+}
+
 pub(crate) fn terminal_size() -> Option<(u16, u16)> {
     // SAFETY: an all-zero winsize is a valid out-buffer.
     let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
@@ -465,6 +500,62 @@ pub(crate) fn visit_dir(
         }
     }
     Ok(())
+}
+
+/// Makes `cmd` start in a session of its own (`setsid` in the child before `exec`), detached from this process's terminal: see
+/// [`crate::spawn_detached`].
+pub(crate) fn detach(cmd: &mut Command) {
+    // SAFETY: `setsid` is async-signal-safe and touches no memory of the parent; the child is a fresh fork here.
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            // Only standard input, output and error (already redirected) reach the daemon: any other descriptor this process got from
+            // its own caller without close-on-exec (a pipe a script reads to its end) is closed at exec, so the caller is never kept
+            // waiting. Marked rather than closed, so the runtime's own exec-error pipe still works.
+            let max = libc::sysconf(libc::_SC_OPEN_MAX);
+            let max = if max <= 0 { 1024 } else { max.min(65_536) } as libc::c_int;
+            for fd in 3..max {
+                let flags = libc::fcntl(fd, libc::F_GETFD);
+                if flags >= 0 && flags & libc::FD_CLOEXEC == 0 {
+                    libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
+                }
+            }
+            Ok(())
+        });
+    }
+}
+
+/// `SIGTERM` to one process (not its group): see [`crate::terminate_process`].
+pub(crate) fn terminate(pid: u32) -> io::Result<()> {
+    let pid =
+        libc::pid_t::try_from(pid).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    // SAFETY: plain system call on a pid number.
+    cvt(unsafe { libc::kill(pid, libc::SIGTERM) }).map(|_| ())
+}
+
+/// Whether a process with this pid exists (one owned by another user counts).
+#[allow(dead_code)] // used only on the Unix systems without a start-time reader
+pub(crate) fn alive(pid: u32) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return false;
+    };
+    // SAFETY: signal 0 checks existence and permission only.
+    let r = unsafe { libc::kill(pid, 0) };
+    r == 0 || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+/// See [`crate::hostname`].
+pub(crate) fn hostname() -> Option<String> {
+    let mut buf = [0u8; 256];
+    // SAFETY: the buffer is valid for `buf.len()` bytes; the result may be unterminated when truncated, handled below.
+    if unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) } != 0 {
+        return None;
+    }
+    let len = buf.iter().position(|b| *b == 0).unwrap_or(buf.len());
+    let name = String::from_utf8_lossy(&buf[..len]).trim().to_string();
+    (!name.is_empty()).then_some(name)
 }
 
 #[cfg(test)]

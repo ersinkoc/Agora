@@ -1832,3 +1832,33 @@ async fn a_model_switch_for_a_node_without_it_is_refused_and_audited() {
         ]
     );
 }
+
+// Silence detection on node links (F1) was taken out of 0.3.8: it needs a hub-owned presence event first (an ADR; see
+// docs/backlog/lan-test-findings.md R1). Its tests return with that design.
+
+#[tokio::test]
+async fn a_window_that_pings_the_hub_gets_a_pong() {
+    let st = state(None);
+    let addr = start(Arc::clone(&st)).await;
+    let mut c = dial(addr, Some("good-token")).await;
+    c.send(&f(
+        STREAM_EVENTS,
+        kinds::SUBSCRIBE,
+        v1::Subscribe::default().encode_to_vec(),
+    ))
+    .await
+    .unwrap();
+    let snap = recv(&mut c).await;
+    assert_eq!(
+        (snap.stream_id, snap.kind),
+        (STREAM_EVENTS, kinds::SNAPSHOT)
+    );
+    c.send(&f(STREAM_CONTROL, kinds::PING, b"w1".to_vec()))
+        .await
+        .unwrap();
+    let pong = recv(&mut c).await;
+    assert_eq!(
+        (pong.stream_id, pong.kind, pong.payload.as_slice()),
+        (STREAM_CONTROL, kinds::PONG, b"w1".as_slice())
+    );
+}

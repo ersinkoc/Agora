@@ -13,7 +13,8 @@ connect (WSS + mTLS for nodes, session token for clients)
   ← ResumeOk   { from_seq }  |  ← SnapshotRequired
   → SnapshotRequired                       (node only, when it no longer has from_seq; ADR-0054)
   ... streams ...
-  → / ← Ping / Pong every 15 s; 3 missed = connection lost
+  → / ← Ping / Pong: a node pings every 15 s; the hub answers each Ping (a node's or a window's) at once with a Pong carrying
+           the same payload. No deadline is enforced yet (silence detection needs a hub-owned presence event, an ADR)
   → / ← Goodbye { reason_code }
 ```
 
@@ -182,6 +183,18 @@ bits, 10 minutes, single use). The web app trades it with `POST /api/session` (`
 wrong, expired or used code, 429 after five misses in a row) for a session token: 128 random bits, valid 12 hours, stored only as a
 hash. The token is the bearer credential above. `<hub dir>/token` stays valid for scripts. 
 
+Screen password (ADR-0067, `agora-hub::password`; additive JSON on the same HTTP routes, no protocol message): `GET /api/session` →
+`{"passwordRequired": bool, "passwordSet": bool}` (required only when one is set and the TCP peer is not loopback). `POST /api/session`
+also takes `"password"`; without the right one from a non-loopback peer it is 401 like a bad code (the code is not spent). Wrong codes,
+passwords and passkeys are limited per address (5 tries, then 1 minute doubling to 1 hour; loopback at most 1 minute) and codes and
+passwords also hub-wide (50), 429 while locked out; every 401/429 is answered after 250 ms. `DELETE /api/session` with a bearer ends that
+session ("Lock"). `POST /api/password` (`{"password", "current"?}`, owner session; `current` needed when one is set) sets it and ends
+every other session (400 `{"code":"password.too_short"|"password.too_long"}`, 401 wrong current, 403 not the owner).
+From a non-loopback peer with a password set, `POST /api/passkey/register-begin` and `register-finish` also need `"password"` (401
+without it, counted like a sign-in); changing or clearing the password deletes passkeys added from elsewhere without it (their ids are
+not in the setting `passkeys_vouched`). Passkey `login-finish` counts only toward the per-address limit. The idle lock of a window
+uses `DELETE /api/session`. The hash is a setting (`screen_password`: `pbkdf2-sha256$<rounds>$<salt hex>$<hash hex>`), not a schema change.
+
 Passkeys (`agora-hub::passkey`, WebAuthn, ES256 only, no attestation): a signed-in session adds one with
 `POST /api/passkey/register-begin` (`{}` → `{"challenge","rpId"}`, `Authorization: Bearer <session>`) and `register-finish`
 (`{"id","publicKey"(SPKI),"clientDataJSON"}`, all base64url). Without a session: `login-begin` (→ `{"challenge","rpId","ids"}`) and
@@ -288,7 +301,7 @@ output, kind 2 resize (cols, rows as u16 LE), kind 3 exit (i32 LE; negative = si
 gets a fresh snapshot instead of the dropped output; it never slows the terminal. Input and resize are ordinary
 commands. Terminal ids are `t-<agent id>` (one terminal per agent). Implemented commands: `project.list`,
 `agent.start`, `agent.stop`, `agent.prompt`, `terminal.input`, `terminal.resize`, `terminal.subscribe`; the rest
-answer `protocol.capability_missing`. `agent.list` (ADR-0025) and `agent.kinds` (ADR-0030: the node's loaded manifests with display name, integration level and whether the launch program is on `PATH`; invalid manifests omitted; `agora agent kinds`).
+answer `protocol.capability_missing`. `agent.list` (ADR-0025) and `agent.kinds` (ADR-0030: the node's built-in and folder manifests, one per kind (agent-manifest.md, "Where agent kinds come from"), with display name, integration level and whether the launch program is on `PATH`; invalid manifests omitted; `agora agent kinds`).
 
 ## 5. Client state model
 
