@@ -29,13 +29,7 @@ const SUBJECTS: [string, ToolAction][] = [
   ['file_path', 'read'], ['filePath', 'read'], ['notebook_path', 'read'], ['path', 'read'], ['abs_path', 'read'], ['description', 'other'],
 ];
 const EDIT_KEYS = ['old_string', 'new_string', 'oldText', 'newText', 'content', 'edits', 'patch', 'diff', 'new_str', 'old_str'];
-const MAX_DETAIL = 2000;
-
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
-
-function clip(s: string, max: number): string {
-  return s.length > max ? `${s.slice(0, max)}…` : s;
-}
 
 // A value as one would read it: text as it is, a command given as words joined, anything else as indented JSON.
 function asText(v: unknown): string {
@@ -87,11 +81,13 @@ export function toolView(text: string): ToolView {
     const args = parsed.arguments;
     if (isObject(args)) {
       const { subject, hint } = pickSubject(args);
-      const details = Object.entries(args).map(([k, v]): [string, string] => [k, clip(asText(v), MAX_DETAIL)]);
+      // Whole values: the row shows the short form, the folded part everything the agent sent (the node caps an entry at 16 KiB).
+      const details = Object.entries(args).map(([k, v]): [string, string] => [k, asText(v)]);
       return { action: kind && kind !== 'other' ? kind : infer(Object.keys(args), hint), title, subject, details, raw: '' };
     }
-    const shown = args === undefined || args === null ? '' : clip(asText(args), MAX_DETAIL);
-    return { action: kind ?? 'other', title, subject: shown.includes('\n') ? '' : shown, details: shown.includes('\n') ? [['', shown]] : [], raw: '' };
+    const shown = args === undefined || args === null ? '' : asText(args);
+    // Folded too when it fits on one line: the row truncates a long one.
+    return { action: kind ?? 'other', title, subject: shown.includes('\n') ? '' : shown, details: shown ? [['', shown]] : [], raw: '' };
   }
   // Cut short at the node's limit, or arguments that were never JSON: read what can be read, keep the rest as it came.
   const tool = stringField(text, 'tool');
@@ -105,7 +101,7 @@ export function toolView(text: string): ToolView {
   }
   const at = text.indexOf('"arguments"');
   const rest = at >= 0 ? text.slice(text.indexOf(':', at) + 1).replace(/\}$/, '').trim() : '';
-  return { action: kind && kind !== 'other' ? kind : infer(EDIT_KEYS.filter((k) => text.includes(`"${k}"`)), hint), title, subject, details: rest && rest !== 'null' ? [['', clip(rest, MAX_DETAIL)]] : [], raw: '' };
+  return { action: kind && kind !== 'other' ? kind : infer(EDIT_KEYS.filter((k) => text.includes(`"${k}"`)), hint), title, subject, details: rest && rest !== 'null' ? [['', rest]] : [], raw: '' };
 }
 
 // An approval's detail in words. A chat agent's detail is its raw input as JSON, often cut at 300 characters with "…"; when it reads
