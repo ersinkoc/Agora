@@ -191,3 +191,22 @@ pub(crate) fn opened_path(file: &std::fs::File) -> io::Result<PathBuf> {
     use std::os::fd::AsRawFd;
     fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd()))
 }
+
+/// Process group and start time (clock ticks after boot, `/proc/<pid>/stat` field 22) of a running process.
+pub(crate) fn identity(pid: u32) -> io::Result<crate::ProcessIdentity> {
+    let bad = || io::Error::new(io::ErrorKind::InvalidData, "unexpected /proc format");
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat"))?;
+    // After the last ')': state(0) ppid(1) pgrp(2) ... starttime(19).
+    let rest = &stat[stat.rfind(')').ok_or_else(bad)? + 1..];
+    let f: Vec<&str> = rest.split_whitespace().collect();
+    if f.first() == Some(&"Z") {
+        return Err(io::Error::new(io::ErrorKind::NotFound, "zombie"));
+    }
+    let group = f.get(2).and_then(|v| v.parse().ok()).ok_or_else(bad)?;
+    let started = f.get(19).and_then(|v| v.parse().ok()).ok_or_else(bad)?;
+    Ok(crate::ProcessIdentity {
+        pid,
+        group,
+        started,
+    })
+}

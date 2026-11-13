@@ -921,6 +921,65 @@ pub fn process_name(pid: u32) -> io::Result<String> {
     }
 }
 
+/// What tells a running process apart from a later one that got the same pid (ADR-0060): its process group and its start time, in
+/// a unit of the system's own (compared, never shown).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProcessIdentity {
+    pub pid: u32,
+    pub group: u32,
+    pub started: u64,
+}
+
+/// The [`ProcessIdentity`] of a running process. `Unsupported` on Windows, where a node's agents are in a job object that ends them
+/// with the node, so none can outlive it to be found again.
+pub fn process_identity(pid: u32) -> io::Result<ProcessIdentity> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        procinfo::identity(pid)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = pid;
+        Err(unsupported())
+    }
+}
+
+/// Whether the process `id` names still runs: the same pid with the same start time (a reused pid is not it).
+pub fn process_still_running(id: &ProcessIdentity) -> bool {
+    id.pid > 1 && process_identity(id.pid).is_ok_and(|now| now.started == id.started)
+}
+
+/// Ends the process `id` names (ADR-0060), and with it its process group when it leads one (an agent's terminal does), only if it
+/// still runs with the same start time: a pid that was given to another process is never touched. `Ok(false)` when it was not
+/// running. Never this process's own group.
+pub fn kill_process_if_same(id: &ProcessIdentity) -> io::Result<bool> {
+    if !process_still_running(id) {
+        return Ok(false);
+    }
+    #[cfg(unix)]
+    {
+        let pid =
+            i32::try_from(id.pid).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+        // SAFETY: getpgrp has no preconditions.
+        let own = unsafe { libc::getpgrp() };
+        let group = i32::try_from(id.group).unwrap_or(0);
+        // SAFETY: plain signals to a process group, or a process, checked to be the recorded one just above.
+        let r = if group == pid && group > 1 && group != own {
+            unsafe { libc::killpg(group, libc::SIGKILL) }
+        } else {
+            unsafe { libc::kill(pid, libc::SIGKILL) }
+        };
+        if r != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(true)
+    }
+    #[cfg(not(unix))]
+    {
+        Err(unsupported())
+    }
+}
+
 /// Current working directory of a process.
 pub fn process_cwd(pid: u32) -> io::Result<PathBuf> {
     #[cfg(any(target_os = "linux", target_os = "macos"))]

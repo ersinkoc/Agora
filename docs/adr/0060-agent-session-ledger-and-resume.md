@@ -43,3 +43,13 @@ agent tools themselves keep and can resume.
 
 ## Consequences
 Schema: `AgentSnapshot.interrupted` + native-session fields, `AgentResume` command, `AgentInterrupted` event or state, capability `agent.resume`; node ledger (agora-node), supervisor wiring of the existing `resume`; clients (Resume / Start again); audit; threat model row (the ledger's contents; resume of a folder that changed).
+
+## Note from the implementation (2026-11-13): an agent that outlives its node
+Found on a real Mac: after the node is killed (`kill -9`) a terminal agent can keep running (it leads its own process group; `codex`
+stayed with PPID 1), and Resume then started a second process on the same conversation. The ledger therefore also records each
+agent's pid, process group and process start time (read in `agora-platform`: `/proc/<pid>/stat` on Linux, `proc_pidinfo` on macOS;
+not needed on Windows, where the agents' job object ends them with the node). At the next start an interrupted entry whose pid still
+runs with the same start time is reported `still_running`: Resume is refused (`agent.still_running`) until the owner stops it
+(`agent.stop` ends exactly that process, its group when it leads one) or leaves it. A pid whose start time differs belongs to another
+process and is never touched. A node that stops cleanly now ends its agents itself before it exits.
+

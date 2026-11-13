@@ -815,3 +815,31 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod identity_tests {
+    use crate::{kill_process_if_same, process_identity, process_still_running};
+
+    #[test]
+    fn a_process_is_known_by_its_start_and_a_reused_pid_is_never_killed() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let id = process_identity(child.id()).unwrap();
+        assert!(process_still_running(&id));
+        // The same pid with another start time is another process: left alone.
+        let other = crate::ProcessIdentity {
+            started: id.started + 1,
+            ..id
+        };
+        assert!(!process_still_running(&other));
+        assert!(!kill_process_if_same(&other).unwrap());
+        assert!(child.try_wait().unwrap().is_none());
+        // Its own group is the test's: only the process itself is ended.
+        assert!(kill_process_if_same(&id).unwrap());
+        assert!(!child.wait().unwrap().success());
+        assert!(!process_still_running(&id));
+    }
+}

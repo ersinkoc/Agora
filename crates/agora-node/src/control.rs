@@ -596,7 +596,26 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                 (Some(s), true) => s.running_helpers(&id),
                 _ => Vec::new(),
             };
-            let events = ctx.sup().stop(&id).map_err(sup_err)?;
+            let stopped_now = ctx.sup().stop(&id);
+            // ADR-0060: an interrupted agent whose process outlived the node is stopped by ending exactly that process.
+            if let (Err(SupervisorError::NotFound(_)), Some(ledger)) = (&stopped_now, &ctx.ledger) {
+                if let Some(entry) = ledger.get(&a.agent_id).filter(|e| e.still_running()) {
+                    if let Some(p) = entry.process() {
+                        agora_platform::kill_process_if_same(&p).map_err(|_| {
+                            Error::new(ErrorCode::Internal).with("incident_id", "unassigned")
+                        })?;
+                    }
+                    ledger.set_process(&a.agent_id, None, crate::daemon::now_ms());
+                    if let (Some(ev), Some(e)) = (&ctx.events, ledger.get(&a.agent_id)) {
+                        ev.agent_interrupted(
+                            &e,
+                            !e.session_id.is_empty() && ctx.sup().resumable(&e.kind),
+                        );
+                    }
+                    return Ok(ok_empty());
+                }
+            }
+            let events = stopped_now.map_err(sup_err)?;
             let mut stopped = vec![(id, events)];
             for h in helpers {
                 // One that ended meanwhile is simply not stopped again.
@@ -848,6 +867,10 @@ pub(crate) fn resume_agent(
             .with("agent_id", agent_id)
             .with("path", entry.folder.as_str())
     };
+    // Its process from before the restart still runs: a second one would continue the same conversation.
+    if entry.still_running() {
+        return Err(Error::new(ErrorCode::AgentStillRunning).with("agent_id", agent_id));
+    }
     let parent = (!entry.parent_agent_id.is_empty()).then(|| AgentId::new(&entry.parent_agent_id));
     {
         let sup = ctx.sup();

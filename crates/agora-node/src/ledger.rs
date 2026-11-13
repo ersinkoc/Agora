@@ -65,6 +65,11 @@ pub struct Entry {
     pub ended: bool,
     /// When the node found it interrupted; 0 while it runs or after it ended.
     pub interrupted_at_ms: u64,
+    /// The agent's top process (its terminal's program, or its adapter) while it runs: pid, process group and start time
+    /// (`agora_platform::ProcessIdentity`), so that one that outlived a crashed node is recognised, and a reused pid is not. 0: none.
+    pub pid: u32,
+    pub process_group: u32,
+    pub process_started: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -141,6 +146,9 @@ impl Entry {
             "last_state": self.last_state,
             "ended": self.ended,
             "interrupted_at_ms": self.interrupted_at_ms,
+            "pid": self.pid,
+            "process_group": self.process_group,
+            "process_started": self.process_started,
         })
     }
 
@@ -177,6 +185,9 @@ impl Entry {
             last_state: field(v, "last_state"),
             ended: flag(v, "ended"),
             interrupted_at_ms: number(v, "interrupted_at_ms"),
+            pid: u32::try_from(number(v, "pid")).unwrap_or(0),
+            process_group: u32::try_from(number(v, "process_group")).unwrap_or(0),
+            process_started: number(v, "process_started"),
         };
         (!e.agent_id.is_empty() && !e.kind.is_empty()).then_some(e)
     }
@@ -190,6 +201,24 @@ impl Entry {
 
     pub fn interrupted(&self) -> bool {
         !self.ended && self.interrupted_at_ms != 0
+    }
+
+    /// The process it ran as, when one was recorded.
+    pub fn process(&self) -> Option<agora_platform::ProcessIdentity> {
+        (self.pid > 1 && self.process_started != 0).then_some(agora_platform::ProcessIdentity {
+            pid: self.pid,
+            group: self.process_group,
+            started: self.process_started,
+        })
+    }
+
+    /// ADR-0060: its process outlived the node that started it (a node killed with `kill -9`: terminal agents lead their own
+    /// process group and do not die with it) and still runs: the same pid with the same start time.
+    pub fn still_running(&self) -> bool {
+        self.interrupted()
+            && self
+                .process()
+                .is_some_and(|p| agora_platform::process_still_running(&p))
     }
 }
 
@@ -327,6 +356,28 @@ impl Ledger {
             )
         });
         v
+    }
+
+    /// The process an agent runs as now (`None`: it has none any more). Written when it changed.
+    pub fn set_process(
+        &self,
+        agent_id: &str,
+        p: Option<agora_platform::ProcessIdentity>,
+        now_ms: u64,
+    ) {
+        let mut st = self.st();
+        let Some(e) = st.entries.get_mut(agent_id) else {
+            return;
+        };
+        let (pid, group, started) = p.map_or((0, 0, 0), |p| (p.pid, p.group, p.started));
+        if (e.pid, e.process_group, e.process_started) == (pid, group, started) {
+            return;
+        }
+        (e.pid, e.process_group, e.process_started) = (pid, group, started);
+        e.updated_at_ms = now_ms;
+        st.dirty = true;
+        drop(st);
+        let _ = self.flush();
     }
 
     /// Start again (ADR-0060): the agent's next run is a new session, so the old session id is no longer its own.
@@ -508,6 +559,7 @@ fn apply(st: &mut State, body: &Body, now: u64) -> bool {
             Some(e) if !e.ended => {
                 e.ended = true;
                 e.interrupted_at_ms = 0;
+                (e.pid, e.process_group, e.process_started) = (0, 0, 0);
                 e.updated_at_ms = now;
                 st.dirty = true;
                 true
