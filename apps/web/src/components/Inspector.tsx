@@ -4,6 +4,7 @@ import type { AgentTileModel } from '../model';
 import { money, type UsageSummary } from '../net/usage';
 import type { ApprovalModel, BoardModel, MessageModel, ProjectCost } from '../net/view';
 import { ApprovalCard } from './ApprovalCard';
+import type { StartChoice } from './StartApproval';
 import { Icon } from './Icon';
 import { ProjectBoard } from './ProjectBoard';
 import { StateBadge } from './StateBadge';
@@ -21,7 +22,7 @@ export function Inspector({ attention, approvals, notice, changed, boards, messa
   usage?: UsageSummary;
   projects: readonly ProjectCost[];
   onOpen: (id: string) => void;
-  onResolve: (a: ApprovalModel, approved: boolean) => void;
+  onResolve: (a: ApprovalModel, approved: boolean, choice?: StartChoice) => void;
   onReview?: (id: string) => void;
   onCollapse: () => void;
 }) {
@@ -54,7 +55,7 @@ export function Inspector({ attention, approvals, notice, changed, boards, messa
         {needs === 0 && <p className="muted">{t('attention-empty')}</p>}
         {attention.map(a => <button key={a.id} type="button" className="ide-row justify-between border border-needs-you/60 px-3 py-2" onClick={() => onOpen(a.id)}><span className="truncate font-medium">{a.name}</span><StateBadge state={a.state} /></button>)}
         {notice && <p role="alert" className="text-needs-you">{notice}</p>}
-        {approvals.map(a => <ApprovalCard key={a.id} approval={a} onResolve={ok => onResolve(a, ok)} />)}
+        {approvals.map(a => <ApprovalCard key={a.id} approval={a} onResolve={(ok, choice) => onResolve(a, ok, choice)} />)}
       </div>}
       {active === 'changes' && (changed.length === 0 ? <p className="muted">{t('changes-none')}</p> : <ul className="m-0 grid list-none gap-1 p-0">
         {changed.map(a => <li key={a.id}>

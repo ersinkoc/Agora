@@ -1,3 +1,5 @@
+import { StartApproval } from './components/StartApproval';
+import { HelperGrants } from './components/HelperGrants';
 import { AgentAddress } from './components/AgentAddress';
 import { LanguagePicker } from './components/LanguagePicker';
 import { ThemePicker } from './components/ThemePicker';
@@ -11,7 +13,7 @@ import { StateBadge } from './components/StateBadge';
 import type { MachineModel, MessageModel, ProjectCost } from './net/view';
 import type { Device } from './net/approval';
 import { money, type UsageSummary } from './net/usage';
-import { demoAgents } from './fixtures';
+import { demoAgents, demoHelper, demoStartApproval } from './fixtures';
 import { demoSource, type TerminalSource } from './terminal/source';
 import { Suspense, lazy, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { actionKey, outcomeKind, type AuditResult } from './net/audit';
@@ -53,6 +55,10 @@ function Themed({ theme }: { theme: 'dark' | 'light' }) {
       <AttentionStrip agents={needsAttention(demoAgents)} />
       <div className="fleet">{demoAgents.map((a) => <AgentTile key={a.id} agent={a} />)}</div>
       <Messages messages={demoMessages} />
+      <div className="fleet"><AgentTile agent={demoHelper} /></div>
+      <AgentAddress agent={{ ...demoHelper, machineId: 'laptop', id: 'laptop/a8' }} />
+      <StartApproval approval={demoStartApproval} start={demoStartApproval.start} onResolve={() => {}} />
+      <HelperGrants list={async () => [{ id: 'ap-1', kind: 'codex', folder: '/home/dev/code/login-fix', remaining: 2 }]} revoke={async () => {}} refresh={0} />
       <div className="gallery__row">
         <button type="button" className="button button--primary">{t('action-start-agent')}</button>
         <button type="button" className="button">{t('action-open')}</button>

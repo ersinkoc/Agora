@@ -61,6 +61,32 @@ pub fn approval_message(node_id: &str, approval_id: &str, approved: bool) -> Vec
     m
 }
 
+/// The bytes a device signs to decide an agent's request to start another (ADR-0057, `agora-node::approvals::start_signed_message`, which
+/// a test compares against): the decision, the grant and a hash of the request exactly as it was shown.
+pub fn start_message(
+    node_id: &str,
+    approval_id: &str,
+    approved: bool,
+    helper_grant: u32,
+    helpers_may_start: bool,
+    detail: &str,
+) -> Vec<u8> {
+    let hash = hex(ring::digest::digest(&ring::digest::SHA256, detail.as_bytes()).as_ref());
+    let mut m = b"agora-approval-start-v1".to_vec();
+    for part in [
+        node_id,
+        approval_id,
+        if approved { "1" } else { "0" },
+        &helper_grant.to_string(),
+        if helpers_may_start { "1" } else { "0" },
+        &hash,
+    ] {
+        m.push(0);
+        m.extend_from_slice(part.as_bytes());
+    }
+    m
+}
+
 /// The exact bytes a device signs for a grant (ADR-0041): a domain tag, then node id, grant id, scope, the commands joined by commas and
 /// the expiry in decimal milliseconds, NUL-separated.
 pub fn grant_message(
@@ -179,6 +205,23 @@ mod tests {
             assert_eq!(
                 approval_message("laptop", "7", approved),
                 agora_node::approvals::signed_message("laptop", "7", approved)
+            );
+        }
+    }
+
+    #[test]
+    fn the_start_message_is_the_one_the_node_rebuilds() {
+        for (approved, grant, nested) in [(true, 0, false), (true, 3, true), (false, 0, false)] {
+            assert_eq!(
+                start_message("laptop", "7", approved, grant, nested, "{\"prompt\":\"x\"}"),
+                agora_node::approvals::start_signed_message(
+                    "laptop",
+                    "7",
+                    approved,
+                    grant,
+                    nested,
+                    "{\"prompt\":\"x\"}"
+                )
             );
         }
     }

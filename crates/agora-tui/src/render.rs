@@ -116,6 +116,27 @@ pub fn render(
     let mut waiting = 0;
     for a in &s.approvals {
         waiting += 1;
+        let (on, off) = paint(AgentState::Blocked, color);
+        // ADR-0057: a request to start an agent shows what would start, where, and its whole first prompt.
+        if let Some(start) = start_request(&a.action, &a.detail) {
+            let line = t(
+                if start.inside {
+                    key!("tui-asks-start")
+                } else {
+                    key!("tui-asks-start-outside")
+                },
+                &[
+                    ("agent", Arg::Str(local(&a.agent_id).to_string())),
+                    ("kind", Arg::Str(plain(&start.kind))),
+                    ("folder", Arg::Str(plain(&start.folder))),
+                ],
+            );
+            out.push(format!("  {on}!{off} {line}"));
+            for l in plain(&start.prompt).lines() {
+                out.push(format!("      {dim}{l}{reset}"));
+            }
+            continue;
+        }
         let line = t(
             key!("tui-asks"),
             &[
@@ -126,7 +147,6 @@ pub fn render(
                 ),
             ],
         );
-        let (on, off) = paint(AgentState::Blocked, color);
         out.push(format!("  {on}!{off} {line}"));
     }
     for a in s
@@ -181,7 +201,7 @@ pub fn render(
             folder(project).unwrap_or_else(|| project.to_string())
         };
         out.push(format!("{bold}{name}{reset}"));
-        for a in agents {
+        for (a, depth) in helper_order(&agents) {
             let st = state_of(a);
             let (on, off) = paint(st, color);
             let marker = if color { "●" } else { "*" };
@@ -191,8 +211,21 @@ pub fn render(
                 " "
             };
             let word = state_text(st, t);
+            // A helper sits under the agent that started it (ADR-0057) and says so.
+            let indent = "  ".repeat(depth);
+            let by = if a.parent_agent_id.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "  {}",
+                    t(
+                        key!("tui-started-by"),
+                        &[("agent", Arg::Str(local(&a.parent_agent_id).to_string()))],
+                    )
+                )
+            };
             out.push(format!(
-                "{pointer} {on}{marker} {word:<10}{off} {}  {dim}{}  {}{reset}",
+                "{pointer} {indent}{on}{marker} {word:<10}{off} {}  {dim}{}  {}{by}{reset}",
                 local(&a.agent_id),
                 a.kind,
                 a.node_id,
@@ -226,6 +259,69 @@ pub fn render(
         out.push(notice.to_string());
     }
     out.push(format!("{dim}{}{reset}", t(key!("tui-quit-hint"), &[])));
+    out
+}
+
+/// What an `agent.start` request asks for (ADR-0057), from its detail; `None` for any other request or a detail that does not parse.
+struct StartRequest {
+    kind: String,
+    folder: String,
+    prompt: String,
+    inside: bool,
+}
+
+fn start_request(action: &str, detail: &str) -> Option<StartRequest> {
+    if action != "agent.start" {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_str(detail).ok()?;
+    let s = |k: &str| {
+        v.get(k)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string()
+    };
+    Some(StartRequest {
+        kind: s("kind"),
+        folder: s("folder"),
+        prompt: s("prompt"),
+        inside: v
+            .get("inside")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+    })
+}
+
+/// `agents` with each helper right after the agent that started it, and how deep it is. A helper whose parent is not in the list (another
+/// project, or gone) stays where it is, at depth 0.
+fn helper_order<'a>(agents: &[&'a AgentSnapshot]) -> Vec<(&'a AgentSnapshot, usize)> {
+    let present = |id: &str| agents.iter().any(|a| a.agent_id == id);
+    let mut out = Vec::new();
+    fn add<'a>(
+        a: &'a AgentSnapshot,
+        depth: usize,
+        agents: &[&'a AgentSnapshot],
+        out: &mut Vec<(&'a AgentSnapshot, usize)>,
+    ) {
+        if depth > 8 || out.iter().any(|(x, _)| x.agent_id == a.agent_id) {
+            return;
+        }
+        out.push((a, depth));
+        for c in agents.iter().filter(|c| c.parent_agent_id == a.agent_id) {
+            add(c, depth + 1, agents, out);
+        }
+    }
+    for a in agents {
+        if a.parent_agent_id.is_empty() || !present(&a.parent_agent_id) {
+            add(a, 0, agents, &mut out);
+        }
+    }
+    // A loop of parents (never made by a node) would leave agents out: they are listed anyway.
+    for a in agents {
+        if !out.iter().any(|(x, _)| x.agent_id == a.agent_id) {
+            out.push((a, 0));
+        }
+    }
     out
 }
 
@@ -466,6 +562,46 @@ mod tests {
         assert!(
             short.iter().any(|l| l.contains("line 49"))
                 && !short.iter().any(|l| l.contains("line 0"))
+        );
+    }
+
+    #[test]
+    fn helpers_sit_under_their_parent_and_a_start_request_shows_its_prompt() {
+        let mut snap = snapshot();
+        snap.agents.insert(
+            0,
+            AgentSnapshot {
+                agent_id: "laptop/agent-3".into(),
+                node_id: "laptop".into(),
+                project_id: "web".into(),
+                kind: "codex".into(),
+                running: true,
+                parent_agent_id: "laptop/agent-1".into(),
+                ..Default::default()
+            },
+        );
+        snap.approvals[0].action = "agent.start".into();
+        snap.approvals[0].detail =
+            r#"{"kind":"claude-code","folder":"/w","inside":true,"prompt":"line one\nline \u001b[2Jtwo"}"#
+                .into();
+        let lines = render(&snap, false, false, "", "", 0, &t);
+        let text = lines.join("\n");
+        assert!(
+            text.contains("tui-asks-start[agent=agent-1,kind=claude-code,folder=/w]"),
+            "{text}"
+        );
+        assert!(
+            text.contains("line one") && text.contains("line [2Jtwo") && !text.contains('\u{1b}'),
+            "{text}"
+        );
+        let parent = lines
+            .iter()
+            .position(|l| l.contains("agent-1  codex"))
+            .expect("parent row");
+        assert!(
+            lines[parent + 1].contains("agent-3")
+                && lines[parent + 1].contains("tui-started-by[agent=agent-1]"),
+            "{lines:?}"
         );
     }
 

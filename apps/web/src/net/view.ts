@@ -22,6 +22,7 @@ export interface AgentV {
   tokens: number; // input + output so far
   startedMs?: number; // when this window saw it start (not known for agents that were already running)
   exitCode?: number; // how it ended, once it has
+  parentId?: string; // ADR-0057: the hub-wide key of the agent that started it
 }
 export interface CheckoutV { nodeId: string; projectId: string; path: string }
 export interface ApprovalV { agentId: string; action: string; detail: string; expiresAtMs: number }
@@ -76,6 +77,7 @@ export function fromSnapshot(s: agora.v1.Snapshot.$Properties): View {
       nodeId: a.nodeId ?? '', worktreeId: a.worktreeId ?? '', kind: a.kind ?? '', state: a.state ?? 0,
       reported: !!a.reported, running: !!a.running, sinceMs: 0,
       tokens: num(a.inputTokens) + num(a.outputTokens),
+      parentId: a.parentAgentId || undefined,
     });
   }
   for (const tm of s.terminals ?? []) if (tm.agentId) v.withTerminal.add(tm.agentId);
@@ -155,6 +157,7 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
       v.agents.set(q(b.agentId), {
         nodeId: b.nodeId ?? '', worktreeId: q(b.worktreeId), kind: b.kind ?? '', state: 3 /* idle */,
         reported: false, running: true, sinceMs: at, tokens: 0, startedMs: at,
+        parentId: b.parentAgentId ? q(b.parentAgentId) : undefined,
       });
       break;
     }
@@ -249,7 +252,7 @@ export function tiles(v: View): AgentTileModel[] {
   const waiting = new Set([...v.approvals.values()].map((a) => a.agentId));
   const sharingCounts = new Map<string, number>();
   for (const [id, agent] of v.agents) { const workspace = v.agentWorkspaces.get(id); if (agent.running && workspace) sharingCounts.set(workspace, (sharingCounts.get(workspace) ?? 0) + 1); }
-  return [...v.agents.entries()].map(([id, a]) => {
+  const list = [...v.agents.entries()].map(([id, a]) => {
     const i = hash(id) % ACCENTS.length;
     const node = v.nodes.get(a.nodeId);
     const wt = v.worktrees.get(a.worktreeId);
@@ -280,8 +283,12 @@ export function tiles(v: View): AgentTileModel[] {
       exitCode: a.exitCode,
       startedMs: a.startedMs,
       endedMs: a.running ? undefined : a.sinceMs || undefined,
-    };
+      parentId: a.parentId,
+    } as AgentTileModel;
   });
+  const names = new Map(list.map((t) => [t.id, t.name]));
+  for (const t of list) if (t.parentId) t.parentName = names.get(t.parentId) ?? t.parentId.slice(t.parentId.indexOf('/') + 1);
+  return list;
 }
 
 export function machinesOnline(v: View): number {
@@ -297,6 +304,22 @@ export interface ApprovalModel {
   action: string;
   detail: string;
   expiresAtMs: number;
+  start?: StartRequest; // ADR-0057: what an `agent.start` request asks for
+}
+
+// An agent's request to start another (ADR-0057), read from the approval's detail. Every field is the asking agent's text: shown, never
+// interpreted. The detail itself is what the decision is signed over, so it is kept as it came.
+export interface StartRequest { kind: string; folder: string; prompt: string; inside: boolean; worktree: boolean; depth: number }
+
+export function startRequest(action: string, detail: string): StartRequest | undefined {
+  if (action !== 'agent.start') return undefined;
+  try {
+    const d = JSON.parse(detail) as Record<string, unknown>;
+    const s = (k: string) => (typeof d[k] === 'string' ? (d[k] as string) : '');
+    return { kind: s('kind'), folder: s('folder'), prompt: s('prompt'), inside: d.inside === true, worktree: d.worktree === true, depth: typeof d.depth === 'number' ? d.depth : 1 };
+  } catch {
+    return undefined;
+  }
 }
 
 // What the approvals section shows: soonest to expire first.
@@ -314,6 +337,7 @@ export function approvalList(v: View): ApprovalModel[] {
         action: a.action,
         detail: a.detail,
         expiresAtMs: a.expiresAtMs,
+        start: startRequest(a.action, a.detail),
       };
     })
     .sort((a, b) => a.expiresAtMs - b.expiresAtMs);
