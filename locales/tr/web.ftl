@@ -240,16 +240,17 @@ chat-steps-earlier =
 chat-working = Çalışıyor…
 chat-copy = Kopyala
 chat-copied = Kopyalandı
-# Ajanın yaptığı iş, kendi başlığını vermediğinde.
-tool-read = Dosya okudu
-tool-edit = Dosya düzenledi
-tool-run = Komut çalıştırdı
-tool-search = Arama yaptı
-tool-fetch = Web sayfası açtı
-tool-delete = Sildi
-tool-move = Taşıdı
-tool-think = Düşündü
-tool-other = Bir adım attı
+# Ajanın yapmak istediği iş, kendi başlığını vermediğinde. Nötr: iş sürüyor ya da reddedilmiş olabilir.
+tool-read = Okuma
+tool-edit = Düzenleme
+tool-run = Komut
+tool-search = Arama
+tool-fetch = Web sayfası
+tool-delete = Silme
+tool-move = Taşıma
+tool-think = Düşünme
+tool-other = Adım
+approval-full-request = İsteğin tamamı
 notice-adapter-turn_failed = Ajanın sırası başarısız oldu (hata { $rpc_code }). Sağlayıcısı isteği reddetmiş olabilir; yeniden deneyin ya da başka bir model seçin. { $stderr_tail }
 notice-adapter-turn_stopped = Ajan sırasını kendisi bitirdi ({ $stop_reason }).
 notice-adapter-turn_empty = Ajan hiçbir şey söylemeden sırasını bitirdi. Sağlayıcısı isteği reddetmiş olabilir. { $stderr_tail }

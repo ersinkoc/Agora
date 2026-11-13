@@ -240,16 +240,17 @@ chat-steps-earlier =
 chat-working = Working…
 chat-copy = Copy
 chat-copied = Copied
-# What an agent did, when it gave no title of its own.
-tool-read = Read a file
-tool-edit = Edited a file
-tool-run = Ran a command
-tool-search = Searched
-tool-fetch = Opened a web page
-tool-delete = Deleted
-tool-move = Moved
-tool-think = Thought it over
-tool-other = Took a step
+# What an agent asked to do, when it gave no title of its own. Neutral: the call may still be running or be refused.
+tool-read = Read
+tool-edit = Edit
+tool-run = Command
+tool-search = Search
+tool-fetch = Web page
+tool-delete = Delete
+tool-move = Move
+tool-think = Thinking
+tool-other = Step
+approval-full-request = Full request
 notice-adapter-turn_failed = The agent's turn failed (error { $rpc_code }). Its provider may have refused the request; try again or choose another model. { $stderr_tail }
 notice-adapter-turn_stopped = The agent stopped its turn ({ $stop_reason }).
 notice-adapter-turn_empty = The agent ended its turn without saying anything. Its provider may have refused the request. { $stderr_tail }
