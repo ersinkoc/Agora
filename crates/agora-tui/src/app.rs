@@ -617,12 +617,12 @@ impl App {
         let mono = s.colors == ColorMode::Mono;
         let strong = Style::default().add_modifier(Modifier::BOLD);
         let chosen = Style::default().add_modifier(Modifier::REVERSED);
-        // Secondary text and dividers are dimmed, not given a palette colour: a terminal's own theme decides what DarkGray looks like
-        // (magenta or yellow-green on some dark themes).
-        let dim = if mono {
-            Style::default()
-        } else {
-            Style::default().add_modifier(Modifier::DIM)
+        // Secondary text and dividers: a fixed mid grey (palette 244) where the terminal has 256 colours, since ConPTY drops DIM and
+        // the 16-colour DarkGray is whatever the theme makes it (magenta or yellow-green on some dark themes); DIM with 16 colours.
+        let dim = match s.colors {
+            ColorMode::Mono => Style::default(),
+            ColorMode::Ansi16 => Style::default().add_modifier(Modifier::DIM),
+            ColorMode::Full => Style::default().fg(Color::Indexed(244)),
         };
         let attention = if mono {
             strong
@@ -1443,6 +1443,43 @@ mod tests {
         assert!(line(3).contains("tui-app-cmd-quit"));
         let cursor = tui.backend_mut().get_cursor_position().unwrap();
         assert_eq!((cursor.x, cursor.y), (34, 2));
+    }
+
+    #[test]
+    fn dividers_are_a_fixed_grey_with_256_colours_and_dim_with_16() {
+        let rows = rows();
+        let app = App::default();
+        for (colors, want) in [
+            (ColorMode::Full, Style::default().fg(Color::Indexed(244))),
+            (
+                ColorMode::Ansi16,
+                Style::default().add_modifier(Modifier::DIM),
+            ),
+            (ColorMode::Mono, Style::default()),
+        ] {
+            let mut tui = Tui::new(TestBackend::new(AREA.width, AREA.height)).unwrap();
+            tui.draw(|f| {
+                app.draw(
+                    f,
+                    &Screen {
+                        rows: &rows,
+                        terminal: None,
+                        details: &[],
+                        notice: "",
+                        colors,
+                        t: &text,
+                    },
+                )
+            })
+            .unwrap();
+            let cell = tui.backend().buffer()[(28, 5)].clone();
+            assert_eq!(cell.symbol(), "│");
+            assert_eq!(
+                (cell.fg, cell.modifier),
+                (want.fg.unwrap_or(Color::Reset), want.add_modifier),
+                "{colors:?}"
+            );
+        }
     }
 
     #[test]
