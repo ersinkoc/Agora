@@ -4,6 +4,9 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+### Agents working together
+- An agent connected to the mesh is now told what the mesh is for: who it can see (`agents_list`), how to message and ask others, share tasks and hand work over, and lease files before editing them. It is also told it cannot start other agents from there.
+
 ## 0.3.6
 
 ### Audit
