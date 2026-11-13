@@ -67,13 +67,14 @@ fn fake_agent() -> PathBuf {
     fake
 }
 
-fn free_port() -> u16 {
-    (17900..18900)
+/// A free port from `from` on; each test has its own range, as the tests run at the same time.
+fn free_port(from: u16) -> u16 {
+    (from..from + 500)
         .find(|p| {
             std::net::TcpListener::bind(("127.0.0.1", *p)).is_ok()
                 && std::net::TcpStream::connect(("127.0.0.1", *p)).is_err()
         })
-        .expect("a free port from 17900 on")
+        .expect("a free port")
 }
 
 fn toml_string(s: &str) -> String {
@@ -150,7 +151,7 @@ fn agora_brings_the_machine_up_and_killing_the_interface_leaves_agents_running()
         ),
     )
     .unwrap();
-    let port = free_port();
+    let port = free_port(17900);
     std::fs::write(
         home.join("machine.toml"),
         format!(
@@ -263,7 +264,7 @@ fn a_caller_capturing_the_output_is_not_kept_waiting_by_the_daemons() {
         return;
     }
     let home = tmp("pipe");
-    let port = free_port();
+    let port = free_port(18400);
     std::fs::write(
         home.join("machine.toml"),
         format!(
@@ -292,4 +293,7 @@ fn a_caller_capturing_the_output_is_not_kept_waiting_by_the_daemons() {
     assert!(text.contains("Agora is running"), "{text}");
     let (_, s, _) = run(&home, &["status"]);
     assert!(s.contains("The hub is running (process"), "{s}");
+    let (code, _, _) = run(&home, &["down"]);
+    assert_eq!(code, 0);
+    let _ = std::fs::remove_dir_all(home);
 }
