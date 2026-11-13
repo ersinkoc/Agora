@@ -1,4 +1,4 @@
-# 0056. One hub; every node machine also serves the hub's panel
+# 0056. One hub; every node machine can reach the hub's panel
 Status: Accepted
 Date: 2026-11-13
 Accepted: 2026-11-13 (maintainer's explicit approval in chat: "0056'yı onaylıyorum"). The maintainer did not answer the open questions; the proposed answers below stand.
@@ -11,7 +11,7 @@ several hubs; and full peer-to-peer), which are not pursued.
 To see everything today you open the hub's address in a browser, which means knowing the hub's address and certificate and having
 a signed-in device. A person sitting at a node machine has a node but no panel there.
 
-## Decision (proposed)
+## Decision
 1. **The hub stays single.** Boards, leases, approvals and the audit trail stay where they are (ADR-0039, ADR-0040, ADR-0053).
    No replication and no second master.
 2. **Every node machine can open the hub's panel locally.** The node already holds the hub's address, its CA and this machine's
@@ -28,7 +28,7 @@ a signed-in device. A person sitting at a node machine has a node but no panel t
 ## Open questions (proposed answers stand)
 - Browser pointed straight at the hub (simple, needs the hub reachable and its CA trusted on this machine), or a loopback
   forwarder in the node (works through the node's existing link, one more component to secure)? Proposed: pointing straight at
-  the hub, with `agora panel` installing the trust once.
+  the hub, with `agora panel` printing how to trust the hub's CA on this machine (it changes no trust store itself).
 - When the hub is itself on a machine you are not at, and unreachable from here, is a forwarder through the node needed?
 - Does the desktop app bundle this, or only the command line?
 
