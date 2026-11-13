@@ -1,8 +1,7 @@
 # 0063. The terminal client on ratatui and crossterm
-Status: Proposed
+Status: Accepted
 Date: 2026-11-13
-
-Not accepted. Nothing here may be built until the maintainer accepts it in a message of their own.
+Accepted: 2026-11-13 (maintainer's explicit approval in chat: "kabul ediyorum, yapalım, 0063'ü onaylıyorum"). The maintainer did not answer the open questions beyond the dependency; the proposed answers stand (mouse capture on by default with `m` to toggle; the interrupted/come-back view follows ADR-0062 once accepted).
 Origin: the maintainer: "we also need a TUI with ratatui, to see the terminals and the rest properly". This is the dependency decision ADR-0043 point 3 left open
 ("a framework (ratatui/crossterm) can be proposed later if the hand-written renderer proves a burden"). It amends ADR-0043 point 3 only; the rest of ADR-0043 stands.
 
@@ -12,7 +11,7 @@ ADR-0057 request cards, a reader for long prompts), but it is the weakest client
 characters and resize handled by hand, and every new feature means more string arithmetic. The people who need the TUI most (SSH-only machines, a quick look from a terminal) are exactly
 those who need to *see an agent's terminal well*: colours, cursor, scrollback, resize, copy.
 
-## Decision (proposed)
+## Decision
 1. **Dependencies:** `ratatui` and `crossterm` (both MIT, widely used, no network code, no build scripts), with `default-features = false` and only what is used. Pinned to exact versions at
    least two weeks old, checked by `cargo deny` like every dependency; the licence and the maintenance status are written in the PR. No other TUI crate: in particular no `tui-term`; the
    terminal pane is our own small widget that draws an `agora-vt` grid into a ratatui `Buffer` (cells, colours, attributes, cursor, wide characters, selection).
@@ -30,7 +29,7 @@ those who need to *see an agent's terminal well*: colours, cursor, scrollback, r
 7. **Platforms:** Linux, macOS and Windows terminals (Windows Terminal, conhost with VT); platform code for raw mode and size stays in `agora-platform` (crossterm is used only where it replaces it without
    an OS-specific `cfg` in the TUI crate; if crossterm's own platform code is used, that is stated and accepted here as an exception to "platform code only in agora-platform" for the vendored crate, not for our code).
 
-## Open questions for the maintainer
+## Open questions (proposed answers stand)
 - Do you accept `ratatui` + `crossterm` as dependencies (point 1)? That is the actual decision.
 - Mouse capture by default (it takes selection away from the terminal; the usual answer is on, with a key to release)? (Proposed: on, `m` toggles.)
 - Should the TUI also be the first client to offer the "come back after restart" view of ADR-0062 once that is accepted? (Proposed: yes, same data.)
