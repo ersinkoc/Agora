@@ -4,6 +4,7 @@ pub mod app;
 pub mod backend;
 pub mod client;
 pub mod device;
+pub mod input;
 pub mod pane;
 pub mod picker;
 pub mod preview;

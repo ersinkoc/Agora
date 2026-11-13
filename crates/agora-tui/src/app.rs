@@ -18,7 +18,10 @@ use ratatui::widgets::{Block, Clear, Paragraph, Widget};
 use ratatui::Frame;
 
 use crate::pane::{ColorMode, TerminalPane};
+
 use crate::render::Text;
+/// The window's area type, for callers that do not depend on ratatui themselves.
+pub use ratatui::layout::Rect as Area;
 
 /// Ctrl-]: leaves an agent's terminal for the tree, as in `agora terminal attach` and the earlier client.
 const DETACH: char = ']';
@@ -111,6 +114,11 @@ pub enum Action {
     },
     /// Capture the mouse (true) or leave it to the terminal so text can be selected (false).
     MouseCapture(bool),
+    /// Enter on an agent without a terminal (a chat agent): the caller opens its conversation.
+    Chat(String),
+    /// A letter the shell has no use for, pressed in the tree or the inspector: the caller's command for the selected agent
+    /// (start, stop, answer, resume…).
+    Command(char),
     Quit,
 }
 
@@ -123,6 +131,10 @@ pub struct Row {
     /// The state in words ("working", "needs you"…): monochrome terminals rely on it.
     pub state: String,
     pub needs_you: bool,
+    /// Whether the agent has a terminal to show; Enter on one without opens its conversation instead ([`Action::Chat`]).
+    pub terminal: bool,
+    /// A heading (a machine), drawn in bold and never selected: the keys and the mouse step over it.
+    pub header: bool,
 }
 
 /// What an event is handled against: the tree's rows, the window, and the active agent's terminal modes.
@@ -142,6 +154,8 @@ pub struct Screen<'a> {
     pub details: &'a [String],
     /// The last thing that happened, shown in the footer.
     pub notice: &'a str,
+    /// What the pane says when the active tab has no screen, instead of "opening" (for example: the agent has finished).
+    pub no_screen: Option<&'a str>,
     pub colors: ColorMode,
     pub t: Text<'a>,
 }
@@ -311,6 +325,12 @@ impl App {
     /// Handles one event and returns what the caller must do, in order.
     pub fn handle(&mut self, event: Event, cx: &Ctx<'_>) -> Vec<Action> {
         let mut out = Vec::new();
+        // The rows may have changed since the last event (agents come and go): never act on a heading.
+        self.selected = settle(
+            cx.rows,
+            self.selected.min(cx.rows.len().saturating_sub(1)),
+            true,
+        );
         let mut area = cx.area;
         match event {
             Event::Resize { cols, rows } => {
@@ -330,7 +350,11 @@ impl App {
             Event::Key(k) => self.key(k, cx, &mut out),
             Event::Mouse(m) => self.mouse(m, cx, area, &mut out),
         }
-        self.selected = self.selected.min(cx.rows.len().saturating_sub(1));
+        self.selected = settle(
+            cx.rows,
+            self.selected.min(cx.rows.len().saturating_sub(1)),
+            true,
+        );
         let term = self.areas(area).terminal;
         let size = (term.width, term.height);
         if self.active_agent().is_some() && self.pane != Some(size) {
@@ -367,18 +391,19 @@ impl App {
                 _ => self.focus = Focus::Tree,
             },
             Focus::Tree => match k {
-                Key::Up | Key::Char('k') => self.selected = self.selected.saturating_sub(1),
+                Key::Up | Key::Char('k') => self.selected = step_row(cx.rows, self.selected, false),
                 Key::Down | Key::Char('j') => {
-                    self.selected = (self.selected + 1).min(cx.rows.len().saturating_sub(1))
+                    self.selected = step_row(cx.rows, self.selected, true)
                 }
-                Key::Home => self.selected = 0,
-                Key::End => self.selected = cx.rows.len().saturating_sub(1),
+                Key::Home => self.selected = settle(cx.rows, 0, true),
+                Key::End => self.selected = settle(cx.rows, cx.rows.len().saturating_sub(1), false),
                 Key::Enter => {
                     if let Some(row) = cx.rows.get(self.selected) {
-                        self.open(&row.id.clone(), out);
+                        self.enter(&row.clone(), out);
                     }
                 }
-                Key::Char('n' | 'N') => self.next_needs_you(cx.rows, out),
+                // N (as in the web window); a lowercase n stays the caller's ("no" to a request).
+                Key::Char('N') => self.next_needs_you(cx.rows, out),
                 Key::Char('w') => self.close_tab(out),
                 Key::Char('<') => self.tree_width = self.tree_width.saturating_sub(2).max(MIN_TREE),
                 Key::Char('>') => self.tree_width = self.tree_width.saturating_add(2),
@@ -404,6 +429,7 @@ impl App {
             }
             Key::Char('i') => self.inspector = !self.inspector,
             Key::Char('q') | Key::Ctrl('c') => out.push(Action::Quit),
+            Key::Char(c) if c.is_alphanumeric() => out.push(Action::Command(c)),
             _ => {}
         }
     }
@@ -423,6 +449,18 @@ impl App {
         } else {
             (at + n - 1) % n
         }]
+    }
+
+    /// Enter on a row: its terminal in a tab, or its conversation when it has no terminal.
+    fn enter(&mut self, row: &Row, out: &mut Vec<Action>) {
+        if row.header {
+            return;
+        }
+        if row.terminal {
+            self.open(&row.id, out);
+        } else {
+            out.push(Action::Chat(row.id.clone()));
+        }
     }
 
     /// Opens an agent in a tab (or brings its tab to the front) and gives it the keyboard.
@@ -455,10 +493,10 @@ impl App {
         let n = rows.len();
         if let Some(i) = (1..=n)
             .map(|d| (self.selected + d) % n)
-            .find(|&i| rows[i].needs_you)
+            .find(|&i| rows[i].needs_you && !rows[i].header)
         {
             self.selected = i;
-            self.open(&rows[i].id.clone(), out);
+            self.enter(&rows[i].clone(), out);
         }
     }
 
@@ -467,6 +505,7 @@ impl App {
         let mut all: Vec<(Command, String)> = cx
             .rows
             .iter()
+            .filter(|r| !r.header)
             .map(|r| {
                 (
                     Command::Open(r.id.clone()),
@@ -529,8 +568,8 @@ impl App {
                     Some(Command::Open(id)) => {
                         if let Some(i) = cx.rows.iter().position(|r| r.id == id) {
                             self.selected = i;
+                            self.enter(&cx.rows[i].clone(), out);
                         }
-                        self.open(&id, out);
                     }
                     Some(Command::NextNeedsYou) => self.next_needs_you(cx.rows, out),
                     Some(Command::ToggleMouse) => self.common(Key::Char('m'), out),
@@ -559,9 +598,10 @@ impl App {
                 } else if a.tree.contains(at) {
                     let i = usize::from(m.row - a.tree.y)
                         + tree_top(self.selected, a.tree.height, cx.rows.len());
-                    if i < cx.rows.len() {
-                        if self.focus == Focus::Tree && i == self.selected {
-                            self.open(&cx.rows[i].id.clone(), out);
+                    if i < cx.rows.len() && !cx.rows[i].header {
+                        // A click on the selected row opens it (so a double click opens and stays open).
+                        if i == self.selected {
+                            self.enter(&cx.rows[i].clone(), out);
                         } else {
                             self.selected = i;
                             self.focus = Focus::Tree;
@@ -592,11 +632,7 @@ impl App {
                 if a.terminal.contains(at) && self.active_agent().is_some() {
                     out.push(Action::Scroll(if up { -WHEEL } else { WHEEL }));
                 } else if a.tree.contains(at) {
-                    self.selected = if up {
-                        self.selected.saturating_sub(1)
-                    } else {
-                        (self.selected + 1).min(cx.rows.len().saturating_sub(1))
-                    };
+                    self.selected = step_row(cx.rows, self.selected, !up);
                 }
             }
         }
@@ -647,6 +683,21 @@ impl App {
             .take(usize::from(a.tree.height))
         {
             let y = a.tree.y + u16::try_from(i - top).unwrap_or(u16::MAX);
+            if row.header {
+                let mut line = vec![Span::styled(row.label.clone(), strong)];
+                if !row.state.is_empty() {
+                    line.push(Span::styled(format!("  {}", row.state), dim));
+                }
+                Line::from(line).render(
+                    Rect {
+                        y,
+                        height: 1,
+                        ..a.tree
+                    },
+                    buf,
+                );
+                continue;
+            }
             let open = self.tabs.contains(&row.id);
             let marker = if row.needs_you {
                 "! "
@@ -732,9 +783,12 @@ impl App {
             (None, _) => Paragraph::new((s.t)(key!("tui-app-no-agent"), &[]))
                 .style(dim)
                 .render(a.terminal, buf),
-            (Some(_), None) => Paragraph::new((s.t)(key!("tui-app-no-screen"), &[]))
-                .style(dim)
-                .render(a.terminal, buf),
+            (Some(_), None) => Paragraph::new(
+                s.no_screen
+                    .map_or_else(|| (s.t)(key!("tui-app-no-screen"), &[]), str::to_string),
+            )
+            .style(dim)
+            .render(a.terminal, buf),
             (Some(_), Some(term)) => TerminalPane::new(term)
                 .colors(s.colors)
                 .render(a.terminal, buf),
@@ -893,6 +947,31 @@ pub fn event_from(ev: &crossterm::event::Event) -> Option<Event> {
     })
 }
 
+/// The next selectable row after (or before) `at`; `at` itself when there is none that way.
+fn step_row(rows: &[Row], at: usize, down: bool) -> usize {
+    let found = if down {
+        (at + 1..rows.len()).find(|&i| !rows[i].header)
+    } else {
+        (0..at).rev().find(|&i| !rows[i].header)
+    };
+    found.unwrap_or(at)
+}
+
+/// `at`, or the nearest selectable row from it (first in the preferred direction) when `at` is a heading.
+fn settle(rows: &[Row], at: usize, down: bool) -> usize {
+    match rows.get(at) {
+        Some(r) if r.header => {
+            let first = step_row(rows, at, down);
+            if first == at {
+                step_row(rows, at, !down)
+            } else {
+                first
+            }
+        }
+        _ => at,
+    }
+}
+
 /// Whether every word of the query appears in the label (case already folded by the caller).
 fn matches(label: &str, query: &str) -> bool {
     query.split_whitespace().all(|w| label.contains(w))
@@ -1030,6 +1109,8 @@ mod tests {
                     "idle".into()
                 },
                 needs_you: i == 2,
+                terminal: true,
+                header: false,
             })
             .collect()
     }
@@ -1074,6 +1155,7 @@ mod tests {
                     terminal: term,
                     details: &details,
                     notice: "",
+                    no_screen: None,
                     colors,
                     t: &text,
                 },
@@ -1248,8 +1330,14 @@ mod tests {
         assert_eq!(app.focus, Focus::Terminal);
         // Nobody else needs the user: from the agent that does, N stays on it.
         key(&mut app, &rows, Key::Ctrl(']'));
-        key(&mut app, &rows, Key::Char('n'));
+        key(&mut app, &rows, Key::Char('N'));
         assert_eq!(app.selected, 2);
+        // A lowercase n is the caller's command, not "next".
+        key(&mut app, &rows, Key::Ctrl(']'));
+        assert_eq!(
+            key(&mut app, &rows, Key::Char('n')),
+            vec![Action::Command('n')]
+        );
     }
 
     #[test]
@@ -1426,6 +1514,7 @@ mod tests {
                     terminal: None,
                     details: &[],
                     notice: "",
+                    no_screen: None,
                     colors: ColorMode::Mono,
                     t: &text,
                 },
@@ -1466,6 +1555,7 @@ mod tests {
                         terminal: None,
                         details: &[],
                         notice: "",
+                        no_screen: None,
                         colors,
                         t: &text,
                     },
@@ -1588,6 +1678,8 @@ mod tests {
                 label: format!("agent{i}"),
                 state: "idle".into(),
                 needs_you: false,
+                terminal: true,
+                header: false,
             })
             .collect();
         let mut app = App::default();
@@ -1605,6 +1697,7 @@ mod tests {
                     terminal: None,
                     details: &[],
                     notice: "",
+                    no_screen: None,
                     colors: ColorMode::Full,
                     t: &text,
                 },
@@ -1622,5 +1715,56 @@ mod tests {
             .collect();
         assert!(screen.contains("name=agent16"), "{screen}");
         assert!(!screen.contains("name=agent1 "), "{screen}");
+    }
+
+    #[test]
+    fn machine_headings_are_drawn_and_never_selected() {
+        let row = |id: &str, header: bool| Row {
+            id: id.into(),
+            label: id.into(),
+            state: String::new(),
+            needs_you: false,
+            terminal: true,
+            header,
+        };
+        let rows = vec![
+            row("mac", true),
+            row("mac/agent-1", false),
+            row("win", true),
+            row("win/agent-2", false),
+        ];
+        let mut app = App::default();
+        // The very first key acts on the first agent, never on the heading above it (seen on macOS: Enter opened "mac" as a chat).
+        assert_eq!(
+            key(&mut app, &rows, Key::Enter)[0],
+            Action::Open("mac/agent-1".into())
+        );
+        key(&mut app, &rows, Key::Ctrl(']'));
+        // The first selectable row is chosen, not the heading.
+        app.handle(
+            Event::Resize {
+                cols: AREA.width,
+                rows: AREA.height,
+            },
+            &cx(&rows),
+        );
+        assert_eq!(app.selected, 1);
+        key(&mut app, &rows, Key::Down);
+        assert_eq!(app.selected, 3, "the heading between is skipped");
+        key(&mut app, &rows, Key::Down);
+        assert_eq!(app.selected, 3, "nothing selectable below");
+        key(&mut app, &rows, Key::Up);
+        assert_eq!(app.selected, 1);
+        key(&mut app, &rows, Key::Home);
+        assert_eq!(app.selected, 1);
+        // A click on a heading does nothing.
+        click(&mut app, &rows, MouseKind::Down, 2, 2);
+        assert_eq!(app.selected, 1);
+        // Headings are not offered in the palette.
+        key(&mut app, &rows, Key::Ctrl('k'));
+        for c in "open win".chars() {
+            key(&mut app, &rows, Key::Char(c));
+        }
+        assert_eq!(app.commands(&cx(&rows)).len(), 1);
     }
 }

@@ -18,6 +18,9 @@ pub struct Screen<B: Backend> {
     restore: bool,
 }
 
+/// The user's real terminal as a [`Screen`].
+pub type Window = Screen<CrosstermBackend<Stdout>>;
+
 impl Screen<CrosstermBackend<Stdout>> {
     /// Switches stdout to the alternate screen and hides the cursor. The caller has already put the terminal into raw mode.
     pub fn enter() -> io::Result<Self> {
@@ -77,6 +80,21 @@ impl<B: Backend> Screen<B> {
             .map_err(|e| io::Error::other(e.to_string()))
     }
 
+    /// After something else wrote to the terminal (a question asked full-screen): the next frame is drawn whole.
+    ///
+    /// Not ratatui's `Terminal::clear`, which asks the terminal where its cursor is (`ESC [ 6 n`) and reads the answer from stdin, where
+    /// the console's own key reader would take it: the screen is cleared without asking, and both of ratatui's buffers are emptied so
+    /// the next frame writes every cell that is not blank.
+    pub fn invalidate(&mut self) -> io::Result<()> {
+        self.term
+            .backend_mut()
+            .clear()
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        self.term.swap_buffers();
+        self.term.swap_buffers();
+        Ok(())
+    }
+
     /// After the terminal was resized: the next frame is drawn whole at the new size.
     pub fn resized(&mut self) -> io::Result<()> {
         self.term
@@ -118,5 +136,18 @@ mod tests {
             })
             .unwrap();
         assert_eq!(screen.lines(), ["$ echo hi", "hi", "$"]);
+    }
+
+    #[test]
+    fn invalidate_makes_the_next_frame_write_every_cell_again() {
+        let mut s = Screen::test(10, 2).unwrap();
+        s.draw(|f| f.render_widget(ratatui::widgets::Paragraph::new("hello"), f.area()))
+            .unwrap();
+        s.invalidate().unwrap();
+        // The test backend was cleared; the same frame drawn again writes "hello" again instead of skipping unchanged cells.
+        assert_eq!(s.lines()[0], "");
+        s.draw(|f| f.render_widget(ratatui::widgets::Paragraph::new("hello"), f.area()))
+            .unwrap();
+        assert_eq!(s.lines()[0], "hello");
     }
 }
