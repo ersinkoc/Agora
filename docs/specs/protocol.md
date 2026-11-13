@@ -301,8 +301,8 @@ fixtures in binary and JSON form.
 stored). After the response the node writes on that stream: frame kind 10, an encoded `ChatSnapshot` (the transcript so far), then
 frame kind 11, an encoded `ChatEntry` for each line added. Kind 3 closes a relay and is not used here. The node keeps the last 500
 entries or 256 KiB of each chat agent's conversation in memory (one entry at most 16 KiB; the user's own requests are entries with
-role USER; adapter items map to TEXT, TOOL_CALL as JSON, PLAN as lines, DIFF with its path). Entry ids increase per agent; a client
-ignores an id it already holds. The text is untrusted.
+role USER; adapter items map to TEXT, TOOL_CALL as JSON, PLAN as lines, DIFF with its path, and NOTICE with `code` and `params` and
+no text, ADR-0058). Entry ids increase per agent; a client ignores an id it already holds. The text is untrusted.
 
 `MeshPost.refs` (ADR-0035, field 5): the sender's refs as written; the receiving broker qualifies them with the hub-vouched `origin`.
 
@@ -314,3 +314,32 @@ project's board; see `docs/specs/mesh-tools.md#shared-board-adr-0039`. New error
 `GrantCreate` (63), `GrantList` (64), `GrantRevoke` (65) and `GrantListResult` (`CommandOk` field 17), ADR-0041: user-signed grants for the commands a node's policy lists in `signed_commands`; see `docs/security/threat-model.md`. New error code `approval.grant_required` (`command`). The node answers them itself; the local control socket refuses them.
 
 `Snapshot.tasks` (8) and `Snapshot.leases` (9), ADR-0040: the shared boards' tasks and held paths, so a client that connects sees them before the next change.
+
+### Notices, modes and models, context and cost (ADR-0058)
+
+All additions; nothing published changed.
+
+- **Notices.** `ChatKind.CHAT_KIND_NOTICE` (5) with `ChatEntry.code` (7) and `ChatEntry.params` (8, string map): something a person
+  should know about the conversation (a failed, stopped or empty turn: `adapter.turn_failed` `{rpc_code}`, `adapter.turn_stopped`
+  `{stop_reason}`, `adapter.turn_empty`; the agent exiting: `adapter.agent_exited` `{stage, exit_code?, stderr_tail}`). Clients
+  render it from their locale files by its code (`notice-` + the code with `.` as `-`) and show an unknown code as a generic notice.
+  The adapter's `NoticeItem` (`ChatAppendParams` field 6) is what the node turns into one, checked and bounded
+  (`docs/specs/adapter-protocol.md`).
+- **Modes and models.** Event `AgentSessionOptions` (`Event` field 37: `agent_id`, `modes[]`, `models[]` of `SessionOption { id, name,
+  description, skips_permissions }`, `current_mode`, `current_model`) replaces the agent's previous report; the snapshot carries the
+  last one in `AgentSnapshot` fields 14-17. A client offers the lists only when the agent reported them; a mode with
+  `skips_permissions` needs the user's confirmation and is never chosen by default. Command `agent.set_mode` (`AgentSetMode`, as
+  published: `agent_id`, `mode`) and the new `agent.set_model` (`AgentSetModel`, request field 86: `agent_id`, `model`) take one of the
+  reported ids. Node capabilities `agent.set_mode` and `agent.set_model`: the hub refuses either command with
+  `protocol.capability_missing` for a node that did not offer it and never forwards it; the node refuses it for an agent whose adapter
+  did not declare the switch (`protocol.capability_missing`) and for an id the agent did not offer (`protocol.invalid_message`,
+  `field` `mode` / `model`). Both commands are the user's own: viewers cannot send them, the hub audits every one like any routed
+  command (action `AgentSetMode` / `AgentSetModel`, the node and the outcome), the event log records the new current mode or model,
+  and no mesh tool lets an agent send them. They need no approval (ADR-0058's open questions).
+- **Context and cost.** `AgentUsageReported` gains `cost_micros` (5, optional: the growth of the cost the agent reported itself, in
+  micro-units of `currency`), `currency` (6, three letters), `context_tokens` (7) and `context_window` (8) (the context's level and
+  size now; 0 when not reported). The hub keeps the last level and size and the sum of the reported cost per agent (a report in
+  another currency starts the sum again) and puts them in `AgentSnapshot` fields 18-21. `usage.report` answers an agent's own cost
+  in US dollars as its `micro_usd`, and estimates from the price table only for agents that reported none.
+- **Start failures.** `agent.start` of an adapter agent whose adapter failed with a stable reason answers with that code instead of
+  `internal`: `adapter.agent_exited` `{stage, exit_code, stderr_tail}` or `adapter.agent_refused` `{stage}` (`error-codes.md`).

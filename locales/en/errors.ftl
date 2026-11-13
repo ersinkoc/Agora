@@ -50,4 +50,7 @@ files-too_large = { $path } is too large (limit: { $limit }).
 files-outside_root = { $path } is outside the project folder.
 adapter-signature_invalid = Package { $package } could not be verified.
 adapter-crashed = { $kind } stopped unexpectedly (exit code { $exit_code }).
+adapter-agent_exited = The agent exited before it was ready (step { $stage }, exit code { $exit_code }). Its last output: { $stderr_tail }
+adapter-agent_refused = The agent refused to start (step { $stage }).
+adapter-option_refused = The agent did not switch to { $id }.
 internal = Something went wrong. Reference: { $incident_id }.

@@ -33,6 +33,9 @@ pub const CAPABILITIES: &[&str] = &[
     "workspace.directory",
     "board.join",
     "directory.list",
+    // ADR-0058
+    "agent.set_mode",
+    "agent.set_model",
 ];
 
 /// Events sent per step; the hub acknowledges after each batch.

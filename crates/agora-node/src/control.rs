@@ -603,6 +603,26 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
             control.write_input(b"\r").map_err(gone)?;
             Ok(ok_empty())
         }
+        // ADR-0058: the user's own switch; the supervisor refuses a terminal agent, an adapter without the switch and an id the
+        // agent did not offer.
+        Cmd::AgentSetMode(a) => ctx
+            .sup()
+            .adapter_set_option(
+                &AgentId::new(a.agent_id.clone()),
+                agora_adapters::host::OptionKind::Mode,
+                &a.mode,
+            )
+            .map(|()| ok_empty())
+            .map_err(sup_err),
+        Cmd::AgentSetModel(a) => ctx
+            .sup()
+            .adapter_set_option(
+                &AgentId::new(a.agent_id.clone()),
+                agora_adapters::host::OptionKind::Model,
+                &a.model,
+            )
+            .map(|()| ok_empty())
+            .map_err(sup_err),
         Cmd::TerminalInput(t) => {
             // The write happens after the supervisor lock is let go: a program that does not read its input blocks this
             // call, and nothing else (ticks, stop and shutdown keep going).
@@ -798,6 +818,7 @@ pub(crate) fn command_name(c: &Cmd) -> &'static str {
         Cmd::AgentStop(_) => "agent.stop",
         Cmd::AgentPrompt(_) => "agent.prompt",
         Cmd::AgentSetMode(_) => "agent.set_mode",
+        Cmd::AgentSetModel(_) => "agent.set_model",
         Cmd::TerminalOpen(_) => "terminal.open",
         Cmd::TerminalInput(_) => "terminal.input",
         Cmd::TerminalResize(_) => "terminal.resize",

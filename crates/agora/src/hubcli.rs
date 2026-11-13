@@ -30,6 +30,9 @@ const HUB_CAPABILITIES: &[&str] = &[
     "workspace.directory",
     "directory.list",
     "board.join",
+    // ADR-0058
+    "agent.set_mode",
+    "agent.set_model",
 ];
 
 pub(crate) fn hub_dir(o: &Opts) -> PathBuf {

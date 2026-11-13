@@ -386,6 +386,7 @@ pub fn snapshot_of(view: &View, pos: u64) -> v1::Snapshot {
                 exit_code: a.exit_code,
                 input_tokens: a.input_tokens,
                 output_tokens: a.output_tokens,
+                ..session_snapshot(&a.session)
             })
             .collect(),
         terminals: view
@@ -1110,6 +1111,22 @@ fn board_for_node(
         };
         let _ = answers.send(resp);
     });
+}
+
+/// ADR-0058: the snapshot fields that come from an agent's reported session (options, context, its own cost).
+fn session_snapshot(s: &crate::projection::SessionView) -> v1::AgentSnapshot {
+    let o = s.options.clone().unwrap_or_default();
+    v1::AgentSnapshot {
+        modes: o.modes,
+        models: o.models,
+        current_mode: o.current_mode,
+        current_model: o.current_model,
+        context_tokens: s.context_tokens,
+        context_window: s.context_window,
+        cost_micros: s.cost_micros,
+        currency: s.currency.clone(),
+        ..v1::AgentSnapshot::default()
+    }
 }
 
 /// Appends a row to the audit trail. A failure to write is not allowed to take the hub down with it.

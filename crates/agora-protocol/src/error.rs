@@ -53,6 +53,9 @@ pub enum ErrorCode {
     FilesOutsideRoot,
     AdapterSignatureInvalid,
     AdapterCrashed,
+    AdapterAgentExited,
+    AdapterAgentRefused,
+    AdapterOptionRefused,
     Internal,
     /// A code this build does not know (sent by a newer peer).
     Unknown(String),
@@ -106,6 +109,9 @@ impl ErrorCode {
         ErrorCode::FilesOutsideRoot,
         ErrorCode::AdapterSignatureInvalid,
         ErrorCode::AdapterCrashed,
+        ErrorCode::AdapterAgentExited,
+        ErrorCode::AdapterAgentRefused,
+        ErrorCode::AdapterOptionRefused,
         ErrorCode::Internal,
     ];
 
@@ -156,6 +162,9 @@ impl ErrorCode {
             ErrorCode::FilesOutsideRoot => "files.outside_root",
             ErrorCode::AdapterSignatureInvalid => "adapter.signature_invalid",
             ErrorCode::AdapterCrashed => "adapter.crashed",
+            ErrorCode::AdapterAgentExited => "adapter.agent_exited",
+            ErrorCode::AdapterAgentRefused => "adapter.agent_refused",
+            ErrorCode::AdapterOptionRefused => "adapter.option_refused",
             ErrorCode::Internal => "internal",
             ErrorCode::Unknown(s) => s,
         }
@@ -218,6 +227,9 @@ impl ErrorCode {
             ErrorCode::FilesOutsideRoot => &["path"],
             ErrorCode::AdapterSignatureInvalid => &["package"],
             ErrorCode::AdapterCrashed => &["kind", "exit_code"],
+            ErrorCode::AdapterAgentExited => &["stage", "exit_code", "stderr_tail"],
+            ErrorCode::AdapterAgentRefused => &["stage"],
+            ErrorCode::AdapterOptionRefused => &["id"],
             ErrorCode::Internal => &["incident_id"],
             ErrorCode::Unknown(_) => &[],
         }

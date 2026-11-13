@@ -62,6 +62,8 @@ message CommandRequest {
     // ADR-0053: a folder picker's one question (node), and forgetting a closed agent (hub only).
     DirectoryList directory_list = 84;
     AgentForget agent_forget = 85;
+    // ADR-0058: sent only to a node with the capability `agent.set_model`.
+    AgentSetModel agent_set_model = 86;
   }
 }
 
@@ -125,9 +127,17 @@ message AgentPrompt {
   string text = 2;
 }
 
+// ADR-0058: `mode` is the id of one of the modes the agent reported (`AgentSessionOptions`). Sent only to a node with the
+// capability `agent.set_mode`.
 message AgentSetMode {
   string agent_id = 1;
   string mode = 2;
+}
+
+// ADR-0058: `model` is the id of one of the models the agent reported (`AgentSessionOptions`).
+message AgentSetModel {
+  string agent_id = 1;
+  string model = 2;
 }
 
 message TerminalOpen {
@@ -374,6 +384,8 @@ enum ChatKind {
   CHAT_KIND_TOOL_CALL = 2;
   CHAT_KIND_PLAN = 3;
   CHAT_KIND_DIFF = 4;
+  // ADR-0058: `code` and `params` say what happened; `text` is empty.
+  CHAT_KIND_NOTICE = 5;
 }
 
 // One line of an agent's conversation (ADR-0038). Untrusted text: a model or a person wrote it.
@@ -387,6 +399,9 @@ message ChatEntry {
   string text = 5;
   // For a diff: the file.
   string path = 6;
+  // ADR-0058, for a notice: a stable code (`adapter.turn_failed`, ...) and its parameters, rendered from the client's locale files.
+  string code = 7;
+  map<string, string> params = 8;
 }
 
 message ChatSnapshot {
