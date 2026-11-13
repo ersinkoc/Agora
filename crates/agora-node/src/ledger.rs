@@ -34,6 +34,8 @@ const MAX_FIELD: usize = 4096;
 /// Folders remembered between `WorkspaceRegistered` and the `AgentStarted` that uses them.
 const MAX_WORKSPACES: usize = 1024;
 const VERSION: u64 = 1;
+/// Session ids held for agents whose start is not recorded yet.
+const MAX_EARLY: usize = 64;
 
 /// One agent in the ledger.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -79,6 +81,9 @@ struct State {
     entries: BTreeMap<String, Entry>,
     workspaces: BTreeMap<String, Workspace>,
     bound: BTreeMap<String, String>,
+    /// Session ids reported before their agent's `AgentStarted` was recorded (an adapter reports its session while it starts, and the
+    /// node's tick can record that before the start is recorded): applied when the start comes.
+    early_sessions: BTreeMap<String, String>,
     /// Something changed that is not on disk yet.
     dirty: bool,
 }
@@ -453,6 +458,9 @@ fn apply(st: &mut State, body: &Body, now: u64) -> bool {
                 // A directory agent said again without its folder (a resync of an agent the node knows) keeps what it had.
                 None => {}
             }
+            if let Some(session) = st.early_sessions.remove(&a.agent_id) {
+                e.session_id = session;
+            }
             // Running again (a restart after a crash, a resume): neither ended nor interrupted.
             e.ended = false;
             e.interrupted_at_ms = 0;
@@ -464,6 +472,14 @@ fn apply(st: &mut State, body: &Body, now: u64) -> bool {
             changed
         }
         Body::AgentSessionReported(r) => match st.entries.get_mut(&r.agent_id) {
+            None if crate::session_files::argv_safe(&r.session_id)
+                && (st.early_sessions.len() < MAX_EARLY
+                    || st.early_sessions.contains_key(&r.agent_id)) =>
+            {
+                st.early_sessions
+                    .insert(r.agent_id.clone(), r.session_id.clone());
+                false
+            }
             Some(e) if e.session_id != r.session_id => {
                 // Only an id that may go on a command line is kept for a resume after a restart (an adapter's own id may be any
                 // string in its JSON, but such an agent is then offered Start again only).
@@ -762,6 +778,20 @@ mod tests {
             .map(|e| e.unwrap().file_name())
             .collect();
         assert_eq!(names, vec![std::ffi::OsString::from(LEDGER_FILE)]);
+    }
+
+    #[test]
+    fn a_session_reported_before_its_start_is_recorded_is_kept() {
+        let l = Ledger::in_memory();
+        l.observe(
+            &Body::AgentSessionReported(v1::AgentSessionReported {
+                agent_id: "agent-1".into(),
+                session_id: "native-s-1".into(),
+            }),
+            1,
+        );
+        l.observe(&started("agent-1", "/wt/a", ""), 2);
+        assert_eq!(l.get("agent-1").unwrap().session_id, "native-s-1");
     }
 
     #[test]
