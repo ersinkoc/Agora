@@ -1498,7 +1498,7 @@ impl Supervisor {
             entry.agent.session.clone(),
             entry.extras.clone(),
         );
-        let (argv, _native) = self.argv_for_resume(&kind, session.as_deref());
+        let (argv, native, fresh) = self.argv_for_resume(&kind, session.as_deref());
         let result = self.launch(&kind, &argv, &worktree, &extras);
         let Some(entry) = self.agents.get_mut(id) else {
             return;
@@ -1511,6 +1511,10 @@ impl Supervisor {
                 entry.pacer = Pacer::default();
                 entry.next_check = now;
                 entry.agent.process_restarted();
+                // A new session when its own could not be continued (ADR-0060): that one is its session now.
+                if !native {
+                    entry.agent.session = fresh;
+                }
                 events.push(SupervisorEvent::Started { agent: id.clone() });
                 events.extend(session_report(&entry.agent));
             }
@@ -1534,19 +1538,43 @@ impl Supervisor {
 
     /// Native resume when the manifest has a resume command and the agent reported a session id; otherwise
     /// the plain launch command (layout-only fallback). The bool is true for the native case.
-    fn argv_for_resume(&self, kind: &str, session: Option<&str>) -> (Vec<String>, bool) {
+    ///
+    /// ADR-0060: only an id [`argv_safe`](crate::session_files::argv_safe) allows goes on the command line (whatever reported it, an id
+    /// that could be read as an option never does). Without one, a kind with `[session] id_args` gets a new id the node chooses, as at a
+    /// first launch, so it can be resumed later; that new id is the third value (the agent's session from then on).
+    fn argv_for_resume(
+        &self,
+        kind: &str,
+        session: Option<&str>,
+    ) -> (Vec<String>, bool, Option<String>) {
         let Some(k) = self.kinds.get(kind) else {
-            return (Vec::new(), false);
+            return (Vec::new(), false, None);
         };
-        match (&k.manifest.resume, session) {
-            (Some(r), Some(sid)) => (
-                r.argv
-                    .iter()
-                    .map(|a| a.replace("{session_id}", sid))
-                    .collect(),
-                true,
-            ),
-            _ => (k.manifest.process.launch.clone(), false),
+        let safe = session.filter(|s| crate::session_files::argv_safe(s));
+        if let (Some(r), Some(sid)) = (&k.manifest.resume, safe) {
+            let argv = r
+                .argv
+                .iter()
+                .map(|a| a.replace("{session_id}", sid))
+                .collect();
+            return (argv, true, None);
+        }
+        let mut argv = k.manifest.process.launch.clone();
+        let id_args = k
+            .manifest
+            .session
+            .as_ref()
+            .map(|s| s.id_args.clone())
+            .unwrap_or_default();
+        if id_args.is_empty() {
+            return (argv, false, None);
+        }
+        match new_session_id() {
+            Ok(new) => {
+                argv.extend(id_args.iter().map(|a| a.replace("{session_id}", &new)));
+                (argv, false, Some(new))
+            }
+            Err(_) => (argv, false, None),
         }
     }
 
@@ -1773,7 +1801,7 @@ impl Supervisor {
             entry.agent.session.clone(),
             entry.agent.project.to_string(),
         );
-        let (argv, native) = self.argv_for_resume(&kind, session.as_deref());
+        let (argv, native, fresh) = self.argv_for_resume(&kind, session.as_deref());
         // A stopped agent left the mesh and its endpoint closed; resuming joins again with a fresh one.
         let config = self.agents.get(id).and_then(|e| e.private_config.clone());
         // A resume that fails after the hook ran gives the endpoint back, as a failed start does.
@@ -1798,6 +1826,9 @@ impl Supervisor {
         entry.next_check = now;
         entry.restarts = 0;
         entry.gave_up = false;
+        if !native {
+            entry.agent.session = fresh;
+        }
         let mut events = vec![SupervisorEvent::Resumed {
             agent: id.clone(),
             native,
@@ -1829,7 +1860,13 @@ impl Supervisor {
     }
 
     /// The agent's own session id, used by [`resume`](Self::resume).
+    ///
+    /// ADR-0060: a terminal agent's id goes on its command line at a restart (`[resume]`), so only an id
+    /// [`argv_safe`](crate::session_files::argv_safe) allows is taken (`protocol.invalid_message`, `session_id`, otherwise).
     pub fn report_session(&mut self, id: &AgentId, session: &str) -> Result<(), SupervisorError> {
+        if !crate::session_files::argv_safe(session) {
+            return Err(SupervisorError::OptionUnknown("session_id"));
+        }
         let entry = self
             .agents
             .get_mut(id)

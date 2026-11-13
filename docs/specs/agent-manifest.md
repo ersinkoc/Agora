@@ -163,8 +163,15 @@ node's policy resumes by itself. The node holds a session id only when it learne
   without a session id, the node looks every 3 s, for at most 30 minutes, at the files the glob matches that were written after the
   agent started, and takes the id from the first line (at most 64 KiB) when it passes `select` and its `cwd` is the agent's folder.
   It takes one only when exactly one new file fits and no other agent has that id. Two agents of one kind waiting in one folder at
-  once get none (a file cannot say which is whose); neither does an agent for which two files fit. An id must be at most 200
-  letters, digits, `-`, `_` or `.`. An agent without an id can only be started again in its folder, never resumed.
+  once get none (a file cannot say which is whose); neither does an agent for which two files fit. A session file's id must be a
+  UUID. An agent without an id can only be started again in its folder, never resumed.
+- **Every id that goes on a command line** (`[resume]`, `id_args`) must start with a letter or digit and hold only letters, digits,
+  `.`, `_` and `-`, at most 128 characters (`agora_node::session_files::argv_safe`), so an id can never be read as an option such as
+  `--dangerously-bypass-approvals-and-sandbox`. It is checked where an id is found (session file), reported (a terminal agent's hook),
+  read from the ledger, and right before the argv is built. An adapter's own id travels in JSON and may be anything, but one that
+  fails the check is not kept in the ledger, so such an agent is offered Start again after a restart. `--` is not put before the id:
+  it was not checked against the real `claude --resume` and `codex resume`.
+- **Start again** of a kind with `id_args` gives it a new node-chosen id, so it can be resumed after the next restart.
 - An adapter or ACP agent reports its own session (`session/reported`); it needs neither.
 
 The table is new in this engine version; older nodes ignore it. When the node itself runs inside a Claude Code session (it inherited
