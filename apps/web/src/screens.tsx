@@ -7,8 +7,8 @@ import { AgentTile } from './components/AgentTile';
 import { AttentionStrip } from './components/AttentionStrip';
 import { Icon } from './components/Icon';
 import { NetworkView } from './components/NetworkView';
-import { StateBadge } from './components/StateBadge';
-import type { MachineModel, MessageModel, ProjectCost } from './net/view';
+import { StateBadge, StateMark } from './components/StateBadge';
+import type { ApprovalModel, MachineModel, MessageModel, ProjectCost } from './net/view';
 import type { Device } from './net/approval';
 import { money, type UsageSummary } from './net/usage';
 import { demoAgents } from './fixtures';
@@ -73,8 +73,11 @@ export function Gallery() {
 }
 
 // Focus: one agent, full size. The terminal arrives with the hub connection; until then a placeholder.
-export function Focus({ agent, source: live, costMicroUsd, chatSource, sendPrompt, onBack }: {
+export function Focus({ agent, approvals = [], onResolve, source: live, costMicroUsd, chatSource, sendPrompt, onBack }: {
   agent: AgentTileModel | undefined;
+  // What this agent waits on, answered here as in the window (an agent shown full size must not be left waiting).
+  approvals?: readonly ApprovalModel[];
+  onResolve?: (approval: ApprovalModel, approved: boolean) => void;
   costMicroUsd?: number;
   source?: TerminalSource;
   chatSource?: ChatSource;
@@ -107,6 +110,14 @@ export function Focus({ agent, source: live, costMicroUsd, chatSource, sendPromp
         <ThemePicker />
       </header>
       <main className="flex min-h-0 min-w-0 flex-col">
+        {approvals.filter((x) => x.agentId === agent.id).map((x) => (
+          <div key={x.id} role="alert" className="flex flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-needs-you/60 bg-surface-2 px-3 py-2">
+            <StateMark state="needs-you" />
+            <div className="min-w-0 flex-1"><strong className="block truncate">{t('approval-title', { name: x.agentName })}</strong><span className="block truncate text-xs text-muted">{x.action}{x.detail ? ` · ${x.detail}` : ''}</span></div>
+            {onResolve && <><button type="button" className="button button--primary px-3 py-1 text-xs" onClick={() => onResolve(x, true)}>{t('approval-allow')}</button>
+            <button type="button" className="button px-3 py-1 text-xs" onClick={() => onResolve(x, false)}>{t('approval-deny')}</button></>}
+          </div>
+        ))}
         <AgentAddress key={agent.id} agent={agent} />
         <div className="pane min-h-0 flex-1 bg-surface-0 p-1.5" aria-label={agent.terminal === false ? t('chat-log') : t('focus-terminal')}>
           {agent.terminal === false ? <PromptBox agent={agent} source={chatSource} send={sendPrompt} /> : (

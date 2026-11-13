@@ -4,6 +4,9 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+### Approvals
+- An agent shown full size now shows what it waits on with Allow and Deny right there; before, it said "Needs you" and the answer could only be given from the window.
+
 ### Machines
 - `agora panel` on a machine that runs a node says where the hub's panel is and which certificate to trust, so the panel is reachable from every machine of the hub (ADR-0056). You still sign in with a code from `agora hub login`.
 ### Agents working together
