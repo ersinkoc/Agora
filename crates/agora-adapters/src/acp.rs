@@ -57,6 +57,8 @@ const SECRET_WORDS: &[&str] = &[
 ];
 /// How long the agent gets to finish exiting after its output ended, before it is killed.
 const EXIT_WAIT: Duration = Duration::from_secs(2);
+/// How long a failed or empty turn waits for the stderr lines the agent wrote just before it answered.
+const STDERR_SETTLE: Duration = Duration::from_millis(100);
 /// How long a bridge whose agent died before the node asked anything waits for the node's first request, to answer it with the
 /// reason.
 const LATE_REQUEST_WAIT: Duration = Duration::from_secs(2);
@@ -450,7 +452,8 @@ pub fn stderr_tail(raw: &[u8], home: Option<&str>) -> String {
                 Some(h) => replace_home(l, h),
                 None => l.to_string(),
             };
-            redact(&l)
+            // The bridge runs without `HOME` under a node (its environment is cleared), so any user's home folder is replaced too.
+            redact(&replace_any_home(&l))
         })
         .collect();
     let tail = lines[lines.len().saturating_sub(STDERR_LINES)..].join("\n");
@@ -462,6 +465,88 @@ pub fn stderr_tail(raw: &[u8], home: Option<&str>) -> String {
         start += 1;
     }
     format!("…{}", &tail[start..])
+}
+
+/// Characters that end a user name in a path when no `/` or `\` follows it.
+const NAME_END: &[char] = &[
+    '"', '\'', '<', '>', '|', ':', ';', ',', '(', ')', '[', ']', '`',
+];
+
+/// The length of the user name at the start of `rest` (after `/Users/`, `/home/`, `C:\Users\` ...), or 0 when there is none. The
+/// name runs to the next `/` or `\`; one with spaces (macOS and Windows allow them) only when that separator follows within 40 bytes and
+/// 3 words; without a separator after it, the name ends at a space or punctuation.
+fn user_name_len(rest: &str, spaces: bool) -> usize {
+    let stop = |c: char| c == '/' || c == '\\';
+    if let Some(sep) = rest.find(stop) {
+        let seg = &rest[..sep];
+        let ok = !seg.is_empty()
+            && !seg.contains(NAME_END)
+            && (!seg.contains(' ')
+                || (spaces
+                    && seg.len() <= 40
+                    && seg.split(' ').count() <= 3
+                    && !seg.starts_with(' ')));
+        if ok {
+            return sep;
+        }
+    }
+    rest.find(|c: char| c.is_whitespace() || stop(c) || NAME_END.contains(&c))
+        .unwrap_or(rest.len())
+}
+
+/// Replaces any user's home folder with `~`, whatever the bridge's own `HOME` is: `/Users/<name>`, `/home/<name>`, `/root`,
+/// `C:\Users\<name>`, `C:/Users/<name>` and `/c/Users/<name>` (drive and `Users` in any case).
+pub fn replace_any_home(line: &str) -> String {
+    let lower = line.to_ascii_lowercase();
+    let b = lower.as_bytes();
+    let mut out = String::with_capacity(line.len());
+    let mut i = 0;
+    let boundary = |at: usize| {
+        at == 0 || !(b[at - 1].is_ascii_alphanumeric() || matches!(b[at - 1], b'_' | b'.' | b'-'))
+    };
+    while i < line.len() {
+        if !line.is_char_boundary(i) {
+            i += 1;
+            continue;
+        }
+        let at = &lower[i..];
+        // (prefix length, whether the name may hold spaces); a drive letter form first, so `C:/Users/` is not read as `/Users/`.
+        let drive = b[i].is_ascii_alphabetic()
+            && (at[1..].starts_with(":\\users\\") || at[1..].starts_with(":/users/"));
+        let git_bash = at.starts_with('/')
+            && b.get(i + 1).is_some_and(u8::is_ascii_alphabetic)
+            && at[2..].starts_with("/users/");
+        let prefix = if boundary(i) && (drive || git_bash) {
+            Some((9, true))
+        } else if at.starts_with("/users/") && boundary(i) {
+            Some((7, true))
+        } else if at.starts_with("/home/") && boundary(i) {
+            Some((6, false))
+        } else if at.starts_with("/root")
+            && boundary(i)
+            && !b
+                .get(i + 5)
+                .is_some_and(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'.' | b'-'))
+        {
+            out.push('~');
+            i += 5;
+            continue;
+        } else {
+            None
+        };
+        if let Some((len, spaces)) = prefix {
+            let name = user_name_len(&line[i + len..], spaces);
+            if name > 0 {
+                out.push('~');
+                i += len + name;
+                continue;
+            }
+        }
+        let c = line[i..].chars().next().unwrap_or(' ');
+        out.push(c);
+        i += c.len_utf8();
+    }
+    out
 }
 
 /// Replaces the home folder with `~` in every spelling a tool may print: as given, with `/` instead of `\\`, as the Git Bash form
@@ -510,7 +595,22 @@ fn replace_ignoring_ascii_case(text: &str, needle: &str, with: &str) -> String {
 
 /// Copies the agent's stderr to the bridge's own (diagnostics for whoever runs the node, as before) and keeps its last bytes. The
 /// receiver hears when the stream ended.
-fn keep_stderr(r: ChildStderr, kept: Arc<Mutex<Vec<u8>>>) -> Receiver<()> {
+/// The last bytes of the agent's stderr and how many it wrote in all (so a turn can take what was written during it).
+#[derive(Default)]
+struct Kept {
+    buf: Vec<u8>,
+    total: u64,
+}
+
+impl Kept {
+    /// What was written since `mark` (a `total` taken earlier), as far as it is still kept.
+    fn since(&self, mark: u64) -> &[u8] {
+        let new = usize::try_from(self.total.saturating_sub(mark)).unwrap_or(usize::MAX);
+        &self.buf[self.buf.len().saturating_sub(new)..]
+    }
+}
+
+fn keep_stderr(r: ChildStderr, kept: Arc<Mutex<Kept>>) -> Receiver<()> {
     let (tx, rx) = channel();
     std::thread::spawn(move || {
         let mut r = r;
@@ -522,9 +622,10 @@ fn keep_stderr(r: ChildStderr, kept: Arc<Mutex<Vec<u8>>>) -> Receiver<()> {
             };
             let _ = io::stderr().write_all(&buf[..n]);
             let mut k = kept.lock().unwrap_or_else(|e| e.into_inner());
-            k.extend_from_slice(&buf[..n]);
-            let over = k.len().saturating_sub(STDERR_KEEP);
-            k.drain(..over);
+            k.buf.extend_from_slice(&buf[..n]);
+            k.total = k.total.saturating_add(n as u64);
+            let over = k.buf.len().saturating_sub(STDERR_KEEP);
+            k.buf.drain(..over);
         }
         let _ = tx.send(());
     });
@@ -569,9 +670,21 @@ struct Bridge<W: Write> {
     modes: Vec<Value>,
     models: Vec<Value>,
     current_mode: String,
+    /// The agent's stderr, how much of it there was when the current turn began, and the bridge's own home folder (if it has one).
+    stderr: Arc<Mutex<Kept>>,
+    turn_mark: u64,
+    home: Option<String>,
 }
 
 impl<W: Write> Bridge<W> {
+    /// What the agent wrote to stderr during the current turn, as a report (scrubbed and size-limited like an exit's tail). Its
+    /// stderr is read by another thread, so a moment is given for the lines written just before the answer.
+    fn turn_stderr(&self) -> String {
+        std::thread::sleep(STDERR_SETTLE);
+        let k = self.stderr.lock().unwrap_or_else(|e| e.into_inner());
+        stderr_tail(k.since(self.turn_mark), self.home.as_deref())
+    }
+
     fn send_node(&mut self, v: &Value) -> io::Result<()> {
         write_line(&mut self.out, v)
     }
@@ -836,6 +949,7 @@ impl<W: Write> Bridge<W> {
                 };
                 done(self)?;
                 self.said = false;
+                self.turn_mark = self.stderr.lock().unwrap_or_else(|e| e.into_inner()).total;
                 self.state("WORKING")?;
                 self.ask_agent(
                     "session/prompt",
@@ -1125,7 +1239,15 @@ impl<W: Write> Bridge<W> {
                         self.flush_text()?;
                         self.perms.clear();
                         match turn_outcome(msg, self.said) {
-                            Some((code, params)) => {
+                            Some((code, mut params)) => {
+                                // A failed or empty turn says nothing about why; what the agent wrote to stderr meanwhile often does
+                                // (an expired login, a provider's refusal).
+                                if code != "adapter.turn_stopped" {
+                                    let tail = self.turn_stderr();
+                                    if !tail.is_empty() {
+                                        params["stderr_tail"] = json!(tail);
+                                    }
+                                }
                                 self.notice(code, &params)?;
                                 self.log_reason("WARN", code, &params)?;
                                 self.state_because("IDLE", code)?;
@@ -1181,7 +1303,7 @@ where
                 return Err(io::Error::other("agent pipes missing"));
             }
         };
-    let kept = Arc::new(Mutex::new(Vec::new()));
+    let kept = Arc::new(Mutex::new(Kept::default()));
     let stderr_done = keep_stderr(stderr, Arc::clone(&kept));
     let (tx, rx) = channel();
     lines(input, Ev::Node, Ev::NodeGone, tx.clone());
@@ -1203,6 +1325,11 @@ where
         modes: Vec::new(),
         models: Vec::new(),
         current_mode: String::new(),
+        stderr: Arc::clone(&kept),
+        turn_mark: 0,
+        home: std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .ok(),
     };
     let result = (|| -> io::Result<()> {
         loop {
@@ -1218,7 +1345,7 @@ where
                     let code = wait_briefly(&mut child);
                     // The rest of its stderr, unless something it started still holds the stream open.
                     let _ = stderr_done.recv_timeout(Duration::from_millis(500));
-                    let raw = kept.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                    let raw = kept.lock().unwrap_or_else(|e| e.into_inner()).buf.clone();
                     let home = std::env::var("HOME")
                         .or_else(|_| std::env::var("USERPROFILE"))
                         .ok();
@@ -1362,6 +1489,47 @@ mod tests {
             b"a\x1b]8;;https://u:p@x/secretlink\x07link\x1b]8;;\x07 b\x1b]0;title sk\x1b\\ c\n";
         assert_eq!(stderr_tail(raw, None), "alink b c");
         assert_eq!(stderr_tail("x\u{9d}0;hidden\u{7}y".as_bytes(), None), "xy");
+    }
+
+    #[test]
+    fn any_users_home_folder_is_replaced_without_knowing_home() {
+        for (line, want) in [
+            (
+                "at /Users/jane/.config/opencode/x.js:3",
+                "at ~/.config/opencode/x.js:3",
+            ),
+            ("at /Users/Jane Doe/proj/a.ts", "at ~/proj/a.ts"),
+            ("at /users/j.doe/x", "at ~/x"),
+            (
+                "open /home/ali.veli/.cache/y failed",
+                "open ~/.cache/y failed",
+            ),
+            ("open /home/bob failed", "open ~ failed"),
+            ("in /root/.npm and /root", "in ~/.npm and ~"),
+            ("C:\\Users\\John Smith\\AppData\\x", "~\\AppData\\x"),
+            ("c:/users/john.smith/AppData", "~/AppData"),
+            ("/c/Users/john/AppData", "~/AppData"),
+            ("/D/users/x.y/z", "~/z"),
+            ("\"/Users/jane\": no such file", "\"~\": no such file"),
+            (
+                "/rootless and /var/home2/x and x/home/y",
+                "/rootless and /var/home2/x and x/home/y",
+            ),
+            (
+                "/usr/lib/node_modules/opencode",
+                "/usr/lib/node_modules/opencode",
+            ),
+            ("/home/ is empty", "/home/ is empty"),
+        ] {
+            assert_eq!(replace_any_home(line), want, "{line}");
+        }
+        // Through the whole report, with no home given.
+        let t = stderr_tail(
+            b"Error: /Users/someone.else/.local/share/opencode/auth.json missing\n",
+            None,
+        );
+        assert_eq!(t, "Error: ~/.local/share/opencode/auth.json missing");
+        assert!(!stderr_tail(b"x /home/user name/y\n", None).contains("user"));
     }
 
     #[test]

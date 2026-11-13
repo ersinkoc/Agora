@@ -7,5 +7,7 @@ min_engine = 1
 # run through `agora acp-bridge` against the real program: the macOS agent is asked to do that before this counts as verified.
 # The node runs it through the bridge, so there is no terminal: the transcript, plans, diffs and permission requests arrive as
 # chat items and approvals. opencode's own terminal screen would be a separate L1 kind once its screens are captured.
+# opencode writes its errors (a provider's refusal, an expired login) to stderr only with `--print-logs --log-level ERROR`; the bridge
+# passes what it wrote during a failed or empty turn along with the notice (ADR-0058), so they are asked for.
 [structured]
-acp = { argv = ["opencode", "acp"] }
+acp = { argv = ["opencode", "acp", "--print-logs", "--log-level", "ERROR"] }

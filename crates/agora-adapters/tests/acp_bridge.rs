@@ -630,3 +630,33 @@ fn an_agent_that_died_before_the_node_asked_still_answers_initialize_with_its_re
     assert_eq!(data["params"]["stage"], "initialize");
     assert_eq!(data["params"]["exit_code"], "5");
 }
+
+#[test]
+fn an_empty_turn_carries_what_the_agent_wrote_to_stderr_during_it() {
+    let mut n = started();
+    assert_eq!(turn_end(&mut n, "silent"), "adapter.turn_empty");
+    assert_eq!(turn_end(&mut n, "silent-loud"), "adapter.turn_empty");
+    let all = notices(&n);
+    assert_eq!(
+        all[0],
+        json!({"code": "adapter.turn_empty", "params": {}}),
+        "nothing written, nothing added"
+    );
+    let tail = all[1]["params"]["stderr_tail"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{all:#?}"));
+    assert!(tail.contains("invalid x-api-key (auth)"), "{tail}");
+    assert!(
+        !tail.contains("/Users/someone") && !tail.contains("sk-fake"),
+        "{tail}"
+    );
+    if let Ok(home) = std::env::var("HOME") {
+        assert!(home.len() < 2 || !tail.contains(&home), "{tail}");
+    }
+    // The next turn starts clean: an empty one without stderr adds nothing.
+    turn_end(&mut n, "silent");
+    assert_eq!(
+        notices(&n)[2],
+        json!({"code": "adapter.turn_empty", "params": {}})
+    );
+}
