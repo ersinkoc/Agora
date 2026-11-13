@@ -20,6 +20,7 @@ use agora_protocol::{Error, ErrorCode};
 use agora_vt::Size;
 
 use crate::git::{self, GitError};
+use crate::launch_options::{LaunchChoice, Refusal, Requested, SkipPermissions};
 use crate::terminal::{TerminalHandle, TerminalOptions};
 
 /// Restart policy for agents that die on their own (crash, non-zero exit, signal). A user stop is never
@@ -100,6 +101,9 @@ struct Extras {
     identity: Option<String>,
     /// The agent's own mesh socket: the only unix socket outside its private temp folder it may reach when offline.
     socket: Option<PathBuf>,
+    /// ADR-0059: the arguments of the launch options chosen at start, put right after the launch (or resume) command at every
+    /// (re)launch, before the injected ones.
+    options: Vec<String>,
 }
 
 /// What to start.
@@ -194,6 +198,12 @@ pub enum SupervisorError {
     OptionUnsupported(&'static str),
     /// ADR-0058: the agent did not offer this id; the field (`mode`, `model`).
     OptionUnknown(&'static str),
+    /// ADR-0059: a launch option the node's policy refuses: `(kind, option, policy)`. Nothing was started.
+    OptionForbidden(String, String, &'static str),
+    /// ADR-0059: a launch option id that is malformed, unknown, repeated or too many: `(kind, option)`.
+    OptionInvalid(String, String),
+    /// ADR-0059: an option that skips permissions without the user's signed confirmation: `(kind, option)`.
+    OptionUnconfirmed(String, String),
     /// The node is at one of its limits; `resource` is `agents` or `terminals`.
     ResourceLimit {
         resource: &'static str,
@@ -243,6 +253,16 @@ impl SupervisorError {
             Self::OptionUnknown(f) => {
                 Error::new(ErrorCode::ProtocolInvalidMessage).with("field", *f)
             }
+            Self::OptionInvalid(k, o) => Error::new(ErrorCode::AgentOptionInvalid)
+                .with("kind", k.as_str())
+                .with("option", o.as_str()),
+            Self::OptionUnconfirmed(k, o) => Error::new(ErrorCode::AgentOptionUnconfirmed)
+                .with("kind", k.as_str())
+                .with("option", o.as_str()),
+            Self::OptionForbidden(k, o, p) => Error::new(ErrorCode::AgentOptionForbidden)
+                .with("kind", k.as_str())
+                .with("option", o.as_str())
+                .with("policy", *p),
             Self::ResourceLimit { resource, limit } => Error::new(ErrorCode::NodeResourceLimit)
                 .with("resource", *resource)
                 .with("limit", i64::try_from(*limit).unwrap_or(i64::MAX)),
@@ -280,6 +300,9 @@ pub struct AgentView {
     pub restarts: u32,
     /// ADR-0057: the agent on this node that started this one through the mesh.
     pub parent: Option<AgentId>,
+    /// ADR-0059: the launch options it was started with, and whether one of them skips permissions.
+    pub launch_options: Vec<String>,
+    pub skips_permissions: bool,
 }
 
 /// ADR-0057: whether `program` is a shell, a wrapper or an interpreter, which runs whatever it is given. Compared by its file name,
@@ -347,6 +370,8 @@ pub struct KindInfo {
     pub display_name: String,
     pub level: IntegrationLevel,
     pub installed: bool,
+    /// ADR-0059: the kind's `[[launch.option]]`s, in the manifest's order.
+    pub launch_options: Vec<agora_adapters::manifest::LaunchOption>,
 }
 
 struct KindEntry {
@@ -391,6 +416,8 @@ struct AdapterEntry {
     /// The agent's own mesh endpoint, passed in `session/start` (`mcp_servers`). Kept across restarts after a crash, as a terminal
     /// agent's is; a stopped agent left the mesh and gets a fresh one when resumed.
     mesh: Option<agora_adapters::inject::Endpoint>,
+    /// ADR-0059: the options it was started with (their arguments are already in `spec.command`).
+    launch: LaunchChoice,
 }
 
 struct Entry {
@@ -406,6 +433,8 @@ struct Entry {
     gave_up: bool,
     extras: Extras,
     private_config: Option<PathBuf>,
+    /// ADR-0059: the options it was started with (their arguments are in `extras.options`).
+    launch: LaunchChoice,
 }
 
 pub struct Supervisor {
@@ -421,6 +450,8 @@ pub struct Supervisor {
     adapters: BTreeMap<AgentId, AdapterEntry>,
     /// ADR-0057: helper -> the agent that started it.
     parents: BTreeMap<AgentId, AgentId>,
+    /// ADR-0059: the owner's `skip_permissions` policy.
+    skip_permissions: SkipPermissions,
 }
 
 impl Supervisor {
@@ -436,7 +467,41 @@ impl Supervisor {
             sandbox: Default::default(),
             adapters: BTreeMap::new(),
             parents: BTreeMap::new(),
+            skip_permissions: SkipPermissions::default(),
         }
+    }
+
+    /// ADR-0059: the owner's `skip_permissions` policy (from the node's policy file; the default allows).
+    pub fn set_skip_permissions(&mut self, policy: SkipPermissions) {
+        self.skip_permissions = policy;
+    }
+
+    /// ADR-0059: resolves a start's launch options and checks them against the owner's policy, before anything is created.
+    /// `confined_only` needs this agent's confinement to be active (the node confines agents and can here: a start that cannot be
+    /// confined is refused on its own before this).
+    fn launch_choice(&self, kind: &str, req: &Requested) -> Result<LaunchChoice, SupervisorError> {
+        if req.is_empty() {
+            return Ok(LaunchChoice::default());
+        }
+        let k = self
+            .kinds
+            .get(kind)
+            .ok_or_else(|| SupervisorError::UnknownKind(kind.to_string()))?;
+        let confined =
+            self.sandbox.level != crate::sandbox::Level::Off && self.sandbox.enforceable();
+        crate::launch_options::choose(&k.manifest, req, self.skip_permissions, confined).map_err(
+            |r| match r {
+                Refusal::Invalid { option } => {
+                    SupervisorError::OptionInvalid(kind.to_string(), option)
+                }
+                Refusal::Unconfirmed { option } => {
+                    SupervisorError::OptionUnconfirmed(kind.to_string(), option)
+                }
+                Refusal::Forbidden { option, policy } => {
+                    SupervisorError::OptionForbidden(kind.to_string(), option, policy)
+                }
+            },
+        )
     }
 
     /// ADR-0057: `child` was started by `parent` (an agent's `agent_start`). Carried in every view of `child`.
@@ -639,8 +704,20 @@ impl Supervisor {
 
     /// Create the agent's own worktree and start it there.
     pub fn start(&mut self, req: &StartRequest, now: Instant) -> Result<AgentId, SupervisorError> {
+        self.start_with_options(req, &Requested::default(), now)
+    }
+
+    /// [`Self::start`] with the launch options a person chose (ADR-0059). Only the person's own start passes options: a helper an agent
+    /// starts (ADR-0057) goes through [`Self::start`] and never gets one.
+    pub fn start_with_options(
+        &mut self,
+        req: &StartRequest,
+        options: &Requested,
+        now: Instant,
+    ) -> Result<AgentId, SupervisorError> {
         // Checked first: a refused start must not leave a worktree behind.
         self.check_limits()?;
+        let choice = self.launch_choice(&req.kind, options)?;
         let kind = self
             .kinds
             .get(&req.kind)
@@ -662,7 +739,9 @@ impl Supervisor {
             }) {
                 return Err(SupervisorError::PublisherRevoked(req.kind.clone(), p));
             }
-            return self.start_adapter(req, &spec);
+            let mut spec = spec;
+            spec.command.extend(choice.args.iter().cloned());
+            return self.start_adapter(req, &spec, choice);
         }
         let argv = kind.manifest.process.launch.clone();
         if argv.is_empty() {
@@ -683,7 +762,10 @@ impl Supervisor {
             &worktree,
             None,
         ) {
-            Ok(x) => x,
+            Ok(x) => Extras {
+                options: choice.args.clone(),
+                ..x
+            },
             Err(e) => {
                 self.abandon(&id, created);
                 return Err(e);
@@ -719,6 +801,7 @@ impl Supervisor {
                 gave_up: false,
                 extras,
                 private_config: None,
+                launch: choice,
             },
         );
         Ok(id)
@@ -733,9 +816,31 @@ impl Supervisor {
         separate: bool,
         now: Instant,
     ) -> Result<AgentId, SupervisorError> {
+        self.start_selected_with_options(
+            req,
+            project,
+            git_root,
+            separate,
+            &Requested::default(),
+            now,
+        )
+    }
+
+    /// [`Self::start_selected`] with the launch options a person chose (ADR-0059); see [`Self::start_with_options`].
+    pub fn start_selected_with_options(
+        &mut self,
+        req: &StartRequest,
+        project: agora_core::ProjectId,
+        git_root: &Path,
+        separate: bool,
+        options: &Requested,
+        now: Instant,
+    ) -> Result<AgentId, SupervisorError> {
+        // Refused before anything is created.
+        self.launch_choice(&req.kind, options)?;
         if !separate {
             self.refuse_protected(&req.checkout, &req.worktree_root)?;
-            return self.start_in_directory(req, project, now);
+            return self.start_directory_impl(req, project, now, true, options);
         }
         self.check_limits()?;
         if !self.sandbox.enforceable() {
@@ -756,7 +861,7 @@ impl Supervisor {
             .map_err(|e| SupervisorError::Spawn(e.to_string()))
             .and_then(|cwd| {
                 direct.checkout = cwd;
-                self.start_directory_impl(&direct, project, now, false)
+                self.start_directory_impl(&direct, project, now, false, options)
             });
         match result {
             Ok(id) => Ok(id),
@@ -774,7 +879,7 @@ impl Supervisor {
         project: agora_core::ProjectId,
         now: Instant,
     ) -> Result<AgentId, SupervisorError> {
-        self.start_directory_impl(req, project, now, true)
+        self.start_directory_impl(req, project, now, true, &Requested::default())
     }
 
     fn start_directory_impl(
@@ -783,8 +888,10 @@ impl Supervisor {
         project: agora_core::ProjectId,
         now: Instant,
         private: bool,
+        options: &Requested,
     ) -> Result<AgentId, SupervisorError> {
         self.check_limits()?;
+        let choice = self.launch_choice(&req.kind, options)?;
         if !self.sandbox.enforceable() {
             return Err(SupervisorError::SandboxUnavailable(
                 req.kind.clone(),
@@ -795,7 +902,10 @@ impl Supervisor {
             .kinds
             .get(&req.kind)
             .ok_or_else(|| SupervisorError::UnknownKind(req.kind.clone()))?;
-        let driver = kind.manifest.driver(&bridge_program());
+        let driver = kind.manifest.driver(&bridge_program()).map(|mut spec| {
+            spec.command.extend(choice.args.iter().cloned());
+            spec
+        });
         let argv = kind.manifest.process.launch.clone();
         let id = AgentId::new(format!("agent-{}", self.next_id));
         self.next_id += 1;
@@ -855,6 +965,7 @@ impl Supervisor {
                     capabilities,
                     options: SessionOptions::default(),
                     mesh,
+                    launch: choice,
                 },
             );
         } else {
@@ -870,7 +981,10 @@ impl Supervisor {
                 &worktree,
                 private_config.as_deref(),
             ) {
-                Ok(e) => e,
+                Ok(e) => Extras {
+                    options: choice.args.clone(),
+                    ..e
+                },
                 Err(e) => {
                     if let Some(hook) = &self.abort_hook {
                         hook(&id);
@@ -910,6 +1024,7 @@ impl Supervisor {
                     gave_up: false,
                     extras,
                     private_config,
+                    launch: choice,
                 },
             );
         }
@@ -1019,6 +1134,7 @@ impl Supervisor {
             env: plan.env,
             identity,
             socket,
+            options: Vec::new(),
         })
     }
 
@@ -1027,6 +1143,7 @@ impl Supervisor {
         &mut self,
         req: &StartRequest,
         spec: &agora_adapters::manifest::AdapterSpec,
+        launch: LaunchChoice,
     ) -> Result<AgentId, SupervisorError> {
         let checkout = git::discover_checkout(&req.checkout)?;
         let worktree = req.worktree_root.join(&req.name);
@@ -1079,6 +1196,7 @@ impl Supervisor {
                 capabilities,
                 options: SessionOptions::default(),
                 mesh,
+                launch,
             },
         );
         Ok(id)
@@ -1271,6 +1389,7 @@ impl Supervisor {
         extras: &Extras,
     ) -> Result<TerminalHandle, SupervisorError> {
         let mut argv = argv.to_vec();
+        argv.extend(extras.options.iter().cloned());
         argv.extend(extras.argv.iter().cloned());
         let program = argv.first().cloned();
         let mut cfg = PtyConfig::new(argv);
@@ -1587,9 +1706,16 @@ impl Supervisor {
         let (argv, native) = self.argv_for_resume(&kind, session.as_deref());
         // A stopped agent left the mesh and its endpoint closed; resuming joins again with a fresh one.
         let config = self.agents.get(id).and_then(|e| e.private_config.clone());
+        // ADR-0059: a resumed agent keeps the options it was started with.
+        let options = self
+            .agents
+            .get(id)
+            .map(|e| e.extras.options.clone())
+            .unwrap_or_default();
         // A resume that fails after the hook ran gives the endpoint back, as a failed start does.
         let launched = self
             .inject(id, &kind, &project, &worktree, config.as_deref())
+            .map(|extras| Extras { options, ..extras })
             .and_then(|extras| Ok((self.launch(&kind, &argv, &worktree, &extras)?, extras)));
         let (terminal, extras) = match launched {
             Ok(t) => t,
@@ -1691,6 +1817,8 @@ impl Supervisor {
                 running: e.terminal.is_some(),
                 restarts: e.restarts,
                 parent: self.parents.get(id).cloned(),
+                launch_options: e.launch.ids.clone(),
+                skips_permissions: e.launch.skips_permissions,
             })
             .collect();
         out.extend(self.adapters.iter().map(|(id, e)| AgentView {
@@ -1706,6 +1834,8 @@ impl Supervisor {
             running: e.running,
             restarts: e.restarts,
             parent: self.parents.get(id).cloned(),
+            launch_options: e.launch.ids.clone(),
+            skips_permissions: e.launch.skips_permissions,
         }));
         out.sort_by(|a, b| a.id.cmp(&b.id));
         out
@@ -1762,6 +1892,7 @@ impl Supervisor {
                     display_name: m.display_name.clone(),
                     level,
                     installed: program.is_some_and(|p| crate::doctor::on_path(p)),
+                    launch_options: m.launch.option.clone(),
                 }
             })
             .collect()

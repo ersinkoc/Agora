@@ -32,6 +32,8 @@ agent-option_forbidden = { $kind }, { $option } seçeneğiyle başlatılmadı: {
         [signature] böyle başlatmak için başlatma isteğinin cihazınızca imzalanması gerekir.
        *[other] bu makine ajanların sormadan çalışmasına izin vermiyor.
     }
+agent-option_invalid = { $kind } başlatılmadı: "{ $option }" başlatma seçeneği onun sunduğu bir seçenek değil (ya da çok fazla seçenek var).
+agent-option_unconfirmed = { $kind }, { $option } seçeneğiyle başlatılmadı: bu seçenek ajanın sormadan çalışmasını sağlar ve başlatma isteğinde bunun için onayınız yoktu.
 agent-running = { $agent_id } hâlâ çalışıyor. Önce durdurun.
 approval-expired = { $approval_id } onayının süresi doldu.
 approval-signature_invalid = { $approval_id } onayı doğrulanamadı.

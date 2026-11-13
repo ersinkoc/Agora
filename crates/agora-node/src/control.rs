@@ -225,6 +225,15 @@ fn resolve_in<'a>(projects: &'a [ProjectEntry], wanted: &str) -> Result<&'a Proj
     }
 }
 
+/// ADR-0059: the launch options an agent was started with, as its events carry them.
+fn launch_of(v: &crate::supervisor::AgentView) -> crate::launch_options::LaunchChoice {
+    crate::launch_options::LaunchChoice {
+        ids: v.launch_options.clone(),
+        args: Vec::new(),
+        skips_permissions: v.skips_permissions,
+    }
+}
+
 fn sup_err(e: SupervisorError) -> Error {
     e.to_protocol()
 }
@@ -295,7 +304,15 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                         agora_core::IntegrationLevel::L3Adapter => v1::IntegrationLevel::L3Adapter,
                     } as i32,
                     installed: k.installed,
-                    launch_options: Vec::new(),
+                    launch_options: k
+                        .launch_options
+                        .iter()
+                        .map(|o| v1::LaunchOption {
+                            id: o.id.clone(),
+                            label: o.label.clone(),
+                            skips_permissions: o.skips_permissions,
+                        })
+                        .collect(),
                 })
                 .collect();
             Ok(v1::CommandOk {
@@ -447,11 +464,15 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
             drop(bindings);
             let mut sup = ctx.sup();
             let id = sup
-                .start_selected(
+                .start_selected_with_options(
                     &req,
                     project,
                     Path::new(&info.git_root),
                     a.separate_worktree,
+                    &crate::launch_options::Requested {
+                        ids: a.launch_options.clone(),
+                        confirmed: a.confirmed_launch_options.clone(),
+                    },
                     Instant::now(),
                 )
                 .map_err(sup_err)?;
@@ -461,6 +482,7 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                 .find(|v| v.id == id)
                 .ok_or_else(|| invalid("agent.id"))?;
             let has_terminal = sup.terminal(&id).is_some();
+            let launch = launch_of(&view);
             let path = view.worktree.to_string_lossy().into_owned();
             let workspace_id = format!("directory:{path}");
             drop(sup);
@@ -474,7 +496,7 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                 } else {
                     info.git_root.clone()
                 };
-                ev.directory_agent_launched(
+                ev.directory_agent_launched_with(
                     &id,
                     &v1::WorkspaceRegistered {
                         workspace_id: workspace_id.clone(),
@@ -494,6 +516,7 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                     },
                     &a.kind,
                     has_terminal,
+                    &launch,
                 );
             }
             ctx.wake_git();
@@ -527,8 +550,18 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                 base: None,
             };
             let mut sup = ctx.sup();
-            let id = sup.start(&req, Instant::now()).map_err(sup_err)?;
+            let id = sup
+                .start_with_options(
+                    &req,
+                    &crate::launch_options::Requested {
+                        ids: a.launch_options.clone(),
+                        confirmed: a.confirmed_launch_options.clone(),
+                    },
+                    Instant::now(),
+                )
+                .map_err(sup_err)?;
             let view = sup.list().into_iter().find(|v| v.id == id);
+            let launch = view.as_ref().map(launch_of).unwrap_or_default();
             let worktree = view
                 .as_ref()
                 .map(|v| v.worktree.to_string_lossy().into_owned())
@@ -542,7 +575,7 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
             let has_terminal = sup.terminal(&id).is_some();
             drop(sup);
             if let Some(ev) = &ctx.events {
-                ev.agent_launched(
+                ev.agent_launched_with(
                     &id,
                     &project.id,
                     &ctx.node_id,
@@ -551,6 +584,7 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                     &branch,
                     &a.kind,
                     has_terminal,
+                    &launch,
                 );
             }
             ctx.wake_git();

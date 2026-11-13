@@ -106,6 +106,17 @@ fn spawn_audit(
                 format!("ok:{}", q(&s.agent_id)),
             )
         }
+        // ADR-0059: every start with an option that skips permissions is audited with its options, however it was started (through
+        // the hub or at the machine). The node never gives a helper one.
+        Body::AgentStarted(s)
+            if s.skips_permissions && !view.agents.contains_key(&q(&s.agent_id)) =>
+        {
+            row(
+                q(&s.agent_id),
+                "agent.launch_options",
+                format!("skips_permissions:{}", s.launch_options.join(",")),
+            )
+        }
         _ => None,
     }
 }
@@ -501,6 +512,44 @@ mod tests {
         view.apply(&started);
         // Said again (a restart or a resync): not a new start.
         assert!(spawn_audit(&view, &started).is_none());
+    }
+
+    #[test]
+    fn a_start_that_does_not_ask_is_audited_once_with_its_options() {
+        let mut view = crate::projection::View::default();
+        let at = |body| Event {
+            producer_id: "n1".into(),
+            seq: 1,
+            at_ms: 7,
+            body: Some(body),
+        };
+        let started = |skips, options: &[&str]| {
+            at(Body::AgentStarted(AgentStarted {
+                agent_id: "c".into(),
+                project_id: "p".into(),
+                node_id: "n1".into(),
+                worktree_id: String::new(),
+                kind: "codex".into(),
+                level: 1,
+                parent_agent_id: String::new(),
+                launch_options: options.iter().map(|o| (*o).to_string()).collect(),
+                skips_permissions: skips,
+            }))
+        };
+        assert!(spawn_audit(&view, &started(false, &[])).is_none());
+        assert!(spawn_audit(&view, &started(false, &["resume-last"])).is_none());
+        let skip = started(true, &["skip-permissions"]);
+        let row = spawn_audit(&view, &skip).unwrap();
+        assert_eq!(
+            (row.0.as_str(), row.1.as_str(), row.3.as_str()),
+            (
+                "n1/c",
+                "agent.launch_options",
+                "skips_permissions:skip-permissions"
+            )
+        );
+        view.apply(&skip);
+        assert!(spawn_audit(&view, &skip).is_none());
     }
 
     fn support() -> Support {

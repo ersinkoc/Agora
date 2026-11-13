@@ -78,6 +78,9 @@ pub struct AgentView {
     pub session: SessionView,
     /// ADR-0057: the hub-wide key (`<node>/<agent>`) of the agent that started this one; empty when the user did.
     pub parent_agent_id: String,
+    /// ADR-0059: the launch options it was started with, and whether it acts without asking (the badge).
+    pub launch_options: Vec<String>,
+    pub skips_permissions: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -258,6 +261,8 @@ impl View {
                         } else {
                             q(&e.parent_agent_id)
                         },
+                        launch_options: e.launch_options.clone(),
+                        skips_permissions: e.skips_permissions,
                     },
                 );
             }
