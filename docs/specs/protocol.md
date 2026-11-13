@@ -198,7 +198,7 @@ Initial event families:
 | project | `CheckoutDiscovered`, `WorktreeCreated`, `WorktreeRemoved`, `GitStatusChanged` (the node checks each running agent's workspace every 5 s and reports when the changed-file count, line counts or HEAD differ from the last report) |
 | agent | `AgentStarted`, `AgentStateChanged`, `AgentSessionReported`, `AgentUsageReported`, `AgentExited` |
 | terminal | `TerminalOpened`, `TerminalTitleChanged`, `TerminalClosed` |
-| approval | `ApprovalRequested`, `ApprovalResolved` |
+| approval | `ApprovalRequested`, `ApprovalResolved`, `AgentStartRefused` (ADR-0057) |
 | mesh | `MessagePosted`, `TaskChanged`, `LeaseGranted`, `LeaseReleased`, `HandoffCreated` |
 | files | `FilesChanged` (batched paths, from watch) |
 
@@ -312,6 +312,39 @@ project's board; see `docs/specs/mesh-tools.md#shared-board-adr-0039`. New error
 `BoardJoin` (command 66, hub → node only; a client's is refused) and `BoardJoinResult` (`CommandOk` field 20, with `BoardJoinLease` and `BoardJoinTask`), ADR-0039 amendment B: when a project becomes shared, the hub asks each node with a checkout for its unfinished local work and puts it on the board. Sent only to nodes that offer the capability `board.join`.
 
 `GrantCreate` (63), `GrantList` (64), `GrantRevoke` (65) and `GrantListResult` (`CommandOk` field 17), ADR-0041: user-signed grants for the commands a node's policy lists in `signed_commands`; see `docs/security/threat-model.md`. New error code `approval.grant_required` (`command`). The node answers them itself; the local control socket refuses them.
+
+### Agents that start agents (ADR-0057)
+
+Capability `mesh.spawn` (offered by a node that has the mesh tools `agent_start`, `agent_wait` and `agent_output`; see
+`mesh-tools.md`). All additions are new fields and one new event; nothing published changes meaning.
+
+- `AgentStarted.parent_agent_id` (7) and `AgentSnapshot.parent_agent_id` (13): the agent on the same node that started this one
+  through the mesh; empty when the user started it. Every `AgentStarted` the node sends for that agent (launch, restart, resync)
+  carries it.
+- An agent's request to start another is an `ApprovalRequested` with `action = "agent.start"`. Its `detail` is JSON with the keys
+  `node`, `agent` (the asking agent), `agent_kind`, `kind` (to start), `folder` (canonical), `inside` (the folder is the asking
+  agent's own folder or below it), `worktree` (the helper gets its own worktree of it), `depth` (the helper's depth) and `prompt`
+  (the first prompt in full, at most 16 KiB; a longer one is refused before anything is asked). Clients show all of it; the prompt
+  is untrusted text written by an agent.
+- The decision on an `agent.start` approval is signed over
+  `agora-approval-start-v1 NUL node_id NUL approval_id NUL verdict NUL helper_grant NUL helpers_may_start NUL sha256(detail)`, where
+  the verdict and `helpers_may_start` are the ASCII digits `0`/`1`, `helper_grant` is decimal and the hash is lowercase hex, instead of the ADR-0028 message. The node keeps the request it announced and starts the helper
+  from that, so the signature binds exactly what the user was shown: a hub that changes the prompt, folder or kind on the way to the
+  window, or adds or strips a grant on the way back, makes the signature fail.
+- `ApprovalResolve.helper_grant` (5): with an approval, allows the asking agent up to this many helpers of the same kind in the same
+  folder while it runs, this start included. `ApprovalResolve.helpers_may_start` (6): the helpers started under this decision may
+  themselves ask (each of their starts still needs its own approval, and their helpers cannot ask further). Neither is honoured for
+  a folder outside the asking agent's own. `ApprovalResolved.helper_grant` (4) and `.helpers_may_start` (5) record what was signed.
+- `GrantList` lists live helper grants as `GrantInfo` with `commands = ["mesh.agent_start"]`, `scope = "agent:<id>"`, the new fields
+  `kind` (6), `folder` (7) and `remaining` (8), and `expires_at_ms = 0` (it ends when the asking agent exits or is stopped). `GrantRevoke { grant_id }`
+  with the approval id ends one.
+- `AgentStop.stop_helpers` (2): also stop the helpers this agent started, and theirs. Old nodes ignore it.
+- `AgentStartRefused` (event 65: `agent_id` of the asking agent, `kind`, `folder`, `code`): the node refused a start before asking
+  the user (helper limit, depth, folder, rate, policy). Together with `ApprovalRequested`/`ApprovalResolved` and `AgentStarted` it
+  is the audit trail of agent starts.
+
+New error codes: `mesh.folder_not_allowed` (`folder`), `mesh.helper_limit` (`rule`, `limit`), `mesh.start_denied`
+(`approval_id`).
 
 `Snapshot.tasks` (8) and `Snapshot.leases` (9), ADR-0040: the shared boards' tasks and held paths, so a client that connects sees them before the next change.
 

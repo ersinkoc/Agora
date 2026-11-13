@@ -83,6 +83,7 @@ fn agent(id: &str) -> Body {
         worktree_id: "w".into(),
         kind: "shell".into(),
         level: 2,
+        parent_agent_id: String::new(),
     })
 }
 
@@ -1331,6 +1332,7 @@ fn started(id: &str, project: &str) -> Body {
         worktree_id: String::new(),
         kind: "shell".into(),
         level: 2,
+        parent_agent_id: String::new(),
     })
 }
 
@@ -1349,6 +1351,7 @@ fn stop_of(id: &str, agent: &str) -> Frame {
         target_node: "n1".into(),
         command: Some(command_request::Command::AgentStop(v1::AgentStop {
             agent_id: agent.into(),
+            stop_helpers: false,
         })),
     };
     f(STREAM_COMMANDS, 0, req.encode_to_vec())

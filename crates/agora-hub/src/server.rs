@@ -386,6 +386,7 @@ pub fn snapshot_of(view: &View, pos: u64) -> v1::Snapshot {
                 exit_code: a.exit_code,
                 input_tokens: a.input_tokens,
                 output_tokens: a.output_tokens,
+                parent_agent_id: a.parent_agent_id.clone(),
                 ..session_snapshot(&a.session)
             })
             .collect(),

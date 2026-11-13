@@ -345,6 +345,9 @@ impl Grants {
             commands: g.commands.clone(),
             expires_at_ms: g.expires_at_ms,
             signer_device_id: g.signer_device_id.clone(),
+            kind: String::new(),
+            folder: String::new(),
+            remaining: 0,
         });
         Ok(())
     }

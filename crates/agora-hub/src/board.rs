@@ -748,6 +748,7 @@ mod tests {
                     model: String::new(),
                     forgotten: false,
                     session: crate::projection::SessionView::default(),
+                    parent_agent_id: String::new(),
                 },
             );
         }
