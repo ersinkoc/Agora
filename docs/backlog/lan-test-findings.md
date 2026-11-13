@@ -55,7 +55,7 @@ branch (`docs/fordevs/`). Each row is something the run showed that no CI run ha
   - New here: the consequence does not wait for the user. The node itself runs `git -C <folder> status` unconfined (`agora-node/src/git.rs`)
     whenever changes are shown. A `core.fsmonitor` command set in `.git/config` runs during `status`; I checked this with git and the
     node's environment (`LC_ALL=C`, `GIT_OPTIONAL_LOCKS=0`).
-  - The same may hold for `git diff` drivers (`diff.external`, `textconv`). Not checked.
+  - The same held for `git diff` drivers (`diff.external`, `textconv`); #300 turns them off for the node's git too.
   - Windows' narrow profile covers only worktrees (`.git` is a file there). On Linux and macOS, the worktree profile makes the shared git
     folder writable (`common_git_dir`).
   - Done:
