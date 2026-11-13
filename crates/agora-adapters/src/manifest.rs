@@ -275,6 +275,16 @@ fn fluent_id(s: &str) -> bool {
         && s.len() <= 64
 }
 
+/// ADR-0059: argument spellings known to make an agent act without asking (`--dangerously-skip-permissions`,
+/// `--dangerously-bypass-approvals-and-sandbox`, any `--dangerously-*`, `--yolo`, `--yolo-plus`, `--yolo-*`).
+pub fn skips_permissions_flag(arg: &str) -> bool {
+    let a = arg.trim().to_ascii_lowercase();
+    a.contains("dangerously")
+        || a == "--yolo"
+        || a.starts_with("--yolo-")
+        || a.starts_with("--yolo=")
+}
+
 /// A launch option id: what a start names and a device signs (comma-joined), so lowercase ASCII, digits and `-` only.
 pub fn valid_option_id(s: &str) -> bool {
     !s.is_empty()
@@ -418,6 +428,11 @@ impl Manifest {
             if !args_ok {
                 return Err(at("args"));
             }
+            // A flag known to make an agent act without asking must be declared as such, so a mislabelled option cannot dodge the
+            // node's `skip_permissions` policy, the confirmation or the badge.
+            if !o.skips_permissions && o.args.iter().any(|a| skips_permissions_flag(a)) {
+                return Err(at("skips_permissions"));
+            }
         }
         Ok(())
     }
@@ -485,6 +500,14 @@ mod launch_tests {
         assert!(!m.launch_option("resume-last").unwrap().skips_permissions);
         assert!(m.launch_option("other").is_none());
         assert!(Manifest::parse(&with("")).unwrap().launch.option.is_empty());
+        // Declared as skipping permissions, the same flags load.
+        for flag in ["--dangerously-skip-permissions", "--yolo", "--yolo-plus"] {
+            assert!(
+                Manifest::parse(&with(&SKIP.replace("--yes", flag))).is_ok(),
+                "{flag}"
+            );
+        }
+        assert!(!skips_permissions_flag("--yolonger") && !skips_permissions_flag("--continue"));
     }
 
     #[test]
@@ -497,6 +520,15 @@ mod launch_tests {
             SKIP.replace("[\"--yes\"]", "[\" \"]"),
             SKIP.replace("option-skip-permissions", "Don't ask"),
             SKIP.replace("option-skip-permissions", ""),
+            // A known "do not ask" flag declared as harmless.
+            SKIP.replace("skips_permissions = true", "skips_permissions = false")
+                .replace("--yes", "--dangerously-skip-permissions"),
+            SKIP.replace("skips_permissions = true\n", "")
+                .replace("--yes", "--yolo"),
+            SKIP.replace("skips_permissions = true", "skips_permissions = false")
+                .replace("--yes", "--yolo-plus"),
+            SKIP.replace("skips_permissions = true", "skips_permissions = false")
+                .replace("--yes", "--Dangerously-Bypass-Approvals-And-Sandbox"),
             format!("{SKIP}extra = 1\n"),
             (0..=MAX_LAUNCH_OPTIONS)
                 .map(|i| SKIP.replace("\"skip-permissions\"", &format!("\"o{i}\"")))
