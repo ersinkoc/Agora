@@ -75,3 +75,4 @@ Date: YYYY-MM-DD
 | 0055 | A resync keeps a running agent's board work | Accepted |
 | 0056 | One hub; every node machine can reach the hub's panel | Accepted |
 | 0057 | An agent can start and wait for other agents, with the user's approval | Accepted |
+| 0058 | Show an adapter's errors and notices, and choose its model and mode | Accepted |
