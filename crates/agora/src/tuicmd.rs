@@ -1523,6 +1523,10 @@ fn console(
     let mut dirty_since: Option<Instant> = None;
     let mut last_refresh = Instant::now();
     let mut preview: Option<Preview> = None;
+    // The open chat agent's conversation (one at a time, the active tab's), and an agent whose conversation could not be opened (not
+    // tried again until another tab comes to the front).
+    let mut chat: Option<ChatPane> = None;
+    let mut chat_failed: Option<String> = None;
     let mut redraw = true;
     let mut last_draw = Instant::now() - Duration::from_secs(1);
     let mut area = window_area();
@@ -1598,10 +1602,16 @@ fn console(
             for act in acts {
                 match act {
                     Action::Input(b) => {
-                        if let Some((node, local)) =
-                            c.app.active_agent().and_then(|a| a.split_once('/'))
-                        {
-                            session.terminal_input(node, &format!("t-{local}"), &b);
+                        let active = c.app.active_agent().map(str::to_string);
+                        match chat.as_mut().filter(|p| Some(&p.agent) == active.as_ref()) {
+                            Some(pane) => chat_input(say, session, rx, c, &mut preview, pane, &b),
+                            None => {
+                                if let Some((node, local)) =
+                                    active.as_deref().and_then(|a| a.split_once('/'))
+                                {
+                                    session.terminal_input(node, &format!("t-{local}"), &b);
+                                }
+                            }
                         }
                     }
                     Action::PaneSize { .. } => sized = None,
@@ -1614,27 +1624,6 @@ fn console(
                         mouse_mode(false);
                         return Next::Quit;
                     }
-                    Action::Chat(id) => {
-                        let agent = c
-                            .snapshot
-                            .as_ref()
-                            .and_then(|s| s.agents.iter().find(|a| a.agent_id == id).cloned());
-                        match full_screen(c, session, &mut preview, |session| {
-                            chat(say, session, &id, rx, color, agent)
-                        }) {
-                            Ok(true) => {
-                                say.err(key!("tui-lost"), hub_arg);
-                                std::thread::sleep(Duration::from_secs(2));
-                                return Next::Reconnect;
-                            }
-                            Ok(false) => c.notice.clear(),
-                            Err(code) => {
-                                c.notice = say
-                                    .text(key!("tui-opening-failed"), &[("code", Arg::Str(code))])
-                            }
-                        }
-                        dirty_since.get_or_insert_with(Instant::now);
-                    }
                     Action::Command(k) => {
                         if command(say, session, rx, color, c, &mut preview, area, k) {
                             dirty_since.get_or_insert_with(Instant::now);
@@ -1645,6 +1634,42 @@ fn console(
         }
         if let Some(s) = &c.snapshot {
             follow(session, s, c.app.active_agent().unwrap_or(""), &mut preview);
+            if let Err(code) = follow_chat(
+                session,
+                s,
+                c.app.active_agent(),
+                &mut chat,
+                &mut chat_failed,
+            ) {
+                c.notice = say.text(key!("tui-opening-failed"), &[("code", Arg::Str(code))]);
+                redraw = true;
+            }
+        }
+        if let Some(pane) = chat.as_mut() {
+            match session.chat_next(pane.stream, Duration::from_millis(1)) {
+                ChatEvent::Lines(lines, replace) => {
+                    if replace {
+                        pane.entries = lines;
+                    } else {
+                        let last = pane.entries.last().map_or(0, |e| e.entry_id);
+                        pane.entries
+                            .extend(lines.into_iter().filter(|e| e.entry_id > last));
+                    }
+                    redraw = true;
+                }
+                ChatEvent::Ended => {
+                    if let Some(p) = chat.take() {
+                        session.terminal_close(p.stream);
+                    }
+                    redraw = true;
+                }
+                ChatEvent::Lost => {
+                    say.err(key!("tui-lost"), hub_arg);
+                    std::thread::sleep(Duration::from_secs(2));
+                    return Next::Reconnect;
+                }
+                ChatEvent::Quiet => {}
+            }
         }
         // The open agent's terminal takes the pane's size (as `agora terminal attach` takes the window's), once per agent and size.
         let pane = c.app.areas(area).terminal;
@@ -1678,7 +1703,7 @@ fn console(
             if std::mem::take(&mut fresh) {
                 let _ = c.window.invalidate();
             }
-            draw_console(say, c, &rows, preview.as_ref(), area);
+            draw_console(say, c, &rows, preview.as_ref(), chat.as_ref(), area);
             last_draw = Instant::now();
             redraw = false;
         }
@@ -1695,7 +1720,14 @@ fn console(
     }
 }
 
-fn draw_console(say: &Say, c: &mut Console, rows: &[Row], preview: Option<&Preview>, area: Area) {
+fn draw_console(
+    say: &Say,
+    c: &mut Console,
+    rows: &[Row],
+    preview: Option<&Preview>,
+    chat: Option<&ChatPane>,
+    area: Area,
+) {
     let text = |id: &str, args: &[(&str, Arg)]| say.text(id, args);
     let inspector = c.app.areas(area).inspector;
     let details = c
@@ -1743,6 +1775,35 @@ fn draw_console(say: &Say, c: &mut Console, rows: &[Row], preview: Option<&Previ
     });
     let ended_text = say.text(key!("tui-state-finished"), &[]);
     let no_screen = ended.then_some(ended_text.as_str());
+    // A chat agent's conversation as it fits the pane: what it runs with first, then its lines, a note, and the line being typed.
+    let pane = c.app.areas(area).terminal;
+    let conversation = chat
+        .filter(|p| Some(p.agent.as_str()) == c.app.active_agent())
+        .map(|p| {
+            let local = p.agent.split_once('/').map_or(p.agent.as_str(), |(_, l)| l);
+            let head = p
+                .snapshot
+                .as_ref()
+                .and_then(|a| session_line(a, &text))
+                .map(|l| plain(&l));
+            let room = usize::from(pane.height)
+                .saturating_sub(usize::from(head.is_some()) + usize::from(!p.note.is_empty()));
+            let mut lines = render_chat(
+                &p.entries,
+                local,
+                &String::from_utf8_lossy(&p.typed),
+                (usize::from(pane.width), room.max(2)),
+                false,
+                &text,
+            );
+            if !p.note.is_empty() {
+                lines.insert(lines.len().saturating_sub(1), plain(&p.note));
+            }
+            if let Some(h) = head {
+                lines.insert(0, h);
+            }
+            lines
+        });
     let (app, colors) = (&c.app, c.colors);
     let _ = c.window.draw(|f| {
         app.draw(
@@ -1753,11 +1814,171 @@ fn draw_console(say: &Say, c: &mut Console, rows: &[Row], preview: Option<&Previ
                 details: &details,
                 notice: &notice,
                 no_screen,
+                conversation: conversation.as_deref(),
                 colors,
                 t: &text,
             },
         );
     });
+}
+
+/// A chat agent's conversation shown in the console's pane (ADR-0063): its stream, what came, and the line being typed.
+struct ChatPane {
+    agent: String,
+    stream: u32,
+    entries: Vec<ChatEntry>,
+    typed: Vec<u8>,
+    note: String,
+    /// ADR-0058: the line that asked to confirm a mode that does not ask; typing it again switches.
+    confirming: Option<String>,
+    /// What it runs with, as opened and as switched here.
+    snapshot: Option<agora_protocol::v1::AgentSnapshot>,
+}
+
+/// The conversation follows the active tab: opened when a chat agent's tab comes to the front, closed when another does. An agent
+/// whose conversation could not be opened is not tried again until another tab has been in front.
+fn follow_chat(
+    session: &mut Session,
+    s: &Snapshot,
+    active: Option<&str>,
+    chat: &mut Option<ChatPane>,
+    failed: &mut Option<String>,
+) -> Result<(), String> {
+    let wanted = active.filter(|id| {
+        s.agents.iter().any(|a| a.agent_id == *id && a.running)
+            && !s.terminals.iter().any(|t| t.agent_id == *id)
+    });
+    if chat.as_ref().map(|p| p.agent.as_str()) == wanted {
+        return Ok(());
+    }
+    if let Some(p) = chat.take() {
+        session.terminal_close(p.stream);
+    }
+    let Some(id) = wanted else {
+        *failed = None;
+        return Ok(());
+    };
+    if failed.as_deref() == Some(id) {
+        return Ok(());
+    }
+    let (node, local) = id.split_once('/').unwrap_or(("", id));
+    match session.chat_open(node, local) {
+        Ok(stream) => {
+            *chat = Some(ChatPane {
+                agent: id.to_string(),
+                stream,
+                entries: Vec::new(),
+                typed: Vec::new(),
+                note: String::new(),
+                confirming: None,
+                snapshot: s.agents.iter().find(|a| a.agent_id == id).cloned(),
+            });
+            *failed = None;
+            Ok(())
+        }
+        Err(code) => {
+            *failed = Some(id.to_string());
+            Err(code)
+        }
+    }
+}
+
+/// One key (or a paste) typed into a chat agent's tab: text goes to the line, Backspace takes a character back, Enter sends it (or
+/// switches the mode or model it names, as the full-screen chat did). Keys that are escape sequences (arrows) are ignored.
+fn chat_input(
+    say: &Say,
+    session: &mut Session,
+    rx: &mpsc::Receiver<u8>,
+    c: &mut Console,
+    preview: &mut Option<Preview>,
+    pane: &mut ChatPane,
+    bytes: &[u8],
+) {
+    if bytes.first() == Some(&0x1b) {
+        return;
+    }
+    // A paste is one chunk of several bytes: its line breaks are spaces, it is sent with Enter like typed text.
+    let paste = bytes.len() > 1 && std::str::from_utf8(bytes).is_ok_and(|t| t.chars().count() > 1);
+    for &b in bytes {
+        match b {
+            b'\r' | b'\n' if paste => pane.typed.push(b' '),
+            b'\r' | b'\n' => chat_send(say, session, rx, c, preview, pane),
+            0x7f | 0x08 => {
+                // Backspace removes one character, not one byte.
+                while pane.typed.pop().is_some_and(|b| b & 0xC0 == 0x80) {}
+            }
+            b if b >= 0x20 => pane.typed.push(b),
+            _ => {}
+        }
+    }
+}
+
+fn chat_send(
+    say: &Say,
+    session: &mut Session,
+    rx: &mpsc::Receiver<u8>,
+    c: &mut Console,
+    preview: &mut Option<Preview>,
+    pane: &mut ChatPane,
+) {
+    let line = String::from_utf8_lossy(&pane.typed).trim().to_string();
+    pane.typed.clear();
+    let (node, local) = pane.agent.split_once('/').unwrap_or(("", &pane.agent));
+    let (node, local) = (node.to_string(), local.to_string());
+    let scope = format!("agent:{local}");
+    let asked = chat_command(&line, pane.snapshot.as_ref(), pane.confirming.as_deref());
+    pane.confirming = None;
+    pane.note = match asked {
+        ChatCommand::Unknown { id, offered } => say.text(
+            key!("tui-option-unknown"),
+            &[("id", Arg::Str(id)), ("ids", Arg::Str(offered.join(", ")))],
+        ),
+        ChatCommand::Confirm { id } => {
+            pane.confirming = Some(line);
+            say.text(key!("tui-option-confirm"), &[("id", Arg::Str(id))])
+        }
+        ChatCommand::Switch { model, id } => {
+            // The same per-agent grant the web client asks for: this one switch for this agent.
+            let command = if model {
+                "agent.set_model"
+            } else {
+                "agent.set_mode"
+            };
+            let tried = full_screen(c, session, preview, |session| {
+                with_grant(say, session, rx, (&node, &scope, &[command]), |s| {
+                    s.set_option(&node, &local, model, &id)
+                })
+            });
+            match tried {
+                Tried::Done(Ok(())) => {
+                    if let Some(a) = pane.snapshot.as_mut() {
+                        agora_tui::render::switched(a, model, &id);
+                    }
+                    say.text(key!("tui-option-switched"), &[])
+                }
+                Tried::Done(Err(code)) => {
+                    say.text(key!("tui-send-failed"), &[("code", Arg::Str(code))])
+                }
+                Tried::Declined => String::new(),
+                Tried::Line(l) => l,
+            }
+        }
+        ChatCommand::Prompt if line.is_empty() => String::new(),
+        ChatCommand::Prompt => {
+            let tried = full_screen(c, session, preview, |session| {
+                with_grant(say, session, rx, (&node, &scope, &TYPING), |s| {
+                    s.prompt(&node, &local, &line)
+                })
+            });
+            match tried {
+                Tried::Done(Ok(())) | Tried::Declined => String::new(),
+                Tried::Done(Err(code)) => {
+                    say.text(key!("tui-send-failed"), &[("code", Arg::Str(code))])
+                }
+                Tried::Line(l) => l,
+            }
+        }
+    };
 }
 
 /// Runs a full-screen question or view (it reads plain bytes and writes its own frames): the panel's terminal is let go and the
