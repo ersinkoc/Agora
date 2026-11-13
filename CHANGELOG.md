@@ -10,6 +10,17 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
   The list is only a list of candidates: a machine trusts none of them because the hub lists it. A device can ask another device of
   the same person to approve it, and the hub carries the signed approval (an endorsement) or removal to the machines, which verify it
   themselves; machines report which devices they trust, so the window can show it.
+- Trusting your devices on a machine is one step (ADR-0061). `agora node enroll` now lists the devices registered on the hub, each as
+  name · fingerprint · when it was registered, and asks on that machine's terminal "Trust these devices on this machine? [y/N]"
+  (a script or any terminal that cannot answer is a no). `agora node trust --from-hub` asks the same on a machine that is already
+  enrolled, and `--yes --fingerprint FP` (repeatable) trusts exactly the devices with those fingerprints without asking.
+  `agora node untrust ID` stops trusting a device at once. `agora node trust ID KEY` works as before, and a newly trusted device
+  is used without restarting the node.
+- A machine accepts an approval of a new device (an endorsement) only from a device it already trusts, for that machine, signed and
+  not expired: it lasts at most 90 days, is renewed each time the device is used there, and never outlasts the device that approved
+  it. A removal signed by a trusted device takes effect at once and an older approval cannot bring the device back. Each one the
+  machine applies or refuses is written to `<data>/device-trust.log`. The trusted-devices file keeps its format (owner-only, one
+  device per line; an approved device's line adds `expires=` and `via=`).
 
 ## 0.3.7
 

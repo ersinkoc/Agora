@@ -22,9 +22,11 @@ cli-usage =
       agora hub backup [FILE] [--keep N] [--hub-dir DIR]
       agora hub restore FILE [--hub-dir DIR]
       agora hub devices [--hub-dir DIR]
-      agora node enroll --hub URL --ca FILE --code CODE --id NAME
+      agora node enroll --hub URL --ca FILE --code CODE --id NAME [--yes --fingerprint FP]...
       agora panel
       agora node trust DEVICE_ID PUBLIC_KEY_HEX [--data DIR]
+      agora node trust --from-hub [--yes --fingerprint FP]... [--data DIR]
+      agora node untrust DEVICE_ID [--data DIR]
       agora tui [--hub HOST:PORT --ca FILE --code CODE] [--hub-dir DIR]
       agora update [--check] [--version X] [--release-url URL] [--release-key FILE] [--unsigned]
       agora adapter install NAME [--registry URL] [--root-key FILE] [--yes] | update [NAME] | list | remove NAME
@@ -80,8 +82,26 @@ cli-hub-notify = Notifications go to { $count } target(s) from { $file }.
 cli-hub-notify-skipped = { $count } line(s) of { $file } were not understood and are ignored. Each line is `ntfy URL` or `webhook URL`.
 cli-hub-web = Web app: https://{ $addr }/ . Sign in with the code { $code } (valid for 10 minutes; `agora hub login` makes another). The hub's certificate is signed by its own CA, so the browser warns until you trust it.
 cli-hub-login = Sign-in code for the web app: { $code } (valid for 10 minutes). Open the hub's address in a browser and enter it.
-cli-trusted = Device { $id } can now answer approvals on this node. Restart the node to apply it.
+cli-trusted = Device { $id } can now answer approvals on this node.
 cli-trust-failed = Could not trust that device: { $reason }
+cli-devices-offer = The hub lists { $count ->
+        [one] a device
+       *[other] { $count } devices
+    } this machine does not trust yet. Compare each fingerprint with the one the window shows under "This device":
+cli-devices-line =   { $name } · { $fingerprint } · registered { $when }
+cli-devices-line-user =   { $name } · { $fingerprint } · registered { $when } · { $user }
+cli-devices-question = Trust these devices on this machine? [y/N]
+cli-devices-yes = y, yes
+cli-devices-trusted = Trusted { $name } ({ $id }, { $fingerprint }) on this machine.
+cli-devices-none = No device is registered on the hub yet. Sign in from the window, then run "agora node trust --from-hub" here.
+cli-devices-none-new = Every device registered on the hub is already trusted on this machine.
+cli-devices-declined = Nothing was trusted.
+cli-devices-not-asked = Nothing was trusted: this is not an interactive terminal. Run "agora node trust --from-hub" on this machine, or pass --yes with --fingerprint for each device.
+cli-devices-unmatched = No device the hub lists has the fingerprint { $fingerprint }; it was not trusted.
+cli-devices-not-enrolled = This machine is not enrolled with a hub. Run "agora node enroll" first.
+cli-devices-failed = Could not get the devices from the hub ({ $reason }).
+cli-untrusted = Device { $id } is no longer trusted on this machine.
+cli-untrust-unknown = Device { $id } was not trusted on this machine. It stays refused if the hub carries an earlier approval of it.
 cli-hub-devices-none = No device is registered yet. A browser or the terminal client registers itself when it signs in.
 cli-hub-device-line = { $name } · { $fingerprint } · { $id } · { $user } · registered { $created } · last used { $used }{ $state }
 cli-device-state-revoked = {" "}· removed

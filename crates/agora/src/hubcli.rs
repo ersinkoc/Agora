@@ -1047,6 +1047,12 @@ pub fn node_enroll(say: &Say, o: &Opts) -> ExitCode {
         say.err(key!("cli-usage"), &[]);
         return ExitCode::from(2);
     };
+    // ADR-0061: `--yes` covers exactly the devices whose fingerprints are given; checked before anything is enrolled.
+    if o.yes != !o.fingerprints.is_empty() {
+        say.err(key!("cli-bad-arguments"), &[]);
+        say.err(key!("cli-usage"), &[]);
+        return ExitCode::from(2);
+    }
     // `--ca -` reads the certificate from standard input (how `hub ssh install` hands it over, ADR-0034).
     let ca_text = if ca_file.as_os_str() == "-" {
         let mut t = String::new();
@@ -1090,7 +1096,13 @@ pub fn node_enroll(say: &Say, o: &Opts) -> ExitCode {
                     ("dir", dir.display().to_string().into()),
                 ],
             );
-            ExitCode::SUCCESS
+            // ADR-0061: the owner is at this machine now; the devices they registered can be trusted here in one step. An old hub
+            // sends none, and nothing is asked.
+            if r.devices.is_empty() {
+                ExitCode::SUCCESS
+            } else {
+                crate::trustcli::offer(say, o, &r.devices)
+            }
         }
         Err(LinkError::Refused(code)) => {
             say.err(key!("cli-enroll-refused"), &[("code", code.into())]);
@@ -1154,6 +1166,7 @@ pub fn load_link(socket: PathBuf) -> Option<(String, HubLink)> {
             mesh_out: None,
             grants: None,
             mesh: None,
+            devices: None,
         },
     ))
 }

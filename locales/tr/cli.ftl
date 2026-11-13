@@ -22,9 +22,11 @@ cli-usage =
       agora hub backup [DOSYA] [--keep N] [--hub-dir DİZİN]
       agora hub restore DOSYA [--hub-dir DİZİN]
       agora hub devices [--hub-dir DİZİN]
-      agora node enroll --hub URL --ca FILE --code CODE --id NAME
+      agora node enroll --hub URL --ca FILE --code CODE --id NAME [--yes --fingerprint PARMAK_İZİ]...
       agora panel
       agora node trust CİHAZ_ID AÇIK_ANAHTAR_HEX [--data DİZİN]
+      agora node trust --from-hub [--yes --fingerprint PARMAK_İZİ]... [--data DİZİN]
+      agora node untrust CİHAZ_ID [--data DİZİN]
       agora tui [--hub ADRES:PORT --ca DOSYA --code KOD] [--hub-dir DİZİN]
       agora update [--check] [--version X] [--release-url URL] [--release-key DOSYA] [--unsigned]
       agora adapter install AD [--registry URL] [--root-key DOSYA] [--yes] | update [AD] | list | remove AD
@@ -80,8 +82,26 @@ cli-hub-notify = Bildirimler { $file } dosyasındaki { $count } hedefe gidiyor.
 cli-hub-notify-skipped = { $file } dosyasının { $count } satırı anlaşılamadı ve yok sayılıyor. Her satır `ntfy URL` ya da `webhook URL` olmalı.
 cli-hub-web = Web uygulaması: https://{ $addr }/ . { $code } koduyla giriş yapın (10 dakika geçerli; yenisi için `agora hub login`). Hub sertifikasını kendi sertifika yetkilisi (CA) imzaladığı için bu yetkiliye güvenene kadar tarayıcı uyarı verir.
 cli-hub-login = Web uygulaması için giriş kodu: { $code } (10 dakika geçerli). Hub adresini tarayıcıda açıp kodu girin.
-cli-trusted = { $id } cihazı artık bu makinedeki onaylara yanıt verebilir. Uygulanması için bu makinedeki düğümü yeniden başlatın.
+cli-trusted = { $id } cihazı artık bu makinedeki onaylara yanıt verebilir.
 cli-trust-failed = Bu cihaz güvenilir olarak kaydedilemedi: { $reason }
+cli-devices-offer = Hub, bu makinenin henüz güvenmediği { $count ->
+        [one] bir cihaz
+       *[other] { $count } cihaz
+    } listeliyor. Her parmak izini, pencerede "Bu cihaz" altında gösterilenle karşılaştırın:
+cli-devices-line =   { $name } · { $fingerprint } · kayıt { $when }
+cli-devices-line-user =   { $name } · { $fingerprint } · kayıt { $when } · { $user }
+cli-devices-question = Bu cihazlara bu makinede güvenilsin mi? [e/H]
+cli-devices-yes = e, evet, y, yes
+cli-devices-trusted = { $name } ({ $id }, { $fingerprint }) bu makinede güvenilir oldu.
+cli-devices-none = Hub'da henüz kayıtlı cihaz yok. Pencereden oturum açın, sonra burada "agora node trust --from-hub" çalıştırın.
+cli-devices-none-new = Hub'da kayıtlı her cihaza bu makinede zaten güveniliyor.
+cli-devices-declined = Hiçbir cihaza güvenilmedi.
+cli-devices-not-asked = Hiçbir cihaza güvenilmedi: bu etkileşimli bir terminal değil. Bu makinede "agora node trust --from-hub" çalıştırın ya da her cihaz için --yes ile --fingerprint verin.
+cli-devices-unmatched = Hub'ın listelediği hiçbir cihazın parmak izi { $fingerprint } değil; güvenilmedi.
+cli-devices-not-enrolled = Bu makine bir hub'a kayıtlı değil. Önce "agora node enroll" çalıştırın.
+cli-devices-failed = Cihazlar hub'dan alınamadı ({ $reason }).
+cli-untrusted = { $id } cihazına artık bu makinede güvenilmiyor.
+cli-untrust-unknown = { $id } cihazına bu makinede zaten güvenilmiyordu. Hub onun daha önceki bir onayını getirse de reddedilir.
 cli-hub-devices-none = Henüz kayıtlı cihaz yok. Bir tarayıcı ya da terminal istemcisi oturum açtığında kendini kaydeder.
 cli-hub-device-line = { $name } · { $fingerprint } · { $id } · { $user } · kayıt { $created } · son kullanım { $used }{ $state }
 cli-device-state-revoked = {" "}· kaldırıldı

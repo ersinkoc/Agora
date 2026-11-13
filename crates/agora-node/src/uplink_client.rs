@@ -37,6 +37,8 @@ pub const CAPABILITIES: &[&str] = &[
     // ADR-0058
     "agent.set_mode",
     "agent.set_model",
+    // ADR-0061: verifies the endorsements and revocations the hub carries, and reports `NodeTrustedDevices`.
+    "device.trust",
 ];
 
 /// Events sent per step; the hub acknowledges after each batch.
@@ -64,6 +66,9 @@ pub struct HubLink {
     /// The node's mesh, for the hub's `BoardJoin` (ADR-0039 amendment B), which is answered here and never through the control
     /// socket. `None`: `BoardJoin` is refused.
     pub mesh: Option<Arc<crate::mesh_server::MeshServer>>,
+    /// The machine's trusted devices (ADR-0061): the hub's `DeviceEndorse` and `DeviceRevoke` are verified and applied here, never
+    /// through the control socket. `None`: both are refused.
+    pub devices: Option<Arc<crate::device_trust::DeviceTrust>>,
 }
 
 type Done = Box<dyn FnOnce(Result<Option<crate::mesh_server::BoardReply>, String>) + Send>;
@@ -313,6 +318,7 @@ pub async fn run_once(
             link.mesh_out.as_deref(),
             link.grants.clone(),
             link.mesh.clone(),
+            link.devices.clone(),
         )
         .await
     } else {
@@ -325,11 +331,13 @@ pub async fn run_once(
             link.mesh_out.as_deref(),
             link.grants.clone(),
             link.mesh.clone(),
+            link.devices.clone(),
         )
         .await
     }
 }
 
+#[allow(clippy::too_many_arguments)] // each is one of the link's parts, handed over as it is
 async fn converse<S>(
     mut conn: Conn<S>,
     sink: &Arc<EventSink>,
@@ -338,6 +346,7 @@ async fn converse<S>(
     mesh_out: Option<&MeshOut>,
     grants: Option<Arc<crate::grants::Grants>>,
     mesh: Option<Arc<crate::mesh_server::MeshServer>>,
+    devices: Option<Arc<crate::device_trust::DeviceTrust>>,
 ) -> Result<(), LinkError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -472,6 +481,21 @@ where
                     };
                     // ADR-0039 amendment B: only the hub asks a node to hand over its local board work, so it is answered here,
                     // where the hub's commands enter, and never through the local control socket.
+                    // ADR-0061: what the hub carries from a person's device is verified here against this machine's trusted devices.
+                    if matches!(
+                        req.command,
+                        Some(
+                            command_request::Command::DeviceEndorse(_)
+                                | command_request::Command::DeviceRevoke(_)
+                        )
+                    ) {
+                        let devices = devices.clone();
+                        let tx = answers_tx.clone();
+                        tokio::task::spawn_blocking(move || {
+                            let _ = tx.send(device_answer(devices.as_deref(), req));
+                        });
+                        continue;
+                    }
                     if let Some(command_request::Command::BoardJoin(j)) = &req.command {
                         let mesh = mesh.clone();
                         let tx = answers_tx.clone();
@@ -676,6 +700,41 @@ fn board_join_answer(
     }
 }
 
+/// The node's answer to the hub's `DeviceEndorse` or `DeviceRevoke` (ADR-0061).
+fn device_answer(
+    devices: Option<&crate::device_trust::DeviceTrust>,
+    req: CommandRequest,
+) -> CommandResponse {
+    use agora_protocol::{Error, ErrorCode};
+    let now = crate::grants::now_ms();
+    let invalid = |f: &str| Error::new(ErrorCode::ProtocolInvalidMessage).with("field", f);
+    let result = match (devices, req.command) {
+        (None, _) => {
+            Err(Error::new(ErrorCode::ProtocolCapabilityMissing).with("capability", "device.trust"))
+        }
+        (Some(d), Some(command_request::Command::DeviceEndorse(e))) => match e.endorsement {
+            Some(e) => d.endorse(&e, now).map(|_| ()),
+            None => Err(invalid("endorsement")),
+        },
+        (Some(d), Some(command_request::Command::DeviceRevoke(r))) => match r.revocation {
+            Some(r) => d.revoke(&r, now).map(|_| ()),
+            None => Err(invalid("revocation")),
+        },
+        (Some(_), _) => Err(invalid("command")),
+    };
+    CommandResponse {
+        request_id: req.request_id,
+        result: Some(match result {
+            Ok(()) => command_response::Result::Ok(agora_protocol::v1::CommandOk {
+                result: Some(agora_protocol::v1::command_ok::Result::Empty(
+                    agora_protocol::v1::Empty {},
+                )),
+            }),
+            Err(e) => command_response::Result::Err(e.to_info()),
+        }),
+    }
+}
+
 /// Runs a routed command on this node's control socket and returns its answer (an error answer when it cannot).
 /// Terminal streams are not relayed by this path (they need a stream of their own), so they are refused.
 fn run_local(
@@ -864,6 +923,56 @@ pub fn spawn(sink: Arc<EventSink>, link: HubLink) -> std::io::Result<UplinkHandl
     Ok(UplinkHandle {
         stop,
         thread: Some(thread),
+    })
+}
+
+/// ADR-0061: the devices registered on the hub (candidates only), asked on a connection of its own made with this node's certificate,
+/// so the node's running connection is not replaced. Blocks the calling thread; for `agora node trust --from-hub`.
+pub fn list_devices(link: &HubLink) -> Result<Vec<agora_protocol::v1::DeviceInfo>, LinkError> {
+    use agora_protocol::v1::{command_ok, DeviceList};
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| LinkError::Transport(e.to_string()))?;
+    rt.block_on(async {
+        let (tls, host, addr) = split_url(&link.url)?;
+        if !tls {
+            // Without TLS the hub cannot tell who is asking, so it would not answer.
+            return Err(LinkError::Bad("asking for devices needs wss://".into()));
+        }
+        let tcp = TcpStream::connect(&addr)
+            .await
+            .map_err(|e| LinkError::Transport(e.to_string()))?;
+        let name = ServerName::try_from(host).map_err(|e| LinkError::Bad(e.to_string()))?;
+        let stream = connector(link)?
+            .connect(name, tcp)
+            .await
+            .map_err(|e| LinkError::Transport(e.to_string()))?;
+        let mut conn = ws::connect(stream, &link.url).await?;
+        let req = CommandRequest {
+            request_id: "devices".into(),
+            idempotency_key: String::new(),
+            target_node: String::new(),
+            command: Some(command_request::Command::DeviceList(DeviceList {})),
+        };
+        conn.send(&frame(STREAM_COMMANDS, 0, req.encode_to_vec()))
+            .await?;
+        let f = match tokio::time::timeout(Duration::from_secs(15), conn.recv()).await {
+            Ok(Ok(Some(f))) => f,
+            Ok(Ok(None)) => return Err(LinkError::Closed),
+            Ok(Err(e)) => return Err(e.into()),
+            Err(_) => return Err(LinkError::Transport("the hub did not answer".into())),
+        };
+        let resp = CommandResponse::decode(f.payload.as_slice())
+            .map_err(|_| LinkError::Transport("bad response".into()))?;
+        match resp.result {
+            Some(command_response::Result::Ok(ok)) => match ok.result {
+                Some(command_ok::Result::DeviceList(l)) => Ok(l.devices),
+                _ => Err(LinkError::Transport("unexpected answer".into())),
+            },
+            Some(command_response::Result::Err(e)) => Err(LinkError::Refused(e.code)),
+            None => Err(LinkError::Transport("empty answer".into())),
+        }
     })
 }
 

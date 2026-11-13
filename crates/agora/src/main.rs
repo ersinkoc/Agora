@@ -26,6 +26,7 @@ const TERMINAL_STREAM: u32 = 3;
 
 mod adaptercmd;
 mod hubcli;
+mod trustcli;
 mod tuicmd;
 mod update;
 
@@ -117,6 +118,9 @@ pub(crate) struct Opts {
     since: Option<u64>,
     who: Option<String>,
     root_key: Option<PathBuf>,
+    /// ADR-0061: `agora node trust --from-hub`, and the fingerprints `--yes` covers.
+    from_hub: bool,
+    fingerprints: Vec<String>,
     positional: Vec<String>,
 }
 
@@ -163,6 +167,8 @@ fn parse(args: &[String]) -> Option<Opts> {
             "--who" => o.who = Some(it.next()?.clone()),
             "--role" => o.role = Some(it.next()?.clone()),
             "--root-key" => o.root_key = Some(it.next()?.into()),
+            "--from-hub" => o.from_hub = true,
+            "--fingerprint" => o.fingerprints.push(it.next()?.clone()),
             s if s.starts_with("--") => return None,
             _ => o.positional.push(a.clone()),
         }
@@ -170,7 +176,7 @@ fn parse(args: &[String]) -> Option<Opts> {
     Some(o)
 }
 
-fn socket_path(o: &Opts) -> PathBuf {
+pub(crate) fn socket_path(o: &Opts) -> PathBuf {
     o.socket.clone().unwrap_or_else(|| home().join("node.sock"))
 }
 
@@ -236,7 +242,8 @@ fn main() -> ExitCode {
         ["hub", "backup"] => hubcli::hub_backup(&say, &opts),
         ["hub", "restore"] => hubcli::hub_restore(&say, &opts),
         ["node", "enroll"] => hubcli::node_enroll(&say, &opts),
-        ["node", "trust"] => node_trust(&say, &opts),
+        ["node", "trust"] => trustcli::node_trust(&say, &opts),
+        ["node", "untrust"] => trustcli::node_untrust(&say, &opts),
         ["node", "stdio"] => bridge_stdio(&say, &socket_path(&opts)),
         ["mesh", "stdio"] => match &opts.socket {
             // An agent's MCP client starts this as its mesh server; the node told it which socket is its own.
@@ -358,36 +365,6 @@ fn doctor(say: &Say, o: &Opts) -> ExitCode {
     }
 }
 
-/// `agora node trust DEVICE_ID PUBLIC_KEY_HEX`: lets a device answer approvals on this node. Run by the owner on the
-/// machine itself; nothing a hub or client sends can do this.
-fn node_trust(say: &Say, o: &Opts) -> ExitCode {
-    let (Some(id), Some(key)) = (o.positional.first(), o.positional.get(1)) else {
-        say.err(key!("cli-bad-arguments"), &[]);
-        say.err(key!("cli-usage"), &[]);
-        return ExitCode::from(2);
-    };
-    let dir = o.data.clone().unwrap_or_else(|| home().join("data"));
-    let result = std::fs::create_dir_all(&dir)
-        .map_err(|e| e.to_string())
-        .and_then(|()| {
-            agora_node::approvals::trust_device(
-                &dir.join(agora_node::approvals::TRUSTED_DEVICES_FILE),
-                id,
-                key,
-            )
-        });
-    match result {
-        Ok(()) => {
-            say.out(key!("cli-trusted"), &[("id", id.clone().into())]);
-            ExitCode::SUCCESS
-        }
-        Err(e) => {
-            say.err(key!("cli-trust-failed"), &[("reason", e.into())]);
-            ExitCode::from(1)
-        }
-    }
-}
-
 fn node_run(say: &Say, o: &Opts) -> ExitCode {
     // A crash can leave folder permissions for a confined agent behind (Windows); nothing is running yet, so undo them.
     agora_platform::recover_sandbox_leftovers();
@@ -445,6 +422,7 @@ fn node_run(say: &Say, o: &Opts) -> ExitCode {
         l.mesh_out = Some(out);
         l.grants = Some(Arc::clone(&node.grants));
         l.mesh = Some(Arc::clone(&node.mesh));
+        l.devices = Some(Arc::clone(&node.devices));
         agora_node::uplink_client::spawn(Arc::clone(&node.events), l).ok()
     });
     // Run until the process is stopped; agents die with it and the socket file is replaced on next start.

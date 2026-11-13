@@ -58,8 +58,13 @@ node id, approval id and verdict (no replay on another node or request, no flipp
 ids, expiry, cancellation when an agent stops, and a policy that lists which actions need approval. The signature scheme sits
 behind a `Verifier` trait; the scheme is ECDSA P-256 (ADR-0028, `P256Verifier`). Trusted device keys reach the node only through its owner:
 `agora node trust DEVICE_ID PUBLIC_KEY_HEX` writes `<data>/trusted-devices` on the machine itself (read at start and again whenever the file changes, so trusting a browser never means restarting the node and stopping its agents; malformed
-lines are skipped, never trusted), and no hub or client message can edit it. The web client keeps a non-extractable P-256 key in the browser (IndexedDB); its "This device" page shows the public key and the exact `agora node trust` command, and approvals are signed there (`apps/web/src/net/approval.ts`) and verified on the node. Adding a device by a user-signed message from an
-already trusted device is ADR-0061 (see "Devices" in `docs/specs/protocol.md`; threats T20 and T21).
+lines are skipped, never trusted), and no hub or client message can edit it. The web client keeps a non-extractable P-256 key in the browser (IndexedDB); its "This device" page shows the public key and the exact `agora node trust` command, and approvals are signed there (`apps/web/src/net/approval.ts`) and verified on the node. ADR-0061 (`agora-node::device_trust`, "Devices" in `docs/specs/protocol.md`, threats T20 and T21): `agora node enroll` and
+`agora node trust --from-hub` show the hub's registered devices with fingerprints and trust them only on the owner's `y` at that
+terminal (a non-interactive one is a no; `--yes` covers only the fingerprints given); a device already trusted can endorse another
+(verified on the node: trusted signer, this machine in scope, at most 90 days, not revoked since, never longer than the signer's own
+trust; renewed by use); a revocation signed by a trusted device, or `agora node untrust`, removes a device at once and is remembered in
+`<data>/device-revocations` so an older endorsement cannot bring it back; every endorsement and revocation applied or refused is
+written to `<data>/device-trust.log`. The trusted-devices file stays owner-only (written beside itself and renamed).
 
 ### Signed grants for routed commands (ADR-0041)
 `agora-node::grants` gates the commands a hub routes to the node (the uplink path only; the node's own control socket is never gated).
