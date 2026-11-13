@@ -2172,3 +2172,87 @@ fn the_hub_says_why_it_refuses_events_that_name_another_node() {
     assert_eq!(sink.acked(), 0);
     assert!(!hub.state.hub.view().0.nodes.contains_key("someone-else"));
 }
+
+/// Found on macOS in review: a node enrolled as one name, linked and fully acknowledged, then enrolled again under another name,
+/// still replayed the old name's events (a resync from 1 reached them) and was refused forever. Any log of another producer is set
+/// aside, not only `local`'s.
+#[test]
+fn a_node_enrolled_again_under_another_name_links_and_keeps_the_old_log() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return;
+    }
+    let hub = hubside("mac-tm4");
+    let addr = hub.listen("127.0.0.1:0");
+    let dir = tmp("re-enroll");
+    std::fs::create_dir_all(&dir).unwrap();
+    let cfg = |id: &str| agora_node::daemon::NodeConfig {
+        node_id: id.into(),
+        socket: dir.join("c.sock"),
+        data_dir: dir.join("data"),
+        worktree_root: dir.join("wt"),
+        manifests_dir: dir.join("manifests"),
+        projects: vec![],
+        limits: Default::default(),
+    };
+    // First enrollment: linked, everything acknowledged.
+    {
+        let node = agora_node::daemon::Node::start(&cfg("mac-tm4")).unwrap();
+        assert!(node.events_set_aside.is_none());
+        node.events
+            .checkout_discovered("mac-tm4", "proj", Path::new("/work/proj"));
+        let events = Arc::clone(&node.events);
+        let _link = spawn(Arc::clone(&events), hub.link(addr)).unwrap();
+        // The node stops while linked, so even its last event (`NodeOffline`) is acknowledged: nothing of the old name waits.
+        drop(node);
+        wait("the first name to be acknowledged", || {
+            events.acked() == events.next_seq() - 1 && events.acked() >= 3
+        });
+    }
+    // Enrolled again under a new name.
+    let (cert, key) = hub.enroll("mac-tm4b");
+    let node = agora_node::daemon::Node::start(&cfg("mac-tm4b")).unwrap();
+    assert_eq!(
+        node.events_set_aside.as_ref().map(|s| s.old_id.as_str()),
+        Some("mac-tm4")
+    );
+    let mut link = hub.link(addr);
+    (link.cert_pem, link.key_pem) = (cert, key);
+    let _link = spawn(Arc::clone(&node.events), link).unwrap();
+    wait("the new name to be online", || {
+        hub.state
+            .hub
+            .view()
+            .0
+            .nodes
+            .get("mac-tm4b")
+            .is_some_and(|n| n.online)
+    });
+    node.events.node_resources("mac-tm4b", 5, 5, 0);
+    wait("a new event under the new name", || {
+        hub.state.hub.view().0.nodes["mac-tm4b"].agents_running == 5
+    });
+    wait("everything to be acknowledged", || {
+        node.events.acked() == node.events.next_seq() - 1
+    });
+    let names: Vec<String> = std::fs::read_dir(dir.join("data").join("events"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    let logs = names
+        .iter()
+        .filter(|n| n.starts_with("events.mac-tm4.") && n.ends_with(".log"))
+        .count();
+    let acks = names
+        .iter()
+        .filter(|n| n.starts_with("events.mac-tm4.") && n.ends_with(".ack"))
+        .count();
+    assert_eq!((logs, acks), (1, 1), "{names:?}");
+    drop(_link);
+    drop(node);
+    // Back to not enrolled: the enrolled name's log is set aside again, never mixed with `local` events.
+    let node = agora_node::daemon::Node::start(&cfg("local")).unwrap();
+    assert_eq!(
+        node.events_set_aside.as_ref().map(|s| s.old_id.as_str()),
+        Some("mac-tm4b")
+    );
+}

@@ -3,6 +3,7 @@
 //! Events go to the durable buffer (`event_buffer`) as protocol `Event`s; with no hub connected they are
 //! simply retained (size-capped) until one acknowledges them. Agents never depend on any of this succeeding.
 
+use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -27,6 +28,8 @@ use crate::terminal::TerminalOptions;
 const TICK: Duration = Duration::from_millis(100);
 /// How often each agent's workspace is checked for uncommitted changes.
 const GIT_POLL: Duration = Duration::from_secs(5);
+/// In the event buffer's folder: the producer (node id) whose events the log holds.
+const PRODUCER_FILE: &str = "producer";
 /// Default size cap of the on-disk event buffer.
 pub const EVENT_BUFFER_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -191,12 +194,21 @@ impl EventSink {
     /// a fresh one starts; [`set_aside`](Self::set_aside) says so.
     pub fn open_with_cap(dir: &Path, producer: &str, max_bytes: u64) -> io::Result<Self> {
         let mut log = DiskEventLog::open(dir, max_bytes)?;
-        let foreign = log
-            .find_unacked(|p| v1::Event::decode(p).is_ok_and(|e| e.producer_id != producer))?
-            .and_then(|p| v1::Event::decode(p.as_slice()).ok())
-            .map(|e| e.producer_id);
+        // Whose log this is: the `producer` file says so (its events may all be acknowledged and compacted away, but the numbering
+        // still belongs to that name); a log from before the file existed is judged by any event it still holds.
+        let recorded = fs::read_to_string(dir.join(PRODUCER_FILE))
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty() && s != producer);
+        let foreign = match recorded {
+            Some(old) => Some(old),
+            None => log
+                .find_retained(|p| v1::Event::decode(p).is_ok_and(|e| e.producer_id != producer))?
+                .and_then(|p| v1::Event::decode(p.as_slice()).ok())
+                .map(|e| e.producer_id),
+        };
         let mut set_aside = None;
-        if let Some(old_id) = foreign {
+        if let Some(old_id) = foreign.filter(|_| !log.is_pristine()) {
             let secs = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map_or(0, |d| d.as_secs());
@@ -204,6 +216,9 @@ impl EventSink {
             log = DiskEventLog::open(dir, max_bytes)?;
             set_aside = Some(SetAside { old_id, path });
         }
+        let tmp = dir.join(format!("{PRODUCER_FILE}.tmp"));
+        fs::write(&tmp, producer)?;
+        fs::rename(&tmp, dir.join(PRODUCER_FILE))?;
         Ok(Self {
             producer: producer.to_string(),
             log: Mutex::new(log),

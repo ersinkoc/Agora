@@ -49,8 +49,10 @@ disk while disconnected.
 
 Node buffer (`agora-node::event_buffer`): an append-only log of checksummed records plus an atomically replaced ack
 file. A torn tail from a crash is truncated on open. After a reconnect the node replays everything after the
-hub's ack, in order. One log holds the events of one producer: when the node starts and events past the ack name another
-producer (it ran as `local` before it was enrolled, or under another name), it never replays them. It renames the log to
+hub's ack, in order. One log holds the events of one producer, named in the `producer` file beside it: when the node starts under
+another id than that file names, or (for a log from before the file) any retained event, acknowledged or not, names another
+producer (it ran as `local` before it was enrolled, was enrolled again under a new id, or runs un-enrolled again), it never
+replays them. It renames the log to
 `events.<old id>.<unix seconds>.log` (and its ack file to `.ack`) in the same folder, never deleting it, starts a fresh log
 numbered from 1, and says so in its output (`cli-node-events-set-aside`). The hub would refuse them anyway (section 3, hub node
 session). The log is size-capped (oldest events dropped first). If the hub asks for events the node no longer
