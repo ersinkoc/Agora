@@ -98,3 +98,6 @@ tui-interrupted-again = stopped with its machine · U start again
 tui-resumed = { $agent } is running again.
 tui-resume-not-interrupted = Only an agent that stopped with its machine can be resumed (u) or started again (U).
 tui-resume-failed = It did not start: { $reason }
+tui-resume-cannot = It cannot continue its own conversation. U starts it again in its folder (a new conversation).
+tui-resume-confirm = Press u again within 5 seconds to resume { $agent }.
+tui-again-confirm = Press U again within 5 seconds to start { $agent } again in its folder (a new conversation).

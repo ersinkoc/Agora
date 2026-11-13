@@ -52,8 +52,61 @@ fn forget_notice(say: &Say, result: Result<(), ErrorInfo>) -> String {
     plain(&say.text(key!("tui-forget-failed"), &[("reason", Arg::Str(reason))])).replace('\n', " ")
 }
 
-/// ADR-0060: Resume (or, with `fresh` or for an agent that cannot continue its own session, Start again) the selected agent, which
-/// its machine reported interrupted. Signed by this terminal's key for exactly that agent and choice.
+/// The first press of `u` or `U`: which key, for which agent, when.
+type Armed = (u8, String, Instant);
+
+/// How long the second press of `u` / `U` may come after the first.
+const CONFIRM_WITHIN: Duration = Duration::from_secs(5);
+
+#[derive(Debug, PartialEq, Eq)]
+enum ResumeKey {
+    NotInterrupted,
+    /// `u` on an agent that cannot continue its own conversation: it never quietly starts a new one.
+    CannotResume,
+    /// First press: the same key again within [`CONFIRM_WITHIN`] does it.
+    Confirm {
+        fresh: bool,
+    },
+    Go {
+        fresh: bool,
+    },
+}
+
+/// ADR-0060: what `u` (Resume) or `U` (Start again) does now for the selected agent. Each needs the same key twice within five seconds;
+/// another key, another agent or a later press starts over.
+fn resume_key(
+    snapshot: &Snapshot,
+    selected: &str,
+    key: u8,
+    armed: &mut Option<Armed>,
+    now: Instant,
+) -> ResumeKey {
+    let fresh = key == b'U';
+    let Some(a) = snapshot
+        .agents
+        .iter()
+        .find(|a| a.agent_id == selected && a.interrupted && !a.running)
+    else {
+        *armed = None;
+        return ResumeKey::NotInterrupted;
+    };
+    if !fresh && !a.resumable {
+        *armed = None;
+        return ResumeKey::CannotResume;
+    }
+    let again = armed.take().is_some_and(|(k, id, at)| {
+        k == key && id == selected && now.duration_since(at) <= CONFIRM_WITHIN
+    });
+    if again {
+        ResumeKey::Go { fresh }
+    } else {
+        *armed = Some((key, selected.to_string(), now));
+        ResumeKey::Confirm { fresh }
+    }
+}
+
+/// ADR-0060: Resume (or, with `fresh`, Start again) the selected agent, which its machine reported interrupted. Signed by this
+/// terminal's key for exactly that agent and choice.
 fn resume(
     say: &Say,
     session: &mut Session,
@@ -68,7 +121,9 @@ fn resume(
     else {
         return say.text(key!("tui-resume-not-interrupted"), &[]);
     };
-    let fresh = fresh || !a.resumable;
+    if !fresh && !a.resumable {
+        return say.text(key!("tui-resume-cannot"), &[]);
+    }
     let (node, local) = selected.split_once('/').unwrap_or(("", selected));
     let fail = |code: &str| {
         say.text(
@@ -910,6 +965,8 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
     let mut notice = String::new();
     let mut selected = String::new();
     let mut cost = 0u64;
+    // ADR-0060: the first press of u / U, waiting for the same key again (see `resume_key`).
+    let mut armed: Option<Armed> = None;
     loop {
         if first {
             say.err(key!("tui-connecting"), &hub_arg);
@@ -1121,7 +1178,26 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                     // ADR-0060: an agent that stopped with its machine comes back (u) or starts again in its folder (U).
                     b'u' | b'U' => {
                         if let Some(sn) = &snapshot {
-                            notice = resume(say, &mut session, sn, &selected, k == b'U');
+                            let local = selected
+                                .split_once('/')
+                                .map_or(selected.as_str(), |(_, l)| l);
+                            let agent = [("agent", Arg::Str(local.to_string()))];
+                            notice = match resume_key(sn, &selected, k, &mut armed, Instant::now())
+                            {
+                                ResumeKey::NotInterrupted => {
+                                    say.text(key!("tui-resume-not-interrupted"), &[])
+                                }
+                                ResumeKey::CannotResume => say.text(key!("tui-resume-cannot"), &[]),
+                                ResumeKey::Confirm { fresh: false } => {
+                                    say.text(key!("tui-resume-confirm"), &agent)
+                                }
+                                ResumeKey::Confirm { fresh: true } => {
+                                    say.text(key!("tui-again-confirm"), &agent)
+                                }
+                                ResumeKey::Go { fresh } => {
+                                    resume(say, &mut session, sn, &selected, fresh)
+                                }
+                            };
                             dirty_since.get_or_insert_with(Instant::now);
                             draw(&snapshot, &selected, &notice, cost, preview.as_ref());
                         }
@@ -1352,6 +1428,94 @@ mod forget_tests {
             forget_notice(&tr, Err(denied)),
             "Kaldırılamadı: Bunu yapmaya izniniz yok (ajanı kaldırma)."
         );
+    }
+
+    #[test]
+    fn u_and_u_shifted_each_need_the_same_key_twice_and_u_never_starts_a_new_session() {
+        let agent = |id: &str, resumable: bool| agora_protocol::v1::AgentSnapshot {
+            agent_id: id.into(),
+            interrupted: true,
+            resumable,
+            ..Default::default()
+        };
+        let snap = Snapshot {
+            agents: vec![agent("n/agent-1", true), agent("n/agent-2", false)],
+            ..Default::default()
+        };
+        let t0 = Instant::now();
+        let mut armed = None;
+        assert_eq!(
+            resume_key(&snap, "n/agent-1", b'u', &mut armed, t0),
+            ResumeKey::Confirm { fresh: false }
+        );
+        assert_eq!(
+            resume_key(
+                &snap,
+                "n/agent-1",
+                b'u',
+                &mut armed,
+                t0 + Duration::from_secs(4)
+            ),
+            ResumeKey::Go { fresh: false }
+        );
+        // Too late, another key, or another agent: asks again.
+        assert_eq!(
+            resume_key(&snap, "n/agent-1", b'U', &mut armed, t0),
+            ResumeKey::Confirm { fresh: true }
+        );
+        assert_eq!(
+            resume_key(
+                &snap,
+                "n/agent-1",
+                b'U',
+                &mut armed,
+                t0 + Duration::from_secs(6)
+            ),
+            ResumeKey::Confirm { fresh: true }
+        );
+        assert_eq!(
+            resume_key(
+                &snap,
+                "n/agent-1",
+                b'u',
+                &mut armed,
+                t0 + Duration::from_secs(7)
+            ),
+            ResumeKey::Confirm { fresh: false }
+        );
+        // u on one that cannot resume says so, whatever was pressed before; U still starts it again after a second press.
+        assert_eq!(
+            resume_key(&snap, "n/agent-2", b'u', &mut armed, t0),
+            ResumeKey::CannotResume
+        );
+        assert_eq!(
+            resume_key(&snap, "n/agent-2", b'u', &mut armed, t0),
+            ResumeKey::CannotResume
+        );
+        assert_eq!(
+            resume_key(&snap, "n/agent-2", b'U', &mut armed, t0),
+            ResumeKey::Confirm { fresh: true }
+        );
+        assert_eq!(
+            resume_key(&snap, "n/agent-2", b'U', &mut armed, t0),
+            ResumeKey::Go { fresh: true }
+        );
+        assert_eq!(
+            resume_key(&snap, "n/agent-9", b'u', &mut armed, t0),
+            ResumeKey::NotInterrupted
+        );
+        let tr = Say(Catalog::turkish());
+        for k in [
+            "tui-resume-cannot",
+            "tui-resume-confirm",
+            "tui-again-confirm",
+        ] {
+            assert!(
+                tr.0.render(k, &[("agent", Arg::Str("agent-1".into()))])
+                    .is_some(),
+                "{k}"
+            );
+        }
     }
 
     #[test]

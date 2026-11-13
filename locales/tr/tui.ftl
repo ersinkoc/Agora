@@ -98,3 +98,6 @@ tui-interrupted-again = makinesiyle birlikte durdu · U yeniden başlat
 tui-resumed = { $agent } yeniden çalışıyor.
 tui-resume-not-interrupted = Yalnızca makinesiyle birlikte duran bir ajan devam ettirilebilir (u) ya da yeniden başlatılabilir (U).
 tui-resume-failed = Başlamadı: { $reason }
+tui-resume-cannot = Kendi konuşmasını sürdüremiyor. U onu klasöründe yeniden başlatır (yeni bir konuşma).
+tui-resume-confirm = { $agent } ajanını devam ettirmek için 5 saniye içinde yeniden u'ya basın.
+tui-again-confirm = { $agent } ajanını klasöründe yeniden başlatmak için 5 saniye içinde yeniden U'ya basın (yeni bir konuşma).
