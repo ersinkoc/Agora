@@ -20,17 +20,18 @@ export function ClosedSummary({ agent, cost, now, onReview, onHistory, onFiles, 
   forgetError?: string;
   onStart?: () => void;
 }) {
-  const failed = !!agent.exitCode;
+  // A non-zero exit code is also what stopping an agent leaves, so it is stated, not judged: the mark is the same either way.
+  const code = agent.exitCode;
   const ran = agent.startedMs && agent.endedMs ? duration(agent.endedMs - agent.startedMs) : undefined;
   const changes = agent.filesChanged ?? 0;
   return (
     <div className="min-h-0 flex-1 overflow-y-auto p-6">
       <div className="mx-auto grid max-w-xl gap-4">
         <div className="flex items-start gap-3">
-          <span className={`[&_.state__mark]:!animate-none ${failed ? 'text-needs-you' : 'text-finished'}`}><StateMark state={failed ? 'needs-you' : 'finished'} /></span>
+          <span className="text-finished"><StateMark state="finished" /></span>
           <div className="min-w-0">
             <h2 className="m-0 text-base normal-case tracking-normal text-ink">{agent.name}</h2>
-            <p className={`m-0 ${failed ? 'text-needs-you' : 'text-finished'}`}>{failed ? t('closed-failed', { code: agent.exitCode ?? 0 }) : t('closed-ok')}</p>
+            <p className="m-0 text-finished">{code ? t('closed-failed', { code }) : t('closed-ok')}</p>
           </div>
         </div>
         <p className="muted m-0">{t('closed-note')}</p>

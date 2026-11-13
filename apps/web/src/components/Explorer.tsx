@@ -111,7 +111,7 @@ export function Explorer({ fleet, machines, open, current, projects, project, on
         {!folded.has('~closed') && <ul className="m-0 list-none p-0">
           {closed.map((a) => <li key={a.id} className="group flex items-center">
             <button type="button" className="ide-row flex-1 opacity-80" aria-current={current === a.id ? 'true' : undefined} aria-pressed={open.includes(a.id)} onClick={() => onToggle(a.id)} title={`${a.machine} · ${a.workspace}`}>
-              <span className="[&_.state__mark]:!animate-none"><StateMark state={a.exitCode ? 'needs-you' : 'finished'} /></span>
+              <span className="[&_.state__mark]:!animate-none"><StateMark state="finished" /></span>
               <span className="min-w-0 flex-1 truncate">{a.name}</span>
               <span className="flex-none text-[11px] text-muted">{a.endedMs ? ago(a.endedMs, now) : ''}</span>
             </button>
