@@ -509,6 +509,29 @@ pub fn chat_command(
     }
 }
 
+/// `row` cut into pieces of at most `first` characters for the first and `rest` for the others, at the last space that fits when
+/// there is one (the space itself is dropped), else in the middle of the word. Counted in characters: a wide character may overshoot
+/// a little, which is harmless.
+fn wrap_row(row: &str, first: usize, rest: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut left: Vec<char> = row.chars().collect();
+    while !left.is_empty() {
+        let width = if out.is_empty() { first } else { rest };
+        if left.len() <= width {
+            out.push(left.iter().collect());
+            break;
+        }
+        let cut = left[..=width]
+            .iter()
+            .rposition(|c| *c == ' ')
+            .filter(|&at| at > 0);
+        let (take, skip) = cut.map_or((width, width), |at| (at, at + 1));
+        out.push(left[..take].iter().collect());
+        left.drain(..skip);
+    }
+    out
+}
+
 /// The conversation of an agent that has no terminal, as the last lines that fit `rows` x `cols`, then the line being typed.
 pub fn render_chat(
     entries: &[ChatEntry],
@@ -541,24 +564,22 @@ pub fn render_chat(
             _ => plain(&e.text),
         };
         for (i, row) in body.split('\n').enumerate() {
-            let prefix = if i == 0 {
-                format!("{bold}{who}:{reset} ")
+            // The first line starts with the speaker, the others are indented; each line is cut to what is left of the width
+            // after its own start (one column spare, so a full line never makes the terminal wrap it on its own).
+            let (prefix, prefix_width) = if i == 0 {
+                (format!("{bold}{who}:{reset} "), who.chars().count() + 2)
             } else {
-                "  ".to_string()
+                ("  ".to_string(), 2)
             };
-            // Hard wrap by characters; a wide character may overshoot a little, which is harmless.
-            let width = cols.saturating_sub(4).max(10);
-            let chars: Vec<char> = row.chars().collect();
-            if chars.is_empty() {
+            let first = cols.saturating_sub(prefix_width + 1).max(10);
+            let rest = cols.saturating_sub(3).max(10);
+            let pieces = wrap_row(row, first, rest);
+            if pieces.is_empty() {
                 lines.push(prefix.trim_end().to_string());
             }
-            for (j, chunk) in chars.chunks(width).enumerate() {
-                let head = if j == 0 {
-                    prefix.clone()
-                } else {
-                    "  ".to_string()
-                };
-                lines.push(format!("{head}{}", chunk.iter().collect::<String>()));
+            for (j, piece) in pieces.into_iter().enumerate() {
+                let head = if j == 0 { prefix.as_str() } else { "  " };
+                lines.push(format!("{head}{piece}"));
             }
         }
     }
@@ -698,6 +719,53 @@ mod tests {
     }
 
     #[test]
+    fn long_chat_lines_fit_the_width_and_break_between_words() {
+        // Seen on macOS: a long notice overflowed its first line (the speaker was not counted), the terminal wrapped it on its own
+        // and "invalid" came out as "inva" / "lid".
+        let body = "ERROR service=llm provider rejected: invalid x-api-key (auth) at ~/.local/share/fake/auth.json";
+        let entries = vec![ChatEntry {
+            role: ChatRole::Agent as i32,
+            kind: ChatKind::Text as i32,
+            text: body.into(),
+            ..Default::default()
+        }];
+        let cols = 40;
+        let lines = render_chat(&entries, "agent-1", "", (cols, 24), false, &t);
+        let said: Vec<&String> = lines
+            .iter()
+            .take_while(|l| !l.starts_with("tui-chat-hint"))
+            .collect();
+        assert!(said.iter().all(|l| l.chars().count() < cols), "{said:#?}");
+        assert!(
+            said[0].starts_with("tui-chat-agent[agent=agent-1]: "),
+            "{said:#?}"
+        );
+        assert!(said[1..].iter().all(|l| l.starts_with("  ")), "{said:#?}");
+        let words: Vec<&str> = said
+            .iter()
+            .enumerate()
+            .flat_map(|(i, l)| {
+                let l = if i == 0 {
+                    l.split_once(": ").map_or("", |(_, r)| r)
+                } else {
+                    l.trim_start()
+                };
+                l.split(' ')
+            })
+            .collect();
+        assert_eq!(
+            words.join(" "),
+            body,
+            "nothing lost, no word cut: {said:#?}"
+        );
+        // A word longer than the line is still cut, and nothing is lost.
+        assert_eq!(wrap_row(&"x".repeat(25), 10, 10).concat(), "x".repeat(25));
+        assert_eq!(wrap_row("aa bb", 10, 10), ["aa bb"]);
+        assert_eq!(wrap_row("aaaa bbbb", 5, 5), ["aaaa", "bbbb"]);
+        assert!(wrap_row("", 5, 5).is_empty());
+    }
+
+    #[test]
     fn the_chat_shows_the_last_lines_and_drops_what_an_agent_could_use_to_drive_the_terminal() {
         let entry = |role: ChatRole, kind: ChatKind, text: &str| ChatEntry {
             role: role as i32,
@@ -732,7 +800,8 @@ mod tests {
             .insert("stderr_tail".into(), "boom\x1b[2J".into());
         let mut other = entry(ChatRole::Agent, ChatKind::Notice, "");
         other.code = "future.thing".into();
-        let said = render_chat(&[notice, other], "a", "", (80, 24), false, &t).join("\n");
+        // Wide enough that the notice is on one line (wrapping is checked on its own).
+        let said = render_chat(&[notice, other], "a", "", (160, 24), false, &t).join("\n");
         assert!(
             said.contains("tui-notice-agent_exited[stage=,exit_code=?,stderr_tail=boom[2J]"),
             "{said}"
