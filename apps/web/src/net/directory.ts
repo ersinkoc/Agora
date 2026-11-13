@@ -4,10 +4,16 @@ export interface DirectoryInfo { path: string; projectId: string; gitRoot: strin
 export function directoryMessage(node: string, operation: string, path: string, kind: string, project: string, option: boolean, identityChange: boolean, nonce: string, expires: number): Uint8Array {
   return new TextEncoder().encode(['directory-action-v1', node, operation, path, kind, project, option ? '1' : '0', identityChange ? '1' : '0', nonce, String(expires)].join('\0'));
 }
-export async function signDirectory(device: Device, node: string, operation: 'inspect' | 'launch' | 'list', path: string, kind = '', project = '', option = false, identityChange = false) {
+/** ADR-0059: a launch that chose launch options signs their ids too (comma-joined, in the order sent), under its own domain. */
+export function launchMessage(node: string, path: string, kind: string, project: string, separate: boolean, identityChange: boolean, launchOptions: readonly string[], nonce: string, expires: number): Uint8Array {
+  return new TextEncoder().encode(['directory-action-v2', node, 'launch', path, kind, project, separate ? '1' : '0', identityChange ? '1' : '0', launchOptions.join(','), nonce, String(expires)].join('\0'));
+}
+export async function signDirectory(device: Device, node: string, operation: 'inspect' | 'launch' | 'list', path: string, kind = '', project = '', option = false, identityChange = false, launchOptions: readonly string[] = []) {
   const nonce = toHex(crypto.getRandomValues(new Uint8Array(16)));
   const expiresAtMs = Date.now() + 120_000;
-  const message = directoryMessage(node, operation, path, kind, project, option, identityChange, nonce, expiresAtMs);
+  const message = operation === 'launch' && launchOptions.length > 0
+    ? launchMessage(node, path, kind, project, option, identityChange, launchOptions, nonce, expiresAtMs)
+    : directoryMessage(node, operation, path, kind, project, option, identityChange, nonce, expiresAtMs);
   const signature = new Uint8Array(await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, device.keys.privateKey, message as BufferSource));
   return { deviceId: device.id, nonce, expiresAtMs, signature };
 }

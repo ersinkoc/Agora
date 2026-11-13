@@ -50,3 +50,26 @@ it('preserves distinct enrolled machine identities when their host names and loc
   expect(agents.map(a => a.id)).toEqual(['laptop/agent-1', 'desktop/agent-1']);
   expect(agents.map(a => a.workspace)).toEqual(['/one', '/two']);
 });
+it('signs chosen launch options under their own domain so a hub can neither add nor remove one (ADR-0059)', async () => {
+  const { launchMessage } = await import('./directory');
+  const device = await thisDevice({ load: async () => undefined, save: async () => {} });
+  const a = await signDirectory(device, 'node', 'launch', '/selected', 'codex', 'id:p', false, false, ['skip-permissions']);
+  const verify = (m: Uint8Array) => crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, device.keys.publicKey, a.signature as BufferSource, m as BufferSource);
+  expect(await verify(launchMessage('node', '/selected', 'codex', 'id:p', false, false, ['skip-permissions'], a.nonce, a.expiresAtMs))).toBe(true);
+  expect(await verify(launchMessage('node', '/selected', 'codex', 'id:p', false, false, [], a.nonce, a.expiresAtMs))).toBe(false);
+  expect(await verify(directoryMessage('node', 'launch', '/selected', 'codex', 'id:p', false, false, a.nonce, a.expiresAtMs))).toBe(false);
+  expect(new TextDecoder().decode(launchMessage('n', '/p', 'k', 'id', false, true, ['skip-permissions', 'resume-last'], 'nonce', 5))).toBe('directory-action-v2\0n\0launch\0/p\0k\0id\x000\x001\0skip-permissions,resume-last\0nonce\x005');
+  // Without options a launch keeps the published v1 bytes.
+  const plain = await signDirectory(device, 'node', 'launch', '/selected', 'codex', 'id:p');
+  expect(await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, device.keys.publicKey, plain.signature as BufferSource, directoryMessage('node', 'launch', '/selected', 'codex', 'id:p', false, false, plain.nonce, plain.expiresAtMs) as BufferSource)).toBe(true);
+});
+it('carries the "does not ask" badge from the start event and the snapshot (ADR-0059)', () => {
+  const v = emptyView();
+  applyEvent(v, 1, { producerId: 'n', body: 'agentStarted', agentStarted: { agentId: 'a', nodeId: 'n', kind: 'codex', launchOptions: ['skip-permissions'], skipsPermissions: true } });
+  applyEvent(v, 2, { producerId: 'n', body: 'agentStarted', agentStarted: { agentId: 'b', nodeId: 'n', kind: 'codex' } });
+  const byId = new Map(tiles(v).map((t) => [t.id, t]));
+  expect(byId.get('n/a')?.skipsPermissions).toBe(true);
+  expect(byId.get('n/b')?.skipsPermissions).toBe(false);
+  const restored = fromSnapshot(agora.v1.Snapshot.fromObject({ pos: 3, nodes: [{ nodeId: 'n', online: true }], agents: [{ agentId: 'n/a', nodeId: 'n', kind: 'codex', running: true, launchOptions: ['skip-permissions'], skipsPermissions: true }] }));
+  expect(tiles(restored)[0]?.skipsPermissions).toBe(true);
+});

@@ -5,7 +5,9 @@ import type { MachineModel, ProjectChoice } from '../net/view';
 import { childPath, type DirectoryInfo, type DirectoryListing } from '../net/directory';
 import { Icon } from './Icon';
 import { machineFor } from './startChoice';
-export interface KindChoice { kind: string; name: string; installed: boolean }
+import { ASK, chosenIds, confirmSkip, harmless, initialLaunch, keepAsking, labelOf, pickPermission, skipping, toggleHarmless, type LaunchOptionChoice } from './launchChoice';
+// ADR-0059: `options` are the kind's launch options as the machine lists them (none from an older machine).
+export interface KindChoice { kind: string; name: string; installed: boolean; options?: LaunchOptionChoice[] }
 
 const chip = 'inline-flex items-center gap-2 rounded-xs border px-2.5 py-1.5 text-[13px] transition-colors duration-150 disabled:opacity-50';
 const chipOn = 'border-accent bg-surface-2 text-ink ring-1 ring-accent';
@@ -22,7 +24,7 @@ export function StartAgent({ projects, machines, initialNode, loadKinds, inspect
   // ADR-0053: the sub-folders of a folder on the machine (empty path: its home folder). Missing, or refused by an older machine: the path is typed.
   list?: (node: string, path: string) => Promise<DirectoryListing>;
   // A failure is a Fluent message id, translated when rendered so an open form follows a language change.
-  onStart: (node: string, info: DirectoryInfo, kind: string, separate: boolean, acceptIdentityChange: boolean) => Promise<string | undefined>;
+  onStart: (node: string, info: DirectoryInfo, kind: string, separate: boolean, acceptIdentityChange: boolean, launchOptions: string[]) => Promise<string | undefined>;
   onClose: () => void;
 }) {
   const online = machines.filter(m => m.online);
@@ -36,6 +38,9 @@ export function StartAgent({ projects, machines, initialNode, loadKinds, inspect
   const [createIdentity, setCreateIdentity] = useState(false);
   const [separate, setSeparate] = useState(false);
   const [acceptIdentityChange, setAcceptIdentityChange] = useState(false);
+  // ADR-0059: "Ask before acting" until the user picks an option that skips permissions and confirms it; a new agent kind starts over.
+  const [launch, setLaunch] = useState(initialLaunch);
+  useEffect(() => { setLaunch(initialLaunch()); }, [kind, node]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   // The folder picker: what the machine answered for the folder being looked at.
@@ -85,8 +90,11 @@ export function StartAgent({ projects, machines, initialNode, loadKinds, inspect
   };
   const go = async () => {
     if (!info) return;
-    setBusy(true); setError(await onStart(node, info, kind, separate, acceptIdentityChange)); setBusy(false);
+    setBusy(true); setError(await onStart(node, info, kind, separate, acceptIdentityChange, chosenIds(launch, offered))); setBusy(false);
   };
+  const offered: LaunchOptionChoice[] = (kinds !== 'loading' && kinds !== 'failed' ? kinds.find((k) => k.kind === kind)?.options : undefined) ?? [];
+  const skips = skipping(offered), plain = harmless(offered);
+  const pendingOption = offered.find((o) => o.id === launch.pending);
   const known = projects.flatMap(p => (p.node === node && p.path ? [{ ...p, path: p.path }] : []));
   const machineName = (m: MachineModel) => (m.name === m.id ? m.name : t('machine-name-id', { name: m.name, id: m.id }));
 
@@ -169,12 +177,27 @@ export function StartAgent({ projects, machines, initialNode, loadKinds, inspect
               {info.gitRoot && <label className="flex items-center gap-2 text-[13px]"><input type="checkbox" checked={separate} disabled={busy} onChange={e => setSeparate(e.target.checked)} />{t('start-separate-worktree')}</label>}
               {info.previousProjectId && <label className="flex items-center gap-2 text-[13px]"><input type="checkbox" checked={acceptIdentityChange} disabled={busy} onChange={e => setAcceptIdentityChange(e.target.checked)} />{t('start-identity-change')}</label>}
             </div>}
+            {offered.length > 0 && <div className="grid gap-1.5">
+              <h2 className="m-0">{t('start-how-it-acts')}</h2>
+              {skips.length > 0 && <div className="flex flex-wrap gap-1.5" role="radiogroup" aria-label={t('start-how-it-acts')}>
+                <button type="button" role="radio" aria-checked={launch.permission === ASK} disabled={busy} className={`${chip} ${launch.permission === ASK ? chipOn : chipOff}`} onClick={() => setLaunch((s) => pickPermission(s, ASK))}>{t('option-ask')}</button>
+                {skips.map((o) => <button key={o.id} type="button" role="radio" aria-checked={launch.permission === o.id} disabled={busy} className={`${chip} ${launch.permission === o.id ? 'border-needs-you bg-surface-2 text-ink ring-1 ring-needs-you' : chipOff}`} onClick={() => setLaunch((s) => pickPermission(s, o.id))}>{labelOf(o, t)}</button>)}
+              </div>}
+              {pendingOption && <div role="alertdialog" aria-label={t('session-confirm-title')} className="flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-s border border-needs-you/60 bg-surface-2 px-3 py-2">
+                <div className="min-w-0 flex-1 basis-64 text-xs"><strong className="block">{t('session-confirm-title')}</strong>
+                  <span className="text-muted">{t('start-confirm-skip-body', { name: labelOf(pendingOption, t) })}</span></div>
+                <button type="button" className="button px-3 py-1 text-xs" onClick={() => setLaunch(confirmSkip)}>{t('start-confirm-skip-yes')}</button>
+                <button type="button" className="button button--primary px-3 py-1 text-xs" autoFocus onClick={() => setLaunch(keepAsking)}>{t('session-confirm-no')}</button>
+              </div>}
+              {launch.permission !== ASK && !pendingOption && <p className="m-0 text-xs text-needs-you">{t('start-does-not-ask-note')}</p>}
+              {plain.map((o) => <label key={o.id} className="flex items-center gap-2 text-[13px]"><input type="checkbox" checked={launch.harmless.includes(o.id)} disabled={busy} onChange={e => { const on = e.target.checked; setLaunch((s) => toggleHarmless(s, o.id, on)); }} />{labelOf(o, t)}</label>)}
+            </div>}
           </>}
           {error && <p role="alert" className="m-0 text-needs-you">{t(error)}</p>}
         </div>}
         <div className="flex justify-end gap-2 border-t border-line px-4 py-3">
           <button type="button" className="button" disabled={busy} onClick={onClose}>{t('start-cancel')}</button>
-          {info && <button type="button" className="button button--primary" disabled={busy || !kind || (!!info.previousProjectId && !acceptIdentityChange)} onClick={() => void go()}>{t('start-go')}</button>}
+          {info && <button type="button" className="button button--primary" disabled={busy || !kind || !!launch.pending || (!!info.previousProjectId && !acceptIdentityChange)} onClick={() => void go()}>{t('start-go')}</button>}
         </div>
       </Dialog.Content>
     </Dialog.Portal>

@@ -732,14 +732,69 @@ fn start_in_folder(
             return String::new();
         }
     }
-    let Some(auth) = device.authorize(
+    // ADR-0059: how it acts. "Ask before acting" is the default (Enter, 1, or any key that is not an option); an option that lets the
+    // agent act without asking is used only after a second question whose default keeps asking.
+    let offered = session.kind_options(&node, kind).unwrap_or_default();
+    let skips: Vec<_> = offered
+        .iter()
+        .filter(|o| o.skips_permissions)
+        .take(8)
+        .collect();
+    let mut launch_options = Vec::new();
+    if !skips.is_empty() {
+        let label = |o: &agora_protocol::v1::LaunchOption| {
+            let said = say.text(&o.label, &[]);
+            plain(if said == o.label { &o.id } else { &said })
+        };
+        let mut menu = vec![say.text(key!("tui-start-acts"), &[]), String::new()];
+        menu.push(say.text(
+            key!("tui-start-item"),
+            &[
+                ("n", Arg::Num(1)),
+                ("name", Arg::Str(say.text(key!("option-ask"), &[]))),
+            ],
+        ));
+        for (i, o) in skips.iter().enumerate() {
+            menu.push(say.text(
+                key!("tui-start-item"),
+                &[("n", Arg::Num(i as i64 + 2)), ("name", Arg::Str(label(o)))],
+            ));
+        }
+        let _ = write!(out, "\x1b[H\x1b[2J{}", menu.join("\r\n"));
+        let _ = out.flush();
+        let Some(k) = read_key(rx, Duration::from_secs(60)) else {
+            return String::new();
+        };
+        if matches!(k, 0x1b | b'q' | 3) {
+            return String::new();
+        }
+        let picked = (b'2'..=b'9')
+            .contains(&k)
+            .then(|| skips.get(usize::from(k - b'2')))
+            .flatten();
+        if let Some(o) = picked {
+            let _ = write!(
+                out,
+                "\x1b[H\x1b[2J{}",
+                say.text(
+                    key!("tui-start-confirm-skip"),
+                    &[("name", Arg::Str(label(o)))]
+                )
+            );
+            let _ = out.flush();
+            if read_key(rx, Duration::from_secs(60)) == Some(b'y') {
+                launch_options.push(o.id.clone());
+            }
+        }
+    }
+    let Some(auth) = device.authorize_launch(
         &node,
-        "launch",
         &info.path,
         kind,
         &info.project_id,
         false,
         accept,
+        &launch_options,
         now_ms(),
     ) else {
         return say.text(
@@ -756,7 +811,7 @@ fn start_in_folder(
             separate_worktree: false,
             authorization: Some(auth),
             accept_identity_change: accept,
-            launch_options: Vec::new(),
+            launch_options,
         },
     ) {
         Ok(agent) => say.text(key!("tui-started"), &[("agent", Arg::Str(agent))]),

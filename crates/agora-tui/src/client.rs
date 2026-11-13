@@ -652,6 +652,27 @@ impl Session {
             .collect())
     }
 
+    /// ADR-0059: the launch options `kind` offers on `node` (none from an older machine or an unknown kind).
+    pub fn kind_options(
+        &mut self,
+        node: &str,
+        kind: &str,
+    ) -> Result<Vec<agora_protocol::v1::LaunchOption>, String> {
+        let ok = self.command_ok(
+            node,
+            command_request::Command::AgentKinds(agora_protocol::v1::AgentKinds {}),
+            Duration::from_secs(15),
+        )?;
+        let Some(command_ok::Result::AgentKinds(k)) = ok.result else {
+            return Ok(Vec::new());
+        };
+        Ok(k.kinds
+            .into_iter()
+            .find(|k| k.kind == kind)
+            .map(|k| k.launch_options)
+            .unwrap_or_default())
+    }
+
     /// Starts an agent of `kind` in a project (its hub-wide id) on a machine; returns the agent's own id.
     pub fn start_agent(
         &mut self,

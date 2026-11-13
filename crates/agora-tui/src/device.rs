@@ -144,6 +144,42 @@ pub fn directory_message(
     m
 }
 
+/// ADR-0059: what a device signs for a launch that chose launch options: the `directory-action-v1` launch fields under the domain
+/// `directory-action-v2`, with the option ids, comma-joined in the order sent, before the nonce (the node's
+/// `agora_node::directory::launch_signed_message`).
+#[allow(clippy::too_many_arguments)] // the fields the node binds, each on its own
+pub fn launch_message(
+    node: &str,
+    path: &str,
+    kind: &str,
+    project: &str,
+    separate: bool,
+    identity_change: bool,
+    launch_options: &[String],
+    nonce: &str,
+    expires_at_ms: u64,
+) -> Vec<u8> {
+    let options = launch_options.join(",");
+    let mut m = b"directory-action-v2".to_vec();
+    for part in [
+        node,
+        "launch",
+        path,
+        kind,
+        project,
+        if separate { "1" } else { "0" },
+        if identity_change { "1" } else { "0" },
+        options.as_str(),
+        nonce,
+    ] {
+        m.push(0);
+        m.extend_from_slice(part.as_bytes());
+    }
+    m.push(0);
+    m.extend_from_slice(expires_at_ms.to_string().as_bytes());
+    m
+}
+
 /// How long a signed folder action stays valid (the node refuses more than five minutes ahead).
 const FOLDER_ACTION_TTL_MS: u64 = 2 * 60 * 1000;
 
@@ -174,6 +210,55 @@ impl Device {
             project,
             option,
             identity_change,
+            &nonce,
+            expires_at_ms,
+        );
+        Some(agora_protocol::v1::DirectoryAuthorization {
+            device_id: self.id.clone(),
+            nonce,
+            expires_at_ms,
+            signature: self.sign(&message)?,
+        })
+    }
+
+    /// [`Self::authorize`] for a launch: with launch options chosen (ADR-0059) the signature covers them too.
+    #[allow(clippy::too_many_arguments)] // the fields the node binds, each on its own
+    pub fn authorize_launch(
+        &self,
+        node: &str,
+        path: &str,
+        kind: &str,
+        project: &str,
+        separate: bool,
+        identity_change: bool,
+        launch_options: &[String],
+        now_ms: u64,
+    ) -> Option<agora_protocol::v1::DirectoryAuthorization> {
+        if launch_options.is_empty() {
+            return self.authorize(
+                node,
+                "launch",
+                path,
+                kind,
+                project,
+                separate,
+                identity_change,
+                now_ms,
+            );
+        }
+        use ring::rand::SecureRandom;
+        let mut b = [0u8; 16];
+        SystemRandom::new().fill(&mut b).ok()?;
+        let nonce = hex(&b);
+        let expires_at_ms = now_ms + FOLDER_ACTION_TTL_MS;
+        let message = launch_message(
+            node,
+            path,
+            kind,
+            project,
+            separate,
+            identity_change,
+            launch_options,
             &nonce,
             expires_at_ms,
         );
@@ -266,6 +351,23 @@ mod tests {
                 )
             );
         }
+    }
+
+    #[test]
+    fn a_launch_with_options_signs_the_same_bytes_the_node_checks() {
+        let options = vec!["skip-permissions".to_string()];
+        for change in [false, true] {
+            assert_eq!(
+                launch_message("laptop", "/w", "codex", "id:p", false, change, &options, "00ff", 7),
+                agora_node::directory::launch_signed_message(
+                    "laptop", "/w", "codex", "id:p", false, change, &options, "00ff", 7
+                )
+            );
+        }
+        let (d, _) = Device::generate().unwrap();
+        assert!(d
+            .authorize_launch("laptop", "/w", "codex", "id:p", false, false, &options, 1_000)
+            .is_some());
     }
 
     #[test]

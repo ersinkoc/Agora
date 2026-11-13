@@ -371,3 +371,13 @@ closed-reason-other = hub'a ulaşılamadı ya da reddetti
 
 # ADR-0059: launch options (manifest `[[launch.option]]` labels)
 option-skip-permissions = Sormadan
+option-ask = Önce sorsun
+start-how-it-acts = Nasıl çalışsın
+start-confirm-skip-body = "{ $name }" seçiliyken ajan, çalıştığı sürece komut çalıştırır ve dosyaları size sormadan değiştirir.
+start-confirm-skip-yes = Sormadan başlat
+start-does-not-ask-note = Bu ajan size sormadan çalışacak.
+start-option-forbidden = Bu makine ajanların sormadan çalışmasına izin vermiyor. "Önce sorsun"u seçin.
+start-option-confined-only = Bu makine bir ajanın sormadan çalışmasına yalnızca klasörüyle sınırlıyken izin veriyor; burada sınırlı olmazdı.
+start-options-unsupported = Bu makine başlatma seçenekleri için fazla eski. Güncelleyin ya da "Önce sorsun"u seçin.
+agent-does-not-ask = Sormuyor
+agent-does-not-ask-explain = Size önce sormadan çalışacak şekilde başlatıldı
