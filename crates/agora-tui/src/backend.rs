@@ -22,12 +22,24 @@ impl Screen<CrosstermBackend<Stdout>> {
     /// Switches stdout to the alternate screen and hides the cursor. The caller has already put the terminal into raw mode.
     pub fn enter() -> io::Result<Self> {
         let mut out = io::stdout();
-        out.execute(EnterAlternateScreen)?.execute(Hide)?;
-        let term = Terminal::new(CrosstermBackend::new(io::stdout()))?;
-        Ok(Self {
-            term,
-            restore: true,
-        })
+        out.execute(EnterAlternateScreen)?;
+        // From here on a failure leaves the alternate screen again, as dropping a `Screen` would.
+        let entered = out
+            .execute(Hide)
+            .map(|_| ())
+            .and_then(|()| Terminal::new(CrosstermBackend::new(io::stdout())));
+        match entered {
+            Ok(term) => Ok(Self {
+                term,
+                restore: true,
+            }),
+            Err(e) => {
+                let _ = io::stdout()
+                    .execute(Show)
+                    .and_then(|o| o.execute(LeaveAlternateScreen));
+                Err(e)
+            }
+        }
     }
 }
 
