@@ -214,6 +214,13 @@ pub struct Manifest {
     /// first prompt typed for it. Same shape as `[[rules]]`, with `state = "idle"`.
     #[serde(default)]
     pub ready: Vec<Rule>,
+    /// ADR-0057: `[[typed]]` rules that say the input box holds typed text and nothing else is on screen (no dialog, no menu); checked
+    /// with [`Manifest::input_box`] before the node presses Enter on a helper's first prompt. Same shape, `state = "idle"`.
+    #[serde(default)]
+    pub typed: Vec<Rule>,
+    /// ADR-0057: a regex over `bottom_non_empty_lines(12)` (multi-line) whose first capture group is the input box's text. Enter is pressed
+    /// only when it holds exactly the typed prompt (whitespace ignored, so a wrapped line still counts).
+    pub input_box: Option<String>,
 }
 
 /// Folders an agent asks to read or write when confined; `~/` stands for the home folder.
@@ -315,12 +322,24 @@ impl Manifest {
                 return Err(invalid("mcp"));
             }
         }
-        for (i, r) in self.ready.iter().enumerate() {
-            if r.state != RuleState::Idle {
-                return Err(invalid(format!("ready[{i}].state")));
+        for (name, list) in [("ready", &self.ready), ("typed", &self.typed)] {
+            for (i, r) in list.iter().enumerate() {
+                if r.state != RuleState::Idle {
+                    return Err(invalid(format!("{name}[{i}].state")));
+                }
             }
         }
-        for (name, list) in [("rules", &self.rules), ("ready", &self.ready)] {
+        if let Some(re) = &self.input_box {
+            let ok = crate::rules::compile(re).is_ok_and(|r| r.captures_len() >= 2);
+            if !ok {
+                return Err(invalid("input_box"));
+            }
+        }
+        for (name, list) in [
+            ("rules", &self.rules),
+            ("ready", &self.ready),
+            ("typed", &self.typed),
+        ] {
             Self::validate_rules(name, list)?;
         }
         Ok(())

@@ -755,3 +755,40 @@ fn granted_prompts_are_recorded_and_waits_are_capped() {
     );
     assert_eq!(m.error_code(ninth), "mesh.too_many_asks");
 }
+
+#[test]
+fn a_helper_stays_a_helper_after_it_ends_and_many_others_do() {
+    if !supported() {
+        return;
+    }
+    let e = Env::new("lineage");
+    let parent = e.launch(&e.folder, "probe");
+    let mut m = e.mcp(&parent);
+    let call = m.call("agent_start", json!({"kind": "probe"}));
+    let p = e.request_of(&parent);
+    e.decide(&p, true, 0, false).unwrap();
+    let (v, _) = m.result(call);
+    let helper = v["agent_id"].as_str().unwrap().to_string();
+    // What a crash the supervisor restarts looks like to the spawner, then 300 other agents ending.
+    e.node().spawner.agent_ended(&AgentId::new(&helper));
+    for i in 0..300 {
+        e.node()
+            .spawner
+            .agent_ended(&AgentId::new(format!("other-{i}")));
+    }
+    // Still a helper at depth 1 that its decision did not allow to ask: no start, not even in an outside folder.
+    let mut h = e.mcp(&helper);
+    let c = h.call("agent_start", json!({"kind": "probe"}));
+    assert_eq!(h.error_code(c), "mesh.helper_limit");
+    let c = h.call(
+        "agent_start",
+        json!({"kind": "probe", "folder": e.root.join("manifests").to_string_lossy()}),
+    );
+    assert_eq!(h.error_code(c), "mesh.helper_limit");
+    // And the parent still counts it, and still follows it.
+    let w = m.call(
+        "agent_wait",
+        json!({"agent_id": helper, "state": "exited", "timeout_s": 0.2}),
+    );
+    assert_eq!(m.error_code(w), "mesh.timeout");
+}

@@ -877,6 +877,8 @@ pub struct Node {
     pub approvals: Arc<crate::approvals::NodeApprovals>,
     /// User-signed grants for commands the hub routes here (ADR-0041).
     pub grants: Arc<crate::grants::Grants>,
+    /// Agents that start agents (ADR-0057).
+    pub spawner: Arc<crate::spawn::Spawner>,
     node_id: String,
     /// Manifests that could not be loaded, as `(path, reason)` for the log.
     pub manifest_problems: Vec<(PathBuf, String)>,
@@ -1235,6 +1237,7 @@ impl Node {
             mesh,
             approvals,
             grants,
+            spawner,
             node_id: cfg.node_id.clone(),
             manifest_problems,
         })
