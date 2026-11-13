@@ -260,7 +260,7 @@ fn chat(
     agent: &str,
     rx: &mpsc::Receiver<u8>,
     color: bool,
-    snapshot: Option<agora_protocol::v1::AgentSnapshot>,
+    mut snapshot: Option<agora_protocol::v1::AgentSnapshot>,
 ) -> Result<bool, String> {
     let (node, local) = agent.split_once('/').unwrap_or(("", agent));
     let stream = session.chat_open(node, local)?;
@@ -316,7 +316,12 @@ fn chat(
                         }
                         ChatCommand::Switch { model, id } => {
                             note = match session.set_option(node, local, model, &id) {
-                                Ok(()) => say.text(key!("tui-option-switched"), &[]),
+                                Ok(()) => {
+                                    if let Some(a) = snapshot.as_mut() {
+                                        agora_tui::render::switched(a, model, &id);
+                                    }
+                                    say.text(key!("tui-option-switched"), &[])
+                                }
                                 Err(code) => {
                                     say.text(key!("tui-send-failed"), &[("code", Arg::Str(code))])
                                 }
@@ -366,7 +371,7 @@ fn chat(
             if !note.is_empty() {
                 lines.insert(lines.len().saturating_sub(1), plain(&note));
             }
-            // What the agent runs with, as it was when the conversation was opened (ADR-0058).
+            // What the agent runs with: as it was when the conversation was opened, and every switch made here since (ADR-0058).
             if let Some(s) = snapshot.as_ref().and_then(|a| session_line(a, &text)) {
                 lines.insert(0, plain(&s));
             }
