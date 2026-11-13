@@ -128,6 +128,8 @@ pub struct EventSink {
     last_online: AtomicU64,
     /// See [`EventSink::set_aside`].
     set_aside: Option<SetAside>,
+    /// ADR-0060: learns from every event recorded (see [`crate::ledger::Ledger::observe`]). Never held with another lock.
+    ledger: std::sync::OnceLock<Arc<crate::ledger::Ledger>>,
 }
 
 /// An event log found at start whose unacknowledged events name another producer (for example `local`, from runs before the node
@@ -226,7 +228,13 @@ impl EventSink {
             reported: Mutex::new(Reported::default()),
             last_online: AtomicU64::new(0),
             set_aside,
+            ledger: std::sync::OnceLock::new(),
         })
+    }
+
+    /// ADR-0060: the session ledger that learns from what this sink records. Set once; a second call is ignored.
+    pub fn set_ledger(&self, ledger: Arc<crate::ledger::Ledger>) {
+        let _ = self.ledger.set(ledger);
     }
 
     /// The log this sink found at open and set aside because its events name another producer, if it did.
@@ -398,6 +406,9 @@ impl EventSink {
     }
 
     fn record(&self, body: Body) {
+        if let Some(ledger) = self.ledger.get() {
+            ledger.observe(&body, now_ms());
+        }
         // Only the few kinds a resync announcement repeats take this lock; every other event goes straight to the log.
         if Reported::keeps(&body) {
             self.reported
@@ -1079,6 +1090,8 @@ pub struct Node {
     pub policy_problems: Vec<String>,
     /// The event log found at start that named another node and was set aside instead of being sent to the hub, for the log.
     pub events_set_aside: Option<SetAside>,
+    /// ADR-0060: the session ledger.
+    pub ledger: Arc<crate::ledger::Ledger>,
 }
 
 impl Node {
@@ -1096,6 +1109,9 @@ impl Node {
             &cfg.node_id,
             max_bytes,
         )?);
+        // ADR-0060: what this node knows of its agents across its own restarts; learns from every event recorded from here on.
+        let ledger = Arc::new(crate::ledger::Ledger::open(&cfg.data_dir, now_ms())?);
+        events.set_ledger(Arc::clone(&ledger));
 
         // Short path on purpose: Unix socket paths are limited to about 100 bytes.
         let mesh_dir = cfg
@@ -1115,6 +1131,7 @@ impl Node {
             limits: cfg.limits,
         });
         sup.set_sandbox(read_policy(&cfg.data_dir.join(POLICY_FILE)).sandbox);
+        sup.reserve_ids(ledger.next_id());
         sup.set_skip_permissions(read_policy(&cfg.data_dir.join(POLICY_FILE)).skip_permissions);
         let (found, manifest_problems) = load_manifests(&cfg.manifests_dir);
         for m in found {
@@ -1442,6 +1459,7 @@ impl Node {
             manifest_problems,
             policy_problems: read_policy(&cfg.data_dir.join(POLICY_FILE)).problems,
             events_set_aside,
+            ledger,
         })
     }
 
@@ -1553,7 +1571,9 @@ impl Drop for Node {
             let _ = t.join();
         }
         self.events.node_offline(&self.node_id);
-        // Agents die with the node's supervisor (terminal handles kill their process groups on drop).
+        // The agents' last states. They die with the node's supervisor (terminal handles kill their process groups on drop) without
+        // an end in the ledger: at the next start they are interrupted (ADR-0060).
+        let _ = self.ledger.flush();
     }
 }
 
