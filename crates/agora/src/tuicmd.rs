@@ -1469,6 +1469,9 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
     }
 }
 
+/// The console's shortest time between two frames: 60 a second, the ADR-0022 budget for a keystroke's echo.
+const FRAME: Duration = Duration::from_millis(16);
+
 /// What the console does after its loop ends.
 enum Next {
     Quit,
@@ -1534,10 +1537,24 @@ fn console(
     let mut sized: Option<(String, u16, u16)> = None;
     mouse_mode(c.app.mouse);
     let mut fresh = true;
+    let mut typed_at: Option<Instant> = None;
     loop {
-        // Watching a terminal: wake often, so typing echoes and output looks live.
-        let wait = if preview.is_some() { 15 } else { 50 };
-        match session.next(Duration::from_millis(wait)) {
+        // Watching a terminal: wake often, so typing echoes and output looks live; with a frame waiting to be drawn, wake when it may
+        // be (any frame from the hub wakes this at once anyway).
+        let mut wait = Duration::from_millis(if preview.is_some() || chat.is_some() {
+            15
+        } else {
+            50
+        });
+        if redraw {
+            wait = wait.min(FRAME.saturating_sub(last_draw.elapsed()));
+        }
+        // Input outranks output (ADR-0022): keys arrive on another channel than the hub's frames, so while the user types (a key in the
+        // last second) the wait is short enough that a key is read within a couple of milliseconds; idle, the console sleeps longer.
+        if typed_at.is_some_and(|t| t.elapsed() < Duration::from_secs(1)) {
+            wait = wait.min(Duration::from_millis(2));
+        }
+        match session.next(wait) {
             Update::Snapshot(s) => {
                 c.snapshot = Some(*s);
                 dirty_since = None;
@@ -1575,12 +1592,17 @@ fn console(
         while let Ok(b) = rx.try_recv() {
             bytes.push(b);
         }
+        if !bytes.is_empty() {
+            typed_at = Some(Instant::now());
+        }
         events.extend(c.parser.push(&bytes));
         if bytes.is_empty() {
             events.extend(c.parser.flush());
         }
         for ev in events {
-            redraw = true;
+            // A key that only goes to the agent changes nothing on screen until the agent answers: drawing for it would hold the
+            // echo back by up to a frame (ADR-0022). Anything else is drawn.
+            let before = c.app.clone();
             let modes = preview
                 .as_ref()
                 .map(|p| p.screen().modes())
@@ -1594,6 +1616,9 @@ fn console(
                     t: &text,
                 },
             );
+            if c.app != before || acts.iter().any(|a| !matches!(a, Action::Input(_))) {
+                redraw = true;
+            }
             c.selected = rows
                 .get(c.app.selected)
                 .filter(|r| !r.header)
@@ -1697,9 +1722,10 @@ fn console(
                 }
             }
         }
-        // At most 25 frames a second, however fast the agent writes; input was handled before this. The first frame of a run is drawn
-        // over a cleared screen: lines written meanwhile ("connecting…", a lost link) must not stay under it.
-        if redraw && last_draw.elapsed() >= Duration::from_millis(40) {
+        // At most one frame per FRAME (ADR-0022: an echo within 16 ms), however fast the agent writes; input was handled before this.
+        // The first frame of a run is drawn over a cleared screen: lines written meanwhile ("connecting…", a lost link) must not stay
+        // under it.
+        if redraw && last_draw.elapsed() >= FRAME {
             if std::mem::take(&mut fresh) {
                 let _ = c.window.invalidate();
             }

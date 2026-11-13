@@ -138,6 +138,24 @@ sockets and the node's uplink set `TCP_NODELAY`.
 
 Not measured: twenty terminals all open and busy at once (the wall shows four; the other agents' output is not relayed to the browser), and any machine over a real network.
 
+### Measured through the hub in the terminal client (ADR-0063)
+
+`agora tui` (release build, macOS on Apple silicon) against a hub and a node on the same machine, driven in a 160×40 pseudo-terminal:
+a key is written to the console, which sends it to the shell agent through the hub, and the time runs until the echoed character is
+in the console's output. The flood row times the console's own answer (Ctrl K drawing the palette) while the agent's tab streams
+`yes … | head -c 50000000`.
+
+| Budget | Result | Note |
+|---|---|---|
+| Keystroke → echo, same machine, ≤ 16 ms p95 | p50 3.6 ms, p95 4.6 ms, max 13 ms | 100 keys, 20 ms apart |
+| Input outranks output | palette drawn p50 4.1 ms, p95 6.2 ms, max 6.8 ms during the flood | 100 times |
+| Idle CPU | 0.2% with a terminal tab open and nothing typed | 10 s |
+
+The first wiring measured the echo at p50 33 ms: frames were capped at 25 a second, a key that only went to the agent still drew a
+frame (holding the echo back by up to one more frame), and the loop slept 15 ms on the hub while a key waited on stdin. Now frames are
+capped at 60 a second, a key that changes nothing on screen draws nothing, and while the user types (a key in the last second) the loop
+reads keys every 2 ms; idle, it sleeps as before.
+
 ### xterm.js against a WebAssembly emulator (decides ADR-0017's open choice)
 
 `scripts/terminal-compare` feeds identical bytes to xterm.js (DOM renderer and the WebGL addon) and ghostty-web 0.4.0 (Ghostty's
