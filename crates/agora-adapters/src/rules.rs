@@ -171,6 +171,14 @@ impl Detector {
         Self { rules }
     }
 
+    /// ADR-0057: the manifest's `[[ready]]` rules (the input box is empty and waiting), compiled the same way. Matches nothing when the
+    /// manifest has none.
+    pub fn ready(manifest: &Manifest) -> Self {
+        let mut rules: Vec<CompiledRule> = manifest.ready.iter().filter_map(compile_rule).collect();
+        rules.sort_by_key(|r| std::cmp::Reverse(r.priority));
+        Self { rules }
+    }
+
     /// The state the highest-priority matching rule reports, or `None` when no rule matches (the caller keeps
     /// the previous state or falls back to `Unknown`). Region text is built once per distinct region.
     pub fn detect(&self, term: &dyn Terminal) -> Option<Detection> {

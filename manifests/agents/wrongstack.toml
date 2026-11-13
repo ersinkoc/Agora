@@ -59,3 +59,13 @@ state = "idle"
 priority = 100
 region = "bottom_non_empty_lines(24)"
 regex = 'WRONGSTACK v[0-9.]+ .*idle ─╮'
+
+# ADR-0057: the input box under the idle header is empty: only then does the node type a helper's first prompt.
+[[ready]]
+id = "empty_prompt_box"
+state = "idle"
+priority = 100
+region = "bottom_non_empty_lines(12)"
+regex = 'WRONGSTACK v[0-9.]+ .*idle ─╮[^\n]*\n│[^\S\n]+❯[^\S\n]+│'
+all = [{ contains = "Enter send" }]
+not = [{ contains = "APPROVAL REQUIRED" }]

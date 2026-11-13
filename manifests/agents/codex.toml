@@ -81,3 +81,14 @@ state = "idle"
 priority = 100
 region = "bottom_non_empty_lines(12)"
 regex = '^\s*› '
+
+# ADR-0057: the input box shows its placeholder (it is empty) above the shortcuts footer: only then does the node type a helper's
+# first prompt. Stricter than `prompt_box`, whose `› ` also marks the selected row of a menu.
+[[ready]]
+id = "empty_prompt_box"
+state = "idle"
+priority = 100
+region = "bottom_non_empty_lines(12)"
+regex = '^›[^\S\n]+Ask Codex to do anything[^\S\n]*$'
+all = [{ contains = "? for shortcuts" }]
+not = [{ contains = "esc to interrupt" }, { contains = "esc to cancel" }, { contains = "enter continue" }]

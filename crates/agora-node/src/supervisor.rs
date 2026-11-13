@@ -270,6 +270,19 @@ pub struct KindInfo {
 struct KindEntry {
     manifest: Manifest,
     detector: Detector,
+    /// ADR-0057: the manifest's `[[ready]]` rules (an empty input box).
+    ready: Detector,
+}
+
+/// What a terminal agent's live screen shows right now (ADR-0057), read when asked rather than from the paced detection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScreenCheck {
+    /// What the kind's rules detect on the live bottom of the screen now (`None`: no rule matches).
+    pub state: Option<AgentState>,
+    /// The `[[ready]]` rules match: the input box is empty and waiting.
+    pub ready: bool,
+    /// The text asked about is on the bottom of the screen (whitespace ignored, so a wrapped line still counts).
+    pub shows: bool,
 }
 
 /// An agent driven through an L3 adapter process instead of a terminal.
@@ -339,9 +352,25 @@ impl Supervisor {
         self.parents.insert(child.clone(), parent.clone());
     }
 
-    /// ADR-0057: whether a scoped grant ("up to N more without asking") may cover `kind`. Not for a shell, nor for a kind that is a plain
-    /// terminal program with nothing of an agent (no screen rules, no mesh, no adapter, no structured mode): a grant there would mean
-    /// "run any N programs without asking". Unknown kinds are not grantable.
+    /// ADR-0057: a fresh look at a terminal agent's live screen, run on its bottom lines now (never the paced detection's last result):
+    /// what its rules detect, whether its `[[ready]]` rules match, and whether `text` shows. `None` for an agent without a terminal.
+    pub fn screen_check(&self, id: &AgentId, text: &str) -> Option<ScreenCheck> {
+        let e = self.agents.get(id)?;
+        let term = e.terminal.as_ref()?;
+        let kind = self.kinds.get(&e.agent.kind)?;
+        let squash = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+        let needle = squash(text);
+        Some(term.inspect(|t| ScreenCheck {
+            state: kind.detector.detect(t).map(|d| d.state),
+            ready: kind.ready.detect(t).is_some(),
+            shows: !needle.is_empty()
+                && squash(&t.bottom_non_empty_lines(12).concat()).contains(&needle),
+        }))
+    }
+
+    /// ADR-0057: whether a scoped grant ("up to N more without asking") may cover `kind`: only a kind with an agent integration (a
+    /// mesh section, an adapter or a structured mode), never a shell or another plain program however many screen rules it has (a
+    /// grant there would mean "run any N programs without asking"). Unknown kinds are not grantable.
     pub fn grantable(&self, kind: &str) -> bool {
         const SHELLS: &[&str] = &[
             "sh",
@@ -357,6 +386,7 @@ impl Supervisor {
             "powershell",
             "cmd",
             "busybox",
+            "env",
         ];
         let Some(k) = self.kinds.get(kind) else {
             return false;
@@ -377,9 +407,13 @@ impl Supervisor {
                     .unwrap_or(base)
             })
             .unwrap_or_default();
-        let agent_like =
-            !m.rules.is_empty() || m.mcp.is_some() || m.adapter.is_some() || m.structured.is_some();
-        kind != "shell" && !SHELLS.contains(&program.as_str()) && agent_like
+        let integrated = m.mcp.is_some() || m.adapter.is_some() || m.structured.is_some();
+        kind != "shell" && !SHELLS.contains(&program.as_str()) && integrated
+    }
+
+    /// ADR-0057: forgets which agent started `child` (its record was pruned).
+    pub fn forget_parent(&mut self, child: &AgentId) {
+        self.parents.remove(child);
     }
 
     /// The node's confinement settings (ADR-0047), for checks that compare two agents' confinement.
@@ -453,8 +487,15 @@ impl Supervisor {
     /// Make an agent kind available. Replaces a previous manifest of the same kind.
     pub fn register(&mut self, manifest: Manifest) {
         let detector = Detector::new(&manifest);
-        self.kinds
-            .insert(manifest.kind.clone(), KindEntry { manifest, detector });
+        let ready = Detector::ready(&manifest);
+        self.kinds.insert(
+            manifest.kind.clone(),
+            KindEntry {
+                manifest,
+                detector,
+                ready,
+            },
+        );
     }
 
     /// Agents that are running or waiting for a restart.

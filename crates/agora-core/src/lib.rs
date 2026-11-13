@@ -9,6 +9,7 @@ pub mod ids;
 pub mod lease;
 pub mod project;
 pub mod task;
+pub mod text;
 pub mod worktree;
 
 pub use agent::{Agent, AgentState, IntegrationLevel, StateSource, Terminal, TerminalPurpose};

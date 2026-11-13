@@ -209,6 +209,11 @@ pub struct Manifest {
     /// What the agent needs beyond its worktree when the node confines agents (ADR-0047). Requests only: the node honours them for
     /// kinds its owner trusts.
     pub sandbox: Option<SandboxNeeds>,
+    /// ADR-0057: `[[ready]]` rules that say the input box is empty and waiting, stricter than an `idle` rule (which may also match a
+    /// menu's selected row). The node types a helper's first prompt only into a screen these match; a kind without them never has its
+    /// first prompt typed for it. Same shape as `[[rules]]`, with `state = "idle"`.
+    #[serde(default)]
+    pub ready: Vec<Rule>,
 }
 
 /// Folders an agent asks to read or write when confined; `~/` stands for the home folder.
@@ -310,9 +315,21 @@ impl Manifest {
                 return Err(invalid("mcp"));
             }
         }
+        for (i, r) in self.ready.iter().enumerate() {
+            if r.state != RuleState::Idle {
+                return Err(invalid(format!("ready[{i}].state")));
+            }
+        }
+        for (name, list) in [("rules", &self.rules), ("ready", &self.ready)] {
+            Self::validate_rules(name, list)?;
+        }
+        Ok(())
+    }
+
+    fn validate_rules(name: &str, rules: &[Rule]) -> Result<(), ManifestError> {
         let mut ids = HashSet::new();
-        for (i, r) in self.rules.iter().enumerate() {
-            let at = |f: &str| invalid(format!("rules[{i}].{f}"));
+        for (i, r) in rules.iter().enumerate() {
+            let at = |f: &str| invalid(format!("{name}[{i}].{f}"));
             if r.id.is_empty() || !ids.insert(r.id.as_str()) {
                 return Err(at("id"));
             }
