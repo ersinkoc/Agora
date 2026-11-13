@@ -21,7 +21,7 @@ cli-usage =
       agora hub ssh [add NAME DESTINATION [--port N]] [--hub-dir DIR]
       agora hub backup [FILE] [--keep N] [--hub-dir DIR]
       agora hub restore FILE [--hub-dir DIR]
-      agora hub devices [--hub-dir DIR]
+      agora hub devices [forget DEVICE_ID] [--hub-dir DIR]
       agora node enroll --hub URL --ca FILE --code CODE --id NAME
       agora panel
       agora node trust DEVICE_ID PUBLIC_KEY_HEX [--data DIR]
@@ -82,6 +82,8 @@ cli-hub-web = Web app: https://{ $addr }/ . Sign in with the code { $code } (val
 cli-hub-login = Sign-in code for the web app: { $code } (valid for 10 minutes). Open the hub's address in a browser and enter it.
 cli-trusted = Device { $id } can now answer approvals on this node. Restart the node to apply it.
 cli-trust-failed = Could not trust that device: { $reason }
+cli-hub-device-forgotten = Device { $id } is no longer listed. Machines keep refusing it.
+cli-hub-device-not-forgotten = Device { $id } is not a removed device on this hub; only removed devices can be forgotten.
 cli-hub-devices-none = No device is registered yet. A browser or the terminal client registers itself when it signs in.
 cli-hub-device-line = { $name } · { $fingerprint } · { $id } · { $user } · registered { $created } · last used { $used }{ $state }
 cli-device-state-revoked = {" "}· removed

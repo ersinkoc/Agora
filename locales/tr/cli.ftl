@@ -21,7 +21,7 @@ cli-usage =
       agora hub ssh [add AD HEDEF [--port N]] [--hub-dir DIR]
       agora hub backup [DOSYA] [--keep N] [--hub-dir DİZİN]
       agora hub restore DOSYA [--hub-dir DİZİN]
-      agora hub devices [--hub-dir DİZİN]
+      agora hub devices [forget CİHAZ_ID] [--hub-dir DİZİN]
       agora node enroll --hub URL --ca FILE --code CODE --id NAME
       agora panel
       agora node trust CİHAZ_ID AÇIK_ANAHTAR_HEX [--data DİZİN]
@@ -82,6 +82,8 @@ cli-hub-web = Web uygulaması: https://{ $addr }/ . { $code } koduyla giriş yap
 cli-hub-login = Web uygulaması için giriş kodu: { $code } (10 dakika geçerli). Hub adresini tarayıcıda açıp kodu girin.
 cli-trusted = { $id } cihazı artık bu makinedeki onaylara yanıt verebilir. Uygulanması için bu makinedeki düğümü yeniden başlatın.
 cli-trust-failed = Bu cihaz güvenilir olarak kaydedilemedi: { $reason }
+cli-hub-device-forgotten = { $id } cihazı artık listelenmiyor. Makineler onu reddetmeye devam eder.
+cli-hub-device-not-forgotten = { $id } bu hub'da kaldırılmış bir cihaz değil; yalnızca kaldırılmış cihazlar unutulabilir.
 cli-hub-devices-none = Henüz kayıtlı cihaz yok. Bir tarayıcı ya da terminal istemcisi oturum açtığında kendini kaydeder.
 cli-hub-device-line = { $name } · { $fingerprint } · { $id } · { $user } · kayıt { $created } · son kullanım { $used }{ $state }
 cli-device-state-revoked = {" "}· kaldırıldı

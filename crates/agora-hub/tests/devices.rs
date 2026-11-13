@@ -167,33 +167,69 @@ fn err(r: &v1::CommandResponse) -> &str {
     }
 }
 
+/// Test device keys, one per number, kept for the whole run.
+fn pair(n: u8) -> &'static ring::signature::EcdsaKeyPair {
+    use ring::signature::{EcdsaKeyPair, ECDSA_P256_SHA256_FIXED_SIGNING};
+    static KEYS: std::sync::OnceLock<Vec<EcdsaKeyPair>> = std::sync::OnceLock::new();
+    let keys = KEYS.get_or_init(|| {
+        let rng = ring::rand::SystemRandom::new();
+        (0..12)
+            .map(|_| {
+                let p =
+                    EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng).unwrap();
+                EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, p.as_ref(), &rng)
+                    .unwrap()
+            })
+            .collect()
+    });
+    &keys[usize::from(n)]
+}
+
 fn key(n: u8) -> Vec<u8> {
-    let mut k = vec![4u8; 65];
-    k[1] = n;
-    k
+    use ring::signature::KeyPair;
+    pair(n).public_key().as_ref().to_vec()
+}
+
+fn sign(n: u8, m: &[u8]) -> Vec<u8> {
+    pair(n)
+        .sign(&ring::rand::SystemRandom::new(), m)
+        .unwrap()
+        .as_ref()
+        .to_vec()
+}
+
+fn registration(id: &str, n: u8) -> v1::DeviceRegister {
+    use agora_hub::devices::register_message;
+    let (name, at) = (format!("Browser {n}"), server::now_ms());
+    v1::DeviceRegister {
+        device_id: id.into(),
+        name: name.clone(),
+        public_key: key(n),
+        signed_at_ms: at,
+        signature: sign(n, &register_message(id, &name, &key(n), at)),
+    }
 }
 
 fn register(id: &str, n: u8) -> cr::Command {
-    cr::Command::DeviceRegister(v1::DeviceRegister {
-        device_id: id.into(),
-        name: format!("Browser {n}"),
-        public_key: key(n),
-    })
+    cr::Command::DeviceRegister(registration(id, n))
 }
 
+/// `device` (key `n`) endorsed by `by`, whose key is 1.
 fn endorse(device: &str, n: u8, by: &str, nodes: &[&str]) -> cr::Command {
     let now = server::now_ms();
+    let mut e = v1::DeviceEndorsement {
+        device_id: device.into(),
+        public_key: key(n),
+        name: "New".into(),
+        nodes: nodes.iter().map(|n| (*n).to_string()).collect(),
+        issued_at_ms: now,
+        expires_at_ms: now + 86_400_000,
+        endorser_device_id: by.into(),
+        signature: Vec::new(),
+    };
+    e.signature = sign(1, &agora_hub::devices::endorse_message(&e));
     cr::Command::DeviceEndorse(v1::DeviceEndorse {
-        endorsement: Some(v1::DeviceEndorsement {
-            device_id: device.into(),
-            public_key: key(n),
-            name: "New".into(),
-            nodes: nodes.iter().map(|n| (*n).to_string()).collect(),
-            issued_at_ms: now,
-            expires_at_ms: now + 86_400_000,
-            endorser_device_id: by.into(),
-            signature: vec![7; 64],
-        }),
+        endorsement: Some(e),
     })
 }
 
@@ -247,6 +283,11 @@ async fn a_client_registers_lists_and_asks_and_the_hub_carries_endorsements_only
         "r4",
         cr::Command::DeviceAskApproval(v1::DeviceAskApproval {
             device_id: "web-new".into(),
+            signed_at_ms: server::now_ms(),
+            signature: sign(
+                2,
+                &agora_hub::devices::ask_message("web-new", server::now_ms()),
+            ),
         }),
     ))
     .await
@@ -291,10 +332,12 @@ async fn a_client_registers_lists_and_asks_and_the_hub_carries_endorsements_only
         panic!("{got:?}")
     };
     let e = d.endorsement.unwrap();
-    assert_eq!(
-        (e.device_id.as_str(), e.signature),
-        ("web-new", vec![7; 64])
-    );
+    assert_eq!(e.device_id, "web-new");
+    assert!(agora_hub::devices::verifies(
+        &key(1),
+        &agora_hub::devices::endorse_message(&e),
+        &e.signature
+    ));
     assert!(nothing_routed(&mut old).await);
 
     // One that names other machines does not go to this one.
@@ -308,11 +351,15 @@ async fn a_client_registers_lists_and_asks_and_the_hub_carries_endorsements_only
     c.send(&command(
         "r10",
         cr::Command::DeviceRevoke(v1::DeviceRevoke {
-            revocation: Some(v1::DeviceRevocation {
-                device_id: "web-new".into(),
-                issued_at_ms: server::now_ms(),
-                revoker_device_id: "web-old".into(),
-                signature: vec![8; 64],
+            revocation: Some({
+                let mut r = v1::DeviceRevocation {
+                    device_id: "web-new".into(),
+                    issued_at_ms: server::now_ms(),
+                    revoker_device_id: "web-old".into(),
+                    signature: Vec::new(),
+                };
+                r.signature = sign(1, &agora_hub::devices::revoke_message(&r));
+                r
             }),
         }),
     ))
@@ -428,15 +475,7 @@ async fn enrollment_offers_the_registered_devices_and_a_node_asks_for_them_with_
     let trust = Ca::from_pem(ca.cert_pem(), &ca.key_pem()).unwrap();
     let st = state(Some(ca));
     agora_hub::devices::Devices::new(st.hub.store())
-        .register(
-            "owner",
-            &v1::DeviceRegister {
-                device_id: "web-1".into(),
-                name: "Firefox".into(),
-                public_key: key(1),
-            },
-            5,
-        )
+        .register("owner", &registration("web-1", 1), server::now_ms())
         .unwrap();
     let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();

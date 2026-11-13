@@ -289,7 +289,9 @@ impl SqliteStore {
                      created_ms        INTEGER NOT NULL,
                      last_used_ms      INTEGER NOT NULL,
                      approval_asked_ms INTEGER NOT NULL DEFAULT 0,
-                     revoked_ms        INTEGER NOT NULL DEFAULT 0
+                     revoked_ms        INTEGER NOT NULL DEFAULT 0,
+                     signed_at_ms      INTEGER NOT NULL DEFAULT 0,
+                     signature         BLOB NOT NULL DEFAULT x''
                  );
                  CREATE TABLE IF NOT EXISTS device_endorsements (
                      id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -297,6 +299,7 @@ impl SqliteStore {
                      endorser   TEXT NOT NULL,
                      issued_ms  INTEGER NOT NULL,
                      expires_ms INTEGER NOT NULL,
+                     signature  BLOB NOT NULL UNIQUE,
                      payload    BLOB NOT NULL
                  );
                  CREATE TABLE IF NOT EXISTS device_revocations (
@@ -304,6 +307,7 @@ impl SqliteStore {
                      device_id TEXT NOT NULL,
                      revoker   TEXT NOT NULL,
                      issued_ms INTEGER NOT NULL,
+                     signature BLOB NOT NULL UNIQUE,
                      payload   BLOB NOT NULL
                  );
                  PRAGMA user_version = 11;

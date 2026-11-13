@@ -9,5 +9,7 @@
   "endorsedBy": [
     "x"
   ],
-  "revokedMs": "1"
+  "revokedMs": "1",
+  "signedAtMs": "1",
+  "registrationSignature": "AQID"
 }

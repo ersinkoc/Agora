@@ -1,3 +1,5 @@
 {
-  "deviceId": "x"
+  "deviceId": "x",
+  "signedAtMs": "1",
+  "signature": "AQID"
 }
