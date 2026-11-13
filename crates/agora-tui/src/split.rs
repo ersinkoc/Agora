@@ -260,8 +260,14 @@ fn tree(v: &View<'_>, t: Text<'_>) -> Vec<Row> {
             } else {
                 format!("{}↳ ", "  ".repeat(depth - 1))
             };
+            // ADR-0059: an agent that acts without asking says so in the tree too.
+            let no_ask = if a.skips_permissions {
+                format!("  [{}]", t(key!("tui-badge-no-ask"), &[]))
+            } else {
+                String::new()
+            };
             rows.push(Row {
-                text: format!("  {lead}{m} {}  {}", local(&a.agent_id), a.kind),
+                text: format!("  {lead}{m} {}  {}{no_ask}", local(&a.agent_id), a.kind),
                 paint,
                 selected: a.agent_id == v.selected,
             });
@@ -383,8 +389,13 @@ pub fn frame(v: &View<'_>, t: Text<'_>) -> String {
                     )
                 )
             };
+            let no_ask = if a.skips_permissions {
+                format!("  [{}]", t(key!("tui-badge-no-ask"), &[]))
+            } else {
+                String::new()
+            };
             format!(
-                " {}  {}  {}  {}{by}",
+                " {}  {}  {}  {}{by}{no_ask}",
                 local(&a.agent_id),
                 a.kind,
                 a.node_id,
