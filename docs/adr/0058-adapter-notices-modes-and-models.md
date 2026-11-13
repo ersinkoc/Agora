@@ -1,8 +1,7 @@
 # 0058. Show an adapter's errors and notices, and choose its model and mode
-Status: Proposed
+Status: Accepted
 Date: 2026-11-13
-
-Not accepted. Nothing here may be built until the maintainer accepts it in a message of their own.
+Accepted: 2026-11-13 (maintainer's explicit approval in chat: "0058'i onaylıyorum"). The maintainer did not answer the open questions; the proposed answers below stand.
 
 ## Context
 A real run of opencode through the ACP bridge (macOS, #401) showed what a person would miss: a provider error ends the turn
@@ -11,7 +10,7 @@ silently, an agent that exits during a prompt leaves no reason, a process that d
 produces stable codes for the first three and maps usage, but the adapter protocol has no message that carries a notice to a
 person, the node turns every adapter error into plain text, and there is no way to pass a mode or a model to an adapter.
 
-## Decision (proposed)
+## Decision
 All changes are additive (new messages, fields, capabilities, error codes).
 1. **A notice in the conversation.** A new chat item kind `NoticeItem { code, params }` in `adapter.proto` (appended to `ChatAppendParams`),
    carried through the node and hub like other chat items. Clients render it from a Fluent message id derived from the code, so
@@ -27,7 +26,7 @@ All changes are additive (new messages, fields, capabilities, error codes).
 5. **Context size and cost.** The node accepts the bridge's usage reports (cost) and a new `context_tokens` field in the usage
    report, so the panel can show how full the agent's context is. Usage sources stay as ADR-0042 defines them.
 
-## Open questions for the maintainer
+## Open questions (proposed answers stand)
 - Setting a model changes cost and where the prompt goes. Should changing the model need an approval? (Proposed: no, it is the
   user's own click in the panel; an agent cannot call it.)
 - Mode changes can lower an agent's own safety (an "auto" mode). Should the panel warn on modes the agent marks as skipping
