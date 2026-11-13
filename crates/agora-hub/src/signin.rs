@@ -12,7 +12,9 @@ use crate::enroll::{hash, new_code, Lockout, CODE_TTL_MS};
 use crate::store::{SqliteStore, StoreError};
 
 /// How long a session lasts.
-pub const SESSION_TTL_MS: u64 = 12 * 60 * 60 * 1000;
+/// A session lasts 30 days and is extended on use (see `check`), so a person who uses the window is not asked for a code again; signing out
+/// or revoking ends it at once.
+pub const SESSION_TTL_MS: u64 = 30 * 24 * 60 * 60 * 1000;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum SignInError {
@@ -180,15 +182,27 @@ impl<'a> SignIn<'a> {
         let Ok(conn) = self.store.lock() else {
             return false;
         };
-        conn.query_row(
-            "SELECT expires_ms FROM sessions WHERE token_hash = ?1",
-            [token_hash(token)],
-            |r| r.get::<_, i64>(0),
-        )
-        .optional()
-        .ok()
-        .flatten()
-        .is_some_and(|exp| exp > to_i64(now_ms))
+        let hash = token_hash(token);
+        let live = conn
+            .query_row(
+                "SELECT expires_ms FROM sessions WHERE token_hash = ?1",
+                [&hash],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()
+            .ok()
+            .flatten()
+            .filter(|exp| *exp > to_i64(now_ms));
+        // Use extends the session: once less than half of its time is left it runs a full term again from now.
+        if let Some(exp) = live {
+            if exp - to_i64(now_ms) < to_i64(SESSION_TTL_MS / 2) {
+                let _ = conn.execute(
+                    "UPDATE sessions SET expires_ms = ?2 WHERE token_hash = ?1",
+                    params![hash, to_i64(now_ms.saturating_add(SESSION_TTL_MS))],
+                );
+            }
+        }
+        live.is_some()
     }
 
     /// What the holder of this session may do (ADR-0049); `None` for a session that is not live or whose person was removed.
@@ -387,6 +401,32 @@ mod tests {
 
     fn si(store: &SqliteStore) -> SignIn<'_> {
         SignIn::new(store, Arc::new(Lockout::new()))
+    }
+
+    #[test]
+    fn using_a_session_extends_it() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let s = si(&store);
+        let code = s.create_code(0).unwrap();
+        let token = s.redeem(&code, 1_000).unwrap();
+        // Used after more than half of its term: it runs a full term again from then.
+        let later = SESSION_TTL_MS * 3 / 4;
+        assert!(s.check(&token, later));
+        assert!(
+            s.check(&token, SESSION_TTL_MS + 2_000),
+            "alive after its first deadline: it was extended"
+        );
+        // Not used again: it ends one full term after that use, not at its first deadline, and not later.
+        assert!(
+            !s.check(&token, later + SESSION_TTL_MS + 5_000),
+            "but not for ever"
+        );
+        let code = s.create_code(later).unwrap();
+        let other = s.redeem(&code, later).unwrap();
+        assert!(
+            s.check(&other, later + SESSION_TTL_MS - 1_000),
+            "a fresh session lasts a full term"
+        );
     }
 
     #[test]
