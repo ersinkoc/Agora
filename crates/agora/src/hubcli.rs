@@ -1029,6 +1029,38 @@ pub fn node_enroll(say: &Say, o: &Opts) -> ExitCode {
     }
 }
 
+/// The address of the hub's web app, from the hub address a node was enrolled with (`wss://host:port` -> `https://host:port/`).
+fn panel_address(hub: &str) -> Option<String> {
+    let rest = hub.trim().strip_prefix("wss://")?;
+    let host = rest.split('/').next().filter(|h| !h.is_empty())?;
+    Some(format!("https://{host}/"))
+}
+
+/// `agora panel`: where to open the hub's panel from a machine that runs a node (ADR-0056). The person still signs in with a code
+/// from `agora hub login` on the hub; nothing here holds a session or opens a port.
+pub fn panel(say: &Say) -> ExitCode {
+    let dir = link_dir();
+    let address = std::fs::read_to_string(dir.join("url"))
+        .ok()
+        .and_then(|u| panel_address(&u));
+    match address {
+        Some(url) => {
+            say.out(
+                key!("cli-panel"),
+                &[
+                    ("url", url.into()),
+                    ("ca", dir.join("ca.pem").display().to_string().into()),
+                ],
+            );
+            ExitCode::SUCCESS
+        }
+        None => {
+            say.err(key!("cli-panel-none"), &[]);
+            ExitCode::from(1)
+        }
+    }
+}
+
 /// What enrollment left on this machine, if anything: the node id and how to dial the hub.
 pub fn load_link(socket: PathBuf) -> Option<(String, HubLink)> {
     let dir = link_dir();
@@ -1061,6 +1093,20 @@ mod tests {
         for c in agora_node::uplink_client::CAPABILITIES {
             assert!(HUB_CAPABILITIES.contains(c), "the hub does not support {c}");
         }
+    }
+
+    #[test]
+    fn the_panel_address_comes_from_the_hub_address() {
+        assert_eq!(
+            panel_address("wss://hub.lan:7444\n").as_deref(),
+            Some("https://hub.lan:7444/")
+        );
+        assert_eq!(
+            panel_address("wss://localhost:7443/x").as_deref(),
+            Some("https://localhost:7443/")
+        );
+        assert_eq!(panel_address("ws://hub:1"), None);
+        assert_eq!(panel_address("wss://"), None);
     }
 
     #[test]
