@@ -156,10 +156,36 @@ try {
   const calm = await page.waitForFunction((id) => !document.querySelector(`[data-agent="${CSS.escape(id)}"]`) && [...document.querySelectorAll('[data-pane]')].some((p) => /Nothing needs you/.test(p.textContent ?? '')), chatId, { timeout: 20000 }).then(() => true, () => false);
   check(calm, 'once answered, the pane moves on (nothing else needs you: it says so)');
 
-  // A phone: no tiling, the panes are tabs of one group.
-  await page.setViewportSize({ width: 420, height: 860 });
+  // A phone: no tiling, the panes are tabs of one group; the terminal in front gets the height, nothing is clipped at the edge.
+  const fits = (w) => page.evaluate((width) => {
+    const out = [...document.querySelectorAll('header button, header a, [data-layout-root] button, aside button')]
+      // A tab strip that scrolls sideways may hold tabs beyond the edge: they are reachable by scrolling, not clipped.
+      .filter((b) => !b.closest('[role=tablist]'))
+      .filter((b) => { const r = b.getBoundingClientRect(); return r.width > 0 && r.height > 0 && getComputedStyle(b).visibility !== 'hidden' && (r.left < -1 || r.right > width + 1); })
+      .map((b) => (b.getAttribute('aria-label') || b.textContent || '').trim().slice(0, 30));
+    return { scroll: document.documentElement.scrollWidth, out };
+  }, w);
+  const keyButtons = ['Layout', 'Start an agent'];
+  await page.setViewportSize({ width: 390, height: 844 });
   await page.waitForFunction(() => document.querySelectorAll('[data-layout-root] [role=separator]').length === 0);
   check((await page.locator('[data-layout-root] [role=tab]').count()) >= 4 && (await terminals()) <= 1, 'on a phone the panes become tabs of one group, one on screen');
+  await page.locator('[data-layout-root] [role=tab]').first().click();
+  await page.waitForFunction(() => document.querySelectorAll('[data-pane] .xterm').length === 1);
+  await page.waitForTimeout(300);
+  const termH = (await page.locator('[data-pane] .xterm').first().boundingBox())?.height ?? 0;
+  check(termH >= 0.4 * 844, `on a phone the terminal gets the height (${Math.round(termH)} px of 844)`);
+  const phone = await fits(390);
+  check(phone.scroll <= 390 && phone.out.length === 0, `on a phone nothing is wider than the screen${phone.out.length ? `: ${phone.out.join(', ')}` : ''} (page ${phone.scroll} px)`);
+  for (const name of keyButtons) {
+    const b = page.getByRole('button', { name, exact: true }).locator('visible=true').first();
+    const r = await b.boundingBox().catch(() => null);
+    check(!!r && r.x >= 0 && r.x + r.width <= 390, `on a phone "${name}" is within the screen`);
+  }
+  await shoot('phone');
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.waitForTimeout(300);
+  const desk = await fits(1440);
+  check(desk.scroll <= 1440 && desk.out.length === 0, `at 1440 × 900 nothing is clipped${desk.out.length ? `: ${desk.out.join(', ')}` : ''}`);
   await page.setViewportSize({ width: 1600, height: 1000 });
 
   check((await page.locator('[role=alert]').count()) === 0, 'no error is shown');

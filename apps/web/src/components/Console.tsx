@@ -293,7 +293,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
 
   return (
     <div className="ide">
-      <header className="ide-bar h-10 border-b">
+      <header className="ide-bar min-h-10 flex-wrap border-b py-1 sm:h-10 sm:flex-nowrap sm:py-0">
         <span aria-hidden className="grid size-6 flex-none place-items-center rounded-xs bg-accent text-xs font-bold text-on-accent">A</span>
         <h1 className="m-0 me-2 hidden text-[13px] font-semibold tracking-normal sm:block">{t('home-title')}</h1>
         {!showAgents && <button type="button" className="ide-iconbtn" onClick={() => setShowAgents(true)} aria-label={t('ide-show-agents')} title={t('ide-show-agents')}><Icon name="panelLeft" /></button>}
@@ -310,12 +310,12 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
         {!showDetails && <button type="button" className="ide-iconbtn" onClick={() => setShowDetails(true)} aria-label={t('ide-show-details')} title={t('ide-show-details')}><Icon name="panelRight" /></button>}
       </header>
 
-      <div className="relative grid min-h-0 grid-cols-1 lg:[grid-template-columns:var(--cols)]" style={{ ['--cols' as string]: cols }}>
+      <div className="relative grid min-h-0 grid-cols-1 overflow-y-auto max-lg:auto-rows-max lg:overflow-visible lg:[grid-template-columns:var(--cols)]" style={{ ['--cols' as string]: cols }}>
         {showAgents && <div className="absolute inset-y-0 z-10 hidden lg:block" style={{ insetInlineStart: leftWidth }}><Resizer side="start" value={leftWidth} min={200} max={480} onChange={setLeftWidth} /></div>}
         {showDetails && <div className="absolute inset-y-0 z-10 hidden lg:block" style={{ insetInlineEnd: rightWidth }}><Resizer side="end" value={rightWidth} min={260} max={560} onChange={setRightWidth} /></div>}
         {showAgents && <Explorer fleet={projectFilter ? fleet.filter((a) => a.projectId === projectFilter) : fleet} machines={machines} projects={projectOptions} project={projectFilter} onProject={chooseProject} open={shownAgents} current={current?.id} onToggle={select} onStart={onStart} onCollapse={() => setShowAgents(false)} onDismiss={removeClosed} everyone={!!onForget} forgetError={forgetError} onResume={resume} resuming={resuming} resumeError={resumeError} />}
 
-        <main className="flex min-h-0 min-w-0 flex-col" aria-label={t('focus-terminal')}>
+        <main className="flex min-h-[70dvh] min-w-0 flex-col lg:min-h-0" aria-label={t('focus-terminal')}>
           <Workspace ws={ws} dispatch={dispatch} fleet={fleet} bindings={bindings} narrow={narrow} renderAgent={agentBody} renderPanel={panel}
             onFiles={filesOf ? (a) => setBrowsing(a.id) : undefined} onStart={onStart ? () => onStart() : undefined} welcome={welcome} />
         </main>
