@@ -4,6 +4,11 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+### ACP agents
+- The ACP bridge no longer ends a failed turn as a silent success: a turn the agent answered with an error, stopped itself (for example a refusal), or ended without saying anything carries a reason code (`adapter.turn_failed`, `adapter.turn_stopped`, `adapter.turn_empty`) in its closing state and in a log line. Showing it in the conversation still needs a protocol addition.
+- An ACP agent that exits is reported with the stage it was in, its exit code and a short tail of its error output with secrets removed (`adapter.agent_exited`). One that dies before it is initialized answers the node's `initialize` with that reason instead of just ending.
+- The running cost an ACP agent reports (`usage_update`) becomes a usage report of how much it grew, with the agent's model; the bridge declares `usage`.
+
 ### Agents working together
 - An agent connected to the mesh is now told what the mesh is for: who it can see (`agents_list`), how to message and ask others, share tasks and hand work over, and lease files before editing them. It is also told it cannot start other agents from there.
 

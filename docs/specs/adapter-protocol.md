@@ -67,8 +67,9 @@ towards the node, so chat items, approvals, state and cancel work as for any L3 
 | `session/update` `tool_call` (title, `rawInput`) | `chat/append` tool call; a `diff` in its content (or in `tool_call_update`) becomes a diff item (old and new text shown as a whole-file replacement) |
 | `session/update` `plan` | `chat/append` plan, one step per entry |
 | `session/request_permission` | `approval/request` (action: the tool call's title, detail: its input cut at 300 characters) and state `blocked` |
-| answer to `session/prompt` (stop reason) | state `idle`; the prompt itself set `working` |
-| `agent_thought_chunk`, other updates | dropped |
+| answer to `session/prompt` (stop reason) | state `idle`; the prompt itself set `working`. A turn that failed, was stopped by the agent or said nothing carries a reason (below) |
+| `session/update` `usage_update` with a `cost` | `usage/report`: `costMicros` is how much the session's running cost grew since the last report (in micro-units of its `currency`), `model` the `currentModelId` from `session/new`, tokens 0. `used` and `size` (the context window) have no field and are dropped |
+| `agent_thought_chunk`, `available_commands_update`, `current_mode_update`, other updates | dropped |
 
 Node → bridge → agent: `session/start` → `session/new` (or `session/load` when the agent said it can and a resume id is known);
 `session/prompt` → `session/prompt` with one text block; `session/cancel` → the ACP `session/cancel` notification;
@@ -76,5 +77,26 @@ Node → bridge → agent: `session/start` → `session/new` (or `session/load` 
 `reject_once`, else `reject_always`, else `cancelled` for a denial). The bridge offers no capabilities: `fs/*` and `terminal/*`
 requests from the agent are refused (the agent works in its own worktree), and mesh delivery to ACP agents goes through the mesh MCP
 endpoint like for any agent. If the agent exits the bridge exits, which the node sees as the adapter exiting (restart policy as
-for L3). The fake ACP agent (`agora-fake-agent --acp`) is the test double; real agents (Claude Code, Codex, WrongStack) need their
+for L3); before that the bridge reports why (below). The bridge declares `usage` among its capabilities. The `models` and `modes`
+lists of the `session/new` answer are not offered for choice: that needs an adapter method for them, which is a schema change. The fake ACP agent (`agora-fake-agent --acp`) is the test double; real agents (Claude Code, Codex, WrongStack) need their
 manifests and fixtures from real accounts (P2-09).
+
+### Turn and exit reasons
+
+The bridge never writes text for people. When something went wrong it gives a stable code and parameters (values are strings):
+
+| Code | Params | When | Where |
+| --- | --- | --- | --- |
+| `adapter.turn_empty` | | The agent answered the prompt with `end_turn` (or no stop reason) and sent nothing: no text, tool call, plan, diff or permission request. opencode does this when its provider refuses the request | the closing `state/update` `idle` (`message`) and a `log` line (`LOG_LEVEL_WARN`) |
+| `adapter.turn_stopped` | `stop_reason` (`refusal`, `max_tokens`, `max_turn_requests`, ...; `other` for anything that is not a lowercase word) | The agent stopped the turn itself | same |
+| `adapter.turn_failed` | `rpc_code` | The agent answered `session/prompt` with a JSON-RPC error | same |
+| `adapter.agent_exited` | `stage` (`initialize`, `session`, `turn`, `idle`, `start`), `exit_code` (when it exited with one), `stderr_tail` | The agent's output ended. Every request the node still waits for (`initialize`, `session/start`) is answered with a JSON-RPC error whose `data` is `{code, params}` with the stage of that request; a `log` line (`LOG_LEVEL_ERROR`) carries the same for the stage it was in. Then the bridge exits | error `data` (`HostError::reason` on the node side) and `log` |
+
+A `log` line's `message` is the JSON `{"code": ..., "params": {...}}`. `stderr_tail` is at most the last 5 non-empty lines and 400
+bytes of the agent's stderr (cut at the front, marked `…`), with escape sequences and control characters removed, the home folder
+written `~`, long runs of letters and digits (20 or more, with both) and the word after `key=`, `token:`, `Bearer ` and the like
+replaced by `[redacted]`. The agent's stderr is still copied to the bridge's own, as before.
+
+Not yet shown to people: the node keeps `log` lines and the `message` of a state out of the transcript and the event log, and maps a
+failed adapter start to `internal`. Showing these reasons needs a transcript item or event field for them (a schema change, so an
+ADR) and the node mapping `adapter.agent_exited` to an error code of `docs/specs/error-codes.md`.

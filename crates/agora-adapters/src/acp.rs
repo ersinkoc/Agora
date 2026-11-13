@@ -11,12 +11,18 @@
 //!   item; `plan` → a plan item; a `diff` in a tool call's content → a diff item; `agent_thought_chunk` is dropped.
 //! - `session/request_permission` → `approval/request` and state `blocked`; `approval/resolve` picks the agent's own allow or reject
 //!   option (`allow_once` before `allow_always`, `reject_once` before `reject_always`, otherwise the first option or `cancelled`).
-//! - A prompt turn: `session/prompt` → state `working`, and the agent's answer (its stop reason) → state `idle`.
+//! - A prompt turn: `session/prompt` → state `working`, and the agent's answer (its stop reason) → state `idle`. A turn that failed,
+//!   was stopped by the agent (`refusal`, `max_tokens`, ...) or ended with nothing said carries a stable reason code in the state's
+//!   `message` and in a `log` line (docs/specs/adapter-protocol.md "Turn and exit reasons"); never text.
+//! - `usage_update` with a cost → `usage/report` with the cost's growth since the last report.
+//! - The agent exiting: requests the node still waits for are answered with an error whose `data` is `adapter.agent_exited` with the
+//!   stage, the exit code and a short tail of the agent's stderr with anything that looks like a secret removed.
 
 use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::process::{Command, Stdio};
-use std::sync::mpsc::{channel, RecvTimeoutError};
+use std::process::{Child, ChildStderr, Command, Stdio};
+use std::sync::mpsc::{channel, Receiver, RecvTimeoutError};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -26,6 +32,26 @@ const JOIN: Duration = Duration::from_millis(150);
 /// The most text one joined item holds before it is sent anyway.
 const JOIN_MAX: usize = 4096;
 const MAX_DETAIL: usize = 300;
+/// The bytes of the agent's stderr kept for an exit report, and the most of them a report carries (after secrets are removed).
+const STDERR_KEEP: usize = 4096;
+const STDERR_TAIL: usize = 400;
+const STDERR_LINES: usize = 5;
+/// What stands in for a run of text that looks like a secret.
+const REDACTED: &str = "[redacted]";
+/// Words after which (and `=` or `:`) the next word is taken for a secret.
+const SECRET_WORDS: &[&str] = &[
+    "key",
+    "token",
+    "secret",
+    "password",
+    "passwd",
+    "credential",
+    "authorization",
+    "cookie",
+    "session",
+];
+/// How long the agent gets to finish exiting after its output ended, before it is killed.
+const EXIT_WAIT: Duration = Duration::from_secs(2);
 
 enum Ev {
     Node(Value),
@@ -119,6 +145,190 @@ fn short(v: &Value) -> String {
     format!("{}…", &s[..end])
 }
 
+/// The longest model id kept from the agent.
+const MODEL_MAX: usize = 200;
+
+fn clip(s: &str, max: usize) -> String {
+    let mut end = s.len().min(max);
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].to_string()
+}
+
+/// An ACP cost `{amount, currency}` as (currency, micro-units). `None` for anything that is not a finite, non-negative amount in a
+/// three-letter currency.
+fn cost_micros(cost: &Value) -> Option<(String, u64)> {
+    let amount = cost.get("amount")?.as_f64()?;
+    let currency = cost.get("currency")?.as_str()?;
+    if !amount.is_finite()
+        || amount < 0.0
+        || currency.len() != 3
+        || !currency.bytes().all(|b| b.is_ascii_alphabetic())
+    {
+        return None;
+    }
+    let micros = (amount * 1_000_000.0).round();
+    // In range by the check: `as` saturates anyway, so a huge amount cannot wrap.
+    let micros = if micros >= u64::MAX as f64 {
+        u64::MAX
+    } else {
+        micros as u64
+    };
+    Some((currency.to_ascii_uppercase(), micros))
+}
+
+/// How a prompt turn ended when that needs saying: a stable code and its parameters (docs/specs/adapter-protocol.md).
+/// `None` for a turn that ended normally or was cancelled.
+fn turn_outcome(answer: &Value, said: bool) -> Option<(&'static str, Value)> {
+    if let Some(e) = answer.get("error") {
+        let code = e.get("code").and_then(Value::as_i64).unwrap_or(0);
+        return Some(("adapter.turn_failed", json!({"rpc_code": code.to_string()})));
+    }
+    match answer
+        .pointer("/result/stopReason")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+    {
+        "cancelled" => None,
+        "end_turn" | "" if !said => Some(("adapter.turn_empty", json!({}))),
+        "end_turn" | "" => None,
+        other => {
+            // The agent's word, kept only if it looks like one of ACP's stop reasons.
+            let reason = if other.len() <= 40
+                && other.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
+            {
+                other
+            } else {
+                "other"
+            };
+            Some(("adapter.turn_stopped", json!({"stop_reason": reason})))
+        }
+    }
+}
+
+/// Replaces anything in `s` that looks like a secret: a long run of letters and digits (a key, a token, an id), and the word after
+/// `key=`, `token:`, `Bearer ` and the like.
+fn redact(s: &str) -> String {
+    let is_word = |c: char| c.is_alphanumeric() || matches!(c, '_' | '-' | '+');
+    let mut out = String::with_capacity(s.len());
+    let (mut keyword, mut armed) = (false, false);
+    let mut rest = s;
+    while let Some(c) = rest.chars().next() {
+        if is_word(c) {
+            let end = rest.find(|c: char| !is_word(c)).unwrap_or(rest.len());
+            let word = &rest[..end];
+            let long = word.chars().count() >= 20
+                && word.chars().any(|c| c.is_ascii_digit())
+                && word.chars().any(char::is_alphabetic);
+            out.push_str(if armed || long { REDACTED } else { word });
+            let lower = word.to_ascii_lowercase();
+            keyword = SECRET_WORDS.iter().any(|w| lower.contains(w));
+            armed = lower == "bearer" || lower == "basic";
+            rest = &rest[end..];
+        } else {
+            out.push(c);
+            match c {
+                '=' | ':' => armed = armed || keyword,
+                ' ' | '"' | '\'' => {}
+                _ => (keyword, armed) = (false, false),
+            }
+            rest = &rest[c.len_utf8()..];
+        }
+    }
+    out
+}
+
+/// The last lines of what the agent wrote to stderr, as a short report: control characters and escape sequences removed, the home
+/// folder shown as `~`, secrets replaced, at most `STDERR_LINES` lines and `STDERR_TAIL` bytes (cut at the front).
+pub fn stderr_tail(raw: &[u8], home: Option<&str>) -> String {
+    let text = String::from_utf8_lossy(raw);
+    let mut plain = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            // ESC [ ... final byte, or ESC and one more character.
+            '\u{1b}' => {
+                if chars.peek() == Some(&'[') {
+                    chars.next();
+                    for c in chars.by_ref() {
+                        if ('@'..='~').contains(&c) {
+                            break;
+                        }
+                    }
+                } else {
+                    chars.next();
+                }
+            }
+            '\n' => plain.push('\n'),
+            '\t' => plain.push(' '),
+            c if c.is_control() => {}
+            c => plain.push(c),
+        }
+    }
+    let home = home.filter(|h| h.len() > 1);
+    let lines: Vec<String> = plain
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(|l| {
+            let l = match home {
+                Some(h) => l.replace(h, "~"),
+                None => l.to_string(),
+            };
+            redact(&l)
+        })
+        .collect();
+    let tail = lines[lines.len().saturating_sub(STDERR_LINES)..].join("\n");
+    if tail.len() <= STDERR_TAIL {
+        return tail;
+    }
+    let mut start = tail.len() - STDERR_TAIL;
+    while !tail.is_char_boundary(start) {
+        start += 1;
+    }
+    format!("…{}", &tail[start..])
+}
+
+/// Copies the agent's stderr to the bridge's own (diagnostics for whoever runs the node, as before) and keeps its last bytes. The
+/// receiver hears when the stream ended.
+fn keep_stderr(r: ChildStderr, kept: Arc<Mutex<Vec<u8>>>) -> Receiver<()> {
+    let (tx, rx) = channel();
+    std::thread::spawn(move || {
+        let mut r = r;
+        let mut buf = [0u8; 1024];
+        loop {
+            let n = match r.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => n,
+            };
+            let _ = io::stderr().write_all(&buf[..n]);
+            let mut k = kept.lock().unwrap_or_else(|e| e.into_inner());
+            k.extend_from_slice(&buf[..n]);
+            let over = k.len().saturating_sub(STDERR_KEEP);
+            k.drain(..over);
+        }
+        let _ = tx.send(());
+    });
+    rx
+}
+
+/// Waits a little for an agent whose output ended to exit, then kills it. Its exit code when it exited on its own with one.
+fn wait_briefly(child: &mut Child) -> Option<i32> {
+    let end = Instant::now() + EXIT_WAIT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.code(),
+            Ok(None) if Instant::now() < end => std::thread::sleep(Duration::from_millis(20)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+}
+
 struct Bridge<W: Write> {
     out: W,
     agent: std::process::ChildStdin,
@@ -129,6 +339,12 @@ struct Bridge<W: Write> {
     text: String,
     text_since: Instant,
     can_load: bool,
+    /// Something reached the node during the current turn (text, a tool call, a plan, a diff, an approval).
+    said: bool,
+    /// The model the agent said it uses (`session/new` `models.currentModelId`), for usage reports.
+    model: String,
+    /// The agent's cumulative session cost as last reported: (currency, micro-units).
+    cost: Option<(String, u64)>,
 }
 
 impl<W: Write> Bridge<W> {
@@ -145,15 +361,31 @@ impl<W: Write> Bridge<W> {
     }
 
     fn state(&mut self, s: &str) -> io::Result<()> {
+        self.state_because(s, "")
+    }
+
+    /// A state with a stable reason code in its diagnostic `message` (never text).
+    fn state_because(&mut self, s: &str, reason: &str) -> io::Result<()> {
         let sid = self.session.clone().unwrap_or_default();
         // The adapter protocol carries `AgentState` as its proto JSON name; the node reads anything else as unknown.
+        let mut p = json!({"sessionId": sid, "state": format!("AGENT_STATE_{s}")});
+        if !reason.is_empty() {
+            p["message"] = json!(reason);
+        }
+        self.note("state/update", p)
+    }
+
+    /// A `log` line carrying a stable reason: `{"code": ..., "params": {...}}` as its message.
+    fn log_reason(&mut self, level: &str, code: &str, params: &Value) -> io::Result<()> {
+        let message = json!({"code": code, "params": params}).to_string();
         self.note(
-            "state/update",
-            json!({"sessionId": sid, "state": format!("AGENT_STATE_{s}")}),
+            "log",
+            json!({"level": format!("LOG_LEVEL_{level}"), "message": message}),
         )
     }
 
     fn chat(&mut self, item: Value) -> io::Result<()> {
+        self.said = true;
         let sid = self.session.clone().unwrap_or_default();
         let mut p = item;
         p["sessionId"] = json!(sid);
@@ -168,20 +400,61 @@ impl<W: Write> Bridge<W> {
         self.chat(json!({"text": {"text": t}}))
     }
 
-    fn ask_agent(&mut self, method: &str, params: Value, waiting: Waiting) -> io::Result<()> {
-        self.next += 1;
-        self.waiting.insert(self.next, waiting);
-        write_line(
-            &mut self.agent,
-            &json!({"jsonrpc": "2.0", "id": self.next, "method": method, "params": params}),
-        )
+    /// A line to the agent. A failed write means the agent is gone or going: the end of its output follows and is reported then
+    /// (with what was still waiting), so the failure itself is not an error of the bridge.
+    fn send_agent(&mut self, v: &Value) {
+        let _ = write_line(&mut self.agent, v);
     }
 
-    fn tell_agent(&mut self, method: &str, params: Value) -> io::Result<()> {
-        write_line(
-            &mut self.agent,
-            &json!({"jsonrpc": "2.0", "method": method, "params": params}),
-        )
+    fn ask_agent(&mut self, method: &str, params: Value, waiting: Waiting) {
+        self.next += 1;
+        self.waiting.insert(self.next, waiting);
+        let line = json!({"jsonrpc": "2.0", "id": self.next, "method": method, "params": params});
+        self.send_agent(&line);
+    }
+
+    fn tell_agent(&mut self, method: &str, params: Value) {
+        self.send_agent(&json!({"jsonrpc": "2.0", "method": method, "params": params}));
+    }
+
+    /// The agent's output ended and it exited (`exit_code` when known). Every request the node still waits for is answered with
+    /// `adapter.agent_exited` and the stage it was in; a `log` line says the same, so an exit in the middle of a turn or while
+    /// idle is reported too.
+    fn agent_gone(&mut self, exit_code: Option<i32>, stderr_tail: &str) -> io::Result<()> {
+        self.flush_text()?;
+        let mut waiting: Vec<(u64, Waiting)> = self.waiting.drain().collect();
+        waiting.sort_by_key(|(n, _)| *n);
+        let stage_of = |w: &Waiting| match w {
+            Waiting::Initialize { .. } => "initialize",
+            Waiting::NewSession { .. } => "session",
+            Waiting::Prompt => "turn",
+        };
+        let stage = ["initialize", "session", "turn"]
+            .into_iter()
+            .find(|s| waiting.iter().any(|(_, w)| stage_of(w) == *s))
+            .unwrap_or(if self.session.is_some() {
+                "idle"
+            } else {
+                "start"
+            });
+        let params = |stage: &str| {
+            let mut p = json!({"stage": stage, "stderr_tail": stderr_tail});
+            if let Some(c) = exit_code {
+                p["exit_code"] = json!(c.to_string());
+            }
+            p
+        };
+        for (_, w) in &waiting {
+            if let Waiting::Initialize { node_id } | Waiting::NewSession { node_id } = w {
+                if !node_id.is_null() {
+                    let data =
+                        json!({"code": "adapter.agent_exited", "params": params(stage_of(w))});
+                    self.send_node(&json!({"jsonrpc": "2.0", "id": node_id,
+                        "error": {"code": -32000, "message": "the agent exited", "data": data}}))?;
+                }
+            }
+        }
+        self.log_reason("ERROR", "adapter.agent_exited", &params(stage))
     }
 
     /// A request or notification from the node.
@@ -201,7 +474,7 @@ impl<W: Write> Bridge<W> {
                     Waiting::Initialize {
                         node_id: id.clone().unwrap_or(Value::Null),
                     },
-                )?;
+                );
             }
             "session/start" => {
                 let cwd = params
@@ -221,13 +494,13 @@ impl<W: Write> Bridge<W> {
                             "session/load",
                             json!({"sessionId": r, "cwd": cwd, "mcpServers": []}),
                             Waiting::NewSession { node_id },
-                        )?;
+                        );
                     }
                     None => self.ask_agent(
                         "session/new",
                         json!({"cwd": cwd, "mcpServers": []}),
                         Waiting::NewSession { node_id },
-                    )?,
+                    ),
                 }
             }
             "session/prompt" => {
@@ -243,17 +516,18 @@ impl<W: Write> Bridge<W> {
                     return Ok(false);
                 };
                 done(self)?;
+                self.said = false;
                 self.state("WORKING")?;
                 self.ask_agent(
                     "session/prompt",
                     json!({"sessionId": sid, "prompt": [{"type": "text", "text": text}]}),
                     Waiting::Prompt,
-                )?;
+                );
             }
             "session/cancel" => {
                 done(self)?;
                 if let Some(sid) = self.session.clone() {
-                    self.tell_agent("session/cancel", json!({"sessionId": sid}))?;
+                    self.tell_agent("session/cancel", json!({"sessionId": sid}));
                 }
             }
             "approval/resolve" => {
@@ -280,10 +554,9 @@ impl<W: Write> Bridge<W> {
                         Some((option, _)) => json!({"outcome": "selected", "optionId": option}),
                         None => json!({"outcome": "cancelled"}),
                     };
-                    write_line(
-                        &mut self.agent,
+                    self.send_agent(
                         &json!({"jsonrpc": "2.0", "id": p.request, "result": {"outcome": outcome}}),
-                    )?;
+                    );
                     if self.perms.is_empty() {
                         self.state("WORKING")?;
                     }
@@ -339,9 +612,33 @@ impl<W: Write> Bridge<W> {
                     .unwrap_or_default();
                 self.chat(json!({"plan": {"steps": steps}}))?;
             }
-            _ => {} // agent_thought_chunk, user_message_chunk, available_commands_update, ...
+            "usage_update" => self.usage(u)?,
+            _ => {} // agent_thought_chunk, user_message_chunk, available_commands_update, current_mode_update, ...
         }
         Ok(())
+    }
+
+    /// ACP `usage_update`: `used` and `size` (the context window) have no place in `usage/report` and are dropped; the cost is the
+    /// session's running total, so the report carries its growth since the last one (like tokens, which are reported as they grow).
+    fn usage(&mut self, u: &Value) -> io::Result<()> {
+        let Some((currency, micros)) = u.get("cost").and_then(cost_micros) else {
+            return Ok(());
+        };
+        let grew = match &self.cost {
+            Some((c, last)) if *c == currency => micros.saturating_sub(*last),
+            _ => micros,
+        };
+        self.cost = Some((currency.clone(), micros));
+        if grew == 0 {
+            return Ok(());
+        }
+        let sid = self.session.clone().unwrap_or_default();
+        let model = self.model.clone();
+        self.note(
+            "usage/report",
+            json!({"sessionId": sid, "model": model, "inputTokens": 0, "outputTokens": 0,
+                   "costMicros": grew, "currency": currency}),
+        )
     }
 
     fn diffs_in(&mut self, u: &Value) -> io::Result<()> {
@@ -406,15 +703,15 @@ impl<W: Write> Bridge<W> {
                 self.perms
                     .insert(approval.clone(), Permission { request, options });
                 let sid = self.session.clone().unwrap_or_default();
+                self.said = true;
                 self.state("BLOCKED")?;
                 self.note("approval/request", json!({"sessionId": sid, "approvalId": approval, "action": action, "detail": detail}))?;
             }
             // Files and terminals are the agent's own business in its worktree; the bridge offers neither.
             (Some(_), Some(id)) => {
-                write_line(
-                    &mut self.agent,
+                self.send_agent(
                     &json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": "method not found"}}),
-                )?;
+                );
             }
             (Some(_), None) => {}
             (None, Some(id)) => {
@@ -432,7 +729,7 @@ impl<W: Write> Bridge<W> {
                                 self.reply(
                                     &node_id,
                                     json!({"adapterName": "acp-bridge", "version": "1", "agentKind": "acp",
-                                           "capabilities": ["chat", "approvals", "plan", "diff", "cancel"]}),
+                                           "capabilities": ["chat", "approvals", "plan", "diff", "cancel", "usage"]}),
                                 )?;
                             }
                         }
@@ -446,6 +743,12 @@ impl<W: Write> Bridge<W> {
                         match sid {
                             Some(sid) if msg.get("error").is_none() => {
                                 self.session = Some(sid.clone());
+                                if let Some(m) = msg
+                                    .pointer("/result/models/currentModelId")
+                                    .and_then(Value::as_str)
+                                {
+                                    self.model = clip(m, MODEL_MAX);
+                                }
                                 self.reply(&node_id, json!({"sessionId": sid}))?;
                                 self.note("session/reported", json!({"sessionId": sid, "nativeSessionId": sid}))?;
                                 self.state("IDLE")?;
@@ -456,7 +759,13 @@ impl<W: Write> Bridge<W> {
                     Some(Waiting::Prompt) => {
                         self.flush_text()?;
                         self.perms.clear();
-                        self.state("IDLE")?;
+                        match turn_outcome(msg, self.said) {
+                            Some((code, params)) => {
+                                self.log_reason("WARN", code, &params)?;
+                                self.state_because("IDLE", code)?;
+                            }
+                            None => self.state("IDLE")?,
+                        }
                     }
                     None => {}
                 }
@@ -480,15 +789,18 @@ where
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
+        .stderr(Stdio::piped())
         .spawn()?;
-    let (stdin, stdout) = match (child.stdin.take(), child.stdout.take()) {
-        (Some(i), Some(o)) => (i, o),
-        _ => {
-            let _ = child.kill();
-            return Err(io::Error::other("agent pipes missing"));
-        }
-    };
+    let (stdin, stdout, stderr) =
+        match (child.stdin.take(), child.stdout.take(), child.stderr.take()) {
+            (Some(i), Some(o), Some(e)) => (i, o, e),
+            _ => {
+                let _ = child.kill();
+                return Err(io::Error::other("agent pipes missing"));
+            }
+        };
+    let kept = Arc::new(Mutex::new(Vec::new()));
+    let stderr_done = keep_stderr(stderr, Arc::clone(&kept));
     let (tx, rx) = channel();
     lines(input, Ev::Node, Ev::NodeGone, tx.clone());
     lines(stdout, Ev::Agent, Ev::AgentGone, tx);
@@ -502,6 +814,9 @@ where
         text: String::new(),
         text_since: Instant::now(),
         can_load: false,
+        said: false,
+        model: String::new(),
+        cost: None,
     };
     let result = (|| -> io::Result<()> {
         loop {
@@ -513,7 +828,17 @@ where
                 }
                 Ok(Ev::Agent(m)) => b.handle_agent(&m)?,
                 Ok(Ev::NodeGone) => return Ok(()),
-                Ok(Ev::AgentGone) => return Err(io::Error::other("the agent exited")),
+                Ok(Ev::AgentGone) => {
+                    let code = wait_briefly(&mut child);
+                    // The rest of its stderr, unless something it started still holds the stream open.
+                    let _ = stderr_done.recv_timeout(Duration::from_millis(500));
+                    let raw = kept.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                    let home = std::env::var("HOME")
+                        .or_else(|_| std::env::var("USERPROFILE"))
+                        .ok();
+                    b.agent_gone(code, &stderr_tail(&raw, home.as_deref()))?;
+                    return Err(io::Error::other("the agent exited"));
+                }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => return Ok(()),
             }
@@ -558,6 +883,89 @@ mod tests {
             }
         }
         assert_eq!(ids, vec![json!(1), json!(2)]);
+    }
+
+    #[test]
+    fn secrets_in_stderr_are_replaced_and_ordinary_words_kept() {
+        assert_eq!(
+            redact("auth failed: api_key=abc token: xyz Bearer qq"),
+            "auth failed: api_key=[redacted] token: [redacted] Bearer [redacted]"
+        );
+        assert_eq!(
+            redact("Invalid API key provided, see https://x.io/docs"),
+            "Invalid API key provided, see https://x.io/docs"
+        );
+        assert_eq!(
+            redact("id sk-proj-0123456789abcdefABCDEF end"),
+            "id [redacted] end"
+        );
+        assert_eq!(
+            redact("exit 3 at /usr/lib/node_modules/opencode"),
+            "exit 3 at /usr/lib/node_modules/opencode"
+        );
+    }
+
+    #[test]
+    fn a_stderr_tail_is_short_plain_and_without_the_home_folder() {
+        let raw = b"one\ntwo\n\x1b[31mthree\x1b[0m\n\nfour /home/me/.config/x\nfive\nsix\x07\n";
+        assert_eq!(
+            stderr_tail(raw, Some("/home/me")),
+            "two\nthree\nfour ~/.config/x\nfive\nsix"
+        );
+        let long = "é".repeat(1000);
+        let t = stderr_tail(long.as_bytes(), None);
+        assert!(
+            t.starts_with('…') && t.len() <= STDERR_TAIL + '…'.len_utf8(),
+            "{t}"
+        );
+        assert_eq!(stderr_tail(b"", None), "");
+    }
+
+    #[test]
+    fn costs_become_micro_units_and_bad_ones_are_ignored() {
+        assert_eq!(
+            cost_micros(&json!({"amount": 0.0123, "currency": "usd"})),
+            Some(("USD".into(), 12300))
+        );
+        assert_eq!(cost_micros(&json!({"amount": -1, "currency": "USD"})), None);
+        assert_eq!(
+            cost_micros(&json!({"amount": 1, "currency": "dollars"})),
+            None
+        );
+        assert_eq!(
+            cost_micros(&json!({"amount": "1", "currency": "USD"})),
+            None
+        );
+        assert_eq!(
+            cost_micros(&json!({"amount": 1e300, "currency": "USD"})),
+            Some(("USD".into(), u64::MAX))
+        );
+    }
+
+    #[test]
+    fn turn_outcomes_name_failures_stops_and_silence_only() {
+        let end = json!({"result": {"stopReason": "end_turn"}});
+        assert_eq!(turn_outcome(&end, true), None);
+        assert_eq!(
+            turn_outcome(&end, false).map(|o| o.0),
+            Some("adapter.turn_empty")
+        );
+        assert_eq!(
+            turn_outcome(&json!({"result": {"stopReason": "cancelled"}}), false),
+            None
+        );
+        assert_eq!(
+            turn_outcome(&json!({"result": {"stopReason": "max_tokens"}}), true),
+            Some(("adapter.turn_stopped", json!({"stop_reason": "max_tokens"})))
+        );
+        assert_eq!(
+            turn_outcome(&json!({"result": {"stopReason": "<b>Nope</b>"}}), true),
+            Some(("adapter.turn_stopped", json!({"stop_reason": "other"})))
+        );
+        assert_eq!(
+            turn_outcome(&json!({"error": {"code": -32603, "message": "x"}}), true),
+            Some(("adapter.turn_failed", json!({"rpc_code": "-32603"})))
+        );
     }
 
     #[test]
