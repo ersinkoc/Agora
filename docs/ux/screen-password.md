@@ -14,7 +14,8 @@ agora password status
 agora password clear    # a code alone is enough again
 ```
 
-`agora password set` refuses to read the password from a pipe or a file. Or, in the window: **This device → Screen password**
+`agora password set` refuses to read the password from a pipe or a file; Ctrl-C while typing stops it (exit 130) with the terminal
+back to normal. Or, in the window: **This device → Screen password**
 (changing it there needs the current one). Setting, changing or clearing it signs out every other window (from the command line:
 every window), and each change is in the Activity page.
 
@@ -26,15 +27,18 @@ every window), and each change is in the Activity page.
 - **Lock** in the title bar signs this window out at the hub and shows the sign-in page. Agents keep running: locking ends the
   window's session only, never a machine's link or an agent.
 - **Lock this window when idle** (This device; off by default; 5, 10, 30 or 60 minutes) is kept in this browser only. After that long
-  without a key, click, touch or scroll the window hides itself and asks for the screen password; the session stays alive on the
-  hub, so nothing else is needed. Without a screen password an idle window signs out instead.
+  without a key, click, touch or scroll the window does what Lock does: its session ends at the hub, so reloading the tab opens
+  nothing. Signing in again takes a code (and, from another machine, the screen password) or a passkey.
 
 ![This device: the screen password and the idle lock](../screenshots/screen-password/device-password-dark.png)
 
 ## Passkeys
 
 A passkey you added on a device (This device → Add a passkey) signs that device in without a code and without the password: it
-already proves who you are.
+already proves who you are. That is why adding one from another machine asks for the screen password too (a session alone is not
+enough), and why setting, changing or clearing the password removes every passkey that was added from another machine without it
+(before a password was set, or before this rule). Passkeys added on the hub's own machine, or with the password, stay. Passkey tries
+count only toward the per-address limit, never the hub-wide one.
 
 ## When it says "too many tries"
 

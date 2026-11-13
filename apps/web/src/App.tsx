@@ -16,9 +16,9 @@ import type { StartChoice } from './components/StartApproval';
 import type { HelperGrant } from './components/HelperGrants';
 import { addPasskey, passkeysSupported, signInWithPasskey } from './net/passkey';
 import { summarize, type UsageSummary } from './net/usage';
-import { endSession, forgetToken, hubConnection, readCode, rememberToken, setPassword, signIn, signInInfo, unlock, type SignInInfo } from './net/session';
+import { endSession, forgetToken, hubConnection, readCode, setPassword, signIn, signInFromLink, signInInfo, type SignInInfo } from './net/session';
 import { idleMinutes, setIdleMinutes, watchIdle, type IdleMinutes } from './net/idle';
-import { LockScreen, ScreenPasswordSettings } from './components/Locks';
+import { ScreenPasswordSettings } from './components/Locks';
 import { Console } from './components/Console';
 import type { ChatSource } from './net/chat';
 import { commitsOf, type CommitItem } from './net/history';
@@ -54,20 +54,21 @@ export function App() {
     if (r.ok) { setSignInNotice(undefined); setHub(hubConnection()); return; }
     setSignInNotice(r.reason === 'refused' ? (password ? 'signin-refused-password' : 'signin-refused') : r.reason === 'too-many' ? 'signin-too-many' : 'signin-failed');
   }, []);
-  // A window that locked itself after sitting idle keeps its session token here, and nowhere else, until the password opens it.
-  const [locked, setLocked] = useState<string | undefined>();
+  // A code from a `#code=` link that still needs the screen password: kept in the form, not submitted.
+  const [linkCode, setLinkCode] = useState<string | undefined>();
   const [idle, setIdle] = useState<IdleMinutes>(() => idleMinutes());
   const trySignInPasskey = useCallback(async () => {
     const r = await signInWithPasskey();
     if (r.ok) { setSignInNotice(undefined); setHub(hubConnection()); return; }
     if (r.reason !== 'cancelled') setSignInNotice(r.reason === 'too-many' ? 'signin-too-many' : 'signin-passkey-failed');
   }, []);
-  // A code in the address (`#code=...`) signs in at once; it is removed from the address either way.
+  // A code in the address (`#code=...`) is removed from the address at once. It signs in at once unless the hub wants the screen
+  // password from here: then it waits in the form for the password.
   useEffect(() => {
     const { code, rest } = readCode(window.location.hash);
     if (code === undefined) return;
     window.history.replaceState(null, '', window.location.pathname + window.location.search + rest);
-    void trySignIn(code);
+    void signInFromLink(code, async () => { const i = await signInInfo(); setInfo(i); return i; }, (c) => { void trySignIn(c); }, setLinkCode);
   }, [trySignIn]);
   const [live, setLive] = useState<View | undefined>();
   const [link, setLink] = useState<LinkState>('connecting');
@@ -213,17 +214,12 @@ export function App() {
     setLive(undefined);
     setHub(undefined);
   }, [hub]);
-  // The idle lock: with a screen password the window locks and the password opens it; without one it signs out.
+  // The idle lock does what Lock does: the session ends at the hub, so reloading the tab opens nothing; signing in again takes a code
+  // (and the screen password from another machine) or a passkey.
   useEffect(() => {
     if (!hub || idle === 0) return;
-    return watchIdle(idle, () => {
-      if (!info.passwordSet) { lockNow(); return; }
-      setLocked(hub.token);
-      forgetToken();
-      setLive(undefined);
-      setHub(undefined);
-    }, window);
-  }, [hub, idle, info.passwordSet, lockNow]);
+    return watchIdle(idle, lockNow, window);
+  }, [hub, idle, lockNow]);
   const agents = useMemo(() => (hub ? (live ? tiles(live) : []) : demoAgents), [hub, live]);
   const current = hash.startsWith('#/agent/') ? decodeURIComponent(hash.slice('#/agent/'.length)) : undefined;
 
@@ -342,24 +338,14 @@ export function App() {
     return () => window.removeEventListener('keydown', on);
   }, [next]);
 
-  if (locked) {
-    return <LockScreen
-      onUnlock={async (password) => {
-        const r = await unlock(locked, password);
-        if (r.ok) { rememberToken(locked); setLocked(undefined); setHub(hubConnection()); }
-        return r;
-      }}
-      onSignOut={() => { void endSession(locked); setLocked(undefined); refreshInfo(); }} />;
-  }
-
   // Served by the hub (a production build) and not signed in: ask for the code. Development keeps the demo data.
   if (!hub && !import.meta.env.DEV && hash !== '#/gallery' && hash !== '#/demo') {
-    return <SignInPage onSubmit={trySignIn} onPasskey={passkeysSupported() ? trySignInPasskey : undefined} notice={signInNotice ? t(signInNotice) : undefined} passwordRequired={info.passwordRequired} />;
+    return <SignInPage onSubmit={trySignIn} onPasskey={passkeysSupported() ? trySignInPasskey : undefined} notice={signInNotice ? t(signInNotice) : undefined} passwordRequired={info.passwordRequired} key={linkCode ?? ''} initialCode={linkCode} />;
   }
 
   return (
     <>
-      {hash === '#/gallery' ? <Gallery /> : hash === '#/machines' ? <MachinesPage machines={live ? machines(live) : hub ? [] : demoMachines} agents={agents} usage={usage} projects={live && usage ? costByProject(live, usage.perAgent) : []} onBack={() => go('#/')} /> : hash === '#/audit' && hub ? <AuditPage load={(who) => loadAudit(hub.token, who)} onBack={() => go('#/')} /> : hash === '#/device' ? <DevicePage device={device} onBack={() => go('#/')} onAddPasskey={hub && passkeysSupported() ? async () => (await addPasskey(hub.token)).ok : undefined}
+      {hash === '#/gallery' ? <Gallery /> : hash === '#/machines' ? <MachinesPage machines={live ? machines(live) : hub ? [] : demoMachines} agents={agents} usage={usage} projects={live && usage ? costByProject(live, usage.perAgent) : []} onBack={() => go('#/')} /> : hash === '#/audit' && hub ? <AuditPage load={(who) => loadAudit(hub.token, who)} onBack={() => go('#/')} /> : hash === '#/device' ? <DevicePage device={device} onBack={() => go('#/')} onAddPasskey={hub && passkeysSupported() ? async (password) => (await addPasskey(hub.token, undefined, password)).ok : undefined} passkeyNeedsPassword={info.passwordRequired}
           security={hub ? <ScreenPasswordSettings passwordSet={info.passwordSet} idle={idle} onIdle={(m) => { setIdleMinutes(m); setIdle(m); }}
             onSet={async (password, current) => { const r = await setPassword(hub.token, password, current); if (r.ok) refreshInfo(); return r; }} /> : undefined} /> : current !== undefined
         ? <Focus agent={selectedAgent} approvals={live ? approvalList(live) : hub ? [] : demoApprovals} onResolve={resolve} chatSource={selectedAgent?.terminal === false ? chatOf(selectedAgent) : undefined} sendPrompt={hub && api ? sendPrompt : undefined} chooseOption={hub && api ? chooseOption : undefined} costMicroUsd={current ? usage?.perAgent.get(current) : undefined} source={terminal} onBack={() => go('#/')} />

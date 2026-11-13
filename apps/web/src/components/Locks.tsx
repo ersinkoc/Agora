@@ -1,39 +1,11 @@
-// The screen password in the window (ADR-0067): the lock screen a window shows after it sat idle, and the This device section that
-// sets the password and the idle lock. Locking hides the window only; agents keep running on their machines.
+// The screen password in the window (ADR-0067): the This device section that sets the password and the idle lock. Locking (Lock, or
+// the idle lock) ends the window's session at the hub; agents keep running on their machines.
 import { useState } from 'react';
 import { t } from '../i18n';
-import { LanguagePicker } from './LanguagePicker';
 import { IDLE_CHOICES, type IdleMinutes } from '../net/idle';
 import { MIN_PASSWORD, type PasswordResult } from '../net/session';
 
 const notice = (r: PasswordResult) => (r.ok ? undefined : `password-${r.reason}`);
-
-export function LockScreen({ onUnlock, onSignOut }: { onUnlock: (password: string) => Promise<PasswordResult>; onSignOut: () => void }) {
-  const [password, setPassword] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [problem, setProblem] = useState<string | undefined>();
-  return (
-    <main className="page">
-      <div className="flex justify-end"><LanguagePicker /></div>
-      <h1>{t('lock-title')}</h1>
-      <p>{t('lock-intro')}</p>
-      <form className="stack" onSubmit={(e) => {
-        e.preventDefault();
-        if (!password || busy) return;
-        setBusy(true);
-        void onUnlock(password).then((r) => { setBusy(false); setProblem(notice(r)); if (!r.ok) setPassword(''); });
-      }}>
-        <label>
-          <span className="muted">{t('signin-password')}</span>{' '}
-          <input type="password" name="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" autoFocus />
-        </label>
-        <p><button type="submit" className="button button--primary" disabled={busy}>{t('lock-unlock')}</button></p>
-      </form>
-      <p><button type="button" className="button" onClick={onSignOut}>{t('lock-sign-out')}</button></p>
-      {problem && <p role="alert">{t(problem)}</p>}
-    </main>
-  );
-}
 
 // Set or change the screen password, and choose the idle lock. `passwordSet`: one is set (changing it needs it).
 export function ScreenPasswordSettings({ passwordSet, onSet, idle, onIdle }: {

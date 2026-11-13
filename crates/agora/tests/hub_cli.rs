@@ -870,6 +870,34 @@ fn the_screen_password_is_typed_twice_unseen_and_never_read_from_a_pipe() {
         pty.write_input(b"open sesame 42\r").unwrap();
         wait_for(&mut pty, "open sessions were signed out");
         assert!(pty.wait().unwrap().success(), "{seen}");
+        // Ctrl-C while typing stops with 130 and changes nothing (the terminal is restored before it exits).
+        let mut stop = agora_platform::spawn(&agora_platform::PtyConfig {
+            argv: vec![
+                AGORA.into(),
+                "password".into(),
+                "set".into(),
+                "--hub-dir".into(),
+                root.display().to_string(),
+            ],
+            cwd: None,
+            env: vec![("AGORA_LANG".into(), "en".into())],
+            cols: 120,
+            rows: 30,
+            limits: agora_platform::ProcessLimits::default(),
+            sandbox: None,
+            identity: None,
+        })
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let mut text = String::new();
+        while !text.contains("New screen password") {
+            assert!(Instant::now() < deadline, "{text}");
+            if let Ok(b) = stop.output().recv_timeout(Duration::from_millis(100)) {
+                text.push_str(&String::from_utf8_lossy(&b));
+            }
+        }
+        stop.write_input(b"half\x03").unwrap();
+        assert_eq!(stop.wait().unwrap().code, Some(130), "{text}");
         assert!(
             !seen.contains("open sesame"),
             "the password is never shown: {seen}"

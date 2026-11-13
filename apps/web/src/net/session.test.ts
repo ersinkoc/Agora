@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { endSession, readCode, readToken, setPassword, signIn, signInInfo, unlock } from './session';
+import { endSession, readCode, readToken, setPassword, signIn, signInFromLink, signInInfo } from './session';
 
 function store() {
   const m = new Map<string, string>();
@@ -61,10 +61,18 @@ describe('screen password', () => {
     expect((calls[0]!.init!.headers as Record<string, string>).authorization).toBe('Bearer tok');
   });
 
-  it('maps unlock and set-password answers', async () => {
-    expect(await unlock('t', 'p', reply(200, {}))).toEqual({ ok: true });
-    expect(await unlock('t', 'p', reply(401))).toEqual({ ok: false, reason: 'refused' });
-    expect(await unlock('t', 'p', reply(429))).toEqual({ ok: false, reason: 'too-many' });
+  it('waits for the hub before using a #code= link, and keeps the code when the password is needed', async () => {
+    const sent: string[] = [];
+    const kept: string[] = [];
+    await signInFromLink('AB12-CD34', async () => ({ passwordRequired: true, passwordSet: true }), (c) => sent.push(c), (c) => kept.push(c));
+    expect([sent, kept]).toEqual([[], ['AB12-CD34']]);
+    await signInFromLink('EF56-GH78', async () => ({ passwordRequired: false, passwordSet: true }), (c) => sent.push(c), (c) => kept.push(c));
+    expect([sent, kept]).toEqual([['EF56-GH78'], ['AB12-CD34']]);
+  });
+
+  it('maps set-password answers', async () => {
+    expect(await setPassword('t', 'x', undefined, reply(401))).toEqual({ ok: false, reason: 'refused' });
+    expect(await setPassword('t', 'x', undefined, reply(429))).toEqual({ ok: false, reason: 'too-many' });
     calls.length = 0;
     expect(await setPassword('t', 'new password', 'old one', reply(200, { revoked: 2 }))).toEqual({ ok: true });
     expect(JSON.parse(calls[0]!.init!.body as string)).toEqual({ password: 'new password', current: 'old one' });

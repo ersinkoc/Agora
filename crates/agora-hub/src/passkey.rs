@@ -474,13 +474,17 @@ mod tests {
         let owner_tok = si.redeem(&si.create_code(now).unwrap(), now).unwrap();
         let b = |v: &[u8]| b64url_encode(v);
         let register_with = |tok: &str, id: &str, d: &Device| {
-            let (st, out) = api.passkey(
+            // From another machine with a password set, a session alone cannot add a passkey.
+            let (st, _) = api.passkey(
                 "register-begin",
                 Some(tok),
                 HOST,
                 &away,
                 &serde_json::json!({}),
             );
+            assert_eq!(st, 401);
+            let pw = serde_json::json!({ "password": "a long screen password" });
+            let (st, out) = api.passkey("register-begin", Some(tok), HOST, &away, &pw);
             assert_eq!(st, 200);
             let ch = serde_json::from_str::<serde_json::Value>(&out).unwrap()["challenge"]
                 .as_str()
@@ -492,7 +496,7 @@ mod tests {
                 Some(tok),
                 HOST,
                 &away,
-                &serde_json::json!({"id": id, "publicKey": b(&d.spki()), "clientDataJSON": b(&cd)}),
+                &serde_json::json!({"id": id, "publicKey": b(&d.spki()), "clientDataJSON": b(&cd), "password": "a long screen password"}),
             );
             assert_eq!(st, 200);
         };

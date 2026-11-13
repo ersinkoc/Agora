@@ -169,6 +169,61 @@ impl<'a> ScreenPassword<'a> {
     }
 }
 
+const VOUCHED: &str = "passkeys_vouched";
+
+/// Records that the passkey `id` was added where the screen password would not have been asked (the hub's own machine) or was
+/// given. Such passkeys outlive a password change; every other one does not ([`drop_unvouched_passkeys`]).
+pub fn vouch_passkey(store: &SqliteStore, id: &str) -> Result<(), PasswordError> {
+    let mut ids = vouched(store);
+    if !ids.iter().any(|v| v == id) {
+        ids.push(id.to_string());
+    }
+    store.set_setting(VOUCHED, ids.join("\n").as_bytes())?;
+    Ok(())
+}
+
+fn vouched(store: &SqliteStore) -> Vec<String> {
+    store
+        .setting(VOUCHED)
+        .ok()
+        .flatten()
+        .map(|v| {
+            String::from_utf8_lossy(&v)
+                .lines()
+                .filter(|l| !l.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Removes every passkey that was added from another machine without the screen password (when none was set, or before this
+/// rule existed): setting, changing or clearing the password must not leave a way in that never knew it. Returns how many.
+pub fn drop_unvouched_passkeys(store: &SqliteStore) -> Result<usize, PasswordError> {
+    let keep = vouched(store);
+    let conn = store.lock()?;
+    let ids: Vec<String> = conn
+        .prepare("SELECT id FROM passkeys")?
+        .query_map([], |r| r.get(0))?
+        .collect::<Result<_, _>>()?;
+    let mut dropped = 0;
+    for id in ids.iter().filter(|id| !keep.contains(id)) {
+        dropped += conn.execute("DELETE FROM passkeys WHERE id = ?1", params![id])?;
+    }
+    drop(conn);
+    let still: Vec<&String> = keep.iter().filter(|k| ids.contains(k)).collect();
+    store.set_setting(
+        VOUCHED,
+        still
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+            .as_bytes(),
+    )?;
+    Ok(dropped)
+}
+
 /// Who is asking, as far as the hub can tell: the TCP peer address and a short summary of the user agent, for rate limits and the
 /// audit trail.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -360,7 +415,8 @@ impl Guard {
             .entry(key)
             .or_default()
             .count(now_ms, ADDRESS_FREE_FAILURES, cap, FORGET_MS);
-        if !local {
+        // A passkey cannot be guessed: its tries never count toward the hub-wide cap (nor can its successes lower it).
+        if !local && scope == Scope::All {
             s.global.count(
                 now_ms,
                 GLOBAL_FREE_FAILURES,
@@ -371,11 +427,12 @@ impl Guard {
         Ok(())
     }
 
-    /// The try that [`Self::attempt`] started proved who is here: the address starts again from zero.
-    pub fn succeeded(&self, client: &Client) {
+    /// The try that [`Self::attempt`] started (with the same `scope`) proved who is here: the address starts again from zero, and
+    /// a code or password try is given back to the hub-wide count.
+    pub fn succeeded(&self, client: &Client, scope: Scope) {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         s.by_address.remove(&client.bucket());
-        if !client.is_local() {
+        if !client.is_local() && scope == Scope::All {
             s.global.failures = s.global.failures.saturating_sub(1);
         }
     }
@@ -521,7 +578,7 @@ mod tests {
         // A success starts the address again from zero.
         now += MAX_LOCKOUT_MS + 1;
         assert_eq!(g.attempt(&c, Scope::All, now), Ok(()));
-        g.succeeded(&c);
+        g.succeeded(&c, Scope::All);
         for _ in 0..ADDRESS_FREE_FAILURES {
             assert_eq!(g.attempt(&c, Scope::All, now), Ok(()));
         }
@@ -581,5 +638,50 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn passkey_tries_neither_fill_nor_drain_the_hub_wide_cap() {
+        let g = Guard::new();
+        // Many passkey misses from many addresses: the global cap is untouched.
+        for last in 0..100u8 {
+            for _ in 0..ADDRESS_FREE_FAILURES {
+                assert_eq!(g.attempt(&remote(last), Scope::AddressOnly, 0), Ok(()));
+            }
+            assert!(
+                g.attempt(&remote(last), Scope::AddressOnly, 0).is_err(),
+                "the per-address limit still holds for passkeys"
+            );
+        }
+        assert_eq!(g.attempt(&remote(200), Scope::All, 0), Ok(()));
+        // Fill the cap with code misses; passkey successes do not give any of it back.
+        let mut n = 1;
+        let mut last = 0u8;
+        'fill: loop {
+            last += 1;
+            for _ in 0..4 {
+                if n >= GLOBAL_FREE_FAILURES {
+                    break 'fill;
+                }
+                assert_eq!(
+                    g.attempt(
+                        &Client::new(Some([198, 51, 100, last].into()), ""),
+                        Scope::All,
+                        0
+                    ),
+                    Ok(())
+                );
+                n += 1;
+            }
+        }
+        for i in 0..20u8 {
+            let c = Client::new(Some([192, 0, 2, i].into()), "");
+            assert_eq!(g.attempt(&c, Scope::AddressOnly, 0), Ok(()));
+            g.succeeded(&c, Scope::AddressOnly);
+        }
+        assert!(
+            g.attempt(&remote(201), Scope::All, 0).is_err(),
+            "still locked"
+        );
     }
 }

@@ -34,8 +34,7 @@ pub trait SessionApi: Send + Sync {
         404
     }
 
-    /// `POST /api/password` (`op` = `password`: set or change the screen password) and `POST /api/unlock` (`op` = `unlock`: open
-    /// a window that locked itself). Returns the status and the JSON body.
+    /// `POST /api/password` (`op` = `password`: set or change the screen password). Returns the status and the JSON body.
     fn account(
         &self,
         _op: &str,
@@ -353,7 +352,6 @@ where
     let passkey_op = path.strip_prefix("/api/passkey/");
     let account_op = match path {
         "/api/password" => Some("password"),
-        "/api/unlock" => Some("unlock"),
         _ => None,
     };
     if method == "POST" && (path == "/api/session" || passkey_op.is_some() || account_op.is_some())

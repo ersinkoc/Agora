@@ -1,9 +1,9 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { setLanguage } from '../i18n';
-import { SignInPage } from '../screens';
+import { DevicePage, SignInPage } from '../screens';
 import { Console } from './Console';
-import { LockScreen, ScreenPasswordSettings } from './Locks';
+import { ScreenPasswordSettings } from './Locks';
 import { demoSource } from '../terminal/source';
 
 describe('screen password in the window', () => {
@@ -24,11 +24,18 @@ describe('screen password in the window', () => {
     expect(renderToStaticMarkup(<Console {...props} />)).not.toContain('>Lock<');
   });
 
-  it('shows a lock screen with a password field and a way out', () => {
-    const html = renderToStaticMarkup(<LockScreen onUnlock={async () => ({ ok: true })} onSignOut={() => {}} />);
+  it('keeps a code from a link in the form when the password is still needed', () => {
+    const html = renderToStaticMarkup(<SignInPage onSubmit={() => {}} passwordRequired initialCode="AB12-CD34" />);
+    expect(html).toContain('value="AB12-CD34"');
     expect(html).toContain('type="password"');
-    expect(html).toContain('Unlock');
-    expect(html).toContain('Sign out instead');
+  });
+
+  it('asks for the password before adding a passkey from another machine', () => {
+    const add = async () => true;
+    expect(renderToStaticMarkup(<DevicePage device={undefined} onBack={() => {}} onAddPasskey={add} />)).not.toContain('type="password"');
+    const away = renderToStaticMarkup(<DevicePage device={undefined} onBack={() => {}} onAddPasskey={add} passkeyNeedsPassword />);
+    expect(away).toContain('name="passkey-password"');
+    expect(away).toMatch(/<button[^>]*disabled=""[^>]*>Add a passkey/);
   });
 
   it('asks for the current password only when one is set, and offers the idle lock off by default', () => {

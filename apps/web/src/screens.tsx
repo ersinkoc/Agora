@@ -174,8 +174,10 @@ function PageFrame({ title, onBack, children, wide }: { title: string; onBack: (
 
 // How an owner makes a machine trust this browser: the key is public, the command is for a terminal. The screen password and the
 // idle lock live here too (ADR-0067).
-export function DevicePage({ device, onBack, onAddPasskey, security }: { device: Device | undefined; onBack: () => void; onAddPasskey?: () => Promise<boolean>; security?: ReactNode }) {
+// `passkeyNeedsPassword`: this browser is on another machine and a screen password is set, so adding a passkey needs it (ADR-0067).
+export function DevicePage({ device, onBack, onAddPasskey, passkeyNeedsPassword = false, security }: { device: Device | undefined; onBack: () => void; onAddPasskey?: (password?: string) => Promise<boolean>; passkeyNeedsPassword?: boolean; security?: ReactNode }) {
   const [passkey, setPasskey] = useState<'added' | 'failed' | undefined>();
+  const [password, setPassword] = useState('');
   return (
     <PageFrame title={t('device-title')} onBack={onBack}>
       <p>{t('device-intro')}</p>
@@ -188,7 +190,13 @@ export function DevicePage({ device, onBack, onAddPasskey, security }: { device:
       {onAddPasskey && (
         <section className="stack">
           <p>{t('device-passkey-intro')}</p>
-          <button type="button" className="button" onClick={() => { void onAddPasskey().then((ok) => setPasskey(ok ? 'added' : 'failed')); }}>{t('device-passkey-add')}</button>
+          {passkeyNeedsPassword && (
+            <label>
+              <span className="muted">{t('signin-password')}</span>{' '}
+              <input type="password" name="passkey-password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" />
+            </label>
+          )}
+          <button type="button" className="button" disabled={passkeyNeedsPassword && !password} onClick={() => { void onAddPasskey(passkeyNeedsPassword ? password : undefined).then((ok) => { setPasskey(ok ? 'added' : 'failed'); setPassword(''); }); }}>{t('device-passkey-add')}</button>
           {passkey && <p role="status">{t(passkey === 'added' ? 'device-passkey-added' : 'device-passkey-failed')}</p>}
         </section>
       )}
@@ -248,8 +256,8 @@ function actionLabel(action: string): string {
 }
 
 // `passwordRequired`: the hub asks this browser for the screen password too (ADR-0067; never on the hub's own machine).
-export function SignInPage({ onSubmit, onPasskey, notice, passwordRequired = false }: { onSubmit: (code: string, password?: string) => void; onPasskey?: () => void; notice?: string; passwordRequired?: boolean }) {
-  const [code, setCode] = useState('');
+export function SignInPage({ onSubmit, onPasskey, notice, passwordRequired = false, initialCode = '' }: { onSubmit: (code: string, password?: string) => void; onPasskey?: () => void; notice?: string; passwordRequired?: boolean; initialCode?: string }) {
+  const [code, setCode] = useState(initialCode);
   const [password, setPassword] = useState('');
   return (
     <main className="page">

@@ -318,7 +318,9 @@ pub fn password(say: &Say, o: &Opts, op: &str) -> ExitCode {
     };
     let screen = ScreenPassword::new(&store);
     let now = server::now_ms();
+    // Every session ends, and so does every passkey added from another machine without the password (ADR-0067).
     let sign_out_all = || {
+        let _ = agora_hub::password::drop_unvouched_passkeys(&store);
         SignIn::new(&store, Arc::new(Lockout::new()))
             .revoke_all()
             .unwrap_or(0)
@@ -359,9 +361,18 @@ pub fn password(say: &Say, o: &Opts, op: &str) -> ExitCode {
                 say.err(prompt, &[]);
                 agora_platform::read_secret_line()
             };
-            let Ok(first) = read(key!("cli-password-prompt")) else {
-                say.err(key!("cli-password-needs-terminal"), &[]);
-                return ExitCode::from(2);
+            // Ctrl-C: the terminal is already back to normal; stop as an interrupted program does.
+            let stopped = |e: std::io::Error| {
+                if e.kind() == std::io::ErrorKind::Interrupted {
+                    ExitCode::from(130)
+                } else {
+                    say.err(key!("cli-password-needs-terminal"), &[]);
+                    ExitCode::from(2)
+                }
+            };
+            let first = match read(key!("cli-password-prompt")) {
+                Ok(p) => p,
+                Err(e) => return stopped(e),
             };
             match check_new(&first) {
                 Ok(()) => {}
@@ -377,9 +388,9 @@ pub fn password(say: &Say, o: &Opts, op: &str) -> ExitCode {
                     return ExitCode::from(2);
                 }
             }
-            let Ok(again) = read(key!("cli-password-repeat")) else {
-                say.err(key!("cli-password-needs-terminal"), &[]);
-                return ExitCode::from(2);
+            let again = match read(key!("cli-password-repeat")) {
+                Ok(p) => p,
+                Err(e) => return stopped(e),
             };
             if again != first {
                 say.err(key!("cli-password-mismatch"), &[]);

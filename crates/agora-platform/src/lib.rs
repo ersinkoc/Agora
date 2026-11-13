@@ -548,15 +548,49 @@ impl Drop for RawMode {
 }
 
 /// Reads one line from the terminal on stdin without showing what is typed (a password), without its line ending. Fails with
-/// `Unsupported` when stdin is not a terminal: a secret is never read from a pipe or a file by accident.
+/// `Unsupported` when stdin is not a terminal (a secret is never read from a pipe or a file by accident) and with `Interrupted` on
+/// Ctrl-C; the terminal's settings are restored on every path, Ctrl-C included.
 pub fn read_secret_line() -> io::Result<String> {
     #[cfg(unix)]
-    let line = unix::read_secret_line();
+    let mode = unix::secret_mode()?;
     #[cfg(windows)]
-    let line = windows::read_secret_line();
+    let mode = windows::secret_mode()?;
     #[cfg(not(any(unix, windows)))]
-    let line: io::Result<String> = Err(unsupported_io("reading a password"));
-    line.map(|l| l.trim_end_matches(['\r', '\n']).to_string())
+    let mode: () = return Err(unsupported_io("reading a password"));
+    let line = secret_from(&mut io::stdin().lock());
+    drop(mode);
+    // The Enter (or Ctrl-C) that ended it was not echoed.
+    eprintln!();
+    line
+}
+
+/// The line editing [`read_secret_line`] does itself, with the terminal's own switched off: Enter ends the line, Backspace removes the
+/// last character, Ctrl-U the whole line, Ctrl-C is `Interrupted`, Ctrl-D on an empty line is `UnexpectedEof`; other control bytes
+/// are dropped.
+pub fn secret_from(input: &mut impl io::Read) -> io::Result<String> {
+    let mut line: Vec<u8> = Vec::new();
+    let mut byte = [0u8; 1];
+    loop {
+        if input.read(&mut byte)? == 0 {
+            if line.is_empty() {
+                return Err(io::ErrorKind::UnexpectedEof.into());
+            }
+            break;
+        }
+        match byte[0] {
+            b'\r' | b'\n' => break,
+            0x03 => return Err(io::ErrorKind::Interrupted.into()),
+            0x04 if line.is_empty() => return Err(io::ErrorKind::UnexpectedEof.into()),
+            0x15 => line.clear(),
+            0x08 | 0x7f => {
+                // One character, however many bytes it took.
+                while line.pop().is_some_and(|b| (0x80..0xc0).contains(&b)) {}
+            }
+            b if b < 0x20 => {}
+            b => line.push(b),
+        }
+    }
+    String::from_utf8(line).map_err(|_| io::ErrorKind::InvalidData.into())
 }
 
 /// Size of the terminal on stdout as `(cols, rows)`, or `None` when stdout is not a terminal.
@@ -1222,5 +1256,32 @@ mod procinfo_tests {
     fn missing_process_is_an_error() {
         assert!(process_name(u32::MAX - 1).is_err());
         assert!(process_tree(u32::MAX - 1).is_err());
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod secret_tests {
+    use super::secret_from;
+    use std::io::ErrorKind;
+
+    fn read(bytes: &[u8]) -> std::io::Result<String> {
+        secret_from(&mut &bytes[..])
+    }
+
+    #[test]
+    fn a_secret_line_is_edited_here_and_ctrl_c_stops_it() {
+        assert_eq!(read(b"open sesame\r").unwrap(), "open sesame");
+        assert_eq!(read(b"abx\x7fc\n").unwrap(), "abc");
+        assert_eq!(read("güz\u{e7}\x7f\x7fel\r".as_bytes()).unwrap(), "güel");
+        assert_eq!(read(b"junk\x15ok\r").unwrap(), "ok");
+        assert_eq!(read(b"a\x1bb\r").unwrap(), "ab");
+        assert_eq!(
+            read(b"secr\x03et\r").unwrap_err().kind(),
+            ErrorKind::Interrupted
+        );
+        assert_eq!(read(b"\x04").unwrap_err().kind(), ErrorKind::UnexpectedEof);
+        assert_eq!(read(b"").unwrap_err().kind(), ErrorKind::UnexpectedEof);
+        assert_eq!(read(b"\xff\r").unwrap_err().kind(), ErrorKind::InvalidData);
     }
 }

@@ -651,15 +651,18 @@ pub(crate) fn restore_mode(saved: &crate::RawMode) {
     }
 }
 
-/// One line from the console on stdin with echo off. The mode is restored even when reading fails.
-pub(crate) fn read_secret_line() -> io::Result<String> {
-    struct Restore(u32);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            // SAFETY: restoring the mode read earlier from the same handle.
-            unsafe { SetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), self.0) };
-        }
+/// Console settings for typing a secret: no echo, no line editing and no Ctrl-C handling by the console (Ctrl-C arrives as a byte, so
+/// the reader can restore the mode before it stops). Restored when dropped, on every path.
+pub(crate) struct SecretMode(u32);
+
+impl Drop for SecretMode {
+    fn drop(&mut self) {
+        // SAFETY: restoring the mode read earlier from the same handle.
+        unsafe { SetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), self.0) };
     }
+}
+
+pub(crate) fn secret_mode() -> io::Result<SecretMode> {
     let mut saved = 0u32;
     // SAFETY: plain calls on the process's standard input handle; the mode is read before it is changed.
     unsafe {
@@ -670,16 +673,12 @@ pub(crate) fn read_secret_line() -> io::Result<String> {
                 "stdin is not a console",
             ));
         }
-        if SetConsoleMode(stdin, saved & !ENABLE_ECHO_INPUT) == 0 {
+        let quiet = saved & !(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT | ENABLE_PROCESSED_INPUT);
+        if SetConsoleMode(stdin, quiet) == 0 {
             return Err(os_error(GetLastError()));
         }
     }
-    let _restore = Restore(saved);
-    let mut line = String::new();
-    io::stdin().read_line(&mut line)?;
-    // The typed newline was not echoed either.
-    eprintln!();
-    Ok(line)
+    Ok(SecretMode(saved))
 }
 
 /// Size of the console window on stdout.

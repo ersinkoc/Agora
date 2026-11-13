@@ -244,7 +244,7 @@ impl<'a> SignIn<'a> {
     }
 }
 
-/// The hub's sign-in: answers `/api/session`, `/api/password`, `/api/unlock` and `/api/passkey/*`, and decides whether a bearer
+/// The hub's sign-in: answers `/api/session`, `/api/password` and `/api/passkey/*`, and decides whether a bearer
 /// token is a live session. Codes, the screen password and passkeys are rate limited per address and for the hub by one
 /// [`Guard`] (ADR-0067).
 pub struct HubSessions {
@@ -363,7 +363,7 @@ impl crate::web::SessionApi for HubSessions {
             .exchange(req.code, now, &format!("code {}", client.describe()))
         {
             Ok(t) => {
-                self.guard.succeeded(client);
+                self.guard.succeeded(client, Scope::All);
                 SignInReply::Token(t)
             }
             Err(SignInError::BadCode) => {
@@ -432,23 +432,10 @@ impl crate::web::SessionApi for HubSessions {
                 audit(action, WRONG_PASSWORD);
                 return Err((401, String::new()));
             }
-            self.guard.succeeded(client);
+            self.guard.succeeded(client, Scope::All);
             Ok(())
         };
         match op {
-            // The idle lock of a window: its session is still live, the password opens it again.
-            "unlock" => {
-                if !password.is_set() {
-                    return (409, String::new());
-                }
-                match proves("unlock", text("password")) {
-                    Ok(()) => {
-                        audit("unlock", "ok");
-                        (200, "{}".into())
-                    }
-                    Err(e) => e,
-                }
-            }
             // Setting or changing the screen password: the owner only, with the current one when there is one; every other
             // session ends.
             "password" => {
@@ -474,6 +461,7 @@ impl crate::web::SessionApi for HubSessions {
                     return (500, String::new());
                 }
                 let revoked = self.signin().revoke_others(token).unwrap_or(0);
+                let _ = crate::password::drop_unvouched_passkeys(self.hub.store());
                 audit("password_set", "ok");
                 (200, serde_json::json!({ "revoked": revoked }).to_string())
             }
@@ -483,6 +471,35 @@ impl crate::web::SessionApi for HubSessions {
 }
 
 impl HubSessions {
+    /// The screen password for a step that a passkey could otherwise skip later: asked of a client on another machine when one is
+    /// set, rate limited and audited like a sign-in. `Ok(true)` when the step is vouched for (the hub's own machine, or the right
+    /// password); `Ok(false)` when no password is set and the client is elsewhere (such a passkey is dropped when a password is set).
+    fn remote_password(
+        &self,
+        client: &Client,
+        body: &serde_json::Value,
+        now: u64,
+    ) -> Result<bool, (u16, String)> {
+        if client.is_local() {
+            return Ok(true);
+        }
+        let password = self.screen_password();
+        if !password.is_set() {
+            return Ok(false);
+        }
+        if self.guard.attempt(client, Scope::All, now).is_err() {
+            self.audit_failure("passkey_add", "password", client, now, LOCKED_OUT);
+            return Err((429, String::new()));
+        }
+        let candidate = body.get("password").and_then(|v| v.as_str()).unwrap_or("");
+        if !password.verify(candidate) {
+            self.audit_failure("passkey_add", "password", client, now, WRONG_PASSWORD);
+            return Err((401, String::new()));
+        }
+        self.guard.succeeded(client, Scope::All);
+        Ok(true)
+    }
+
     fn passkey_op(
         &self,
         op: &str,
@@ -506,12 +523,22 @@ impl HubSessions {
         let signed_in = who.is_some();
         let json = |v: serde_json::Value| (200, v.to_string());
         match op {
-            // Adding a passkey needs a signed-in session: the code (or another passkey) proved who is here.
-            "register-begin" if signed_in => match self.challenges.issue(Purpose::Register, now) {
-                Ok(c) => json(serde_json::json!({ "challenge": c, "rpId": pk::rp_id(host) })),
-                Err(_) => (500, String::new()),
-            },
-            "register-finish" if signed_in => {
+            // Adding a passkey needs a signed-in session: the code (or another passkey) proved who is here. From another machine,
+            // with a screen password set, it needs the password too: a passkey replaces the password, so a session token alone
+            // (taken from a window) must not be able to make one (ADR-0067).
+            "register-begin" | "register-finish" if signed_in => {
+                let vouched = match self.remote_password(client, body, now) {
+                    Ok(v) => v,
+                    Err(e) => return e,
+                };
+                if op == "register-begin" {
+                    return match self.challenges.issue(Purpose::Register, now) {
+                        Ok(c) => {
+                            json(serde_json::json!({ "challenge": c, "rpId": pk::rp_id(host) }))
+                        }
+                        Err(_) => (500, String::new()),
+                    };
+                }
                 let id = body.get("id").and_then(|v| v.as_str()).unwrap_or("");
                 match (field("publicKey"), field("clientDataJSON")) {
                     (Some(key), Some(cd)) => {
@@ -525,7 +552,12 @@ impl HubSessions {
                             now,
                             who.as_ref().and_then(|u| u.as_deref()),
                         ) {
-                            Ok(()) => (200, "{}".into()),
+                            Ok(()) => {
+                                if vouched {
+                                    let _ = crate::password::vouch_passkey(store, id);
+                                }
+                                (200, "{}".into())
+                            }
                             Err(pk::PasskeyError::Refused) => (403, String::new()),
                             Err(_) => (500, String::new()),
                         }
@@ -562,7 +594,7 @@ impl HubSessions {
                         &format!("passkey {}", client.describe()),
                     ) {
                         Ok(t) => {
-                            self.guard.succeeded(client);
+                            self.guard.succeeded(client, Scope::AddressOnly);
                             json(serde_json::json!({ "token": t }))
                         }
                         Err(_) => (500, String::new()),
@@ -964,24 +996,9 @@ mod tests {
         }
 
         #[test]
-        fn a_locked_window_opens_with_the_password_and_sign_out_ends_the_session() {
+        fn locking_ends_the_session_and_leaves_machines_alone() {
             let (hub, api) = hub();
             let tok = token(sign_in(&api, &code(&hub), None, &home())).unwrap();
-            let unlock = |p: &str| {
-                api.account(
-                    "unlock",
-                    Some(&tok),
-                    &away(5),
-                    &serde_json::json!({"password": p}),
-                )
-                .0
-            };
-            assert_eq!(unlock(PW), 409, "no password: nothing to unlock with");
-            ScreenPassword::with_iterations(hub.store(), 1_000)
-                .set(PW)
-                .unwrap();
-            assert_eq!(unlock("wrong password"), 401);
-            assert_eq!(unlock(PW), 200);
             // Locking or signing out ends a window's session only: machines keep their own credentials and their agents run on.
             hub.store()
                 .lock()
@@ -997,11 +1014,97 @@ mod tests {
                 .unwrap());
             assert!(!api.signin().check(&tok, crate::server::now_ms()));
             assert_eq!(api.end(&tok), 401);
-            assert_eq!(unlock(PW), 401, "a session that ended cannot be unlocked");
             let rows = crate::audit::Audit::new(hub.store())
                 .list(0, None, 50)
                 .unwrap();
             assert!(rows.iter().any(|r| r.action == "sign_out"));
+        }
+
+        fn register(api: &HubSessions, tok: &str, client: &Client, body: serde_json::Value) -> u16 {
+            api.passkey("register-begin", Some(tok), "hub.example", client, &body)
+                .0
+        }
+
+        #[test]
+        fn a_session_alone_adds_no_passkey_from_elsewhere_once_a_password_is_set() {
+            let (hub, api) = hub();
+            let local = token(sign_in(&api, &code(&hub), None, &home())).unwrap();
+            // No password yet: unchanged.
+            assert_eq!(register(&api, &local, &away(6), serde_json::json!({})), 200);
+            ScreenPassword::with_iterations(hub.store(), 1_000)
+                .set(PW)
+                .unwrap();
+            // The token was taken at the machine, used from the LAN: the password is needed, and misses count.
+            assert_eq!(register(&api, &local, &away(6), serde_json::json!({})), 401);
+            assert_eq!(
+                register(
+                    &api,
+                    &local,
+                    &away(6),
+                    serde_json::json!({"password": "nope nope"})
+                ),
+                401
+            );
+            assert_eq!(
+                register(&api, &local, &away(6), serde_json::json!({"password": PW})),
+                200
+            );
+            assert_eq!(
+                register(&api, &local, &home(), serde_json::json!({})),
+                200,
+                "the hub's own machine is not asked"
+            );
+            for _ in 0..ADDRESS_FREE_FAILURES {
+                let _ = register(
+                    &api,
+                    &local,
+                    &away(7),
+                    serde_json::json!({"password": "guess guess"}),
+                );
+            }
+            assert_eq!(
+                register(&api, &local, &away(7), serde_json::json!({"password": PW})),
+                429
+            );
+            let rows = crate::audit::Audit::new(hub.store())
+                .list(0, None, 50)
+                .unwrap();
+            assert!(rows
+                .iter()
+                .any(|r| r.action == "passkey_add" && r.outcome == WRONG_PASSWORD));
+        }
+
+        #[test]
+        fn a_password_change_keeps_only_passkeys_that_never_skipped_it() {
+            let (hub, api) = hub();
+            let add = |id: &str| {
+                hub.store()
+                    .lock()
+                    .unwrap()
+                    .execute(
+                        "INSERT INTO passkeys (id, public_key, sign_count, created_ms) VALUES (?1, x'00', 0, 1)",
+                        [id],
+                    )
+                    .unwrap();
+            };
+            add("from-elsewhere-before");
+            add("at-the-machine");
+            crate::password::vouch_passkey(hub.store(), "at-the-machine").unwrap();
+            let owner = token(sign_in(&api, &code(&hub), None, &home())).unwrap();
+            assert_eq!(
+                api.account(
+                    "password",
+                    Some(&owner),
+                    &home(),
+                    &serde_json::json!({"password": PW})
+                )
+                .0,
+                200
+            );
+            assert_eq!(
+                crate::passkey::ids(hub.store()).unwrap(),
+                ["at-the-machine"]
+            );
         }
     }
 }

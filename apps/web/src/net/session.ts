@@ -85,7 +85,7 @@ export async function signInInfo(fetcher: typeof fetch = fetch): Promise<SignInI
   }
 }
 
-// Ends this session at the hub ("Lock" in the window, or sign out from the lock screen) and forgets it here. Agents are not touched.
+// Ends this session at the hub ("Lock" in the window, or the idle lock) and forgets it here. Agents are not touched.
 export async function endSession(token: string, fetcher: typeof fetch = fetch): Promise<void> {
   forgetToken();
   try {
@@ -103,19 +103,6 @@ const passwordReply = async (r: Response): Promise<PasswordResult> => {
   return { ok: false, reason: 'failed' };
 };
 
-// Opens a window that locked itself after it sat idle: its session is still live, the screen password proves it is the owner.
-export async function unlock(token: string, password: string, fetcher: typeof fetch = fetch): Promise<PasswordResult> {
-  try {
-    return await passwordReply(await fetcher('/api/unlock', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
-      body: JSON.stringify({ password }),
-    }));
-  } catch {
-    return { ok: false, reason: 'failed' };
-  }
-}
-
 // Sets or changes the screen password (owner only; `current` when one is set). Every other session of the hub ends.
 export async function setPassword(token: string, password: string, current?: string, fetcher: typeof fetch = fetch): Promise<PasswordResult> {
   try {
@@ -131,3 +118,10 @@ export async function setPassword(token: string, password: string, current?: str
 
 // The shortest screen password the hub accepts (crates/agora-hub/src/password.rs MIN_CHARS).
 export const MIN_PASSWORD = 8;
+
+// A `#code=` link: sign in at once, unless the hub wants the screen password from this browser; then the code waits in the form
+// (`keep`) for the password, and is neither sent nor counted as a miss.
+export async function signInFromLink(code: string, info: () => Promise<SignInInfo>, submit: (code: string) => void, keep: (code: string) => void): Promise<void> {
+  if ((await info()).passwordRequired) keep(code);
+  else submit(code);
+}
