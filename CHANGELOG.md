@@ -4,6 +4,11 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+## 0.3.6
+
+### Audit
+- A command whose client disconnected before the answer still gets its outcome in the audit trail.
+
 ### Closed agents
 - A closed agent is shown as finished the same way whatever its exit code; before, one stopped while the window was open (which leaves a non-zero code) showed the orange "Needs you" mark until the next reload. The summary states the exit code ("Ended with exit code 143") instead of calling it an error.
 
