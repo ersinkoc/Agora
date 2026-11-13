@@ -78,12 +78,22 @@ pub const METHODS: &[MethodInfo] = &[
     m("session/cancel", N2A, Req, "SessionCancelParams", None),
     m("approval/resolve", N2A, Req, "ApprovalResolveParams", None),
     m("mesh/deliver", N2A, Req, "MeshDeliverParams", None),
+    // ADR-0058
+    m(
+        "session/set_option",
+        N2A,
+        Req,
+        "SessionSetOptionParams",
+        None,
+    ),
     m("state/update", A2N, Note, "StateUpdateParams", None),
     m("chat/append", A2N, Note, "ChatAppendParams", None),
     m("approval/request", A2N, Note, "ApprovalRequestParams", None),
     m("usage/report", A2N, Note, "UsageReportParams", None),
     m("session/reported", A2N, Note, "SessionReportedParams", None),
     m("log", A2N, Note, "LogParams", None),
+    // ADR-0058
+    m("session/options", A2N, Note, "SessionOptionsParams", None),
 ];
 
 pub fn method(name: &str) -> Option<&'static MethodInfo> {

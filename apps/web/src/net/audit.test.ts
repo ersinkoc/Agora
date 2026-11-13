@@ -8,11 +8,13 @@ describe('audit', () => {
     let seen = '';
     const f = (async (url: string) => { seen = url; return new Response(JSON.stringify([
       { id: 1, at_ms: 10, who: 'owner', action: 'sign_in', node: '', outcome: 'ok' },
-      { id: 2, at_ms: 20, who: 'eda', action: 'AgentStop', node: 'n1', outcome: 'auth.forbidden' },
+      { id: 2, at_ms: 20, who: 'eda', session: 'a1b2c3', action: 'AgentStop', node: 'n1', outcome: 'auth.forbidden' },
     ])); }) as unknown as typeof fetch;
     const r = await loadAudit('tok', 'eda', f);
     expect(seen).toBe('/api/audit?limit=500&who=eda');
     expect(r.ok && r.rows.map((x) => x.id)).toEqual([2, 1]);
+    // A row from a hub that predates sessions in the trail has none.
+    expect(r.ok && r.rows.map((x) => x.session)).toEqual(['a1b2c3', '']);
     await loadAudit('tok', 'a b&c', f);
     expect(seen).toBe('/api/audit?limit=500');
   });

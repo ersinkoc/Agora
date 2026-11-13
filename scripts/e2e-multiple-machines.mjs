@@ -3,7 +3,7 @@
 import { copyFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
-import { startStack } from './browser-harness.mjs';
+import { openStart, startStack } from './browser-harness.mjs';
 let stack;
 const check = (ok, message) => { if (!ok) throw new Error(message); console.log(`PASS: ${message}`); };
 try {
@@ -19,7 +19,7 @@ try {
   const desktop = await addNode({ id: 'desktop', project: copy, hostname: 'shared-host' });
   const launch = async (node, folder) => {
     await page.goto(`${origin}/#/`);
-    await page.getByRole('button', { name: 'Start an agent', exact: true }).click();
+    await openStart(page);
     await page.getByRole('radio', { name: node }).click();
     await page.getByLabel('Working folder', { exact: true }).fill(folder);
     await page.getByRole('button', { name: 'Use this folder', exact: true }).click();
@@ -31,7 +31,8 @@ try {
     const id = decodeURIComponent(new URL(page.url()).hash.slice('#/agent/'.length));
     await page.locator('form textarea').fill('cwd');
     await page.getByRole('button', { name: 'Send', exact: true }).click();
-    await page.waitForFunction(path => document.querySelector('[aria-label="Conversation"]')?.textContent.includes(path), folder);
+    // The fake agent answers with JSON, where a Windows path's backslashes are escaped.
+    await page.waitForFunction(path => document.querySelector('[aria-label="Conversation"]')?.textContent.includes(path), JSON.stringify(folder).slice(1, -1));
     return id;
   };
   const first = await launch('laptop', proj);
@@ -70,15 +71,17 @@ try {
   // Clipboard refusal must still leave the selectable address and useful instructions.
   await page.evaluate(() => Object.defineProperty(navigator, 'clipboard', { configurable: true,
     value: { writeText: async () => { throw new Error('test refusal'); } } }));
-  await page.getByRole('button', { name: `Copy agent address ${second}`, exact: true }).click();
+  // Home shows one pane at a time, the first agent's.
+  await page.getByRole('button', { name: `Copy agent address ${first}`, exact: true }).click();
   await page.getByText('Copy failed. Select the address and copy it manually.', { exact: true }).waitFor();
   check(true, 'clipboard refusal retains a selectable address and manual-copy instructions');
   await page.reload();
   await page.getByRole('button', { name: `Copy agent address ${first}`, exact: true }).waitFor();
   check(await page.locator('aside section[data-machine-id]').count() === 2, 'snapshot reload preserves machine identity and session addresses');
   await page.goto(`${origin}/#/machines`);
-  await page.getByText('Machine ID: laptop', { exact: true }).waitFor();
-  await page.getByText('Machine ID: desktop', { exact: true }).waitFor();
+  // Each machine's card names its enrolled ID under the shared host name.
+  await page.getByText('laptop', { exact: true }).waitFor();
+  await page.getByText('desktop', { exact: true }).waitFor();
   check(true, 'machine details expose enrollment identities separately from host names');
   await page.addInitScript(() => Object.defineProperty(navigator, 'language', { get: () => 'tr-TR' }));
   await page.goto(`${origin}/#/`);

@@ -17,6 +17,12 @@ pub const MAX_ENTRIES: usize = 500;
 pub const MAX_BYTES: usize = 256 * 1024;
 /// Longest text of one entry; more is cut.
 pub const MAX_ENTRY_BYTES: usize = 16 * 1024;
+/// ADR-0058: a notice's code is at most this long and has this many parameters at most, each key at most `MAX_PARAM_KEY` bytes and
+/// each value at most `MAX_PARAM_BYTES` (more is cut). An adapter is untrusted; a notice that does not fit the shape is dropped.
+pub const MAX_CODE: usize = 64;
+pub const MAX_PARAMS: usize = 8;
+pub const MAX_PARAM_KEY: usize = 32;
+pub const MAX_PARAM_BYTES: usize = 1024;
 
 #[derive(Default)]
 struct Transcript {
@@ -32,9 +38,13 @@ pub struct ChatBoard {
     agents: Mutex<HashMap<AgentId, Transcript>>,
 }
 
-fn cut(mut text: String) -> String {
-    if text.len() > MAX_ENTRY_BYTES {
-        let mut end = MAX_ENTRY_BYTES;
+fn cut(text: String) -> String {
+    cut_to(text, MAX_ENTRY_BYTES)
+}
+
+fn cut_to(mut text: String, max: usize) -> String {
+    if text.len() > max {
+        let mut end = max;
         while !text.is_char_boundary(end) {
             end -= 1;
         }
@@ -67,7 +77,35 @@ pub fn describe(item: &ChatItem) -> (ChatKind, String, String) {
         ChatItem::Diff { path, unified_diff } => {
             (ChatKind::Diff, unified_diff.clone(), path.clone())
         }
+        // The code and parameters travel in their own fields (`notice`).
+        ChatItem::Notice { .. } => (ChatKind::Notice, String::new(), String::new()),
     }
+}
+
+/// A word of lowercase letters, digits and `_`.
+fn word(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+}
+
+/// ADR-0058: a notice's code and parameters as an entry keeps them, or `None` when the code is not a dotted lowercase code
+/// (`adapter.turn_failed`). Clients turn the code into a message id, so nothing else is let through; parameters with other keys are
+/// dropped and long values cut.
+pub fn notice(
+    code: &str,
+    params: &[(String, String)],
+) -> Option<(String, std::collections::HashMap<String, String>)> {
+    if code.len() > MAX_CODE || !code.contains('.') || !code.split('.').all(word) {
+        return None;
+    }
+    let params = params
+        .iter()
+        .filter(|(k, _)| k.len() <= MAX_PARAM_KEY && word(k))
+        .take(MAX_PARAMS)
+        .map(|(k, v)| (k.clone(), cut_to(v.clone(), MAX_PARAM_BYTES)))
+        .collect();
+    Some((code.to_string(), params))
 }
 
 fn json_string(s: &str) -> String {
@@ -106,31 +144,70 @@ impl ChatBoard {
         path: String,
         at_ms: u64,
     ) {
+        self.insert(
+            agent,
+            ChatEntry {
+                entry_id: 0,
+                at_ms,
+                role: role as i32,
+                kind: kind as i32,
+                text: cut(text),
+                path,
+                code: String::new(),
+                params: std::collections::HashMap::new(),
+            },
+        );
+    }
+
+    fn size(e: &ChatEntry) -> usize {
+        e.text.len()
+            + e.path.len()
+            + e.code.len()
+            + e.params
+                .iter()
+                .map(|(k, v)| k.len() + v.len())
+                .sum::<usize>()
+    }
+
+    /// Numbers an entry, keeps it within the ring's bounds and hands it to every follower.
+    fn insert(&self, agent: &AgentId, mut entry: ChatEntry) {
         let mut g = self.lock();
         let t = g.entry(agent.clone()).or_default();
         t.next_id += 1;
-        let entry = ChatEntry {
-            entry_id: t.next_id,
-            at_ms,
-            role: role as i32,
-            kind: kind as i32,
-            text: cut(text),
-            path,
-        };
-        t.bytes += entry.text.len() + entry.path.len();
+        entry.entry_id = t.next_id;
+        t.bytes += Self::size(&entry);
         t.entries.push_back(entry.clone());
         while t.entries.len() > MAX_ENTRIES || t.bytes > MAX_BYTES {
             let Some(old) = t.entries.pop_front() else {
                 break;
             };
-            t.bytes = t.bytes.saturating_sub(old.text.len() + old.path.len());
+            t.bytes = t.bytes.saturating_sub(Self::size(&old));
         }
         // A follower that went away is dropped here.
         t.followers.retain(|f| f.send(entry.clone()).is_ok());
     }
 
-    /// What an adapter said.
+    /// What an adapter said. A notice whose code has the wrong shape is dropped (ADR-0058).
     pub fn push_item(&self, agent: &AgentId, item: &ChatItem, at_ms: u64) {
+        if let ChatItem::Notice { code, params } = item {
+            let Some((code, params)) = notice(code, params) else {
+                return;
+            };
+            self.insert(
+                agent,
+                ChatEntry {
+                    entry_id: 0,
+                    at_ms,
+                    role: ChatRole::Agent as i32,
+                    kind: ChatKind::Notice as i32,
+                    text: String::new(),
+                    path: String::new(),
+                    code,
+                    params,
+                },
+            );
+            return;
+        }
         let (kind, text, path) = describe(item);
         self.push(agent, ChatRole::Agent, kind, text, path, at_ms);
     }
@@ -235,5 +312,52 @@ mod tests {
         assert_eq!(t, "{\"tool\":\"run \\\"x\\\"\",\"arguments\":{\"a\":1}}");
         let (k, t, _) = describe(&ChatItem::Plan(vec!["a".into(), "b".into()]));
         assert_eq!((k, t.as_str()), (ChatKind::Plan, "a\nb"));
+    }
+
+    #[test]
+    fn a_notice_keeps_its_code_and_bounded_params_and_a_bad_code_is_dropped() {
+        let b = ChatBoard::new();
+        let a = AgentId::new("a");
+        let mut params = vec![
+            ("stderr_tail".to_string(), "é".repeat(MAX_PARAM_BYTES)),
+            ("Bad Key".to_string(), "x".to_string()),
+        ];
+        params.extend((0..20).map(|i| (format!("k{i}"), "v".to_string())));
+        b.push_item(
+            &a,
+            &ChatItem::Notice {
+                code: "adapter.agent_exited".into(),
+                params,
+            },
+            1,
+        );
+        for bad in [
+            "",
+            "adapter",
+            "Adapter.x",
+            "a..b",
+            "a.b c",
+            &"a.b".repeat(30),
+            "notice-x.y",
+        ] {
+            b.push_item(
+                &a,
+                &ChatItem::Notice {
+                    code: bad.into(),
+                    params: vec![],
+                },
+                2,
+            );
+        }
+        let s = b.snapshot(&a);
+        assert_eq!(s.len(), 1, "{s:?}");
+        let n = &s[0];
+        assert_eq!(
+            (n.kind, n.code.as_str(), n.text.as_str()),
+            (ChatKind::Notice as i32, "adapter.agent_exited", "")
+        );
+        assert_eq!(n.params.len(), MAX_PARAMS);
+        assert!(!n.params.contains_key("Bad Key"));
+        assert!(n.params["stderr_tail"].len() <= MAX_PARAM_BYTES);
     }
 }
