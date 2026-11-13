@@ -73,3 +73,4 @@ Date: YYYY-MM-DD
 | 0053 | Browsing a machine's folders, and forgetting closed agents | Accepted |
 | 0054 | A node that lost unacknowledged events resynchronizes instead of stalling | Accepted |
 | 0055 | A resync keeps a running agent's board work | Accepted |
+| 0057 | An agent can start and wait for other agents, with the user's approval | Proposed |
