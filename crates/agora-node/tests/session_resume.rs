@@ -353,7 +353,12 @@ fn a_folder_that_is_gone_is_not_resumed_and_the_owner_can_resume_on_their_own() 
     });
     let probe = e.launch("probe");
     e.start();
-    std::fs::remove_dir_all(e.folder()).unwrap();
+    // On Windows a folder cannot be removed while a process that is being ended still has it as its working folder: try for a while.
+    let end = Instant::now() + Duration::from_secs(20);
+    while let Err(err) = std::fs::remove_dir_all(e.folder()) {
+        assert!(Instant::now() < end, "{err}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
     assert_eq!(e.resume(&probe, false).unwrap_err(), "agent.folder_changed");
     assert_eq!(e.resume(&probe, true).unwrap_err(), "agent.folder_changed");
     assert!(e.node().ledger.get(&probe).unwrap().interrupted());
@@ -505,4 +510,67 @@ fn a_session_id_that_could_be_an_option_never_reaches_a_command_line() {
         "agent.session_missing"
     );
     assert!(e.reports("resume-").is_empty());
+}
+
+fn stop(e: &Env, id: &str) -> Result<(), String> {
+    e.client()
+        .call(Cmd::AgentStop(v1::AgentStop {
+            agent_id: id.into(),
+            stop_helpers: false,
+        }))
+        .unwrap()
+        .map(|_| ())
+        .map_err(|err| err.code)
+}
+
+#[test]
+fn an_agent_that_outlived_a_crashed_node_is_stopped_before_it_is_resumed() {
+    // Where an agent can outlive its node at all (on Windows its job object ends it with the node, and no identity is kept).
+    if !supported() || agora_platform::process_identity(std::process::id()).is_err() {
+        return;
+    }
+    let mut e = Env::new("crash");
+    let probe = e.launch("probe");
+    e.wait("the probe's process in the ledger", |e| {
+        e.node()
+            .ledger
+            .get(&probe)
+            .is_some_and(|x| x.process().is_some())
+    });
+    let old = e.node().ledger.get(&probe).unwrap().process().unwrap();
+    // The node is killed without stopping its agents (kill -9): the probe keeps running.
+    e.node.take().unwrap().crash();
+    // A pid that was given to another process since: this test's own, with another start time.
+    let file = e.root.join("data/sessions/ledger.json");
+    let mut ledger: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    ledger["entries"].as_array_mut().unwrap().push(serde_json::json!({
+        "agent_id": "agent-50", "kind": "plain", "project_id": "p", "folder": "/nowhere", "directory": true,
+        "started_at_ms": 1, "pid": std::process::id(), "process_group": std::process::id(), "process_started": 1
+    }));
+    std::fs::write(&file, serde_json::to_vec(&ledger).unwrap()).unwrap();
+    e.start();
+    assert!(agora_platform::process_still_running(&old));
+    let found = e.interrupted();
+    assert!(found.iter().any(|i| i.agent_id == probe && i.still_running));
+    assert!(found
+        .iter()
+        .any(|i| i.agent_id == "agent-50" && !i.still_running));
+    // Two processes on one conversation are never started: Resume waits until it is stopped.
+    assert_eq!(e.resume(&probe, false).unwrap_err(), "agent.still_running");
+    assert_eq!(e.resume(&probe, true).unwrap_err(), "agent.still_running");
+    // A reused pid is never touched: stopping that entry ends nothing (this test is still here to say so).
+    assert!(stop(&e, "agent-50").is_err());
+    // Stop ends exactly the old process; then Resume works.
+    stop(&e, &probe).unwrap();
+    e.wait("the old process to end", |_| {
+        !agora_platform::process_still_running(&old)
+    });
+    assert!(e
+        .interrupted()
+        .iter()
+        .any(|i| i.agent_id == probe && !i.still_running));
+    let r = e.resume(&probe, false).unwrap();
+    assert_eq!(r.agent_id, probe);
+    assert!(e.running(&probe));
 }

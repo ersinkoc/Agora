@@ -613,6 +613,7 @@ impl EventSink {
             started_at_ms: e.started_at_ms,
             interrupted_at_ms: e.interrupted_at_ms,
             last_state: crate::ledger::proto_state(&e.last_state) as i32,
+            still_running: e.still_running(),
         }));
     }
 
@@ -1044,6 +1045,8 @@ pub struct Node {
     pub events_set_aside: Option<SetAside>,
     /// ADR-0060: the session ledger.
     pub ledger: Arc<crate::ledger::Ledger>,
+    /// See [`Node::crash`].
+    crashed: bool,
 }
 
 impl Node {
@@ -1279,6 +1282,7 @@ impl Node {
                 Arc::clone(&chat),
                 Arc::clone(&spawner),
             );
+            let ledger_tick = Arc::clone(&ledger);
             std::thread::Builder::new()
                 .name("agora-supervise".into())
                 .spawn(move || {
@@ -1287,8 +1291,10 @@ impl Node {
                     let mut memory_checked = Instant::now();
                     let mut usage = crate::usage_files::UsageWatcher::default();
                     let mut sessions = crate::session_files::SessionWatcher::default();
+                    // ADR-0060: the process each agent runs as, as last written to the ledger.
+                    let mut processes: std::collections::HashMap<AgentId, u32> = Default::default();
                     while !stop.load(Ordering::Acquire) {
-                        let (events, views, usage_targets, ended, session_targets) = {
+                        let (events, views, usage_targets, ended, session_targets, pids) = {
                             let mut s = sup.lock().unwrap_or_else(|e| e.into_inner());
                             let events = s.tick(Instant::now());
                             (
@@ -1297,8 +1303,22 @@ impl Node {
                                 s.usage_targets(),
                                 s.take_ended_usage_targets(),
                                 s.session_file_targets(),
+                                s.agent_pids(),
                             )
                         };
+                        // ADR-0060: a new process (a start, a restart, a resume) is written to the ledger with its start time, so one
+                        // that outlives a crashed node is recognised at the next start. Read only when the pid changed.
+                        for (agent, pid) in &pids {
+                            if processes.get(agent) != Some(pid) {
+                                processes.insert(agent.clone(), *pid);
+                                ledger_tick.set_process(
+                                    agent.as_str(),
+                                    agora_platform::process_identity(*pid).ok(),
+                                    now_ms(),
+                                );
+                            }
+                        }
+                        processes.retain(|a, _| pids.iter().any(|(p, _)| p == a));
                         // ADR-0060: the session ids terminal agents write to their own files (`[session.file]`), read outside the lock.
                         if !session_targets.is_empty() {
                             let known = sup
@@ -1462,7 +1482,15 @@ impl Node {
             manifest_problems,
             events_set_aside,
             ledger,
+            crashed: false,
         })
+    }
+
+    /// What a node killed without warning (`kill -9`) leaves behind, for tests (ADR-0060): it stops serving and supervising and
+    /// records nothing more, and its agents' processes are not stopped (on Unix a terminal agent leads its own process group and
+    /// outlives the node that way). They are left running for good.
+    pub fn crash(mut self) {
+        self.crashed = true;
     }
 
     pub fn socket(&self) -> Option<&Path> {
@@ -1572,9 +1600,18 @@ impl Drop for Node {
         if let Some(t) = self.git_watch.take() {
             let _ = t.join();
         }
+        if self.crashed {
+            // Nothing is said and nothing is stopped: the supervisor, which owns the agents' processes, is never dropped.
+            std::mem::forget(Arc::clone(&self.supervisor));
+            return;
+        }
         self.events.node_offline(&self.node_id);
-        // The agents' last states. They die with the node's supervisor (terminal handles kill their process groups on drop) without
-        // an end in the ledger: at the next start they are interrupted (ADR-0060).
+        // The agents end with the node, now (other parts of the node may still hold the supervisor, so its own drop is not relied on).
+        self.supervisor
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .shutdown();
+        // The agents' last states. They ended without an end in the ledger: at the next start they are interrupted (ADR-0060).
         let _ = self.ledger.flush();
     }
 }

@@ -77,6 +77,8 @@ message AgentSnapshot {
   uint64 interrupted_at_ms = 42;
   // The folder from `AgentInterrupted`, for an agent the hub has no workspace for.
   string folder = 43;
+  // `AgentInterrupted.still_running`.
+  bool still_running = 44;
 }
 
 message TerminalSnapshot {

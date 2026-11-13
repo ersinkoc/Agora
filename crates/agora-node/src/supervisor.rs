@@ -1883,6 +1883,37 @@ impl Supervisor {
         self.agents.get(id)?.terminal.as_ref()
     }
 
+    /// The node is stopping: every agent's process ends now (terminal process groups killed, adapters shut down), without an end
+    /// recorded anywhere, so the session ledger finds them interrupted at the next start (ADR-0060). Nothing is restarted.
+    pub fn shutdown(&mut self) {
+        for e in self.agents.values_mut() {
+            e.restart_at = None;
+            // Dropping the handle kills the process group and joins the actor.
+            e.terminal = None;
+        }
+        for e in self.adapters.values_mut() {
+            e.restart_at = None;
+            e.running = false;
+            if let Some(adapter) = e.adapter.take() {
+                adapter.shutdown(Duration::from_secs(1));
+            }
+        }
+    }
+
+    /// ADR-0060: each running agent's top process (its terminal's program, or its adapter), for the session ledger.
+    pub fn agent_pids(&self) -> Vec<(AgentId, u32)> {
+        self.agents
+            .iter()
+            .filter_map(|(id, e)| Some((id.clone(), e.terminal.as_ref()?.pid())))
+            .chain(
+                self.adapters
+                    .iter()
+                    .filter(|(_, e)| e.running)
+                    .filter_map(|(id, e)| Some((id.clone(), e.adapter.as_ref()?.pid()))),
+            )
+            .collect()
+    }
+
     /// The process ids at the top of each running agent: its terminal's process, or its adapter process.
     pub fn running_pids(&self) -> Vec<u32> {
         self.agents

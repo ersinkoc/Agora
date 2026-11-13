@@ -89,6 +89,8 @@ pub struct InterruptedView {
     pub resumable: bool,
     pub at_ms: u64,
     pub folder: String,
+    /// Its process from before the node's restart still runs: Stop it before Resume.
+    pub still_running: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -307,6 +309,7 @@ impl View {
                     resumable: e.resumable,
                     at_ms: e.interrupted_at_ms,
                     folder: e.folder.clone(),
+                    still_running: e.still_running,
                 });
             }
             Body::AgentSessionOptions(e) => {
@@ -531,6 +534,7 @@ mod tests {
                 started_at_ms: 1,
                 interrupted_at_ms: 99,
                 last_state: AgentState::Working as i32,
+                still_running: false,
             })
         };
         let mut v = View::default();
@@ -557,7 +561,8 @@ mod tests {
             Some(InterruptedView {
                 resumable: true,
                 at_ms: 99,
-                folder: "/work/a".into()
+                folder: "/work/a".into(),
+                still_running: false,
             })
         );
         // Said again by a resync: still one agent, still interrupted.

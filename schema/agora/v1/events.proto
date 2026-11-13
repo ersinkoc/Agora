@@ -172,6 +172,9 @@ message AgentInterrupted {
   uint64 interrupted_at_ms = 8;
   // The last state the node saw.
   AgentState last_state = 9;
+  // Its process outlived the node (a node killed without stopping its agents) and still runs: Resume is refused until it is
+  // stopped (`agent.stop` ends exactly that process), so two processes never continue one conversation.
+  bool still_running = 10;
 }
 
 message AgentForgotten {
