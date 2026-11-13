@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react';
 import { t } from '../i18n';
 import { forgetReasonKey } from '../net/forget';
 import { resumeReasonKey } from '../net/directory';
-import { helperTree, machineKey, type AgentTileModel } from '../model';
+import { helperTree, machineKey, type AgentTileModel, type ResumeAction } from '../model';
 import { bytesLabel, type MachineModel } from '../net/view';
 import { ago } from '../net/time';
 import { Icon } from './Icon';
@@ -25,7 +25,7 @@ export function Explorer({ fleet, machines, open, current, projects, project, on
   everyone?: boolean;
   forgetError?: string;
   // ADR-0060: agents that were running when their machine stopped are listed under it with Resume (or Start again).
-  onResume?: (agent: AgentTileModel, newSession: boolean) => void;
+  onResume?: (agent: AgentTileModel, action: ResumeAction) => void;
   resuming?: string;
   resumeError?: { id: string; code: string };
 }) {
@@ -124,8 +124,8 @@ export function Explorer({ fleet, machines, open, current, projects, project, on
                     <span className="[&_.state__mark]:!animate-none"><StateMark state="finished" /></span>
                     <span className="min-w-0 flex-1 truncate">{a.name}</span>
                   </button>
-                  {onResume && <button type="button" className="ide-chip me-1 flex-none hover:text-ink" disabled={resuming === a.id} onClick={() => onResume(a, !a.interrupted?.resumable)}>
-                    {t(a.interrupted?.resumable ? 'action-resume' : 'action-start-again')}
+                  {onResume && <button type="button" className="ide-chip me-1 flex-none hover:text-ink" disabled={resuming === a.id} onClick={() => onResume(a, a.interrupted?.stillRunning ? 'stop' : a.interrupted?.resumable ? 'resume' : 'again')}>
+                    {t(a.interrupted?.stillRunning ? 'action-stop-old' : a.interrupted?.resumable ? 'action-resume' : 'action-start-again')}
                   </button>}
                 </div>
                 {resumeError?.id === a.id && <p role="alert" className="m-0 px-2 pb-1 text-xs text-needs-you">{t(resumeReasonKey(resumeError.code))}</p>}

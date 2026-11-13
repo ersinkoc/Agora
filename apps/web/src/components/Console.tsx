@@ -1,7 +1,7 @@
 import { ApprovalBanner } from './ApprovalBanner';
 import { Suspense, lazy, useEffect, useMemo, useRef, useState, useSyncExternalStore, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
 import { t } from '../i18n';
-import { type AgentTileModel, machineKey, needsAttention, sortFleet } from '../model';
+import { type AgentTileModel, machineKey, needsAttention, sortFleet, type ResumeAction } from '../model';
 import { money, type UsageSummary } from '../net/usage';
 import type { ApprovalModel, BoardModel, MachineModel, MessageModel, ProjectCost } from '../net/view';
 import type { TerminalSource } from '../terminal/source';
@@ -58,7 +58,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   // Ask the hub to forget a closed agent for every client (ADR-0053); false when it could not (an older hub), and it is only hidden here.
   onForget?: (agentId: string) => Promise<string | undefined>;
   // ADR-0060: resume an interrupted agent (or start it again in its folder); undefined when it did, else the error code.
-  onResume?: (agent: AgentTileModel, newSession: boolean) => Promise<string | undefined>;
+  onResume?: (agent: AgentTileModel, action: ResumeAction) => Promise<string | undefined>;
   start?: ReactNode;
   onResolve: (a: ApprovalModel, approved: boolean, choice?: StartChoice) => void;
   // ADR-0057: what an agent may still start without asking, and taking that back.
@@ -207,10 +207,10 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   // ADR-0060: Resume or Start again, and why it did not happen, per agent.
   const [resumeError, setResumeError] = useState<{ id: string; code: string } | undefined>();
   const [resuming, setResuming] = useState<string | undefined>();
-  const resume = onResume ? (a: AgentTileModel, newSession: boolean) => {
+  const resume = onResume ? (a: AgentTileModel, action: ResumeAction) => {
     setResumeError(undefined);
     setResuming(a.id);
-    void onResume(a, newSession).then((code) => { setResuming(undefined); if (code) setResumeError({ id: a.id, code }); });
+    void onResume(a, action).then((code) => { setResuming(undefined); if (code) setResumeError({ id: a.id, code }); });
   } : undefined;
 
   const pane = (a: AgentTileModel) => (
@@ -247,7 +247,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
         onReview={loadDiff ? () => setReviewing(a.id) : undefined} onHistory={loadHistory && a.git !== false ? () => setHistory(a.id) : undefined} onFiles={filesOf ? () => setBrowsing(a.id) : undefined}
         onStart={onStart ? () => onStart() : undefined} onDismiss={() => dismiss([a.id])}
         onForget={onForget ? () => removeClosed([a.id]) : undefined} forgetError={forgetError}
-        onResume={resume && a.interrupted ? (fresh) => resume(a, fresh) : undefined} resuming={resuming === a.id}
+        onResume={resume && a.interrupted ? (action) => resume(a, action) : undefined} resuming={resuming === a.id}
         resumeError={resumeError?.id === a.id ? resumeError.code : undefined} /> : <div className="pane min-h-0 flex-1 p-1.5">
         {a.terminal === false ? <PromptBox agent={a} send={sendPrompt} source={chatOf?.(a)} choose={chooseOption} /> : (
           <Suspense fallback={<div className="terminal" aria-busy="true" />}>

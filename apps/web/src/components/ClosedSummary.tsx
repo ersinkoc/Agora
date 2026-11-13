@@ -1,7 +1,7 @@
 import { t } from '../i18n';
 import { forgetReasonKey } from '../net/forget';
 import { resumeReasonKey } from '../net/directory';
-import type { AgentTileModel } from '../model';
+import type { AgentTileModel, ResumeAction } from '../model';
 import { ago, duration } from '../net/time';
 import { Icon } from './Icon';
 import { StateMark } from './StateBadge';
@@ -21,7 +21,7 @@ export function ClosedSummary({ agent, cost, now, onReview, onHistory, onFiles, 
   forgetError?: string;
   onStart?: () => void;
   // ADR-0060, for an agent that was running when its machine stopped: Resume (its own session) or Start again (a new one there).
-  onResume?: (newSession: boolean) => void;
+  onResume?: (action: ResumeAction) => void;
   resuming?: boolean;
   resumeError?: string;
 }) {
@@ -39,10 +39,13 @@ export function ClosedSummary({ agent, cost, now, onReview, onHistory, onFiles, 
             <p className="m-0 text-finished">{code ? t('closed-failed', { code }) : t('closed-ok')}</p>
           </div>
         </div>
-        <p className="muted m-0">{t(agent.interrupted ? (agent.interrupted.resumable ? 'interrupted-note' : 'interrupted-note-new') : 'closed-note')}</p>
-        {agent.interrupted && onResume && <div className="flex flex-wrap gap-2">
-          {agent.interrupted.resumable && <button type="button" className="button button--primary" disabled={resuming} onClick={() => onResume(false)}><Icon name="play" className="size-4" />{t('action-resume')}</button>}
-          <button type="button" className={agent.interrupted.resumable ? 'button' : 'button button--primary'} disabled={resuming} onClick={() => onResume(true)}>{t('action-start-again')}</button>
+        <p className="muted m-0">{t(agent.interrupted ? (agent.interrupted.stillRunning ? 'interrupted-note-running' : agent.interrupted.resumable ? 'interrupted-note' : 'interrupted-note-new') : 'closed-note')}</p>
+        {agent.interrupted?.stillRunning && onResume && <div className="flex flex-wrap gap-2">
+          <button type="button" className="button button--primary" disabled={resuming} onClick={() => onResume('stop')}>{t('action-stop-old')}</button>
+        </div>}
+        {agent.interrupted && !agent.interrupted.stillRunning && onResume && <div className="flex flex-wrap gap-2">
+          {agent.interrupted.resumable && <button type="button" className="button button--primary" disabled={resuming} onClick={() => onResume('resume')}><Icon name="play" className="size-4" />{t('action-resume')}</button>}
+          <button type="button" className={agent.interrupted.resumable ? 'button' : 'button button--primary'} disabled={resuming} onClick={() => onResume('again')}>{t('action-start-again')}</button>
         </div>}
         {resumeError && <p role="alert" className="m-0 text-needs-you">{t(resumeReasonKey(resumeError))}</p>}
         <dl className="m-0 grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1.5 rounded-m border border-line bg-surface-1 p-4 text-[13px]">

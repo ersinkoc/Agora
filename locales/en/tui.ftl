@@ -101,3 +101,5 @@ tui-resume-failed = It did not start: { $reason }
 tui-resume-cannot = It cannot continue its own conversation. U starts it again in its folder (a new conversation).
 tui-resume-confirm = Press u again within 5 seconds to resume { $agent }.
 tui-again-confirm = Press U again within 5 seconds to start { $agent } again in its folder (a new conversation).
+tui-interrupted-running = still running from before its machine's restart · x stops it
+tui-resume-still-running = Its process from before the restart is still running. Stop it with x first, then resume it.

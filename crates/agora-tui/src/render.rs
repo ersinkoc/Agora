@@ -47,7 +47,9 @@ fn state_text(state: AgentState, t: Text<'_>) -> String {
 /// ADR-0060: what an interrupted agent's row says: it stopped with its machine, and `u` resumes it (or `U` starts it again).
 pub fn interrupted_text(a: &AgentSnapshot, t: Text<'_>) -> String {
     t(
-        if a.resumable {
+        if a.still_running {
+            key!("tui-interrupted-running")
+        } else if a.resumable {
             key!("tui-interrupted-resume")
         } else {
             key!("tui-interrupted-again")

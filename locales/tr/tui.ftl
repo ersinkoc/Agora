@@ -101,3 +101,5 @@ tui-resume-failed = Başlamadı: { $reason }
 tui-resume-cannot = Kendi konuşmasını sürdüremiyor. U onu klasöründe yeniden başlatır (yeni bir konuşma).
 tui-resume-confirm = { $agent } ajanını devam ettirmek için 5 saniye içinde yeniden u'ya basın.
 tui-again-confirm = { $agent } ajanını klasöründe yeniden başlatmak için 5 saniye içinde yeniden U'ya basın (yeni bir konuşma).
+tui-interrupted-running = makinesi yeniden başlamadan önceki haliyle hâlâ çalışıyor · x durdurur
+tui-resume-still-running = Yeniden başlamadan önceki işlemi hâlâ çalışıyor. Önce x ile durdurun, sonra devam ettirin.

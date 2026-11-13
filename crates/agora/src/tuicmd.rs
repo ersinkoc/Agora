@@ -63,6 +63,8 @@ enum ResumeKey {
     NotInterrupted,
     /// `u` on an agent that cannot continue its own conversation: it never quietly starts a new one.
     CannotResume,
+    /// Its process from before the restart still runs: `x` stops it first.
+    StillRunning,
     /// First press: the same key again within [`CONFIRM_WITHIN`] does it.
     Confirm {
         fresh: bool,
@@ -90,6 +92,10 @@ fn resume_key(
         *armed = None;
         return ResumeKey::NotInterrupted;
     };
+    if a.still_running {
+        *armed = None;
+        return ResumeKey::StillRunning;
+    }
     if !fresh && !a.resumable {
         *armed = None;
         return ResumeKey::CannotResume;
@@ -1188,6 +1194,9 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                                     say.text(key!("tui-resume-not-interrupted"), &[])
                                 }
                                 ResumeKey::CannotResume => say.text(key!("tui-resume-cannot"), &[]),
+                                ResumeKey::StillRunning => {
+                                    say.text(key!("tui-resume-still-running"), &[])
+                                }
                                 ResumeKey::Confirm { fresh: false } => {
                                     say.text(key!("tui-resume-confirm"), &agent)
                                 }
@@ -1504,11 +1513,26 @@ mod forget_tests {
             resume_key(&snap, "n/agent-9", b'u', &mut armed, t0),
             ResumeKey::NotInterrupted
         );
+        // Its process from before the restart still runs: neither key starts anything.
+        let mut running = agent("n/agent-3", true);
+        running.still_running = true;
+        let snap = Snapshot {
+            agents: vec![running],
+            ..Default::default()
+        };
+        for k in *b"uUuU" {
+            assert_eq!(
+                resume_key(&snap, "n/agent-3", k, &mut armed, t0),
+                ResumeKey::StillRunning
+            );
+        }
         let tr = Say(Catalog::turkish());
         for k in [
             "tui-resume-cannot",
             "tui-resume-confirm",
             "tui-again-confirm",
+            "tui-resume-still-running",
+            "tui-interrupted-running",
         ] {
             assert!(
                 tr.0.render(k, &[("agent", Arg::Str("agent-1".into()))])

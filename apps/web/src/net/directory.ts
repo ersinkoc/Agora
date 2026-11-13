@@ -26,6 +26,7 @@ export function resumeReasonKey(code: string): string {
     case 'agent.parent_not_running': return 'resume-failed-parent';
     case 'agent.session_missing': return 'resume-failed-session';
     case 'agent.not_interrupted': return 'resume-failed-gone';
+    case 'agent.still_running': return 'resume-failed-still-running';
     case 'approval.signature_invalid': return 'approval-not-trusted';
     case 'protocol.capability_missing': return 'resume-failed-unsupported';
     case 'node.offline': return 'resume-failed-offline';

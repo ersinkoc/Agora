@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import { CommandPalette, type PaletteItem } from './components/CommandPalette';
 import { demoAgents, demoApprovals, demoList, demoMachines, demoProjects } from './fixtures';
 import { chooseLanguage, getLanguage, subscribeLanguage, t } from './i18n';
-import { nextNeedingMe, type AgentTileModel } from './model';
+import { nextNeedingMe, type AgentTileModel, type ResumeAction } from './model';
 import { connectLive, type CommandBody, type Live, type LinkState } from './net/live';
 import { GrantDialog } from './components/GrantDialog';
 import { grantFor, signGrant, type GrantAsk } from './net/grant';
@@ -110,10 +110,13 @@ export function App() {
   }, []);
   // ADR-0060: brings back an interrupted agent under the same id, with its own session or (`newSession`) a new one in the same folder.
   // Signed by this browser for exactly that agent and choice; the answer is undefined when it started, else the error code.
-  const resumeAgent = useCallback(async (agent: AgentTileModel, newSession: boolean): Promise<string | undefined> => {
+  const resumeAgent = useCallback(async (agent: AgentTileModel, action: ResumeAction): Promise<string | undefined> => {
     if (!api || !device || !agent.machineId) return 'approval.signature_invalid';
     const local = agent.id.slice(agent.id.indexOf('/') + 1);
+    const newSession = action === 'again';
     try {
+      // Its process from before the restart: ended by the node (exactly that process), like any stop.
+      if (action === 'stop') { await api.command(agent.machineId, { agentStop: { agentId: local, stopHelpers: false } }); return undefined; }
       const authorization = await signDirectory(device, agent.machineId, 'resume', local, '', '', newSession);
       await api.command(agent.machineId, { agentResume: { agentId: local, newSession, authorization } });
       return undefined;

@@ -32,8 +32,17 @@ it('keeps an interrupted agent closed under its machine until it starts again, a
   expect(tiles(snap)[0]).toMatchObject({ closed: true, workspace: '/work/b', interrupted: { resumable: false } });
 });
 
+it('marks an interrupted agent whose process outlived the restart until the node says it is stopped', () => {
+  const v = emptyView();
+  applyEvent(v, 1, { producerId: 'n', body: 'agentInterrupted', agentInterrupted: { agentId: 'agent-1', kind: 'codex', folder: '/w', resumable: true, stillRunning: true } });
+  expect(tiles(v)[0]?.interrupted).toEqual({ resumable: true, stillRunning: true });
+  applyEvent(v, 2, { producerId: 'n', body: 'agentInterrupted', agentInterrupted: { agentId: 'agent-1', kind: 'codex', folder: '/w', resumable: true } });
+  expect(tiles(v)[0]?.interrupted).toEqual({ resumable: true, stillRunning: false });
+});
+
 it('names why a resume did not happen in words of its own', () => {
   expect(resumeReasonKey('agent.folder_changed')).toBe('resume-failed-folder');
   expect(resumeReasonKey('agent.parent_not_running')).toBe('resume-failed-parent');
+  expect(resumeReasonKey('agent.still_running')).toBe('resume-failed-still-running');
   expect(resumeReasonKey('something.new')).toBe('resume-failed');
 });

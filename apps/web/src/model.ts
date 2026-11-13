@@ -46,8 +46,13 @@ export interface AgentTileModel {
   parentName?: string;
   // ADR-0060: it was running when its machine stopped. `resumable`: it can continue its own conversation (Resume); otherwise only Start
   // again (a new session in the same folder).
-  interrupted?: { resumable: boolean };
+  // `stillRunning`: its process from before the restart still runs; it must be stopped before it can be resumed.
+  interrupted?: { resumable: boolean; stillRunning?: boolean };
 }
+
+// ADR-0060: what to do with an interrupted agent: continue its conversation, start a new one in its folder, or stop its process that
+// outlived the restart.
+export type ResumeAction = 'resume' | 'again' | 'stop';
 
 // ADR-0057: each helper right after the agent that started it, with how deep it sits. A helper whose parent is not in `list` stays in
 // its place at depth 0.
