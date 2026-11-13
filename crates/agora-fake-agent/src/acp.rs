@@ -4,7 +4,29 @@
 //! - `ask`: sends `session/request_permission`, waits for the client's answer, says `allowed` or `denied`, and finishes the turn.
 //! - `plan`: sends a plan, a tool call carrying a diff, and a message in two chunks, then finishes.
 //! - `crash`: exits at once.
+//! - `crash-loud`: writes a fatal error (with a fake token in it) to stderr and exits with code 4, mid-turn.
+//! - `silent`: finishes the turn (`end_turn`) without saying anything, like an agent whose provider failed.
+//! - `refuse`: finishes the turn with the stop reason `refusal`.
+//! - `fail`: answers the prompt with a JSON-RPC error.
+//! - `usage`: reports `usage_update` twice (a running cost of 0.0123 USD, then 0.02 USD), says `counted` and finishes.
 //! - anything else: echoes the text as a message and finishes.
+//!
+//! `session/new` answers with a model list and a mode list (`build`, `plan`) like real ACP agents. [`fail_at_start`] is an agent
+//! that dies before `initialize` (`agora-fake-agent --acp --fail-at-start`).
+
+/// What an agent killed by a broken plugin writes before it exits: an error, a path in the home folder and a token that must not
+/// reach a report. Returns the exit code to use (5).
+pub fn fail_at_start<W: Write>(err: &mut W) -> i32 {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let _ = writeln!(err, "loading plugin {home}/.config/fake/plugin.js");
+    let _ = writeln!(
+        err,
+        "\u{1b}[31merror\u{1b}[0m: plugin failed: api_key=sk-fake0123456789abcdefghij"
+    );
+    let _ = writeln!(err, "TypeError: undefined is not a function");
+    let _ = err.flush();
+    5
+}
 
 use std::io::{self, BufRead, Write};
 
@@ -51,7 +73,14 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
                     json!({"protocolVersion": 1, "agentCapabilities": {"loadSession": false}}),
                 )?;
             }
-            "session/new" => reply(out, json!({"sessionId": "acp-s1"}))?,
+            "session/new" => reply(
+                out,
+                json!({"sessionId": "acp-s1",
+                       "models": {"currentModelId": "fake/model-1", "availableModels": [
+                           {"modelId": "fake/model-1", "name": "Fake 1"}, {"modelId": "fake/model-2", "name": "Fake 2"}]},
+                       "modes": {"currentModeId": "build", "availableModes": [
+                           {"id": "build", "name": "Build"}, {"id": "plan", "name": "Plan", "description": "No edits"}]}}),
+            )?,
             "session/prompt" => {
                 let session = params
                     .get("sessionId")
@@ -63,8 +92,41 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .to_string();
+                let mut stop = "end_turn";
                 match text.as_str() {
                     "crash" => std::process::exit(3),
+                    "crash-loud" => {
+                        eprintln!(
+                            "fatal: free usage limit reached (token: fake0123456789abcdefghijklmn)"
+                        );
+                        std::process::exit(4)
+                    }
+                    "silent" => {}
+                    "refuse" => stop = "refusal",
+                    "fail" => {
+                        if let Some(id) = &id {
+                            send(
+                                out,
+                                &json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32603, "message": "provider error"}}),
+                            )?;
+                        }
+                        continue;
+                    }
+                    "usage" => {
+                        for amount in [0.0123, 0.02] {
+                            update(
+                                out,
+                                &session,
+                                json!({"sessionUpdate": "usage_update", "used": 1200, "size": 1_000_000,
+                                       "cost": {"amount": amount, "currency": "USD"}}),
+                            )?;
+                        }
+                        update(
+                            out,
+                            &session,
+                            json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "counted"}}),
+                        )?;
+                    }
                     "ask" => {
                         send(
                             out,
@@ -129,7 +191,7 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
                         json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": other}}),
                     )?,
                 }
-                reply(out, json!({"stopReason": "end_turn"}))?;
+                reply(out, json!({"stopReason": stop}))?;
             }
             _ => {
                 // An unknown request is answered with an error; a notification (`session/cancel`) is ignored.
