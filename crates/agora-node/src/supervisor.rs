@@ -1822,14 +1822,22 @@ fn launch_adapter(
         .command
         .split_first()
         .ok_or_else(|| SupervisorError::Spawn("empty adapter command".into()))?;
+    let mut env: Vec<(String, String)> = spec
+        .env
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    // A confined adapter works in its own private temporary folder, as a confined terminal agent does.
+    if sandbox.is_some() && agora_platform::PRIVATE_TEMP {
+        let temp = crate::sandbox::agent_temp(worktree).display().to_string();
+        env.push(("TMPDIR".into(), temp.clone()));
+        env.push(("TEMP".into(), temp.clone()));
+        env.push(("TMP".into(), temp));
+    }
     let adapter = Adapter::spawn(&AdapterConfig {
         program: program.into(),
         args: args.to_vec(),
-        env: spec
-            .env
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect(),
+        env,
         cwd: Some(worktree.to_path_buf()),
         sandbox,
     })

@@ -276,12 +276,12 @@ impl TerminalHandle {
         self.control()?.write_input(&bytes)
     }
 
-    /// Resize the terminal. The PTY and the screen change together, between two output chunks. A resize to the size it already has
-    /// does nothing: windows ask for their size again whenever their layout settles, and each pass would reach the process (a
-    /// console resize on Windows, where a fresh Git `sh` can lose a key typed around one) and every subscriber.
+    /// Resize the terminal. The PTY and the screen change together, between two output chunks.
     pub fn resize(&self, size: Size) -> io::Result<()> {
         let control = self.control()?;
         let mut g = self.inner.lock();
+        // The same size again changes nothing; a console that is resized needlessly can drop input typed at that moment (Git `sh`
+        // on Windows lost the first key this way).
         if g.term.size() == size {
             return Ok(());
         }
