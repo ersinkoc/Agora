@@ -121,9 +121,24 @@ The bridge never writes text for people. When something went wrong it gives a st
 | `adapter.option_refused` | `id` | The id was not one the agent offered, or the agent answered `session/set_mode` / `session/set_model` with an error | error `data` of `session/set_option` |
 
 A `log` line's `message` is the JSON `{"code": ..., "params": {...}}`. `stderr_tail` is at most the last 5 non-empty lines and 400
-bytes of the agent's stderr (cut at the front, marked `…`), with escape sequences and control characters removed, the home folder
-written `~`, long runs of letters and digits (20 or more, with both) and the word after `key=`, `token:`, `Bearer ` and the like
-replaced by `[redacted]`. The agent's stderr is still copied to the bridge's own, as before.
+bytes of the agent's stderr (cut at the front, marked `…`). Escape sequences and control characters are removed, OSC, DCS, APC and
+PM sequences with their whole payload (a hyperlink's address, a window title). The home folder is written `~` (every spelling of it).
+Replaced by `[redacted]`: the user and password of a URL (`https://user:pass@host` → `https://[redacted]@host`); any unbroken run of
+32 or more token characters (letters, digits, `_ - + / = .`) that is not a path (a path starts with `/`, `~` or `.`, or has `/`
+between parts shorter than 32 and no `+` or `=`), so base64 and letters-only secrets are caught; words of 20 or more characters
+with both letters and digits; and the word after `key=`, `token:`, `Bearer ` and the like. This is a best effort, not a guarantee:
+an agent can print a secret in a shape none of these rules match.
+
+**Who sees the tail** (a decision, so that widening it is one too):
+- Today only the node process: the host turns the `log` line into `AdapterEvent::Log`, which the node drops, and the error `data`
+  into `HostError::Rpc`, whose text (the reason code, not the params) the node keeps as a log-only `Spawn` error and answers
+  `internal`. Nothing is written to the node's event buffer, sent to the hub, stored or shown.
+- The agent's raw stderr (unscrubbed) is still copied to the bridge's own stderr, which the node inherits: whoever reads the node's
+  own output (a terminal, a service log) sees it, as before this change.
+- When the node maps `adapter.agent_exited` to an error code (follow-up), the scrubbed tail becomes a parameter of the `agent.start`
+  error: it then travels node → hub → the client that asked, is shown to that user, and is not kept: the hub's audit trail records
+  only the error code, and command results are not events. Putting the tail into an event (stored by the hub, seen by everyone who
+  may see the agent) would be a further decision.
 
 `adapter.turn_stopped` and `adapter.turn_failed` are a notice too, like `adapter.turn_empty`. The node still keeps `log` lines and
 the `message` of a state out of the transcript and the event log; the notices are what people see (ADR-0058), and a failed start
