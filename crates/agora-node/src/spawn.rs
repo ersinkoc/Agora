@@ -9,15 +9,22 @@
 //!   folder only by a decision that names it), and on a node that confines agents a helper of another kind may not bring a manifest
 //!   the owner trusts to widen its confinement;
 //! - a helper cannot start helpers unless the decision that started it allowed it, and a helper's helper never can;
-//! - at most [`MAX_HELPERS`] running helpers per agent, one start waiting for the user at a time, [`STARTS_PER_MINUTE`] attempts a
-//!   minute, the node's own agent limit, and a first prompt of at most [`MAX_PROMPT`] bytes;
+//! - at most [`MAX_HELPERS`] running helpers per agent, one start in progress or waiting for the user per agent at a time (a slot
+//!   reserved from the first check to the end of the start, so concurrent calls cannot pass the limits together),
+//!   [`STARTS_PER_MINUTE`] attempts a minute, the node's own agent limit, and a first prompt of at most [`MAX_PROMPT`] bytes with
+//!   no control characters, no bidirectional or zero-width characters and no leading `!`, `/` or `#` (shell escapes, slash and
+//!   memory commands in common agents);
+//! - the first prompt is typed only into a helper whose screen is idle, and Enter only while it is not blocked: a trust or
+//!   permission dialog is never answered by it. Unless typed within [`PROMPT_WAIT`] it is left for the user (`agent.blocked`);
 //! - `agent_wait` and `agent_output` answer only for helpers the caller started; output is the bottom of the live screen (never
 //!   scrollback, ADR detection rule) or the end of a chat agent's transcript, size-limited.
 //!
-//! Every refusal before asking is an `AgentStartRefused` event, and every request, decision and start is in the event log.
+//! Every refusal before asking is an `AgentStartRefused` event (one per minute for rate refusals, agent-written fields cut to
+//! [`MAX_FIELD`]), every helper's first prompt is a `MessagePosted` from its parent (the text, or its hash when long), and every
+//! request, decision and start is in the event log.
 //! Prompts, kinds and folders come from an agent: they are untrusted data and are only shown, never interpreted.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -45,10 +52,16 @@ pub const MAX_GRANT: u32 = 10;
 pub const MAX_DEPTH: u8 = 2;
 /// Most bytes `agent_output` returns.
 pub const MAX_OUTPUT_BYTES: usize = 16 * 1024;
-/// A helper's first prompt is typed once its screen settles, or after this long.
-const PROMPT_FALLBACK: Duration = Duration::from_secs(8);
+/// The longest agent-written text (kind, folder) an `AgentStartRefused` event carries.
+pub const MAX_FIELD: usize = 256;
+/// A prompt up to this size is recorded as it is; a longer one by its hash.
+pub const MAX_RECORDED_PROMPT: usize = 4 * 1024;
+/// How long a new helper's screen may take to become idle before its first prompt is left for the user.
+pub const PROMPT_WAIT: Duration = Duration::from_secs(120);
 /// Between the prompt text and its Enter (a program that reads both at once takes them for a paste).
 const ENTER_AFTER: Duration = Duration::from_millis(150);
+/// Ended helpers whose lineage is kept (so a wait on one answers `exited`); older ones are forgotten.
+const ENDED_KEPT: usize = 256;
 
 /// Who started a helper, and what the decision allowed it.
 #[derive(Debug, Clone)]
@@ -68,14 +81,46 @@ struct Request {
     worktree: bool,
     prompt: String,
     depth: u8,
+    /// A scoped grant may cover this kind (not a shell or a plain terminal program, see `Supervisor::grantable`).
+    grantable: bool,
     ticket: u64,
 }
 
 struct Prompt {
     agent: AgentId,
+    parent: AgentId,
+    kind: String,
     text: String,
     since: Instant,
     typed: Option<Instant>,
+}
+
+/// What to do with a helper's first prompt now (see [`prompt_step`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Step {
+    Wait,
+    Type,
+    Enter,
+    /// It never became idle, or turned blocked after the text was typed: leave it for the user.
+    GiveUp,
+    /// The helper is gone.
+    Drop,
+}
+
+/// The first prompt is typed only into an idle screen, and Enter is pressed only if the screen is not blocked then: a trust or
+/// permission dialog (blocked) is never answered by it. Pure, so the rule is tested without a terminal.
+fn prompt_step(state: Option<AgentState>, typed: Option<Duration>, waited: Duration) -> Step {
+    let Some(state) = state else {
+        return Step::Drop;
+    };
+    match typed {
+        Some(_) if state == AgentState::Blocked => Step::GiveUp,
+        Some(after) if after >= ENTER_AFTER => Step::Enter,
+        Some(_) => Step::Wait,
+        None if state == AgentState::Idle => Step::Type,
+        None if waited >= PROMPT_WAIT => Step::GiveUp,
+        None => Step::Wait,
+    }
 }
 
 #[derive(Default)]
@@ -84,7 +129,13 @@ struct State {
     tickets: HashMap<u64, Option<StartOutcome>>,
     next_ticket: u64,
     lineage: HashMap<AgentId, Lineage>,
+    ended: VecDeque<AgentId>,
     attempts: HashMap<AgentId, VecDeque<Instant>>,
+    /// When a rate refusal of each agent was last recorded.
+    rate_noted: HashMap<AgentId, Instant>,
+    /// Agents with a start in progress or waiting for the user: the slot is reserved before the limits are checked and kept until
+    /// the start ends, so two calls cannot both pass them.
+    busy: HashSet<AgentId>,
     prompts: Vec<Prompt>,
 }
 
@@ -110,6 +161,10 @@ fn not_found(agent: &str) -> Error {
     Error::new(ErrorCode::AgentNotFound).with("agent_id", agent)
 }
 
+fn invalid(field: &str) -> Error {
+    Error::new(ErrorCode::ProtocolInvalidMessage).with("field", field)
+}
+
 fn state_word(v: &AgentView) -> &'static str {
     if !v.running {
         return "exited";
@@ -126,6 +181,51 @@ fn state_word(v: &AgentView) -> &'static str {
 /// `child` is `parent` or below it, both canonical.
 fn within(child: &Path, parent: &Path) -> bool {
     child.starts_with(parent)
+}
+
+/// Characters that change how text is displayed without being seen: bidirectional overrides and isolates, zero-width characters and
+/// the byte order mark. In a request they could make the approval card show something other than what would run.
+fn invisible(c: char) -> bool {
+    matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{200b}'..='\u{200f}' | '\u{feff}')
+}
+
+/// The prompt rules that need nothing but the text.
+fn check_prompt(prompt: &str) -> Result<(), Error> {
+    if prompt.len() > MAX_PROMPT {
+        return Err(helper_limit("prompt", MAX_PROMPT));
+    }
+    // Control characters would be keys the user never saw (escape sequences, Enter in the middle, Ctrl-C) when typed into a
+    // terminal: only line breaks and tabs are allowed. Invisible characters could make the card lie.
+    if prompt
+        .chars()
+        .any(|c| (c.is_control() && c != '\n' && c != '\t') || invisible(c))
+    {
+        return Err(invalid("prompt"));
+    }
+    // Common agents read a leading `!` as a shell command, `/` as one of their own commands and `#` as a memory edit.
+    if matches!(prompt.trim_start().chars().next(), Some('!' | '/' | '#')) {
+        return Err(invalid("prompt"));
+    }
+    Ok(())
+}
+
+/// `s` cut to at most `max` bytes at a character boundary.
+fn cut(s: &str, max: usize) -> &str {
+    let mut end = s.len().min(max);
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+/// How a prompt is recorded: as it is when small, else by its hash.
+fn recorded(prompt: &str) -> String {
+    if prompt.len() <= MAX_RECORDED_PROMPT {
+        return prompt.to_string();
+    }
+    let d = ring::digest::digest(&ring::digest::SHA256, prompt.as_bytes());
+    let hex: String = d.as_ref().iter().map(|b| format!("{b:02x}")).collect();
+    format!("sha256:{hex}")
 }
 
 impl Spawner {
@@ -165,11 +265,21 @@ impl Spawner {
         self.sup.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Records a refusal (agent-written fields cut short) and hands it back.
     fn refused(&self, caller: &AgentId, kind: &str, folder: &str, e: Error) -> Error {
         if let Some(ev) = &self.events {
-            ev.agent_start_refused(caller, kind, folder, e.code.as_str());
+            ev.agent_start_refused(
+                caller,
+                cut(kind, MAX_FIELD),
+                cut(folder, MAX_FIELD),
+                e.code.as_str(),
+            );
         }
         e
+    }
+
+    fn release(&self, caller: &AgentId) {
+        self.st().busy.remove(caller);
     }
 
     fn new_ticket(st: &mut State, outcome: Option<StartOutcome>) -> u64 {
@@ -179,43 +289,38 @@ impl Spawner {
         t
     }
 
-    /// Everything decided before the user is asked. Returns the request (without its ticket) or the refusal.
+    /// The rate, then the slot. `Ok(())` reserves the caller's slot; `Err((error, record))` says whether to record the refusal.
+    fn reserve(&self, caller: &AgentId) -> Result<(), (Error, bool)> {
+        let mut st = self.st();
+        let now = Instant::now();
+        let seen = st.attempts.entry(caller.clone()).or_default();
+        while seen
+            .front()
+            .is_some_and(|t| now.duration_since(*t) >= Duration::from_secs(60))
+        {
+            seen.pop_front();
+        }
+        if seen.len() >= STARTS_PER_MINUTE {
+            // One record per minute: a looping agent must not fill the event log with refusals.
+            let record = st
+                .rate_noted
+                .get(caller)
+                .is_none_or(|t| now.duration_since(*t) >= Duration::from_secs(60));
+            if record {
+                st.rate_noted.insert(caller.clone(), now);
+            }
+            return Err((Error::new(ErrorCode::MeshRateLimited), record));
+        }
+        seen.push_back(now);
+        if !st.busy.insert(caller.clone()) {
+            return Err((helper_limit("pending", 1), true));
+        }
+        Ok(())
+    }
+
+    /// Everything decided before the user is asked, with the caller's slot reserved. Returns the request (without its ticket).
     fn check(&self, caller: &AgentId, a: &StartArgs) -> Result<Request, Error> {
-        if a.node
-            .as_deref()
-            .is_some_and(|n| !n.is_empty() && n != self.node_id)
-        {
-            // ADR-0057 allows another machine only when the approval names it; starting there is not built yet, so it is refused.
-            return Err(Error::new(ErrorCode::ProtocolCapabilityMissing)
-                .with("capability", "mesh.spawn.remote"));
-        }
-        {
-            let mut st = self.st();
-            let now = Instant::now();
-            let seen = st.attempts.entry(caller.clone()).or_default();
-            while seen
-                .front()
-                .is_some_and(|t| now.duration_since(*t) >= Duration::from_secs(60))
-            {
-                seen.pop_front();
-            }
-            if seen.len() >= STARTS_PER_MINUTE {
-                return Err(Error::new(ErrorCode::MeshRateLimited));
-            }
-            seen.push_back(now);
-        }
-        if a.prompt.len() > MAX_PROMPT {
-            return Err(helper_limit("prompt", MAX_PROMPT));
-        }
-        // Control characters would be keys the user never saw (escape sequences, Enter in the middle, Ctrl-C) when typed into a
-        // terminal, and could hide text in the request: only line breaks and tabs are allowed.
-        if a.prompt
-            .chars()
-            .any(|c| c.is_control() && c != '\n' && c != '\t')
-        {
-            return Err(Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "prompt"));
-        }
-        let (views, kinds, confined, trusted) = {
+        let (views, kinds, confined, trusted, grantable) = {
             let sup = self.sup();
             let p = sup.sandbox_policy();
             (
@@ -223,6 +328,7 @@ impl Spawner {
                 sup.kinds(),
                 p.level != crate::sandbox::Level::Off,
                 p.trusted_kinds.clone(),
+                sup.grantable(&a.kind),
             )
         };
         let me = views
@@ -237,21 +343,20 @@ impl Spawner {
                 if !l.may_start || l.depth >= MAX_DEPTH {
                     return Err(helper_limit("depth", usize::from(MAX_DEPTH)));
                 }
+            } else if me.parent.is_some() {
+                // The supervisor knows it as a helper but this record of what its decision allowed is gone: it may not ask.
+                return Err(helper_limit("depth", usize::from(MAX_DEPTH)));
             }
-            let running = views
-                .iter()
-                .filter(|v| v.running && st.lineage.get(&v.id).is_some_and(|l| l.parent == *caller))
-                .count();
-            if running >= MAX_HELPERS {
+            // The slot is held, so no other start of this caller can add a helper before this one ends.
+            if Self::running_children(&st, &views, caller) >= MAX_HELPERS {
                 return Err(helper_limit("helpers", MAX_HELPERS));
-            }
-            if st.requests.values().any(|r| r.caller == *caller) {
-                return Err(helper_limit("pending", 1));
             }
             mine.map_or(1, |l| l.depth + 1)
         };
         if !kinds.iter().any(|k| k.kind == a.kind) {
-            return Err(Error::new(ErrorCode::AgentKindUnknown).with("kind", a.kind.as_str()));
+            return Err(
+                Error::new(ErrorCode::AgentKindUnknown).with("kind", cut(&a.kind, MAX_FIELD))
+            );
         }
         // The ceiling on confinement, the same on every platform: with agents confined, a helper of another kind gets the node's
         // profile plus what its manifest asks only if the owner trusts that manifest, which would make it wider than the asker.
@@ -262,29 +367,28 @@ impl Spawner {
         }
         let mine = agora_platform::canonicalize_plain(&me.worktree)
             .map_err(|_| not_found(caller.as_str()))?;
-        let wanted = a
-            .folder
-            .as_deref()
-            .filter(|f| !f.is_empty())
-            .map_or_else(|| mine.clone(), PathBuf::from);
-        let folder = agora_platform::canonicalize_plain(&wanted).map_err(|_| {
-            Error::new(ErrorCode::MeshFolderNotAllowed)
-                .with("folder", wanted.to_string_lossy().as_ref())
-        })?;
+        let folder_refused =
+            |f: &str| Error::new(ErrorCode::MeshFolderNotAllowed).with("folder", cut(f, MAX_FIELD));
+        let wanted = match a.folder.as_deref().filter(|f| !f.is_empty()) {
+            None => mine.clone(),
+            Some(f) if f.chars().any(|c| c.is_control() || invisible(c)) => {
+                return Err(folder_refused(f))
+            }
+            // A relative folder is below the asker's own, never below the node's working folder.
+            Some(f) => mine.join(f),
+        };
+        let folder = agora_platform::canonicalize_plain(&wanted)
+            .map_err(|_| folder_refused(&wanted.to_string_lossy()))?;
         // The folder rules of ADR-0052 (refused folders, identity) apply as to any launch.
         let (info, _) = crate::directory::inspect(&folder.to_string_lossy(), &self.node_id, false)?;
         if a.worktree && info.git_root.is_empty() {
-            return Err(
-                Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "directory.git_root")
-            );
+            return Err(invalid("directory.git_root"));
         }
         let inside = within(&folder, &mine);
         // A helper below the user's agent may go outside the asker's folder only by a decision naming it; a helper's helper, whose
         // decision the user gave to its parent's chain, stays inside.
         if !inside && depth > 1 {
-            return Err(
-                Error::new(ErrorCode::MeshFolderNotAllowed).with("folder", info.path.as_str())
-            );
+            return Err(folder_refused(&info.path));
         }
         Ok(Request {
             caller: caller.clone(),
@@ -294,8 +398,21 @@ impl Spawner {
             worktree: a.worktree,
             prompt: a.prompt.clone(),
             depth,
+            grantable,
             ticket: 0,
         })
+    }
+
+    /// Running helpers of `caller`, by the supervisor's parent links (which every view carries) or this record.
+    fn running_children(st: &State, views: &[AgentView], caller: &AgentId) -> usize {
+        views
+            .iter()
+            .filter(|v| {
+                v.running
+                    && (v.parent.as_ref() == Some(caller)
+                        || st.lineage.get(&v.id).is_some_and(|l| l.parent == *caller))
+            })
+            .count()
     }
 
     fn detail(&self, r: &Request, caller_kind: &str) -> String {
@@ -308,32 +425,24 @@ impl Spawner {
             "inside": r.inside,
             "worktree": r.worktree,
             "depth": r.depth,
+            "grant_allowed": r.inside && r.grantable,
             "prompt": r.prompt,
         })
         .to_string()
     }
 
-    /// Starts the helper the user (or a grant) allowed. Limits are checked again: things changed while the user read.
+    /// Starts the helper the user (or a grant) allowed. Called with the caller's slot held; limits are checked again, since things
+    /// changed while the user read.
     fn launch(&self, r: &Request, may_start: bool) -> StartOutcome {
-        let running = {
-            let st = self.st();
-            self.sup()
-                .list()
-                .iter()
-                .filter(|v| {
-                    v.running && st.lineage.get(&v.id).is_some_and(|l| l.parent == r.caller)
-                })
-                .count()
-        };
-        if running >= MAX_HELPERS {
+        let views = self.sup().list();
+        if Self::running_children(&self.st(), &views, &r.caller) >= MAX_HELPERS {
             return Err(helper_limit("helpers", MAX_HELPERS));
         }
         let (info, project) = crate::directory::inspect(&r.folder, &self.node_id, false)?;
         // The folder that was shown is the folder used: a path that now resolves elsewhere is not followed.
         if info.path != r.folder {
-            return Err(
-                Error::new(ErrorCode::MeshFolderNotAllowed).with("folder", r.folder.as_str())
-            );
+            return Err(Error::new(ErrorCode::MeshFolderNotAllowed)
+                .with("folder", cut(&r.folder, MAX_FIELD)));
         }
         let n = self.names.fetch_add(1, Ordering::SeqCst);
         let stamp = crate::grants::now_ms();
@@ -400,6 +509,15 @@ impl Spawner {
                 has_terminal,
                 r.caller.as_str(),
             );
+            // The helper's task, from its parent, in the log: every start's prompt, granted ones included (which nobody was shown).
+            if !r.prompt.is_empty() {
+                ev.record_bodies(vec![v1::event::Body::MessagePosted(v1::MessagePosted {
+                    message_id: format!("start-{}", id.as_str()),
+                    from_agent_id: r.caller.as_str().to_string(),
+                    to: id.as_str().to_string(),
+                    body: recorded(&r.prompt),
+                })]);
+            }
         }
         if let Some(w) = &self.git_wake {
             w.store(true, Ordering::Release);
@@ -407,6 +525,8 @@ impl Spawner {
         if !r.prompt.is_empty() {
             self.st().prompts.push(Prompt {
                 agent: id.clone(),
+                parent: r.caller.clone(),
+                kind: r.kind.clone(),
                 text: r.prompt.clone(),
                 since: Instant::now(),
                 typed: None,
@@ -415,20 +535,30 @@ impl Spawner {
         Ok(id.as_str().to_string())
     }
 
-    /// The user's verified decision on an `agent.start` request (called after `NodeApprovals::resolve_request` succeeded).
-    pub fn decided(&self, request: &Pending, r: &v1::ApprovalResolve) {
+    /// The user's verified decision on an `agent.start` request (called after `NodeApprovals::resolve_request` succeeded). An error
+    /// means the request was no longer waiting (its agent stopped waiting): nothing starts, and the asker was already told.
+    pub fn decided(&self, request: &Pending, r: &v1::ApprovalResolve) -> Result<(), Error> {
         let Some(req) = self.st().requests.remove(&request.id) else {
-            return;
+            return Err(
+                Error::new(ErrorCode::MeshStartDenied).with("approval_id", request.id.as_str())
+            );
         };
         let (outcome, grant, nested) = if r.approved {
-            // A grant and permission to go deeper are honoured only inside the asker's own folder.
-            let grant = if req.inside {
+            // A grant and permission to go deeper are honoured only inside the asker's own folder, and a grant never for a shell or
+            // a plain terminal program (it would mean "run any N programs without asking").
+            let grant = if req.inside && req.grantable {
                 r.helper_grant.min(MAX_GRANT)
             } else {
                 0
             };
-            let nested = req.inside && r.helpers_may_start;
-            (self.launch(&req, nested), grant, nested)
+            let nested = req.inside && req.grantable && r.helpers_may_start;
+            let outcome = self.launch(&req, nested);
+            if outcome.is_ok() {
+                (outcome, grant, nested)
+            } else {
+                // Approved but not started: no grant was given, and the failure is on record.
+                (outcome, 0, false)
+            }
         } else {
             (
                 Err(Error::new(ErrorCode::MeshStartDenied).with("approval_id", request.id.as_str())),
@@ -436,12 +566,13 @@ impl Spawner {
                 false,
             )
         };
-        if outcome.is_ok() && grant > 1 {
+        if grant > 1 {
             self.approvals.add_helper_grant(HelperGrant {
                 id: request.id.clone(),
                 agent: req.caller.clone(),
                 kind: req.kind.clone(),
                 folder: req.folder.clone(),
+                worktree: req.worktree,
                 remaining: grant - 1,
                 helpers_may_start: nested,
                 signer_device_id: r.signer_device_id.clone(),
@@ -450,9 +581,15 @@ impl Spawner {
         if let Some(ev) = &self.events {
             ev.start_resolved(&request.id, r.approved, &r.signer_device_id, grant, nested);
         }
-        if let Some(t) = self.st().tickets.get_mut(&req.ticket) {
+        if let (true, Err(e)) = (r.approved, &outcome) {
+            self.refused(&req.caller, &req.kind, &req.folder, e.clone());
+        }
+        let mut st = self.st();
+        st.busy.remove(&req.caller);
+        if let Some(t) = st.tickets.get_mut(&req.ticket) {
             *t = Some(outcome);
         }
+        Ok(())
     }
 
     /// A request that ran out of time; `false` if it was not a start request.
@@ -463,7 +600,9 @@ impl Spawner {
         if let Some(ev) = &self.events {
             ev.approval_resolved(approval_id, false, "");
         }
-        if let Some(t) = self.st().tickets.get_mut(&req.ticket) {
+        let mut st = self.st();
+        st.busy.remove(&req.caller);
+        if let Some(t) = st.tickets.get_mut(&req.ticket) {
             *t = Some(Err(
                 Error::new(ErrorCode::ApprovalExpired).with("approval_id", approval_id)
             ));
@@ -471,7 +610,7 @@ impl Spawner {
         true
     }
 
-    /// The agent exited or was stopped: its grants end, and a start it was waiting for is withdrawn.
+    /// The agent exited or was stopped: its grants end, a start it was waiting for is withdrawn, and what is kept about it shrinks.
     pub fn agent_ended(&self, agent: &AgentId) {
         self.approvals.end_helper_grants(agent);
         let withdrawn: Vec<String> = {
@@ -487,7 +626,19 @@ impl Spawner {
                     st.tickets.remove(&r.ticket);
                 }
             }
+            st.busy.remove(agent);
+            st.attempts.remove(agent);
+            st.rate_noted.remove(agent);
             st.prompts.retain(|p| p.agent != *agent);
+            // An ended helper's lineage is kept for a while (a wait on it answers `exited`), then forgotten.
+            if st.lineage.contains_key(agent) && !st.ended.contains(agent) {
+                st.ended.push_back(agent.clone());
+                while st.ended.len() > ENDED_KEPT {
+                    if let Some(old) = st.ended.pop_front() {
+                        st.lineage.remove(&old);
+                    }
+                }
+            }
             ids
         };
         for id in withdrawn {
@@ -503,10 +654,11 @@ impl Spawner {
         let views = self.sup().list();
         let st = self.st();
         let mut out = Vec::new();
+        let mut seen = HashSet::new();
         let mut todo = vec![agent.clone()];
         while let Some(p) = todo.pop() {
             for (child, l) in &st.lineage {
-                if l.parent == p && !out.contains(child) {
+                if l.parent == p && seen.insert(child.clone()) {
                     todo.push(child.clone());
                     if views.iter().any(|v| v.id == *child && v.running) {
                         out.push(child.clone());
@@ -517,52 +669,56 @@ impl Spawner {
         out
     }
 
-    /// Types each new helper's first prompt once its screen settled (or after a while). Called on the node's tick.
+    /// Types each new helper's first prompt once its screen is idle (see [`prompt_step`]). Called on the node's tick.
     pub fn tick(&self) {
-        let due: Vec<(AgentId, String, bool)> = {
+        let mut type_now: Vec<(AgentId, String)> = Vec::new();
+        let mut enter_now: Vec<AgentId> = Vec::new();
+        let mut gave_up: Vec<(AgentId, String, AgentId)> = Vec::new();
+        {
             let mut st = self.st();
             if st.prompts.is_empty() {
                 return;
             }
             let views = self.sup().list();
-            let mut due = Vec::new();
             st.prompts.retain_mut(|p| {
-                let Some(v) = views.iter().find(|v| v.id == p.agent && v.running) else {
-                    return false;
-                };
-                match p.typed {
-                    Some(at) if at.elapsed() >= ENTER_AFTER => {
-                        due.push((p.agent.clone(), String::new(), true));
+                let view = views.iter().find(|v| v.id == p.agent && v.running);
+                let step = prompt_step(
+                    view.map(|v| v.state),
+                    p.typed.map(|t| t.elapsed()),
+                    p.since.elapsed(),
+                );
+                match step {
+                    Step::Wait => true,
+                    Step::Drop => false,
+                    Step::GiveUp => {
+                        gave_up.push((p.parent.clone(), p.kind.clone(), p.agent.clone()));
                         false
                     }
-                    Some(_) => true,
-                    None => {
-                        let settled = matches!(v.state, AgentState::Idle | AgentState::Blocked);
-                        if settled || p.since.elapsed() >= PROMPT_FALLBACK {
-                            due.push((p.agent.clone(), p.text.clone(), false));
-                            if v.terminal {
-                                p.typed = Some(Instant::now());
-                                return true;
-                            }
-                            return false;
+                    Step::Enter => {
+                        enter_now.push(p.agent.clone());
+                        false
+                    }
+                    Step::Type => {
+                        type_now.push((p.agent.clone(), p.text.clone()));
+                        // A terminal gets Enter on a later tick; a chat agent takes the whole request at once.
+                        if view.is_some_and(|v| v.terminal) {
+                            p.typed = Some(Instant::now());
+                            return true;
                         }
-                        true
+                        false
                     }
                 }
             });
-            due
-        };
-        for (agent, text, enter) in due {
+        }
+        for (agent, text) in type_now {
             let sup = self.sup();
             match sup.terminal(&agent).and_then(|t| t.input_handle().ok()) {
                 Some(control) => {
                     drop(sup);
                     // In a terminal a line break would be Enter mid-prompt: it is typed as a space, so the prompt goes as one request.
-                    let typed = text.replace(['\n', '\t'], " ");
-                    let bytes: &[u8] = if enter { b"\r" } else { typed.as_bytes() };
-                    let _ = control.write_input(bytes);
+                    let _ = control.write_input(text.replace(['\n', '\t'], " ").as_bytes());
                 }
-                None if !enter && sup.adapter_prompt(&agent, &text, false).is_ok() => {
+                None if sup.adapter_prompt(&agent, &text, false).is_ok() => {
                     drop(sup);
                     self.chat.push(
                         &agent,
@@ -576,14 +732,34 @@ impl Spawner {
                 None => {}
             }
         }
+        for agent in enter_now {
+            let control = self
+                .sup()
+                .terminal(&agent)
+                .and_then(|t| t.input_handle().ok());
+            if let Some(control) = control {
+                let _ = control.write_input(b"\r");
+            }
+        }
+        // Not typed (or typed but not sent): the user finds it on the helper's screen; the log says why.
+        for (parent, kind, helper) in gave_up {
+            if let Some(ev) = &self.events {
+                ev.agent_start_refused(
+                    &parent,
+                    cut(&kind, MAX_FIELD),
+                    helper.as_str(),
+                    ErrorCode::AgentBlocked.as_str(),
+                );
+            }
+        }
     }
 
-    fn helper_of(&self, caller: &AgentId, helper: &str) -> Result<AgentId, Error> {
+    fn helper_of(st: &State, caller: &AgentId, helper: &str) -> Result<AgentId, Error> {
         let id = AgentId::new(helper);
-        match self.st().lineage.get(&id) {
+        match st.lineage.get(&id) {
             Some(l) if l.parent == *caller => Ok(id),
             // Another agent's helper, or no agent at all: the same answer, so a caller learns nothing about agents it did not start.
-            _ => Err(not_found(helper)),
+            _ => Err(not_found(cut(helper, MAX_FIELD))),
         }
     }
 }
@@ -605,18 +781,41 @@ fn tail_within(lines: Vec<String>, max: usize) -> Vec<String> {
 impl Helpers for Spawner {
     fn start(&self, caller: &AgentId, a: &StartArgs) -> Result<u64, Error> {
         let folder_shown = a.folder.clone().unwrap_or_default();
-        let mut req = match self.check(caller, a) {
+        let refuse = |e: Error| self.refused(caller, &a.kind, &folder_shown, e);
+        if a.node
+            .as_deref()
+            .is_some_and(|n| !n.is_empty() && n != self.node_id)
+        {
+            // ADR-0057 allows another machine only when the approval names it; starting there is not built yet, so it is refused.
+            return Err(refuse(
+                Error::new(ErrorCode::ProtocolCapabilityMissing)
+                    .with("capability", "mesh.spawn.remote"),
+            ));
+        }
+        if let Err((e, record)) = self.reserve(caller) {
+            return Err(if record { refuse(e) } else { e });
+        }
+        // From here the caller's slot is held: every way out releases it, or hands it to the waiting request.
+        let mut req = match check_prompt(&a.prompt).and_then(|()| self.check(caller, a)) {
             Ok(r) => r,
-            Err(e) => return Err(self.refused(caller, &a.kind, &folder_shown, e)),
+            Err(e) => {
+                self.release(caller);
+                return Err(refuse(e));
+            }
         };
-        // A grant covers this start without asking: same asker, kind and folder, inside its own folder.
-        if req.inside {
-            if let Some(nested) = self
-                .approvals
-                .use_helper_grant(caller, &req.kind, &req.folder)
+        // A grant covers this start without asking: same asker, kind, folder and worktree choice, inside its own folder.
+        if req.inside && req.grantable {
+            if let Some(nested) =
+                self.approvals
+                    .use_helper_grant(caller, &req.kind, &req.folder, req.worktree)
             {
                 let outcome = self.launch(&req, nested);
-                return Ok(Self::new_ticket(&mut self.st(), Some(outcome)));
+                if let Err(e) = &outcome {
+                    self.refused(caller, &req.kind, &req.folder, e.clone());
+                }
+                let mut st = self.st();
+                st.busy.remove(caller);
+                return Ok(Self::new_ticket(&mut st, Some(outcome)));
             }
         }
         let caller_kind = self
@@ -631,6 +830,7 @@ impl Helpers for Spawner {
             .approvals
             .request_start(caller, &detail, crate::daemon::now_ms())
         else {
+            self.release(caller);
             return Err(Error::new(ErrorCode::Internal).with("incident_id", "approval-id"));
         };
         let mut st = self.st();
@@ -660,17 +860,19 @@ impl Helpers for Spawner {
         let gone: Option<String> = {
             let mut st = self.st();
             st.tickets.remove(&ticket);
-            let id = st
+            let found = st
                 .requests
                 .iter()
                 .find(|(_, r)| r.ticket == ticket)
-                .map(|(id, _)| id.clone());
-            if let Some(id) = &id {
+                .map(|(id, r)| (id.clone(), r.caller.clone()));
+            if let Some((id, caller)) = &found {
                 st.requests.remove(id);
+                st.busy.remove(caller);
             }
-            id
+            found.map(|(id, _)| id)
         };
-        // Nobody will read the answer: the request leaves the queue, and a late decision on it is refused.
+        // Nobody will read the answer: the request leaves the queue and is recorded as withdrawn. A decision that raced it finds no
+        // request and is answered with `mesh.start_denied` (nothing starts).
         if let Some(id) = gone {
             self.approvals.withdraw(&id);
             if let Some(ev) = &self.events {
@@ -679,19 +881,31 @@ impl Helpers for Spawner {
         }
     }
 
-    fn state(&self, caller: &AgentId, helper: &str) -> Result<String, Error> {
-        let id = self.helper_of(caller, helper)?;
-        Ok(self
-            .sup()
-            .list()
-            .iter()
-            .find(|v| v.id == id)
-            .map_or("exited", state_word)
-            .to_string())
+    fn states(&self, caller: &AgentId, helpers: &[String]) -> Vec<Result<String, Error>> {
+        let ids: Vec<Result<AgentId, Error>> = {
+            let st = self.st();
+            helpers
+                .iter()
+                .map(|h| Self::helper_of(&st, caller, h))
+                .collect()
+        };
+        // One view of the node for all of them.
+        let views = self.sup().list();
+        ids.into_iter()
+            .map(|id| {
+                id.map(|id| {
+                    views
+                        .iter()
+                        .find(|v| v.id == id)
+                        .map_or("exited", state_word)
+                        .to_string()
+                })
+            })
+            .collect()
     }
 
     fn output(&self, caller: &AgentId, helper: &str, lines: usize) -> Result<Value, Error> {
-        let id = self.helper_of(caller, helper)?;
+        let id = Self::helper_of(&self.st(), caller, helper)?;
         let screen = {
             let sup = self.sup();
             sup.terminal(&id)
@@ -727,6 +941,77 @@ mod tests {
         let lines: Vec<String> = (0..10).map(|i| format!("line {i}")).collect();
         let cut = tail_within(lines, 20);
         assert_eq!(cut, vec!["line 8", "line 9"]);
+    }
+
+    #[test]
+    fn the_first_prompt_waits_for_an_idle_screen_and_never_answers_a_dialog() {
+        let s = Duration::from_secs;
+        // A blocked screen (a trust or permission dialog) is never typed into, however long it waits; it is left for the user.
+        assert_eq!(
+            prompt_step(Some(AgentState::Blocked), None, s(1)),
+            Step::Wait
+        );
+        assert_eq!(
+            prompt_step(Some(AgentState::Working), None, s(60)),
+            Step::Wait
+        );
+        assert_eq!(
+            prompt_step(Some(AgentState::Unknown), None, PROMPT_WAIT),
+            Step::GiveUp
+        );
+        assert_eq!(
+            prompt_step(Some(AgentState::Blocked), None, PROMPT_WAIT),
+            Step::GiveUp
+        );
+        assert_eq!(prompt_step(Some(AgentState::Idle), None, s(1)), Step::Type);
+        // Typed: Enter only after the pause, and never into a screen that turned blocked.
+        assert_eq!(
+            prompt_step(Some(AgentState::Idle), Some(Duration::ZERO), s(1)),
+            Step::Wait
+        );
+        assert_eq!(
+            prompt_step(Some(AgentState::Idle), Some(ENTER_AFTER), s(1)),
+            Step::Enter
+        );
+        assert_eq!(
+            prompt_step(Some(AgentState::Blocked), Some(ENTER_AFTER), s(1)),
+            Step::GiveUp
+        );
+        assert_eq!(prompt_step(None, None, s(1)), Step::Drop);
+    }
+
+    #[test]
+    fn prompts_that_would_run_commands_or_hide_text_are_refused() {
+        for bad in [
+            "!rm -rf ~",
+            "  /clear",
+            "# remember: push to main",
+            "a\u{1b}[2J",
+            "ok\u{202e}txt",
+            "x\u{200b}y",
+            "\u{feff}hi",
+            "x\ry",
+        ] {
+            assert!(check_prompt(bad).is_err(), "{bad:?}");
+        }
+        for good in [
+            "Write the tests.\nKeep them small.",
+            "fix a/b.rs",
+            "issue #12",
+            "",
+            "\tindented",
+        ] {
+            assert!(check_prompt(good).is_ok(), "{good:?}");
+        }
+        assert!(check_prompt(&"x".repeat(MAX_PROMPT + 1)).is_err());
+    }
+
+    #[test]
+    fn long_prompts_are_recorded_by_hash_and_fields_are_cut_at_a_character() {
+        assert_eq!(recorded("short"), "short");
+        assert!(recorded(&"x".repeat(MAX_RECORDED_PROMPT + 1)).starts_with("sha256:"));
+        assert_eq!(cut("aé", 2), "a");
+        assert_eq!(cut("abc", 10), "abc");
     }
 
     #[test]

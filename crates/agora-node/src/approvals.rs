@@ -440,6 +440,8 @@ pub struct HelperGrant {
     pub agent: agora_core::AgentId,
     pub kind: String,
     pub folder: String,
+    /// Whether it covers starts in a worktree of the folder (it covers only what the user approved: one or the other).
+    pub worktree: bool,
     pub remaining: u32,
     pub helpers_may_start: bool,
     pub signer_device_id: String,
@@ -468,10 +470,15 @@ impl NodeApprovals {
         agent: &agora_core::AgentId,
         kind: &str,
         folder: &str,
+        worktree: bool,
     ) -> Option<bool> {
         let mut grants = self.hg();
         let g = grants.iter_mut().find(|g| {
-            g.agent == *agent && g.kind == kind && g.folder == folder && g.remaining > 0
+            g.agent == *agent
+                && g.kind == kind
+                && g.folder == folder
+                && g.worktree == worktree
+                && g.remaining > 0
         })?;
         g.remaining -= 1;
         let nested = g.helpers_may_start;
@@ -778,6 +785,19 @@ mod tests {
         assert_eq!(a.resolve(&r, 1).unwrap().1, Verdict::Approved);
     }
 
+    /// The vector the web client's and the TUI's tests use too: every signer hashes the announced detail byte for byte (UTF-8,
+    /// non-ASCII, a raw line break and an emoji included).
+    pub const START_VECTOR_DETAIL: &str = "{\"prompt\":\"Grüße\nçalış 🚀\"}";
+    pub const START_VECTOR_HASH: &str =
+        "2705e6e894314e40e3938d6e7780386d393351c5d33a5826ed13948b56d8c076";
+
+    #[test]
+    fn the_start_message_hashes_the_detail_byte_for_byte() {
+        let m = start_signed_message("node-1", "ap-1", true, 3, false, START_VECTOR_DETAIL);
+        let want = format!("agora-approval-start-v1\0node-1\0ap-1\01\03\00\0{START_VECTOR_HASH}");
+        assert_eq!(m, want.as_bytes());
+    }
+
     #[test]
     fn a_grant_on_another_kind_of_request_is_refused() {
         let mut a = approvals();
@@ -797,20 +817,23 @@ mod tests {
             agent: me.clone(),
             kind: "codex".into(),
             folder: "/w".into(),
+            worktree: false,
             remaining: 2,
             helpers_may_start: false,
             signer_device_id: "phone".into(),
         };
         n.add_helper_grant(grant("g1"));
-        assert_eq!(n.use_helper_grant(&me, "codex", "/other"), None);
-        assert_eq!(n.use_helper_grant(&me, "claude", "/w"), None);
+        assert_eq!(n.use_helper_grant(&me, "codex", "/other", false), None);
+        assert_eq!(n.use_helper_grant(&me, "claude", "/w", false), None);
         assert_eq!(
-            n.use_helper_grant(&agora_core::AgentId::new("b"), "codex", "/w"),
+            n.use_helper_grant(&agora_core::AgentId::new("b"), "codex", "/w", false),
             None
         );
-        assert_eq!(n.use_helper_grant(&me, "codex", "/w"), Some(false));
-        assert_eq!(n.use_helper_grant(&me, "codex", "/w"), Some(false));
-        assert_eq!(n.use_helper_grant(&me, "codex", "/w"), None);
+        // A grant from a start in the folder does not cover a start in a worktree of it.
+        assert_eq!(n.use_helper_grant(&me, "codex", "/w", true), None);
+        assert_eq!(n.use_helper_grant(&me, "codex", "/w", false), Some(false));
+        assert_eq!(n.use_helper_grant(&me, "codex", "/w", false), Some(false));
+        assert_eq!(n.use_helper_grant(&me, "codex", "/w", false), None);
         n.add_helper_grant(grant("g2"));
         assert!(n.revoke_helper_grant("g2"));
         assert!(n.helper_grants().is_empty());

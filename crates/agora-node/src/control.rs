@@ -671,7 +671,7 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
             // which announces it with the grant that was signed.
             if resolution.request.action == crate::approvals::START_ACTION {
                 if let Some(s) = &ctx.spawn {
-                    s.decided(&resolution.request, r);
+                    s.decided(&resolution.request, r)?;
                 }
                 return Ok(ok_empty());
             }

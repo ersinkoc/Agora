@@ -323,7 +323,8 @@ Capability `mesh.spawn` (offered by a node that has the mesh tools `agent_start`
   carries it.
 - An agent's request to start another is an `ApprovalRequested` with `action = "agent.start"`. Its `detail` is JSON with the keys
   `node`, `agent` (the asking agent), `agent_kind`, `kind` (to start), `folder` (canonical), `inside` (the folder is the asking
-  agent's own folder or below it), `worktree` (the helper gets its own worktree of it), `depth` (the helper's depth) and `prompt`
+  agent's own folder or below it), `worktree` (the helper gets its own worktree of it), `depth` (the helper's depth),
+  `grant_allowed` (a scoped grant may be given: inside, and not a shell or plain terminal program) and `prompt`
   (the first prompt in full, at most 16 KiB; a longer one is refused before anything is asked). Clients show all of it; the prompt
   is untrusted text written by an agent.
 - The decision on an `agent.start` approval is signed over
