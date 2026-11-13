@@ -368,3 +368,6 @@ closed-reason-forbidden = you are not allowed to remove it
 closed-reason-running = it is running again
 closed-reason-gone = the hub no longer knows it
 closed-reason-other = the hub could not be reached or refused
+
+# ADR-0059: launch options (manifest `[[launch.option]]` labels)
+option-skip-permissions = Don't ask

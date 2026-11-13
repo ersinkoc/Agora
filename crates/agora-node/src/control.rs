@@ -295,6 +295,7 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                         agora_core::IntegrationLevel::L3Adapter => v1::IntegrationLevel::L3Adapter,
                     } as i32,
                     installed: k.installed,
+                    launch_options: Vec::new(),
                 })
                 .collect();
             Ok(v1::CommandOk {

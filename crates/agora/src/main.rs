@@ -555,6 +555,7 @@ fn agent_start(say: &Say, o: &Opts) -> ExitCode {
         separate_worktree: o.separate_worktree,
         accept_identity_change: o.accept_identity_change,
         authorization: None,
+        launch_options: Vec::new(),
     });
     match call(say, &mut c, cmd) {
         Ok(v1::CommandOk {
