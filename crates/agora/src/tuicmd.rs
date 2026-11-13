@@ -315,11 +315,26 @@ fn chat(
                             continue;
                         }
                         ChatCommand::Switch { model, id } => {
-                            note = match session.set_option(node, local, model, &id) {
-                                Ok(()) => say.text(key!("tui-option-switched"), &[]),
-                                Err(code) => {
+                            // The same per-agent grant the web client asks for (its `grantFor`): this one switch for this agent.
+                            let scope = format!("agent:{local}");
+                            let command = if model {
+                                "agent.set_model"
+                            } else {
+                                "agent.set_mode"
+                            };
+                            note = match with_grant(
+                                say,
+                                session,
+                                rx,
+                                (node, &scope, &[command]),
+                                |s| s.set_option(node, local, model, &id),
+                            ) {
+                                Tried::Done(Ok(())) => say.text(key!("tui-option-switched"), &[]),
+                                Tried::Done(Err(code)) => {
                                     say.text(key!("tui-send-failed"), &[("code", Arg::Str(code))])
                                 }
+                                Tried::Declined => String::new(),
+                                Tried::Line(l) => l,
                             };
                             dirty = true;
                             continue;
