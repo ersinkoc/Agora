@@ -18,9 +18,17 @@ try {
 
   await start('Shell');
   await page.waitForSelector('.xterm-helper-textarea', { state: 'attached', timeout: 10000 });
-  // Type at the prompt, as a person does: Git for Windows' sh drops what arrives while it is still starting.
+  // Type once the shell reads input. Git for Windows' sh drops keys that arrive while it is still starting, even after its first
+  // prompt is drawn, so an empty Enter goes first until a second prompt answers it.
   await page.waitForFunction(() => /\$\s*$/.test((document.querySelector('.xterm-rows')?.innerText ?? '').trim()), null, { timeout: 30000 });
   await page.focus('.xterm-helper-textarea');
+  const prompts = () => page.evaluate(() => ((document.querySelector('.xterm-rows')?.innerText ?? '').match(/\$/g) ?? []).length);
+  for (let tries = 1; tries <= 5; tries++) {
+    const before = await prompts();
+    await page.keyboard.press('Enter');
+    const answered = await page.waitForFunction(n => ((document.querySelector('.xterm-rows')?.innerText ?? '').match(/\$/g) ?? []).length > n, before, { timeout: 3000 }).then(() => true, () => false);
+    if (answered) { if (tries > 1) console.log(`(the shell answered the ${tries}. Enter; the earlier ones were dropped while it started)`); break; }
+  }
   await page.keyboard.type('echo hello-from-e2e\n', { delay: 5 });
   await page.waitForFunction(() => (document.querySelector('.xterm-rows')?.innerText ?? '').split('hello-from-e2e').length > 2, null, { timeout: 20000 }).catch(() => {});
   const screen = await page.innerText('.xterm-rows');
