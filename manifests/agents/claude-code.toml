@@ -2,6 +2,8 @@ kind = "claude-code"
 display_name = "Claude Code"
 version = "2026.11.09.1"
 min_engine = 1
+# ADR-0057: before Enter, the box between its two rules must hold the typed prompt (and only it), with the mode footer and no dialog.
+input_box = '^─{20,}\n❯[^\S\n]?((?s:.*?))\n─{20,}$'
 
 [process]
 names = ["claude"]
@@ -78,3 +80,14 @@ region = "bottom_non_empty_lines(12)"
 regex = '^─{20,}\n❯[^\S\n]*(Try "[^\n]*")?[^\S\n]*\n─{20,}$'
 all = [{ contains = "shift+tab to cycle" }]
 not = [{ contains = "esc to interrupt" }, { contains = "Enter to confirm" }, { contains = "Esc to cancel" }]
+
+
+[[typed]]
+id = "typed_prompt_box"
+state = "idle"
+priority = 100
+region = "bottom_non_empty_lines(12)"
+regex = '^─{20,}\n❯[^\S\n]+\S'
+all = [{ contains = "shift+tab to cycle" }]
+# The placeholder (`Try "…"`) is not typed text.
+not = [{ contains = "esc to interrupt" }, { contains = "Enter to confirm" }, { contains = "Esc to cancel" }, { contains = "Do you want" }, { regex = '^❯[^\S\n]*Try "' }]

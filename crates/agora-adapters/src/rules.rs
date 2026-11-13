@@ -174,9 +174,27 @@ impl Detector {
     /// ADR-0057: the manifest's `[[ready]]` rules (the input box is empty and waiting), compiled the same way. Matches nothing when the
     /// manifest has none.
     pub fn ready(manifest: &Manifest) -> Self {
-        let mut rules: Vec<CompiledRule> = manifest.ready.iter().filter_map(compile_rule).collect();
+        Self::from_rules(&manifest.ready)
+    }
+
+    /// ADR-0057: the manifest's `[[typed]]` rules (typed text in the input box, no dialog or menu).
+    pub fn typed(manifest: &Manifest) -> Self {
+        Self::from_rules(&manifest.typed)
+    }
+
+    fn from_rules(list: &[crate::manifest::Rule]) -> Self {
+        let mut rules: Vec<CompiledRule> = list.iter().filter_map(compile_rule).collect();
         rules.sort_by_key(|r| std::cmp::Reverse(r.priority));
         Self { rules }
+    }
+
+    /// ADR-0057: the text a manifest's `input_box` regex captures on the screen's bottom (its last match), or `None`.
+    pub fn input_box(pattern: &str, term: &dyn Terminal) -> Option<String> {
+        let re = compile(pattern).ok()?;
+        let text = term.bottom_non_empty_lines(12).join("\n");
+        re.captures_iter(&text)
+            .last()
+            .and_then(|c| c.get(1).map(|m| m.as_str().to_string()))
     }
 
     /// The state the highest-priority matching rule reports, or `None` when no rule matches (the caller keeps

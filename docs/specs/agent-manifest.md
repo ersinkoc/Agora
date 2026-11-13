@@ -108,6 +108,11 @@ request, stricter than an `idle` rule (whose prompt marker can also be the selec
 first prompt only when a fresh look at the live screen matches them and the kind's rules detect idle; a kind without them never gets
 a first prompt typed for it (the prompt is left for the user). Every shipped terminal manifest has them, and the fixture test checks
 that they match the captured idle and answered screens and nothing else (including a `menu.screen` that an `idle` rule matches).
+`[[typed]]` (same shape, `state = "idle"`) match an input box that holds typed text with no dialog or menu on screen, and the top-level
+`input_box` is a multi-line regex over `bottom_non_empty_lines(12)` whose first capture group is the box's text: before pressing
+Enter on a helper's first prompt the node needs both, with the box holding exactly that prompt. The `typed.screen` fixtures are
+constructed from the captured idle screens with text in the box (a capture of that moment is not kept); the test checks that
+`[[typed]]` matches them and nothing else and that `input_box` reads exactly the typed text.
 
 Manifests in this repository: `claude-code` and `codex` (screens captured from the real agents, `manifests/agents/fixtures/`); `wrongstack` is planned and not shipped yet (it needs a machine that has it). `crates/agora-adapters/tests/shipped_manifests.rs` checks every shipped manifest against its captured screens.
 

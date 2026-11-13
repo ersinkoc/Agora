@@ -272,6 +272,8 @@ struct KindEntry {
     detector: Detector,
     /// ADR-0057: the manifest's `[[ready]]` rules (an empty input box).
     ready: Detector,
+    /// ADR-0057: the manifest's `[[typed]]` rules and `input_box` pattern (typed text in the box, nothing else on screen).
+    typed: Detector,
 }
 
 /// What a terminal agent's live screen shows right now (ADR-0057), read when asked rather than from the paced detection.
@@ -281,7 +283,8 @@ pub struct ScreenCheck {
     pub state: Option<AgentState>,
     /// The `[[ready]]` rules match: the input box is empty and waiting.
     pub ready: bool,
-    /// The text asked about is on the bottom of the screen (whitespace ignored, so a wrapped line still counts).
+    /// The `[[typed]]` rules match and the input box (`input_box`) holds exactly the text asked about and nothing else (whitespace
+    /// ignored, so a wrapped line still counts). Keys someone else typed into the box make it false.
     pub shows: bool,
 }
 
@@ -353,18 +356,27 @@ impl Supervisor {
     }
 
     /// ADR-0057: a fresh look at a terminal agent's live screen, run on its bottom lines now (never the paced detection's last result):
-    /// what its rules detect, whether its `[[ready]]` rules match, and whether `text` shows. `None` for an agent without a terminal.
+    /// what its rules detect, whether its `[[ready]]` rules match, and whether its input box holds exactly `text` (`[[typed]]` and
+    /// `input_box`). `None` for an agent without a terminal.
     pub fn screen_check(&self, id: &AgentId, text: &str) -> Option<ScreenCheck> {
         let e = self.agents.get(id)?;
         let term = e.terminal.as_ref()?;
         let kind = self.kinds.get(&e.agent.kind)?;
         let squash = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
         let needle = squash(text);
-        Some(term.inspect(|t| ScreenCheck {
-            state: kind.detector.detect(t).map(|d| d.state),
-            ready: kind.ready.detect(t).is_some(),
-            shows: !needle.is_empty()
-                && squash(&t.bottom_non_empty_lines(12).concat()).contains(&needle),
+        Some(term.inspect(|t| {
+            ScreenCheck {
+                state: kind.detector.detect(t).map(|d| d.state),
+                ready: kind.ready.detect(t).is_some(),
+                shows: !needle.is_empty()
+                    && kind.typed.detect(t).is_some()
+                    && kind
+                        .manifest
+                        .input_box
+                        .as_deref()
+                        .and_then(|p| Detector::input_box(p, t))
+                        .is_some_and(|in_box| squash(&in_box) == needle),
+            }
         }))
     }
 
@@ -386,7 +398,23 @@ impl Supervisor {
             "powershell",
             "cmd",
             "busybox",
+            // Wrappers and interpreters that run whatever they are given.
             "env",
+            "nice",
+            "timeout",
+            "sudo",
+            "doas",
+            "su",
+            "python",
+            "python3",
+            "perl",
+            "ruby",
+            "node",
+            "deno",
+            "bun",
+            "ssh",
+            "docker",
+            "podman",
         ];
         let Some(k) = self.kinds.get(kind) else {
             return false;
@@ -409,11 +437,6 @@ impl Supervisor {
             .unwrap_or_default();
         let integrated = m.mcp.is_some() || m.adapter.is_some() || m.structured.is_some();
         kind != "shell" && !SHELLS.contains(&program.as_str()) && integrated
-    }
-
-    /// ADR-0057: forgets which agent started `child` (its record was pruned).
-    pub fn forget_parent(&mut self, child: &AgentId) {
-        self.parents.remove(child);
     }
 
     /// The node's confinement settings (ADR-0047), for checks that compare two agents' confinement.
@@ -488,12 +511,14 @@ impl Supervisor {
     pub fn register(&mut self, manifest: Manifest) {
         let detector = Detector::new(&manifest);
         let ready = Detector::ready(&manifest);
+        let typed = Detector::typed(&manifest);
         self.kinds.insert(
             manifest.kind.clone(),
             KindEntry {
                 manifest,
                 detector,
                 ready,
+                typed,
             },
         );
     }

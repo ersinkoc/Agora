@@ -118,7 +118,8 @@ the node answers them itself (`agora-node::spawn`), not the broker. The caller i
   that the helpers it starts may ask in turn. Later starts that match the grant (same asking agent, kind, folder and `worktree`
   choice) start at once. A grant ends when the asking agent exits or is stopped, or when revoked (`GrantRevoke` with the approval id;
   `GrantList` shows it). No grant is given for a kind without an agent integration (a mesh section, an adapter or a structured mode), nor for
-  kind `shell` or a known shell (or `env`) as the program, whatever screen rules it has: there it would mean "run any N programs
+  kind `shell` or a program that is a shell, a wrapper (`env`, `nice`, `timeout`, `sudo`, `doas`, `su`, `ssh`, `docker`, `podman`)
+  or an interpreter (`python`, `perl`, `ruby`, `node`, `deno`, `bun`), whatever screen rules it has: there it would mean "run any N programs
   without asking". The
   request's `grant_allowed` says whether one may be given.
 - **Never wider than the asker.** The folder defaults to the asker's own; one below it is allowed (a relative `folder` is taken below
@@ -134,30 +135,32 @@ the node answers them itself (`agora-node::spawn`), not the broker. The caller i
   node's own agent limit (`node.resource_limit`). A refusal before asking is an `AgentStartRefused` event (rate refusals at most one a
   minute per agent; agent-written fields cut to 256 bytes).
 - **Prompt rules** (`protocol.invalid_message`, `field = prompt`): no control characters other than line breaks and tabs; no
-  invisible characters (`agora_core::text::is_hidden`: every Unicode format character such as U+00AD, U+061C, U+180E,
-  U+200B-200F, U+202A-202E, U+2060-2064 and U+2066-206F, the tag block U+E0000-E007F, variation selectors and the fillers U+115F,
-  U+1160, U+3164, U+FFA0; also refused in `folder`); no leading `!`, `/`, `#`, `&` or `$` (a shell escape, a slash command, a
-  memory edit, a background send or a skill form in common agents); and no last word starting with `@` (a file picker would take the
+  invisible characters (the list in `crates/agora-core/src/hidden-characters.txt`: Default_Ignorable_Code_Point and every format
+  character, the line and paragraph separators and the private use areas; also refused in the requested `folder` and in the folder
+  it resolves to); no leading `!`, `/`, `#`, `&`, `$` or `?` (a shell escape, a slash command, a memory edit, a background send, a
+  skill form or the shortcuts key in common agents); and no last word starting with `@` (a file picker would take the
   Enter). Clients show any such character that reaches them as a visible `\u{…}` escape.
 - **Following.** `agent_wait` and `agent_output` answer only for helpers the caller started (anything else is `agent.not_found`).
   `agent_wait` ends when the helper reaches the state or exits (`state: "exited"`); a connection may have 8 waits open
   (`mesh.too_many_asks`), all read from one view of the node per poll. `agent_output` is the bottom of the live screen (never
   scrollback) or, for a chat agent without a terminal, the end of its transcript; at most 16 KiB. It is untrusted text.
-- **The first prompt** is typed into a terminal helper only when a fresh look at its live screen (taken then, not the paced
-  detection's last result) shows the kind's empty input box (`[[ready]]` in its manifest, see `agent-manifest.md`) and an idle
-  state; line breaks and tabs are typed as spaces. Enter follows only after another fresh look, 150 ms or more after the typing,
-  still detects idle and shows the typed text on screen; a dialog or menu that appeared, or text that did not arrive, leaves the text
-  for the user. A kind without `[[ready]]` rules never gets its first prompt typed. When it is not typed within 120 seconds, or not
-  sent, that is recorded as an `AgentStartRefused` with `code = agent.blocked` (its `folder` holds the helper's id). A chat agent gets
-  it as its first request once it reports idle. Every helper's first prompt, granted starts included, is recorded as a
-  `MessagePosted` from the parent to the helper (the text, or `sha256:<hex>` above 4 KiB). Later messages from the parent are
-  ordinary mesh messages (information, not authority).
+- **The first prompt** is typed into a terminal helper only after two fresh looks in a row at its live screen (taken then, not the
+  paced detection's last result) show the kind's empty input box (`[[ready]]`) and an idle state; line breaks and tabs are typed as
+  spaces. Enter follows only after two later fresh looks in a row show the input box (`input_box`) holding exactly the typed prompt
+  and nothing else, with no dialog or menu on screen (`[[typed]]`), see `agent-manifest.md`. A blocked screen, keys someone else typed
+  into the box, or text that does not show within a second leave it for the user. A kind without these rules never gets its first
+  prompt typed, and a prompt long enough to wrap where the kind's `input_box` reads one row is left for the user too. When it is not
+  typed within 120 seconds, or not sent, that is recorded as an `AgentStartRefused` with `code = agent.blocked` (its `folder` holds
+  the helper's id). A chat agent gets it as its first request once it reports idle. Every helper's first prompt, granted starts
+  included, is recorded as a `MessagePosted` from the parent to the helper (the text, or `sha256:<hex>` above 4 KiB). Later messages
+  from the parent are ordinary mesh messages (information, not authority).
 - **Stopping.** `AgentStop { stop_helpers: true }` stops the agent's running helpers and theirs too. A parent that exits on its own leaves
   its helpers running.
 - **Restart.** Which helper an agent started is kept in the node's memory (the supervisor's parent links and the spawner's record of
-  what each decision allowed). Agents end with the node process, so a restarted node starts with no helpers. An agent the supervisor
-  knows as a helper but whose decision record is gone may not ask for helpers, and helper counts use the supervisor's links, so a
-  lost record never widens the limits.
+  what each decision allowed) for as long as the supervisor lists the agent, which is the node process's life: a helper that crashes
+  and is restarted, or is resumed, is still the same helper. Agents end with the node process, so a restarted node starts with no
+  helpers. An agent the supervisor knows as a helper but whose decision record is missing may not ask for helpers, and helper counts
+  use the supervisor's links, so a missing record never widens the limits.
 
 ## Implementation status
 `agora-mesh::broker::Mesh` implements the tools' logic as deterministic in-memory state: registry, messages with

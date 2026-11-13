@@ -60,8 +60,6 @@ pub const MAX_RECORDED_PROMPT: usize = 4 * 1024;
 pub const PROMPT_WAIT: Duration = Duration::from_secs(120);
 /// Between the prompt text and its Enter (a program that reads both at once takes them for a paste).
 const ENTER_AFTER: Duration = Duration::from_millis(150);
-/// Ended helpers whose lineage is kept (so a wait on one answers `exited`); older ones are forgotten.
-const ENDED_KEPT: usize = 256;
 
 /// Who started a helper, and what the decision allowed it.
 #[derive(Debug, Clone)]
@@ -93,6 +91,7 @@ struct Prompt {
     text: String,
     since: Instant,
     typed: Option<Instant>,
+    agreed: Agreed,
 }
 
 /// What to do with a helper's first prompt now (see [`prompt_step`]).
@@ -118,28 +117,65 @@ enum Seen {
     Reported(AgentState),
 }
 
-/// The first prompt is typed only when a fresh look at the screen shows the kind's empty input box (`[[ready]]`) and an idle state.
-/// Enter follows only when another fresh look, after the typing, still shows idle with the typed text on screen; anything else
-/// (a dialog that appeared, a menu, text that did not arrive) leaves the text for the user. A chat agent gets it when it reports
-/// idle. Pure, so the rule is tested without a terminal.
-fn prompt_step(seen: Seen, typed: Option<Duration>, waited: Duration) -> Step {
+/// Consecutive fresh looks that agreed, for [`prompt_step`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Agreed {
+    ready: u8,
+    typed: u8,
+}
+
+/// Fresh looks in a row that must agree before the node types, and again before it presses Enter.
+const LOOKS: u8 = 2;
+/// How long typed text may take to show in the box before the node gives up on sending it.
+const TYPE_SETTLE: Duration = Duration::from_secs(1);
+
+/// The first prompt is typed only when [`LOOKS`] fresh looks in a row at the screen show the kind's empty input box (`[[ready]]`) and
+/// an idle state. Enter follows only when [`LOOKS`] later fresh looks in a row show the box holding exactly the typed text with no
+/// dialog or menu on screen (`[[typed]]`, `input_box`); a blocked screen, keys someone else typed, or text that did not arrive within
+/// [`TYPE_SETTLE`] leave it for the user. A chat agent gets it when it reports idle. Pure, so the rule is tested without a terminal.
+fn prompt_step(seen: Seen, typed: Option<Duration>, waited: Duration, agreed: &mut Agreed) -> Step {
     match (seen, typed) {
         (Seen::Gone, _) => Step::Drop,
         (Seen::Screen(_), Some(after)) if after < ENTER_AFTER => Step::Wait,
-        (Seen::Screen(c), Some(_)) if c.state == Some(AgentState::Idle) && c.shows => Step::Enter,
-        (Seen::Screen(_), Some(_)) => Step::GiveUp,
-        (Seen::Screen(c), None) if c.state == Some(AgentState::Idle) && c.ready => Step::Type,
+        (Seen::Screen(c), Some(after)) => {
+            if c.state == Some(AgentState::Blocked) {
+                return Step::GiveUp;
+            }
+            if c.state == Some(AgentState::Idle) && c.shows {
+                agreed.typed += 1;
+                return if agreed.typed >= LOOKS {
+                    Step::Enter
+                } else {
+                    Step::Wait
+                };
+            }
+            agreed.typed = 0;
+            if after < TYPE_SETTLE {
+                Step::Wait
+            } else {
+                Step::GiveUp
+            }
+        }
+        (Seen::Screen(c), None) => {
+            if c.state == Some(AgentState::Idle) && c.ready {
+                agreed.ready += 1;
+                if agreed.ready >= LOOKS {
+                    return Step::Type;
+                }
+                return Step::Wait;
+            }
+            agreed.ready = 0;
+            if waited >= PROMPT_WAIT {
+                Step::GiveUp
+            } else {
+                Step::Wait
+            }
+        }
         (Seen::Reported(AgentState::Idle), None) => Step::Type,
         (Seen::Reported(_), Some(_)) => Step::Drop,
-        (_, None) if waited >= PROMPT_WAIT => Step::GiveUp,
-        (_, None) => Step::Wait,
+        (Seen::Reported(_), None) if waited >= PROMPT_WAIT => Step::GiveUp,
+        (Seen::Reported(_), None) => Step::Wait,
     }
-}
-
-/// The end of a prompt as typed, which must show on screen before Enter is pressed.
-fn typed_tail(text: &str) -> String {
-    let typed: Vec<char> = text.replace(['\n', '\t'], " ").chars().collect();
-    typed[typed.len().saturating_sub(24)..].iter().collect()
 }
 
 #[derive(Default)]
@@ -148,7 +184,6 @@ struct State {
     tickets: HashMap<u64, Option<StartOutcome>>,
     next_ticket: u64,
     lineage: HashMap<AgentId, Lineage>,
-    ended: VecDeque<AgentId>,
     attempts: HashMap<AgentId, VecDeque<Instant>>,
     /// When a rate refusal of each agent was last recorded.
     rate_noted: HashMap<AgentId, Instant>,
@@ -226,10 +261,10 @@ fn check_prompt(prompt: &str) -> Result<(), Error> {
         return Err(invalid("prompt"));
     }
     // Common agents read a leading `!` as a shell command, `/` as one of their own commands, `#` as a memory edit, `&` as a background
-    // send and `$` as a skill or shell form.
+    // send, `$` as a skill or shell form and `?` (in an empty box) as the shortcuts key.
     if matches!(
         prompt.trim_start().chars().next(),
-        Some('!' | '/' | '#' | '&' | '$')
+        Some('!' | '/' | '#' | '&' | '$' | '?')
     ) {
         return Err(invalid("prompt"));
     }
@@ -431,6 +466,10 @@ impl Spawner {
             .map_err(|_| folder_refused(&wanted.to_string_lossy()))?;
         // The folder rules of ADR-0052 (refused folders, identity) apply as to any launch.
         let (info, _) = crate::directory::inspect(&folder.to_string_lossy(), &self.node_id, false)?;
+        // The resolved path is what is shown, signed and launched: it must be as plain as the one asked for.
+        if info.path.chars().any(|c| c.is_control() || invisible(c)) {
+            return Err(folder_refused(&info.path));
+        }
         if a.worktree && info.git_root.is_empty() {
             return Err(invalid("directory.git_root"));
         }
@@ -586,6 +625,7 @@ impl Spawner {
                 text: r.prompt.clone(),
                 since: Instant::now(),
                 typed: None,
+                agreed: Agreed::default(),
             });
         }
         Ok(id.as_str().to_string())
@@ -670,10 +710,11 @@ impl Spawner {
         true
     }
 
-    /// The agent exited or was stopped: its grants end, a start it was waiting for is withdrawn, and what is kept about it shrinks.
+    /// The agent exited (a crash the supervisor restarts included) or was stopped: its grants end and a start it was waiting for is
+    /// withdrawn. What it is (a helper of whom, how deep, what its decision allowed) is kept: an agent can run again under the same id
+    /// (a restart, a resume), and the supervisor, which never forgets an agent while the node runs, keeps its parent link too.
     pub fn agent_ended(&self, agent: &AgentId) {
         self.approvals.end_helper_grants(agent);
-        let mut forgotten = Vec::new();
         let withdrawn: Vec<String> = {
             let mut st = self.st();
             let ids: Vec<String> = st
@@ -688,27 +729,10 @@ impl Spawner {
                 }
             }
             st.busy.remove(agent);
-            st.attempts.remove(agent);
-            st.rate_noted.remove(agent);
             st.prompts.retain(|p| p.agent != *agent);
-            // An ended helper's lineage is kept for a while (a wait on it answers `exited`), then forgotten.
-            if st.lineage.contains_key(agent) && !st.ended.contains(agent) {
-                st.ended.push_back(agent.clone());
-                while st.ended.len() > ENDED_KEPT {
-                    if let Some(old) = st.ended.pop_front() {
-                        st.lineage.remove(&old);
-                        forgotten.push(old);
-                    }
-                }
-            }
+            // Old attempt times leave the rate window by themselves; an agent that crashes and restarts keeps its count.
             ids
         };
-        if !forgotten.is_empty() {
-            let mut sup = self.sup();
-            for old in &forgotten {
-                sup.forget_parent(old);
-            }
-        }
         for id in withdrawn {
             self.approvals.withdraw(&id);
             if let Some(ev) = &self.events {
@@ -753,14 +777,18 @@ impl Spawner {
                 let view = views.iter().find(|v| v.id == p.agent && v.running);
                 let seen = match view {
                     None => Seen::Gone,
-                    Some(v) if v.terminal => match sup.screen_check(&p.agent, &typed_tail(&p.text))
-                    {
+                    Some(v) if v.terminal => match sup.screen_check(&p.agent, &p.text) {
                         Some(c) => Seen::Screen(c),
                         None => Seen::Gone,
                     },
                     Some(v) => Seen::Reported(v.state),
                 };
-                match prompt_step(seen, p.typed.map(|t| t.elapsed()), p.since.elapsed()) {
+                match prompt_step(
+                    seen,
+                    p.typed.map(|t| t.elapsed()),
+                    p.since.elapsed(),
+                    &mut p.agreed,
+                ) {
                     Step::Wait => true,
                     Step::Drop => false,
                     Step::GiveUp => {
@@ -1029,73 +1057,101 @@ mod tests {
             })
         };
         let idle = Some(AgentState::Idle);
-        // Typing needs a fresh idle state and the empty input box; a menu row that an idle rule matches is not enough.
+        let step = |seen, typed, waited, a: &mut Agreed| prompt_step(seen, typed, waited, a);
+        // Typing needs two looks in a row with a fresh idle state and the empty input box; a menu row an idle rule matches is not one.
+        let mut a = Agreed::default();
         assert_eq!(
-            prompt_step(screen(idle, true, false), None, s(1)),
+            step(screen(idle, true, false), None, s(1), &mut a),
+            Step::Wait
+        );
+        assert_eq!(
+            step(screen(idle, false, false), None, s(1), &mut a),
+            Step::Wait
+        );
+        assert_eq!(
+            step(screen(idle, true, false), None, s(1), &mut a),
+            Step::Wait
+        );
+        assert_eq!(
+            step(screen(idle, true, false), None, s(1), &mut a),
             Step::Type
         );
+        let mut a = Agreed::default();
         assert_eq!(
-            prompt_step(screen(idle, false, false), None, s(1)),
-            Step::Wait
-        );
-        assert_eq!(
-            prompt_step(screen(Some(AgentState::Blocked), false, false), None, s(1)),
-            Step::Wait
-        );
-        assert_eq!(
-            prompt_step(
+            step(
                 screen(Some(AgentState::Blocked), false, false),
                 None,
-                PROMPT_WAIT
+                PROMPT_WAIT,
+                &mut a
             ),
             Step::GiveUp
         );
         assert_eq!(
-            prompt_step(screen(None, false, false), None, PROMPT_WAIT),
+            step(screen(None, false, false), None, PROMPT_WAIT, &mut a),
             Step::GiveUp
         );
-        // Enter needs another look after the typing: still idle and the text on screen. A dialog that appeared, or text that did not
-        // arrive, leaves it for the user.
+        // Enter needs two looks in a row, after the pause, with exactly our text in the box and nothing else on screen.
+        let mut a = Agreed::default();
         assert_eq!(
-            prompt_step(screen(idle, false, true), Some(Duration::ZERO), s(1)),
+            step(
+                screen(idle, false, true),
+                Some(Duration::ZERO),
+                s(1),
+                &mut a
+            ),
             Step::Wait
         );
         assert_eq!(
-            prompt_step(screen(idle, false, true), Some(ENTER_AFTER), s(1)),
-            Step::Enter
+            step(screen(idle, false, true), Some(ENTER_AFTER), s(1), &mut a),
+            Step::Wait
         );
         assert_eq!(
-            prompt_step(
+            step(screen(idle, false, true), Some(ENTER_AFTER), s(1), &mut a),
+            Step::Enter
+        );
+        // A dialog that appeared, or a box that does not hold exactly our text (keys someone else typed), leaves it for the user.
+        let mut a = Agreed::default();
+        assert_eq!(
+            step(
                 screen(Some(AgentState::Blocked), false, true),
                 Some(ENTER_AFTER),
-                s(1)
+                s(1),
+                &mut a
             ),
             Step::GiveUp
         );
         assert_eq!(
-            prompt_step(screen(idle, false, false), Some(ENTER_AFTER), s(1)),
+            step(screen(idle, false, false), Some(ENTER_AFTER), s(1), &mut a),
+            Step::Wait
+        );
+        assert_eq!(
+            step(screen(idle, false, true), Some(ENTER_AFTER), s(1), &mut a),
+            Step::Wait
+        );
+        assert_eq!(
+            step(screen(idle, false, false), Some(TYPE_SETTLE), s(1), &mut a),
             Step::GiveUp
         );
         assert_eq!(
-            prompt_step(
+            step(
                 screen(Some(AgentState::Working), false, true),
-                Some(ENTER_AFTER),
-                s(1)
+                Some(TYPE_SETTLE),
+                s(1),
+                &mut a
             ),
             Step::GiveUp
         );
         // A chat agent: when it reports idle.
+        let mut a = Agreed::default();
         assert_eq!(
-            prompt_step(Seen::Reported(AgentState::Idle), None, s(1)),
+            step(Seen::Reported(AgentState::Idle), None, s(1), &mut a),
             Step::Type
         );
         assert_eq!(
-            prompt_step(Seen::Reported(AgentState::Working), None, s(1)),
+            step(Seen::Reported(AgentState::Working), None, s(1), &mut a),
             Step::Wait
         );
-        assert_eq!(prompt_step(Seen::Gone, None, s(1)), Step::Drop);
-        assert_eq!(typed_tail("a\nb"), "a b");
-        assert_eq!(typed_tail(&"x".repeat(40)).len(), 24);
+        assert_eq!(step(Seen::Gone, None, s(1), &mut a), Step::Drop);
     }
 
     #[test]
@@ -1106,6 +1162,7 @@ mod tests {
             "# remember: push to main",
             "& run in background",
             "$skill",
+            "? what now",
             "look at @src/main.rs",
             "a\u{1b}[2J",
             "ok\u{202e}txt",

@@ -2,6 +2,9 @@ kind = "codex"
 display_name = "Codex"
 version = "2026.11.11.2"
 min_engine = 1
+# ADR-0057: before Enter, the last `› ` row (the input box) must hold the typed prompt (and only it), above the shortcuts footer and
+# with no dialog. A prompt long enough to wrap does not match, so it is left for the user rather than sent half-checked.
+input_box = '^›[^\S\n]+([^\n]*?)[^\S\n]*$'
 
 [process]
 names = ["codex"]
@@ -92,3 +95,14 @@ region = "bottom_non_empty_lines(12)"
 regex = '^›[^\S\n]+Ask Codex to do anything[^\S\n]*$'
 all = [{ contains = "? for shortcuts" }]
 not = [{ contains = "esc to interrupt" }, { contains = "esc to cancel" }, { contains = "enter continue" }]
+
+
+[[typed]]
+id = "typed_prompt_box"
+state = "idle"
+priority = 100
+region = "bottom_non_empty_lines(12)"
+regex = '^›[^\S\n]+\S'
+all = [{ contains = "? for shortcuts" }]
+# A numbered row (`› 1. …`) is a menu's selection, not typed text.
+not = [{ contains = "esc to interrupt" }, { contains = "esc to cancel" }, { contains = "enter continue" }, { contains = "Press enter to confirm" }, { contains = "Ask Codex to do anything" }, { contains = "t trust all" }, { regex = '^›[^\S\n]+[0-9]+\. ' }]

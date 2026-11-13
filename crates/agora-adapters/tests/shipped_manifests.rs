@@ -48,6 +48,7 @@ fn every_shipped_manifest_loads_and_its_captured_screens_produce_the_expected_st
         }
         let detector = Detector::new(&manifest);
         let ready = Detector::ready(&manifest);
+        let typed = Detector::typed(&manifest);
         assert!(
             !manifest.ready.is_empty(),
             "{kind} needs [[ready]] rules (ADR-0057)"
@@ -80,6 +81,23 @@ fn every_shipped_manifest_loads_and_its_captured_screens_produce_the_expected_st
             // selected row an `idle` rule also matches (`menu.screen`, written to show that difference).
             let name = f.file_stem().unwrap().to_string_lossy().into_owned();
             let empty_box = name == "idle" || name == "answered";
+            // `typed.screen` (constructed from the captured idle screen with text in the box, since a real capture of that moment is
+            // not kept): `[[typed]]` matches it and nothing else, and `input_box` reads exactly the typed text from it.
+            assert_eq!(
+                typed.detect(&term).is_some(),
+                name == "typed",
+                "{}: typed rules\n{screen}",
+                f.display()
+            );
+            if name == "typed" {
+                let pattern = manifest.input_box.as_deref().expect("input_box");
+                assert_eq!(
+                    Detector::input_box(pattern, &term).as_deref(),
+                    Some("write the tests"),
+                    "{}\n{screen}",
+                    f.display()
+                );
+            }
             assert_eq!(
                 ready.detect(&term).is_some(),
                 empty_box,
