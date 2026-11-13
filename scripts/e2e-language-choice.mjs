@@ -85,6 +85,8 @@ try {
   await page.getByRole('button', { name: 'Back to Home', exact: true }).waitFor();
   assert.equal(await focusTerminal.getAttribute('data-language-probe'), 'focused-terminal');
   await page.getByRole('button', { name: 'Back to Home', exact: true }).click();
+  // Home is drawn: until then the first h1 is still the agent's name, which the timing below would wait on for ever (macOS).
+  await page.waitForFunction(() => document.querySelector('h1')?.textContent === 'Home');
   await shoot('home-en-desktop');
   await choice().selectOption('system');
   assert.equal(await page.evaluate(() => localStorage.getItem('ui.language')), null);
@@ -96,10 +98,12 @@ try {
     for (let i = 0; i < 20; i++) {
       const lang = i % 2 ? 'en' : 'tr';
       const started = performance.now();
-      await new Promise(resolve => {
+      await new Promise((resolve, reject) => {
+        // A sample that never arrives fails with what was shown, instead of hanging the script.
+        const late = setTimeout(() => { observer.disconnect(); reject(new Error(`no ${lang} heading, h1: ${document.querySelector('h1')?.textContent}`)); }, 5000);
         const observer = new MutationObserver(() => {
           if (document.querySelector('h1')?.textContent === (lang === 'tr' ? 'Ana sayfa' : 'Home')) {
-            observer.disconnect(); resolve();
+            clearTimeout(late); observer.disconnect(); resolve();
           }
         });
         observer.observe(document.getElementById('root'), { childList: true, subtree: true, characterData: true });
