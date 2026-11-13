@@ -86,8 +86,13 @@ pub trait Helpers: Send + Sync {
     fn started(&self, ticket: u64) -> Option<StartOutcome>;
     /// The connection that asked went away: the ticket is dropped and its request, if still waiting, withdrawn.
     fn abandon(&self, ticket: u64);
-    /// The state word of a helper `caller` started (`idle`, `working`, `blocked`, `done`, `unknown`, or `exited` once it ended).
-    fn state(&self, caller: &AgentId, helper: &str) -> Result<String, agora_protocol::Error>;
+    /// The state words of helpers `caller` started (`idle`, `working`, `blocked`, `done`, `unknown`, or `exited` once it ended), one
+    /// per name, read from one view of the node.
+    fn states(
+        &self,
+        caller: &AgentId,
+        helpers: &[String],
+    ) -> Vec<Result<String, agora_protocol::Error>>;
     /// The last `lines` of a helper `caller` started, as the tool result's JSON.
     fn output(
         &self,
@@ -651,6 +656,8 @@ struct Links<'a> {
 /// The longest `agent_wait`, and the one used when none is given.
 const WAIT_MAX_MS: u64 = 3_600_000;
 const WAIT_DEFAULT_MS: u64 = 600_000;
+/// `agent_wait` calls one connection may have open at once.
+const MAX_WAITS: usize = 8;
 
 /// A spawn tool call that waits: a start until the user decides, or a wait until the helper's state.
 enum SpawnWait {
@@ -690,7 +697,8 @@ fn tool_reply(id: &Value, result: Value) -> Message {
 }
 
 fn reached(state: &str, wanted: &str) -> bool {
-    state == wanted || state == "exited" || (wanted == "done" && state == "exited")
+    // A wait ends at the state asked for, or when the helper exited (it will reach nothing else).
+    state == wanted || state == "exited"
 }
 
 /// ADR-0057: a call to one of the spawn tools. `None` when the line is not one (or no helpers are offered), so the broker handles it.
@@ -783,7 +791,25 @@ fn spawn_call(
                     _ => return bad(),
                 },
             };
-            match helpers.state(me, helper) {
+            let open = waits
+                .iter()
+                .filter(|w| matches!(w, SpawnWait::State { .. }))
+                .count();
+            if open >= MAX_WAITS {
+                return err(
+                    agora_protocol::Error::new(agora_protocol::ErrorCode::MeshTooManyAsks)
+                        .with("limit", MAX_WAITS as i64),
+                );
+            }
+            let state = helpers
+                .states(me, &[helper.to_string()])
+                .pop()
+                .unwrap_or_else(|| {
+                    Err(agora_protocol::Error::new(
+                        agora_protocol::ErrorCode::Internal,
+                    ))
+                });
+            match state {
                 Ok(state) if reached(&state, wanted) => Some(Some(tool_reply(
                     &id,
                     agora_mesh::mcp::ok_tool_result(&json!({"agent_id": helper, "state": state})),
@@ -830,6 +856,20 @@ fn poll_spawn(
     let Some(helpers) = starts.helpers.clone() else {
         return Ok(());
     };
+    // Every waiting helper's state from one view of the node, not one per wait.
+    let names: Vec<String> = waits
+        .iter()
+        .filter_map(|w| match w {
+            SpawnWait::State { helper, .. } => Some(helper.clone()),
+            SpawnWait::Start { .. } => None,
+        })
+        .collect();
+    let mut states = if names.is_empty() {
+        Vec::new()
+    } else {
+        helpers.states(caller, &names)
+    }
+    .into_iter();
     let mut still = Vec::new();
     for w in waits.drain(..) {
         match w {
@@ -850,7 +890,12 @@ fn poll_spawn(
                 wanted,
                 deadline_ms,
             } => {
-                let result = match helpers.state(caller, &helper) {
+                let state = states.next().unwrap_or_else(|| {
+                    Err(agora_protocol::Error::new(
+                        agora_protocol::ErrorCode::Internal,
+                    ))
+                });
+                let result = match state {
                     Ok(state) if reached(&state, &wanted) => Some(agora_mesh::mcp::ok_tool_result(
                         &json!({"agent_id": helper, "state": state}),
                     )),

@@ -339,6 +339,49 @@ impl Supervisor {
         self.parents.insert(child.clone(), parent.clone());
     }
 
+    /// ADR-0057: whether a scoped grant ("up to N more without asking") may cover `kind`. Not for a shell, nor for a kind that is a plain
+    /// terminal program with nothing of an agent (no screen rules, no mesh, no adapter, no structured mode): a grant there would mean
+    /// "run any N programs without asking". Unknown kinds are not grantable.
+    pub fn grantable(&self, kind: &str) -> bool {
+        const SHELLS: &[&str] = &[
+            "sh",
+            "bash",
+            "zsh",
+            "fish",
+            "dash",
+            "ksh",
+            "csh",
+            "tcsh",
+            "nu",
+            "pwsh",
+            "powershell",
+            "cmd",
+            "busybox",
+        ];
+        let Some(k) = self.kinds.get(kind) else {
+            return false;
+        };
+        let m = &k.manifest;
+        let program = m
+            .process
+            .launch
+            .first()
+            .map(|p| {
+                let base = p
+                    .rsplit(['/', '\\'])
+                    .next()
+                    .unwrap_or(p)
+                    .to_ascii_lowercase();
+                base.strip_suffix(".exe")
+                    .map(str::to_string)
+                    .unwrap_or(base)
+            })
+            .unwrap_or_default();
+        let agent_like =
+            !m.rules.is_empty() || m.mcp.is_some() || m.adapter.is_some() || m.structured.is_some();
+        kind != "shell" && !SHELLS.contains(&program.as_str()) && agent_like
+    }
+
     /// The node's confinement settings (ADR-0047), for checks that compare two agents' confinement.
     pub fn sandbox_policy(&self) -> &crate::sandbox::SandboxPolicy {
         &self.sandbox

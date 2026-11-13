@@ -72,7 +72,8 @@ impl Env {
         .unwrap();
         std::fs::write(
             root.join("manifests/probe.toml"),
-            format!("kind = \"probe\"\ndisplay_name = \"Probe\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = {launch}\n"),
+            // An agent (it has a mesh section), so a grant may cover it; `screen` is a plain terminal program, which no grant covers.
+            format!("kind = \"probe\"\ndisplay_name = \"Probe\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = {launch}\n[mcp]\nmethod = \"cli_flag\"\npath = \".mcp.json\"\nflag = [\"--mcp-config\", \"{{config_file}}\"]\n"),
         )
         .unwrap();
         std::fs::write(
@@ -511,6 +512,17 @@ fn a_refusal_a_grant_and_the_limits() {
     }
     let c = s.call("agent_start", json!({"kind": "probe"}));
     assert_eq!(s.error_code(c), "mesh.rate_limited");
+    let c = s.call("agent_start", json!({"kind": "probe"}));
+    assert_eq!(s.error_code(c), "mesh.rate_limited");
+    // A looping agent does not fill the log: one rate refusal on record per minute.
+    let rate_records = e
+        .node()
+        .events
+        .events_after(0)
+        .iter()
+        .filter(|ev| matches!(&ev.body, Some(Body::AgentStartRefused(r)) if r.agent_id == stranger && r.code == "mesh.rate_limited"))
+        .count();
+    assert_eq!(rate_records, 1);
 
     // Stopping the parent with its helpers stops them, and its grant ends with it.
     let helpers: Vec<String> = e
@@ -607,4 +619,139 @@ fn the_folder_ceiling_and_a_decision_that_lets_a_helper_ask() {
         e.decide(&p, true, 0, false).is_err(),
         "a decision on a withdrawn request starts nothing"
     );
+}
+
+#[test]
+fn concurrent_starts_shells_recorded_prompts_and_failed_launches() {
+    if !supported() {
+        return;
+    }
+    let e = Env::new("race");
+    let parent = e.launch(&e.folder, "probe");
+    // Two connections of one agent ask at the same moment: one request reaches the user, the other is refused.
+    let (mut a, mut b) = (e.mcp(&parent), e.mcp(&parent));
+    let ca = a.call("agent_start", json!({"kind": "probe", "prompt": "one"}));
+    let cb = b.call("agent_start", json!({"kind": "probe", "prompt": "two"}));
+    let p = e.request_of(&parent);
+    std::thread::sleep(Duration::from_millis(300));
+    let waiting = e
+        .node()
+        .approvals
+        .waiting()
+        .into_iter()
+        .filter(|w| w.agent_id == parent)
+        .count();
+    assert_eq!(waiting, 1);
+    e.decide(&p, false, 0, false).unwrap();
+    let mut codes = vec![a.error_code(ca), b.error_code(cb)];
+    codes.sort();
+    assert_eq!(codes, vec!["mesh.helper_limit", "mesh.start_denied"]);
+
+    // A plain terminal program is never covered by a grant, and the request says so.
+    let call = a.call("agent_start", json!({"kind": "screen"}));
+    let p = e.request_of(&parent);
+    assert_eq!(
+        serde_json::from_str::<Value>(&p.detail).unwrap()["grant_allowed"],
+        false
+    );
+    e.decide(&p, true, 3, true).unwrap();
+    let (v, is_error) = a.result(call);
+    assert!(!is_error, "{v}");
+    assert!(e.node().approvals.helper_grants().is_empty());
+    let resolved = e
+        .node()
+        .events
+        .events_after(0)
+        .into_iter()
+        .find_map(|ev| match ev.body {
+            Some(Body::ApprovalResolved(r)) if r.approval_id == p.id => Some(r),
+            _ => None,
+        });
+    assert_eq!(
+        resolved.map(|r| (r.helper_grant, r.helpers_may_start)),
+        Some((0, false))
+    );
+
+    // Commands for the agent itself are refused; a relative folder is below the asker's own.
+    for bad in ["!rm -rf ~", "/clear"] {
+        let c = a.call("agent_start", json!({"kind": "probe", "prompt": bad}));
+        assert_eq!(a.error_code(c), "protocol.invalid_message", "{bad:?}");
+    }
+    let call = b.call(
+        "agent_start",
+        json!({"kind": "probe", "folder": "sub", "prompt": "in sub"}),
+    );
+    let p = e.request_of(&parent);
+    let detail: Value = serde_json::from_str(&p.detail).unwrap();
+    assert_eq!(
+        Path::new(detail["folder"].as_str().unwrap()),
+        agora_platform::canonicalize_plain(&e.folder.join("sub")).unwrap()
+    );
+    assert_eq!(detail["inside"], true);
+    // The folder went away before the user answered: nothing starts, no grant is given, and the failure is on record.
+    std::fs::remove_dir_all(e.folder.join("sub")).unwrap();
+    e.decide(&p, true, 3, false).unwrap();
+    assert!(b.result(call).1);
+    let events = e.node().events.events_after(0);
+    assert!(events.iter().any(|ev| matches!(&ev.body, Some(Body::ApprovalResolved(r)) if r.approval_id == p.id && r.approved && r.helper_grant == 0)));
+    assert!(events.iter().any(|ev| matches!(&ev.body, Some(Body::AgentStartRefused(r)) if r.agent_id == parent && r.folder.ends_with("sub"))));
+    assert!(e.node().approvals.helper_grants().is_empty());
+}
+
+#[test]
+fn granted_prompts_are_recorded_and_waits_are_capped() {
+    if !supported() {
+        return;
+    }
+    let e = Env::new("record");
+    let parent = e.launch(&e.folder, "probe");
+    let mut m = e.mcp(&parent);
+    let call = m.call(
+        "agent_start",
+        json!({"kind": "probe", "prompt": "first task"}),
+    );
+    let p = e.request_of(&parent);
+    e.decide(&p, true, 3, false).unwrap();
+    let (v, _) = m.result(call);
+    let first = v["agent_id"].as_str().unwrap().to_string();
+    // A worktree start is not what the grant covered: it asks (refused here).
+    let call = m.call("agent_start", json!({"kind": "probe", "worktree": true}));
+    let c = m.error_code(call);
+    assert!(
+        c == "protocol.invalid_message",
+        "a plain folder has no git root: {c}"
+    );
+    // Under the grant nobody is asked, but the prompt is on record as the parent's message to its helper.
+    let call = m.call(
+        "agent_start",
+        json!({"kind": "probe", "prompt": "granted task"}),
+    );
+    let (v, is_error) = m.result(call);
+    assert!(!is_error, "{v}");
+    let second = v["agent_id"].as_str().unwrap().to_string();
+    let events = e.node().events.events_after(0);
+    for (helper, text) in [(&first, "first task"), (&second, "granted task")] {
+        assert!(
+            events.iter().any(|ev| matches!(&ev.body, Some(Body::MessagePosted(mp)) if mp.from_agent_id == parent && mp.to == *helper && mp.body == text)),
+            "{helper}"
+        );
+    }
+    // Text that would show differently from what it is, or edit the agent's memory, is refused.
+    for bad in ["ok\u{202e}gnp.exe", "  # remember this"] {
+        let c = m.call("agent_start", json!({"kind": "probe", "prompt": bad}));
+        assert_eq!(m.error_code(c), "protocol.invalid_message", "{bad:?}");
+    }
+    // At most eight waits per connection.
+    let mut ids = Vec::new();
+    for _ in 0..8 {
+        ids.push(m.call(
+            "agent_wait",
+            json!({"agent_id": first, "state": "blocked", "timeout_s": 30}),
+        ));
+    }
+    let ninth = m.call(
+        "agent_wait",
+        json!({"agent_id": first, "state": "blocked", "timeout_s": 30}),
+    );
+    assert_eq!(m.error_code(ninth), "mesh.too_many_asks");
 }

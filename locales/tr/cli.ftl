@@ -22,6 +22,7 @@ cli-usage =
       agora hub backup [DOSYA] [--keep N] [--hub-dir DİZİN]
       agora hub restore DOSYA [--hub-dir DİZİN]
       agora node enroll --hub URL --ca FILE --code CODE --id NAME
+      agora panel
       agora node trust CİHAZ_ID AÇIK_ANAHTAR_HEX [--data DİZİN]
       agora tui [--hub ADRES:PORT --ca DOSYA --code KOD] [--hub-dir DİZİN]
       agora update [--check] [--version X] [--release-url URL] [--release-key DOSYA] [--unsigned]
@@ -138,3 +139,6 @@ cli-adapter-listed = { $name } { $version } (yayımcı { $publisher })
 cli-adapter-listed-revoked = { $name } { $version } (yayımcı { $publisher }, en yeni dizinde iptal edilmiş: kaldırın ya da yeni bir yayımcı bulun)
 
 cli-project-identity = Proje kimliği: { $id } (klasör: { $path }). .agent-project.json dosyasını projenin diğer kopyalarına taşıyın.
+
+cli-panel = Hub'ın panelini tarayıcıda şu adreste açın: { $url }. Bu makinenin tarayıcısı hub'ın sertifikasına güvenmeli: { $ca } dosyasını sertifika otoritesi olarak içe aktarın (Windows'ta: certutil -user -addstore Root { $ca }). Giriş için hub makinesinde "agora hub login" ile alınan kodu kullanın.
+cli-panel-none = Bu makine bir hub'a kayıtlı değil, açılacak panel yok. Önce "agora node enroll" ile kaydedin.

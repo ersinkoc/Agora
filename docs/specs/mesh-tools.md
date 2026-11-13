@@ -115,26 +115,42 @@ the node answers them itself (`agora-node::spawn`), not the broker. The caller i
   `approval.expired`. The decision is signed over a hash of the request as announced, so a hub cannot change what starts. The call
   does not block the agent's other calls; if the connection ends first, the request is withdrawn.
 - **A grant.** The decision may allow "up to N helpers of this kind in this folder" (N at most 10, this start included) and, separately,
-  that the helpers it starts may ask in turn. Later starts that match the grant (same asking agent, kind and folder) start at once.
-  A grant ends when the asking agent exits or is stopped, or when revoked (`GrantRevoke` with the approval id; `GrantList` shows it).
-- **Never wider than the asker.** The folder defaults to the asker's own; one below it is allowed; `worktree: true` makes the helper its
-  own worktree of it. Another folder is asked about with `inside: false` shown to the user, never covered by a grant, and a helper
-  started there cannot ask for helpers. A helper's helper must stay inside. Folder rules of ADR-0052 apply. On a node that confines
-  agents (ADR-0047), a helper of another kind whose manifest the owner trusts to widen confinement is refused
-  (`node.policy_denied`, rule `sandbox.trust_manifest`). Another machine is not supported yet (`protocol.capability_missing`,
-  `mesh.spawn.remote`).
+  that the helpers it starts may ask in turn. Later starts that match the grant (same asking agent, kind, folder and `worktree`
+  choice) start at once. A grant ends when the asking agent exits or is stopped, or when revoked (`GrantRevoke` with the approval id;
+  `GrantList` shows it). No grant is given for a shell or a plain terminal program (kind `shell`, a known shell as the program, or a
+  manifest with no screen rules, mesh, adapter or structured mode): there it would mean "run any N programs without asking". The
+  request's `grant_allowed` says whether one may be given.
+- **Never wider than the asker.** The folder defaults to the asker's own; one below it is allowed (a relative `folder` is taken below
+  the asker's own); `worktree: true` makes the helper its own worktree of it. Another folder is asked about with `inside: false`
+  shown to the user, never covered by a grant, and a helper started there cannot ask for helpers. A helper's helper must stay
+  inside. Folder rules of ADR-0052 apply. On a node that confines agents (ADR-0047), a helper of another kind whose manifest the
+  owner trusts to widen confinement is refused (`node.policy_denied`, rule `sandbox.trust_manifest`). Another machine is not
+  supported yet (`protocol.capability_missing`, `mesh.spawn.remote`).
 - **Limits** (`mesh.helper_limit` with `rule`): a helper cannot start helpers unless the decision that started it allowed it, and a
-  helper's helper never can (`depth`); 3 running helpers per agent (`helpers`); one start waiting for the user per agent (`pending`);
-  a first prompt over 16 KiB (`prompt`). Six `agent_start` calls a minute per agent (`mesh.rate_limited`), and the node's own agent
-  limit (`node.resource_limit`). A refusal before asking is an `AgentStartRefused` event.
+  helper's helper never can (`depth`); 3 running helpers per agent (`helpers`); one start in progress or waiting for the user per
+  agent (`pending`; the slot is taken before the limits are checked and held until the start ends, so concurrent calls cannot pass
+  them together); a first prompt over 16 KiB (`prompt`). Six `agent_start` calls a minute per agent (`mesh.rate_limited`), and the
+  node's own agent limit (`node.resource_limit`). A refusal before asking is an `AgentStartRefused` event (rate refusals at most one a
+  minute per agent; agent-written fields cut to 256 bytes).
+- **Prompt rules** (`protocol.invalid_message`, `field = prompt`): no control characters other than line breaks and tabs, no
+  bidirectional override or isolate and no zero-width characters (U+202A-202E, U+2066-2069, U+200B-200F, U+FEFF; also refused in
+  `folder`), and no leading `!`, `/` or `#` (a shell escape, a slash command or a memory edit in common agents).
 - **Following.** `agent_wait` and `agent_output` answer only for helpers the caller started (anything else is `agent.not_found`).
-  `agent_wait` ends when the helper reaches the state or exits (`state: "exited"`). `agent_output` is the bottom of the live screen
-  (never scrollback) or, for a chat agent without a terminal, the end of its transcript; at most 16 KiB. It is untrusted text.
-- **The first prompt** is typed into the helper once its screen settles (idle or blocked) or after 8 seconds, then Enter (line breaks
-  and tabs are typed as spaces); a chat agent gets it as its first request. A prompt with any other control character is refused
-  (`protocol.invalid_message`, `field = prompt`): typed into a terminal it would be keys the user never saw. Later messages from the parent are ordinary mesh messages (information, not authority).
+  `agent_wait` ends when the helper reaches the state or exits (`state: "exited"`); a connection may have 8 waits open
+  (`mesh.too_many_asks`), all read from one view of the node per poll. `agent_output` is the bottom of the live screen (never
+  scrollback) or, for a chat agent without a terminal, the end of its transcript; at most 16 KiB. It is untrusted text.
+- **The first prompt** is typed into the helper only when its screen is idle (line breaks and tabs as spaces), and Enter follows
+  150 ms later only if the screen is not blocked: a trust or permission dialog (blocked) is never answered by it. If the screen
+  is not idle within 120 seconds, the prompt is not typed and is left for the user, recorded as an `AgentStartRefused` with
+  `code = agent.blocked` (its `folder` holds the helper's id). A chat agent gets it as its first request once idle. Every helper's
+  first prompt, granted starts included, is recorded as a `MessagePosted` from the parent to the helper (the text, or
+  `sha256:<hex>` above 4 KiB). Later messages from the parent are ordinary mesh messages (information, not authority).
 - **Stopping.** `AgentStop { stop_helpers: true }` stops the agent's running helpers and theirs too. A parent that exits on its own leaves
   its helpers running.
+- **Restart.** Which helper an agent started is kept in the node's memory (the supervisor's parent links and the spawner's record of
+  what each decision allowed). Agents end with the node process, so a restarted node starts with no helpers. An agent the supervisor
+  knows as a helper but whose decision record is gone may not ask for helpers, and helper counts use the supervisor's links, so a
+  lost record never widens the limits.
 
 ## Implementation status
 `agora-mesh::broker::Mesh` implements the tools' logic as deterministic in-memory state: registry, messages with
