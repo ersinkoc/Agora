@@ -744,13 +744,23 @@ impl DeviceTrust {
             return Err(Error::new(ErrorCode::DeviceEndorsementExpired)
                 .with("device_id", e.device_id.as_str()));
         }
-        if read_revocations(&self.revocations())
+        let revocations = read_revocations(&self.revocations());
+        if revocations
             .iter()
             .any(|(d, at)| *d == e.device_id && *at >= began)
         {
             return Err(
                 Error::new(ErrorCode::DeviceRevoked).with("device_id", e.device_id.as_str())
             );
+        }
+        // Nor what its endorser signed before the endorser itself was revoked (the hub keeps and replays it), even if the endorser
+        // was trusted again since.
+        if revocations
+            .iter()
+            .any(|(d, at)| *d == e.endorser_device_id && *at >= e.issued_at_ms)
+        {
+            return Err(Error::new(ErrorCode::DeviceRevoked)
+                .with("device_id", e.endorser_device_id.as_str()));
         }
         // Never longer than the endorser's own trust here.
         let expires = match effective_expiry(&entries, &endorser) {
@@ -806,7 +816,8 @@ impl DeviceTrust {
                     Some(end) => end,
                     None => x.expires_ms,
                 };
-                if !wider || ran_out.is_some_and(|t| e.issued_at_ms < t) {
+                // `began` (never later than this node's clock): a signer's clock running ahead cannot reach into the last minutes.
+                if !wider || ran_out.is_some_and(|t| began < t) {
                     return Err(forbidden());
                 }
                 false

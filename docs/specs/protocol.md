@@ -567,7 +567,8 @@ or when a device it already trusts signs an **endorsement** of it. The hub only 
   endorsed down with it; a renewal by use happens only while the endorser's current limit still covers the device. For a device the node already trusts through an endorsement: its own endorser may renew it, also after it
   ran out, while that endorser's current limit still covers what it was given (it keeps its endorser and limits); another endorser
   may take it over only if its current limit covers both the device's current limit and its current endorser's, and only with an
-  endorsement signed at or after the device's trust ran out (its effective expiry, or its own expiry when its chain is broken);
+  endorsement whose start (the earlier of its `issued_at_ms` and the node's clock) is at or after the device's trust ran out
+  (its effective expiry, or its own expiry when its chain is broken);
   `auth.forbidden` otherwise. A limit naming a project the file cannot hold (empty, or with a comma or a space) refuses the endorsement
   (`node.policy_denied`, rule `device.projects`). A revocation dated more than 5 minutes ahead of the node's or the hub's clock is
   refused. The hub carries an endorsement only to machines the device's person may act on, a revocation to every machine. It then
@@ -583,7 +584,7 @@ or when a device it already trusts signs an **endorsement** of it. The hub only 
   The hub verifies it under the revoker's registered key before keeping it, keeps each signature once, at most 256 per person
   (`node.resource_limit` `{resource: revocations}`), and forgets one after 400 days (every endorsement signed before it expired long
   before). A node applies one signed by a device it trusts at once: the device is no longer trusted there if its trust there began
-  (`since`) at or before `issued_at_ms`, and neither are the devices it endorsed; endorsements of it signed at or before `issued_at_ms`
+  (`since`) at or before `issued_at_ms`, and neither are the devices it endorsed; endorsements of it, and endorsements it signed, at or before `issued_at_ms`
   are refused from then on. A revocation sent again later never removes trust given after it (an endorsement signed later, or the
   owner trusting it again on the machine with `agora node trust ID KEY`).
 - **Fingerprint.** What people compare: the first 12 bytes (96 bits) of the SHA-256 of the 65-byte key, lowercase hex in groups of 4

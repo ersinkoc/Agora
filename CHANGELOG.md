@@ -35,7 +35,8 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
   approved a device can renew that approval (keeping its limits), and approvals reach only the machines their person works on.
   Limiting or narrowing a device on a machine limits the devices it approved too, at once; the device that approved a device can
   renew it even after it ran out; another trusted device can take it over only if it is at least as wide as the device and the
-  one that approved it, and only with an approval signed after it ran out.
+  one that approved it, and only with an approval signed after it ran out
+  (by the machine's clock). Approvals a device signed before it was removed stay refused, even if it is trusted again.
 - The window registers this browser with the hub when it connects. "This device" shows its fingerprint, which machines trust it,
   "Ask another device to approve" for the ones that do not (the command to run on the machine stays as the fallback), and your
   other devices with their fingerprints, where they are trusted, and Remove. On a device the machines already trust, a card shows
