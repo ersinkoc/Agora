@@ -874,7 +874,12 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
             Err(ClientError::Refused | ClientError::TooMany) => {
                 token = None;
                 if first || !local {
-                    say.err(key!("tui-signin-failed"), &[]);
+                    // On the hub's machine nobody is asked for a code: the client makes its own.
+                    if local {
+                        say.err(key!("tui-signin-failed-local"), &[]);
+                    } else {
+                        say.err(key!("tui-signin-failed"), &[]);
+                    }
                     return ExitCode::from(1);
                 }
                 std::thread::sleep(Duration::from_secs(2));

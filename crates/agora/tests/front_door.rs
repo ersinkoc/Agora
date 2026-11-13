@@ -112,7 +112,7 @@ fn help_prints_usage_and_a_first_run_without_a_terminal_explains_itself() {
     let home = tmp("first");
     let (code, out, _) = run(&home, &["--help"]);
     assert_eq!(code, 0);
-    assert!(out.contains("agora [--ui tui|web|none]"), "{out}");
+    assert!(out.contains("agora [--ui tui|web|none [--save]]"), "{out}");
 
     let (code, _, err) = run(&home, &[]);
     assert_eq!(code, 2, "{err}");
@@ -229,10 +229,12 @@ fn agora_brings_the_machine_up_and_killing_the_interface_leaves_agents_running()
     assert!(out.contains("Agora is running"), "{out}");
     assert!(!out.contains("Starting"), "{out}");
     assert_eq!((locks("hub"), locks("node")), (hub_lock, node_lock));
-    // `--ui` is remembered.
-    assert!(std::fs::read_to_string(home.join("machine.toml"))
-        .unwrap()
-        .contains("ui = \"none\""));
+    // `--ui` alone applies to this run only; with `--save` it becomes the default.
+    let saved = || std::fs::read_to_string(home.join("machine.toml")).unwrap();
+    assert!(saved().contains("ui = \"tui\""), "{}", saved());
+    let (code, out, err) = run(&home, &["--ui", "none", "--save"]);
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(saved().contains("ui = \"none\""), "{}", saved());
 
     // `agora down` stops the node, then the hub.
     let (code, out, err) = run(&home, &["down"]);

@@ -230,11 +230,16 @@ fn save(home: &Path, m: &Machine) -> std::io::Result<()> {
     agora_platform::write_private(&machine_path(home), m.to_toml().as_bytes())
 }
 
-/// The machine's name as a node id: lower case letters, digits, `.`, `_` and `-` (anything else becomes `-`), at most 64 characters.
+/// The host name up to its first dot: `mac.lan` is `mac`.
+fn short_name(hostname: &str) -> String {
+    let h = hostname.trim();
+    h.split('.').next().unwrap_or(h).to_string()
+}
+
+/// The machine's short name (`mac` for `mac.lan`) as a node id: lower case letters, digits, `_` and `-` (anything else becomes
+/// `-`), at most 64 characters.
 fn node_id_from(hostname: Option<String>) -> String {
-    let id: String = hostname
-        .unwrap_or_default()
-        .trim()
+    let id: String = short_name(&hostname.unwrap_or_default())
         .to_lowercase()
         .chars()
         .map(|c| {
@@ -369,15 +374,18 @@ fn ask(
     };
     let mut names = vec!["localhost".to_string()];
     if lan {
-        if let Some(h) = agora_platform::hostname() {
-            let h: String = h
-                .trim()
-                .to_lowercase()
-                .chars()
-                .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.'))
-                .collect();
-            if !h.is_empty() && !names.contains(&h) {
-                names.push(h);
+        if let Some(full) = agora_platform::hostname() {
+            // The short name (`mac`) and, as a certificate name only, the full one (`mac.lan`).
+            for h in [short_name(&full), full] {
+                let h: String = h
+                    .trim()
+                    .to_lowercase()
+                    .chars()
+                    .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.'))
+                    .collect();
+                if !h.is_empty() && !names.contains(&h) {
+                    names.push(h);
+                }
             }
         }
         names.extend(lan_ipv4().iter().map(Ipv4Addr::to_string));
@@ -398,7 +406,7 @@ fn ask(
     }))
 }
 
-/// `agora [--ui tui|web|none]`.
+/// `agora [--ui tui|web|none [--save]]`: `--ui` alone applies to this run; with `--save` it becomes the default.
 pub fn front_door(say: &Say, o: &Opts) -> ExitCode {
     let ui = match o.ui.as_deref().map(Ui::parse) {
         None => None,
@@ -411,7 +419,7 @@ pub fn front_door(say: &Say, o: &Opts) -> ExitCode {
     let h = home();
     let m = match load(&h) {
         Some(mut m) => {
-            if let Some(u) = ui.filter(|u| *u != m.ui) {
+            if let Some(u) = ui.filter(|u| o.save && *u != m.ui) {
                 m.ui = u;
                 if let Err(e) = save(&h, &m) {
                     return failed(say, &e.to_string());
@@ -451,7 +459,7 @@ pub fn front_door(say: &Say, o: &Opts) -> ExitCode {
                 &mut std::io::stdout(),
                 &h,
                 &cwd,
-                ui.unwrap_or(Ui::Tui),
+                ui.filter(|_| o.save).unwrap_or(Ui::Tui),
             );
             match asked {
                 Ok(Some(m)) => {
@@ -472,7 +480,7 @@ pub fn front_door(say: &Say, o: &Opts) -> ExitCode {
     if let Err(code) = up(say, &h, &m) {
         return code;
     }
-    open(say, &m, m.ui)
+    open(say, &m, ui.unwrap_or(m.ui))
 }
 
 /// `agora web`: makes sure this machine's Agora runs, then opens it in the browser, signed in.
@@ -515,7 +523,10 @@ fn open(say: &Say, m: &Machine, ui: Ui) -> ExitCode {
         Ui::Web => {
             let code = match new_login_code(&m.hub_dir) {
                 Ok(c) => c,
-                Err(e) => return failed(say, &e),
+                Err(e) => {
+                    say.err(key!("frontdoor-web-failed"), &[("reason", e.into())]);
+                    return ExitCode::from(1);
+                }
             };
             let Some(port) = m.port() else {
                 return failed(say, &m.hub_listen);
@@ -1016,10 +1027,8 @@ mod tests {
 
     #[test]
     fn a_hostname_becomes_a_valid_node_id() {
-        assert_eq!(
-            node_id_from(Some("My Laptop.local\n".into())),
-            "my-laptop.local"
-        );
+        assert_eq!(node_id_from(Some("My Laptop.local\n".into())), "my-laptop");
+        assert_eq!(node_id_from(Some("mac.lan".into())), "mac");
         assert_eq!(node_id_from(Some("--Box (2)".into())), "box--2");
         assert_eq!(node_id_from(None), "this-machine");
         assert_eq!(node_id_from(Some("x".repeat(80))).len(), 64);

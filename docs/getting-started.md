@@ -16,7 +16,7 @@ Three steps on one machine (Linux, macOS or Windows). The details are in ADR-006
    `~/.agora/machine.toml` (readable by you only, never a secret).
 3. **Use it.** `agora` starts the hub and this machine's node in the background (if they are not running), connects the node to
    the hub, and opens the terminal client signed in; no code to copy. `agora web` opens the browser instead, signed in (the browser
-   warns about the hub's own certificate until you trust it). `agora --ui web|tui|none` chooses what plain `agora` opens from now on.
+   warns about the hub's own certificate until you trust it). `agora --ui web|tui|none` opens that once; add `--save` to make it what plain `agora` opens from now on.
 
 Closing or killing the window changes nothing: the hub, the node and your agents keep running. Next time, `agora` only opens the
 window again.

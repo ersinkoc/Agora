@@ -1,6 +1,7 @@
 # Terminal istemcisi (ADR-0043). Arayüz sözlüğü: makine, "Sizi bekliyor", "Bitti" (docs/ux/visual-language.md).
 tui-connecting = { $hub } adresine bağlanılıyor…
 tui-lost = { $hub } ile bağlantı koptu. Yeniden deneniyor…
+tui-signin-failed-local = Bu makinenin hub'ında oturum açılamadı. `agora` komutunu yeniden çalıştırın; `agora status` çalışıp çalışmadığını ve günlüğünün yerini gösterir.
 tui-signin-failed = Hub kodu kabul etmedi. "agora hub login" ile yeni bir kod alın.
 tui-need-hub = Hub'ınızın adresini belirtin: bu komutu hub'ın çalıştığı makinede çalıştırın ya da --hub ADRES:PORT --ca DOSYA --code KOD verin.
 tui-quit-hint = Çıkmak için Ctrl-C

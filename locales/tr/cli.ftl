@@ -2,7 +2,7 @@
 
 cli-usage =
     Kullanım:
-      agora [--ui tui|web|none]
+      agora [--ui tui|web|none [--save]]
       agora web
       agora status
       agora down
@@ -169,8 +169,9 @@ frontdoor-starting = { $role } başlatılıyor…
 frontdoor-not-ready = { $role } { $seconds } sn içinde başlamadı. Yazdıkları: { $log }
 frontdoor-not-linked = Bu makine { $seconds } sn içinde hub'ına bağlanmadı. Yazdıkları: { $log }
 frontdoor-running = Agora bu makinede çalışıyor. Bu pencereyi kapatsanız da çalışmaya devam eder; `agora status` durumu gösterir, `agora down` durdurur.
+frontdoor-web-failed = Tarayıcıda oturum açılamadı: { $reason }. `agora web` komutunu yeniden çalıştırın; `agora status` Agora'nın çalışıp çalışmadığını gösterir.
 frontdoor-web-opened = Agora tarayıcınızda, oturum açılmış olarak açıldı.
-frontdoor-web-url = Oturum açmak için bu adresi tarayıcınızda açın (bir kez, 10 dakika geçerli): { $url }
+frontdoor-web-url = Oturum açmak için bu adresi tarayıcınızda açın (bir kez, 10 dakika geçerli; süresi dolduysa `agora web` komutunu yeniden çalıştırın): { $url }
 status-machine = Bu makinenin Agora'sı ({ $path }); arayüz: { $ui }
 status-running = { $role } çalışıyor (süreç { $pid }, sürüm { $version })
 status-running-other = { $role } çalışıyor (`agora` tarafından başlatılmadı)

@@ -2,7 +2,7 @@
 
 cli-usage =
     Usage:
-      agora [--ui tui|web|none]
+      agora [--ui tui|web|none [--save]]
       agora web
       agora status
       agora down
@@ -169,8 +169,9 @@ frontdoor-starting = Starting the { $role }…
 frontdoor-not-ready = The { $role } did not start within { $seconds } s. What it wrote is in { $log }
 frontdoor-not-linked = This machine did not connect to its hub within { $seconds } s. What it wrote is in { $log }
 frontdoor-running = Agora is running on this machine. It keeps running when you close this window; `agora status` shows it, `agora down` stops it.
+frontdoor-web-failed = Could not sign the browser in: { $reason }. Run `agora web` again; `agora status` shows whether Agora is running.
 frontdoor-web-opened = Opened Agora in your browser, signed in.
-frontdoor-web-url = Open this address in your browser to sign in (it works once, for 10 minutes): { $url }
+frontdoor-web-url = Open this address in your browser to sign in (it works once, for 10 minutes; if it expired, run `agora web` again): { $url }
 status-machine = This machine's Agora ({ $path }); interface: { $ui }
 status-running = The { $role } is running (process { $pid }, version { $version })
 status-running-other = The { $role } is running (it was not started by `agora`)

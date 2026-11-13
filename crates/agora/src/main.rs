@@ -119,6 +119,7 @@ pub(crate) struct Opts {
     who: Option<String>,
     root_key: Option<PathBuf>,
     ui: Option<String>,
+    save: bool,
     positional: Vec<String>,
 }
 
@@ -166,6 +167,7 @@ fn parse(args: &[String]) -> Option<Opts> {
             "--role" => o.role = Some(it.next()?.clone()),
             "--root-key" => o.root_key = Some(it.next()?.into()),
             "--ui" => o.ui = Some(it.next()?.clone()),
+            "--save" => o.save = true,
             s if s.starts_with("--") => return None,
             _ => o.positional.push(a.clone()),
         }
