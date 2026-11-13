@@ -1,5 +1,5 @@
 import { ApprovalBanner } from './ApprovalBanner';
-import { Suspense, lazy, useEffect, useMemo, useRef, useState, useSyncExternalStore, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { t } from '../i18n';
 import { type AgentTileModel, machineKey, needsAttention, sortFleet, type ResumeAction } from '../model';
 import { money, type UsageSummary } from '../net/usage';
@@ -28,6 +28,13 @@ import { forgetReasonKey } from '../net/forget';
 import { Resizer } from './Resizer';
 import type { StartChoice } from './StartApproval';
 import { HelperGrants, type HelperGrant } from './HelperGrants';
+import { Details, type DetailsTab } from './Inspector';
+import { type Action, findPane, reduce, tabsOf, visiblePanes, workspaceOf } from '../layout/engine';
+import { loadWorkspace, saveWorkspace } from '../layout/store';
+import { agentOf, assignAttention } from '../layout/streams';
+import { bindOf, defaultLayout, followOf, panesOf } from '../layout/tree';
+import { Workspace } from '../layout/Workspace';
+import { LayoutMenu } from '../layout/LayoutMenu';
 
 const TerminalView = lazy(() => import('../terminal/TerminalView').then((m) => ({ default: m.TerminalView })));
 
@@ -35,6 +42,12 @@ const MAX_AUTO_PINNED = 4;
 // The search shortcut as the keyboard spells it: ⌘ on Apple machines (the desktop app's WebKit included), Ctrl elsewhere.
 const commandKey = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent) ? '⌘' : 'Ctrl';
 const wide = () => typeof window === 'undefined' || !window.matchMedia || window.matchMedia('(min-width: 1024px)').matches;
+// Below this width the panes are tabs of one group (no tiling on a phone; ADR-0068).
+const NARROW = '(max-width: 699px)';
+const subscribeNarrow = (cb: () => void) => { const m = typeof window !== 'undefined' ? window.matchMedia?.(NARROW) : undefined; m?.addEventListener?.('change', cb); return () => m?.removeEventListener?.('change', cb); };
+const isNarrow = () => typeof window !== 'undefined' && !!window.matchMedia?.(NARROW).matches;
+// The layout's global panels and the details tab that draws each.
+const PANEL_TAB: Record<string, DetailsTab> = { approvals: 'needs', changes: 'changes', tasks: 'board', messages: 'messages', usage: 'cost' };
 
 // The one window, laid out like an editor: the agents on the left as a tree, the terminals you are watching as tabs in the
 // middle (or side by side), details on the right, and a status bar. Everything is derived from props.
@@ -76,8 +89,19 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   const [now, setNow] = useState(Date.now());
   useEffect(() => { const id = setInterval(() => setNow(Date.now()), 15000); return () => clearInterval(id); }, []);
   const saved = useRef(loadLayout()).current;
-  const [pinned, setPinned] = useState<string[]>(saved?.pinned ?? []);
-  const [active, setActive] = useState<string | undefined>(saved?.active);
+  // The panes (ADR-0068): a tree of splits, tab groups and panes, kept for this visit and in this browser.
+  const [stored, setStored] = useState(() => loadWorkspace());
+  const ws = stored.ws;
+  // Every layout change goes through the reducer. One the user makes (not focusing or switching tabs) marks the window as
+  // arranged by them: agents stop opening on their own.
+  const dispatch = useCallback((a: Action, byUser = true) => setStored((cur) => {
+    const next = reduce(cur.ws, a);
+    const touched = cur.touched || (byUser && next !== cur.ws && a.type !== 'focus' && a.type !== 'activate');
+    return next === cur.ws && touched === cur.touched ? cur : { ws: next, touched };
+  }), []);
+  useEffect(() => { saveWorkspace(stored, undefined, 200); }, [stored]);
+  const narrow = useSyncExternalStore(subscribeNarrow, isNarrow, () => false);
+  const [selection, setSelection] = useState<string | undefined>();
   const [projectFilter, setProjectFilter] = useState('');
   const projectOptions = useMemo(() => {
     const groups = new Map<string, { name: string; machines: Set<string> }>();
@@ -89,87 +113,62 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   }, [projectFilter, projectOptions]);
   const chooseProject = (id: string) => {
     setProjectFilter(id);
-    // The first view of a project gets real tabs, so closing a tab always removes what it shows.
-    if (id) setPinned(cur => cur.some(key => fleet.some(a => a.id === key && a.projectId === id)) ? cur : fleet.filter(a => a.projectId === id).slice(0, MAX_AUTO_PINNED).map(a => a.id));
+    // The first view of a project opens its agents, so there is something of it to watch.
+    if (id && !shownAgents.some((key) => fleet.some((a) => a.id === key && a.projectId === id))) {
+      for (const a of fleet.filter((x) => x.projectId === id).slice(0, MAX_AUTO_PINNED)) dispatch({ type: 'open', agent: a.id, background: true });
+    }
   };
-  const [layout, setLayout] = useState<'single' | 'grid'>(saved?.layout ?? 'single');
   const [, textSize] = useState(0); // the size buttons follow the stored choice
   useEffect(() => { const on = () => textSize((n) => n + 1); window.addEventListener('agora-terminal-size', on); return () => window.removeEventListener('agora-terminal-size', on); }, []);
   const [showAgents, setShowAgents] = useState(saved?.showAgents ?? wide());
   const [showDetails, setShowDetails] = useState(saved?.showDetails ?? wide());
   const [leftWidth, setLeftWidth] = useState(saved?.leftWidth ?? 272);
   const [rightWidth, setRightWidth] = useState(saved?.rightWidth ?? 336);
-  const touched = useRef(saved?.touched ?? false);
   const [reviewing, setReviewing] = useState<string | undefined>();
   const [browsing, setBrowsing] = useState<string | undefined>();
   const [history, setHistory] = useState<string | undefined>();
 
-  // Until the user picks for themselves, watch the first few agents (those that need you come first). A new agent joins
-  // while there is room; one that is gone leaves. Nothing is reordered, so a terminal never jumps under your hands.
+  // Until the user arranges the window, watch the first few agents (those that need you come first). A new agent joins while there
+  // is room; one that is gone leaves (its tab closes, a pane of its own stays empty). Nothing is reordered, so a terminal never jumps.
   useEffect(() => {
-    setPinned((cur) => {
-      // Before the first snapshot there is no fleet to compare with: keep what was open rather than dropping it.
-      if (fleet.length === 0) return cur;
-      const alive = cur.filter((id) => fleet.some((a) => a.id === id));
-      const room = touched.current ? [] : fleet.filter((a) => !a.closed && a.state !== 'finished' && a.state !== 'unknown' && !alive.includes(a.id)).slice(0, Math.max(0, MAX_AUTO_PINNED - alive.length)).map((a) => a.id);
-      return alive.length === cur.length && room.length === 0 ? cur : [...alive, ...room];
+    // Before the first snapshot there is no fleet to compare with: keep what was open rather than dropping it.
+    if (fleet.length === 0) return;
+    setStored((cur) => {
+      let next = reduce(cur.ws, { type: 'prune', alive: new Set(fleet.map((a) => a.id)) });
+      if (!cur.touched) {
+        const shown = new Set(panesOf(next.layout.root).map(bindOf).filter((x): x is string => !!x));
+        const room = fleet.filter((a) => !a.closed && a.state !== 'finished' && a.state !== 'unknown' && !shown.has(a.id)).slice(0, Math.max(0, MAX_AUTO_PINNED - shown.size));
+        for (const a of room) next = reduce(next, { type: 'open', agent: a.id, background: true });
+      }
+      return next === cur.ws ? cur : { ...cur, ws: next };
     });
-  }, [fleet]);
-  useEffect(() => { saveLayout({ pinned, active, layout, touched: touched.current, showAgents, showDetails, leftWidth, rightWidth }); }, [pinned, active, layout, showAgents, showDetails, leftWidth, rightWidth]);
-  useEffect(() => {
-    setActive((cur) => (cur && pinned.includes(cur) ? cur : pinned[0]));
-  }, [pinned]);
+  }, [fleet, stored.touched]);
 
-  // Tabs are rearranged by dragging one onto another: the dragged tab takes that tab's place.
-  const [dragging, setDragging] = useState<string | undefined>();
-  const move = (from: string, to: string) => {
-    touched.current = true;
-    setPinned((cur) => {
-      const a = cur.indexOf(from);
-      const b = cur.indexOf(to);
-      if (a < 0 || b < 0 || a === b) return cur;
-      const next = [...cur];
-      next.splice(a, 1);
-      next.splice(b, 0, from);
-      return next;
-    });
-  };
-  const close = (id: string) => { touched.current = true; setPinned((cur) => cur.filter((x) => x !== id)); };
-  // The tree: a closed agent opens as a tab and takes focus; the one in focus closes; an open one comes to the front.
+  // Panes that follow attention each show a different agent that needs you, oldest first, and keep it while it still does.
+  const attentionPanes = useMemo(() => panesOf(ws.layout.root).filter((p) => followOf(p) === 'attention').map((p) => p.id), [ws.layout]);
+  const waiting = useMemo(() => needsAttention(fleet).map((a, i) => [a, i] as const).sort(([a, i], [b, j]) => (a.since ?? Infinity) - (b.since ?? Infinity) || i - j).map(([a]) => a.id), [fleet]);
+  const lastAttention = useRef<ReadonlyMap<string, string>>(new Map());
+  const attentionMap = useMemo(() => assignAttention(attentionPanes, lastAttention.current, waiting), [attentionPanes, waiting]);
+  useEffect(() => { lastAttention.current = attentionMap; }, [attentionMap]);
+  const bindings = useMemo(() => ({ selection, attention: attentionMap }), [selection, attentionMap]);
+  const allPanes = panesOf(ws.layout.root);
+  const shownAgents = [...new Set(allPanes.map((p) => agentOf(p, bindings)).filter((x): x is string => !!x))];
+  const focusedPane = findPane(ws.layout, ws.focus);
+  const current = focusedPane ? fleet.find((a) => a.id === agentOf(focusedPane, bindings)) : undefined;
+  useEffect(() => { saveLayout({ pinned: shownAgents, active: current?.id, layout: 'single', touched: stored.touched, showAgents, showDetails, leftWidth, rightWidth }); },
+    [shownAgents.join('\n'), current?.id, stored.touched, showAgents, showDetails, leftWidth, rightWidth]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // The tree: selecting an agent shows it in a pane that follows the selection; else it opens in the pane in focus (as a tab) or
+  // comes to the front where it is shown; selecting the one in focus closes it.
   const select = (id: string) => {
-    touched.current = true;
-    if (!pinned.includes(id)) { setPinned((cur) => [...cur, id]); setActive(id); }
-    else if (active === id) close(id);
-    else setActive(id);
+    setSelection(id);
+    if (allPanes.some((p) => followOf(p) === 'selection')) return;
+    if (focusedPane && bindOf(focusedPane) === id && visiblePanes(ws, narrow).some((p) => p.id === focusedPane.id)) dispatch({ type: 'close', pane: focusedPane.id });
+    else dispatch({ type: 'open', agent: id });
   };
+  const presetAgents = () => [...new Set([...shownAgents, ...fleet.filter((a) => !a.closed).map((a) => a.id)])];
+  const resetLayout = () => setStored({ ws: workspaceOf(defaultLayout()), touched: false });
 
-  const tabs = pinned.map((id) => fleet.find((a) => a.id === id)).filter((a): a is AgentTileModel => !!a && (!projectFilter || a.projectId === projectFilter));
-  // The tab row as a tab list: arrows (mirrored right to left) and Home/End move between tabs, Delete or Backspace closes the
-  // focused one; only the selected tab is a stop for Tab, so the row is one stop on the way to the terminal.
-  const tabKey = (e: ReactKeyboardEvent<HTMLElement>, id: string) => {
-    const ids = tabs.map((x) => x.id);
-    const at = ids.indexOf(id);
-    const rtl = getComputedStyle(e.currentTarget).direction === 'rtl';
-    const step = { ArrowRight: rtl ? -1 : 1, ArrowLeft: rtl ? 1 : -1 }[e.key];
-    let to: string | undefined;
-    if (e.key === 'Enter' || e.key === ' ') to = id;
-    else if (step !== undefined) to = ids[(at + step + ids.length) % ids.length];
-    else if (e.key === 'Home') to = ids[0];
-    else if (e.key === 'End') to = ids[ids.length - 1];
-    else if (e.key === 'Delete' || e.key === 'Backspace') {
-      e.preventDefault();
-      const next = ids[at + 1] ?? ids[at - 1];
-      close(id);
-      if (next) { setActive(next); requestAnimationFrame(() => document.getElementById(`tab-${next}`)?.focus()); }
-      return;
-    } else return;
-    e.preventDefault();
-    if (!to) return;
-    setActive(to);
-    document.getElementById(`tab-${to}`)?.focus();
-  };
-  const current = tabs.find((a) => a.id === active) ?? tabs[0];
-  const shown = layout === 'grid' ? tabs.slice(0, MAX_AUTO_PINNED) : current ? [current] : [];
   const attention = needsAttention(fleet);
   const changed = [...new Map(fleet.filter((a) => (a.filesChanged ?? 0) > 0 && (!projectFilter || a.projectId === projectFilter))
     .map((a) => [a.workspaceRef ? `${a.workspaceRef.node}/${a.workspaceRef.id}` : a.id, a])).values()]
@@ -180,17 +179,18 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   const cols = `${showAgents ? `${leftWidth}px ` : ''}minmax(0,1fr)${showDetails ? ` ${rightWidth}px` : ''}`
   const find = (id?: string) => fleet.find((a) => a.id === id);
 
-  // Editor habits: Alt+1…9 picks a tab, Ctrl/⌘+B hides or shows the agent list.
+  // Editor habits: Alt+1…9 picks a tab of the group in focus (or a pane, when it has no tabs), Ctrl/⌘+B hides or shows the agent list.
   useEffect(() => {
     const on = (e: KeyboardEvent) => {
       if (e.altKey && !e.ctrlKey && !e.metaKey && /^[1-9]$/.test(e.key)) {
-        const target = tabs[Number(e.key) - 1];
-        if (target) { e.preventDefault(); setActive(target.id); }
+        const group = !narrow && !ws.zoom ? tabsOf(ws.layout, ws.focus) : undefined;
+        const target = (group ?? (narrow ? panesOf(ws.layout.root) : visiblePanes(ws, narrow)))[Number(e.key) - 1];
+        if (target) { e.preventDefault(); dispatch({ type: 'activate', pane: target.id }); }
       } else if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === 'b') { e.preventDefault(); setShowAgents((v) => !v); }
     };
     window.addEventListener('keydown', on);
     return () => window.removeEventListener('keydown', on);
-  }, [tabs]);
+  }, [ws, narrow, dispatch]);
 
   // Removing closed agents from the list: for every client when the hub can forget them. A hub that does not know the command can only
   // hide them here; any other refusal (permission, the agent running again) is shown with its reason and nothing is hidden.
@@ -216,9 +216,9 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
     void onResume(a, action).then((code) => { setResuming(undefined); if (code) setResumeError({ id: a.id, code }); });
   } : undefined;
 
-  const pane = (a: AgentTileModel) => (
-    <section key={a.id} aria-label={a.name} onDragOver={(e) => { if (dragging) e.preventDefault(); }} onDrop={(e) => { e.preventDefault(); if (dragging) move(dragging, a.id); setDragging(undefined); }}
-      className={`flex min-h-0 min-w-0 flex-col bg-surface-0 ${layout === 'grid' ? `border ${a.state === 'needs-you' ? 'border-needs-you' : 'border-line'}` : ''}`}>
+  // One agent as a pane draws it: where it runs and its tools, a request waiting for you, then its terminal, chat or summary.
+  const agentBody = (a: AgentTileModel) => (
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       <div className="flex min-h-9 flex-none flex-wrap items-center gap-x-3 gap-y-1 border-b border-line bg-surface-1 px-3 py-1">
         <div className="flex min-w-0 flex-1 basis-56 items-center gap-1.5 text-xs text-muted" title={`${a.machine} · ${a.workspace}`}>
           <Icon name="machine" className="size-3.5" /><span className="truncate">{a.machine}</span>
@@ -240,7 +240,6 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
           {loadHistory && a.git !== false && <button type="button" className="ide-iconbtn" onClick={() => setHistory(a.id)} aria-label={t('console-history')} title={t('console-history')}><Icon name="history" /></button>}
           {filesOf && <button type="button" className="ide-iconbtn" onClick={() => setBrowsing(a.id)} aria-label={t('console-files')} title={t('console-files')}><Icon name="files" /></button>}
           <button type="button" className="ide-iconbtn" onClick={() => onOpen(a.id)} aria-label={t('console-maximize')} title={t('console-maximize')}><Icon name="maximize" /></button>
-          {layout === 'grid' && <button type="button" className="ide-iconbtn" onClick={() => close(a.id)} aria-label={t('console-hide')} title={t('console-hide')}><Icon name="close" /></button>}
         </div>
       </div>
       {approvals.filter((x) => x.agentId === a.id).map((x) => <ApprovalBanner key={x.id} approval={x} onResolve={onResolve} />)}
@@ -259,7 +258,35 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
           </Suspense>
         )}
       </div>}
-    </section>
+    </div>
+  );
+  const panel = (id: string) => PANEL_TAB[id] ? <div className="min-h-0 flex-1 overflow-y-auto p-3">
+    <Details tab={PANEL_TAB[id] as DetailsTab} attention={attention} approvals={approvals} notice={notice} changed={changed} boards={boards} messages={messages} usage={usage} projects={projects} onOpen={onOpen}
+      onResolve={onResolve} onReview={loadDiff ? setReviewing : undefined} />
+  </div> : undefined;
+
+  // Nothing open: a start button, the agents that are running, and the two shortcuts.
+  const welcome = (
+    <div className="grid min-h-0 flex-1 place-items-center overflow-y-auto p-6">
+      <div className="grid w-full max-w-md gap-5">
+        <div className="grid justify-items-start gap-1">
+          <Icon name="terminal" className="size-8 text-accent" />
+          <h2 className="m-0 mt-2 text-base normal-case tracking-normal text-ink">{t('ide-welcome-title')}</h2>
+          <p className="muted m-0">{t('console-wall-empty')}</p>
+        </div>
+        {onStart && <button type="button" className="button button--primary justify-self-start" onClick={() => onStart()}><Icon name="plus" />{t('action-start-agent')}</button>}
+        <div className="grid gap-1">
+          <h2 className="m-0">{t('ide-welcome-running')}</h2>
+          {fleet.length === 0 ? <p className="muted m-0">{t('ide-welcome-none')}</p> : <ul className="m-0 grid list-none gap-0.5 p-0">
+            {fleet.slice(0, 6).map((a) => <li key={a.id}><button type="button" className="ide-row py-1.5" onClick={() => select(a.id)}><StateMark state={a.state} /><span className="min-w-0 flex-1 truncate">{a.name}</span><span className="truncate text-xs text-muted">{a.machine}</span></button></li>)}
+          </ul>}
+        </div>
+        <dl className="m-0 grid gap-1.5 text-xs text-muted">
+          <div className="flex items-center gap-2"><dt><kbd className="ide-kbd">{commandKey} K</kbd></dt><dd className="m-0">{t('ide-welcome-search')}</dd></div>
+          <div className="flex items-center gap-2"><dt><kbd className="ide-kbd">N</kbd></dt><dd className="m-0">{t('ide-welcome-next')}</dd></div>
+        </dl>
+      </div>
+    </div>
   );
 
   return (
@@ -272,6 +299,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
           <Icon name="search" className="size-3.5" /><span className="min-w-0 flex-1 truncate">{t('ide-command')}</span><kbd className="ide-kbd hidden sm:inline">{commandKey} K</kbd>
         </button>
         {link !== 'live' && <span role="status" className="ide-chip">{t(link === 'offline' ? 'link-offline' : 'link-connecting')}</span>}
+        <LayoutMenu ws={ws} dispatch={dispatch} agents={presetAgents} onReset={resetLayout} narrow={narrow} />
         <span className="hidden sm:block"><LanguagePicker compact /></span>
         <ThemePicker />
         <a className="ide-chip hidden whitespace-nowrap hover:text-ink md:inline-flex" href="#/device">{t('device-link')}</a>
@@ -282,54 +310,11 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
       <div className="relative grid min-h-0 grid-cols-1 lg:[grid-template-columns:var(--cols)]" style={{ ['--cols' as string]: cols }}>
         {showAgents && <div className="absolute inset-y-0 z-10 hidden lg:block" style={{ insetInlineStart: leftWidth }}><Resizer side="start" value={leftWidth} min={200} max={480} onChange={setLeftWidth} /></div>}
         {showDetails && <div className="absolute inset-y-0 z-10 hidden lg:block" style={{ insetInlineEnd: rightWidth }}><Resizer side="end" value={rightWidth} min={260} max={560} onChange={setRightWidth} /></div>}
-        {showAgents && <Explorer fleet={projectFilter ? fleet.filter((a) => a.projectId === projectFilter) : fleet} machines={machines} projects={projectOptions} project={projectFilter} onProject={chooseProject} open={pinned} current={current?.id} onToggle={select} onStart={onStart} onCollapse={() => setShowAgents(false)} onDismiss={removeClosed} everyone={!!onForget} forgetError={forgetError} onResume={resume} resuming={resuming} resumeError={resumeError} />}
+        {showAgents && <Explorer fleet={projectFilter ? fleet.filter((a) => a.projectId === projectFilter) : fleet} machines={machines} projects={projectOptions} project={projectFilter} onProject={chooseProject} open={shownAgents} current={current?.id} onToggle={select} onStart={onStart} onCollapse={() => setShowAgents(false)} onDismiss={removeClosed} everyone={!!onForget} forgetError={forgetError} onResume={resume} resuming={resuming} resumeError={resumeError} />}
 
         <main className="flex min-h-0 min-w-0 flex-col" aria-label={t('focus-terminal')}>
-          <div className="flex h-9 flex-none items-stretch border-b border-line bg-surface-1">
-            <div role="tablist" aria-label={t('console-agents')} className="flex min-w-0 flex-1 overflow-x-auto quiet-scroll">
-              {tabs.map((a) => (
-                <div key={a.id} id={`tab-${a.id}`} role="tab" aria-selected={current?.id === a.id} aria-keyshortcuts="Delete" tabIndex={current?.id === a.id ? 0 : -1} draggable className={`ide-tab group cursor-pointer ${dragging && dragging !== a.id ? 'ring-1 ring-inset ring-accent/50' : ''}`}
-                  onClick={() => setActive(a.id)} onKeyDown={(e) => tabKey(e, a.id)}
-                  onDragStart={(e) => { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', a.id); setDragging(a.id); }} onDragEnd={() => setDragging(undefined)}
-                  onDragOver={(e) => { if (dragging) e.preventDefault(); }} onDrop={(e) => { e.preventDefault(); if (dragging) move(dragging, a.id); setDragging(undefined); }} title={t('console-drag')}>
-                  <StateMark state={a.state} />
-                  <span className="min-w-0 truncate">{a.name}</span>
-                  <NoAskBadge agent={a} compact />
-                  <button type="button" tabIndex={-1} aria-hidden className="ide-iconbtn size-5 opacity-60 group-hover:opacity-100" onClick={(e) => { e.stopPropagation(); close(a.id); }} title={t('ide-close-tab', { name: a.name })}><Icon name="close" className="size-3" /></button>
-                </div>
-              ))}
-              {onStart && <button type="button" className="ide-iconbtn m-1 flex-none" onClick={() => onStart()} aria-label={t('ide-new-tab')} title={t('ide-new-tab')}><Icon name="plus" /></button>}
-            </div>
-            {tabs.length > 1 && <div className="flex flex-none items-center gap-0.5 px-1" role="group" aria-label={t('ide-layout-single')}>
-              <button type="button" className="ide-iconbtn" aria-pressed={layout === 'single'} onClick={() => setLayout('single')} aria-label={t('ide-layout-single')} title={t('ide-layout-single')}><Icon name="single" /></button>
-              <button type="button" className="ide-iconbtn" aria-pressed={layout === 'grid'} onClick={() => setLayout('grid')} aria-label={t('ide-layout-grid')} title={t('ide-layout-grid')}><Icon name="grid" /></button>
-            </div>}
-          </div>
-          {shown.length === 0 ? (
-            <div className="grid min-h-0 flex-1 place-items-center overflow-y-auto p-6">
-              <div className="grid w-full max-w-md gap-5">
-                <div className="grid justify-items-start gap-1">
-                  <Icon name="terminal" className="size-8 text-accent" />
-                  <h2 className="m-0 mt-2 text-base normal-case tracking-normal text-ink">{t('ide-welcome-title')}</h2>
-                  <p className="muted m-0">{t('console-wall-empty')}</p>
-                </div>
-                {onStart && <button type="button" className="button button--primary justify-self-start" onClick={() => onStart()}><Icon name="plus" />{t('action-start-agent')}</button>}
-                <div className="grid gap-1">
-                  <h2 className="m-0">{t('ide-welcome-running')}</h2>
-                  {fleet.length === 0 ? <p className="muted m-0">{t('ide-welcome-none')}</p> : <ul className="m-0 grid list-none gap-0.5 p-0">
-                    {fleet.slice(0, 6).map((a) => <li key={a.id}><button type="button" className="ide-row py-1.5" onClick={() => select(a.id)}><StateMark state={a.state} /><span className="min-w-0 flex-1 truncate">{a.name}</span><span className="truncate text-xs text-muted">{a.machine}</span></button></li>)}
-                  </ul>}
-                </div>
-                <dl className="m-0 grid gap-1.5 text-xs text-muted">
-                  <div className="flex items-center gap-2"><dt><kbd className="ide-kbd">{commandKey} K</kbd></dt><dd className="m-0">{t('ide-welcome-search')}</dd></div>
-                  <div className="flex items-center gap-2"><dt><kbd className="ide-kbd">N</kbd></dt><dd className="m-0">{t('ide-welcome-next')}</dd></div>
-                </dl>
-              </div>
-            </div>
-          ) : (
-            <div role={layout === 'single' ? 'tabpanel' : undefined} aria-labelledby={layout === 'single' && current ? `tab-${current.id}` : undefined}
-              className={`grid min-h-0 flex-1 gap-px bg-line ${shown.length > 1 ? 'lg:grid-cols-2 lg:[&>*:last-child:nth-child(odd)]:col-span-2' : ''}`} style={{ gridAutoRows: 'minmax(0, 1fr)' }}>{shown.map(pane)}</div>
-          )}
+          <Workspace ws={ws} dispatch={dispatch} fleet={fleet} bindings={bindings} narrow={narrow} renderAgent={agentBody} renderPanel={panel}
+            onFiles={filesOf ? (a) => setBrowsing(a.id) : undefined} onStart={onStart ? () => onStart() : undefined} welcome={welcome} />
         </main>
 
         {showDetails && <Inspector attention={attention} approvals={approvals} notice={notice} changed={changed} boards={boards} messages={messages} usage={usage} projects={projects} onOpen={onOpen}

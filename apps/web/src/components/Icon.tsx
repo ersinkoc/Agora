@@ -21,6 +21,12 @@ const PATHS = {
   copy: 'M5.5 5.5h7v8h-7zM3.5 10.5v-8h7',
   play: 'M5 3.5l7 4.5-7 4.5z',
   lock: 'M4 7.5h8v6H4zM5.5 7.5V5a2.5 2.5 0 0 1 5 0v2.5',
+  // ADR-0068 layouts: split beside, split below, restore from maximized, the layout menu, more actions.
+  splitRight: 'M2.5 3.5h11v9h-11zM8 3.5v9',
+  splitDown: 'M2.5 3.5h11v9h-11zM2.5 8h11',
+  restore: 'M6 3v3H3M10 3v3h3M6 13v-3H3M10 13v-3h3',
+  layout: 'M2.5 3.5h11v9h-11zM7 3.5v9M7 8h6.5',
+  more: 'M3.5 8h.5M7.75 8h.5M12 8h.5',
 } as const;
 export type IconName = keyof typeof PATHS;
 
