@@ -41,10 +41,15 @@ branch (`docs/fordevs/`). Each row is something the run showed that no CI run ha
 - **L14** The `win` node is shown under the PC's host name, not the node id. It puts a personal name in every screenshot.
 - **L15** Two boards with the same display name (different `origin` spellings) cannot be told apart in the UI. Implemented in #286: cards retain logical project IDs, expose selectable identities and expandable machine/folder context, and use identity rather than display name as their React key.
 - **L16** The audit page cannot tell sessions apart (every row says "owner"); a device column would answer "who".
+  Fixed: every row a session makes names it by a short id (the first 6 hex digits of its token's hash, schema 10), the sign-in row
+  included, so two windows of one person show different ones; rows from before, and the hub's own, have none.
+  Screenshots: `docs/screenshots/audit-session-{light,dark}.png`.
 - **L17** Audit rows "Watched a terminal … Sent, no answer yet" stay unresolved after a node restart.
   Fixed: the row stayed `sent` when the client left before the answer (a reload, as after a node restart, or a closed tab); the
   hub dropped the command with the client session. It now waits for each such answer until its deadline and records the node's
   outcome, `node.offline` or `node.timeout` (reproduced on 0.3.5 with Start then reload: `AgentLaunch` stayed `sent`, now `ok`).
+  Cleanup visits the earliest deadline first, even when live polling reordered the requests; waiting for a newer command must not
+  turn an older command's late reply into a success (#395).
 - **L18** "Recent messages" says agents have not written to each other yet after a hub restart (mesh history is not re-read).
 - **L19** The web app takes its language only from `navigator.language`; there is no in-app switch, so Turkish needs a `tr-TR` browser. Implemented in #284: sign-in, Home and Focus offer a remembered browser-language override; live terminals and unfinished forms survive switching.
 - **L20** A refused or abandoned start leaves its `agent/<name>` branch behind: `Supervisor::abandon` removes the worktree but not the branch.

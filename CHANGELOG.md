@@ -4,6 +4,9 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+### Activity
+- Each row on the Activity page names the session that did it (`session 6ee82d`), so two windows or devices of the same person can be told apart. The sign-in row has the same id, so you can see how that session signed in.
+
 ### ACP agents
 - The ACP bridge no longer ends a failed turn as a silent success: a turn the agent answered with an error, stopped itself (for example a refusal), or ended without saying anything carries a reason code (`adapter.turn_failed`, `adapter.turn_stopped`, `adapter.turn_empty`) in its closing state and in a log line. Showing it in the conversation still needs a protocol addition.
 - An ACP agent that exits is reported with the stage it was in, its exit code and a short tail of its error output with secrets removed (`adapter.agent_exited`). One that dies before it is initialized answers the node's `initialize` with that reason instead of just ending.
