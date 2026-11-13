@@ -115,7 +115,7 @@ tui-badge-no-ask = sormuyor
 
 ## The app shell (ADR-0063 stage 2)
 tui-app-keys-tree = ↑↓ seç · Enter aç · Tab sonraki bölüm · Ctrl K komutlar · N seni bekleyen sonraki · Alt+1…9 sekmeler · w sekmeyi kapat · i ayrıntılar · q çık
-tui-app-keys-terminal = Tuşların ajana gider · Ctrl-] listeye dön · Alt+1…9 sekmeler
+tui-app-keys-terminal = Tuşların ajana gider · Ctrl-] ya da F12 listeye dön · Alt+1…9 sekmeler
 tui-app-keys-inspector = Tab sonraki bölüm · Esc listeye dön · Ctrl K komutlar
 tui-app-keys-palette = Süzmek için yaz · ↑↓ seç · Enter çalıştır · Esc kapat
 tui-app-mouse-on = fare açık (metin seçmek için m ile bırak)

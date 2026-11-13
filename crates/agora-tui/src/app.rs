@@ -22,6 +22,8 @@ use crate::render::Text;
 
 /// Ctrl-]: leaves an agent's terminal for the tree, as in `agora terminal attach` and the earlier client.
 const DETACH: char = ']';
+/// F12 leaves it too: on layouts where `]` needs AltGr (Turkish Q, German) Ctrl-] cannot be typed.
+const BACK: u8 = 12;
 /// Narrowest columns for the tree, the terminal and the inspector; below the sum the inspector goes first, then the tree narrows.
 const MIN_TREE: u16 = 12;
 const MIN_MIDDLE: u16 = 20;
@@ -57,6 +59,8 @@ pub enum Key {
     End,
     PageUp,
     PageDown,
+    /// A function key, F1..F12.
+    F(u8),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -354,7 +358,7 @@ impl App {
         }
         match self.focus {
             Focus::Terminal => match k {
-                Key::Ctrl(DETACH) => self.focus = Focus::Tree,
+                Key::Ctrl(DETACH) | Key::F(BACK) => self.focus = Focus::Tree,
                 k if self.active_agent().is_some() => {
                     if let Some(bytes) = key_bytes(&k, cx.modes) {
                         out.push(Action::Input(bytes));
@@ -613,10 +617,12 @@ impl App {
         let mono = s.colors == ColorMode::Mono;
         let strong = Style::default().add_modifier(Modifier::BOLD);
         let chosen = Style::default().add_modifier(Modifier::REVERSED);
+        // Secondary text and dividers are dimmed, not given a palette colour: a terminal's own theme decides what DarkGray looks like
+        // (magenta or yellow-green on some dark themes).
         let dim = if mono {
             Style::default()
         } else {
-            Style::default().fg(Color::DarkGray)
+            Style::default().add_modifier(Modifier::DIM)
         };
         let attention = if mono {
             strong
@@ -835,6 +841,9 @@ pub fn event_from(ev: &crossterm::event::Event) -> Option<Event> {
             let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
             let alt = k.modifiers.contains(KeyModifiers::ALT);
             Event::Key(match k.code {
+                // AltGr arrives as Ctrl+Alt with the character it makes (`@`, `{`, `]`, and `i` on Turkish Q): that is text, not a
+                // shortcut.
+                KeyCode::Char(c) if ctrl && alt => Key::Char(c),
                 // A terminal sends Ctrl-\\ ] ^ _ as 0x1c..0x1f, which crossterm reports as Ctrl with the digits 4..7.
                 KeyCode::Char(c @ '4'..='7') if ctrl => {
                     Key::Ctrl(['\\', ']', '^', '_'][usize::from(c as u8 - b'4')])
@@ -856,6 +865,7 @@ pub fn event_from(ev: &crossterm::event::Event) -> Option<Event> {
                 KeyCode::End => Key::End,
                 KeyCode::PageUp => Key::PageUp,
                 KeyCode::PageDown => Key::PageDown,
+                KeyCode::F(n) => Key::F(n),
                 _ => return None,
             })
         }
@@ -964,6 +974,12 @@ fn key_bytes(k: &Key, modes: Modes) -> Option<Vec<u8>> {
         Key::End => arrow('F'),
         Key::PageUp => csi("5~"),
         Key::PageDown => csi("6~"),
+        Key::F(n @ 1..=4) => format!("\x1bO{}", char::from(b'P' + n - 1)).into_bytes(),
+        Key::F(n @ 5..=12) => csi(&format!(
+            "{}~",
+            [15, 17, 18, 19, 20, 21, 23, 24][usize::from(n - 5)]
+        )),
+        Key::F(_) => return None,
     })
 }
 
@@ -1153,8 +1169,19 @@ mod tests {
             key(&mut app, &rows, Key::Up),
             vec![Action::Input(b"\x1b[A".to_vec())]
         );
-        // Ctrl-] leaves it.
+        // Ctrl-] leaves it, and so does F12 (for layouts where `]` needs AltGr); other function keys reach the agent.
         assert_eq!(key(&mut app, &rows, Key::Ctrl(']')), vec![]);
+        assert_eq!(app.focus, Focus::Tree);
+        key(&mut app, &rows, Key::Enter);
+        assert_eq!(
+            key(&mut app, &rows, Key::F(2)),
+            vec![Action::Input(b"\x1bOQ".to_vec())]
+        );
+        assert_eq!(
+            key(&mut app, &rows, Key::F(5)),
+            vec![Action::Input(b"\x1b[15~".to_vec())]
+        );
+        assert_eq!(key(&mut app, &rows, Key::F(12)), vec![]);
         assert_eq!(app.focus, Focus::Tree);
         // Opening it again brings the same tab to the front without a second subscription.
         assert_eq!(key(&mut app, &rows, Key::Enter), vec![]);
@@ -1443,6 +1470,25 @@ mod tests {
                 state: KeyEventState::NONE,
             })
         };
+        // What a real terminal sends for Ctrl-] (0x1d) reaches crossterm as Ctrl+5.
+        assert_eq!(
+            event_from(&k(KeyCode::Char('5'), KeyModifiers::CONTROL)),
+            Some(Event::Key(Key::Ctrl(']')))
+        );
+        // AltGr (Ctrl+Alt) makes text: `i` on Turkish Q, `]` on German.
+        let altgr = KeyModifiers::CONTROL | KeyModifiers::ALT;
+        assert_eq!(
+            event_from(&k(KeyCode::Char('i'), altgr)),
+            Some(Event::Key(Key::Char('i')))
+        );
+        assert_eq!(
+            event_from(&k(KeyCode::Char(']'), altgr)),
+            Some(Event::Key(Key::Char(']')))
+        );
+        assert_eq!(
+            event_from(&k(KeyCode::F(12), KeyModifiers::NONE)),
+            Some(Event::Key(Key::F(12)))
+        );
         assert_eq!(
             event_from(&k(KeyCode::Char(']'), KeyModifiers::CONTROL)),
             Some(Event::Key(Key::Ctrl(']')))

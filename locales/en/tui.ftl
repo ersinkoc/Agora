@@ -115,7 +115,7 @@ tui-badge-no-ask = does not ask
 
 ## The app shell (ADR-0063 stage 2)
 tui-app-keys-tree = ↑↓ choose · Enter open · Tab next part · Ctrl K commands · N next that needs you · Alt+1…9 tabs · w close tab · i details · q quit
-tui-app-keys-terminal = Your keys go to the agent · Ctrl-] back to the list · Alt+1…9 tabs
+tui-app-keys-terminal = Your keys go to the agent · Ctrl-] or F12 back to the list · Alt+1…9 tabs
 tui-app-keys-inspector = Tab next part · Esc back to the list · Ctrl K commands
 tui-app-keys-palette = Type to filter · ↑↓ choose · Enter run · Esc close
 tui-app-mouse-on = mouse on (m releases it to select text)
