@@ -278,6 +278,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
                   onDragOver={(e) => { if (dragging) e.preventDefault(); }} onDrop={(e) => { e.preventDefault(); if (dragging) move(dragging, a.id); setDragging(undefined); }} title={t('console-drag')}>
                   <StateMark state={a.state} />
                   <span className="min-w-0 truncate">{a.name}</span>
+                  <NoAskBadge agent={a} compact />
                   <button type="button" tabIndex={-1} aria-hidden className="ide-iconbtn size-5 opacity-60 group-hover:opacity-100" onClick={(e) => { e.stopPropagation(); close(a.id); }} title={t('ide-close-tab', { name: a.name })}><Icon name="close" className="size-3" /></button>
                 </div>
               ))}
