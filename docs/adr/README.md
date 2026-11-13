@@ -78,4 +78,5 @@ Date: YYYY-MM-DD
 | 0058 | Show an adapter's errors and notices, and choose its model and mode | Accepted |
 | 0059 | Launch options, including "do not ask" modes, chosen when an agent starts | Accepted |
 | 0060 | A node keeps a session ledger and offers Resume after a restart | Accepted |
+| 0070 | The hub owns whether a machine is online | Proposed |
 | 0061 | Trusting your devices on a machine in one step | Accepted |
