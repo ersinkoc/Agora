@@ -545,7 +545,10 @@ fn confined_selected_subfolders_cannot_write_to_the_parent_checkout() {
         let a = launch(&mut c, &info, "boundary", separate);
         let cwd = Path::new(&a.path);
         let until = Instant::now() + Duration::from_secs(10);
-        while !cwd.join("result").exists() && Instant::now() < until {
+        // `printf … > result` creates the file before it writes it: wait for the content, not for the file.
+        while std::fs::read_to_string(cwd.join("result")).map_or(true, |s| s.is_empty())
+            && Instant::now() < until
+        {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert_eq!(

@@ -116,6 +116,33 @@ pub fn render(
     let mut waiting = 0;
     for a in &s.approvals {
         waiting += 1;
+        let (on, off) = paint(AgentState::Blocked, color);
+        // ADR-0057: a request to start an agent shows what would start, where, and its whole first prompt.
+        if let Some(start) = start_request(&a.action, &a.detail) {
+            let line = t(
+                if start.inside {
+                    key!("tui-asks-start")
+                } else {
+                    key!("tui-asks-start-outside")
+                },
+                // Everything from the signed request itself, never from what the hub says around it, and every hidden or control
+                // character as a visible escape: what is shown is what the answer is signed over.
+                &[
+                    ("agent", Arg::Str(visible(&start.agent))),
+                    ("agent_kind", Arg::Str(visible(&start.agent_kind))),
+                    ("node", Arg::Str(visible(&start.node))),
+                    ("kind", Arg::Str(visible(&start.kind))),
+                    ("folder", Arg::Str(visible(&start.folder))),
+                    ("worktree", Arg::Str(start.worktree.to_string())),
+                    ("depth", Arg::Num(start.depth)),
+                ],
+            );
+            out.push(format!("  {on}!{off} {line}"));
+            for l in visible(&start.prompt).lines() {
+                out.push(format!("      {dim}{l}{reset}"));
+            }
+            continue;
+        }
         let line = t(
             key!("tui-asks"),
             &[
@@ -126,7 +153,6 @@ pub fn render(
                 ),
             ],
         );
-        let (on, off) = paint(AgentState::Blocked, color);
         out.push(format!("  {on}!{off} {line}"));
     }
     for a in s
@@ -181,7 +207,7 @@ pub fn render(
             folder(project).unwrap_or_else(|| project.to_string())
         };
         out.push(format!("{bold}{name}{reset}"));
-        for a in agents {
+        for (a, depth) in helper_order(&agents) {
             let st = state_of(a);
             let (on, off) = paint(st, color);
             let marker = if color { "●" } else { "*" };
@@ -191,8 +217,21 @@ pub fn render(
                 " "
             };
             let word = state_text(st, t);
+            // A helper sits under the agent that started it (ADR-0057) and says so.
+            let indent = "  ".repeat(depth);
+            let by = if a.parent_agent_id.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "  {}",
+                    t(
+                        key!("tui-started-by"),
+                        &[("agent", Arg::Str(local(&a.parent_agent_id).to_string()))],
+                    )
+                )
+            };
             out.push(format!(
-                "{pointer} {on}{marker} {word:<10}{off} {}  {dim}{}  {}{reset}",
+                "{pointer} {indent}{on}{marker} {word:<10}{off} {}  {dim}{}  {}{by}{reset}",
                 local(&a.agent_id),
                 a.kind,
                 a.node_id,
@@ -229,6 +268,89 @@ pub fn render(
     out
 }
 
+/// What an `agent.start` request asks for (ADR-0057), from its detail; `None` for any other request or a detail that does not parse.
+struct StartRequest {
+    agent: String,
+    agent_kind: String,
+    node: String,
+    kind: String,
+    folder: String,
+    prompt: String,
+    inside: bool,
+    worktree: bool,
+    depth: i64,
+}
+
+fn start_request(action: &str, detail: &str) -> Option<StartRequest> {
+    if action != "agent.start" {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_str(detail).ok()?;
+    let s = |k: &str| {
+        v.get(k)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string()
+    };
+    let flag = |k: &str| {
+        v.get(k)
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+    };
+    Some(StartRequest {
+        agent: s("agent"),
+        agent_kind: s("agent_kind"),
+        node: s("node"),
+        kind: s("kind"),
+        folder: s("folder"),
+        prompt: s("prompt"),
+        inside: flag("inside"),
+        worktree: flag("worktree"),
+        depth: v
+            .get("depth")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(1),
+    })
+}
+
+/// `agents` with each helper right after the agent that started it, and how deep it is. A helper whose parent is not in the list (another
+/// project, or gone) stays where it is, at depth 0.
+fn helper_order<'a>(agents: &[&'a AgentSnapshot]) -> Vec<(&'a AgentSnapshot, usize)> {
+    let present = |id: &str| agents.iter().any(|a| a.agent_id == id);
+    let mut out = Vec::new();
+    fn add<'a>(
+        a: &'a AgentSnapshot,
+        depth: usize,
+        agents: &[&'a AgentSnapshot],
+        out: &mut Vec<(&'a AgentSnapshot, usize)>,
+    ) {
+        if depth > 8 || out.iter().any(|(x, _)| x.agent_id == a.agent_id) {
+            return;
+        }
+        out.push((a, depth));
+        for c in agents.iter().filter(|c| c.parent_agent_id == a.agent_id) {
+            add(c, depth + 1, agents, out);
+        }
+    }
+    for a in agents {
+        if a.parent_agent_id.is_empty() || !present(&a.parent_agent_id) {
+            add(a, 0, agents, &mut out);
+        }
+    }
+    // A loop of parents (never made by a node) would leave agents out: they are listed anyway.
+    for a in agents {
+        if !out.iter().any(|(x, _)| x.agent_id == a.agent_id) {
+            out.push((a, 0));
+        }
+    }
+    out
+}
+
+/// `agora_core::text::visible`, with each line break kept (a prompt's lines are shown as lines).
+fn visible(text: &str) -> String {
+    agora_core::text::visible(text)
+}
+
 /// Text an agent or a person wrote is shown as plain text: control characters (escape sequences that could move the cursor, change the
 /// title or paste into the prompt) and bidirectional overrides are dropped, a tab becomes spaces.
 pub fn plain(text: &str) -> String {
@@ -239,6 +361,14 @@ pub fn plain(text: &str) -> String {
             c if c.is_control() => None,
             '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' => None,
             c => Some(c),
+        })
+        // Other invisible characters (zero-width, tags, fillers) are shown as escapes rather than passed through unseen.
+        .map(|c| {
+            if agora_core::text::is_hidden(c) {
+                format!("\\u{{{:x}}}", u32::from(c))
+            } else {
+                c.to_string()
+            }
         })
         .collect()
 }
@@ -689,6 +819,63 @@ mod tests {
             chat_command("/mode plan", None, None),
             ChatCommand::Unknown { .. }
         ));
+    }
+
+    #[test]
+    fn helpers_sit_under_their_parent_and_a_start_request_shows_its_prompt() {
+        let mut snap = snapshot();
+        snap.agents.insert(
+            0,
+            AgentSnapshot {
+                agent_id: "laptop/agent-3".into(),
+                node_id: "laptop".into(),
+                project_id: "web".into(),
+                kind: "codex".into(),
+                running: true,
+                parent_agent_id: "laptop/agent-1".into(),
+                ..Default::default()
+            },
+        );
+        snap.approvals[0].action = "agent.start".into();
+        snap.approvals[0].detail =
+            r#"{"agent":"agent-1","agent_kind":"codex","node":"laptop","kind":"claude-code","folder":"/w","inside":true,"worktree":true,"depth":1,"prompt":"line one\nline \u001b[2Jtwo\u200b"}"#
+                .into();
+        let lines = render(&snap, false, false, "", "", 0, &t);
+        let text = lines.join("\n");
+        assert!(
+            text.contains("tui-asks-start[agent=agent-1,agent_kind=codex,node=laptop,kind=claude-code,folder=/w,worktree=true,depth=1]"),
+            "{text}"
+        );
+        assert!(
+            text.contains("line one")
+                && text.contains("line \\u{1b}[2Jtwo\\u{200b}")
+                && !text.contains('\u{1b}'),
+            "{text}"
+        );
+        let parent = lines
+            .iter()
+            .position(|l| l.contains("agent-1  codex"))
+            .expect("parent row");
+        assert!(
+            lines[parent + 1].contains("agent-3")
+                && lines[parent + 1].contains("tui-started-by[agent=agent-1]"),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn the_tui_hides_nothing_on_the_shared_list() {
+        // The one list (crates/agora-core/src/hidden-characters.txt, pinned there and in the web client): every range's ends show as
+        // escapes, in a start request and in plain text.
+        for (lo, hi) in agora_core::text::HIDDEN {
+            for c in [*lo, *hi].into_iter().filter_map(char::from_u32) {
+                let s = c.to_string();
+                let want = format!("\\u{{{:x}}}", u32::from(c));
+                assert_eq!(visible(&s), want);
+                // plain() drops the bidirectional controls outright and escapes the rest.
+                assert!(plain(&s) == want || plain(&s).is_empty(), "{want}");
+            }
+        }
     }
 
     #[test]

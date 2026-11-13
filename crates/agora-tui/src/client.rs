@@ -327,8 +327,14 @@ impl Session {
             .approval_id
             .split_once('/')
             .unwrap_or(("", a.approval_id.as_str()));
+        // ADR-0057: a start is decided over the request as shown (one start; grants are given in the web window).
+        let message = if a.action == "agent.start" {
+            crate::device::start_message(node, local, approved, 0, false, &a.detail)
+        } else {
+            approval_message(node, local, approved)
+        };
         let signature = device
-            .sign(&approval_message(node, local, approved))
+            .sign(&message)
             .ok_or_else(|| "client.sign".to_string())?;
         let cmd = command_request::Command::ApprovalResolve(agora_protocol::v1::ApprovalResolve {
             approval_id: local.to_string(),
@@ -710,11 +716,21 @@ impl Session {
 
     /// Stops an agent on a machine.
     pub fn stop_agent(&mut self, node: &str, agent_id: &str) -> Result<(), String> {
+        self.stop_agent_with(node, agent_id, false)
+    }
+
+    /// Stops an agent and, with `helpers`, the helpers it started and theirs (ADR-0057).
+    pub fn stop_agent_with(
+        &mut self,
+        node: &str,
+        agent_id: &str,
+        helpers: bool,
+    ) -> Result<(), String> {
         self.command(
             node,
             command_request::Command::AgentStop(agora_protocol::v1::AgentStop {
                 agent_id: agent_id.to_string(),
-                stop_helpers: false,
+                stop_helpers: helpers,
             }),
             Duration::from_secs(15),
         )

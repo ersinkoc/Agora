@@ -23,6 +23,7 @@ export interface AgentV {
   startedMs?: number; // when this window saw it start (not known for agents that were already running)
   exitCode?: number; // how it ended, once it has
   session?: SessionModel; // ADR-0058: options, context and its own cost, once reported
+  parentId?: string; // ADR-0057: the hub-wide key of the agent that started it
 }
 
 type OptionWire = { id?: string | null; name?: string | null; description?: string | null; skipsPermissions?: boolean | null };
@@ -96,6 +97,7 @@ export function fromSnapshot(s: agora.v1.Snapshot.$Properties): View {
       nodeId: a.nodeId ?? '', worktreeId: a.worktreeId ?? '', kind: a.kind ?? '', state: a.state ?? 0,
       reported: !!a.reported, running: !!a.running, sinceMs: 0,
       tokens: num(a.inputTokens) + num(a.outputTokens),
+      parentId: a.parentAgentId || undefined,
     });
     const modes = optionsOf(a.modes, true), models = optionsOf(a.models, false);
     const reported = a.costMicros !== undefined && a.costMicros !== null && !!a.currency;
@@ -185,6 +187,7 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
       v.agents.set(q(b.agentId), {
         nodeId: b.nodeId ?? '', worktreeId: q(b.worktreeId), kind: b.kind ?? '', state: 3 /* idle */,
         reported: false, running: true, sinceMs: at, tokens: 0, startedMs: at,
+        parentId: b.parentAgentId ? q(b.parentAgentId) : undefined,
       });
       break;
     }
@@ -288,7 +291,7 @@ export function tiles(v: View): AgentTileModel[] {
   const waiting = new Set([...v.approvals.values()].map((a) => a.agentId));
   const sharingCounts = new Map<string, number>();
   for (const [id, agent] of v.agents) { const workspace = v.agentWorkspaces.get(id); if (agent.running && workspace) sharingCounts.set(workspace, (sharingCounts.get(workspace) ?? 0) + 1); }
-  return [...v.agents.entries()].map(([id, a]) => {
+  const list = [...v.agents.entries()].map(([id, a]) => {
     const i = hash(id) % ACCENTS.length;
     const node = v.nodes.get(a.nodeId);
     const wt = v.worktrees.get(a.worktreeId);
@@ -320,8 +323,12 @@ export function tiles(v: View): AgentTileModel[] {
       startedMs: a.startedMs,
       endedMs: a.running ? undefined : a.sinceMs || undefined,
       session: a.session,
-    };
+      parentId: a.parentId,
+    } as AgentTileModel;
   });
+  const names = new Map(list.map((t) => [t.id, t.name]));
+  for (const t of list) if (t.parentId) t.parentName = names.get(t.parentId) ?? t.parentId.slice(t.parentId.indexOf('/') + 1);
+  return list;
 }
 
 export function machinesOnline(v: View): number {
@@ -337,6 +344,40 @@ export interface ApprovalModel {
   action: string;
   detail: string;
   expiresAtMs: number;
+  start?: StartRequest; // ADR-0057: what an `agent.start` request asks for
+}
+
+// An agent's request to start another (ADR-0057), read from the approval's detail. Every field is the asking agent's text: shown, never
+// interpreted. The detail itself is what the decision is signed over, so it is kept as it came.
+export interface StartRequest { agent: string; agentKind: string; node: string; kind: string; folder: string; prompt: string; inside: boolean; worktree: boolean; depth: number; grantAllowed: boolean }
+
+// Characters that are invisible or change how text around them looks: the one list in crates/agora-core/src/hidden-characters.txt
+// (Default_Ignorable_Code_Point and every format character, the line and paragraph separators, the private use areas). The node refuses them in a start request; anything that reaches a card
+// is shown as a visible escape, with control characters other than line breaks and tabs, so what is shown is what is signed.
+export const HIDDEN_RANGES: readonly (readonly [number, number])[] = [
+  [0x00ad, 0x00ad], [0x034f, 0x034f], [0x0600, 0x0605], [0x061c, 0x061c], [0x06dd, 0x06dd], [0x070f, 0x070f], [0x0890, 0x0891],
+  [0x08e2, 0x08e2], [0x115f, 0x1160], [0x17b4, 0x17b5], [0x180b, 0x180f], [0x200b, 0x200f], [0x2028, 0x202e], [0x2060, 0x206f],
+  [0x3164, 0x3164], [0xfe00, 0xfe0f], [0xfeff, 0xfeff], [0xffa0, 0xffa0], [0xfff0, 0xfffb], [0x110bd, 0x110bd], [0x110cd, 0x110cd],
+  [0x13430, 0x1343f], [0x1bca0, 0x1bca3], [0x1d173, 0x1d17a], [0xe0000, 0xe0fff], [0xe000, 0xf8ff], [0xf0000, 0xffffd],
+  [0x100000, 0x10fffd],
+];
+const hex = (n: number) => `\\u{${n.toString(16)}}`;
+const HIDDEN = new RegExp(`[${HIDDEN_RANGES.map(([lo, hi]) => (lo === hi ? hex(lo) : `${hex(lo)}-${hex(hi)}`)).join('')}]|[\\u0000-\\u0008\\u000b-\\u001f\\u007f-\\u009f]`, 'gu');
+
+export function visible(text: string): string {
+  return text.replace(HIDDEN, (c) => `\\u{${(c.codePointAt(0) ?? 0).toString(16)}}`);
+}
+
+export function startRequest(action: string, detail: string): StartRequest | undefined {
+  if (action !== 'agent.start') return undefined;
+  try {
+    const d = JSON.parse(detail) as Record<string, unknown>;
+    const s = (k: string) => (typeof d[k] === 'string' ? (d[k] as string) : '');
+    // `grant_allowed` (a scoped grant may be given: not for a shell or plain terminal program); a node that does not say so offers none.
+    return { agent: s('agent'), agentKind: s('agent_kind'), node: s('node'), kind: s('kind'), folder: s('folder'), prompt: s('prompt'), inside: d.inside === true, worktree: d.worktree === true, depth: typeof d.depth === 'number' ? d.depth : 1, grantAllowed: d.grant_allowed === true };
+  } catch {
+    return undefined;
+  }
 }
 
 // What the approvals section shows: soonest to expire first.
@@ -354,6 +395,7 @@ export function approvalList(v: View): ApprovalModel[] {
         action: a.action,
         detail: a.detail,
         expiresAtMs: a.expiresAtMs,
+        start: startRequest(a.action, a.detail),
       };
     })
     .sort((a, b) => a.expiresAtMs - b.expiresAtMs);

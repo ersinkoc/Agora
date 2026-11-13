@@ -4,6 +4,9 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+### Agents
+- Agents started in structured (ACP) mode now find their own configuration and login: the node passes on the variables that name the user's folders (`HOME`, `USERPROFILE`, `APPDATA`, `XDG_*`, language and terminal settings) and still passes no API key or token. Before, they ran with only `PATH`.
+
 ### Activity
 - Each row on the Activity page names the session that did it (`session 6ee82d`), so two windows or devices of the same person can be told apart. The sign-in row has the same id, so you can see how that session signed in.
 
@@ -26,6 +29,13 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ### Agents working together
 - An agent connected to the mesh is now told what the mesh is for: who it can see (`agents_list`), how to message and ask others, share tasks and hand work over, and lease files before editing them. It is also told it cannot start other agents from there.
+
+### Agents that start agents
+- An agent can ask to start a helper agent for a piece of work (ADR-0057). Nothing starts until you approve the request, which shows the asking agent, the kind, the folder and the whole first prompt. You can allow a few more helpers of that kind in that folder while the agent runs, and revoke that permission at any time.
+- The asking agent can wait for its helper and read the last lines of its screen. A helper works only in its parent's folder (or a worktree of it) unless you approve another folder.
+- Limits: 3 running helpers per agent; by default a helper cannot start helpers of its own.
+- On a machine that offers this, an agent's mesh instructions tell it about `agent_start` instead of saying it cannot start agents. A helper's first prompt is typed only once its screen is idle, never into a trust or permission question, and a prompt that would run a command in the agent itself (`!`, `/`, `#`) is refused. No "more like this" permission is offered for a shell.
+- The web window and the terminal client show helpers under the agent that started them ("started by …"); the web window lists what an agent may still start without asking, with a Revoke button. In the terminal client, stopping an agent with helpers asks whether they stop too.
 
 ## 0.3.6
 

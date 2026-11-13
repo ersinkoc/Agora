@@ -70,6 +70,8 @@ pub struct ControlContext {
     directories: Mutex<crate::directory::Bindings>,
     /// Where the agent manifests live; read again before agents are listed or started.
     manifests_dir: Option<PathBuf>,
+    /// ADR-0057: agents that start agents; decisions on their requests come through `ApprovalResolve`.
+    spawn: Option<Arc<crate::spawn::Spawner>>,
     /// Set after an agent starts: the node's Git watcher then checks its folder at once instead of on its next round.
     git_wake: Option<Arc<AtomicBool>>,
     names: AtomicU64,
@@ -108,6 +110,7 @@ impl ControlContext {
             chat,
             names: AtomicU64::new(0),
             manifests_dir: None,
+            spawn: None,
             git_wake: None,
             seen: Mutex::new(IdempotencyCache::default()),
         }
@@ -118,6 +121,13 @@ impl ControlContext {
     #[must_use]
     pub fn with_git_wake(mut self, wake: Arc<AtomicBool>) -> Self {
         self.git_wake = Some(wake);
+        self
+    }
+
+    /// ADR-0057: who handles decisions on `agent.start` requests and stopping an agent's helpers.
+    #[must_use]
+    pub fn with_spawner(mut self, spawn: Arc<crate::spawn::Spawner>) -> Self {
+        self.spawn = Some(spawn);
         self
     }
 
@@ -557,12 +567,29 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
         }
         Cmd::AgentStop(a) => {
             let id = AgentId::new(a.agent_id.clone());
+            // ADR-0057: its helpers (and theirs) first, when asked; found before the parent stops.
+            let helpers = match (&ctx.spawn, a.stop_helpers) {
+                (Some(s), true) => s.running_helpers(&id),
+                _ => Vec::new(),
+            };
             let events = ctx.sup().stop(&id).map_err(sup_err)?;
-            if let Some(mesh) = &ctx.mesh {
-                mesh.unregister(&id);
+            let mut stopped = vec![(id, events)];
+            for h in helpers {
+                // One that ended meanwhile is simply not stopped again.
+                if let Ok(events) = ctx.sup().stop(&h) {
+                    stopped.push((h, events));
+                }
             }
-            if let Some(ev) = &ctx.events {
-                ev.supervisor_events(&events, &ctx.sup().list());
+            for (id, events) in stopped {
+                if let Some(mesh) = &ctx.mesh {
+                    mesh.unregister(&id);
+                }
+                if let Some(s) = &ctx.spawn {
+                    s.agent_ended(&id);
+                }
+                if let Some(ev) = &ctx.events {
+                    ev.supervisor_events(&events, &ctx.sup().list());
+                }
             }
             Ok(ok_empty())
         }
@@ -650,7 +677,7 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
-            let (agent, adapter_id, verdict) = approvals.resolve(r, now).map_err(|e| match e {
+            let resolution = approvals.resolve_request(r, now).map_err(|e| match e {
                 ApprovalError::Unknown => invalid("approval_id"),
                 ApprovalError::Expired => Error::new(ErrorCode::ApprovalExpired)
                     .with("approval_id", r.approval_id.as_str()),
@@ -660,6 +687,19 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                     Error::new(ErrorCode::AuthForbidden).with("action", "approval.resolve")
                 }
             })?;
+            // ADR-0057: a start request is the node's own, not an adapter's; its decision (verified above) goes to the spawner,
+            // which announces it with the grant that was signed.
+            if resolution.request.action == crate::approvals::START_ACTION {
+                if let Some(s) = &ctx.spawn {
+                    s.decided(&resolution.request, r)?;
+                }
+                return Ok(ok_empty());
+            }
+            let (agent, adapter_id, verdict) = (
+                resolution.agent,
+                resolution.adapter_approval_id,
+                resolution.verdict,
+            );
             let approved = verdict == crate::approvals::Verdict::Approved;
             ctx.sup()
                 .adapter_resolve_approval(&agent, &adapter_id, approved)

@@ -973,12 +973,32 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                         if !selected.is_empty() {
                             let (node, local) = selected.split_once('/').unwrap_or(("", &selected));
                             let scope = format!("agent:{local}");
+                            // ADR-0057: an agent that started helpers asks whether they stop too; yes unless the user says no.
+                            let helpers = snapshot.as_ref().map_or(0, |s| {
+                                s.agents
+                                    .iter()
+                                    .filter(|a| a.running && a.parent_agent_id == selected)
+                                    .count()
+                            });
+                            let with_helpers = helpers == 0 || {
+                                let mut out = std::io::stdout();
+                                let _ = write!(
+                                    out,
+                                    "\x1b[H\x1b[2J{}",
+                                    say.text(
+                                        key!("tui-stop-helpers"),
+                                        &[("count", Arg::Num(helpers as i64))]
+                                    )
+                                );
+                                let _ = out.flush();
+                                !matches!(rx.recv_timeout(Duration::from_secs(30)), Ok(b'n'))
+                            };
                             notice = match with_grant(
                                 say,
                                 &mut session,
                                 &rx,
                                 (node, &scope, &TYPING),
-                                |s| s.stop_agent(node, local),
+                                |s| s.stop_agent_with(node, local, helpers > 0 && with_helpers),
                             ) {
                                 Tried::Done(Ok(())) => say.text(key!("tui-stopped"), &[]),
                                 Tried::Done(Err(code)) => {
