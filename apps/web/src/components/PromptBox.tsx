@@ -1,11 +1,17 @@
 import { useEffect, useRef, useState } from 'react';
 import { t } from '../i18n';
 import type { AgentTileModel } from '../model';
-import { mergeLines, type ChatLine, type ChatSource } from '../net/chat';
+import { mergeLines, noticeText, type ChatLine, type ChatSource } from '../net/chat';
+import { SessionBar } from './SessionBar';
+import type { OptionKind } from './sessionChoice';
 
 function Line({ line }: { line: ChatLine }) {
   if (line.role === 'user') {
     return <div className="ms-auto max-w-[85%] rounded-m bg-accent/15 px-3 py-2 break-words whitespace-pre-wrap">{line.text}</div>;
+  }
+  if (line.kind === 'notice') {
+    // Something went wrong or changed in the conversation (ADR-0058): said by the window, from the code the agent's adapter sent.
+    return <div role="note" className="max-w-[90%] rounded-s border border-needs-you/50 bg-surface-1 px-3 py-1.5 text-xs break-words whitespace-pre-wrap text-muted">{noticeText(line, t)}</div>;
   }
   if (line.kind === 'tool') {
     return <div className="max-w-[90%] rounded-s border border-line bg-surface-0 px-3 py-1.5 font-mono text-xs break-all text-muted"><span className="font-sans font-medium text-ink">{t('chat-tool')}</span> {line.text}</div>;
@@ -30,7 +36,7 @@ function Line({ line }: { line: ChatLine }) {
 }
 
 // A chat agent has no terminal: you talk to it with requests and read its answers, as a conversation the node keeps (ADR-0038).
-export function PromptBox({ agent, send, source }: { agent: AgentTileModel; send?: (a: AgentTileModel, text: string) => Promise<boolean>; source?: ChatSource }) {
+export function PromptBox({ agent, send, source, choose }: { agent: AgentTileModel; send?: (a: AgentTileModel, text: string) => Promise<boolean>; source?: ChatSource; choose?: (a: AgentTileModel, kind: OptionKind, id: string) => Promise<boolean> }) {
   const [text, setText] = useState('');
   const [sent, setSent] = useState<'ok' | 'failed' | undefined>();
   const [busy, setBusy] = useState(false);
@@ -56,6 +62,7 @@ export function PromptBox({ agent, send, source }: { agent: AgentTileModel; send
   };
   return (
     <div className="flex h-full min-h-0 flex-col gap-3 rounded-m bg-surface-0 p-3">
+      {agent.session && <SessionBar session={agent.session} disabled={agent.closed} choose={choose ? (kind, id) => choose(agent, kind, id) : undefined} />}
       <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto" aria-live="polite" aria-label={t('chat-log')}>
         {lines.length === 0 && <p className="muted m-0">{t(source ? 'chat-empty' : 'prompt-intro')}</p>}
         {lines.map((l) => <Line key={l.id} line={l} />)}

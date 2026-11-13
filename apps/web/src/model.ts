@@ -1,5 +1,20 @@
 // Client-side view model. Components render this; rendering never mutates state (AGENTS.md: render is pure).
 
+// ADR-0058: one mode or model an agent offers. Name and description are the agent's own words.
+export interface SessionOptionModel { id: string; name: string; description: string; skipsPermissions: boolean }
+// What an agent reported about its session: the modes and models it offers and the ones in use, how full its context is, and its own
+// cost (in micro-units of `currency`). Absent parts were never reported.
+export interface SessionModel {
+  modes: SessionOptionModel[];
+  models: SessionOptionModel[];
+  currentMode: string;
+  currentModel: string;
+  contextTokens: number;
+  contextWindow: number;
+  costMicros?: number;
+  currency?: string;
+}
+
 export type UiState = 'working' | 'needs-you' | 'finished' | 'idle' | 'unknown';
 
 export interface AgentTileModel {
@@ -26,6 +41,7 @@ export interface AgentTileModel {
   exitCode?: number;
   startedMs?: number;
   endedMs?: number;
+  session?: SessionModel; // ADR-0058, for agents whose adapter reported it
 }
 
 // Protocol AgentState (schema/agora/v1/common.proto) → what the user sees.

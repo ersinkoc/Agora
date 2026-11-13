@@ -45,6 +45,29 @@ function Messages({ messages }: { messages: readonly MessageModel[] }) {
 
 const STATES: UiState[] = ['working', 'needs-you', 'finished', 'idle', 'unknown'];
 
+// ADR-0058: a chat agent that reported its modes, models, context and cost, and a conversation with a notice in it.
+const demoChatAgent: AgentTileModel = {
+  ...(demoAgents[0] as AgentTileModel), id: 'demo/chat', terminal: false,
+  session: {
+    modes: [{ id: 'build', name: 'Build', description: '', skipsPermissions: false }, { id: 'plan', name: 'Plan', description: 'No edits', skipsPermissions: false },
+      { id: 'bypassPermissions', name: 'Bypass Permissions', description: '', skipsPermissions: true }],
+    models: [{ id: 'provider/model-large', name: 'Model Large', description: '', skipsPermissions: false }, { id: 'provider/model-small', name: 'Model Small', description: '', skipsPermissions: false }],
+    currentMode: 'build', currentModel: 'provider/model-large', contextTokens: 61_400, contextWindow: 200_000, costMicros: 23_000, currency: 'USD',
+  },
+};
+const demoChat: ChatSource = {
+  connect(onLines) {
+    onLines([
+      { id: 1, atMs: 0, role: 'user', kind: 'text', text: 'Fix the login test.', path: '' },
+      { id: 2, atMs: 0, role: 'agent', kind: 'notice', text: '', path: '', code: 'adapter.turn_empty', params: {} },
+      { id: 3, atMs: 0, role: 'user', kind: 'text', text: 'Try again with the small model.', path: '' },
+      { id: 4, atMs: 0, role: 'agent', kind: 'text', text: 'The test expected the old redirect; I updated it.', path: '' },
+      { id: 5, atMs: 0, role: 'agent', kind: 'notice', text: '', path: '', code: 'adapter.agent_exited', params: { stage: 'idle', exit_code: '1', stderr_tail: 'error: free usage limit reached' } },
+    ], true);
+    return { close() {} };
+  },
+};
+
 function Themed({ theme }: { theme: 'dark' | 'light' }) {
   return (
     <section className="theme-panel" data-theme={theme}>
@@ -53,6 +76,7 @@ function Themed({ theme }: { theme: 'dark' | 'light' }) {
       <AttentionStrip agents={needsAttention(demoAgents)} />
       <div className="fleet">{demoAgents.map((a) => <AgentTile key={a.id} agent={a} />)}</div>
       <Messages messages={demoMessages} />
+      <div className="h-[26rem] max-w-2xl"><PromptBox agent={demoChatAgent} source={demoChat} choose={async () => true} /></div>
       <div className="gallery__row">
         <button type="button" className="button button--primary">{t('action-start-agent')}</button>
         <button type="button" className="button">{t('action-open')}</button>
@@ -73,12 +97,13 @@ export function Gallery() {
 }
 
 // Focus: one agent, full size. The terminal arrives with the hub connection; until then a placeholder.
-export function Focus({ agent, source: live, costMicroUsd, chatSource, sendPrompt, onBack }: {
+export function Focus({ agent, source: live, costMicroUsd, chatSource, sendPrompt, chooseOption, onBack }: {
   agent: AgentTileModel | undefined;
   costMicroUsd?: number;
   source?: TerminalSource;
   chatSource?: ChatSource;
   sendPrompt?: (agent: AgentTileModel, text: string) => Promise<boolean>;
+  chooseOption?: (agent: AgentTileModel, kind: 'mode' | 'model', id: string) => Promise<boolean>;
   onBack: () => void;
 }) {
   const preview = agent?.preview ?? '';
@@ -109,7 +134,7 @@ export function Focus({ agent, source: live, costMicroUsd, chatSource, sendPromp
       <main className="flex min-h-0 min-w-0 flex-col">
         <AgentAddress key={agent.id} agent={agent} />
         <div className="pane min-h-0 flex-1 bg-surface-0 p-1.5" aria-label={agent.terminal === false ? t('chat-log') : t('focus-terminal')}>
-          {agent.terminal === false ? <PromptBox agent={agent} source={chatSource} send={sendPrompt} /> : (
+          {agent.terminal === false ? <PromptBox agent={agent} source={chatSource} send={sendPrompt} choose={chooseOption} /> : (
             <Suspense fallback={<div className="terminal" aria-busy="true" />}>
               <TerminalView source={source} label={t('focus-terminal')} />
             </Suspense>

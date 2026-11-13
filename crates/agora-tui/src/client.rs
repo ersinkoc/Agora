@@ -524,6 +524,28 @@ impl Session {
         )
     }
 
+    /// ADR-0058: switches a chat agent's mode (`model == false`) or model to one of the ids it offered.
+    pub fn set_option(
+        &mut self,
+        node: &str,
+        agent_id: &str,
+        model: bool,
+        id: &str,
+    ) -> Result<(), String> {
+        let command = if model {
+            command_request::Command::AgentSetModel(agora_protocol::v1::AgentSetModel {
+                agent_id: agent_id.to_string(),
+                model: id.to_string(),
+            })
+        } else {
+            command_request::Command::AgentSetMode(agora_protocol::v1::AgentSetMode {
+                agent_id: agent_id.to_string(),
+                mode: id.to_string(),
+            })
+        };
+        self.command(node, command, Duration::from_secs(15))
+    }
+
     /// What the agents used so far, as the hub estimates it: total in micro-USD (the hub answers this itself, ADR-0033).
     pub fn usage_total(&mut self) -> Result<u64, String> {
         let ok = self.command_ok(
