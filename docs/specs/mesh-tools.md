@@ -60,7 +60,11 @@ same connection without blocking the agent's other calls. The connection owns it
 of its polling queue. On EOF, input/output failure or shutdown it discards those asks (including already answered ones)
 without unregistering the agent or affecting another connection's requests. A live connection still receives a completed
 answer even if it starts another ask before polling that answer. Mesh activity is written to the node's event log.
-The socket reaches the agent through its manifest's `[mcp]` section (see `agent-manifest.md`). Messages to agents on other nodes: see below.
+The socket reaches a terminal agent through its manifest's `[mcp]` section (see `agent-manifest.md`). A structured agent (an L3
+adapter, or an ACP agent through `agora acp-bridge`) joins the mesh the same way and gets the same server in `session/start`
+`mcpServers` (`adapter-protocol.md`), which the bridge passes on to ACP `session/new`/`session/load`; so every tool above,
+`agent_start`, `agent_wait` and `agent_output` included, works for it, and its `agent_start` waits for the user like any agent's.
+Messages to agents on other nodes: see below.
 
 
 ## Messages between nodes (ADR-0031)

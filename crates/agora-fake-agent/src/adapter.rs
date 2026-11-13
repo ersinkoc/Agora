@@ -5,6 +5,7 @@
 //! - `ask`: goes `blocked`, sends an `approval/request`, waits for `approval/resolve`, then works and finishes.
 //! - `crash`: exits abruptly with status 3 (a crashing adapter).
 //! - `env`: appends a chat item saying whether the variable `AGORA_TEST_SECRET` is visible to the adapter.
+//! - `mcp-servers`: appends a chat item with the `mcpServers` of `session/start`, as JSON (`[]` when there were none).
 //! - `noise`: prints a line that is not JSON and a notification with an unknown method, then finishes normally.
 //! - anything else: works, appends the text back as a chat item, reports usage, goes idle.
 //!
@@ -38,6 +39,7 @@ fn state<W: Write>(out: &mut W, sid: &str, s: &str) -> io::Result<()> {
 pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
     let mut session = String::new();
     let mut selected_cwd = Value::Null;
+    let mut servers = Value::Array(Vec::new());
     let mut lines = input.lines();
     while let Some(line) = lines.next() {
         let line = line?;
@@ -67,6 +69,10 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
                     .or_else(|| params.get("cwd"))
                     .cloned()
                     .unwrap_or(Value::Null);
+                servers = params
+                    .get("mcpServers")
+                    .cloned()
+                    .unwrap_or_else(|| Value::Array(Vec::new()));
                 session = match params.get("resumeSessionId").and_then(Value::as_str) {
                     Some(r) => r.to_string(),
                     None => "s-1".to_string(),
@@ -89,6 +95,11 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
                         json!({"sessionId": session, "text": {"text": json!({"cwd": std::env::current_dir().ok(), "session_cwd": selected_cwd}).to_string()}}),
                     )?,
                     "crash" => std::process::exit(3),
+                    "mcp-servers" => note(
+                        out,
+                        "chat/append",
+                        json!({"sessionId": session, "text": {"text": servers.to_string()}}),
+                    )?,
                     "env" => {
                         let seen = std::env::var_os("AGORA_TEST_SECRET").is_some();
                         note(

@@ -47,6 +47,19 @@ fn acp_child_refuses_session() {
     let _ = agora_fake_agent::acp::run(std::io::stdin().lock(), &mut std::io::stdout().lock());
 }
 
+/// The fake agent that says it takes no stdio MCP servers (`mcpCapabilities.stdio: false`).
+#[test]
+fn acp_child_no_stdio_mcp() {
+    if std::env::var_os("AGORA_TEST_ACP").is_none()
+        || !std::env::args().any(|a| a == "acp_child_no_stdio_mcp")
+    {
+        return;
+    }
+    println!();
+    std::env::set_var("AGORA_FAKE_ACP_NO_STDIO_MCP", "1");
+    let _ = agora_fake_agent::acp::run(std::io::stdin().lock(), &mut std::io::stdout().lock());
+}
+
 struct ChanReader(Receiver<Vec<u8>>, Vec<u8>);
 impl Read for ChanReader {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
@@ -670,4 +683,47 @@ fn an_empty_turn_carries_what_the_agent_wrote_to_stderr_during_it() {
         notices(&n)[2],
         json!({"code": "adapter.turn_empty", "params": {}})
     );
+}
+
+/// The node's `mcp_servers` (the agent's own mesh server) reach the agent's `session/new` as ACP stdio servers.
+#[test]
+fn the_mesh_server_reaches_the_agents_session() {
+    let mesh = json!({"name": "agora-mesh", "command": "/usr/bin/agora",
+                      "args": ["mesh", "stdio", "--socket", "/s/agent-1.sock"]});
+    let mut n = Node::start();
+    n.call("initialize", json!({"protocolGeneration": 1}));
+    n.call(
+        "session/start",
+        json!({"projectRoot": ".", "worktree": ".", "mcpServers": [mesh]}),
+    );
+    n.call(
+        "session/prompt",
+        json!({"sessionId": "acp-s1", "text": "mcp-servers"}),
+    );
+    let said = n.wait(|m| {
+        m["method"] == "chat/append"
+            && m["params"]["text"]["text"]
+                .as_str()
+                .is_some_and(|t| t.starts_with('['))
+    });
+    let got: Value =
+        serde_json::from_str(said["params"]["text"]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        got,
+        json!([{"name": "agora-mesh", "command": "/usr/bin/agora",
+                "args": ["mesh", "stdio", "--socket", "/s/agent-1.sock"], "env": []}])
+    );
+
+    // An agent that says it takes no stdio MCP servers gets none.
+    let mut n = Node::start_with("acp_child_no_stdio_mcp");
+    n.call("initialize", json!({"protocolGeneration": 1}));
+    n.call(
+        "session/start",
+        json!({"projectRoot": ".", "worktree": ".", "mcpServers": [mesh]}),
+    );
+    n.call(
+        "session/prompt",
+        json!({"sessionId": "acp-s1", "text": "mcp-servers"}),
+    );
+    n.wait(|m| m["method"] == "chat/append" && m["params"]["text"]["text"] == "[]");
 }

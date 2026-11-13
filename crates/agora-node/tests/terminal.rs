@@ -223,6 +223,31 @@ fn resize_and_exit_are_delivered_to_subscribers() {
 }
 
 #[test]
+fn a_resize_to_the_same_size_reaches_no_one() {
+    let h = handle(&["sh"]);
+    let (snap, sub) = h.subscribe();
+    let same = snap.size;
+    let seq = h.snapshot().seq;
+    h.resize(same).unwrap();
+    h.resize(Size { cols: 91, rows: 21 }).unwrap();
+    h.resize(Size { cols: 91, rows: 21 }).unwrap();
+    let mut resizes = Vec::new();
+    let end = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < end {
+        if let Ok(Output::Resize(s)) = sub.recv_timeout(Duration::from_millis(100)) {
+            resizes.push(s);
+        }
+    }
+    assert_eq!(
+        resizes,
+        [Size { cols: 91, rows: 21 }],
+        "only the change is delivered"
+    );
+    assert!(h.snapshot().seq > seq);
+    h.kill().unwrap();
+}
+
+#[test]
 fn a_slow_subscriber_lags_without_slowing_the_terminal_and_can_resync() {
     let flood = handle(&["sh", "-c", "yes 'flood flood flood flood flood flood'"]);
     let (_s, slow) = flood.subscribe();

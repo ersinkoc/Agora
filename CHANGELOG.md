@@ -10,6 +10,9 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 - Asking the owner for a grant to switch an agent's model asks for that agent only, as for its mode (it asked for the whole machine); the terminal client asks for the same grant.
 
 ### Agents
+- Agents started in structured mode (ACP agents through the bridge, and adapter agents) now get the mesh: the node passes each its own mesh server when its session starts, restarts or resumes, so they can message other agents, use the board and leases, appear in other agents' lists and start helpers (with your approval) like terminal agents. Before, they started with no MCP servers at all.
+
+### Agents
 - A structured (ACP) agent that is not confined keeps the user's temporary folder (on Windows it no longer drops temp files in the profile root); a confined one gets its own private one. A terminal resized to the size it already has is left alone, which stops a fresh Git `sh` on Windows from sometimes losing the first key typed.
 
 ### Agents
