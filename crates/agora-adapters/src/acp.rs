@@ -273,7 +273,7 @@ pub fn stderr_tail(raw: &[u8], home: Option<&str>) -> String {
         .filter(|l| !l.is_empty())
         .map(|l| {
             let l = match home {
-                Some(h) => l.replace(h, "~"),
+                Some(h) => replace_home(l, h),
                 None => l.to_string(),
             };
             redact(&l)
@@ -288,6 +288,50 @@ pub fn stderr_tail(raw: &[u8], home: Option<&str>) -> String {
         start += 1;
     }
     format!("…{}", &tail[start..])
+}
+
+/// Replaces the home folder with `~` in every spelling a tool may print: as given, with `/` instead of `\\`, as the Git Bash form
+/// (`/c/Users/name`) of a drive path, and ignoring ASCII case (Windows paths do not care about it).
+fn replace_home(line: &str, home: &str) -> String {
+    let mut spellings = vec![home.to_string(), home.replace('\\', "/")];
+    let b = home.as_bytes();
+    if b.len() > 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
+        spellings.push(format!(
+            "/{}{}",
+            home[..1].to_ascii_lowercase(),
+            home[2..].replace('\\', "/")
+        ));
+    }
+    spellings.dedup();
+    let mut out = line.to_string();
+    for sp in spellings {
+        out = replace_ignoring_ascii_case(&out, &sp, "~");
+    }
+    out
+}
+
+fn replace_ignoring_ascii_case(text: &str, needle: &str, with: &str) -> String {
+    if needle.is_empty() {
+        return text.to_string();
+    }
+    let (t, n) = (text.as_bytes(), needle.as_bytes());
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < t.len() {
+        if i + n.len() <= t.len()
+            && t[i..i + n.len()].eq_ignore_ascii_case(n)
+            && text.is_char_boundary(i)
+            && text.is_char_boundary(i + n.len())
+        {
+            out.push_str(with);
+            i += n.len();
+        } else {
+            let step = text[i..].chars().next().map_or(1, char::len_utf8);
+            out.push_str(&text[i..i + step]);
+            i += step;
+        }
+    }
+    out
 }
 
 /// Copies the agent's stderr to the bridge's own (diagnostics for whoever runs the node, as before) and keeps its last bytes. The
@@ -854,6 +898,29 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_home_folder_is_hidden_in_every_spelling() {
+        let home = "C:\\Users\\someone";
+        for line in [
+            "C:\\Users\\someone\\.config\\x",
+            "C:/Users/someone/.config/x",
+            "c:\\users\\someone\\x",
+            "/c/Users/someone/x",
+            "\\\\?\\C:\\Users\\someone\\x",
+        ] {
+            let out = super::stderr_tail(line.as_bytes(), Some(home));
+            assert!(
+                !out.to_ascii_lowercase().contains("someone"),
+                "{line} -> {out}"
+            );
+            assert!(out.contains('~'), "{line} -> {out}");
+        }
+        assert_eq!(
+            super::stderr_tail(b"/home/x/.cache", Some("/home/x")),
+            "~/.cache"
+        );
+    }
+
     use super::*;
 
     #[test]
