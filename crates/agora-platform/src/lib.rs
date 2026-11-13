@@ -1055,6 +1055,156 @@ pub fn process_children(pid: u32) -> io::Result<Vec<u32>> {
     }
 }
 
+/// Starts `cmd` detached from this process, its terminal and its session (ADR-0062): it survives the terminal closing, the SSH session
+/// ending and this process being killed. Standard input is empty; standard output and error are appended to `log` (created readable by
+/// the user only). Unix: a new session (`setsid`), so no terminal hangup or Ctrl-C reaches it; Windows: `DETACHED_PROCESS` and
+/// `CREATE_NEW_PROCESS_GROUP`. Returns its process id. A thread of this process reaps it if it ends while this process still runs,
+/// so it never lingers as a zombie.
+pub fn spawn_detached(cmd: &mut std::process::Command, log: &std::path::Path) -> io::Result<u32> {
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let out = options.open(log)?;
+    #[cfg(windows)]
+    windows::set_owner_only(log, false)?;
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(out.try_clone()?)
+        .stderr(out);
+    #[cfg(unix)]
+    unix::detach(cmd);
+    #[cfg(windows)]
+    winproc::detach(cmd);
+    let mut child = cmd.spawn()?;
+    let pid = child.id();
+    let _ = std::thread::Builder::new()
+        .name("agora-reap".into())
+        .spawn(move || {
+            let _ = child.wait();
+        });
+    Ok(pid)
+}
+
+/// When process `pid` started, in a unit of the system's own (only compared for equality), or `None` when no such process runs (an
+/// ended one that was not reaped yet counts as ended). A pid with the same start time is the same process, not a recycled pid: what
+/// lock files compare. Where the start time cannot be read, a live process reports 0.
+pub fn process_start_time(pid: u32) -> Option<u64> {
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    {
+        procinfo::start_time(pid)
+    }
+    #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+    {
+        unix::alive(pid).then_some(0)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
+/// Asks process `pid` to end: `SIGTERM` on Unix, `TerminateProcess` on Windows.
+pub fn terminate_process(pid: u32) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        unix::terminate(pid)
+    }
+    #[cfg(windows)]
+    {
+        winproc::terminate(pid)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+        Err(io::Error::from(io::ErrorKind::Unsupported))
+    }
+}
+
+/// This machine's name (`gethostname` on Unix, `COMPUTERNAME` on Windows), if it has one.
+pub fn hostname() -> Option<String> {
+    #[cfg(unix)]
+    {
+        unix::hostname()
+    }
+    #[cfg(windows)]
+    {
+        std::env::var("COMPUTERNAME")
+            .ok()
+            .filter(|n| !n.trim().is_empty())
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        None
+    }
+}
+
+/// Opens `url` in the user's browser: `open` on macOS, `cmd /c start` on Windows, `xdg-open` elsewhere. An error means no browser
+/// could be asked (the caller then shows the address); a helper still running after a few seconds counts as success.
+pub fn open_url(url: &str) -> io::Result<()> {
+    use std::process::{Command, Stdio};
+    #[cfg(target_os = "macos")]
+    let mut cmd = Command::new("open");
+    #[cfg(windows)]
+    let mut cmd = {
+        let mut c = Command::new("cmd");
+        // The empty argument is the window title `start` takes first; without it a quoted URL would become the title.
+        c.args(["/c", "start", ""]);
+        c
+    };
+    #[cfg(not(any(target_os = "macos", windows)))]
+    let mut cmd = Command::new("xdg-open");
+    let mut child = cmd
+        .arg(url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return if status.success() {
+                Ok(())
+            } else {
+                Err(io::Error::other("no browser opened the address"))
+            };
+        }
+        if std::time::Instant::now() > end {
+            // Still working (some helpers wait for the browser): leave it be, and reap it from a thread.
+            let _ = std::thread::Builder::new().spawn(move || {
+                let _ = child.wait();
+            });
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod detached_tests {
+    #[test]
+    fn a_live_process_keeps_its_start_time_and_an_ended_one_has_none() {
+        let me = std::process::id();
+        let first = super::process_start_time(me);
+        assert!(first.is_some());
+        assert_eq!(super::process_start_time(me), first);
+        if !cfg!(any(unix, windows)) {
+            return;
+        }
+        let exe = std::env::current_exe().unwrap();
+        let mut child = std::process::Command::new(exe)
+            .arg("--list")
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        assert_eq!(super::process_start_time(pid), None);
+        assert!(super::hostname().is_some_and(|h| !h.is_empty()));
+    }
+}
+
 /// The process and all its descendants, parents before children. Processes that exit while the tree is
 /// being walked are skipped.
 pub fn process_tree(root: u32) -> io::Result<Vec<ProcessInfo>> {

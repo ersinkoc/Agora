@@ -999,6 +999,9 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
         return ExitCode::from(2);
     };
     let addr = o.hub.clone().unwrap_or_else(|| DEFAULT_LISTEN.to_string());
+    // On the hub's machine (no `--hub`, or `--hub-dir` given with it: the front door's hub on a port of its own, ADR-0062) a sign-in
+    // code is made from the hub's folder whenever one is needed; nobody types one.
+    let local = o.hub.is_none() || o.hub_dir.is_some();
     let hub = Hub {
         addr: addr.clone(),
         ca_pem,
@@ -1058,7 +1061,7 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                 Some(t) => t.clone(),
                 None => {
                     // A code from the flag the first time; on the hub's machine a new one whenever it is needed.
-                    let code = match (&o.code, o.hub.is_none()) {
+                    let code = match (&o.code, local) {
                         (Some(c), _) if first => c.clone(),
                         (_, true) => new_login_code(&dir).map_err(|_| ClientError::Refused)?,
                         _ => return Err(ClientError::Refused),
@@ -1074,8 +1077,13 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
             Ok(s) => s,
             Err(ClientError::Refused | ClientError::TooMany) => {
                 token = None;
-                if first || o.hub.is_some() {
-                    say.err(key!("tui-signin-failed"), &[]);
+                if first || !local {
+                    // On the hub's machine nobody is asked for a code: the client makes its own.
+                    if local {
+                        say.err(key!("tui-signin-failed-local"), &[]);
+                    } else {
+                        say.err(key!("tui-signin-failed"), &[]);
+                    }
                     return ExitCode::from(1);
                 }
                 std::thread::sleep(Duration::from_secs(2));

@@ -467,6 +467,51 @@ pub(crate) fn visit_dir(
     Ok(())
 }
 
+/// Makes `cmd` start in a session of its own (`setsid` in the child before `exec`), detached from this process's terminal: see
+/// [`crate::spawn_detached`].
+pub(crate) fn detach(cmd: &mut Command) {
+    // SAFETY: `setsid` is async-signal-safe and touches no memory of the parent; the child is a fresh fork here.
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+/// `SIGTERM` to one process (not its group): see [`crate::terminate_process`].
+pub(crate) fn terminate(pid: u32) -> io::Result<()> {
+    let pid =
+        libc::pid_t::try_from(pid).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    // SAFETY: plain system call on a pid number.
+    cvt(unsafe { libc::kill(pid, libc::SIGTERM) }).map(|_| ())
+}
+
+/// Whether a process with this pid exists (one owned by another user counts).
+#[allow(dead_code)] // used only on the Unix systems without a start-time reader
+pub(crate) fn alive(pid: u32) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return false;
+    };
+    // SAFETY: signal 0 checks existence and permission only.
+    let r = unsafe { libc::kill(pid, 0) };
+    r == 0 || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+/// See [`crate::hostname`].
+pub(crate) fn hostname() -> Option<String> {
+    let mut buf = [0u8; 256];
+    // SAFETY: the buffer is valid for `buf.len()` bytes; the result may be unterminated when truncated, handled below.
+    if unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) } != 0 {
+        return None;
+    }
+    let len = buf.iter().position(|b| *b == 0).unwrap_or(buf.len());
+    let name = String::from_utf8_lossy(&buf[..len]).trim().to_string();
+    (!name.is_empty()).then_some(name)
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used)] // expect is allowed in tests
 mod tests {

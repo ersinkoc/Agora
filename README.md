@@ -29,6 +29,11 @@ blocks it ("cannot be verified"): run `xattr -d com.apple.quarantine agora-aarch
 `agora update` checks and installs newer releases the same way once the key is saved as `<agora dir>/release-key`.
 The web window is embedded in the binary, so steps 2 to 4 below work with a release too.
 
+## Get started
+
+Type `agora`. The first time it asks one question; then it starts everything this machine needs in the background and opens
+the terminal client signed in (`agora web` opens the browser). See [docs/getting-started.md](docs/getting-started.md).
+
 ## Try it (from source)
 
 ```sh

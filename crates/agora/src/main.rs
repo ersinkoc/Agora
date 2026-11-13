@@ -25,6 +25,7 @@ const DETACH: u8 = 0x1d;
 const TERMINAL_STREAM: u32 = 3;
 
 mod adaptercmd;
+mod frontdoor;
 mod hubcli;
 mod tuicmd;
 mod update;
@@ -117,6 +118,8 @@ pub(crate) struct Opts {
     since: Option<u64>,
     who: Option<String>,
     root_key: Option<PathBuf>,
+    ui: Option<String>,
+    save: bool,
     positional: Vec<String>,
 }
 
@@ -163,6 +166,8 @@ fn parse(args: &[String]) -> Option<Opts> {
             "--who" => o.who = Some(it.next()?.clone()),
             "--role" => o.role = Some(it.next()?.clone()),
             "--root-key" => o.root_key = Some(it.next()?.into()),
+            "--ui" => o.ui = Some(it.next()?.clone()),
+            "--save" => o.save = true,
             s if s.starts_with("--") => return None,
             _ => o.positional.push(a.clone()),
         }
@@ -194,6 +199,13 @@ fn main() -> ExitCode {
     }
     let say = Say(Catalog::for_locale(&agora_i18n::catalog::locale_from_env()));
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if matches!(
+        args.first().map(String::as_str),
+        Some("--help" | "-h" | "help")
+    ) {
+        say.out(key!("cli-usage"), &[]);
+        return ExitCode::SUCCESS;
+    }
     let words: Vec<&str> = args
         .iter()
         .map(String::as_str)
@@ -207,6 +219,11 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     };
     match words.as_slice() {
+        // ADR-0062: plain `agora` brings this machine's Agora up and opens it.
+        [] => frontdoor::front_door(&say, &opts),
+        ["web"] => frontdoor::web(&say),
+        ["status"] => frontdoor::status(&say),
+        ["down"] => frontdoor::down(&say),
         ["node", "run"] => node_run(&say, &opts),
         ["agent", "start"] => agent_start(&say, &opts),
         ["project", "init"] => project_init(&say, &opts),

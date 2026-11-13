@@ -4,6 +4,9 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+### Getting started
+- Type `agora` and it works (ADR-0062, first rung). The first time it asks one question (start Agora here, just this machine, or join; joining from here comes later) and keeps the answer in `~/.agora/machine.toml`. Then it starts this machine's hub and node in the background when they are not running, connects the node to the hub by itself (no code to copy), and opens the terminal client signed in. `agora web` opens the browser signed in; `agora --ui web|tui|none` opens that for one run, and with `--save` makes it what plain `agora` opens. Closing or killing the window leaves the hub, the node and the agents running. `agora status` shows what runs and where its logs are (`~/.agora/logs`), `agora down` stops it. `agora --help` prints the usage. See `docs/getting-started.md`.
+
 ### Signing in
 - A browser stays signed in: the session token is kept for 30 days (it was 12 hours and was forgotten when the tab closed) and every use extends it, so you are not asked for a code again each time you open the window. Signing out ends it at once.
 ### Agents

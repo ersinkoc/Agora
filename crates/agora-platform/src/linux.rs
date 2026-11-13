@@ -215,3 +215,15 @@ pub(crate) fn identity(pid: u32) -> io::Result<crate::ProcessIdentity> {
         name: name(pid)?,
     })
 }
+
+/// See [`crate::process_start_time`]: field 22 of `/proc/<pid>/stat` (clock ticks after boot); a zombie counts as ended.
+pub(crate) fn start_time(pid: u32) -> Option<u64> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let rest = &stat[stat.rfind(')')? + 1..];
+    let f: Vec<&str> = rest.split_whitespace().collect();
+    if f.first() == Some(&"Z") || f.first() == Some(&"X") {
+        return None;
+    }
+    // Fields after the name start at field 3 (state), so field 22 is index 19.
+    f.get(19)?.parse().ok()
+}

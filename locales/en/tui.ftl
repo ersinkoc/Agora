@@ -1,6 +1,7 @@
 # The terminal client (ADR-0043). UI vocabulary: machines, "Needs you", "Finished" (docs/ux/visual-language.md).
 tui-connecting = Connecting to { $hub }…
 tui-lost = The connection to { $hub } was lost. Trying again…
+tui-signin-failed-local = Could not sign in to this machine's hub. Run `agora` again; `agora status` shows whether it is running and where its log is.
 tui-signin-failed = The hub did not accept the code. Make a new one with "agora hub login".
 tui-need-hub = Tell me where your hub is: run this on the hub's machine, or pass --hub HOST:PORT --ca FILE --code CODE.
 tui-quit-hint = Ctrl-C to quit
