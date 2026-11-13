@@ -30,6 +30,7 @@ const HUB_CAPABILITIES: &[&str] = &[
     "workspace.directory",
     "directory.list",
     "board.join",
+    "mesh.spawn",
     // ADR-0058
     "agent.set_mode",
     "agent.set_model",

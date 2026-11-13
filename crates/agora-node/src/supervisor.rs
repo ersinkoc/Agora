@@ -277,6 +277,66 @@ pub struct AgentView {
     pub project: String,
     pub running: bool,
     pub restarts: u32,
+    /// ADR-0057: the agent on this node that started this one through the mesh.
+    pub parent: Option<AgentId>,
+}
+
+/// ADR-0057: whether `program` is a shell, a wrapper or an interpreter, which runs whatever it is given. Compared by its file name,
+/// lower-cased, without `.exe`, `.cmd`, `.bat` or `.com` and without a version (`python3.12` is `python`, `pypy3` is `pypy`).
+fn runs_anything(program: &str) -> bool {
+    const ANY: &[&str] = &[
+        "sh",
+        "bash",
+        "zsh",
+        "fish",
+        "dash",
+        "ksh",
+        "csh",
+        "tcsh",
+        "nu",
+        "pwsh",
+        "powershell",
+        "cmd",
+        "busybox",
+        "wsl",
+        "env",
+        "nice",
+        "nohup",
+        "setsid",
+        "timeout",
+        "stdbuf",
+        "xargs",
+        "sudo",
+        "doas",
+        "su",
+        "ssh",
+        "docker",
+        "podman",
+        "python",
+        "pypy",
+        "perl",
+        "ruby",
+        "node",
+        "deno",
+        "bun",
+        "npx",
+        "uvx",
+        "bunx",
+        "php",
+        "lua",
+    ];
+    let base = program
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(program)
+        .to_ascii_lowercase();
+    let base = [".exe", ".cmd", ".bat", ".com"]
+        .iter()
+        .find_map(|x| base.strip_suffix(x))
+        .unwrap_or(&base);
+    let name =
+        base.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.' || c == '-' || c == '_');
+    ANY.contains(&name) || ANY.contains(&base)
 }
 
 /// One startable agent kind, as reported by [`Supervisor::kinds`].
@@ -291,6 +351,22 @@ pub struct KindInfo {
 struct KindEntry {
     manifest: Manifest,
     detector: Detector,
+    /// ADR-0057: the manifest's `[[ready]]` rules (an empty input box).
+    ready: Detector,
+    /// ADR-0057: the manifest's `[[typed]]` rules and `input_box` pattern (typed text in the box, nothing else on screen).
+    typed: Detector,
+}
+
+/// What a terminal agent's live screen shows right now (ADR-0057), read when asked rather than from the paced detection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScreenCheck {
+    /// What the kind's rules detect on the live bottom of the screen now (`None`: no rule matches).
+    pub state: Option<AgentState>,
+    /// The `[[ready]]` rules match: the input box is empty and waiting.
+    pub ready: bool,
+    /// The `[[typed]]` rules match and the input box (`input_box`) holds exactly the text asked about and nothing else (whitespace
+    /// ignored, so a wrapped line still counts). Keys someone else typed into the box make it false.
+    pub shows: bool,
 }
 
 /// An agent driven through an L3 adapter process instead of a terminal.
@@ -339,6 +415,8 @@ pub struct Supervisor {
     abort_hook: Option<AbortHook>,
     sandbox: crate::sandbox::SandboxPolicy,
     adapters: BTreeMap<AgentId, AdapterEntry>,
+    /// ADR-0057: helper -> the agent that started it.
+    parents: BTreeMap<AgentId, AgentId>,
 }
 
 impl Supervisor {
@@ -353,7 +431,87 @@ impl Supervisor {
             abort_hook: None,
             sandbox: Default::default(),
             adapters: BTreeMap::new(),
+            parents: BTreeMap::new(),
         }
+    }
+
+    /// ADR-0057: `child` was started by `parent` (an agent's `agent_start`). Carried in every view of `child`.
+    pub fn set_parent(&mut self, child: &AgentId, parent: &AgentId) {
+        self.parents.insert(child.clone(), parent.clone());
+    }
+
+    /// ADR-0057: a fresh look at a terminal agent's live screen, run on its bottom lines now (never the paced detection's last result):
+    /// what its rules detect, whether its `[[ready]]` rules match, and whether its input box holds exactly `text` (`[[typed]]` and
+    /// `input_box`). `None` for an agent without a terminal.
+    pub fn screen_check(&self, id: &AgentId, text: &str) -> Option<ScreenCheck> {
+        let e = self.agents.get(id)?;
+        let term = e.terminal.as_ref()?;
+        let kind = self.kinds.get(&e.agent.kind)?;
+        let squash = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+        let needle = squash(text);
+        Some(term.inspect(|t| {
+            ScreenCheck {
+                state: kind.detector.detect(t).map(|d| d.state),
+                ready: kind.ready.detect(t).is_some(),
+                shows: !needle.is_empty()
+                    && kind.typed.detect(t).is_some()
+                    && kind
+                        .manifest
+                        .input_box
+                        .as_deref()
+                        .and_then(|p| Detector::input_box(p, t))
+                        .is_some_and(|in_box| squash(&in_box) == needle),
+            }
+        }))
+    }
+
+    /// ADR-0057: whether a scoped grant ("up to N more without asking") may cover `kind`: only a kind with an agent integration (a
+    /// mesh section, an adapter or a structured mode) whose program (`process.launch`, else `structured.acp.argv`, else
+    /// `adapter.command`) is not a shell, a wrapper or an interpreter, however many screen rules it has: a grant there would mean "run
+    /// any N programs without asking". Unknown kinds are not grantable.
+    pub fn grantable(&self, kind: &str) -> bool {
+        let Some(k) = self.kinds.get(kind) else {
+            return false;
+        };
+        let m = &k.manifest;
+        let integrated = m.mcp.is_some() || m.adapter.is_some() || m.structured.is_some();
+        let program = m
+            .process
+            .launch
+            .first()
+            .or_else(|| {
+                m.structured
+                    .as_ref()
+                    .and_then(|s| s.acp.as_ref())
+                    .and_then(|a| a.argv.first())
+            })
+            .or_else(|| m.adapter.as_ref().and_then(|a| a.command.first()));
+        kind != "shell" && integrated && program.is_some_and(|p| !runs_anything(p))
+    }
+
+    /// ADR-0057: the footer and marker texts the kind's `[[typed]]` rules require on screen. A prompt that contains one could stand in
+    /// for the real footer, so such a prompt is never typed.
+    pub fn typed_markers(&self, kind: &str) -> Vec<String> {
+        let Some(k) = self.kinds.get(kind) else {
+            return Vec::new();
+        };
+        k.manifest
+            .typed
+            .iter()
+            .flat_map(|r| {
+                r.contains.iter().cloned().chain(
+                    r.all
+                        .iter()
+                        .chain(&r.any)
+                        .filter_map(|c| c.contains.clone()),
+                )
+            })
+            .collect()
+    }
+
+    /// The node's confinement settings (ADR-0047), for checks that compare two agents' confinement.
+    pub fn sandbox_policy(&self) -> &crate::sandbox::SandboxPolicy {
+        &self.sandbox
     }
 
     /// Installs the hook that gives each launching agent a mesh endpoint.
@@ -422,8 +580,17 @@ impl Supervisor {
     /// Make an agent kind available. Replaces a previous manifest of the same kind.
     pub fn register(&mut self, manifest: Manifest) {
         let detector = Detector::new(&manifest);
-        self.kinds
-            .insert(manifest.kind.clone(), KindEntry { manifest, detector });
+        let ready = Detector::ready(&manifest);
+        let typed = Detector::typed(&manifest);
+        self.kinds.insert(
+            manifest.kind.clone(),
+            KindEntry {
+                manifest,
+                detector,
+                ready,
+                typed,
+            },
+        );
     }
 
     /// Agents that are running or waiting for a restart.
@@ -1465,6 +1632,7 @@ impl Supervisor {
                 project: e.agent.project.to_string(),
                 running: e.terminal.is_some(),
                 restarts: e.restarts,
+                parent: self.parents.get(id).cloned(),
             })
             .collect();
         out.extend(self.adapters.iter().map(|(id, e)| AgentView {
@@ -1479,6 +1647,7 @@ impl Supervisor {
             project: e.agent.project.to_string(),
             running: e.running,
             restarts: e.restarts,
+            parent: self.parents.get(id).cloned(),
         }));
         out.sort_by(|a, b| a.id.cmp(&b.id));
         out
@@ -1829,6 +1998,103 @@ fn session_report(agent: &Agent) -> Option<SupervisorEvent> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod adapter_option_tests {
     use super::*;
+
+    #[test]
+    fn a_grant_needs_an_agent_program_from_launch_acp_or_adapter() {
+        let mut sup = Supervisor::new(SupervisorConfig {
+            node: NodeId::new("n"),
+            restart: RestartPolicy::default(),
+            terminal: TerminalOptions::default(),
+            limits: NodeLimits::default(),
+        });
+        let head = |k: &str| {
+            format!("kind = \"{k}\"\ndisplay_name = \"K\"\nversion = \"1\"\nmin_engine = 1\n")
+        };
+        let mcp = "[mcp]\nmethod = \"cli_flag\"\nflag = [\"--mcp\", \"{config_file}\"]\n";
+        let cases = [
+            (
+                "agent",
+                format!("{}[process]\nlaunch = [\"claude\"]\n{mcp}", head("agent")),
+                true,
+            ),
+            (
+                "bare",
+                format!("{}[process]\nlaunch = [\"claude\"]\n", head("bare")),
+                false,
+            ),
+            (
+                "pyl",
+                format!(
+                    "{}[process]\nlaunch = [\"/usr/bin/python3.12\", \"x.py\"]\n{mcp}",
+                    head("pyl")
+                ),
+                false,
+            ),
+            (
+                "acp-ok",
+                format!(
+                    "{}[structured]\nacp = {{ argv = [\"opencode\", \"acp\"] }}\n",
+                    head("acp-ok")
+                ),
+                true,
+            ),
+            (
+                "acp-py",
+                format!(
+                    "{}[structured]\nacp = {{ argv = [\"python3\", \"a.py\"] }}\n",
+                    head("acp-py")
+                ),
+                false,
+            ),
+            (
+                "acp-env",
+                format!(
+                    "{}[structured]\nacp = {{ argv = [\"env\", \"-S\", \"x\"] }}\n",
+                    head("acp-env")
+                ),
+                false,
+            ),
+            (
+                "ad-ok",
+                format!(
+                    "{}[adapter]\ncommand = [\"agora-adapter-x\"]\n",
+                    head("ad-ok")
+                ),
+                true,
+            ),
+            (
+                "ad-bash",
+                format!(
+                    "{}[adapter]\ncommand = [\"C:\\\\Tools\\\\BASH.EXE\", \"-c\"]\n",
+                    head("ad-bash")
+                ),
+                false,
+            ),
+            (
+                "ad-npx",
+                format!(
+                    "{}[adapter]\ncommand = [\"npx\", \"pkg\"]\n",
+                    head("ad-npx")
+                ),
+                false,
+            ),
+        ];
+        for (kind, src, _) in &cases {
+            sup.register(Manifest::parse(src).unwrap_or_else(|e| panic!("{kind}: {e:?}")));
+        }
+        for (kind, _, want) in &cases {
+            assert_eq!(sup.grantable(kind), *want, "{kind}");
+        }
+        for p in [
+            "pypy3", "PWSH.exe", "wsl.exe", "uvx", "bunx", "nohup", "setsid", "xargs", "stdbuf",
+            "cmd.cmd", "node22",
+        ] {
+            assert!(runs_anything(p), "{p}");
+        }
+        for p in ["claude", "codex", "wstack", "opencode"] {
+            assert!(!runs_anything(p), "{p}");
+        }
+    }
 
     fn opt(id: &str, skips: bool) -> SessionOption {
         SessionOption {

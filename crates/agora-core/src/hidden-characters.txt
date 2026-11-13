@@ -1,0 +1,34 @@
+# ADR-0057: characters that are invisible or change how text around them looks. The node refuses them in an agent's start request;
+# clients show any that reach them as a visible \u{...} escape. One code point or an inclusive range (hex) per line. This file is the
+# one list: crates/agora-core/src/text.rs (node and TUI) and apps/web/src/net/view.ts (web) are each tested against it.
+# Default_Ignorable_Code_Point and every format character (Cf), Unicode 15.1:
+00AD
+034F
+0600-0605
+061C
+06DD
+070F
+0890-0891
+08E2
+115F-1160
+17B4-17B5
+180B-180F
+200B-200F
+# Line and paragraph separators (Zl, Zp), then the bidirectional embeddings and overrides.
+2028-202E
+2060-206F
+3164
+FE00-FE0F
+FEFF
+FFA0
+FFF0-FFFB
+110BD
+110CD
+13430-1343F
+1BCA0-1BCA3
+1D173-1D17A
+E0000-E0FFF
+# Private use areas.
+E000-F8FF
+F0000-FFFFD
+100000-10FFFD

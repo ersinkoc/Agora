@@ -103,6 +103,19 @@ Rule semantics: highest-priority matching rule wins; `all` = AND, `any` = OR, `n
 `title`, `bottom_lines(n)`, `bottom_non_empty_lines(n)`. Reported state (hooks, ACP, adapter) always overrides
 rule results.
 
+`[[ready]]` (ADR-0057, optional): rules of the same shape with `state = "idle"` that match only an empty input box waiting for a
+request, stricter than an `idle` rule (whose prompt marker can also be the selected row of a menu or dialog). The node types a helper's
+first prompt only when a fresh look at the live screen matches them and the kind's rules detect idle; a kind without them never gets
+a first prompt typed for it (the prompt is left for the user). Every shipped terminal manifest has them, and the fixture test checks
+that they match the captured idle and answered screens and nothing else (including a `menu.screen` that an `idle` rule matches).
+`[[typed]]` (same shape, `state = "idle"`) match an input box that holds typed text with no dialog or menu on screen, with the
+footer anchored to the lines right under the box (not anywhere on screen); the node refuses a prompt that contains a text these rules
+require (`contains` in the rule, `all` or `any`), and the top-level
+`input_box` is a multi-line regex over `bottom_non_empty_lines(12)` whose first capture group is the box's text: before pressing
+Enter on a helper's first prompt the node needs both, with the box holding exactly that prompt. The `typed.screen` fixtures are
+constructed from the captured idle screens with text in the box (a capture of that moment is not kept); the test checks that
+`[[typed]]` matches them and nothing else and that `input_box` reads exactly the typed text.
+
 Manifests in this repository: `claude-code` and `codex` (screens captured from the real agents, `manifests/agents/fixtures/`); `wrongstack` is planned and not shipped yet (it needs a machine that has it). `crates/agora-adapters/tests/shipped_manifests.rs` checks every shipped manifest against its captured screens.
 
 ## Usage files (ADR-0042)

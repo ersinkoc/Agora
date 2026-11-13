@@ -209,6 +209,18 @@ pub struct Manifest {
     /// What the agent needs beyond its worktree when the node confines agents (ADR-0047). Requests only: the node honours them for
     /// kinds its owner trusts.
     pub sandbox: Option<SandboxNeeds>,
+    /// ADR-0057: `[[ready]]` rules that say the input box is empty and waiting, stricter than an `idle` rule (which may also match a
+    /// menu's selected row). The node types a helper's first prompt only into a screen these match; a kind without them never has its
+    /// first prompt typed for it. Same shape as `[[rules]]`, with `state = "idle"`.
+    #[serde(default)]
+    pub ready: Vec<Rule>,
+    /// ADR-0057: `[[typed]]` rules that say the input box holds typed text and nothing else is on screen (no dialog, no menu); checked
+    /// with [`Manifest::input_box`] before the node presses Enter on a helper's first prompt. Same shape, `state = "idle"`.
+    #[serde(default)]
+    pub typed: Vec<Rule>,
+    /// ADR-0057: a regex over `bottom_non_empty_lines(12)` (multi-line) whose first capture group is the input box's text. Enter is pressed
+    /// only when it holds exactly the typed prompt (whitespace ignored, so a wrapped line still counts).
+    pub input_box: Option<String>,
 }
 
 /// Folders an agent asks to read or write when confined; `~/` stands for the home folder.
@@ -310,9 +322,33 @@ impl Manifest {
                 return Err(invalid("mcp"));
             }
         }
+        for (name, list) in [("ready", &self.ready), ("typed", &self.typed)] {
+            for (i, r) in list.iter().enumerate() {
+                if r.state != RuleState::Idle {
+                    return Err(invalid(format!("{name}[{i}].state")));
+                }
+            }
+        }
+        if let Some(re) = &self.input_box {
+            let ok = crate::rules::compile(re).is_ok_and(|r| r.captures_len() >= 2);
+            if !ok {
+                return Err(invalid("input_box"));
+            }
+        }
+        for (name, list) in [
+            ("rules", &self.rules),
+            ("ready", &self.ready),
+            ("typed", &self.typed),
+        ] {
+            Self::validate_rules(name, list)?;
+        }
+        Ok(())
+    }
+
+    fn validate_rules(name: &str, rules: &[Rule]) -> Result<(), ManifestError> {
         let mut ids = HashSet::new();
-        for (i, r) in self.rules.iter().enumerate() {
-            let at = |f: &str| invalid(format!("rules[{i}].{f}"));
+        for (i, r) in rules.iter().enumerate() {
+            let at = |f: &str| invalid(format!("{name}[{i}].{f}"));
             if r.id.is_empty() || !ids.insert(r.id.as_str()) {
                 return Err(at("id"));
             }
