@@ -78,6 +78,22 @@ pub struct AgentView {
     pub session: SessionView,
     /// ADR-0057: the hub-wide key (`<node>/<agent>`) of the agent that started this one; empty when the user did.
     pub parent_agent_id: String,
+    /// ADR-0059: the launch options it was started with, and whether it acts without asking (the badge).
+    pub launch_options: Vec<String>,
+    pub skips_permissions: bool,
+    /// ADR-0060: the node found this agent interrupted (running when the node stopped). Cleared by its next `AgentStarted`.
+    pub interrupted: Option<InterruptedView>,
+}
+
+/// ADR-0060: what `AgentInterrupted` said about an agent.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct InterruptedView {
+    /// Resume continues its own session; false: only Start again (a new session in the same folder).
+    pub resumable: bool,
+    pub at_ms: u64,
+    pub folder: String,
+    /// Its process from before the node's restart still runs: Stop it before Resume.
+    pub still_running: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -258,8 +274,50 @@ impl View {
                         } else {
                             q(&e.parent_agent_id)
                         },
+                        interrupted: None,
+                        launch_options: e.launch_options.clone(),
+                        skips_permissions: e.skips_permissions,
                     },
                 );
+            }
+            // ADR-0060: kept with the closed agents ("finished"), with what Resume or Start again needs. An agent the hub never saw
+            // (its store was reset) is listed from the event alone.
+            Body::AgentInterrupted(e) => {
+                let a = self
+                    .agents
+                    .entry(q(&e.agent_id))
+                    .or_insert_with(|| AgentView {
+                        node_id: producer.to_string(),
+                        project_id: e.project_id.clone(),
+                        worktree_id: q(""),
+                        kind: e.kind.clone(),
+                        state: AgentState::Done,
+                        reported: false,
+                        session_id: None,
+                        running: false,
+                        exit_code: None,
+                        input_tokens: 0,
+                        output_tokens: 0,
+                        model: String::new(),
+                        forgotten: false,
+                        session: SessionView::default(),
+                        parent_agent_id: if e.parent_agent_id.is_empty() {
+                            String::new()
+                        } else {
+                            q(&e.parent_agent_id)
+                        },
+                        interrupted: None,
+                        launch_options: Vec::new(),
+                        skips_permissions: false,
+                    });
+                a.running = false;
+                a.state = AgentState::Done;
+                a.interrupted = Some(InterruptedView {
+                    resumable: e.resumable,
+                    at_ms: e.interrupted_at_ms,
+                    folder: e.folder.clone(),
+                    still_running: e.still_running,
+                });
             }
             Body::AgentSessionOptions(e) => {
                 if let Some(a) = self.agents.get_mut(&q(&e.agent_id)) {
@@ -453,6 +511,8 @@ mod tests {
             kind: "claude-code".into(),
             level: 2,
             parent_agent_id: String::new(),
+            launch_options: Vec::new(),
+            skips_permissions: false,
         })
     }
 
@@ -462,6 +522,72 @@ mod tests {
             state: s as i32,
             reported,
         })
+    }
+
+    #[test]
+    fn an_interrupted_agent_stays_closed_until_it_starts_again_and_one_never_seen_is_listed() {
+        let online = Body::NodeOnline(NodeOnline {
+            node_id: "n1".into(),
+            hostname: "laptop".into(),
+            os: "linux".into(),
+            build: "b".into(),
+        });
+        let interrupted = |id: &str, resumable: bool| {
+            Body::AgentInterrupted(AgentInterrupted {
+                agent_id: id.into(),
+                kind: "claude-code".into(),
+                project_id: "p".into(),
+                folder: "/work/a".into(),
+                parent_agent_id: String::new(),
+                resumable,
+                started_at_ms: 1,
+                interrupted_at_ms: 99,
+                last_state: AgentState::Working as i32,
+                still_running: false,
+            })
+        };
+        let mut v = View::default();
+        v.apply(&ev("n1", 1, online.clone()));
+        v.apply(&ev("n1", 2, started("a")));
+        v.apply(&ev(
+            "n1",
+            3,
+            Body::AgentUsageReported(AgentUsageReported {
+                agent_id: "a".into(),
+                input_tokens: 5,
+                ..Default::default()
+            }),
+        ));
+        // The node stops with the agent running and starts again.
+        v.apply(&ev("n1", 4, online));
+        v.apply(&ev("n1", 5, interrupted("a", true)));
+        let a = &v.agents["n1/a"];
+        assert!(!a.running);
+        assert_eq!(a.state, AgentState::Done);
+        assert_eq!(a.input_tokens, 5);
+        assert_eq!(
+            a.interrupted,
+            Some(InterruptedView {
+                resumable: true,
+                at_ms: 99,
+                folder: "/work/a".into(),
+                still_running: false,
+            })
+        );
+        // Said again by a resync: still one agent, still interrupted.
+        v.apply(&ev("n1", 6, interrupted("a", true)));
+        assert_eq!(v.agents.len(), 1);
+        // Resumed: its start clears it.
+        v.apply(&ev("n1", 7, started("a")));
+        assert!(v.agents["n1/a"].running && v.agents["n1/a"].interrupted.is_none());
+        // One the hub never saw start (its store was reset) is listed from the event alone.
+        v.apply(&ev("n1", 8, interrupted("b", false)));
+        let b = &v.agents["n1/b"];
+        assert!(!b.running && b.interrupted.as_ref().is_some_and(|i| !i.resumable));
+        assert_eq!(
+            (b.kind.as_str(), b.project_id.as_str()),
+            ("claude-code", "p")
+        );
     }
 
     #[test]

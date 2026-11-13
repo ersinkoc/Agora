@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import { CommandPalette, type PaletteItem } from './components/CommandPalette';
 import { demoAgents, demoApprovals, demoList, demoMachines, demoProjects } from './fixtures';
 import { chooseLanguage, getLanguage, subscribeLanguage, t } from './i18n';
-import { nextNeedingMe, type AgentTileModel } from './model';
+import { nextNeedingMe, type AgentTileModel, type ResumeAction } from './model';
 import { connectLive, type CommandBody, type Live, type LinkState } from './net/live';
 import { GrantDialog } from './components/GrantDialog';
 import { grantFor, signGrant, type GrantAsk } from './net/grant';
@@ -16,7 +16,9 @@ import type { StartChoice } from './components/StartApproval';
 import type { HelperGrant } from './components/HelperGrants';
 import { addPasskey, passkeysSupported, signInWithPasskey } from './net/passkey';
 import { summarize, type UsageSummary } from './net/usage';
-import { forgetToken, hubConnection, readCode, signIn } from './net/session';
+import { endSession, forgetToken, hubConnection, readCode, setPassword, signIn, signInFromLink, signInInfo, type SignInInfo } from './net/session';
+import { idleMinutes, setIdleMinutes, watchIdle, type IdleMinutes } from './net/idle';
+import { ScreenPasswordSettings } from './components/Locks';
 import { Console } from './components/Console';
 import type { ChatSource } from './net/chat';
 import { commitsOf, type CommitItem } from './net/history';
@@ -25,6 +27,13 @@ import { demoSource } from './terminal/source';
 import { AuditPage, DevicePage, Focus, Gallery, MachinesPage, SignInPage } from './screens';
 import { loadAudit } from './net/audit';
 import { agentTarget } from './components/sessionChoice';
+import { usableId } from './components/launchChoice';
+
+// ADR-0059: why the machine refused the chosen launch option, as a message id (its `policy` parameter, a stable value).
+function optionForbidden(e: unknown): string {
+  const policy = (e as { params?: Record<string, string> }).params?.policy;
+  return policy === 'confined_only' ? 'start-option-confined-only' : 'start-option-forbidden';
+}
 
 function useHash(): [string, (h: string) => void] {
   const [hash, setHash] = useState(window.location.hash);
@@ -43,22 +52,30 @@ export function App() {
   // With a hub token the fleet comes from the hub; without one (development) the demo data stands in.
   const [hub, setHub] = useState(hubConnection);
   const [signInNotice, setSignInNotice] = useState<string | undefined>();
-  const trySignIn = useCallback(async (code: string) => {
-    const r = await signIn(code);
+  // Whether the hub asks this browser for the screen password (ADR-0067), and whether one is set.
+  const [info, setInfo] = useState<SignInInfo>({ passwordRequired: false, passwordSet: false });
+  const refreshInfo = useCallback(() => { void signInInfo().then(setInfo); }, []);
+  useEffect(refreshInfo, [refreshInfo]);
+  const trySignIn = useCallback(async (code: string, password?: string) => {
+    const r = await signIn(code, password);
     if (r.ok) { setSignInNotice(undefined); setHub(hubConnection()); return; }
-    setSignInNotice(r.reason === 'refused' ? 'signin-refused' : r.reason === 'too-many' ? 'signin-too-many' : 'signin-failed');
+    setSignInNotice(r.reason === 'refused' ? (password ? 'signin-refused-password' : 'signin-refused') : r.reason === 'too-many' ? 'signin-too-many' : 'signin-failed');
   }, []);
+  // A code from a `#code=` link that still needs the screen password: kept in the form, not submitted.
+  const [linkCode, setLinkCode] = useState<string | undefined>();
+  const [idle, setIdle] = useState<IdleMinutes>(() => idleMinutes());
   const trySignInPasskey = useCallback(async () => {
     const r = await signInWithPasskey();
     if (r.ok) { setSignInNotice(undefined); setHub(hubConnection()); return; }
     if (r.reason !== 'cancelled') setSignInNotice(r.reason === 'too-many' ? 'signin-too-many' : 'signin-passkey-failed');
   }, []);
-  // A code in the address (`#code=...`) signs in at once; it is removed from the address either way.
+  // A code in the address (`#code=...`) is removed from the address at once. It signs in at once unless the hub wants the screen
+  // password from here: then it waits in the form for the password.
   useEffect(() => {
     const { code, rest } = readCode(window.location.hash);
     if (code === undefined) return;
     window.history.replaceState(null, '', window.location.pathname + window.location.search + rest);
-    void trySignIn(code);
+    void signInFromLink(code, async () => { const i = await signInInfo(); setInfo(i); return i; }, (c) => { void trySignIn(c); }, setLinkCode);
   }, [trySignIn]);
   const [live, setLive] = useState<View | undefined>();
   const [link, setLink] = useState<LinkState>('connecting');
@@ -72,7 +89,11 @@ export function App() {
   const [grantAsk, setGrantAsk] = useState<{ node: string; body: CommandBody; ask: GrantAsk; busy: boolean; failed: boolean } | undefined>();
   const loadKinds = useCallback(async (node: string): Promise<KindChoice[]> => {
     const ok = await api!.command(node, { agentKinds: {} });
-    return (ok.agentKinds?.kinds ?? []).map((k) => ({ kind: k.kind ?? '', name: k.displayName || (k.kind ?? ''), installed: !!k.installed }));
+    return (ok.agentKinds?.kinds ?? []).map((k) => ({
+      kind: k.kind ?? '', name: k.displayName || (k.kind ?? ''), installed: !!k.installed,
+      // ADR-0059: the kind's launch options (the machine keeps their arguments).
+      options: (k.launchOptions ?? []).filter((o) => usableId(o.id ?? '')).map((o) => ({ id: o.id ?? '', label: o.label ?? '', skipsPermissions: !!o.skipsPermissions })),
+    }));
   }, [api]);
   const inspectDirectory = useCallback(async (node: string, path: string, createProjectId: boolean): Promise<DirectoryInfo> => {
     if (!api || !device) throw { code: 'approval.signature_invalid' };
@@ -90,17 +111,22 @@ export function App() {
     if (!d) throw { code: 'protocol.capability_missing' };
     return { path: d.path ?? '', parent: d.parent ?? '', entries: (d.entries ?? []).map((e) => ({ name: e.name ?? '', isGit: !!e.isGit })), truncated: !!d.truncated };
   }, [api, device]);
-  const startAgent = useCallback(async (node: string, info: DirectoryInfo, kind: string, separateWorktree: boolean, acceptIdentityChange: boolean): Promise<string | undefined> => {
+  const startAgent = useCallback(async (node: string, info: DirectoryInfo, kind: string, separateWorktree: boolean, acceptIdentityChange: boolean, launch: { ids: string[]; confirmed: string[] }): Promise<string | undefined> => {
     try {
       if (!api || !device) return 'approval-not-trusted';
-      const authorization = await signDirectory(device, node, 'launch', info.path, kind, info.projectId, separateWorktree, acceptIdentityChange);
-      const ok = await api.command(node, { agentLaunch: { path: info.path, projectId: info.projectId, kind, separateWorktree, acceptIdentityChange, authorization } });
+      // ADR-0059: the device signs the chosen launch options too, so the hub can neither add nor remove one.
+      const authorization = await signDirectory(device, node, 'launch', info.path, kind, info.projectId, separateWorktree, acceptIdentityChange, launch.ids, launch.confirmed);
+      const ok = await api.command(node, { agentLaunch: { path: info.path, projectId: info.projectId, kind, separateWorktree, acceptIdentityChange, authorization, launchOptions: launch.ids, confirmedLaunchOptions: launch.confirmed } });
       const id = ok.agentLaunch?.agentId;
       setStarting(false);
       if (id) window.location.hash = `#/agent/${encodeURIComponent(`${node}/${id}`)}`;
       return undefined;
     } catch (e) {
       const code = (e as { code?: string }).code;
+      if (code === 'agent.option_forbidden') return optionForbidden(e);
+      if (code === 'agent.option_unconfirmed') return 'start-option-unconfirmed';
+      if (code === 'agent.option_invalid') return 'start-option-invalid';
+      if (code === 'protocol.capability_missing' && launch.ids.length > 0) return 'start-options-unsupported';
       return code === 'agent.mode_unsupported' ? 'start-directory-agent-unsupported' : code === 'approval.signature_invalid' ? 'approval-not-trusted' : code === 'protocol.capability_missing' ? 'start-directory-unsupported' : code === 'agent.kind_unknown' ? 'start-kind-unknown' : code === 'node.resource_limit' ? 'start-limit' : 'start-failed';
     }
   }, [api, device]);
@@ -108,6 +134,20 @@ export function App() {
     const store = indexedDbStore();
     if (store) void thisDevice(store).then(setDevice).catch(() => setDevice(undefined));
   }, []);
+  // ADR-0060: brings back an interrupted agent under the same id, with its own session or (`newSession`) a new one in the same folder.
+  // Signed by this browser for exactly that agent and choice; the answer is undefined when it started, else the error code.
+  const resumeAgent = useCallback(async (agent: AgentTileModel, action: ResumeAction): Promise<string | undefined> => {
+    if (!api || !device || !agent.machineId) return 'approval.signature_invalid';
+    const local = agent.id.slice(agent.id.indexOf('/') + 1);
+    const newSession = action === 'again';
+    try {
+      // Its process from before the restart: ended by the node (exactly that process), like any stop.
+      if (action === 'stop') { await api.command(agent.machineId, { agentStop: { agentId: local, stopHelpers: false } }); return undefined; }
+      const authorization = await signDirectory(device, agent.machineId, 'resume', local, '', '', newSession);
+      await api.command(agent.machineId, { agentResume: { agentId: local, newSession, authorization } });
+      return undefined;
+    } catch (e) { return (e as { code?: string }).code ?? 'internal'; }
+  }, [api, device]);
   // Asks the hub to forget a closed agent for every client (ADR-0053). The answer is undefined when it did, else the error code.
   const forgetAgent = useCallback(async (agentId: string): Promise<string | undefined> => {
     if (!api) return 'hub.unreachable';
@@ -197,6 +237,19 @@ export function App() {
     setApi(c);
     return () => { c.close(); setApi(undefined); };
   }, [hub]);
+  // "Lock" in the title bar: this window's session ends at the hub and the sign-in screen comes back. Agents keep running.
+  const lockNow = useCallback(() => {
+    if (!hub) return;
+    void endSession(hub.token);
+    setLive(undefined);
+    setHub(undefined);
+  }, [hub]);
+  // The idle lock does what Lock does: the session ends at the hub, so reloading the tab opens nothing; signing in again takes a code
+  // (and the screen password from another machine) or a passkey.
+  useEffect(() => {
+    if (!hub || idle === 0) return;
+    return watchIdle(idle, lockNow, window);
+  }, [hub, idle, lockNow]);
   const agents = useMemo(() => (hub ? (live ? tiles(live) : []) : demoAgents), [hub, live]);
   const current = hash.startsWith('#/agent/') ? decodeURIComponent(hash.slice('#/agent/'.length)) : undefined;
 
@@ -317,17 +370,19 @@ export function App() {
 
   // Served by the hub (a production build) and not signed in: ask for the code. Development keeps the demo data.
   if (!hub && !import.meta.env.DEV && hash !== '#/gallery' && hash !== '#/demo') {
-    return <SignInPage onSubmit={trySignIn} onPasskey={passkeysSupported() ? trySignInPasskey : undefined} notice={signInNotice ? t(signInNotice) : undefined} />;
+    return <SignInPage onSubmit={trySignIn} onPasskey={passkeysSupported() ? trySignInPasskey : undefined} notice={signInNotice ? t(signInNotice) : undefined} passwordRequired={info.passwordRequired} key={linkCode ?? ''} initialCode={linkCode} />;
   }
 
   return (
     <>
-      {hash === '#/gallery' ? <Gallery /> : hash === '#/machines' ? <MachinesPage machines={live ? machines(live) : hub ? [] : demoMachines} agents={agents} usage={usage} projects={live && usage ? costByProject(live, usage.perAgent) : []} onBack={() => go('#/')} /> : hash === '#/audit' && hub ? <AuditPage load={(who) => loadAudit(hub.token, who)} onBack={() => go('#/')} /> : hash === '#/device' ? <DevicePage device={device} onBack={() => go('#/')} onAddPasskey={hub && passkeysSupported() ? async () => (await addPasskey(hub.token)).ok : undefined} /> : current !== undefined
+      {hash === '#/gallery' ? <Gallery /> : hash === '#/machines' ? <MachinesPage machines={live ? machines(live) : hub ? [] : demoMachines} agents={agents} usage={usage} projects={live && usage ? costByProject(live, usage.perAgent) : []} onBack={() => go('#/')} /> : hash === '#/audit' && hub ? <AuditPage load={(who) => loadAudit(hub.token, who)} onBack={() => go('#/')} /> : hash === '#/device' ? <DevicePage device={device} onBack={() => go('#/')} onAddPasskey={hub && passkeysSupported() ? async (password) => (await addPasskey(hub.token, undefined, password)).ok : undefined} passkeyNeedsPassword={info.passwordRequired}
+          security={hub ? <ScreenPasswordSettings passwordSet={info.passwordSet} idle={idle} onIdle={(m) => { setIdleMinutes(m); setIdle(m); }}
+            onSet={async (password, current) => { const r = await setPassword(hub.token, password, current); if (r.ok) refreshInfo(); return r; }} /> : undefined} /> : current !== undefined
         ? <Focus agent={selectedAgent} approvals={live ? approvalList(live) : hub ? [] : demoApprovals} onResolve={resolve} chatSource={selectedAgent?.terminal === false ? chatOf(selectedAgent) : undefined} sendPrompt={hub && api ? sendPrompt : undefined} chooseOption={hub && api ? chooseOption : undefined} costMicroUsd={current ? usage?.perAgent.get(current) : undefined} source={terminal} onBack={() => go('#/')} />
         : <Console agents={agents} machines={live ? machines(live) : []} usage={usage} projects={live && usage ? costByProject(live, usage.perAgent) : []}
           approvals={live ? approvalList(live) : hub ? [] : demoApprovals} messages={live ? recentMessages(live) : []} boards={live ? boards(live) : []} terminalFor={terminalFor} chatOf={hub && api ? chatOf : undefined} sendPrompt={hub && api ? sendPrompt : undefined} chooseOption={hub && api ? chooseOption : undefined} loadDiff={hub && api ? loadDiff : undefined} loadHistory={hub && api ? loadHistory : undefined} filesOf={hub && api ? filesOf : undefined} onOpen={open}
-          onResolve={resolve} helperGrants={hub && api ? helperGrants : undefined} revokeGrant={hub && api ? revokeGrant : undefined} notice={notice ? t(notice) : undefined} link={hub ? link : 'live'}
-          onStart={hub && api && live ? (node) => setStarting({ node }) : (!hub && import.meta.env.DEV ? (node) => setStarting({ node }) : undefined)} onCommand={() => setPalette(true)} onForget={hub && api ? forgetAgent : undefined}
+          onResolve={resolve} helperGrants={hub && api ? helperGrants : undefined} revokeGrant={hub && api ? revokeGrant : undefined} notice={notice ? t(notice) : undefined} link={hub ? link : 'live'} onRetry={api ? api.retry : undefined}
+          onStart={hub && api && live ? (node) => setStarting({ node }) : (!hub && import.meta.env.DEV ? (node) => setStarting({ node }) : undefined)} onCommand={() => setPalette(true)} onForget={hub && api ? forgetAgent : undefined} onResume={hub && api ? resumeAgent : (!hub && import.meta.env.DEV ? async () => undefined : undefined)} onLock={hub ? lockNow : undefined}
           start={!hub && import.meta.env.DEV && starting ? <StartAgent initialNode={starting.node} projects={demoProjects} machines={demoMachines}
             loadKinds={async () => [{ kind: 'claude-code', name: 'Claude Code', installed: true }, { kind: 'codex', name: 'Codex', installed: true }, { kind: 'shell', name: 'Shell', installed: true }, { kind: 'gemini', name: 'Gemini CLI', installed: false }]}
             list={async (_n, path) => demoList(path)} inspect={async (_n, path) => ({ path, projectId: 'demo', gitRoot: path, branch: 'main', portable: false })} onStart={async () => { setStarting(false); return undefined; }} onClose={() => setStarting(false)} /> : starting && live ? <StartAgent initialNode={starting ? starting.node : undefined} projects={projectChoices(live)} machines={machines(live)} inspect={inspectDirectory} list={listDirectory} loadKinds={loadKinds} onStart={startAgent} onClose={() => setStarting(false)} /> : undefined} />}

@@ -2,6 +2,10 @@
 
 cli-usage =
     Usage:
+      agora [--ui tui|web|none [--save]]
+      agora web
+      agora status
+      agora down
       agora node run [--socket PATH] [--manifests DIR] [--project PATH]... [--data DIR] [--worktrees DIR]
       agora agent start KIND [--cwd PATH] [--worktree] [--project NAME] [--name NAME] [--accept-project-id-change] [--socket PATH]
       agora project init [--cwd PATH] [--socket PATH]
@@ -16,6 +20,7 @@ cli-usage =
       agora hub code [--hub-dir DIR]
       agora hub ssh install NAME [--yes] [--unsigned] [--release-url URL] [--hub-dir DIR]
       agora hub login [--hub-dir DIR]
+      agora password set|clear|status [--hub-dir DIR]
       agora hub notify [--ntfy URL | --webhook URL | --test] [--hub-dir DIR]
       agora hub prices update [--url URL] [--hub-dir DIR]
       agora hub ssh [add NAME DESTINATION [--port N]] [--hub-dir DIR]
@@ -43,6 +48,7 @@ cli-ambiguous-project = More than one project is registered; choose one with --p
 cli-no-projects = This node has no projects. Start it with --project PATH.
 cli-bad-arguments = The arguments were not understood.
 cli-error = Error { $code }: { $message }
+cli-invalid-directory-identity_changed = This folder's project identity changed since an agent last started here. Add --accept-project-id-change to start one anyway.
 
 doctor-status-ok = ok
 doctor-status-warn = note
@@ -65,9 +71,14 @@ doctor-manifests = { $detail ->
         [one] 1 agent description loaded.
        *[other] { $detail } agent descriptions loaded.
     }
-doctor-manifests-missing = No agent descriptions folder at { $detail }.
-doctor-agent-installed = { $detail } is installed.
-doctor-agent-missing = { $detail } is not installed on this machine.
+doctor-agent-installed = { $detail } ({ $from ->
+        [built-in] built in
+       *[folder] from the manifests folder
+    }): `{ $program }` is found.
+doctor-agent-missing = { $detail } ({ $from ->
+        [built-in] built in
+       *[folder] from the manifests folder
+    }): this machine cannot find `{ $program }` in its PATH. Install it there, or start the node from a terminal where `{ $program }` runs.
 doctor-policy-path-dropped = The node's policy line "{ $detail }" names a path the node cannot use (relative, "..", or "~" without a home folder); agents start without it. Write a full path or one starting with "~/".
 doctor-policy-path-missing = The node's policy line "{ $detail }" names a path that does not exist yet; agents start without it until it does.
 doctor-manifest-invalid = The agent description { $detail } could not be read.
@@ -79,7 +90,17 @@ cli-hub-notify = Notifications go to { $count } target(s) from { $file }.
 cli-hub-notify-skipped = { $count } line(s) of { $file } were not understood and are ignored. Each line is `ntfy URL` or `webhook URL`.
 cli-hub-web = Web app: https://{ $addr }/ . Sign in with the code { $code } (valid for 10 minutes; `agora hub login` makes another). The hub's certificate is signed by its own CA, so the browser warns until you trust it.
 cli-hub-login = Sign-in code for the web app: { $code } (valid for 10 minutes). Open the hub's address in a browser and enter it.
-cli-trusted = Device { $id } can now answer approvals on this node. Restart the node to apply it.
+cli-password-prompt = New screen password (not shown as you type):
+cli-password-repeat = Type it again:
+cli-password-needs-terminal = Setting the screen password needs an interactive terminal: it is never read from a pipe or a file.
+cli-password-too-short = That is too short: use at least { $min } characters.
+cli-password-too-long = That is too long.
+cli-password-mismatch = The two did not match; nothing was changed.
+cli-password-set = Screen password set. A sign-in from another machine now needs it; this machine's own browser is never asked. { $count } open sessions were signed out.
+cli-password-cleared = Screen password removed. A sign-in code alone is enough again. { $count } open sessions were signed out.
+cli-password-on = A screen password is set: sign-ins from other machines need it.
+cli-password-off = No screen password is set: a sign-in code alone is enough.
+cli-trusted = Device { $id } can now answer approvals on this node.
 cli-trust-failed = Could not trust that device: { $reason }
 cli-hub-backup = Backup written to { $path }.
 cli-hub-restored = Database restored from the backup into { $path }. The previous one is kept next to it as before-restore.
@@ -143,3 +164,42 @@ cli-project-identity = Project identity: { $id } (folder: { $path }). Share .age
 
 cli-panel = Open the hub's panel at { $url } in a browser. This machine's browser must trust the hub's certificate: import { $ca } as a certificate authority (on Windows: certutil -user -addstore Root { $ca }). Sign in with a code from "agora hub login" on the hub machine.
 cli-panel-none = This machine is not enrolled with a hub, so there is no panel to open. Enroll it first with "agora node enroll".
+
+# ADR-0062: plain `agora` (the front door), `agora web`, `agora status`, `agora down`.
+frontdoor-welcome = Welcome to Agora. What should this machine do?
+frontdoor-choice-here = 1) Start Agora here: your agents run on this machine and you open them from here
+frontdoor-choice-alone = 2) Just this machine, alone
+frontdoor-choice-join = 3) Join an Agora that runs on another machine
+frontdoor-choose = Type 1, 2 or 3 and press Enter:
+frontdoor-lan-question = Let other machines of yours connect? [y/N]
+frontdoor-join-later = Joining from here is not available yet. On the machine that runs Agora, run `agora hub code`; then here run `agora node enroll` and `agora node run` (see `agora --help`).
+frontdoor-get-started = Agora is not set up on this machine yet. Run `agora` in a terminal and answer one question. (Settings are kept in { $path }.)
+frontdoor-set-up-by-hand = This machine already has an Agora started by hand ({ $path }). `agora` does not take it over yet: keep using `agora hub run` and `agora node run`, or set AGORA_HOME to a new folder to let `agora` set one up there.
+frontdoor-saved = Saved in { $path }.
+frontdoor-bad-machine-file = { $path } could not be read. Fix it, or delete it and run `agora` again to answer the first question anew.
+frontdoor-not-set-up = Agora is not set up on this machine yet. Run `agora` first.
+frontdoor-no-port = No free port was found from { $port } on.
+frontdoor-failed = Agora could not start: { $reason }
+frontdoor-role-hub = hub
+frontdoor-role-node = node
+frontdoor-starting = Starting the { $role }…
+frontdoor-in-job = The { $role } could not leave the job of the terminal that started it, so it ends when that terminal closes. Start `agora` from a terminal outside that job (or a service) to keep it running.
+frontdoor-not-ready = The { $role } did not start within { $seconds } s. What it wrote is in { $log }
+frontdoor-not-linked = This machine did not connect to its hub within { $seconds } s. What it wrote is in { $log }
+frontdoor-running = Agora is running on this machine. It keeps running when you close this window; `agora status` shows it, `agora down` stops it.
+frontdoor-web-failed = Could not sign the browser in: { $reason }. Run `agora web` again; `agora status` shows whether Agora is running.
+frontdoor-web-opened = Opened Agora in your browser, signed in.
+frontdoor-web-url = Open this address in your browser to sign in (it works once, for 10 minutes; if it expired, run `agora web` again): { $url }
+status-machine = This machine's Agora ({ $path }); interface: { $ui }
+status-running = The { $role } is running (process { $pid }, version { $version })
+status-running-other = The { $role } is running (it was not started by `agora`)
+status-stopped = The { $role } is not running
+status-hub = listens on { $addr }; data folder { $dir }
+status-node-linked = connected to { $hub } as { $id }
+status-node-not-linked = not connected to a hub
+status-agents = agents running: { $count }
+status-log = log: { $log }
+down-stopped = Stopped the { $role } (process { $pid }).
+down-failed = Could not stop the { $role }: { $reason }
+down-nothing = Nothing to stop: `agora` did not start anything that is still running.
+cli-node-policy-not-understood = node.policy_not_understood: the policy file has a line this node does not understand ({ $line }), so no agent may start without asking until it is fixed.

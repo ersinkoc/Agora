@@ -37,6 +37,10 @@ pub const CAPABILITIES: &[&str] = &[
     // ADR-0058
     "agent.set_mode",
     "agent.set_model",
+    // ADR-0060
+    "agent.resume",
+    // ADR-0059
+    "agent.launch_options",
 ];
 
 /// Events sent per step; the hub acknowledges after each batch.
@@ -698,6 +702,18 @@ fn run_local_on(
         request_id: req.request_id.clone(),
         result: Some(command_response::Result::Err(e.to_info())),
     };
+    // ADR-0059: launch options come through the hub only on a signed `AgentLaunch` (its signature covers them); a routed
+    // `AgentStart` carries no signature, so one with options is refused whatever grant is live (a grant never covers one).
+    if let Some(command_request::Command::AgentStart(a)) = &req.command {
+        if let Some(option) = a.launch_options.first() {
+            return fail(
+                Error::new(ErrorCode::AgentOptionForbidden)
+                    .with("kind", a.kind.as_str())
+                    .with("option", option.as_str())
+                    .with("policy", "signature"),
+            );
+        }
+    }
     // ADR-0041: grants are made and judged here, where the hub's commands enter the node. A command the policy lists
     // runs only under a live grant; the local socket never passes through this function.
     if grants.is_none()
@@ -707,6 +723,7 @@ fn run_local_on(
                 command_request::Command::DirectoryInspect(_)
                     | command_request::Command::DirectoryList(_)
                     | command_request::Command::AgentLaunch(_)
+                    | command_request::Command::AgentResume(_)
             )
         )
     {
@@ -732,7 +749,8 @@ fn run_local_on(
             Some(
                 c @ (command_request::Command::DirectoryInspect(_)
                 | command_request::Command::DirectoryList(_)
-                | command_request::Command::AgentLaunch(_)),
+                | command_request::Command::AgentLaunch(_)
+                | command_request::Command::AgentResume(_)),
             ) => {
                 if let Err(e) = g.directory_action(c, now) {
                     return fail(e);
@@ -966,5 +984,68 @@ mod tests {
         );
         assert!(split_url("http://x").is_err());
         assert!(split_url("wss://").is_err());
+    }
+
+    /// ADR-0059: a routed `AgentStart` that chose launch options carries no signature over them, so it is refused where the hub's
+    /// commands enter the node, with or without grants, and even under a live grant for `agent.start` (a grant never covers one).
+    #[test]
+    fn a_routed_start_with_launch_options_is_refused_even_under_a_grant() {
+        struct Fake;
+        impl crate::approvals::Verifier for Fake {
+            fn verify(&self, device: &str, message: &[u8], signature: &[u8]) -> bool {
+                device == "dev" && signature == message
+            }
+        }
+        let approvals = std::sync::Arc::new(crate::approvals::NodeApprovals::new(
+            "node-a",
+            Box::new(Fake),
+        ));
+        let grants = crate::grants::Grants::new(
+            "node-a",
+            approvals,
+            crate::grants::SignedCommands(vec!["agent.start".into()]),
+        );
+        let now = crate::grants::now_ms();
+        let commands = vec!["agent.start".to_string()];
+        let expires = now + 60_000;
+        let message = crate::grants::signed_message("node-a", "g", "node", &commands, expires);
+        grants
+            .create(
+                &agora_protocol::v1::GrantCreate {
+                    grant_id: "g".into(),
+                    scope: "node".into(),
+                    commands,
+                    expires_at_ms: expires,
+                    signer_device_id: "dev".into(),
+                    signature: message,
+                },
+                now,
+            )
+            .unwrap();
+        let start = |options: Vec<String>| CommandRequest {
+            request_id: "r".into(),
+            command: Some(command_request::Command::AgentStart(
+                agora_protocol::v1::AgentStart {
+                    kind: "codex".into(),
+                    launch_options: options,
+                    ..Default::default()
+                },
+            )),
+            ..Default::default()
+        };
+        for g in [None, Some(&grants)] {
+            let resp = run_local(None, start(vec!["skip-permissions".into()]), g);
+            let Some(command_response::Result::Err(e)) = resp.result else {
+                panic!("not refused: {resp:?}");
+            };
+            assert_eq!(e.code, "agent.option_forbidden");
+            assert!(e.params.contains_key("policy"));
+        }
+        // Without options the grant lets it through to the node (here: no control socket, so `commands.routed`).
+        let resp = run_local(None, start(Vec::new()), Some(&grants));
+        let Some(command_response::Result::Err(e)) = resp.result else {
+            panic!("{resp:?}");
+        };
+        assert_eq!(e.code, "node.policy_denied");
     }
 }

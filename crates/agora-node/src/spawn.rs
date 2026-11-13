@@ -571,6 +571,7 @@ impl Spawner {
         sup.set_parent(&id, &r.caller);
         let view = sup.list().into_iter().find(|v| v.id == id);
         let has_terminal = sup.terminal(&id).is_some();
+        let session = sup.session_of(&id);
         drop(sup);
         self.st().lineage.insert(
             id.clone(),
@@ -614,6 +615,10 @@ impl Spawner {
                 has_terminal,
                 r.caller.as_str(),
             );
+            // ADR-0060: a session id the node chose at launch.
+            if let Some(session) = &session {
+                ev.session_reported(&id, session);
+            }
             // The helper's task, from its parent, in the log: every start's prompt, granted ones included (which nobody was shown).
             if !r.prompt.is_empty() {
                 ev.record_bodies(vec![v1::event::Body::MessagePosted(v1::MessagePosted {
@@ -749,6 +754,20 @@ impl Spawner {
                 ev.approval_resolved(&id, false, "");
             }
         }
+    }
+
+    /// ADR-0060: `helper` was resumed under `parent` after the node restarted. It is `parent`'s helper again (stopped with it, listed
+    /// as its own), but the decision that started it is not restored: it may not ask to start helpers, and no grant of its parent's
+    /// covers anything until a new decision is signed.
+    pub fn resumed_helper(&self, helper: &AgentId, parent: &AgentId) {
+        self.st().lineage.insert(
+            helper.clone(),
+            Lineage {
+                parent: parent.clone(),
+                depth: MAX_DEPTH,
+                may_start: false,
+            },
+        );
     }
 
     /// The helpers `agent` started, and theirs, that still run (for "stop its helpers too").
