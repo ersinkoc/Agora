@@ -84,7 +84,7 @@ pub trait EventStore {
     fn set_setting(&self, key: &str, value: &[u8]) -> Result<(), StoreError>;
 }
 
-const SCHEMA_VERSION: i64 = 9;
+const SCHEMA_VERSION: i64 = 10;
 
 pub struct SqliteStore {
     conn: Mutex<Connection>,
@@ -257,6 +257,21 @@ impl SqliteStore {
                      at_ms    INTEGER NOT NULL
                  );
                  PRAGMA user_version = 9;
+                 COMMIT;",
+            )?;
+        }
+        if version < 10 {
+            // Which session did it (L16): a short id of the session, so two windows of the same person can be told apart. Rows
+            // written before have none. The trigger is made again so the new column is as fixed as the others.
+            conn.execute_batch(
+                "BEGIN;
+                 ALTER TABLE audit ADD COLUMN session TEXT NOT NULL DEFAULT '';
+                 DROP TRIGGER audit_only_the_outcome;
+                 CREATE TRIGGER audit_only_the_outcome BEFORE UPDATE ON audit
+                 WHEN OLD.outcome != 'sent' OR NEW.id != OLD.id OR NEW.at_ms != OLD.at_ms OR NEW.who != OLD.who
+                      OR NEW.action != OLD.action OR NEW.node != OLD.node OR NEW.session != OLD.session
+                 BEGIN SELECT RAISE(ABORT, 'the audit trail is append-only'); END;
+                 PRAGMA user_version = 10;
                  COMMIT;",
             )?;
         }
@@ -784,6 +799,55 @@ mod tests {
         assert!(s.resyncs().unwrap().is_empty());
     }
 
+    /// Takes a current database back to schema 9: the audit trail as it was before it named sessions (L16).
+    fn undo_audit_sessions(conn: &Connection) {
+        conn.execute_batch(
+            "DROP TRIGGER audit_only_the_outcome;
+             ALTER TABLE audit DROP COLUMN session;
+             CREATE TRIGGER audit_only_the_outcome BEFORE UPDATE ON audit
+             WHEN OLD.outcome != 'sent' OR NEW.id != OLD.id OR NEW.at_ms != OLD.at_ms OR NEW.who != OLD.who
+                  OR NEW.action != OLD.action OR NEW.node != OLD.node
+             BEGIN SELECT RAISE(ABORT, 'the audit trail is append-only'); END;
+             PRAGMA user_version = 9;",
+        )
+        .unwrap();
+    }
+
+    /// L16: a schema 9 database opens with its audit rows kept, each with no session, and the session is as fixed as the rest.
+    #[test]
+    fn an_audit_trail_from_before_sessions_upgrades_in_place() {
+        let d = tmpdir("upgrade9");
+        let path = d.join("hub.db");
+        {
+            let s = SqliteStore::open(&path).unwrap();
+            let conn = s.lock().unwrap();
+            undo_audit_sessions(&conn);
+            conn.execute_batch(
+                "INSERT INTO audit (at_ms, who, action, node, outcome) VALUES (1, 'owner', 'AgentStop', 'n1', 'sent');",
+            )
+            .unwrap();
+        }
+        let s = SqliteStore::open(&path).unwrap();
+        let rows = crate::audit::Audit::new(&s).list(0, None, 10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].session, "");
+        assert_eq!(rows[0].outcome, "sent");
+        let conn = s.lock().unwrap();
+        assert!(conn.execute("UPDATE audit SET session = 'x'", []).is_err());
+        assert!(conn.execute("UPDATE audit SET who = 'x'", []).is_err());
+        assert!(conn.execute("DELETE FROM audit", []).is_err());
+        drop(conn);
+        crate::audit::Audit::new(&s)
+            .finish(rows[0].id, "ok")
+            .unwrap();
+        assert_eq!(
+            crate::audit::Audit::new(&s).outcome(rows[0].id).as_deref(),
+            Some("ok")
+        );
+        drop(s);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     /// A hub database from before ADR-0054 (schema 8) opens, gains an empty `resyncs` table and keeps its events.
     #[test]
     fn a_database_from_before_resyncs_upgrades_in_place() {
@@ -793,6 +857,7 @@ mod tests {
             let s = SqliteStore::open(&path).unwrap();
             s.append("n1", 1, 5, b"a").unwrap();
             let conn = s.lock().unwrap();
+            undo_audit_sessions(&conn);
             conn.execute_batch("DROP TABLE resyncs; PRAGMA user_version = 8;")
                 .unwrap();
         }

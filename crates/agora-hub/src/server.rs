@@ -313,6 +313,7 @@ pub trait ClientAuth {
             role: crate::users::Role::Owner,
             user: "owner".into(),
             projects: None,
+            session: String::new(),
         })
     }
 }
@@ -446,6 +447,7 @@ where
             role: crate::users::Role::Owner,
             user: "owner".into(),
             projects: None,
+            session: String::new(),
         })
     })
     .await
@@ -1121,7 +1123,7 @@ fn audit(
     outcome: &str,
 ) -> Option<i64> {
     crate::audit::Audit::new(hub.store())
-        .record(now_ms(), &who.user, action, node, outcome)
+        .record_in(&who.session, now_ms(), &who.user, action, node, outcome)
         .ok()
 }
 

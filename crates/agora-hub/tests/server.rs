@@ -1193,6 +1193,7 @@ impl ClientAuth for Demotable {
             role: *self.0.lock().unwrap(),
             user: "eda".into(),
             projects: None,
+            session: String::new(),
         })
     }
 }
@@ -1318,6 +1319,7 @@ impl ClientAuth for Scoped {
             role: agora_hub::users::Role::Member,
             user: "eda".into(),
             projects: Some(["n1/mine".to_string()].into()),
+            session: String::new(),
         })
     }
 }
