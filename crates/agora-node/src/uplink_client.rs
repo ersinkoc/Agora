@@ -34,6 +34,9 @@ pub const CAPABILITIES: &[&str] = &[
     "board.join",
     "mesh.spawn",
     "directory.list",
+    // ADR-0058
+    "agent.set_mode",
+    "agent.set_model",
 ];
 
 /// Events sent per step; the hub acknowledges after each batch.

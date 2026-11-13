@@ -992,6 +992,7 @@ async fn a_client_asks_the_hub_for_usage_and_gets_tokens_with_a_price_only_where
             model: model.into(),
             input_tokens: 1_000_000,
             output_tokens: 1_000_000,
+            ..Default::default()
         })
     };
     let bodies = vec![
@@ -1194,6 +1195,7 @@ impl ClientAuth for Demotable {
             role: *self.0.lock().unwrap(),
             user: "eda".into(),
             projects: None,
+            session: String::new(),
         })
     }
 }
@@ -1319,6 +1321,7 @@ impl ClientAuth for Scoped {
             role: agora_hub::users::Role::Member,
             user: "eda".into(),
             projects: Some(["n1/mine".to_string()].into()),
+            session: String::new(),
         })
     }
 }
@@ -1530,6 +1533,7 @@ async fn a_closed_agent_is_forgotten_for_every_client_but_its_usage_still_counts
             model: "anthropic/claude-haiku-4-5".into(),
             input_tokens: 1_000,
             output_tokens: 2_000,
+            ..Default::default()
         }),
     ];
     for (i, b) in bodies.into_iter().enumerate() {
@@ -1749,4 +1753,78 @@ async fn a_command_whose_session_ended_still_gets_its_outcome_in_the_audit_trail
         .await
         .unwrap();
     assert_eq!(agent_list_outcome(&st, Duration::from_secs(10)).await, "ok");
+}
+
+/// ADR-0058: a mode or model switch is never sent to a node that cannot do it, and every switch, refused or sent, is in the audit
+/// trail.
+#[tokio::test]
+async fn a_model_switch_for_a_node_without_it_is_refused_and_audited() {
+    let st = state(None);
+    let addr = start(Arc::clone(&st)).await;
+    let (mut node, _t) = node_conn(&st, "n1").await;
+    handshake(&mut node).await;
+    node.send(&f(
+        STREAM_EVENTS,
+        kinds::EVENT,
+        event("n1", 1, online("n1")),
+    ))
+    .await
+    .unwrap();
+    next_ack(&mut node).await;
+    let mut client = dial(addr, Some("good-token")).await;
+    client
+        .send(&f(
+            STREAM_EVENTS,
+            kinds::SUBSCRIBE,
+            v1::Subscribe::default().encode_to_vec(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(recv(&mut client).await.kind, kinds::SNAPSHOT);
+    for (id, command) in [
+        (
+            "m1",
+            command_request::Command::AgentSetModel(v1::AgentSetModel {
+                agent_id: "agent-1".into(),
+                model: "fake/model-2".into(),
+            }),
+        ),
+        (
+            "m2",
+            command_request::Command::AgentSetMode(v1::AgentSetMode {
+                agent_id: "agent-1".into(),
+                mode: "plan".into(),
+            }),
+        ),
+    ] {
+        let req = v1::CommandRequest {
+            request_id: id.into(),
+            idempotency_key: String::new(),
+            target_node: "n1".into(),
+            command: Some(command),
+        };
+        client
+            .send(&f(STREAM_COMMANDS, 0, req.encode_to_vec()))
+            .await
+            .unwrap();
+        let r = response(&mut client).await;
+        assert_eq!(
+            (r.request_id.as_str(), err_code(&r)),
+            (id, "protocol.capability_missing")
+        );
+    }
+    let rows = agora_hub::audit::Audit::new(st.hub.store())
+        .list(0, None, 100)
+        .unwrap();
+    let seen: Vec<(&str, &str, &str)> = rows
+        .iter()
+        .map(|e| (e.action.as_str(), e.node.as_str(), e.outcome.as_str()))
+        .collect();
+    assert_eq!(
+        seen,
+        [
+            ("AgentSetModel", "n1", "protocol.capability_missing"),
+            ("AgentSetMode", "n1", "protocol.capability_missing"),
+        ]
+    );
 }

@@ -9,7 +9,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use agora_adapters::host::{Adapter, AdapterConfig, AdapterEvent};
+use agora_adapters::host::{
+    Adapter, AdapterConfig, AdapterEvent, HostError, OptionKind, SessionOption, SessionOptions,
+};
 use agora_adapters::{Detector, Manifest, Pacer};
 use agora_core::{Agent, AgentId, AgentState, IntegrationLevel, NodeId, StateSource, WorktreeId};
 use agora_platform::{spawn, ExitStatus, ProcessLimits, PtyConfig};
@@ -181,6 +183,16 @@ pub enum SupervisorError {
     Git(GitError),
     /// Starting the process failed; the text is for logs only.
     Spawn(String),
+    /// ADR-0058: the adapter answered with one of the stable reasons the node passes on (`adapter.agent_exited`,
+    /// `adapter.agent_refused`, `adapter.option_refused`), with its parameters already checked and bounded.
+    Adapter {
+        code: &'static str,
+        params: Vec<(&'static str, String)>,
+    },
+    /// ADR-0058: the agent has no such switch (a terminal agent, or an adapter that did not declare it). The capability's name.
+    OptionUnsupported(&'static str),
+    /// ADR-0058: the agent did not offer this id; the field (`mode`, `model`).
+    OptionUnknown(&'static str),
     /// The node is at one of its limits; `resource` is `agents` or `terminals`.
     ResourceLimit {
         resource: &'static str,
@@ -219,6 +231,17 @@ impl SupervisorError {
             }
             Self::Git(e) => e.to_protocol(),
             Self::Spawn(_) => Error::new(ErrorCode::Internal).with("incident_id", "unassigned"),
+            Self::Adapter { code, params } => params
+                .iter()
+                .fold(Error::new(ErrorCode::parse(code)), |e, (k, v)| {
+                    e.with(k, v.as_str())
+                }),
+            Self::OptionUnsupported(c) => {
+                Error::new(ErrorCode::ProtocolCapabilityMissing).with("capability", *c)
+            }
+            Self::OptionUnknown(f) => {
+                Error::new(ErrorCode::ProtocolInvalidMessage).with("field", *f)
+            }
             Self::ResourceLimit { resource, limit } => Error::new(ErrorCode::NodeResourceLimit)
                 .with("resource", *resource)
                 .with("limit", i64::try_from(*limit).unwrap_or(i64::MAX)),
@@ -302,6 +325,10 @@ struct AdapterEntry {
     checkout_root: PathBuf,
     restarts: u32,
     restart_at: Option<Instant>,
+    /// What the adapter declared in `initialize` (ADR-0058: `set_mode`, `set_model`).
+    capabilities: Vec<String>,
+    /// The modes and models the adapter last reported (ADR-0058), checked and bounded.
+    options: SessionOptions,
 }
 
 struct Entry {
@@ -738,14 +765,13 @@ impl Supervisor {
             }
             let root =
                 git::discover_checkout(&worktree).map_or_else(|_| worktree.clone(), |c| c.root);
-            let (adapter, session_id) = launch_adapter(
+            let (adapter, session_id, capabilities) = launch_adapter(
                 &spec,
                 &root,
                 &worktree,
                 None,
                 self.sandbox_for(&req.kind, &worktree, &spec.command[0]),
-            )
-            .map_err(SupervisorError::Spawn)?;
+            )?;
             let mut agent = Agent::new(
                 id.clone(),
                 project,
@@ -768,6 +794,8 @@ impl Supervisor {
                     checkout_root: root,
                     restarts: 0,
                     restart_at: None,
+                    capabilities,
+                    options: SessionOptions::default(),
                 },
             );
         } else {
@@ -929,9 +957,8 @@ impl Supervisor {
             &worktree,
             None,
             self.sandbox_for(&req.kind, &worktree, &spec.command[0]),
-        )
-        .map_err(SupervisorError::Spawn);
-        let (adapter, session_id) = match result {
+        );
+        let (adapter, session_id, capabilities) = match result {
             Ok(started) => started,
             Err(error) => {
                 let _ = created.rollback();
@@ -962,6 +989,8 @@ impl Supervisor {
                 checkout_root: checkout.root,
                 restarts: 0,
                 restart_at: None,
+                capabilities,
+                options: SessionOptions::default(),
             },
         );
         Ok(id)
@@ -992,6 +1021,19 @@ impl Supervisor {
                             events.push(SupervisorEvent::StateChanged {
                                 agent: id.clone(),
                                 state,
+                            });
+                        }
+                    }
+                    AdapterEvent::Options { options, .. } => {
+                        let options = bounded_options(options);
+                        if options != e.options {
+                            e.options = options.clone();
+                            events.push(SupervisorEvent::Adapter {
+                                agent: id.clone(),
+                                event: AdapterEvent::Options {
+                                    session_id: e.session_id.clone(),
+                                    options,
+                                },
                             });
                         }
                     }
@@ -1048,9 +1090,10 @@ impl Supervisor {
             e.agent.session.as_deref(),
             profile,
         ) {
-            Ok((adapter, session_id)) => {
+            Ok((adapter, session_id, capabilities)) => {
                 e.adapter = Some(adapter);
                 e.session_id = session_id;
+                e.capabilities = capabilities;
                 e.running = true;
                 e.agent.process_restarted();
                 events.push(SupervisorEvent::Started { agent: id.clone() });
@@ -1079,6 +1122,42 @@ impl Supervisor {
         adapter
             .prompt(session, text, from_mesh, Duration::from_secs(10))
             .map_err(|e| SupervisorError::Spawn(e.to_string()))
+    }
+
+    /// ADR-0058: switches an adapter agent to one of the modes or models it reported. Only the user's own command reaches this (an
+    /// agent has no mesh tool for it); a terminal agent, an adapter that did not declare the switch, and an id the agent did not offer
+    /// are refused before the adapter hears of it.
+    pub fn adapter_set_option(
+        &self,
+        id: &AgentId,
+        kind: OptionKind,
+        value: &str,
+    ) -> Result<(), SupervisorError> {
+        let (capability, field) = match kind {
+            OptionKind::Mode => ("agent.set_mode", "mode"),
+            OptionKind::Model => ("agent.set_model", "model"),
+        };
+        let Some(e) = self.adapters.get(id) else {
+            return Err(if self.agents.contains_key(id) {
+                SupervisorError::OptionUnsupported(capability)
+            } else {
+                SupervisorError::NotFound(id.clone())
+            });
+        };
+        if !e.capabilities.iter().any(|c| c == kind.capability()) {
+            return Err(SupervisorError::OptionUnsupported(capability));
+        }
+        let offered = match kind {
+            OptionKind::Mode => &e.options.modes,
+            OptionKind::Model => &e.options.models,
+        };
+        if value.is_empty() || !offered.iter().any(|o| o.id == value) {
+            return Err(SupervisorError::OptionUnknown(field));
+        }
+        let (adapter, session) = self.adapter_of(id)?;
+        adapter
+            .set_option(session, kind, value, Duration::from_secs(10))
+            .map_err(adapter_error)
     }
 
     /// Delivers a decision the node has already verified (ADR-0020) to the adapter that asked.
@@ -1365,20 +1444,20 @@ impl Supervisor {
                 .first()
                 .and_then(|p| self.sandbox_for(&entry.agent.kind, &entry.worktree, p));
             let native = entry.agent.session.is_some();
-            let (adapter, session_id) = launch_adapter(
+            let (adapter, session_id, capabilities) = launch_adapter(
                 &entry.spec,
                 &entry.checkout_root,
                 &entry.worktree,
                 entry.agent.session.as_deref(),
                 profile,
-            )
-            .map_err(SupervisorError::Spawn)?;
+            )?;
             let entry = self
                 .adapters
                 .get_mut(id)
                 .ok_or_else(|| SupervisorError::NotFound(id.clone()))?;
             entry.adapter = Some(adapter);
             entry.session_id = session_id;
+            entry.capabilities = capabilities;
             entry.running = true;
             entry.restart_at = None;
             entry.restarts = 0;
@@ -1602,16 +1681,104 @@ fn bridge_program() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("agora"))
 }
 
-/// Spawns an adapter process, initializes it and starts (or resumes) a session. Returns it with the session id.
+/// The most modes or models kept per agent, and the longest id, name and description (ADR-0058). Adapters are untrusted: an option
+/// with a longer id is dropped (a cut id would name another option), longer text is cut.
+const OPTIONS_MAX: usize = 200;
+const OPTION_ID_MAX: usize = 200;
+const OPTION_NAME_MAX: usize = 200;
+const OPTION_DESCRIPTION_MAX: usize = 500;
+/// The longest parameter value of an adapter's reason passed on in an error (the bridge's stderr tail is at most about 400 bytes).
+const REASON_PARAM_MAX: usize = 600;
+
+fn clip(s: &str, max: usize) -> String {
+    let mut end = s.len().min(max);
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].to_string()
+}
+
+/// ADR-0058: an adapter's report, checked and bounded. A current id that is not in its list is dropped too.
+fn bounded_options(o: SessionOptions) -> SessionOptions {
+    let list = |l: Vec<SessionOption>, modes: bool| -> Vec<SessionOption> {
+        let mut seen = std::collections::BTreeSet::new();
+        l.into_iter()
+            .filter(|o| !o.id.is_empty() && o.id.len() <= OPTION_ID_MAX)
+            .filter(|o| seen.insert(o.id.clone()))
+            .take(OPTIONS_MAX)
+            .map(|o| SessionOption {
+                name: clip(&o.name, OPTION_NAME_MAX),
+                description: clip(&o.description, OPTION_DESCRIPTION_MAX),
+                skips_permissions: modes && o.skips_permissions,
+                id: o.id,
+            })
+            .collect()
+    };
+    let (modes, models) = (list(o.modes, true), list(o.models, false));
+    let keep = |id: String, l: &[SessionOption]| {
+        if l.iter().any(|o| o.id == id) {
+            id
+        } else {
+            String::new()
+        }
+    };
+    SessionOptions {
+        current_mode: keep(o.current_mode, &modes),
+        current_model: keep(o.current_model, &models),
+        modes,
+        models,
+    }
+}
+
+/// An adapter's error answer as a supervisor error: one of the stable reasons the node passes on (ADR-0058), with only the
+/// parameters that code has, as strings, bounded; anything else is internal (the text goes to logs only).
+fn adapter_error(e: HostError) -> SupervisorError {
+    if let Some((code, params)) = e.reason() {
+        let known = [
+            agora_protocol::ErrorCode::AdapterAgentExited,
+            agora_protocol::ErrorCode::AdapterAgentRefused,
+            agora_protocol::ErrorCode::AdapterOptionRefused,
+        ];
+        if let Some(c) = known.iter().find(|c| c.as_str() == code) {
+            let code = match c {
+                agora_protocol::ErrorCode::AdapterAgentExited => "adapter.agent_exited",
+                agora_protocol::ErrorCode::AdapterAgentRefused => "adapter.agent_refused",
+                _ => "adapter.option_refused",
+            };
+            let params = c
+                .params()
+                .iter()
+                .map(|k| {
+                    let v = params.get(*k).and_then(serde_json::Value::as_str);
+                    // The one parameter an adapter may leave out: an agent killed by a signal has no exit code.
+                    let v = match (v, *k) {
+                        (Some(v), _) => clip(v, REASON_PARAM_MAX),
+                        (None, "exit_code") => "?".to_string(),
+                        (None, _) => String::new(),
+                    };
+                    (*k, v)
+                })
+                .collect();
+            return SupervisorError::Adapter { code, params };
+        }
+    }
+    SupervisorError::Spawn(e.to_string())
+}
+
+/// Spawns an adapter process, initializes it and starts (or resumes) a session. Returns it with the session id and the capabilities
+/// it declared. An adapter's stable reason for failing (ADR-0058) becomes [`SupervisorError::Adapter`].
 fn launch_adapter(
     spec: &agora_adapters::manifest::AdapterSpec,
     checkout_root: &Path,
     worktree: &Path,
     resume: Option<&str>,
     sandbox: Option<agora_platform::Sandbox>,
-) -> Result<(Adapter, String), String> {
+) -> Result<(Adapter, String, Vec<String>), SupervisorError> {
     const STEP: Duration = Duration::from_secs(10);
-    let (program, args) = spec.command.split_first().ok_or("empty adapter command")?;
+    let (program, args) = spec
+        .command
+        .split_first()
+        .ok_or_else(|| SupervisorError::Spawn("empty adapter command".into()))?;
     let adapter = Adapter::spawn(&AdapterConfig {
         program: program.into(),
         args: args.to_vec(),
@@ -1623,9 +1790,10 @@ fn launch_adapter(
         cwd: Some(worktree.to_path_buf()),
         sandbox,
     })
-    .map_err(|e| e.to_string())?;
-    let fail = |e: agora_adapters::host::HostError| e.to_string();
-    adapter.initialize(&["chat"], "en", STEP).map_err(fail)?;
+    .map_err(|e| SupervisorError::Spawn(e.to_string()))?;
+    let init = adapter
+        .initialize(&["chat"], "en", STEP)
+        .map_err(adapter_error)?;
     let session_id = adapter
         .start_session(
             &checkout_root.to_string_lossy(),
@@ -1633,8 +1801,8 @@ fn launch_adapter(
             resume,
             STEP,
         )
-        .map_err(fail)?;
-    Ok((adapter, session_id))
+        .map_err(adapter_error)?;
+    Ok((adapter, session_id, init.capabilities))
 }
 
 /// After an adapter died on its own: wait out the backoff and try again, or give up for good.
@@ -1781,4 +1949,85 @@ fn session_report(agent: &Agent) -> Option<SupervisorEvent> {
             agent: agent.id.clone(),
             session: session.clone(),
         })
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod adapter_option_tests {
+    use super::*;
+
+    fn opt(id: &str, skips: bool) -> SessionOption {
+        SessionOption {
+            id: id.into(),
+            name: "n".repeat(300),
+            skips_permissions: skips,
+            ..SessionOption::default()
+        }
+    }
+
+    #[test]
+    fn reported_options_are_bounded_and_a_model_never_skips_permissions() {
+        let mut models: Vec<SessionOption> =
+            (0..250).map(|i| opt(&format!("m{i}"), true)).collect();
+        models.insert(0, opt(&"x".repeat(OPTION_ID_MAX + 1), false));
+        models.push(opt("m1", false));
+        let o = bounded_options(SessionOptions {
+            modes: vec![
+                opt("plan", false),
+                opt("yolo", true),
+                opt("", false),
+                opt("plan", true),
+            ],
+            models,
+            current_mode: "yolo".into(),
+            current_model: "gone".into(),
+        });
+        assert_eq!(
+            o.modes
+                .iter()
+                .map(|m| (m.id.as_str(), m.skips_permissions))
+                .collect::<Vec<_>>(),
+            [("plan", false), ("yolo", true)],
+            "empty and repeated ids are dropped"
+        );
+        assert_eq!(o.models.len(), OPTIONS_MAX);
+        assert!(o
+            .models
+            .iter()
+            .all(|m| !m.skips_permissions && m.name.len() <= OPTION_NAME_MAX));
+        assert_eq!(
+            (o.current_mode.as_str(), o.current_model.as_str()),
+            ("yolo", "")
+        );
+    }
+
+    #[test]
+    fn an_adapters_reason_is_passed_on_only_for_known_codes_with_their_own_params() {
+        let exited = HostError::Rpc {
+            code: -32000,
+            data: Some(serde_json::json!({"code": "adapter.agent_exited",
+                "params": {"stage": "initialize", "stderr_tail": "x".repeat(2000), "extra": "no"}})),
+        };
+        let e = adapter_error(exited).to_protocol();
+        assert_eq!(e.code, ErrorCode::AdapterAgentExited);
+        let s = |k: &str| match e.params.get(k) {
+            Some(agora_protocol::ParamValue::Str(s)) => s.clone(),
+            other => panic!("{k}: {other:?}"),
+        };
+        assert_eq!(
+            (s("stage").as_str(), s("exit_code").as_str()),
+            ("initialize", "?")
+        );
+        assert_eq!(s("stderr_tail").len(), REASON_PARAM_MAX);
+        assert!(!e.params.contains_key("extra"));
+        let other = HostError::Rpc {
+            code: -32000,
+            data: Some(serde_json::json!({"code": "auth.forbidden", "params": {}})),
+        };
+        assert_eq!(adapter_error(other).to_protocol().code, ErrorCode::Internal);
+        assert_eq!(
+            adapter_error(HostError::Timeout).to_protocol().code,
+            ErrorCode::Internal
+        );
+    }
 }

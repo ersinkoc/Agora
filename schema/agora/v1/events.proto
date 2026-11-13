@@ -33,6 +33,8 @@ message Event {
     AgentExited agent_exited = 34;
     // ADR-0053: the hub stops listing this closed agent; earlier events stay in the store.
     AgentForgotten agent_forgotten = 36;
+    // ADR-0058: the modes and models an agent offers, and the ones in use.
+    AgentSessionOptions agent_session_options = 37;
     // terminal
     TerminalOpened terminal_opened = 40;
     TerminalTitleChanged terminal_title_changed = 41;
@@ -127,6 +129,21 @@ message AgentUsageReported {
   string model = 2;
   uint64 input_tokens = 3;
   uint64 output_tokens = 4;
+  // ADR-0058: what the agent's own reported cost grew by, in micro-units of `currency`; absent when it reported none.
+  optional uint64 cost_micros = 5;
+  string currency = 6;
+  // ADR-0058: the tokens the agent's context holds now and how many it can hold (a level, not a growth); 0 when not reported.
+  uint64 context_tokens = 7;
+  uint64 context_window = 8;
+}
+
+// ADR-0058: replaces the previous report for this agent.
+message AgentSessionOptions {
+  string agent_id = 1;
+  repeated SessionOption modes = 2;
+  repeated SessionOption models = 3;
+  string current_mode = 4;
+  string current_model = 5;
 }
 
 message AgentExited {

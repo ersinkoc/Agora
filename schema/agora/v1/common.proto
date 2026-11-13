@@ -28,6 +28,17 @@ enum TerminalPurpose {
   TERMINAL_PURPOSE_SERVICE = 3;
 }
 
+// ADR-0058: one mode or model an agent offers for its session, as its adapter reports it. `id` is what `AgentSetMode.mode` and
+// `AgentSetModel.model` take; `name` and `description` are the agent's own words (untrusted text, shown as written).
+message SessionOption {
+  string id = 1;
+  string name = 2;
+  string description = 3;
+  // A mode in which the agent acts without asking first (it skips its own permission prompts). A client asks the user to confirm
+  // before choosing it and never chooses it by default. Always false for a model.
+  bool skips_permissions = 4;
+}
+
 // A flat error parameter: a string or a number (docs/specs/error-codes.md).
 message ParamValue {
   oneof value {

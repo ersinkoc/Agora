@@ -172,6 +172,18 @@ fn an_adapter_agent_gets_its_own_worktree_and_reports_its_state() {
     // Chat and usage are passed on as adapter events, and the native session id is recorded.
     let all = ev;
     assert!(all.iter().any(|e| matches!(e, SupervisorEvent::Adapter { event: AdapterEvent::Chat { item: ChatItem::Text(t), .. }, .. } if t == "hello")), "{all:#?}");
+    // ADR-0058: this adapter declared no mode or model switch, so neither is sent to it.
+    for (kind, cap) in [
+        (agora_adapters::host::OptionKind::Mode, "agent.set_mode"),
+        (agora_adapters::host::OptionKind::Model, "agent.set_model"),
+    ] {
+        assert_eq!(
+            s.adapter_set_option(&id, kind, "x"),
+            Err(agora_node::supervisor::SupervisorError::OptionUnsupported(
+                cap
+            ))
+        );
+    }
 }
 
 #[test]

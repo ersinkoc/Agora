@@ -31,6 +31,9 @@ const HUB_CAPABILITIES: &[&str] = &[
     "directory.list",
     "board.join",
     "mesh.spawn",
+    // ADR-0058
+    "agent.set_mode",
+    "agent.set_model",
 ];
 
 pub(crate) fn hub_dir(o: &Opts) -> PathBuf {
@@ -91,6 +94,7 @@ impl ClientAuth for ClientTokens {
                 role: agora_hub::users::Role::Owner,
                 user: "owner".into(),
                 projects: None,
+                session: String::new(),
             });
         }
         agora_hub::server::ClientAuth::access(&*self.sessions, token)

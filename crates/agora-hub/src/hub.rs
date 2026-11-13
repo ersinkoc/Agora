@@ -137,7 +137,8 @@ impl Hub {
         }
     }
 
-    /// Tokens and estimated cost per agent (ADR-0033). An agent whose model has no price has no estimate.
+    /// Tokens and estimated cost per agent (ADR-0033). An agent whose model has no price has no estimate; an agent that reported its
+    /// own cost in US dollars (ADR-0058) has that instead.
     pub fn usage_report(&self) -> agora_protocol::v1::UsageReportResult {
         use crate::usage::{Cost, Usage};
         let (catalog, prices_at_ms) = match self.prices.read() {
@@ -155,7 +156,13 @@ impl Hub {
                     output_tokens: a.output_tokens,
                     ..Usage::default()
                 };
-                let micro_usd = catalog.cost(&a.model, &usage, None).map(Cost::micro_usd);
+                // ADR-0058: a cost the agent reported itself in US dollars is what it cost; only without one is it estimated.
+                let reported = a
+                    .session
+                    .cost_micros
+                    .filter(|_| a.session.currency == "USD");
+                let micro_usd =
+                    reported.or_else(|| catalog.cost(&a.model, &usage, None).map(Cost::micro_usd));
                 total = total.saturating_add(micro_usd.unwrap_or(0));
                 agora_protocol::v1::AgentUsage {
                     agent_id: id.clone(),
