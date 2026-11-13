@@ -1313,13 +1313,10 @@ impl Supervisor {
         Ok((self.launch(kind, &argv, worktree, extras)?, Some(session)))
     }
 
-    /// The agent's own session id, as reported or chosen (ADR-0060).
+    /// A terminal agent's own session id, as chosen at its launch or reported (ADR-0060). `None` for an adapter agent: what it holds
+    /// right after its start is the adapter's session, not the agent's own, which its adapter reports itself (`session/reported`).
     pub fn session_of(&self, id: &AgentId) -> Option<String> {
-        self.agents
-            .get(id)
-            .map(|e| &e.agent)
-            .or_else(|| self.adapters.get(id).map(|e| &e.agent))
-            .and_then(|a| a.session.clone())
+        self.agents.get(id).and_then(|e| e.agent.session.clone())
     }
 
     /// Every session id the node's agents have (ADR-0060): a session file naming one of these is never another agent's.
