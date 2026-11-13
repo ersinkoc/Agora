@@ -33,6 +33,8 @@ agent-option_forbidden = { $kind } was not started with option { $option }: { $p
         [signature] starting it that way needs your device's signature on the start.
        *[other] this machine does not let agents act without asking.
     }
+agent-option_invalid = { $kind } was not started: the launch option "{ $option }" is not one it offers (or there are too many).
+agent-option_unconfirmed = { $kind } was not started with option { $option }: it lets the agent act without asking, and the start did not carry your confirmation for that.
 agent-running = { $agent_id } is still running. Stop it first.
 approval-expired = Approval { $approval_id } has expired.
 approval-signature_invalid = Approval { $approval_id } could not be verified.

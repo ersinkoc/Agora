@@ -119,6 +119,9 @@ message AgentStart {
   // ADR-0059: ids of the kind's `[[launch.option]]`s to start with (capability `agent.launch_options`). Accepted only on the
   // node's own control socket; routed through the hub such a start is refused (it carries no signature), use `AgentLaunch`.
   repeated string launch_options = 7;
+  // ADR-0059: the chosen ids whose "act without asking" confirmation the window showed and the user accepted. The node, from its own
+  // manifest, refuses an option that skips permissions unless it is listed here (`agent.option_unconfirmed`).
+  repeated string confirmed_launch_options = 8;
 }
 
 message AgentStop {
@@ -578,8 +581,10 @@ message AgentLaunch {
   DirectoryAuthorization authorization = 5;
   bool accept_identity_change = 6;
   // ADR-0059: ids of the kind's `[[launch.option]]`s to start with (capability `agent.launch_options`). When not empty the
-  // authorization signs them too (`directory-action-v2`, docs/specs/protocol.md), so a hub can neither add nor remove one.
+  // authorization signs them too (`directory-action-v3`, docs/specs/protocol.md), so a hub can neither add nor remove one.
   repeated string launch_options = 7;
+  // ADR-0059: as `AgentStart.confirmed_launch_options`; signed with `launch_options` as a separate list.
+  repeated string confirmed_launch_options = 8;
 }
 message AgentLaunchResult {
   string agent_id = 1;
