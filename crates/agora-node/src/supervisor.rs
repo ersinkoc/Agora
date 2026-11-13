@@ -1876,7 +1876,10 @@ fn launch_adapter(
     mut sandbox: Option<agora_platform::Sandbox>,
     mesh: Option<&agora_adapters::inject::Endpoint>,
 ) -> Result<(Adapter, String, Vec<String>), SupervisorError> {
-    const STEP: Duration = Duration::from_secs(10);
+    // A real agent can be slow to answer: opencode 2.x took 2 to 5 s to initialize and 9.5 to 12 s to open a session (seen on Windows), so
+    // the old 10 s ended such a start as a bare `internal` error.
+    const INIT: Duration = Duration::from_secs(30);
+    const SESSION: Duration = Duration::from_secs(60);
     let (program, args) = spec
         .command
         .split_first()
@@ -1906,7 +1909,7 @@ fn launch_adapter(
     })
     .map_err(|e| SupervisorError::Spawn(e.to_string()))?;
     let init = adapter
-        .initialize(&["chat"], "en", STEP)
+        .initialize(&["chat"], "en", INIT)
         .map_err(adapter_error)?;
     // The agent's own mesh server, described as for a terminal agent (`inject`): `agora mesh stdio --socket <its socket>`.
     let servers: Vec<McpServer> = mesh
@@ -1928,7 +1931,7 @@ fn launch_adapter(
             &worktree.to_string_lossy(),
             resume,
             &servers,
-            STEP,
+            SESSION,
         )
         .map_err(adapter_error)?;
     Ok((adapter, session_id, init.capabilities))

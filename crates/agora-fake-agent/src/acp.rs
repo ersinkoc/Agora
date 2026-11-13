@@ -22,7 +22,7 @@
 //! `AGORA_FAKE_ACP_BYPASS_MODE=1` the list also has `bypassPermissions`. `session/set_mode` and `session/set_model` take an id from
 //! those lists and refuse anything else (and `fake/model-2` with `AGORA_FAKE_ACP_REFUSE_MODEL=1`); with
 //! `AGORA_FAKE_ACP_REFUSE_SESSION=1` `session/new` itself is refused; with `AGORA_FAKE_ACP_NO_STDIO_MCP=1` `initialize` says
-//! `mcpCapabilities.stdio: false`. [`fail_at_start`] is an agent
+//! `mcpCapabilities.stdio: false`; with `AGORA_FAKE_ACP_NO_CURRENT=1` the agent does not say which mode and model it runs with. [`fail_at_start`] is an agent
 //! that dies before `initialize` (`agora-fake-agent --acp --fail-at-start`).
 
 /// What an agent killed by a broken plugin writes before it exits: an error, a path in the home folder and a token that must not
@@ -230,12 +230,18 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
                 if std::env::var_os("AGORA_FAKE_ACP_BYPASS_MODE").is_some() {
                     modes.push(json!({"id": "bypassPermissions", "name": "Bypass Permissions"}));
                 }
+                // An agent that does not say which mode or model it runs with: `AGORA_FAKE_ACP_NO_CURRENT=1` leaves both ids out.
+                let (model, mode) = if std::env::var_os("AGORA_FAKE_ACP_NO_CURRENT").is_some() {
+                    (json!(""), json!(""))
+                } else {
+                    (json!("fake/model-1"), json!("build"))
+                };
                 reply(
                     out,
                     json!({"sessionId": "acp-s1",
-                           "models": {"currentModelId": "fake/model-1", "availableModels": [
+                           "models": {"currentModelId": model, "availableModels": [
                                {"modelId": "fake/model-1", "name": "Fake 1"}, {"modelId": "fake/model-2", "name": "Fake 2"}]},
-                           "modes": {"currentModeId": "build", "availableModes": modes}}),
+                           "modes": {"currentModeId": mode, "availableModes": modes}}),
                 )?;
             }
             "session/set_mode" | "session/set_model" => {

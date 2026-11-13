@@ -4,6 +4,18 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+## 0.3.7
+
+### Agents
+- When a structured agent fails or says nothing in a turn, the notice carries the lines of its stderr that name an ERROR, FATAL or WARN level or a failing HTTP status (opencode 2.x logs a failure only that way) when there are any, so an agent that also logs at INFO (opencode) no longer buries the reason under routine lines. A structured agent now has 30 s to initialize and 60 s to open a session (it was 10 s each; opencode 2.x needs up to 12 s, which ended the start as a bare `internal` error).
+
+### Machines
+- A machine whose node ran before it was enrolled now links to the hub. Before, the node sent the hub the events it had recorded under the name `local`, the hub dropped the connection without a word, and the node only logged "connection reset", forever. Now the node sets those events aside whenever it starts under another name than the one its log was recorded under (enrolled after running as `local`, enrolled again under a new name, or running un-enrolled again) (the old log is renamed to `events.<old name>.<time>.log` beside the new one, never deleted, and the node says so when it starts), and a hub that refuses events naming another machine closes the connection with the code `protocol.producer_mismatch`, which the node logs (`hub link: Refused("protocol.producer_mismatch")`).
+### Modes and models
+- A confirmation to let an agent act without asking stays with the agent it was opened for: switching to another agent closes it, and "Switch anyway" can no longer reach a different agent (two machines' `agent-1` included).
+- A mode or model the agent did not report as current shows "Not reported" instead of preselecting the first one in the list.
+- Asking the owner for a grant to switch an agent's model asks for that agent only, as for its mode (it asked for the whole machine); the terminal client asks for the same grant.
+
 ### Agents
 - Agents started in structured mode (ACP agents through the bridge, and adapter agents) now get the mesh: the node passes each its own mesh server when its session starts, restarts or resumes, so they can message other agents, use the board and leases, appear in other agents' lists and start helpers (with your approval) like terminal agents. Before, they started with no MCP servers at all.
 

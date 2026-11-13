@@ -34,7 +34,12 @@ pub fn tree_order(s: &Snapshot) -> Vec<String> {
         let mut agents: Vec<&AgentSnapshot> =
             s.agents.iter().filter(|a| a.node_id == n.node_id).collect();
         agents.sort_by(|a, b| a.agent_id.cmp(&b.agent_id));
-        out.extend(agents.into_iter().map(|a| a.agent_id.clone()));
+        // Helpers right after the agent that started them (ADR-0057), the order the rows are drawn in.
+        out.extend(
+            crate::render::helper_order(&agents)
+                .into_iter()
+                .map(|(a, _)| a.agent_id.clone()),
+        );
     }
     // Agents of a machine the hub does not list come last, so none is unreachable.
     let mut rest: Vec<&AgentSnapshot> = s
@@ -109,6 +114,73 @@ fn fit(text: &str, width: usize) -> String {
     out
 }
 
+/// The lines of the `agent.start` request `a` as shown at `width` columns (ADR-0057): who asks to start what and where, its whole first
+/// prompt indented, and how to answer. `None` for any other request.
+pub fn start_card_lines(
+    a: &agora_protocol::v1::ApprovalSnapshot,
+    width: usize,
+    t: Text<'_>,
+) -> Option<Vec<String>> {
+    let (line, prompt) = crate::render::start_card(&a.action, &a.detail, t)?;
+    let width = width.max(12);
+    let mut lines = crate::render::wrap_row(&line, width, width);
+    lines.push(String::new());
+    for p in prompt {
+        let wrapped = crate::render::wrap_row(&p, width - 2, width - 2);
+        if wrapped.is_empty() {
+            lines.push(String::new());
+        }
+        lines.extend(wrapped.into_iter().map(|w| format!("  {w}")));
+    }
+    lines.push(String::new());
+    lines.push(t(key!("tui-split-answer"), &[]));
+    Some(lines)
+}
+
+/// The `agent.start` request y / n would answer in this view, and whether all of it fits the right panel. `None` when the request to
+/// answer is not a start (or there is none). A start that does not fit must be read whole (the reader) before y may allow it.
+pub fn start_card_fit<'a>(
+    v: &View<'a>,
+    t: Text<'_>,
+) -> Option<(&'a agora_protocol::v1::ApprovalSnapshot, bool)> {
+    let (cols, rows) = (v.cols.max(20), v.rows.max(5));
+    let left = (cols / 3).clamp(18, 36);
+    let right = cols.saturating_sub(left + 1);
+    let room = usize::from((rows - 1).saturating_sub(1)).max(2);
+    let a = crate::client::answered_approval(v.snapshot, Some(v.selected))?;
+    let lines = start_card_lines(a, usize::from(right).saturating_sub(3), t)?;
+    Some((a, lines.len() <= room))
+}
+
+/// The full-screen reader of a start request that did not fit (ADR-0057): `lines` from `top`, a key line at the bottom. Returns the frame
+/// and whether the last line is in view, which is what counts as read.
+pub fn reader_frame(
+    lines: &[String],
+    top: usize,
+    cols: u16,
+    rows: u16,
+    t: Text<'_>,
+) -> (String, bool) {
+    let rows = usize::from(rows.max(3));
+    let room = rows - 1;
+    let top = top.min(lines.len().saturating_sub(room));
+    let mut out = String::from("\x1b[?25l\x1b[H\x1b[2J");
+    for (i, l) in lines.iter().skip(top).take(room).enumerate() {
+        let _ = write!(
+            out,
+            "\x1b[{};1H{}",
+            i + 1,
+            fit(&format!(" {l}"), usize::from(cols))
+        );
+    }
+    let _ = write!(
+        out,
+        "\x1b[{rows};1H\x1b[2m{}\x1b[0m",
+        fit(&t(key!("tui-reader-keys"), &[]), usize::from(cols))
+    );
+    (out, top + room >= lines.len())
+}
+
 /// One line of the left panel: its text and how it is painted.
 struct Row {
     text: String,
@@ -129,7 +201,12 @@ fn tree(v: &View<'_>, t: Text<'_>) -> Vec<Row> {
         let answered =
             crate::client::answered_approval(s, Some(v.selected)).map(|a| a.approval_id.as_str());
         for a in &s.approvals {
-            let what = format!("{} {}", a.action, a.detail);
+            // ADR-0057: a request to start an agent is named in words here; its whole request is on the right while it is the one
+            // y / n answers (`start_card`), never raw JSON cut to the panel's width.
+            let what = match crate::render::start_kind(&a.action, &a.detail) {
+                Some(kind) => t(key!("tui-split-asks-start"), &[("kind", Arg::Str(kind))]),
+                None => format!("{} {}", a.action, a.detail),
+            };
             // The one y / n answer is marked.
             let mark = if Some(a.approval_id.as_str()) == answered {
                 "▶"
@@ -174,11 +251,17 @@ fn tree(v: &View<'_>, t: Text<'_>) -> Vec<Row> {
         let mut agents: Vec<&AgentSnapshot> =
             s.agents.iter().filter(|a| a.node_id == n.node_id).collect();
         agents.sort_by(|a, b| a.agent_id.cmp(&b.agent_id));
-        for a in agents {
+        // A helper is drawn under the agent that started it, one step in per level (ADR-0057).
+        for (a, depth) in crate::render::helper_order(&agents) {
             let st = state_of(a);
             let (m, paint) = mark(st, a.running);
+            let lead = if depth == 0 {
+                String::new()
+            } else {
+                format!("{}↳ ", "  ".repeat(depth - 1))
+            };
             rows.push(Row {
-                text: format!("  {m} {}  {}", local(&a.agent_id), a.kind),
+                text: format!("  {lead}{m} {}  {}", local(&a.agent_id), a.kind),
                 paint,
                 selected: a.agent_id == v.selected,
             });
@@ -260,6 +343,22 @@ pub fn frame(v: &View<'_>, t: Text<'_>) -> String {
     let body = rows - 1; // the last row is the status line
     let s = v.snapshot;
     let agent = s.agents.iter().find(|a| a.agent_id == v.selected);
+    // ADR-0057: when the request y / n would answer asks to start an agent, the right panel shows it instead of a screen. One that
+    // does not fit says how much is hidden; y refuses it until it was read whole (`start_card_fit`, the reader).
+    let card: Option<Vec<String>> = crate::client::answered_approval(s, Some(v.selected))
+        .and_then(|a| start_card_lines(a, usize::from(right).saturating_sub(3), t))
+        .map(|mut lines| {
+            let room = usize::from(body.saturating_sub(1)).max(2);
+            if lines.len() > room {
+                let hidden = lines.len() - (room - 1);
+                lines.truncate(room - 1);
+                lines.push(t(
+                    key!("tui-split-card-more"),
+                    &[("count", Arg::Num(i64::try_from(hidden).unwrap_or(i64::MAX)))],
+                ));
+            }
+            lines
+        });
 
     let tree = tree(v, t);
     // Keep the selected agent in view when the tree is taller than the panel.
@@ -269,18 +368,30 @@ pub fn frame(v: &View<'_>, t: Text<'_>) -> String {
         .min(tree.len().saturating_sub(usize::from(body)));
 
     // The right panel: a title row, then the agent's screen, bottom rows first when it is taller than the panel.
-    let title = match agent {
-        Some(a) => {
+    let title = match (&card, agent) {
+        (Some(_), _) => format!(" {}", t(key!("tui-attention"), &[])),
+        (None, Some(a)) => {
             let st = state_of(a);
+            let by = if a.parent_agent_id.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "  · {}",
+                    t(
+                        key!("tui-started-by"),
+                        &[("agent", Arg::Str(local(&a.parent_agent_id).to_string()))]
+                    )
+                )
+            };
             format!(
-                " {}  {}  {}  {}",
+                " {}  {}  {}  {}{by}",
                 local(&a.agent_id),
                 a.kind,
                 a.node_id,
                 state_word(st, t)
             )
         }
-        None => format!(" {}", t(key!("tui-split-pick"), &[])),
+        (None, None) => format!(" {}", t(key!("tui-split-pick"), &[])),
     };
     // An agent without a terminal (a chat agent) is talked to in its conversation, which Enter opens.
     let empty_pane = if agent.is_some_and(|a| s.terminals.iter().any(|x| x.agent_id == a.agent_id))
@@ -321,6 +432,9 @@ pub fn frame(v: &View<'_>, t: Text<'_>) -> String {
         let _ = write!(out, "{dim}│{reset}");
         if r == 0 {
             let _ = write!(out, "{bold}{}{reset}", fit(&title, usize::from(right)));
+        } else if let Some(card) = &card {
+            let line = card.get(usize::from(r - 1)).map_or("", String::as_str);
+            out.push_str(&fit(&format!(" {line}"), usize::from(right)));
         } else {
             match v.screen {
                 Some(term) if r - 1 + screen_start < term.size().rows => {
@@ -432,6 +546,116 @@ mod tests {
         let mut grid = AlacrittyTerminal::new(Size { cols: 100, rows });
         grid.feed(f.as_bytes());
         (0..rows).map(|r| grid.line(r)).collect()
+    }
+
+    #[test]
+    fn a_request_to_start_an_agent_is_shown_whole_on_the_right_while_it_is_the_one_answered() {
+        // Seen on macOS: the split view listed an `agent.start` request as raw JSON cut to the panel ("agent.start {\"agent\":\"…"),
+        // so y signed a start whose prompt and folder were never in view.
+        let mut s = snapshot();
+        s.approvals = vec![ApprovalSnapshot {
+            approval_id: "mac2/a9".into(),
+            agent_id: "mac2/agent-1".into(),
+            action: "agent.start".into(),
+            detail: r#"{"node":"mac2","agent":"agent-1","agent_kind":"claude-code","kind":"codex","folder":"/w/proj","inside":true,"worktree":false,"depth":1,"prompt":"Fix the tests.\nThen open a PR, do not \u001b[2Jmerge."}"#.into(),
+            ..Default::default()
+        }];
+        let v = View {
+            snapshot: &s,
+            selected: "mac2/agent-2",
+            screen: None,
+            notice: "",
+            color: false,
+            cols: 100,
+            rows: 16,
+        };
+        let rows = plain_rows(&frame(&v, &text), 16);
+        let left: Vec<&str> = rows
+            .iter()
+            .map(|r| r.split('│').next().unwrap_or_default())
+            .collect();
+        let right: String = rows
+            .iter()
+            .map(|r| r.split_once('│').map_or("", |(_, r)| r).trim_end())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            left[1].contains("▶ agent-1: tui-split-asks-sta"),
+            "{rows:#?}"
+        );
+        assert!(
+            !rows.iter().any(|r| r.contains("agent.start {")),
+            "{rows:#?}"
+        );
+        assert!(right.contains("tui-attention"), "{right}");
+        assert!(
+            right.contains("folder=/w/proj") && right.contains("kind=codex"),
+            "{right}"
+        );
+        assert!(
+            right.contains("  Fix the tests.") && right.contains("  Then open a PR"),
+            "{right}"
+        );
+        // The escape in the prompt is shown, not obeyed.
+        assert!(
+            right.contains("\\u{1b}") || right.contains("\\x1b") || right.contains("␛"),
+            "{right}"
+        );
+        assert!(right.contains("tui-split-answer"), "{right}");
+        // Any other request keeps the screen side as it was.
+        let mut other = s.clone();
+        other.approvals[0].action = "files.write".into();
+        let v = View {
+            snapshot: &other,
+            ..v
+        };
+        let rows = plain_rows(&frame(&v, &text), 16);
+        assert!(
+            !rows[0].split_once('│').unwrap().1.contains("tui-attention"),
+            "{rows:#?}"
+        );
+    }
+
+    #[test]
+    fn a_helper_is_drawn_and_reached_right_under_the_agent_that_started_it() {
+        let mut s = snapshot();
+        s.approvals.clear();
+        s.agents.push(AgentSnapshot {
+            agent_id: "mac2/agent-3".into(),
+            node_id: "mac2".into(),
+            kind: "codex".into(),
+            parent_agent_id: "mac2/agent-1".into(),
+            running: true,
+            ..Default::default()
+        });
+        // Arrow keys follow the rows: the helper comes right after its parent, before agent-2.
+        assert_eq!(
+            tree_order(&s),
+            [
+                "mac2/agent-1",
+                "mac2/agent-3",
+                "mac2/agent-2",
+                "win/agent-1"
+            ]
+        );
+        let v = View {
+            snapshot: &s,
+            selected: "mac2/agent-3",
+            screen: None,
+            notice: "",
+            color: false,
+            cols: 100,
+            rows: 10,
+        };
+        let rows = plain_rows(&frame(&v, &text), 10);
+        let at = |id: &str| {
+            rows.iter()
+                .position(|r| r.split('│').next().unwrap_or("").contains(id))
+        };
+        let (parent, helper) = (at("agent-1  claude").unwrap(), at("agent-3").unwrap());
+        assert_eq!(helper, parent + 1, "{rows:#?}");
+        assert!(rows[helper].contains("↳"), "{rows:#?}");
+        assert!(rows[0].contains("· tui-started-by agent="), "{rows:#?}");
     }
 
     #[test]

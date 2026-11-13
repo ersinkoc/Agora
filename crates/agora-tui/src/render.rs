@@ -118,27 +118,9 @@ pub fn render(
         waiting += 1;
         let (on, off) = paint(AgentState::Blocked, color);
         // ADR-0057: a request to start an agent shows what would start, where, and its whole first prompt.
-        if let Some(start) = start_request(&a.action, &a.detail) {
-            let line = t(
-                if start.inside {
-                    key!("tui-asks-start")
-                } else {
-                    key!("tui-asks-start-outside")
-                },
-                // Everything from the signed request itself, never from what the hub says around it, and every hidden or control
-                // character as a visible escape: what is shown is what the answer is signed over.
-                &[
-                    ("agent", Arg::Str(visible(&start.agent))),
-                    ("agent_kind", Arg::Str(visible(&start.agent_kind))),
-                    ("node", Arg::Str(visible(&start.node))),
-                    ("kind", Arg::Str(visible(&start.kind))),
-                    ("folder", Arg::Str(visible(&start.folder))),
-                    ("worktree", Arg::Str(start.worktree.to_string())),
-                    ("depth", Arg::Num(start.depth)),
-                ],
-            );
+        if let Some((line, prompt)) = start_card(&a.action, &a.detail, t) {
             out.push(format!("  {on}!{off} {line}"));
-            for l in visible(&start.prompt).lines() {
+            for l in prompt {
                 out.push(format!("      {dim}{l}{reset}"));
             }
             continue;
@@ -281,6 +263,36 @@ struct StartRequest {
     depth: i64,
 }
 
+/// ADR-0057: what an `agent.start` request shows before it is answered: one line saying who asks to start what and where, then its whole
+/// first prompt, line by line. Everything comes from the signed request and every hidden or control character is made visible, since
+/// the answer is signed over exactly that request. `None` for any other request.
+pub(crate) fn start_card(action: &str, detail: &str, t: Text<'_>) -> Option<(String, Vec<String>)> {
+    let start = start_request(action, detail)?;
+    let line = t(
+        if start.inside {
+            key!("tui-asks-start")
+        } else {
+            key!("tui-asks-start-outside")
+        },
+        &[
+            ("agent", Arg::Str(visible(&start.agent))),
+            ("agent_kind", Arg::Str(visible(&start.agent_kind))),
+            ("node", Arg::Str(visible(&start.node))),
+            ("kind", Arg::Str(visible(&start.kind))),
+            ("folder", Arg::Str(visible(&start.folder))),
+            ("worktree", Arg::Str(start.worktree.to_string())),
+            ("depth", Arg::Num(start.depth)),
+        ],
+    );
+    let prompt = visible(&start.prompt).lines().map(str::to_string).collect();
+    Some((line, prompt))
+}
+
+/// The kind an `agent.start` request asks for, made visible; `None` for any other request.
+pub(crate) fn start_kind(action: &str, detail: &str) -> Option<String> {
+    start_request(action, detail).map(|s| visible(&s.kind))
+}
+
 fn start_request(action: &str, detail: &str) -> Option<StartRequest> {
     if action != "agent.start" {
         return None;
@@ -315,7 +327,7 @@ fn start_request(action: &str, detail: &str) -> Option<StartRequest> {
 
 /// `agents` with each helper right after the agent that started it, and how deep it is. A helper whose parent is not in the list (another
 /// project, or gone) stays where it is, at depth 0.
-fn helper_order<'a>(agents: &[&'a AgentSnapshot]) -> Vec<(&'a AgentSnapshot, usize)> {
+pub(crate) fn helper_order<'a>(agents: &[&'a AgentSnapshot]) -> Vec<(&'a AgentSnapshot, usize)> {
     let present = |id: &str| agents.iter().any(|a| a.agent_id == id);
     let mut out = Vec::new();
     fn add<'a>(
@@ -522,7 +534,7 @@ pub fn chat_command(
 /// `row` cut into pieces of at most `first` characters for the first and `rest` for the others, at the last space that fits when
 /// there is one (the space itself is dropped), else in the middle of the word. Counted in characters: a wide character may overshoot
 /// a little, which is harmless.
-fn wrap_row(row: &str, first: usize, rest: usize) -> Vec<String> {
+pub(crate) fn wrap_row(row: &str, first: usize, rest: usize) -> Vec<String> {
     let mut out = Vec::new();
     let mut left: Vec<char> = row.chars().collect();
     while !left.is_empty() {

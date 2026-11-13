@@ -173,6 +173,7 @@ notice-adapter-agent_refused = The agent refused to start (step { $stage }, erro
 notice-other = The agent reported something this window cannot show ({ $code }).
 session-mode = Mode
 session-model = Model
+session-not-reported = Not reported
 session-mode-unasked = { $name } (does not ask)
 session-context = Context { $percent }%
 session-context-under-one = Context <1%
