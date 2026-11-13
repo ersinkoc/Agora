@@ -41,7 +41,34 @@ function meshCall(bin, env, socket, name, args, ms = 15000) {
     send({ id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'e2e-link-resilience', version: '1' } } });
   });
 }
-const sent = r => !!r && !r.hang && !r.error && !r.isError && typeof r.value?.message_id === 'string';
+// A mesh client that stays open, for polling without starting a process per call (the reconnect times are measured with it).
+function meshClient(bin, env, socket) {
+  const child = spawn(bin, ['mesh', 'stdio', '--socket', socket], { env, stdio: ['pipe', 'pipe', 'ignore'] });
+  const pending = new Map();
+  let next = 1;
+  createInterface({ input: child.stdout }).on('line', line => {
+    const reply = JSON.parse(line);
+    pending.get(reply.id)?.(reply);
+    pending.delete(reply.id);
+  });
+  const call = (method, params) => new Promise(resolve => {
+    const id = ++next;
+    pending.set(id, resolve);
+    child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
+  });
+  const ready = call('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'e2e-link-resilience', version: '1' } })
+    .then(() => child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n'));
+  return {
+    tool: async (name, args) => {
+      await ready;
+      const reply = await call('tools/call', { name, arguments: args });
+      const text = reply.result?.content?.find(c => c.type === 'text')?.text ?? 'null';
+      return JSON.parse(text);
+    },
+    close: () => child.kill(),
+  };
+}
+const sent = r =>!!r && !r.hang && !r.error && !r.isError && typeof r.value?.message_id === 'string';
 
 let stack;
 try {
@@ -96,22 +123,29 @@ try {
 
   // 3. The hub comes back on the same data and port.
   await wait(Math.max(0, Number(process.env.HUB_DOWN_MS ?? 15000) - (Date.now() - down)));
+  const sender = meshClient(bin, env, join(home, 'm', `${shell}.sock`));
+  const receiver = meshClient(bin, desktop.env, join(desktop.home, 'm', `${remote}.sock`));
+  await sender.tool('agents_list', {});
+  await receiver.tool('agents_list', {});
   stack.startHub();
   const up = Date.now();
+  // The window is watched from the same moment, on its own, so its time does not include the node's.
+  const windowBack = page.getByText('Hub unreachable').first().waitFor({ state: 'detached', timeout: 60000 }).then(() => Date.now() - up, () => 0);
   // `send_message` answers with an id at once and reports a failed delivery later, in the sender's inbox: "back" is when a message
   // sent now is in the desktop's inbox.
   let nodeBack = 0;
-  for (let i = 0; i < 30 && !nodeBack; i++) {
-    await laptop(shell, 'send_message', { to: `desktop/${remote}`, body: `after, other machine #${i}` }, 5000);
-    await wait(1000);
-    if ((await deskBodies()).some(b => b.startsWith('after, other machine'))) nodeBack = Date.now() - up;
+  for (let i = 0; Date.now() - up < 60000 && !nodeBack; i++) {
+    await sender.tool('send_message', { to: `desktop/${remote}`, body: `after, other machine #${i}` });
+    await wait(300);
+    const inbox = await receiver.tool('inbox', {});
+    if (Array.isArray(inbox) && inbox.some(m => m.body.startsWith('after, other machine'))) nodeBack = Date.now() - up;
   }
+  sender.close();
+  receiver.close();
   check(nodeBack > 0, 'a message from the laptop reaches the desktop again after the hub is back');
-  const windowBack = await step('the window reconnects by itself', async () => {
-    await page.getByText('Hub unreachable').first().waitFor({ state: 'detached', timeout: 60000 });
-    return Date.now() - up;
-  });
-  console.log(`     the hub was down ${Math.round((up - down) / 1000)} s; back after it started: laptop ${nodeBack} ms, window ${windowBack ?? '-'} ms`);
+  const windowMs = await windowBack;
+  check(windowMs > 0, 'the window reconnects by itself');
+  console.log(`     the hub was down ${Math.round((up - down) / 1000)} s; back after it started: the laptop reaches the desktop in ${nodeBack} ms, the window in ${windowMs} ms`);
 
   // 4. What the window shows afterwards, after a reload too.
   await page.reload();
