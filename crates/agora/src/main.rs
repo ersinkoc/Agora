@@ -636,6 +636,7 @@ fn agent_stop(say: &Say, o: &Opts) -> ExitCode {
         &mut c,
         Cmd::AgentStop(v1::AgentStop {
             agent_id: id.clone(),
+            stop_helpers: false,
         }),
     ) {
         Ok(_) => {

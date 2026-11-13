@@ -335,6 +335,8 @@ impl Session {
             approved,
             signer_device_id: device.id.clone(),
             signature,
+            helper_grant: 0,
+            helpers_may_start: false,
         });
         self.command(node, cmd, Duration::from_secs(15))
             .map(|()| true)
@@ -690,6 +692,7 @@ impl Session {
             node,
             command_request::Command::AgentStop(agora_protocol::v1::AgentStop {
                 agent_id: agent_id.to_string(),
+                stop_helpers: false,
             }),
             Duration::from_secs(15),
         )

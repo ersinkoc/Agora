@@ -311,6 +311,7 @@ impl EventSink {
                 agora_core::IntegrationLevel::L2Acp => v1::IntegrationLevel::L2Acp,
                 agora_core::IntegrationLevel::L3Adapter => v1::IntegrationLevel::L3Adapter,
             } as i32,
+            parent_agent_id: String::new(),
         }));
         self.record(Body::AgentStateChanged(v1::AgentStateChanged {
             agent_id: agent.into(),
@@ -370,6 +371,7 @@ impl EventSink {
             worktree_id: worktree.to_string(),
             kind: kind.to_string(),
             level: v1::IntegrationLevel::L1Manifest as i32,
+            parent_agent_id: String::new(),
         }));
     }
 
@@ -459,6 +461,8 @@ impl EventSink {
             approval_id: approval_id.to_string(),
             approved,
             signer_device_id: signer_device_id.to_string(),
+            helper_grant: 0,
+            helpers_may_start: false,
         }));
     }
 

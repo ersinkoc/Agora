@@ -325,6 +325,7 @@ fn node_stdio_carries_the_framed_protocol_over_pipes() {
         target_node: String::new(),
         command: Some(Cmd::AgentStop(agora_protocol::v1::AgentStop {
             agent_id: "agent-404".into(),
+            stop_helpers: false,
         })),
     };
     let bytes = Frame {

@@ -19,13 +19,18 @@ approval verified on the node), and mesh content stays untrusted (an agent can b
      buffer only, ADR detection rule; size-limited). Not for other agents.
 2. **Every start needs the user's signed approval.** The request appears in the panel as an approval of a new kind
    (`agent.start`) showing who asks (agent, machine), the kind, the folder and the first prompt in full. The node verifies the
-   signature before it starts anything; the hub cannot approve for the user. A user may approve once, or "for this agent, up to N
-   helpers of this kind in this folder, for this session" (a scoped, signed grant, shown and revocable in the panel).
+   signature before it starts anything; the hub cannot approve for the user. The signature covers a hash of exactly what was shown
+   (node, asking agent, kind, folder, prompt) and the grant, so a hub cannot swap the prompt or change the scope in transit. A user may approve once, or "for this agent, up to N
+   helpers of this kind in this folder, for this session" (a scoped, signed grant, shown and revocable in the panel). The grant
+   ends when the asking agent exits or is stopped.
 3. **The helper is never wider than the one that started it.** Its folder is the caller's folder or a worktree of it; any other
    folder is refused (`mesh.folder_not_allowed`) unless the approval names it, and the node's confinement for the helper is at most the
    caller's. Folder identity rules of ADR-0052 apply.
-4. **Limits.** Depth 2 (a helper cannot start helpers unless the user's grant says so), 3 running helpers per agent, and the
-   node's existing agent limit. Starting is rate-limited per agent like messages.
+4. **Limits.** By default a helper cannot start helpers. The user's signed decision on a start may allow the helpers it starts to
+   ask in turn (each of their starts is approved on its own); a helper of a helper never can, so the deepest chain is user-started
+   agent -> helper -> helper of helper. 3 running helpers per agent, and the node's existing agent limit. Starting is rate-limited
+   per agent like messages. (Wording clarified during implementation: the earlier text said "depth 2 unless the user's grant says
+   so".)
 5. **The tree is visible.** `AgentStarted` gains an optional `parent_agent_id` (append-only; old clients ignore it). The panel and
    TUI show helpers under the agent that started them and label them "started by Claude Code (agent-3)".
 6. **The prompt is the helper's task, and is shown to the user** in the approval; the helper still treats later mesh messages as
