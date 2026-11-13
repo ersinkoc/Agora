@@ -7,6 +7,7 @@ auth-device_revoked = This device ({ $device_id }) has been removed and can no l
 protocol-unsupported_generation = This version is not compatible: offered { $offered }, supported { $supported }.
 protocol-capability_missing = The other side does not support { $capability }.
 protocol-invalid_message = The request was not valid (field: { $field }).
+protocol-producer_mismatch = Machine { $node_id } sent events recorded under another name ({ $producer_id }); the hub did not accept them.
 node-offline = Machine { $node_id } is not connected.
 node-unknown = Machine { $node_id } is not known to this hub.
 node-timeout = Machine { $node_id } did not answer in time.

@@ -21,6 +21,8 @@ pub enum TransportError {
     Ws(String),
     /// The peer sent something that is not exactly one valid frame.
     BadFrame,
+    /// The peer closed the connection and said why: the close reason, a stable error code (`docs/specs/error-codes.md`).
+    Refused(String),
 }
 
 impl fmt::Display for TransportError {
@@ -28,6 +30,7 @@ impl fmt::Display for TransportError {
         match self {
             Self::Ws(e) => write!(f, "websocket: {e}"),
             Self::BadFrame => write!(f, "peer sent a malformed frame"),
+            Self::Refused(code) => write!(f, "peer closed the connection: {code}"),
         }
     }
 }
@@ -182,6 +185,10 @@ where
     pub async fn recv(&mut self) -> Result<Option<Frame>, TransportError> {
         loop {
             match self.ws.next().await {
+                // A close that says why carries a stable error code (see `close_with`); one that does not is an ordinary end.
+                Some(Ok(Message::Close(Some(c)))) if !c.reason.is_empty() => {
+                    return Err(TransportError::Refused(c.reason.into_owned()))
+                }
                 None | Some(Ok(Message::Close(_))) => return Ok(None),
                 Some(Err(e)) => return Err(ws_err(e)),
                 Some(Ok(Message::Binary(bytes))) => {
@@ -213,6 +220,28 @@ where
     pub async fn close(&mut self) {
         let _ = self.ws.close(None).await;
     }
+
+    /// Ends the connection saying why: a WebSocket close (1008, policy violation) whose reason is the stable error `code`, so the
+    /// peer's [`recv`](Self::recv) returns [`TransportError::Refused`] instead of a bare reset. Then waits (at most 5 s) for the
+    /// peer's side of the close, reading and dropping whatever it still sends: closing with unread data would reset the
+    /// connection and the peer could lose the reason.
+    pub async fn close_with(&mut self, code: &str) {
+        use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+        use tokio_tungstenite::tungstenite::protocol::CloseFrame;
+        // A close reason is at most 123 bytes; error codes are short ASCII, but never send a frame the peer must reject.
+        let reason: String = code.chars().filter(char::is_ascii).take(123).collect();
+        let frame = CloseFrame {
+            code: CloseCode::Policy,
+            reason: reason.into(),
+        };
+        if self.ws.close(Some(frame)).await.is_err() {
+            return;
+        }
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while let Some(Ok(_)) = self.ws.next().await {}
+        })
+        .await;
+    }
 }
 
 #[cfg(test)]
@@ -240,6 +269,30 @@ mod tests {
             seq: Some(9),
             payload: payload.to_vec(),
         }
+    }
+
+    #[tokio::test]
+    async fn a_close_with_a_code_reaches_the_peer_even_while_it_is_still_sending() {
+        let (mut s, mut c) = pair().await;
+        // The peer has sent frames the closing side never reads.
+        for _ in 0..50 {
+            c.send(&frame(2, &[7; 4096])).await.unwrap();
+        }
+        let closing = tokio::spawn(async move { s.close_with("protocol.producer_mismatch").await });
+        let mut got = None;
+        for _ in 0..100 {
+            match c.recv().await {
+                Err(TransportError::Refused(code)) => {
+                    got = Some(code);
+                    break;
+                }
+                Ok(Some(_)) => {}
+                other => panic!("expected the close reason, got {other:?}"),
+            }
+        }
+        assert_eq!(got.as_deref(), Some("protocol.producer_mismatch"));
+        drop(c);
+        closing.await.unwrap();
     }
 
     #[tokio::test]

@@ -98,9 +98,28 @@ where
 }
 
 /// The conversation with one authenticated node, until it ends. `node_id` comes from the certificate. When the
-/// node had come online, the hub records it offline at the end.
+/// node had come online, the hub records it offline at the end. When the node broke the protocol, the connection ends with the
+/// error's stable code as the close reason, so the node can say why instead of seeing a bare reset; the hub's log says it too.
 pub async fn serve_node<S>(
     mut conn: Conn<S>,
+    node_id: &str,
+    hub: &Arc<Hub>,
+    support: &Support,
+) -> Result<(), ServeError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let result = converse_node(&mut conn, node_id, hub, support).await;
+    if let Err(ServeError::Protocol(e)) = &result {
+        // Codes and parameters only: this is the hub's log, not a user's screen.
+        eprintln!("node refused: {node_id} {} {:?}", e.code.as_str(), e.params);
+        conn.close_with(e.code.as_str()).await;
+    }
+    result
+}
+
+async fn converse_node<S>(
+    conn: &mut Conn<S>,
     node_id: &str,
     hub: &Arc<Hub>,
     support: &Support,
@@ -111,7 +130,7 @@ where
     let mut session = NodeSession::new(hub.store(), node_id, support);
 
     let hello = v1::Hello::decode(
-        expect(&mut conn, STREAM_CONTROL, kinds::HELLO)
+        expect(conn, STREAM_CONTROL, kinds::HELLO)
             .await?
             .payload
             .as_slice(),
@@ -126,7 +145,7 @@ where
     .await?;
 
     let resume = v1::Resume::decode(
-        expect(&mut conn, STREAM_CONTROL, kinds::RESUME)
+        expect(conn, STREAM_CONTROL, kinds::RESUME)
             .await?
             .payload
             .as_slice(),
@@ -139,7 +158,7 @@ where
     let (registration, commands) = hub
         .router()
         .register_with_capabilities(node_id, welcome.capabilities);
-    let result = stream_events(&mut conn, &mut session, hub, node_id, commands).await;
+    let result = stream_events(conn, &mut session, hub, node_id, commands).await;
     // However it ended, the hub now knows this node is not connected, unless a newer connection of the node replaced this
     // one: that one is live, and the node is not offline.
     if registration.end() {
