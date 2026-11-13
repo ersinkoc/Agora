@@ -1,8 +1,8 @@
 # 0060. A node keeps a session ledger and offers Resume after a restart
-Status: Proposed
+Status: Accepted
 Date: 2026-11-13
 
-Not accepted. Nothing here may be built until the maintainer accepts it in a message of their own.
+Accepted: 2026-11-13 (maintainer's explicit approval in chat: "0059 ve 0060 kabul"). Decisions the maintainer gave (first to the Windows agent, then confirmed here): `resume = "ask"` is the default (a Resume button, nothing automatic); the other open questions (paths and session ids in the owner-only ledger, 14 days): the proposed answers stand.
 Origin: the maintainer asked (via the Windows agent, 2026-11-13) what happens to agents when a machine, hub or node restarts, and whether ids are tracked.
 
 ## Context
@@ -13,7 +13,7 @@ call it. A hub restart is fine (event store, `Resume` handshake), but there is n
 Agents ending with the node is intended (nodes are autonomous, but agents are processes of the node); what is lost is the *conversation*, which the
 agent tools themselves keep and can resume.
 
-## Decision (proposed)
+## Decision
 1. **A session ledger on disk**, in the node's data folder, owner-only: per agent id, kind, folder/worktree, project, parent agent id, native session id
    (when reported), launch options (ADR-0059), start time, last state, and whether it ended cleanly. Written when an agent starts, when its native session id is reported,
    and when it ends; never terminal contents, prompts, or secrets. Size-limited, old ended entries pruned.
@@ -36,7 +36,7 @@ agent tools themselves keep and can resume.
   `NSLocalNetworkUsageDescription`).
 - **The ledger file** is mode `0600` in a `0700` folder on macOS and Linux and is written atomically (temp file and rename in the same folder), like the event log.
 
-## Open questions for the maintainer
+## Open questions (answers as decided above)
 - Default `resume = "ask"` (proposed) or `auto` for trusted folders?
 - Is it acceptable that the ledger stores folder paths and session ids on disk in the node's data folder (owner-only)? (Proposed: yes; no prompts or terminal contents.)
 - How long should an interrupted entry stay offered? (Proposed: 14 days.)
