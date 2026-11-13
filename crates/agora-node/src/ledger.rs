@@ -425,6 +425,14 @@ fn apply(st: &mut State, body: &Body, now: u64) -> bool {
             e.kind = bounded(&a.kind);
             e.project_id = bounded(&a.project_id);
             e.parent_agent_id = bounded(&a.parent_agent_id);
+            // ADR-0059: kept for the record only; a resume never applies them (a resumed agent asks before acting again).
+            e.launch_options = a
+                .launch_options
+                .iter()
+                .filter(|o| o.len() <= 32)
+                .take(8)
+                .cloned()
+                .collect();
             match workspace {
                 Some(w) => {
                     e.directory = true;
@@ -531,6 +539,7 @@ mod tests {
             kind: "fake".into(),
             level: 2,
             parent_agent_id: parent.into(),
+            ..Default::default()
         })
     }
 

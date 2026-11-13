@@ -33,6 +33,9 @@ or a local response timeout has a localized retry message.
 | `agent.not_authenticated` | `kind`, `node_id` | Agent account not logged in on that node |
 | `agent.blocked` | `agent_id` | Agent waits for input; prompt not sent |
 | `agent.mode_unsupported` | `kind`, `mode` | e.g. chat mode for an L1 agent |
+| `agent.option_forbidden` | `kind`, `option`, `policy` | ADR-0059: a start chose a launch option (`option`, the first refused id) that may not be used; nothing was started. `policy`: `forbid` (the node's `skip_permissions` policy does not allow an option that skips permissions), `confined_only` (it allows one only for a confined agent and this one would not be confined), `signature` (a routed `AgentStart` with options: only a signed `AgentLaunch` or the node's own socket may carry them) |
+| `agent.option_invalid` | `kind`, `option` | ADR-0059: a launch option id that is not `[a-z0-9-]{1,32}` (so `!` or `,` in it), that the node's manifest for `kind` does not declare, that is repeated, or a confirmation for an id that was not chosen; more than 8 (`option` empty). Nothing was started |
+| `agent.option_unconfirmed` | `kind`, `option` | ADR-0059: the node's own manifest says `option` makes the agent act without asking, and the start did not list it in `confirmed_launch_options` (signed with the start): the window did not show the confirmation for it, for example because a hub relabelled it as harmless. Nothing was started |
 | `agent.running` | `agent_id` | the agent still runs, so it cannot be forgotten (ADR-0053) |
 | `agent.not_interrupted` | `agent_id` | ADR-0060: `agent.resume` names an agent the node does not hold as interrupted (never seen, running, resumed already, or no longer kept after 14 days) |
 | `agent.session_missing` | `agent_id` | ADR-0060: Resume needs the agent's own session id and a kind that can resume one; the node has neither, so only Start again (`new_session`) is possible |

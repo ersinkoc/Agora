@@ -78,6 +78,9 @@ pub struct AgentView {
     pub session: SessionView,
     /// ADR-0057: the hub-wide key (`<node>/<agent>`) of the agent that started this one; empty when the user did.
     pub parent_agent_id: String,
+    /// ADR-0059: the launch options it was started with, and whether it acts without asking (the badge).
+    pub launch_options: Vec<String>,
+    pub skips_permissions: bool,
     /// ADR-0060: the node found this agent interrupted (running when the node stopped). Cleared by its next `AgentStarted`.
     pub interrupted: Option<InterruptedView>,
 }
@@ -270,6 +273,8 @@ impl View {
                             q(&e.parent_agent_id)
                         },
                         interrupted: None,
+                        launch_options: e.launch_options.clone(),
+                        skips_permissions: e.skips_permissions,
                     },
                 );
             }
@@ -300,6 +305,8 @@ impl View {
                             q(&e.parent_agent_id)
                         },
                         interrupted: None,
+                        launch_options: Vec::new(),
+                        skips_permissions: false,
                     });
                 a.running = false;
                 a.state = AgentState::Done;
@@ -501,6 +508,8 @@ mod tests {
             kind: "claude-code".into(),
             level: 2,
             parent_agent_id: String::new(),
+            launch_options: Vec::new(),
+            skips_permissions: false,
         })
     }
 

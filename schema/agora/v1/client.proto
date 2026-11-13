@@ -77,6 +77,9 @@ message AgentSnapshot {
   uint64 interrupted_at_ms = 42;
   // The folder from `AgentInterrupted`, for an agent the hub has no workspace for.
   string folder = 43;
+  // ADR-0059: `AgentStarted.launch_options` and `skips_permissions` (fields 30-39 are kept for ADR-0059).
+  repeated string launch_options = 30;
+  bool skips_permissions = 31;
 }
 
 message TerminalSnapshot {
