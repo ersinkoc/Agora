@@ -31,6 +31,13 @@ not must be sure no agent can be started that way by accident, by the hub, or by
    explicitly; a grant never covers it.
 6. **Per-kind defaults** ("always start Codex like this") are a later, separate decision; this ADR only adds the per-start choice.
 
+## Notes from the macOS review (2026-11-13)
+- `confined_only` is a real choice on macOS: Seatbelt confinement works there, so a "don't ask" Claude Code or Codex under `sandbox = worktree` still cannot write outside
+  its folder or to the shared `.git` config and hooks (#303). It is not yet a choice on Windows (confinement is disabled there).
+- Every flag is checked on the real version before a manifest declares it. A skip flag may show a one-time acceptance screen the first time (Claude Code has shown a
+  "Bypass Permissions mode" screen in the past); that screen needs a `blocked` rule and a fixture, or the agent waits and nobody is told. Capturing it is a macOS task
+  once this ADR is accepted.
+
 ## Open questions for the maintainer
 - Default node policy `forbid` (proposed) or `allow`? A fresh machine that forbids means the choice is greyed out until the owner changes the node's configuration.
 - May a structured (ACP) agent's *mode* that skips permissions also be chosen at start (not only switched later)? (Proposed: yes, same confirmation.)

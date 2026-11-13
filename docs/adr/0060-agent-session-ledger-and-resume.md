@@ -28,6 +28,14 @@ agent tools themselves keep and can resume.
    as a follow-up of ADR-0056's `agora service install`.
 7. The hub shows interrupted agents from the node's report and keeps them in the closed list with the usual "finished" wording until resumed; closed-agent summaries (ADR-0053) keep working.
 
+## Notes from the macOS review (2026-11-13)
+- **Claude Code's native session id (L1)** comes from its transcript (`~/.claude/projects/<folder>/<session>.jsonl`). With `CLAUDE_CODE_CHILD_SESSION` in the node's environment
+  Claude Code writes no transcript, so there is no session id and nothing to resume: the environment a terminal agent is started with matters for Resume (check it before building).
+- **Autostart on macOS** is a user LaunchAgent (`~/Library/LaunchAgents`, `RunAtLoad`, not a system daemon), so it runs as the user with their home and keychain. Risk to
+  test first: macOS local-network privacy may refuse a launchd-started CLI that connects to a LAN hub without a prompt (seen with the unsigned desktop app,
+  `NSLocalNetworkUsageDescription`).
+- **The ledger file** is mode `0600` in a `0700` folder on macOS and Linux and is written atomically (temp file and rename in the same folder), like the event log.
+
 ## Open questions for the maintainer
 - Default `resume = "ask"` (proposed) or `auto` for trusted folders?
 - Is it acceptable that the ledger stores folder paths and session ids on disk in the node's data folder (owner-only)? (Proposed: yes; no prompts or terminal contents.)
