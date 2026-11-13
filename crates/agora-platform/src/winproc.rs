@@ -5,6 +5,7 @@
 use std::io;
 use std::path::Path;
 
+use windows_sys::Win32::Foundation::STILL_ACTIVE;
 use windows_sys::Win32::Foundation::{
     CloseHandle, GetLastError, FILETIME, HANDLE, INVALID_HANDLE_VALUE,
 };
@@ -13,7 +14,9 @@ use windows_sys::Win32::System::Diagnostics::ToolHelp::{
 };
 use windows_sys::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
 use windows_sys::Win32::System::Threading::{
-    GetProcessTimes, OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
+    GetExitCodeProcess, GetProcessTimes, OpenProcess, QueryFullProcessImageNameW, TerminateProcess,
+    CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS, PROCESS_QUERY_LIMITED_INFORMATION,
+    PROCESS_TERMINATE,
 };
 
 fn last_error() -> io::Error {
@@ -110,6 +113,45 @@ pub(crate) fn children(pid: u32) -> io::Result<Vec<u32>> {
         more = unsafe { Process32NextW(snap.0, &mut entry) } != 0;
     }
     Ok(out)
+}
+
+/// See [`crate::process_start_time`]: the creation time (100 ns units since 1601) of a process that has not ended.
+pub(crate) fn start_time(pid: u32) -> Option<u64> {
+    let p = Process::open(pid).ok()?;
+    let mut code = 0u32;
+    // SAFETY: a live handle and a valid out pointer.
+    if unsafe { GetExitCodeProcess(p.0, &mut code) } == 0 || code != STILL_ACTIVE as u32 {
+        return None;
+    }
+    // SAFETY: all-zero FILETIMEs are valid out-buffers.
+    let (mut created, mut exited, mut kernel, mut user): (FILETIME, FILETIME, FILETIME, FILETIME) =
+        unsafe { std::mem::zeroed() };
+    // SAFETY: a live handle and valid out pointers.
+    if unsafe { GetProcessTimes(p.0, &mut created, &mut exited, &mut kernel, &mut user) } == 0 {
+        return None;
+    }
+    Some((u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))
+}
+
+/// See [`crate::terminate_process`].
+pub(crate) fn terminate(pid: u32) -> io::Result<()> {
+    // SAFETY: plain call; the handle is closed on drop.
+    let h = unsafe { OpenProcess(PROCESS_TERMINATE, 0, pid) };
+    if h.is_null() {
+        return Err(last_error());
+    }
+    let p = Process(h);
+    // SAFETY: a live handle opened with PROCESS_TERMINATE.
+    if unsafe { TerminateProcess(p.0, 1) } == 0 {
+        return Err(last_error());
+    }
+    Ok(())
+}
+
+/// See [`crate::spawn_detached`]: no console of its own and out of this console's Ctrl-C group.
+pub(crate) fn detach(cmd: &mut std::process::Command) {
+    use std::os::windows::process::CommandExt;
+    cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
 }
 
 #[cfg(test)]

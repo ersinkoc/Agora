@@ -267,6 +267,28 @@ pub(crate) fn opened_path(file: &std::fs::File) -> io::Result<PathBuf> {
     Ok(PathBuf::from(std::ffi::OsStr::from_bytes(&buf[..len])))
 }
 
+/// See [`crate::process_start_time`]: the start time `proc_pidinfo` reports, in microseconds; a zombie counts as ended.
+pub(crate) fn start_time(pid: u32) -> Option<u64> {
+    // SAFETY: an all-zero proc_bsdinfo is a valid buffer for the kernel to fill.
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as i32;
+    // SAFETY: the buffer is a live proc_bsdinfo of `size` bytes.
+    let n = unsafe {
+        libc::proc_pidinfo(
+            i32::try_from(pid).ok()?,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            (&mut info as *mut libc::proc_bsdinfo).cast(),
+            size,
+        )
+    };
+    // SZOMB is 5 in <sys/proc.h>.
+    if n < size || info.pbi_status == 5 {
+        return None;
+    }
+    Some(info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod sandbox_tests {

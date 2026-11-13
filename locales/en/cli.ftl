@@ -2,6 +2,10 @@
 
 cli-usage =
     Usage:
+      agora [--ui tui|web|none]
+      agora web
+      agora status
+      agora down
       agora node run [--socket PATH] [--manifests DIR] [--project PATH]... [--data DIR] [--worktrees DIR]
       agora agent start KIND [--cwd PATH] [--worktree] [--project NAME] [--name NAME] [--accept-project-id-change] [--socket PATH]
       agora project init [--cwd PATH] [--socket PATH]
@@ -143,3 +147,39 @@ cli-project-identity = Project identity: { $id } (folder: { $path }). Share .age
 
 cli-panel = Open the hub's panel at { $url } in a browser. This machine's browser must trust the hub's certificate: import { $ca } as a certificate authority (on Windows: certutil -user -addstore Root { $ca }). Sign in with a code from "agora hub login" on the hub machine.
 cli-panel-none = This machine is not enrolled with a hub, so there is no panel to open. Enroll it first with "agora node enroll".
+
+# ADR-0062: plain `agora` (the front door), `agora web`, `agora status`, `agora down`.
+frontdoor-welcome = Welcome to Agora. What should this machine do?
+frontdoor-choice-here = 1) Start Agora here: your agents run on this machine and you open them from here
+frontdoor-choice-alone = 2) Just this machine, alone
+frontdoor-choice-join = 3) Join an Agora that runs on another machine
+frontdoor-choose = Type 1, 2 or 3 and press Enter:
+frontdoor-lan-question = Let other machines of yours connect? [y/N]
+frontdoor-join-later = Joining from here is not available yet. On the machine that runs Agora, run `agora hub code`; then here run `agora node enroll` and `agora node run` (see `agora --help`).
+frontdoor-get-started = Agora is not set up on this machine yet. Run `agora` in a terminal and answer one question. (Settings are kept in { $path }.)
+frontdoor-set-up-by-hand = This machine already has an Agora started by hand ({ $path }). `agora` does not take it over yet: keep using `agora hub run` and `agora node run`, or set AGORA_HOME to a new folder to let `agora` set one up there.
+frontdoor-saved = Saved in { $path }.
+frontdoor-bad-machine-file = { $path } could not be read. Fix it, or delete it and run `agora` again to answer the first question anew.
+frontdoor-not-set-up = Agora is not set up on this machine yet. Run `agora` first.
+frontdoor-no-port = No free port was found from { $port } on.
+frontdoor-failed = Agora could not start: { $reason }
+frontdoor-role-hub = hub
+frontdoor-role-node = node
+frontdoor-starting = Starting the { $role }…
+frontdoor-not-ready = The { $role } did not start within { $seconds } s. What it wrote is in { $log }
+frontdoor-not-linked = This machine did not connect to its hub within { $seconds } s. What it wrote is in { $log }
+frontdoor-running = Agora is running on this machine. It keeps running when you close this window; `agora status` shows it, `agora down` stops it.
+frontdoor-web-opened = Opened Agora in your browser, signed in.
+frontdoor-web-url = Open this address in your browser to sign in (it works once, for 10 minutes): { $url }
+status-machine = This machine's Agora ({ $path }); interface: { $ui }
+status-running = The { $role } is running (process { $pid }, version { $version })
+status-running-other = The { $role } is running (it was not started by `agora`)
+status-stopped = The { $role } is not running
+status-hub = listens on { $addr }; data folder { $dir }
+status-node-linked = connected to { $hub } as { $id }
+status-node-not-linked = not connected to a hub
+status-agents = agents running: { $count }
+status-log = log: { $log }
+down-stopped = Stopped the { $role } (process { $pid }).
+down-failed = Could not stop the { $role }: { $reason }
+down-nothing = Nothing to stop: `agora` did not start anything that is still running.

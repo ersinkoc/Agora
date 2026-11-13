@@ -864,15 +864,7 @@ pub fn hub_notify(say: &Say, o: &Opts) -> ExitCode {
 /// `agora hub code`: a one-time code for enrolling a node, and where the CA to pin is.
 pub fn hub_code(say: &Say, o: &Opts) -> ExitCode {
     let dir = hub_dir(o);
-    let result = (|| -> Result<String, String> {
-        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        let _ = load_or_create_ca(&dir)?;
-        let store = SqliteStore::open(&dir.join("hub.db")).map_err(|e| e.to_string())?;
-        Enrollment::new(&store)
-            .create_code(server::now_ms())
-            .map_err(|_| "could not create a code".to_string())
-    })();
-    match result {
+    match new_enrollment_code(&dir) {
         Ok(code) => {
             say.out(
                 key!("cli-hub-code"),
@@ -888,6 +880,16 @@ pub fn hub_code(say: &Say, o: &Opts) -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+/// A one-time enrollment code from the hub's own store (valid 10 minutes), creating the hub's CA the first time.
+pub(crate) fn new_enrollment_code(dir: &Path) -> Result<String, String> {
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let _ = load_or_create_ca(dir)?;
+    let store = SqliteStore::open(&dir.join("hub.db")).map_err(|e| e.to_string())?;
+    Enrollment::new(&store)
+        .create_code(server::now_ms())
+        .map_err(|_| "could not create a code".to_string())
 }
 
 const BACKUP_PREFIX: &str = "hub-";
@@ -989,14 +991,46 @@ pub fn node_enroll(say: &Say, o: &Opts) -> ExitCode {
         );
         return ExitCode::from(1);
     };
-    let Ok((key_pem, csr)) = new_device_request() else {
-        say.err(
-            key!("cli-hub-failed"),
-            &[("reason", "key generation".into())],
-        );
-        return ExitCode::from(1);
-    };
-    match enroll(url, &ca_pem, code, id, &csr) {
+    match enroll_and_save(url, &ca_pem, code, id) {
+        Ok(dir) => {
+            say.out(
+                key!("cli-enrolled"),
+                &[
+                    ("id", id.as_str().into()),
+                    ("dir", dir.display().to_string().into()),
+                ],
+            );
+            ExitCode::SUCCESS
+        }
+        Err(EnrollFailure::Refused(code)) => {
+            say.err(key!("cli-enroll-refused"), &[("code", code.into())]);
+            ExitCode::from(1)
+        }
+        Err(EnrollFailure::Other(reason)) => {
+            say.err(key!("cli-hub-failed"), &[("reason", reason.into())]);
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Why [`enroll_and_save`] did not enroll this machine.
+pub(crate) enum EnrollFailure {
+    /// The hub refused, with this error code.
+    Refused(String),
+    Other(String),
+}
+
+/// Enrolls this machine with the hub at `url` (pinning `ca_pem`) under `id` with a one-time `code`, and keeps what the hub gave it in
+/// the link folder, which it returns.
+pub(crate) fn enroll_and_save(
+    url: &str,
+    ca_pem: &str,
+    code: &str,
+    id: &str,
+) -> Result<PathBuf, EnrollFailure> {
+    let (key_pem, csr) =
+        new_device_request().map_err(|_| EnrollFailure::Other("key generation".into()))?;
+    match enroll(url, ca_pem, code, id, &csr) {
         Ok(r) => {
             let dir = link_dir();
             let write = || -> std::io::Result<()> {
@@ -1007,30 +1041,11 @@ pub fn node_enroll(say: &Say, o: &Opts) -> ExitCode {
                 std::fs::write(dir.join("cert.pem"), &r.cert_pem)?;
                 agora_platform::write_private(&dir.join("key.pem"), key_pem.as_bytes())
             };
-            if let Err(e) = write() {
-                say.err(key!("cli-hub-failed"), &[("reason", e.to_string().into())]);
-                return ExitCode::from(1);
-            }
-            say.out(
-                key!("cli-enrolled"),
-                &[
-                    ("id", id.as_str().into()),
-                    ("dir", dir.display().to_string().into()),
-                ],
-            );
-            ExitCode::SUCCESS
+            write().map_err(|e| EnrollFailure::Other(e.to_string()))?;
+            Ok(dir)
         }
-        Err(LinkError::Refused(code)) => {
-            say.err(key!("cli-enroll-refused"), &[("code", code.into())]);
-            ExitCode::from(1)
-        }
-        Err(e) => {
-            say.err(
-                key!("cli-hub-failed"),
-                &[("reason", format!("{e:?}").into())],
-            );
-            ExitCode::from(1)
-        }
+        Err(LinkError::Refused(code)) => Err(EnrollFailure::Refused(code)),
+        Err(e) => Err(EnrollFailure::Other(format!("{e:?}"))),
     }
 }
 

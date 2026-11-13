@@ -2,6 +2,10 @@
 
 cli-usage =
     Kullanım:
+      agora [--ui tui|web|none]
+      agora web
+      agora status
+      agora down
       agora node run [--socket YOL] [--manifests DİZİN] [--project YOL]... [--data DİZİN] [--worktrees DİZİN]
       agora agent start TÜR [--cwd YOL] [--worktree] [--project AD] [--name AD] [--accept-project-id-change] [--socket YOL]
       agora project init [--cwd YOL] [--socket YOL]
@@ -143,3 +147,39 @@ cli-project-identity = Proje kimliği: { $id } (klasör: { $path }). .agent-proj
 
 cli-panel = Hub'ın panelini tarayıcıda şu adreste açın: { $url }. Bu makinenin tarayıcısı hub'ın sertifikasına güvenmeli: { $ca } dosyasını sertifika otoritesi olarak içe aktarın (Windows'ta: certutil -user -addstore Root { $ca }). Giriş için hub makinesinde "agora hub login" ile alınan kodu kullanın.
 cli-panel-none = Bu makine bir hub'a kayıtlı değil, açılacak panel yok. Önce "agora node enroll" ile kaydedin.
+
+# ADR-0062: yalın `agora` (ön kapı), `agora web`, `agora status`, `agora down`.
+frontdoor-welcome = Agora'ya hoş geldiniz. Bu makine ne yapsın?
+frontdoor-choice-here = 1) Agora'yı burada başlat: ajanlarınız bu makinede çalışır, onları buradan açarsınız
+frontdoor-choice-alone = 2) Yalnızca bu makine, tek başına
+frontdoor-choice-join = 3) Başka bir makinede çalışan bir Agora'ya katıl
+frontdoor-choose = 1, 2 ya da 3 yazıp Enter'a basın:
+frontdoor-lan-question = Diğer makineleriniz bağlanabilsin mi? [e/H]
+frontdoor-join-later = Buradan katılmak henüz yok. Agora'nın çalıştığı makinede `agora hub code` çalıştırın; sonra burada `agora node enroll` ve `agora node run` çalıştırın (bkz. `agora --help`).
+frontdoor-get-started = Agora bu makinede henüz kurulmadı. Bir terminalde `agora` çalıştırıp tek bir soruyu yanıtlayın. (Ayarlar { $path } dosyasında tutulur.)
+frontdoor-set-up-by-hand = Bu makinede elle başlatılmış bir Agora zaten var ({ $path }). `agora` onu henüz devralmıyor: `agora hub run` ve `agora node run` ile devam edin ya da `agora` yeni bir kurulum yapsın diye AGORA_HOME değişkenini yeni bir klasöre yöneltin.
+frontdoor-saved = { $path } dosyasına kaydedildi.
+frontdoor-bad-machine-file = { $path } okunamadı. Düzeltin ya da silip ilk soruyu yeniden yanıtlamak için `agora` komutunu tekrar çalıştırın.
+frontdoor-not-set-up = Agora bu makinede henüz kurulmadı. Önce `agora` çalıştırın.
+frontdoor-no-port = { $port } ve sonrasında boş port bulunamadı.
+frontdoor-failed = Agora başlatılamadı: { $reason }
+frontdoor-role-hub = hub
+frontdoor-role-node = node
+frontdoor-starting = { $role } başlatılıyor…
+frontdoor-not-ready = { $role } { $seconds } sn içinde başlamadı. Yazdıkları: { $log }
+frontdoor-not-linked = Bu makine { $seconds } sn içinde hub'ına bağlanmadı. Yazdıkları: { $log }
+frontdoor-running = Agora bu makinede çalışıyor. Bu pencereyi kapatsanız da çalışmaya devam eder; `agora status` durumu gösterir, `agora down` durdurur.
+frontdoor-web-opened = Agora tarayıcınızda, oturum açılmış olarak açıldı.
+frontdoor-web-url = Oturum açmak için bu adresi tarayıcınızda açın (bir kez, 10 dakika geçerli): { $url }
+status-machine = Bu makinenin Agora'sı ({ $path }); arayüz: { $ui }
+status-running = { $role } çalışıyor (süreç { $pid }, sürüm { $version })
+status-running-other = { $role } çalışıyor (`agora` tarafından başlatılmadı)
+status-stopped = { $role } çalışmıyor
+status-hub = dinlediği adres { $addr }; veri klasörü { $dir }
+status-node-linked = { $hub } adresine { $id } olarak bağlı
+status-node-not-linked = bir hub'a bağlı değil
+status-agents = çalışan ajan: { $count }
+status-log = günlük: { $log }
+down-stopped = { $role } durduruldu (süreç { $pid }).
+down-failed = { $role } durdurulamadı: { $reason }
+down-nothing = Durdurulacak bir şey yok: `agora` şu anda çalışan hiçbir şey başlatmamış.
