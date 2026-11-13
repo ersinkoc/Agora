@@ -74,7 +74,7 @@ fn pipe() -> io::Result<(Handle, Handle)> {
 }
 
 /// One argument as the C runtime's command-line parser reads it back (the rules of `CommandLineToArgvW`).
-fn quote_arg(arg: &str) -> String {
+pub(crate) fn quote_arg(arg: &str) -> String {
     if !arg.is_empty() && !arg.contains([' ', '\t', '\n', '\x0b', '"']) {
         return arg.to_string();
     }

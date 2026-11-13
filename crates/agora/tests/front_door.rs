@@ -254,3 +254,42 @@ fn agora_brings_the_machine_up_and_killing_the_interface_leaves_agents_running()
     assert!(out.contains("Nothing to stop"), "{out}");
     let _ = std::fs::remove_dir_all(home);
 }
+
+/// A caller that captures `agora`'s output (a script, `$(agora)`, CI) reads to the end of the pipe: the daemons `agora` starts must
+/// not hold it, or the caller waits until they end.
+#[test]
+fn a_caller_capturing_the_output_is_not_kept_waiting_by_the_daemons() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return;
+    }
+    let home = tmp("pipe");
+    let port = free_port();
+    std::fs::write(
+        home.join("machine.toml"),
+        format!(
+            "roles = [\"hub\", \"node\"]\nui = \"none\"\nhub_listen = \"127.0.0.1:{port}\"\nhub_names = [\"localhost\"]\nhub_dir = {}\nnode_projects = []\n",
+            toml_string(&home.join("hub").to_string_lossy()),
+        ),
+    )
+    .unwrap();
+    let _down = Down(home.clone());
+    let (tx, rx) = std::sync::mpsc::channel();
+    let h = home.clone();
+    // `output()` returns only when the pipes reach their end: with a daemon holding them it would wait for `agora down`.
+    std::thread::spawn(move || {
+        let _ = tx.send(agora(&h, &[]).output());
+    });
+    let out = rx
+        .recv_timeout(Duration::from_secs(60))
+        .expect("`agora` with captured output did not return while its daemons run")
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{text}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(text.contains("Agora is running"), "{text}");
+    let (_, s, _) = run(&home, &["status"]);
+    assert!(s.contains("The hub is running (process"), "{s}");
+}

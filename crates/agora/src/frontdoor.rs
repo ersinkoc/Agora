@@ -712,6 +712,21 @@ fn ensure(say: &Say, home: &Path, m: &Machine, role: Role) -> Result<(), ExitCod
             rotate(&log);
             let started = command(home, m, role)
                 .and_then(|mut c| agora_platform::spawn_detached(&mut c, &log))
+                .map(|d| {
+                    if d.in_job {
+                        // Windows: the terminal's job would not let it go, so closing that terminal ends it. Said here and in its log.
+                        let text = say.text(
+                            key!("frontdoor-in-job"),
+                            &[("role", role.label(say).into())],
+                        );
+                        eprintln!("{text}");
+                        let _ = std::fs::OpenOptions::new()
+                            .append(true)
+                            .open(&log)
+                            .and_then(|mut f| writeln!(f, "{text}"));
+                    }
+                    d.pid
+                })
                 .and_then(|pid| {
                     LockInfo::of(pid).ok_or_else(|| std::io::Error::other("ended at once"))
                 })

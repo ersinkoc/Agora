@@ -1124,30 +1124,49 @@ pub fn process_children(pid: u32) -> io::Result<Vec<u32>> {
 /// ending and this process being killed. Standard input is empty; standard output and error are appended to `log` (created readable by
 /// the user only). Unix: a new session (`setsid`), so no terminal hangup or Ctrl-C reaches it; Windows: `DETACHED_PROCESS` and
 /// `CREATE_NEW_PROCESS_GROUP`. Returns its process id. A thread of this process reaps it if it ends while this process still runs,
-/// so it never lingers as a zombie.
-pub fn spawn_detached(cmd: &mut std::process::Command, log: &std::path::Path) -> io::Result<u32> {
+/// so it never lingers as a zombie. Nothing else of this process is inherited: no other descriptor or handle (a caller reading this
+/// process's output to its end is never kept waiting by the daemon).
+///
+/// On Windows the process also leaves this process's job (`CREATE_BREAKAWAY_FROM_JOB`), so closing the terminal that started it does
+/// not end it; when the job forbids that, it is started inside the job and [`Detached::in_job`] says so.
+pub fn spawn_detached(
+    cmd: &mut std::process::Command,
+    log: &std::path::Path,
+) -> io::Result<Detached> {
     let mut options = std::fs::OpenOptions::new();
     options.create(true).append(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
     let out = options.open(log)?;
     #[cfg(windows)]
-    windows::set_owner_only(log, false)?;
-    cmd.stdin(std::process::Stdio::null())
-        .stdout(out.try_clone()?)
-        .stderr(out);
-    #[cfg(unix)]
-    unix::detach(cmd);
-    #[cfg(windows)]
-    winproc::detach(cmd);
-    let mut child = cmd.spawn()?;
-    let pid = child.id();
-    let _ = std::thread::Builder::new()
-        .name("agora-reap".into())
-        .spawn(move || {
-            let _ = child.wait();
-        });
-    Ok(pid)
+    {
+        windows::set_owner_only(log, false)?;
+        winproc::spawn_detached(cmd, &out)
+    }
+    #[cfg(not(windows))]
+    {
+        cmd.stdin(std::process::Stdio::null())
+            .stdout(out.try_clone()?)
+            .stderr(out);
+        #[cfg(unix)]
+        unix::detach(cmd);
+        let mut child = cmd.spawn()?;
+        let pid = child.id();
+        let _ = std::thread::Builder::new()
+            .name("agora-reap".into())
+            .spawn(move || {
+                let _ = child.wait();
+            });
+        Ok(Detached { pid, in_job: false })
+    }
+}
+
+/// A process started by [`spawn_detached`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Detached {
+    pub pid: u32,
+    /// Windows only: the caller's job forbade leaving it, so the process still ends when that job is closed.
+    pub in_job: bool,
 }
 
 /// When process `pid` started, in a unit of the system's own (only compared for equality), or `None` when no such process runs (an

@@ -511,6 +511,17 @@ pub(crate) fn detach(cmd: &mut Command) {
             if libc::setsid() == -1 {
                 return Err(io::Error::last_os_error());
             }
+            // Only standard input, output and error (already redirected) reach the daemon: any other descriptor this process got from
+            // its own caller without close-on-exec (a pipe a script reads to its end) is closed at exec, so the caller is never kept
+            // waiting. Marked rather than closed, so the runtime's own exec-error pipe still works.
+            let max = libc::sysconf(libc::_SC_OPEN_MAX);
+            let max = if max <= 0 { 1024 } else { max.min(65_536) } as libc::c_int;
+            for fd in 3..max {
+                let flags = libc::fcntl(fd, libc::F_GETFD);
+                if flags >= 0 && flags & libc::FD_CLOEXEC == 0 {
+                    libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
+                }
+            }
             Ok(())
         });
     }

@@ -183,6 +183,7 @@ frontdoor-failed = Agora başlatılamadı: { $reason }
 frontdoor-role-hub = hub
 frontdoor-role-node = node
 frontdoor-starting = { $role } başlatılıyor…
+frontdoor-in-job = { $role } kendisini başlatan terminalin iş nesnesinden (job) ayrılamadı; bu yüzden o terminal kapanınca o da kapanır. Çalışmaya devam etmesi için `agora` komutunu o işin dışındaki bir terminalden (ya da bir hizmetten) başlatın.
 frontdoor-not-ready = { $role } { $seconds } sn içinde başlamadı. Yazdıkları: { $log }
 frontdoor-not-linked = Bu makine { $seconds } sn içinde hub'ına bağlanmadı. Yazdıkları: { $log }
 frontdoor-running = Agora bu makinede çalışıyor. Bu pencereyi kapatsanız da çalışmaya devam eder; `agora status` durumu gösterir, `agora down` durdurur.

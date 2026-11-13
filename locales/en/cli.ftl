@@ -183,6 +183,7 @@ frontdoor-failed = Agora could not start: { $reason }
 frontdoor-role-hub = hub
 frontdoor-role-node = node
 frontdoor-starting = Starting the { $role }…
+frontdoor-in-job = The { $role } could not leave the job of the terminal that started it, so it ends when that terminal closes. Start `agora` from a terminal outside that job (or a service) to keep it running.
 frontdoor-not-ready = The { $role } did not start within { $seconds } s. What it wrote is in { $log }
 frontdoor-not-linked = This machine did not connect to its hub within { $seconds } s. What it wrote is in { $log }
 frontdoor-running = Agora is running on this machine. It keeps running when you close this window; `agora status` shows it, `agora down` stops it.
