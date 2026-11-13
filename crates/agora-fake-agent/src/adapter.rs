@@ -73,15 +73,15 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
                     .get("mcpServers")
                     .cloned()
                     .unwrap_or_else(|| Value::Array(Vec::new()));
-                session = match params.get("resumeSessionId").and_then(Value::as_str) {
-                    Some(r) => r.to_string(),
-                    None => "s-1".to_string(),
-                };
+                let resumed = params.get("resumeSessionId").and_then(Value::as_str);
+                session = resumed.map_or_else(|| "s-1".to_string(), str::to_string);
                 reply(out, json!({"sessionId": session}))?;
+                // A resumed session is the agent's own session again: it reports the same native id it was asked to resume.
+                let native = resumed.map_or_else(|| format!("native-{session}"), str::to_string);
                 note(
                     out,
                     "session/reported",
-                    json!({"sessionId": session, "nativeSessionId": format!("native-{session}")}),
+                    json!({"sessionId": session, "nativeSessionId": native}),
                 )?;
                 state(out, &session, "IDLE")?;
             }

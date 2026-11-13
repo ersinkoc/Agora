@@ -1,6 +1,7 @@
 # The terminal client (ADR-0043). UI vocabulary: machines, "Needs you", "Finished" (docs/ux/visual-language.md).
 tui-connecting = Connecting to { $hub }…
 tui-lost = The connection to { $hub } was lost. Trying again…
+tui-signin-failed-local = Could not sign in to this machine's hub. Run `agora` again; `agora status` shows whether it is running and where its log is.
 tui-signin-failed = The hub did not accept the code. Make a new one with "agora hub login".
 tui-need-hub = Tell me where your hub is: run this on the hub's machine, or pass --hub HOST:PORT --ca FILE --code CODE.
 tui-quit-hint = Ctrl-C to quit
@@ -21,6 +22,12 @@ tui-blocked = { $agent } is waiting for you
 tui-machines = Machines
 tui-online = online
 tui-offline = offline
+tui-last-seen = last seen { $unit ->
+        [s] { $n } s
+        [min] { $n } min
+        [h] { $n } h
+       *[d] { $n } d
+    } ago
 tui-no-agents = No agents yet. Start one in the web app or with "agora agent start".
 tui-state-working = Working
 tui-state-needs-you = Needs you
@@ -31,7 +38,7 @@ tui-no-project = (no project)
 tui-hint-answer = Press y to allow, n to deny the first request above.
 tui-allowed = Allowed.
 tui-denied = Denied.
-tui-not-trusted = This device is not trusted by that machine yet. On that machine run: agora node trust { $id } { $key } (or press a to ask another device of yours to approve this one, fingerprint { $fingerprint })
+tui-not-trusted = This device is not trusted by that machine yet. On that machine run: agora node trust { $id } { $key }   (if `agora` is not found there, run it in the folder of the agora program: ./agora, or .\agora.exe on Windows). Or press a to ask another device of yours to approve this one (fingerprint { $fingerprint }).
 tui-device-name = Terminal on { $host }
 tui-device-asked = Asked. Approve this terminal ({ $fingerprint }) on another device of yours that your machines trust: in the window, or with v in its terminal client.
 tui-devices-none-waiting = No device of yours is waiting for approval. This terminal's fingerprint: { $fingerprint }
@@ -72,6 +79,7 @@ tui-send-failed = Could not send it ({ $code }).
 tui-start-pick = Start which agent on { $machine }? Press its number, any other key cancels.
 tui-start-item = { $n }  { $name }
 tui-start-none = No agent is installed on { $machine }.
+tui-start-missing = Not found on this machine: { $names }. The machine cannot find their programs in its PATH. Install them there, or start the node from a terminal where they run.
 tui-start-nowhere = No machine with a project is online.
 tui-started = Started { $agent }.
 tui-start-failed = Could not start it ({ $code }).
@@ -86,7 +94,7 @@ tui-reader-keys = j / k or the arrows scroll · space goes a page down · q goes
 tui-split-pick = Pick an agent on the left
 tui-split-no-screen = Opening its terminal…
 tui-split-status = { $online }/{ $total } machines · { $agents } agents · { $waiting } need you
-tui-split-keys = ↑↓ choose · Enter open · s start · f folder · x stop · d remove · a ask · v devices · q quit
+tui-split-keys = ↑↓ choose · Enter open · s start · f folder · x stop · u resume · d remove · a ask · v devices · q quit
 tui-split-chat = No terminal: Enter opens its conversation
 tui-folder-title = Start an agent in a folder on { $machine }
 tui-folder-keys = ↑↓ choose · Enter open · ⌫ up · Space start here · m machine · Esc cancel
@@ -102,3 +110,21 @@ tui-forget-failed = Could not remove it: { $reason }
 tui-forget-disconnected = The connection was lost. Wait for it to reconnect.
 tui-forget-timeout = No answer arrived in time. Try again.
 tui-forget-action = removing the agent
+tui-interrupted = stopped with its machine
+tui-interrupted-resume = stopped with its machine · u resume · U start again
+tui-interrupted-again = stopped with its machine · U start again
+tui-resumed = { $agent } is running again.
+tui-resume-not-interrupted = Only an agent that stopped with its machine can be resumed (u) or started again (U).
+tui-resume-failed = It did not start: { $reason }
+tui-resume-cannot = It cannot continue its own conversation. U starts it again in its folder (a new conversation).
+tui-resume-confirm = Press u again within 5 seconds to resume { $agent }.
+tui-again-confirm = Press U again within 5 seconds to start { $agent } again in its folder (a new conversation).
+tui-interrupted-running = still running from before its machine's restart · x stops it
+tui-resume-still-running = Its process from before the restart is still running. Stop it with x first, then resume it.
+
+# ADR-0059: launch options (manifest `[[launch.option]]` labels)
+option-skip-permissions = Don't ask
+option-ask = Ask before acting
+tui-start-acts = How should it act? Press its number; Enter or any other key asks before acting.
+tui-start-confirm-skip = Let the agent act without asking? With "{ $name }" it runs commands and changes files without asking you first, for as long as it runs. Press y to start without asking; any other key keeps asking.
+tui-badge-no-ask = does not ask

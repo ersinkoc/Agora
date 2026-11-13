@@ -36,6 +36,12 @@ const ACK_IDLE: Duration = Duration::from_millis(50);
 const ACK_BATCH: u32 = 64;
 /// How often live events are pushed to a client.
 const PUSH: Duration = Duration::from_millis(20);
+/// A node connection on which nothing at all arrived for this long is closed and the node recorded offline (`NodeLink { up: false,
+/// reason: silent }`, ADR-0070), although the operating system may still call the connection open (a frozen node, a laptop that
+/// slept, a NAT that forgot the connection). When the node dials again, the new connection records it online by itself.
+/// A node pings every 10 s (`agora_node::uplink_client::PING_EVERY`), so an idle but healthy node is never dropped; the node
+/// uses the same deadline for the hub (`SILENCE_DEADLINE`). Two and a half pings: one late ping is not enough.
+pub const NODE_SILENCE: Duration = Duration::from_millis(25_000);
 
 #[derive(Debug)]
 pub enum ServeError {
@@ -44,6 +50,8 @@ pub enum ServeError {
     Store(StoreError),
     /// The peer did something this role may not do.
     Refused,
+    /// Nothing arrived from the peer for its deadline, or a frame could not be sent for as long (see [`NODE_SILENCE`]).
+    Silent,
 }
 
 impl From<TransportError> for ServeError {
@@ -98,7 +106,7 @@ where
 }
 
 /// The conversation with one authenticated node, until it ends. `node_id` comes from the certificate. When the
-/// node had come online, the hub records it offline at the end. When the node broke the protocol, the connection ends with the
+/// connection opened, the hub records the node online, and at the end offline (ADR-0070). When the node broke the protocol, the connection ends with the
 /// error's stable code as the close reason, so the node can say why instead of seeing a bare reset; the hub's log says it too.
 pub async fn serve_node<S>(
     conn: Conn<S>,
@@ -109,25 +117,50 @@ pub async fn serve_node<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    serve_node_from(conn, None, node_id, hub, support).await
+    serve_node_within(conn, node_id, hub, support, NODE_SILENCE).await
 }
 
-/// [`serve_node`] when the connection's first frame was already read (it must be the node's `Hello`).
+/// [`serve_node`] with another silence deadline than [`NODE_SILENCE`] (tests use a short one).
+pub async fn serve_node_within<S>(
+    conn: Conn<S>,
+    node_id: &str,
+    hub: &Arc<Hub>,
+    support: &Support,
+    silence: Duration,
+) -> Result<(), ServeError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    serve_node_from(conn, None, node_id, hub, support, silence).await
+}
+
+/// [`serve_node_within`] when the connection's first frame was already read (it must be the node's `Hello`; ADR-0061 reads it to
+/// tell a one-shot question from a node's conversation).
 async fn serve_node_from<S>(
     mut conn: Conn<S>,
     first: Option<Frame>,
     node_id: &str,
     hub: &Arc<Hub>,
     support: &Support,
+    silence: Duration,
 ) -> Result<(), ServeError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let result = converse_node(&mut conn, first, node_id, hub, support).await;
-    if let Err(ServeError::Protocol(e)) = &result {
-        // Codes and parameters only: this is the hub's log, not a user's screen.
-        eprintln!("node refused: {node_id} {} {:?}", e.code.as_str(), e.params);
-        conn.close_with(e.code.as_str()).await;
+    let result = converse_node(&mut conn, first, node_id, hub, support, silence).await;
+    match &result {
+        Err(ServeError::Protocol(e)) => {
+            // Codes and parameters only: this is the hub's log, not a user's screen.
+            eprintln!("node refused: {node_id} {} {:?}", e.code.as_str(), e.params);
+            conn.close_with(e.code.as_str()).await;
+        }
+        // Closed, so a node that was only frozen or asleep reads the end of the stream as soon as it runs again and dials at once.
+        // Bounded: a peer that reads nothing must not hold this task. It is recorded offline as `silent` (see `converse_node`).
+        Err(ServeError::Silent) => {
+            eprintln!("node silent: {node_id}");
+            let _ = tokio::time::timeout(Duration::from_secs(1), conn.close()).await;
+        }
+        _ => {}
     }
     result
 }
@@ -138,6 +171,7 @@ async fn converse_node<S>(
     node_id: &str,
     hub: &Arc<Hub>,
     support: &Support,
+    silence: Duration,
 ) -> Result<(), ServeError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -169,26 +203,51 @@ where
     conn.send(&frame(STREAM_CONTROL, kinds::RESUME_OK, ok.encode_to_vec()))
         .await?;
 
+    // ADR-0070: the connection is open, so the hub records the node online (a first connect or a reconnect alike: nothing the node
+    // runs is reset) and, when it ends, offline with why. Both come from this certificate-authenticated connection only.
     let verifies_devices = welcome.capabilities.iter().any(|c| c == "device.trust");
-    let (registration, commands) = hub
-        .router()
-        .register_with_capabilities(node_id, welcome.capabilities);
+    let (registration, commands, generation) =
+        hub.node_link_opened(node_id, welcome.capabilities, now_ms());
     // ADR-0061: a node that verifies endorsements gets every one it may have missed while it was away, and every revocation.
     if verifies_devices {
         give_device_changes(hub, node_id);
     }
-    let result = stream_events(conn, &mut session, hub, node_id, commands).await;
-    // However it ended, the hub now knows this node is not connected, unless a newer connection of the node replaced this
-    // one: that one is live, and the node is not offline.
-    if registration.end() {
-        let _ = hub.node_disconnected(node_id, now_ms());
-        // Forget it as a member of its projects, so it is asked to hand over its local work when it is back (ADR-0039 amendment B);
-        // anyone the change makes due is asked now.
-        for (node, project) in hub.board_membership(now_ms()) {
+    let mut last_heard = tokio::time::Instant::now();
+    let result = stream_events(
+        conn,
+        &mut session,
+        hub,
+        node_id,
+        commands,
+        silence,
+        &mut last_heard,
+    )
+    .await;
+    // However it ended, the router now knows this node is not connected (commands to it fail with `node.offline` at once), unless
+    // a newer connection of the node replaced this one: that one is live, and the node is not offline.
+    let now = now_ms();
+    let heard_ms = now.saturating_sub(last_heard.elapsed().as_millis() as u64);
+    let silent = matches!(result, Err(ServeError::Silent));
+    if hub.node_link_closed(registration, generation, silent, heard_ms, now) {
+        // Forget it as a member of its projects, so it is asked to hand over its local work when it is back (ADR-0039 amendment
+        // B); anyone the change makes due is asked now.
+        for (node, project) in hub.board_membership(now) {
             ask_board_join(hub, node, project);
         }
     }
     result
+}
+
+/// Sends one frame to a node, but never waits longer than `limit` for it: a node that stopped reading fills the socket's buffer,
+/// and a send that waits forever would keep its connection from ever being found dead.
+async fn put<S>(conn: &mut Conn<S>, f: &Frame, limit: Duration) -> Result<(), ServeError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    match tokio::time::timeout(limit, conn.send(f)).await {
+        Ok(r) => Ok(r?),
+        Err(_) => Err(ServeError::Silent),
+    }
 }
 
 async fn stream_events<S>(
@@ -197,10 +256,13 @@ async fn stream_events<S>(
     hub: &Arc<Hub>,
     node_id: &str,
     mut commands: tokio::sync::mpsc::UnboundedReceiver<crate::router::ToNode>,
+    silence: Duration,
+    last_heard: &mut tokio::time::Instant,
 ) -> Result<(), ServeError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    // Every frame from the node counts as a sign of life; an idle node sends its pings (every 10 s; 15 s before ADR-0070).
     let mut acked: Option<u64> = None; // highest contiguous seq not yet acknowledged
     let mut since_ack = 0u32;
     // Commands sent to this node and not yet answered, by the request id the hub chose.
@@ -214,11 +276,14 @@ where
     // Handoffs the board accepted but the receiving node did not take: undone here, where the hub is at hand.
     let (revert_tx, mut reverts) = tokio::sync::mpsc::unbounded_channel::<crate::board::Handoff>();
     loop {
+        if last_heard.elapsed() >= silence {
+            return Err(ServeError::Silent);
+        }
         let idle;
         let received = tokio::select! {
             r = tokio::time::timeout(ACK_IDLE, conn.recv()) => r,
             Some(answer) = posted.recv() => {
-                conn.send(&frame(STREAM_COMMANDS, 1, answer.encode_to_vec())).await?;
+                put(conn, &frame(STREAM_COMMANDS, 1, answer.encode_to_vec()), silence).await?;
                 continue;
             }
             Some(handoff) = reverts.recv() => {
@@ -231,10 +296,10 @@ where
                         waiting.retain(|_, s| !s.is_closed());
                         let payload = request.encode_to_vec();
                         waiting.insert(request.request_id.clone(), reply);
-                        conn.send(&frame(stream, 0, payload)).await?;
+                        put(conn, &frame(stream, 0, payload), silence).await?;
                     }
                     crate::router::ToNode::Close { stream } => {
-                        conn.send(&frame(stream, STREAM_CLOSE, Vec::new())).await?;
+                        put(conn, &frame(stream, STREAM_CLOSE, Vec::new()), silence).await?;
                     }
                 }
                 continue;
@@ -243,6 +308,7 @@ where
         match received {
             Ok(Ok(Some(f))) => {
                 idle = false;
+                *last_heard = tokio::time::Instant::now();
                 match (f.stream_id, f.kind) {
                     (STREAM_EVENTS, kinds::EVENT) => match hub.ingest(session, &f.payload)? {
                         Ingest::Applied { acked: a, .. } => {
@@ -281,8 +347,12 @@ where
                         // Not the next event: tell the node where to start again (nothing was stored).
                         Ingest::Gap { expected } => {
                             let ok = v1::ResumeOk { from_seq: expected };
-                            conn.send(&frame(STREAM_CONTROL, kinds::RESUME_OK, ok.encode_to_vec()))
-                                .await?;
+                            put(
+                                conn,
+                                &frame(STREAM_CONTROL, kinds::RESUME_OK, ok.encode_to_vec()),
+                                silence,
+                            )
+                            .await?;
                         }
                     },
                     // The node cannot replay from where the hub asked (ADR-0054): its next new event is the new base.
@@ -290,8 +360,12 @@ where
                         session.snapshot_required(now_ms())?
                     }
                     (STREAM_CONTROL, kinds::PING) => {
-                        conn.send(&frame(STREAM_CONTROL, kinds::PONG, f.payload))
-                            .await?;
+                        put(
+                            conn,
+                            &frame(STREAM_CONTROL, kinds::PONG, f.payload),
+                            silence,
+                        )
+                        .await?;
                     }
                     // A node asks the hub to carry one mesh message to an agent on another node (ADR-0031). Nothing else
                     // is accepted from a node on this stream.
@@ -332,8 +406,12 @@ where
         if let Some(a) = acked {
             if idle || since_ack >= ACK_BATCH {
                 let ack = v1::EventAck { up_to_seq: a };
-                conn.send(&frame(STREAM_EVENTS, kinds::EVENT_ACK, ack.encode_to_vec()))
-                    .await?;
+                put(
+                    conn,
+                    &frame(STREAM_EVENTS, kinds::EVENT_ACK, ack.encode_to_vec()),
+                    silence,
+                )
+                .await?;
                 acked = None;
                 since_ack = 0;
             }
@@ -427,6 +505,17 @@ pub fn snapshot_of(view: &View, pos: u64) -> v1::Snapshot {
                 input_tokens: a.input_tokens,
                 output_tokens: a.output_tokens,
                 parent_agent_id: a.parent_agent_id.clone(),
+                interrupted: a.interrupted.is_some(),
+                resumable: a.interrupted.as_ref().is_some_and(|i| i.resumable),
+                interrupted_at_ms: a.interrupted.as_ref().map_or(0, |i| i.at_ms),
+                folder: a
+                    .interrupted
+                    .as_ref()
+                    .map(|i| i.folder.clone())
+                    .unwrap_or_default(),
+                still_running: a.interrupted.as_ref().is_some_and(|i| i.still_running),
+                launch_options: a.launch_options.clone(),
+                skips_permissions: a.skips_permissions,
                 ..session_snapshot(&a.session)
             })
             .collect(),
@@ -651,6 +740,11 @@ where
                     .await?;
                 }
                 (stream, STREAM_CLOSE) if stream >= FIRST_DYNAMIC_STREAM => relays.close(stream),
+                // A window checks that the hub is still there (protocol section 1): answered at once, whatever else is queued.
+                (STREAM_CONTROL, kinds::PING) => {
+                    conn.send(&frame(STREAM_CONTROL, kinds::PONG, f.payload))
+                        .await?;
+                }
                 _ => {}
             },
             Err(_) => {}
@@ -810,14 +904,14 @@ where
     })();
     match outcome {
         Ok(mut i) => {
-            i.audit = audit(hub, who, &command_name(&req), &i.node, "sent");
+            i.audit = audit(hub, who, &audit_action(&req), &i.node, "sent");
             inflight.push(i);
         }
         Err(e) => {
             audit(
                 hub,
                 who,
-                &command_name(&req),
+                &audit_action(&req),
                 &req.target_node,
                 e.code.as_str(),
             );
@@ -1360,6 +1454,21 @@ fn audit(
         .ok()
 }
 
+/// The audit row's action: the command's schema name, with the launch options a start chose (ADR-0059: `AgentLaunch[skip-permissions]`).
+fn audit_action(req: &v1::CommandRequest) -> String {
+    let options = match &req.command {
+        Some(command_request::Command::AgentLaunch(a)) => a.launch_options.as_slice(),
+        Some(command_request::Command::AgentStart(a)) => a.launch_options.as_slice(),
+        _ => &[],
+    };
+    let name = command_name(req);
+    if options.is_empty() {
+        name
+    } else {
+        format!("{name}[{}]", options.join(","))
+    }
+}
+
 /// The command's schema name (`AgentStop`), for an error that names what was refused.
 fn command_name(req: &v1::CommandRequest) -> String {
     let dbg = format!("{:?}", req.command);
@@ -1485,9 +1594,11 @@ async fn handle(
     tcp: tokio::net::TcpStream,
     tls: Option<tokio_rustls::TlsAcceptor>,
 ) -> Result<(), ServeError> {
+    // Who is on the other end: a sign-in from another machine needs the screen password (ADR-0067), the hub's own does not.
+    let peer = tcp.peer_addr().ok().map(|a| a.ip());
     let Some(acceptor) = tls else {
         // Without TLS nothing can prove it is a node: only the token path exists (development and tests).
-        let Some(tcp) = websocket_only(tcp, state).await? else {
+        let Some(tcp) = websocket_only(tcp, peer, state).await? else {
             return Ok(());
         };
         let (conn, token) = agora_protocol::ws::accept_with_token(tcp).await?;
@@ -1498,7 +1609,7 @@ async fn handle(
         .await
         .map_err(|e| ServeError::Transport(TransportError::Ws(e.to_string())))?;
     let identity = crate::tls::identity(stream.get_ref().1.peer_certificates());
-    let Some(stream) = websocket_only(stream, state).await? else {
+    let Some(stream) = websocket_only(stream, peer, state).await? else {
         return Ok(());
     };
     let (conn, token) = agora_protocol::ws::accept_with_token(stream).await?;
@@ -1513,7 +1624,12 @@ async fn handle(
                 ));
             }
             let mut conn = conn;
-            let Some(first) = conn.recv().await? else {
+            // The first frame decides; a peer that says nothing is dropped like a silent node (ADR-0070).
+            let first = match tokio::time::timeout(NODE_SILENCE, conn.recv()).await {
+                Ok(r) => r?,
+                Err(_) => return Err(ServeError::Silent),
+            };
+            let Some(first) = first else {
                 return Ok(());
             };
             // ADR-0061: a one-shot question on a connection of its own.
@@ -1522,7 +1638,7 @@ async fn handle(
             }
             // Revoking a node ends its connection, not only its next one.
             tokio::select! {
-                r = serve_node_from(conn, Some(first), &id.node_id, &state.hub, &state.support) => r,
+                r = serve_node_from(conn, Some(first), &id.node_id, &state.hub, &state.support, NODE_SILENCE) => r,
                 () = still(|| Enrollment::new(state.hub.store()).is_active(&id.serial_hex).unwrap_or(false)) => {
                     Err(ServeError::Protocol(
                         Error::new(ErrorCode::AuthDeviceRevoked).with("device_id", id.node_id.as_str()),
@@ -1555,14 +1671,20 @@ async fn still(valid: impl Fn() -> bool) {
 /// Answers plain HTTP requests from the assets; returns the stream (replaying what was read) when it is a WebSocket.
 async fn websocket_only<S>(
     stream: S,
+    peer: Option<std::net::IpAddr>,
     state: &ServerState,
 ) -> Result<Option<crate::web::Rewind<S>>, ServeError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    match crate::web::route(stream, state.assets.as_deref(), state.sessions.as_deref())
-        .await
-        .map_err(|e| ServeError::Transport(TransportError::Ws(e.to_string())))?
+    match crate::web::route(
+        stream,
+        peer,
+        state.assets.as_deref(),
+        state.sessions.as_deref(),
+    )
+    .await
+    .map_err(|e| ServeError::Transport(TransportError::Ws(e.to_string())))?
     {
         crate::web::First::WebSocket(s) => Ok(Some(s)),
         crate::web::First::Answered => Ok(None),

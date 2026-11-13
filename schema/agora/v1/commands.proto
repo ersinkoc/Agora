@@ -65,6 +65,8 @@ message CommandRequest {
     AgentForget agent_forget = 85;
     // ADR-0058: sent only to a node with the capability `agent.set_model`.
     AgentSetModel agent_set_model = 86;
+    // ADR-0060: sent only to a node with the capability `agent.resume`.
+    AgentResume agent_resume = 87;
     // ADR-0061 (87 is ADR-0060's): devices. `DeviceRegister`, `DeviceList` and `DeviceAskApproval` are answered by the hub;
     // `DeviceEndorse` and `DeviceRevoke` a client sends to the hub, which carries them to the nodes with the capability `device.trust`.
     DeviceRegister device_register = 88;
@@ -126,6 +128,12 @@ message AgentStart {
   string worktree_id = 4;
   IntegrationLevel level = 5;
   string prompt = 6;
+  // ADR-0059: ids of the kind's `[[launch.option]]`s to start with (capability `agent.launch_options`). Accepted only on the
+  // node's own control socket; routed through the hub such a start is refused (it carries no signature), use `AgentLaunch`.
+  repeated string launch_options = 7;
+  // ADR-0059: the chosen ids whose "act without asking" confirmation the window showed and the user accepted. The node, from its own
+  // manifest, refuses an option that skips permissions unless it is listed here (`agent.option_unconfirmed`).
+  repeated string confirmed_launch_options = 8;
 }
 
 message AgentStop {
@@ -494,6 +502,17 @@ message AgentKind {
   IntegrationLevel level = 3;
   // Whether the launch program is found on this node.
   bool installed = 4;
+  // ADR-0059: the options a start may choose (the manifest's `[[launch.option]]`s, in its order). Old nodes send none.
+  repeated LaunchOption launch_options = 5;
+}
+
+// ADR-0059: one `[[launch.option]]` of a kind. The arguments it adds stay on the node.
+message LaunchOption {
+  string id = 1;
+  // A Fluent message id; a client without it shows `id`.
+  string label = 2;
+  // The agent acts without asking (a permission-skipping flag): never preselected, confirmed, signed, audited, badged.
+  bool skips_permissions = 3;
 }
 
 message AgentKindsResult {
@@ -566,6 +585,17 @@ message AgentForget {
   string agent_id = 1;
 }
 
+// ADR-0060. Brings back an agent the node reported interrupted (`AgentInterrupted`): same agent id, same folder, same project. The
+// node runs the manifest's `[resume]` argv or the adapter's session load with the agent's own session id; with `new_session` it starts
+// a new session of the same kind in the same folder instead ("Start again"). Signed like `agent.launch` on the routed path (operation
+// `resume`, see docs/specs/protocol.md); the node answers with `AgentLaunchResult`.
+message AgentResume {
+  // The node's own id of the agent (`agent-7`), not the hub-wide key.
+  string agent_id = 1;
+  bool new_session = 2;
+  DirectoryAuthorization authorization = 3;
+}
+
 message AgentLaunch {
   string path = 1;
   string project_id = 2;
@@ -573,6 +603,11 @@ message AgentLaunch {
   bool separate_worktree = 4;
   DirectoryAuthorization authorization = 5;
   bool accept_identity_change = 6;
+  // ADR-0059: ids of the kind's `[[launch.option]]`s to start with (capability `agent.launch_options`). When not empty the
+  // authorization signs them too (`directory-action-v3`, docs/specs/protocol.md), so a hub can neither add nor remove one.
+  repeated string launch_options = 7;
+  // ADR-0059: as `AgentStart.confirmed_launch_options`; signed with `launch_options` as a separate list.
+  repeated string confirmed_launch_options = 8;
 }
 message AgentLaunchResult {
   string agent_id = 1;

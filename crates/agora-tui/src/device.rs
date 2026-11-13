@@ -144,6 +144,53 @@ pub fn directory_message(
     m
 }
 
+/// ADR-0059: a list as signed: its count, then `:<byte length>:<item>` per item (the node's `agora_node::directory::signed_list`).
+fn signed_list(items: &[String]) -> String {
+    let mut out = items.len().to_string();
+    for i in items {
+        out.push_str(&format!(":{}:{i}", i.len()));
+    }
+    out
+}
+
+/// ADR-0059: what a device signs for a launch that chose launch options: the `directory-action-v1` launch fields under the domain
+/// `directory-action-v3`, then the chosen ids and the ids the user confirmed, as two length-prefixed lists, before the nonce. Checked
+/// against `schema/fixtures/signing/directory-action-v3.json`, as the node and the web window are.
+#[allow(clippy::too_many_arguments)] // the fields the node binds, each on its own
+pub fn launch_message(
+    node: &str,
+    path: &str,
+    kind: &str,
+    project: &str,
+    separate: bool,
+    identity_change: bool,
+    launch_options: &[String],
+    confirmed: &[String],
+    nonce: &str,
+    expires_at_ms: u64,
+) -> Vec<u8> {
+    let (options, confirmed) = (signed_list(launch_options), signed_list(confirmed));
+    let mut m = b"directory-action-v3".to_vec();
+    for part in [
+        node,
+        "launch",
+        path,
+        kind,
+        project,
+        if separate { "1" } else { "0" },
+        if identity_change { "1" } else { "0" },
+        options.as_str(),
+        confirmed.as_str(),
+        nonce,
+    ] {
+        m.push(0);
+        m.extend_from_slice(part.as_bytes());
+    }
+    m.push(0);
+    m.extend_from_slice(expires_at_ms.to_string().as_bytes());
+    m
+}
+
 /// How long a signed folder action stays valid (the node refuses more than five minutes ahead).
 const FOLDER_ACTION_TTL_MS: u64 = 2 * 60 * 1000;
 
@@ -174,6 +221,57 @@ impl Device {
             project,
             option,
             identity_change,
+            &nonce,
+            expires_at_ms,
+        );
+        Some(agora_protocol::v1::DirectoryAuthorization {
+            device_id: self.id.clone(),
+            nonce,
+            expires_at_ms,
+            signature: self.sign(&message)?,
+        })
+    }
+
+    /// [`Self::authorize`] for a launch: with launch options chosen (ADR-0059) the signature covers them too.
+    #[allow(clippy::too_many_arguments)] // the fields the node binds, each on its own
+    pub fn authorize_launch(
+        &self,
+        node: &str,
+        path: &str,
+        kind: &str,
+        project: &str,
+        separate: bool,
+        identity_change: bool,
+        launch_options: &[String],
+        confirmed: &[String],
+        now_ms: u64,
+    ) -> Option<agora_protocol::v1::DirectoryAuthorization> {
+        if launch_options.is_empty() && confirmed.is_empty() {
+            return self.authorize(
+                node,
+                "launch",
+                path,
+                kind,
+                project,
+                separate,
+                identity_change,
+                now_ms,
+            );
+        }
+        use ring::rand::SecureRandom;
+        let mut b = [0u8; 16];
+        SystemRandom::new().fill(&mut b).ok()?;
+        let nonce = hex(&b);
+        let expires_at_ms = now_ms + FOLDER_ACTION_TTL_MS;
+        let message = launch_message(
+            node,
+            path,
+            kind,
+            project,
+            separate,
+            identity_change,
+            launch_options,
+            confirmed,
             &nonce,
             expires_at_ms,
         );
@@ -395,6 +493,55 @@ mod tests {
                 )
             );
         }
+    }
+
+    #[test]
+    fn a_launch_with_options_signs_the_shared_vectors() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../schema/fixtures/signing/directory-action-v3.json");
+        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let list = |x: &serde_json::Value| -> Vec<String> {
+            x.as_array()
+                .unwrap()
+                .iter()
+                .map(|s| s.as_str().unwrap().to_string())
+                .collect()
+        };
+        for c in v["cases"].as_array().unwrap() {
+            let m = launch_message(
+                c["node"].as_str().unwrap(),
+                c["path"].as_str().unwrap(),
+                c["kind"].as_str().unwrap(),
+                c["project"].as_str().unwrap(),
+                c["separate"].as_bool().unwrap(),
+                c["identity_change"].as_bool().unwrap(),
+                &list(&c["options"]),
+                &list(&c["confirmed"]),
+                c["nonce"].as_str().unwrap(),
+                c["expires"].as_u64().unwrap(),
+            );
+            assert_eq!(hex(&m), c["hex"].as_str().unwrap(), "{}", c["name"]);
+        }
+        let one = vec!["a,b".to_string()];
+        let two = vec!["a".to_string(), "b".to_string()];
+        assert_ne!(
+            launch_message("n", "/p", "k", "id", false, false, &one, &[], "00", 1),
+            launch_message("n", "/p", "k", "id", false, false, &two, &[], "00", 1)
+        );
+        let (d, _) = Device::generate().unwrap();
+        assert!(d
+            .authorize_launch(
+                "laptop",
+                "/w",
+                "codex",
+                "id:p",
+                false,
+                false,
+                &one,
+                &[],
+                1_000
+            )
+            .is_some());
     }
 
     #[test]

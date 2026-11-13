@@ -629,7 +629,38 @@ impl Session {
         }
     }
 
+    /// ADR-0060: brings back an interrupted agent (`agent.resume`, signed by this terminal's key for that agent and choice); answers
+    /// its hub-wide id. Errors keep the node's code and parameters for a localized reason.
+    pub fn resume_in(
+        &mut self,
+        node: &str,
+        resume: agora_protocol::v1::AgentResume,
+    ) -> Result<String, ErrorInfo> {
+        let ok = self.command_info(
+            node,
+            command_request::Command::AgentResume(resume),
+            Duration::from_secs(45),
+        )?;
+        match ok.result {
+            Some(command_ok::Result::AgentLaunch(r)) => Ok(format!("{node}/{}", r.agent_id)),
+            _ => Err(ErrorInfo {
+                code: "protocol.invalid_message".into(),
+                ..Default::default()
+            }),
+        }
+    }
+
     pub fn agent_kinds(&mut self, node: &str) -> Result<Vec<(String, String)>, String> {
+        Ok(self
+            .agent_kinds_all(node)?
+            .into_iter()
+            .filter(|(_, _, installed)| *installed)
+            .map(|(kind, name, _)| (kind, name))
+            .collect())
+    }
+
+    /// Every agent a machine offers: `(kind, display name, installed)`, the ones whose program the machine cannot find included.
+    pub fn agent_kinds_all(&mut self, node: &str) -> Result<Vec<(String, String, bool)>, String> {
         let ok = self.command_ok(
             node,
             command_request::Command::AgentKinds(agora_protocol::v1::AgentKinds {}),
@@ -640,16 +671,38 @@ impl Session {
         };
         Ok(k.kinds
             .into_iter()
-            .filter(|k| k.installed)
             .map(|k| {
                 let name = if k.display_name.is_empty() {
                     k.kind.clone()
                 } else {
                     k.display_name
                 };
-                (k.kind, name)
+                (k.kind, name, k.installed)
             })
             .collect())
+    }
+
+    /// ADR-0059: the launch options `kind` offers on `node` (none from an older machine or an unknown kind).
+    pub fn kind_options(
+        &mut self,
+        node: &str,
+        kind: &str,
+    ) -> Result<Vec<agora_protocol::v1::LaunchOption>, String> {
+        let ok = self.command_ok(
+            node,
+            command_request::Command::AgentKinds(agora_protocol::v1::AgentKinds {}),
+            Duration::from_secs(15),
+        )?;
+        let Some(command_ok::Result::AgentKinds(k)) = ok.result else {
+            return Ok(Vec::new());
+        };
+        Ok(usable_options(
+            k.kinds
+                .into_iter()
+                .find(|k| k.kind == kind)
+                .map(|k| k.launch_options)
+                .unwrap_or_default(),
+        ))
     }
 
     /// Starts an agent of `kind` in a project (its hub-wide id) on a machine; returns the agent's own id.
@@ -960,4 +1013,45 @@ fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(0))
+}
+
+/// ADR-0059: the options a hub relayed that this window may offer: ids outside `[a-z0-9-]{1,32}` (a `!` or `,` in one, which a hub
+/// could use to make a signed id look like a confirmation or like two ids) are dropped before anything is shown or signed. The list
+/// is a display hint; the node decides which options skip permissions.
+pub fn usable_options(
+    options: Vec<agora_protocol::v1::LaunchOption>,
+) -> Vec<agora_protocol::v1::LaunchOption> {
+    options
+        .into_iter()
+        .filter(|o| {
+            !o.id.is_empty()
+                && o.id.len() <= 32
+                && o.id
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod launch_option_tests {
+    use super::usable_options;
+    use agora_protocol::v1::LaunchOption;
+
+    #[test]
+    fn ids_a_hub_could_abuse_are_never_offered() {
+        let o = |id: &str, skips| LaunchOption {
+            id: id.into(),
+            label: "option-skip-permissions".into(),
+            skips_permissions: skips,
+        };
+        let kept = usable_options(vec![
+            o("skip-permissions!", false),
+            o("a,b", false),
+            o("Skip", true),
+            o("", true),
+            o("skip-permissions", true),
+        ]);
+        assert_eq!(kept, vec![o("skip-permissions", true)]);
+    }
 }

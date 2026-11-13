@@ -10,6 +10,7 @@ pub mod hub;
 pub mod notifier;
 pub mod notify;
 pub mod passkey;
+pub mod password;
 pub mod projection;
 pub mod router;
 pub mod scope;

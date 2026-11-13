@@ -128,6 +128,8 @@ pub struct EventSink {
     last_online: AtomicU64,
     /// See [`EventSink::set_aside`].
     set_aside: Option<SetAside>,
+    /// ADR-0060: learns from every event recorded (see [`crate::ledger::Ledger::observe`]). Never held with another lock.
+    ledger: std::sync::OnceLock<Arc<crate::ledger::Ledger>>,
 }
 
 /// An event log found at start whose unacknowledged events name another producer (for example `local`, from runs before the node
@@ -159,6 +161,19 @@ pub fn checkout_id(root: &Path) -> String {
         h = h.wrapping_mul(0x0100_0000_01b3);
     }
     format!("co-{h:016x}")
+}
+
+/// The kind of a chat agent's item in the fixed words other agents see (`agora_mesh::awareness`); `None` for an item that says
+/// nothing about what it is doing (a notice).
+fn activity_word(item: &agora_adapters::host::ChatItem) -> Option<&'static str> {
+    use agora_adapters::host::ChatItem;
+    match item {
+        ChatItem::Text(_) => Some("writing a reply"),
+        ChatItem::ToolCall { tool, .. } => Some(agora_mesh::awareness::tool_word(tool)),
+        ChatItem::Plan(_) => Some("planning"),
+        ChatItem::Diff { .. } => Some("editing files"),
+        ChatItem::Notice { .. } => None,
+    }
 }
 
 fn state_word(s: AgentState) -> &'static str {
@@ -226,7 +241,13 @@ impl EventSink {
             reported: Mutex::new(Reported::default()),
             last_online: AtomicU64::new(0),
             set_aside,
+            ledger: std::sync::OnceLock::new(),
         })
+    }
+
+    /// ADR-0060: the session ledger that learns from what this sink records. Set once; a second call is ignored.
+    pub fn set_ledger(&self, ledger: Arc<crate::ledger::Ledger>) {
+        let _ = self.ledger.set(ledger);
     }
 
     /// The log this sink found at open and set aside because its events name another producer, if it did.
@@ -373,6 +394,8 @@ impl EventSink {
                 .as_ref()
                 .map(|p| p.as_str().to_string())
                 .unwrap_or_default(),
+            launch_options: view.launch_options.clone(),
+            skips_permissions: view.skips_permissions,
         }));
         self.record(Body::AgentStateChanged(v1::AgentStateChanged {
             agent_id: agent.into(),
@@ -396,6 +419,9 @@ impl EventSink {
     }
 
     fn record(&self, body: Body) {
+        if let Some(ledger) = self.ledger.get() {
+            ledger.observe(&body, now_ms());
+        }
         // Only the few kinds a resync announcement repeats take this lock; every other event goes straight to the log.
         if Reported::keeps(&body) {
             self.reported
@@ -438,6 +464,22 @@ impl EventSink {
         kind: &str,
         parent: &str,
     ) {
+        let none = crate::launch_options::LaunchChoice::default();
+        self.agent_started_with(agent, project, node, worktree, kind, parent, &none);
+    }
+
+    /// [`Self::agent_started_by`] with the launch options the agent was started with (ADR-0059).
+    #[allow(clippy::too_many_arguments)]
+    fn agent_started_with(
+        &self,
+        agent: &AgentId,
+        project: &str,
+        node: &str,
+        worktree: &str,
+        kind: &str,
+        parent: &str,
+        launch: &crate::launch_options::LaunchChoice,
+    ) {
         self.record(Body::AgentStarted(v1::AgentStarted {
             agent_id: agent.as_str().to_string(),
             project_id: project.to_string(),
@@ -446,6 +488,8 @@ impl EventSink {
             kind: kind.to_string(),
             level: v1::IntegrationLevel::L1Manifest as i32,
             parent_agent_id: parent.to_string(),
+            launch_options: launch.ids.clone(),
+            skips_permissions: launch.skips_permissions,
         }));
     }
 
@@ -581,6 +625,31 @@ impl EventSink {
         }));
     }
 
+    /// The agent's own session id (ADR-0060: chosen by the node at its first launch, or read from its session file).
+    pub fn session_reported(&self, agent: &AgentId, session: &str) {
+        self.record(Body::AgentSessionReported(v1::AgentSessionReported {
+            agent_id: agent.as_str().to_string(),
+            session_id: session.to_string(),
+        }));
+    }
+
+    /// ADR-0060: an agent the ledger holds as interrupted (it ran when the node last stopped). `resumable`: the node has its own session
+    /// id and its kind can continue one.
+    pub fn agent_interrupted(&self, e: &crate::ledger::Entry, resumable: bool) {
+        self.record(Body::AgentInterrupted(v1::AgentInterrupted {
+            agent_id: e.agent_id.clone(),
+            kind: e.kind.clone(),
+            project_id: e.project_id.clone(),
+            folder: e.folder.clone(),
+            parent_agent_id: e.parent_agent_id.clone(),
+            resumable,
+            started_at_ms: e.started_at_ms,
+            interrupted_at_ms: e.interrupted_at_ms,
+            last_state: crate::ledger::proto_state(&e.last_state) as i32,
+            still_running: e.still_running(),
+        }));
+    }
+
     /// The node refused an agent's `agent_start` before asking anyone (ADR-0057).
     pub fn agent_start_refused(&self, agent: &AgentId, kind: &str, folder: &str, code: &str) {
         self.record(Body::AgentStartRefused(v1::AgentStartRefused {
@@ -673,6 +742,34 @@ impl EventSink {
         kind: &str,
         has_terminal: bool,
     ) {
+        let none = crate::launch_options::LaunchChoice::default();
+        self.agent_launched_with(
+            agent,
+            project,
+            node,
+            checkout,
+            worktree,
+            branch,
+            kind,
+            has_terminal,
+            &none,
+        );
+    }
+
+    /// [`Self::agent_launched`] with the launch options the agent was started with (ADR-0059).
+    #[allow(clippy::too_many_arguments)]
+    pub fn agent_launched_with(
+        &self,
+        agent: &AgentId,
+        project: &str,
+        node: &str,
+        checkout: &Path,
+        worktree: &Path,
+        branch: &str,
+        kind: &str,
+        has_terminal: bool,
+        launch: &crate::launch_options::LaunchChoice,
+    ) {
         let worktree_id = worktree.to_string_lossy().into_owned();
         self.record(Body::WorktreeCreated(v1::WorktreeCreated {
             worktree_id: worktree_id.clone(),
@@ -680,7 +777,7 @@ impl EventSink {
             path: worktree_id.clone(),
             branch: branch.to_string(),
         }));
-        self.agent_started(agent, project, node, &worktree_id, kind);
+        self.agent_started_with(agent, project, node, &worktree_id, kind, "", launch);
         if !has_terminal {
             return; // an adapter agent has no terminal
         }
@@ -702,6 +799,18 @@ impl EventSink {
         self.helper_launched(agent, workspace, kind, terminal, "");
     }
 
+    /// [`Self::directory_agent_launched`] with the launch options the agent was started with (ADR-0059).
+    pub fn directory_agent_launched_with(
+        &self,
+        agent: &AgentId,
+        workspace: &v1::WorkspaceRegistered,
+        kind: &str,
+        terminal: bool,
+        launch: &crate::launch_options::LaunchChoice,
+    ) {
+        self.workspace_agent_launched(agent, workspace, kind, terminal, "", launch);
+    }
+
     /// [`Self::directory_agent_launched`] for a helper `parent` started (ADR-0057); `parent` empty means the user.
     pub fn helper_launched(
         &self,
@@ -711,18 +820,33 @@ impl EventSink {
         terminal: bool,
         parent: &str,
     ) {
+        // ADR-0059: a helper never has launch options.
+        let none = crate::launch_options::LaunchChoice::default();
+        self.workspace_agent_launched(agent, workspace, kind, terminal, parent, &none);
+    }
+
+    fn workspace_agent_launched(
+        &self,
+        agent: &AgentId,
+        workspace: &v1::WorkspaceRegistered,
+        kind: &str,
+        terminal: bool,
+        parent: &str,
+        launch: &crate::launch_options::LaunchChoice,
+    ) {
         self.record(Body::WorkspaceRegistered(workspace.clone()));
         self.record(Body::AgentWorkspaceBound(v1::AgentWorkspaceBound {
             agent_id: agent.as_str().into(),
             workspace_id: workspace.workspace_id.clone(),
         }));
-        self.agent_started_by(
+        self.agent_started_with(
             agent,
             &workspace.project_id,
             &workspace.node_id,
             "",
             kind,
             parent,
+            launch,
         );
         if terminal {
             self.record(Body::TerminalOpened(v1::TerminalOpened {
@@ -823,6 +947,38 @@ pub struct Policy {
     pub sandbox: crate::sandbox::SandboxPolicy,
     /// What each trusted device may sign (`device.<id>.projects = a, b`; ADR-0049). A device not named is not limited.
     pub device_projects: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+    /// Whether an agent may start with a launch option that skips permissions (`skip_permissions = forbid | allow | confined_only`;
+    /// ADR-0059). Default: allow.
+    pub skip_permissions: crate::launch_options::SkipPermissions,
+    /// Lines of an existing policy file the node did not understand (`unreadable` when the file could not be read). Any of them sets
+    /// `skip_permissions` to `forbid`: a typo (`skip_permission = forbid`) must never leave the default `allow` in place.
+    pub problems: Vec<String>,
+    /// What happens to interrupted agents after the node starts (`resume`, `resume.kinds`, `resume.folders`; ADR-0060).
+    pub resume: ResumePolicy,
+}
+
+/// ADR-0060: `resume = ask | auto`. `ask` (the default, and any other value) offers Resume in the window and does nothing by itself;
+/// `auto` resumes, as the node starts, the interrupted agents that can continue their own session, of a kind in `resume.kinds`, in a
+/// folder at or below one in `resume.folders`. Both lists must name something: `auto` with an empty list resumes nothing.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ResumePolicy {
+    pub auto: bool,
+    pub kinds: Vec<String>,
+    pub folders: Vec<PathBuf>,
+}
+
+impl ResumePolicy {
+    /// Whether `auto` covers an agent of `kind` in `folder`.
+    pub fn covers(&self, kind: &str, folder: &Path) -> bool {
+        let folder =
+            agora_platform::canonicalize_plain(folder).unwrap_or_else(|_| folder.to_path_buf());
+        self.auto
+            && self.kinds.iter().any(|k| k == kind)
+            && self.folders.iter().any(|f| {
+                let listed = agora_platform::canonicalize_plain(f).unwrap_or_else(|_| f.clone());
+                folder.starts_with(&listed)
+            })
+    }
 }
 
 impl Default for Policy {
@@ -832,6 +988,9 @@ impl Default for Policy {
             signed_commands: crate::grants::SignedCommands::default(),
             sandbox: crate::sandbox::SandboxPolicy::default(),
             device_projects: std::collections::BTreeMap::new(),
+            resume: ResumePolicy::default(),
+            skip_permissions: crate::launch_options::SkipPermissions::default(),
+            problems: Vec::new(),
         }
     }
 }
@@ -870,15 +1029,26 @@ pub fn policy_sandbox_entries(path: &std::path::Path) -> Vec<(&'static str, Stri
 /// counts as `false`: a typo must never widen what the node allows. Unknown keys are ignored.
 pub fn read_policy(path: &std::path::Path) -> Policy {
     let mut p = Policy::default();
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return p;
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        // No file: the defaults, `skip_permissions = allow` included (the maintainer's decision, ADR-0059).
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return p,
+        Err(_) => {
+            p.problems.push("unreadable".into());
+            p.skip_permissions = crate::launch_options::SkipPermissions::Forbid;
+            return p;
+        }
     };
     for line in text
         .lines()
         .map(str::trim)
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
     {
-        if let Some((k, v)) = line.split_once('=') {
+        let Some((k, v)) = line.split_once('=') else {
+            p.problems.push(line.chars().take(80).collect());
+            continue;
+        };
+        {
             match k.trim() {
                 "mesh.remote" => p.mesh_remote = v.trim() == "true",
                 "signed_commands" => {
@@ -904,7 +1074,26 @@ pub fn read_policy(path: &std::path::Path) -> Policy {
                         );
                     }
                 }
+                "resume" => p.resume.auto = v.trim() == "auto",
+                "resume.kinds" => {
+                    p.resume.kinds = v
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string)
+                        .collect();
+                }
+                "resume.folders" => p.resume.folders = paths(v),
                 "sandbox" => p.sandbox.level = crate::sandbox::Level::parse(v),
+                "skip_permissions" => {
+                    // `"forbid"` as the ADR writes it means the same as `forbid`.
+                    let v = v.trim();
+                    let v = v
+                        .strip_prefix('"')
+                        .and_then(|x| x.strip_suffix('"'))
+                        .unwrap_or(v);
+                    p.skip_permissions = crate::launch_options::SkipPermissions::parse(v);
+                }
                 "sandbox.read" => p.sandbox.read = paths(v),
                 "sandbox.write" => p.sandbox.write = paths(v),
                 "sandbox.trust_manifest" => {
@@ -915,9 +1104,12 @@ pub fn read_policy(path: &std::path::Path) -> Policy {
                         .map(str::to_string)
                         .collect();
                 }
-                _ => {}
+                other => p.problems.push(other.chars().take(80).collect()),
             }
         }
+    }
+    if !p.problems.is_empty() {
+        p.skip_permissions = crate::launch_options::SkipPermissions::Forbid;
     }
     p
 }
@@ -978,8 +1170,15 @@ pub struct Node {
     node_id: String,
     /// Manifests that could not be loaded, as `(path, reason)` for the log.
     pub manifest_problems: Vec<(PathBuf, String)>,
+    /// Policy file lines the node did not understand (see [`Policy::problems`]), for the log: they forbid launch options that skip
+    /// permissions until they are fixed.
+    pub policy_problems: Vec<String>,
     /// The event log found at start that named another node and was set aside instead of being sent to the hub, for the log.
     pub events_set_aside: Option<SetAside>,
+    /// ADR-0060: the session ledger.
+    pub ledger: Arc<crate::ledger::Ledger>,
+    /// See [`Node::crash`].
+    crashed: bool,
 }
 
 impl Node {
@@ -997,6 +1196,9 @@ impl Node {
             &cfg.node_id,
             max_bytes,
         )?);
+        // ADR-0060: what this node knows of its agents across its own restarts; learns from every event recorded from here on.
+        let ledger = Arc::new(crate::ledger::Ledger::open(&cfg.data_dir, now_ms())?);
+        events.set_ledger(Arc::clone(&ledger));
 
         // Short path on purpose: Unix socket paths are limited to about 100 bytes.
         let mesh_dir = cfg
@@ -1016,6 +1218,8 @@ impl Node {
             limits: cfg.limits,
         });
         sup.set_sandbox(read_policy(&cfg.data_dir.join(POLICY_FILE)).sandbox);
+        sup.reserve_ids(ledger.next_id());
+        sup.set_skip_permissions(read_policy(&cfg.data_dir.join(POLICY_FILE)).skip_permissions);
         let (found, manifest_problems) = load_manifests(&cfg.manifests_dir);
         for m in found {
             sup.register(m);
@@ -1038,6 +1242,10 @@ impl Node {
         events.node_online(&cfg.node_id);
         for p in &projects {
             events.checkout_discovered(&cfg.node_id, &p.id, &p.root);
+        }
+        // ADR-0060: what was running when the node last stopped, offered again (Resume, or Start again in the same folder).
+        for e in ledger.interrupted() {
+            events.agent_interrupted(&e, !e.session_id.is_empty() && sup.resumable(&e.kind));
         }
         let known_checkouts: Vec<(String, PathBuf)> = projects
             .iter()
@@ -1123,14 +1331,27 @@ impl Node {
             // What this node says when the hub's record of it cannot be continued (ADR-0054, ADR-0055): who it is (only when the hub
             // lost this process's start), its checkouts, and its present. Each lock is taken alone and released before the next, and
             // before anything is recorded (see `announce`).
-            let (node, sup, approvals) = (
+            let (node, sup, approvals, ledger) = (
                 cfg.node_id.clone(),
                 Arc::clone(&supervisor),
                 Arc::clone(&approvals),
+                Arc::clone(&ledger),
             );
             events.set_announcer(Box::new(move |ev, how| {
                 let views = sup.lock().unwrap_or_else(|e| e.into_inner()).list();
                 let waiting = approvals.waiting();
+                // ADR-0060: the agents still offered to resume, said again after the others.
+                let interrupted: Vec<(crate::ledger::Entry, bool)> = {
+                    let found = ledger.interrupted();
+                    let s = sup.lock().unwrap_or_else(|e| e.into_inner());
+                    found
+                        .into_iter()
+                        .map(|e| {
+                            let resumable = !e.session_id.is_empty() && s.resumable(&e.kind);
+                            (e, resumable)
+                        })
+                        .collect()
+                };
                 if how == Announce::Restart {
                     ev.node_online(&node);
                 }
@@ -1138,6 +1359,9 @@ impl Node {
                     ev.checkout_discovered(&node, id, root);
                 }
                 ev.announce_present(&views, &waiting, how);
+                for (e, resumable) in &interrupted {
+                    ev.agent_interrupted(e, *resumable);
+                }
             }));
         }
         let chat = Arc::new(crate::chat::ChatBoard::new());
@@ -1168,8 +1392,20 @@ impl Node {
             )
             .with_manifests_dir(cfg.manifests_dir.clone())
             .with_git_wake(Arc::clone(&git_wake))
-            .with_spawner(Arc::clone(&spawner)),
+            .with_spawner(Arc::clone(&spawner))
+            .with_ledger(Arc::clone(&ledger)),
         );
+        // ADR-0060: `resume = auto` brings back, without anyone asking, the interrupted agents of the kinds and folders the owner listed
+        // that can continue their own session. In id order, so a helper comes after its parent (a helper whose parent did not come
+        // back stays offered). A refusal leaves the agent offered as before.
+        let resume = read_policy(&cfg.data_dir.join(POLICY_FILE)).resume;
+        if resume.auto {
+            for e in ledger.interrupted() {
+                if !e.session_id.is_empty() && resume.covers(&e.kind, Path::new(&e.folder)) {
+                    let _ = crate::control::resume_agent(&ctx, &e.agent_id, false);
+                }
+            }
+        }
         let server = ControlServer::start(&cfg.socket, ctx)?;
 
         let stop = Arc::new(AtomicBool::new(false));
@@ -1184,6 +1420,7 @@ impl Node {
                 Arc::clone(&chat),
                 Arc::clone(&spawner),
             );
+            let ledger_tick = Arc::clone(&ledger);
             std::thread::Builder::new()
                 .name("agora-supervise".into())
                 .spawn(move || {
@@ -1191,8 +1428,11 @@ impl Node {
                     let mut reported_memory = 0u64;
                     let mut memory_checked = Instant::now();
                     let mut usage = crate::usage_files::UsageWatcher::default();
+                    let mut sessions = crate::session_files::SessionWatcher::default();
+                    // ADR-0060: the process each agent runs as, as last written to the ledger.
+                    let mut processes: std::collections::HashMap<AgentId, u32> = Default::default();
                     while !stop.load(Ordering::Acquire) {
-                        let (events, views, usage_targets, ended) = {
+                        let (events, views, usage_targets, ended, session_targets, pids) = {
                             let mut s = sup.lock().unwrap_or_else(|e| e.into_inner());
                             let events = s.tick(Instant::now());
                             (
@@ -1200,8 +1440,44 @@ impl Node {
                                 s.list(),
                                 s.usage_targets(),
                                 s.take_ended_usage_targets(),
+                                s.session_file_targets(),
+                                s.agent_pids(),
                             )
                         };
+                        // ADR-0060: a new process (a start, a restart, a resume) is written to the ledger with its start time, so one
+                        // that outlives a crashed node is recognised at the next start. Read only when the pid changed.
+                        for (agent, pid) in &pids {
+                            if processes.get(agent) != Some(pid) {
+                                // A read that failed (a process just starting) is tried again on the next tick.
+                                if let Ok(identity) = agora_platform::process_identity(*pid) {
+                                    processes.insert(agent.clone(), *pid);
+                                    ledger_tick.set_process(
+                                        agent.as_str(),
+                                        Some(identity),
+                                        now_ms(),
+                                    );
+                                }
+                            }
+                        }
+                        processes.retain(|a, _| pids.iter().any(|(p, _)| p == a));
+                        // ADR-0060: the session ids terminal agents write to their own files (`[session.file]`), read outside the lock.
+                        if !session_targets.is_empty() {
+                            let known = sup
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .known_sessions();
+                            for (agent, id) in
+                                sessions.poll(Instant::now(), &session_targets, &known)
+                            {
+                                let set = sup
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .report_session(&agent, &id);
+                                if set.is_ok() {
+                                    ev.session_reported(&agent, &id);
+                                }
+                            }
+                        }
                         // Usage that terminal agents wrote to their own files (ADR-0042); the files are read outside the lock.
                         let mut used = usage.finish(Instant::now(), &ended);
                         used.extend(usage.poll(Instant::now(), &usage_targets));
@@ -1229,9 +1505,11 @@ impl Node {
                         for e in &events {
                             match e {
                                 SupervisorEvent::Exited { agent, status } if status.success() => {
-                                    mesh.unregister(agent);
+                                    mesh.unregister_because(agent, "finished");
                                 }
-                                SupervisorEvent::GaveUp { agent } => mesh.unregister(agent),
+                                SupervisorEvent::GaveUp { agent } => {
+                                    mesh.unregister_because(agent, "crashed");
+                                }
                                 _ => {}
                             }
                             // ADR-0057: an agent's helper grants and waiting start end when it exits or is stopped.
@@ -1244,7 +1522,7 @@ impl Node {
                         }
                         spawner.tick();
                         for v in views.iter().filter(|v| v.running) {
-                            mesh.set_state(&v.id, state_word(v.state));
+                            mesh.observe(&v.id, state_word(v.state), v.parent.as_ref());
                         }
                         ev.record_bodies(mesh.take_events());
                         // Adapter approval requests enter the queue and are announced; stopped or dead agents leave
@@ -1256,7 +1534,13 @@ impl Node {
                                 SupervisorEvent::Adapter {
                                     agent,
                                     event: AdapterEvent::Chat { item, .. },
-                                } => chat.push_item(agent, item, now),
+                                } => {
+                                    // Other agents see the kind of this item in fixed words (`workspace_status`), never its text.
+                                    if let Some(word) = activity_word(item) {
+                                        mesh.set_activity(agent, word);
+                                    }
+                                    chat.push_item(agent, item, now);
+                                }
                                 SupervisorEvent::Adapter {
                                     agent,
                                     event:
@@ -1267,6 +1551,7 @@ impl Node {
                                             ..
                                         },
                                 } => {
+                                    mesh.set_activity(agent, "asking the user");
                                     if let Some(p) =
                                         approvals.request(agent, approval_id, action, detail, now)
                                     {
@@ -1322,14 +1607,15 @@ impl Node {
                 })?
         };
         let git_watch = {
-            let (sup, ev, stop) = (
+            let (sup, ev, stop, mesh) = (
                 Arc::clone(&supervisor),
                 Arc::clone(&events),
                 Arc::clone(&stop),
+                Arc::clone(&mesh),
             );
             std::thread::Builder::new()
                 .name("agora-git".into())
-                .spawn(move || watch_git(&sup, &ev, &stop, &git_wake))?
+                .spawn(move || watch_git(&sup, &ev, &mesh, &stop, &git_wake))?
         };
         // ADR-0061: what this machine trusts, said at start and whenever it changes (the owner's CLI, an endorsement, a revocation, an
         // expiry), so a window can tell whether this machine trusts its device. The file is small and read every 2 s off every hot path.
@@ -1371,8 +1657,18 @@ impl Node {
             devices_watch: Some(devices_watch),
             node_id: cfg.node_id.clone(),
             manifest_problems,
+            policy_problems: read_policy(&cfg.data_dir.join(POLICY_FILE)).problems,
             events_set_aside,
+            ledger,
+            crashed: false,
         })
+    }
+
+    /// What a node killed without warning (`kill -9`) leaves behind, for tests (ADR-0060): it stops serving and supervising and
+    /// records nothing more, and its agents' processes are not stopped (on Unix a terminal agent leads its own process group and
+    /// outlives the node that way). They are left running for good.
+    pub fn crash(mut self) {
+        self.crashed = true;
     }
 
     pub fn socket(&self) -> Option<&Path> {
@@ -1411,7 +1707,13 @@ fn memory_moved(reported: u64, now: u64) -> bool {
 }
 
 /// `wake` (set when an agent starts) ends the wait between rounds early, so a new folder's changes are counted at once.
-fn watch_git(sup: &Mutex<Supervisor>, ev: &EventSink, stop: &AtomicBool, wake: &AtomicBool) {
+fn watch_git(
+    sup: &Mutex<Supervisor>,
+    ev: &EventSink,
+    mesh: &crate::mesh_server::MeshServer,
+    stop: &AtomicBool,
+    wake: &AtomicBool,
+) {
     let mut last: std::collections::HashMap<(PathBuf, bool), (u32, u32, u32, String)> =
         std::collections::HashMap::new();
     while !stop.load(Ordering::Acquire) {
@@ -1434,6 +1736,8 @@ fn watch_git(sup: &Mutex<Supervisor>, ev: &EventSink, stop: &AtomicBool, wake: &
             let Ok(st) = git::status(path) else {
                 continue;
             };
+            // Agents see how many files are changed in each other's workspace (`workspace_status`).
+            mesh.set_files_changed(path, st.files_changed);
             let now = (
                 st.files_changed,
                 st.insertions,
@@ -1485,34 +1789,28 @@ impl Drop for Node {
         if let Some(t) = self.devices_watch.take() {
             let _ = t.join();
         }
+        if self.crashed {
+            // Nothing is said and nothing is stopped: the supervisor, which owns the agents' processes, is never dropped.
+            std::mem::forget(Arc::clone(&self.supervisor));
+            return;
+        }
         self.events.node_offline(&self.node_id);
-        // Agents die with the node's supervisor (terminal handles kill their process groups on drop).
+        // The agents end with the node, now (other parts of the node may still hold the supervisor, so its own drop is not relied on).
+        self.supervisor
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .shutdown();
+        // The agents' last states. They ended without an end in the ledger: at the next start they are interrupted (ADR-0060).
+        let _ = self.ledger.flush();
     }
 }
 
-/// Every `*.toml` agent manifest in `dir`, in file-name order, and each file that could not be read or parsed with the reason.
+/// The node's agent kinds: the built-in manifests, then every `*.toml` in `dir` (a file there replaces the built-in kind of the same
+/// name or adds one; see `crate::manifests`), and each file that could not be read or parsed with the reason.
 /// The node reads them at start and again before it lists or starts agents, so a manifest added later is seen without a restart.
 pub fn load_manifests(dir: &Path) -> (Vec<Manifest>, Vec<(PathBuf, String)>) {
-    let mut found = Vec::new();
-    let mut problems = Vec::new();
-    if let Ok(rd) = std::fs::read_dir(dir) {
-        let mut paths: Vec<PathBuf> = rd
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|x| x == "toml"))
-            .collect();
-        paths.sort();
-        for p in paths {
-            match std::fs::read_to_string(&p)
-                .map_err(|e| e.to_string())
-                .and_then(|s| Manifest::parse(&s).map_err(|e| e.to_string()))
-            {
-                Ok(m) => found.push(m),
-                Err(e) => problems.push((p, e)),
-            }
-        }
-    }
-    (found, problems)
+    let (loaded, problems) = crate::manifests::load(dir);
+    (loaded.into_iter().map(|l| l.manifest).collect(), problems)
 }
 
 #[cfg(test)]
@@ -1611,6 +1909,8 @@ mod announce_tests {
             running,
             restarts: 0,
             parent: None,
+            launch_options: Vec::new(),
+            skips_permissions: false,
         }
     }
 
@@ -1751,5 +2051,47 @@ mod announce_tests {
             && r.approved == r.approval_id[3..].parse::<u32>().unwrap().is_multiple_of(2)));
         assert_eq!(restated(Announce::Present), first, "the ring did not move");
         assert!(restated(Announce::Restart).is_empty());
+    }
+
+    #[test]
+    fn a_policy_file_that_is_not_understood_forbids_skipping_permissions() {
+        use crate::launch_options::SkipPermissions as S;
+        let dir = std::env::temp_dir().join(format!("policy-skip-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("policy");
+        let read = |text: &str| {
+            std::fs::write(&file, text).unwrap();
+            let p = read_policy(&file);
+            (p.skip_permissions, p.problems)
+        };
+        // No file: the maintainer's default.
+        assert_eq!(read_policy(&dir.join("absent")).skip_permissions, S::Allow);
+        assert_eq!(read("mesh.remote = true\n"), (S::Allow, vec![]));
+        assert_eq!(read("skip_permissions = \"forbid\"\n").0, S::Forbid);
+        assert_eq!(
+            read("skip_permissions = \"confined_only\"\n").0,
+            S::ConfinedOnly
+        );
+        assert_eq!(read("skip_permissions = \"allow\"\n").0, S::Allow);
+        // A typo'd key, a line without `=`: forbid, and said.
+        assert_eq!(
+            read("skip_permission = forbid\n"),
+            (S::Forbid, vec!["skip_permission".to_string()])
+        );
+        assert_eq!(read("skip_permissions allow\n").0, S::Forbid);
+        assert_eq!(
+            read("skip_permissions = allow\nsandbx = worktree\n").0,
+            S::Forbid
+        );
+        // An existing file that cannot be read (here: a folder): forbid.
+        std::fs::remove_file(&file).unwrap();
+        std::fs::create_dir_all(&file).unwrap();
+        let p = read_policy(&file);
+        assert_eq!(
+            (p.skip_permissions, p.problems),
+            (S::Forbid, vec!["unreadable".to_string()])
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
