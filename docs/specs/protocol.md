@@ -416,7 +416,8 @@ All additions; nothing published changed.
   killed without stopping its agents). Then `agent.resume` answers `agent.still_running`, and `agent.stop` with its id ends exactly
   that process (its group when it leads one), with `stop_helpers` also its helpers that outlived the node, and says
   `AgentInterrupted` again without `still_running`; a pid whose start time, boot (Linux `boot_id`) or program name differs is never
-  signalled. Not on Windows, where a node's agents end with it.
+  signalled. `agent.stop` of any interrupted agent succeeds: when its old process has ended meanwhile nothing is signalled, and it is
+  announced again without `still_running`, so clients offer Resume and Start again. Not on Windows, where a node's agents end with it.
 - **Resume.** Command `agent.resume` (`AgentResume`, request field 87: `agent_id` (the node's own id), `new_session`,
   `authorization`) → `AgentLaunchResult` (Ok tag 19). Node capability `agent.resume`: the hub refuses the command with
   `protocol.capability_missing` for a node that did not offer it. Same agent id, same folder, same project, same kind. Without
