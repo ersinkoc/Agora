@@ -11,11 +11,26 @@ use serde_json::{json, Value};
 
 #[test]
 fn acp_child() {
-    if std::env::var_os("AGORA_TEST_ACP").is_none() {
+    // Only as the bridge's child: the harness running every test sees the variable too once another test set it, and would
+    // otherwise play the agent on its own stdin.
+    if std::env::var_os("AGORA_TEST_ACP").is_none() || !std::env::args().any(|a| a == "acp_child") {
         return;
     }
     println!(); // end the harness's unfinished "test acp_child ... " line; JSON starts on its own
     let _ = agora_fake_agent::acp::run(std::io::stdin().lock(), &mut std::io::stdout().lock());
+}
+
+/// The fake agent that dies before `initialize` (a broken plugin), for `Node::start_with`.
+#[test]
+fn acp_child_fails_at_start() {
+    // Only as the bridge's child: the harness running every test sees the variable too (other tests set it), and this one exits.
+    if std::env::var_os("AGORA_TEST_ACP").is_none()
+        || !std::env::args().any(|a| a == "acp_child_fails_at_start")
+    {
+        return;
+    }
+    let code = agora_fake_agent::acp::fail_at_start(&mut std::io::stderr().lock());
+    std::process::exit(code);
 }
 
 struct ChanReader(Receiver<Vec<u8>>, Vec<u8>);
@@ -55,13 +70,18 @@ struct Node {
 
 impl Node {
     fn start() -> Self {
+        Self::start_with("acp_child")
+    }
+
+    /// The bridge with this test function of the binary as its agent.
+    fn start_with(child: &str) -> Self {
         std::env::set_var("AGORA_TEST_ACP", "1");
         let (tx, rx) = channel();
         let out = Out(Arc::default());
         let agent: Vec<String> = [
             std::env::current_exe().unwrap().to_string_lossy().as_ref(),
             "--exact",
-            "acp_child",
+            child,
             "--nocapture",
             "--test-threads=1",
         ]
@@ -254,4 +274,156 @@ fn an_agent_that_dies_ends_the_bridge_so_the_node_sees_the_adapter_exit() {
         json!({"sessionId": "acp-s1", "text": "crash"}),
     );
     assert!(n.done.take().unwrap().join().unwrap().is_err());
+}
+
+fn started() -> Node {
+    let mut n = Node::start();
+    n.call("initialize", json!({}));
+    n.call(
+        "session/start",
+        json!({"projectRoot": ".", "worktree": "."}),
+    );
+    n
+}
+
+fn logs(n: &Node) -> Vec<Value> {
+    n.messages()
+        .into_iter()
+        .filter(|m| m["method"] == "log")
+        .map(|m| serde_json::from_str(m["params"]["message"].as_str().unwrap()).unwrap())
+        .collect()
+}
+
+/// Runs one turn and returns the reason its closing `IDLE` carries (empty for a turn that ended normally).
+fn turn_end(n: &mut Node, prompt: &str) -> String {
+    let before = n.messages().len();
+    n.call(
+        "session/prompt",
+        json!({"sessionId": "acp-s1", "text": prompt}),
+    );
+    let idle =
+        |m: &Value| m["method"] == "state/update" && m["params"]["state"] == "AGENT_STATE_IDLE";
+    let end = Instant::now() + Duration::from_secs(10);
+    loop {
+        let msgs = n.messages();
+        if let Some(m) = msgs[before..].iter().find(|m| idle(m)) {
+            return m["params"]["message"].as_str().unwrap_or("").to_string();
+        }
+        assert!(
+            Instant::now() < end,
+            "no idle after {prompt}: {:#?}",
+            &msgs[before..]
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn a_turn_that_fails_or_says_nothing_is_not_a_silent_success() {
+    let mut n = started();
+    assert_eq!(
+        turn_end(&mut n, "hi"),
+        "",
+        "a normal turn carries no reason"
+    );
+    assert_eq!(turn_end(&mut n, "silent"), "adapter.turn_empty");
+    assert_eq!(turn_end(&mut n, "refuse"), "adapter.turn_stopped");
+    assert_eq!(turn_end(&mut n, "fail"), "adapter.turn_failed");
+    let l = logs(&n);
+    assert!(
+        l.contains(&json!({"code": "adapter.turn_empty", "params": {}})),
+        "{l:#?}"
+    );
+    assert!(
+        l.contains(&json!({"code": "adapter.turn_stopped", "params": {"stop_reason": "refusal"}})),
+        "{l:#?}"
+    );
+    assert!(
+        l.contains(&json!({"code": "adapter.turn_failed", "params": {"rpc_code": "-32603"}})),
+        "{l:#?}"
+    );
+    // Only the three turns that need it said anything in the log.
+    assert_eq!(l.len(), 3, "{l:#?}");
+}
+
+#[test]
+fn an_agent_that_exits_mid_turn_is_reported_with_its_exit_code_and_stderr() {
+    let mut n = started();
+    n.call(
+        "session/prompt",
+        json!({"sessionId": "acp-s1", "text": "crash-loud"}),
+    );
+    assert!(n.done.take().unwrap().join().unwrap().is_err());
+    let l = logs(&n);
+    let gone = l
+        .iter()
+        .find(|e| e["code"] == "adapter.agent_exited")
+        .unwrap_or_else(|| panic!("{l:#?}"));
+    assert_eq!(gone["params"]["stage"], "turn");
+    assert_eq!(gone["params"]["exit_code"], "4");
+    let tail = gone["params"]["stderr_tail"].as_str().unwrap();
+    assert!(tail.contains("free usage limit reached"), "{tail}");
+    assert!(!tail.contains("fake0123456789"), "a secret leaked: {tail}");
+}
+
+#[test]
+fn an_agent_that_dies_before_initialize_gets_its_own_reason() {
+    let n = Node::start_with("acp_child_fails_at_start");
+    n.to_bridge
+        .send(
+            format!(
+                "{}\n",
+                json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+            )
+            .into_bytes(),
+        )
+        .unwrap();
+    let reply = n.wait(|m| m.get("id") == Some(&json!(1)));
+    let data = &reply["error"]["data"];
+    assert_eq!(data["code"], "adapter.agent_exited", "{reply:#}");
+    assert_eq!(data["params"]["stage"], "initialize");
+    assert_eq!(data["params"]["exit_code"], "5");
+    let tail = data["params"]["stderr_tail"].as_str().unwrap();
+    assert!(tail.contains("plugin failed"), "{tail}");
+    assert!(tail.contains("TypeError"), "{tail}");
+    assert!(!tail.contains("sk-fake"), "a secret leaked: {tail}");
+    assert!(
+        !tail.contains('\u{1b}'),
+        "escape sequences stay out: {tail:?}"
+    );
+    assert!(tail.len() <= 400 + '…'.len_utf8(), "{tail}");
+}
+
+#[test]
+fn a_running_cost_becomes_usage_reports_of_what_it_grew_by() {
+    let mut n = started();
+    let init = n.messages();
+    assert!(
+        init.iter().any(|m| m["result"]["capabilities"]
+            .as_array()
+            .is_some_and(|c| c.contains(&json!("usage")))),
+        "usage is declared"
+    );
+    n.call(
+        "session/prompt",
+        json!({"sessionId": "acp-s1", "text": "usage"}),
+    );
+    n.wait(|m| m["method"] == "chat/append" && m["params"]["text"]["text"] == "counted");
+    let reports: Vec<Value> = n
+        .messages()
+        .into_iter()
+        .filter(|m| m["method"] == "usage/report")
+        .map(|m| m["params"].clone())
+        .collect();
+    assert_eq!(reports.len(), 2, "{reports:#?}");
+    assert_eq!(reports[0]["costMicros"], 12300);
+    assert_eq!(reports[1]["costMicros"], 7700);
+    for r in &reports {
+        assert_eq!(r["currency"], "USD");
+        assert_eq!(r["model"], "fake/model-1");
+        assert_eq!(
+            (r["inputTokens"].as_u64(), r["outputTokens"].as_u64()),
+            (Some(0), Some(0))
+        );
+    }
 }

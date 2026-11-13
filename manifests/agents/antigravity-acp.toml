@@ -1,0 +1,10 @@
+kind = "antigravity-acp"
+display_name = "Antigravity (structured)"
+version = "2026.11.13.1"
+min_engine = 1
+
+# L2: Antigravity's `agy` CLI as an Agent Client Protocol server over stdio (`agy acp`, agy 1.5.6 `--help` on Windows). Not yet run
+# through `agora acp-bridge` against the real program. The node runs it through the bridge, so there is no terminal. The flag
+# `--dangerously-skip-permissions` is deliberately not used: permission requests must reach the panel.
+[structured]
+acp = { argv = ["agy", "acp"] }

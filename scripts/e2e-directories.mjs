@@ -45,7 +45,8 @@ try {
   await page.waitForSelector('form textarea');
   await page.fill('form textarea', 'cwd');
   await page.getByRole('button', { name: 'Send', exact: true }).click();
-  await page.waitForFunction(path => document.querySelector('[aria-label="Conversation"]')?.textContent.includes(path), folder);
+  // The fake agent answers with JSON, where a Windows path's backslashes are escaped.
+  await page.waitForFunction(path => document.querySelector('[aria-label="Conversation"]')?.textContent.includes(path), JSON.stringify(folder).slice(1, -1));
   check(true, 'adapter process and session report the selected folder as cwd');
 
   await selectFolder(folder);
@@ -53,10 +54,11 @@ try {
   await launchSelected();
   await page.waitForSelector('form textarea');
   await page.goto(`${origin}/#/`);
-  await page.getByText('Shared folder · changes belong to the workspace', { exact: true }).first().waitFor();
+  // A "Shared" chip whose title explains it.
+  await page.getByTitle('Shared folder · changes belong to the workspace', { exact: true }).first().waitFor();
   check(true, 'two independent sessions in one folder are marked as sharing files');
   await page.reload();
-  await page.getByText('Shared folder · changes belong to the workspace', { exact: true }).first().waitFor();
+  await page.getByTitle('Shared folder · changes belong to the workspace', { exact: true }).first().waitFor();
   check(true, 'workspace/session binding survives a browser reload');
   await screenshots('shared-sessions');
 

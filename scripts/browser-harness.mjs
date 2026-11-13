@@ -29,6 +29,10 @@ export async function startStack({ viewport = { width: 1440, height: 900 }, host
   const env = { ...process.env, ...(hostname ? { HOSTNAME: hostname } : {}), AGORA_HOME: home, AGORA_LANG: 'en', GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@x', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@x' };
   const run = (args) => execFileSync(bin, args, { env }).toString();
   const children = [];
+  // A script stopped with Ctrl-C (or SIGTERM) must not leave its hub on the port for the next run.
+  const onSignal = () => { for (const c of children) c.kill(); process.exit(130); };
+  process.once('SIGINT', onSignal);
+  process.once('SIGTERM', onSignal);
   let browser;
   const close = async () => {
     await browser?.close().catch(() => {});

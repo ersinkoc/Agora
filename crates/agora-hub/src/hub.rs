@@ -441,6 +441,7 @@ mod tests {
                 worktree_id: "w".into(),
                 kind: "shell".into(),
                 level: 2,
+                parent_agent_id: String::new(),
             })),
         }
         .encode_to_vec()

@@ -171,6 +171,7 @@ impl Scope {
             Body::AgentSessionReported(e) => self.granted(self.agents.get(&q(&e.agent_id))),
             Body::AgentUsageReported(e) => self.granted(self.agents.get(&q(&e.agent_id))),
             Body::AgentExited(e) => self.granted(self.agents.get(&q(&e.agent_id))),
+            Body::AgentStartRefused(e) => self.granted(self.agents.get(&q(&e.agent_id))),
             // Made by the hub, which names the agent by its hub-wide key already (ADR-0053).
             Body::AgentForgotten(e) => self.granted(self.agents.get(&e.agent_id)),
             Body::TerminalOpened(e) => {
@@ -295,6 +296,7 @@ mod tests {
                 worktree_id: String::new(),
                 kind: "k".into(),
                 level: 0,
+                parent_agent_id: String::new(),
             }),
         )
     }
@@ -534,6 +536,7 @@ mod tests {
         let stop = |id: &str| {
             Command::AgentStop(v1::AgentStop {
                 agent_id: id.into(),
+                stop_helpers: false,
             })
         };
         assert!(s.command_allowed("n1", &stop("a1")));

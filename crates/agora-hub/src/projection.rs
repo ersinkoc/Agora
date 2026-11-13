@@ -60,6 +60,8 @@ pub struct AgentView {
     pub model: String,
     /// ADR-0053: the owner had the hub forget this closed agent. It is no longer listed to clients; its tokens and cost still count.
     pub forgotten: bool,
+    /// ADR-0057: the hub-wide key (`<node>/<agent>`) of the agent that started this one; empty when the user did.
+    pub parent_agent_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -234,6 +236,11 @@ impl View {
                         output_tokens: 0,
                         model: String::new(),
                         forgotten: false,
+                        parent_agent_id: if e.parent_agent_id.is_empty() {
+                            String::new()
+                        } else {
+                            q(&e.parent_agent_id)
+                        },
                     },
                 );
             }
@@ -342,7 +349,11 @@ impl View {
                 };
                 self.leases.remove(&format!("{agent}\0{}", l.path));
             }
-            Body::MessagePosted(_) | Body::HandoffCreated(_) | Body::FilesChanged(_) => {}
+            // ADR-0057: a refused start changes no view; it is in the store and the audit trail.
+            Body::MessagePosted(_)
+            | Body::HandoffCreated(_)
+            | Body::FilesChanged(_)
+            | Body::AgentStartRefused(_) => {}
         }
     }
 
@@ -407,6 +418,7 @@ mod tests {
             worktree_id: "w".into(),
             kind: "claude-code".into(),
             level: 2,
+            parent_agent_id: String::new(),
         })
     }
 
@@ -571,6 +583,19 @@ mod tests {
     }
 
     #[test]
+    fn a_helper_names_its_parent_by_hub_wide_key() {
+        let mut v = View::default();
+        v.apply(&ev("n1", 1, started("a")));
+        let mut helper = started("b");
+        if let Body::AgentStarted(s) = &mut helper {
+            s.parent_agent_id = "a".into();
+        }
+        v.apply(&ev("n1", 2, helper));
+        assert_eq!(v.agents["n1/b"].parent_agent_id, "n1/a");
+        assert_eq!(v.agents["n1/a"].parent_agent_id, "");
+    }
+
+    #[test]
     fn agent_lifecycle_tracks_state_usage_and_exit() {
         let mut v = View::default();
         v.apply(&ev("n1", 1, started("a")));
@@ -651,6 +676,8 @@ mod tests {
                 approval_id: "x".into(),
                 approved: true,
                 signer_device_id: "d".into(),
+                helper_grant: 0,
+                helpers_may_start: false,
             }),
         ));
         assert_eq!(v.needs_attention(), ["n1/a"]);

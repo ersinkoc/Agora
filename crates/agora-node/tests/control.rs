@@ -131,6 +131,7 @@ fn project_list_and_agent_start_stop_over_the_socket() {
 
     ok(c.call(Cmd::AgentStop(v1::AgentStop {
         agent_id: s.agent_id.clone(),
+        stop_helpers: false,
     })));
     assert!(!n.supervisor.lock().unwrap().list()[0].running);
 
@@ -162,7 +163,8 @@ fn errors_travel_as_codes_with_params() {
     );
     assert_eq!(
         err_code(c.call(Cmd::AgentStop(v1::AgentStop {
-            agent_id: "agent-404".into()
+            agent_id: "agent-404".into(),
+            stop_helpers: false,
         }))),
         "agent.not_found"
     );
@@ -351,6 +353,7 @@ fn the_node_reports_what_the_hub_needs_to_show_it() {
     let s = started(ok(c.call(start_cmd("shell"))));
     ok(c.call(Cmd::AgentStop(v1::AgentStop {
         agent_id: s.agent_id.clone(),
+        stop_helpers: false,
     })));
 
     // Exit is noticed by the supervision tick; wait for the terminal to be reported closed.
@@ -568,6 +571,7 @@ fn agents_on_one_node_coordinate_through_their_own_mesh_endpoints() {
     assert_eq!(r["error"]["code"], "lease.held");
     ok(c.call(Cmd::AgentStop(v1::AgentStop {
         agent_id: a1.clone(),
+        stop_helpers: false,
     })));
     assert!(!n.mesh.is_registered(&AgentId::new(&a1)));
     assert!(!sock(&a1).exists(), "its endpoint is gone");
@@ -749,6 +753,7 @@ fn input_to_a_program_that_never_reads_does_not_wedge_the_node() {
     ok(c.call(Cmd::AgentList(v1::AgentList::default())));
     ok(c.call(Cmd::AgentStop(v1::AgentStop {
         agent_id: s.agent_id.clone(),
+        stop_helpers: false,
     })));
     assert!(
         t0.elapsed() < Duration::from_secs(5),
@@ -919,6 +924,8 @@ fn an_adapter_approval_waits_for_a_signed_decision_and_is_relayed() {
             approved,
             signer_device_id: device.into(),
             signature: signed_message(node, id, approved),
+            helper_grant: 0,
+            helpers_may_start: false,
         }))
     };
     let state_of = |n: &Node, id: &str| {
@@ -1049,6 +1056,8 @@ fn with_no_trusted_device_every_decision_is_refused() {
         approved: true,
         signer_device_id: "phone".into(),
         signature: signed_message("node-test", &id, true),
+        helper_grant: 0,
+        helpers_may_start: false,
     }));
     assert_eq!(err_code(r), "approval.signature_invalid");
 }
@@ -1155,6 +1164,7 @@ fn uncommitted_changes_in_an_agents_workspace_are_reported() {
     }
     ok(c.call(Cmd::AgentStop(v1::AgentStop {
         agent_id: s.agent_id,
+        stop_helpers: false,
     })));
 }
 
@@ -1215,6 +1225,7 @@ fn git_status_and_diff_cover_new_and_changed_files_and_only_agent_workspaces() {
     }
     ok(c.call(Cmd::AgentStop(v1::AgentStop {
         agent_id: s.agent_id,
+        stop_helpers: false,
     })));
 }
 
@@ -1297,6 +1308,7 @@ fn files_list_and_read_stay_inside_an_agents_workspace() {
     );
     ok(c.call(Cmd::AgentStop(v1::AgentStop {
         agent_id: s.agent_id,
+        stop_helpers: false,
     })));
 }
 
@@ -1345,6 +1357,7 @@ fn git_log_lists_the_workspaces_commits_newest_first() {
     );
     ok(c.call(Cmd::AgentStop(v1::AgentStop {
         agent_id: s.agent_id,
+        stop_helpers: false,
     })));
 }
 
@@ -1440,6 +1453,7 @@ fn a_chat_agents_conversation_streams_to_whoever_subscribes() {
     );
     ok(c.call(Cmd::AgentStop(v1::AgentStop {
         agent_id: s.agent_id,
+        stop_helpers: false,
     })));
 }
 

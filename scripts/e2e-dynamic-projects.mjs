@@ -97,5 +97,6 @@ try {
   console.error(error.stack || error); process.exitCode = 1;
 } finally {
   for (const client of clients) client.close();
-  await stack?.close(); rmSync(fixture, { recursive: true, force: true });
+  // On Windows a process that was just killed still holds its folder for a moment.
+  await stack?.close(); rmSync(fixture, { recursive: true, force: true, maxRetries: 10, retryDelay: 500 });
 }
