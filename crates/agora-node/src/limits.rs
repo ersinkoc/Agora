@@ -21,7 +21,7 @@ pub struct DeviceLimits {
 type Inherited = (
     std::path::PathBuf,
     Option<Vec<u8>>,
-    BTreeMap<String, BTreeSet<String>>,
+    Vec<crate::device_trust::Entry>,
 );
 
 impl DeviceLimits {
@@ -36,32 +36,24 @@ impl DeviceLimits {
     /// Follows the trusted-devices file for limits inherited through endorsements (ADR-0061), read again whenever it changes.
     pub fn follow_trust_file(&self, path: &std::path::Path) {
         *self.inherited.lock().unwrap_or_else(|e| e.into_inner()) =
-            Some((path.to_path_buf(), None, BTreeMap::new()));
+            Some((path.to_path_buf(), None, Vec::new()));
     }
 
-    /// What `device` may act in: what the policy's line and what it inherited through an endorsement both allow (the policy can
-    /// narrow an inherited limit, never widen it: a limited device may endorse a key under an id the policy names more widely);
-    /// `None`: not limited.
+    /// What `device` may act in: its policy line, what it inherited through an endorsement, and what its endorser may act in now, up
+    /// the chain ([`crate::device_trust::effective_limit`]); `None`: not limited.
     fn limit(&self, device: &str) -> Option<BTreeSet<String>> {
-        let inherited = {
-            let mut guard = self.inherited.lock().unwrap_or_else(|e| e.into_inner());
-            match guard.as_mut() {
-                None => None,
-                Some((path, seen, map)) => {
-                    let now = std::fs::read(&*path).ok();
-                    if now != *seen {
-                        *map = crate::device_trust::read_entries(path)
-                            .0
-                            .into_iter()
-                            .filter_map(|e| e.projects.map(|p| (e.id, p)))
-                            .collect();
-                        *seen = now;
-                    }
-                    map.get(device).cloned()
+        let mut guard = self.inherited.lock().unwrap_or_else(|e| e.into_inner());
+        match guard.as_mut() {
+            None => self.map.get(device).cloned(),
+            Some((path, seen, entries)) => {
+                let now = std::fs::read(&*path).ok();
+                if now != *seen {
+                    *entries = crate::device_trust::read_entries(path).0;
+                    *seen = now;
                 }
+                crate::device_trust::effective_limit(entries, &self.map, device)
             }
-        };
-        combine(self.map.get(device).cloned(), inherited)
+        }
     }
 
     pub fn is_empty(&self) -> bool {

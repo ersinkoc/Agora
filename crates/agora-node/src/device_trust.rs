@@ -243,6 +243,31 @@ pub fn effective_expiry(entries: &[Entry], e: &Entry) -> Option<Option<u64>> {
     Some(end)
 }
 
+/// What `id` may act in here (ADR-0049 with ADR-0061): the policy's line for it, what it inherited when it was endorsed, and what its
+/// endorser may act in NOW, up the chain (at most two endorsements), all at once. So a device demoted or narrowed by the owner's
+/// policy takes the devices it endorsed down with it, and the policy can never widen what was inherited. `None`: not limited. A chain
+/// whose endorser is gone limits to nothing.
+pub fn effective_limit(
+    entries: &[Entry],
+    policy: &std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+    id: &str,
+) -> Option<std::collections::BTreeSet<String>> {
+    let mut limit: Option<std::collections::BTreeSet<String>> = None;
+    let mut at = id.to_string();
+    for _ in 0..=MAX_DEPTH {
+        let entry = entries.iter().find(|e| e.id == at);
+        limit = crate::limits::combine(limit, policy.get(&at).cloned());
+        limit = crate::limits::combine(limit, entry.and_then(|e| e.projects.clone()));
+        match entry.and_then(|e| e.via.clone()) {
+            None => return limit,
+            Some(v) if entries.iter().any(|e| e.id == v) => at = v,
+            Some(_) => return Some(std::collections::BTreeSet::new()),
+        }
+    }
+    // Deeper than any chain this node accepts.
+    Some(std::collections::BTreeSet::new())
+}
+
 /// Is `e` trusted at `now_ms`?
 pub fn alive(entries: &[Entry], e: &Entry, now_ms: u64) -> bool {
     matches!(effective_expiry(entries, e), Some(end) if end.is_none_or(|t| now_ms < t))
@@ -595,13 +620,8 @@ impl DeviceTrust {
             .policy
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .get(id)
-            .cloned();
-        let inherited = entries
-            .iter()
-            .find(|e| e.id == id)
-            .and_then(|e| e.projects.clone());
-        crate::limits::combine(policy, inherited)
+            .clone();
+        effective_limit(entries, &policy, id)
     }
 
     pub fn file(&self) -> &Path {
@@ -743,7 +763,9 @@ impl DeviceTrust {
                     .with("device_id", e.device_id.as_str()))
             }
             Some(x) if x.expires_ms.is_none() => Ok(Endorsed::Already(None)),
-            Some(x) if x.expires_ms.is_some_and(|old| old >= expires) => {
+            Some(x)
+                if alive(&entries, x, now_ms) && x.expires_ms.is_some_and(|old| old >= expires) =>
+            {
                 Ok(Endorsed::Already(x.expires_ms))
             }
             existing => {
@@ -758,6 +780,9 @@ impl DeviceTrust {
                         .with("node_id", self.node_id.as_str())
                         .with("rule", "device.projects"));
                 }
+                // Only a still-valid endorsed entry is protected from being taken over; an expired one (or one whose endorser is gone)
+                // is endorsed afresh like a new device.
+                let existing = existing.filter(|x| alive(&entries, x, now_ms));
                 let entry = match existing {
                     // A renewal keeps who endorsed it and what it may do: only its own endorser may renew it, and only while that
                     // endorser's limits still cover the device's (a limited device cannot re-parent a wider one to itself).
@@ -884,6 +909,22 @@ impl DeviceTrust {
             return;
         };
         let Some(old) = e.expires_ms else { return };
+        // Not renewed when its endorser's limits today no longer cover what it was given: it then runs out, and the owner decides.
+        if let Some(v) = &e.via {
+            let policy = self
+                .policy
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone();
+            let covered = match (effective_limit(&entries, &policy, v), &e.projects) {
+                (None, _) => true,
+                (Some(_), None) => false,
+                (Some(now), Some(given)) => given.is_subset(&now),
+            };
+            if !covered {
+                return;
+            }
+        }
         let mut new = now_ms.saturating_add(MAX_ENDORSEMENT_MS);
         if let Some(endorser) = e
             .via
