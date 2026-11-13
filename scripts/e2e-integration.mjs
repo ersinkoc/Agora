@@ -91,18 +91,16 @@ try {
   const helperIdle = await ms.tool('agent_wait', { agent_id: helper.value?.agent_id, state: 'idle', timeout_s: 60 }, 70000).catch(e => ({ error: true, value: e.message }));
   check(!helperIdle.error, `the parent can wait for its helper to be idle: ${JSON.stringify(helperIdle.value)}`);
 
-  // The spec gives ACP and adapter agents the mesh like any agent (adapter-protocol.md); on main they get no endpoint yet (comms
-  // finding 2026-11-13). Reported, not failed, until that is fixed; then this says so.
+  // ACP and adapter agents have their own mesh endpoint like terminal agents (#422, adapter-protocol.md).
   const sockets = node => (existsSync(join(node, 'm')) ? readdirSync(join(node, 'm')) : []);
-  const acpHasMesh = sockets(desktop.home).includes(`${acp}.sock`) && sockets(home).includes(`${chat}.sock`);
-  console.log(acpHasMesh ? 'FIXED ACP and adapter agents have a mesh endpoint now: make this a check' : 'KNOWN ACP and adapter agents have no mesh endpoint (finding of 2026-11-13)');
+  check(sockets(desktop.home).includes(`${acp}.sock`), 'the ACP agent on the desktop has its mesh endpoint');
+  check(sockets(home).includes(`${chat}.sock`), 'the adapter agent in the worktree has its mesh endpoint');
 
-  // 3. Messages between machines: the laptop's shell writes to a shell in project B on the desktop, which reads it.
-  const shellB = id(desktop.run(['agent', 'start', 'shell', '--cwd', projB]));
-  const md = mesh(bin, desktop.env, join(desktop.home, 'm', `${shellB}.sock`)); clients.push(md);
+  // 3. Messages between machines: the laptop's shell writes to the ACP agent on the desktop, which reads it from its own inbox.
+  const md = mesh(bin, desktop.env, join(desktop.home, 'm', `${acp}.sock`)); clients.push(md);
   await md.init();
-  const sent = await ms.tool('send_message', { to: `desktop/${shellB}`, body: 'hello from the laptop' });
-  check(!sent.error, `a message to an agent on the other machine is accepted: ${JSON.stringify(sent.value)}`);
+  const sent = await ms.tool('send_message', { to: `desktop/${acp}`, body: 'hello from the laptop' });
+  check(!sent.error, `a message to the ACP agent on the other machine is accepted: ${JSON.stringify(sent.value)}`);
   let inbox;
   for (let i = 0; i < 20; i++) {
     inbox = await md.tool('inbox', {});
@@ -110,7 +108,7 @@ try {
     await new Promise(r => setTimeout(r, 500));
   }
   const got = (inbox?.value ?? []).find?.(m => m.body === 'hello from the laptop');
-  check(!!got, 'the other machine\'s agent receives it');
+  check(!!got, 'the other machine\'s ACP agent receives it');
   check(got?.provenance?.node === 'laptop', `it says which machine it came from: ${JSON.stringify(got?.provenance)}`);
 
   // 4. The shared board: project A is on both machines, so a task made on the laptop is seen from the desktop's clone.
@@ -129,19 +127,27 @@ try {
     if (!seen) await new Promise(r => setTimeout(r, 500));
   }
   check(seen, 'the desktop agent in the same project sees it');
+  // The ACP agent is in project B. A failed query is not evidence that the board is kept apart.
   const otherProject = await md.tool('task_list', {});
-  check(!JSON.stringify(otherProject.value).includes('Integration task'), 'an agent in another project does not');
+  check(!otherProject.error && !JSON.stringify(otherProject.value).includes('Integration task'), `an agent in another project does not: ${JSON.stringify(otherProject.value)}`);
 
   // 5. The node's own list agrees with what the window shows.
   const agents = run(['agent', 'list']);
   check([shell, chat, helper.value?.agent_id].every(a => agents.includes(a)), `the laptop lists its three agents: ${agents.trim().split('\n').map(l => l.replace(/\s+/g, ' ')).join(' | ')}`);
 
-  // 6. A reload keeps everything.
+  // 6. A reload keeps everything: each machine shows the same agents as before, and the helper is still under its parent.
+  const rows = () => page.evaluate(() => Object.fromEntries([...document.querySelectorAll('aside section[data-machine-id]')]
+    .map(s => [s.dataset.machineId, s.querySelectorAll('button[aria-pressed]').length])));
+  await page.waitForFunction(() => document.querySelectorAll('aside section[data-machine-id="desktop"] button[aria-pressed]').length >= 2, null, { timeout: 30000 }).catch(() => {});
+  const before = await rows();
   await page.reload();
   await step('a reload keeps both machines, the agents and the helper', async () => {
-    await page.waitForFunction(() => document.querySelectorAll('aside section[data-machine-id]').length === 2, null, { timeout: 30000 });
+    await page.waitForFunction(want => {
+      const now = Object.fromEntries([...document.querySelectorAll('aside section[data-machine-id]')].map(s => [s.dataset.machineId, s.querySelectorAll('button[aria-pressed]').length]));
+      return Object.keys(want).length === 2 && Object.entries(want).every(([m, n]) => now[m] === n);
+    }, before, { timeout: 30000 });
     await page.getByText(/started by/).first().waitFor({ timeout: 20000 });
-    check(true, 'a reload keeps both machines, the agents and the helper');
+    check(before.laptop >= 3 && before.desktop >= 2, `a reload keeps both machines, every agent row (${JSON.stringify(before)}) and the helper`);
   });
 
   // 7. The desktop goes away: it is shown offline, the laptop is not affected, and it comes back.
