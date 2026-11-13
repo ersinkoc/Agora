@@ -1,3 +1,4 @@
+import { ApprovalBanner } from './components/ApprovalBanner';
 import { AgentAddress } from './components/AgentAddress';
 import { LanguagePicker } from './components/LanguagePicker';
 import { ThemePicker } from './components/ThemePicker';
@@ -110,14 +111,7 @@ export function Focus({ agent, approvals = [], onResolve, source: live, costMicr
         <ThemePicker />
       </header>
       <main className="flex min-h-0 min-w-0 flex-col">
-        {approvals.filter((x) => x.agentId === agent.id).map((x) => (
-          <div key={x.id} role="alert" className="flex flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-needs-you/60 bg-surface-2 px-3 py-2">
-            <StateMark state="needs-you" />
-            <div className="min-w-0 flex-1"><strong className="block truncate">{t('approval-title', { name: x.agentName })}</strong><span className="block truncate text-xs text-muted">{x.action}{x.detail ? ` · ${x.detail}` : ''}</span></div>
-            {onResolve && <><button type="button" className="button button--primary px-3 py-1 text-xs" onClick={() => onResolve(x, true)}>{t('approval-allow')}</button>
-            <button type="button" className="button px-3 py-1 text-xs" onClick={() => onResolve(x, false)}>{t('approval-deny')}</button></>}
-          </div>
-        ))}
+        {approvals.filter((x) => x.agentId === agent.id).map((x) => <ApprovalBanner key={x.id} approval={x} onResolve={onResolve} />)}
         <AgentAddress key={agent.id} agent={agent} />
         <div className="pane min-h-0 flex-1 bg-surface-0 p-1.5" aria-label={agent.terminal === false ? t('chat-log') : t('focus-terminal')}>
           {agent.terminal === false ? <PromptBox agent={agent} source={chatSource} send={sendPrompt} /> : (
