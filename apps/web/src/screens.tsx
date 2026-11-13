@@ -7,10 +7,12 @@ import { ThemePicker } from './components/ThemePicker';
 import { PromptBox } from './components/PromptBox';
 import type { ChatSource } from './net/chat';
 import { AgentTile } from './components/AgentTile';
+import { StartAgent, type KindChoice } from './components/StartAgent';
 import { AttentionStrip } from './components/AttentionStrip';
 import { Icon } from './components/Icon';
 import { NetworkView } from './components/NetworkView';
 import { StateBadge } from './components/StateBadge';
+import { NoAskBadge } from './components/NoAskBadge';
 import type { ApprovalModel, MachineModel, MessageModel, ProjectCost } from './net/view';
 import type { Device } from './net/approval';
 import { money, type UsageSummary } from './net/usage';
@@ -71,7 +73,17 @@ const demoChat: ChatSource = {
   },
 };
 
-function Themed({ theme }: { theme: 'dark' | 'light' }) {
+// ADR-0059: the start window with a kind that offers "Don't ask", for the gallery (nothing is sent anywhere).
+const demoKinds: KindChoice[] = [{ kind: 'codex', name: 'Codex', installed: true, options: [{ id: 'skip-permissions', label: 'option-skip-permissions', skipsPermissions: true }] }];
+function DemoStart({ onClose }: { onClose: () => void }) {
+  return <StartAgent projects={[{ node: 'laptop', projectId: 'p', label: 'login-fix', path: '/home/dev/code/login-fix' }]}
+    machines={[{ id: 'laptop', name: 'laptop', os: 'linux', online: true, agentsRunning: 1, lastSeenMs: 0 }]}
+    loadKinds={async () => demoKinds}
+    inspect={async (_node, path) => ({ path, projectId: 'p', gitRoot: path, branch: 'main', portable: false })}
+    onStart={async () => { onClose(); return undefined; }} onClose={onClose} />;
+}
+
+function Themed({ theme, onStart }: { theme: 'dark' | 'light'; onStart?: () => void }) {
   return (
     <section className="theme-panel" data-theme={theme}>
       <h2>{t(`theme-${theme}`)}</h2>
@@ -85,7 +97,7 @@ function Themed({ theme }: { theme: 'dark' | 'light' }) {
       <StartApproval approval={demoStartApproval} start={demoStartApproval.start} onResolve={() => {}} />
       <HelperGrants list={async () => [{ id: 'ap-1', kind: 'codex', folder: '/home/dev/code/login-fix', remaining: 2 }]} revoke={async () => {}} refresh={0} />
       <div className="gallery__row">
-        <button type="button" className="button button--primary">{t('action-start-agent')}</button>
+        <button type="button" className="button button--primary" onClick={onStart}>{t('action-start-agent')}</button>
         <button type="button" className="button">{t('action-open')}</button>
       </div>
     </section>
@@ -94,11 +106,13 @@ function Themed({ theme }: { theme: 'dark' | 'light' }) {
 
 // Every component in every state, both themes: the review surface for UI pull requests.
 export function Gallery() {
+  const [starting, setStarting] = useState(false);
   return (
     <main className="page gallery">
       <h1>{t('gallery-title')}</h1>
-      <Themed theme="dark" />
-      <Themed theme="light" />
+      <Themed theme="dark" onStart={() => setStarting(true)} />
+      <Themed theme="light" onStart={() => setStarting(true)} />
+      {starting && <DemoStart onClose={() => setStarting(false)} />}
     </main>
   );
 }
@@ -135,6 +149,7 @@ export function Focus({ agent, approvals = [], onResolve, source: live, costMicr
         <button type="button" className="ide-row w-auto flex-none text-[13px] text-muted hover:text-ink" onClick={onBack}><Icon name="chevron" className="size-3.5 rotate-180 rtl:rotate-0" />{t('focus-back')}</button>
         <h1 className="m-0 truncate text-[13px] font-semibold tracking-normal">{agent.name}</h1>
         <span title={`${t('focus-why')} ${why}`}><StateBadge state={agent.state} /></span>
+        <NoAskBadge agent={agent} />
         <span className="hidden min-w-0 items-center gap-1.5 truncate text-xs text-muted md:flex"><Icon name="machine" className="size-3.5" />{agent.machine}<Icon name="chevron" className="size-3 rtl:rotate-180" /><Icon name="folder" className="size-3.5" />{agent.project || agent.workspace}{agent.branch && <><Icon name="branch" className="ms-1 size-3.5" /><span className="font-mono">{agent.branch}</span></>}</span>
         <span className="flex-1" />
         {agent.tokens ? <span className="ide-chip">{t('agent-tokens', { count: agent.tokens })}{costMicroUsd !== undefined ? ` · ${t('agent-cost', { amount: money(costMicroUsd) })}` : ''}</span> : null}

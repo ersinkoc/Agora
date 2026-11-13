@@ -43,6 +43,7 @@ export interface AgentTileModel {
   endedMs?: number;
   session?: SessionModel; // ADR-0058, for agents whose adapter reported it
   parentId?: string; // ADR-0057: the agent that started this one (hub-wide key)
+  skipsPermissions?: boolean; // ADR-0059: started with an option that lets it act without asking (the "does not ask" badge)
   parentName?: string;
 }
 
