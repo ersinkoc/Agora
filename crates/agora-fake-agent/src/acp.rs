@@ -6,6 +6,7 @@
 //! - `crash`: exits at once.
 //! - `crash-loud`: writes a fatal error (with a fake token in it) to stderr and exits with code 4, mid-turn.
 //! - `silent`: finishes the turn (`end_turn`) without saying anything, like an agent whose provider failed.
+//! - `silent-loud`: the same, after writing the reason (an auth error, a home path and a key) to stderr.
 //! - `refuse`: finishes the turn with the stop reason `refusal`.
 //! - `fail`: answers the prompt with a JSON-RPC error.
 //! - `usage`: reports `usage_update` twice (a running cost of 0.0123 USD, then 0.02 USD), says `counted` and finishes.
@@ -141,6 +142,14 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
                         std::process::exit(4)
                     }
                     "silent" => {}
+                    "silent-loud" => {
+                        // Like opencode with `--print-logs`: the reason is only on stderr.
+                        let home = std::env::var("HOME").unwrap_or_default();
+                        eprintln!("ERROR service=llm provider rejected: invalid x-api-key (auth) at {home}/.local/share/fake/auth.json");
+                        eprintln!(
+                            "ERROR at /Users/someone/.config/fake key=sk-fake0123456789abcdefghij"
+                        );
+                    }
                     "auto" => {
                         update(
                             out,

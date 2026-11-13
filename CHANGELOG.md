@@ -10,9 +10,11 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 - The running cost an ACP agent reports (`usage_update`) becomes a usage report of how much it grew, with the agent's model; the bridge declares `usage`.
 - ADR-0058, protocol and node: those reasons now reach the conversation as notices (a code and parameters, rendered by the clients in your language). An ACP agent that dies or refuses while starting makes `agent start` fail with that reason (`adapter.agent_exited` with the step, exit code and a short, secret-free tail of its errors; `adapter.agent_refused`) instead of "Something went wrong". The modes and models an agent offers are recorded, and a node switches between them on `agent.set_mode` / `agent.set_model` (only ids the agent offered; never sent to a node or agent that cannot). Usage reports carry how full the agent's context is and its own cost, which the cost view uses in place of an estimate.
 - ADR-0058, windows: a chat agent's conversation shows those notices in your language (a failed or empty turn, the agent stopping with the end of its error output). Above the conversation, the agent's mode and model can be switched among what it offers, a mode in which it acts without asking needs a confirmation first and is never chosen for you, and the bar shows how full its context is and the cost it reported. The terminal client shows the notices and the mode, model and context, and switches with `/mode <name>` and `/model <name>` (a mode that does not ask needs the same line twice).
+- A failed or empty ACP turn's notice carries what the agent wrote to its error output during that turn (an expired login, a provider's refusal); `opencode-acp` now asks opencode for those errors (`--print-logs --log-level ERROR`). Error output no longer shows your home folder's path even though the bridge runs without `HOME`: any `/Users/<name>`, `/home/<name>`, `/root` or `C:\Users\<name>` becomes `~`.
 
 ### Approvals
 - An agent shown full size now shows what it waits on with Allow and Deny right there; before, it said "Needs you" and the answer could only be given from the window.
+
 ### Agents
 - New `opencode-acp` and `antigravity-acp` kinds start opencode and Antigravity (`agy acp`) as structured (ACP) agents. Both were written from the programs' own `--help` and still need a run against the real programs.
 

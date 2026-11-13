@@ -113,16 +113,17 @@ The bridge never writes text for people. When something went wrong it gives a st
 
 | Code | Params | When | Where |
 | --- | --- | --- | --- |
-| `adapter.turn_empty` | | The agent answered the prompt with `end_turn` (or no stop reason) and sent nothing: no text, tool call, plan, diff or permission request. opencode does this when its provider refuses the request | the closing `state/update` `idle` (`message`), a `log` line (`LOG_LEVEL_WARN`) and a `chat/append` notice (ADR-0058) |
+| `adapter.turn_empty` | `stderr_tail` (only when the agent wrote to stderr during the turn) | The agent answered the prompt with `end_turn` (or no stop reason) and sent nothing: no text, tool call, plan, diff or permission request. opencode does this when its provider refuses the request | the closing `state/update` `idle` (`message`), a `log` line (`LOG_LEVEL_WARN`) and a `chat/append` notice (ADR-0058) |
 | `adapter.turn_stopped` | `stop_reason` (`refusal`, `max_tokens`, `max_turn_requests`, ...; `other` for anything that is not a lowercase word) | The agent stopped the turn itself | same |
-| `adapter.turn_failed` | `rpc_code` | The agent answered `session/prompt` with a JSON-RPC error | same |
+| `adapter.turn_failed` | `rpc_code`, `stderr_tail` (as for `turn_empty`) | The agent answered `session/prompt` with a JSON-RPC error | same |
 | `adapter.agent_exited` | `stage` (`initialize`, `session`, `turn`, `idle`, `start`, `option`), `exit_code` (when it exited with one), `stderr_tail` | The agent's output ended. Every request the node still waits for (`initialize`, `session/start`, `session/set_option`) is answered with a JSON-RPC error whose `data` is `{code, params}` with the stage of that request; a `log` line (`LOG_LEVEL_ERROR`) and a `chat/append` notice carry the same for the stage it was in. An agent that died before the node asked anything (`start`) leaves the bridge waiting up to 2 s for the node's first request, which it answers the same way (`initialize` or `session` as its stage). Then the bridge exits | error `data` (`HostError::reason` on the node side), notice and `log` |
 | `adapter.agent_refused` | `stage` (`initialize`, `session`) | The agent answered its own `initialize` or `session/new` (`session/load`) with an error | error `data` of the node's request |
 | `adapter.option_refused` | `id` | The id was not one the agent offered, or the agent answered `session/set_mode` / `session/set_model` with an error | error `data` of `session/set_option` |
 
-A `log` line's `message` is the JSON `{"code": ..., "params": {...}}`. `stderr_tail` is at most the last 5 non-empty lines and 400
+For `turn_empty` and `turn_failed` the bridge waits 100 ms for the last lines and adds what the agent wrote to stderr during that turn,
+scrubbed and limited like an exit's tail. A `log` line's `message` is the JSON `{"code": ..., "params": {...}}`. `stderr_tail` is at most the last 5 non-empty lines and 400
 bytes of the agent's stderr (cut at the front, marked `…`). Escape sequences and control characters are removed, OSC, DCS, APC and
-PM sequences with their whole payload (a hyperlink's address, a window title). The home folder is written `~` (every spelling of it).
+PM sequences with their whole payload (a hyperlink's address, a window title). The home folder is written `~` (every spelling of it): the bridge's own `HOME` when it has one, and in any case any user's home folder (`/Users/<name>`, `/home/<name>`, `/root`, `C:\Users\<name>`, `C:/Users/<name>`, `/c/Users/<name>`, drive and `Users` in any case, names with dots or spaces), since under a node the bridge runs without `HOME`.
 Replaced by `[redacted]`: the user and password of a URL (`https://user:pass@host` → `https://[redacted]@host`); any unbroken run of
 32 or more token characters (letters, digits, `_ - + / = .`) that is not a path (a path starts with `/`, `~` or `.`, or has `/`
 between parts shorter than 32 and no `+` or `=`), so base64 and letters-only secrets are caught; words of 20 or more characters
