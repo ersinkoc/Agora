@@ -276,6 +276,87 @@ fn board_reply(
     }
 }
 
+/// How long `workspace_status` waits for the hub before it answers from this node alone (`partial: true`).
+const STATUS_WAIT: Duration = Duration::from_secs(3);
+
+/// `workspace_status`: this node's broker answers for its own agents; on a shared project (ADR-0039) the hub adds the agents on other
+/// machines and the board's tasks and leases. When the hub cannot be asked the answer is this node's alone, marked `partial`.
+/// `None` when the line is not that call (or the caller is not registered: the broker answers the error).
+fn status_reply(
+    conn: &McpConnection,
+    line: &str,
+    mesh: &Arc<Mutex<Mesh>>,
+    remote: &RemoteSlot,
+    shares: &Shares,
+) -> Option<Message> {
+    if !conn.initialized() {
+        return None;
+    }
+    let Ok(Message::Request { id, method, params }) = agora_protocol::jsonrpc::parse_line(line)
+    else {
+        return None;
+    };
+    if method != "tools/call"
+        || params.get("name").and_then(Value::as_str) != Some("workspace_status")
+        || !params
+            .get("arguments")
+            .is_none_or(|a| a.is_null() || a.is_object())
+    {
+        return None;
+    }
+    let (mut status, project, node) = {
+        let m = mesh.lock().unwrap_or_else(|e| e.into_inner());
+        let status = agora_mesh::awareness::local_status(&m, conn.agent(), now_ms()).ok()?;
+        let info = m.agent_info(conn.agent())?;
+        (status, info.project.clone(), info.node.clone())
+    };
+    let link = remote.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    // `Some(None)`: the hub says the project lives on this machine only. `None`: the hub could not be asked.
+    let hub: Option<Option<Value>> = match link {
+        None => None,
+        Some(_) if matches!(shares.get(&project), Some((false, at)) if at.elapsed() < LOCAL_FOR) => {
+            Some(None)
+        }
+        Some(link) => {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let asked = Instant::now();
+            link.board(
+                conn.agent().as_str(),
+                &project,
+                "workspace_status",
+                "{}",
+                Box::new(move |r| {
+                    let _ = tx.send(r);
+                }),
+            );
+            match rx.recv_timeout(STATUS_WAIT) {
+                Ok(Ok(r)) if r.shared => serde_json::from_str::<Value>(&r.result_json)
+                    .ok()
+                    .filter(|v| v.get("isError").and_then(Value::as_bool) != Some(true))
+                    .and_then(|v| agora_mesh::mcp::tool_result_value(&v))
+                    .map(Some),
+                Ok(Ok(_)) => {
+                    shares.set_not_shared_since(&project, asked);
+                    Some(None)
+                }
+                _ => None,
+            }
+        }
+    };
+    match hub {
+        Some(Some(h)) => agora_mesh::awareness::merge_shared(&mut status, &h, &node),
+        Some(None) => {
+            status["partial"] = json!(false);
+            agora_mesh::awareness::finish(&mut status);
+        }
+        None => {}
+    }
+    Some(Message::Response {
+        id,
+        result: agora_mesh::mcp::ok_tool_result(&status),
+    })
+}
+
 struct AgentServer {
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
@@ -460,7 +541,7 @@ impl MeshServer {
         self.mesh
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .register(info);
+            .join(info, now_ms());
         let stop = Arc::new(AtomicBool::new(false));
         let thread = {
             let (mesh, stop, agent, remote, allowed, shares, helpers) = (
@@ -534,6 +615,12 @@ impl MeshServer {
 
     /// The agent ended: it leaves the mesh (its tasks, leases and asks are given back) and its endpoint closes.
     pub fn unregister(&self, agent: &AgentId) {
+        self.unregister_because(agent, "left");
+    }
+
+    /// [`Self::unregister`] saying why, for the `presence` notice the other agents of its project get: a fixed word (`finished`,
+    /// `stopped`, `crashed`, `left`).
+    pub fn unregister_because(&self, agent: &AgentId, reason: &'static str) {
         let server = self
             .agents
             .lock()
@@ -549,7 +636,7 @@ impl MeshServer {
         self.mesh
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .unregister(agent, now_ms());
+            .leave(agent, reason, now_ms());
     }
 
     pub fn set_state(&self, agent: &AgentId, state: &str) {
@@ -557,6 +644,29 @@ impl MeshServer {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .set_state(agent, state);
+    }
+
+    /// The agent's state in UI words and who started it (ADR-0057), as the supervisor sees them now.
+    pub fn observe(&self, agent: &AgentId, state: &str, parent: Option<&AgentId>) {
+        let mut m = self.mesh.lock().unwrap_or_else(|e| e.into_inner());
+        m.set_state(agent, state);
+        m.set_parent(agent, parent);
+    }
+
+    /// The kind of a chat agent's latest item in fixed words (`agora_mesh::awareness`), never the item's text.
+    pub fn set_activity(&self, agent: &AgentId, latest: &'static str) {
+        self.mesh
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .set_activity(agent, Some(latest));
+    }
+
+    /// How many files are changed in `worktree`, from the node's git status.
+    pub fn set_files_changed(&self, worktree: &Path, n: u32) {
+        self.mesh
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .set_files_changed(&worktree.to_string_lossy(), n);
     }
 
     /// Audit events produced by mesh activity since the last call.
@@ -976,6 +1086,12 @@ fn serve(
                         }
                         continue;
                     }
+                }
+                if let Some(msg) = status_reply(&conn, &text, mesh, remote, shares) {
+                    if send(&mut writer, &msg).is_err() {
+                        break;
+                    }
+                    continue;
                 }
                 // A shared project's tasks, leases and handoffs are decided on the hub's board (ADR-0039).
                 if let Some(msg) = board_reply(&conn, &text, mesh, remote, shares) {

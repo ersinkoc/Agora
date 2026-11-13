@@ -249,6 +249,76 @@ impl Boards {
         a
     }
 
+    /// `workspace_status` on a shared project: the hub's facts about every running agent of the project on an online node (kind,
+    /// machine, state, the board task it claimed, the paths it holds, who started it), the board's open tasks and live leases, and how
+    /// many machines are online. Read only; the calling node merges it with what it knows of its own agents.
+    fn status(&self, view: &View, project: &str, now_ms: u64) -> Answer {
+        use agora_protocol::v1::AgentState;
+        let mut guard = self.by_project.lock().unwrap_or_else(|e| e.into_inner());
+        let mesh = guard
+            .entry(project.to_string())
+            .or_insert_with(|| Mesh::new(Limits::default()));
+        Self::sync(mesh, view, project, now_ms);
+        mesh.release_orphans();
+        mesh.expire_leases(now_ms);
+        let word = |s: AgentState| match s {
+            AgentState::Working => "working",
+            AgentState::Blocked => "blocked",
+            AgentState::Idle => "idle",
+            AgentState::Done => "done",
+            AgentState::Unspecified => "unknown",
+        };
+        let agents: Vec<Value> = view
+            .agents
+            .iter()
+            .filter(|(_, a)| {
+                a.project_id == project
+                    && a.running
+                    && view.nodes.get(&a.node_id).is_some_and(|n| n.online)
+            })
+            .take(agora_mesh::awareness::MAX_AGENTS)
+            .map(|(key, a)| {
+                let id = AgentId::new(key.as_str());
+                json!({
+                    "id": key, "kind": a.kind, "machine": a.node_id, "state": word(a.state),
+                    "holds": mesh.holds(&id, now_ms), "task": mesh.claimed_task(&id),
+                    "parent": (!a.parent_agent_id.is_empty()).then_some(a.parent_agent_id.as_str()),
+                    "workspace": view.worktrees.get(&a.worktree_id).map_or("", |w| w.path.as_str()),
+                })
+            })
+            .collect();
+        let open_tasks: Vec<Value> = mesh
+            .export_tasks()
+            .1
+            .iter()
+            .filter(|t| t.project == project && t.status != agora_mesh::broker::TaskStatus::Done)
+            .take(agora_mesh::awareness::MAX_TASKS)
+            .map(|t| {
+                json!({"id": t.id.as_str(), "title": cut(&t.title, 512),
+                       "owner": t.owner.as_ref().map(AgentId::as_str)})
+            })
+            .collect();
+        let leases: Vec<Value> = mesh
+            .live_leases(project, now_ms)
+            .iter()
+            .take(agora_mesh::awareness::MAX_LEASES)
+            .map(|(path, holder, expires)| {
+                json!({"path": cut(path, 512), "owner": holder.as_str(),
+                       "ttl": expires.saturating_sub(now_ms).div_ceil(1000)})
+            })
+            .collect();
+        let text = json!({
+            "project": project, "machines_online": nodes_with(view, project).len(),
+            "agents": agents, "open_tasks": open_tasks, "leases": leases,
+        });
+        let mut a = answer(Verdict::Done {
+            result: json!({"content": [{"type": "text", "text": text.to_string()}], "isError": false}),
+            is_error: false,
+        });
+        a.events = mesh.take_events();
+        a
+    }
+
     /// Undoes a handoff whose message could not be delivered: the task goes back to the giver. Returns the audit events.
     pub fn revert_handoff(&self, h: &Handoff) -> Vec<Body> {
         let Some(task) = &h.task_id else {
@@ -421,7 +491,8 @@ impl Boards {
             ))
         };
         let channel = tool == "send_message";
-        if !channel && !BOARD_TOOLS.contains(&tool) {
+        let status = tool == "workspace_status";
+        if !channel && !status && !BOARD_TOOLS.contains(&tool) {
             return bad("tool");
         }
         let Ok(mut args) = serde_json::from_str::<Value>(arguments_json) else {
@@ -441,6 +512,9 @@ impl Boards {
         }
         if channel {
             return Self::channel(view, node, agent, project, &args);
+        }
+        if status {
+            return self.status(view, project, now_ms);
         }
         // ADR-0039 amendment B: while the project's nodes are handing over their local work, nothing is granted against work the
         // board has not seen yet.
@@ -1030,6 +1104,52 @@ mod tests {
             .as_str()
             .unwrap_or("")
             .to_string()
+    }
+
+    #[test]
+    fn workspace_status_lists_the_projects_agents_on_online_nodes_with_their_board_work() {
+        let b = Boards::new();
+        let mut v = view(&["alpha", "beta"]);
+        v.agents.get_mut("beta/a").unwrap().state = AgentState::Working;
+        v.agents.get_mut("beta/a").unwrap().parent_agent_id = "beta/boss".into();
+        // Not shared: the node answers from its own broker.
+        let single = view(&["alpha"]);
+        assert_eq!(
+            run(&b, &single, "alpha", "workspace_status", json!({}), 1).verdict,
+            Verdict::NotShared
+        );
+        let t = run(
+            &b,
+            &v,
+            "beta",
+            "task_create",
+            json!({"title": "ship it"}),
+            1,
+        );
+        let tid = serde_json::from_str::<Value>(&text(&t)).unwrap()["task_id"].clone();
+        run(&b, &v, "beta", "task_claim", json!({"task_id": tid}), 2);
+        run(
+            &b,
+            &v,
+            "beta",
+            "lease_acquire",
+            json!({"paths": ["src/a.rs"], "ttl_s": 60}),
+            3,
+        );
+        let a = run(&b, &v, "alpha", "workspace_status", json!({}), 1_000);
+        let st: Value = serde_json::from_str(&text(&a)).unwrap();
+        assert_eq!(st["machines_online"], 2);
+        let agents = st["agents"].as_array().unwrap();
+        // gamma is offline: its agent is not listed.
+        assert_eq!(agents.len(), 2, "{st}");
+        let beta = agents.iter().find(|r| r["id"] == "beta/a").unwrap();
+        assert_eq!(beta["state"], "working");
+        assert_eq!(beta["task"], "ship it");
+        assert_eq!(beta["holds"], 1);
+        assert_eq!(beta["parent"], "beta/boss");
+        assert_eq!(st["open_tasks"][0]["owner"], "beta/a");
+        assert_eq!(st["leases"][0]["path"], "src/a.rs");
+        assert_eq!(st["leases"][0]["ttl"], 60);
     }
 
     #[test]

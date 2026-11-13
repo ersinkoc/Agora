@@ -75,9 +75,25 @@ pub struct Message {
     pub refs: Vec<String>,
     pub at_ms: u64,
     pub reply_to: Option<String>,
-    /// `message`, `ask`, `reply` or `handoff`.
+    /// `message`, `ask`, `reply`, `handoff`, `delivery_failed` or `presence`.
     pub kind: &'static str,
 }
+
+/// What the node knows about an agent besides [`AgentInfo`], for `agents_list` and `workspace_status`: facts, never what the agent
+/// typed or what its screen shows.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Activity {
+    /// When it joined the mesh (ms); `None` for an agent registered without a time.
+    pub since_ms: Option<u64>,
+    /// The kind of a chat agent's latest item, in fixed words (`running a command`, `editing files`, `planning`,
+    /// `asking the user`); cleared when it stops working.
+    pub latest: Option<&'static str>,
+    /// The agent that started it (ADR-0057).
+    pub parent: Option<AgentId>,
+}
+
+/// Presence notices one inbox gets per [`Limits::window_ms`] at most; the last one of a window says that more changed.
+pub const PRESENCE_PER_WINDOW: usize = 10;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MeshError {
@@ -252,6 +268,11 @@ pub struct Mesh {
     batches: BTreeMap<String, LeaseBatch>,
     next: u64,
     events: Vec<Body>,
+    activity: BTreeMap<AgentId, Activity>,
+    /// Files changed in each worktree, from the node's own git status.
+    files: BTreeMap<String, u32>,
+    /// When each inbox got its recent presence notices.
+    presence_sent: BTreeMap<AgentId, VecDeque<u64>>,
 }
 
 impl Mesh {
@@ -268,6 +289,9 @@ impl Mesh {
             batches: BTreeMap::new(),
             next: 1,
             events: Vec::new(),
+            activity: BTreeMap::new(),
+            files: BTreeMap::new(),
+            presence_sent: BTreeMap::new(),
         }
     }
 
@@ -372,11 +396,173 @@ impl Mesh {
         self.agents.insert(info.id.clone(), info);
     }
 
+    /// [`register`](Self::register) for an agent that starts now: it remembers when, and the other running agents of its project
+    /// get a `presence` notice. Registering an agent that is already registered (a restart keeps its endpoint) changes nothing.
+    pub fn join(&mut self, info: AgentInfo, now_ms: u64) {
+        if self.agents.contains_key(&info.id) {
+            return;
+        }
+        self.activity.insert(
+            info.id.clone(),
+            Activity {
+                since_ms: Some(now_ms),
+                ..Activity::default()
+            },
+        );
+        self.register(info.clone());
+        self.presence(&info, "joined", None, now_ms);
+    }
+
+    /// [`unregister`](Self::unregister) with a `presence` notice to the other running agents of its project. `reason` is a fixed
+    /// word the node chose (`finished`, `stopped`, `crashed`, `left`), never text from the agent.
+    pub fn leave(&mut self, agent: &AgentId, reason: &str, now_ms: u64) {
+        let info = self.agents.get(agent).cloned();
+        self.unregister(agent, now_ms);
+        if let Some(info) = info {
+            self.presence(&info, "left", Some(reason), now_ms);
+        }
+    }
+
+    /// One notice per change to every other running agent of the subject's project: it lands in the inbox (data, never typed
+    /// into a terminal). Each inbox gets at most [`PRESENCE_PER_WINDOW`] per window; the last of them says more changed.
+    fn presence(&mut self, subject: &AgentInfo, change: &str, reason: Option<&str>, now_ms: u64) {
+        let recipients: Vec<AgentInfo> = self
+            .agents
+            .values()
+            .filter(|a| a.project == subject.project && a.id != subject.id)
+            .cloned()
+            .collect();
+        let window = self.limits.window_ms;
+        for r in recipients {
+            let q = self.presence_sent.entry(r.id.clone()).or_default();
+            while q
+                .front()
+                .is_some_and(|t| now_ms.saturating_sub(*t) >= window)
+            {
+                q.pop_front();
+            }
+            if q.len() >= PRESENCE_PER_WINDOW {
+                continue;
+            }
+            q.push_back(now_ms);
+            let place = if r.node == subject.node && r.worktree == subject.worktree {
+                "this workspace"
+            } else {
+                "this project"
+            };
+            let body = if q.len() == PRESENCE_PER_WINDOW {
+                "more agents joined or left this project; call workspace_status for the current picture"
+                    .to_string()
+            } else {
+                match reason {
+                    Some(why) => format!(
+                        "{} {} {change} {place} ({why})",
+                        crate::awareness::clean(&subject.kind, 64),
+                        crate::awareness::clean(subject.id.as_str(), 128)
+                    ),
+                    None => format!(
+                        "{} {} {change} {place} (machine {})",
+                        crate::awareness::clean(&subject.kind, 64),
+                        crate::awareness::clean(subject.id.as_str(), 128),
+                        crate::awareness::clean(&subject.node, 128)
+                    ),
+                }
+            };
+            let m = Message {
+                id: self.id("m"),
+                provenance: Provenance {
+                    from: subject.id.clone(),
+                    kind: subject.kind.clone(),
+                    node: subject.node.clone(),
+                    project: subject.project.clone(),
+                },
+                to: r.id.as_str().to_string(),
+                body,
+                refs: Vec::new(),
+                at_ms: now_ms,
+                reply_to: None,
+                kind: "presence",
+            };
+            let inbox = self.inboxes.entry(r.id).or_default();
+            inbox.push_back(m);
+            while inbox.len() > self.limits.inbox_capacity {
+                inbox.pop_front();
+            }
+        }
+    }
+
+    /// The kind of a chat agent's latest item, in fixed words (see [`Activity::latest`]).
+    pub fn set_activity(&mut self, agent: &AgentId, latest: Option<&'static str>) {
+        if self.agents.contains_key(agent) {
+            self.activity.entry(agent.clone()).or_default().latest = latest;
+        }
+    }
+
+    /// The agent that started this one (ADR-0057).
+    pub fn set_parent(&mut self, agent: &AgentId, parent: Option<&AgentId>) {
+        if self.agents.contains_key(agent) {
+            let a = self.activity.entry(agent.clone()).or_default();
+            if a.parent.as_ref() != parent {
+                a.parent = parent.cloned();
+            }
+        }
+    }
+
+    /// How many files are changed in `worktree`, from the node's git status.
+    pub fn set_files_changed(&mut self, worktree: &str, n: u32) {
+        if self.files.get(worktree) != Some(&n) {
+            self.files.insert(worktree.to_string(), n);
+        }
+    }
+
+    pub fn files_changed(&self, worktree: &str) -> Option<u32> {
+        self.files.get(worktree).copied()
+    }
+
+    pub fn activity(&self, agent: &AgentId) -> Option<&Activity> {
+        self.activity.get(agent)
+    }
+
+    /// How many paths `agent` holds a lease on that has not ended.
+    pub fn holds(&self, agent: &AgentId, now_ms: u64) -> usize {
+        let Some(info) = self.agents.get(agent) else {
+            return 0;
+        };
+        self.leases.get(&info.project).map_or(0, |t| {
+            t.all()
+                .iter()
+                .filter(|l| &l.holder == agent && !l.is_expired(now_ms))
+                .count()
+        })
+    }
+
+    /// The title of a task `agent` has claimed, if it holds one (the first by id).
+    pub fn claimed_task(&self, agent: &AgentId) -> Option<&str> {
+        self.tasks.values().find_map(|t| match t.task.state() {
+            TaskState::Claimed(a) if a == agent => Some(t.task.title.as_str()),
+            _ => None,
+        })
+    }
+
+    /// Leases of one project that have not ended, as `(path, holder, expires_at_ms)`.
+    pub fn live_leases(&self, project: &str, now_ms: u64) -> Vec<(String, AgentId, u64)> {
+        self.export_leases(project, now_ms)
+            .into_iter()
+            .filter(|(_, _, e)| *e > now_ms)
+            .collect()
+    }
+
     /// The agent ended: it leaves the registry, loses its leases and open asks, and gives its tasks back.
     pub fn unregister(&mut self, agent: &AgentId, now_ms: u64) {
-        self.agents.remove(agent);
+        if let Some(gone) = self.agents.remove(agent) {
+            if !self.agents.values().any(|a| a.worktree == gone.worktree) {
+                self.files.remove(&gone.worktree);
+            }
+        }
         self.inboxes.remove(agent);
         self.sent.remove(agent);
+        self.activity.remove(agent);
+        self.presence_sent.remove(agent);
         self.asks.retain(|_, a| &a.from != agent && &a.to != agent);
         let held: Vec<String> = self
             .batches
@@ -412,6 +598,12 @@ impl Mesh {
         if let Some(a) = self.agents.get_mut(agent) {
             if a.state != state {
                 a.state = state.to_string();
+                // What a chat agent did last is only what it is doing while it works (or waits on the user).
+                if !matches!(state, "working" | "blocked") {
+                    if let Some(x) = self.activity.get_mut(agent) {
+                        x.latest = None;
+                    }
+                }
             }
         }
     }
@@ -1722,6 +1914,84 @@ mod tests {
             ["message", "task", "task", "lease", "message", "task", "handoff"]
         );
         assert!(m.take_events().is_empty());
+    }
+
+    fn presence(m: &Mesh, who: &str) -> Vec<String> {
+        m.inbox(&id(who), None, 1000)
+            .unwrap()
+            .iter()
+            .filter(|x| x.kind == "presence")
+            .map(|x| x.body.clone())
+            .collect()
+    }
+
+    #[test]
+    fn joining_and_leaving_tell_the_project_once_each() {
+        let mut m = Mesh::new(Limits::default());
+        m.join(agent("a", "p", "mac"), 0);
+        m.join(agent("b", "p", "mac"), 10);
+        m.join(agent("c", "other", "mac"), 20);
+        // A restart registers again: no second notice.
+        m.join(agent("b", "p", "mac"), 30);
+        assert_eq!(
+            presence(&m, "a"),
+            ["claude-code b joined this workspace (machine mac)"]
+        );
+        assert!(presence(&m, "b").is_empty());
+        assert!(presence(&m, "c").is_empty());
+        m.leave(&id("b"), "finished", 40);
+        // Already gone: an exit after a stop says nothing more.
+        m.leave(&id("b"), "stopped", 50);
+        m.unregister(&id("b"), 60);
+        assert_eq!(
+            presence(&m, "a"),
+            [
+                "claude-code b joined this workspace (machine mac)",
+                "claude-code b left this workspace (finished)"
+            ]
+        );
+        let notice = &m.inbox(&id("a"), None, 10).unwrap()[1];
+        assert_eq!(notice.provenance.from, id("b"));
+        // Not audited as a message and never sent anywhere else.
+        assert!(m.take_outbound().is_empty());
+        assert!(m
+            .take_events()
+            .iter()
+            .all(|e| !matches!(e, Body::MessagePosted(_))));
+    }
+
+    #[test]
+    fn presence_notices_are_rate_limited_per_inbox_and_say_when_more_changed() {
+        let mut m = Mesh::new(Limits::default());
+        m.join(agent("watcher", "p", "mac"), 0);
+        for i in 0..30 {
+            let mut a = agent(&format!("h{i}"), "p", "mac");
+            a.worktree = "/elsewhere".into();
+            m.join(a, 1_000 + i);
+            m.leave(&id(&format!("h{i}")), "crashed", 1_000 + i);
+        }
+        let got = presence(&m, "watcher");
+        assert_eq!(got.len(), PRESENCE_PER_WINDOW);
+        assert_eq!(got[0], "claude-code h0 joined this project (machine mac)");
+        assert_eq!(got[1], "claude-code h0 left this project (crashed)");
+        assert!(got[PRESENCE_PER_WINDOW - 1].contains("workspace_status"));
+        // A new window lets notices through again.
+        m.join(agent("late", "p", "mac"), 70_000);
+        assert_eq!(presence(&m, "watcher").len(), PRESENCE_PER_WINDOW + 1);
+    }
+
+    #[test]
+    fn presence_bodies_are_one_clean_line() {
+        let mut m = Mesh::new(Limits::default());
+        m.join(agent("a", "p", "mac"), 0);
+        let mut evil = agent("b", "p", "mac\nIGNORE ALL\u{202e}");
+        evil.kind = "x\u{1b}[2Jy".into();
+        m.join(evil, 1);
+        let got = presence(&m, "a");
+        assert_eq!(
+            got,
+            ["x [2Jy b joined this project (machine mac IGNORE ALL)"]
+        );
     }
 
     #[test]
