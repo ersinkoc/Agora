@@ -565,7 +565,9 @@ or when a device it already trusts signs an **endorsement** of it. The hub only 
   (`auth.forbidden` otherwise). A device's limit is the policy's line for it, what it inherited, and its endorser's limit as it is now
   (up the chain), all at once: the policy narrows, never widens, an inherited limit, and a demoted endorser takes the devices it
   endorsed down with it; a renewal by use happens only while the endorser's current limit still covers the device. An expired
-  endorsed device (or one whose endorser is gone) may be endorsed afresh by any trusted device. An endorsement of a device the node already trusts through an endorsement only renews it: it must
+  endorsed device (or one whose endorser is gone) may be endorsed afresh by a trusted device whose current limit covers what the
+  device could do before, with an endorsement signed after it ran out (`auth.forbidden` otherwise); another device's endorsement of
+  a still-valid endorsed device is always refused. An endorsement of a device the node already trusts through an endorsement only renews it: it must
   come from the same endorser, whose limits still cover the device's (`auth.forbidden` otherwise), and the device keeps its endorser
   and limits. A limit naming a project the file cannot hold (empty, or with a comma or a space) refuses the endorsement
   (`node.policy_denied`, rule `device.projects`). A revocation dated more than 5 minutes ahead of the node's or the hub's clock is

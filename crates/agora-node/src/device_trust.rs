@@ -757,73 +757,88 @@ impl DeviceTrust {
             Some(Some(x)) => x.min(e.expires_at_ms),
             _ => e.expires_at_ms,
         };
-        match entries.iter().find(|x| x.id == e.device_id) {
+        let endorser_limits = self.limits_of(&entries, &e.endorser_device_id);
+        let covers =
+            |had: &Option<std::collections::BTreeSet<String>>| match (&endorser_limits, had) {
+                (None, _) => true,
+                (Some(_), None) => false,
+                (Some(mine), Some(theirs)) => theirs.is_subset(mine),
+            };
+        let forbidden = || Error::new(ErrorCode::AuthForbidden).with("action", "device.endorse");
+        let current = entries.iter().find(|x| x.id == e.device_id);
+        match current {
             Some(x) if x.key != e.public_key => {
-                Err(Error::new(ErrorCode::DeviceKeyMismatch)
-                    .with("device_id", e.device_id.as_str()))
+                return Err(Error::new(ErrorCode::DeviceKeyMismatch)
+                    .with("device_id", e.device_id.as_str()));
             }
-            Some(x) if x.expires_ms.is_none() => Ok(Endorsed::Already(None)),
-            Some(x)
-                if alive(&entries, x, now_ms) && x.expires_ms.is_some_and(|old| old >= expires) =>
-            {
-                Ok(Endorsed::Already(x.expires_ms))
-            }
-            existing => {
-                let endorser_limits = self.limits_of(&entries, &e.endorser_device_id);
-                // A project name the trusted-devices file cannot hold (`projects=a,b`): refused, never silently dropped.
-                if endorser_limits.as_ref().is_some_and(|p| {
-                    p.iter().any(|n| {
-                        n.is_empty() || n.contains(',') || n.chars().any(char::is_whitespace)
-                    })
-                }) {
-                    return Err(Error::new(ErrorCode::NodePolicyDenied)
-                        .with("node_id", self.node_id.as_str())
-                        .with("rule", "device.projects"));
+            Some(x) if x.expires_ms.is_none() => return Ok(Endorsed::Already(None)),
+            // A still-valid endorsed device: only its own endorser may renew it, while that endorser's limits still cover it (a
+            // limited device cannot re-parent a wider one to itself), whatever the expiry asked for.
+            Some(x) if alive(&entries, x, now_ms) => {
+                if x.via.as_deref() != Some(e.endorser_device_id.as_str()) || !covers(&x.projects) {
+                    return Err(forbidden());
                 }
-                // Only a still-valid endorsed entry is protected from being taken over; an expired one (or one whose endorser is gone)
-                // is endorsed afresh like a new device.
-                let existing = existing.filter(|x| alive(&entries, x, now_ms));
-                let entry = match existing {
-                    // A renewal keeps who endorsed it and what it may do: only its own endorser may renew it, and only while that
-                    // endorser's limits still cover the device's (a limited device cannot re-parent a wider one to itself).
-                    Some(x) => {
-                        let covered = match (&endorser_limits, &x.projects) {
-                            (None, _) => true,
-                            (Some(_), None) => false,
-                            (Some(mine), Some(theirs)) => theirs.is_subset(mine),
-                        };
-                        if x.via.as_deref() != Some(e.endorser_device_id.as_str()) || !covered {
-                            return Err(Error::new(ErrorCode::AuthForbidden)
-                                .with("action", "device.endorse"));
-                        }
-                        Entry {
-                            expires_ms: Some(expires),
-                            ..x.clone()
-                        }
-                    }
-                    None => Entry {
-                        id: e.device_id.clone(),
-                        key: e.public_key.clone(),
-                        expires_ms: Some(expires),
-                        via: Some(e.endorser_device_id.clone()),
-                        since: Some(began),
-                        // ADR-0049: a limited endorser vouches only within its own projects; the device it endorses carries them.
-                        projects: endorser_limits,
-                    },
-                };
-                let mut all: Vec<Entry> = entries
-                    .iter()
-                    .filter(|x| x.id != e.device_id)
-                    .cloned()
-                    .collect();
-                all.push(entry);
-                write_entries(&self.file, &all).map_err(Self::io)?;
-                Ok(match existing {
-                    Some(_) => Endorsed::Already(Some(expires)),
-                    None => Endorsed::Trusted(expires),
-                })
+                if x.expires_ms.is_some_and(|old| old >= expires) {
+                    return Ok(Endorsed::Already(x.expires_ms));
+                }
             }
+            // An expired device (or one whose endorser is gone) may be endorsed afresh, but only by a device whose limits cover what it
+            // could do before (so a limited device cannot take over an owner's device that ran out), and only with an endorsement
+            // signed after it ran out (so one signed earlier, and kept and replayed by the hub, cannot land then).
+            Some(x) => {
+                let policy = self
+                    .policy
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .clone();
+                if !covers(&effective_limit(&entries, &policy, &x.id)) {
+                    return Err(forbidden());
+                }
+                if let Some(ran_out) = x.expires_ms.filter(|t| *t <= now_ms) {
+                    if e.issued_at_ms < ran_out {
+                        return Err(forbidden());
+                    }
+                }
+            }
+            None => {}
         }
+        // A project name the trusted-devices file cannot hold (`projects=a,b`): refused, never silently dropped.
+        if endorser_limits.as_ref().is_some_and(|p| {
+            p.iter()
+                .any(|n| n.is_empty() || n.contains(',') || n.chars().any(char::is_whitespace))
+        }) {
+            return Err(Error::new(ErrorCode::NodePolicyDenied)
+                .with("node_id", self.node_id.as_str())
+                .with("rule", "device.projects"));
+        }
+        let existing = current.filter(|x| alive(&entries, x, now_ms));
+        let entry = match existing {
+            // A renewal keeps who endorsed it and what it may do.
+            Some(x) => Entry {
+                expires_ms: Some(expires),
+                ..x.clone()
+            },
+            None => Entry {
+                id: e.device_id.clone(),
+                key: e.public_key.clone(),
+                expires_ms: Some(expires),
+                via: Some(e.endorser_device_id.clone()),
+                since: Some(began),
+                // ADR-0049: a limited endorser vouches only within its own projects; the device it endorses carries them.
+                projects: endorser_limits,
+            },
+        };
+        let mut all: Vec<Entry> = entries
+            .iter()
+            .filter(|x| x.id != e.device_id)
+            .cloned()
+            .collect();
+        all.push(entry);
+        write_entries(&self.file, &all).map_err(Self::io)?;
+        Ok(match existing {
+            Some(_) => Endorsed::Already(Some(expires)),
+            None => Endorsed::Trusted(expires),
+        })
     }
 
     /// Applies a revocation the hub carried. `Ok(true)`: the device was trusted here (from before the revocation was signed) and is not
