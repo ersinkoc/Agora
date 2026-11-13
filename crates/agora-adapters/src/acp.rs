@@ -661,6 +661,39 @@ fn wait_briefly(child: &mut Child) -> Option<i32> {
     }
 }
 
+/// The most MCP servers passed on to the agent; the node passes one (the agent's mesh server).
+const MCP_SERVERS_MAX: usize = 16;
+
+/// `session/start` `mcpServers` (adapter protocol: `{name, command, args}`) in the ACP shape of a stdio MCP server:
+/// `{name, command, args, env: []}`. An entry without a name or a command, or with an argument that is not a string, is dropped.
+fn acp_mcp_servers(from_node: Option<&Value>) -> Vec<Value> {
+    let Some(list) = from_node.and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    list.iter()
+        .filter_map(|m| {
+            let name = m
+                .get("name")
+                .and_then(Value::as_str)
+                .filter(|n| !n.is_empty())?;
+            let command = m
+                .get("command")
+                .and_then(Value::as_str)
+                .filter(|c| !c.is_empty())?;
+            let args = match m.get("args") {
+                None | Some(Value::Null) => Vec::new(),
+                Some(a) => a
+                    .as_array()?
+                    .iter()
+                    .map(|x| x.as_str().map(str::to_string))
+                    .collect::<Option<Vec<_>>>()?,
+            };
+            Some(json!({"name": name, "command": command, "args": args, "env": []}))
+        })
+        .take(MCP_SERVERS_MAX)
+        .collect()
+}
+
 struct Bridge<W: Write> {
     out: W,
     agent: std::process::ChildStdin,
@@ -671,6 +704,9 @@ struct Bridge<W: Write> {
     text: String,
     text_since: Instant,
     can_load: bool,
+    /// The agent takes stdio MCP servers in `session/new` and `session/load`. ACP requires every agent to, so this is true unless
+    /// the agent's `initialize` says `mcpCapabilities.stdio: false`.
+    mcp_stdio: bool,
     /// Something reached the node during the current turn (text, a tool call, a plan, a diff, an approval).
     said: bool,
     /// The model the agent said it uses (`session/new` `models.currentModelId`), for usage reports.
@@ -958,18 +994,24 @@ impl<W: Write> Bridge<W> {
                     .and_then(Value::as_str)
                     .map(str::to_string);
                 let node_id = id.clone().unwrap_or(Value::Null);
+                // The node's MCP servers (the agent's own mesh server), as ACP stdio servers.
+                let servers = if self.mcp_stdio {
+                    acp_mcp_servers(params.get("mcpServers"))
+                } else {
+                    Vec::new()
+                };
                 match resume.filter(|_| self.can_load) {
                     Some(r) => {
                         self.session = Some(r.clone());
                         self.ask_agent(
                             "session/load",
-                            json!({"sessionId": r, "cwd": cwd, "mcpServers": []}),
+                            json!({"sessionId": r, "cwd": cwd, "mcpServers": servers}),
                             Waiting::NewSession { node_id },
                         );
                     }
                     None => self.ask_agent(
                         "session/new",
-                        json!({"cwd": cwd, "mcpServers": []}),
+                        json!({"cwd": cwd, "mcpServers": servers}),
                         Waiting::NewSession { node_id },
                     ),
                 }
@@ -1218,6 +1260,10 @@ impl<W: Write> Bridge<W> {
                                 .pointer("/result/agentCapabilities/loadSession")
                                 .and_then(Value::as_bool)
                                 .unwrap_or(false);
+                            self.mcp_stdio = msg
+                                .pointer("/result/agentCapabilities/mcpCapabilities/stdio")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(true);
                             if !node_id.is_null() {
                                 self.reply(
                                     &node_id,
@@ -1355,6 +1401,7 @@ where
         text: String::new(),
         text_since: Instant::now(),
         can_load: false,
+        mcp_stdio: true,
         said: false,
         model: String::new(),
         cost: None,
@@ -1445,6 +1492,27 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn the_nodes_mcp_servers_become_acp_stdio_servers() {
+        let from_node = json!([
+            {"name": "agora-mesh", "command": "/usr/bin/agora", "args": ["mesh", "stdio", "--socket", "/s/agent-1.sock"]},
+            {"name": "no-args", "command": "x"},
+            {"name": "", "command": "x"},
+            {"name": "bad", "command": "x", "args": [1]},
+            {"command": "x"},
+        ]);
+        assert_eq!(
+            acp_mcp_servers(Some(&from_node)),
+            vec![
+                json!({"name": "agora-mesh", "command": "/usr/bin/agora",
+                       "args": ["mesh", "stdio", "--socket", "/s/agent-1.sock"], "env": []}),
+                json!({"name": "no-args", "command": "x", "args": [], "env": []}),
+            ]
+        );
+        assert!(acp_mcp_servers(None).is_empty());
+        assert!(acp_mcp_servers(Some(&json!("x"))).is_empty());
+    }
 
     #[test]
     fn a_replacement_diff_shows_every_old_line_removed_and_new_line_added() {

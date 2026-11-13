@@ -92,6 +92,12 @@ impl Env {
             format!("kind = \"screen\"\ndisplay_name = \"Screen\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = {screen}\n"),
         )
         .unwrap();
+        // A structured agent: the fake L3 adapter (ACP agents go through the same adapter path, `agora acp-bridge`).
+        std::fs::write(
+            root.join("manifests/adapter.toml"),
+            format!("kind = \"adapter\"\ndisplay_name = \"Adapter\"\nversion = \"1\"\nmin_engine = 1\n[adapter]\ncommand = [{:?}, \"--adapter\"]\n", fake()),
+        )
+        .unwrap();
         let rng = SystemRandom::new();
         let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng).unwrap();
         let key = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8.as_ref(), &rng)
@@ -831,4 +837,112 @@ fn a_helper_stays_a_helper_after_it_ends_and_many_others_do() {
         json!({"agent_id": helper, "state": "exited", "timeout_s": 0.2}),
     );
     assert_eq!(m.error_code(w), "mesh.timeout");
+}
+
+/// The agent's transcript text, once an agent entry satisfies `done`.
+fn agent_says(e: &Env, agent: &str, prompt: &str, done: impl Fn(&str) -> bool) -> String {
+    use agora_node::control::{KIND_CHAT_ENTRY, KIND_CHAT_SNAPSHOT};
+    use prost::Message as _;
+    let mut c = e.client();
+    c.call_on(
+        3,
+        Cmd::ChatSubscribe(v1::ChatSubscribe {
+            agent_id: agent.into(),
+        }),
+    )
+    .unwrap()
+    .unwrap();
+    c.call(Cmd::AgentPrompt(v1::AgentPrompt {
+        agent_id: agent.into(),
+        text: prompt.into(),
+    }))
+    .unwrap()
+    .unwrap();
+    let end = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < end {
+        let Some(f) = c.read_frame(Some(Duration::from_millis(200))).unwrap() else {
+            continue;
+        };
+        let entries = match (f.stream_id, f.kind) {
+            (3, KIND_CHAT_SNAPSHOT) => {
+                v1::ChatSnapshot::decode(f.payload.as_slice())
+                    .unwrap()
+                    .entries
+            }
+            (3, KIND_CHAT_ENTRY) => vec![v1::ChatEntry::decode(f.payload.as_slice()).unwrap()],
+            _ => continue,
+        };
+        if let Some(t) = entries
+            .into_iter()
+            .find(|en| en.role == v1::ChatRole::Agent as i32 && done(&en.text))
+        {
+            return t.text;
+        }
+    }
+    panic!("{agent} did not answer {prompt}");
+}
+
+/// Structured agents (L3 adapters and L2 ACP agents through the bridge) get the mesh too: the node registers them, passes their own
+/// endpoint in `session/start` (`mcp_servers`), other agents see them in `agents_list`, and their `agent_start` waits for the user
+/// like any agent's.
+#[test]
+fn an_adapter_agent_is_in_the_mesh_and_its_start_waits_for_the_user() {
+    if !supported() {
+        return;
+    }
+    let e = Env::new("adapter-mesh");
+    let structured = e.launch(&e.folder, "adapter");
+    let own = e.node().mesh.socket_path(&AgentId::new(&structured));
+    let said = agent_says(&e, &structured, "mcp-servers", |t| t.starts_with('['));
+    let servers: Value = serde_json::from_str(&said).unwrap();
+    assert_eq!(servers.as_array().unwrap().len(), 1, "{servers}");
+    assert_eq!(servers[0]["name"], "agora-mesh");
+    assert_eq!(
+        servers[0]["command"],
+        std::env::current_exe().unwrap().to_string_lossy().as_ref(),
+        "the node's own program, as for a terminal agent"
+    );
+    assert_eq!(
+        servers[0]["args"],
+        json!(["mesh", "stdio", "--socket", own.to_string_lossy()])
+    );
+
+    // Another agent sees it in the mesh.
+    let other = e.launch(&e.folder, "probe");
+    let mut m = e.mcp(&other);
+    let id = m.call("agents_list", json!({}));
+    let (list, is_error) = m.result(id);
+    assert!(!is_error, "{list}");
+    assert!(
+        list.as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["agent_id"] == structured.as_str() && a["kind"] == "adapter"),
+        "{list}"
+    );
+
+    // Its own endpoint is its identity in the mesh: a start it asks for waits for the user's decision.
+    let mut mine = Mcp::connect(&own);
+    let _call = mine.call("agent_start", json!({"kind": "screen", "prompt": "hello"}));
+    let p = e.request_of(&structured);
+    assert_eq!(p.action, START_ACTION);
+    let detail: Value = serde_json::from_str(&p.detail).unwrap();
+    assert_eq!(detail["agent"], structured.as_str());
+    assert_eq!(detail["kind"], "screen");
+
+    // A stop takes it out of the mesh and closes its endpoint; a resume joins again and passes the new endpoint.
+    e.stop(&structured, false);
+    wait_until("endpoint closed", || {
+        !e.node().mesh.is_registered(&AgentId::new(&structured))
+    });
+    e.node()
+        .supervisor
+        .lock()
+        .unwrap()
+        .resume(&AgentId::new(&structured), Instant::now())
+        .unwrap();
+    assert!(e.node().mesh.is_registered(&AgentId::new(&structured)));
+    let said = agent_says(&e, &structured, "mcp-servers", |t| t.starts_with('['));
+    let servers: Value = serde_json::from_str(&said).unwrap();
+    assert_eq!(servers[0]["args"][3], own.to_string_lossy().as_ref());
 }

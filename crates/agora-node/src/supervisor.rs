@@ -10,7 +10,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use agora_adapters::host::{
-    Adapter, AdapterConfig, AdapterEvent, HostError, OptionKind, SessionOption, SessionOptions,
+    Adapter, AdapterConfig, AdapterEvent, HostError, McpServer, OptionKind, SessionOption,
+    SessionOptions,
 };
 use agora_adapters::{Detector, Manifest, Pacer};
 use agora_core::{Agent, AgentId, AgentState, IntegrationLevel, NodeId, StateSource, WorktreeId};
@@ -387,6 +388,9 @@ struct AdapterEntry {
     capabilities: Vec<String>,
     /// The modes and models the adapter last reported (ADR-0058), checked and bounded.
     options: SessionOptions,
+    /// The agent's own mesh endpoint, passed in `session/start` (`mcp_servers`). Kept across restarts after a crash, as a terminal
+    /// agent's is; a stopped agent left the mesh and gets a fresh one when resumed.
+    mesh: Option<agora_adapters::inject::Endpoint>,
 }
 
 struct Entry {
@@ -808,13 +812,24 @@ impl Supervisor {
             }
             let root =
                 git::discover_checkout(&worktree).map_or_else(|_| worktree.clone(), |c| c.root);
-            let (adapter, session_id, capabilities) = launch_adapter(
+            let mesh = self.adapter_mesh(&id, &req.kind, &project.to_string(), &worktree);
+            let launched = launch_adapter(
                 &spec,
                 &root,
                 &worktree,
                 None,
                 self.sandbox_for(&req.kind, &worktree, &spec.command[0]),
-            )?;
+                mesh.as_ref(),
+            );
+            let (adapter, session_id, capabilities) = match launched {
+                Ok(l) => l,
+                Err(e) => {
+                    if let Some(hook) = &self.abort_hook {
+                        hook(&id);
+                    }
+                    return Err(e);
+                }
+            };
             let mut agent = Agent::new(
                 id.clone(),
                 project,
@@ -839,6 +854,7 @@ impl Supervisor {
                     restart_at: None,
                     capabilities,
                     options: SessionOptions::default(),
+                    mesh,
                 },
             );
         } else {
@@ -900,6 +916,39 @@ impl Supervisor {
         Ok(id)
     }
 
+    /// Registers the agent with the mesh through the launch hook and returns the endpoint it is to be given; `None` without a hook or
+    /// when the mesh could not serve it (the mesh is an addition: an agent never fails to start because of it).
+    fn join_mesh(
+        &self,
+        id: &AgentId,
+        kind: &str,
+        project: &str,
+        worktree: &Path,
+        identity: Option<String>,
+    ) -> Option<agora_adapters::inject::Endpoint> {
+        let hook = self.hook.as_ref()?;
+        hook(&Launching {
+            id: id.clone(),
+            kind: kind.to_string(),
+            project: project.to_string(),
+            node: self.cfg.node.as_str().to_string(),
+            worktree: worktree.to_path_buf(),
+            identity,
+        })
+    }
+
+    /// The mesh endpoint of an adapter agent, passed to it in `session/start`. No confined identity: the adapter process is not
+    /// started with one (on Windows, the only system that has them, a confined adapter cannot be started at all yet).
+    fn adapter_mesh(
+        &self,
+        id: &AgentId,
+        kind: &str,
+        project: &str,
+        worktree: &Path,
+    ) -> Option<agora_adapters::inject::Endpoint> {
+        self.join_mesh(id, kind, project, worktree, None)
+    }
+
     /// Gives the agent its mesh MCP server as its manifest says (`[mcp]`): asks the hook for an endpoint, writes
     /// the config file inside the worktree, and returns the arguments and variables to add at every launch.
     fn inject(
@@ -920,19 +969,12 @@ impl Supervisor {
             identity: identity.clone(),
             ..Extras::default()
         };
-        let Some(hook) = &self.hook else {
+        if self.hook.is_none() {
             return Ok(none());
-        };
+        }
         // The hook registers the agent with the mesh even when its manifest has no `[mcp]` (it may reach the mesh
         // some other way); only a manifest with `[mcp]` gets anything injected.
-        let endpoint = hook(&Launching {
-            id: id.clone(),
-            kind: kind.to_string(),
-            project: project.to_string(),
-            node: self.cfg.node.as_str().to_string(),
-            worktree: worktree.to_path_buf(),
-            identity: identity.clone(),
-        });
+        let endpoint = self.join_mesh(id, kind, project, worktree, identity.clone());
         let socket = endpoint.as_ref().map(|e| e.socket.clone());
         let (Some(endpoint), Some(spec)) = (
             endpoint,
@@ -994,22 +1036,24 @@ impl Supervisor {
         }
         let created =
             git::create_start_worktree(&checkout.root, &worktree, &branch, req.base.as_deref())?;
+        let id = AgentId::new(format!("agent-{}", self.next_id));
+        self.next_id += 1;
+        let mesh = self.adapter_mesh(&id, &req.kind, &checkout.project.to_string(), &worktree);
         let result = launch_adapter(
             spec,
             &checkout.root,
             &worktree,
             None,
             self.sandbox_for(&req.kind, &worktree, &spec.command[0]),
+            mesh.as_ref(),
         );
         let (adapter, session_id, capabilities) = match result {
             Ok(started) => started,
             Err(error) => {
-                let _ = created.rollback();
+                self.abandon(&id, created);
                 return Err(error);
             }
         };
-        let id = AgentId::new(format!("agent-{}", self.next_id));
-        self.next_id += 1;
         let mut agent = Agent::new(
             id.clone(),
             checkout.project,
@@ -1034,6 +1078,7 @@ impl Supervisor {
                 restart_at: None,
                 capabilities,
                 options: SessionOptions::default(),
+                mesh,
             },
         );
         Ok(id)
@@ -1126,12 +1171,14 @@ impl Supervisor {
         };
         e.restart_at = None;
         e.restarts += 1;
+        // A crash keeps the agent in the mesh: the restarted session gets the same endpoint.
         match launch_adapter(
             &e.spec,
             &e.checkout_root,
             &e.worktree,
             e.agent.session.as_deref(),
             profile,
+            e.mesh.as_ref(),
         ) {
             Ok((adapter, session_id, capabilities)) => {
                 e.adapter = Some(adapter);
@@ -1235,14 +1282,7 @@ impl Supervisor {
         cfg.identity = extras.identity.clone();
         if let Some(profile) = &mut cfg.sandbox {
             profile.read.extend(extras.read.iter().cloned());
-            // Offline (ADR-0047 `worktree-offline`): only its own mesh socket and the unix sockets it makes in its private temp
-            // folder; not `/tmp` (a tmux server or an SSH agent there would hand it a way out) and not other agents' sockets.
-            if profile.offline {
-                profile.sockets = extras.socket.iter().cloned().collect();
-                if agora_platform::PRIVATE_TEMP {
-                    profile.sockets.push(crate::sandbox::agent_temp(worktree));
-                }
-            }
+            offline_sockets(profile, extras.socket.as_deref(), worktree);
         }
         if let Some(k) = self.kinds.get(kind) {
             cfg.env = k
@@ -1487,13 +1527,30 @@ impl Supervisor {
                 .first()
                 .and_then(|p| self.sandbox_for(&entry.agent.kind, &entry.worktree, p));
             let native = entry.agent.session.is_some();
-            let (adapter, session_id, capabilities) = launch_adapter(
+            // A stopped (or given-up) agent left the mesh; resuming joins again with a fresh endpoint, given back if the start fails.
+            let mesh = self.adapter_mesh(
+                id,
+                &entry.agent.kind,
+                &entry.agent.project.to_string(),
+                &entry.worktree,
+            );
+            let launched = launch_adapter(
                 &entry.spec,
                 &entry.checkout_root,
                 &entry.worktree,
                 entry.agent.session.as_deref(),
                 profile,
-            )?;
+                mesh.as_ref(),
+            );
+            let (adapter, session_id, capabilities) = match launched {
+                Ok(l) => l,
+                Err(e) => {
+                    if let Some(hook) = &self.abort_hook {
+                        hook(id);
+                    }
+                    return Err(e);
+                }
+            };
             let entry = self
                 .adapters
                 .get_mut(id)
@@ -1501,6 +1558,7 @@ impl Supervisor {
             entry.adapter = Some(adapter);
             entry.session_id = session_id;
             entry.capabilities = capabilities;
+            entry.mesh = mesh;
             entry.running = true;
             entry.restart_at = None;
             entry.restarts = 0;
@@ -1815,7 +1873,8 @@ fn launch_adapter(
     checkout_root: &Path,
     worktree: &Path,
     resume: Option<&str>,
-    sandbox: Option<agora_platform::Sandbox>,
+    mut sandbox: Option<agora_platform::Sandbox>,
+    mesh: Option<&agora_adapters::inject::Endpoint>,
 ) -> Result<(Adapter, String, Vec<String>), SupervisorError> {
     const STEP: Duration = Duration::from_secs(10);
     let (program, args) = spec
@@ -1827,6 +1886,10 @@ fn launch_adapter(
         .iter()
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
+    // The agent's mesh server runs below the adapter, inside its confinement: offline, it may reach its own mesh socket and no other.
+    if let Some(profile) = &mut sandbox {
+        offline_sockets(profile, mesh.map(|m| m.socket.as_path()), worktree);
+    }
     // A confined adapter works in its own private temporary folder, as a confined terminal agent does.
     if sandbox.is_some() && agora_platform::PRIVATE_TEMP {
         let temp = crate::sandbox::agent_temp(worktree).display().to_string();
@@ -1845,15 +1908,41 @@ fn launch_adapter(
     let init = adapter
         .initialize(&["chat"], "en", STEP)
         .map_err(adapter_error)?;
+    // The agent's own mesh server, described as for a terminal agent (`inject`): `agora mesh stdio --socket <its socket>`.
+    let servers: Vec<McpServer> = mesh
+        .map(|m| McpServer {
+            name: "agora-mesh".into(),
+            command: m.command.to_string_lossy().into_owned(),
+            args: vec![
+                "mesh".into(),
+                "stdio".into(),
+                "--socket".into(),
+                m.socket.to_string_lossy().into_owned(),
+            ],
+        })
+        .into_iter()
+        .collect();
     let session_id = adapter
-        .start_session(
+        .start_session_with(
             &checkout_root.to_string_lossy(),
             &worktree.to_string_lossy(),
             resume,
+            &servers,
             STEP,
         )
         .map_err(adapter_error)?;
     Ok((adapter, session_id, init.capabilities))
+}
+
+/// Offline (ADR-0047 `worktree-offline`): an agent may reach only its own mesh socket and the unix sockets it makes in its private temp
+/// folder; not `/tmp` (a tmux server or an SSH agent there would hand it a way out) and not other agents' sockets.
+fn offline_sockets(profile: &mut agora_platform::Sandbox, socket: Option<&Path>, worktree: &Path) {
+    if profile.offline {
+        profile.sockets = socket.map(Path::to_path_buf).into_iter().collect();
+        if agora_platform::PRIVATE_TEMP {
+            profile.sockets.push(crate::sandbox::agent_temp(worktree));
+        }
+    }
 }
 
 /// After an adapter died on its own: wait out the backoff and try again, or give up for good.

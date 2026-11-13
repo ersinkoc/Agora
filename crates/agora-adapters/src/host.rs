@@ -20,6 +20,15 @@ use agora_core::AgentState;
 use agora_protocol::jsonrpc::{parse_line, to_line, Message};
 use serde_json::{json, Value};
 
+/// An MCP server the agent should connect to (`McpServer` in `schema/agora/v1/adapter.proto`): started by the agent as `command args`,
+/// speaking MCP over its stdio.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpServer {
+    pub name: String,
+    pub command: String,
+    pub args: Vec<String>,
+}
+
 /// The longest line accepted from an adapter. Longer lines are discarded whole.
 pub const MAX_LINE: usize = 4 * 1024 * 1024;
 
@@ -624,7 +633,26 @@ impl Adapter {
         resume_session_id: Option<&str>,
         timeout: Duration,
     ) -> Result<String, HostError> {
+        self.start_session_with(project_root, worktree, resume_session_id, &[], timeout)
+    }
+
+    /// Starts a session and hands the agent `mcp_servers` (`SessionStartParams.mcp_servers`: the node passes the agent's own mesh
+    /// server there); returns its id.
+    pub fn start_session_with(
+        &self,
+        project_root: &str,
+        worktree: &str,
+        resume_session_id: Option<&str>,
+        mcp_servers: &[McpServer],
+        timeout: Duration,
+    ) -> Result<String, HostError> {
         let mut params = json!({"projectRoot": project_root, "worktree": worktree});
+        if !mcp_servers.is_empty() {
+            params["mcpServers"] = mcp_servers
+                .iter()
+                .map(|m| json!({"name": m.name, "command": m.command, "args": m.args}))
+                .collect();
+        }
         if let Some(r) = resume_session_id {
             params["resumeSessionId"] = json!(r);
         }
