@@ -37,6 +37,8 @@ pub const CAPABILITIES: &[&str] = &[
     // ADR-0058
     "agent.set_mode",
     "agent.set_model",
+    // ADR-0060
+    "agent.resume",
 ];
 
 /// Events sent per step; the hub acknowledges after each batch.
@@ -707,6 +709,7 @@ fn run_local_on(
                 command_request::Command::DirectoryInspect(_)
                     | command_request::Command::DirectoryList(_)
                     | command_request::Command::AgentLaunch(_)
+                    | command_request::Command::AgentResume(_)
             )
         )
     {
@@ -732,7 +735,8 @@ fn run_local_on(
             Some(
                 c @ (command_request::Command::DirectoryInspect(_)
                 | command_request::Command::DirectoryList(_)
-                | command_request::Command::AgentLaunch(_)),
+                | command_request::Command::AgentLaunch(_)
+                | command_request::Command::AgentResume(_)),
             ) => {
                 if let Err(e) = g.directory_action(c, now) {
                     return fail(e);

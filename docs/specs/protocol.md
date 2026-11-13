@@ -425,6 +425,11 @@ All additions; nothing published changed.
   local id in the `path` field, kind and project empty, `option` the `new_session` flag, `identity_change` `0`); a hub cannot resume
   anything by itself. The local owner-only socket needs no signature. Viewers cannot send it, and the hub audits it like every routed
   command (action `AgentResume`).
+- **Session ids.** Adapter and ACP agents report theirs (`session/reported`). A terminal agent's comes from its manifest's `[session]`
+  (`docs/specs/agent-manifest.md`): an id the node chooses and passes at the first launch (Claude Code), or one read from the first line
+  of the session file the agent writes (Codex), only when that cannot be confused with another agent's. Without either, a terminal
+  agent is offered Start again only. A resumed helper keeps its parent (stopped with it, listed under it) but may not ask to start
+  helpers and none of its parent's grants cover it until a new decision is signed.
 - **Automatic resume.** The node's own `<data>/policy` may say `resume = auto` with `resume.kinds = a, b` and `resume.folders = /x,
   /y`: after a start, interrupted agents of a listed kind in a listed folder (or below it) that can resume their own session are
   resumed without anyone asking (a helper only after its parent was). The default is `resume = ask`; any other value is `ask`. The

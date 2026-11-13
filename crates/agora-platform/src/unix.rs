@@ -230,6 +230,11 @@ pub(crate) fn spawn(config: &PtyConfig) -> io::Result<Box<dyn Pty>> {
     if let Some(cwd) = &config.cwd {
         cmd.current_dir(cwd);
     }
+    for (name, _) in std::env::vars_os() {
+        if crate::env_removed(&name, &config.env_remove) {
+            cmd.env_remove(name);
+        }
+    }
     if !config.env.iter().any(|(k, _)| k == "TERM") {
         cmd.env("TERM", "xterm-256color");
     }
@@ -755,6 +760,24 @@ mod tests {
         assert!(seen.contains("yes"), "{seen:?}");
         assert!(p.wait().expect("wait").success());
         assert!(p.try_wait().expect("try_wait").is_some());
+    }
+
+    #[test]
+    fn inherited_variables_named_in_env_remove_are_left_out_and_set_ones_kept() {
+        // A name no other test uses: set for this process, so every child inherits it unless it is removed.
+        std::env::set_var("AGORA_TEST_DROP_ME_1", "inherited");
+        std::env::set_var("AGORA_TEST_KEEP_ME", "kept");
+        let mut cfg = PtyConfig::new(vec![
+            "sh".into(),
+            "-c".into(),
+            "echo \"[${AGORA_TEST_DROP_ME_1:-gone}|$AGORA_TEST_KEEP_ME|$AGORA_TEST_DROP_SET]\"; sleep 0.2".into(),
+        ]);
+        cfg.env_remove = vec!["AGORA_TEST_DROP_*".into()];
+        cfg.env.push(("AGORA_TEST_DROP_SET".into(), "set".into()));
+        let mut p = spawn(&cfg).expect("spawn");
+        let seen = read_until(&*p, "]");
+        assert!(seen.contains("[gone|kept|set]"), "{seen:?}");
+        let _ = p.wait();
     }
 
     #[test]

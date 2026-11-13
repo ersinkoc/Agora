@@ -46,6 +46,14 @@ install = "builtin:example"             # or a script path from the package
 [resume]
 argv = ["example-agent", "--resume", "{session_id}"]
 
+[session]                               # ADR-0060: how the node learns the agent's own session id (one of the two ways)
+id_args = ["--session-id", "{session_id}"]   # the node chooses the id (a v4 UUID) and adds these to the first launch
+# [session.file]                        # or: read it from the first line of the session file the agent writes
+# glob = "{home}/.example/sessions/*.jsonl"
+# select = { path = "type", equals = "session_meta" }
+# id = "payload.id"
+# cwd = "payload.cwd"
+
 [usage]
 source = "file"                         # file is read by the node today (ADR-0042); otel | adapter | none are reserved
 quota_profiles = ["example-provider/pro", "example-provider/max"]
@@ -140,6 +148,29 @@ added at every launch, restarts and resumes included; a resumed agent gets a fre
 `[mcp]` still joins the mesh. A manifest whose injection fails does not start (it asked for something the node refused).
 `[mcp]` is for terminal agents: a structured agent (`[adapter]` or `[structured] acp`) needs none, the node passes its mesh server in
 `session/start` (`adapter-protocol.md`).
+
+## `[resume]` and `[session]` (ADR-0060)
+
+`[resume] argv` is how a terminal agent continues its own session: `{session_id}` is replaced by the session id the node holds for
+the agent. The node uses it after a crash (restart), and after its own restart when someone chooses Resume (`agent.resume`) or the
+node's policy resumes by itself. The node holds a session id only when it learned one:
+
+- **`id_args`** (Claude Code, `--session-id <uuid>`, checked on 2.1.319): the node chooses a random v4 UUID at the agent's first launch,
+  adds `id_args` with `{session_id}` replaced, and records the id (`AgentSessionReported`) right after the start. Restarts and
+  resumes use `[resume]` instead and never add `id_args`.
+- **`[session.file]`** (Codex, which has no flag for it: `~/.codex/sessions/YYYY/MM/DD/rollout-<time>-<id>.jsonl`, whose first line is
+  `{"type":"session_meta","payload":{"id":...,"cwd":...}}`, checked on codex-cli 0.167.0 and 0.167.1): while a terminal agent runs
+  without a session id, the node looks every 3 s, for at most 30 minutes, at the files the glob matches that were written after the
+  agent started, and takes the id from the first line (at most 64 KiB) when it passes `select` and its `cwd` is the agent's folder.
+  It takes one only when exactly one new file fits and no other agent has that id. Two agents of one kind waiting in one folder at
+  once get none (a file cannot say which is whose); neither does an agent for which two files fit. An id must be at most 200
+  letters, digits, `-`, `_` or `.`. An agent without an id can only be started again in its folder, never resumed.
+- An adapter or ACP agent reports its own session (`session/reported`); it needs neither.
+
+The table is new in this engine version; older nodes ignore it. When the node itself runs inside a Claude Code session (it inherited
+`CLAUDECODE` or `CLAUDE_CODE_CHILD_SESSION`), it leaves `CLAUDECODE` and every `CLAUDE_CODE_*` variable out of the terminal agents it
+starts: Claude Code that inherits them takes itself for a child session and saves no transcript, so `--resume` would have nothing to
+load. A node started normally passes them on.
 
 ## `[sandbox]` (ADR-0047)
 

@@ -190,3 +190,49 @@ fn a_folder_listing_needs_the_owners_signature_for_that_folder() {
         )
         .is_err());
 }
+
+/// ADR-0060: `agent.resume` is signed like a launch, over the agent id and the Start again flag.
+#[test]
+fn a_resume_is_signed_for_that_agent_and_that_choice_only() {
+    let key = key();
+    let nonce = "ffeeddccbbaa99887766554433221100";
+    let expires = 101_000;
+    let message = signed_message(
+        "node-a", "resume", "agent-3", "", "", false, false, nonce, expires,
+    );
+    let signature = key
+        .sign(&SystemRandom::new(), &message)
+        .unwrap()
+        .as_ref()
+        .to_vec();
+    let a = v1::AgentResume {
+        agent_id: "agent-3".into(),
+        new_session: false,
+        authorization: Some(v1::DirectoryAuthorization {
+            device_id: "browser".into(),
+            nonce: nonce.into(),
+            expires_at_ms: expires,
+            signature,
+        }),
+    };
+    let g = grants(&key);
+    let mut other = a.clone();
+    other.agent_id = "agent-4".into();
+    assert!(g
+        .directory_action(&Cmd::AgentResume(other), 100_000)
+        .is_err());
+    let mut fresh = a.clone();
+    fresh.new_session = true;
+    assert!(g
+        .directory_action(&Cmd::AgentResume(fresh), 100_000)
+        .is_err());
+    let mut unsigned = a.clone();
+    unsigned.authorization = None;
+    assert!(g
+        .directory_action(&Cmd::AgentResume(unsigned), 100_000)
+        .is_err());
+    assert!(g
+        .directory_action(&Cmd::AgentResume(a.clone()), 100_000)
+        .is_ok());
+    assert!(g.directory_action(&Cmd::AgentResume(a), 100_000).is_err());
+}

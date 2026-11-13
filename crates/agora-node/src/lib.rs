@@ -14,6 +14,7 @@ pub mod ledger;
 pub mod limits;
 pub mod mesh_server;
 pub mod sandbox;
+pub mod session_files;
 pub mod spawn;
 pub mod supervisor;
 pub mod terminal;

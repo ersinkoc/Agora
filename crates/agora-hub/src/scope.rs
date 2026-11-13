@@ -243,6 +243,7 @@ impl Scope {
                         || self.granted(self.worktrees.get(&q(&c.worktree_id))))
             }
             C::AgentStop(c) => self.granted(self.agents.get(&q(&c.agent_id))),
+            C::AgentResume(c) => self.granted(self.agents.get(&q(&c.agent_id))),
             // ADR-0053: named by the hub-wide key, so it is not qualified again.
             C::AgentForget(c) => self.granted(self.agents.get(&c.agent_id)),
             C::AgentPrompt(c) => self.granted(self.agents.get(&q(&c.agent_id))),

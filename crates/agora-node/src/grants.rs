@@ -199,6 +199,16 @@ impl Grants {
                 a.separate_worktree,
                 a.accept_identity_change,
             ),
+            // ADR-0060: the agent id stands in the path field; the node takes its folder, kind and project from its own ledger.
+            Cmd::AgentResume(a) => (
+                a.authorization.as_ref(),
+                "resume",
+                a.agent_id.as_str(),
+                "",
+                "",
+                a.new_session,
+                false,
+            ),
             _ => return Ok(()),
         };
         let bad =

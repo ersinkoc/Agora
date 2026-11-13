@@ -585,6 +585,31 @@ pub struct PtyConfig {
     /// The agent's own identity under confinement, from [`new_agent_identity`]: the confined process runs with it, and its mesh endpoint
     /// ([`local_listen_agent`]) admits exactly it. `None` makes a fresh one (or means nothing where agents are not confined this way).
     pub identity: Option<String>,
+    /// Inherited environment variables the process must not get: exact names, or a prefix ending in `*` (`CLAUDE_CODE_*`). Variables
+    /// in `env` are set whatever this says.
+    pub env_remove: Vec<String>,
+}
+
+/// Whether an inherited variable `name` is one [`PtyConfig::env_remove`] leaves out (on Windows names compare without case).
+pub fn env_removed(name: &std::ffi::OsStr, patterns: &[String]) -> bool {
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    let eq = |a: &str, b: &str| {
+        if cfg!(windows) {
+            a.eq_ignore_ascii_case(b)
+        } else {
+            a == b
+        }
+    };
+    patterns.iter().any(|p| match p.strip_suffix('*') {
+        Some(prefix) => {
+            name.len() >= prefix.len()
+                && name.is_char_boundary(prefix.len())
+                && eq(&name[..prefix.len()], prefix)
+        }
+        None => eq(name, p),
+    })
 }
 
 /// File-system confinement for a process and everything it starts: it may read (and run programs from) `read` and `write`, and
@@ -783,6 +808,7 @@ impl PtyConfig {
             limits: ProcessLimits::default(),
             sandbox: None,
             identity: None,
+            env_remove: Vec::new(),
         }
     }
 }

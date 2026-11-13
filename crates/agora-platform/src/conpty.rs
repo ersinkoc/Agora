@@ -101,8 +101,10 @@ fn quote_arg(arg: &str) -> String {
 }
 
 /// `vars_os`, not `vars`: Windows allows variables that are not valid Unicode, and `vars` panics on them.
-fn environment(extra: &[(String, String)]) -> Vec<u16> {
-    let mut vars: Vec<(OsString, OsString)> = std::env::vars_os().collect();
+fn environment(extra: &[(String, String)], remove: &[String]) -> Vec<u16> {
+    let mut vars: Vec<(OsString, OsString)> = std::env::vars_os()
+        .filter(|(k, _)| !crate::env_removed(k, remove))
+        .collect();
     let mut set = |k: &str, v: &str| {
         vars.retain(|(have, _)| !have.eq_ignore_ascii_case(k));
         vars.push((k.into(), v.into()));
@@ -322,7 +324,7 @@ fn start_process(config: &PtyConfig, hpc: HPCON) -> io::Result<(Handle, u32, Opt
             .collect::<Vec<_>>()
             .join(" "),
     );
-    let env = environment(&config.env);
+    let env = environment(&config.env, &config.env_remove);
     // Not lossily: a folder name need not be valid Unicode.
     let cwd: Option<Vec<u16>> = config.cwd.as_ref().map(|c| {
         c.as_os_str()

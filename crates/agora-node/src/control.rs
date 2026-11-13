@@ -28,7 +28,7 @@ use prost::Message;
 
 use crate::daemon::EventSink;
 use crate::git;
-use crate::supervisor::{StartRequest, Supervisor, SupervisorError};
+use crate::supervisor::{StartRequest, Supervisor, SupervisorError, SupervisorEvent};
 use crate::terminal::{Output, OutputSubscription, Snapshot};
 
 pub const KIND_REQUEST: u8 = 0;
@@ -74,6 +74,8 @@ pub struct ControlContext {
     spawn: Option<Arc<crate::spawn::Spawner>>,
     /// Set after an agent starts: the node's Git watcher then checks its folder at once instead of on its next round.
     git_wake: Option<Arc<AtomicBool>>,
+    /// ADR-0060: the session ledger, which holds the agents `agent.resume` can bring back. `None`: nothing can be resumed.
+    ledger: Option<Arc<crate::ledger::Ledger>>,
     names: AtomicU64,
     seen: Mutex<IdempotencyCache>,
 }
@@ -112,6 +114,7 @@ impl ControlContext {
             manifests_dir: None,
             spawn: None,
             git_wake: None,
+            ledger: None,
             seen: Mutex::new(IdempotencyCache::default()),
         }
     }
@@ -128,6 +131,13 @@ impl ControlContext {
     #[must_use]
     pub fn with_spawner(mut self, spawn: Arc<crate::spawn::Spawner>) -> Self {
         self.spawn = Some(spawn);
+        self
+    }
+
+    /// ADR-0060: the session ledger `agent.resume` reads.
+    #[must_use]
+    pub fn with_ledger(mut self, ledger: Arc<crate::ledger::Ledger>) -> Self {
+        self.ledger = Some(ledger);
         self
     }
 
@@ -234,7 +244,7 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
     use v1::command_ok::Result as Ok_;
     if matches!(
         cmd,
-        Cmd::AgentKinds(_) | Cmd::AgentStart(_) | Cmd::AgentLaunch(_)
+        Cmd::AgentKinds(_) | Cmd::AgentStart(_) | Cmd::AgentLaunch(_) | Cmd::AgentResume(_)
     ) {
         ctx.reload_manifests();
     }
@@ -460,6 +470,7 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                 .find(|v| v.id == id)
                 .ok_or_else(|| invalid("agent.id"))?;
             let has_terminal = sup.terminal(&id).is_some();
+            let session = sup.session_of(&id);
             let path = view.worktree.to_string_lossy().into_owned();
             let workspace_id = format!("directory:{path}");
             drop(sup);
@@ -494,6 +505,10 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                     &a.kind,
                     has_terminal,
                 );
+                // ADR-0060: a session id the node chose at launch, recorded right after the start.
+                if let Some(session) = &session {
+                    ev.session_reported(&id, session);
+                }
             }
             ctx.wake_git();
             Ok(v1::CommandOk {
@@ -507,6 +522,11 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                     workspace_id,
                     path,
                 })),
+            })
+        }
+        Cmd::AgentResume(a) => {
+            resume_agent(ctx, &a.agent_id, a.new_session).map(|r| v1::CommandOk {
+                result: Some(Ok_::AgentLaunch(r)),
             })
         }
         Cmd::AgentStart(a) => {
@@ -539,6 +559,7 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                 }
             }
             let has_terminal = sup.terminal(&id).is_some();
+            let session = sup.session_of(&id);
             drop(sup);
             if let Some(ev) = &ctx.events {
                 ev.agent_launched(
@@ -551,6 +572,9 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                     &a.kind,
                     has_terminal,
                 );
+                if let Some(session) = &session {
+                    ev.session_reported(&id, session);
+                }
             }
             ctx.wake_git();
             Ok(v1::CommandOk {
@@ -796,6 +820,169 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
         }
         other => Err(capability_missing(command_name(other))),
     }
+}
+
+/// ADR-0060: brings back an agent the session ledger holds as interrupted, under the same id, in the same folder and project, with its
+/// own session (`new_session` false: the kind's `[resume]` argv or the adapter's session load) or a new one ("Start again"). Refused
+/// when the ledger does not hold it as interrupted, when Resume is asked without a session the kind can continue, when the folder is
+/// gone or changed identity (ADR-0052), for a helper whose parent does not run (ADR-0057; its grants and approvals are not restored),
+/// and by the same confinement and limits as a start. The routed path checks the device signature before this (`Grants`).
+pub(crate) fn resume_agent(
+    ctx: &ControlContext,
+    agent_id: &str,
+    new_session: bool,
+) -> Result<v1::AgentLaunchResult, Error> {
+    let ledger = ctx
+        .ledger
+        .as_ref()
+        .ok_or_else(|| capability_missing("agent.resume"))?;
+    let not_interrupted = || Error::new(ErrorCode::AgentNotInterrupted).with("agent_id", agent_id);
+    let entry = ledger
+        .get(agent_id)
+        .filter(crate::ledger::Entry::interrupted)
+        .ok_or_else(not_interrupted)?;
+    let id = AgentId::new(agent_id);
+    let folder = PathBuf::from(&entry.folder);
+    let folder_changed = || {
+        Error::new(ErrorCode::AgentFolderChanged)
+            .with("agent_id", agent_id)
+            .with("path", entry.folder.as_str())
+    };
+    let parent = (!entry.parent_agent_id.is_empty()).then(|| AgentId::new(&entry.parent_agent_id));
+    {
+        let sup = ctx.sup();
+        let views = sup.list();
+        if views.iter().any(|v| v.id == id) {
+            return Err(not_interrupted());
+        }
+        if let Some(p) = &parent {
+            if !views.iter().any(|v| v.id == *p && v.running) {
+                return Err(Error::new(ErrorCode::AgentParentNotRunning)
+                    .with("agent_id", agent_id)
+                    .with("parent_agent_id", p.as_str()));
+            }
+        }
+        if !new_session && (entry.session_id.is_empty() || !sup.resumable(&entry.kind)) {
+            return Err(Error::new(ErrorCode::AgentSessionMissing).with("agent_id", agent_id));
+        }
+    }
+    // The folder must still be the one the agent worked in: there, a directory, with the same project identity (ADR-0052), and for a
+    // selected folder the same canonical path and no unconfirmed change of its identity.
+    let project = if entry.directory {
+        let (info, project) = crate::directory::inspect(&entry.folder, &ctx.node_id, false)
+            .map_err(|_| folder_changed())?;
+        let confirmed = ctx
+            .directories
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .previous(&info)
+            .is_empty();
+        if info.path != entry.folder || info.project_id != entry.project_id || !confirmed {
+            return Err(folder_changed());
+        }
+        project
+    } else {
+        let checkout = git::discover_checkout(&folder).map_err(|_| folder_changed())?;
+        if checkout.project.to_string() != entry.project_id {
+            return Err(folder_changed());
+        }
+        checkout.project
+    };
+    let restore = crate::supervisor::Restore {
+        id: id.clone(),
+        kind: entry.kind.clone(),
+        project,
+        folder: folder.clone(),
+        directory: entry.directory,
+        branch: entry.branch.clone(),
+        session: (!new_session).then(|| entry.session_id.clone()),
+        private_config: (entry.directory && !entry.managed_worktree).then(|| {
+            ctx.worktree_root
+                .join(".sessions")
+                .join(format!("resume-{agent_id}"))
+        }),
+    };
+    let (events, views, has_terminal) = {
+        let mut sup = ctx.sup();
+        if !sup.sandbox_policy().enforceable() {
+            return Err(SupervisorError::SandboxUnavailable(
+                entry.kind.clone(),
+                sup.sandbox_policy().level.name(),
+            )
+            .to_protocol());
+        }
+        if entry.directory && !entry.managed_worktree {
+            sup.refuse_protected(&folder, &ctx.worktree_root)
+                .map_err(sup_err)?;
+        }
+        sup.restore(restore).map_err(sup_err)?;
+        if let Some(p) = &parent {
+            sup.set_parent(&id, p);
+        }
+        match sup.resume(&id, Instant::now()) {
+            Ok(events) => (events, sup.list(), sup.terminal(&id).is_some()),
+            Err(e) => {
+                sup.unrestore(&id);
+                return Err(sup_err(e));
+            }
+        }
+    };
+    if new_session {
+        ledger.forget_session(agent_id, crate::daemon::now_ms());
+    }
+    // A resumed helper may not start helpers of its own: the decision that once allowed it is not restored (ADR-0060, 5).
+    if let (Some(p), Some(s)) = (&parent, &ctx.spawn) {
+        s.resumed_helper(&id, p);
+    }
+    let path = views
+        .iter()
+        .find(|v| v.id == id)
+        .map(|v| v.worktree.to_string_lossy().into_owned())
+        .unwrap_or_else(|| entry.folder.clone());
+    let workspace_id = if entry.directory {
+        format!("directory:{path}")
+    } else {
+        String::new()
+    };
+    if let Some(ev) = &ctx.events {
+        if entry.directory {
+            ev.helper_launched(
+                &id,
+                &v1::WorkspaceRegistered {
+                    workspace_id: workspace_id.clone(),
+                    node_id: ctx.node_id.clone(),
+                    project_id: entry.project_id.clone(),
+                    path: path.clone(),
+                    git_root: entry.git_root.clone(),
+                    branch: entry.branch.clone(),
+                    managed_worktree: entry.managed_worktree,
+                    files_changed: 0,
+                },
+                &entry.kind,
+                has_terminal,
+                &entry.parent_agent_id,
+            );
+            // Its start is said above with its folder; the rest (its state, its session) as usual.
+            let rest: Vec<SupervisorEvent> = events
+                .into_iter()
+                .filter(|e| !matches!(e, SupervisorEvent::Resumed { .. }))
+                .collect();
+            ev.supervisor_events(&rest, &views);
+        } else {
+            ev.supervisor_events(&events, &views);
+        }
+    }
+    ctx.wake_git();
+    Ok(v1::AgentLaunchResult {
+        agent_id: agent_id.to_string(),
+        terminal_id: if has_terminal {
+            terminal_id_of(&id)
+        } else {
+            String::new()
+        },
+        workspace_id,
+        path,
+    })
 }
 
 /// Git's own directory (or a file standing in for it in a linked worktree) is bookkeeping, not project content: its config

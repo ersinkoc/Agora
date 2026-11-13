@@ -1,6 +1,6 @@
 kind = "claude-code"
 display_name = "Claude Code"
-version = "2026.11.09.1"
+version = "2026.11.13.1"
 min_engine = 1
 # ADR-0057: before Enter, the box between its two rules must hold the typed prompt (and only it), with the mode footer and no dialog.
 input_box = '^─{20,}\n❯[^\S\n]?((?s:.*?))\n─{20,}$'
@@ -22,6 +22,12 @@ flag = ["--mcp-config", "{config_file}"]
 
 [resume]
 argv = ["claude", "--resume", "{session_id}"]
+
+[session]
+# ADR-0060: the node chooses the session id at the first launch (`--session-id <uuid>`, checked on Claude Code 2.1.319), so `--resume`
+# finds it after a restart without reading any transcript. Claude Code saves no transcript when it inherits a parent session's
+# markers; the node leaves those out of an agent's environment.
+id_args = ["--session-id", "{session_id}"]
 
 [usage]
 # Claude Code writes one JSON line per message to ~/.claude/projects/<cwd>/<session>.jsonl (checked on 2.1.319, ADR-0042). A message
