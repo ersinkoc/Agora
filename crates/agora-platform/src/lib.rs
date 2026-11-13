@@ -568,14 +568,33 @@ impl Drop for RawMode {
 
 /// Reads one line from the terminal on stdin without showing what is typed (a password), without its line ending. Fails with
 /// `Unsupported` when stdin is not a terminal (a secret is never read from a pipe or a file by accident) and with `Interrupted` on
-/// Ctrl-C; the terminal's settings are restored on every path, Ctrl-C included.
+/// Ctrl-C; the terminal's settings are restored on every path, Ctrl-C included. A caller that shows a prompt should use
+/// [`read_secret_line_with_prompt`]: a prompt printed before this call can be answered before echo is off, and that answer is shown.
 pub fn read_secret_line() -> io::Result<String> {
+    read_secret(None)
+}
+
+/// [`read_secret_line`] that writes `prompt` (and a line break) to stderr only once echo is off, so nothing typed or pasted in answer
+/// to it is ever shown. On Unix, input that arrived before the prompt (typed ahead, and already shown by the terminal as it came) is
+/// discarded when echo is switched off, so it never becomes part of the secret; the person types it again after the prompt.
+pub fn read_secret_line_with_prompt(prompt: &str) -> io::Result<String> {
+    read_secret(Some(prompt))
+}
+
+fn read_secret(prompt: Option<&str>) -> io::Result<String> {
     #[cfg(unix)]
-    let mode = unix::secret_mode()?;
+    let mode = unix::secret_mode(prompt.is_some())?;
     #[cfg(windows)]
     let mode = windows::secret_mode()?;
     #[cfg(not(any(unix, windows)))]
     let mode: () = return Err(unsupported_io("reading a password"));
+    if let Some(prompt) = prompt {
+        use std::io::Write;
+        let mut err = io::stderr().lock();
+        // A prompt that cannot be shown does not stop the read: the terminal is still the one typed into.
+        let _ = writeln!(err, "{prompt}");
+        let _ = err.flush();
+    }
     let line = secret_from(&mut io::stdin().lock());
     drop(mode);
     // The Enter (or Ctrl-C) that ended it was not echoed.

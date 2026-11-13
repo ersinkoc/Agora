@@ -162,7 +162,8 @@ pub(crate) fn restore_mode(saved: &libc::termios) {
 }
 
 /// Terminal settings for typing a secret: no echo, no line editing by the terminal and no signals (Ctrl-C arrives as a byte, so the
-/// reader can restore the settings before it stops). Restored when dropped, on every path.
+/// reader can restore the settings before it stops). Restored when dropped, on every path. With `discard_pending`, input that is
+/// waiting unread is dropped as the settings change (`TCSAFLUSH`), so what was typed before the prompt never joins the secret.
 pub(crate) struct SecretMode(libc::termios);
 
 impl Drop for SecretMode {
@@ -171,7 +172,7 @@ impl Drop for SecretMode {
     }
 }
 
-pub(crate) fn secret_mode() -> io::Result<SecretMode> {
+pub(crate) fn secret_mode(discard_pending: bool) -> io::Result<SecretMode> {
     // SAFETY: an all-zero termios is a valid buffer for tcgetattr to fill.
     let mut saved: libc::termios = unsafe { std::mem::zeroed() };
     // SAFETY: fd 0 is stdin; `saved` is a valid out-pointer. Fails (ENOTTY) when stdin is not a terminal.
@@ -185,8 +186,13 @@ pub(crate) fn secret_mode() -> io::Result<SecretMode> {
     quiet.c_lflag &= !(libc::ECHO | libc::ICANON | libc::ISIG);
     quiet.c_cc[libc::VMIN] = 1;
     quiet.c_cc[libc::VTIME] = 0;
+    let when = if discard_pending {
+        libc::TCSAFLUSH
+    } else {
+        libc::TCSANOW
+    };
     // SAFETY: fd 0 is stdin; `quiet` is a valid termios.
-    cvt(unsafe { libc::tcsetattr(0, libc::TCSANOW, &quiet) })?;
+    cvt(unsafe { libc::tcsetattr(0, when, &quiet) })?;
     Ok(SecretMode(saved))
 }
 

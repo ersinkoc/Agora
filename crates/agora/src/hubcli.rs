@@ -359,10 +359,9 @@ pub fn password(say: &Say, o: &Opts, op: &str) -> ExitCode {
             Err(e) => fail(format!("{e:?}")),
         },
         "set" => {
-            let read = |prompt: &str| {
-                say.err(prompt, &[]);
-                agora_platform::read_secret_line()
-            };
+            // The prompt appears only once echo is off: an answer typed or pasted right after it is never shown.
+            let read =
+                |prompt: &str| agora_platform::read_secret_line_with_prompt(&say.text(prompt, &[]));
             // Ctrl-C: the terminal is already back to normal; stop as an interrupted program does.
             let stopped = |e: std::io::Error| {
                 if e.kind() == std::io::ErrorKind::Interrupted {
