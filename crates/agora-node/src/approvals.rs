@@ -570,6 +570,8 @@ mod tests {
             approved,
             signer_device_id: device.into(),
             signature: sign(secret, &signed_message(node, id, approved)),
+            helper_grant: 0,
+            helpers_may_start: false,
         }
     }
 
@@ -784,6 +786,8 @@ mod tests {
                 approved,
                 signer_device_id: "web-1".into(),
                 signature: sig.as_ref().to_vec(),
+                helper_grant: 0,
+                helpers_may_start: false,
             }
         };
         assert_eq!(
@@ -820,6 +824,8 @@ mod tests {
             approved: true,
             signer_device_id: "web-1".into(),
             signature: sig.as_ref().to_vec(),
+            helper_grant: 0,
+            helpers_may_start: false,
         };
         assert_eq!(
             n.resolve(&resolve, 4).unwrap_err(),
@@ -865,6 +871,8 @@ mod tests {
             approved: true,
             signer_device_id: "phone".into(),
             signature: pair.sign(&rng, &m).unwrap().as_ref().to_vec(),
+            helper_grant: 0,
+            helpers_may_start: false,
         };
         assert_eq!(a.resolve(&r, 1).unwrap().1, Verdict::Approved);
     }

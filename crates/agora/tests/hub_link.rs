@@ -555,6 +555,7 @@ mod shared_board {
         local
             .call(Cmd::AgentStop(v1::AgentStop {
                 agent_id: quitter.1.clone(),
+                stop_helpers: false,
             }))
             .unwrap()
             .unwrap();

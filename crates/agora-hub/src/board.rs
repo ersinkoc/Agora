@@ -747,6 +747,7 @@ mod tests {
                     output_tokens: 0,
                     model: String::new(),
                     forgotten: false,
+                    parent_agent_id: String::new(),
                 },
             );
         }

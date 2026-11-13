@@ -46,6 +46,8 @@ message Event {
     LeaseGranted lease_granted = 62;
     LeaseReleased lease_released = 63;
     HandoffCreated handoff_created = 64;
+    // ADR-0057: the node refused an agent's `agent_start` before any approval was asked (limits, folder, kind).
+    AgentStartRefused agent_start_refused = 65;
     // files
     FilesChanged files_changed = 70;
   }
@@ -103,6 +105,9 @@ message AgentStarted {
   string worktree_id = 4;
   string kind = 5;
   IntegrationLevel level = 6;
+  // ADR-0057: the agent that started this one through the mesh (`agent_start`), on the same node; empty when the user started it.
+  // Old clients ignore it.
+  string parent_agent_id = 7;
 }
 
 message AgentStateChanged {
@@ -163,6 +168,11 @@ message ApprovalResolved {
   bool approved = 2;
   // Device that signed the decision (ADR-0020).
   string signer_device_id = 3;
+  // ADR-0057: for an approved `agent.start`, how many helpers of that kind in that folder the signed decision allows the asking
+  // agent for its session (this start included). 0: this start only.
+  uint32 helper_grant = 4;
+  // ADR-0057: `ApprovalResolve.helpers_may_start` as signed.
+  bool helpers_may_start = 5;
 }
 
 message MessagePosted {
@@ -198,6 +208,15 @@ message HandoffCreated {
   string to_agent_id = 3;
   string summary = 4;
   repeated string refs = 5;
+}
+
+// ADR-0057. `code` is the error code the asking agent received (`mesh.helper_limit`, `mesh.folder_not_allowed`,
+// `mesh.rate_limited`, `node.policy_denied`, ...); `kind` and `folder` are what it asked for. The prompt is not repeated here.
+message AgentStartRefused {
+  string agent_id = 1;
+  string kind = 2;
+  string folder = 3;
+  string code = 4;
 }
 
 message FilesChanged {

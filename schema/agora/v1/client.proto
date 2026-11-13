@@ -58,6 +58,8 @@ message AgentSnapshot {
   optional int32 exit_code = 10;
   uint64 input_tokens = 11;
   uint64 output_tokens = 12;
+  // ADR-0057: `AgentStarted.parent_agent_id`.
+  string parent_agent_id = 13;
 }
 
 message TerminalSnapshot {
