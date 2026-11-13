@@ -599,7 +599,9 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
             let stopped_now = ctx.sup().stop(&id);
             // ADR-0060: an interrupted agent whose process outlived the node is stopped by ending exactly that process.
             if let (Err(SupervisorError::NotFound(_)), Some(ledger)) = (&stopped_now, &ctx.ledger) {
-                if ledger.get(&a.agent_id).is_some_and(|e| e.still_running()) {
+                // Also when its old process has ended since it was announced still running: the stop then signals nothing and
+                // only says it is interrupted without a process, so Resume and Start again are offered again.
+                if ledger.get(&a.agent_id).is_some_and(|e| e.interrupted()) {
                     stop_survivor(ctx, ledger, &a.agent_id)?;
                     // Its helpers that outlived the node too, and theirs, when asked (ADR-0057).
                     if a.stop_helpers {
@@ -608,7 +610,7 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                         while let Some(parent) = todo.pop() {
                             for h in ledger.interrupted() {
                                 if h.parent_agent_id == parent && seen.insert(h.agent_id.clone()) {
-                                    if h.still_running() {
+                                    if h.process().is_some() {
                                         stop_survivor(ctx, ledger, &h.agent_id)?;
                                     }
                                     todo.push(h.agent_id);
@@ -845,8 +847,9 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
     }
 }
 
-/// ADR-0060: ends the process of an interrupted agent that outlived the node (only when it is still the recorded process), forgets it,
-/// and says the agent is interrupted again, now without `still_running`.
+/// ADR-0060: ends the process of an interrupted agent that outlived the node (only when it is still the recorded process: one that has
+/// ended, or a pid now used by another process, is not signalled), forgets it, and says the agent is interrupted again, now without
+/// `still_running`.
 fn stop_survivor(
     ctx: &ControlContext,
     ledger: &crate::ledger::Ledger,

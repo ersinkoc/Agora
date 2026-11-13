@@ -574,8 +574,9 @@ fn an_agent_that_outlived_a_crashed_node_is_stopped_before_it_is_resumed() {
     // Two processes on one conversation are never started: Resume waits until it is stopped.
     assert_eq!(e.resume(&probe, false).unwrap_err(), "agent.still_running");
     assert_eq!(e.resume(&probe, true).unwrap_err(), "agent.still_running");
-    // A reused pid is never touched: stopping that entry ends nothing (this test is still here to say so).
-    assert!(stop(&e, "agent-50", false).is_err());
+    // A reused pid is never touched: stopping that entry signals nothing (this test is still here to say so) and only forgets it.
+    stop(&e, "agent-50", false).unwrap();
+    assert!(e.node().ledger.get("agent-50").unwrap().process().is_none());
     // Stop ends exactly the old process, and with stop_helpers its helper that outlived the node too; then Resume works.
     stop(&e, &probe, true).unwrap();
     e.wait("the helper's old process to end", |_| {
@@ -591,4 +592,49 @@ fn an_agent_that_outlived_a_crashed_node_is_stopped_before_it_is_resumed() {
     let r = e.resume(&probe, false).unwrap();
     assert_eq!(r.agent_id, probe);
     assert!(e.running(&probe));
+}
+
+/// Codex review of #437 (`docs/reviews/0437-ended-survivor.md`): a survivor that ends after it was announced still running is cleared
+/// by Stop (nothing is signalled), and the window is told it can be resumed again.
+#[test]
+fn review_a_survivor_that_ended_after_announcement_can_be_cleared_by_stop() {
+    if !supported() || agora_platform::process_identity(std::process::id()).is_err() {
+        return;
+    }
+    let mut e = Env::new("review-dead-survivor");
+    let probe = e.launch("probe");
+    e.wait("the owned probe process in the ledger", |e| {
+        e.node()
+            .ledger
+            .get(&probe)
+            .is_some_and(|x| x.process().is_some())
+    });
+    let process = e.node().ledger.get(&probe).unwrap().process().unwrap();
+    e.node.take().unwrap().crash();
+    e.start();
+    assert!(e
+        .interrupted()
+        .iter()
+        .any(|i| i.agent_id == probe && i.still_running));
+    // End only this test's fake process after the hub would have seen still_running=true.
+    agora_platform::kill_process_if_same(&process).unwrap();
+    e.wait("the owned probe to end", |_| {
+        !agora_platform::process_still_running(&process)
+    });
+    let result = stop(&e, &probe, false);
+    assert!(
+        result.is_ok(),
+        "Stop it cannot clear an already-ended survivor: {result:?}"
+    );
+    // The last word on it says it no longer runs, and Resume works.
+    let last = e
+        .interrupted()
+        .into_iter()
+        .rfind(|i| i.agent_id == probe)
+        .unwrap();
+    assert!(!last.still_running);
+    assert!(e.node().ledger.get(&probe).unwrap().process().is_none());
+    e.resume(&probe, false).unwrap();
+    // Unknown agents are still refused.
+    assert!(stop(&e, "agent-77", false).is_err());
 }
