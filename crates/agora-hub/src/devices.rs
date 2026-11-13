@@ -5,7 +5,9 @@
 //! machine, or a device the machine already trusts signs an endorsement, which the machine verifies itself. So nothing in this module
 //! can widen what a machine trusts; at worst a lying hub offers a candidate the owner then refuses after comparing fingerprints.
 
-use agora_protocol::v1::{DeviceEndorsement, DeviceInfo, DeviceRegister, DeviceRevocation};
+use agora_protocol::v1::{
+    DeviceAskApproval, DeviceEndorsement, DeviceInfo, DeviceRegister, DeviceRevocation,
+};
 use agora_protocol::{Error, ErrorCode};
 use prost::Message;
 use rusqlite::{params, OptionalExtension};
@@ -17,15 +19,23 @@ use crate::store::{SqliteStore, StoreError};
 pub const MAX_ENDORSEMENT_MS: u64 = 90 * 24 * 60 * 60 * 1000;
 /// Most machines one endorsement may name.
 pub const MAX_SCOPE: usize = 64;
-/// Most devices one person may register (a browser profile made per visit must not fill the hub).
+/// Most devices one person may have registered and not revoked (a browser profile made per visit must not fill the hub).
 pub const MAX_DEVICES_PER_USER: usize = 64;
+/// Most revocations kept per person.
+pub const MAX_REVOCATIONS_PER_USER: usize = 256;
+/// A revocation is kept this long, then forgotten: every endorsement signed before it has long expired (at most 90 days), so
+/// forgetting it cannot bring a device back.
+pub const REVOCATION_KEPT_MS: u64 = 400 * 24 * 60 * 60 * 1000;
+/// How far a registration's `signed_at_ms` may be from the hub's clock, and an ask's.
+const REGISTER_SKEW_MS: u64 = 10 * 60 * 1000;
+const ASK_SKEW_MS: u64 = 5 * 60 * 1000;
 
-/// What people compare: the first 8 bytes of the SHA-256 of the 65-byte public key, lowercase hex in groups of 2 bytes joined by `-`
-/// (`3f9a-07c2-11be-d4e0`). Vectors: `schema/fixtures/signing/device-trust-v1.json`.
+/// What people compare: the first 12 bytes (96 bits) of the SHA-256 of the 65-byte public key, lowercase hex in groups of 4 hex
+/// digits joined by `-` (`f947-3cb5-e304-81be-ecf2-64cd`). Vectors: `schema/fixtures/signing/device-trust-v1.json`.
 pub fn fingerprint(public_key: &[u8]) -> String {
     let digest = Sha256::digest(public_key);
     let hex: Vec<String> = digest
-        .get(..8)
+        .get(..12)
         .unwrap_or_default()
         .chunks(2)
         .map(|pair| pair.iter().map(|b| format!("{b:02x}")).collect())
@@ -42,9 +52,77 @@ pub fn valid_device_id(id: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
-/// A name a person reads: at most 64 characters, no control characters.
+/// A name a person reads: at most 64 characters, no control, format, bidi or other hidden characters (agora-core's list, ADR-0057).
 pub fn valid_name(name: &str) -> bool {
-    name.chars().count() <= 64 && !name.chars().any(char::is_control)
+    name.chars().count() <= 64
+        && !name
+            .chars()
+            .any(|c| c.is_control() || agora_core::text::is_hidden(c))
+}
+
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+fn field(out: &mut Vec<u8>, x: &[u8]) {
+    out.extend_from_slice(x.len().to_string().as_bytes());
+    out.push(b':');
+    out.extend_from_slice(x);
+}
+
+/// The bytes a device signs to register itself (proof of possession; docs/specs/protocol.md "Devices").
+pub fn register_message(
+    device_id: &str,
+    name: &str,
+    public_key: &[u8],
+    signed_at_ms: u64,
+) -> Vec<u8> {
+    let mut m = b"agora-device-register-v1\0".to_vec();
+    field(&mut m, device_id.as_bytes());
+    field(&mut m, name.as_bytes());
+    field(&mut m, hex(public_key).as_bytes());
+    field(&mut m, signed_at_ms.to_string().as_bytes());
+    m
+}
+
+/// The bytes a device signs to ask another device of its person to approve it.
+pub fn ask_message(device_id: &str, signed_at_ms: u64) -> Vec<u8> {
+    let mut m = b"agora-device-ask-v1\0".to_vec();
+    field(&mut m, device_id.as_bytes());
+    field(&mut m, signed_at_ms.to_string().as_bytes());
+    m
+}
+
+/// The bytes an endorser signs (the node's `device_trust::endorse_message`).
+pub fn endorse_message(e: &DeviceEndorsement) -> Vec<u8> {
+    let mut m = b"agora-device-endorse-v1\0".to_vec();
+    field(&mut m, e.device_id.as_bytes());
+    field(&mut m, hex(&e.public_key).as_bytes());
+    field(&mut m, e.name.as_bytes());
+    field(&mut m, e.nodes.len().to_string().as_bytes());
+    for n in &e.nodes {
+        field(&mut m, n.as_bytes());
+    }
+    field(&mut m, e.issued_at_ms.to_string().as_bytes());
+    field(&mut m, e.expires_at_ms.to_string().as_bytes());
+    field(&mut m, e.endorser_device_id.as_bytes());
+    m
+}
+
+/// The bytes a revoker signs.
+pub fn revoke_message(r: &DeviceRevocation) -> Vec<u8> {
+    let mut m = b"agora-device-revoke-v1\0".to_vec();
+    field(&mut m, r.device_id.as_bytes());
+    field(&mut m, r.issued_at_ms.to_string().as_bytes());
+    field(&mut m, r.revoker_device_id.as_bytes());
+    m
+}
+
+/// ES256 (r || s) by `key` over `message`.
+pub fn verifies(key: &[u8], message: &[u8], signature: &[u8]) -> bool {
+    ring::signature::UnparsedPublicKey::new(&ring::signature::ECDSA_P256_SHA256_FIXED, key)
+        .verify(message, signature)
+        .is_ok()
 }
 
 fn valid_key(key: &[u8]) -> bool {
@@ -88,6 +166,17 @@ impl<'a> Devices<'a> {
         if !valid_key(&r.public_key) {
             return Err(invalid("public_key"));
         }
+        // Proof of possession, checked before anything is stored: only the holder of the key can register it.
+        if r.signed_at_ms.abs_diff(now_ms) > REGISTER_SKEW_MS
+            || !verifies(
+                &r.public_key,
+                &register_message(&r.device_id, &r.name, &r.public_key, r.signed_at_ms),
+                &r.signature,
+            )
+        {
+            return Err(Error::new(ErrorCode::DeviceSignatureInvalid)
+                .with("device_id", r.device_id.as_str()));
+        }
         let conn = self.store.lock().map_err(store_error)?;
         let existing: Option<(String, Vec<u8>)> = conn
             .query_row(
@@ -104,8 +193,8 @@ impl<'a> Devices<'a> {
             }
             Some(_) => {
                 conn.execute(
-                    "UPDATE user_devices SET name = ?2, last_used_ms = ?3 WHERE device_id = ?1",
-                    params![r.device_id, r.name, to_i64(now_ms)],
+                    "UPDATE user_devices SET name = ?2, last_used_ms = ?3, signed_at_ms = ?4, signature = ?5 WHERE device_id = ?1",
+                    params![r.device_id, r.name, to_i64(now_ms), to_i64(r.signed_at_ms), r.signature],
                 )
                 .map_err(|e| store_error(e.into()))?;
                 Ok(())
@@ -113,7 +202,7 @@ impl<'a> Devices<'a> {
             None => {
                 let count: i64 = conn
                     .query_row(
-                        "SELECT COUNT(*) FROM user_devices WHERE user_id = ?1",
+                        "SELECT COUNT(*) FROM user_devices WHERE user_id = ?1 AND revoked_ms = 0",
                         [user],
                         |row| row.get(0),
                     )
@@ -124,9 +213,9 @@ impl<'a> Devices<'a> {
                         .with("limit", MAX_DEVICES_PER_USER as i64));
                 }
                 conn.execute(
-                    "INSERT INTO user_devices (device_id, user_id, name, public_key, created_ms, last_used_ms)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
-                    params![r.device_id, user, r.name, r.public_key, to_i64(now_ms)],
+                    "INSERT INTO user_devices (device_id, user_id, name, public_key, created_ms, last_used_ms, signed_at_ms, signature)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, ?7)",
+                    params![r.device_id, user, r.name, r.public_key, to_i64(now_ms), to_i64(r.signed_at_ms), r.signature],
                 )
                 .map_err(|e| store_error(e.into()))?;
                 Ok(())
@@ -138,7 +227,7 @@ impl<'a> Devices<'a> {
         let conn = self.store.lock().map_err(store_error)?;
         let mut stmt = conn
             .prepare(
-                "SELECT device_id, name, public_key, created_ms, last_used_ms, user_id, approval_asked_ms, revoked_ms
+                "SELECT device_id, name, public_key, created_ms, last_used_ms, user_id, approval_asked_ms, revoked_ms, signed_at_ms, signature
                  FROM user_devices WHERE ?1 IS NULL OR user_id = ?1 ORDER BY created_ms, rowid",
             )
             .map_err(|e| store_error(e.into()))?;
@@ -154,6 +243,8 @@ impl<'a> Devices<'a> {
                     approval_asked_ms: to_u64(row.get(6)?),
                     endorsed_by: Vec::new(),
                     revoked_ms: to_u64(row.get(7)?),
+                    signed_at_ms: to_u64(row.get(8)?),
+                    registration_signature: row.get(9)?,
                 })
             })
             .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
@@ -206,9 +297,20 @@ impl<'a> Devices<'a> {
         }
     }
 
-    /// This device of `user` asks another device of theirs to approve it.
-    pub fn ask_approval(&self, user: &str, id: &str, now_ms: u64) -> Result<(), Error> {
-        self.own(user, id)?;
+    /// This device of `user` asks another device of theirs to approve it; the ask is signed by the device itself, just now.
+    pub fn ask_approval(
+        &self,
+        user: &str,
+        a: &DeviceAskApproval,
+        now_ms: u64,
+    ) -> Result<(), Error> {
+        let id = a.device_id.as_str();
+        let key = self.own(user, id)?;
+        if a.signed_at_ms.abs_diff(now_ms) > ASK_SKEW_MS
+            || !verifies(&key, &ask_message(id, a.signed_at_ms), &a.signature)
+        {
+            return Err(Error::new(ErrorCode::DeviceSignatureInvalid).with("device_id", id));
+        }
         let conn = self.store.lock().map_err(store_error)?;
         conn.execute(
             "UPDATE user_devices SET approval_asked_ms = ?2 WHERE device_id = ?1",
@@ -254,15 +356,22 @@ impl<'a> Devices<'a> {
                 Error::new(ErrorCode::DeviceKeyMismatch).with("device_id", e.device_id.as_str())
             );
         }
-        self.own(user, &e.endorser_device_id)?;
+        let endorser = self.own(user, &e.endorser_device_id)?;
+        // Verified before it is stored or carried: the hub keeps only what the endorser's registered key signed.
+        if !verifies(&endorser, &endorse_message(e), &e.signature) {
+            return Err(Error::new(ErrorCode::DeviceSignatureInvalid)
+                .with("device_id", e.device_id.as_str()));
+        }
         let conn = self.store.lock().map_err(store_error)?;
+        // The same signed endorsement again is kept once.
         conn.execute(
-            "INSERT INTO device_endorsements (device_id, endorser, issued_ms, expires_ms, payload) VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT OR IGNORE INTO device_endorsements (device_id, endorser, issued_ms, expires_ms, signature, payload) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 e.device_id,
                 e.endorser_device_id,
                 to_i64(e.issued_at_ms),
                 to_i64(e.expires_at_ms),
+                e.signature,
                 e.encode_to_vec()
             ],
         )
@@ -292,24 +401,61 @@ impl<'a> Devices<'a> {
             return Err(invalid("signature"));
         }
         self.own(user, &r.device_id)?;
-        self.own(user, &r.revoker_device_id)?;
+        let revoker = self.own(user, &r.revoker_device_id)?;
+        if !verifies(&revoker, &revoke_message(r), &r.signature) {
+            return Err(Error::new(ErrorCode::DeviceSignatureInvalid)
+                .with("device_id", r.device_id.as_str()));
+        }
         let conn = self.store.lock().map_err(store_error)?;
         conn.execute(
-            "INSERT INTO device_revocations (device_id, revoker, issued_ms, payload) VALUES (?1, ?2, ?3, ?4)",
+            "DELETE FROM device_revocations WHERE issued_ms < ?1",
+            [to_i64(now_ms.saturating_sub(REVOCATION_KEPT_MS))],
+        )
+        .map_err(|e| store_error(e.into()))?;
+        let kept: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM device_revocations r JOIN user_devices d ON d.device_id = r.device_id WHERE d.user_id = ?1",
+                [user],
+                |row| row.get(0),
+            )
+            .map_err(|e| store_error(e.into()))?;
+        if usize::try_from(kept).unwrap_or(usize::MAX) >= MAX_REVOCATIONS_PER_USER {
+            return Err(Error::new(ErrorCode::NodeResourceLimit)
+                .with("resource", "revocations")
+                .with("limit", MAX_REVOCATIONS_PER_USER as i64));
+        }
+        conn.execute(
+            "INSERT OR IGNORE INTO device_revocations (device_id, revoker, issued_ms, signature, payload) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
                 r.device_id,
                 r.revoker_device_id,
                 to_i64(r.issued_at_ms),
+                r.signature,
                 r.encode_to_vec()
             ],
         )
         .map_err(|e| store_error(e.into()))?;
         conn.execute(
-            "UPDATE user_devices SET revoked_ms = ?2, approval_asked_ms = 0 WHERE device_id = ?1",
+            "UPDATE user_devices SET revoked_ms = CASE revoked_ms WHEN 0 THEN ?2 ELSE revoked_ms END, approval_asked_ms = 0 WHERE device_id = ?1",
             params![r.device_id, to_i64(now_ms)],
         )
         .map_err(|e| store_error(e.into()))?;
         Ok(())
+    }
+
+    /// Deletes a revoked device from the hub's list (`agora hub devices forget ID`). Its revocations stay, so machines keep refusing
+    /// it. `Ok(false)`: no such device, or it is not revoked.
+    pub fn forget(&self, id: &str) -> Result<bool, Error> {
+        let conn = self.store.lock().map_err(store_error)?;
+        let n = conn
+            .execute(
+                "DELETE FROM user_devices WHERE device_id = ?1 AND revoked_ms > 0",
+                [id],
+            )
+            .map_err(|e| store_error(e.into()))?;
+        conn.execute("DELETE FROM device_endorsements WHERE device_id = ?1", [id])
+            .map_err(|e| store_error(e.into()))?;
+        Ok(n > 0)
     }
 
     /// What a machine that connects is given again: every revocation, and every endorsement that has not expired, oldest first. The
@@ -327,10 +473,12 @@ impl<'a> Devices<'a> {
             })
             .map_err(|e| store_error(e.into()))?;
         let revocations = conn
-            .prepare("SELECT payload FROM device_revocations ORDER BY id")
+            .prepare("SELECT payload FROM device_revocations WHERE issued_ms >= ?1 ORDER BY id")
             .and_then(|mut s| {
-                s.query_map([], |row| row.get::<_, Vec<u8>>(0))
-                    .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+                s.query_map([to_i64(now_ms.saturating_sub(REVOCATION_KEPT_MS))], |row| {
+                    row.get::<_, Vec<u8>>(0)
+                })
+                .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
             })
             .map_err(|e| store_error(e.into()))?;
         Ok((
@@ -348,62 +496,150 @@ impl<'a> Devices<'a> {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    use ring::rand::SystemRandom;
+    use ring::signature::{EcdsaKeyPair, KeyPair, ECDSA_P256_SHA256_FIXED_SIGNING};
 
-    fn key(n: u8) -> Vec<u8> {
-        let mut k = vec![4u8; 65];
-        k[1] = n;
-        k
-    }
+    /// A device key for tests, and what it signs.
+    pub struct Key(EcdsaKeyPair);
 
-    fn reg(id: &str, n: u8) -> DeviceRegister {
-        DeviceRegister {
-            device_id: id.into(),
-            name: format!("Browser {n}"),
-            public_key: key(n),
+    impl Key {
+        pub fn new() -> Self {
+            let rng = SystemRandom::new();
+            let pkcs8 =
+                EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng).unwrap();
+            Key(
+                EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8.as_ref(), &rng)
+                    .unwrap(),
+            )
+        }
+        pub fn public(&self) -> Vec<u8> {
+            self.0.public_key().as_ref().to_vec()
+        }
+        pub fn sign(&self, m: &[u8]) -> Vec<u8> {
+            self.0
+                .sign(&SystemRandom::new(), m)
+                .unwrap()
+                .as_ref()
+                .to_vec()
+        }
+        pub fn register(&self, id: &str, name: &str, at: u64) -> DeviceRegister {
+            DeviceRegister {
+                device_id: id.into(),
+                name: name.into(),
+                public_key: self.public(),
+                signed_at_ms: at,
+                signature: self.sign(&register_message(id, name, &self.public(), at)),
+            }
+        }
+        pub fn ask(&self, id: &str, at: u64) -> DeviceAskApproval {
+            DeviceAskApproval {
+                device_id: id.into(),
+                signed_at_ms: at,
+                signature: self.sign(&ask_message(id, at)),
+            }
+        }
+        pub fn endorse(
+            &self,
+            by: &str,
+            device: &str,
+            key: &[u8],
+            issued: u64,
+            ttl: u64,
+        ) -> DeviceEndorsement {
+            let mut e = DeviceEndorsement {
+                device_id: device.into(),
+                public_key: key.to_vec(),
+                name: "New".into(),
+                nodes: vec![],
+                issued_at_ms: issued,
+                expires_at_ms: issued + ttl,
+                endorser_device_id: by.into(),
+                signature: Vec::new(),
+            };
+            e.signature = self.sign(&endorse_message(&e));
+            e
+        }
+        pub fn revoke(&self, by: &str, device: &str, issued: u64) -> DeviceRevocation {
+            let mut r = DeviceRevocation {
+                device_id: device.into(),
+                issued_at_ms: issued,
+                revoker_device_id: by.into(),
+                signature: Vec::new(),
+            };
+            r.signature = self.sign(&revoke_message(&r));
+            r
         }
     }
 
-    fn endorsement(device: &str, n: u8, by: &str) -> DeviceEndorsement {
-        DeviceEndorsement {
-            device_id: device.into(),
-            public_key: key(n),
-            name: "New".into(),
-            nodes: vec![],
-            issued_at_ms: 1_000,
-            expires_at_ms: 1_000 + MAX_ENDORSEMENT_MS,
-            endorser_device_id: by.into(),
-            signature: vec![0; 64],
-        }
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
     }
 
     #[test]
-    fn fingerprints_match_the_shared_vectors() {
+    fn signed_bytes_and_fingerprints_match_the_shared_vectors() {
         let v: serde_json::Value = serde_json::from_str(include_str!(
             "../../../schema/fixtures/signing/device-trust-v1.json"
         ))
         .unwrap();
+        let key = unhex(v["endorser_public_key"].as_str().unwrap());
         for f in v["fingerprints"].as_array().unwrap() {
-            let k: Vec<u8> = (0..130)
-                .step_by(2)
-                .map(|i| {
-                    u8::from_str_radix(&f["public_key"].as_str().unwrap()[i..i + 2], 16).unwrap()
-                })
-                .collect();
-            assert_eq!(fingerprint(&k), f["fingerprint"].as_str().unwrap());
+            assert_eq!(
+                fingerprint(&unhex(f["public_key"].as_str().unwrap())),
+                f["fingerprint"].as_str().unwrap()
+            );
+        }
+        for c in v["registrations"].as_array().unwrap() {
+            let m = register_message(
+                c["device_id"].as_str().unwrap(),
+                c["name"].as_str().unwrap(),
+                &unhex(c["public_key"].as_str().unwrap()),
+                c["signed_at_ms"].as_u64().unwrap(),
+            );
+            assert_eq!(hex(&m), c["hex"].as_str().unwrap());
+            assert!(verifies(&key, &m, &unhex(c["signature"].as_str().unwrap())));
+        }
+        for c in v["asks"].as_array().unwrap() {
+            let m = ask_message(
+                c["device_id"].as_str().unwrap(),
+                c["signed_at_ms"].as_u64().unwrap(),
+            );
+            assert_eq!(hex(&m), c["hex"].as_str().unwrap());
+            assert!(verifies(&key, &m, &unhex(c["signature"].as_str().unwrap())));
+        }
+        for c in v["endorsements"].as_array().unwrap() {
+            let e = DeviceEndorsement {
+                device_id: c["device_id"].as_str().unwrap().into(),
+                public_key: unhex(c["public_key"].as_str().unwrap()),
+                name: c["name"].as_str().unwrap().into(),
+                nodes: c["nodes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|n| n.as_str().unwrap().to_string())
+                    .collect(),
+                issued_at_ms: c["issued_at_ms"].as_u64().unwrap(),
+                expires_at_ms: c["expires_at_ms"].as_u64().unwrap(),
+                endorser_device_id: c["endorser_device_id"].as_str().unwrap().into(),
+                signature: unhex(c["signature"].as_str().unwrap()),
+            };
+            assert_eq!(hex(&endorse_message(&e)), c["hex"].as_str().unwrap());
         }
     }
 
     #[test]
-    fn a_device_id_stays_bound_to_its_key_and_its_person() {
+    fn a_device_id_stays_bound_to_its_key_and_its_person_and_needs_its_key_to_register() {
         let store = SqliteStore::open_in_memory().unwrap();
         let d = Devices::new(&store);
-        d.register("owner", &reg("web-1", 1), 10).unwrap();
-        // Again later, under a new name: touched, not duplicated.
-        let mut again = reg("web-1", 1);
-        again.name = "Firefox".into();
-        d.register("owner", &again, 20).unwrap();
+        let (k1, k2) = (Key::new(), Key::new());
+        d.register("owner", &k1.register("web-1", "Browser", 10), 10)
+            .unwrap();
+        d.register("owner", &k1.register("web-1", "Firefox", 20), 20)
+            .unwrap();
         let list = d.list_for("owner").unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(
@@ -414,98 +650,174 @@ mod tests {
             ),
             ("Firefox", 10, 20)
         );
-        // Another key under the same id, or the same id for another person: refused.
-        for (user, n) in [("owner", 2), ("eda", 1)] {
-            let e = d.register(user, &reg("web-1", n), 30).unwrap_err();
-            assert_eq!(e.code, ErrorCode::DeviceKeyMismatch);
-        }
-        assert!(d.list_for("eda").unwrap().is_empty());
-        assert_eq!(d.list_all().unwrap().len(), 1);
-        for bad in [
-            DeviceRegister {
-                device_id: "bad id".into(),
-                ..reg("x", 1)
-            },
-            DeviceRegister {
-                public_key: vec![4; 64],
-                ..reg("web-2", 1)
-            },
-            DeviceRegister {
-                name: "a\u{7}b".into(),
-                ..reg("web-3", 1)
-            },
-        ] {
+        assert!(!list[0].registration_signature.is_empty());
+        for (user, k) in [("owner", &k2), ("eda", &k1)] {
             assert_eq!(
-                d.register("owner", &bad, 1).unwrap_err().code,
+                d.register(user, &k.register("web-1", "x", 30), 30)
+                    .unwrap_err()
+                    .code,
+                ErrorCode::DeviceKeyMismatch
+            );
+        }
+        // A key nobody signed for (the hub or a client inventing one), a stale proof, a name with hidden characters: refused.
+        let mut forged = k1.register("web-9", "x", 40);
+        forged.public_key = k2.public();
+        assert_eq!(
+            d.register("owner", &forged, 40).unwrap_err().code,
+            ErrorCode::DeviceSignatureInvalid
+        );
+        assert_eq!(
+            d.register("owner", &k2.register("web-9", "x", 0), REGISTER_SKEW_MS + 1)
+                .unwrap_err()
+                .code,
+            ErrorCode::DeviceSignatureInvalid
+        );
+        for name in ["a\u{7}b", "a\u{202e}b", "a\u{200b}b"] {
+            assert_eq!(
+                d.register("owner", &k2.register("web-9", name, 40), 40)
+                    .unwrap_err()
+                    .code,
                 ErrorCode::ProtocolInvalidMessage
             );
         }
     }
 
     #[test]
-    fn endorsements_are_kept_only_between_a_persons_own_devices() {
+    fn endorsements_and_revocations_are_verified_kept_once_and_bounded() {
         let store = SqliteStore::open_in_memory().unwrap();
         let d = Devices::new(&store);
-        d.register("owner", &reg("web-old", 1), 1).unwrap();
-        d.register("owner", &reg("web-new", 2), 2).unwrap();
-        d.register("eda", &reg("web-eda", 3), 3).unwrap();
-        d.ask_approval("owner", "web-new", 5).unwrap();
+        let (old, new, eda, stranger) = (Key::new(), Key::new(), Key::new(), Key::new());
+        d.register("owner", &old.register("web-old", "Old", 1), 1)
+            .unwrap();
+        d.register("owner", &new.register("web-new", "New", 2), 2)
+            .unwrap();
+        d.register("eda", &eda.register("web-eda", "Eda", 3), 3)
+            .unwrap();
+        // Only the device itself can ask, and only now.
+        assert_eq!(
+            d.ask_approval("owner", &stranger.ask("web-new", 5), 5)
+                .unwrap_err()
+                .code,
+            ErrorCode::DeviceSignatureInvalid
+        );
+        assert_eq!(
+            d.ask_approval("owner", &new.ask("web-new", 5), 5 + ASK_SKEW_MS + 1)
+                .unwrap_err()
+                .code,
+            ErrorCode::DeviceSignatureInvalid
+        );
+        assert_eq!(
+            d.ask_approval("eda", &new.ask("web-new", 5), 5)
+                .unwrap_err()
+                .code,
+            ErrorCode::DeviceUnknown
+        );
+        d.ask_approval("owner", &new.ask("web-new", 5), 5).unwrap();
         assert_eq!(d.list_for("owner").unwrap()[1].approval_asked_ms, 5);
-        // Someone else's device can neither be asked for nor endorsed nor used to endorse.
+        let day = 86_400_000;
         assert_eq!(
-            d.ask_approval("eda", "web-new", 5).unwrap_err().code,
+            d.record_endorsement(
+                "owner",
+                &eda.endorse("web-eda", "web-new", &new.public(), 1_000, day),
+                10
+            )
+            .unwrap_err()
+            .code,
             ErrorCode::DeviceUnknown
         );
+        // Signed by someone other than the endorser it names: never stored.
         assert_eq!(
-            d.record_endorsement("owner", &endorsement("web-new", 2, "web-eda"), 10)
-                .unwrap_err()
-                .code,
-            ErrorCode::DeviceUnknown
+            d.record_endorsement(
+                "owner",
+                &stranger.endorse("web-old", "web-new", &new.public(), 1_000, day),
+                10
+            )
+            .unwrap_err()
+            .code,
+            ErrorCode::DeviceSignatureInvalid
         );
         assert_eq!(
-            d.record_endorsement("eda", &endorsement("web-new", 2, "web-eda"), 10)
-                .unwrap_err()
-                .code,
-            ErrorCode::DeviceUnknown
-        );
-        // A key other than the registered one is refused before any machine sees it.
-        assert_eq!(
-            d.record_endorsement("owner", &endorsement("web-new", 9, "web-old"), 10)
-                .unwrap_err()
-                .code,
+            d.record_endorsement(
+                "owner",
+                &old.endorse("web-old", "web-new", &stranger.public(), 1_000, day),
+                10
+            )
+            .unwrap_err()
+            .code,
             ErrorCode::DeviceKeyMismatch
         );
-        // Longer than 90 days, or already over: refused.
-        let mut long = endorsement("web-new", 2, "web-old");
-        long.expires_at_ms += 1;
         assert_eq!(
-            d.record_endorsement("owner", &long, 10).unwrap_err().code,
+            d.record_endorsement(
+                "owner",
+                &old.endorse(
+                    "web-old",
+                    "web-new",
+                    &new.public(),
+                    1_000,
+                    MAX_ENDORSEMENT_MS + 1
+                ),
+                10
+            )
+            .unwrap_err()
+            .code,
             ErrorCode::DeviceEndorsementExpired
         );
-        d.record_endorsement("owner", &endorsement("web-new", 2, "web-old"), 10)
-            .unwrap();
-        let list = d.list_for("owner").unwrap();
-        assert_eq!(list[1].endorsed_by, ["web-old"]);
-        assert_eq!(list[1].approval_asked_ms, 0, "the card goes away");
-        let (e, r) = d.for_machines(11).unwrap();
-        assert_eq!((e.len(), r.len()), (1, 0));
-        assert!(d
-            .for_machines(2_000 + MAX_ENDORSEMENT_MS)
-            .unwrap()
-            .0
-            .is_empty());
-        d.record_revocation(
-            "owner",
-            &DeviceRevocation {
-                device_id: "web-new".into(),
-                issued_at_ms: 20,
-                revoker_device_id: "web-old".into(),
-                signature: vec![0; 64],
-            },
-            20,
-        )
-        .unwrap();
+        let e = old.endorse("web-old", "web-new", &new.public(), 1_000, day);
+        d.record_endorsement("owner", &e, 10).unwrap();
+        d.record_endorsement("owner", &e, 11).unwrap();
+        assert_eq!(
+            d.for_machines(11).unwrap().0.len(),
+            1,
+            "the same signed endorsement is kept once"
+        );
+        assert_eq!(d.list_for("owner").unwrap()[1].endorsed_by, ["web-old"]);
+        assert_eq!(d.list_for("owner").unwrap()[1].approval_asked_ms, 0);
+        assert_eq!(
+            d.record_revocation("owner", &stranger.revoke("web-old", "web-new", 20), 20)
+                .unwrap_err()
+                .code,
+            ErrorCode::DeviceSignatureInvalid
+        );
+        let r = old.revoke("web-old", "web-new", 20);
+        d.record_revocation("owner", &r, 20).unwrap();
+        d.record_revocation("owner", &r, 21).unwrap();
         assert_eq!(d.for_machines(21).unwrap().1.len(), 1);
         assert_eq!(d.list_for("owner").unwrap()[1].revoked_ms, 20);
+        // Forgotten after 400 days; a revoked device can be deleted from the list, a live one cannot.
+        assert!(d
+            .for_machines(21 + REVOCATION_KEPT_MS)
+            .unwrap()
+            .1
+            .is_empty());
+        assert!(!d.forget("web-old").unwrap());
+        assert!(d.forget("web-new").unwrap());
+        assert_eq!(d.list_for("owner").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn only_devices_not_revoked_count_toward_the_limit() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let d = Devices::new(&store);
+        let keeper = Key::new();
+        d.register("owner", &keeper.register("keep", "k", 1), 1)
+            .unwrap();
+        for i in 1..MAX_DEVICES_PER_USER {
+            let k = Key::new();
+            d.register("owner", &k.register(&format!("d{i}"), "x", 1), 1)
+                .unwrap();
+            if i == 1 {
+                d.record_revocation("owner", &keeper.revoke("keep", "d1", 2), 2)
+                    .unwrap();
+            }
+        }
+        // 64 registered, one of them revoked: one more fits, then the limit holds.
+        d.register("owner", &Key::new().register("more", "x", 3), 3)
+            .unwrap();
+        assert_eq!(
+            d.register("owner", &Key::new().register("over", "x", 3), 3)
+                .unwrap_err()
+                .code,
+            ErrorCode::NodeResourceLimit
+        );
     }
 }

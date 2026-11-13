@@ -21,7 +21,7 @@ cli-usage =
       agora hub ssh [add NAME DESTINATION [--port N]] [--hub-dir DIR]
       agora hub backup [FILE] [--keep N] [--hub-dir DIR]
       agora hub restore FILE [--hub-dir DIR]
-      agora hub devices [--hub-dir DIR]
+      agora hub devices [forget DEVICE_ID] [--hub-dir DIR]
       agora node enroll --hub URL --ca FILE --code CODE --id NAME [--yes --fingerprint FP]...
       agora panel
       agora node trust DEVICE_ID PUBLIC_KEY_HEX [--data DIR]
@@ -102,6 +102,8 @@ cli-devices-not-enrolled = This machine is not enrolled with a hub. Run "agora n
 cli-devices-failed = Could not get the devices from the hub ({ $reason }).
 cli-untrusted = Device { $id } is no longer trusted on this machine.
 cli-untrust-unknown = Device { $id } was not trusted on this machine. It stays refused if the hub carries an earlier approval of it.
+cli-hub-device-forgotten = Device { $id } is no longer listed. Machines keep refusing it.
+cli-hub-device-not-forgotten = Device { $id } is not a removed device on this hub; only removed devices can be forgotten.
 cli-hub-devices-none = No device is registered yet. A browser or the terminal client registers itself when it signs in.
 cli-hub-device-line = { $name } · { $fingerprint } · { $id } · { $user } · registered { $created } · last used { $used }{ $state }
 cli-device-state-revoked = {" "}· removed

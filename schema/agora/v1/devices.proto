@@ -19,6 +19,11 @@ message DeviceRegister {
   string name = 2;
   // The 65-byte uncompressed P-256 point the device signs with (ADR-0028).
   bytes public_key = 3;
+  // Proof of possession: the device's own signature, by `public_key`, over `agora-device-register-v1` (docs/specs/protocol.md
+  // "Devices") at `signed_at_ms` (its clock; the hub accepts at most 10 minutes either way). The hub and every node verify it, so
+  // nobody can register, and no hub can invent, a device for a key nobody holds.
+  uint64 signed_at_ms = 4;
+  bytes signature = 5;
 }
 
 // A registered device as the hub knows it.
@@ -38,6 +43,9 @@ message DeviceInfo {
   repeated string endorsed_by = 8;
   // When a signed revocation of it was carried; 0 when none was.
   uint64 revoked_ms = 9;
+  // The registration's proof of possession (`DeviceRegister.signed_at_ms` and `signature`), for the node to verify.
+  uint64 signed_at_ms = 10;
+  bytes registration_signature = 11;
 }
 
 // client -> hub, answered by the hub with `DeviceListResult`: the caller's own devices. A node may send it too, on a connection made
@@ -90,4 +98,8 @@ message DeviceRevoke {
 // (`DeviceInfo.approval_asked_ms`) so the person's other devices show a card for it; nothing else changes.
 message DeviceAskApproval {
   string device_id = 1;
+  // Signed by the asking device's own key over `agora-device-ask-v1` at `signed_at_ms` (at most 5 minutes from the hub's clock): only
+  // the device itself can ask.
+  uint64 signed_at_ms = 2;
+  bytes signature = 3;
 }
