@@ -25,7 +25,7 @@ const SLACK: Duration = Duration::from_secs(2);
 /// Longest first line read.
 const FIRST_LINE_MAX: u64 = 64 * 1024;
 /// Longest id accepted; it is passed to the agent's `[resume]` argv, so only plain characters.
-const MAX_ID: usize = 200;
+const MAX_ID: usize = 128;
 
 /// A running terminal agent without a session id whose kind names its session file.
 #[derive(Debug, Clone)]
@@ -61,12 +61,28 @@ fn at<'a>(v: &'a Value, path: &str) -> Option<&'a Value> {
     path.split('.').try_fold(v, |v, k| v.get(k))
 }
 
-fn plain_id(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() <= MAX_ID
+/// Whether a session id may be put on an agent's command line (`[resume]` argv, `[session] id_args`): it starts with an ASCII letter or
+/// digit (so it can never be read as an option such as `--dangerously-bypass-approvals-and-sandbox`), then only letters, digits, `.`,
+/// `_` and `-`, at most 128 characters. The one check every id passes before it reaches an argv (ADR-0060). An adapter's id travels in
+/// JSON (`session/load`) and need not pass it, but it never goes on a command line unless it does.
+pub fn argv_safe(id: &str) -> bool {
+    id.len() <= MAX_ID
+        && id.bytes().next().is_some_and(|b| b.is_ascii_alphanumeric())
         && id
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+}
+
+/// A UUID in its usual spelling (8-4-4-4-12 hex digits): what Codex and Claude Code session ids are. A session file's id must be one.
+pub fn is_uuid(id: &str) -> bool {
+    id.len() == 36
+        && id.bytes().enumerate().all(|(i, b)| {
+            if [8, 13, 18, 23].contains(&i) {
+                b == b'-'
+            } else {
+                b.is_ascii_hexdigit()
+            }
+        })
 }
 
 fn same_dir(a: &Path, b: &Path) -> bool {
@@ -92,7 +108,7 @@ fn session_in(file: &Path, spec: &SessionFile, folder: &Path) -> Option<String> 
         return None;
     }
     let id = at(&v, &spec.id)?.as_str()?;
-    plain_id(id).then(|| id.to_string())
+    (argv_safe(id) && is_uuid(id)).then(|| id.to_string())
 }
 
 impl SessionWatcher {
@@ -252,16 +268,55 @@ mod tests {
         // Another folder's session, a line that is not a session start, and an id with characters argv must not get are not its.
         write(&root, "rollout-1.jsonl", "other-id", &root.join("work/b"));
         write(&root, "rollout-2.jsonl", "bad id;rm", &root.join("work/a"));
-        write(&root, "rollout-3.jsonl", "0199-abc", &root.join("work/a"));
+        write(
+            &root,
+            "rollout-3.jsonl",
+            "0199aaaa-0000-4000-8000-000000000001",
+            &root.join("work/a"),
+        );
         let found = w.poll(now + SCAN_EVERY, &t, &HashSet::new());
         assert_eq!(
             found,
-            vec![(AgentId::new("agent-1"), "0199-abc".to_string())]
+            vec![(
+                AgentId::new("agent-1"),
+                "0199aaaa-0000-4000-8000-000000000001".to_string()
+            )]
         );
         // The node now knows it as that agent's: it is not offered again (the agent is no longer a target either).
-        let known: HashSet<String> = ["0199-abc".to_string()].into();
+        let known: HashSet<String> = ["0199aaaa-0000-4000-8000-000000000001".to_string()].into();
         assert!(w.poll(now + SCAN_EVERY * 2, &t, &known).is_empty());
         assert!(w.poll(now + SCAN_EVERY * 3, &[], &known).is_empty());
+    }
+
+    #[test]
+    fn a_planted_file_can_never_put_an_option_on_the_agents_command_line() {
+        let long = "a".repeat(129);
+        let bad = [
+            "--dangerously-bypass-approvals-and-sandbox",
+            "-x",
+            "a b",
+            "a;b",
+            "ünïcode-0000-4000-8000-000000000001",
+            "",
+            long.as_str(),
+            // Argv-safe, but not a UUID: a session file's id must be one.
+            "abc",
+        ];
+        for id in bad {
+            let root = tmp("planted");
+            let mut w = SessionWatcher::new(Some(root.join("home")));
+            let t = vec![target("agent-1", root.join("work/a"))];
+            write(&root, "rollout-1.jsonl", id, &root.join("work/a"));
+            assert!(
+                w.poll(Instant::now(), &t, &HashSet::new()).is_empty(),
+                "{id:?}"
+            );
+        }
+        for id in &bad[..7] {
+            assert!(!argv_safe(id), "{id:?}");
+        }
+        assert!(argv_safe("0199aaaa-0000-4000-8000-000000000001") && argv_safe("ses_9.x-Y"));
+        assert!(argv_safe(&"a".repeat(128)));
     }
 
     #[test]
@@ -273,21 +328,39 @@ mod tests {
             target("agent-1", root.join("work/a")),
             target("agent-2", root.join("work/a")),
         ];
-        write(&root, "rollout-1.jsonl", "s-1", &root.join("work/a"));
+        write(
+            &root,
+            "rollout-1.jsonl",
+            "0199aaaa-0000-4000-8000-000000000011",
+            &root.join("work/a"),
+        );
         assert!(w.poll(now, &twins, &HashSet::new()).is_empty());
         assert!(w.poll(now + SCAN_EVERY, &twins, &HashSet::new()).is_empty());
         // Alone in another folder, but two new files fit: no guess either.
         let mut w = SessionWatcher::new(Some(root.join("home")));
-        write(&root, "rollout-2.jsonl", "s-2", &root.join("work/b"));
-        write(&root, "rollout-3.jsonl", "s-3", &root.join("work/b"));
+        write(
+            &root,
+            "rollout-2.jsonl",
+            "0199aaaa-0000-4000-8000-000000000012",
+            &root.join("work/b"),
+        );
+        write(
+            &root,
+            "rollout-3.jsonl",
+            "0199aaaa-0000-4000-8000-000000000013",
+            &root.join("work/b"),
+        );
         let alone = vec![target("agent-3", root.join("work/b"))];
         assert!(w.poll(now, &alone, &HashSet::new()).is_empty());
         // A session another agent already has is never given again.
         let mut w = SessionWatcher::new(Some(root.join("home")));
-        let known: HashSet<String> = ["s-2".to_string()].into();
+        let known: HashSet<String> = ["0199aaaa-0000-4000-8000-000000000012".to_string()].into();
         assert_eq!(
             w.poll(now, &alone, &known),
-            vec![(AgentId::new("agent-3"), "s-3".to_string())]
+            vec![(
+                AgentId::new("agent-3"),
+                "0199aaaa-0000-4000-8000-000000000013".to_string()
+            )]
         );
     }
 }

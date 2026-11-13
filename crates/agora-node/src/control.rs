@@ -862,7 +862,10 @@ pub(crate) fn resume_agent(
                     .with("parent_agent_id", p.as_str()));
             }
         }
-        if !new_session && (entry.session_id.is_empty() || !sup.resumable(&entry.kind)) {
+        // The id goes on a command line for a terminal agent: checked here again, whatever the ledger holds.
+        if !new_session
+            && (!crate::session_files::argv_safe(&entry.session_id) || !sup.resumable(&entry.kind))
+        {
             return Err(Error::new(ErrorCode::AgentSessionMissing).with("agent_id", agent_id));
         }
     }

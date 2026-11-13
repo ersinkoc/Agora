@@ -407,3 +407,102 @@ fn a_helper_is_resumed_only_while_its_parent_runs() {
     assert_eq!(v.parent.as_ref().map(|p| p.as_str()), Some(parent.as_str()));
     assert!(Path::new(&r.path).is_dir());
 }
+
+const BAD_IDS: &[&str] = &[
+    "--dangerously-bypass-approvals-and-sandbox",
+    "-x",
+    "a b",
+    "a;b",
+    "ünïcode",
+    "",
+];
+
+#[test]
+fn start_again_gives_a_kind_that_chooses_its_ids_a_new_one_it_can_resume_later() {
+    if !supported() {
+        return;
+    }
+    let mut e = Env::new("again");
+    let probe = e.launch("probe");
+    let first = e.session(&probe);
+    e.start();
+    let r = e.resume(&probe, true).unwrap();
+    assert_eq!(r.agent_id, probe);
+    // A new id, passed as at a first launch, and kept as its session.
+    e.wait("the new session", |e| {
+        let s = e.session(&probe);
+        !s.is_empty() && s != first
+    });
+    let fresh = e.session(&probe);
+    assert_eq!(fresh.len(), 36);
+    e.wait("the second start", |e| e.reports("start-").len() >= 2);
+    assert!(e.reports("start-").iter().any(|r| {
+        args(r)
+            .windows(2)
+            .any(|w| w[0] == "--session-id" && w[1] == fresh)
+    }));
+    // So after the next restart it can be resumed with it.
+    e.start();
+    assert!(e
+        .interrupted()
+        .iter()
+        .any(|i| i.agent_id == probe && i.resumable));
+    e.resume(&probe, false).unwrap();
+    e.wait("the resume", |e| !e.reports("resume-").is_empty());
+    assert!(args(&e.reports("resume-")[0])
+        .windows(2)
+        .any(|w| w[0] == "--resume" && w[1] == fresh));
+}
+
+#[test]
+fn a_session_id_that_could_be_an_option_never_reaches_a_command_line() {
+    if !supported() {
+        return;
+    }
+    let long = "a".repeat(129);
+    let mut bad: Vec<&str> = BAD_IDS.to_vec();
+    bad.push(&long);
+    let mut e = Env::new("inject");
+    let probe = e.launch("probe");
+    // (d) A hook or file reporting one for a terminal agent: refused.
+    for id in &bad {
+        let set = e
+            .node()
+            .supervisor
+            .lock()
+            .unwrap()
+            .report_session(&agora_core::AgentId::new(&probe), id);
+        assert!(set.is_err(), "{id:?}");
+    }
+    // Recorded as reported anyway (a forged event): the ledger does not keep it.
+    for id in &bad {
+        e.node()
+            .events
+            .record_bodies(vec![v1::event::Body::AgentSessionReported(
+                v1::AgentSessionReported {
+                    agent_id: probe.clone(),
+                    session_id: id.to_string(),
+                },
+            )]);
+        assert!(e.session(&probe).is_empty(), "{id:?}");
+    }
+    // (b) Written into the ledger file while the node is down: dropped as it loads, so (c) Resume is refused and nothing starts.
+    e.node = None;
+    let file = e.root.join("data/sessions/ledger.json");
+    let mut ledger: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    for entry in ledger["entries"].as_array_mut().unwrap() {
+        entry["session_id"] = serde_json::Value::from("--dangerously-bypass-approvals-and-sandbox");
+    }
+    std::fs::write(&file, serde_json::to_vec(&ledger).unwrap()).unwrap();
+    e.start();
+    assert!(e
+        .interrupted()
+        .iter()
+        .any(|i| i.agent_id == probe && !i.resumable));
+    assert_eq!(
+        e.resume(&probe, false).unwrap_err(),
+        "agent.session_missing"
+    );
+    assert!(e.reports("resume-").is_empty());
+}
