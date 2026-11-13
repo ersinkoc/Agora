@@ -84,6 +84,8 @@ fn agent(id: &str) -> Body {
         kind: "shell".into(),
         level: 2,
         parent_agent_id: String::new(),
+        launch_options: Vec::new(),
+        skips_permissions: false,
     })
 }
 
@@ -1335,6 +1337,8 @@ fn started(id: &str, project: &str) -> Body {
         kind: "shell".into(),
         level: 2,
         parent_agent_id: String::new(),
+        launch_options: Vec::new(),
+        skips_permissions: false,
     })
 }
 

@@ -465,6 +465,8 @@ pub fn snapshot_of(view: &View, pos: u64) -> v1::Snapshot {
                 input_tokens: a.input_tokens,
                 output_tokens: a.output_tokens,
                 parent_agent_id: a.parent_agent_id.clone(),
+                launch_options: a.launch_options.clone(),
+                skips_permissions: a.skips_permissions,
                 ..session_snapshot(&a.session)
             })
             .collect(),
@@ -847,14 +849,14 @@ where
     })();
     match outcome {
         Ok(mut i) => {
-            i.audit = audit(hub, who, &command_name(&req), &i.node, "sent");
+            i.audit = audit(hub, who, &audit_action(&req), &i.node, "sent");
             inflight.push(i);
         }
         Err(e) => {
             audit(
                 hub,
                 who,
-                &command_name(&req),
+                &audit_action(&req),
                 &req.target_node,
                 e.code.as_str(),
             );
@@ -1228,6 +1230,21 @@ fn audit(
     crate::audit::Audit::new(hub.store())
         .record_in(&who.session, now_ms(), &who.user, action, node, outcome)
         .ok()
+}
+
+/// The audit row's action: the command's schema name, with the launch options a start chose (ADR-0059: `AgentLaunch[skip-permissions]`).
+fn audit_action(req: &v1::CommandRequest) -> String {
+    let options = match &req.command {
+        Some(command_request::Command::AgentLaunch(a)) => a.launch_options.as_slice(),
+        Some(command_request::Command::AgentStart(a)) => a.launch_options.as_slice(),
+        _ => &[],
+    };
+    let name = command_name(req);
+    if options.is_empty() {
+        name
+    } else {
+        format!("{name}[{}]", options.join(","))
+    }
 }
 
 /// The command's schema name (`AgentStop`), for an error that names what was refused.

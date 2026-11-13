@@ -144,3 +144,4 @@ cli-project-identity = Project identity: { $id } (folder: { $path }). Share .age
 
 cli-panel = Open the hub's panel at { $url } in a browser. This machine's browser must trust the hub's certificate: import { $ca } as a certificate authority (on Windows: certutil -user -addstore Root { $ca }). Sign in with a code from "agora hub login" on the hub machine.
 cli-panel-none = This machine is not enrolled with a hub, so there is no panel to open. Enroll it first with "agora node enroll".
+cli-node-policy-not-understood = node.policy_not_understood: the policy file has a line this node does not understand ({ $line }), so no agent may start without asking until it is fixed.

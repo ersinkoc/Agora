@@ -54,3 +54,4 @@ themes, desktop and phone). They are the contract for how the shared components 
 images with `--update`, and the diff shows in review.
 
 `grant-dark.png` and `grant-light.png` show the permission window a machine's `signed_commands` policy triggers (ADR-0041).
+- `adr59-start-dont-ask-confirm-{dark,light}.png`, `adr59-start-dont-ask-chosen-{dark,light}.png`: ADR-0059 start window, "Don't ask" asked about (Keep asking is the main button) and chosen; `adr59-no-ask-badge-tiles-{dark,light}.png`: the "Does not ask" badge on an agent's tile (gallery).

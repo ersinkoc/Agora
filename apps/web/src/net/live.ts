@@ -56,9 +56,16 @@ export interface Live {
 }
 
 export class CommandError extends Error {
-  constructor(readonly code: string) {
+  // The error's parameters as text (stable values such as `policy`, never user-facing text).
+  constructor(readonly code: string, readonly params: Record<string, string> = {}) {
     super(code);
   }
+}
+
+function paramsOf(p: { [k: string]: agora.v1.IParamValue } | null | undefined): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(p ?? {})) out[k] = v.str ?? (v.int !== undefined && v.int !== null ? String(v.int) : '');
+  return out;
 }
 
 const browserSocket: SocketFactory = (url, protocols) => new WebSocket(url, protocols) as unknown as Socket;
@@ -220,7 +227,7 @@ export function connectLive(o: LiveOptions): Live {
           pending.delete(r.requestId);
           if (r.err) {
             if (p && r.err.code === 'approval.grant_required') o.onGrantRequired?.(p.node, p.body);
-            p?.reject(new CommandError(r.err.code ?? 'error'));
+            p?.reject(new CommandError(r.err.code ?? 'error', paramsOf(r.err.params)));
           }
           else p?.resolve(r.ok ?? agora.v1.CommandOk.create());
         } catch { /* a garbled answer: the request stays pending until the connection ends */ }
