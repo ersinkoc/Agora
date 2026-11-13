@@ -5,6 +5,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 pub const METADATA: &str = ".agent-project.json";
+/// The owner-confirmed folder bindings ([`Bindings`]), in the node's worktree folder.
+pub const BINDINGS_FILE: &str = ".directory-bindings.json";
 
 pub fn invalid(field: &'static str) -> Error {
     Error::new(ErrorCode::ProtocolInvalidMessage).with("field", field)
@@ -158,6 +160,51 @@ impl Bindings {
         self.ids = ids;
         Ok(())
     }
+}
+
+/// The project the node itself knows `requested` to belong to, for a device limited to some projects (ADR-0049, ADR-0053): the
+/// project of the nearest folder that is `requested` or contains it among the owner-confirmed folders in `bindings_file` (written by
+/// launches) and the registered checkouts in `projects` (`(id, root)`), compared as canonical paths. A registered project's id or name
+/// (what `directory.inspect` also accepts) names its root. `None`: a folder the node knows for no project. What the folder itself
+/// claims (its metadata) is never asked, so a copied identity cannot place a folder in a project.
+pub fn known_project(
+    bindings_file: &Path,
+    projects: &[(String, String, PathBuf)],
+    requested: &str,
+) -> Option<String> {
+    if let Some((id, _, _)) = projects
+        .iter()
+        .find(|(id, name, _)| id == requested || name == requested)
+    {
+        return Some(id.clone());
+    }
+    if requested.is_empty() || requested.len() > 4096 || requested.contains('\0') {
+        return None;
+    }
+    let path = agora_platform::canonicalize_plain(Path::new(requested)).ok()?;
+    let bindings = Bindings::load(bindings_file.to_path_buf());
+    if !bindings.valid {
+        return None;
+    }
+    let roots = projects.iter().filter_map(|(id, _, root)| {
+        Some((agora_platform::canonicalize_plain(root).ok()?, id.clone()))
+    });
+    let found: Vec<(usize, String)> = bindings
+        .ids
+        .iter()
+        .map(|(p, id)| (PathBuf::from(p), id.clone()))
+        .chain(roots)
+        .filter(|(known, _)| path.starts_with(known))
+        .map(|(known, id)| (known.components().count(), id))
+        .collect();
+    let nearest = found.iter().map(|(depth, _)| *depth).max()?;
+    let mut ids = found
+        .into_iter()
+        .filter(|(d, _)| *d == nearest)
+        .map(|(_, id)| id);
+    let id = ids.next()?;
+    // The same folder known as two projects (its identity changed): the node cannot say which, so neither.
+    ids.all(|other| other == id).then_some(id)
 }
 
 /// Most folders one `directory.list` answer carries (ADR-0053); more are reported as `truncated`.

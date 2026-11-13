@@ -56,6 +56,11 @@ impl DeviceLimits {
         }
     }
 
+    /// Is `device` limited to some projects (by the policy file or through an endorsement)?
+    pub fn is_limited(&self, device: &str) -> bool {
+        self.limit(device).is_some()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()
     }

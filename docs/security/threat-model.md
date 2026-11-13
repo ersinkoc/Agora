@@ -115,8 +115,13 @@ Found by an independent audit after 0.2.0 and fixed: a passkey added by a member
 Directory inspection and launch are always authorized on the node by an exact-request trusted-device signature over
 node, operation, path, kind, expected project, metadata/worktree option, changed-identity confirmation, nonce and expiry.
 A generic start grant cannot substitute another path. Used nonces persist across restarts; malformed or full replay state
-fails closed. See `specs/protocol.md` for the canonical encoding. Initially this new flow is restricted to unrestricted
-owner devices; node-scoped policy limits refuse it for member devices. The local owner-only socket keeps its authority.
+fails closed. See `specs/protocol.md` for the canonical encoding. A device limited to some projects (ADR-0049) may take
+these actions only inside its projects, placed by the node's own records (folders launches confirmed and registered
+checkouts, nearest wins; the session ledger for a resume), never by a folder's metadata, so a copied identity cannot move a
+folder into its project; it can neither create nor change an identity, list the home folder or any folder outside its
+projects, and the check runs after the signature so only a trusted device learns where a project is. Accepted: a known
+folder of its project is resolved again when the action runs, so whoever can change the machine's folders between the check
+and the action (a local user, not the hub) could redirect it. The local owner-only socket keeps its authority.
 
 
 Folder listing (ADR-0053 `directory.list`) discloses **folder names only** (and whether each holds a `.git`), one folder per

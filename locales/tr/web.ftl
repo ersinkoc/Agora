@@ -310,6 +310,7 @@ start-separate-worktree = Ayrı bir çalışma kopyası oluştur
 start-identity-change = Bu klasörü değişen proje kimliğiyle eşleştir
 start-directory-unsupported = Seçilen klasörde ajan başlatmak için bu makineyi güncelleyin.
 start-directory-failed = Klasör seçilemedi. Yolu ve erişim izinlerini kontrol edin.
+start-directory-forbidden = Bu cihaz bu makinede başka projelerle sınırlı. Üzerinde çalıştığınız bir projenin klasörünü seçin ya da makinenin sahibine sorun.
 workspace-shared = Ortak klasör · değişiklikler çalışma alanına ait
 filter-project = Proje
 filter-all-projects = Tüm projeler
@@ -445,6 +446,7 @@ resume-failed-gone = O makine artık bunu sunmuyor.
 resume-failed-unsupported = O makine henüz ajanları devam ettiremiyor. Güncelleyin.
 resume-failed-still-running = Yeniden başlamadan önceki işlemi hâlâ çalışıyor. Önce durdurun.
 resume-failed-offline = O makine çevrimdışı.
+resume-failed-forbidden = Bu cihaz bu makinede başka projelerle sınırlı, bu yüzden bu ajanı başlatamaz.
 
 # ADR-0059: launch options (manifest `[[launch.option]]` labels)
 option-skip-permissions = Sormadan

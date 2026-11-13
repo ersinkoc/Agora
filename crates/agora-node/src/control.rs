@@ -102,7 +102,7 @@ impl ControlContext {
             supervisor,
             projects,
             directories: Mutex::new(crate::directory::Bindings::load(
-                worktree_root.join(".directory-bindings.json"),
+                worktree_root.join(crate::directory::BINDINGS_FILE),
             )),
             worktree_root,
             node_id,
