@@ -1694,3 +1694,56 @@ async fn a_command_whose_client_left_still_gets_its_outcome_in_the_audit_trail()
         }
     }
 }
+
+#[tokio::test]
+async fn a_command_whose_session_ended_still_gets_its_outcome_in_the_audit_trail() {
+    // Sign-out, expiry or a revoked session ends the client's connection from the hub's side (macos's review of L17): the command
+    // the node is still carrying out gets its outcome in the audit trail all the same.
+    std::env::set_var("AGORA_RECHECK_MS", "100");
+    let valid = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let st = Arc::new(ServerState {
+        hub: Arc::new(Hub::open(SqliteStore::open_in_memory().unwrap()).unwrap()),
+        support: support(),
+        ca: None,
+        lockout: Arc::new(Lockout::new()),
+        auth: Box::new(Switch(Arc::clone(&valid))),
+        assets: None,
+        sessions: None,
+    });
+    let addr = start(Arc::clone(&st)).await;
+    let (mut node, _task) = node_conn(&st, "n3").await;
+    handshake(&mut node).await;
+    node.send(&f(
+        STREAM_EVENTS,
+        kinds::EVENT,
+        event("n3", 1, online("n3")),
+    ))
+    .await
+    .unwrap();
+    next_ack(&mut node).await;
+    let mut client = dial(addr, Some("any")).await;
+    client
+        .send(&f(
+            STREAM_EVENTS,
+            kinds::SUBSCRIBE,
+            v1::Subscribe::default().encode_to_vec(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(recv(&mut client).await.kind, kinds::SNAPSHOT);
+    client.send(&routed("revoked", "n3")).await.unwrap();
+    let got = recv(&mut node).await;
+    let forwarded = v1::CommandRequest::decode(got.payload.as_slice()).unwrap();
+    valid.store(false, std::sync::atomic::Ordering::SeqCst);
+    assert!(closed(&mut client).await);
+    let answer = v1::CommandResponse {
+        request_id: forwarded.request_id,
+        result: Some(command_response::Result::Ok(v1::CommandOk {
+            result: Some(command_ok::Result::AgentList(v1::AgentListResult::default())),
+        })),
+    };
+    node.send(&f(STREAM_COMMANDS, 1, answer.encode_to_vec()))
+        .await
+        .unwrap();
+    assert_eq!(agent_list_outcome(&st, Duration::from_secs(10)).await, "ok");
+}

@@ -462,9 +462,27 @@ pub async fn serve_client_as<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    serve_client_while(conn, hub, first, access, &|| true).await
+}
+
+/// [`serve_client_as`] that also ends the connection as soon as `valid` turns false (a session that expired, was signed out or
+/// revoked). Only the client's part is raced against it, so commands already on its way still get their outcome recorded.
+async fn serve_client_while<S>(
+    conn: Conn<S>,
+    hub: &Hub,
+    first: Frame,
+    access: &(dyn Fn() -> Option<crate::users::Access> + Sync),
+    valid: &(dyn Fn() -> bool + Sync),
+) -> Result<(), ServeError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let mut inflight: Vec<Inflight> = Vec::new();
     // The connection is moved in, so it is closed when the client's part ends, whichever way it ends.
-    let result = serve_client_loop(conn, hub, first, access, &mut inflight).await;
+    let result = tokio::select! {
+        r = serve_client_loop(conn, hub, first, access, &mut inflight) => r,
+        () = still(valid) => Err(ServeError::Refused),
+    };
     finish_unanswered(hub, inflight).await;
     result
 }
@@ -1207,10 +1225,7 @@ where
             // The token was good when the connection opened; an expired or revoked session must not keep a live one.
             let token = token.unwrap_or_default();
             let role = || state.auth.access(token);
-            tokio::select! {
-                r = serve_client_as(conn, &state.hub, first, &role) => r,
-                () = still(|| state.auth.check(token)) => Err(ServeError::Refused),
-            }
+            serve_client_while(conn, &state.hub, first, &role, &|| state.auth.check(token)).await
         }
         _ => Err(ServeError::Refused),
     }
