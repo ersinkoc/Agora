@@ -11,8 +11,9 @@ min_engine = 1
 # during a failed or empty turn along with the notice (ADR-0058), so it is asked for. `--log-level` is left out on purpose: 1.x accepts only
 # the upper case (`ERROR`) and 2.x only the lower case (`error`), so no spelling works for both; the default level is INFO and the bridge keeps
 # the last lines (the error is among them).
-# opencode 2.x (seen with 2.2.6 on Windows) runs sessions in a background service: `opencode acp` initializes, but `session/new`
-# fails with -32603 `ServiceUnavailableError` unless `opencode service` is running. The start then fails as `adapter.agent_refused`
-# (stage `session`) and the bridge's notice carries the agent's message. Start the service first, or use opencode 1.x.
+# opencode 2.x (seen with 2.2.6 on Windows): `session/new` takes 9.5 to 12 s and now and then fails with -32603 `ServiceUnavailableError`, because
+# opencode's own `/api/model/default` answered 503 (its default model/provider); the start then fails as `adapter.agent_refused` (stage `session`)
+# and the notice carries the agent's message. opencode 2.x logs such a failure only as an INFO line with `http.status=503`, which the bridge's
+# stderr tail keeps.
 [structured]
 acp = { argv = ["opencode", "acp", "--print-logs"] }
