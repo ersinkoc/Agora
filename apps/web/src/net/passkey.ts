@@ -39,9 +39,12 @@ async function post(env: Env, op: string, body: unknown, bearer?: string): Promi
 const cancelled = (e: unknown) => e instanceof DOMException && (e.name === 'NotAllowedError' || e.name === 'AbortError');
 
 // Adds a passkey for this hub. `session` is the token of the signed-in session.
-export async function addPasskey(session: string, env: Env = defaults()): Promise<PasskeyResult> {
+// `password`: the screen password, which the hub asks for when this browser is on another machine (ADR-0067): a passkey replaces the
+// password, so a session alone may not add one from elsewhere.
+export async function addPasskey(session: string, env: Env = defaults(), password?: string): Promise<PasskeyResult> {
+  const pw = password ? { password } : {};
   try {
-    const begin = await post(env, 'register-begin', {}, session);
+    const begin = await post(env, 'register-begin', pw, session);
     if (!begin.ok) return { ok: false, reason: 'failed' };
     const { challenge, rpId } = (await begin.json()) as { challenge: string; rpId: string };
     const cred = (await env.credentials.create({
@@ -61,6 +64,7 @@ export async function addPasskey(session: string, env: Env = defaults()): Promis
       id: cred.id,
       publicKey: b64urlEncode(key),
       clientDataJSON: b64urlEncode(response.clientDataJSON),
+      ...pw,
     }, session);
     return done.ok ? { ok: true } : { ok: false, reason: 'failed' };
   } catch (e) {

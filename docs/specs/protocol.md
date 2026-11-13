@@ -13,7 +13,8 @@ connect (WSS + mTLS for nodes, session token for clients)
   ← ResumeOk   { from_seq }  |  ← SnapshotRequired
   → SnapshotRequired                       (node only, when it no longer has from_seq; ADR-0054)
   ... streams ...
-  → / ← Ping / Pong every 15 s; 3 missed = connection lost
+  → / ← Ping / Pong: a node pings every 15 s; the hub answers each Ping (a node's or a window's) at once with a Pong carrying
+           the same payload. No deadline is enforced yet (silence detection needs a hub-owned presence event, an ADR)
   → / ← Goodbye { reason_code }
 ```
 
@@ -182,6 +183,18 @@ bits, 10 minutes, single use). The web app trades it with `POST /api/session` (`
 wrong, expired or used code, 429 after five misses in a row) for a session token: 128 random bits, valid 12 hours, stored only as a
 hash. The token is the bearer credential above. `<hub dir>/token` stays valid for scripts. 
 
+Screen password (ADR-0067, `agora-hub::password`; additive JSON on the same HTTP routes, no protocol message): `GET /api/session` →
+`{"passwordRequired": bool, "passwordSet": bool}` (required only when one is set and the TCP peer is not loopback). `POST /api/session`
+also takes `"password"`; without the right one from a non-loopback peer it is 401 like a bad code (the code is not spent). Wrong codes,
+passwords and passkeys are limited per address (5 tries, then 1 minute doubling to 1 hour; loopback at most 1 minute) and codes and
+passwords also hub-wide (50), 429 while locked out; every 401/429 is answered after 250 ms. `DELETE /api/session` with a bearer ends that
+session ("Lock"). `POST /api/password` (`{"password", "current"?}`, owner session; `current` needed when one is set) sets it and ends
+every other session (400 `{"code":"password.too_short"|"password.too_long"}`, 401 wrong current, 403 not the owner).
+From a non-loopback peer with a password set, `POST /api/passkey/register-begin` and `register-finish` also need `"password"` (401
+without it, counted like a sign-in); changing or clearing the password deletes passkeys added from elsewhere without it (their ids are
+not in the setting `passkeys_vouched`). Passkey `login-finish` counts only toward the per-address limit. The idle lock of a window
+uses `DELETE /api/session`. The hash is a setting (`screen_password`: `pbkdf2-sha256$<rounds>$<salt hex>$<hash hex>`), not a schema change.
+
 Passkeys (`agora-hub::passkey`, WebAuthn, ES256 only, no attestation): a signed-in session adds one with
 `POST /api/passkey/register-begin` (`{}` → `{"challenge","rpId"}`, `Authorization: Bearer <session>`) and `register-finish`
 (`{"id","publicKey"(SPKI),"clientDataJSON"}`, all base64url). Without a session: `login-begin` (→ `{"challenge","rpId","ids"}`) and
@@ -288,7 +301,7 @@ output, kind 2 resize (cols, rows as u16 LE), kind 3 exit (i32 LE; negative = si
 gets a fresh snapshot instead of the dropped output; it never slows the terminal. Input and resize are ordinary
 commands. Terminal ids are `t-<agent id>` (one terminal per agent). Implemented commands: `project.list`,
 `agent.start`, `agent.stop`, `agent.prompt`, `terminal.input`, `terminal.resize`, `terminal.subscribe`; the rest
-answer `protocol.capability_missing`. `agent.list` (ADR-0025) and `agent.kinds` (ADR-0030: the node's loaded manifests with display name, integration level and whether the launch program is on `PATH`; invalid manifests omitted; `agora agent kinds`).
+answer `protocol.capability_missing`. `agent.list` (ADR-0025) and `agent.kinds` (ADR-0030: the node's built-in and folder manifests, one per kind (agent-manifest.md, "Where agent kinds come from"), with display name, integration level and whether the launch program is on `PATH`; invalid manifests omitted; `agora agent kinds`).
 
 ## 5. Client state model
 
@@ -388,3 +401,94 @@ All additions; nothing published changed.
   in US dollars as its `micro_usd`, and estimates from the price table only for agents that reported none.
 - **Start failures.** `agent.start` of an adapter agent whose adapter failed with a stable reason answers with that code instead of
   `internal`: `adapter.agent_exited` `{stage, exit_code, stderr_tail}` or `adapter.agent_refused` `{stage}` (`error-codes.md`).
+
+### Session ledger and Resume (ADR-0060)
+
+All additions; nothing published changed.
+
+- **Ledger.** A node keeps `<data>/sessions/ledger.json` (folder `0700`, file `0600` on Unix, an owner-only ACL on Windows; replaced
+  whole through a temporary file in the same folder and a rename; at most 512 entries, 4 MiB read). Per agent: id, kind, project,
+  folder (its workspace path or its own worktree), whether it is a directory agent (ADR-0052) and its separate worktree's Git root
+  and branch, parent agent (ADR-0057), the agent's own session id once reported (`AgentSessionReported`), the launch options of
+  ADR-0059 (recorded from `AgentStarted`, never applied by `agent.resume`: a resumed or restarted-again agent asks before acting,
+  and its `AgentStarted` carries no options, so the "does not ask" badge goes), start time, last state, whether it ended, and when it was found interrupted. Never
+  terminal contents, prompts, or secrets. It learns from the events the node records: written when an agent starts, reports its
+  session and ends; a state change is written with the next write and when the node stops cleanly. The ledger also keeps the next
+  agent id, so an id is never given twice across restarts. A file that cannot be read is renamed (`ledger.json.unreadable-<ms>`),
+  never deleted. Entries are dropped 14 days after they were last touched (an interrupted one 14 days after it was found).
+- **Interrupted.** An agent whose entry had not ended when the node started again was interrupted by the node stopping. Event
+  `AgentInterrupted` (`Event` field 38: `agent_id`, `kind`, `project_id`, `folder`, `parent_agent_id`, `resumable`, `started_at_ms`,
+  `interrupted_at_ms`, `last_state`) says so after the node's `NodeOnline`, and again in every resync announcement, until the agent
+  is resumed or started again (its next `AgentStarted`) or no longer kept. `resumable` is true when the node has the agent's own
+  session id and its kind can resume one (a manifest `[resume]` argv, or an adapter or ACP agent, whose bridge asks the agent for
+  `session/load` when it offers `loadSession` and opens a new session otherwise). The hub keeps the agent with the closed ones
+  (`running` false, state `done`, so it reads "finished") and adds `AgentSnapshot.interrupted` (40), `resumable` (41),
+  `interrupted_at_ms` (42) and `folder` (43); its next `AgentStarted` clears them. An agent the hub never saw (its store was reset)
+  is listed from the event alone. `agent.forget` works on it like on any closed agent.
+- **Still running.** The ledger also records each agent's pid, process group and start time. `AgentInterrupted.still_running` (10,
+  snapshot `AgentSnapshot.still_running` 44) says its process from before the restart still runs (same pid, same start time; a node
+  killed without stopping its agents). Then `agent.resume` answers `agent.still_running`, and `agent.stop` with its id ends exactly
+  that process (its group when it leads one), with `stop_helpers` also its helpers that outlived the node, and says
+  `AgentInterrupted` again without `still_running`; a pid whose start time, boot (Linux `boot_id`) or program name differs is never
+  signalled. `agent.stop` of any interrupted agent succeeds: when its old process has ended meanwhile nothing is signalled, and it is
+  announced again without `still_running`, so clients offer Resume and Start again. Not on Windows, where a node's agents end with it.
+- **Resume.** Command `agent.resume` (`AgentResume`, request field 87: `agent_id` (the node's own id), `new_session`,
+  `authorization`) → `AgentLaunchResult` (Ok tag 19). Node capability `agent.resume`: the hub refuses the command with
+  `protocol.capability_missing` for a node that did not offer it. Same agent id, same folder, same project, same kind. Without
+  `new_session` the node runs the kind's `[resume]` argv with `{session_id}` replaced, or starts the adapter with the session to
+  load; `agent.session_missing` when it has no session id or the kind cannot resume one. With `new_session` (Start again) it starts
+  a new session of the same kind in the same folder and forgets the old session id. Refusals: `agent.not_interrupted` (not held as
+  interrupted), `agent.folder_changed` (the folder is gone, or a directory agent's folder now has another project identity,
+  ADR-0052), `agent.parent_not_running` (a helper is resumed only while the agent that started it runs; its grants and approvals are
+  not restored), and the same node policy and limits as a start (`agent.sandbox_unavailable`, `node.resource_limit`, ...). Over the
+  hub it is signed like `agent.launch`, with the same `DirectoryAuthorization` and message:
+  `directory-action-v1\0node\0resume\0agent_id\0\0\0new_session\00\0nonce\0expires_at_ms` (operation `resume`, the agent's
+  local id in the `path` field, kind and project empty, `option` the `new_session` flag, `identity_change` `0`); a hub cannot resume
+  anything by itself. The local owner-only socket needs no signature. Viewers cannot send it, and the hub audits it like every routed
+  command (action `AgentResume`).
+- **Session ids.** Adapter and ACP agents report theirs (`session/reported`). A terminal agent's comes from its manifest's `[session]`
+  (`docs/specs/agent-manifest.md`): an id the node chooses and passes at the first launch (Claude Code), or one read from the first line
+  of the session file the agent writes (Codex), only when that cannot be confused with another agent's. Without either, a terminal
+  agent is offered Start again only. A resumed helper keeps its parent (stopped with it, listed under it) but may not ask to start
+  helpers and none of its parent's grants cover it until a new decision is signed.
+- **Automatic resume.** The node's own `<data>/policy` may say `resume = auto` with `resume.kinds = a, b` and `resume.folders = /x,
+  /y`: after a start, interrupted agents of a listed kind in a listed folder (or below it) that can resume their own session are
+  resumed without anyone asking (a helper only after its parent was). The default is `resume = ask`; any other value is `ask`. The
+  hub cannot change it.
+
+### Launch options (ADR-0059)
+
+All additions; nothing published changed. Node capability `agent.launch_options`.
+
+- **What may be chosen.** `AgentKind.launch_options` (5) lists a kind's `[[launch.option]]`s as `LaunchOption { id, label,
+  skips_permissions }` (the manifest's order; the arguments stay on the node). A window offers them only for a node with the
+  capability; "Ask before acting" (no option) is always the default and a `skips_permissions` option is never preselected and needs the
+  user's confirmation (the ADR-0058 dialog, Keep asking as the primary button).
+- **The choice.** `AgentStart.launch_options` (7) and `AgentLaunch.launch_options` (7) name the chosen ids; `confirmed_launch_options`
+  (8 on both) names those whose "Let the agent act without asking?" confirmation the window showed and the user accepted. Every id must
+  be `[a-z0-9-]{1,32}` and declared by the node's manifest for the kind, at most 8, no repeats, and each confirmed id must be chosen;
+  otherwise `agent.option_invalid {kind, option}` and nothing starts (so a `!` or `,` in an advertised id gets nowhere). Which options
+  skip permissions is the node's own manifest's word: one not listed as confirmed is refused with `agent.option_unconfirmed {kind,
+  option}`, so a hub that relays `AgentKind.launch_options` relabelled as harmless (the window asks nothing) gets the start refused.
+  The window's list is a display hint only; windows drop advertised ids outside `[a-z0-9-]{1,32}` before offering them. The node adds
+  the arguments to the launch command (terminal kinds) or the ACP server command (structured kinds) for the agent's whole life,
+  restarts and resumes included. Through the hub, `AgentLaunch` with options or confirmations is authorized over its own domain,
+  with both lists length-prefixed (`<count>` then `:<byte length>:<id>` per id: `["a","b"]` is `2:1:a:1:b`, `["a,b"]` is `1:3:a,b`):
+
+  ```
+  directory-action-v3\0node\0launch\0path\0kind\0project_id\0option\0identity_change\0launch_options\0confirmed\0nonce\0expires_at_ms
+  ```
+
+  Shared vectors checked by the node, the terminal client and the web window: `schema/fixtures/signing/directory-action-v3.json`.
+  An `AgentLaunch` without either list keeps `directory-action-v1` exactly as published, so a hub can neither add, remove or swap an
+  option nor add or strip a confirmation. A routed `AgentStart` with options carries no signature and is refused
+  (`agent.option_forbidden` `{kind, option, policy: signature}`); a grant (ADR-0041) never covers one. On the node's own control
+  socket (the owner) no signature is needed. An agent's `agent_start` helper (ADR-0057) never gets an option.
+- **Node policy.** `skip_permissions = forbid | allow | confined_only` (quoted or not) in the node's own policy file (default `allow`
+  when there is no file; any other value, an unknown key, a line without `=`, or an existing file that cannot be read counts as
+  `forbid`, and the node says `node.policy_not_understood` when it starts; the hub cannot change it). A start with a `skips_permissions` option that the policy does not allow is refused
+  before anything starts with `agent.option_forbidden` `{kind, option, policy}` (`policy` is `forbid`, or `confined_only` when the
+  agent's confinement, ADR-0047/0050, would not be active).
+- **What everyone sees.** `AgentStarted.launch_options` (30) and `skips_permissions` (31), carried by the hub in `AgentSnapshot`
+  fields 30 and 31 (30-39 are kept for ADR-0059): a "does not ask" badge on the agent in every client for its whole life. The hub's
+  audit row for such a start names the options (action `AgentLaunch[skip-permissions]`).

@@ -44,6 +44,20 @@ fn state_text(state: AgentState, t: Text<'_>) -> String {
     )
 }
 
+/// ADR-0060: what an interrupted agent's row says: it stopped with its machine, and `u` resumes it (or `U` starts it again).
+pub fn interrupted_text(a: &AgentSnapshot, t: Text<'_>) -> String {
+    t(
+        if a.still_running {
+            key!("tui-interrupted-running")
+        } else if a.resumable {
+            key!("tui-interrupted-resume")
+        } else {
+            key!("tui-interrupted-again")
+        },
+        &[],
+    )
+}
+
 /// The part of a hub-wide id after `<node>/`.
 fn local(id: &str) -> &str {
     id.split_once('/').map_or(id, |(_, rest)| rest)
@@ -212,8 +226,20 @@ pub fn render(
                     )
                 )
             };
+            // ADR-0060: stopped with its machine; the keys that bring it back.
+            let by = if a.interrupted && !a.running {
+                format!("{by}  · {}", interrupted_text(a, t))
+            } else {
+                by
+            };
+            // ADR-0059: an agent started so that it acts without asking says so on its row, for its whole life.
+            let no_ask = if a.skips_permissions {
+                format!("  [{}]", t(key!("tui-badge-no-ask"), &[]))
+            } else {
+                String::new()
+            };
             out.push(format!(
-                "{pointer} {indent}{on}{marker} {word:<10}{off} {}  {dim}{}  {}{by}{reset}",
+                "{pointer} {indent}{on}{marker} {word:<10}{off} {}  {dim}{}  {}{by}{reset}{no_ask}",
                 local(&a.agent_id),
                 a.kind,
                 a.node_id,
@@ -721,6 +747,31 @@ mod tests {
     }
 
     #[test]
+    fn an_agent_that_stopped_with_its_machine_says_how_to_bring_it_back() {
+        let mut snap = snapshot();
+        for (id, resumable) in [("laptop/agent-3", true), ("laptop/agent-4", false)] {
+            snap.agents.push(AgentSnapshot {
+                agent_id: id.into(),
+                node_id: "laptop".into(),
+                project_id: "web".into(),
+                kind: "claude-code".into(),
+                state: AgentState::Done as i32,
+                interrupted: true,
+                resumable,
+                ..Default::default()
+            });
+        }
+        let text = render(&snap, false, true, "", "", 0, &t).join("\n");
+        let row = |id: &str| text.lines().find(|l| l.contains(id)).unwrap().to_string();
+        assert!(
+            row("agent-3").contains("tui-interrupted-resume[]"),
+            "{text}"
+        );
+        assert!(row("agent-4").contains("tui-interrupted-again[]"), "{text}");
+        assert!(!row("agent-1").contains("tui-interrupted"), "{text}");
+    }
+
+    #[test]
     fn the_pointer_marks_the_selected_agent_and_offers_its_terminal() {
         let mut snap = snapshot();
         snap.terminals.push(agora_protocol::v1::TerminalSnapshot {
@@ -933,6 +984,34 @@ mod tests {
             chat_command("/mode plan", None, None),
             ChatCommand::Unknown { .. }
         ));
+    }
+
+    #[test]
+    fn an_agent_that_does_not_ask_says_so_on_its_row() {
+        let mut snap = snapshot();
+        snap.agents.insert(
+            0,
+            AgentSnapshot {
+                agent_id: "laptop/agent-9".into(),
+                node_id: "laptop".into(),
+                kind: "codex".into(),
+                running: true,
+                launch_options: vec!["skip-permissions".into()],
+                skips_permissions: true,
+                ..Default::default()
+            },
+        );
+        let lines = render(&snap, false, false, "", "", 0, &t);
+        let row = lines.iter().find(|l| l.contains("agent-9")).expect("row");
+        assert!(row.contains("[tui-badge-no-ask[]]"), "{row}");
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|l| l.contains("tui-badge-no-ask"))
+                .count(),
+            1,
+            "{lines:?}"
+        );
     }
 
     #[test]

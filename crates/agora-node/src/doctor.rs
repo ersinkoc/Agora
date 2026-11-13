@@ -5,8 +5,6 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use agora_adapters::manifest::Manifest;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
     Ok,
@@ -23,6 +21,8 @@ pub struct Check {
     pub status: Status,
     /// Version, path, count or name, whatever the sentence needs as `$detail`.
     pub detail: String,
+    /// More named values for the sentence, beside `$detail` (an agent kind's `$program` and `$from`).
+    pub args: Vec<(&'static str, String)>,
 }
 
 fn check(id: &'static str, status: Status, detail: impl Into<String>) -> Check {
@@ -30,6 +30,7 @@ fn check(id: &'static str, status: Status, detail: impl Into<String>) -> Check {
         id,
         status,
         detail: detail.into(),
+        args: Vec::new(),
     }
 }
 
@@ -155,44 +156,36 @@ fn data_dir(dir: &Path) -> Check {
     )
 }
 
+/// Every agent kind the node offers (the built-in ones and the folder's, `crate::manifests`): where it came from (`$from`: `built-in`
+/// or `folder`), the program looked for (`$program`) and whether it is found. A folder file that cannot be read is named; its
+/// built-in kind, if any, stays. A missing folder is fine: the built-in kinds still load.
 fn manifests(dir: &Path) -> Vec<Check> {
-    let Ok(rd) = std::fs::read_dir(dir) else {
-        return vec![check("manifests", Status::Warn, dir.display().to_string())];
-    };
-    let mut paths: Vec<PathBuf> = rd
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|x| x == "toml"))
-        .collect();
-    paths.sort();
-    let mut out = Vec::new();
-    let mut loaded = 0;
-    for p in paths {
+    let (loaded, problems) = crate::manifests::load(dir);
+    let mut out = vec![check("manifests", Status::Ok, loaded.len().to_string())];
+    for l in loaded {
+        let program = crate::manifests::program(&l.manifest)
+            .unwrap_or_default()
+            .to_string();
+        let installed = !program.is_empty() && on_path(&program);
+        let mut c = check(
+            if installed {
+                "agent-installed"
+            } else {
+                "agent-missing"
+            },
+            if installed { Status::Ok } else { Status::Warn },
+            l.manifest.kind,
+        );
+        c.args = vec![("program", program), ("from", l.source.name().to_string())];
+        out.push(c);
+    }
+    for (p, _) in problems {
         let name = p
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        match std::fs::read_to_string(&p)
-            .map_err(|e| e.to_string())
-            .and_then(|s| Manifest::parse(&s).map_err(|e| e.to_string()))
-        {
-            Ok(m) => {
-                loaded += 1;
-                let installed = m.process.launch.first().is_some_and(|l| on_path(l));
-                out.push(check(
-                    if installed {
-                        "agent-installed"
-                    } else {
-                        "agent-missing"
-                    },
-                    if installed { Status::Ok } else { Status::Warn },
-                    m.kind,
-                ));
-            }
-            Err(_) => out.push(check("manifest-invalid", Status::Warn, name)),
-        }
+        out.push(check("manifest-invalid", Status::Warn, name));
     }
-    out.insert(0, check("manifests", Status::Ok, loaded.to_string()));
     out
 }
 
@@ -230,7 +223,12 @@ mod tests {
         assert_eq!(find(&checks, "version")[0].status, Status::Ok);
         assert_eq!(find(&checks, "data-dir")[0].status, Status::Ok);
         assert_eq!(find(&checks, "node")[0].status, Status::Warn);
-        assert_eq!(find(&checks, "manifests")[0].status, Status::Warn);
+        // No manifests folder: the built-in kinds still load.
+        assert_eq!(find(&checks, "manifests")[0].status, Status::Ok);
+        assert_eq!(
+            find(&checks, "manifests")[0].detail,
+            (crate::manifests::BUILT_IN.len() + 1).to_string()
+        );
         // Where terminals are unsupported (Windows for now) that is a reported problem, not a healthy machine.
         let git_ok = find(&checks, "git")[0].status == Status::Ok;
         assert_eq!(healthy(&checks), git_ok && agora_platform::PTY_SUPPORTED);
@@ -307,9 +305,20 @@ mod tests {
         std::fs::write(m.join("c.toml"), "not = [valid").unwrap();
         let checks = manifests(&m);
         assert_eq!(checks[0].id, "manifests");
-        assert_eq!(checks[0].detail, "2");
-        assert_eq!(find(&checks, "agent-installed")[0].detail, "demo");
-        assert_eq!(find(&checks, "agent-missing")[0].detail, "ghost");
+        assert_eq!(
+            checks[0].detail,
+            (crate::manifests::BUILT_IN.len() + 3).to_string()
+        );
+        let of = |kind: &str| checks.iter().find(|c| c.detail == kind).unwrap();
+        assert_eq!(of("demo").id, "agent-installed");
+        assert_eq!(
+            of("demo").args,
+            [("program", present.to_string()), ("from", "folder".into())]
+        );
+        assert_eq!(of("ghost").id, "agent-missing");
+        assert_eq!(of("ghost").args[0].1, "definitely-not-installed-xyz");
+        assert_eq!(of("codex").args[1].1, "built-in");
+        assert_eq!(of("codex").args[0].1, "codex");
         assert_eq!(find(&checks, "manifest-invalid")[0].detail, "c.toml");
         let _ = std::fs::remove_dir_all(&d);
     }

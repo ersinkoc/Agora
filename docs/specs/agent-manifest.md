@@ -7,16 +7,37 @@ Fixtures are replayed at 120x40 unless their filename specifies the capture size
 `<name>@<cols>x<rows>.screen`, with a matching `<name>@<cols>x<rows>.expect`.
 Keep the raw captured bytes and use the original terminal size so wrapping and clipping are tested.
 
+**Where agent kinds come from.** The `agora` binary carries every `manifests/agents/*.toml` of the repository it was built from
+as built-in defaults (`agora-node::manifests::BUILT_IN`, compiled in with `include_str!`; fixtures are not), so a fresh install
+offers every shipped agent with nothing copied. It also has a built-in `shell` kind made on the machine itself, not from a
+file: the user's shell (`$SHELL` when it names a file, else `sh`; on Windows `%ComSpec%`, else `cmd.exe`), so a fresh node can
+always open a terminal. The node then reads its manifests folder (`<AGORA_HOME>/manifests`, or
+`agora node run --manifests DIR`; `agora adapter install` writes there too): a file whose `kind` matches a built-in one replaces
+it, a file with a new `kind` adds one. A built-in kind cannot be removed, only replaced. A file that does not parse is skipped
+and named by `agora doctor`, and the built-in kind it meant to replace stays. The folder is read again before agents are listed
+or started, so a new or changed file needs no restart. `agora doctor` lists each kind with where it came from (built in, or the
+folder) and the program it looks for. A kind is "installed" when that program (the L3 adapter command, else the ACP `argv[0]`,
+else `process.launch[0]`) is found in the node's own `PATH` (the environment the node was started in, not the user's current
+shell) or, when the manifest names a path, exists there. A new shipped manifest must be added to `BUILT_IN`; a test fails until
+it is.
+
 ```toml
 kind = "example-agent"          # stable id, lowercase, used in protocol and UI
 display_name = "Example Agent"  # brand name, not translated
 version = "2026.11.06.1"        # manifest version
-min_engine = 1
+min_engine = 2                  # 2 when the manifest has [[launch.option]] (ADR-0059); 1 otherwise
 
 [process]
 names = ["example-agent", "exa"]        # foreground process names
 launch = ["example-agent"]              # default argv
 env = { EXAMPLE_NO_UPDATE_CHECK = "1" }
+
+# ADR-0059: choices made when an agent starts (see "Launch options" below).
+[[launch.option]]
+id = "skip-permissions"                 # what a start names and a device signs: a-z, 0-9, `-`, at most 32
+label = "option-skip-permissions"       # Fluent message id the windows show
+args = ["--dangerously-skip-permissions"]   # added to the launch command (or the ACP server command)
+skips_permissions = true                # the agent acts without asking; default false
 
 [accounts]
 config_dir_env = "EXAMPLE_HOME"         # lets the node isolate multiple accounts
@@ -45,6 +66,14 @@ install = "builtin:example"             # or a script path from the package
 
 [resume]
 argv = ["example-agent", "--resume", "{session_id}"]
+
+[session]                               # ADR-0060: how the node learns the agent's own session id (one of the two ways)
+id_args = ["--session-id", "{session_id}"]   # the node chooses the id (a v4 UUID) and adds these to the first launch
+# [session.file]                        # or: read it from the first line of the session file the agent writes
+# glob = "{home}/.example/sessions/*.jsonl"
+# select = { path = "type", equals = "session_meta" }
+# id = "payload.id"
+# cwd = "payload.cwd"
 
 [usage]
 source = "file"                         # file is read by the node today (ADR-0042); otel | adapter | none are reserved
@@ -116,6 +145,24 @@ Enter on a helper's first prompt the node needs both, with the box holding exact
 constructed from the captured idle screens with text in the box (a capture of that moment is not kept); the test checks that
 `[[typed]]` matches them and nothing else and that `input_box` reads exactly the typed text.
 
+## Launch options (ADR-0059)
+
+`[[launch.option]]` (engine 2, so a manifest with one says `min_engine = 2`) declares named choices the start window offers. A start
+names the ids it chose (`AgentStart`/`AgentLaunch.launch_options`); the node adds each option's `args`, in the manifest's order, after
+the launch command (`[process] launch`, or `[resume] argv` when the agent is resumed) and before the `[mcp]` flags; for a structured
+kind they are added to the end of `[structured] acp.argv`, the ACP server command. The arguments never leave the node: the window gets
+the id, the label and `skips_permissions` (`AgentKind.launch_options`).
+
+Validation: at most 8 options; ids unique, lowercase ASCII letters, digits and `-` (at most 32); `label` a Fluent message id (the
+shipped manifests' labels must be in `locales/en/web.ftl` and `tui.ftl`, checked by `shipped_manifests.rs`); `args` from one to eight
+non-empty arguments without NUL; an option whose arguments contain a known "do not ask" spelling (`--dangerously-*`, `--yolo`,
+`--yolo-*`) must say `skips_permissions = true`; unknown keys are an error.
+
+An option with `skips_permissions = true` makes the agent act without asking. The window never preselects it and asks before it is
+used; the node allows it only as its owner's `skip_permissions` policy says (`forbid`, `allow`, `confined_only`; docs/specs/protocol.md)
+and refuses it for helpers an agent starts (ADR-0057). A shipped manifest declares only a flag checked on a real version of the
+agent, with that version in a comment; a flag that was not checked is not declared.
+
 Manifests in this repository: `claude-code` and `codex` (screens captured from the real agents, `manifests/agents/fixtures/`); `wrongstack` is planned and not shipped yet (it needs a machine that has it). `crates/agora-adapters/tests/shipped_manifests.rs` checks every shipped manifest against its captured screens.
 
 ## Usage files (ADR-0042)
@@ -140,6 +187,36 @@ added at every launch, restarts and resumes included; a resumed agent gets a fre
 `[mcp]` still joins the mesh. A manifest whose injection fails does not start (it asked for something the node refused).
 `[mcp]` is for terminal agents: a structured agent (`[adapter]` or `[structured] acp`) needs none, the node passes its mesh server in
 `session/start` (`adapter-protocol.md`).
+
+## `[resume]` and `[session]` (ADR-0060)
+
+`[resume] argv` is how a terminal agent continues its own session: `{session_id}` is replaced by the session id the node holds for
+the agent. The node uses it after a crash (restart), and after its own restart when someone chooses Resume (`agent.resume`) or the
+node's policy resumes by itself. The node holds a session id only when it learned one:
+
+- **`id_args`** (Claude Code, `--session-id <uuid>`, checked on 2.1.319): the node chooses a random v4 UUID at the agent's first launch,
+  adds `id_args` with `{session_id}` replaced, and records the id (`AgentSessionReported`) right after the start. Restarts and
+  resumes use `[resume]` instead and never add `id_args`.
+- **`[session.file]`** (Codex, which has no flag for it: `~/.codex/sessions/YYYY/MM/DD/rollout-<time>-<id>.jsonl`, whose first line is
+  `{"type":"session_meta","payload":{"id":...,"cwd":...}}`, checked on codex-cli 0.167.0 and 0.167.1): while a terminal agent runs
+  without a session id, the node looks every 3 s, for at most 30 minutes, at the files the glob matches that were written after the
+  agent started, and takes the id from the first line (at most 64 KiB) when it passes `select` and its `cwd` is the agent's folder.
+  It takes one only when exactly one new file fits and no other agent has that id. Two agents of one kind waiting in one folder at
+  once get none (a file cannot say which is whose); neither does an agent for which two files fit. A session file's id must be a
+  UUID. An agent without an id can only be started again in its folder, never resumed.
+- **Every id that goes on a command line** (`[resume]`, `id_args`) must start with a letter or digit and hold only letters, digits,
+  `.`, `_` and `-`, at most 128 characters (`agora_node::session_files::argv_safe`), so an id can never be read as an option such as
+  `--dangerously-bypass-approvals-and-sandbox`. It is checked where an id is found (session file), reported (a terminal agent's hook),
+  read from the ledger, and right before the argv is built. An adapter's own id travels in JSON and may be anything, but one that
+  fails the check is not kept in the ledger, so such an agent is offered Start again after a restart. `--` is not put before the id:
+  it was not checked against the real `claude --resume` and `codex resume`.
+- **Start again** of a kind with `id_args` gives it a new node-chosen id, so it can be resumed after the next restart.
+- An adapter or ACP agent reports its own session (`session/reported`); it needs neither.
+
+The table is new in this engine version; older nodes ignore it. When the node itself runs inside a Claude Code session (it inherited
+`CLAUDECODE` or `CLAUDE_CODE_CHILD_SESSION`), it leaves `CLAUDECODE` and every `CLAUDE_CODE_*` variable out of the terminal agents it
+starts: Claude Code that inherits them takes itself for a child session and saves no transcript, so `--resume` would have nothing to
+load. A node started normally passes them on.
 
 ## `[sandbox]` (ADR-0047)
 
