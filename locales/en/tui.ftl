@@ -31,7 +31,17 @@ tui-no-project = (no project)
 tui-hint-answer = Press y to allow, n to deny the first request above.
 tui-allowed = Allowed.
 tui-denied = Denied.
-tui-not-trusted = This device is not trusted by that machine yet. On that machine run: agora node trust { $id } { $key }
+tui-not-trusted = This device is not trusted by that machine yet. On that machine run: agora node trust { $id } { $key } (or press a to ask another device of yours to approve this one, fingerprint { $fingerprint })
+tui-device-name = Terminal on { $host }
+tui-device-asked = Asked. Approve this terminal ({ $fingerprint }) on another device of yours that your machines trust: in the window, or with v in its terminal client.
+tui-devices-none-waiting = No device of yours is waiting for approval. This terminal's fingerprint: { $fingerprint }
+tui-device-cannot-vouch = No machine trusts this terminal yet, so its approval would count nowhere.
+tui-device-card =
+    { $name } asks to be trusted on your machines.
+    Fingerprint: { $fingerprint } (compare it with the one that device shows)
+    It will be trusted where this terminal is trusted: { $machines }
+    Press y to approve it with this terminal's key, any other key to cancel.
+tui-device-approved = Approved { $name }. Each machine checks the approval itself; the device shows as trusted once it has.
 tui-answer-failed = Could not send your answer ({ $code }).
 tui-hint-open = Tab: next agent · Enter: open it · x: stop it · s: start one (Ctrl-] comes back)
 tui-opening-failed = Could not open that terminal ({ $code }).
@@ -76,7 +86,7 @@ tui-reader-keys = j / k or the arrows scroll · space goes a page down · q goes
 tui-split-pick = Pick an agent on the left
 tui-split-no-screen = Opening its terminal…
 tui-split-status = { $online }/{ $total } machines · { $agents } agents · { $waiting } need you
-tui-split-keys = ↑↓ choose · Enter open · s start · f folder · x stop · d remove · q quit
+tui-split-keys = ↑↓ choose · Enter open · s start · f folder · x stop · d remove · a ask · v devices · q quit
 tui-split-chat = No terminal: Enter opens its conversation
 tui-folder-title = Start an agent in a folder on { $machine }
 tui-folder-keys = ↑↓ choose · Enter open · ⌫ up · Space start here · m machine · Esc cancel

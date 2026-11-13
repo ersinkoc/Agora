@@ -21,6 +21,14 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
   it. A removal signed by a trusted device takes effect at once and an older approval cannot bring the device back. Each one the
   machine applies or refuses is written to `<data>/device-trust.log`. The trusted-devices file keeps its format (owner-only, one
   device per line; an approved device's line adds `expires=` and `via=`).
+- The window registers this browser with the hub when it connects. "This device" shows its fingerprint, which machines trust it,
+  "Ask another device to approve" for the ones that do not (the command to run on the machine stays as the fallback), and your
+  other devices with their fingerprints, where they are trusted, and Remove. On a device the machines already trust, a card shows
+  a device waiting for approval with its name, fingerprint and the machines it would be trusted on; Approve signs it with that
+  device's key. The start window offers "Ask another device to approve" when a machine does not trust this browser and another of
+  your devices could approve it there.
+- The terminal client registers its key too, shows its fingerprint when a machine does not trust it, asks another device to
+  approve it with `a`, and with `v` shows a device waiting for approval (name, fingerprint, machines) and approves it with `y`.
 
 ### Starting agents
 - When a machine does not trust your browser yet, the start window now shows the exact command to run on that machine, with a Copy button, instead of pointing to another page. The same folder spelled several ways on Windows (`D:\x`, `D:/x`, `\\?\D:\x`) is listed once.

@@ -714,6 +714,65 @@ impl Session {
         )
     }
 
+    /// ADR-0061: registers this terminal's key and name with the hub under the signed-in person (a candidate for their machines, never
+    /// trust by itself). Sent after every sign-in; the hub keeps when it was last used.
+    pub fn register_device(&mut self, device: &Device, name: &str) -> Result<(), String> {
+        self.command(
+            "",
+            command_request::Command::DeviceRegister(agora_protocol::v1::DeviceRegister {
+                device_id: device.id.clone(),
+                name: name.to_string(),
+                public_key: device.public_key(),
+            }),
+            Duration::from_secs(15),
+        )
+    }
+
+    /// ADR-0061: the signed-in person's registered devices, as the hub lists them.
+    pub fn list_devices(&mut self) -> Result<Vec<agora_protocol::v1::DeviceInfo>, String> {
+        let ok = self.command_ok(
+            "",
+            command_request::Command::DeviceList(agora_protocol::v1::DeviceList {}),
+            Duration::from_secs(15),
+        )?;
+        match ok.result {
+            Some(command_ok::Result::DeviceList(l)) => Ok(l.devices),
+            _ => Ok(Vec::new()),
+        }
+    }
+
+    /// ADR-0061: asks the person's other devices to approve this one.
+    pub fn ask_approval(&mut self, device: &Device) -> Result<(), String> {
+        self.command(
+            "",
+            command_request::Command::DeviceAskApproval(agora_protocol::v1::DeviceAskApproval {
+                device_id: device.id.clone(),
+            }),
+            Duration::from_secs(15),
+        )
+    }
+
+    /// ADR-0061: this terminal vouches for `target` on every machine of the person; the hub carries it and each machine verifies it.
+    pub fn endorse_device(
+        &mut self,
+        device: &Device,
+        target: &agora_protocol::v1::DeviceInfo,
+    ) -> Result<(), String> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(0));
+        let endorsement = device
+            .endorse(target, &[], now)
+            .ok_or_else(|| "client.sign".to_string())?;
+        self.command(
+            "",
+            command_request::Command::DeviceEndorse(agora_protocol::v1::DeviceEndorse {
+                endorsement: Some(endorsement),
+            }),
+            Duration::from_secs(15),
+        )
+    }
+
     /// Stops an agent on a machine.
     pub fn stop_agent(&mut self, node: &str, agent_id: &str) -> Result<(), String> {
         self.stop_agent_with(node, agent_id, false)

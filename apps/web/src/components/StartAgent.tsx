@@ -16,18 +16,31 @@ function TrustCommand({ command }: { command: string }) {
   </div>;
 }
 
+// ADR-0061: another device of this person that the machine trusts can approve this one; asking puts a card on that device.
+function AskApproval({ ask }: { ask: () => Promise<boolean> }) {
+  const [state, setState] = useState<'idle' | 'busy' | 'asked' | 'failed'>('idle');
+  return <div className="flex flex-wrap items-center gap-2">
+    <button type="button" className="button button--primary" disabled={state === 'busy' || state === 'asked'}
+      onClick={() => { setState('busy'); void ask().then((ok) => setState(ok ? 'asked' : 'failed')); }}>{t('trust-ask')}</button>
+    {state === 'asked' && <span role="status" className="text-[13px] text-muted">{t('trust-asked')}</span>}
+    {state === 'failed' && <span role="alert" className="text-[13px] text-needs-you">{t('device-ask-failed')}</span>}
+  </div>;
+}
+
 const chip = 'inline-flex items-center gap-2 rounded-xs border px-2.5 py-1.5 text-[13px] transition-colors duration-150 disabled:opacity-50';
 const chipOn = 'border-accent bg-surface-2 text-ink ring-1 ring-accent';
 const chipOff = 'border-line bg-surface-0 text-muted hover:bg-surface-2 hover:text-ink';
 
 // "Start an agent" in one window: the machine, the folder (a known one in a click, or any path), then the agent. Choosing the
 // folder shows the folder the node resolved before anything starts (ADR-0052); the rest is a click.
-export function StartAgent({ projects, machines, initialNode, trust, loadKinds, inspect, list, onStart, onClose }: {
+export function StartAgent({ projects, machines, initialNode, trust, askApproval, loadKinds, inspect, list, onStart, onClose }: {
   projects: readonly ProjectChoice[];
   machines: readonly MachineModel[];
   initialNode?: string;
   // This device's id and public key: when a machine does not trust the device yet, the command that fixes it is shown right here.
   trust?: { id: string; key: string };
+  // ADR-0061: whether another device of this person that `node` trusts could approve this one, and asking it to.
+  askApproval?: { can: (node: string) => boolean; ask: () => Promise<boolean> };
   loadKinds: (node: string) => Promise<KindChoice[]>;
   inspect: (node: string, path: string, createIdentity: boolean) => Promise<DirectoryInfo>;
   // ADR-0053: the sub-folders of a folder on the machine (empty path: its home folder). Missing, or refused by an older machine: the path is typed.
@@ -185,6 +198,7 @@ export function StartAgent({ projects, machines, initialNode, trust, loadKinds, 
             </div>}
           </>}
           {error && <p role="alert" className="m-0 text-needs-you">{error === 'approval-not-trusted' && trust ? t('trust-hint', { machine: online.find(m => m.id === node)?.name ?? node }) : t(error)}</p>}
+          {error === 'approval-not-trusted' && askApproval?.can(node) && <AskApproval ask={askApproval.ask} />}
           {error === 'approval-not-trusted' && trust && <TrustCommand command={`agora node trust ${trust.id} ${trust.key}`} />}
         </div>}
         <div className="flex justify-end gap-2 border-t border-line px-4 py-3">

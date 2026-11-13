@@ -67,6 +67,102 @@ fn device() -> Option<Device> {
     Some(d)
 }
 
+/// The name this terminal registers under (ADR-0061): what the person sees beside its fingerprint on their other devices.
+fn device_name(say: &Say) -> String {
+    let host = std::env::var("HOSTNAME")
+        .or_else(|_| std::env::var("COMPUTERNAME"))
+        .unwrap_or_default();
+    let name = say.text(key!("tui-device-name"), &[("host", Arg::Str(host))]);
+    name.chars().filter(|c| !c.is_control()).take(64).collect()
+}
+
+/// `a`: asks the person's other devices to approve this terminal (ADR-0061). Returns the line to show.
+fn ask_approval(say: &Say, session: &mut Session) -> String {
+    let Some(device) = device() else {
+        return say.text(
+            key!("tui-answer-failed"),
+            &[("code", Arg::Str("device".into()))],
+        );
+    };
+    match session.ask_approval(&device) {
+        Ok(()) => say.text(
+            key!("tui-device-asked"),
+            &[("fingerprint", Arg::Str(device.fingerprint()))],
+        ),
+        Err(code) => say.text(key!("tui-answer-failed"), &[("code", Arg::Str(code))]),
+    }
+}
+
+/// `v`: the first device of the person that waits for approval, shown with its fingerprint and the machines that trust this terminal
+/// (where the approval counts); `y` approves it with this terminal's key (ADR-0061). Returns the line to show.
+fn approve_device(
+    say: &Say,
+    session: &mut Session,
+    snapshot: Option<&Snapshot>,
+    rx: &mpsc::Receiver<u8>,
+) -> String {
+    let fail = |code: String| say.text(key!("tui-answer-failed"), &[("code", Arg::Str(code))]);
+    let Some(device) = device() else {
+        return fail("device".into());
+    };
+    let list = match session.list_devices() {
+        Ok(l) => l,
+        Err(code) => return fail(code),
+    };
+    let Some(waiting) = list
+        .into_iter()
+        .find(|d| d.approval_asked_ms > 0 && d.revoked_ms == 0 && d.device_id != device.id)
+    else {
+        return say.text(
+            key!("tui-devices-none-waiting"),
+            &[("fingerprint", Arg::Str(device.fingerprint()))],
+        );
+    };
+    let machines: Vec<String> = snapshot
+        .map(|s| {
+            s.nodes
+                .iter()
+                .filter(|n| n.trusted_device_ids.contains(&device.id))
+                .map(|n| {
+                    plain(if n.hostname.is_empty() {
+                        &n.node_id
+                    } else {
+                        &n.hostname
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if machines.is_empty() {
+        return say.text(key!("tui-device-cannot-vouch"), &[]);
+    }
+    // The name and the fingerprint come from the hub: shown as plain text, never as terminal control sequences.
+    let name = plain(&waiting.name).replace('\n', " ");
+    let fingerprint = agora_tui::device::fingerprint(&waiting.public_key);
+    let mut out = std::io::stdout();
+    let _ = write!(
+        out,
+        "\x1b[H\x1b[2J{}",
+        say.text(
+            key!("tui-device-card"),
+            &[
+                ("name", Arg::Str(name.clone())),
+                ("fingerprint", Arg::Str(fingerprint)),
+                ("machines", Arg::Str(machines.join(", "))),
+            ],
+        )
+        .replace('\n', "\r\n")
+    );
+    let _ = out.flush();
+    if read_key(rx, Duration::from_secs(120)) != Some(b'y') {
+        return String::new();
+    }
+    match session.endorse_device(&device, &waiting) {
+        Ok(()) => say.text(key!("tui-device-approved"), &[("name", Arg::Str(name))]),
+        Err(code) => fail(code),
+    }
+}
+
 /// Answers the first waiting approval. Returns the line to show.
 fn answer(
     say: &Say,
@@ -96,6 +192,7 @@ fn answer(
             &[
                 ("id", Arg::Str(device.id.clone())),
                 ("key", Arg::Str(device.public_key_hex())),
+                ("fingerprint", Arg::Str(device.fingerprint())),
             ],
         ),
         Err(code) => say.text(key!("tui-answer-failed"), &[("code", Arg::Str(code))]),
@@ -196,6 +293,7 @@ fn ask_grant(
             &[
                 ("id", Arg::Str(device.id.clone())),
                 ("key", Arg::Str(device.public_key_hex())),
+                ("fingerprint", Arg::Str(device.fingerprint())),
             ],
         )),
         Err(code) => Err(fail(code)),
@@ -580,6 +678,7 @@ fn start_in_folder(
             &[
                 ("id", Arg::Str(device.id.clone())),
                 ("key", Arg::Str(device.public_key_hex())),
+                ("fingerprint", Arg::Str(device.fingerprint())),
             ],
         )
     };
@@ -860,8 +959,12 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                     sign_in(&hub, &code)?
                 }
             };
-            let s = Session::connect(&hub, &t)?;
+            let mut s = Session::connect(&hub, &t)?;
             token = Some(t);
+            // ADR-0061: this terminal's key is registered with the hub at every sign-in (a candidate, never trust by itself).
+            if let Some(d) = device() {
+                let _ = s.register_device(&d, &device_name(say));
+            }
             Ok(s)
         })();
         let mut session = match session {
@@ -1043,6 +1146,18 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                             dirty_since.get_or_insert_with(Instant::now);
                             draw(&snapshot, &selected, &notice, cost, preview.as_ref());
                         }
+                    }
+                    b'a' => {
+                        notice = ask_approval(say, &mut session);
+                        draw(&snapshot, &selected, &notice, cost, preview.as_ref());
+                    }
+                    b'v' => {
+                        if let Some(p) = preview.take() {
+                            p.close(&mut session);
+                        }
+                        notice = approve_device(say, &mut session, snapshot.as_ref(), &rx);
+                        dirty_since.get_or_insert_with(Instant::now);
+                        draw(&snapshot, &selected, &notice, cost, preview.as_ref());
                     }
                     b's' => {
                         if let Some(sn) = &snapshot {
