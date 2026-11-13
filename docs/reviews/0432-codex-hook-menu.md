@@ -7,13 +7,15 @@ The existing hook-review screen, ready rules and typed-input guards are unchange
 
 ## Evidence and fixture provenance
 
-The menu text was reported from Codex 0.167.0 on macOS in the `comms` branch,
-`log/2026-11-13-1327-macos-real-claude-codex.md`. The new `hook_review_menu.screen` currently reconstructs that
-reported text at 120x40; it is **not an original raw capture**. A raw capture and its terminal size have been
-requested from macOS. Keep the PR in draft until that replaces the reconstruction, as required by
-`docs/specs/agent-manifest.md`.
+The menu was captured from Codex 0.167.0 on macOS in an **80-column, 24-row** PTY (`TERM=xterm-256color`),
+recorded for eight seconds after startup. A scratch `CODEX_HOME` enabled hooks and declared one new
+`SessionStart` hook (`true`); no prompt was sent and no hook was trusted. The folder was already trusted.
+`hook_review_menu@80x24.screen` preserves the original 2,562 bytes from capture-only commit
+`60d8cdb0f20666146b90e61f1ca961aef1cdbcbc` without modification (SHA-256
+`59b1ede1bb1d54fd5673cd491443a996dcdce3d292189992ae0742575b6d031b`). Its filename makes the fixture
+test replay the capture at its original terminal size. It replaces the initial reconstructed report.
 
-The existing shipped-manifest test fails before the rule change with `Idle prompt_box` instead of
+The existing shipped-manifest test with this raw capture fails before the rule change with `Idle prompt_box` instead of
 `Blocked hook_review_menu`. After the change both shipped-manifest tests pass, including the checks that
 neither ready nor typed-input rules match this menu. This is a local replay, with no hook trusted or run.
 
