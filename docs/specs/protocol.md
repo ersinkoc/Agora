@@ -414,8 +414,9 @@ All additions; nothing published changed.
 - **Still running.** The ledger also records each agent's pid, process group and start time. `AgentInterrupted.still_running` (10,
   snapshot `AgentSnapshot.still_running` 44) says its process from before the restart still runs (same pid, same start time; a node
   killed without stopping its agents). Then `agent.resume` answers `agent.still_running`, and `agent.stop` with its id ends exactly
-  that process (its group when it leads one) and says `AgentInterrupted` again without `still_running`; a pid whose start time
-  differs is never signalled. Not on Windows, where a node's agents end with it.
+  that process (its group when it leads one), with `stop_helpers` also its helpers that outlived the node, and says
+  `AgentInterrupted` again without `still_running`; a pid whose start time, boot (Linux `boot_id`) or program name differs is never
+  signalled. Not on Windows, where a node's agents end with it.
 - **Resume.** Command `agent.resume` (`AgentResume`, request field 87: `agent_id` (the node's own id), `new_session`,
   `authorization`) → `AgentLaunchResult` (Ok tag 19). Node capability `agent.resume`: the hub refuses the command with
   `protocol.capability_missing` for a node that did not offer it. Same agent id, same folder, same project, same kind. Without

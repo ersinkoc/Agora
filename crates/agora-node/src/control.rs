@@ -599,18 +599,22 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
             let stopped_now = ctx.sup().stop(&id);
             // ADR-0060: an interrupted agent whose process outlived the node is stopped by ending exactly that process.
             if let (Err(SupervisorError::NotFound(_)), Some(ledger)) = (&stopped_now, &ctx.ledger) {
-                if let Some(entry) = ledger.get(&a.agent_id).filter(|e| e.still_running()) {
-                    if let Some(p) = entry.process() {
-                        agora_platform::kill_process_if_same(&p).map_err(|_| {
-                            Error::new(ErrorCode::Internal).with("incident_id", "unassigned")
-                        })?;
-                    }
-                    ledger.set_process(&a.agent_id, None, crate::daemon::now_ms());
-                    if let (Some(ev), Some(e)) = (&ctx.events, ledger.get(&a.agent_id)) {
-                        ev.agent_interrupted(
-                            &e,
-                            !e.session_id.is_empty() && ctx.sup().resumable(&e.kind),
-                        );
+                if ledger.get(&a.agent_id).is_some_and(|e| e.still_running()) {
+                    stop_survivor(ctx, ledger, &a.agent_id)?;
+                    // Its helpers that outlived the node too, and theirs, when asked (ADR-0057).
+                    if a.stop_helpers {
+                        let mut todo = vec![a.agent_id.clone()];
+                        let mut seen = std::collections::HashSet::new();
+                        while let Some(parent) = todo.pop() {
+                            for h in ledger.interrupted() {
+                                if h.parent_agent_id == parent && seen.insert(h.agent_id.clone()) {
+                                    if h.still_running() {
+                                        stop_survivor(ctx, ledger, &h.agent_id)?;
+                                    }
+                                    todo.push(h.agent_id);
+                                }
+                            }
+                        }
                     }
                     return Ok(ok_empty());
                 }
@@ -839,6 +843,25 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
         }
         other => Err(capability_missing(command_name(other))),
     }
+}
+
+/// ADR-0060: ends the process of an interrupted agent that outlived the node (only when it is still the recorded process), forgets it,
+/// and says the agent is interrupted again, now without `still_running`.
+fn stop_survivor(
+    ctx: &ControlContext,
+    ledger: &crate::ledger::Ledger,
+    agent_id: &str,
+) -> Result<(), Error> {
+    if let Some(p) = ledger.get(agent_id).and_then(|e| e.process()) {
+        agora_platform::kill_process_if_same(&p)
+            .map_err(|_| Error::new(ErrorCode::Internal).with("incident_id", "unassigned"))?;
+    }
+    ledger.set_process(agent_id, None, crate::daemon::now_ms());
+    if let (Some(ev), Some(e)) = (&ctx.events, ledger.get(agent_id)) {
+        let resumable = !e.session_id.is_empty() && ctx.sup().resumable(&e.kind);
+        ev.agent_interrupted(&e, resumable);
+    }
+    Ok(())
 }
 
 /// ADR-0060: brings back an agent the session ledger holds as interrupted, under the same id, in the same folder and project, with its

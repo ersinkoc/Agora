@@ -830,12 +830,29 @@ mod identity_tests {
         let id = process_identity(child.id()).unwrap();
         assert!(process_still_running(&id));
         // The same pid with another start time is another process: left alone.
-        let other = crate::ProcessIdentity {
-            started: id.started + 1,
-            ..id
-        };
-        assert!(!process_still_running(&other));
-        assert!(!kill_process_if_same(&other).unwrap());
+        // Another start time, another boot, another program, or no program named: another process, left alone.
+        let others = [
+            crate::ProcessIdentity {
+                started: id.started + 1,
+                ..id.clone()
+            },
+            crate::ProcessIdentity {
+                boot: format!("{}x", id.boot),
+                ..id.clone()
+            },
+            crate::ProcessIdentity {
+                name: "victim".into(),
+                ..id.clone()
+            },
+            crate::ProcessIdentity {
+                name: String::new(),
+                ..id.clone()
+            },
+        ];
+        for other in &others {
+            assert!(!process_still_running(other), "{other:?}");
+            assert!(!kill_process_if_same(other).unwrap(), "{other:?}");
+        }
         assert!(child.try_wait().unwrap().is_none());
         // Its own group is the test's: only the process itself is ended.
         assert!(kill_process_if_same(&id).unwrap());

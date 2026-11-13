@@ -204,9 +204,14 @@ pub(crate) fn identity(pid: u32) -> io::Result<crate::ProcessIdentity> {
     }
     let group = f.get(2).and_then(|v| v.parse().ok()).ok_or_else(bad)?;
     let started = f.get(19).and_then(|v| v.parse().ok()).ok_or_else(bad)?;
+    let boot = fs::read_to_string("/proc/sys/kernel/random/boot_id")?
+        .trim()
+        .to_string();
     Ok(crate::ProcessIdentity {
         pid,
         group,
         started,
+        boot,
+        name: name(pid)?,
     })
 }

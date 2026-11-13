@@ -293,6 +293,9 @@ pub(crate) fn identity(pid: u32) -> io::Result<crate::ProcessIdentity> {
         pid,
         group: info.pbi_pgid,
         started: info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec,
+        // The start time is wall-clock time to the microsecond: another boot cannot give a process the same one.
+        boot: String::new(),
+        name: name(pid)?,
     })
 }
 

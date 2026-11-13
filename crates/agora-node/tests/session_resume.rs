@@ -512,11 +512,11 @@ fn a_session_id_that_could_be_an_option_never_reaches_a_command_line() {
     assert!(e.reports("resume-").is_empty());
 }
 
-fn stop(e: &Env, id: &str) -> Result<(), String> {
+fn stop(e: &Env, id: &str, helpers: bool) -> Result<(), String> {
     e.client()
         .call(Cmd::AgentStop(v1::AgentStop {
             agent_id: id.into(),
-            stop_helpers: false,
+            stop_helpers: helpers,
         }))
         .unwrap()
         .map(|_| ())
@@ -538,6 +538,15 @@ fn an_agent_that_outlived_a_crashed_node_is_stopped_before_it_is_resumed() {
             .is_some_and(|x| x.process().is_some())
     });
     let old = e.node().ledger.get(&probe).unwrap().process().unwrap();
+    // Another agent, which the ledger will say the first one started (a helper, ADR-0057).
+    let helper = e.launch("probe");
+    e.wait("the helper's process in the ledger", |e| {
+        e.node()
+            .ledger
+            .get(&helper)
+            .is_some_and(|x| x.process().is_some())
+    });
+    let helper_process = e.node().ledger.get(&helper).unwrap().process().unwrap();
     // The node is killed without stopping its agents (kill -9): the probe keeps running.
     e.node.take().unwrap().crash();
     // A pid that was given to another process since: this test's own, with another start time.
@@ -548,9 +557,15 @@ fn an_agent_that_outlived_a_crashed_node_is_stopped_before_it_is_resumed() {
         "agent_id": "agent-50", "kind": "plain", "project_id": "p", "folder": "/nowhere", "directory": true,
         "started_at_ms": 1, "pid": std::process::id(), "process_group": std::process::id(), "process_started": 1
     }));
+    for entry in ledger["entries"].as_array_mut().unwrap() {
+        if entry["agent_id"] == helper.as_str() {
+            entry["parent_agent_id"] = serde_json::Value::from(probe.as_str());
+        }
+    }
     std::fs::write(&file, serde_json::to_vec(&ledger).unwrap()).unwrap();
     e.start();
     assert!(agora_platform::process_still_running(&old));
+    assert!(agora_platform::process_still_running(&helper_process));
     let found = e.interrupted();
     assert!(found.iter().any(|i| i.agent_id == probe && i.still_running));
     assert!(found
@@ -560,9 +575,12 @@ fn an_agent_that_outlived_a_crashed_node_is_stopped_before_it_is_resumed() {
     assert_eq!(e.resume(&probe, false).unwrap_err(), "agent.still_running");
     assert_eq!(e.resume(&probe, true).unwrap_err(), "agent.still_running");
     // A reused pid is never touched: stopping that entry ends nothing (this test is still here to say so).
-    assert!(stop(&e, "agent-50").is_err());
-    // Stop ends exactly the old process; then Resume works.
-    stop(&e, &probe).unwrap();
+    assert!(stop(&e, "agent-50", false).is_err());
+    // Stop ends exactly the old process, and with stop_helpers its helper that outlived the node too; then Resume works.
+    stop(&e, &probe, true).unwrap();
+    e.wait("the helper's old process to end", |_| {
+        !agora_platform::process_still_running(&helper_process)
+    });
     e.wait("the old process to end", |_| {
         !agora_platform::process_still_running(&old)
     });
