@@ -4,6 +4,9 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+### Agents
+- Agents started in structured (ACP) mode now find their own configuration and login: the node passes on the variables that name the user's folders (`HOME`, `USERPROFILE`, `APPDATA`, `XDG_*`, language and terminal settings) and still passes no API key or token. Before, they ran with only `PATH`.
+
 ### Activity
 - Each row on the Activity page names the session that did it (`session 6ee82d`), so two windows or devices of the same person can be told apart. The sign-in row has the same id, so you can see how that session signed in.
 

@@ -417,6 +417,53 @@ fn to_event(method: &str, p: &Value) -> Option<AdapterEvent> {
     })
 }
 
+/// Whether an environment variable is passed on to an adapter: `PATH`, the user's home and standard folders, the language and
+/// terminal settings and the Windows system folders, never anything that can hold a secret (API keys, tokens, `SSH_AUTH_SOCK`).
+fn inheritable(name: &str) -> bool {
+    const NAMES: &[&str] = &[
+        "PATH",
+        "PATHEXT",
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "SHELL",
+        "LANG",
+        "LANGUAGE",
+        "TERM",
+        "TZ",
+        "TMPDIR",
+        "TEMP",
+        "TMP",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_STATE_HOME",
+        "XDG_RUNTIME_DIR",
+        "USERPROFILE",
+        "USERNAME",
+        "USERDOMAIN",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "PROGRAMDATA",
+        "HOMEDRIVE",
+        "HOMEPATH",
+        "SYSTEMROOT",
+        "SYSTEMDRIVE",
+        "WINDIR",
+        "COMSPEC",
+        "COMPUTERNAME",
+        "PROGRAMFILES",
+        "PROGRAMFILES(X86)",
+        "PROGRAMW6432",
+        "COMMONPROGRAMFILES",
+        "NUMBER_OF_PROCESSORS",
+        "PROCESSOR_ARCHITECTURE",
+        "OS",
+    ];
+    let upper = name.to_ascii_uppercase();
+    NAMES.contains(&upper.as_str()) || upper.starts_with("LC_")
+}
+
 impl Adapter {
     /// The adapter process's id (the agent it hosts runs below it).
     pub fn pid(&self) -> u32 {
@@ -435,10 +482,13 @@ impl Adapter {
             // The adapter's own stderr is diagnostics for whoever runs the node; it is not parsed.
             .stderr(Stdio::inherit());
         // An adapter starts with a clean environment plus what the node chose: it never inherits the node's
-        // secrets by accident. PATH is kept so it can find the tools it wraps.
+        // secrets by accident. PATH and the variables that say where the user's own folders are (`inheritable`) are kept, so
+        // the agent it wraps finds its own configuration and login the way it does when the user starts it.
         cmd.env_clear();
-        if let Some(path) = std::env::var_os("PATH") {
-            cmd.env("PATH", path);
+        for (name, value) in std::env::vars_os() {
+            if name.to_str().is_some_and(inheritable) {
+                cmd.env(name, value);
+            }
         }
         cmd.envs(cfg.env.iter().map(|(k, v)| (k, v)));
         if let Some(dir) = &cfg.cwd {
@@ -782,6 +832,40 @@ fn deliver(pending: &Pending, id: &Value, r: Result<Value, HostError>) {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    #[test]
+    fn an_adapter_gets_the_users_folders_and_never_a_secret() {
+        for ok in [
+            "PATH",
+            "Path",
+            "HOME",
+            "USERPROFILE",
+            "APPDATA",
+            "LocalAppData",
+            "XDG_CONFIG_HOME",
+            "LANG",
+            "LC_ALL",
+            "SystemRoot",
+            "TMPDIR",
+        ] {
+            assert!(super::inheritable(ok), "{ok}");
+        }
+        for secret in [
+            "OPENAI_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "GITHUB_TOKEN",
+            "AWS_SECRET_ACCESS_KEY",
+            "SSH_AUTH_SOCK",
+            "AGORA_HUB_TOKEN",
+            "DATABASE_URL",
+            "NPM_TOKEN",
+            "HOME_SECRET",
+            "LCX",
+            "",
+        ] {
+            assert!(!super::inheritable(secret), "{secret}");
+        }
+    }
+
     use super::*;
     use std::io::Cursor;
 
