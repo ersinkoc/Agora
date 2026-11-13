@@ -320,7 +320,7 @@ pub async fn run_once(
     // A dial that hangs (a hub that froze or went away mid-handshake) is given up after the silence deadline and tried again, so
     // a node never waits forever on a connection that will not finish.
     let dial = async {
-        let tcp = TcpStream::connect(&addr)
+        let tcp = agora_protocol::dial::connect(&addr)
             .await
             .map_err(|e| LinkError::Transport(e.to_string()))?;
         // Keystrokes and echoes are small frames; do not let Nagle's algorithm hold them back.
@@ -1079,7 +1079,7 @@ pub fn list_devices(link: &HubLink) -> Result<Vec<agora_protocol::v1::DeviceInfo
             // Without TLS the hub cannot tell who is asking, so it would not answer.
             return Err(LinkError::Bad("asking for devices needs wss://".into()));
         }
-        let tcp = TcpStream::connect(&addr)
+        let tcp = agora_protocol::dial::connect(&addr)
             .await
             .map_err(|e| LinkError::Transport(e.to_string()))?;
         let name = ServerName::try_from(host).map_err(|e| LinkError::Bad(e.to_string()))?;
@@ -1149,7 +1149,7 @@ pub fn enroll(
             .map_err(|e| bad(&e))?
             .with_root_certificates(roots)
             .with_no_client_auth();
-        let tcp = TcpStream::connect(&addr)
+        let tcp = agora_protocol::dial::connect(&addr)
             .await
             .map_err(|e| LinkError::Transport(e.to_string()))?;
         let name = ServerName::try_from(host).map_err(|e| bad(&e))?;
