@@ -13,7 +13,7 @@ use agora_tui::client::{sign_in, ChatEvent, ClientError, Hub, Session, TermEvent
 use agora_tui::device::Device;
 use agora_tui::preview::{Preview, Pumped};
 use agora_tui::render::{chat_command, plain, render, render_chat, session_line, ChatCommand};
-use agora_tui::split::{frame, tree_order, View};
+use agora_tui::split::{frame, reader_frame, start_card_fit, start_card_lines, tree_order, View};
 
 use crate::hubcli::{hub_dir, new_login_code, DEFAULT_LISTEN};
 use crate::{home, Opts, Say};
@@ -99,6 +99,65 @@ fn answer(
             ],
         ),
         Err(code) => say.text(key!("tui-answer-failed"), &[("code", Arg::Str(code))]),
+    }
+}
+
+/// The `agent.start` request y would answer when it does not fit the split view at the terminal's size now and was not read whole in
+/// the reader (ADR-0057): y must not allow it yet.
+fn start_unread(
+    s: &Snapshot,
+    selected: &str,
+    color: bool,
+    read_whole: &std::collections::HashSet<String>,
+    text: agora_tui::render::Text<'_>,
+    (cols, rows): (u16, u16),
+) -> Option<agora_protocol::v1::ApprovalSnapshot> {
+    let view = View {
+        snapshot: s,
+        selected,
+        screen: None,
+        notice: "",
+        color,
+        cols,
+        rows,
+    };
+    match start_card_fit(&view, text) {
+        Some((a, false)) if !read_whole.contains(&a.approval_id) => Some(a.clone()),
+        _ => None,
+    }
+}
+
+/// The full-screen reader of a start request (ADR-0057). Returns whether its last line was in view before the reader was left.
+fn read_start(
+    a: &agora_protocol::v1::ApprovalSnapshot,
+    rx: &mpsc::Receiver<u8>,
+    text: agora_tui::render::Text<'_>,
+) -> bool {
+    let mut top = 0usize;
+    let mut seen_end = false;
+    loop {
+        let (cols, rows) = agora_platform::terminal_size().unwrap_or((100, 30));
+        let Some(lines) = start_card_lines(a, usize::from(cols).saturating_sub(3), text) else {
+            return false;
+        };
+        let room = usize::from(rows.max(3)) - 1;
+        top = top.min(lines.len().saturating_sub(room));
+        let (out, end) = reader_frame(&lines, top, cols, rows, text);
+        seen_end |= end;
+        let mut o = std::io::stdout();
+        let _ = o.write_all(out.as_bytes());
+        let _ = o.flush();
+        // Arrow keys come as j / k (`read_key`); Esc as itself.
+        let Some(k) = read_key(rx, Duration::from_secs(300)) else {
+            return seen_end;
+        };
+        match k {
+            b'j' => top += 1,
+            b'k' => top = top.saturating_sub(1),
+            b' ' => top += room,
+            b'q' | 3 | 0x1b => return seen_end,
+            _ => {}
+        }
     }
 }
 
@@ -825,6 +884,8 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
         };
         first = false;
         let mut dirty_since: Option<Instant> = None;
+        // ADR-0057: the `agent.start` requests read whole in the reader, which y may then allow even where the panel cannot show them.
+        let mut read_whole: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut last_refresh = Instant::now();
         // With a keyboard: machines and agents on the left, the selected agent's terminal on the right, a status line. Without one
         // (output piped): the plain list, as before.
@@ -951,6 +1012,22 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                     3 | b'q' => return ExitCode::SUCCESS, // Ctrl-C is a plain byte in raw mode
                     b'y' | b'n' => {
                         if let Some(s) = &snapshot {
+                            // A start request is allowed only once all of it was in view: in the panel, or in the reader.
+                            if k == b'y'
+                                && start_unread(
+                                    s,
+                                    &selected,
+                                    color,
+                                    &read_whole,
+                                    &text,
+                                    agora_platform::terminal_size().unwrap_or((100, 30)),
+                                )
+                                .is_some()
+                            {
+                                notice = say.text(key!("tui-split-read-first"), &[]);
+                                draw(&snapshot, &selected, &notice, cost, preview.as_ref());
+                                continue;
+                            }
                             notice = answer(say, &mut session, s, &selected, k == b'y');
                             dirty_since.get_or_insert_with(Instant::now);
                             draw(&snapshot, &selected, &notice, cost, preview.as_ref());
@@ -1031,6 +1108,39 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                             draw(&snapshot, &selected, &notice, cost, preview.as_ref());
                         }
                     }
+                    b'\r' | b'\n'
+                        if snapshot
+                            .as_ref()
+                            .and_then(|s| {
+                                start_unread(
+                                    s,
+                                    &selected,
+                                    color,
+                                    &read_whole,
+                                    &text,
+                                    agora_platform::terminal_size().unwrap_or((100, 30)),
+                                )
+                            })
+                            .is_some() =>
+                    {
+                        // ADR-0057: Enter reads a start request that does not fit the panel, before anything else.
+                        if let Some(a) = snapshot.as_ref().and_then(|s| {
+                            start_unread(
+                                s,
+                                &selected,
+                                color,
+                                &read_whole,
+                                &text,
+                                agora_platform::terminal_size().unwrap_or((100, 30)),
+                            )
+                        }) {
+                            if read_start(&a, &rx, &text) {
+                                read_whole.insert(a.approval_id.clone());
+                            }
+                        }
+                        notice = String::new();
+                        draw(&snapshot, &selected, &notice, cost, preview.as_ref());
+                    }
                     b'\r' | b'\n' => {
                         if let (Some(s), false) = (&snapshot, selected.is_empty()) {
                             // The full-screen view reads the same terminal: stop watching it here first.
@@ -1086,6 +1196,65 @@ mod forget_tests {
     use super::*;
     use agora_i18n::Catalog;
     use agora_protocol::error::{Error, ErrorCode};
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn y_does_not_allow_a_start_request_that_was_never_wholly_in_view() {
+        // ADR-0057: an asking agent chooses the prompt's length, so what is below the panel's edge must be read before y counts.
+        let detail = serde_json::json!({
+            "node": "mac2", "agent": "agent-1", "agent_kind": "claude-code", "kind": "codex", "folder": "/w",
+            "inside": true, "worktree": false, "depth": 1,
+            "prompt": (1..=40).map(|i| format!("step {i}")).collect::<Vec<_>>().join("\n"),
+        })
+        .to_string();
+        let s = Snapshot {
+            approvals: vec![agora_protocol::v1::ApprovalSnapshot {
+                approval_id: "mac2/a1".into(),
+                agent_id: "mac2/agent-1".into(),
+                action: "agent.start".into(),
+                detail,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let say = Say(Catalog::english());
+        let text = |id: &str, args: &[(&str, Arg)]| say.text(id, args);
+        let mut read = std::collections::HashSet::new();
+        // 40 prompt lines on a 10-row terminal: y is refused.
+        assert!(start_unread(&s, "mac2/agent-1", false, &read, &text, (100, 10)).is_some());
+        // The panel says how much is hidden.
+        let view = View {
+            snapshot: &s,
+            selected: "mac2/agent-1",
+            screen: None,
+            notice: "",
+            color: false,
+            cols: 100,
+            rows: 10,
+        };
+        let frame = frame(&view, &text);
+        assert!(
+            frame.contains("more lines: press Enter to read all"),
+            "{frame}"
+        );
+        // Read whole in the reader: allowed.
+        read.insert("mac2/a1".to_string());
+        assert!(start_unread(&s, "mac2/agent-1", false, &read, &text, (100, 10)).is_none());
+        // On a terminal tall enough to show all of it: allowed without the reader.
+        assert!(start_unread(
+            &s,
+            "mac2/agent-1",
+            false,
+            &Default::default(),
+            &text,
+            (100, 80)
+        )
+        .is_none());
+        // The reader counts as read only once its last line was on screen.
+        let lines = start_card_lines(&s.approvals[0], 97, &text).unwrap();
+        assert!(!reader_frame(&lines, 0, 100, 10, &text).1);
+        assert!(reader_frame(&lines, lines.len(), 100, 10, &text).1);
+    }
 
     #[test]
     fn a_remote_refusal_explains_the_reason_in_the_selected_language() {

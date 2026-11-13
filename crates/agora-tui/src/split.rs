@@ -114,6 +114,73 @@ fn fit(text: &str, width: usize) -> String {
     out
 }
 
+/// The lines of the `agent.start` request `a` as shown at `width` columns (ADR-0057): who asks to start what and where, its whole first
+/// prompt indented, and how to answer. `None` for any other request.
+pub fn start_card_lines(
+    a: &agora_protocol::v1::ApprovalSnapshot,
+    width: usize,
+    t: Text<'_>,
+) -> Option<Vec<String>> {
+    let (line, prompt) = crate::render::start_card(&a.action, &a.detail, t)?;
+    let width = width.max(12);
+    let mut lines = crate::render::wrap_row(&line, width, width);
+    lines.push(String::new());
+    for p in prompt {
+        let wrapped = crate::render::wrap_row(&p, width - 2, width - 2);
+        if wrapped.is_empty() {
+            lines.push(String::new());
+        }
+        lines.extend(wrapped.into_iter().map(|w| format!("  {w}")));
+    }
+    lines.push(String::new());
+    lines.push(t(key!("tui-split-answer"), &[]));
+    Some(lines)
+}
+
+/// The `agent.start` request y / n would answer in this view, and whether all of it fits the right panel. `None` when the request to
+/// answer is not a start (or there is none). A start that does not fit must be read whole (the reader) before y may allow it.
+pub fn start_card_fit<'a>(
+    v: &View<'a>,
+    t: Text<'_>,
+) -> Option<(&'a agora_protocol::v1::ApprovalSnapshot, bool)> {
+    let (cols, rows) = (v.cols.max(20), v.rows.max(5));
+    let left = (cols / 3).clamp(18, 36);
+    let right = cols.saturating_sub(left + 1);
+    let room = usize::from((rows - 1).saturating_sub(1)).max(2);
+    let a = crate::client::answered_approval(v.snapshot, Some(v.selected))?;
+    let lines = start_card_lines(a, usize::from(right).saturating_sub(3), t)?;
+    Some((a, lines.len() <= room))
+}
+
+/// The full-screen reader of a start request that did not fit (ADR-0057): `lines` from `top`, a key line at the bottom. Returns the frame
+/// and whether the last line is in view, which is what counts as read.
+pub fn reader_frame(
+    lines: &[String],
+    top: usize,
+    cols: u16,
+    rows: u16,
+    t: Text<'_>,
+) -> (String, bool) {
+    let rows = usize::from(rows.max(3));
+    let room = rows - 1;
+    let top = top.min(lines.len().saturating_sub(room));
+    let mut out = String::from("\x1b[?25l\x1b[H\x1b[2J");
+    for (i, l) in lines.iter().skip(top).take(room).enumerate() {
+        let _ = write!(
+            out,
+            "\x1b[{};1H{}",
+            i + 1,
+            fit(&format!(" {l}"), usize::from(cols))
+        );
+    }
+    let _ = write!(
+        out,
+        "\x1b[{rows};1H\x1b[2m{}\x1b[0m",
+        fit(&t(key!("tui-reader-keys"), &[]), usize::from(cols))
+    );
+    (out, top + room >= lines.len())
+}
+
 /// One line of the left panel: its text and how it is painted.
 struct Row {
     text: String,
@@ -276,24 +343,20 @@ pub fn frame(v: &View<'_>, t: Text<'_>) -> String {
     let body = rows - 1; // the last row is the status line
     let s = v.snapshot;
     let agent = s.agents.iter().find(|a| a.agent_id == v.selected);
-    // ADR-0057: when the request y / n would answer asks to start an agent, the right panel shows all of it instead of a screen, so
-    // the answer is never given without the prompt and folder in view.
+    // ADR-0057: when the request y / n would answer asks to start an agent, the right panel shows it instead of a screen. One that
+    // does not fit says how much is hidden; y refuses it until it was read whole (`start_card_fit`, the reader).
     let card: Option<Vec<String>> = crate::client::answered_approval(s, Some(v.selected))
-        .and_then(|a| crate::render::start_card(&a.action, &a.detail, t))
-        .map(|(line, prompt)| {
-            let width = usize::from(right).saturating_sub(3).max(10);
-            let mut lines = crate::render::wrap_row(&line, width, width.saturating_sub(2));
-            lines.push(String::new());
-            for p in prompt {
-                let wrapped =
-                    crate::render::wrap_row(&p, width.saturating_sub(2), width.saturating_sub(2));
-                if wrapped.is_empty() {
-                    lines.push(String::new());
-                }
-                lines.extend(wrapped.into_iter().map(|w| format!("  {w}")));
+        .and_then(|a| start_card_lines(a, usize::from(right).saturating_sub(3), t))
+        .map(|mut lines| {
+            let room = usize::from(body.saturating_sub(1)).max(2);
+            if lines.len() > room {
+                let hidden = lines.len() - (room - 1);
+                lines.truncate(room - 1);
+                lines.push(t(
+                    key!("tui-split-card-more"),
+                    &[("count", Arg::Num(i64::try_from(hidden).unwrap_or(i64::MAX)))],
+                ));
             }
-            lines.push(String::new());
-            lines.push(t(key!("tui-split-answer"), &[]));
             lines
         });
 
