@@ -1,5 +1,7 @@
 {
   "deviceId": "x",
   "name": "x",
-  "publicKey": "AQID"
+  "publicKey": "AQID",
+  "signedAtMs": "1",
+  "signature": "AQID"
 }

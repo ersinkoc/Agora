@@ -1214,9 +1214,7 @@ fn device_command(
         ),
         Some(C::DeviceAskApproval(a)) => (
             "device.ask_approval",
-            devices
-                .ask_approval(&who.user, &a.device_id, now)
-                .map(|()| empty()),
+            devices.ask_approval(&who.user, a, now).map(|()| empty()),
         ),
         Some(C::DeviceEndorse(_) | C::DeviceRevoke(_)) if viewer => (
             "device.endorse",

@@ -452,6 +452,44 @@ pub(crate) fn utc(ms: u64) -> String {
 /// and last used. These are candidates: a machine trusts one only when its owner says so there, or a trusted device endorses it.
 pub fn hub_devices(say: &Say, o: &Opts) -> ExitCode {
     let dir = hub_dir(o);
+    // `agora hub devices forget ID`: a revoked device leaves the list (its revocations stay, so machines keep refusing it).
+    if let [verb, id] = o.positional.as_slice() {
+        if verb != "forget" {
+            say.err(key!("cli-bad-arguments"), &[]);
+            return ExitCode::from(2);
+        }
+        let done = SqliteStore::open(&dir.join("hub.db"))
+            .map_err(|e| e.to_string())
+            .and_then(|store| {
+                agora_hub::devices::Devices::new(&store)
+                    .forget(id)
+                    .map_err(|e| e.code.as_str().to_string())
+            });
+        return match done {
+            Ok(true) => {
+                say.out(
+                    key!("cli-hub-device-forgotten"),
+                    &[("id", id.clone().into())],
+                );
+                ExitCode::SUCCESS
+            }
+            Ok(false) => {
+                say.err(
+                    key!("cli-hub-device-not-forgotten"),
+                    &[("id", id.clone().into())],
+                );
+                ExitCode::from(1)
+            }
+            Err(e) => {
+                say.err(key!("cli-hub-failed"), &[("reason", e.into())]);
+                ExitCode::from(1)
+            }
+        };
+    }
+    if !o.positional.is_empty() {
+        say.err(key!("cli-bad-arguments"), &[]);
+        return ExitCode::from(2);
+    }
     let list = SqliteStore::open(&dir.join("hub.db"))
         .map_err(|e| e.to_string())
         .and_then(|store| {
@@ -1048,7 +1086,7 @@ pub fn node_enroll(say: &Say, o: &Opts) -> ExitCode {
         return ExitCode::from(2);
     };
     // ADR-0061: `--yes` covers exactly the devices whose fingerprints are given; checked before anything is enrolled.
-    if o.yes != !o.fingerprints.is_empty() {
+    if o.yes != !o.fingerprints.is_empty() || (o.include_others && !o.yes) {
         say.err(key!("cli-bad-arguments"), &[]);
         say.err(key!("cli-usage"), &[]);
         return ExitCode::from(2);

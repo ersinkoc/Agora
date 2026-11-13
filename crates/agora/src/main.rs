@@ -121,6 +121,9 @@ pub(crate) struct Opts {
     /// ADR-0061: `agora node trust --from-hub`, and the fingerprints `--yes` covers.
     from_hub: bool,
     fingerprints: Vec<String>,
+    /// ADR-0061: also other people's devices (with their fingerprints), and replacing a key already trusted under the same id.
+    include_others: bool,
+    replace: bool,
     positional: Vec<String>,
 }
 
@@ -169,6 +172,8 @@ fn parse(args: &[String]) -> Option<Opts> {
             "--root-key" => o.root_key = Some(it.next()?.into()),
             "--from-hub" => o.from_hub = true,
             "--fingerprint" => o.fingerprints.push(it.next()?.clone()),
+            "--include-others" => o.include_others = true,
+            "--replace" => o.replace = true,
             s if s.starts_with("--") => return None,
             _ => o.positional.push(a.clone()),
         }

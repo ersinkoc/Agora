@@ -40,7 +40,7 @@ or a local response timeout has a localized retry message.
 | `device.unknown` | `device_id` | ADR-0061: the hub has no device with this id registered to the caller (another person's device looks the same) |
 | `device.key_mismatch` | `device_id` | ADR-0061: the id is registered (or trusted on the machine) with another key; a device id stays bound to its key |
 | `device.untrusted` | `device_id`, `node_id` | ADR-0061: the device that signed an endorsement or revocation (`device_id`) is not one this machine trusts, or its trust there expired |
-| `device.signature_invalid` | `device_id` | ADR-0061: the endorsement or revocation of `device_id` does not verify under its signer's key |
+| `device.signature_invalid` | `device_id` | ADR-0061: the registration, ask, endorsement or revocation of `device_id` does not verify under the key that must have signed it, or its time is too far from the receiver's clock |
 | `device.endorsement_expired` | `device_id` | ADR-0061: the endorsement has expired, lasts longer than 90 days, or was signed in the future |
 | `device.not_in_scope` | `device_id`, `node_id` | ADR-0061: the endorsement names other machines than this one |
 | `device.revoked` | `device_id` | ADR-0061: a revocation of the device was signed at or after this endorsement |

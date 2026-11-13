@@ -1,20 +1,24 @@
 //! Which devices this machine trusts, and how that changes (ADR-0061).
 //!
 //! The trusted-devices file (`<data>/trusted-devices`, owner-only) holds one device per line: `<id> <public key as 130 hex digits>`,
-//! as `agora node trust ID KEY` has always written it. ADR-0061 adds optional fields after the key, `expires=<ms>` and `via=<device>`,
-//! for a device another device endorsed. A line with any other field is skipped, never trusted, so a typo cannot widen trust; a node
-//! from before ADR-0061 skips such a line too (it trusts less, never more).
+//! as `agora node trust ID KEY` has always written it. ADR-0061 adds optional fields after the key: `since=<ms>` (when its trust here
+//! began: the owner's confirmation, or the endorsement's signing time), and for a device another device endorsed `expires=<ms>` and
+//! `via=<device>`. A line with any other field is skipped, never trusted, so a typo cannot widen trust; a node from before ADR-0061
+//! skips such a line too (it trusts less, never more).
 //!
 //! Trust grows only two ways: the owner says yes on the machine (`agora node trust`, `agora node enroll`, `agora node trust
-//! --from-hub`), or a device this machine already trusts signs an endorsement, verified here ([`DeviceTrust::endorse`]). The hub only
-//! carries endorsements; it can neither make nor change one. A revocation signed by a trusted device ([`DeviceTrust::revoke`]) and
-//! `agora node untrust` narrow it at once, and are remembered (`<data>/device-revocations`) so an older endorsement the hub sends again
-//! cannot bring the device back. Every endorsement and revocation applied or refused is written to `<data>/device-trust.log`.
+//! --from-hub`), or a device this machine already trusts signs an endorsement, verified here ([`DeviceTrust::endorse`]); chains are at
+//! most two endorsements deep and an endorsed device never outlasts its endorser. The hub only carries endorsements; it can neither
+//! make nor change one. A revocation signed by a trusted device ([`DeviceTrust::revoke`]) and `agora node untrust` narrow it at once
+//! (with every device the removed one endorsed), and are remembered (`<data>/device-revocations`) so an older endorsement the hub
+//! sends again cannot bring the device back; a revocation removes only trust that began at or before it was signed, so one sent again
+//! later cannot undo a newer decision. Every change happens under a lock file shared by every process (`<file>.lock`) and is written
+//! beside the file and renamed over it. Every endorsement and revocation applied or refused is written to `<data>/device-trust.log`.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use agora_protocol::v1::{DeviceEndorsement, DeviceRevocation};
+use agora_protocol::v1::{DeviceEndorsement, DeviceInfo, DeviceRevocation};
 use agora_protocol::{Error, ErrorCode};
 
 /// The longest an endorsement lasts from when it was signed, and how far each use renews it (ADR-0061: 90 days, renewable by use).
@@ -23,6 +27,12 @@ pub const MAX_ENDORSEMENT_MS: u64 = 90 * 24 * 60 * 60 * 1000;
 const SKEW_MS: u64 = 5 * 60 * 1000;
 /// A renewal is written only when it moves the expiry by more than this (a device used all day writes once).
 const RENEW_STEP_MS: u64 = 24 * 60 * 60 * 1000;
+/// Endorsements in a row: a device the owner confirmed, one it endorsed, one that one endorsed. No deeper.
+pub const MAX_DEPTH: u32 = 2;
+/// Revocations remembered: at most this many (beyond it, ones older than any endorsement can be are forgotten first)...
+pub const MAX_REVOCATIONS: usize = 256;
+/// ...and none longer than this: every endorsement signed before such a revocation expired long ago.
+pub const REVOCATION_KEPT_MS: u64 = 400 * 24 * 60 * 60 * 1000;
 
 /// Remembered revocations, one `<device id> <issued ms>` per line.
 pub const REVOCATIONS_FILE: &str = "device-revocations";
@@ -34,19 +44,20 @@ pub const AUDIT_FILE: &str = "device-trust.log";
 pub struct Entry {
     pub id: String,
     pub key: Vec<u8>,
-    /// `None`: confirmed on the machine, no end. `Some`: endorsed, trusted until then.
+    /// `None`: confirmed on the machine, no end. `Some`: endorsed, trusted until then (and never past its endorser).
     pub expires_ms: Option<u64>,
     /// The device that endorsed it.
     pub via: Option<String>,
+    /// When its trust here began; `None` on a line written before ADR-0061's review (counts as the beginning of time).
+    pub since: Option<u64>,
 }
 
 impl Entry {
-    pub fn live(&self, now_ms: u64) -> bool {
-        self.expires_ms.is_none_or(|e| now_ms < e)
-    }
-
     fn line(&self) -> String {
         let mut l = format!("{} {}", self.id, hex(&self.key));
+        if let Some(s) = self.since {
+            l.push_str(&format!(" since={s}"));
+        }
         if let Some(e) = self.expires_ms {
             l.push_str(&format!(" expires={e}"));
         }
@@ -85,6 +96,42 @@ pub fn valid_key(key: &[u8]) -> bool {
     key.len() == 65 && key.first() == Some(&4)
 }
 
+/// Text from the hub (a device's name, a person) as this machine may show it: every control, escape, bidi, zero-width and other
+/// hidden character removed (agora-core's list, ADR-0057), at most `max` characters (then `…`). A name can then neither move the
+/// cursor, erase a line nor reorder what is printed after it.
+pub fn shown(text: &str, max: usize) -> String {
+    let clean: Vec<char> = text
+        .chars()
+        .filter(|c| !c.is_control() && !agora_core::text::is_hidden(*c))
+        .collect();
+    if clean.len() > max {
+        let mut s: String = clean[..max].iter().collect();
+        s.push('…');
+        s
+    } else {
+        clean.into_iter().collect()
+    }
+}
+
+/// A value for the log: an id as it is when it is one, anything else with every character outside `[A-Za-z0-9._-]` as `?` and at most
+/// 64 characters, so a value can never start a line of its own.
+fn logged(value: &str) -> String {
+    if valid_device_id(value) {
+        return value.to_string();
+    }
+    value
+        .chars()
+        .take(64)
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '?'
+            }
+        })
+        .collect()
+}
+
 /// One line of the file: `None` for a blank line or a comment, `Some(None)` for a line that does not parse (skipped, never
 /// trusted), `Some(Some(entry))` for a device.
 pub fn parse_line(line: &str) -> Option<Option<Entry>> {
@@ -104,6 +151,7 @@ pub fn parse_line(line: &str) -> Option<Option<Entry>> {
         key,
         expires_ms: None,
         via: None,
+        since: None,
     };
     for w in words {
         match w.split_once('=') {
@@ -111,11 +159,19 @@ pub fn parse_line(line: &str) -> Option<Option<Entry>> {
                 Ok(ms) => entry.expires_ms = Some(ms),
                 Err(_) => return Some(None),
             },
+            Some(("since", v)) if entry.since.is_none() => match v.parse() {
+                Ok(ms) => entry.since = Some(ms),
+                Err(_) => return Some(None),
+            },
             Some(("via", v)) if entry.via.is_none() && valid_device_id(v) => {
                 entry.via = Some(v.to_string());
             }
             _ => return Some(None),
         }
+    }
+    // An endorsed device has an end; a line naming an endorser without one is not trusted.
+    if entry.via.is_some() && entry.expires_ms.is_none() {
+        return Some(None);
     }
     Some(Some(entry))
 }
@@ -140,24 +196,125 @@ pub fn read_entries(path: &Path) -> (Vec<Entry>, usize) {
     (out, skipped)
 }
 
-/// Replaces the line of `id` (or adds `entry` at the end; `None` removes it), keeping every other line as it was. Written beside the
-/// file and renamed over it, owner-only from the start (`agora_platform::write_private`).
-fn rewrite(path: &Path, id: &str, entry: Option<&Entry>) -> std::io::Result<()> {
+/// How many endorsements lead to `e` (0: confirmed on the machine); `None` when the chain is broken (an endorser that is gone), loops,
+/// or is deeper than any chain this node accepts.
+pub fn depth(entries: &[Entry], e: &Entry) -> Option<u32> {
+    let mut d = 0;
+    let mut at = e;
+    while let Some(v) = &at.via {
+        d += 1;
+        if d > MAX_DEPTH {
+            return None;
+        }
+        at = entries.iter().find(|x| x.id == *v)?;
+    }
+    Some(d)
+}
+
+/// Until when `e` is trusted here: `Some(None)` with no end (confirmed), `Some(Some(t))` until `t` (its own expiry and every
+/// endorser's up the chain, whichever comes first), `None` when its chain is broken.
+pub fn effective_expiry(entries: &[Entry], e: &Entry) -> Option<Option<u64>> {
+    depth(entries, e)?;
+    let mut end = e.expires_ms;
+    let mut at = e;
+    while let Some(v) = &at.via {
+        at = entries.iter().find(|x| x.id == *v)?;
+        end = match (end, at.expires_ms) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+    }
+    Some(end)
+}
+
+/// Is `e` trusted at `now_ms`?
+pub fn alive(entries: &[Entry], e: &Entry, now_ms: u64) -> bool {
+    matches!(effective_expiry(entries, e), Some(end) if end.is_none_or(|t| now_ms < t))
+}
+
+/// `entries` without `id` and without every device whose chain of endorsers leads to it.
+fn without(entries: &[Entry], id: &str) -> Vec<Entry> {
+    let mut gone = vec![id.to_string()];
+    loop {
+        let more: Vec<String> = entries
+            .iter()
+            .filter(|e| !gone.contains(&e.id) && e.via.as_ref().is_some_and(|v| gone.contains(v)))
+            .map(|e| e.id.clone())
+            .collect();
+        if more.is_empty() {
+            break;
+        }
+        gone.extend(more);
+    }
+    entries
+        .iter()
+        .filter(|e| !gone.contains(&e.id))
+        .cloned()
+        .collect()
+}
+
+/// Holds the lock file beside the trusted-devices file (every process that changes it takes it), released when dropped.
+struct FileLock(std::fs::File);
+
+impl FileLock {
+    fn take(file: &Path) -> std::io::Result<Self> {
+        let mut name = file.as_os_str().to_owned();
+        name.push(".lock");
+        let f = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(PathBuf::from(name))?;
+        f.lock()?;
+        Ok(Self(f))
+    }
+}
+
+impl Drop for FileLock {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
+/// Writes `entries` back: every line of the file that is not a device (comments, blank lines, lines it skipped) is kept as it was,
+/// and devices keep their order. Written beside the file and renamed over it, owner-only from the start.
+fn write_entries(path: &Path, entries: &[Entry]) -> std::io::Result<()> {
     let old = std::fs::read_to_string(path).unwrap_or_default();
-    let mut out: String = old
-        .lines()
-        .filter(|l| l.split_whitespace().next() != Some(id))
-        .map(|l| format!("{l}\n"))
-        .collect();
-    if let Some(e) = entry {
-        out.push_str(&e.line());
-        out.push('\n');
+    let mut written: Vec<&str> = Vec::new();
+    let mut out = String::new();
+    for l in old.lines() {
+        match parse_line(l) {
+            Some(Some(e)) => {
+                if let Some(n) = entries.iter().find(|n| n.id == e.id) {
+                    if !written.contains(&n.id.as_str()) {
+                        out.push_str(&n.line());
+                        out.push('\n');
+                        written.push(&n.id);
+                    }
+                }
+            }
+            _ => {
+                out.push_str(l);
+                out.push('\n');
+            }
+        }
+    }
+    for n in entries {
+        if !written.contains(&n.id.as_str()) {
+            out.push_str(&n.line());
+            out.push('\n');
+        }
     }
     agora_platform::write_private(path, out.as_bytes())
 }
 
-/// The owner on the machine trusts `id` with `key`, with no end (`agora node trust`, and a yes at enrollment or `--from-hub`). A
-/// remembered revocation of it is forgotten: the person at the machine just decided otherwise.
+fn now() -> u64 {
+    crate::grants::now_ms()
+}
+
+/// The owner on the machine trusts `id` with `key`, with no end, from now (`agora node trust`, and a yes at enrollment or
+/// `--from-hub`). A remembered revocation of it is forgotten: the person at the machine just decided otherwise. It replaces a key
+/// already trusted under `id` (what `agora node trust ID KEY` has always done; the hub-fed paths ask first, see `--replace`).
 pub fn confirm(file: &Path, id: &str, key: &[u8]) -> Result<(), String> {
     if !valid_device_id(id) {
         return Err("the device id may contain only letters, digits, '.', '_' and '-'".into());
@@ -165,31 +322,39 @@ pub fn confirm(file: &Path, id: &str, key: &[u8]) -> Result<(), String> {
     if !valid_key(key) {
         return Err("the key is not an uncompressed P-256 point (65 bytes)".into());
     }
-    rewrite(
-        file,
-        id,
-        Some(&Entry {
-            id: id.to_string(),
-            key: key.to_vec(),
-            expires_ms: None,
-            via: None,
-        }),
-    )
-    .map_err(|e| e.to_string())?;
+    let _lock = FileLock::take(file).map_err(|e| e.to_string())?;
+    let (mut entries, _) = read_entries(file);
+    let replaced = entries.iter().any(|e| e.id == id && e.key != key);
+    // A new key under the id ends what the old key endorsed.
+    if replaced {
+        entries = without(&entries, id);
+    }
+    entries.retain(|e| e.id != id);
+    entries.push(Entry {
+        id: id.to_string(),
+        key: key.to_vec(),
+        expires_ms: None,
+        via: None,
+        since: Some(now()),
+    });
+    write_entries(file, &entries).map_err(|e| e.to_string())?;
     forget_revocation(&file.with_file_name(REVOCATIONS_FILE), id).map_err(|e| e.to_string())
 }
 
-/// The owner on the machine stops trusting `id` (`agora node untrust`): removed, and remembered as revoked now so the hub cannot bring
-/// it back with an endorsement it carried before. `Ok(false)`: it was not trusted (it is remembered as revoked all the same).
+/// The owner on the machine stops trusting `id` (`agora node untrust`): removed with every device it endorsed, and remembered as
+/// revoked now so the hub cannot bring it back with an endorsement it carried before. `Ok(false)`: it was not trusted (it is remembered
+/// as revoked all the same).
 pub fn untrust(file: &Path, id: &str, now_ms: u64) -> Result<bool, String> {
     if !valid_device_id(id) {
         return Err("the device id may contain only letters, digits, '.', '_' and '-'".into());
     }
-    let was = read_entries(file).0.iter().any(|e| e.id == id);
+    let _lock = FileLock::take(file).map_err(|e| e.to_string())?;
+    let (entries, _) = read_entries(file);
+    let was = entries.iter().any(|e| e.id == id);
     if was {
-        rewrite(file, id, None).map_err(|e| e.to_string())?;
+        write_entries(file, &without(&entries, id)).map_err(|e| e.to_string())?;
     }
-    remember_revocation(&file.with_file_name(REVOCATIONS_FILE), id, now_ms)
+    remember_revocation(&file.with_file_name(REVOCATIONS_FILE), id, now_ms, now_ms)
         .map_err(|e| e.to_string())?;
     audit(
         &file.with_file_name(AUDIT_FILE),
@@ -208,6 +373,7 @@ fn read_revocations(path: &Path) -> Vec<(String, u64)> {
         .lines()
         .filter_map(|l| {
             let (id, at) = l.trim().split_once(' ')?;
+            valid_device_id(id).then_some(())?;
             Some((id.to_string(), at.trim().parse().ok()?))
         })
         .collect()
@@ -218,8 +384,10 @@ fn write_revocations(path: &Path, list: &[(String, u64)]) -> std::io::Result<()>
     agora_platform::write_private(path, text.as_bytes())
 }
 
-/// Keeps the latest revocation time of `id`.
-fn remember_revocation(path: &Path, id: &str, at_ms: u64) -> std::io::Result<()> {
+/// Keeps the latest revocation time of `id`, and keeps the list bounded: records older than 400 days go (every endorsement signed
+/// before them has expired, so forgetting them cannot bring a device back), then, beyond [`MAX_REVOCATIONS`], the oldest of those older
+/// than any endorsement can last.
+fn remember_revocation(path: &Path, id: &str, at_ms: u64, now_ms: u64) -> std::io::Result<()> {
     let mut list = read_revocations(path);
     let latest = list
         .iter()
@@ -228,8 +396,22 @@ fn remember_revocation(path: &Path, id: &str, at_ms: u64) -> std::io::Result<()>
         .max()
         .unwrap_or(0)
         .max(at_ms);
-    list.retain(|(d, _)| d != id);
+    list.retain(|(d, a)| d != id && a.saturating_add(REVOCATION_KEPT_MS) >= now_ms);
     list.push((id.to_string(), latest));
+    if list.len() > MAX_REVOCATIONS {
+        list.sort_by_key(|(_, a)| *a);
+        let old = now_ms.saturating_sub(MAX_ENDORSEMENT_MS + SKEW_MS);
+        let over = list.len() - MAX_REVOCATIONS;
+        let mut dropped = 0;
+        list.retain(|(_, a)| {
+            if dropped < over && *a < old {
+                dropped += 1;
+                false
+            } else {
+                true
+            }
+        });
+    }
     write_revocations(path, &list)
 }
 
@@ -243,10 +425,16 @@ fn forget_revocation(path: &Path, id: &str) -> std::io::Result<()> {
     write_revocations(path, &list)
 }
 
-/// One line of the machine's own record (best effort: a full disk must not stop a revocation).
+/// One line of the machine's own record (best effort: a full disk must not stop a revocation). Every value is passed through
+/// [`logged`], so nothing a hub sends can add a line.
 fn audit(path: &Path, now_ms: u64, action: &str, device: &str, by: &str, outcome: &str) {
     use std::io::Write;
-    let line = format!("{now_ms} {action} {device} by={by} {outcome}\n");
+    let line = format!(
+        "{now_ms} {action} {} by={} {}\n",
+        logged(device),
+        logged(by),
+        logged(outcome)
+    );
     let mut options = std::fs::OpenOptions::new();
     options.create(true).append(true);
     #[cfg(unix)]
@@ -254,7 +442,10 @@ fn audit(path: &Path, now_ms: u64, action: &str, device: &str, by: &str, outcome
     if let Ok(mut f) = options.open(path) {
         let _ = f.write_all(line.as_bytes());
     }
-    eprintln!("devices: {action} {device} by={by} {outcome}");
+    eprint!(
+        "devices: {}",
+        line.split_once(' ').map_or("", |(_, rest)| rest)
+    );
 }
 
 fn field(out: &mut Vec<u8>, x: &[u8]) {
@@ -288,12 +479,39 @@ pub fn revoke_message(r: &DeviceRevocation) -> Vec<u8> {
     m
 }
 
-/// What people compare: the first 8 bytes of the SHA-256 of the key, lowercase hex in groups of 2 bytes joined by `-`.
+/// The exact bytes a device signs to register itself (its proof of possession).
+pub fn register_message(
+    device_id: &str,
+    name: &str,
+    public_key: &[u8],
+    signed_at_ms: u64,
+) -> Vec<u8> {
+    let mut m = b"agora-device-register-v1\0".to_vec();
+    field(&mut m, device_id.as_bytes());
+    field(&mut m, name.as_bytes());
+    field(&mut m, hex(public_key).as_bytes());
+    field(&mut m, signed_at_ms.to_string().as_bytes());
+    m
+}
+
+/// Did the holder of the device's key register it as listed (id, name, key)? A device the hub lists without that proof is not
+/// offered: the hub cannot make one up for a key nobody holds.
+pub fn registration_verifies(d: &DeviceInfo) -> bool {
+    valid_key(&d.public_key)
+        && verifies(
+            &d.public_key,
+            &register_message(&d.device_id, &d.name, &d.public_key, d.signed_at_ms),
+            &d.registration_signature,
+        )
+}
+
+/// What people compare: the first 12 bytes (96 bits) of the SHA-256 of the key, lowercase hex in groups of 4 digits joined by `-`.
+/// Always computed here from the key bytes, never taken from the hub.
 pub fn fingerprint(public_key: &[u8]) -> String {
     let digest = ring::digest::digest(&ring::digest::SHA256, public_key);
     digest
         .as_ref()
-        .get(..8)
+        .get(..12)
         .unwrap_or_default()
         .chunks(2)
         .map(hex)
@@ -301,7 +519,8 @@ pub fn fingerprint(public_key: &[u8]) -> String {
         .join("-")
 }
 
-/// A fingerprint as someone typed it: hex digits only, lowercased (`3F9A 07C2...`, `3f9a:07c2...` and `3f9a-07c2-...` are the same).
+/// A fingerprint as someone typed it: hex digits only, lowercased (`F947 3CB5…`, `f947:3cb5…` and `f947-3cb5-…` are the same). Only the
+/// whole fingerprint (24 digits) matches a device.
 pub fn normalize_fingerprint(s: &str) -> String {
     s.chars()
         .filter(char::is_ascii_hexdigit)
@@ -328,7 +547,7 @@ pub enum Endorsed {
 pub struct DeviceTrust {
     node_id: String,
     file: PathBuf,
-    /// One change at a time from this process (the owner's CLI writes through the same atomic rename).
+    /// One change at a time from this process (other processes wait on the lock file).
     lock: Mutex<()>,
 }
 
@@ -361,13 +580,13 @@ impl DeviceTrust {
         );
     }
 
-    /// The devices trusted now (live entries), sorted: what `NodeTrustedDevices` reports.
+    /// The devices trusted now, sorted: what `NodeTrustedDevices` reports.
     pub fn trusted_ids(&self, now_ms: u64) -> Vec<String> {
-        let mut ids: Vec<String> = read_entries(&self.file)
-            .0
-            .into_iter()
-            .filter(|e| e.live(now_ms))
-            .map(|e| e.id)
+        let (entries, _) = read_entries(&self.file);
+        let mut ids: Vec<String> = entries
+            .iter()
+            .filter(|e| alive(&entries, e, now_ms))
+            .map(|e| e.id.clone())
             .collect();
         ids.sort();
         ids
@@ -383,7 +602,10 @@ impl DeviceTrust {
         signature: &[u8],
         now_ms: u64,
     ) -> Result<Entry, Error> {
-        let Some(e) = entries.iter().find(|e| e.id == signer && e.live(now_ms)) else {
+        let Some(e) = entries
+            .iter()
+            .find(|e| e.id == signer && alive(entries, e, now_ms))
+        else {
             return Err(Error::new(ErrorCode::DeviceUntrusted)
                 .with("device_id", signer)
                 .with("node_id", self.node_id.as_str()));
@@ -392,6 +614,10 @@ impl DeviceTrust {
             return Err(Error::new(ErrorCode::DeviceSignatureInvalid).with("device_id", subject));
         }
         Ok(e.clone())
+    }
+
+    fn io(_: std::io::Error) -> Error {
+        Error::new(ErrorCode::Internal).with("incident_id", "trusted-devices")
     }
 
     /// Applies an endorsement the hub carried, after checking everything ADR-0061 asks (docs/specs/protocol.md "Devices").
@@ -421,6 +647,7 @@ impl DeviceTrust {
         if !valid_device_id(&e.endorser_device_id) || e.endorser_device_id == e.device_id {
             return Err(invalid("endorser_device_id"));
         }
+        let _lock = FileLock::take(&self.file).map_err(Self::io)?;
         let (entries, _) = read_entries(&self.file);
         let endorser = self.signer(
             &entries,
@@ -430,6 +657,12 @@ impl DeviceTrust {
             &e.signature,
             now_ms,
         )?;
+        // Two endorsements deep at most: a device endorsed by an endorsed device cannot endorse.
+        if depth(&entries, &endorser).is_none_or(|d| d >= MAX_DEPTH) {
+            return Err(Error::new(ErrorCode::DeviceUntrusted)
+                .with("device_id", e.endorser_device_id.as_str())
+                .with("node_id", self.node_id.as_str()));
+        }
         if !valid_key(&e.public_key) {
             return Err(invalid("public_key"));
         }
@@ -455,10 +688,10 @@ impl DeviceTrust {
             );
         }
         // Never longer than the endorser's own trust here.
-        let expires = endorser
-            .expires_ms
-            .map_or(e.expires_at_ms, |x| x.min(e.expires_at_ms));
-        let io = |_| Error::new(ErrorCode::Internal).with("incident_id", "trusted-devices");
+        let expires = match effective_expiry(&entries, &endorser) {
+            Some(Some(x)) => x.min(e.expires_at_ms),
+            _ => e.expires_at_ms,
+        };
         match entries.iter().find(|x| x.id == e.device_id) {
             Some(x) if x.key != e.public_key => {
                 Err(Error::new(ErrorCode::DeviceKeyMismatch)
@@ -474,8 +707,15 @@ impl DeviceTrust {
                     key: e.public_key.clone(),
                     expires_ms: Some(expires),
                     via: Some(e.endorser_device_id.clone()),
+                    since: Some(e.issued_at_ms),
                 };
-                rewrite(&self.file, &e.device_id, Some(&entry)).map_err(io)?;
+                let mut all: Vec<Entry> = entries
+                    .iter()
+                    .filter(|x| x.id != e.device_id)
+                    .cloned()
+                    .collect();
+                all.push(entry);
+                write_entries(&self.file, &all).map_err(Self::io)?;
                 Ok(match existing {
                     Some(_) => Endorsed::Already(Some(expires)),
                     None => Endorsed::Trusted(expires),
@@ -484,7 +724,8 @@ impl DeviceTrust {
         }
     }
 
-    /// Applies a revocation the hub carried. `Ok(true)`: the device was trusted here and is not any more.
+    /// Applies a revocation the hub carried. `Ok(true)`: the device was trusted here (from before the revocation was signed) and is not
+    /// any more, nor is any device it endorsed.
     pub fn revoke(&self, r: &DeviceRevocation, now_ms: u64) -> Result<bool, Error> {
         let _g = self.lock.lock().unwrap_or_else(|p| p.into_inner());
         let result = self.revoke_locked(r, now_ms);
@@ -504,9 +745,14 @@ impl DeviceTrust {
     }
 
     fn revoke_locked(&self, r: &DeviceRevocation, now_ms: u64) -> Result<bool, Error> {
+        let invalid = |f: &str| Error::new(ErrorCode::ProtocolInvalidMessage).with("field", f);
         if !valid_device_id(&r.device_id) {
-            return Err(Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "device_id"));
+            return Err(invalid("device_id"));
         }
+        if !valid_device_id(&r.revoker_device_id) {
+            return Err(invalid("revoker_device_id"));
+        }
+        let _lock = FileLock::take(&self.file).map_err(Self::io)?;
         let (entries, _) = read_entries(&self.file);
         self.signer(
             &entries,
@@ -516,29 +762,55 @@ impl DeviceTrust {
             &r.signature,
             now_ms,
         )?;
-        let io = |_| Error::new(ErrorCode::Internal).with("incident_id", "trusted-devices");
-        remember_revocation(&self.revocations(), &r.device_id, r.issued_at_ms).map_err(io)?;
-        let was = entries.iter().any(|e| e.id == r.device_id);
-        if was {
-            rewrite(&self.file, &r.device_id, None).map_err(io)?;
+        remember_revocation(&self.revocations(), &r.device_id, r.issued_at_ms, now_ms)
+            .map_err(Self::io)?;
+        // Only trust that began at or before the revocation was signed: one the hub sends again later cannot undo a newer decision.
+        let applies = entries
+            .iter()
+            .any(|e| e.id == r.device_id && e.since.unwrap_or(0) <= r.issued_at_ms);
+        if applies {
+            write_entries(&self.file, &without(&entries, &r.device_id)).map_err(Self::io)?;
         }
-        Ok(was)
+        Ok(applies)
     }
 
-    /// A device endorsed here was used (its signature verified): its trust runs 90 days from now. Written at most once a day per
-    /// device; a device confirmed on the machine has no end and is left alone.
+    /// A device endorsed here was used (its signature verified): its trust runs 90 days from now, never past its endorser's own.
+    /// Written at most once a day per device; a device confirmed on the machine has no end and is left alone.
     pub fn renew(&self, device_id: &str, now_ms: u64) {
         let _g = self.lock.lock().unwrap_or_else(|p| p.into_inner());
+        let Ok(_lock) = FileLock::take(&self.file) else {
+            return;
+        };
         let (entries, _) = read_entries(&self.file);
-        let Some(e) = entries.iter().find(|e| e.id == device_id && e.live(now_ms)) else {
+        let Some(e) = entries
+            .iter()
+            .find(|e| e.id == device_id && alive(&entries, e, now_ms))
+        else {
             return;
         };
         let Some(old) = e.expires_ms else { return };
-        let new = now_ms.saturating_add(MAX_ENDORSEMENT_MS);
+        let mut new = now_ms.saturating_add(MAX_ENDORSEMENT_MS);
+        if let Some(endorser) = e
+            .via
+            .as_ref()
+            .and_then(|v| entries.iter().find(|x| x.id == *v))
+        {
+            if let Some(Some(limit)) = effective_expiry(&entries, endorser) {
+                new = new.min(limit);
+            }
+        }
         if new > old.saturating_add(RENEW_STEP_MS) {
-            let mut renewed = e.clone();
-            renewed.expires_ms = Some(new);
-            let _ = rewrite(&self.file, device_id, Some(&renewed));
+            let all: Vec<Entry> = entries
+                .iter()
+                .map(|x| {
+                    let mut x = x.clone();
+                    if x.id == device_id {
+                        x.expires_ms = Some(new);
+                    }
+                    x
+                })
+                .collect();
+            let _ = write_entries(&self.file, &all);
         }
     }
 }
@@ -682,7 +954,7 @@ mod tests {
         let (old, new, stranger) = (Key::new(), Key::new(), Key::new());
         confirm(&file, "web-old", &old.public()).unwrap();
         let t = DeviceTrust::new("laptop", &file);
-        let now = 1_700_000_000_000;
+        let now = crate::grants::now_ms();
         let code = |r: Result<Endorsed, Error>| r.unwrap_err().code;
 
         // The hub lists a device and makes up an endorsement for it: signed by no device this machine trusts.
@@ -770,7 +1042,7 @@ mod tests {
         let (a, b, c) = (Key::new(), Key::new(), Key::new());
         confirm(&file, "a", &a.public()).unwrap();
         let t = DeviceTrust::new("laptop", &file);
-        let now = 1_700_000_000_000;
+        let now = crate::grants::now_ms();
         t.endorse(&a.endorse("a", "b", &b.public(), &[], now, 10 * DAY), now)
             .unwrap();
         // b (trusted for 10 days) endorses c for 60: c ends with b.
@@ -801,7 +1073,7 @@ mod tests {
         let (old, new, stranger) = (Key::new(), Key::new(), Key::new());
         confirm(&file, "web-old", &old.public()).unwrap();
         let t = DeviceTrust::new("laptop", &file);
-        let now = 1_700_000_000_000;
+        let now = crate::grants::now_ms();
         let e = old.endorse("web-old", "web-new", &new.public(), &[], now, DAY);
         t.endorse(&e, now).unwrap();
         // A revocation the hub made up does nothing.
@@ -871,7 +1143,11 @@ mod tests {
         confirm(&file, "web-9", &k.public()).unwrap();
         let text = std::fs::read_to_string(&file).unwrap();
         assert!(text.starts_with("# mine\nphone "));
-        assert!(text.ends_with(&format!("web-9 {h}\n")));
+        assert!(text
+            .lines()
+            .last()
+            .unwrap()
+            .starts_with(&format!("web-9 {h} since=")));
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -879,5 +1155,208 @@ mod tests {
             assert_eq!(mode & 0o777, 0o600);
         }
         let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn a_revocation_sent_again_never_undoes_a_newer_trust() {
+        // Review finding 2: the hub resends every revocation on each reconnect.
+        let d = dir("replay");
+        let file = d.join(crate::approvals::TRUSTED_DEVICES_FILE);
+        let (old, new) = (Key::new(), Key::new());
+        confirm(&file, "web-old", &old.public()).unwrap();
+        let t = DeviceTrust::new("laptop", &file);
+        let now = crate::grants::now_ms();
+        t.endorse(
+            &old.endorse("web-old", "web-new", &new.public(), &[], now, DAY),
+            now,
+        )
+        .unwrap();
+        let revocation = old.revoke("web-old", "web-new", now + 2);
+        assert!(t.revoke(&revocation, now + 2).unwrap());
+        // A newer endorsement (signed after the revocation) trusts it again...
+        let again = old.endorse("web-old", "web-new", &new.public(), &[], now + 4, DAY);
+        assert!(matches!(
+            t.endorse(&again, now + 4),
+            Ok(Endorsed::Trusted(_))
+        ));
+        // ...and the old revocation sent again keeps it.
+        assert!(!t.revoke(&revocation, now + 5).unwrap());
+        assert!(t.trusted_ids(now + 5).contains(&"web-new".to_string()));
+        // The same after the owner confirms it on the machine.
+        assert!(t
+            .revoke(&old.revoke("web-old", "web-new", now + 6), now + 6)
+            .unwrap());
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        confirm(&file, "web-new", &new.public()).unwrap();
+        assert!(!t
+            .revoke(
+                &old.revoke("web-old", "web-new", now + 6),
+                crate::grants::now_ms()
+            )
+            .unwrap());
+        assert!(t
+            .trusted_ids(crate::grants::now_ms())
+            .contains(&"web-new".to_string()));
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn nothing_a_hub_sends_can_add_a_line_to_the_log() {
+        // Review finding 3.
+        let d = dir("log");
+        let file = d.join(crate::approvals::TRUSTED_DEVICES_FILE);
+        let old = Key::new();
+        confirm(&file, "web-old", &old.public()).unwrap();
+        let t = DeviceTrust::new("laptop", &file);
+        let now = crate::grants::now_ms();
+        let evil = "x\n2 untrust web-old by=owner ok";
+        let e = old.endorse("web-old", evil, &old.public(), &[], now, DAY);
+        assert_eq!(
+            t.endorse(&e, now).unwrap_err().code,
+            ErrorCode::ProtocolInvalidMessage
+        );
+        let mut e = old.endorse(evil, "web-new", &old.public(), &[], now, DAY);
+        e.device_id = "web-new".into();
+        assert!(t.endorse(&e, now).is_err());
+        let r = old.revoke(evil, "web-new", now);
+        assert_eq!(
+            t.revoke(&r, now).unwrap_err().code,
+            ErrorCode::ProtocolInvalidMessage
+        );
+        let r = old.revoke("web-old", evil, now);
+        assert_eq!(
+            t.revoke(&r, now).unwrap_err().code,
+            ErrorCode::ProtocolInvalidMessage
+        );
+        let log = std::fs::read_to_string(d.join(AUDIT_FILE)).unwrap();
+        assert_eq!(log.lines().count(), 4, "{log}");
+        assert!(log.lines().all(|l| !l.starts_with("2 ")), "{log}");
+        assert!(
+            log.lines().all(|l| l.split(' ').count() == 5),
+            "one record per line: {log}"
+        );
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn revoking_a_device_removes_what_it_endorsed_and_chains_stay_short() {
+        // Review finding 4.
+        let d = dir("cascade");
+        let file = d.join(crate::approvals::TRUSTED_DEVICES_FILE);
+        let (a, b, c, x) = (Key::new(), Key::new(), Key::new(), Key::new());
+        confirm(&file, "a", &a.public()).unwrap();
+        let t = DeviceTrust::new("laptop", &file);
+        let now = crate::grants::now_ms();
+        t.endorse(&a.endorse("a", "b", &b.public(), &[], now, 10 * DAY), now)
+            .unwrap();
+        t.endorse(&b.endorse("b", "c", &c.public(), &[], now, 60 * DAY), now)
+            .unwrap();
+        // c was endorsed by an endorsed device: it cannot endorse in turn.
+        assert_eq!(
+            t.endorse(&c.endorse("c", "x", &x.public(), &[], now, DAY), now)
+                .unwrap_err()
+                .code,
+            ErrorCode::DeviceUntrusted
+        );
+        // Using c does not carry it past b's own trust.
+        t.renew("c", now + DAY + 1);
+        let c_entry = read_entries(&file)
+            .0
+            .into_iter()
+            .find(|e| e.id == "c")
+            .unwrap();
+        assert!(c_entry.expires_ms.unwrap() <= now + 10 * DAY, "{c_entry:?}");
+        // b stolen: revoking it removes c too.
+        assert!(t.revoke(&a.revoke("a", "b", now + 3), now + 3).unwrap());
+        assert_eq!(t.trusted_ids(now + 3), ["a"]);
+        // The owner untrusting a on the machine removes all it endorsed.
+        t.endorse(
+            &a.endorse("a", "x", &x.public(), &[], now + 4, DAY),
+            now + 4,
+        )
+        .unwrap();
+        assert!(untrust(&file, "a", now + 5).unwrap());
+        assert!(t.trusted_ids(now + 5).is_empty());
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn remembered_revocations_are_bounded_and_forgotten_only_when_harmless() {
+        // Review finding 5.
+        let d = dir("bounded");
+        let path = d.join(REVOCATIONS_FILE);
+        let now = crate::grants::now_ms();
+        remember_revocation(&path, "ancient", now - REVOCATION_KEPT_MS - 1, now).unwrap();
+        for i in 0..MAX_REVOCATIONS + 10 {
+            remember_revocation(&path, &format!("old-{i}"), now - 200 * DAY, now).unwrap();
+        }
+        remember_revocation(&path, "recent", now - DAY, now).unwrap();
+        let list = read_revocations(&path);
+        assert!(list.len() <= MAX_REVOCATIONS, "{}", list.len());
+        assert!(!list.iter().any(|(id, _)| id == "ancient"));
+        assert!(
+            list.iter().any(|(id, _)| id == "recent"),
+            "a recent one is never dropped"
+        );
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn a_change_waits_for_another_process_holding_the_lock() {
+        let d = dir("lock");
+        let file = d.join(crate::approvals::TRUSTED_DEVICES_FILE);
+        let k = Key::new();
+        let held = FileLock::take(&file).unwrap();
+        let (f2, key) = (file.clone(), k.public());
+        let other = std::thread::spawn(move || confirm(&f2, "web-1", &key));
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(read_entries(&file).0.is_empty(), "it waited");
+        drop(held);
+        other.join().unwrap().unwrap();
+        assert_eq!(read_entries(&file).0.len(), 1);
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn names_from_the_hub_are_shown_without_anything_that_moves_or_hides_text() {
+        let evil = "Phone\u{1b}[2K\r\u{1b}[1A  fake · 0000-0000\u{202e}gnp\u{200b}x";
+        let s = shown(evil, 40);
+        assert!(
+            !s.chars()
+                .any(|c| c.is_control() || agora_core::text::is_hidden(c)),
+            "{s:?}"
+        );
+        assert_eq!(shown(&"a".repeat(50), 40).chars().count(), 41);
+        assert_eq!(shown("Firefox · Linux", 40), "Firefox · Linux");
+    }
+
+    #[test]
+    fn a_registration_counts_only_with_the_devices_own_signature() {
+        let v = vectors();
+        for c in v["registrations"].as_array().unwrap() {
+            let mut d = DeviceInfo {
+                device_id: c["device_id"].as_str().unwrap().into(),
+                name: c["name"].as_str().unwrap().into(),
+                public_key: from_hex(c["public_key"].as_str().unwrap()).unwrap(),
+                signed_at_ms: c["signed_at_ms"].as_u64().unwrap(),
+                registration_signature: from_hex(c["signature"].as_str().unwrap()).unwrap(),
+                ..Default::default()
+            };
+            assert_eq!(
+                hex(&register_message(
+                    &d.device_id,
+                    &d.name,
+                    &d.public_key,
+                    d.signed_at_ms
+                )),
+                c["hex"].as_str().unwrap()
+            );
+            assert!(registration_verifies(&d));
+            d.name.push('!');
+            assert!(!registration_verifies(&d), "a hub cannot rename it");
+            d.name.pop();
+            d.public_key = Key::new().public();
+            assert!(!registration_verifies(&d), "nor put another key under it");
+        }
     }
 }

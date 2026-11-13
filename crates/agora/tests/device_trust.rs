@@ -53,6 +53,22 @@ impl Key {
     fn hex(&self) -> String {
         self.public().iter().map(|b| format!("{b:02x}")).collect()
     }
+    /// This device registering itself, with its proof of possession.
+    fn registration(&self, id: &str, name: &str) -> v1::DeviceRegister {
+        let at = server::now_ms();
+        v1::DeviceRegister {
+            device_id: id.into(),
+            name: name.into(),
+            public_key: self.public(),
+            signed_at_ms: at,
+            signature: self.sign(&agora_node::device_trust::register_message(
+                id,
+                name,
+                &self.public(),
+                at,
+            )),
+        }
+    }
     fn sign(&self, m: &[u8]) -> Vec<u8> {
         self.0
             .sign(&SystemRandom::new(), m)
@@ -164,11 +180,7 @@ fn the_hub_offers_devices_the_owner_decides_and_endorsements_and_revocations_are
         devices
             .register(
                 "owner",
-                &v1::DeviceRegister {
-                    device_id: id.into(),
-                    name: format!("Browser {id}"),
-                    public_key: k.public(),
-                },
+                &k.registration(id, &format!("Browser {id}")),
                 server::now_ms(),
             )
             .unwrap();
@@ -237,6 +249,114 @@ fn the_hub_offers_devices_the_owner_decides_and_endorsements_and_revocations_are
         &["node", "trust", "--from-hub", "--yes", "--data", data_arg],
     );
     assert!(!ok);
+
+    // Someone else's device on the same hub: never trusted by the owner's fingerprints alone, only with --include-others.
+    let eda = Key::new();
+    devices
+        .register(
+            "eda",
+            &eda.registration("web-eda", "Eda's laptop"),
+            server::now_ms(),
+        )
+        .unwrap();
+    let fp_eda = fingerprint(&eda.public());
+    let (ok, out, err) = agora(
+        &home,
+        &[
+            "node",
+            "trust",
+            "--from-hub",
+            "--yes",
+            "--fingerprint",
+            &fp_eda,
+            "--data",
+            data_arg,
+        ],
+    );
+    assert!(!ok && err.contains(&fp_eda), "{out}{err}");
+    assert!(out.contains("other people"), "listed apart: {out}");
+    assert!(!trusted(&file).contains(&"web-eda".to_string()));
+    let (ok, out, err) = agora(
+        &home,
+        &[
+            "node",
+            "trust",
+            "--from-hub",
+            "--yes",
+            "--include-others",
+            "--fingerprint",
+            &fp_eda,
+            "--data",
+            data_arg,
+        ],
+    );
+    assert!(ok, "{out}{err}");
+    assert!(trusted(&file).contains(&"web-eda".to_string()));
+    agora(&home, &["node", "untrust", "web-eda", "--data", data_arg]);
+
+    // An id the machine trusts with another key: the hub's key replaces it only with --replace.
+    let (mine_before, swapped) = (Key::new(), Key::new());
+    agora(
+        &home,
+        &[
+            "node",
+            "trust",
+            "web-swap",
+            &mine_before.hex(),
+            "--data",
+            data_arg,
+        ],
+    );
+    devices
+        .register(
+            "owner",
+            &swapped.registration("web-swap", "Swapped"),
+            server::now_ms(),
+        )
+        .unwrap();
+    let fp_swap = fingerprint(&swapped.public());
+    let (ok, out, err) = agora(
+        &home,
+        &[
+            "node",
+            "trust",
+            "--from-hub",
+            "--yes",
+            "--fingerprint",
+            &fp_swap,
+            "--data",
+            data_arg,
+        ],
+    );
+    assert!(!ok && out.contains("replaces"), "{out}{err}");
+    let kept = agora_node::device_trust::read_entries(&file)
+        .0
+        .into_iter()
+        .find(|e| e.id == "web-swap")
+        .unwrap();
+    assert_eq!(kept.key, mine_before.public(), "not replaced silently");
+    let (ok, out, err) = agora(
+        &home,
+        &[
+            "node",
+            "trust",
+            "--from-hub",
+            "--yes",
+            "--replace",
+            "--fingerprint",
+            &fp_swap,
+            "--data",
+            data_arg,
+        ],
+    );
+    assert!(ok, "{out}{err}");
+    let now_key = agora_node::device_trust::read_entries(&file)
+        .0
+        .into_iter()
+        .find(|e| e.id == "web-swap")
+        .unwrap();
+    assert_eq!(now_key.key, swapped.public());
+    agora(&home, &["node", "untrust", "web-swap", "--data", data_arg]);
 
     // The owner removes one on the machine.
     let (ok, out, _) = agora(&home, &["node", "untrust", "web-new", "--data", data_arg]);
@@ -394,10 +514,21 @@ fn the_hub_offers_devices_the_owner_decides_and_endorsements_and_revocations_are
         "not trusted yet"
     );
 
-    // The hub (or anyone without web-old's key) makes up an endorsement: carried, refused on the machine.
+    // Anyone without web-old's key makes up an endorsement: the hub does not even keep it...
     assert_eq!(
         call("", endorsement(&fake, "web-old", now, now + 86_400_000)),
-        "ok"
+        "device.signature_invalid"
+    );
+    // ...and a hub that carries one anyway is refused on the machine.
+    let cr::Command::DeviceEndorse(v1::DeviceEndorse {
+        endorsement: Some(forged),
+    }) = endorsement(&fake, "web-old", now, now + 86_400_000)
+    else {
+        panic!("not an endorsement")
+    };
+    assert_eq!(
+        node.devices.endorse(&forged, now).unwrap_err().code,
+        agora_protocol::ErrorCode::DeviceSignatureInvalid
     );
     // An expired one is refused before it travels (and the machine would refuse it too).
     assert_eq!(
@@ -462,11 +593,7 @@ fn enrolling_shows_the_registered_devices_and_trusts_only_the_ones_the_owner_nam
         devices
             .register(
                 "owner",
-                &v1::DeviceRegister {
-                    device_id: id.into(),
-                    name: format!("Browser {id}"),
-                    public_key: k.public(),
-                },
+                &k.registration(id, &format!("Browser {id}")),
                 server::now_ms(),
             )
             .unwrap();
