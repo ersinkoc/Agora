@@ -1,8 +1,7 @@
 # 0067. Remote access: a screen password, Tailscale and Cloudflare Tunnel, and a phone-sized window
-Status: Proposed
+Status: Accepted
 Date: 2026-11-14
-
-Not accepted. Nothing here may be built until the maintainer accepts it in a message of their own.
+Accepted: 2026-11-14 (maintainer's explicit approval in chat: "0067'yi onaylıyorum"). The open questions were not answered; the proposed answers stand (Tailscale first, one owner password, idle lock off by default, a passkey may replace the password per device). Built in the five rungs, each alone.
 Origin: the maintainer: "our next thing is a screen password for the web UI, remote access through a Cloudflare Tunnel and/or Tailscale, and the mobile interface."
 Builds on ADR-0046 (mobile is the web client as a PWA), ADR-0051 (ntfy is the push channel), ADR-0049 (team mode), ADR-0020/0061 (device-signed actions), ADR-0065 (pairing).
 
@@ -11,7 +10,7 @@ The window is reached today by a LAN address with a self-signed certificate (a b
 a way to get there safely (a network path with a real certificate), a lock on the door (so that an address someone learns opens nothing), and a window that works on a phone. Three properties already protect the *dangerous* part: an agent start,
 an approval or a grant is signed by a device key and checked on the machine, so a stolen session token alone cannot start anything (ADR-0020). What a remote visitor with only a session could do is **watch**: terminals, costs, diffs. That is the data this ADR protects.
 
-## Decision (proposed)
+## Decision
 Built in five small rungs; each ships alone.
 1. **Screen password (rung 1).** The owner sets a password (`agora password set`, or in the window under This device). A new sign-in from a non-loopback address needs it (the owner on the hub's own machine is never asked: ADR-0062). Stored as a salted, slow hash (PBKDF2-HMAC-SHA256 through `ring`, 600 000 iterations, no new dependency); a wrong password is rate limited with a growing lockout per address and globally, and is audited. A passkey (already supported) can replace it per device. **Lock now** in the window ends the session; an optional **idle lock** (off by default; e.g. 10 minutes) locks the window until the password is typed again, which does not touch agents. Sessions stay 30 days, extended on use (#450); a locked or signed-out session needs the password.
 2. **A phone-sized window (rung 2).** The same web client (ADR-0046), reviewed on phone widths: a single column (machines and agents -> an agent -> its terminal or conversation), "Needs you" first with Approve/Deny reachable in one tap, big tap targets, a terminal key bar (Esc, Tab, Ctrl, arrows, paste) for a touch keyboard, install as a PWA, ntfy pushes that open the right agent, and safe-area/landscape handling. Signing actions with the device key works on phones (WebCrypto non-extractable keys); a phone is trusted like any device (ADR-0061, a card on another device or at the machine).
@@ -20,7 +19,7 @@ Built in five small rungs; each ships alone.
 5. **Hardening and visibility (rung 5).** Remote sign-ins are audited with address, device and result; "Where am I signed in" lists sessions with a revoke button; per-address and global rate limits on the sign-in and websocket upgrade; a remote session cannot register a new device key or change the password without the password again; **no remote command ever bypasses a machine's own trust**: a remote session can watch, and can start/approve only with a device the machine trusts (ADR-0061), exactly like a local one.
 6. **Nothing is reachable from outside by default:** loopback or LAN only, until `agora remote ...` is run on purpose; turning a path off removes it (certificate names, `tailscale serve`, the tunnel).
 
-## Open questions for the maintainer
+## Open questions (proposed answers stand)
 - Which first: Tailscale (private, simpler, proposed) or Cloudflare Tunnel (public hostname)?
 - Password: one for the owner (proposed) or per device? Idle lock default off (proposed) or on?
 - Is a screen password *in addition to* passkeys acceptable, or should remote sign-in require a passkey where one is registered? (Proposed: either; both is optional.)
