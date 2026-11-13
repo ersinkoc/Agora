@@ -31,11 +31,16 @@ export function toggleHarmless(s: LaunchState, id: string, on: boolean): LaunchS
   return { ...s, harmless: on ? [...rest, id] : rest };
 }
 
+/** The confirmation marker: an option the user confirmed "Let the agent act without asking?" for is sent (and signed) as `<id>!`. The
+ * list comes through the hub and is only a display hint: the machine decides from its own manifest which options skip permissions
+ * and refuses one without the marker (`agent.option_unconfirmed`). */
+export const CONFIRMED = '!';
+
 /** The ids a start sends, in the order the kind declares them; only options the kind offers, never a pending one. */
 export function chosenIds(s: LaunchState, options: readonly LaunchOptionChoice[]): string[] {
   return options
     .filter((o) => (o.skipsPermissions ? o.id === s.permission : s.harmless.includes(o.id)))
-    .map((o) => o.id);
+    .map((o) => (o.skipsPermissions ? o.id + CONFIRMED : o.id));
 }
 
 /** A label is a Fluent id; one this window does not have shows the option's id instead of a bare key. */

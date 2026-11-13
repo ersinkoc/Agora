@@ -113,6 +113,7 @@ export function App() {
     } catch (e) {
       const code = (e as { code?: string }).code;
       if (code === 'agent.option_forbidden') return optionForbidden(e);
+      if (code === 'agent.option_unconfirmed') return 'start-option-unconfirmed';
       if (code === 'protocol.capability_missing' && launchOptions.length > 0) return 'start-options-unsupported';
       return code === 'agent.mode_unsupported' ? 'start-directory-agent-unsupported' : code === 'approval.signature_invalid' ? 'approval-not-trusted' : code === 'protocol.capability_missing' ? 'start-directory-unsupported' : code === 'agent.kind_unknown' ? 'start-kind-unknown' : code === 'node.resource_limit' ? 'start-limit' : 'start-failed';
     }

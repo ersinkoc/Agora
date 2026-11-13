@@ -381,3 +381,4 @@ start-option-confined-only = This machine lets an agent act without asking only 
 start-options-unsupported = This machine is too old for start options. Update it, or choose "Ask before acting".
 agent-does-not-ask = Does not ask
 agent-does-not-ask-explain = Started so that it acts without asking you first
+start-option-unconfirmed = This machine says that option lets the agent act without asking, and this window did not ask you first. Nothing was started; open the start window again.

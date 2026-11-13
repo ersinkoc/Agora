@@ -381,3 +381,4 @@ start-option-confined-only = Bu makine bir ajanın sormadan çalışmasına yaln
 start-options-unsupported = Bu makine başlatma seçenekleri için fazla eski. Güncelleyin ya da "Önce sorsun"u seçin.
 agent-does-not-ask = Sormuyor
 agent-does-not-ask-explain = Size önce sormadan çalışacak şekilde başlatıldı
+start-option-unconfirmed = Bu makineye göre o seçenek ajanın sormadan çalışmasını sağlıyor ve bu pencere önce size sormadı. Hiçbir şey başlatılmadı; başlatma penceresini yeniden açın.

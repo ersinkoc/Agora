@@ -782,8 +782,9 @@ fn start_in_folder(
                 )
             );
             let _ = out.flush();
+            // The confirmation marker (`<id>!`): signed with the start; the node refuses an option that skips permissions without it.
             if read_key(rx, Duration::from_secs(60)) == Some(b'y') {
-                launch_options.push(o.id.clone());
+                launch_options.push(format!("{}!", o.id));
             }
         }
     }
