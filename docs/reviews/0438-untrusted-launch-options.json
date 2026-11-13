@@ -1,0 +1,104 @@
+{
+  "head": "51c371e187a74b8bb9656ff084d8e87f911bfe29",
+  "recorded_at": "2026-11-13T14:54:30.936701+00:00",
+  "scope": "Actual StartAgent component and signing utility in Chromium with controlled loadKinds/onStart; no hub, running node or real agent launched",
+  "browser": [
+    {
+      "lang": "en",
+      "id": "skip-permissions!",
+      "label": "Ask before acting",
+      "dialogs": 0,
+      "node": "node",
+      "kind": "codex",
+      "options": [
+        "skip-permissions!"
+      ],
+      "signatureValid": true,
+      "rewritten": [
+        "skip-permissions!"
+      ],
+      "rewrittenValid": true,
+      "confirmationDialogs": 0
+    },
+    {
+      "lang": "en",
+      "id": "resume-last,skip-permissions!",
+      "label": "Ask before acting",
+      "dialogs": 0,
+      "node": "node",
+      "kind": "codex",
+      "options": [
+        "resume-last,skip-permissions!"
+      ],
+      "signatureValid": true,
+      "rewritten": [
+        "resume-last",
+        "skip-permissions!"
+      ],
+      "rewrittenValid": true,
+      "confirmationDialogs": 0
+    },
+    {
+      "lang": "tr",
+      "id": "skip-permissions!",
+      "label": "Önce sorsun",
+      "dialogs": 0,
+      "node": "node",
+      "kind": "codex",
+      "options": [
+        "skip-permissions!"
+      ],
+      "signatureValid": true,
+      "rewritten": [
+        "skip-permissions!"
+      ],
+      "rewrittenValid": true,
+      "confirmationDialogs": 0
+    },
+    {
+      "lang": "tr",
+      "id": "resume-last,skip-permissions!",
+      "label": "Önce sorsun",
+      "dialogs": 0,
+      "node": "node",
+      "kind": "codex",
+      "options": [
+        "resume-last,skip-permissions!"
+      ],
+      "signatureValid": true,
+      "rewritten": [
+        "resume-last",
+        "skip-permissions!"
+      ],
+      "rewrittenValid": true,
+      "confirmationDialogs": 0
+    }
+  ],
+  "node_resolver": {
+    "input": [
+      "skip-permissions!"
+    ],
+    "permission_choice": "",
+    "confirmation_pending": false,
+    "policy": "allow",
+    "result": {
+      "ids": [
+        "skip-permissions"
+      ],
+      "args": [
+        "--dangerously-skip-permissions"
+      ],
+      "skips_permissions": true
+    }
+  },
+  "expected_security_assertions": {
+    "web_rejects_premarked_id": "FAIL",
+    "different_id_vectors_sign_distinct_bytes": "FAIL",
+    "node_refuses_checkbox_only_output": "FAIL"
+  },
+  "existing_regressions": {
+    "node_launch_options": "6 passed",
+    "signature_binding": "1 passed",
+    "malformed_or_unreadable_policy": "1 passed"
+  }
+}
