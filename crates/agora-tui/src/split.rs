@@ -297,6 +297,19 @@ fn tree(v: &View<'_>, t: Text<'_>) -> Vec<Row> {
     rows
 }
 
+/// The colour names the web window gives agents, in its order (`apps/web/src/net/view.ts`, `ACCENT_NAMES`).
+const ACCENT_NAMES: [&str; 7] = ["amber", "teal", "violet", "rose", "slate", "sky", "mint"];
+
+/// An agent's name as the web window shows it, "kind · colour", the colour picked from its hub-wide id with the web's hash (31 times the
+/// previous value plus each UTF-16 unit, modulo 2^32), so both clients call the same agent the same thing.
+pub fn agent_name(agent_id: &str, kind: &str) -> String {
+    let h = agent_id
+        .encode_utf16()
+        .fold(0u32, |h, u| h.wrapping_mul(31).wrapping_add(u32::from(u)));
+    let accent = ACCENT_NAMES[usize::try_from(h).unwrap_or(0) % ACCENT_NAMES.len()];
+    format!("{kind} · {accent}")
+}
+
 /// ADR-0063: the tree as the app shell's rows: a heading per machine (online first, then by name), then its agents, helpers indented
 /// under the agent that started them (ADR-0057). Agents of a machine the hub does not list come last.
 pub fn app_rows(s: &Snapshot, t: Text<'_>) -> Vec<crate::app::Row> {
@@ -323,7 +336,7 @@ pub fn app_rows(s: &Snapshot, t: Text<'_>) -> Vec<crate::app::Row> {
         let asks = s.approvals.iter().any(|x| x.agent_id == a.agent_id);
         crate::app::Row {
             id: a.agent_id.clone(),
-            label: format!(" {lead}{}  {}{no_ask}", local(&a.agent_id), a.kind),
+            label: format!(" {lead}{}{no_ask}", agent_name(&a.agent_id, &a.kind)),
             state,
             needs_you: asks || (a.running && st == AgentState::Blocked),
             terminal: s.terminals.iter().any(|x| x.agent_id == a.agent_id),
@@ -401,8 +414,8 @@ pub fn app_details(s: &Snapshot, selected: &str, width: u16, height: u16, t: Tex
     match s.agents.iter().find(|a| a.agent_id == selected) {
         None => lines.push(t(key!("tui-split-pick"), &[])),
         Some(a) => {
-            lines.push(format!("{}  {}", local(&a.agent_id), a.kind));
-            lines.push(a.node_id.clone());
+            lines.push(agent_name(&a.agent_id, &a.kind));
+            lines.push(a.agent_id.clone());
             lines.push(if a.running {
                 state_word(state_of(a), t)
             } else {
@@ -992,7 +1005,10 @@ mod tests {
         assert!(rows[1].needs_you && !rows[1].terminal);
         assert!(!rows[2].needs_you && rows[2].terminal);
         assert_eq!(rows[2].state, "tui-state-working");
-        assert_eq!(rows[1].label, " agent-1  claude-code");
+        assert_eq!(
+            rows[1].label,
+            format!(" {}", agent_name("mac2/agent-1", "claude-code"))
+        );
     }
 
     #[test]
@@ -1003,8 +1019,8 @@ mod tests {
         assert_eq!(
             &d.lines[..3],
             &[
-                "agent-1  claude-code".to_string(),
-                "mac2".into(),
+                agent_name("mac2/agent-1", "claude-code"),
+                "mac2/agent-1".into(),
                 "tui-state-needs-you".into()
             ]
         );
@@ -1053,5 +1069,13 @@ mod tests {
             app_details(&s, "mac2/agent-2", 0, 0, &text).start,
             Some(("mac2/a9".into(), false))
         );
+    }
+
+    #[test]
+    fn agents_are_named_as_the_web_window_names_them() {
+        // Names seen in the web window for these ids.
+        assert_eq!(agent_name("mac/agent-1", "shell"), "shell · amber");
+        assert_eq!(agent_name("laptop/agent-1", "shell"), "shell · mint");
+        assert_eq!(agent_name("mac.lan/agent-1", "shell"), "shell · violet");
     }
 }
