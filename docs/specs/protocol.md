@@ -562,7 +562,12 @@ or when a device it already trusts signs an **endorsement** of it. The hub only 
   and the node's clock (a revocation signed now always wins over an endorsement dated ahead). A device the node's policy limits to
   some projects (ADR-0049) endorses only within them: the new device is limited to the same projects (written as `projects=` on its
   line, so it survives restarts), and a limited device revokes only itself or devices whose limits are within its own
-  (`auth.forbidden` otherwise). A revocation dated more than 5 minutes ahead of the node's or the hub's clock is refused. It then
+  (`auth.forbidden` otherwise). A device's limit is the policy's line for it and what it inherited, both at once: the policy narrows,
+  never widens, an inherited limit. An endorsement of a device the node already trusts through an endorsement only renews it: it must
+  come from the same endorser, whose limits still cover the device's (`auth.forbidden` otherwise), and the device keeps its endorser
+  and limits. A limit naming a project the file cannot hold (empty, or with a comma or a space) refuses the endorsement
+  (`node.policy_denied`, rule `device.projects`). A revocation dated more than 5 minutes ahead of the node's or the hub's clock is
+  refused. The hub carries an endorsement only to machines the device's person may act on, a revocation to every machine. It then
   trusts the device until `expires_at_ms` (never
   longer than its endorser's own trust there), and each use of the device on that node renews it to 90 days from the use.
 - **Revocation.** `DeviceRevoke { revocation }` (request field 91): both devices must be the caller's; the hub keeps it and sends it to

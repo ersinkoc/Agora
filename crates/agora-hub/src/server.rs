@@ -1362,8 +1362,19 @@ fn device_command(
 /// only those). A node that is not connected gets it when it connects ([`give_device_changes`]). The answers are not waited for: what
 /// a node did shows in its next `NodeTrustedDevices`, and the node keeps its own record of every one it refused.
 fn carry_device_change(hub: &Hub, command: command_request::Command, nodes: &[String]) {
+    let devices = crate::devices::Devices::new(hub.store());
     for node in hub.router().nodes_with("device.trust") {
-        if nodes.is_empty() || nodes.contains(&node) {
+        // An endorsement goes only to machines its device's person may act on (as the device list does); a revocation, which can
+        // only narrow, goes everywhere.
+        let relevant = match &command {
+            command_request::Command::DeviceEndorse(d) => d.endorsement.as_ref().is_some_and(|e| {
+                devices
+                    .list_for_node(&node)
+                    .is_ok_and(|l| l.iter().any(|x| x.device_id == e.device_id))
+            }),
+            _ => true,
+        };
+        if relevant && (nodes.is_empty() || nodes.contains(&node)) {
             let req = v1::CommandRequest {
                 request_id: String::new(),
                 idempotency_key: String::new(),
@@ -1383,9 +1394,14 @@ fn give_device_changes(hub: &Hub, node_id: &str) {
     else {
         return;
     };
+    let relevant: Vec<String> = crate::devices::Devices::new(hub.store())
+        .list_for_node(node_id)
+        .map(|l| l.into_iter().map(|d| d.device_id).collect())
+        .unwrap_or_default();
     let commands = endorsements
         .into_iter()
         .filter(|e| e.nodes.is_empty() || e.nodes.iter().any(|n| n == node_id))
+        .filter(|e| relevant.contains(&e.device_id))
         .map(|e| {
             command_request::Command::DeviceEndorse(v1::DeviceEndorse {
                 endorsement: Some(e),

@@ -547,3 +547,40 @@ async fn enrollment_offers_the_registered_devices_and_a_node_asks_for_them_with_
         "a question is not a node coming online"
     );
 }
+
+#[tokio::test]
+async fn an_endorsement_reaches_only_machines_its_person_works_on() {
+    use agora_hub::users::{Role, Users};
+    let st = state(None);
+    let users = Users::new(st.hub.store());
+    let eda = users.add("Eda", Role::Member, 1).unwrap();
+    users.grant(&eda.id, "vps", "web").unwrap();
+    let devices = agora_hub::devices::Devices::new(st.hub.store());
+    devices
+        .register(&eda.id, &registration("eda-old", 3), server::now_ms())
+        .unwrap();
+    devices
+        .register(&eda.id, &registration("eda-new", 4), server::now_ms())
+        .unwrap();
+    let now = server::now_ms();
+    let mut e = v1::DeviceEndorsement {
+        device_id: "eda-new".into(),
+        public_key: key(4),
+        name: "New".into(),
+        nodes: vec![],
+        issued_at_ms: now,
+        expires_at_ms: now + 86_400_000,
+        endorser_device_id: "eda-old".into(),
+        signature: Vec::new(),
+    };
+    e.signature = sign(3, &agora_hub::devices::endorse_message(&e));
+    devices.record_endorsement(&eda.id, &e, now).unwrap();
+    // A machine she has no project on is not given it; one she works on is.
+    let mut laptop = node(&st, "laptop", &["device.trust"]).await;
+    assert!(nothing_routed(&mut laptop).await);
+    let mut vps = node(&st, "vps", &["device.trust"]).await;
+    assert!(matches!(
+        routed(&mut vps).await.command,
+        Some(cr::Command::DeviceEndorse(_))
+    ));
+}

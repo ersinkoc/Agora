@@ -31,7 +31,8 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 - A device limited to some projects on a machine (`device.<id>.projects`) can approve only a device limited to the same projects,
   and can remove only itself or such devices. A removal signed right after an approval always wins, even if the approval was dated
   a few minutes ahead, and approvals or removals dated in the future are refused. A machine is offered only the devices of the
-  people who may work on it.
+  people who may work on it. A machine's policy can narrow such a device's limit but never widen it, only the device that
+  approved a device can renew that approval (keeping its limits), and approvals reach only the machines their person works on.
 - The window registers this browser with the hub when it connects. "This device" shows its fingerprint, which machines trust it,
   "Ask another device to approve" for the ones that do not (the command to run on the machine stays as the fallback), and your
   other devices with their fingerprints, where they are trusted, and Remove. On a device the machines already trust, a card shows

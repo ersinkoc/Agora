@@ -39,23 +39,29 @@ impl DeviceLimits {
             Some((path.to_path_buf(), None, BTreeMap::new()));
     }
 
-    /// What `device` may act in: the policy's line, else what it inherited; `None`: not limited.
+    /// What `device` may act in: what the policy's line and what it inherited through an endorsement both allow (the policy can
+    /// narrow an inherited limit, never widen it: a limited device may endorse a key under an id the policy names more widely);
+    /// `None`: not limited.
     fn limit(&self, device: &str) -> Option<BTreeSet<String>> {
-        if let Some(p) = self.map.get(device) {
-            return Some(p.clone());
-        }
-        let mut guard = self.inherited.lock().unwrap_or_else(|e| e.into_inner());
-        let (path, seen, map) = guard.as_mut()?;
-        let now = std::fs::read(&*path).ok();
-        if now != *seen {
-            *map = crate::device_trust::read_entries(path)
-                .0
-                .into_iter()
-                .filter_map(|e| e.projects.map(|p| (e.id, p)))
-                .collect();
-            *seen = now;
-        }
-        map.get(device).cloned()
+        let inherited = {
+            let mut guard = self.inherited.lock().unwrap_or_else(|e| e.into_inner());
+            match guard.as_mut() {
+                None => None,
+                Some((path, seen, map)) => {
+                    let now = std::fs::read(&*path).ok();
+                    if now != *seen {
+                        *map = crate::device_trust::read_entries(path)
+                            .0
+                            .into_iter()
+                            .filter_map(|e| e.projects.map(|p| (e.id, p)))
+                            .collect();
+                        *seen = now;
+                    }
+                    map.get(device).cloned()
+                }
+            }
+        };
+        combine(self.map.get(device).cloned(), inherited)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -94,6 +100,17 @@ impl DeviceLimits {
             Some(("agent", id)) => self.allows_agent(device, id),
             _ => false,
         }
+    }
+}
+
+/// A device's limit from the policy file and the one it inherited: both apply (their intersection); either alone applies as is.
+pub fn combine(
+    policy: Option<BTreeSet<String>>,
+    inherited: Option<BTreeSet<String>>,
+) -> Option<BTreeSet<String>> {
+    match (policy, inherited) {
+        (Some(p), Some(i)) => Some(p.intersection(&i).cloned().collect()),
+        (p, i) => p.or(i),
     }
 }
 

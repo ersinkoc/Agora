@@ -591,18 +591,17 @@ impl DeviceTrust {
 
     /// What `id` may act in here: the policy file's line for it, else what it inherited from a limited endorser; `None`: anything.
     fn limits_of(&self, entries: &[Entry], id: &str) -> Option<std::collections::BTreeSet<String>> {
-        if let Some(p) = self
+        let policy = self
             .policy
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .get(id)
-        {
-            return Some(p.clone());
-        }
-        entries
+            .cloned();
+        let inherited = entries
             .iter()
             .find(|e| e.id == id)
-            .and_then(|e| e.projects.clone())
+            .and_then(|e| e.projects.clone());
+        crate::limits::combine(policy, inherited)
     }
 
     pub fn file(&self) -> &Path {
@@ -748,14 +747,44 @@ impl DeviceTrust {
                 Ok(Endorsed::Already(x.expires_ms))
             }
             existing => {
-                let entry = Entry {
-                    id: e.device_id.clone(),
-                    key: e.public_key.clone(),
-                    expires_ms: Some(expires),
-                    via: Some(e.endorser_device_id.clone()),
-                    since: Some(began),
-                    // ADR-0049: a limited endorser vouches only within its own projects; the device it endorses carries them.
-                    projects: self.limits_of(&entries, &e.endorser_device_id),
+                let endorser_limits = self.limits_of(&entries, &e.endorser_device_id);
+                // A project name the trusted-devices file cannot hold (`projects=a,b`): refused, never silently dropped.
+                if endorser_limits.as_ref().is_some_and(|p| {
+                    p.iter().any(|n| {
+                        n.is_empty() || n.contains(',') || n.chars().any(char::is_whitespace)
+                    })
+                }) {
+                    return Err(Error::new(ErrorCode::NodePolicyDenied)
+                        .with("node_id", self.node_id.as_str())
+                        .with("rule", "device.projects"));
+                }
+                let entry = match existing {
+                    // A renewal keeps who endorsed it and what it may do: only its own endorser may renew it, and only while that
+                    // endorser's limits still cover the device's (a limited device cannot re-parent a wider one to itself).
+                    Some(x) => {
+                        let covered = match (&endorser_limits, &x.projects) {
+                            (None, _) => true,
+                            (Some(_), None) => false,
+                            (Some(mine), Some(theirs)) => theirs.is_subset(mine),
+                        };
+                        if x.via.as_deref() != Some(e.endorser_device_id.as_str()) || !covered {
+                            return Err(Error::new(ErrorCode::AuthForbidden)
+                                .with("action", "device.endorse"));
+                        }
+                        Entry {
+                            expires_ms: Some(expires),
+                            ..x.clone()
+                        }
+                    }
+                    None => Entry {
+                        id: e.device_id.clone(),
+                        key: e.public_key.clone(),
+                        expires_ms: Some(expires),
+                        via: Some(e.endorser_device_id.clone()),
+                        since: Some(began),
+                        // ADR-0049: a limited endorser vouches only within its own projects; the device it endorses carries them.
+                        projects: endorser_limits,
+                    },
                 };
                 let mut all: Vec<Entry> = entries
                     .iter()
