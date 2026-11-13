@@ -227,7 +227,7 @@ mod tests {
         assert_eq!(find(&checks, "manifests")[0].status, Status::Ok);
         assert_eq!(
             find(&checks, "manifests")[0].detail,
-            crate::manifests::BUILT_IN.len().to_string()
+            (crate::manifests::BUILT_IN.len() + 1).to_string()
         );
         // Where terminals are unsupported (Windows for now) that is a reported problem, not a healthy machine.
         let git_ok = find(&checks, "git")[0].status == Status::Ok;
@@ -307,7 +307,7 @@ mod tests {
         assert_eq!(checks[0].id, "manifests");
         assert_eq!(
             checks[0].detail,
-            (crate::manifests::BUILT_IN.len() + 2).to_string()
+            (crate::manifests::BUILT_IN.len() + 3).to_string()
         );
         let of = |kind: &str| checks.iter().find(|c| c.detail == kind).unwrap();
         assert_eq!(of("demo").id, "agent-installed");

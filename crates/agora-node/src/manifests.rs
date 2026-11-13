@@ -39,6 +39,21 @@ pub const BUILT_IN: &[(&str, &str)] = &[
     ),
 ];
 
+/// The built-in terminal kind: the user's own shell (`agora_platform::default_shell`), so a fresh node can always start something.
+/// It is made at load time, not from a file, because the shell differs per machine; a folder file of this kind replaces it.
+pub const SHELL_KIND: &str = "shell";
+
+/// The built-in `shell` manifest for this machine.
+pub fn shell_manifest() -> Result<Manifest, String> {
+    let program = agora_platform::default_shell()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    let text = format!(
+        "kind = \"{SHELL_KIND}\"\ndisplay_name = \"Shell\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"{program}\"]\n"
+    );
+    Manifest::parse(&text).map_err(|e| e.to_string())
+}
+
 /// Where a loaded kind came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Source {
@@ -65,7 +80,7 @@ pub struct Loaded {
     pub source: Source,
 }
 
-/// The built-in kinds, then the folder's: one entry per kind, sorted by kind. The second value lists each folder file (or, never in
+/// The built-in kinds (the shipped files and `shell`), then the folder's: one entry per kind, sorted by kind. The second value lists each folder file (or, never in
 /// a tested build, a built-in one) that could not be read or parsed, with the reason.
 pub fn load(dir: &Path) -> (Vec<Loaded>, Vec<(PathBuf, String)>) {
     let mut by_kind: BTreeMap<String, Loaded> = BTreeMap::new();
@@ -83,6 +98,18 @@ pub fn load(dir: &Path) -> (Vec<Loaded>, Vec<(PathBuf, String)>) {
             }
             Err(e) => problems.push((PathBuf::from(name), e.to_string())),
         }
+    }
+    match shell_manifest() {
+        Ok(m) => {
+            by_kind.insert(
+                m.kind.clone(),
+                Loaded {
+                    manifest: m,
+                    source: Source::BuiltIn,
+                },
+            );
+        }
+        Err(e) => problems.push((PathBuf::from("shell"), e)),
     }
     if let Ok(rd) = std::fs::read_dir(dir) {
         let mut paths: Vec<PathBuf> = rd
@@ -171,11 +198,15 @@ mod tests {
         for dir in [d.clone(), d.join("not-there")] {
             let (loaded, problems) = load(&dir);
             assert!(problems.is_empty());
-            assert_eq!(loaded.len(), BUILT_IN.len());
+            assert_eq!(
+                loaded.len(),
+                BUILT_IN.len() + 1,
+                "the shipped files and shell"
+            );
             assert!(loaded.iter().all(|l| l.source == Source::BuiltIn));
         }
         let kinds: Vec<_> = load(&d).0.into_iter().map(|l| l.manifest.kind).collect();
-        for k in ["claude-code", "codex", "wrongstack"] {
+        for k in ["claude-code", "codex", "wrongstack", SHELL_KIND] {
             assert!(kinds.contains(&k.to_string()), "{k}");
         }
         let _ = std::fs::remove_dir_all(&d);
@@ -207,9 +238,39 @@ mod tests {
         assert_eq!(by["extra"].source.name(), "folder");
         assert_eq!(by["claude-code"].source, Source::BuiltIn);
         assert_eq!(program(&by["claude-code"].manifest), Some("claude"));
-        assert_eq!(loaded.len(), BUILT_IN.len() + 1);
+        assert_eq!(loaded.len(), BUILT_IN.len() + 2);
         assert_eq!(problems.len(), 1);
         assert_eq!(problems[0].0, d.join("claude-code.toml"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn shell_is_built_in_and_a_folder_file_replaces_it() {
+        assert!(
+            BUILT_IN
+                .iter()
+                .all(|(n, _)| *n != format!("{SHELL_KIND}.toml")),
+            "shell is made per machine, not shipped as a file"
+        );
+        let m = shell_manifest().unwrap();
+        assert_eq!(m.display_name, "Shell");
+        assert!(
+            crate::doctor::on_path(program(&m).unwrap()),
+            "the user's shell exists"
+        );
+        let d = tmp("shell");
+        std::fs::write(
+            d.join("my-shell.toml"),
+            "kind = \"shell\"\ndisplay_name = \"My shell\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"sh\", \"-i\"]\n",
+        )
+        .unwrap();
+        let (loaded, _) = load(&d);
+        let shell = loaded
+            .iter()
+            .find(|l| l.manifest.kind == SHELL_KIND)
+            .unwrap();
+        assert_eq!(shell.manifest.display_name, "My shell");
+        assert_eq!(shell.source.name(), "folder");
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -223,6 +284,8 @@ mod tests {
         assert_eq!(by["wrongstack"], Some("wstack"));
         assert_eq!(by["wrongstack-acp"], Some("wstack"));
         assert_eq!(by["antigravity-acp"], Some("agy"));
+        let shell = agora_platform::default_shell();
+        assert_eq!(by[SHELL_KIND], Some(shell.as_str()));
         // The embedded text is the whole file: ADR-0059 launch options come along.
         for l in &loaded {
             let file =

@@ -36,6 +36,25 @@ pub const LOCAL_SOCKETS_SUPPORTED: bool = cfg!(any(unix, windows));
 /// True where [`spawn`] can start a PTY.
 pub const PTY_SUPPORTED: bool = cfg!(any(unix, windows));
 
+/// The user's shell, for the node's built-in `shell` kind: on Unix `$SHELL` when it names an existing file, else `sh`; on Windows
+/// `%ComSpec%` when set, else `cmd.exe`.
+pub fn default_shell() -> String {
+    #[cfg(windows)]
+    {
+        std::env::var("ComSpec")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "cmd.exe".to_string())
+    }
+    #[cfg(not(windows))]
+    {
+        std::env::var("SHELL")
+            .ok()
+            .filter(|s| std::path::Path::new(s).is_file())
+            .unwrap_or_else(|| "sh".to_string())
+    }
+}
+
 /// A connected local (same-machine) stream, used for the node's control socket.
 pub struct LocalStream {
     #[cfg(unix)]

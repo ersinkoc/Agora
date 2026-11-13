@@ -1127,8 +1127,8 @@ fn agent_kinds_lists_what_this_node_can_start() {
 }
 
 #[test]
-fn a_node_with_an_empty_manifests_folder_offers_every_shipped_kind_and_a_folder_file_overrides_one()
-{
+fn a_node_with_an_empty_manifests_folder_offers_and_starts_every_built_in_kind_and_a_folder_file_overrides_one(
+) {
     if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
         return;
     }
@@ -1170,11 +1170,16 @@ fn a_node_with_an_empty_manifests_folder_offers_every_shipped_kind_and_a_folder_
         listed.keys().cloned().collect::<Vec<_>>(),
         {
             let mut s = shipped.clone();
+            s.push(agora_node::manifests::SHELL_KIND.to_string());
             s.sort();
             s
         },
-        "every shipped kind, nothing else"
+        "every shipped kind and the built-in shell, nothing else"
     );
+    assert_eq!(listed["shell"], "Shell");
+    // With no file at all, the user's shell starts.
+    let started = c.call(start_cmd("shell"));
+    assert!(started.is_ok(), "{started:?}");
     // What the node looks for is the program's name, for the "not installed" line.
     let programs: std::collections::BTreeMap<_, _> = n
         .supervisor

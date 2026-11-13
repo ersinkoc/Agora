@@ -9,7 +9,9 @@ Keep the raw captured bytes and use the original terminal size so wrapping and c
 
 **Where agent kinds come from.** The `agora` binary carries every `manifests/agents/*.toml` of the repository it was built from
 as built-in defaults (`agora-node::manifests::BUILT_IN`, compiled in with `include_str!`; fixtures are not), so a fresh install
-offers every shipped agent with nothing copied. The node then reads its manifests folder (`<AGORA_HOME>/manifests`, or
+offers every shipped agent with nothing copied. It also has a built-in `shell` kind made on the machine itself, not from a
+file: the user's shell (`$SHELL` when it names a file, else `sh`; on Windows `%ComSpec%`, else `cmd.exe`), so a fresh node can
+always open a terminal. The node then reads its manifests folder (`<AGORA_HOME>/manifests`, or
 `agora node run --manifests DIR`; `agora adapter install` writes there too): a file whose `kind` matches a built-in one replaces
 it, a file with a new `kind` adds one. A built-in kind cannot be removed, only replaced. A file that does not parse is skipped
 and named by `agora doctor`, and the built-in kind it meant to replace stays. The folder is read again before agents are listed
