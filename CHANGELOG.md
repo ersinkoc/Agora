@@ -4,6 +4,8 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+## 0.3.8
+
 ### Getting started
 - Type `agora` and it works (ADR-0062, first rung). The first time it asks one question (start Agora here, just this machine, or join; joining from here comes later) and keeps the answer in `~/.agora/machine.toml`. Then it starts this machine's hub and node in the background when they are not running, connects the node to the hub by itself (no code to copy), and opens the terminal client signed in. `agora web` opens the browser signed in; `agora --ui web|tui|none` opens that for one run, and with `--save` makes it what plain `agora` opens. Closing or killing the window leaves the hub, the node and the agents running. `agora status` shows what runs and where its logs are (`~/.agora/logs`), `agora down` stops it. `agora --help` prints the usage. See `docs/getting-started.md`.
 
