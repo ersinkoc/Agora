@@ -1,8 +1,6 @@
 //! Draws a sample agent screen through the terminal pane on the real terminal, for the captures of ADR-0063 stage 1:
 //! `cargo run -p agora-tui --example pane_demo` (`NO_COLOR=1` for the monochrome palette). Any key, or 10 s, ends it.
 
-#![allow(clippy::unwrap_used)]
-
 use std::io::Read;
 use std::time::Duration;
 
@@ -20,7 +18,7 @@ const SAMPLE: &str = concat!(
     "$ ",
 );
 
-fn main() {
+fn main() -> std::io::Result<()> {
     let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
     let mut vt = AlacrittyTerminal::new(Size { cols, rows });
     vt.feed(SAMPLE.as_bytes());
@@ -29,26 +27,29 @@ fn main() {
         std::env::var("COLORTERM").ok().as_deref(),
     );
     let raw = crossterm::terminal::enable_raw_mode();
-    {
-        let mut screen = Screen::enter().unwrap();
-        screen
-            .draw(|f| {
-                let area = f.area();
-                f.render_widget(TerminalPane::new(&vt).colors(colors), area);
-                if let Some(p) = TerminalPane::cursor_position(&vt, area) {
-                    f.set_cursor_position(p);
-                }
-            })
-            .unwrap();
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let mut b = [0u8; 1];
-            let _ = std::io::stdin().read(&mut b);
-            let _ = tx.send(());
-        });
-        let _ = rx.recv_timeout(Duration::from_secs(10));
-    }
+    // Whatever `show` returns, raw mode is switched off again before the error (if any) is reported.
+    let shown = show(&vt, colors);
     if raw.is_ok() {
         let _ = crossterm::terminal::disable_raw_mode();
     }
+    shown
+}
+
+fn show(vt: &AlacrittyTerminal, colors: ColorMode) -> std::io::Result<()> {
+    let mut screen = Screen::enter()?;
+    screen.draw(|f| {
+        let area = f.area();
+        f.render_widget(TerminalPane::new(vt).colors(colors), area);
+        if let Some(p) = TerminalPane::cursor_position(vt, area) {
+            f.set_cursor_position(p);
+        }
+    })?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut b = [0u8; 1];
+        let _ = std::io::stdin().read(&mut b);
+        let _ = tx.send(());
+    });
+    let _ = rx.recv_timeout(Duration::from_secs(10));
+    Ok(())
 }

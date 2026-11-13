@@ -123,8 +123,14 @@ impl Widget for TerminalPane<'_> {
                     continue;
                 };
                 let mut style = to_style(cell.style, self.colors);
+                // A selection inverts what is there: inside text the agent already shows inverse (SGR 7), it turns inversion off,
+                // so the selection's edges stay visible.
                 if self.selection.is_some_and(|s| s.contains(row, x)) {
-                    style = style.add_modifier(Modifier::REVERSED);
+                    style = if style.add_modifier.contains(Modifier::REVERSED) {
+                        style.remove_modifier(Modifier::REVERSED)
+                    } else {
+                        style.add_modifier(Modifier::REVERSED)
+                    };
                 }
                 out.set_style(style);
                 if cell.spacer {
@@ -393,6 +399,25 @@ mod tests {
         assert!(!inv(3, 0) && inv(4, 0) && inv(5, 0));
         assert!((0..6).all(|x| inv(x, 1)), "the whole line between");
         assert!(inv(0, 2) && inv(1, 2) && !inv(2, 2));
+    }
+
+    #[test]
+    fn a_selection_inside_inverse_text_turns_inversion_off_so_its_edges_show() {
+        // "ab" plain, "cdef" inverse (SGR 7); the selection covers "bcd".
+        let t = term(6, 1, b"ab\x1b[7mcdef\x1b[0m");
+        let area = Rect::new(0, 0, 6, 1);
+        let mut buf = Buffer::empty(area);
+        TerminalPane::new(&t)
+            .selection(Some(Selection {
+                from: (0, 1),
+                to: (0, 3),
+            }))
+            .render(area, &mut buf);
+        let inv = |x: u16| buf[(x, 0)].modifier.contains(Modifier::REVERSED);
+        assert_eq!(
+            (0..6).map(inv).collect::<Vec<_>>(),
+            vec![false, true, false, false, true, true]
+        );
     }
 
     #[test]
