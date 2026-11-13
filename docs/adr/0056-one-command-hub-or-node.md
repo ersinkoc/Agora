@@ -1,8 +1,8 @@
 # 0056. One hub; every node machine also serves the hub's panel
-Status: Proposed
+Status: Accepted
 Date: 2026-11-13
+Accepted: 2026-11-13 (maintainer's explicit approval in chat: "0056'yı onaylıyorum"). The maintainer did not answer the open questions; the proposed answers below stand.
 
-Not accepted. Nothing here may be built until the maintainer accepts it in a message of their own.
 The maintainer's latest direction in chat: the hub stays single, and every machine that runs a node can open the hub's panel,
 even when the hub is on another machine. This replaces the two earlier drafts of this ADR (hub and node on every machine, a node in
 several hubs; and full peer-to-peer), which are not pursued.
@@ -25,7 +25,7 @@ a signed-in device. A person sitting at a node machine has a node but no panel t
 5. **Without a hub connection the panel cannot work.** The node keeps agents running (autonomy), and `agora agent list` keeps
    showing local agents through the node socket.
 
-## Open questions for the maintainer
+## Open questions (proposed answers stand)
 - Browser pointed straight at the hub (simple, needs the hub reachable and its CA trusted on this machine), or a loopback
   forwarder in the node (works through the node's existing link, one more component to secure)? Proposed: pointing straight at
   the hub, with `agora panel` installing the trust once.
