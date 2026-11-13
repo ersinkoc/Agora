@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { agora } from '../gen/agora.js';
-import { encodeFrame, EVENT_KIND, STREAM_EVENTS } from './frame';
-import { connectLive, defaultBackoff, OPEN_WITHIN_MS, RETRY_CAP_MS, type LinkState, type Socket } from './live';
+import { CONTROL_KIND, decodeFrame, encodeFrame, EVENT_KIND, STREAM_CONTROL, STREAM_EVENTS } from './frame';
+import { connectLive, defaultBackoff, OPEN_WITHIN_MS, PING_EVERY_MS, PONG_WITHIN_MS, RETRY_CAP_MS, type LinkState, type Socket } from './live';
 
 class FakeSocket implements Socket {
   binaryType = '';
@@ -16,6 +16,7 @@ class FakeSocket implements Socket {
     const b = encodeFrame({ streamId, kind, payload });
     this.onmessage?.({ data: b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength) });
   }
+  pings() { return this.sent.map((b) => decodeFrame(b)).filter((f) => f?.streamId === STREAM_CONTROL && f.kind === CONTROL_KIND.PING).length; }
 }
 
 function setup(opts: { backoffMs?: (n: number) => number } = {}) {
@@ -38,8 +39,59 @@ function setup(opts: { backoffMs?: (n: number) => number } = {}) {
   return { live, sockets, states, last, goLive, poke: () => poke?.() };
 }
 
-// The window's own ping deadline (F1) was taken out of 0.3.8 with the node and hub silence deadlines: see
-// docs/backlog/lan-test-findings.md R1. Its tests return with that design.
+describe('window to hub liveness', () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  it('a hub that goes silent on an open connection is noticed: Hub unreachable, then a new connection', () => {
+    const t = setup();
+    t.goLive();
+    expect(t.states.at(-1)).toBe('live');
+    vi.advanceTimersByTime(PING_EVERY_MS);
+    expect(t.last().pings()).toBe(1);
+    // Nothing comes back, but the browser never reports the connection closed.
+    vi.advanceTimersByTime(PONG_WITHIN_MS);
+    expect(t.states.at(-1)).toBe('offline');
+    expect(t.sockets[0]?.closed).toBe(true);
+    expect(t.sockets).toHaveLength(1);
+    vi.advanceTimersByTime(1000);
+    expect(t.sockets).toHaveLength(2);
+    expect(t.states.at(-1)).toBe('connecting');
+    t.live.close();
+  });
+
+  it('a silent connection that is given up never counts as a refused session', () => {
+    const t = setup();
+    for (let i = 0; i < 3; i++) {
+      t.last().onopen?.(); // opens, then nothing at all
+      vi.advanceTimersByTime(PING_EVERY_MS + PONG_WITHIN_MS + 1000);
+    }
+    expect(t.sockets.length).toBeGreaterThanOrEqual(4);
+    t.live.close();
+  });
+
+  it('an idle hub that answers every ping is never dropped', () => {
+    const t = setup();
+    t.goLive();
+    for (let i = 0; i < 40; i++) {
+      vi.advanceTimersByTime(PING_EVERY_MS);
+      t.last().frame(STREAM_CONTROL, CONTROL_KIND.PONG, new Uint8Array());
+    }
+    expect(t.sockets).toHaveLength(1);
+    expect(t.states.at(-1)).toBe('live');
+    expect(t.last().pings()).toBe(40);
+    t.live.close();
+  });
+
+  it('a dial that never opens is given up and tried again', () => {
+    const t = setup();
+    vi.advanceTimersByTime(OPEN_WITHIN_MS);
+    expect(t.states.at(-1)).toBe('offline');
+    vi.advanceTimersByTime(1000);
+    expect(t.sockets).toHaveLength(2);
+    t.live.close();
+  });
+});
 
 describe('a connect attempt that never opens', () => {
   beforeEach(() => { vi.useFakeTimers(); });
@@ -64,8 +116,12 @@ describe('a connect attempt that never opens', () => {
     expect(t.sockets).toHaveLength(3);
     t.goLive();
     expect(t.states.at(-1)).toBe('live');
-    // An open connection has no deadline: hours of quiet do not drop it.
-    vi.advanceTimersByTime(3_600_000);
+    // An open connection has no open deadline; its liveness is the ping's (ADR-0070): an hour of a hub that only answers pings
+    // does not drop it.
+    for (let i = 0; i < 240; i++) {
+      vi.advanceTimersByTime(PING_EVERY_MS);
+      t.last().frame(STREAM_CONTROL, CONTROL_KIND.PONG, new Uint8Array());
+    }
     expect(t.sockets).toHaveLength(3);
     expect(t.states.at(-1)).toBe('live');
     t.live.close();
@@ -115,12 +171,13 @@ describe('coming back quickly', () => {
     t.live.close();
   });
 
-  it('on a live link, waking up does nothing', () => {
+  it('on a live link, waking up checks it with a ping and notices a silent one at once', () => {
     const t = setup();
     t.goLive();
-    t.poke();
-    expect(t.sockets).toHaveLength(1);
-    expect(t.states.at(-1)).toBe('live');
+    t.poke(); // the laptop woke up and the window became visible
+    expect(t.last().pings()).toBe(1);
+    vi.advanceTimersByTime(PONG_WITHIN_MS);
+    expect(t.states.at(-1)).toBe('offline');
     t.live.close();
   });
 

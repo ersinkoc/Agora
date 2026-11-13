@@ -111,6 +111,11 @@ impl Registration {
         self.release()
     }
 
+    /// The node this registration is for.
+    pub fn node(&self) -> &str {
+        &self.node
+    }
+
     fn release(&self) -> bool {
         let ours = {
             let mut g = self.router.nodes.lock().unwrap_or_else(|e| e.into_inner());

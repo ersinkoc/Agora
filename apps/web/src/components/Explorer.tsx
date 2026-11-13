@@ -91,13 +91,16 @@ export function Explorer({ fleet, machines, open, current, projects, project, on
         const stopped = interrupted.get(machine) ?? [];
         const closed = folded.has(machine);
         const name = m?.name ?? machine;
-        return <section key={machine} data-machine-id={machine} className="mb-0.5">
+        // ADR-0070: an offline machine says when it was last heard from, on the row and in its tooltip.
+        const seen = m && !m.online ? t('machine-last-seen', { when: ago(m.lastSeenMs, now) }) : undefined;
+        return <section key={machine} data-machine-id={machine} data-online={m?.online ? 'true' : 'false'} className="mb-0.5">
           <div className="group flex items-center">
-            <button type="button" className="ide-row flex-1 font-medium" aria-expanded={!closed} aria-label={t('ide-toggle-machine', { name })} onClick={() => fold(machine)}>
+            <button type="button" className="ide-row flex-1 font-medium" aria-expanded={!closed} aria-label={t('ide-toggle-machine', { name })} title={seen ? `${t('machine-offline')} · ${seen}` : undefined} onClick={() => fold(machine)}>
               <Icon name="chevron" className={`size-3.5 text-muted transition-transform duration-150 ${closed ? 'rtl:rotate-180' : 'rotate-90'}`} />
               <span aria-hidden className={`size-2 flex-none rounded-full ${m?.online ? 'bg-finished' : 'bg-unknown'}`} />
               <span className="sr-only">{t(m?.online ? 'machine-online' : 'machine-offline')}</span>
               <span className="min-w-0 flex-1 truncate">{name}{m && m.id !== m.name && <code className="ms-1.5 text-[11px] font-normal text-muted">{m.id}</code>}</span>
+              {seen && <span className="flex-none truncate text-[11px] font-normal text-muted" data-last-seen>{seen}</span>}
               {!!m?.memoryBytes && <span className="font-mono text-[11px] font-normal text-muted" title={t('ide-memory')}>{bytesLabel(m.memoryBytes)}</span>}
               <span className="text-[11px] font-normal text-muted">{count}</span>
             </button>

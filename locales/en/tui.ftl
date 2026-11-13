@@ -22,6 +22,12 @@ tui-blocked = { $agent } is waiting for you
 tui-machines = Machines
 tui-online = online
 tui-offline = offline
+tui-last-seen = last seen { $unit ->
+        [s] { $n } s
+        [min] { $n } min
+        [h] { $n } h
+       *[d] { $n } d
+    } ago
 tui-no-agents = No agents yet. Start one in the web app or with "agora agent start".
 tui-state-working = Working
 tui-state-needs-you = Needs you

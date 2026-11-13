@@ -112,6 +112,7 @@ machines-title = Makineleriniz
 machines-empty = Henüz bağlı makine yok.
 machine-online = Çevrimiçi
 machine-offline = Çevrimdışı
+machine-last-seen = son görülme: { $when }
 machine-agents =
     { $count ->
         [one] { $count } ajan çalışıyor
@@ -352,7 +353,7 @@ network-hub = Hub'ınız
 network-build = Bu makinede çalışan sürüm
 network-never = hiç
 network-heard = { $when } duyuldu
-network-last-seen = son duyulma: { $when }
+network-last-seen = son görülme: { $when }
 network-online =
     { $total ->
         [one] { $total } makineden { $online } tanesi çevrimiçi

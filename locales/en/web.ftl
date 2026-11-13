@@ -112,6 +112,7 @@ machines-title = Your machines
 machines-empty = No machines connected yet.
 machine-online = Online
 machine-offline = Offline
+machine-last-seen = last seen { $when }
 machine-agents =
     { $count ->
         [one] { $count } agent running
@@ -352,7 +353,7 @@ network-hub = Your hub
 network-build = Version running on this machine
 network-never = never
 network-heard = heard { $when }
-network-last-seen = last heard { $when }
+network-last-seen = last seen { $when }
 network-online =
     { $total ->
         [one] { $online } of { $total } machine online

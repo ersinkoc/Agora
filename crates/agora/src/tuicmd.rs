@@ -248,6 +248,7 @@ fn start_unread(
         color,
         cols,
         rows,
+        now_ms: now_ms(),
     };
     match start_card_fit(&view, text) {
         Some((a, false)) if !read_whole.contains(&a.approval_id) => Some(a.clone()),
@@ -1120,10 +1121,11 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                         color,
                         cols,
                         rows,
+                        now_ms: now_ms(),
                     };
                     let _ = out.write_all(frame(&view, &text).as_bytes());
                 } else {
-                    let lines = render(s, color, keys, selected, notice, cost, &text);
+                    let lines = render(s, color, keys, selected, notice, cost, now_ms(), &text);
                     let _ = write!(out, "\x1b[H\x1b[2J{}{eol}", lines.join(eol));
                 }
                 let _ = out.flush();
@@ -1499,6 +1501,7 @@ mod forget_tests {
             color: false,
             cols: 100,
             rows: 10,
+            now_ms: 0,
         };
         let frame = frame(&view, &text);
         assert!(
