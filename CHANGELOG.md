@@ -22,6 +22,9 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
   machine applies or refuses is written to `<data>/device-trust.log`. The trusted-devices file keeps its format (owner-only, one
   device per line; an approved device's line adds `expires=` and `via=`).
 
+### Starting agents
+- When a machine does not trust your browser yet, the start window now shows the exact command to run on that machine, with a Copy button, instead of pointing to another page. The same folder spelled several ways on Windows (`D:\x`, `D:/x`, `\\?\D:\x`) is listed once.
+
 ## 0.3.7
 
 ### Agents
@@ -89,6 +92,7 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 ### Closed agents
 - A closed agent is always shown as finished; before, one that ended while it was waiting kept a spinning orange mark and counted as waiting for you.
 - The ✕ on a closed agent in the list and **Clear closed** now remove it for everyone when the hub can (ADR-0053). If the hub refuses (a permission, or the agent is running again) the reason is shown and nothing is hidden; only a hub that does not know the command hides it in this browser. What you cleared stays hidden only while the agent is closed.
+
 ### Starting agents
 - The start window picks up a machine that comes online after it was opened, instead of leaving nothing selected and no folders to choose from.
 
@@ -105,6 +109,7 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 ## 0.3.3
 ### Machines
 - A machine that was cut off from the hub for a long time sends what it saved much faster when the link comes back.
+
 
 ### Starting agents
 - **Browse folders:** the start window can list a machine's folders (ADR-0053): click **Browse folders**, step into a folder or up one, see which are Git projects, and use the folder you are in. Only folder names are listed, protected folders never show, and each listing is signed by this device. A machine that has not been updated keeps the typed path.
@@ -156,6 +161,7 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 - Machines, This device and Audit share the window's title bar. Alt+1…9 picks a tab, Ctrl/⌘+B hides the agent list. A long "shared folder" label no longer pushes an agent's name out of the list.
 - The window is laid out like an editor: the agents as a tree on the left (machine, folder, agent), the terminals you watch as tabs in the middle (or side by side), details in tabs on the right, a status bar at the bottom. Search and commands are one click or Ctrl+K from the title bar.
 - Starting an agent is one window: pick the machine, then a known folder in one click (or type a path), then the agent; the resolved folder is shown before anything starts.
+
 ### Starting agents
 - A start that fails after creating a separate working copy cleans up that copy and its unchanged branch. Branches with new commits or another working copy stay available; starts in existing folders preserve those folders.
 

@@ -7,16 +7,27 @@ import { Icon } from './Icon';
 import { machineFor } from './startChoice';
 export interface KindChoice { kind: string; name: string; installed: boolean }
 
+// The command a machine's owner runs once so the machine trusts this device (ADR-0020), with a Copy button: no hunting for it on another page.
+function TrustCommand({ command }: { command: string }) {
+  const [copied, setCopied] = useState(false);
+  return <div className="flex items-start gap-2 rounded-xs border border-line bg-surface-0 px-3 py-2">
+    <code className="min-w-0 flex-1 break-all font-mono text-xs">{command}</code>
+    <button type="button" className="button px-2 py-1 text-xs" onClick={() => { void navigator.clipboard?.writeText(command).then(() => setCopied(true), () => undefined); }}>{copied ? t('trust-copied') : t('trust-copy')}</button>
+  </div>;
+}
+
 const chip = 'inline-flex items-center gap-2 rounded-xs border px-2.5 py-1.5 text-[13px] transition-colors duration-150 disabled:opacity-50';
 const chipOn = 'border-accent bg-surface-2 text-ink ring-1 ring-accent';
 const chipOff = 'border-line bg-surface-0 text-muted hover:bg-surface-2 hover:text-ink';
 
 // "Start an agent" in one window: the machine, the folder (a known one in a click, or any path), then the agent. Choosing the
 // folder shows the folder the node resolved before anything starts (ADR-0052); the rest is a click.
-export function StartAgent({ projects, machines, initialNode, loadKinds, inspect, list, onStart, onClose }: {
+export function StartAgent({ projects, machines, initialNode, trust, loadKinds, inspect, list, onStart, onClose }: {
   projects: readonly ProjectChoice[];
   machines: readonly MachineModel[];
   initialNode?: string;
+  // This device's id and public key: when a machine does not trust the device yet, the command that fixes it is shown right here.
+  trust?: { id: string; key: string };
   loadKinds: (node: string) => Promise<KindChoice[]>;
   inspect: (node: string, path: string, createIdentity: boolean) => Promise<DirectoryInfo>;
   // ADR-0053: the sub-folders of a folder on the machine (empty path: its home folder). Missing, or refused by an older machine: the path is typed.
@@ -87,7 +98,10 @@ export function StartAgent({ projects, machines, initialNode, loadKinds, inspect
     if (!info) return;
     setBusy(true); setError(await onStart(node, info, kind, separate, acceptIdentityChange)); setBusy(false);
   };
-  const known = projects.flatMap(p => (p.node === node && p.path ? [{ ...p, path: p.path }] : []));
+  // The same folder can be spelled several ways on Windows (`D:\x`, `D:/x`, `\\?\D:\x`): listed once.
+  const sameFolder = (path: string) => path.replace(/^\\\\\?\\/, '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+  const seen = new Set<string>();
+  const known = projects.flatMap(p => (p.node === node && p.path && !seen.has(sameFolder(p.path)) && seen.add(sameFolder(p.path)) ? [{ ...p, path: p.path }] : []));
   const machineName = (m: MachineModel) => (m.name === m.id ? m.name : t('machine-name-id', { name: m.name, id: m.id }));
 
   return <Dialog.Root open onOpenChange={open => { if (!open && !busy) onClose(); }}>
@@ -170,7 +184,8 @@ export function StartAgent({ projects, machines, initialNode, loadKinds, inspect
               {info.previousProjectId && <label className="flex items-center gap-2 text-[13px]"><input type="checkbox" checked={acceptIdentityChange} disabled={busy} onChange={e => setAcceptIdentityChange(e.target.checked)} />{t('start-identity-change')}</label>}
             </div>}
           </>}
-          {error && <p role="alert" className="m-0 text-needs-you">{t(error)}</p>}
+          {error && <p role="alert" className="m-0 text-needs-you">{error === 'approval-not-trusted' && trust ? t('trust-hint', { machine: online.find(m => m.id === node)?.name ?? node }) : t(error)}</p>}
+          {error === 'approval-not-trusted' && trust && <TrustCommand command={`agora node trust ${trust.id} ${trust.key}`} />}
         </div>}
         <div className="flex justify-end gap-2 border-t border-line px-4 py-3">
           <button type="button" className="button" disabled={busy} onClick={onClose}>{t('start-cancel')}</button>
