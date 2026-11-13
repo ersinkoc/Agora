@@ -246,17 +246,30 @@ fn turn_outcome(answer: &Value, said: bool) -> Option<(&'static str, Value)> {
 }
 
 /// ADR-0058: whether a mode's id or name says the agent acts without asking in it.
-fn skips_permissions(id: &str, name: &str) -> bool {
+fn skips_permissions(id: &str, name: &str, description: &str) -> bool {
     let squash = |s: &str| -> String {
         s.chars()
             .filter(char::is_ascii_alphanumeric)
             .map(|c| c.to_ascii_lowercase())
             .collect()
     };
-    let (id, name) = (squash(id), squash(name));
+    // `auto` only as a whole word (`auto`, `Auto mode`, `auto-edit`), so `autosave` or `automatic-plan` are not marked by it.
+    let has_word = |s: &str, w: &str| {
+        s.split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|part| part.eq_ignore_ascii_case(w))
+    };
+    let d = description.to_ascii_lowercase();
+    let approves_automatically = d
+        .find("approve")
+        .is_some_and(|at| d[at..].contains("automatically"));
+    let (sid, sname) = (squash(id), squash(name));
     SKIPS_PERMISSIONS
         .iter()
-        .any(|w| id.contains(w) || name.contains(w))
+        .any(|w| sid.contains(w) || sname.contains(w))
+        || has_word(id, "auto")
+        || has_word(name, "auto")
+        || d.contains("without asking")
+        || approves_automatically
 }
 
 /// ADR-0058: an ACP mode list (`availableModes` of `{id, name, description}`) or model list (`availableModels` of `{modelId, name,
@@ -275,7 +288,7 @@ fn acp_options(list: Option<&Value>, id_key: &str, mode: bool) -> Vec<Value> {
                     let name = text(o, "name", OPTION_NAME_MAX);
                     let mut v = json!({"id": id, "name": name,
                                        "description": text(o, "description", OPTION_DESCRIPTION_MAX)});
-                    if mode && skips_permissions(id, &name) {
+                    if mode && skips_permissions(id, &name, o.get("description").and_then(Value::as_str).unwrap_or("")) {
                         v["skipsPermissions"] = json!(true);
                     }
                     Some(v)
@@ -843,6 +856,32 @@ impl<W: Write> Bridge<W> {
         Ok(true)
     }
 
+    /// The agent answered its own `initialize` or `session/new` with an error. The node's request is answered with
+    /// `adapter.agent_refused`, and a notice says the same with the agent's error code and its message (scrubbed and cut like a
+    /// stderr tail), so a restart that fails this way is visible in the conversation: opencode 2.x, for one, answers `session/new` with
+    /// -32603 `ServiceUnavailableError` when its background service (`opencode service`) is not running.
+    fn refused(&mut self, node_id: &Value, stage: &str, answer: &Value) -> io::Result<()> {
+        let rpc_code = answer
+            .pointer("/error/code")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        let message = answer
+            .pointer("/error/message")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let detail = stderr_tail(message.as_bytes(), self.home.as_deref());
+        self.notice(
+            "adapter.agent_refused",
+            &json!({"stage": stage, "rpc_code": rpc_code.to_string(), "detail": detail}),
+        )?;
+        if node_id.is_null() {
+            return Ok(());
+        }
+        let data = json!({"code": "adapter.agent_refused", "params": {"stage": stage}});
+        self.send_node(&json!({"jsonrpc": "2.0", "id": node_id,
+            "error": {"code": -32000, "message": "the agent refused to start", "data": data}}))
+    }
+
     /// ADR-0058: the node's `session/set_option`. Only an id the agent offered is passed on; anything else is refused here.
     fn set_option(&mut self, id: Option<Value>, params: &Value) -> io::Result<()> {
         let node_id = id.unwrap_or(Value::Null);
@@ -1173,8 +1212,7 @@ impl<W: Write> Bridge<W> {
                 match self.waiting.remove(&n) {
                     Some(Waiting::Initialize { node_id }) => {
                         if msg.get("error").is_some() {
-                            let data = json!({"code": "adapter.agent_refused", "params": {"stage": "initialize"}});
-                            self.send_node(&json!({"jsonrpc": "2.0", "id": node_id, "error": {"code": -32000, "message": "the agent refused to initialize", "data": data}}))?;
+                            self.refused(&node_id, "initialize", msg)?;
                         } else {
                             self.can_load = msg
                                 .pointer("/result/agentCapabilities/loadSession")
@@ -1230,8 +1268,7 @@ impl<W: Write> Bridge<W> {
                                 self.state("IDLE")?;
                             }
                             _ => {
-                                let data = json!({"code": "adapter.agent_refused", "params": {"stage": "session"}});
-                                self.send_node(&json!({"jsonrpc": "2.0", "id": node_id, "error": {"code": -32000, "message": "the agent refused the session", "data": data}}))?;
+                                self.refused(&node_id, "session", msg)?;
                             }
                         }
                     }
@@ -1597,12 +1634,56 @@ mod tests {
 
     #[test]
     fn modes_that_act_without_asking_are_marked_and_others_are_not() {
-        assert!(skips_permissions("bypassPermissions", "Bypass Permissions"));
-        assert!(skips_permissions("full", "Full Access"));
-        assert!(skips_permissions("acceptEdits", ""));
-        assert!(!skips_permissions("build", "Build"));
-        assert!(!skips_permissions("plan", "Plan"));
-        assert!(!skips_permissions("default", "Always Ask"));
+        assert!(skips_permissions(
+            "bypassPermissions",
+            "Bypass Permissions",
+            ""
+        ));
+        assert!(skips_permissions("full", "Full Access", ""));
+        assert!(skips_permissions("acceptEdits", "", ""));
+        assert!(!skips_permissions("build", "Build", ""));
+        assert!(!skips_permissions("plan", "Plan", ""));
+        assert!(!skips_permissions("default", "Always Ask", ""));
+        // Codex's `auto`; `auto` only as a whole word.
+        assert!(skips_permissions("auto", "Auto", ""));
+        assert!(!skips_permissions("autosave", "Autosave", ""));
+        // What a description says.
+        assert!(skips_permissions("x", "X", "Runs tools without asking"));
+        assert!(skips_permissions(
+            "x",
+            "X",
+            "Approve every edit automatically"
+        ));
+        assert!(!skips_permissions("x", "X", "Ask before every edit"));
+    }
+
+    /// The mode list of Antigravity (`agy`) 1.5.6 as it offers it: `accept-edits` and `auto` act without asking first.
+    #[test]
+    fn antigravitys_modes_mark_accept_edits_and_auto_only() {
+        let list = json!([
+            {"id": "default", "name": "Default", "description": "Ask before edits and commands"},
+            {"id": "accept-edits", "name": "Accept edits", "description": "Approve file edits in the workspace without asking"},
+            {"id": "auto", "name": "Auto", "description": "Approve edits and safe commands; ask before irreversible actions"},
+            {"id": "plan", "name": "Plan", "description": "Read and plan only; no edits"},
+        ]);
+        let marked: Vec<(String, bool)> = acp_options(Some(&list), "id", true)
+            .iter()
+            .map(|o| {
+                (
+                    o["id"].as_str().unwrap_or("").to_string(),
+                    o.get("skipsPermissions").is_some(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            marked,
+            [
+                ("default".to_string(), false),
+                ("accept-edits".to_string(), true),
+                ("auto".to_string(), true),
+                ("plan".to_string(), false)
+            ]
+        );
     }
 
     #[test]

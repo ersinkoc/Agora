@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { t } from '../i18n';
 import type { SessionModel, SessionOptionModel } from '../model';
-import { choices, contextPercent, needsConfirm, ownCost, shortCount, type OptionKind } from './sessionChoice';
+import { choices, contextFill, contextLabel, contextPercent, needsConfirm, ownCost, shortCount, type OptionKind } from './sessionChoice';
 
 // ADR-0058: the mode and model a chat agent runs with, how full its context is, and what it says it cost. The pickers appear only
 // for what the agent reported; a mode in which the agent acts without asking is chosen only after the user confirms it.
@@ -10,6 +10,8 @@ export function SessionBar({ session, choose, disabled }: { session: SessionMode
   const [failed, setFailed] = useState(false);
   const [busy, setBusy] = useState(false);
   const pct = contextPercent(session);
+  const label = contextLabel(session);
+  const said = label ? t(label.key, { percent: label.percent }) : '';
   const cost = ownCost(session);
   const apply = async (kind: OptionKind, id: string) => {
     if (!choose) return;
@@ -43,8 +45,12 @@ export function SessionBar({ session, choose, disabled }: { session: SessionMode
         {picker('model', session.models, session.currentModel)}
         {pct !== undefined && (
           <span className="flex items-center gap-1.5 text-xs text-muted" title={t('session-context-detail', { used: shortCount(session.contextTokens), size: shortCount(session.contextWindow) })}>
-            <span>{t('session-context', { percent: pct })}</span>
-            <meter className="h-1.5 w-16" min={0} max={100} low={70} high={90} optimum={0} value={pct} aria-label={t('session-context', { percent: pct })} />
+            <span>{said}</span>
+            {/* Drawn with design tokens, not a native <meter>: Chromium paints its empty track light grey, which reads as full in dark mode. */}
+            <span role="meter" aria-valuemin={0} aria-valuemax={100} aria-valuenow={pct} aria-label={said}
+              className="relative h-1.5 w-16 overflow-hidden rounded-full border border-line bg-surface-2">
+              <span className={`absolute inset-y-0 start-0 rounded-full ${contextFill(pct)}`} style={{ width: `${session.contextTokens > 0 ? Math.max(pct, 2) : 0}%` }} />
+            </span>
           </span>
         )}
         {cost !== undefined && <span className="ide-chip">{t('session-cost', { amount: cost })}</span>}

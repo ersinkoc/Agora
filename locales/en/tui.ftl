@@ -41,6 +41,7 @@ tui-notice-turn_failed = (the turn failed, error { $rpc_code }; its provider may
 tui-notice-turn_stopped = (the agent stopped its turn: { $stop_reason })
 tui-notice-turn_empty = (the turn ended without a word; its provider may have refused the request) { $stderr_tail }
 tui-notice-agent_exited = (the agent stopped, step { $stage }, exit code { $exit_code }: { $stderr_tail })
+tui-notice-agent_refused = (the agent refused to start, step { $stage }, error { $rpc_code }: { $detail })
 tui-notice-other = (the agent reported { $code })
 tui-option-switched = Switched.
 tui-option-unknown = The agent does not offer { $id }. It offers: { $ids }

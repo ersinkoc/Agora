@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { agora } from '../gen/agora.js';
 import { applyEvent, emptyView, fromSnapshot, tiles } from './view';
-import { choices, contextPercent, needsConfirm, ownCost } from '../components/sessionChoice';
+import { choices, contextFill, contextLabel, contextPercent, needsConfirm, ownCost } from '../components/sessionChoice';
 
 const ev = (producer: string, seq: number, body: Record<string, unknown>) => agora.v1.Event.create({ producerId: producer, seq, ...body });
 const opt = (id: string, skips = false) => ({ id, name: id.toUpperCase(), description: '', skipsPermissions: skips });
@@ -34,5 +34,12 @@ describe('session options, context and own cost', () => {
     expect(needsConfirm('mode', undefined)).toBe(false);
     expect(choices([opt('a')], 'gone').map((o) => o.id)).toEqual(['gone', 'a']);
     expect(contextPercent({ modes: [], models: [], currentMode: '', currentModel: '', contextTokens: 9, contextWindow: 0 })).toBeUndefined();
+  });
+  it('says under 1% for a context that is barely used, and colors a nearly full one', () => {
+    const s = (tokens: number) => ({ modes: [], models: [], currentMode: '', currentModel: '', contextTokens: tokens, contextWindow: 1_000_000 });
+    expect(contextLabel(s(1200))).toEqual({ key: 'session-context-under-one', percent: 0 });
+    expect(contextLabel(s(0))).toEqual({ key: 'session-context', percent: 0 });
+    expect(contextLabel(s(250_000))).toEqual({ key: 'session-context', percent: 25 });
+    expect([contextFill(25), contextFill(85)]).toEqual(['bg-accent', 'bg-needs-you']);
   });
 });

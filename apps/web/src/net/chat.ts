@@ -32,7 +32,7 @@ export const noticeKey = (code: string): string => `notice-${code.replace(/\./g,
 // are passed as plain strings (a stderr tail is the agent's text, shown as text). `exit_code` and `stderr_tail` are optional on the wire.
 export function noticeText(line: ChatLine, tr: (id: string, args?: Record<string, string>) => string): string {
   const code = line.code ?? '';
-  const args = { exit_code: '?', stderr_tail: '', ...(line.params ?? {}) };
+  const args = { exit_code: '?', stderr_tail: '', detail: '', rpc_code: '', ...(line.params ?? {}) };
   const id = noticeKey(code);
   const said = tr(id, args);
   return said === id ? tr('notice-other', { code }) : said;

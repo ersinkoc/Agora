@@ -41,6 +41,7 @@ tui-notice-turn_failed = (sıra başarısız oldu, hata { $rpc_code }; sağlayı
 tui-notice-turn_stopped = (ajan sırasını bitirdi: { $stop_reason })
 tui-notice-turn_empty = (sıra tek kelime söylenmeden bitti; sağlayıcısı isteği reddetmiş olabilir) { $stderr_tail }
 tui-notice-agent_exited = (ajan durdu, adım { $stage }, çıkış kodu { $exit_code }: { $stderr_tail })
+tui-notice-agent_refused = (ajan başlamayı reddetti, adım { $stage }, hata { $rpc_code }: { $detail })
 tui-notice-other = (ajan bunu bildirdi: { $code })
 tui-option-switched = Geçildi.
 tui-option-unknown = Ajan { $id } seçeneğini sunmuyor. Sunduğu: { $ids }

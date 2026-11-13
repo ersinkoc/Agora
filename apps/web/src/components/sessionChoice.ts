@@ -16,6 +16,16 @@ export function contextPercent(s: SessionModel | undefined): number | undefined 
   return Math.min(100, Math.round((s.contextTokens / s.contextWindow) * 100));
 }
 
+// The context fill in words: a level above 0 that rounds to 0% says "under 1%", never "0%" (an empty context would read as unused).
+export function contextLabel(s: SessionModel | undefined): { key: 'session-context' | 'session-context-under-one'; percent: number } | undefined {
+  const pct = contextPercent(s);
+  if (pct === undefined || !s) return undefined;
+  return pct === 0 && s.contextTokens > 0 ? { key: 'session-context-under-one', percent: 0 } : { key: 'session-context', percent: pct };
+}
+
+// The fill's design token: the accent while there is room, the needs-you color once the context is nearly full.
+export const contextFill = (pct: number): 'bg-accent' | 'bg-needs-you' => (pct >= 80 ? 'bg-needs-you' : 'bg-accent');
+
 // "12.3k", "1.2M": a token count short enough for a chip.
 export function shortCount(n: number, locale?: string): string {
   return new Intl.NumberFormat(locale, { notation: 'compact', maximumFractionDigits: 1 }).format(n);

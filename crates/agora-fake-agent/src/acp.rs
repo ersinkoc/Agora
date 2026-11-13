@@ -83,7 +83,7 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
                 if let Some(id) = &id {
                     send(
                         out,
-                        &json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32000, "message": "no provider configured"}}),
+                        &json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32603, "message": "ServiceUnavailableError: service not running at /Users/someone/.local/share/opencode"}}),
                     )?;
                 }
             }

@@ -273,6 +273,14 @@ pub fn notice_text(e: &ChatEntry, t: Text<'_>) -> String {
                 ("stderr_tail", p("stderr_tail")),
             ],
         ),
+        "adapter.agent_refused" => t(
+            key!("tui-notice-agent_refused"),
+            &[
+                ("stage", p("stage")),
+                ("rpc_code", p("rpc_code")),
+                ("detail", p("detail")),
+            ],
+        ),
         other => t(
             key!("tui-notice-other"),
             &[("code", Arg::Str(plain(other)))],
