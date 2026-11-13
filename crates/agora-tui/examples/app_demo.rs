@@ -2,8 +2,6 @@
 //! `cargo run -p agora-tui --example app_demo` (`NO_COLOR=1` for the monochrome palette). Typing in a terminal tab echoes into that
 //! agent's screen; `q` in the tree quits, as does 60 s without a key.
 
-#![allow(clippy::unwrap_used)]
-
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -25,7 +23,7 @@ fn text(id: &str, args: &[(&str, Arg)]) -> String {
     CATALOG.with(|c| c.render(id, args).unwrap_or_else(|| id.to_string()))
 }
 
-fn main() {
+fn main() -> std::io::Result<()> {
     let rows = vec![
         Row {
             id: "mac/agent-1".into(),
@@ -53,8 +51,19 @@ fn main() {
     );
     let raw = crossterm::terminal::enable_raw_mode();
     let _ = execute!(std::io::stdout(), EnableMouseCapture, EnableBracketedPaste);
+    // Whatever `run` returns, the mouse, the paste mode and raw mode are given back before the error (if any) is reported.
+    let ran = run(&rows, &mut screens, colors);
+    finish(raw.is_ok());
+    ran
+}
+
+fn run(
+    rows: &[Row],
+    screens: &mut HashMap<String, AlacrittyTerminal>,
+    colors: ColorMode,
+) -> std::io::Result<()> {
     {
-        let mut window = Window::enter().unwrap();
+        let mut window = Window::enter()?;
         let mut app = App::default();
         let (cols, rows_n) = crossterm::terminal::size().unwrap_or((120, 30));
         let mut area = ratatui::layout::Rect::new(0, 0, cols, rows_n);
@@ -68,21 +77,19 @@ fn main() {
                 .as_deref()
                 .and_then(|id| screens.get(id))
                 .map(|t| t as &dyn Terminal);
-            window
-                .draw(|f| {
-                    app.draw(
-                        f,
-                        &Screen {
-                            rows: &rows,
-                            terminal: term,
-                            details: &details,
-                            notice: "",
-                            colors,
-                            t: &text,
-                        },
-                    )
-                })
-                .unwrap();
+            window.draw(|f| {
+                app.draw(
+                    f,
+                    &Screen {
+                        rows,
+                        terminal: term,
+                        details: &details,
+                        notice: "",
+                        colors,
+                        t: &text,
+                    },
+                )
+            })?;
             if last_key.elapsed() > Duration::from_secs(60)
                 || !event::poll(Duration::from_millis(250)).unwrap_or(false)
             {
@@ -106,14 +113,14 @@ fn main() {
             for action in app.handle(
                 ev,
                 &Ctx {
-                    rows: &rows,
+                    rows,
                     area,
                     modes,
                     t: &text,
                 },
             ) {
                 match action {
-                    Action::Quit => return finish(raw.is_ok()),
+                    Action::Quit => return Ok(()),
                     Action::Open(id) => {
                         let mut t = AlacrittyTerminal::new(Size { cols: 80, rows: 24 });
                         t.feed(
@@ -157,7 +164,7 @@ fn main() {
             }
         }
     }
-    finish(raw.is_ok());
+    Ok(())
 }
 
 fn finish(raw: bool) {
