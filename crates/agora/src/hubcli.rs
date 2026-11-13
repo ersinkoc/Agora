@@ -297,6 +297,127 @@ pub fn hub_login(say: &Say, o: &Opts) -> ExitCode {
     }
 }
 
+/// `agora password set|clear|status` (ADR-0067): the screen password a sign-in from another machine must give. Run on the hub's
+/// machine, so no old password is asked. Setting reads the password twice from the terminal with echo off and refuses to read one
+/// from a pipe; setting or clearing it signs out every session, and both are in the audit trail.
+pub fn password(say: &Say, o: &Opts, op: &str) -> ExitCode {
+    use agora_hub::password::{check_new, PasswordError, ScreenPassword};
+    let fail = |e: String| {
+        say.err(key!("cli-hub-failed"), &[("reason", e.into())]);
+        ExitCode::from(1)
+    };
+    let dir = hub_dir(o);
+    if op == "set" && !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        say.err(key!("cli-password-needs-terminal"), &[]);
+        return ExitCode::from(2);
+    }
+    if std::fs::create_dir_all(&dir).is_err() {
+        return fail(dir.display().to_string());
+    }
+    let store = match SqliteStore::open(&dir.join("hub.db")) {
+        Ok(s) => s,
+        Err(e) => return fail(e.to_string()),
+    };
+    let screen = ScreenPassword::new(&store);
+    let now = server::now_ms();
+    // Every session ends, and so does every passkey added from another machine without the password (ADR-0067).
+    let sign_out_all = || {
+        let _ = agora_hub::password::drop_unvouched_passkeys(&store);
+        SignIn::new(&store, Arc::new(Lockout::new()))
+            .revoke_all()
+            .unwrap_or(0)
+    };
+    let audit = |action: &str| {
+        let _ = agora_hub::audit::Audit::new(&store).record(now, "owner", action, "cli", "ok");
+    };
+    match op {
+        "status" => {
+            say.out(
+                if screen.is_set() {
+                    key!("cli-password-on")
+                } else {
+                    key!("cli-password-off")
+                },
+                &[],
+            );
+            ExitCode::SUCCESS
+        }
+        "clear" => match screen.clear() {
+            Ok(true) => {
+                let revoked = sign_out_all();
+                audit("password_clear");
+                say.out(
+                    key!("cli-password-cleared"),
+                    &[("count", (revoked as i64).into())],
+                );
+                ExitCode::SUCCESS
+            }
+            Ok(false) => {
+                say.out(key!("cli-password-off"), &[]);
+                ExitCode::SUCCESS
+            }
+            Err(e) => fail(format!("{e:?}")),
+        },
+        "set" => {
+            let read = |prompt: &str| {
+                say.err(prompt, &[]);
+                agora_platform::read_secret_line()
+            };
+            // Ctrl-C: the terminal is already back to normal; stop as an interrupted program does.
+            let stopped = |e: std::io::Error| {
+                if e.kind() == std::io::ErrorKind::Interrupted {
+                    ExitCode::from(130)
+                } else {
+                    say.err(key!("cli-password-needs-terminal"), &[]);
+                    ExitCode::from(2)
+                }
+            };
+            let first = match read(key!("cli-password-prompt")) {
+                Ok(p) => p,
+                Err(e) => return stopped(e),
+            };
+            match check_new(&first) {
+                Ok(()) => {}
+                Err(PasswordError::TooLong) => {
+                    say.err(key!("cli-password-too-long"), &[]);
+                    return ExitCode::from(2);
+                }
+                Err(_) => {
+                    say.err(
+                        key!("cli-password-too-short"),
+                        &[("min", (agora_hub::password::MIN_CHARS as i64).into())],
+                    );
+                    return ExitCode::from(2);
+                }
+            }
+            let again = match read(key!("cli-password-repeat")) {
+                Ok(p) => p,
+                Err(e) => return stopped(e),
+            };
+            if again != first {
+                say.err(key!("cli-password-mismatch"), &[]);
+                return ExitCode::from(1);
+            }
+            match screen.set(&first) {
+                Ok(()) => {
+                    let revoked = sign_out_all();
+                    audit("password_set");
+                    say.out(
+                        key!("cli-password-set"),
+                        &[("count", (revoked as i64).into())],
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(e) => fail(format!("{e:?}")),
+            }
+        }
+        _ => {
+            say.err(key!("cli-usage"), &[]);
+            ExitCode::from(2)
+        }
+    }
+}
+
 /// `agora hub user add|list|role|remove|login` (ADR-0049): the people of a team hub and what each may do.
 pub fn hub_user(say: &Say, o: &Opts) -> ExitCode {
     use agora_hub::users::{Role, Users};

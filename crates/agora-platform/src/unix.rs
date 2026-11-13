@@ -161,6 +161,35 @@ pub(crate) fn restore_mode(saved: &libc::termios) {
     unsafe { libc::tcsetattr(0, libc::TCSANOW, saved) };
 }
 
+/// Terminal settings for typing a secret: no echo, no line editing by the terminal and no signals (Ctrl-C arrives as a byte, so the
+/// reader can restore the settings before it stops). Restored when dropped, on every path.
+pub(crate) struct SecretMode(libc::termios);
+
+impl Drop for SecretMode {
+    fn drop(&mut self) {
+        restore_mode(&self.0);
+    }
+}
+
+pub(crate) fn secret_mode() -> io::Result<SecretMode> {
+    // SAFETY: an all-zero termios is a valid buffer for tcgetattr to fill.
+    let mut saved: libc::termios = unsafe { std::mem::zeroed() };
+    // SAFETY: fd 0 is stdin; `saved` is a valid out-pointer. Fails (ENOTTY) when stdin is not a terminal.
+    if unsafe { libc::tcgetattr(0, &mut saved) } != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "stdin is not a terminal",
+        ));
+    }
+    let mut quiet = saved;
+    quiet.c_lflag &= !(libc::ECHO | libc::ICANON | libc::ISIG);
+    quiet.c_cc[libc::VMIN] = 1;
+    quiet.c_cc[libc::VTIME] = 0;
+    // SAFETY: fd 0 is stdin; `quiet` is a valid termios.
+    cvt(unsafe { libc::tcsetattr(0, libc::TCSANOW, &quiet) })?;
+    Ok(SecretMode(saved))
+}
+
 pub(crate) fn terminal_size() -> Option<(u16, u16)> {
     // SAFETY: an all-zero winsize is a valid out-buffer.
     let mut ws: libc::winsize = unsafe { std::mem::zeroed() };

@@ -240,6 +240,7 @@ fn main() -> ExitCode {
         ["adapter", "list"] => adaptercmd::list(&say, &opts),
         ["adapter", "remove"] => adaptercmd::remove(&say, &opts),
         ["adapter", "update"] => adaptercmd::update(&say, &opts),
+        ["password", op @ ("set" | "clear" | "status")] => hubcli::password(&say, &opts, op),
         ["hub", "run"] => hubcli::hub_run(&say, &opts),
         ["hub", "code"] => hubcli::hub_code(&say, &opts),
         ["hub", "fingerprint"] => hubcli::hub_fingerprint(&say, &opts),

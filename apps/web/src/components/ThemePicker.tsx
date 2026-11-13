@@ -10,7 +10,7 @@ const CHOICES: { id: ThemePreference; icon: IconName; label: string }[] = [
 ];
 
 export function ThemePicker() {
-  const pref = useSyncExternalStore(subscribeTheme, getThemePreference);
+  const pref = useSyncExternalStore(subscribeTheme, getThemePreference, getThemePreference);
   return <div role="group" aria-label={t('theme-label')} className="flex items-center rounded-xs border border-line bg-surface-0 p-0.5">
     {CHOICES.map(c => <button key={c.id} type="button" className="ide-iconbtn size-6" aria-pressed={pref === c.id} onClick={() => setTheme(c.id)} aria-label={t(c.label)} title={t(c.label)}><Icon name={c.icon} className="size-3.5" /></button>)}
   </div>;

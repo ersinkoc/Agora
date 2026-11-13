@@ -38,7 +38,7 @@ const wide = () => typeof window === 'undefined' || !window.matchMedia || window
 
 // The one window, laid out like an editor: the agents on the left as a tree, the terminals you are watching as tabs in the
 // middle (or side by side), details on the right, and a status bar. Everything is derived from props.
-export function Console({ agents, machines, usage, projects = [], approvals, messages, boards = [], terminalFor, chatOf, sendPrompt, chooseOption, loadDiff, loadHistory, filesOf, onOpen, onStart, onCommand, onForget, onResume, start, onResolve, helperGrants, revokeGrant, notice, link }: {
+export function Console({ agents, machines, usage, projects = [], approvals, messages, boards = [], terminalFor, chatOf, sendPrompt, chooseOption, loadDiff, loadHistory, filesOf, onOpen, onStart, onCommand, onForget, onResume, start, onResolve, helperGrants, revokeGrant, notice, link, onLock }: {
   agents: readonly AgentTileModel[];
   machines: readonly MachineModel[];
   usage?: UsageSummary;
@@ -67,8 +67,10 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   revokeGrant?: (agent: AgentTileModel, id: string) => Promise<void>;
   notice?: string;
   link: 'connecting' | 'live' | 'offline';
+  // ADR-0067: sign this window out (its session ends at the hub); agents keep running.
+  onLock?: () => void;
 }) {
-  const cleared = useSyncExternalStore(subscribeDismissed, dismissedIds);
+  const cleared = useSyncExternalStore(subscribeDismissed, dismissedIds, dismissedIds);
   // What was cleared stays hidden only while the agent is closed: one that runs again (a new run under the same id) is back in the list.
   const fleet = useMemo(() => sortFleet(agents.filter((a) => !(a.closed && cleared.has(a.id)))), [agents, cleared]);
   const [now, setNow] = useState(Date.now());
@@ -273,6 +275,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
         <span className="hidden sm:block"><LanguagePicker compact /></span>
         <ThemePicker />
         <a className="ide-chip hidden whitespace-nowrap hover:text-ink md:inline-flex" href="#/device">{t('device-link')}</a>
+        {onLock && <button type="button" className="ide-chip whitespace-nowrap hover:text-ink" onClick={onLock} title={t('lock-now-hint')}><Icon name="lock" className="size-3.5" />{t('lock-now')}</button>}
         {!showDetails && <button type="button" className="ide-iconbtn" onClick={() => setShowDetails(true)} aria-label={t('ide-show-details')} title={t('ide-show-details')}><Icon name="panelRight" /></button>}
       </header>
 

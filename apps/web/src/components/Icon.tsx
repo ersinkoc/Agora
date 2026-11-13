@@ -20,6 +20,7 @@ const PATHS = {
   sun: 'M8 10.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5zM8 1.5v1.5M8 13v1.5M1.5 8H3M13 8h1.5M3.4 3.4l1 1M11.6 11.6l1 1M3.4 12.6l1-1M11.6 4.4l1-1',
   copy: 'M5.5 5.5h7v8h-7zM3.5 10.5v-8h7',
   play: 'M5 3.5l7 4.5-7 4.5z',
+  lock: 'M4 7.5h8v6H4zM5.5 7.5V5a2.5 2.5 0 0 1 5 0v2.5',
 } as const;
 export type IconName = keyof typeof PATHS;
 

@@ -20,6 +20,7 @@ cli-usage =
       agora hub code [--hub-dir DIR]
       agora hub ssh install AD [--yes] [--unsigned] [--release-url URL] [--hub-dir DIR]
       agora hub login [--hub-dir DİZİN]
+      agora password set|clear|status [--hub-dir DİZİN]
       agora hub notify [--ntfy URL | --webhook URL | --test] [--hub-dir DIR]
       agora hub prices update [--url URL] [--hub-dir DIR]
       agora hub ssh [add AD HEDEF [--port N]] [--hub-dir DIR]
@@ -88,6 +89,16 @@ cli-hub-notify = Bildirimler { $file } dosyasındaki { $count } hedefe gidiyor.
 cli-hub-notify-skipped = { $file } dosyasının { $count } satırı anlaşılamadı ve yok sayılıyor. Her satır `ntfy URL` ya da `webhook URL` olmalı.
 cli-hub-web = Web uygulaması: https://{ $addr }/ . { $code } koduyla giriş yapın (10 dakika geçerli; yenisi için `agora hub login`). Hub sertifikasını kendi sertifika yetkilisi (CA) imzaladığı için bu yetkiliye güvenene kadar tarayıcı uyarı verir.
 cli-hub-login = Web uygulaması için giriş kodu: { $code } (10 dakika geçerli). Hub adresini tarayıcıda açıp kodu girin.
+cli-password-prompt = Yeni ekran parolası (yazarken görünmez):
+cli-password-repeat = Bir kez daha yazın:
+cli-password-needs-terminal = Ekran parolasını ayarlamak etkileşimli bir terminal ister: parola hiçbir zaman bir borudan ya da dosyadan okunmaz.
+cli-password-too-short = Bu çok kısa: en az { $min } karakter kullanın.
+cli-password-too-long = Bu çok uzun.
+cli-password-mismatch = İkisi aynı değil; hiçbir şey değişmedi.
+cli-password-set = Ekran parolası ayarlandı. Başka bir makineden giriş artık bu parolayı ister; bu makinenin kendi tarayıcısına hiç sorulmaz. Açık { $count } oturum kapatıldı.
+cli-password-cleared = Ekran parolası kaldırıldı. Giriş kodu yine tek başına yeterli. Açık { $count } oturum kapatıldı.
+cli-password-on = Ekran parolası ayarlı: başka makinelerden girişler bu parolayı ister.
+cli-password-off = Ekran parolası ayarlı değil: giriş kodu tek başına yeterli.
 cli-trusted = { $id } cihazı artık bu makinedeki onaylara yanıt verebilir.
 cli-trust-failed = Bu cihaz güvenilir olarak kaydedilemedi: { $reason }
 cli-hub-backup = Yedek { $path } dosyasına yazıldı.
