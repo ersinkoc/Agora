@@ -1,8 +1,9 @@
 // ADR-0057: helpers under the agent that started them, the start request as shown, and the decision's signed bytes.
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { helperTree } from '../model';
 import { signStart, startSignedMessage, thisDevice, toHex, type KeyStore } from './approval';
-import { applyEvent, approvalList, emptyView, fromSnapshot, startRequest, tiles, visible } from './view';
+import { HIDDEN_RANGES, applyEvent, approvalList, emptyView, fromSnapshot, startRequest, tiles, visible } from './view';
 
 function memoryStore(): KeyStore {
   let saved: Awaited<ReturnType<KeyStore['load']>>;
@@ -27,6 +28,17 @@ describe('agents that start agents', () => {
   it('shows hidden and control characters as visible escapes, the same set the node refuses', () => {
     expect(visible('a\u200bb\u202ec\u{e0041}d\ufe0fe\u3164f\u00adg\u001bh\nk\tl')).toBe('a\\u{200b}b\\u{202e}c\\u{e0041}d\\u{fe0f}e\\u{3164}f\\u{ad}g\\u{1b}h\nk\tl');
     expect(visible('Grüße 🚀 çalış')).toBe('Grüße 🚀 çalış');
+  });
+
+  it('hides exactly the shared list the node and the TUI use', () => {
+    const file = readFileSync(new URL('../../../../crates/agora-core/src/hidden-characters.txt', import.meta.url), 'utf8')
+      .split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('#'))
+      .map((l) => { const [lo, hi] = l.split('-'); return [parseInt(lo as string, 16), parseInt((hi ?? lo) as string, 16)]; });
+    expect(HIDDEN_RANGES.map((r) => [...r])).toEqual(file);
+    for (const [lo, hi] of HIDDEN_RANGES) {
+      for (const c of [lo, hi]) expect(visible(String.fromCodePoint(c))).toBe(`\\u{${c.toString(16)}}`);
+    }
+    expect(visible('\u2028\u2029\ue000')).toBe('\\u{2028}\\u{2029}\\u{e000}');
   });
 
   it('puts helpers right under their parent', () => {

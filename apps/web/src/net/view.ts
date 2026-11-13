@@ -311,10 +311,18 @@ export interface ApprovalModel {
 // interpreted. The detail itself is what the decision is signed over, so it is kept as it came.
 export interface StartRequest { agent: string; agentKind: string; node: string; kind: string; folder: string; prompt: string; inside: boolean; worktree: boolean; depth: number; grantAllowed: boolean }
 
-// Characters that are invisible or change how text around them looks (crates/agora-core/src/text.rs `is_hidden`): every format
-// character, the tag block, variation selectors and fillers. The node refuses them in a start request; anything that reaches a card
+// Characters that are invisible or change how text around them looks: the one list in crates/agora-core/src/hidden-characters.txt
+// (Default_Ignorable_Code_Point and every format character, the line and paragraph separators, the private use areas). The node refuses them in a start request; anything that reaches a card
 // is shown as a visible escape, with control characters other than line breaks and tabs, so what is shown is what is signed.
-const HIDDEN = /[\u00ad\u0600-\u0605\u061c\u06dd\u070f\u0890\u0891\u08e2\u115f\u1160\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u206f\u3164\ufe00-\ufe0f\ufeff\uffa0\ufff9-\ufffb\u{110bd}\u{110cd}\u{13430}-\u{1343f}\u{1bca0}-\u{1bca3}\u{1d173}-\u{1d17a}\u{e0000}-\u{e007f}\u{e0100}-\u{e01ef}]|[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/gu;
+export const HIDDEN_RANGES: readonly (readonly [number, number])[] = [
+  [0x00ad, 0x00ad], [0x034f, 0x034f], [0x0600, 0x0605], [0x061c, 0x061c], [0x06dd, 0x06dd], [0x070f, 0x070f], [0x0890, 0x0891],
+  [0x08e2, 0x08e2], [0x115f, 0x1160], [0x17b4, 0x17b5], [0x180b, 0x180f], [0x200b, 0x200f], [0x2028, 0x202e], [0x2060, 0x206f],
+  [0x3164, 0x3164], [0xfe00, 0xfe0f], [0xfeff, 0xfeff], [0xffa0, 0xffa0], [0xfff0, 0xfffb], [0x110bd, 0x110bd], [0x110cd, 0x110cd],
+  [0x13430, 0x1343f], [0x1bca0, 0x1bca3], [0x1d173, 0x1d17a], [0xe0000, 0xe0fff], [0xe000, 0xf8ff], [0xf0000, 0xffffd],
+  [0x100000, 0x10fffd],
+];
+const hex = (n: number) => `\\u{${n.toString(16)}}`;
+const HIDDEN = new RegExp(`[${HIDDEN_RANGES.map(([lo, hi]) => (lo === hi ? hex(lo) : `${hex(lo)}-${hex(hi)}`)).join('')}]|[\\u0000-\\u0008\\u000b-\\u001f\\u007f-\\u009f]`, 'gu');
 
 export function visible(text: string): string {
   return text.replace(HIDDEN, (c) => `\\u{${(c.codePointAt(0) ?? 0).toString(16)}}`);

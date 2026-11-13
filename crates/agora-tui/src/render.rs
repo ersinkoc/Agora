@@ -642,6 +642,21 @@ mod tests {
     }
 
     #[test]
+    fn the_tui_hides_nothing_on_the_shared_list() {
+        // The one list (crates/agora-core/src/hidden-characters.txt, pinned there and in the web client): every range's ends show as
+        // escapes, in a start request and in plain text.
+        for (lo, hi) in agora_core::text::HIDDEN {
+            for c in [*lo, *hi].into_iter().filter_map(char::from_u32) {
+                let s = c.to_string();
+                let want = format!("\\u{{{:x}}}", u32::from(c));
+                assert_eq!(visible(&s), want);
+                // plain() drops the bidirectional controls outright and escapes the rest.
+                assert!(plain(&s) == want || plain(&s).is_empty(), "{want}");
+            }
+        }
+    }
+
+    #[test]
     fn the_header_adds_up_the_tokens_the_agents_used() {
         let mut snap = snapshot();
         snap.agents[0].input_tokens = 1000;
