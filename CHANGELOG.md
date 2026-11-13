@@ -5,7 +5,7 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 ## Next
 
 ### Agents
-- A new `opencode-acp` kind starts opencode as a structured (ACP) agent. It was written from opencode's own `--help` and still needs a run against the real program.
+- New `opencode-acp` and `antigravity-acp` kinds start opencode and Antigravity (`agy acp`) as structured (ACP) agents. Both were written from the programs' own `--help` and still need a run against the real programs.
 
 ### Agents working together
 - An agent connected to the mesh is now told what the mesh is for: who it can see (`agents_list`), how to message and ask others, share tasks and hand work over, and lease files before editing them. It is also told it cannot start other agents from there.
