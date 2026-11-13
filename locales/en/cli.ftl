@@ -183,3 +183,4 @@ status-log = log: { $log }
 down-stopped = Stopped the { $role } (process { $pid }).
 down-failed = Could not stop the { $role }: { $reason }
 down-nothing = Nothing to stop: `agora` did not start anything that is still running.
+cli-node-policy-not-understood = node.policy_not_understood: the policy file has a line this node does not understand ({ $line }), so no agent may start without asking until it is fixed.

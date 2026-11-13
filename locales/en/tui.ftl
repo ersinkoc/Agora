@@ -92,3 +92,6 @@ tui-forget-failed = Could not remove it: { $reason }
 tui-forget-disconnected = The connection was lost. Wait for it to reconnect.
 tui-forget-timeout = No answer arrived in time. Try again.
 tui-forget-action = removing the agent
+
+# ADR-0059: launch options (manifest `[[launch.option]]` labels)
+option-skip-permissions = Don't ask

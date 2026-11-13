@@ -110,6 +110,10 @@ message AgentStarted {
   // ADR-0057: the agent that started this one through the mesh (`agent_start`), on the same node; empty when the user started it.
   // Old clients ignore it.
   string parent_agent_id = 7;
+  // ADR-0059: the launch options the agent was started with, and whether one of them skips permissions (the "does not ask"
+  // badge for the agent's whole life). Old clients ignore them. (30-39 are kept for ADR-0059.)
+  repeated string launch_options = 30;
+  bool skips_permissions = 31;
 }
 
 message AgentStateChanged {

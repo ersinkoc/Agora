@@ -749,6 +749,8 @@ mod tests {
                     forgotten: false,
                     session: crate::projection::SessionView::default(),
                     parent_agent_id: String::new(),
+                    launch_options: Vec::new(),
+                    skips_permissions: false,
                 },
             );
         }
