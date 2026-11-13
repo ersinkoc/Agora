@@ -48,6 +48,7 @@ cli-ambiguous-project = Birden fazla proje kayıtlı; --project ile birini seçi
 cli-no-projects = Bu düğümde proje yok. --project YOL ile başlatın.
 cli-bad-arguments = Komut satırı argümanları anlaşılamadı.
 cli-error = Hata { $code }: { $message }
+cli-invalid-directory-identity_changed = Bu klasörün proje kimliği, burada son kez ajan başlatıldığından beri değişti. Yine de başlatmak için --accept-project-id-change ekleyin.
 
 doctor-status-ok = tamam
 doctor-status-warn = not

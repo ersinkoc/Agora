@@ -354,9 +354,17 @@ impl Mesh {
         Ok(id)
     }
 
-    /// Tells `from` that a message it sent to another node did not arrive. It lands in the inbox as a notice (kind
-    /// `delivery_failed`, body the error code); delivery is at most once, so nothing is retried.
-    pub fn delivery_failed(&mut self, from: &AgentId, to: &str, code: &str, now_ms: u64) {
+    /// Tells `from` that its message `message_id` (the id `send_message` answered with) to another node did not arrive. It lands
+    /// in the inbox as a notice (kind `delivery_failed`, body the error code, `reply_to` the failed message's id, so an agent with
+    /// several messages in flight knows which one); delivery is at most once, so nothing is retried.
+    pub fn delivery_failed(
+        &mut self,
+        from: &AgentId,
+        message_id: &str,
+        to: &str,
+        code: &str,
+        now_ms: u64,
+    ) {
         let Some(info) = self.agents.get(from).cloned() else {
             return;
         };
@@ -374,7 +382,7 @@ impl Mesh {
             body: code.to_string(),
             refs: Vec::new(),
             at_ms: now_ms,
-            reply_to: None,
+            reply_to: (!message_id.is_empty()).then(|| message_id.to_string()),
             kind: "delivery_failed",
         };
         let inbox = self.inboxes.entry(info.id).or_default();
@@ -2174,13 +2182,20 @@ mod tests {
         #[test]
         fn a_failed_delivery_reaches_the_sender_as_a_notice() {
             let mut m = mesh();
-            m.delivery_failed(&AgentId::new("a1"), "n2/b7", "node.offline", 3);
+            m.delivery_failed(&AgentId::new("a1"), "m-3", "n2/b7", "node.offline", 3);
+            m.delivery_failed(&AgentId::new("a1"), "m-4", "n2/b8", "node.offline", 4);
             let got = m.inbox(&AgentId::new("a1"), None, 10).unwrap();
+            // Each notice names the message that failed, so several in flight can be told apart.
             assert_eq!(
-                (got[0].kind, got[0].body.as_str()),
-                ("delivery_failed", "node.offline")
+                got.iter()
+                    .map(|g| (g.kind, g.body.as_str(), g.reply_to.as_deref()))
+                    .collect::<Vec<_>>(),
+                vec![
+                    ("delivery_failed", "node.offline", Some("m-3")),
+                    ("delivery_failed", "node.offline", Some("m-4")),
+                ]
             );
-            m.delivery_failed(&AgentId::new("gone"), "n2/b7", "x", 3); // an agent that left: nothing happens
+            m.delivery_failed(&AgentId::new("gone"), "m-5", "n2/b7", "x", 3); // an agent that left: nothing happens
         }
     }
 }

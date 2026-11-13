@@ -48,6 +48,7 @@ cli-ambiguous-project = More than one project is registered; choose one with --p
 cli-no-projects = This node has no projects. Start it with --project PATH.
 cli-bad-arguments = The arguments were not understood.
 cli-error = Error { $code }: { $message }
+cli-invalid-directory-identity_changed = This folder's project identity changed since an agent last started here. Add --accept-project-id-change to start one anyway.
 
 doctor-status-ok = ok
 doctor-status-warn = note

@@ -34,6 +34,17 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 - Windows: the start window lists the agent's launch options under "How it acts". "Ask before acting" is always the default and "Don't ask" is never preselected: choosing it asks "Let the agent act without asking?" first, with Keep asking as the main button, and the browser signs the choice with the start (with the ids you confirmed as a separate signed list, which the machine requires; ids that are not `[a-z0-9-]` are not offered). An agent started that way carries a "Does not ask" badge in the tree, on its tile and in its pane header for as long as it is listed. The terminal client asks the same two questions when it starts an agent (any key but `y` keeps asking) and shows "does not ask" on the agent's row, in the split view's tree and in its title.
 - The node itself decides which launch options skip permissions: the ids the user confirmed are sent and signed as a separate list (length-prefixed, `directory-action-v3`), the node refuses an unconfirmed one (`agent.option_unconfirmed`) and any id outside `[a-z0-9-]{1,32}` (`agent.option_invalid`), so a hub that shows it to the window as harmless cannot get it signed unknowingly. A policy file line the node does not understand (a typo such as `skip_permission = forbid`), or an existing policy file it cannot read, forbids such options and is reported at start (`node.policy_not_understood`); quoted values (`"forbid"`) are read as unquoted ones. A manifest that declares a known skip flag (`--dangerously-*`, `--yolo*`) without `skips_permissions = true` does not load.
 
+### Machines
+- A link that goes silent while the connection stays open (a frozen hub or node, a laptop that slept, a Wi-Fi switch, a NAT that forgot the connection) is now noticed. A node dials the hub again when it has heard nothing for 25 s; the hub shows a machine offline when it has heard nothing from it for 25 s (an idle machine keeps its link with a ping every 10 s and is never dropped). Before, the window showed a frozen machine as online, and nodes never dialled again, for as long as the silence lasted.
+- `agora agent start` in a folder whose project identity changed (after `agora project init`) says so and names `--accept-project-id-change`, instead of "The request was not valid (field: directory.identity_changed)".
+- `agora node trust` no longer tells you to restart the node: the node reads its trusted devices again when the file changes.
+
+### Window
+- The window notices a hub that stopped answering (it pings every 15 s and starts over when nothing comes back within 10 s) and shows "Hub unreachable". It comes back within 5 s of the hub, sooner when the browser is back online, the tab becomes visible or the window gets the focus, and the banner has a "Retry now" button. Before, it waited up to 30 s between attempts.
+
+### Agents
+- A `delivery_failed` notice for a message to another machine names the message that failed: its `reply_to` is the `message_id` that `send_message` answered with, so an agent with several messages in flight knows which one did not arrive. Nothing is resent.
+
 ## 0.3.7
 
 ### Agents

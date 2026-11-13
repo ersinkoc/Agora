@@ -13,7 +13,8 @@ connect (WSS + mTLS for nodes, session token for clients)
   ← ResumeOk   { from_seq }  |  ← SnapshotRequired
   → SnapshotRequired                       (node only, when it no longer has from_seq; ADR-0054)
   ... streams ...
-  → / ← Ping / Pong every 15 s; 3 missed = connection lost
+  → / ← Ping / Pong: a node pings every 10 s, a window every 15 s; the peer answers each at once with a Pong carrying the
+           same payload. Nothing at all received for 25 s (node and hub) or 10 s after a ping (window) = connection lost
   → / ← Goodbye { reason_code }
 ```
 

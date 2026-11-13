@@ -51,7 +51,7 @@ const PANEL_TAB: Record<string, DetailsTab> = { approvals: 'needs', changes: 'ch
 
 // The one window, laid out like an editor: the agents on the left as a tree, the terminals you are watching as tabs in the
 // middle (or side by side), details on the right, and a status bar. Everything is derived from props.
-export function Console({ agents, machines, usage, projects = [], approvals, messages, boards = [], terminalFor, chatOf, sendPrompt, chooseOption, loadDiff, loadHistory, filesOf, onOpen, onStart, onCommand, onForget, onResume, start, onResolve, helperGrants, revokeGrant, notice, link, onLock }: {
+export function Console({ agents, machines, usage, projects = [], approvals, messages, boards = [], terminalFor, chatOf, sendPrompt, chooseOption, loadDiff, loadHistory, filesOf, onOpen, onStart, onCommand, onForget, onResume, start, onResolve, helperGrants, revokeGrant, notice, link, onLock, onRetry }: {
   agents: readonly AgentTileModel[];
   machines: readonly MachineModel[];
   usage?: UsageSummary;
@@ -82,6 +82,8 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   link: 'connecting' | 'live' | 'offline';
   // ADR-0067: sign this window out (its session ends at the hub); agents keep running.
   onLock?: () => void;
+  // Try the hub now instead of after the wait, offered while it is unreachable.
+  onRetry?: () => void;
 }) {
   const cleared = useSyncExternalStore(subscribeDismissed, dismissedIds, dismissedIds);
   // What was cleared stays hidden only while the agent is closed: one that runs again (a new run under the same id) is back in the list.
@@ -299,6 +301,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
           <Icon name="search" className="size-3.5" /><span className="min-w-0 flex-1 truncate">{t('ide-command')}</span><kbd className="ide-kbd hidden sm:inline">{commandKey} K</kbd>
         </button>
         {link !== 'live' && <span role="status" className="ide-chip">{t(link === 'offline' ? 'link-offline' : 'link-connecting')}</span>}
+        {link === 'offline' && onRetry && <button type="button" className="ide-chip whitespace-nowrap hover:border-accent hover:text-ink" onClick={onRetry}>{t('link-retry')}</button>}
         <LayoutMenu ws={ws} dispatch={dispatch} agents={presetAgents} onReset={resetLayout} narrow={narrow} />
         <span className="hidden sm:block"><LanguagePicker compact /></span>
         <ThemePicker />

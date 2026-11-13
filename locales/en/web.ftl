@@ -23,6 +23,7 @@ machines-online =
     }
 link-connecting = Connecting to your hub…
 link-offline = Hub unreachable. Retrying…
+link-retry = Retry now
 action-open = Open
 action-start-agent = Start an agent
 theme-dark = Dark

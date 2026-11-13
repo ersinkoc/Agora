@@ -23,6 +23,7 @@ machines-online =
     }
 link-connecting = Hub'a bağlanılıyor…
 link-offline = Hub'a ulaşılamıyor. Yeniden deneniyor…
+link-retry = Şimdi dene
 action-open = Aç
 action-start-agent = Ajan başlat
 theme-dark = Koyu
