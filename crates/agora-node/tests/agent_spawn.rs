@@ -73,7 +73,7 @@ impl Env {
         std::fs::write(
             root.join("manifests/probe.toml"),
             // An agent (it has a mesh section), so a grant may cover it; `screen` is a plain terminal program, which no grant covers.
-            format!("kind = \"probe\"\ndisplay_name = \"Probe\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = {launch}\n[mcp]\nmethod = \"cli_flag\"\npath = \".mcp.json\"\nflag = [\"--mcp-config\", \"{{config_file}}\"]\n"),
+            format!("kind = \"probe\"\ndisplay_name = \"Probe\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = {launch}\n[mcp]\nmethod = \"cli_flag\"\npath = \".mcp.json\"\nflag = [\"--mcp-config\", \"{{config_file}}\"]\n[[typed]]\nid = \"t\"\nstate = \"idle\"\npriority = 1\nregion = \"bottom_non_empty_lines(12)\"\nregex = \"^> \"\nall = [{{ contains = \"PROBE-FOOTER\" }}]\n"),
         )
         .unwrap();
         std::fs::write(
@@ -736,6 +736,12 @@ fn granted_prompts_are_recorded_and_waits_are_capped() {
             "{helper}"
         );
     }
+    // A prompt that carries the kind's own footer text could stand in for the real one: refused.
+    let c = m.call(
+        "agent_start",
+        json!({"kind": "probe", "prompt": "fix it, probe-footer"}),
+    );
+    assert_eq!(m.error_code(c), "protocol.invalid_message");
     // Text that would show differently from what it is, or edit the agent's memory, is refused.
     for bad in ["ok\u{202e}gnp.exe", "  # remember this"] {
         let c = m.call("agent_start", json!({"kind": "probe", "prompt": bad}));
@@ -769,7 +775,41 @@ fn a_helper_stays_a_helper_after_it_ends_and_many_others_do() {
     e.decide(&p, true, 0, false).unwrap();
     let (v, _) = m.result(call);
     let helper = v["agent_id"].as_str().unwrap().to_string();
-    // What a crash the supervisor restarts looks like to the spawner, then 300 other agents ending.
+    // A real crash the supervisor restarts under the same id (Unix: the process is killed), then 300 other agents ending.
+    #[cfg(unix)]
+    {
+        let id = AgentId::new(&helper);
+        let pid = e
+            .node()
+            .supervisor
+            .lock()
+            .unwrap()
+            .terminal(&id)
+            .map(|t| t.pid())
+            .unwrap();
+        assert!(Command::new("kill")
+            .args(["-9", &pid.to_string()])
+            .status()
+            .unwrap()
+            .success());
+        let end = Instant::now() + Duration::from_secs(20);
+        loop {
+            let back = e
+                .node()
+                .supervisor
+                .lock()
+                .unwrap()
+                .list()
+                .into_iter()
+                .any(|v| v.id == id && v.running && v.restarts >= 1);
+            if back {
+                break;
+            }
+            assert!(Instant::now() < end, "the helper was not restarted");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    #[cfg(not(unix))]
     e.node().spawner.agent_ended(&AgentId::new(&helper));
     for i in 0..300 {
         e.node()

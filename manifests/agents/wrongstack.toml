@@ -78,6 +78,7 @@ id = "typed_prompt_box"
 state = "idle"
 priority = 100
 region = "bottom_non_empty_lines(12)"
-regex = 'WRONGSTACK v[0-9.]+ .*idle ─╮[^\n]*\n│[^\S\n]+❯[^\S\n]+[^\s│]'
+# The `Enter send` hint is checked on the box's own bottom border, not anywhere on screen.
+regex = 'WRONGSTACK v[0-9.]+ .*idle ─╮[^\n]*\n│[^\S\n]+❯[^\S\n]+[^\s│][^\n]*\n╰─[^\n]*Enter send'
 all = [{ contains = "Enter send" }]
 not = [{ contains = "APPROVAL REQUIRED" }]

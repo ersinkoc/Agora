@@ -281,6 +281,64 @@ pub struct AgentView {
     pub parent: Option<AgentId>,
 }
 
+/// ADR-0057: whether `program` is a shell, a wrapper or an interpreter, which runs whatever it is given. Compared by its file name,
+/// lower-cased, without `.exe`, `.cmd`, `.bat` or `.com` and without a version (`python3.12` is `python`, `pypy3` is `pypy`).
+fn runs_anything(program: &str) -> bool {
+    const ANY: &[&str] = &[
+        "sh",
+        "bash",
+        "zsh",
+        "fish",
+        "dash",
+        "ksh",
+        "csh",
+        "tcsh",
+        "nu",
+        "pwsh",
+        "powershell",
+        "cmd",
+        "busybox",
+        "wsl",
+        "env",
+        "nice",
+        "nohup",
+        "setsid",
+        "timeout",
+        "stdbuf",
+        "xargs",
+        "sudo",
+        "doas",
+        "su",
+        "ssh",
+        "docker",
+        "podman",
+        "python",
+        "pypy",
+        "perl",
+        "ruby",
+        "node",
+        "deno",
+        "bun",
+        "npx",
+        "uvx",
+        "bunx",
+        "php",
+        "lua",
+    ];
+    let base = program
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(program)
+        .to_ascii_lowercase();
+    let base = [".exe", ".cmd", ".bat", ".com"]
+        .iter()
+        .find_map(|x| base.strip_suffix(x))
+        .unwrap_or(&base);
+    let name =
+        base.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.' || c == '-' || c == '_');
+    ANY.contains(&name) || ANY.contains(&base)
+}
+
 /// One startable agent kind, as reported by [`Supervisor::kinds`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KindInfo {
@@ -408,62 +466,47 @@ impl Supervisor {
     }
 
     /// ADR-0057: whether a scoped grant ("up to N more without asking") may cover `kind`: only a kind with an agent integration (a
-    /// mesh section, an adapter or a structured mode), never a shell or another plain program however many screen rules it has (a
-    /// grant there would mean "run any N programs without asking"). Unknown kinds are not grantable.
+    /// mesh section, an adapter or a structured mode) whose program (`process.launch`, else `structured.acp.argv`, else
+    /// `adapter.command`) is not a shell, a wrapper or an interpreter, however many screen rules it has: a grant there would mean "run
+    /// any N programs without asking". Unknown kinds are not grantable.
     pub fn grantable(&self, kind: &str) -> bool {
-        const SHELLS: &[&str] = &[
-            "sh",
-            "bash",
-            "zsh",
-            "fish",
-            "dash",
-            "ksh",
-            "csh",
-            "tcsh",
-            "nu",
-            "pwsh",
-            "powershell",
-            "cmd",
-            "busybox",
-            // Wrappers and interpreters that run whatever they are given.
-            "env",
-            "nice",
-            "timeout",
-            "sudo",
-            "doas",
-            "su",
-            "python",
-            "python3",
-            "perl",
-            "ruby",
-            "node",
-            "deno",
-            "bun",
-            "ssh",
-            "docker",
-            "podman",
-        ];
         let Some(k) = self.kinds.get(kind) else {
             return false;
         };
         let m = &k.manifest;
+        let integrated = m.mcp.is_some() || m.adapter.is_some() || m.structured.is_some();
         let program = m
             .process
             .launch
             .first()
-            .map(|p| {
-                let base = p
-                    .rsplit(['/', '\\'])
-                    .next()
-                    .unwrap_or(p)
-                    .to_ascii_lowercase();
-                base.strip_suffix(".exe")
-                    .map(str::to_string)
-                    .unwrap_or(base)
+            .or_else(|| {
+                m.structured
+                    .as_ref()
+                    .and_then(|s| s.acp.as_ref())
+                    .and_then(|a| a.argv.first())
             })
-            .unwrap_or_default();
-        let integrated = m.mcp.is_some() || m.adapter.is_some() || m.structured.is_some();
-        kind != "shell" && !SHELLS.contains(&program.as_str()) && integrated
+            .or_else(|| m.adapter.as_ref().and_then(|a| a.command.first()));
+        kind != "shell" && integrated && program.is_some_and(|p| !runs_anything(p))
+    }
+
+    /// ADR-0057: the footer and marker texts the kind's `[[typed]]` rules require on screen. A prompt that contains one could stand in
+    /// for the real footer, so such a prompt is never typed.
+    pub fn typed_markers(&self, kind: &str) -> Vec<String> {
+        let Some(k) = self.kinds.get(kind) else {
+            return Vec::new();
+        };
+        k.manifest
+            .typed
+            .iter()
+            .flat_map(|r| {
+                r.contains.iter().cloned().chain(
+                    r.all
+                        .iter()
+                        .chain(&r.any)
+                        .filter_map(|c| c.contains.clone()),
+                )
+            })
+            .collect()
     }
 
     /// The node's confinement settings (ADR-0047), for checks that compare two agents' confinement.
@@ -1955,6 +1998,103 @@ fn session_report(agent: &Agent) -> Option<SupervisorEvent> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod adapter_option_tests {
     use super::*;
+
+    #[test]
+    fn a_grant_needs_an_agent_program_from_launch_acp_or_adapter() {
+        let mut sup = Supervisor::new(SupervisorConfig {
+            node: NodeId::new("n"),
+            restart: RestartPolicy::default(),
+            terminal: TerminalOptions::default(),
+            limits: NodeLimits::default(),
+        });
+        let head = |k: &str| {
+            format!("kind = \"{k}\"\ndisplay_name = \"K\"\nversion = \"1\"\nmin_engine = 1\n")
+        };
+        let mcp = "[mcp]\nmethod = \"cli_flag\"\nflag = [\"--mcp\", \"{config_file}\"]\n";
+        let cases = [
+            (
+                "agent",
+                format!("{}[process]\nlaunch = [\"claude\"]\n{mcp}", head("agent")),
+                true,
+            ),
+            (
+                "bare",
+                format!("{}[process]\nlaunch = [\"claude\"]\n", head("bare")),
+                false,
+            ),
+            (
+                "pyl",
+                format!(
+                    "{}[process]\nlaunch = [\"/usr/bin/python3.12\", \"x.py\"]\n{mcp}",
+                    head("pyl")
+                ),
+                false,
+            ),
+            (
+                "acp-ok",
+                format!(
+                    "{}[structured]\nacp = {{ argv = [\"opencode\", \"acp\"] }}\n",
+                    head("acp-ok")
+                ),
+                true,
+            ),
+            (
+                "acp-py",
+                format!(
+                    "{}[structured]\nacp = {{ argv = [\"python3\", \"a.py\"] }}\n",
+                    head("acp-py")
+                ),
+                false,
+            ),
+            (
+                "acp-env",
+                format!(
+                    "{}[structured]\nacp = {{ argv = [\"env\", \"-S\", \"x\"] }}\n",
+                    head("acp-env")
+                ),
+                false,
+            ),
+            (
+                "ad-ok",
+                format!(
+                    "{}[adapter]\ncommand = [\"agora-adapter-x\"]\n",
+                    head("ad-ok")
+                ),
+                true,
+            ),
+            (
+                "ad-bash",
+                format!(
+                    "{}[adapter]\ncommand = [\"C:\\\\Tools\\\\BASH.EXE\", \"-c\"]\n",
+                    head("ad-bash")
+                ),
+                false,
+            ),
+            (
+                "ad-npx",
+                format!(
+                    "{}[adapter]\ncommand = [\"npx\", \"pkg\"]\n",
+                    head("ad-npx")
+                ),
+                false,
+            ),
+        ];
+        for (kind, src, _) in &cases {
+            sup.register(Manifest::parse(src).unwrap_or_else(|e| panic!("{kind}: {e:?}")));
+        }
+        for (kind, _, want) in &cases {
+            assert_eq!(sup.grantable(kind), *want, "{kind}");
+        }
+        for p in [
+            "pypy3", "PWSH.exe", "wsl.exe", "uvx", "bunx", "nohup", "setsid", "xargs", "stdbuf",
+            "cmd.cmd", "node22",
+        ] {
+            assert!(runs_anything(p), "{p}");
+        }
+        for p in ["claude", "codex", "wstack", "opencode"] {
+            assert!(!runs_anything(p), "{p}");
+        }
+    }
 
     fn opt(id: &str, skips: bool) -> SessionOption {
         SessionOption {

@@ -108,7 +108,9 @@ request, stricter than an `idle` rule (whose prompt marker can also be the selec
 first prompt only when a fresh look at the live screen matches them and the kind's rules detect idle; a kind without them never gets
 a first prompt typed for it (the prompt is left for the user). Every shipped terminal manifest has them, and the fixture test checks
 that they match the captured idle and answered screens and nothing else (including a `menu.screen` that an `idle` rule matches).
-`[[typed]]` (same shape, `state = "idle"`) match an input box that holds typed text with no dialog or menu on screen, and the top-level
+`[[typed]]` (same shape, `state = "idle"`) match an input box that holds typed text with no dialog or menu on screen, with the
+footer anchored to the lines right under the box (not anywhere on screen); the node refuses a prompt that contains a text these rules
+require (`contains` in the rule, `all` or `any`), and the top-level
 `input_box` is a multi-line regex over `bottom_non_empty_lines(12)` whose first capture group is the box's text: before pressing
 Enter on a helper's first prompt the node needs both, with the box holding exactly that prompt. The `typed.screen` fixtures are
 constructed from the captured idle screens with text in the box (a capture of that moment is not kept); the test checks that

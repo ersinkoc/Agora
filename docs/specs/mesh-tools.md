@@ -118,8 +118,10 @@ the node answers them itself (`agora-node::spawn`), not the broker. The caller i
   that the helpers it starts may ask in turn. Later starts that match the grant (same asking agent, kind, folder and `worktree`
   choice) start at once. A grant ends when the asking agent exits or is stopped, or when revoked (`GrantRevoke` with the approval id;
   `GrantList` shows it). No grant is given for a kind without an agent integration (a mesh section, an adapter or a structured mode), nor for
-  kind `shell` or a program that is a shell, a wrapper (`env`, `nice`, `timeout`, `sudo`, `doas`, `su`, `ssh`, `docker`, `podman`)
-  or an interpreter (`python`, `perl`, `ruby`, `node`, `deno`, `bun`), whatever screen rules it has: there it would mean "run any N programs
+  kind `shell` or a kind whose program (`process.launch`, else `structured.acp.argv`, else `adapter.command`; its file name lower-cased,
+  without `.exe`/`.cmd`/`.bat`/`.com` and without a version) is a shell, a wrapper (`env`, `nice`, `nohup`, `setsid`, `timeout`,
+  `stdbuf`, `xargs`, `sudo`, `doas`, `su`, `ssh`, `wsl`, `docker`, `podman`) or an interpreter or runner (`python`, `pypy`, `perl`,
+  `ruby`, `node`, `deno`, `bun`, `npx`, `uvx`, `bunx`, `php`, `lua`), whatever screen rules it has: there it would mean "run any N programs
   without asking". The
   request's `grant_allowed` says whether one may be given.
 - **Never wider than the asker.** The folder defaults to the asker's own; one below it is allowed (a relative `folder` is taken below
@@ -138,7 +140,8 @@ the node answers them itself (`agora-node::spawn`), not the broker. The caller i
   invisible characters (the list in `crates/agora-core/src/hidden-characters.txt`: Default_Ignorable_Code_Point and every format
   character, the line and paragraph separators and the private use areas; also refused in the requested `folder` and in the folder
   it resolves to); no leading `!`, `/`, `#`, `&`, `$` or `?` (a shell escape, a slash command, a memory edit, a background send, a
-  skill form or the shortcuts key in common agents); and no last word starting with `@` (a file picker would take the
+  skill form or the shortcuts key in common agents); and no text the kind's `[[typed]]` rules require on screen (its footer,
+  compared case-insensitively), which could stand in for the real footer; and no last word starting with `@` (a file picker would take the
   Enter). Clients show any such character that reaches them as a visible `\u{…}` escape.
 - **Following.** `agent_wait` and `agent_output` answer only for helpers the caller started (anything else is `agent.not_found`).
   `agent_wait` ends when the helper reaches the state or exits (`state: "exited"`); a connection may have 8 waits open
