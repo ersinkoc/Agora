@@ -248,6 +248,59 @@ impl DiskEventLog {
         self.ack(next - 1)
     }
 
+    /// The first retained event not yet acknowledged for which `pick` says yes, read from disk one record at a time (a start-up
+    /// check must not hold the whole backlog in memory).
+    pub fn find_unacked(&self, mut pick: impl FnMut(&[u8]) -> bool) -> io::Result<Option<Vec<u8>>> {
+        let idx =
+            usize::try_from((self.acked + 1).saturating_sub(self.first_seq)).unwrap_or(usize::MAX);
+        let Some(start) = self.offsets.get(idx) else {
+            return Ok(None);
+        };
+        let mut f = File::open(self.dir.join("events.log"))?;
+        f.seek(SeekFrom::Start(*start))?;
+        let mut reader = io::BufReader::new(f.take(self.end - start));
+        while let Some(p) = read_record(&mut reader) {
+            if pick(&p) {
+                return Ok(Some(p));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Moves this log out of the way, never deleting it: `events.log` becomes `events.<label>.<unix_secs>.log` in the same folder
+    /// (and the ack file `events.<label>.<unix_secs>.ack`), with `-2`, `-3`, ... added when that name is taken. `label` is reduced
+    /// to `[A-Za-z0-9._-]` (others become `_`, at most 64 characters). Returns the new path of the log; opening the folder
+    /// afterwards starts a fresh, empty log numbered from 1.
+    pub fn set_aside(self, label: &str, unix_secs: u64) -> io::Result<PathBuf> {
+        let Self { dir, file, .. } = self;
+        drop(file);
+        let label: String = label
+            .chars()
+            .take(64)
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let label = if label.is_empty() { "_".into() } else { label };
+        let mut stem = format!("events.{label}.{unix_secs}");
+        let mut n = 1;
+        while dir.join(format!("{stem}.log")).exists() || dir.join(format!("{stem}.ack")).exists() {
+            n += 1;
+            stem = format!("events.{label}.{unix_secs}-{n}");
+        }
+        let log = dir.join(format!("{stem}.log"));
+        fs::rename(dir.join("events.log"), &log)?;
+        let ack = dir.join("ack");
+        if ack.exists() {
+            fs::rename(ack, dir.join(format!("{stem}.ack")))?;
+        }
+        Ok(log)
+    }
+
     /// Events after `after`, in order, for replay following a reconnect (`after` is the consumer's ack).
     pub fn replay_after(&self, after: u64) -> Result<Vec<Vec<u8>>, ReplayError> {
         self.replay_after_max(after, usize::MAX)
@@ -459,6 +512,42 @@ mod tests {
         assert_eq!(log.acked(), 2);
         log.ack(1000).unwrap();
         assert_eq!(log.acked(), 3);
+    }
+
+    #[test]
+    fn find_unacked_looks_only_past_the_ack() {
+        let mut log = DiskEventLog::open(&dir(), 1 << 20).unwrap();
+        for i in 1..=4 {
+            log.append(&ev(i)).unwrap();
+        }
+        log.ack(2).unwrap();
+        assert_eq!(log.find_unacked(|p| p == ev(1)).unwrap(), None);
+        assert_eq!(log.find_unacked(|p| p == ev(3)).unwrap(), Some(ev(3)));
+        log.ack(4).unwrap();
+        assert_eq!(log.find_unacked(|_| true).unwrap(), None);
+    }
+
+    #[test]
+    fn a_log_set_aside_is_renamed_never_deleted_and_a_fresh_one_starts_at_1() {
+        let d = dir();
+        let mut log = DiskEventLog::open(&d, 1 << 20).unwrap();
+        for i in 1..=3 {
+            log.append(&ev(i)).unwrap();
+        }
+        log.ack(1).unwrap();
+        let kept = log.set_aside("lo/cal", 1700).unwrap();
+        assert_eq!(kept, d.join("events.lo_cal.1700.log"));
+        assert!(d.join("events.lo_cal.1700.ack").exists());
+        assert!(!d.join("ack").exists());
+        let old = DiskEventLog::open(&d, 1 << 20).unwrap();
+        assert_eq!((old.next_seq(), old.acked()), (1, 0));
+        // The same name in the same second does not overwrite the first.
+        assert_eq!(
+            old.set_aside("lo/cal", 1700).unwrap(),
+            d.join("events.lo_cal.1700-2.log")
+        );
+        let bytes = fs::read(&kept).unwrap();
+        assert_eq!(&bytes[..8], MAGIC);
     }
 
     #[test]

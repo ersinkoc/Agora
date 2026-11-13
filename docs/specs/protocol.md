@@ -49,7 +49,11 @@ disk while disconnected.
 
 Node buffer (`agora-node::event_buffer`): an append-only log of checksummed records plus an atomically replaced ack
 file. A torn tail from a crash is truncated on open. After a reconnect the node replays everything after the
-hub's ack, in order. The log is size-capped (oldest events dropped first). If the hub asks for events the node no longer
+hub's ack, in order. One log holds the events of one producer: when the node starts and events past the ack name another
+producer (it ran as `local` before it was enrolled, or under another name), it never replays them. It renames the log to
+`events.<old id>.<unix seconds>.log` (and its ack file to `.ack`) in the same folder, never deleting it, starts a fresh log
+numbered from 1, and says so in its output (`cli-node-events-set-aside`). The hub would refuse them anyway (section 3, hub node
+session). The log is size-capped (oldest events dropped first). If the hub asks for events the node no longer
 has (unacknowledged events dropped by the cap, or a hub restored from a backup older than what the node has trimmed), the
 node resynchronizes instead of stalling (ADR-0054): it appends a resync announcement to its buffer, sends
 `SnapshotRequired`, and replays from its oldest retained event. The announcement states facts (ADR-0055): the
@@ -80,8 +84,13 @@ numbering moves to it and the skipped range `(producer, from_seq, to_seq, at_ms)
 the acknowledgement to send back. Clients page the log by global position. Payloads are opaque encoded events.
 
 Hub node session (`agora-hub::session`): a state machine over decoded messages, independent of transport and framing.
-The producer id is the node's authenticated identity; an event naming another producer is `protocol.invalid_message`.
-Order is `Hello` (role must be node) → `Resume` → events. The hub answers `Resume` with `ResumeOk { from_seq }` where
+The producer id is the node's authenticated identity; an event naming another producer is `protocol.producer_mismatch`
+(`node_id`, `producer_id`).
+When the hub ends a node's connection because the node broke the protocol (such as
+`protocol.producer_mismatch`), it first sends a WebSocket close (code 1008) whose reason is the stable error code, logs
+`node refused: <node> <code> <params>`, and reads until the node's side of the close (at most 5 s) so the reason is not lost
+to a reset; the node's link reports it as `Refused(<code>)` in its log. A close reason is transport framing, not a schema message:
+a peer that does not look at it sees an ordinary close. Order is `Hello` (role must be node) → `Resume` → events. The hub answers `Resume` with `ResumeOk { from_seq }` where
 `from_seq` is one past what the hub already holds, regardless of what the node claims. Each event yields `Applied`,
 `Duplicate` or `Gap { expected }`. After the handshake the node may send `SnapshotRequired` (before it is
 `protocol.invalid_message`): then its next event with a `seq` above the hub's ack becomes the new base, once, and yields

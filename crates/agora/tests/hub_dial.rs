@@ -2085,3 +2085,90 @@ fn the_terminal_console_keeps_a_forget_refusals_permission_details() {
     );
     assert!(!hub.state.hub.view().0.agents["laptop/agent-1"].forgotten);
 }
+
+/// Found on macOS: a machine whose node ran once before it was enrolled has events recorded as `local` in its buffer. After
+/// `agora node enroll` the node used to replay them, the hub ended the connection because they name another node than the
+/// certificate, and the node saw only "connection reset", forever. Now the node sets the unlinked log aside at start (renamed, never
+/// deleted), links at once under its enrolled name, and its new events reach the hub.
+#[test]
+fn a_node_that_ran_before_it_was_enrolled_links_and_its_new_events_arrive() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return;
+    }
+    let hub = hubside("mac-tm3");
+    let addr = hub.listen("127.0.0.1:0");
+    let dir = tmp("before-enroll");
+    std::fs::create_dir_all(&dir).unwrap();
+    let cfg = |id: &str| agora_node::daemon::NodeConfig {
+        node_id: id.into(),
+        socket: dir.join("c.sock"),
+        data_dir: dir.join("data"),
+        worktree_root: dir.join("wt"),
+        manifests_dir: dir.join("manifests"),
+        projects: vec![],
+        limits: Default::default(),
+    };
+    // Not enrolled yet: the node runs as `local` and records events nobody acknowledges.
+    {
+        let node = agora_node::daemon::Node::start(&cfg("local")).unwrap();
+        node.events
+            .checkout_discovered("local", "proj", Path::new("/work/proj"));
+        node.events.node_resources("local", 1, 1, 0);
+        assert!(node.events.next_seq() > 2);
+    }
+    // Enrolled, started again under the certificate's name.
+    let node = agora_node::daemon::Node::start(&cfg("mac-tm3")).unwrap();
+    assert_eq!(
+        node.events_set_aside.as_ref().map(|s| s.old_id.as_str()),
+        Some("local"),
+        "the node says it set the unlinked events aside"
+    );
+    let _link = spawn(Arc::clone(&node.events), hub.link(addr)).unwrap();
+    wait("the enrolled node to be online in the hub", || {
+        hub.state
+            .hub
+            .view()
+            .0
+            .nodes
+            .get("mac-tm3")
+            .is_some_and(|n| n.online)
+    });
+    node.events.node_resources("mac-tm3", 4, 4, 0);
+    wait("a new event to arrive", || {
+        hub.state.hub.view().0.nodes["mac-tm3"].agents_running == 4
+    });
+    wait("everything to be acknowledged", || {
+        node.events.acked() == node.events.next_seq() - 1
+    });
+    assert!(!hub.state.hub.view().0.nodes.contains_key("local"));
+    // The old events are kept beside the new log, never deleted.
+    let kept: Vec<String> = std::fs::read_dir(dir.join("data").join("events"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with("events.local.") && n.ends_with(".log"))
+        .collect();
+    assert_eq!(kept.len(), 1, "{kept:?}");
+}
+
+/// When the hub ends a node's connection because an event names another node, it says why with a stable code before it closes,
+/// and the node's link reports that code instead of a bare reset.
+#[test]
+fn the_hub_says_why_it_refuses_events_that_name_another_node() {
+    let hub = hubside("laptop");
+    let addr = hub.listen("127.0.0.1:0");
+    // A buffer written under another name, sent over the certificate of `laptop`.
+    let sink = sink_with_agent(&tmp("mismatch"), "someone-else");
+    let link = hub.link(addr);
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let r = hub
+        .rt
+        .block_on(agora_node::uplink_client::run_once(&link, &sink, &stop));
+    match r {
+        Err(agora_node::uplink_client::LinkError::Refused(code)) => {
+            assert_eq!(code, "protocol.producer_mismatch");
+        }
+        other => panic!("expected a refusal with a code, got {other:?}"),
+    }
+    assert_eq!(sink.acked(), 0);
+    assert!(!hub.state.hub.view().0.nodes.contains_key("someone-else"));
+}

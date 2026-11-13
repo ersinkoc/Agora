@@ -6,6 +6,7 @@ auth-device_revoked = Bu cihaz ({ $device_id }) kaldırıldı ve artık bağlana
 protocol-unsupported_generation = Bu sürüm uyumlu değil: sunulan { $offered }, desteklenen { $supported }.
 protocol-capability_missing = Karşı taraf { $capability } özelliğini desteklemiyor.
 protocol-invalid_message = İstek geçerli değildi (alan: { $field }).
+protocol-producer_mismatch = { $node_id } makinesi başka bir adla ({ $producer_id }) kaydedilmiş olaylar gönderdi; hub bunları kabul etmedi.
 node-offline = { $node_id } makinesi bağlı değil.
 node-unknown = { $node_id } makinesi bu hub tarafından tanınmıyor.
 node-timeout = { $node_id } makinesi zamanında yanıt vermedi.
