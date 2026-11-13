@@ -51,5 +51,8 @@ agent's pid, process group and process start time (read in `agora-platform`: `/p
 not needed on Windows, where the agents' job object ends them with the node). At the next start an interrupted entry whose pid still
 runs with the same start time is reported `still_running`: Resume is refused (`agent.still_running`) until the owner stops it
 (`agent.stop` ends exactly that process, its group when it leads one) or leaves it. A pid whose start time differs belongs to another
-process and is never touched. A node that stops cleanly now ends its agents itself before it exits.
+process and is never touched; neither is one whose boot (Linux `boot_id`) or program name (`comm`) differs from the recorded one, so
+a ledger written by someone else cannot point a stop at another program. A node dropped in-process (tests, an embedding) ends its
+agents itself. `agora node` has no signal handler: under systemd's default `KillMode=control-group` its agents die with it anyway; a
+plain `kill` of the node process leaves terminal agents running, and they show as still running at the next start.
 

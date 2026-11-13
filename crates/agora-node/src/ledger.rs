@@ -70,6 +70,9 @@ pub struct Entry {
     pub pid: u32,
     pub process_group: u32,
     pub process_started: u64,
+    /// The boot it started in (Linux) and its program's name: a process is the recorded one only when both match too.
+    pub process_boot: String,
+    pub process_name: String,
 }
 
 #[derive(Debug, Clone)]
@@ -149,6 +152,8 @@ impl Entry {
             "pid": self.pid,
             "process_group": self.process_group,
             "process_started": self.process_started,
+            "process_boot": self.process_boot,
+            "process_name": self.process_name,
         })
     }
 
@@ -188,6 +193,8 @@ impl Entry {
             pid: u32::try_from(number(v, "pid")).unwrap_or(0),
             process_group: u32::try_from(number(v, "process_group")).unwrap_or(0),
             process_started: number(v, "process_started"),
+            process_boot: field(v, "process_boot"),
+            process_name: field(v, "process_name"),
         };
         (!e.agent_id.is_empty() && !e.kind.is_empty()).then_some(e)
     }
@@ -205,10 +212,12 @@ impl Entry {
 
     /// The process it ran as, when one was recorded.
     pub fn process(&self) -> Option<agora_platform::ProcessIdentity> {
-        (self.pid > 1 && self.process_started != 0).then_some(agora_platform::ProcessIdentity {
+        (self.pid > 1 && self.process_started != 0).then(|| agora_platform::ProcessIdentity {
             pid: self.pid,
             group: self.process_group,
             started: self.process_started,
+            boot: self.process_boot.clone(),
+            name: self.process_name.clone(),
         })
     }
 
@@ -369,11 +378,34 @@ impl Ledger {
         let Some(e) = st.entries.get_mut(agent_id) else {
             return;
         };
-        let (pid, group, started) = p.map_or((0, 0, 0), |p| (p.pid, p.group, p.started));
-        if (e.pid, e.process_group, e.process_started) == (pid, group, started) {
+        let (pid, group, started, boot, name) =
+            p.map_or((0, 0, 0, String::new(), String::new()), |p| {
+                (
+                    p.pid,
+                    p.group,
+                    p.started,
+                    bounded(&p.boot),
+                    bounded(&p.name),
+                )
+            });
+        let now = (pid, group, started, boot, name);
+        let was = (
+            e.pid,
+            e.process_group,
+            e.process_started,
+            e.process_boot.clone(),
+            e.process_name.clone(),
+        );
+        if was == now {
             return;
         }
-        (e.pid, e.process_group, e.process_started) = (pid, group, started);
+        (
+            e.pid,
+            e.process_group,
+            e.process_started,
+            e.process_boot,
+            e.process_name,
+        ) = now;
         e.updated_at_ms = now_ms;
         st.dirty = true;
         drop(st);
@@ -560,6 +592,8 @@ fn apply(st: &mut State, body: &Body, now: u64) -> bool {
                 e.ended = true;
                 e.interrupted_at_ms = 0;
                 (e.pid, e.process_group, e.process_started) = (0, 0, 0);
+                e.process_boot.clear();
+                e.process_name.clear();
                 e.updated_at_ms = now;
                 st.dirty = true;
                 true

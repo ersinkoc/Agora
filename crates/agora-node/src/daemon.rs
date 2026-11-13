@@ -1310,12 +1310,15 @@ impl Node {
                         // that outlives a crashed node is recognised at the next start. Read only when the pid changed.
                         for (agent, pid) in &pids {
                             if processes.get(agent) != Some(pid) {
-                                processes.insert(agent.clone(), *pid);
-                                ledger_tick.set_process(
-                                    agent.as_str(),
-                                    agora_platform::process_identity(*pid).ok(),
-                                    now_ms(),
-                                );
+                                // A read that failed (a process just starting) is tried again on the next tick.
+                                if let Ok(identity) = agora_platform::process_identity(*pid) {
+                                    processes.insert(agent.clone(), *pid);
+                                    ledger_tick.set_process(
+                                        agent.as_str(),
+                                        Some(identity),
+                                        now_ms(),
+                                    );
+                                }
                             }
                         }
                         processes.retain(|a, _| pids.iter().any(|(p, _)| p == a));

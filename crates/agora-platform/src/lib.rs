@@ -921,13 +921,16 @@ pub fn process_name(pid: u32) -> io::Result<String> {
     }
 }
 
-/// What tells a running process apart from a later one that got the same pid (ADR-0060): its process group and its start time, in
-/// a unit of the system's own (compared, never shown).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// What tells a running process apart from a later one that got the same pid (ADR-0060): its process group, its start time in a
+/// unit of the system's own (compared, never shown), the boot it started in (Linux `boot_id`; empty where the start time already
+/// tells boots apart) and its program's name.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessIdentity {
     pub pid: u32,
     pub group: u32,
     pub started: u64,
+    pub boot: String,
+    pub name: String,
 }
 
 /// The [`ProcessIdentity`] of a running process. `Unsupported` on Windows, where a node's agents are in a job object that ends them
@@ -944,9 +947,14 @@ pub fn process_identity(pid: u32) -> io::Result<ProcessIdentity> {
     }
 }
 
-/// Whether the process `id` names still runs: the same pid with the same start time (a reused pid is not it).
+/// Whether the process `id` names still runs: the same pid with the same start time, in the same boot, running the same program (a
+/// reused pid is not it, and neither is a record that names nothing: an empty name never matches).
 pub fn process_still_running(id: &ProcessIdentity) -> bool {
-    id.pid > 1 && process_identity(id.pid).is_ok_and(|now| now.started == id.started)
+    id.pid > 1
+        && !id.name.is_empty()
+        && process_identity(id.pid).is_ok_and(|now| {
+            now.started == id.started && now.boot == id.boot && now.name == id.name
+        })
 }
 
 /// Ends the process `id` names (ADR-0060), and with it its process group when it leads one (an agent's terminal does), only if it
