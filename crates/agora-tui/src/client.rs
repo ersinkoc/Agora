@@ -717,13 +717,12 @@ impl Session {
     /// ADR-0061: registers this terminal's key and name with the hub under the signed-in person (a candidate for their machines, never
     /// trust by itself). Sent after every sign-in; the hub keeps when it was last used.
     pub fn register_device(&mut self, device: &Device, name: &str) -> Result<(), String> {
+        let registration = device
+            .registration(name, now_ms())
+            .ok_or_else(|| "client.sign".to_string())?;
         self.command(
             "",
-            command_request::Command::DeviceRegister(agora_protocol::v1::DeviceRegister {
-                device_id: device.id.clone(),
-                name: name.to_string(),
-                public_key: device.public_key(),
-            }),
+            command_request::Command::DeviceRegister(registration),
             Duration::from_secs(15),
         )
     }
@@ -743,11 +742,12 @@ impl Session {
 
     /// ADR-0061: asks the person's other devices to approve this one.
     pub fn ask_approval(&mut self, device: &Device) -> Result<(), String> {
+        let ask = device
+            .ask(now_ms())
+            .ok_or_else(|| "client.sign".to_string())?;
         self.command(
             "",
-            command_request::Command::DeviceAskApproval(agora_protocol::v1::DeviceAskApproval {
-                device_id: device.id.clone(),
-            }),
+            command_request::Command::DeviceAskApproval(ask),
             Duration::from_secs(15),
         )
     }
@@ -758,9 +758,7 @@ impl Session {
         device: &Device,
         target: &agora_protocol::v1::DeviceInfo,
     ) -> Result<(), String> {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(0));
+        let now = now_ms();
         let endorsement = device
             .endorse(target, &[], now)
             .ok_or_else(|| "client.sign".to_string())?;
@@ -955,4 +953,11 @@ mod answer_tests {
             None
         );
     }
+}
+
+/// Milliseconds since the Unix epoch (0 before it).
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(0))
 }

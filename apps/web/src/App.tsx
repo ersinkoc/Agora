@@ -23,7 +23,7 @@ import { commitsOf, type CommitItem } from './net/history';
 import type { WorkspaceFiles } from './net/files';
 import { demoSource } from './terminal/source';
 import { AuditPage, DevicePage, Focus, Gallery, MachinesPage, SignInPage, type MyDevice } from './screens';
-import { browserName, canBeApprovedOn, fingerprint, fromHex, signEndorsement, signRevocation, trustedBy, waitingForApproval, type DeviceInfo } from './net/devices';
+import { browserName, canBeApprovedOn, fingerprint, fromHex, registrationVerifies, signAsk, signEndorsement, signRegistration, signRevocation, trustedBy, waitingForApproval, type DeviceInfo } from './net/devices';
 import { DeviceRequest } from './components/DeviceRequest';
 import { num } from './net/view';
 import { loadAudit } from './net/audit';
@@ -73,6 +73,7 @@ export function App() {
   const [mine, setMine] = useState<DeviceInfo[]>([]);
   const [prints, setPrints] = useState<Map<string, string>>(new Map());
   const [later, setLater] = useState<Set<string>>(new Set());
+  const [proven, setProven] = useState<Set<string>>(new Set());
   const [notice, setNotice] = useState<string | undefined>();
   const [starting, setStarting] = useState<{ node?: string } | false>(false);
   // A machine refused a command until the owner allows it (ADR-0041): what was asked, shown as a dialog.
@@ -172,7 +173,7 @@ export function App() {
   useEffect(() => {
     if (!api || !device || !live) return;
     let stop = false;
-    void api.command('', { deviceRegister: { deviceId: device.id, name: browserName(), publicKey: fromHex(device.publicKeyHex) } })
+    void signRegistration(device, browserName(), Date.now()).then((r) => api.command('', { deviceRegister: r }))
       .catch(() => undefined).then(() => { if (!stop) void refreshDevices(); });
     const timer = setInterval(() => { void refreshDevices(); }, 15_000);
     return () => { stop = true; clearInterval(timer); };
@@ -183,11 +184,13 @@ export function App() {
     if (device) keys.push([device.id, fromHex(device.publicKeyHex)]);
     void Promise.all(keys.map(async ([id, k]) => [id, k.length === 65 ? await fingerprint(k) : ''] as const))
       .then((e) => { if (!stop) setPrints(new Map(e)); }, () => undefined);
+    void Promise.all(mine.map(async (d) => ((await registrationVerifies(d)) ? d.deviceId ?? '' : '')))
+      .then((ids) => { if (!stop) setProven(new Set(ids.filter(Boolean))); }, () => undefined);
     return () => { stop = true; };
   }, [mine, device]);
   const askApproval = useCallback(async (): Promise<boolean> => {
     if (!api || !device) return false;
-    try { await api.command('', { deviceAskApproval: { deviceId: device.id } }); void refreshDevices(); return true; } catch { return false; }
+    try { await api.command('', { deviceAskApproval: await signAsk(device, Date.now()) }); void refreshDevices(); return true; } catch { return false; }
   }, [api, device, refreshDevices]);
   const approveDevice = useCallback(async (d: DeviceInfo, nodes: string[]): Promise<boolean> => {
     if (!api || !device || !d.deviceId || !d.publicKey) return false;
@@ -203,7 +206,7 @@ export function App() {
     try { await api.command('', { deviceRevoke: { revocation: await signRevocation(device, id, Date.now()) } }); void refreshDevices(); return true; } catch { return false; }
   }, [api, device, refreshDevices]);
   const trustedOn = device ? trustedBy(live?.trusted, device.id) : [];
-  const waiting = device && trustedOn.length ? waitingForApproval(mine, device.id).filter((d) => !later.has(d.deviceId ?? '')) : [];
+  const waiting = device && trustedOn.length ? waitingForApproval(mine, device.id).filter((d) => !later.has(d.deviceId ?? '') && proven.has(d.deviceId ?? '')) : [];
   const others: MyDevice[] = mine.filter((d) => d.deviceId && d.deviceId !== device?.id).map((d) => ({
     id: d.deviceId ?? '', name: d.name ?? '', fingerprint: prints.get(d.deviceId ?? '') ?? '', lastUsedMs: num(d.lastUsedMs),
     trustedOn: trustedBy(live?.trusted, d.deviceId ?? ''), waiting: num(d.approvalAskedMs) > 0, removed: num(d.revokedMs) > 0,

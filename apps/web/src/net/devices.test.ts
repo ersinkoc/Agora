@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import vectors from '../../../../schema/fixtures/signing/device-trust-v1.json';
 import { thisDevice, toHex, type KeyStore } from './approval';
 import { applyEvent, fromSnapshot } from './view';
-import { browserName, canBeApprovedOn, endorseMessage, fingerprint, fromHex, revokeMessage, signEndorsement, trustedBy, waitingForApproval } from './devices';
+import { askMessage, browserName, canBeApprovedOn, endorseMessage, fingerprint, fromHex, registerMessage, registrationVerifies, revokeMessage, signAsk, signEndorsement, signRegistration, trustedBy, waitingForApproval } from './devices';
 
 function memoryStore(): KeyStore {
   let saved: Awaited<ReturnType<KeyStore['load']>>;
@@ -24,6 +24,25 @@ describe('device endorsements (ADR-0061)', () => {
       expect(toHex(m), c.case).toBe(c.hex);
       expect(await crypto.subtle.verify(ES256, endorser, fromHex(c.signature) as BufferSource, m as BufferSource)).toBe(true);
     }
+  });
+
+  it('proves it holds its key when it registers and asks, as the hub and the node check', async () => {
+    const key = await crypto.subtle.importKey('raw', fromHex(vectors.endorser_public_key) as BufferSource, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['verify']);
+    for (const c of vectors.registrations) {
+      const m = registerMessage(c.device_id, c.name, fromHex(c.public_key), c.signed_at_ms);
+      expect(toHex(m), c.case).toBe(c.hex);
+      expect(await crypto.subtle.verify(ES256, key, fromHex(c.signature) as BufferSource, m as BufferSource)).toBe(true);
+    }
+    for (const c of vectors.asks) expect(toHex(askMessage(c.device_id, c.signed_at_ms))).toBe(c.hex);
+    const me = await thisDevice(memoryStore());
+    const r = await signRegistration(me, 'Firefox · Linux', 1_700_000_000_000);
+    expect(await crypto.subtle.verify(ES256, me.keys.publicKey, r.signature as BufferSource, registerMessage(me.id, 'Firefox · Linux', fromHex(me.publicKeyHex), 1_700_000_000_000) as BufferSource)).toBe(true);
+    expect(await registrationVerifies({ ...r, registrationSignature: r.signature })).toBe(true);
+    expect(await registrationVerifies({ ...r, name: 'Renamed by the hub', registrationSignature: r.signature })).toBe(false);
+    const other = await thisDevice(memoryStore());
+    expect(await registrationVerifies({ ...r, publicKey: fromHex(other.publicKeyHex), registrationSignature: r.signature })).toBe(false);
+    const a = await signAsk(me, 1_700_000_000_500);
+    expect(await crypto.subtle.verify(ES256, me.keys.publicKey, a.signature as BufferSource, askMessage(me.id, 1_700_000_000_500) as BufferSource)).toBe(true);
   });
 
   it('shows the same fingerprint as every other client', async () => {

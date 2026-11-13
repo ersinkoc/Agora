@@ -109,10 +109,13 @@ fn approve_device(
         Ok(l) => l,
         Err(code) => return fail(code),
     };
-    let Some(waiting) = list
-        .into_iter()
-        .find(|d| d.approval_asked_ms > 0 && d.revoked_ms == 0 && d.device_id != device.id)
-    else {
+    let Some(waiting) = list.into_iter().find(|d| {
+        d.approval_asked_ms > 0
+                && d.revoked_ms == 0
+                && d.device_id != device.id
+                // Only a device that registered itself with its own key: the hub cannot make up a request.
+                && agora_node::device_trust::registration_verifies(d)
+    }) else {
         return say.text(
             key!("tui-devices-none-waiting"),
             &[("fingerprint", Arg::Str(device.fingerprint()))],
@@ -137,7 +140,7 @@ fn approve_device(
         return say.text(key!("tui-device-cannot-vouch"), &[]);
     }
     // The name and the fingerprint come from the hub: shown as plain text, never as terminal control sequences.
-    let name = plain(&waiting.name).replace('\n', " ");
+    let name = agora_node::device_trust::shown(&plain(&waiting.name), 40);
     let fingerprint = agora_tui::device::fingerprint(&waiting.public_key);
     let mut out = std::io::stdout();
     let _ = write!(

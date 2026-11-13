@@ -85,7 +85,7 @@ function Themed({ theme }: { theme: 'dark' | 'light' }) {
       <AgentAddress agent={{ ...demoHelper, machineId: 'laptop', id: 'laptop/a8' }} />
       <StartApproval approval={demoStartApproval} start={demoStartApproval.start} onResolve={() => {}} />
       <HelperGrants list={async () => [{ id: 'ap-1', kind: 'codex', folder: '/home/dev/code/login-fix', remaining: 2 }]} revoke={async () => {}} refresh={0} />
-      <DeviceRequest inline request={{ id: 'web-3fa9c1', name: 'Firefox · Linux', fingerprint: '3f9a-07c2-11be-d4e0' }}
+      <DeviceRequest inline request={{ id: 'web-3fa9c1d24e5b6a70', name: 'Firefox · Linux', fingerprint: 'f947-3cb5-e304-81be-ecf2-64cd' }}
         machines={[{ id: 'laptop', name: 'laptop' }, { id: 'vps-1', name: 'vps-1' }]} onApprove={async () => true} onLater={() => {}} />
       <div className="gallery__row">
         <button type="button" className="button button--primary">{t('action-start-agent')}</button>

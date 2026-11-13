@@ -218,11 +218,34 @@ pub fn revoke_message(r: &agora_protocol::v1::DeviceRevocation) -> Vec<u8> {
     m
 }
 
-/// What people compare (ADR-0061): the first 8 bytes of the SHA-256 of the key, in groups of 2 bytes joined by `-`.
+/// The bytes a device signs to register itself (ADR-0061 proof of possession; `agora-node::device_trust::register_message`).
+pub fn register_message(
+    device_id: &str,
+    name: &str,
+    public_key: &[u8],
+    signed_at_ms: u64,
+) -> Vec<u8> {
+    let mut m = b"agora-device-register-v1\0".to_vec();
+    field(&mut m, device_id.as_bytes());
+    field(&mut m, name.as_bytes());
+    field(&mut m, hex(public_key).as_bytes());
+    field(&mut m, signed_at_ms.to_string().as_bytes());
+    m
+}
+
+/// The bytes a device signs to ask another device of its person to approve it.
+pub fn ask_message(device_id: &str, signed_at_ms: u64) -> Vec<u8> {
+    let mut m = b"agora-device-ask-v1\0".to_vec();
+    field(&mut m, device_id.as_bytes());
+    field(&mut m, signed_at_ms.to_string().as_bytes());
+    m
+}
+
+/// What people compare (ADR-0061): the first 12 bytes (96 bits) of the SHA-256 of the key, in groups of 4 hex digits joined by `-`.
 pub fn fingerprint(public_key: &[u8]) -> String {
     ring::digest::digest(&ring::digest::SHA256, public_key)
         .as_ref()
-        .get(..8)
+        .get(..12)
         .unwrap_or_default()
         .chunks(2)
         .map(hex)
@@ -237,6 +260,31 @@ impl Device {
     /// The 65-byte public key.
     pub fn public_key(&self) -> Vec<u8> {
         self.pair.public_key().as_ref().to_vec()
+    }
+
+    /// This device registering itself under `name`, signed at `now_ms` with its own key.
+    pub fn registration(
+        &self,
+        name: &str,
+        now_ms: u64,
+    ) -> Option<agora_protocol::v1::DeviceRegister> {
+        let public_key = self.public_key();
+        Some(agora_protocol::v1::DeviceRegister {
+            signature: self.sign(&register_message(&self.id, name, &public_key, now_ms))?,
+            device_id: self.id.clone(),
+            name: name.to_string(),
+            public_key,
+            signed_at_ms: now_ms,
+        })
+    }
+
+    /// This device asking another of its person to approve it, signed at `now_ms`.
+    pub fn ask(&self, now_ms: u64) -> Option<agora_protocol::v1::DeviceAskApproval> {
+        Some(agora_protocol::v1::DeviceAskApproval {
+            device_id: self.id.clone(),
+            signed_at_ms: now_ms,
+            signature: self.sign(&ask_message(&self.id, now_ms))?,
+        })
     }
 
     /// This device's fingerprint, as every client shows it.
@@ -433,6 +481,22 @@ mod tests {
             };
             assert_eq!(hex(&revoke_message(&r)), c["hex"].as_str().unwrap());
         }
+        for c in v["registrations"].as_array().unwrap() {
+            let m = register_message(
+                c["device_id"].as_str().unwrap(),
+                c["name"].as_str().unwrap(),
+                &unhex(c["public_key"].as_str().unwrap()),
+                c["signed_at_ms"].as_u64().unwrap(),
+            );
+            assert_eq!(hex(&m), c["hex"].as_str().unwrap());
+        }
+        for c in v["asks"].as_array().unwrap() {
+            let m = ask_message(
+                c["device_id"].as_str().unwrap(),
+                c["signed_at_ms"].as_u64().unwrap(),
+            );
+            assert_eq!(hex(&m), c["hex"].as_str().unwrap());
+        }
         for f in v["fingerprints"].as_array().unwrap() {
             assert_eq!(
                 fingerprint(&unhex(f["public_key"].as_str().unwrap())),
@@ -461,7 +525,21 @@ mod tests {
         let trust = agora_node::device_trust::DeviceTrust::new("laptop", &file);
         assert!(trust.endorse(&e, now).is_ok());
         assert!(trust.trusted_ids(now).contains(&other.id));
-        assert_eq!(me.fingerprint().len(), 19);
+        assert_eq!(me.fingerprint().len(), 29, "96 bits in groups of 4");
+        let r = me.registration("Terminal on box", now).unwrap();
+        let info = agora_protocol::v1::DeviceInfo {
+            device_id: r.device_id.clone(),
+            name: r.name.clone(),
+            public_key: r.public_key.clone(),
+            signed_at_ms: r.signed_at_ms,
+            registration_signature: r.signature.clone(),
+            ..Default::default()
+        };
+        assert!(agora_node::device_trust::registration_verifies(&info));
+        assert_eq!(
+            ask_message("x", 1),
+            b"agora-device-ask-v1\x001:x1:1".to_vec()
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 

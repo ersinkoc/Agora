@@ -17,7 +17,7 @@ describe('approval signatures', () => {
   it('keeps one device key, whose raw signature verifies against its public key', async () => {
     const store = memoryStore();
     const d = await thisDevice(store);
-    expect(d.id).toMatch(/^web-[0-9a-f]{6}$/);
+    expect(d.id).toMatch(/^web-[0-9a-f]{16}$/); // 64 random bits
     expect(d.publicKeyHex).toHaveLength(130); // 65 bytes
     expect(d.publicKeyHex.startsWith('04')).toBe(true);
     expect((await thisDevice(store)).publicKeyHex).toBe(d.publicKeyHex); // second visit: same key

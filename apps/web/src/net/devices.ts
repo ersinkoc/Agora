@@ -55,10 +55,51 @@ export function fromHex(hex: string): Uint8Array {
   return out;
 }
 
-// What people compare: the first 8 bytes of the SHA-256 of the 65-byte key, in groups of 2 bytes joined by `-`.
+// What people compare: the first 12 bytes (96 bits) of the SHA-256 of the 65-byte key, in groups of 4 hex digits joined by `-`.
+// Always computed here from the key bytes, never taken from the hub.
 export async function fingerprint(publicKey: Uint8Array, subtle: SubtleCrypto = crypto.subtle): Promise<string> {
-  const d = toHex(new Uint8Array(await subtle.digest('SHA-256', publicKey as BufferSource)).slice(0, 8));
-  return [0, 4, 8, 12].map((i) => d.slice(i, i + 4)).join('-');
+  const d = toHex(new Uint8Array(await subtle.digest('SHA-256', publicKey as BufferSource)).slice(0, 12));
+  return [0, 4, 8, 12, 16, 20].map((i) => d.slice(i, i + 4)).join('-');
+}
+
+// Proof of possession (ADR-0061): what this device signs to register itself, and to ask another device to approve it.
+export function registerMessage(deviceId: string, name: string, publicKey: Uint8Array, signedAtMs: number): Uint8Array {
+  const out = [...enc.encode('agora-device-register-v1'), 0];
+  field(out, deviceId);
+  field(out, name);
+  field(out, toHex(publicKey));
+  field(out, String(signedAtMs));
+  return Uint8Array.from(out);
+}
+
+export function askMessage(deviceId: string, signedAtMs: number): Uint8Array {
+  const out = [...enc.encode('agora-device-ask-v1'), 0];
+  field(out, deviceId);
+  field(out, String(signedAtMs));
+  return Uint8Array.from(out);
+}
+
+const sign = async (device: Device, m: Uint8Array, subtle: SubtleCrypto) =>
+  new Uint8Array(await subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, device.keys.privateKey, m as BufferSource));
+
+export async function signRegistration(device: Device, name: string, nowMs: number, subtle: SubtleCrypto = crypto.subtle): Promise<agora.v1.IDeviceRegister> {
+  const publicKey = fromHex(device.publicKeyHex);
+  return { deviceId: device.id, name, publicKey, signedAtMs: nowMs, signature: await sign(device, registerMessage(device.id, name, publicKey, nowMs), subtle) };
+}
+
+// Did the holder of the device's key register it as listed? The card for a device that asks is shown only then: a hub cannot make up
+// a request for a key nobody holds.
+export async function registrationVerifies(d: DeviceInfo, subtle: SubtleCrypto = crypto.subtle): Promise<boolean> {
+  const key = d.publicKey, sig = d.registrationSignature;
+  if (!key || key.length !== 65 || !sig || sig.length !== 64 || !d.deviceId) return false;
+  try {
+    const k = await subtle.importKey('raw', key as BufferSource, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['verify']);
+    return await subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, k, sig as BufferSource, registerMessage(d.deviceId, d.name ?? '', key, Number(d.signedAtMs ?? 0)) as BufferSource);
+  } catch { return false; }
+}
+
+export async function signAsk(device: Device, nowMs: number, subtle: SubtleCrypto = crypto.subtle): Promise<agora.v1.IDeviceAskApproval> {
+  return { deviceId: device.id, signedAtMs: nowMs, signature: await sign(device, askMessage(device.id, nowMs), subtle) };
 }
 
 // The name this browser registers under: the browser and the system, as the person would say it ("Firefox on Linux").
