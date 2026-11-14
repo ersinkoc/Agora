@@ -26,9 +26,12 @@ cli-usage =
       agora hub ssh [add NAME DESTINATION [--port N]] [--hub-dir DIR]
       agora hub backup [FILE] [--keep N] [--hub-dir DIR]
       agora hub restore FILE [--hub-dir DIR]
-      agora node enroll --hub URL --ca FILE --code CODE --id NAME
+      agora hub devices [forget DEVICE_ID] [--hub-dir DIR]
+      agora node enroll --hub URL --ca FILE --code CODE --id NAME [--yes --fingerprint FP]... [--include-others] [--replace]
       agora panel
       agora node trust DEVICE_ID PUBLIC_KEY_HEX [--data DIR]
+      agora node trust --from-hub [--yes --fingerprint FP]... [--include-others] [--replace] [--data DIR]
+      agora node untrust DEVICE_ID [--data DIR]
       agora tui [--hub HOST:PORT --ca FILE --code CODE] [--hub-dir DIR]
       agora update [--check] [--version X] [--release-url URL] [--release-key FILE] [--unsigned]
       agora adapter install NAME [--registry URL] [--root-key FILE] [--yes] | update [NAME] | list | remove NAME
@@ -81,6 +84,8 @@ doctor-agent-missing = { $detail } ({ $from ->
     }): this machine cannot find `{ $program }` in its PATH. Install it there, or start the node from a terminal where `{ $program }` runs.
 doctor-policy-path-dropped = The node's policy line "{ $detail }" names a path the node cannot use (relative, "..", or "~" without a home folder); agents start without it. Write a full path or one starting with "~/".
 doctor-policy-path-missing = The node's policy line "{ $detail }" names a path that does not exist yet; agents start without it until it does.
+doctor-policy-restart = The node reads its policy file { $detail } only when it starts: after you change it, restart the node ("agora node run"). Trusting or removing a device needs no restart.
+doctor-policy-changed = The policy file { $detail } changed after this node started, so the change does not apply yet. Restart the node ("agora node run") to apply it.
 doctor-manifest-invalid = The agent description { $detail } could not be read.
 doctor-summary-ok = Everything Agora needs is in place.
 doctor-summary-problems = Something Agora needs is missing. Fix the items marked PROBLEM.
@@ -102,6 +107,36 @@ cli-password-on = A screen password is set: sign-ins from other machines need it
 cli-password-off = No screen password is set: a sign-in code alone is enough.
 cli-trusted = Device { $id } can now answer approvals on this node.
 cli-trust-failed = Could not trust that device: { $reason }
+cli-devices-offer = The hub lists { $count ->
+        [one] a device
+       *[other] { $count } devices
+    } this machine does not trust yet. Compare each fingerprint with the one the window shows under "This device":
+cli-devices-line =   { $name } ({ $id }) · registered { $when }
+cli-devices-line-user =   { $name } ({ $id }) · of { $user } · registered { $when }
+cli-devices-fingerprint =     fingerprint { $fingerprint }
+cli-devices-replaces =     This machine already trusts { $id } with another key: trusting this one replaces it (only with --replace).
+cli-devices-unproven = The hub lists { $id } without its own signature (proof that its key is held); it is not offered.
+cli-devices-others = Devices of other people on this hub ({ $count }), trusted only with --include-others and their fingerprints:
+cli-devices-others-need-flag = Nothing was trusted: these devices are not the hub owner's. To trust one, pass --yes --include-others --fingerprint FP.
+cli-devices-replace-refused = Not trusted: { $id } is already trusted here with another key. Pass --replace to replace it.
+cli-devices-question = Trust these devices on this machine? [y/N]
+cli-devices-yes = y, yes
+cli-devices-trusted = Trusted { $name } ({ $id }, { $fingerprint }) on this machine.
+cli-devices-none = No device is registered on the hub yet. Sign in from the window, then run "agora node trust --from-hub" here.
+cli-devices-none-new = Every device registered on the hub is already trusted on this machine.
+cli-devices-declined = Nothing was trusted.
+cli-devices-not-asked = Nothing was trusted: this is not an interactive terminal. Run "agora node trust --from-hub" on this machine, or pass --yes with --fingerprint for each device.
+cli-devices-unmatched = No device the hub lists has the fingerprint { $fingerprint }; it was not trusted.
+cli-devices-not-enrolled = This machine is not enrolled with a hub. Run "agora node enroll" first.
+cli-devices-failed = Could not get the devices from the hub ({ $reason }).
+cli-untrusted = Device { $id } is no longer trusted on this machine.
+cli-untrust-unknown = Device { $id } was not trusted on this machine. It stays refused if the hub carries an earlier approval of it.
+cli-hub-device-forgotten = Device { $id } is no longer listed. Machines keep refusing it.
+cli-hub-device-not-forgotten = Device { $id } is not a removed device on this hub; only removed devices can be forgotten.
+cli-hub-devices-none = No device is registered yet. A browser or the terminal client registers itself when it signs in.
+cli-hub-device-line = { $name } · { $fingerprint } · { $id } · { $user } · registered { $created } · last used { $used }{ $state }
+cli-device-state-revoked = {" "}· removed
+cli-device-state-waiting = {" "}· waiting for approval
 cli-hub-backup = Backup written to { $path }.
 cli-hub-restored = Database restored from the backup into { $path }. The previous one is kept next to it as before-restore.
 cli-hub-failed = The hub command failed: { $reason }

@@ -22,6 +22,12 @@ tui-blocked = { $agent } is waiting for you
 tui-machines = Machines
 tui-online = online
 tui-offline = offline
+tui-last-seen = last seen { $unit ->
+        [s] { $n } s
+        [min] { $n } min
+        [h] { $n } h
+       *[d] { $n } d
+    } ago
 tui-no-agents = No agents yet. Start one in the web app or with "agora agent start".
 tui-state-working = Working
 tui-state-needs-you = Needs you
@@ -32,7 +38,17 @@ tui-no-project = (no project)
 tui-hint-answer = Press y to allow, n to deny the first request above.
 tui-allowed = Allowed.
 tui-denied = Denied.
-tui-not-trusted = This device is not trusted by that machine yet. On that machine run: agora node trust { $id } { $key }   (if `agora` is not found there, run it in the folder of the agora program: ./agora, or .\agora.exe on Windows)
+tui-not-trusted = This device is not trusted by that machine yet. On that machine run: agora node trust { $id } { $key }   (if `agora` is not found there, run it in the folder of the agora program: ./agora, or .\agora.exe on Windows). Or press a to ask another device of yours to approve this one (fingerprint { $fingerprint }).
+tui-device-name = Terminal on { $host }
+tui-device-asked = Asked. Approve this terminal ({ $fingerprint }) on another device of yours that your machines trust: in the window, or with v in its terminal client.
+tui-devices-none-waiting = No device of yours is waiting for approval. This terminal's fingerprint: { $fingerprint }
+tui-device-cannot-vouch = No machine trusts this terminal yet, so its approval would count nowhere.
+tui-device-card =
+    { $name } asks to be trusted on your machines.
+    Fingerprint: { $fingerprint } (compare it with the one that device shows)
+    It will be trusted where this terminal is trusted: { $machines }
+    Press y to approve it with this terminal's key, any other key to cancel.
+tui-device-approved = Approved { $name }. Each machine checks the approval itself; the device shows as trusted once it has.
 tui-answer-failed = Could not send your answer ({ $code }).
 tui-hint-open = Tab: next agent · Enter: open it · x: stop it · s: start one (Ctrl-] comes back)
 tui-opening-failed = Could not open that terminal ({ $code }).
@@ -78,7 +94,7 @@ tui-reader-keys = j / k or the arrows scroll · space goes a page down · q goes
 tui-split-pick = Pick an agent on the left
 tui-split-no-screen = Opening its terminal…
 tui-split-status = { $online }/{ $total } machines · { $agents } agents · { $waiting } need you
-tui-split-keys = ↑↓ choose · Enter open · s start · f folder · x stop · u resume · d remove · q quit
+tui-split-keys = ↑↓ choose · Enter open · s start · f folder · x stop · u resume · d remove · a ask · v devices · q quit
 tui-split-chat = No terminal: Enter opens its conversation
 tui-folder-title = Start an agent in a folder on { $machine }
 tui-folder-keys = ↑↓ choose · Enter open · ⌫ up · Space start here · m machine · Esc cancel
@@ -114,7 +130,7 @@ tui-start-confirm-skip = Let the agent act without asking? With "{ $name }" it r
 tui-badge-no-ask = does not ask
 
 ## The app shell (ADR-0063 stage 2)
-tui-app-keys-tree = Enter open · N next that needs you · y / n answer · s start · f folder · x stop · u resume · d remove · Ctrl K commands · Tab next part · i details · q quit
+tui-app-keys-tree = Enter open · N next that needs you · y / n answer · s start · f folder · x stop · u resume · d remove · a ask · v devices · Ctrl K commands · Tab next part · i details · q quit
 tui-app-keys-terminal = Your keys go to the agent · Ctrl-] or F12 back to the list · Alt+1…9 tabs
 tui-app-keys-inspector = Tab next part · Esc back to the list · Ctrl K commands
 tui-app-keys-palette = Type to filter · ↑↓ choose · Enter run · Esc close

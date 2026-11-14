@@ -507,16 +507,16 @@ fn a_node_owner_can_trust_a_device_and_bad_input_trusts_nothing() {
     };
     assert!(run(&["node", "trust", "phone", &key]).status.success());
     let file = home.join("data/trusted-devices");
-    assert_eq!(
-        std::fs::read_to_string(&file).unwrap(),
-        format!("phone {key}\n")
+    // One line, the id and the key as before; ADR-0061 adds when its trust began (`since=`).
+    let written = std::fs::read_to_string(&file).unwrap();
+    assert!(
+        written.starts_with(&format!("phone {key} since=")),
+        "{written}"
     );
+    assert_eq!(written.lines().count(), 1);
     assert!(!run(&["node", "trust", "phone", "zz"]).status.success());
     assert!(!run(&["node", "trust", "phone"]).status.success());
-    assert_eq!(
-        std::fs::read_to_string(&file).unwrap(),
-        format!("phone {key}\n")
-    );
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), written);
     let _ = std::fs::remove_dir_all(&home);
 }
 

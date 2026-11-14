@@ -93,7 +93,14 @@ Measured with the real binaries and Chromium (`comms`: `log/2026-11-14-0115-wind
 the node keeps every agent running and catches up 1.5 s after the hub is back (guarded by `crates/agora/tests/hub_dial.rs`
 `a_node_keeps_working_without_the_hub_and_catches_up_when_it_appears`; the browser scenario is `scripts/e2e-link-resilience.mjs`).
 
-- **R1** Open: a silent link is not noticed (process frozen or asleep, TCP open): the window shows a frozen node online, and
+- **R1** Closed by ADR-0070 (hub-owned presence): the hub writes `NodeLink` up when a node's connection opens (a reconnect
+  included, so a node the hub closed as silent is Online again by itself with its agents untouched) and down when it ends or
+  is closed after 25 s of silence; the node pings every 10 s, drops a silent hub after 25 s, gives up a hung dial after 25 s
+  and redials at once after a suspension; the window pings every 15 s and starts over after 10 s without an answer; offline
+  machines show "last seen". Design and constants: `docs/design/observability.md` (Presence, Silence); acceptance:
+  `scripts/e2e-link-silent.mjs`; tests: `crates/agora-hub/tests/server.rs` (silent, frozen, replaced, old-node cadence),
+  `crates/agora-hub/src/projection.rs`, `crates/agora-node/src/uplink_client.rs`, `apps/web/src/net/live-resilience.test.ts`.
+  The original finding: a silent link was not noticed (process frozen or asleep, TCP open): the window shows a frozen node online, and
   nodes and windows do not reconnect to a frozen hub until it runs again (then within about 1 s, as before). A first version
   (node and hub dropping a link silent for 25 s, the window pinging every 15 s) was taken out of 0.3.8 after real runs:
   on `754a7b1` a node frozen 40 s or 3 min was never shown offline (the hub closed the silent link and recorded nothing; an

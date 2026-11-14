@@ -284,6 +284,135 @@ impl Device {
     }
 }
 
+fn field(out: &mut Vec<u8>, x: &[u8]) {
+    out.extend_from_slice(x.len().to_string().as_bytes());
+    out.push(b':');
+    out.extend_from_slice(x);
+}
+
+/// The bytes a device signs to endorse another (ADR-0061, `agora-node::device_trust::endorse_message`; vectors in
+/// `schema/fixtures/signing/device-trust-v1.json`).
+pub fn endorse_message(e: &agora_protocol::v1::DeviceEndorsement) -> Vec<u8> {
+    let mut m = b"agora-device-endorse-v1\0".to_vec();
+    field(&mut m, e.device_id.as_bytes());
+    field(&mut m, hex(&e.public_key).as_bytes());
+    field(&mut m, e.name.as_bytes());
+    field(&mut m, e.nodes.len().to_string().as_bytes());
+    for n in &e.nodes {
+        field(&mut m, n.as_bytes());
+    }
+    field(&mut m, e.issued_at_ms.to_string().as_bytes());
+    field(&mut m, e.expires_at_ms.to_string().as_bytes());
+    field(&mut m, e.endorser_device_id.as_bytes());
+    m
+}
+
+/// The bytes a device signs to revoke one (ADR-0061).
+pub fn revoke_message(r: &agora_protocol::v1::DeviceRevocation) -> Vec<u8> {
+    let mut m = b"agora-device-revoke-v1\0".to_vec();
+    field(&mut m, r.device_id.as_bytes());
+    field(&mut m, r.issued_at_ms.to_string().as_bytes());
+    field(&mut m, r.revoker_device_id.as_bytes());
+    m
+}
+
+/// The bytes a device signs to register itself (ADR-0061 proof of possession; `agora-node::device_trust::register_message`).
+pub fn register_message(
+    device_id: &str,
+    name: &str,
+    public_key: &[u8],
+    signed_at_ms: u64,
+) -> Vec<u8> {
+    let mut m = b"agora-device-register-v1\0".to_vec();
+    field(&mut m, device_id.as_bytes());
+    field(&mut m, name.as_bytes());
+    field(&mut m, hex(public_key).as_bytes());
+    field(&mut m, signed_at_ms.to_string().as_bytes());
+    m
+}
+
+/// The bytes a device signs to ask another device of its person to approve it.
+pub fn ask_message(device_id: &str, signed_at_ms: u64) -> Vec<u8> {
+    let mut m = b"agora-device-ask-v1\0".to_vec();
+    field(&mut m, device_id.as_bytes());
+    field(&mut m, signed_at_ms.to_string().as_bytes());
+    m
+}
+
+/// What people compare (ADR-0061): the first 12 bytes (96 bits) of the SHA-256 of the key, in groups of 4 hex digits joined by `-`.
+pub fn fingerprint(public_key: &[u8]) -> String {
+    ring::digest::digest(&ring::digest::SHA256, public_key)
+        .as_ref()
+        .get(..12)
+        .unwrap_or_default()
+        .chunks(2)
+        .map(hex)
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+/// How long an endorsement this terminal signs lasts (ADR-0061: 90 days; the machine renews it by use).
+pub const ENDORSEMENT_TTL_MS: u64 = 90 * 24 * 60 * 60 * 1000;
+
+impl Device {
+    /// The 65-byte public key.
+    pub fn public_key(&self) -> Vec<u8> {
+        self.pair.public_key().as_ref().to_vec()
+    }
+
+    /// This device registering itself under `name`, signed at `now_ms` with its own key.
+    pub fn registration(
+        &self,
+        name: &str,
+        now_ms: u64,
+    ) -> Option<agora_protocol::v1::DeviceRegister> {
+        let public_key = self.public_key();
+        Some(agora_protocol::v1::DeviceRegister {
+            signature: self.sign(&register_message(&self.id, name, &public_key, now_ms))?,
+            device_id: self.id.clone(),
+            name: name.to_string(),
+            public_key,
+            signed_at_ms: now_ms,
+        })
+    }
+
+    /// This device asking another of its person to approve it, signed at `now_ms`.
+    pub fn ask(&self, now_ms: u64) -> Option<agora_protocol::v1::DeviceAskApproval> {
+        Some(agora_protocol::v1::DeviceAskApproval {
+            device_id: self.id.clone(),
+            signed_at_ms: now_ms,
+            signature: self.sign(&ask_message(&self.id, now_ms))?,
+        })
+    }
+
+    /// This device's fingerprint, as every client shows it.
+    pub fn fingerprint(&self) -> String {
+        fingerprint(self.pair.public_key().as_ref())
+    }
+
+    /// This device vouches for `target` (another device of the same person) on `nodes` (empty: every machine) for 90 days from
+    /// `now_ms` (ADR-0061).
+    pub fn endorse(
+        &self,
+        target: &agora_protocol::v1::DeviceInfo,
+        nodes: &[String],
+        now_ms: u64,
+    ) -> Option<agora_protocol::v1::DeviceEndorsement> {
+        let mut e = agora_protocol::v1::DeviceEndorsement {
+            device_id: target.device_id.clone(),
+            public_key: target.public_key.clone(),
+            name: target.name.clone(),
+            nodes: nodes.to_vec(),
+            issued_at_ms: now_ms,
+            expires_at_ms: now_ms + ENDORSEMENT_TTL_MS,
+            endorser_device_id: self.id.clone(),
+            signature: Vec::new(),
+        };
+        e.signature = self.sign(&endorse_message(&e))?;
+        Some(e)
+    }
+}
+
 /// A fresh grant id.
 pub fn new_grant_id() -> Option<String> {
     use ring::rand::SecureRandom;
@@ -453,6 +582,112 @@ mod tests {
         );
         let id = new_grant_id().unwrap();
         assert!(id.starts_with("gr-") && id.len() == 19, "{id}");
+    }
+
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn endorsements_revocations_and_fingerprints_match_the_shared_vectors_and_the_node() {
+        let v: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../schema/fixtures/signing/device-trust-v1.json"
+        ))
+        .unwrap();
+        for c in v["endorsements"].as_array().unwrap() {
+            let e = agora_protocol::v1::DeviceEndorsement {
+                device_id: c["device_id"].as_str().unwrap().into(),
+                public_key: unhex(c["public_key"].as_str().unwrap()),
+                name: c["name"].as_str().unwrap().into(),
+                nodes: c["nodes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|n| n.as_str().unwrap().to_string())
+                    .collect(),
+                issued_at_ms: c["issued_at_ms"].as_u64().unwrap(),
+                expires_at_ms: c["expires_at_ms"].as_u64().unwrap(),
+                endorser_device_id: c["endorser_device_id"].as_str().unwrap().into(),
+                signature: Vec::new(),
+            };
+            assert_eq!(hex(&endorse_message(&e)), c["hex"].as_str().unwrap());
+            assert_eq!(
+                endorse_message(&e),
+                agora_node::device_trust::endorse_message(&e)
+            );
+        }
+        for c in v["revocations"].as_array().unwrap() {
+            let r = agora_protocol::v1::DeviceRevocation {
+                device_id: c["device_id"].as_str().unwrap().into(),
+                issued_at_ms: c["issued_at_ms"].as_u64().unwrap(),
+                revoker_device_id: c["revoker_device_id"].as_str().unwrap().into(),
+                signature: Vec::new(),
+            };
+            assert_eq!(hex(&revoke_message(&r)), c["hex"].as_str().unwrap());
+        }
+        for c in v["registrations"].as_array().unwrap() {
+            let m = register_message(
+                c["device_id"].as_str().unwrap(),
+                c["name"].as_str().unwrap(),
+                &unhex(c["public_key"].as_str().unwrap()),
+                c["signed_at_ms"].as_u64().unwrap(),
+            );
+            assert_eq!(hex(&m), c["hex"].as_str().unwrap());
+        }
+        for c in v["asks"].as_array().unwrap() {
+            let m = ask_message(
+                c["device_id"].as_str().unwrap(),
+                c["signed_at_ms"].as_u64().unwrap(),
+            );
+            assert_eq!(hex(&m), c["hex"].as_str().unwrap());
+        }
+        for f in v["fingerprints"].as_array().unwrap() {
+            assert_eq!(
+                fingerprint(&unhex(f["public_key"].as_str().unwrap())),
+                f["fingerprint"].as_str().unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn an_endorsement_this_terminal_signs_is_accepted_by_a_machine_that_trusts_it() {
+        let (me, _) = Device::generate().unwrap();
+        let (other, _) = Device::generate().unwrap();
+        let dir = std::env::temp_dir().join(format!("agora-tui-endorse-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("trusted-devices");
+        agora_node::device_trust::confirm(&file, &me.id, &me.public_key()).unwrap();
+        let target = agora_protocol::v1::DeviceInfo {
+            device_id: other.id.clone(),
+            name: "Phone".into(),
+            public_key: other.public_key(),
+            ..Default::default()
+        };
+        let now = 1_700_000_000_000;
+        let e = me.endorse(&target, &[], now).unwrap();
+        let trust = agora_node::device_trust::DeviceTrust::new("laptop", &file);
+        assert!(trust.endorse(&e, now).is_ok());
+        assert!(trust.trusted_ids(now).contains(&other.id));
+        assert_eq!(me.fingerprint().len(), 29, "96 bits in groups of 4");
+        let r = me.registration("Terminal on box", now).unwrap();
+        let info = agora_protocol::v1::DeviceInfo {
+            device_id: r.device_id.clone(),
+            name: r.name.clone(),
+            public_key: r.public_key.clone(),
+            signed_at_ms: r.signed_at_ms,
+            registration_signature: r.signature.clone(),
+            ..Default::default()
+        };
+        assert!(agora_node::device_trust::registration_verifies(&info));
+        assert_eq!(
+            ask_message("x", 1),
+            b"agora-device-ask-v1\x001:x1:1".to_vec()
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
