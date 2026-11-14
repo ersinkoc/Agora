@@ -655,10 +655,28 @@ pub(crate) enum Claim {
     Held,
 }
 
+/// Holds `<lock>.guard` exclusively (an OS file lock, released when the returned file is dropped or the process ends). Every change
+/// of a role's lock happens under it: taking or replacing it ([`claim`], the front door's handover), and removing it
+/// ([`remove_lock_of`]). So a check of what the lock names and the change that follows are one step for every other process: `agora
+/// down` can never delete a lock that a new supervisor put in place between its check and its removal (Codex's review of #548).
+fn guard(lock: &Path) -> std::io::Result<std::fs::File> {
+    let mut path = lock.as_os_str().to_owned();
+    path.push(".guard");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(PathBuf::from(path))?;
+    file.lock()?;
+    Ok(file)
+}
+
 /// Takes the role's lock for this process, replacing a stale one (its process ended, or its pid now belongs to another process).
 pub(crate) fn claim(path: &Path) -> std::io::Result<Claim> {
     let me = LockInfo::of(std::process::id())
         .ok_or_else(|| std::io::Error::other("own start time unknown"))?;
+    let _guard = guard(path)?;
     for _ in 0..3 {
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create_new(true);
@@ -774,9 +792,15 @@ fn ensure(say: &Say, home: &Path, m: &Machine, role: Role) -> Result<(), ExitCod
                 .and_then(|pid| {
                     LockInfo::of(pid).ok_or_else(|| std::io::Error::other("ended at once"))
                 })
-                .and_then(|l| agora_platform::write_private(&lock, l.text().as_bytes()));
+                .and_then(|l| {
+                    let _guard = guard(&lock)?;
+                    agora_platform::write_private(&lock, l.text().as_bytes())
+                });
             if let Err(e) = started {
-                let _ = std::fs::remove_file(&lock);
+                // Only this process's own lock: a supervisor may hold it by now.
+                if let Some(me) = LockInfo::of(std::process::id()) {
+                    remove_lock_of(&lock, &me);
+                }
                 say.err(
                     key!("frontdoor-not-ready"),
                     &[
@@ -1032,6 +1056,9 @@ fn supervised_child(pid: u32) -> Option<u32> {
 /// Removes the role's lock only while it still names `l` (the same pid and start time): a supervisor that took the lock after `l`
 /// ended keeps it. An unreadable lock (one being written) is left alone too.
 fn remove_lock_of(lock: &Path, l: &LockInfo) {
+    let Ok(_guard) = guard(lock) else {
+        return;
+    };
     if read_lock(lock).is_some_and(|now| now.pid == l.pid && now.start == l.start) {
         let _ = std::fs::remove_file(lock);
     }
@@ -1116,6 +1143,38 @@ mod tests {
 
     /// Linux's follow-up to #543: `agora down` deletes a lock only while it names the process it stopped. A lock another supervisor
     /// took in the meantime, or one still being written, stays.
+    /// Codex's review of #548: the check of what the lock names and its removal are one step against a supervisor replacing it. Here
+    /// the "supervisor" holds the guard while it replaces the lock; the removal that started meanwhile waits for it, then sees the new
+    /// holder and keeps the lock. Without the guard it would have deleted the lock it checked a moment before.
+    #[test]
+    fn removing_a_lock_waits_for_a_replacement_in_progress() {
+        let dir = tmp("guard");
+        let lock = dir.join("node.lock");
+        let me = LockInfo::of(std::process::id()).unwrap();
+        let stopped = LockInfo {
+            pid: me.pid,
+            start: me.start + 1,
+            version: String::new(),
+        };
+        std::fs::write(&lock, stopped.text()).unwrap();
+        let held = guard(&lock).unwrap();
+        let remover = {
+            let (lock, stopped) = (lock.clone(), stopped.clone());
+            std::thread::spawn(move || remove_lock_of(&lock, &stopped))
+        };
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(lock.exists(), "the removal did not wait for the guard");
+        // The replacement: a new holder writes its lock, then lets go.
+        std::fs::write(&lock, me.text()).unwrap();
+        drop(held);
+        remover.join().unwrap();
+        assert_eq!(
+            read_lock(&lock).map(|l| (l.pid, l.start)),
+            Some((me.pid, me.start))
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn down_removes_only_the_lock_of_the_process_it_stopped() {
         let dir = tmp("lock-of");
