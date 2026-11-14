@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { t } from '../i18n';
-import { baseName, parseDiff, type DiffFile, type DiffStatus } from '../net/diff';
+import { baseName, isTruncated, parseDiff, type DiffFile, type DiffStatus } from '../net/diff';
 import { ancestors, changedFolders, changeMarks, crumbs, findMatches, statusByPath, type ChangeMark, type Match } from '../net/fileview';
 import { decodeText, formatSize, joinPath, type FileItem, type WorkspaceFiles } from '../net/files';
 import { markRanges } from '../net/highlight';
@@ -38,6 +38,8 @@ export function FilesView({ files, load, changed, compact = false }: {
   const [active, setActive] = useState<string | undefined>();
   const [contents, setContents] = useState<Map<string, Content>>(new Map());
   const [changes, setChanges] = useState<DiffFile[]>([]);
+  // The diff was cut at 512 KiB: files after the cut carry no mark, and the view says so.
+  const [cut, setCut] = useState(false);
   const [onlyChanged, setOnlyChanged] = useState(false);
   const [query, setQuery] = useState('');
   const [treeWidth, setTreeWidth] = useState(compact ? 220 : 280);
@@ -75,11 +77,11 @@ export function FilesView({ files, load, changed, compact = false }: {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const attempt = (n: number) => {
       const loader = loadRef.current;
-      if (!loader) { setChanges([]); return; }
+      if (!loader) { setChanges([]); setCut(false); return; }
       const again = () => { if (live && n < 3) timer = setTimeout(() => attempt(n + 1), 1500 * (n + 1)); };
       loader().then(
-        (d) => { if (!live) return; const parsed = parseDiff(d); setChanges(parsed); if (parsed.length === 0 && (changed ?? 0) > 0) again(); },
-        () => { if (live) { setChanges([]); again(); } },
+        (d) => { if (!live) return; const parsed = parseDiff(d); setChanges(parsed); setCut(isTruncated(d)); if (parsed.length === 0 && (changed ?? 0) > 0) again(); },
+        () => { if (live) { setChanges([]); setCut(false); again(); } },
       );
     };
     attempt(0);
@@ -88,6 +90,34 @@ export function FilesView({ files, load, changed, compact = false }: {
   const status = useMemo(() => statusByPath(changes), [changes]);
   const folders = useMemo(() => changedFolders(status.keys()), [status]);
   const changeOf = (path: string) => changes.find((c) => c.path === path);
+
+  // The tree is one Tab stop (WAI-ARIA tree): the item last focused, else the open file, else the first; arrows move between the
+  // items shown, Right and Left open and close a folder or go to its first child and to the parent, Home and End to the ends.
+  const treeRef = useRef<HTMLDivElement>(null);
+  const [cursor, setCursor] = useState<string | undefined>();
+  useLayoutEffect(() => {
+    const items = [...(treeRef.current?.querySelectorAll<HTMLElement>('[role=treeitem]') ?? [])];
+    const target = items.find((el) => el.dataset.path === cursor) ?? items.find((el) => el.getAttribute('aria-selected') === 'true') ?? items[0];
+    for (const el of items) el.tabIndex = el === target ? 0 : -1;
+  });
+  const onTreeKey = (e: KeyboardEvent<HTMLDivElement>) => {
+    const items = [...(treeRef.current?.querySelectorAll<HTMLElement>('[role=treeitem]:not([disabled])') ?? [])];
+    const at = items.indexOf(document.activeElement as HTMLElement);
+    if (at < 0) return;
+    const el = items[at] as HTMLElement;
+    const level = Number(el.getAttribute('aria-level') ?? 1);
+    const go = (i: number) => { const to = items[Math.max(0, Math.min(items.length - 1, i))]; if (to) { e.preventDefault(); to.focus(); } };
+    if (e.key === 'ArrowDown') go(at + 1);
+    else if (e.key === 'ArrowUp') go(at - 1);
+    else if (e.key === 'Home') go(0);
+    else if (e.key === 'End') go(items.length - 1);
+    else if (e.key === 'ArrowRight') {
+      if (el.getAttribute('aria-expanded') === 'false') { e.preventDefault(); el.click(); } else if (el.getAttribute('aria-expanded') === 'true') go(at + 1);
+    } else if (e.key === 'ArrowLeft') {
+      if (el.getAttribute('aria-expanded') === 'true') { e.preventDefault(); el.click(); return; }
+      for (let i = at - 1; i >= 0; i--) if (Number(items[i]?.getAttribute('aria-level') ?? 1) < level) { go(i); return; }
+    }
+  };
 
   const read = useCallback((path: string) => {
     setContents((c) => new Map(c).set(path, 'loading'));
@@ -193,14 +223,16 @@ export function FilesView({ files, load, changed, compact = false }: {
           </button>}
           <button type="button" className="ide-iconbtn" onClick={() => setRound((r) => r + 1)} aria-label={t('files-refresh')} title={t('files-refresh')}><Icon name="restore" /></button>
         </div>
-        <div className="min-h-0 flex-1 overflow-auto py-1" role="tree" aria-label={t('files-tree')}>
+        {cut && <p role="status" className="m-0 flex-none border-b border-line bg-needs-you/10 px-3 py-1.5 text-xs text-ink">{t('files-truncated', { count: status.size, total: Math.max(changed ?? 0, status.size) })}</p>}
+        <div ref={treeRef} className="min-h-0 flex-1 overflow-auto py-1" role="tree" aria-label={t('files-tree')} onKeyDown={onTreeKey}
+          onFocus={(e) => { const p = (e.target as HTMLElement).dataset.path; if (p !== undefined) setCursor(p); }}>
           {flat ? (
             flat.length === 0 ? <p className="muted px-3 py-2">{t('files-no-match')}</p>
               : flat.map(([path, size]) => {
                 const st = status.get(path);
                 const gone = st === 'deleted';
                 return (
-                  <button key={path} type="button" role="treeitem" aria-selected={path === active} aria-current={path === active} disabled={gone}
+                  <button key={path} type="button" role="treeitem" aria-level={1} data-path={path} aria-selected={path === active} aria-current={path === active} disabled={gone}
                     className="ide-row font-mono text-xs disabled:opacity-60" title={gone ? t('files-deleted') : path}
                     onClick={() => { if (!gone) { openFile(path, size < 0 ? 0 : size); reveal(path); } }}>
                     <Icon name="files" className="size-3.5 flex-none text-muted" />
@@ -310,7 +342,7 @@ function TreeLevel({ dir, depth, listings, open, list, toggle, pick, active, sta
         const isOpen = open.has(path);
         return (
           <div key={path}>
-            <button type="button" role="treeitem" aria-expanded={f.isDir ? isOpen : undefined} aria-selected={path === active} aria-current={path === active}
+            <button type="button" role="treeitem" aria-level={depth + 1} data-path={path} aria-expanded={f.isDir ? isOpen : undefined} aria-selected={path === active} aria-current={path === active}
               className="ide-row gap-1.5 py-0.5 font-mono text-xs" style={pad} title={path}
               onClick={() => (f.isDir ? toggle(path) : pick(path, f.size))}>
               <span className="w-3 flex-none text-muted">{f.isDir && <Icon name="chevron" className={`size-3 transition-transform duration-150 ${isOpen ? 'rotate-90' : 'rtl:rotate-180'}`} />}</span>

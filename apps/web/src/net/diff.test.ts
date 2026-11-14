@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   byFolder, changedSpan, countByStatus, fileLines, gapLines, gapsOf, isTruncated, MAX_DIFF_BYTES, matchesFile, pairedLines, parseDiff,
-  sameChange, splitRows, unquote,
+  lineEndingOnly, sameChange, splitRows, unquote,
 } from './diff';
 
 const SAMPLE = `diff --git a/a.txt b/a.txt
@@ -104,6 +104,37 @@ describe('unquote', () => {
   it('keeps a literal character outside the BMP whole (core.quotePath=false)', () => {
     expect(unquote('"a/emoji\\"😀.txt"')).toBe('a/emoji"😀.txt');
     expect(unquote('"😀\\360\\237\\230\\200"')).toBe('😀😀');
+  });
+});
+
+describe('line endings', () => {
+  it('counts lines that changed only from LF to CR LF (real git output)', () => {
+    const [f] = parseDiff('diff --git a/f.txt b/f.txt\nindex 4cb29ea..e08aa17 100644\n--- a/f.txt\n+++ b/f.txt\n@@ -1,3 +1,3 @@\n'
+      + '-one\n-two\n-three\n+one\r\n+two\r\n+THREE\r\n');
+    expect(f?.lines.filter((l) => l.kind === 'add').map((l) => [l.text, l.cr])).toEqual([['one', true], ['two', true], ['THREE', true]]);
+    expect(lineEndingOnly(f?.lines ?? [])).toBe(2);
+  });
+});
+
+describe('a folder whose name holds " b/"', () => {
+  it('names empty new, binary and mode-only files right (real git output)', () => {
+    const files = parseDiff([
+      'diff --git a/dir b/empty.txt b/dir b/empty.txt', 'new file mode 100644', 'index 0000000..e69de29',
+      'diff --git a/dir b/file.bin b/dir b/file.bin', 'new file mode 100644', 'index 0000000..8352675',
+      'Binary files /dev/null and b/dir b/file.bin differ',
+      'diff --git a/dir b/mode.sh b/dir b/mode.sh', 'old mode 100644', 'new mode 100755', '',
+    ].join('\n'));
+    expect(files.map((f) => [f.path, f.status, f.binary])).toEqual([
+      ['dir b/empty.txt', 'added', false], ['dir b/file.bin', 'added', true], ['dir b/mode.sh', 'modified', false],
+    ]);
+  });
+
+  it('still reads the --no-index form and a deleted binary file', () => {
+    const files = parseDiff([
+      'diff --git a/dev/null b/fresh.bin', 'new file mode 100644', 'Binary files /dev/null and b/fresh.bin differ',
+      'diff --git a/x b/gone.bin b/x b/gone.bin', 'deleted file mode 100644', 'Binary files a/x b/gone.bin and /dev/null differ', '',
+    ].join('\n'));
+    expect(files.map((f) => [f.path, f.status])).toEqual([['fresh.bin', 'added'], ['x b/gone.bin', 'deleted']]);
   });
 });
 

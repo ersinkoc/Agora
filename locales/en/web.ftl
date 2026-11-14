@@ -244,7 +244,22 @@ changes-gap-failed = Could not read this file to show the unchanged lines.
 changes-retry = Try again
 changes-stale = The file has changed since these changes were read, so the unchanged lines are not shown. Read the changes again.
 changes-truncated = These changes are larger than 512 KiB, so only the first part was read. The last file in the list is cut off.
+changes-truncated-count = These changes are larger than 512 KiB, so only the first { $count ->
+        [one] file was
+       *[other] { $count } files were
+    } read. The machine counts { $total } changed files: at least { $min ->
+        [one] one is
+       *[other] { $min } are
+    } not listed here. The last file in the list is cut off.
+files-truncated = The changes are larger than 512 KiB, so files after the cut have no change mark. The machine counts { $total } changed files; { $count ->
+        [one] one is
+       *[other] { $count } are
+    } marked.
 changes-partial = This file is cut off: the changes were too large to read at once.
+changes-eol = { $count ->
+    [one] One changed line differs only in its line ending (LF or CRLF); its text is the same.
+   *[other] { $count } changed lines differ only in their line endings (LF or CRLF); their text is the same.
+}
 changes-load-file = Read only this file
 changes-load-file-failed = This file alone is still too large to read.
 changes-show-all = { $count ->

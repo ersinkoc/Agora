@@ -13,6 +13,8 @@ export interface DiffLine {
   newNo?: number;
   /** git's "\ No newline at end of file" followed this line. */
   noEol?: boolean;
+  /** The line ended in CR LF in its file (the CR is not part of `text`). */
+  cr?: boolean;
 }
 
 export interface DiffHunk {
@@ -89,8 +91,22 @@ function gitHeaderPath(rest: string): string {
     const m = /"(?:[^"\\]|\\.)*"\s*$/.exec(rest);
     if (m) return unquote(m[0].trim()).replace(/^b\//, '');
   }
+  // `a/P b/P` names one path twice; split it in the middle, so a folder named `x b` (`a/x b/f b/x b/f`) is not cut at its own " b/".
+  // Only a rename or the `--no-index` form (`a/dev/null b/x`) has two different names; those take the last " b/" (a rename's name
+  // comes from `rename to` anyway).
+  const half = (rest.length - 5) / 2;
+  if (rest.startsWith('a/') && Number.isInteger(half) && half > 0 && rest.slice(2 + half, 5 + half) === ' b/'
+    && rest.slice(2, 2 + half) === rest.slice(5 + half)) return rest.slice(5 + half);
   const at = rest.lastIndexOf(' b/');
   return at >= 0 ? rest.slice(at + 3) : rest;
+}
+
+// `Binary files a/x and b/y differ`: the new name, or undefined for `/dev/null` (a deleted file keeps the name it had).
+function binaryPath(raw: string): string | undefined {
+  const m = /^Binary files (.+) and (.+) differ$/.exec(raw);
+  if (!m) return undefined;
+  const name = unquote(m[2] as string);
+  return name === '/dev/null' ? undefined : name.replace(/^b\//, '');
 }
 
 const HUNK = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@ ?(.*)$/;
@@ -104,7 +120,8 @@ export function parseDiff(text: string): DiffFile[] {
   let oldLeft = 0;
   let newLeft = 0;
   for (const line of text.split('\n')) {
-    const raw = line.endsWith('\r') ? line.slice(0, -1) : line;
+    const cr = line.endsWith('\r');
+    const raw = cr ? line.slice(0, -1) : line;
     if (raw.startsWith('diff --git ')) {
       cur = { path: gitHeaderPath(raw.slice('diff --git '.length)), status: 'modified', binary: false, added: 0, removed: 0, lines: [], hunks: [] };
       files.push(cur);
@@ -129,15 +146,15 @@ export function parseDiff(text: string): DiffFile[] {
       newLeft = hunk.newLines;
     } else if (inHunk && raw.startsWith('+')) {
       cur.added++;
-      cur.lines.push({ kind: 'add', text: raw.slice(1), newNo: newNo++ });
+      cur.lines.push({ kind: 'add', text: raw.slice(1), newNo: newNo++, ...(cr ? { cr } : {}) });
       newLeft--;
     } else if (inHunk && raw.startsWith('-')) {
       cur.removed++;
-      cur.lines.push({ kind: 'del', text: raw.slice(1), oldNo: oldNo++ });
+      cur.lines.push({ kind: 'del', text: raw.slice(1), oldNo: oldNo++, ...(cr ? { cr } : {}) });
       oldLeft--;
     } else if (inHunk && (raw.startsWith(' ') || raw === '')) {
       // An empty line inside a hunk is an unchanged empty line whose leading space was trimmed on the way.
-      cur.lines.push({ kind: 'ctx', text: raw.slice(1), oldNo: oldNo++, newNo: newNo++ });
+      cur.lines.push({ kind: 'ctx', text: raw.slice(1), oldNo: oldNo++, newNo: newNo++, ...(cr ? { cr } : {}) });
       oldLeft--;
       newLeft--;
     } else if (raw.startsWith('\\')) {
@@ -149,7 +166,11 @@ export function parseDiff(text: string): DiffFile[] {
       else if (raw.startsWith('deleted file mode')) cur.status = 'deleted';
       else if (raw.startsWith('rename from ')) { cur.oldPath = unquote(raw.slice('rename from '.length)); cur.status = 'renamed'; }
       else if (raw.startsWith('rename to ')) { cur.path = unquote(raw.slice('rename to '.length)); cur.status = 'renamed'; }
-      else if (raw.startsWith('Binary files ') || raw === 'GIT binary patch') cur.binary = true;
+      else if (raw.startsWith('Binary files ') || raw === 'GIT binary patch') {
+        cur.binary = true;
+        const p = binaryPath(raw);
+        if (p !== undefined && cur.status !== 'renamed') cur.path = p;
+      }
       else if (raw.startsWith('+++ ')) {
         // `+++ /dev/null`: the file is gone, and its name came from the `---` line. An emptied file (`@@ -1,3 +0,0 @@`) keeps its name.
         const p = headerPath(raw.slice(4));
@@ -195,6 +216,16 @@ export function splitRows(lines: DiffLine[]): SplitRow[] {
 }
 
 /** For each line of a run of changes, the line it replaces or is replaced by (the same position in the facing run), if any. */
+/** Changed lines whose text is the same on both sides and only the line ending differs (LF and CR LF): each pair counts once. */
+export function lineEndingOnly(lines: DiffLine[], pairs: Map<DiffLine, DiffLine> = pairedLines(lines)): number {
+  let n = 0;
+  for (const l of lines) {
+    const p = l.kind === 'del' ? pairs.get(l) : undefined;
+    if (p && p.text === l.text && !!p.cr !== !!l.cr) n++;
+  }
+  return n;
+}
+
 export function pairedLines(lines: DiffLine[]): Map<DiffLine, DiffLine> {
   const pairs = new Map<DiffLine, DiffLine>();
   for (const r of splitRows(lines)) {

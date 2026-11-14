@@ -70,7 +70,8 @@ approvals do.
 
 `scripts/e2e-phone.mjs` at 360 × 740, 390 × 844, 844 × 390 and 768 × 1024 on an emulated touch screen, and with the High
 contrast and Large text themes at 360 and 390 px (44 px targets, the key bar fits); screenshots in both themes
-in `docs/screenshots/phone/`. Unit tests: `apps/web/src/terminal/keys.test.ts`, `apps/web/src/phone/nav.test.ts`.
+in `docs/screenshots/phone/`. `scripts/e2e-phone-changes.mjs` opens the review screen and the file browser at 390 × 844 and the
+review screen again at 360 × 740 (fits, no sideways scroll). Unit tests: `apps/web/src/terminal/keys.test.ts`, `apps/web/src/phone/nav.test.ts`.
 
 ## Not in this rung
 
