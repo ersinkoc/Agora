@@ -523,8 +523,35 @@ pub struct Details {
 /// request y / n would answer asks to start an agent, the panel shows that request alone, like the old right panel; otherwise the
 /// agent's facts, its session line, and the request it waits on.
 pub fn app_details(s: &Snapshot, selected: &str, width: u16, height: u16, t: Text<'_>) -> Details {
+    details(s, selected, width, height, t, false)
+}
+
+/// The inspector beside the agent's own tab, the keyboard in it: only that agent's request (never another agent's), answered
+/// with Alt+Y / Alt+N (a plain y there is typing).
+pub fn app_details_in_tab(
+    s: &Snapshot,
+    selected: &str,
+    width: u16,
+    height: u16,
+    t: Text<'_>,
+) -> Details {
+    details(s, selected, width, height, t, true)
+}
+
+fn details(
+    s: &Snapshot,
+    selected: &str,
+    width: u16,
+    height: u16,
+    t: Text<'_>,
+    in_tab: bool,
+) -> Details {
     let room = usize::from(height);
-    let answered = crate::client::answered_approval(s, Some(selected));
+    let answered = if in_tab {
+        s.approvals.iter().find(|a| a.agent_id == selected)
+    } else {
+        crate::client::answered_approval(s, Some(selected))
+    };
     if let Some(a) = answered {
         if let Some(card) = start_card_lines(a, usize::from(width).saturating_sub(1), t) {
             let mut lines = vec![t(key!("tui-attention"), &[])];
@@ -621,7 +648,14 @@ pub fn app_details(s: &Snapshot, selected: &str, width: u16, height: u16, t: Tex
             usize::from(width).max(12),
             usize::from(width).max(12),
         ));
-        lines.push(t(key!("tui-split-answer"), &[]));
+        lines.push(t(
+            if in_tab {
+                key!("tui-tab-answer")
+            } else {
+                key!("tui-split-answer")
+            },
+            &[],
+        ));
     }
     Details { lines, start: None }
 }
@@ -1219,6 +1253,33 @@ mod tests {
             app_details(&s, "", 40, 20, &text).lines[0],
             "tui-split-pick"
         );
+    }
+
+    #[test]
+    fn in_its_tab_the_inspector_shows_only_the_agents_own_request_and_the_alt_keys() {
+        let s = snapshot();
+        // mac2/agent-2 has no request; the list's inspector shows the first one (mac2/agent-1's), which y would answer.
+        let list = app_details(&s, "mac2/agent-2", 60, 20, &text);
+        assert!(
+            list.lines.iter().any(|l| l.contains("files.write")),
+            "{:#?}",
+            list.lines
+        );
+        // Beside its own tab it shows none: another agent's request never sits in this agent's tab.
+        let tab = app_details_in_tab(&s, "mac2/agent-2", 60, 20, &text);
+        assert!(
+            !tab.lines.iter().any(|l| l.contains("files.write")),
+            "{:#?}",
+            tab.lines
+        );
+        // Its own request is shown with the keys that answer it there.
+        let own = app_details_in_tab(&s, "mac2/agent-1", 60, 20, &text);
+        assert!(
+            own.lines.iter().any(|l| l.contains("files.write")),
+            "{:#?}",
+            own.lines
+        );
+        assert_eq!(own.lines.last().map(String::as_str), Some("tui-tab-answer"));
     }
 
     #[test]
