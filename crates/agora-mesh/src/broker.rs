@@ -191,6 +191,7 @@ pub enum AskStatus {
     TimedOut,
 }
 
+#[derive(Clone)]
 struct Ask {
     from: AgentId,
     to: AgentId,
@@ -217,6 +218,7 @@ pub enum TaskStatus {
     Done,
 }
 
+#[derive(Clone)]
 struct TaskRec {
     task: Task,
     project: String,
@@ -230,6 +232,7 @@ struct TaskRec {
 pub const MAX_HANDOVER_TASKS: usize = 500;
 pub const MAX_HANDOVER_LEASES: usize = 500;
 
+#[derive(Clone)]
 struct LeaseBatch {
     holder: AgentId,
     project: String,
@@ -256,6 +259,7 @@ fn split_address(to: &str) -> Option<(&str, &str)> {
     (!node.is_empty() && !agent.is_empty() && !agent.contains('/')).then_some((node, agent))
 }
 
+#[derive(Clone)]
 pub struct Mesh {
     outbox: Vec<Outbound>,
     limits: Limits,

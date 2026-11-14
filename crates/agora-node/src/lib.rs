@@ -24,5 +24,6 @@ pub mod terminal;
 pub mod uplink;
 pub mod uplink_client;
 pub mod usage_files;
+pub mod usage_merge;
 
 pub mod directory;
