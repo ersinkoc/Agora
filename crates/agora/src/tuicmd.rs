@@ -1119,7 +1119,11 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                 shown_request: None,
                 note: Note::default(),
                 colors: if color {
-                    ColorMode::from_env(None, std::env::var("COLORTERM").ok().as_deref())
+                    ColorMode::from_env(
+                        None,
+                        std::env::var("COLORTERM").ok().as_deref(),
+                        std::env::var("TERM").ok().as_deref(),
+                    )
                 } else {
                     ColorMode::Mono
                 },
