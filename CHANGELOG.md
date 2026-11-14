@@ -68,6 +68,17 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 - Connecting to a hub at `localhost` no longer waits about two seconds on Windows: nodes, the terminal client, the desktop app and the hub's notifications try `127.0.0.1` first for a loopback name and `::1` only after it.
 ### Getting started
 - Plain `agora` now opens the browser window by default on a desktop. The terminal client is the default only when there is no screen (an SSH session, or Linux with no display); `--ui tui` and `--save` still choose it.
+### On a phone (ADR-0067, rung 2)
+- On a phone the window is one column: what needs you first, with Allow and Deny one tap away (signed by the phone's device key and
+  checked on the machine, as everywhere), then each machine with its agents; tapping an agent opens its terminal or conversation
+  with Back at the top and **Next** to the next thing that needs you. Held sideways it works the same. Tablets and desktops keep
+  the full window.
+- On a touch screen every terminal has a key bar: Esc, Tab, Ctrl (for the next key), the arrows and Paste, sending what a program
+  expects (arrows follow the program's cursor mode; Ctrl+c is `0x03`). The touch keyboard stays open while you press them.
+- Every control on a phone is at least 44 px; the window keeps out of the notch and the home indicator and stays above the touch
+  keyboard. Installing it to the home screen gets PNG and maskable icons and an iOS icon.
+- With the hub's `public-url` set, a notice about an agent that waits or finished links to that agent; an approval's link opens the
+  agent that asks. See `docs/ux/phone.md`.
 
 ## 0.3.8
 

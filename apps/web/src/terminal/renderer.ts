@@ -14,6 +14,10 @@ export interface TerminalRenderer {
   /** Size that fits the mounted element, to report to the node. */
   fit(): { cols: number; rows: number } | undefined;
   onInput(cb: (data: string) => void): void;
+  /** Pastes text as the program expects it (bracketed when it asked for that); it arrives through `onInput`. */
+  paste(text: string): void;
+  /** Whether the program asked for application cursor keys (DECCKM), which changes the bytes an arrow sends. */
+  applicationCursor(): boolean;
   focus(): void;
   setFontSize(px: number): void;
   dispose(): void;
@@ -97,6 +101,14 @@ export class XtermRenderer implements TerminalRenderer {
 
   onInput(cb: (data: string) => void): void {
     this.term.onData(cb);
+  }
+
+  paste(text: string): void {
+    this.term.paste(text);
+  }
+
+  applicationCursor(): boolean {
+    return this.term.modes.applicationCursorKeysMode;
   }
 
   focus(): void {

@@ -118,7 +118,8 @@ Built-in themes cannot be changed; a test keeps Dark and Light equal to `tokens.
 
 A panel of the window (panel id `theme`, `layout.md`), so the window it styles stays in view. It opens beside the pane in
 focus (as a tab there when the layout has no room for another pane), from **Edit theme** in the palette, the **Appearance**
-section of **This device**, or a pane's **Show** menu.
+section of **This device**, or a pane's **Show** menu. On a phone, which has no panels (ADR-0067 rung 2, [phone.md](phone.md)),
+the same two ways open it as a screen of its own (`#/theme`) with Back.
 
 - Built-in themes are shown read-only with **Customize**, which makes a copy "⟨name⟩ (mine)" and selects it.
 - On one of your themes every token is a field: colours as a swatch and a hex field, fonts as text, sizes as sliders. A change

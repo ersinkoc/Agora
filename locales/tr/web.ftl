@@ -602,3 +602,24 @@ palette-theme-editor = Temayı düzenle
 palette-theme = Tema: { $name }
 device-appearance = Görünüm
 device-appearance-intro = Bu tarayıcı { $name } temasını gösteriyor. Temalar yalnızca bu tarayıcıda saklanır.
+
+## ADR-0067 2. basamak: telefon boyutunda pencere ve terminal tuş çubuğu.
+phone-nav = Git
+phone-search = Ara
+phone-start = Başlat
+phone-machines = Makineler
+phone-back = Listeye dön
+phone-offline = çevrim dışı
+phone-no-agents = Bu makinede ajan yok.
+phone-needs = Sizi bekleyenler · { $count }
+phone-next = Sıradaki · { $count }
+phone-untrusted = { $machine } bu cihaza henüz güvenmiyor; buradan verilen yanıtı reddeder.
+key-bar = Terminal tuşları
+key-esc = Esc
+key-tab = Tab
+key-ctrl = Ctrl
+key-up = Yukarı
+key-down = Aşağı
+key-left = Sol
+key-right = Sağ
+key-paste = Yapıştır

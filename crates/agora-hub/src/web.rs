@@ -123,16 +123,24 @@ impl Assets for DirAssets {
 }
 
 /// The page's install manifest (ADR-0046): installable to a phone's home screen, no service worker. The name is the locale's
-/// product string; colours are the design tokens' dark surface and accent.
+/// product string; colours are the design tokens' dark surface and accent. Besides the mark as SVG, PNG sizes for launchers that
+/// need them, and a maskable one with the mark inside the safe zone (ADR-0067 rung 2); the files are the web app's own.
 pub fn manifest(name: &str) -> Vec<u8> {
     serde_json::json!({
+        "id": "/",
         "name": name,
         "short_name": name,
         "start_url": "/",
+        "scope": "/",
         "display": "standalone",
         "background_color": "#09090b",
         "theme_color": "#09090b",
-        "icons": [{ "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }],
+        "icons": [
+            { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+            { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+            { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+            { "src": "/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" },
+        ],
     })
     .to_string()
     .into_bytes()
@@ -563,6 +571,20 @@ mod tests {
             (v["name"].as_str(), v["display"].as_str()),
             (Some("Name"), Some("standalone"))
         );
+        // ADR-0067 rung 2: launchers that cannot use the SVG get PNGs, one of them maskable.
+        let icons = v["icons"].as_array().unwrap();
+        for (src, sizes, purpose) in [
+            ("/icon-192.png", "192x192", "any"),
+            ("/icon-512.png", "512x512", "any"),
+            ("/icon-maskable-512.png", "512x512", "maskable"),
+        ] {
+            assert!(
+                icons
+                    .iter()
+                    .any(|i| i["src"] == src && i["sizes"] == sizes && i["purpose"] == purpose),
+                "{src}"
+            );
+        }
         assert_eq!(a.get("/").unwrap().body, b"shell");
     }
 

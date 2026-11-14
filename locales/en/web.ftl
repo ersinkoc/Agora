@@ -602,3 +602,24 @@ palette-theme-editor = Edit theme
 palette-theme = Theme: { $name }
 device-appearance = Appearance
 device-appearance-intro = This browser shows the { $name } theme. Themes are kept in this browser only.
+
+## ADR-0067 rung 2: the phone-sized window and the terminal key bar.
+phone-nav = Go to
+phone-search = Search
+phone-start = Start
+phone-machines = Machines
+phone-back = Back to the list
+phone-offline = offline
+phone-no-agents = No agents on this machine.
+phone-needs = Needs you · { $count }
+phone-next = Next · { $count }
+phone-untrusted = { $machine } does not trust this device yet, so it will refuse an answer from here.
+key-bar = Terminal keys
+key-esc = Esc
+key-tab = Tab
+key-ctrl = Ctrl
+key-up = Up
+key-down = Down
+key-left = Left
+key-right = Right
+key-paste = Paste

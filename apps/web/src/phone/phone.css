@@ -1,0 +1,229 @@
+/* ADR-0067 rung 2: the phone-sized window and the terminal key bar. Design tokens only (docs/ux/visual-language.md); every control a
+   finger presses is at least 44px in both directions (--tap). */
+:root {
+  --tap: 44px;
+}
+
+/* With `viewport-fit=cover` the page reaches under a notch held sideways: the pages keep out of it (0 everywhere else). */
+body {
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
+}
+
+.phone {
+  position: fixed;
+  inset-inline: 0;
+  top: 0;
+  height: 100dvh;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  background: var(--surface-0);
+  color: var(--text);
+  font-size: var(--text-14);
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
+  overflow: hidden;
+}
+
+.phone__top {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--tap);
+  padding: calc(env(safe-area-inset-top) + var(--space-1)) var(--space-2) var(--space-1);
+  background: var(--surface-1);
+  border-bottom: 1px solid var(--border);
+}
+
+.phone__main {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.phone__bottom {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-2) calc(env(safe-area-inset-bottom) + var(--space-1));
+  background: var(--surface-1);
+  border-top: 1px solid var(--border);
+}
+
+.phone__nav {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  min-height: var(--tap);
+  min-width: var(--tap);
+  border-radius: var(--radius-s);
+  color: var(--text-muted);
+  font-size: var(--text-12);
+  text-decoration: none;
+  transition: background-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
+}
+.phone__nav:hover, .phone__nav:active { background: var(--surface-2); color: var(--text); }
+.phone__nav:disabled { opacity: 0.4; }
+.phone__nav--primary { color: var(--accent); }
+
+/* Every control in the phone window, and the ones it borrows (the theme switch, cards' buttons), is big enough for a finger. */
+.phone .button { min-height: var(--tap); }
+.phone .ide-iconbtn { min-width: var(--tap); min-height: var(--tap); }
+.phone-iconbtn {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: var(--tap);
+  height: var(--tap);
+  border-radius: var(--radius-s);
+  color: var(--text-muted);
+}
+.phone-iconbtn:hover, .phone-iconbtn:active { background: var(--surface-2); color: var(--text); }
+.phone-chipbtn {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  min-height: var(--tap);
+  padding: 0 var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-s);
+  background: var(--surface-2);
+  font-size: var(--text-12);
+  white-space: nowrap;
+}
+
+.phone-notice {
+  margin: var(--space-2) var(--space-3) 0;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--state-needs-you);
+  border-radius: var(--radius-s);
+  background: var(--surface-1);
+}
+
+.phone-section { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-2); padding: var(--space-3); }
+.phone-section + .phone-section { padding-top: 0; }
+.phone-section__title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0 var(--space-1);
+}
+
+.phone-list {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-m);
+  background: var(--surface-1);
+  overflow: hidden;
+}
+.phone-list > li + li { border-top: 1px solid var(--border); }
+.phone-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  min-height: 56px;
+  padding: var(--space-2) var(--space-3);
+  text-align: start;
+}
+.phone-row:hover, .phone-row:active { background: var(--surface-2); }
+.phone-row--closed { opacity: 0.7; }
+
+.phone-card {
+  display: grid;
+  /* One column that never grows past the screen: a long name truncates instead of pushing Deny off it. */
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-m);
+  background: var(--surface-1);
+}
+.phone-card--needs { border-color: var(--state-needs-you); }
+.phone-card > .start { border: 0; padding: 0; background: transparent; }
+.phone-card__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--tap);
+  margin: calc(-1 * var(--space-2)) calc(-1 * var(--space-2)) 0;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-s);
+  text-align: start;
+}
+.phone-card__head:enabled:active { background: var(--surface-2); }
+.phone-card__detail {
+  margin: 0;
+  max-height: 9em;
+  overflow: auto;
+  padding: var(--space-2);
+  border-radius: var(--radius-s);
+  background: var(--surface-0);
+  font-family: var(--font-mono);
+  font-size: var(--text-12);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.phone-card__hint { display: grid; gap: var(--space-2); margin: 0; color: var(--text-muted); font-size: var(--text-13); }
+.phone-card__actions { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-2); }
+
+.phone-asks { display: grid; gap: var(--space-2); padding: var(--space-2); max-height: 50%; overflow-y: auto; flex: none; }
+.phone-pane { display: flex; flex-direction: column; flex: 1; min-height: 0; padding: var(--space-1); padding-bottom: calc(env(safe-area-inset-bottom) + var(--space-1)); }
+.phone-pane .terminal { border: 0; }
+
+/* The terminal and its key bar, on a touch screen (any window size). */
+.terminal-touch { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.terminal-touch > .terminal { flex: 1; height: auto; min-height: 0; }
+.key-bar {
+  display: flex;
+  flex: none;
+  margin-top: var(--space-1);
+  overflow-x: auto;
+}
+/* One row of joined keys: eight of them fit a 360 px phone at 44 px each. */
+.key-bar__key {
+  display: inline-grid;
+  place-items: center;
+  flex: 1 0 var(--tap);
+  min-width: var(--tap);
+  height: var(--tap);
+  padding: 0 2px;
+  border: 1px solid var(--border);
+  border-radius: 0;
+  background: var(--surface-2);
+  color: var(--text);
+  font-family: var(--font-mono);
+  /* The label grows with the theme's text size up to what a 44 px key holds, so the row still fits a 360 px phone. */
+  font-size: min(var(--text-12), calc(var(--tap) * 0.3));
+  touch-action: manipulation;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.key-bar__key + .key-bar__key { margin-inline-start: -1px; }
+.key-bar__key:first-child { border-start-start-radius: var(--radius-s); border-end-start-radius: var(--radius-s); }
+.key-bar__key:last-child { border-start-end-radius: var(--radius-s); border-end-end-radius: var(--radius-s); }
+.key-bar__key:active { background: var(--surface-1); }
+.key-bar__key[aria-pressed='true'] { position: relative; background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+
+/* A phone held sideways: the height is what is short, so the bars are as slim as a finger allows. */
+@media (max-height: 500px) {
+  .phone__top { padding-top: calc(env(safe-area-inset-top) + 2px); padding-bottom: 2px; }
+  .phone__nav { flex-direction: row; gap: var(--space-2); }
+  .phone-asks { max-height: 40%; }
+}
+
+/* The pages a phone shows in the window's own frame (machines, this device, audit): Back and the bar's buttons take a finger too. */
+@media (max-width: 699px), (max-height: 500px) and (pointer: coarse) {
+  header.ide-bar { height: auto; min-height: calc(var(--tap) + var(--space-1)); }
+  header.ide-bar .ide-row { min-height: var(--tap); }
+  header.ide-bar .ide-iconbtn { min-width: var(--tap); min-height: var(--tap); }
+}
