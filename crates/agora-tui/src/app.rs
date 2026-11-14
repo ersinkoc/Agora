@@ -856,7 +856,10 @@ impl App {
         // The inspector.
         if a.inspector.width > 0 {
             let lines: Vec<Line<'_>> = s.details.iter().map(|d| Line::raw(d.clone())).collect();
-            Paragraph::new(lines).render(a.inspector, buf);
+            // Lines longer than the panel wrap (a start request's card is already cut to it, so its fit is unchanged).
+            Paragraph::new(lines)
+                .wrap(Wrap { trim: false })
+                .render(a.inspector, buf);
         }
 
         // The footer: the keys for where the keyboard is, the mouse state, the last notice.
