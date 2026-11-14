@@ -621,3 +621,62 @@ fn a_service_started_supervisor_finds_its_folder_and_writes_its_log() {
     let _ = std::fs::remove_dir_all(elsewhere);
     let _ = std::fs::remove_dir_all(home);
 }
+
+/// Linux's decision on #563: under a service (`--log`) every end the supervisor decides itself exits 0, so the service manager restarts
+/// only a crash of the supervisor; without `--log` (the front door's supervisor) the code says the role did not start.
+#[test]
+fn a_service_supervisor_exits_0_for_its_own_decisions() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return;
+    }
+    let home = tmp("exit0");
+    // A project folder that does not exist: the node refuses at once.
+    std::fs::write(
+        home.join("machine.toml"),
+        format!(
+            "roles = [\"node\"]\nui = \"none\"\nnode_projects = [{}]\n",
+            toml_string(&home.join("missing").to_string_lossy()),
+        ),
+    )
+    .unwrap();
+    let _down = Down(home.clone());
+    let home_arg = home.to_string_lossy().into_owned();
+    // A refusal: 0 under a service, non-zero for the front door's supervisor.
+    let (code, out, err) = run(&home, &["supervise", "node", "--home", &home_arg, "--log"]);
+    assert_eq!(code, 0, "{out}{err}");
+    let log = std::fs::read_to_string(home.join("logs/node.log")).unwrap();
+    assert!(log.contains("too soon to be a crash"), "{log}");
+    let (code, _, err) = run(&home, &["supervise", "node"]);
+    assert_ne!(code, 0, "{err}");
+
+    // A lock another live process holds: 0 under a service, 1 otherwise.
+    let mut holder = agora(&home, &["supervise", "node", "--home", &home_arg, "--log"]);
+    std::fs::write(
+        home.join("machine.toml"),
+        "roles = [\"node\"]\nui = \"none\"\nnode_projects = []\n",
+    )
+    .unwrap();
+    let mut holder = holder
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    wait_for(
+        "the first supervisor's lock",
+        Duration::from_secs(20),
+        || lock_pid(&home, "node") == Some(holder.id()),
+    );
+    let (code, _, err) = run(&home, &["supervise", "node", "--home", &home_arg, "--log"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(err.contains("already looks after the node"), "{err}");
+    let (code, _, err) = run(&home, &["supervise", "node"]);
+    assert_eq!(code, 1, "{err}");
+    let (code, out, err) = run(&home, &["down"]);
+    assert_eq!(code, 0, "{out}{err}");
+    let end = Instant::now() + Duration::from_secs(10);
+    while holder.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < end, "the supervisor outlived `agora down`");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let _ = std::fs::remove_dir_all(home);
+}
