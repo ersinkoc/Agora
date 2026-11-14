@@ -165,18 +165,23 @@ impl Bindings {
 /// The project the node itself knows `requested` to belong to, for a device limited to some projects (ADR-0049, ADR-0053): the
 /// project of the nearest folder that is `requested` or contains it among the owner-confirmed folders in `bindings_file` (written by
 /// launches) and the registered checkouts in `projects` (`(id, root)`), compared as canonical paths. A registered project's id or name
-/// (what `directory.inspect` also accepts) names its root. `None`: a folder the node knows for no project. What the folder itself
+/// (what `directory.inspect` also accepts; an id before a name, a shared name for none) names its root. `None`: a folder the node knows for no project. What the folder itself
 /// claims (its metadata) is never asked, so a copied identity cannot place a folder in a project.
 pub fn known_project(
     bindings_file: &Path,
     projects: &[(String, String, PathBuf)],
     requested: &str,
 ) -> Option<String> {
-    if let Some((id, _, _)) = projects
-        .iter()
-        .find(|(id, name, _)| id == requested || name == requested)
-    {
+    // As `directory.inspect` resolves it (`control::resolve_in`): an id wins over a name, and a name two projects share names
+    // neither, so the project checked here is always the one the action reads.
+    if let Some((id, _, _)) = projects.iter().find(|(id, _, _)| id == requested) {
         return Some(id.clone());
+    }
+    let mut named = projects.iter().filter(|(_, name, _)| name == requested);
+    match (named.next(), named.next()) {
+        (Some((id, _, _)), None) => return Some(id.clone()),
+        (Some(_), Some(_)) => return None,
+        _ => {}
     }
     if requested.is_empty() || requested.len() > 4096 || requested.contains('\0') {
         return None;

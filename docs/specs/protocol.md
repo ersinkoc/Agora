@@ -299,7 +299,7 @@ Generic start grants cannot authorize a substituted directory. A device the node
 those projects, judged after its signature by the node's own records, never by what the request or the folder claims: the
 canonical folder must be one the node already knows for a project, or lie inside one (the nearest known folder decides;
 known folders are the owner-confirmed launch bindings and the checkouts registered with `node run`; a registered project's
-id or name for `inspect`); that project must be one of the device's, and for `launch` also the signed `project_id` (the
+id or name for `inspect`, an id before a name and a name two projects share for none); that project must be one of the device's, and for `launch` also the signed `project_id` (the
 launch then checks the folder's identity against it as for every launch). `resume` uses the project the node's session
 ledger holds for the agent. Refused with `auth.forbidden` (`action: directory`): a folder the node knows for no project or
 for another one (also its parent folders, `..`, the home folder), `inspect` with `create_project_id`, `launch` with

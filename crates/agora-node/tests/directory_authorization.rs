@@ -636,6 +636,78 @@ mod limited_device {
         let _ = std::fs::remove_dir_all(&m.dir);
     }
 
+    /// Review of #478 (r5): a registered project's id wins over another project's name, and a name two projects share places
+    /// nothing, as `directory.inspect` resolves them, so the check and the action never read different projects.
+    #[test]
+    fn a_project_id_wins_over_a_name_and_a_shared_name_places_nothing() {
+        let m = machine("id-name");
+        let projects = vec![
+            (
+                "id:own".to_string(),
+                "shared".to_string(),
+                PathBuf::from(&m.own),
+            ),
+            (
+                "shared".to_string(),
+                "b".to_string(),
+                PathBuf::from(&m.other),
+            ),
+        ];
+        assert_eq!(
+            known_project(&m.bindings, &projects, "shared").as_deref(),
+            Some("shared")
+        );
+        assert_eq!(
+            known_project(&m.bindings, &projects, "b").as_deref(),
+            Some("shared")
+        );
+        let twice = vec![
+            (
+                "id:own".to_string(),
+                "same".to_string(),
+                PathBuf::from(&m.own),
+            ),
+            (
+                "id:other".to_string(),
+                "same".to_string(),
+                PathBuf::from(&m.other),
+            ),
+        ];
+        assert_eq!(known_project(&m.bindings, &twice, "same"), None);
+        let _ = std::fs::remove_dir_all(&m.dir);
+    }
+
+    /// Review of #478 (r6), accepted: a folder known for a project covers every folder below it, so a separate repository nested
+    /// inside can be inspected and listed by the project's limited device, but a launch there is refused: the device can only sign
+    /// it for its own project (the node refuses another), and the launch checks the folder's real identity against that.
+    #[test]
+    fn a_separate_repository_inside_a_project_folder_can_be_seen_but_not_launched_in() {
+        let key = key();
+        let m = machine("nested-repo");
+        let repo = Path::new(&m.own).join("src");
+        let git = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&repo)
+            .status();
+        if !git.is_ok_and(|s| s.success()) {
+            return;
+        }
+        let g = node(&key, &m);
+        let p = canon(&repo);
+        assert!(g
+            .directory_action(&inspect(&key, 1, &p, false), NOW)
+            .is_ok());
+        assert!(g.directory_action(&list(&key, 2, &p), NOW).is_ok());
+        let (info, _) = agora_node::directory::inspect(&p, "node-a", false).unwrap();
+        assert_ne!(info.project_id, "id:own");
+        // Signed for its real identity: refused here. Signed for `id:own`: passes here, and the launch refuses the identity mismatch.
+        assert!(forbidden(g.directory_action(
+            &launch_in(&key, 3, &p, &info.project_id, false),
+            NOW
+        )));
+        let _ = std::fs::remove_dir_all(&m.dir);
+    }
+
     #[test]
     fn the_node_places_folders_by_its_own_records_only() {
         let m = machine("places");
