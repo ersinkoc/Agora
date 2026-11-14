@@ -1273,6 +1273,10 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                         None,
                         std::env::var("COLORTERM").ok().as_deref(),
                         std::env::var("TERM").ok().as_deref(),
+                        std::env::var("WT_SESSION")
+                            .or_else(|_| std::env::var("TERM_PROGRAM"))
+                            .ok()
+                            .as_deref(),
                     )
                 } else {
                     ColorMode::Mono

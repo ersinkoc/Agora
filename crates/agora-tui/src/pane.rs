@@ -29,8 +29,15 @@ impl ColorMode {
     /// - `NO_COLOR` set to anything turns colour off (https://no-color.org), and so does `TERM=dumb`;
     /// - `COLORTERM=truecolor` / `24bit` is 24-bit colour;
     /// - a `TERM` with `256color` in it is the 256-colour palette, any other `TERM` the 16 colours;
-    /// - no `TERM` at all (Windows consoles, which take 24-bit colour) is 24-bit colour.
-    pub fn from_env(no_color: Option<&str>, colorterm: Option<&str>, term: Option<&str>) -> Self {
+    /// - no `TERM` at all is a Windows console: 24-bit colour in a modern host that says so (`host`: Windows Terminal's
+    ///   `WT_SESSION`, or a `TERM_PROGRAM`), else the classic console (conhost), whose 256-colour palette is not the xterm one (a
+    ///   grey came out orange): the 16 colours there.
+    pub fn from_env(
+        no_color: Option<&str>,
+        colorterm: Option<&str>,
+        term: Option<&str>,
+        host: Option<&str>,
+    ) -> Self {
         if no_color.is_some() || term == Some("dumb") {
             return Self::Mono;
         }
@@ -38,7 +45,8 @@ impl ColorMode {
             return Self::Full;
         }
         match term {
-            None | Some("") => Self::Full,
+            None | Some("") if host.is_some_and(|h| !h.is_empty()) => Self::Full,
+            None | Some("") => Self::Ansi16,
             Some(t) if t.contains("256color") || t.contains("direct") => Self::Ansi256,
             Some(_) => Self::Ansi16,
         }
@@ -372,31 +380,35 @@ mod tests {
         );
         assert!(mono[(0, 0)].modifier.contains(Modifier::BOLD));
         // The environment decides the mode (the review: 16 colours were never chosen).
-        for (no_color, colorterm, term, want) in [
+        for (no_color, colorterm, term, host, want) in [
             (
                 Some("1"),
                 Some("truecolor"),
                 Some("xterm-256color"),
+                None,
                 ColorMode::Mono,
             ),
-            (None, None, Some("dumb"), ColorMode::Mono),
+            (None, None, Some("dumb"), None, ColorMode::Mono),
             (
                 None,
                 Some("truecolor"),
                 Some("xterm-256color"),
+                None,
                 ColorMode::Full,
             ),
-            (None, Some("24bit"), Some("xterm"), ColorMode::Full),
-            (None, None, Some("xterm-256color"), ColorMode::Ansi256),
-            (None, None, Some("tmux-256color"), ColorMode::Ansi256),
-            (None, None, Some("xterm"), ColorMode::Ansi16),
-            (None, None, Some("linux"), ColorMode::Ansi16),
-            (None, None, None, ColorMode::Full),
+            (None, Some("24bit"), Some("xterm"), None, ColorMode::Full),
+            (None, None, Some("xterm-256color"), None, ColorMode::Ansi256),
+            (None, None, Some("tmux-256color"), None, ColorMode::Ansi256),
+            (None, None, Some("xterm"), None, ColorMode::Ansi16),
+            (None, None, Some("linux"), None, ColorMode::Ansi16),
+            // No TERM: Windows. Windows Terminal (WT_SESSION) takes 24-bit; the classic console (conhost) the 16 colours.
+            (None, None, None, Some("1f2c-…"), ColorMode::Full),
+            (None, None, None, None, ColorMode::Ansi16),
         ] {
             assert_eq!(
-                ColorMode::from_env(no_color, colorterm, term),
+                ColorMode::from_env(no_color, colorterm, term, host),
                 want,
-                "{no_color:?} {colorterm:?} {term:?}"
+                "{no_color:?} {colorterm:?} {term:?} {host:?}"
             );
         }
         // Without 24-bit colour, a 24-bit colour is the nearest palette entry (never one of the theme's 16).
