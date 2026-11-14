@@ -36,6 +36,12 @@ tui-state-finished = Finished
 tui-state-unreachable = Machine offline
 tui-agent-on = on { $machine }
 tui-agent-on-in = on { $machine } in { $folder }
+tui-agent-changes = { $files } { $files ->
+        [one] file
+       *[other] files
+    } changed · +{ $plus } −{ $minus }
+tui-agent-tokens = { $input } in · { $output } out
+tui-agent-cost = { $amount } { $currency } so far
 tui-state-unknown = Unknown
 tui-no-project = (no project)
 tui-hint-answer = Press y to allow, n to deny the first request above.

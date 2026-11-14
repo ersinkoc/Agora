@@ -137,8 +137,10 @@ pub struct Row {
     pub needs_you: bool,
     /// Whether the agent has a terminal; one without (a chat agent) is shown as its conversation ([`Screen::conversation`]).
     pub terminal: bool,
-    /// A heading (a machine), drawn in bold and never selected: the keys and the mouse step over it.
+    /// A heading (a machine, or a project under it), never selected: the keys and the mouse step over it.
     pub header: bool,
+    /// A project's heading under its machine (as the web's folders): drawn dim with a folder mark, where a machine's is bold.
+    pub group: bool,
 }
 
 /// What an event is handled against: the tree's rows, the window, and the active agent's terminal modes.
@@ -793,7 +795,8 @@ impl App {
             if row.header {
                 let label = clip_to(&row.label, usize::from(a.tree.width));
                 let room = usize::from(a.tree.width).saturating_sub(text_width(&label) + 2);
-                let mut line = vec![Span::styled(label, strong)];
+                // A machine in bold; a project under it (its folder) dim, as the web's tree.
+                let mut line = vec![Span::styled(label, if row.group { dim } else { strong })];
                 // What the machine says (its memory, or when it was last seen) is cut with an ellipsis, never mid-word silently.
                 if !row.state.is_empty() && room > 1 {
                     line.push(Span::styled(
@@ -1643,6 +1646,7 @@ mod tests {
                 needs_you: i == 2,
                 terminal: true,
                 header: false,
+                group: false,
             })
             .collect()
     }
@@ -2315,6 +2319,7 @@ mod tests {
                 needs_you: false,
                 terminal: true,
                 header: false,
+                group: false,
             })
             .collect();
         let mut app = App::default();
@@ -2364,6 +2369,7 @@ mod tests {
             needs_you: false,
             terminal: true,
             header: false,
+            group: false,
         }];
         let app = App::default();
         let question = vec![
@@ -2552,6 +2558,7 @@ mod tests {
                 needs_you: false,
                 terminal: false,
                 header: true,
+                group: false,
             },
         );
         let mut app = App::default();
@@ -2658,6 +2665,7 @@ mod tests {
             needs_you: false,
             terminal: true,
             header,
+            group: false,
         };
         let rows = vec![
             row("mac", true),

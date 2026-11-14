@@ -331,6 +331,76 @@ pub fn agent_label(s: &Snapshot, agent_id: &str) -> String {
         )
 }
 
+/// An agent's tokens and, when the hub could price them, what they cost so far ("12.3k in · 4.1k out · 0.02 USD"). Nothing when it
+/// reported neither.
+fn usage_line(a: &AgentSnapshot, t: Text<'_>) -> Option<String> {
+    let short = |n: u64| {
+        if n >= 1_000_000 {
+            format!("{:.1}M", n as f64 / 1e6)
+        } else if n >= 1_000 {
+            format!("{:.1}k", n as f64 / 1e3)
+        } else {
+            n.to_string()
+        }
+    };
+    let mut parts = Vec::new();
+    if a.input_tokens + a.output_tokens > 0 {
+        parts.push(t(
+            key!("tui-agent-tokens"),
+            &[
+                ("input", Arg::Str(short(a.input_tokens))),
+                ("output", Arg::Str(short(a.output_tokens))),
+            ],
+        ));
+    }
+    if let Some(c) = a.cost_micros.filter(|c| *c > 0) {
+        let amount = c as f64 / 1e6;
+        let amount = if amount >= 0.01 {
+            format!("{amount:.2}")
+        } else {
+            format!("{amount:.4}")
+        };
+        let currency = if a.currency.is_empty() {
+            "USD".to_string()
+        } else {
+            plain(&a.currency)
+        };
+        parts.push(t(
+            key!("tui-agent-cost"),
+            &[
+                ("amount", Arg::Str(amount)),
+                ("currency", Arg::Str(currency)),
+            ],
+        ));
+    }
+    (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
+/// The name of the project an agent works in, as the web shows it: the folder name of its project's checkout on its machine, else
+/// of the folder it runs in, else the project's id; empty when it has none of them.
+fn project_name(s: &Snapshot, a: &AgentSnapshot) -> String {
+    let folder = |path: &str| {
+        path.trim_end_matches(['/', '\\'])
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or_default()
+            .to_string()
+    };
+    let checkout = s
+        .checkouts
+        .iter()
+        .find(|c| {
+            !a.project_id.is_empty() && c.project_id == a.project_id && c.node_id == a.node_id
+        })
+        .map(|c| folder(&c.path))
+        .filter(|n| !n.is_empty());
+    plain(
+        &checkout
+            .or_else(|| Some(folder(&a.folder)).filter(|n| !n.is_empty()))
+            .unwrap_or_else(|| a.project_id.clone()),
+    )
+}
+
 /// Whether the machine `node` is known to the hub and offline (ADR-0070: the hub owns presence).
 fn machine_offline(s: &Snapshot, node: &str) -> bool {
     s.nodes.iter().any(|n| n.node_id == node && !n.online)
@@ -369,6 +439,7 @@ pub fn app_rows(s: &Snapshot, now_ms: u64, t: Text<'_>) -> Vec<crate::app::Row> 
             needs_you: asks || (a.running && !unreachable && st == AgentState::Blocked),
             terminal: s.terminals.iter().any(|x| x.agent_id == a.agent_id),
             header: false,
+            group: false,
         }
     };
     let mut nodes: Vec<_> = s.nodes.iter().collect();
@@ -388,12 +459,41 @@ pub fn app_rows(s: &Snapshot, now_ms: u64, t: Text<'_>) -> Vec<crate::app::Row> 
             needs_you: false,
             terminal: false,
             header: true,
+            group: false,
         });
         let mut agents: Vec<&AgentSnapshot> =
             s.agents.iter().filter(|a| a.node_id == n.node_id).collect();
         agents.sort_by(|a, b| a.agent_id.cmp(&b.agent_id));
-        for (a, depth) in crate::render::helper_order(&agents) {
-            rows.push(agent_row(a, depth));
+        // As the web's tree: the machine's agents under their project's folder name, the folders in name order; agents of no
+        // project and no folder stay right under the machine.
+        let mut groups: Vec<(String, Vec<&AgentSnapshot>)> = Vec::new();
+        for a in agents {
+            let name = project_name(s, a);
+            match groups.iter_mut().find(|(g, _)| *g == name) {
+                Some((_, list)) => list.push(a),
+                None => groups.push((name, vec![a])),
+            }
+        }
+        groups.sort_by(|a, b| {
+            (!a.0.is_empty())
+                .cmp(&!b.0.is_empty())
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        for (name, list) in groups {
+            if !name.is_empty() {
+                rows.push(crate::app::Row {
+                    id: format!("{}#{name}", n.node_id),
+                    label: format!("  {name}/"),
+                    state: String::new(),
+                    needs_you: false,
+                    terminal: false,
+                    header: true,
+                    group: true,
+                });
+            }
+            for (a, depth) in crate::render::helper_order(&list) {
+                rows.push(agent_row(a, depth));
+            }
         }
     }
     let mut rest: Vec<&AgentSnapshot> = s
@@ -486,6 +586,25 @@ pub fn app_details(s: &Snapshot, selected: &str, width: u16, height: u16, t: Tex
                 lines.push(format!("[{}]", t(key!("tui-badge-no-ask"), &[])));
             }
             if let Some(l) = crate::render::session_line(a, t) {
+                lines.push(l);
+            }
+            // What it changed in its worktree, and what it used: as the web's inspector shows them.
+            if let Some(w) = s
+                .worktrees
+                .iter()
+                .find(|w| !a.worktree_id.is_empty() && w.worktree_id == a.worktree_id)
+                .filter(|w| w.files_changed > 0)
+            {
+                lines.push(t(
+                    key!("tui-agent-changes"),
+                    &[
+                        ("files", Arg::Num(i64::from(w.files_changed))),
+                        ("plus", Arg::Num(i64::from(w.insertions))),
+                        ("minus", Arg::Num(i64::from(w.deletions))),
+                    ],
+                ));
+            }
+            if let Some(l) = usage_line(a, t) {
                 lines.push(l);
             }
         }
@@ -1097,6 +1216,98 @@ mod tests {
             app_details(&s, "", 40, 20, &text).lines[0],
             "tui-split-pick"
         );
+    }
+
+    #[test]
+    fn the_inspector_says_what_an_agent_changed_and_used() {
+        let mut s = snapshot();
+        s.worktrees = vec![agora_protocol::v1::WorktreeSnapshot {
+            worktree_id: "w1".into(),
+            files_changed: 3,
+            insertions: 12,
+            deletions: 4,
+            ..Default::default()
+        }];
+        let a = &mut s.agents[0]; // mac2/agent-2
+        a.worktree_id = "w1".into();
+        a.input_tokens = 12_345;
+        a.output_tokens = 678;
+        a.cost_micros = Some(20_000);
+        a.currency = "USD".into();
+        let d = app_details(&s, "mac2/agent-2", 60, 20, &text);
+        assert!(
+            d.lines
+                .contains(&"tui-agent-changes files=3 plus=12 minus=4".to_string()),
+            "{:#?}",
+            d.lines
+        );
+        assert!(
+            d.lines.contains(
+                &"tui-agent-tokens input=12.3k output=678 · tui-agent-cost amount=0.02 currency=USD"
+                    .to_string()
+            ),
+            "{:#?}",
+            d.lines
+        );
+        // Nothing reported, nothing said (never a guessed zero).
+        let d = app_details(&s, "mac2/agent-1", 60, 20, &text);
+        assert!(!d
+            .lines
+            .iter()
+            .any(|l| l.contains("tui-agent-tokens") || l.contains("tui-agent-changes")));
+    }
+
+    #[test]
+    fn a_machines_agents_sit_under_their_projects_folder_names() {
+        let mut s = snapshot();
+        s.checkouts = vec![
+            agora_protocol::v1::CheckoutSnapshot {
+                node_id: "mac2".into(),
+                project_id: "p-web".into(),
+                path: "/Users/me/code/web/".into(),
+                ..Default::default()
+            },
+            agora_protocol::v1::CheckoutSnapshot {
+                node_id: "mac2".into(),
+                project_id: "p-api".into(),
+                path: "/Users/me/code/api".into(),
+                ..Default::default()
+            },
+        ];
+        s.agents[0].project_id = "p-web".into(); // mac2/agent-2
+        s.agents[1].project_id = "p-api".into(); // mac2/agent-1
+                                                 // No project, a folder of its own (an agent started in a folder): grouped by that folder's name.
+        s.agents.push(AgentSnapshot {
+            agent_id: "mac2/agent-3".into(),
+            node_id: "mac2".into(),
+            kind: "shell".into(),
+            folder: "/tmp/notes".into(),
+            running: true,
+            ..Default::default()
+        });
+        let rows = app_rows(&s, 0, &text);
+        let mac2 = rows.iter().position(|r| r.id == "mac2").unwrap();
+        let shown: Vec<(&str, bool)> = rows[mac2 + 1..]
+            .iter()
+            .take_while(|r| !r.header || r.group)
+            .map(|r| (r.label.trim(), r.group))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                ("api/", true),
+                (agent_name("mac2/agent-1", "claude-code").as_str(), false),
+                ("notes/", true),
+                (agent_name("mac2/agent-3", "shell").as_str(), false),
+                ("web/", true),
+                (agent_name("mac2/agent-2", "codex").as_str(), false),
+            ]
+        );
+        // A folder heading is a heading: never selected, never "needs you".
+        assert!(rows
+            .iter()
+            .filter(|r| r.group)
+            .all(|r| r.header && !r.needs_you));
     }
 
     #[test]
