@@ -145,7 +145,12 @@ fn quote(p: &std::path::Path) -> String {
 /// save fails while the file itself is writable. Nothing else in that folder opens up.
 ///
 /// Refuses ([`crate::SandboxRefusal`]) when a `deny` entry is relative or cannot be resolved (a closed folder that silently fell out
-/// of the profile would leave the node's home open), and when a `reopen` entry is not a plain folder.
+/// of the profile would leave the node's home open), when a `reopen` entry is not a plain folder, and when an entry is reached
+/// through a link the agent could have made.
+///
+/// Every path in the profile is where the kernel has it ([`walk`]): Seatbelt matches the path the kernel resolved, so a rule spelled
+/// another way (`/System/Volumes/Data/Users/...`, which `realpath` keeps) would match nothing (measured: a deny spelled through
+/// that firmlink left the folder readable by both spellings).
 pub(crate) fn profile(sb: &crate::Sandbox) -> io::Result<String> {
     let refused = |why| io::Error::new(io::ErrorKind::PermissionDenied, why);
     let mut denied: Vec<std::path::PathBuf> = Vec::new();
@@ -155,62 +160,73 @@ pub(crate) fn profile(sb: &crate::Sandbox) -> io::Result<String> {
             None => return Err(refused(crate::SandboxRefusal::ProtectedPathUnresolved)),
         }
     }
+    // #545: an entry is resolved through links when the profile is built, so a link the agent made where it may write would widen
+    // its next start (`ln -s ~/.zshrc ~/.claude.json`, `ln -s ~ ~/.claude`, the shared Git folder's `refs` made a link to `~`).
+    // The places the agent may write are known first, each where the kernel has it: an entry's own place (its folder resolved, then
+    // its name) and where it leads now. Every entry is then walked one component at a time, and a link at one of those places or
+    // below one refuses the start ([`agents_link`]): checking a link and resolving the entry are one step, so a link swapped in
+    // between cannot slip through. A link the agent cannot have made is followed: one outside every place it may write (an owner's
+    // `~/.gitconfig` kept in a dotfiles folder), or the system's (`/tmp` in `/`, which only root may change).
+    let mut places: Vec<std::path::PathBuf> = Vec::new();
+    for p in sb.write.iter().chain(sb.reopen.iter()) {
+        if !p.is_absolute() {
+            continue;
+        }
+        if let (Some(parent), Some(name)) = (p.parent(), p.file_name()) {
+            if let Ok(r) = walk(parent, &|_, _| false) {
+                places.push(r.path.join(name));
+            }
+        }
+        if let Ok(r) = walk(p, &|_, _| false) {
+            places.push(r.path);
+        }
+    }
+    let agents = |at: &std::path::Path, dir: std::os::fd::RawFd| agents_link(at, dir, &places);
     // The agent's worktree must still be the folder the node made: one it replaced with a link (into the node's home, or to any
     // folder it wants written at its next start) refuses the start instead of starting it unable to use its folder, or able to
     // write where the link points.
+    let mut reopened: Vec<std::path::PathBuf> = Vec::new();
     for p in &sb.reopen {
-        let plain = p.is_absolute()
-            && std::fs::symlink_metadata(p)
-                .is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink());
-        if !plain {
-            return Err(refused(crate::SandboxRefusal::WorktreeNotFolder));
+        match walk(p, &agents).ok().filter(|r| p.is_absolute() && r.dir) {
+            Some(r) => reopened.push(r.path),
+            None => return Err(refused(crate::SandboxRefusal::WorktreeNotFolder)),
         }
     }
-    // #545: an entry is resolved through links when the profile is built, so a link the agent made where it may write would widen
-    // its next start (`ln -s ~/.zshrc ~/.claude.json`, `ln -s ~ ~/.claude`, the shared Git folder's `refs` made a link to `~`).
-    // Refused, as a swapped worktree is. A link the agent cannot have made is followed: one outside every `write` entry (an owner's
-    // `~/.gitconfig` kept in a dotfiles folder), or one in a folder this user cannot write (`/tmp`, `/var` in `/`).
-    if sb
-        .write
-        .iter()
-        .chain(sb.read.iter())
-        .any(|e| through_agents_link(e, &sb.write))
-    {
-        return Err(refused(crate::SandboxRefusal::WritableIsLink));
-    }
     // A `read` or `write` entry that resolves below a closed folder (`~/.claude` made a link to the node's home) is left out: the
-    // closed folder stays closed whatever the agent left behind for its next start.
-    let real = |p: &std::path::Path| {
-        std::fs::canonicalize(p)
-            .ok()
-            .filter(|r| !denied.iter().any(|d| r.starts_with(d)))
+    // closed folder stays closed whatever the agent left behind for its next start. One that does not exist is left out too.
+    let resolve = |list: &[std::path::PathBuf]| -> io::Result<Vec<Walked>> {
+        let mut out = Vec::new();
+        for p in list.iter().filter(|p| p.is_absolute()) {
+            match walk(p, &agents) {
+                Ok(r) if !denied.iter().any(|d| r.path.starts_with(d)) => out.push(r),
+                Ok(_) | Err(Walk::Missing(_)) | Err(Walk::Failed) => {}
+                Err(Walk::AgentsLink) => {
+                    return Err(refused(crate::SandboxRefusal::WritableIsLink))
+                }
+            }
+        }
+        Ok(out)
     };
+    let write_real = resolve(&sb.write)?;
+    let read_real = resolve(&sb.read)?;
     let holds_private = |p: &std::path::Path| {
         PRIVATE
             .iter()
             .map(std::path::Path::new)
             .any(|private| private != p && private.starts_with(p))
     };
-    let reads: Vec<String> = sb
-        .read
+    let reads: Vec<String> = read_real
         .iter()
-        .chain(sb.write.iter())
-        .filter_map(|p| real(p))
+        .chain(write_real.iter())
+        .map(|r| &r.path)
         .filter(|p| !holds_private(p))
-        .map(|p| quote(&p))
+        .map(|p| quote(p))
         .collect();
-    let writes: Vec<String> = sb
-        .write
+    let writes: Vec<String> = write_real.iter().map(|r| quote(&r.path)).collect();
+    let siblings: Vec<String> = write_real
         .iter()
-        .filter_map(|p| real(p))
-        .map(|p| quote(&p))
-        .collect();
-    let siblings: Vec<String> = sb
-        .write
-        .iter()
-        .filter_map(|p| real(p))
-        .filter(|p| p.is_file())
-        .filter_map(|p| sibling_rule(&p))
+        .filter(|r| r.file)
+        .filter_map(|r| sibling_rule(&r.path))
         .collect();
     let private: Vec<String> = PRIVATE
         .iter()
@@ -261,7 +277,7 @@ pub(crate) fn profile(sb: &crate::Sandbox) -> io::Result<String> {
         // A closed folder cannot be moved or removed by moving a folder above it: below a folder the agent may write (a node home
         // under `/tmp`), `mv /tmp/home /tmp/x` would carry everything out from under rules that name its path. The folders on the
         // way to it are closed to writes themselves (their own entry: renaming or removing them), not to what is created in them.
-        let writable: Vec<std::path::PathBuf> = sb.write.iter().filter_map(|p| real(p)).collect();
+        let writable: Vec<&std::path::PathBuf> = write_real.iter().map(|r| &r.path).collect();
         let mut above: Vec<String> = Vec::new();
         for d in &denied {
             for a in d.ancestors().skip(1) {
@@ -280,16 +296,9 @@ pub(crate) fn profile(sb: &crate::Sandbox) -> io::Result<String> {
         // of the node's home stays closed), with the metadata of the folders on the way, so a path to it can still be walked
         // (`git` resolves every folder of its working directory). Only while it is still a real folder: the agent could have
         // replaced it with a link to the home, which would then be opened as its worktree.
-        let inside: Vec<std::path::PathBuf> = sb
-            .reopen
+        let inside: Vec<&std::path::PathBuf> = reopened
             .iter()
-            .filter(|p| p.is_absolute())
-            .filter(|p| {
-                std::fs::symlink_metadata(p)
-                    .is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink())
-            })
-            .filter_map(|p| std::fs::canonicalize(p).ok())
-            .filter(|w| denied.iter().any(|d| w.starts_with(d) && w != d))
+            .filter(|w| denied.iter().any(|d| w.starts_with(d) && *w != d))
             .collect();
         if !inside.is_empty() {
             let open: Vec<String> = inside.iter().map(|w| quote(w)).collect();
@@ -351,22 +360,170 @@ pub(crate) fn profile(sb: &crate::Sandbox) -> io::Result<String> {
     Ok(out)
 }
 
-/// Whether `entry`, or a folder on its way, is a symbolic link the agent could have made: inside one of the `writes` entries (as
-/// written: that is where the agent could write in its last run) and in a folder this user may write (`/tmp` itself is a link in
-/// `/`, which nobody but root writes; `/private/tmp` and `~` are writable). A folder that cannot be checked counts as writable.
-fn through_agents_link(entry: &std::path::Path, writes: &[std::path::PathBuf]) -> bool {
-    use std::os::unix::ffi::OsStrExt;
-    let writable = |d: &std::path::Path| {
-        std::ffi::CString::new(d.as_os_str().as_bytes()).map_or(true, |c| {
-            // SAFETY: `c` is a NUL-terminated path that lives for the call.
-            unsafe { libc::access(c.as_ptr(), libc::W_OK) == 0 }
-        })
+/// An entry where the kernel has it (see [`walk`]).
+struct Walked {
+    path: std::path::PathBuf,
+    dir: bool,
+    file: bool,
+}
+
+/// Why [`walk`] stopped.
+enum Walk {
+    /// A component does not exist: the path the kernel has for the folders that do, and the rest as it was written.
+    Missing(std::path::PathBuf),
+    /// A link the agent could have made ([`agents_link`]).
+    AgentsLink,
+    /// Not walked to the end (no access, too many links, not a folder on the way).
+    Failed,
+}
+
+/// Where the absolute path `p` really is, walked from `/` one component at a time: each opened with `O_NOFOLLOW` relative to the
+/// folder before it (`O_EVTONLY`: no read access needed), each link read there (`readlinkat`) and followed by hand after `agents`
+/// was asked about it (its place, and the folder holding it), and the end's path taken from its descriptor (`F_GETPATH`). Nothing is
+/// looked up twice by name, so what is checked is what is resolved. At most 40 links, as the kernel.
+fn walk(
+    p: &std::path::Path,
+    agents: &dyn Fn(&std::path::Path, std::os::fd::RawFd) -> bool,
+) -> Result<Walked, Walk> {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+    use std::path::Component;
+    const FLAGS: libc::c_int =
+        libc::O_EVTONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC;
+    let open = |dir: Option<&OwnedFd>, name: &std::ffi::OsStr| -> io::Result<OwnedFd> {
+        let c = std::ffi::CString::new(name.as_bytes())
+            .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+        let at = dir.map_or(libc::AT_FDCWD, |d| d.as_raw_fd());
+        // SAFETY: `c` is NUL-terminated and lives for the call; the descriptor returned is owned here.
+        let fd = unsafe { libc::openat(at, c.as_ptr(), FLAGS) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: `fd` was just opened and is owned by nothing else.
+        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
     };
-    entry.ancestors().any(|c| {
-        writes.iter().any(|w| c.starts_with(w))
-            && std::fs::symlink_metadata(c).is_ok_and(|m| m.file_type().is_symlink())
-            && c.parent().is_none_or(writable)
+    let path_of = |fd: &OwnedFd| -> io::Result<std::path::PathBuf> {
+        let mut buf = vec![0u8; libc::PATH_MAX as usize];
+        // SAFETY: F_GETPATH writes a NUL-terminated path of at most PATH_MAX bytes into `buf`, which holds that many.
+        if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETPATH, buf.as_mut_ptr()) } == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        let len = buf.iter().position(|b| *b == 0).unwrap_or(buf.len());
+        Ok(std::path::PathBuf::from(std::ffi::OsStr::from_bytes(
+            &buf[..len],
+        )))
+    };
+    let failed = |_: io::Error| Walk::Failed;
+    if !p.is_absolute() {
+        return Err(failed(io::Error::from(io::ErrorKind::InvalidInput)));
+    }
+    let root = std::ffi::OsStr::new("/");
+    let mut at = open(None, root).map_err(failed)?;
+    // The components still to walk, the next one last.
+    let mut rest: Vec<std::ffi::OsString> = Vec::new();
+    let push = |rest: &mut Vec<std::ffi::OsString>, p: &std::path::Path| {
+        for c in p.components().rev() {
+            match c {
+                Component::Normal(n) => rest.push(n.to_os_string()),
+                Component::ParentDir => rest.push("..".into()),
+                Component::CurDir | Component::RootDir | Component::Prefix(_) => {}
+            }
+        }
+    };
+    push(&mut rest, p);
+    let mut links = 0;
+    while let Some(name) = rest.pop() {
+        match open(Some(&at), &name) {
+            Ok(next) => at = next,
+            Err(e) if e.raw_os_error() == Some(libc::ELOOP) => {
+                let place = path_of(&at).map_err(failed)?.join(&name);
+                if agents(&place, at.as_raw_fd()) {
+                    return Err(Walk::AgentsLink);
+                }
+                links += 1;
+                if links > 40 {
+                    return Err(failed(e));
+                }
+                let c = std::ffi::CString::new(name.as_bytes())
+                    .map_err(|_| failed(io::Error::from(io::ErrorKind::InvalidInput)))?;
+                let mut buf = vec![0u8; libc::PATH_MAX as usize];
+                // SAFETY: `c` is NUL-terminated; readlinkat writes at most `buf.len()` bytes into `buf`.
+                let n = unsafe {
+                    libc::readlinkat(
+                        at.as_raw_fd(),
+                        c.as_ptr(),
+                        buf.as_mut_ptr().cast(),
+                        buf.len(),
+                    )
+                };
+                if n < 0 {
+                    return Err(failed(io::Error::last_os_error()));
+                }
+                buf.truncate(n as usize);
+                let target = std::path::PathBuf::from(std::ffi::OsString::from_vec(buf));
+                if target.is_absolute() {
+                    at = open(None, root).map_err(failed)?;
+                }
+                push(&mut rest, &target);
+            }
+            Err(e) if e.raw_os_error() == Some(libc::ENOENT) => {
+                let mut missing = path_of(&at).map_err(failed)?.join(&name);
+                while let Some(n) = rest.pop() {
+                    missing.push(n);
+                }
+                return Err(Walk::Missing(missing));
+            }
+            // The last component is something `open` refuses (a unix socket): its place is its folder's, joined with its name, as long
+            // as it is no link (checked through the same folder).
+            Err(e) if rest.is_empty() => {
+                let c = std::ffi::CString::new(name.as_bytes()).map_err(|_| Walk::Failed)?;
+                // SAFETY: an all-zero `stat` is a valid value to be overwritten.
+                let mut st: libc::stat = unsafe { std::mem::zeroed() };
+                // SAFETY: `c` is NUL-terminated; `st` is a valid `stat` to write.
+                let r = unsafe {
+                    libc::fstatat(
+                        at.as_raw_fd(),
+                        c.as_ptr(),
+                        &mut st,
+                        libc::AT_SYMLINK_NOFOLLOW,
+                    )
+                };
+                if r != 0 || st.st_mode & libc::S_IFMT == libc::S_IFLNK {
+                    return Err(failed(e));
+                }
+                return Ok(Walked {
+                    path: path_of(&at).map_err(failed)?.join(&name),
+                    dir: false,
+                    file: st.st_mode & libc::S_IFMT == libc::S_IFREG,
+                });
+            }
+            Err(e) => return Err(failed(e)),
+        }
+    }
+    let path = path_of(&at).map_err(failed)?;
+    let meta = std::fs::File::from(at).metadata().map_err(failed)?;
+    Ok(Walked {
+        path,
+        dir: meta.is_dir(),
+        file: meta.is_file(),
     })
+}
+
+/// Whether a link found at `place` (in the folder open as `dir`) is one the agent could have made: below a place it may write (it
+/// could also have changed that folder's mode), or at one of those places itself while this user may write the folder holding it
+/// (`~/.claude` in `~`; not `/tmp` in `/`, which only root may change). The places are where the kernel has them, so another
+/// spelling of the same folder (`/private/tmp`, `/System/Volumes/Data/Users/...`, other upper or lower case) is the same place.
+fn agents_link(
+    place: &std::path::Path,
+    dir: std::os::fd::RawFd,
+    places: &[std::path::PathBuf],
+) -> bool {
+    if places.iter().any(|w| place != w && place.starts_with(w)) {
+        return true;
+    }
+    places.iter().any(|w| place == w)
+        // SAFETY: `dir` is an open folder for the call; "." is a NUL-terminated literal.
+        && unsafe { libc::faccessat(dir, c".".as_ptr(), libc::W_OK, libc::AT_EACCESS) } == 0
 }
 
 /// `(regex #"^<file>\.[^/]*$")`: the names next to `file` that start with its name and a dot. `None` for a path a raw string
@@ -387,29 +544,29 @@ fn sibling_rule(file: &std::path::Path) -> Option<String> {
     Some(format!("(regex #\"{re}\")"))
 }
 
-/// The canonical form of `p`, or, for a path that does not exist yet (a socket made later), its canonical parent joined with its name.
-/// `p` resolved as far as it exists (symbolic links in its existing part followed: `/tmp` is `/private/tmp`), the rest of it as
-/// written. `None` only when not even its root resolves.
+/// `p` where the kernel has it as far as it exists (links in its existing part followed: `/tmp` is `/private/tmp`), the rest of it as
+/// written. `None` when it cannot be walked, or when the missing rest steps up (`..`), which no rule could name.
 fn real_or_future(p: &std::path::Path) -> Option<std::path::PathBuf> {
-    let mut missing = Vec::new();
-    let mut at = p;
-    loop {
-        if let Ok(real) = std::fs::canonicalize(at) {
-            return Some(missing.iter().rev().fold(real, |acc, part| acc.join(part)));
+    match walk(p, &|_, _| false) {
+        Ok(r) => Some(r.path),
+        Err(Walk::Missing(m)) if !m.components().any(|c| c == std::path::Component::ParentDir) => {
+            Some(m)
         }
-        missing.push(at.file_name()?.to_os_string());
-        at = at.parent()?;
+        Err(_) => None,
     }
 }
 
+/// `p` where the kernel has it, or, when it does not exist yet (a socket made later), its folder where the kernel has it and its name.
 fn real_or_new(p: &std::path::Path) -> Option<std::path::PathBuf> {
-    std::fs::canonicalize(p).ok().or_else(|| {
-        Some(
-            std::fs::canonicalize(p.parent()?)
+    match walk(p, &|_, _| false) {
+        Ok(r) => Some(r.path),
+        Err(_) => Some(
+            walk(p.parent()?, &|_, _| false)
                 .ok()?
+                .path
                 .join(p.file_name()?),
-        )
-    })
+        ),
+    }
 }
 
 /// `program args...` rewritten to run under `sandbox-exec` with the profile for `sb`.
@@ -1112,6 +1269,99 @@ mod sandbox_tests {
             ..dotfiles
         };
         assert!(super::profile(&mine).is_err());
+        let _ = std::fs::remove_dir_all(&u);
+    }
+
+    #[test]
+    fn a_link_swapped_in_while_the_profile_is_built_never_opens_what_it_points_to() {
+        // Review of #555 (1): another agent with the same write entry flips it between a folder and a link to the user's home while
+        // this one starts. Checking and resolving are one walk, so every profile either refuses or names the folder itself.
+        let u = std::path::PathBuf::from(format!("/tmp/agora-race-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&u);
+        std::fs::create_dir_all(u.join(".claude")).unwrap();
+        let real = std::fs::canonicalize(&u).unwrap();
+        let sb = crate::Sandbox {
+            write: vec![u.join(".claude"), "/dev".into()],
+            ..Default::default()
+        };
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flipper = {
+            let (u, stop) = (u.clone(), stop.clone());
+            std::thread::spawn(move || {
+                let mut flips = 0u64;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let _ = std::fs::remove_dir(u.join(".claude"));
+                    let _ = std::os::unix::fs::symlink(&u, u.join(".claude"));
+                    let _ = std::fs::remove_file(u.join(".claude"));
+                    let _ = std::fs::create_dir(u.join(".claude"));
+                    flips += 1;
+                }
+                flips
+            })
+        };
+        let home_rule = format!("(subpath \"{}\")", real.display());
+        let (mut ok, mut refused) = (0, 0);
+        for _ in 0..3000 {
+            match super::profile(&sb) {
+                Ok(p) => {
+                    assert!(!p.contains(&home_rule), "{p}");
+                    ok += 1;
+                }
+                Err(_) => refused += 1,
+            }
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let flips = flipper.join().unwrap();
+        assert!(flips > 100, "the link was swapped {flips} times");
+        eprintln!("race: {flips} swaps, {ok} profiles, {refused} refused");
+        let _ = std::fs::remove_dir_all(&u);
+    }
+
+    #[test]
+    fn another_spelling_of_a_place_the_agent_may_write_is_the_same_place() {
+        // Review of #555 (2): the match was on spelling. Write entries spelled through the `/System/Volumes/Data` firmlink or in
+        // other case, and a link the agent made below the real folder, are still the agent's; and every rule names the kernel's path
+        // (a rule spelled through the firmlink matches nothing).
+        let u = std::path::PathBuf::from(format!("/tmp/agora-spell-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&u);
+        std::fs::create_dir_all(u.join("w")).unwrap();
+        std::fs::write(u.join(".zshrc"), "# rc\n").unwrap();
+        let real = std::fs::canonicalize(&u).unwrap();
+        let firm =
+            std::path::Path::new("/System/Volumes/Data").join(real.strip_prefix("/").unwrap());
+        let upper = std::path::PathBuf::from(real.display().to_string().to_uppercase());
+        for spelled in [firm.join("w"), upper.join("W")] {
+            let sb = crate::Sandbox {
+                write: vec![spelled.clone(), "/dev".into()],
+                deny: vec![firm.join("w/closed")],
+                ..Default::default()
+            };
+            let p = super::profile(&sb).unwrap();
+            assert!(
+                p.contains(&format!("(subpath \"{}\")", real.join("w").display())),
+                "{spelled:?}: {p}"
+            );
+            assert!(
+                p.contains(&format!(
+                    "(subpath \"{}\")",
+                    real.join("w/closed").display()
+                )),
+                "{spelled:?}: {p}"
+            );
+            assert!(!p.contains("/System/Volumes/Data"), "{p}");
+            // A link the agent made below it, read through an entry spelled the kernel's way: refused.
+            std::os::unix::fs::symlink(u.join(".zshrc"), u.join("w/rc")).unwrap();
+            let via = crate::Sandbox {
+                read: vec![real.join("w/rc")],
+                ..sb
+            };
+            assert_eq!(
+                crate::sandbox_refusal(&super::profile(&via).unwrap_err()),
+                Some(crate::SandboxRefusal::WritableIsLink),
+                "{spelled:?}"
+            );
+            std::fs::remove_file(u.join("w/rc")).unwrap();
+        }
         let _ = std::fs::remove_dir_all(&u);
     }
 
