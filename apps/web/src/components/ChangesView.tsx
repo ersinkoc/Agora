@@ -5,6 +5,7 @@ import {
   baseName, byFolder, changedSpan, countByStatus, fileLines, gapLines, gapsOf, isTruncated, matchesFile, pairedLines, parseDiff,
   sameChange, splitRows, type DiffFile, type DiffLine, type DiffStatus, type Gap,
 } from '../net/diff';
+import { Rounds } from '../net/rounds';
 import { Icon } from './Icon';
 import { Resizer } from './Resizer';
 
@@ -57,11 +58,11 @@ export function ChangesView({ load, read }: {
   const [showAll, setShowAll] = useState<Set<string>>(new Set());
   const body = useRef<HTMLDivElement>(null);
   // The refresh a read belongs to: a read that completes after a refresh (with success or failure) is dropped.
-  const generation = useRef(0);
+  const [rounds] = useState(() => new Rounds());
 
   useEffect(() => {
     let live = true;
-    generation.current++;
+    rounds.next();
     setDiff('loading');
     load().then(
       (text) => {
@@ -77,7 +78,7 @@ export function ChangesView({ load, read }: {
     setTexts(new Map());
     setSingle(new Map());
     return () => { live = false; };
-  }, [load, round]);
+  }, [load, round, rounds]);
 
   const setLayout = (l: Layout) => { setLayoutState(l); saveLayout(l); };
   const files = diff === 'loading' || diff === 'failed' ? [] : diff.files;
@@ -102,8 +103,14 @@ export function ChangesView({ load, read }: {
       setClosedFolders((c) => { if (!c.has(folder)) return c; const n = new Set(c); n.delete(folder); return n; });
     }
     body.current?.scrollTo({ top: 0 });
-    if (path) document.getElementById(optionId(path))?.scrollIntoView({ block: 'nearest' });
   }, []);
+  // The selected file stays in view in the list; after the render, since its folder may just have been opened.
+  useEffect(() => {
+    if (selected !== undefined) document.getElementById(optionId(selected))?.scrollIntoView({ block: 'nearest' });
+  }, [selected, closedFolders]);
+  // The selection as the list shows it: none while its folder is closed (its option is not drawn).
+  const folderOf = (path: string) => (path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '');
+  const activeOption = selected !== undefined && order.includes(selected) && !closedFolders.has(folderOf(selected)) ? optionId(selected) : undefined;
   const step = (by: number) => {
     if (order.length === 0) return;
     const at = selected !== undefined ? order.indexOf(selected) : -1;
@@ -119,8 +126,7 @@ export function ChangesView({ load, read }: {
   const fetchText = useCallback((f: DiffFile): void => {
     if (!read) return;
     const path = f.path;
-    const gen = generation.current;
-    const put = (v: FileText) => { if (gen === generation.current) setTexts((x) => new Map(x).set(path, v)); };
+    const put = rounds.bind((v: FileText) => setTexts((x) => new Map(x).set(path, v)));
     setTexts((x) => { const v = x.get(path); return v && v !== 'failed' ? x : new Map(x).set(path, 'loading'); });
     read(path)
       .then(async (bytes): Promise<FileText> => {
@@ -132,7 +138,7 @@ export function ChangesView({ load, read }: {
         return sameChange(f, now) ? fileLines(text) : 'stale';
       })
       .then(put, () => put('failed'));
-  }, [read, load]);
+  }, [read, load, rounds]);
   // Also checked against the diff's own lines, which needs no second read.
   const textOf = (f: DiffFile): FileText | undefined => {
     const x = texts.get(f.path);
@@ -148,8 +154,7 @@ export function ChangesView({ load, read }: {
     if (needsText(f)) fetchText(f);
   };
   const loadSingle = (path: string) => {
-    const gen = generation.current;
-    const put = (v: DiffFile | 'failed') => { if (gen === generation.current) setSingle((s) => new Map(s).set(path, v)); };
+    const put = rounds.bind((v: DiffFile | 'failed') => setSingle((s) => new Map(s).set(path, v)));
     setSingle((s) => new Map(s).set(path, 'loading'));
     load(path).then(
       (text) => { const f = parseDiff(text).find((x) => x.path === path); put(f && !f.partial ? f : 'failed'); },
@@ -209,7 +214,7 @@ export function ChangesView({ load, read }: {
       {diff.truncated && <p role="status" className="m-0 flex-none border-b border-line bg-needs-you/10 px-3 py-1.5 text-xs text-ink">{t('changes-truncated')}</p>}
 
       <div className="flex min-h-0 flex-1 flex-col md:flex-row">
-        <div role="listbox" tabIndex={0} aria-label={t('changes-list')} aria-activedescendant={selected !== undefined && order.includes(selected) ? optionId(selected) : undefined}
+        <div role="listbox" tabIndex={0} aria-label={t('changes-list')} aria-activedescendant={activeOption}
           onKeyDown={onListKey} style={{ ['--list-w' as string]: `${listWidth}px` }}
           className="max-h-44 flex-none overflow-auto border-b border-line py-1 outline-none focus-visible:ring-1 focus-visible:ring-accent md:max-h-none md:w-[var(--list-w)] md:border-b-0">
           {groups.length === 0 && <p className="muted px-3 py-2">{t('changes-no-match')}</p>}

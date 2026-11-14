@@ -23,6 +23,8 @@ try {
   writeFileSync(join(proj, 'gone.txt'), 'bye\n');
   writeFileSync(join(proj, 'old name.txt'), 'kept as it is\n');
   writeFileSync(join(proj, 'before.txt'), lines(30));
+  // A name that is also a member of every JavaScript object: the view must treat it as any other file.
+  writeFileSync(join(proj, 'constructor'), lines(30));
   git('add', '.');
   git('commit', '-q', '-m', 'files');
   writeFileSync(join(proj, 'src', 'app.txt'), lines(40, { 3: 'line three', 30: 'line thirty' }));
@@ -30,6 +32,7 @@ try {
   git('mv', 'old name.txt', 'new name.txt');
   git('mv', 'before.txt', 'after.txt');
   writeFileSync(join(proj, 'after.txt'), lines(30, { 2: 'second', 28: 'twenty-eighth' })); // renamed and edited
+  writeFileSync(join(proj, 'constructor'), lines(30, { 2: 'built two', 27: 'built twenty-seven' }));
   writeFileSync(join(proj, 'notes.md'), '# notes\n\nwritten by the agent\n');
   writeFileSync(join(proj, 'blob.bin'), Buffer.from([0, 1, 2, 3, 0, 255]));
 
@@ -43,7 +46,7 @@ try {
   await list.waitFor();
   const names = async () => (await list.getByRole('option').allInnerTexts()).map((s) => s.split('\n').filter(Boolean)[1] ?? s);
   const shown = await names();
-  check(['after.txt', 'app.txt', 'blob.bin', 'gone.txt', 'new name.txt', 'notes.md'].every((n) => shown.includes(n)), `every changed file is listed: ${shown.join(', ')}`);
+  check(['after.txt', 'app.txt', 'blob.bin', 'constructor', 'gone.txt', 'new name.txt', 'notes.md'].every((n) => shown.includes(n)), `every changed file is listed: ${shown.join(', ')}`);
 
   const filter = (name) => page.getByRole('radiogroup', { name: 'Show' }).getByRole('radio', { name: new RegExp(`^${name}`) });
   await filter('Deleted').click();
@@ -102,6 +105,16 @@ try {
   await page.getByText('line 15', { exact: true }).waitFor();
   check(!(await page.getByText(/The file has changed since/).count()), 'a renamed and edited file shows its unchanged lines');
 
+  // A file named `constructor`: listed, opened, its unchanged lines shown, the whole file shown.
+  await list.getByRole('option', { name: /constructor/ }).click();
+  await page.getByText('built twenty-seven', { exact: true }).waitFor();
+  await page.getByRole('button', { name: /^Show \d+ unchanged lines$/ }).first().click();
+  await page.getByText('line 15', { exact: true }).waitFor();
+  await page.getByRole('button', { name: 'Whole file', exact: true }).click();
+  await page.getByText('line 29', { exact: true }).waitFor();
+  check(!(await body.innerText()).includes('@@'), 'a file named constructor opens, unfolds and shows whole like any other');
+  await page.getByRole('button', { name: 'Whole file', exact: true }).click();
+
   // Keys: j and k move through the list in its order (top folder first, then src/).
   await list.focus();
   await page.keyboard.press('Home');
@@ -114,6 +127,17 @@ try {
 
   await list.getByRole('option', { name: /app\.txt/ }).click();
   await page.getByText('edited later', { exact: true }).waitFor();
+
+  // Closing the folder of the selected file leaves no reference to its hidden row; a key that reaches it opens the folder again.
+  const folder = list.getByRole('button', { name: 'src', exact: true });
+  await folder.click();
+  check(await folder.getAttribute('aria-expanded') === 'false' && !(await list.getAttribute('aria-activedescendant')),
+    'closing the selected file\'s folder leaves the list pointing at no hidden row');
+  await list.focus();
+  await page.keyboard.press('End');
+  const active = await list.getAttribute('aria-activedescendant');
+  check(await folder.getAttribute('aria-expanded') === 'true' && !!active && await page.locator(`[id="${active}"]`).isVisible(),
+    'End reaches app.txt in the closed folder: the folder opens and the row is shown');
 
   if (shotDir) {
     mkdirSync(shotDir, { recursive: true });
