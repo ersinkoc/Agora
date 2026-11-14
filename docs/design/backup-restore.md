@@ -30,9 +30,9 @@ missing stretch is recorded as a lost range (`resyncs`, shown on the Activity pa
 A backup taken often keeps this window short: `agora hub backup` (online, safe while the hub runs) from cron or a timer.
 
 **How long it takes.** In the drill, the restored hub's present is whole 0.46–0.67 s after it starts, on one Linux machine: the
-machines redial on their own (0.5 s, 1 s, then 1.5 s apart) and replay what the backup missed. **Proposed recovery target, for the
-maintainer to confirm:** the present is whole within 5 s of the hub starting, for machines that can reach it; history inside a
-machine's buffer is not lost. The drill does not assert a time yet.
+machines redial on their own (0.5 s, 1 s, then 1.5 s apart) and replay what the backup missed. **Recovery target (approved by the
+maintainer, 2026-11-15):** the present is whole within 5 s of the hub starting, for machines that can reach it; history inside a
+machine's buffer is not lost. The drill fails when the present takes longer than 5 s.
 
 ## Implementation status
 `agora-hub::store`: `SqliteStore::backup_to` (online, consistent, refuses to overwrite), `verify` (integrity check and
