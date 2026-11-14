@@ -16,6 +16,15 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 ### Getting started
 - `agora --version` prints the version.
 
+### Reviewing changes and files
+- Changes larger than 512 KiB say how many files were read and at least how many are not listed, in the review screen and in the
+  file browser, so the "files changed" count never silently disagrees with the list.
+- A very long change shown whole ("Show all") and switched to side by side no longer holds the page for seconds: only the rows in
+  view are drawn.
+- Files in a folder whose name contains " b/" keep their real path; lines that changed only between LF and CRLF are noted as such;
+  finding in a file marks the right characters after letters such as `İ`.
+- The file tree works from the keyboard as one Tab stop: arrows, Right and Left to open, enter, leave and close folders, Home and End.
+
 ## 0.3.10
 
 ### Machines

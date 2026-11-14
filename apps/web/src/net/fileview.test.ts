@@ -59,6 +59,9 @@ describe('search in a file', () => {
   it('ignores case unless the query has a capital letter', () => {
     expect(findMatches(lines, 'beta')).toEqual([{ line: 0, start: 6, end: 10 }, { line: 1, start: 0, end: 4 }, { line: 1, start: 5, end: 9 }]);
     expect(findMatches(lines, 'BETA')).toEqual([{ line: 1, start: 5, end: 9 }]);
+    // `İ` lowercases to two code units: the marks still fall on the line as it is.
+    expect(findMatches(['İİabc İz'], 'abc')).toEqual([{ line: 0, start: 2, end: 5 }]);
+    expect(findMatches(['a.b axb'], 'a.b')).toEqual([{ line: 0, start: 0, end: 3 }]);
   });
   it('finds nothing for an empty query and stops at the limit', () => {
     expect(findMatches(lines, '')).toEqual([]);

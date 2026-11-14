@@ -63,17 +63,15 @@ export interface Match { line: number; start: number; end: number }
  *  the query holds a capital letter (as editors do). */
 export function findMatches(lines: string[], query: string, limit = 10_000): Match[] {
   if (!query) return [];
+  // Smart case: a query with a capital letter matches exactly. Otherwise case is ignored by the pattern itself, on the line as it is:
+  // a lowercased copy can be longer than the line (`İ` lowercases to two code units), which would move every mark after it.
   const exact = query !== query.toLowerCase();
-  const q = exact ? query : query.toLowerCase();
+  const re = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), exact ? 'gu' : 'giu');
   const out: Match[] = [];
   for (let i = 0; i < lines.length && out.length < limit; i++) {
-    const text = exact ? (lines[i] as string) : (lines[i] as string).toLowerCase();
-    let from = 0;
-    for (;;) {
-      const at = text.indexOf(q, from);
-      if (at < 0 || out.length >= limit) break;
-      out.push({ line: i, start: at, end: at + q.length });
-      from = at + Math.max(1, q.length);
+    re.lastIndex = 0;
+    for (let m = re.exec(lines[i] as string); m && out.length < limit; m = re.exec(lines[i] as string)) {
+      out.push({ line: i, start: m.index, end: m.index + m[0].length });
     }
   }
   return out;
