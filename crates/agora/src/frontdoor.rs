@@ -959,14 +959,25 @@ pub fn status(say: &Say) -> ExitCode {
                     );
                 }
             }
-            (Some(l), _) => say.out(
-                key!("status-running"),
-                &[
-                    ("role", label),
-                    ("pid", i64::from(l.pid).into()),
-                    ("version", l.version.into()),
-                ],
-            ),
+            (Some(l), _) => match supervised_child(l.pid) {
+                Some(child) => say.out(
+                    key!("status-running-supervised"),
+                    &[
+                        ("role", label),
+                        ("pid", i64::from(child).into()),
+                        ("supervisor", i64::from(l.pid).into()),
+                        ("version", l.version.into()),
+                    ],
+                ),
+                None => say.out(
+                    key!("status-running"),
+                    &[
+                        ("role", label),
+                        ("pid", i64::from(l.pid).into()),
+                        ("version", l.version.into()),
+                    ],
+                ),
+            },
             (None, true) => say.out(key!("status-running-other"), &[("role", label)]),
             (None, false) => say.out(key!("status-stopped"), &[("role", label)]),
         }
@@ -1007,6 +1018,29 @@ pub fn status(say: &Say) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// The role process a supervisor runs (its `agora` child), when `pid` is a supervisor; `None` for a role started without one (by an
+/// earlier version).
+fn supervised_child(pid: u32) -> Option<u32> {
+    agora_platform::process_children(pid)
+        .ok()?
+        .into_iter()
+        .find(|c| {
+            agora_platform::process_name(*c).is_ok_and(|n| n.to_lowercase().starts_with("agora"))
+        })
+}
+
+/// Removes the role's lock only while it still names `l` (the same pid and start time): a supervisor that took the lock after `l`
+/// ended keeps it. An unreadable lock (one being written) is left alone too.
+fn remove_lock_of(lock: &Path, l: &LockInfo) {
+    if read_lock(lock).is_some_and(|now| now.pid == l.pid && now.start == l.start) {
+        let _ = std::fs::remove_file(lock);
+    }
+}
+
+/// How many holders of one role `agora down` stops in a row: a supervisor that took the lock while the one before was being stopped is
+/// stopped too.
+const DOWN_ROUNDS: usize = 3;
+
 /// `agora down`: stops what the front door started, the node first, then the hub.
 pub fn down(say: &Say) -> ExitCode {
     let h = home();
@@ -1015,44 +1049,54 @@ pub fn down(say: &Say) -> ExitCode {
     let mut stopped_any = false;
     for role in [Role::Node, Role::Hub] {
         let lock = role.lock(&h);
-        let Some(l) = holder(&h, role) else {
-            let _ = std::fs::remove_file(&lock);
-            continue;
-        };
-        let label: Arg = role.label(say).into();
-        if let Err(e) = agora_platform::terminate_process(l.pid) {
-            say.err(
-                key!("down-failed"),
-                &[("role", label), ("reason", e.to_string().into())],
-            );
-            code = ExitCode::from(1);
-            continue;
-        }
-        let end = Instant::now() + Duration::from_secs(10);
-        while l.alive() && Instant::now() < end {
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        if l.alive() {
-            say.err(
-                key!("down-failed"),
-                &[("role", label), ("reason", "still running".into())],
-            );
-            code = ExitCode::from(1);
-            continue;
-        }
-        let _ = std::fs::remove_file(&lock);
-        // What the ended process had open (its socket, its port) can linger a moment; status reads them right after.
-        if let Some(m) = &machine {
-            let end = Instant::now() + Duration::from_secs(5);
-            while role_answers(&h, m, role) && Instant::now() < end {
+        for _ in 0..DOWN_ROUNDS {
+            let Some(l) = read_lock(&lock) else {
+                break;
+            };
+            if !l.alive() {
+                remove_lock_of(&lock, &l);
+                break;
+            }
+            let label: Arg = role.label(say).into();
+            let supervised = supervised_child(l.pid).is_some();
+            if let Err(e) = agora_platform::terminate_process(l.pid) {
+                say.err(
+                    key!("down-failed"),
+                    &[("role", label), ("reason", e.to_string().into())],
+                );
+                code = ExitCode::from(1);
+                break;
+            }
+            let end = Instant::now() + Duration::from_secs(10);
+            while l.alive() && Instant::now() < end {
                 std::thread::sleep(Duration::from_millis(100));
             }
+            if l.alive() {
+                say.err(
+                    key!("down-failed"),
+                    &[("role", label), ("reason", "still running".into())],
+                );
+                code = ExitCode::from(1);
+                break;
+            }
+            remove_lock_of(&lock, &l);
+            // What the ended process had open (its socket, its port) can linger a moment; status reads them right after.
+            if let Some(m) = &machine {
+                let end = Instant::now() + Duration::from_secs(5);
+                while role_answers(&h, m, role) && Instant::now() < end {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            }
+            stopped_any = true;
+            say.out(
+                if supervised {
+                    key!("down-stopped-supervised")
+                } else {
+                    key!("down-stopped")
+                },
+                &[("role", label), ("pid", i64::from(l.pid).into())],
+            );
         }
-        stopped_any = true;
-        say.out(
-            key!("down-stopped"),
-            &[("role", label), ("pid", i64::from(l.pid).into())],
-        );
     }
     if !stopped_any && code == ExitCode::SUCCESS {
         say.out(key!("down-nothing"), &[]);
@@ -1068,6 +1112,30 @@ mod tests {
 
     fn say() -> Say {
         Say(Catalog::for_locale("en"))
+    }
+
+    /// Linux's follow-up to #543: `agora down` deletes a lock only while it names the process it stopped. A lock another supervisor
+    /// took in the meantime, or one still being written, stays.
+    #[test]
+    fn down_removes_only_the_lock_of_the_process_it_stopped() {
+        let dir = tmp("lock-of");
+        let lock = dir.join("node.lock");
+        let me = LockInfo::of(std::process::id()).unwrap();
+        let stopped = LockInfo {
+            pid: me.pid,
+            start: me.start + 1,
+            version: String::new(),
+        };
+        std::fs::write(&lock, me.text()).unwrap();
+        remove_lock_of(&lock, &stopped);
+        assert!(lock.exists(), "a newer holder's lock was deleted");
+        std::fs::write(&lock, "").unwrap();
+        remove_lock_of(&lock, &me);
+        assert!(lock.exists(), "a lock being written was deleted");
+        std::fs::write(&lock, me.text()).unwrap();
+        remove_lock_of(&lock, &me);
+        assert!(!lock.exists());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     fn tmp(name: &str) -> PathBuf {
