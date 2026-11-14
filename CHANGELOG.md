@@ -5,11 +5,13 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 ## Next
 
 ### Hub
+- A machine whose certificate is revoked while it is connected (for example, another machine enrolled under its name) is shown
+  offline at once. Its connection already ended, but every window kept showing it online until the hub restarted.
 - `agora hub run --metrics` lets the hub's owner read its own numbers at `/api/metrics` (Prometheus format): events stored, how long
   each one held the hub, machines online, windows following, slow windows let go, approvals waiting and resyncs. Off unless asked for.
 
 ### Security
-- macOS: a confined agent (`sandbox = worktree`) can no longer reach the node's own files and sockets: the whole node home is closed to it (trusted devices, policy, ledger, identity, logs, hub folder, manifests, adapter trust files, the node's control socket and the other agents' mesh sockets), except its own worktree and mesh socket; the home cannot be renamed away, and no socket can be bound there before the node's own. Before, it could connect to the control socket (Seatbelt checks unix sockets as network, not as files), and with a node home under `/tmp` it could read and write the node's data (#475). Its own mesh socket stays open. Its worktree is given back only while it is still a real folder: an agent that leaves a link in its place is not started again, and says why. A node home that cannot be found stops confined agents from starting instead of leaving the home open, and your own home folder is never taken for the node's.
+- macOS: a confined agent (`sandbox = worktree`) can no longer reach the node's own files and sockets: the whole node home is closed to it (trusted devices, policy, ledger, identity, logs, hub folder, manifests, adapter trust files, the node's control socket and the other agents' mesh sockets), except its own worktree and mesh socket; the home cannot be renamed away, and no socket can be bound there before the node's own. Before, it could connect to the control socket (Seatbelt checks unix sockets as network, not as files), and with a node home under `/tmp` it could read and write the node's data (#475). Its own mesh socket stays open. Its worktree is given back only while it is still a real folder: an agent that leaves a link in its place is not started again, and says why. A node home that cannot be found stops confined agents from starting instead of leaving the home open, and your own home folder is never taken for the node's. A confined agent that replaces a file or folder it may write with a link (to `~/.zshrc`, to your home) is not started again: before, its next start could write where the link pointed, also when another agent swapped the link in while it started (#545). The message says to check that link and remove it if you did not make it; a file you keep there as a link yourself (a dotfiles link) is refused too. A folder named in the policy through `/System/Volumes/Data/...` is now closed or opened as named; before, such a rule matched nothing.
 ### Machines (ADR-0073)
 - A machine not seen for more than a day is shown as **old**: on the Machines page in its own folded section, and no longer offered
   for new agents. **Clean up…** forgets all old machines in one dialog, and **Forget…** forgets one offline machine. Forgotten
@@ -21,7 +23,10 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 - `agora service install` makes this machine's Agora start when you log in: for you only, with no administrator rights, and it
   says what it registers first. `agora service status` says whether it is set up and whether it runs now; `agora service remove`
   stops it and removes it. On Windows (a logon task) and on Linux with systemd (a user unit in `~/.config/systemd/user`, no root;
-  to start it at boot without logging in, run `loginctl enable-linger` yourself, which Agora never does). macOS follows.
+  to start it at boot without logging in, run `loginctl enable-linger` yourself, which Agora never does), and on macOS (a
+  LaunchAgent in `~/Library/LaunchAgents`; macOS may say "Background Items Added" and lists it under Login Items, where switching it
+  off is shown by `status` and only you can switch it on again). A login entry of the same name that Agora did not write is left
+  exactly as it is, and `status` says it is not Agora's. The service gets only the full-path entries of your `PATH`.
 
 ### Getting started
 - A hub or node started by `agora` that crashes is started again 30 seconds later, at most 5 times in 10 minutes; one that

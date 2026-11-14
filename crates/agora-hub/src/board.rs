@@ -1198,6 +1198,26 @@ mod tests {
     }
 
     #[test]
+    fn a_handoff_to_an_agent_on_the_callers_own_node_is_delivered() {
+        let b = Boards::new();
+        let mut v = view(&["alpha", "beta"]);
+        // A second agent on alpha, as sync registers it: the hub-wide id names the agent.
+        let twin = v.agents.get("alpha/a").unwrap().clone();
+        v.agents.insert("alpha/b".to_string(), twin);
+        let a = run(
+            &b,
+            &v,
+            "alpha",
+            "handoff",
+            json!({"to": "alpha/b", "summary": "s", "refs": []}),
+            1,
+        );
+        assert_eq!(code(&a), "", "{}", text(&a));
+        let h = a.handoff.expect("the handoff must be accepted");
+        assert_eq!((h.to_node.as_str(), h.to_agent.as_str()), ("alpha", "b"));
+    }
+
+    #[test]
     fn the_board_stays_in_use_after_a_node_drops_while_it_holds_unfinished_work() {
         // ADR-0039 amendment A. `alpha` and `beta` share the project and `alpha` makes a task; `beta` goes offline.
         let b = Boards::new();

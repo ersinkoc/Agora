@@ -7,14 +7,17 @@
 //
 //   cargo build -p agora && (cd apps/web && npm ci && npm run gen && npm run build)
 //   PW_DIR=<dir with node_modules/playwright-core> node scripts/perf-tree.mjs
-// Existing build artifacts can be supplied with AGORA_PERF_BIN and AGORA_PERF_WEB_DIR.
+// Existing build artifacts can be supplied with AGORA_PERF_BIN and AGORA_PERF_WEB_DIR. PYTHON selects the Python executable
+// (default python3); on Windows also set CHROME and AGORA_PERF_BIN to the installed browser and built agora.exe.
 import { execFileSync, spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { createRequire } from 'node:module';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const root = new URL('..', import.meta.url).pathname;
+const root = fileURLToPath(new URL('..', import.meta.url));
 const bin = process.env.AGORA_PERF_BIN ?? join(root, 'target/debug/agora');
 const web = process.env.AGORA_PERF_WEB_DIR ?? join(root, 'apps/web/dist');
 const home = mkdtempSync(join(tmpdir(), 'agora-perf-tree-'));
@@ -25,6 +28,13 @@ const exe = process.env.CHROME ?? `${process.env.HOME}/.cache/ms-playwright/chro
 const fleet = (process.env.AGORA_PERF_FLEET ?? '10 5 10').split(/\s+/);
 const total = fleet.reduce((a, b) => a * Number(b), 1);
 const hub = () => spawn(bin, ['hub', 'run', '--listen', '127.0.0.1:0', '--hub-dir', hubDir, '--web', web], { env, stdio: 'ignore' });
+const stopHub = async (child) => {
+  if (child.exitCode === null && child.signalCode === null) {
+    const exited = once(child, 'exit');
+    child.kill();
+    await exited;
+  }
+};
 const waitFor = async (ok) => { for (let i = 0; i < 100; i++) { try { if (ok()) return; } catch {} await new Promise((r) => setTimeout(r, 100)); } throw new Error('timed out'); };
 
 let h = hub();
@@ -32,8 +42,8 @@ let browser;
 try {
   // The first start makes the database; the fleet is written while the hub is stopped, then it starts on it.
   await waitFor(() => readFileSync(join(hubDir, 'listen'), 'utf8'));
-  h.kill(); await new Promise((r) => h.once('exit', r));
-  execFileSync('python3', ['-I', join(root, 'scripts/perf-seed-agents.py'), join(hubDir, 'hub.db'), ...fleet], { stdio: 'ignore' });
+  await stopHub(h);
+  execFileSync(process.env.PYTHON ?? 'python3', ['-I', join(root, 'scripts/perf-seed-agents.py'), join(hubDir, 'hub.db'), ...fleet], { stdio: 'ignore' });
   rmSync(join(hubDir, 'listen'));
   h = hub();
   await waitFor(() => readFileSync(join(hubDir, 'listen'), 'utf8'));
@@ -101,7 +111,10 @@ try {
   }, rows);
   console.log(JSON.stringify({ fleet: fleet.join('x'), agents: total, fixture: 'static-fleet-no-live-nodes-or-terminal-streams', domRowsReadyMs, ...result }, null, 1));
 } finally {
-  await browser?.close();
-  h.kill();
-  rmSync(home, { recursive: true, force: true });
+  try {
+    await browser?.close();
+  } finally {
+    await stopHub(h);
+    rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
 }

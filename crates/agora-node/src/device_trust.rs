@@ -1352,9 +1352,12 @@ mod tests {
         // ...and the old revocation sent again keeps it.
         assert!(!t.revoke(&revocation, now + 5).unwrap());
         assert!(t.trusted_ids(now + 5).contains(&"web-new".to_string()));
-        // The same after the owner confirms it on the machine.
+        // The same after the owner confirms it on the machine. Both revocations here date from the
+        // endorsement's instant: older than whatever the owner's confirmation records (the sleep above
+        // guarantees the wall clock has moved at least 5 ms past `now`, so since >= now + 5 > now + 4),
+        // so a replay can never undo the newer decision, on any clock.
         assert!(t
-            .revoke(&old.revoke("web-old", "web-new", now + 6), now + 6)
+            .revoke(&old.revoke("web-old", "web-new", now + 4), now + 4)
             .unwrap());
         // The confirmation takes the real clock: it must come after the revocation signed at `now + 6`, or that revocation is the
         // newer fact and wins (a fixed 5 ms sleep left that to chance: the test failed about one run in two on a fast machine).
@@ -1364,7 +1367,7 @@ mod tests {
         confirm(&file, "web-new", &new.public()).unwrap();
         assert!(!t
             .revoke(
-                &old.revoke("web-old", "web-new", now + 6),
+                &old.revoke("web-old", "web-new", now + 4),
                 crate::grants::now_ms()
             )
             .unwrap());

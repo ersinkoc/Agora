@@ -37,6 +37,37 @@ Not seen on a real machine: a task disabled by Group Policy (no domain here), an
   - a crash is restarted after 30 s;
   - `agora down` leaves nothing.
   - Recorded on #543 (https://github.com/ersinkoc/Agora/pull/543).
+- **macOS, `agora service` as a LaunchAgent**, by macos, on a scratch folder (`/tmp/agl`), with the label `agora-node`
+  (first version, `KeepAlive = { Crashed = true }`):
+  - `install` writes `~/Library/LaunchAgents/agora-node.plist` (owner-only, `plutil -lint` OK), loads it and starts supervisor → node;
+    `status` → "starts when you log in … running now";
+  - a second `install` changes nothing; after `launchctl disable`, `status` → "turned off in this system's settings";
+  - `kill -9` of the supervisor takes its node with it, and launchd does **not** start it again (`Crashed` counts only crash
+    signals); after SIGABRT it is back within 1 s; after SIGTERM (a clean stop) it stays ended. This led to the decision on #563:
+    the supervisor exits 0 for every end it decides itself under a service (#564), and the job uses `SuccessfulExit = false`;
+  - `remove` → "Stopped the node and its supervisor … removed": the job unloaded, the file gone, no processes; a second `remove`
+    → "was not set to start".
+  - Left behind: launchd keeps an `"agora-node" => enabled` line in its own override list after a `disable`/`enable`.
+- **macOS, the LaunchAgent with `SuccessfulExit = false` and Agora's marker**, by macos, macOS 27.2, real launchd, scratch label
+  `agora-handcheck-<pid>` running `/bin/sh` (the ignored test `launchd_restarts_a_failed_job_but_not_one_that_exited_0_and_leaves_a_hand_made_job_alone`
+  in `agora-platform`, run with `AGORA_LAUNCHD_HANDCHECK=1`):
+  - after `kill -9` the job was started again after 10.1 s (launchd's 10 s throttle); an exit 0 was not restarted;
+  - turned off with `launchctl disable`: `status` said so, and `install` turned it on again;
+  - a job file of the same label without the marker: `install`, `start` and `remove` each refused it (`NotOurs`), and the file was
+    unchanged and never loaded;
+  - afterwards no job, no file; launchd's override list keeps an `enabled` line for the scratch label.
+- **macOS, the #563 follow-up** (Linux's review of #563), by macos, macOS 27.2, scratch labels, with the maintainer's OK given in the
+  session for each run:
+  - `bootout` (`agora service remove`) ends a child in the job's process group, but not one in its own session, as an agent in its
+    terminal is: the agents keep running after the service is removed;
+  - **Login Items:** the maintainer switched a scratch LaunchAgent off in System Settings > General > Login Items & Extensions
+    ("Allow in the Background"). launchd unloaded it at once, `launchctl print-disabled` showed nothing, `sfltool dumpbtm` showed
+    `disallowed`, and `+[SMAppService statusForLegacyURL:]` returned 2 (`requiresApproval`; 1 while it was on, 0 once its file was
+    gone). `launchctl enable` did not change it; `launchctl bootstrap` loaded and ran it for that session while it stayed `disallowed`.
+    So `status` reads `SMAppService`, and `install` refuses such a job and says only the user can switch it on there;
+  - BTM marked each scratch job `notified` (the "Background Items Added" notice); its records went away with the job files;
+  - `kill -9` → started again after 10.1 s; an exit 0 → not restarted (the ignored hand check, again).
+  - Not measured: an SSH session with no login at the screen (`launchctl print gui/<uid>` failing → "no login session").
 - **Linux, scratch homes, #543 at 1d59d55 and #548 / #551**, by linux and linux Codex:
   - crash → restart after 30 s;
   - `kill -9` of the supervisor → the node ended within 1.5 s;

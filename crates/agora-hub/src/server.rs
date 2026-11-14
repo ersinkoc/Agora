@@ -131,7 +131,24 @@ pub async fn serve_node_within<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    serve_node_from(conn, None, node_id, hub, support, silence).await
+    serve_node_from(conn, None, node_id, hub, support, silence, &|| true).await
+}
+
+/// [`serve_node_within`] for as long as `valid` holds: when it stops holding (a revoked certificate), the conversation ends with
+/// `auth.device_revoked` and the node is recorded offline, the handshake included. The certificate path uses it with the enrollment
+/// record; tests with a switch.
+pub async fn serve_node_while<S>(
+    conn: Conn<S>,
+    node_id: &str,
+    hub: &Arc<Hub>,
+    support: &Support,
+    silence: Duration,
+    valid: &(dyn Fn() -> bool + Sync),
+) -> Result<(), ServeError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    serve_node_from(conn, None, node_id, hub, support, silence, valid).await
 }
 
 /// [`serve_node_within`] when the connection's first frame was already read (it must be the node's `Hello`; ADR-0061 reads it to
@@ -143,11 +160,12 @@ async fn serve_node_from<S>(
     hub: &Arc<Hub>,
     support: &Support,
     silence: Duration,
+    valid: &(dyn Fn() -> bool + Sync),
 ) -> Result<(), ServeError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let result = converse_node(&mut conn, first, node_id, hub, support, silence).await;
+    let result = converse_node(&mut conn, first, node_id, hub, support, silence, valid).await;
     match &result {
         Err(ServeError::Protocol(e)) => {
             // Codes and parameters only: this is the hub's log, not a user's screen.
@@ -172,36 +190,55 @@ async fn converse_node<S>(
     hub: &Arc<Hub>,
     support: &Support,
     silence: Duration,
+    valid: &(dyn Fn() -> bool + Sync),
 ) -> Result<(), ServeError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let mut session = NodeSession::new(hub.store(), node_id, support);
-
-    let hello_frame = match first {
-        Some(f) if (f.stream_id, f.kind) == (STREAM_CONTROL, kinds::HELLO) => f,
-        Some(_) => return Err(invalid("frame")),
-        None => expect(conn, STREAM_CONTROL, kinds::HELLO).await?,
+    let revoked = || {
+        ServeError::Protocol(Error::new(ErrorCode::AuthDeviceRevoked).with("device_id", node_id))
     };
-    let hello = v1::Hello::decode(hello_frame.payload.as_slice()).map_err(|_| invalid("hello"))?;
-    let welcome = session.hello(&hello, now_ms())?;
-    conn.send(&frame(
-        STREAM_CONTROL,
-        kinds::WELCOME,
-        welcome.encode_to_vec(),
-    ))
-    .await?;
 
-    let resume = v1::Resume::decode(
-        expect(conn, STREAM_CONTROL, kinds::RESUME)
-            .await?
-            .payload
-            .as_slice(),
-    )
-    .map_err(|_| invalid("resume"))?;
-    let ok = session.resume(&resume)?;
-    conn.send(&frame(STREAM_CONTROL, kinds::RESUME_OK, ok.encode_to_vec()))
-        .await?;
+    // The handshake is watched as the conversation is (#558 review): a certificate revoked between Hello and Resume ends it, and a
+    // node that stops in the middle is dropped after `silence` instead of holding the connection forever.
+    let welcome = {
+        let handshake = async {
+            let hello_frame = match first {
+                Some(f) if (f.stream_id, f.kind) == (STREAM_CONTROL, kinds::HELLO) => f,
+                Some(_) => return Err(invalid("frame")),
+                None => expect(conn, STREAM_CONTROL, kinds::HELLO).await?,
+            };
+            let hello =
+                v1::Hello::decode(hello_frame.payload.as_slice()).map_err(|_| invalid("hello"))?;
+            let welcome = session.hello(&hello, now_ms())?;
+            conn.send(&frame(
+                STREAM_CONTROL,
+                kinds::WELCOME,
+                welcome.encode_to_vec(),
+            ))
+            .await?;
+            let resume = v1::Resume::decode(
+                expect(conn, STREAM_CONTROL, kinds::RESUME)
+                    .await?
+                    .payload
+                    .as_slice(),
+            )
+            .map_err(|_| invalid("resume"))?;
+            let ok = session.resume(&resume)?;
+            conn.send(&frame(STREAM_CONTROL, kinds::RESUME_OK, ok.encode_to_vec()))
+                .await?;
+            Ok::<_, ServeError>(welcome)
+        };
+        tokio::select! {
+            r = tokio::time::timeout(silence, handshake) => r.map_err(|_| ServeError::Silent)??,
+            () = still(valid) => return Err(revoked()),
+        }
+    };
+    // Checked once more right before the node is recorded online.
+    if !valid() {
+        return Err(revoked());
+    }
 
     // ADR-0070: the connection is open, so the hub records the node online (a first connect or a reconnect alike: nothing the node
     // runs is reset) and, when it ends, offline with why. Both come from this certificate-authenticated connection only.
@@ -213,16 +250,12 @@ where
         give_device_changes(hub, node_id);
     }
     let mut last_heard = tokio::time::Instant::now();
-    let result = stream_events(
-        conn,
-        &mut session,
-        hub,
-        node_id,
-        commands,
-        silence,
-        &mut last_heard,
-    )
-    .await;
+    // A certificate revoked while the connection is open ends it here, inside the conversation, so the end below still records the
+    // node offline (it used to be cancelled from outside, and a revoked machine stayed online in every view).
+    let result = tokio::select! {
+        r = stream_events(conn, &mut session, hub, node_id, commands, silence, &mut last_heard) => r,
+        () = still(valid) => Err(revoked()),
+    };
     // However it ended, the router now knows this node is not connected (commands to it fail with `node.offline` at once), unless
     // a newer connection of the node replaced this one: that one is live, and the node is not offline.
     let now = now_ms();
@@ -1728,15 +1761,29 @@ async fn handle(
             if (first.stream_id, first.kind) == (STREAM_COMMANDS, 0) {
                 return serve_node_query(conn, &state.hub, &id.node_id, first).await;
             }
-            // Revoking a node ends its connection, not only its next one.
-            tokio::select! {
-                r = serve_node_from(conn, Some(first), &id.node_id, &state.hub, &state.support, NODE_SILENCE) => r,
-                () = still(|| Enrollment::new(state.hub.store()).is_active(&id.serial_hex).unwrap_or(false)) => {
-                    Err(ServeError::Protocol(
-                        Error::new(ErrorCode::AuthDeviceRevoked).with("device_id", id.node_id.as_str()),
-                    ))
+            // Revoking a node ends its connection, not only its next one (checked inside the conversation, so it ends as any other).
+            // While the connection is open, only a record that says "revoked" ends it: a store that cannot be read right now is
+            // logged and the connection kept (#558 review), where the check at connect time above refuses on any doubt.
+            let active = || match Enrollment::new(state.hub.store()).is_active(&id.serial_hex) {
+                Ok(active) => active,
+                Err(_) => {
+                    eprintln!(
+                        "node {}: enrollment record unreadable; connection kept",
+                        id.node_id
+                    );
+                    true
                 }
-            }
+            };
+            serve_node_from(
+                conn,
+                Some(first),
+                &id.node_id,
+                &state.hub,
+                &state.support,
+                NODE_SILENCE,
+                &active,
+            )
+            .await
         }
         None => serve_unauthenticated(conn, token.as_deref(), state).await,
     }

@@ -182,6 +182,9 @@ reads keys every 2 ms; idle, it sleeps as before.
 agents; `AGORA_PERF_FLEET`) and measures the tree in headless Chromium (software rendering, 1440x900). No node connects and no
 terminal streams: the seeded machines are offline after the hub opens. Every tree row is in the DOM. Existing artifacts can be
 supplied with `AGORA_PERF_BIN` and `AGORA_PERF_WEB_DIR` instead of building another target.
+`PYTHON` selects the Python executable (default `python3`); Windows can set it to `python`, with `AGORA_PERF_BIN` pointing to
+`agora.exe` and `CHROME` to the Chromium executable. `PW_DIR` names the directory containing `node_modules/playwright-core`.
+Repository and executable paths may contain spaces. Cleanup waits for the temporary hub to exit before removing its files.
 
 The load endpoint is a warm reload until all rows exist in the DOM (`domRowsReadyMs`), not a paint measurement. Picking is a
 programmatic row click to the next frame. Filtering changes only Explorer's local state (`filterToFrameMs`); it does not measure

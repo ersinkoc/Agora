@@ -69,7 +69,10 @@ pub fn frame(p: &Picker<'_>, t: Text<'_>) -> String {
         String::new(),
     ];
     // The list fills what the title, the path, a blank line and the status line leave; the selected folder stays in view.
-    let room = rows.saturating_sub(4).max(1);
+    // A truncated listing keeps one row for its "more" note, so the cut is never silent.
+    let room = rows
+        .saturating_sub(4 + usize::from(p.folder.truncated))
+        .max(1);
     let entries = &p.folder.entries;
     if entries.is_empty() {
         lines.push(format!(
@@ -193,6 +196,29 @@ mod tests {
         assert!(r.iter().any(|l| l == "   p24  tui-folder-git"), "{r:#?}");
         assert!(!r.iter().any(|l| l.contains("p00")), "scrolled: {r:#?}");
         assert!(r[11].contains("tui-folder-keys"), "{r:#?}");
+    }
+
+    #[test]
+    fn a_truncated_folder_that_fills_the_list_still_says_there_are_more() {
+        // The list fills the room exactly when a listing was cut (directory.list's cap): the notice
+        // must not be the one line the status row squeezes out.
+        let f = folder(30, true);
+        let p = Picker {
+            machine: "mac2",
+            folder: &f,
+            selected: 25,
+            notice: "",
+            color: false,
+            cols: 80,
+            rows: 12,
+        };
+        assert!(
+            rows(&frame(&p, &text), 12)
+                .iter()
+                .any(|l| l.contains("tui-folder-more n=30")),
+            "the truncation notice is not shown: {r:#?}",
+            r = rows(&frame(&p, &text), 12)
+        );
     }
 
     #[test]

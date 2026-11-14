@@ -88,4 +88,16 @@
   need a device-signed grant (the `signed_commands` line, the team default a limited device turns on, or none: a note, since a
   compromised hub could then send them, threat model T1), how many devices are trusted and how many of them may act in every
   project, the `skip_permissions` setting, and how many policy lines the node did not understand.
+- **Failure drills** (architecture review R8). Each one runs in CI and says which hop failed and what it recovered:
+
+  | Drill | Test | What it shows |
+  | --- | --- | --- |
+  | Backup and restore with two machines | `crates/agora/tests/restore_drill.rs` `the_hub_comes_back_from_an_older_backup_and_every_machine_brings_its_present` | real processes; the restored hub gets both machines' present back by itself in 0.5–0.7 s, with no lost history while the machines still hold it |
+  | A machine's certificate revoked while connected | `restore_drill.rs` `revoking_a_connected_machine_ends_its_connection_and_keeps_it_out` | the connection ends within the hub's recheck, the machine is shown offline, it stays out when it redials, and a newly enrolled machine of that name connects |
+  | A long disconnect whose buffer overflows | `crates/agora/tests/hub_link.rs` (a node with a 16 KiB cap; `a_node_whose_cap_dropped_unacked_events_resyncs_and_delivers_its_newer_events`) | the node resynchronizes, the hub records the lost range (`resyncs`), and agents still running keep their board work (ADR-0054, ADR-0055) |
+  | A client that leaves while its command is on its way | `crates/agora-hub/tests/server.rs` `a_command_whose_client_left_still_gets_its_outcome_in_the_audit_trail` | the command still happens once and its outcome reaches the audit trail |
+
+  Not yet: the metrics the review lists first (ingest and storage latency, lock hold time, queue depth, oldest unacknowledged event,
+  resync and relay-reset counts, approval latency), and a recovery target written down apart from the acceptable history-loss
+  window (a resync restores the present, not the missing history).
 - **Tracing across hops:** commands carry a trace id from client through hub to node and adapter.

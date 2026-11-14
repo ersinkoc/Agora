@@ -1,0 +1,141 @@
+{
+  "issue": 573,
+  "base_head": "4660a75",
+  "at": "2026-11-14T22:21:12.777072+00:00",
+  "source_sha256": "bbbcbb24f8f7346cef312f9c08583a67527001f766a6addee58267df960fa7cc",
+  "local_platform": "Linux; headless Chromium 1248; fresh task binary and web assets",
+  "regular_500_agents": {
+    "fleet": "10x5x10",
+    "agents": 500,
+    "fixture": "static-fleet-no-live-nodes-or-terminal-streams",
+    "domRowsReadyMs": 118,
+    "rows": 500,
+    "treeNodes": 3810,
+    "pageNodes": 4901,
+    "heapMB": 11,
+    "scrollFrameMs": {
+      "p50": 16.7,
+      "p95": 17.8,
+      "max": 21.5
+    },
+    "longTasksWhileScrolling": 0,
+    "longTasksWhilePicking": 0,
+    "longTasksWhileFiltering": 0,
+    "longTasksOutsidePhases": 0,
+    "longTasksTotal": 0,
+    "pickToFrameMs": {
+      "p50": 27.1,
+      "p95": 29.2
+    },
+    "filterToFrameMs": {
+      "p50": 20.3,
+      "p95": 32.8
+    }
+  },
+  "path_python_delayed_exit_control": {
+    "repository_path_has_spaces_and_unicode": true,
+    "python_override_used": true,
+    "hub_exit_observations": [
+      {
+        "home_before_hub_exit": true,
+        "home_after_hub_exit": true
+      },
+      {
+        "home_before_hub_exit": true,
+        "home_after_hub_exit": true
+      }
+    ],
+    "benchmark": {
+      "fleet": "10x5x10",
+      "agents": 500,
+      "fixture": "static-fleet-no-live-nodes-or-terminal-streams",
+      "domRowsReadyMs": 126,
+      "rows": 500,
+      "treeNodes": 3810,
+      "pageNodes": 4901,
+      "heapMB": 11,
+      "reviewControl": {
+        "controlStart": 2638.7999999523163,
+        "controlEnd": 2718.7999999523163,
+        "phases": {
+          "scroll": {
+            "start": 626.3999999761581,
+            "end": 2638.7000000476837
+          },
+          "pick": {
+            "start": 2729.399999976158,
+            "end": 4923.600000023842
+          },
+          "filter": {
+            "start": 4923.600000023842,
+            "end": 6374.600000023842
+          }
+        },
+        "entries": [
+          {
+            "start": 2638.7999999523163,
+            "duration": 80
+          }
+        ]
+      },
+      "scrollFrameMs": {
+        "p50": 16.7,
+        "p95": 17.8,
+        "max": 22.6
+      },
+      "longTasksWhileScrolling": 0,
+      "longTasksWhilePicking": 0,
+      "longTasksWhileFiltering": 0,
+      "longTasksOutsidePhases": 1,
+      "longTasksTotal": 1,
+      "pickToFrameMs": {
+        "p50": 25.3,
+        "p95": 28.7
+      },
+      "filterToFrameMs": {
+        "p50": 19.3,
+        "p95": 29.6
+      },
+      "reviewControlPassed": true
+    }
+  },
+  "temporary_source_mutations": [
+    {
+      "mutation": "url-path",
+      "exit": 1,
+      "expected_failure_observed": true,
+      "expected_marker": "Command failed:"
+    },
+    {
+      "mutation": "python-selection",
+      "exit": 1,
+      "expected_failure_observed": true,
+      "expected_marker": "python-used"
+    },
+    {
+      "mutation": "cleanup-order",
+      "exit": 1,
+      "expected_failure_observed": true,
+      "expected_marker": "Temporary home removed before hub exit"
+    }
+  ],
+  "limitations": [
+    "No native Windows execution in this Linux validation; independent Windows review requested",
+    "No new product performance claim or budget table measurement"
+  ],
+  "mutations_only_in_temporary_copies": true,
+  "checks_passed": [
+    "native 500-agent benchmark",
+    "path/Python/delayed-exit native-browser control",
+    "all three negative mutations",
+    "node --check scripts/perf-tree.mjs",
+    "node --check docs/reviews/0557-phase-control.mjs",
+    "Python control compilation",
+    "sh scripts/check-docs.sh",
+    "cargo fmt --all -- --check",
+    "cargo clippy -- -D warnings",
+    "git diff --check",
+    "cargo build -p agora",
+    "web npm ci, gen and build"
+  ]
+}
