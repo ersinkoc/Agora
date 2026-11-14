@@ -16,7 +16,10 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 ### Starting at login
 - `agora service install` makes this machine's Agora start when you log in: for you only, with no administrator rights, and it
   says what it registers first. `agora service status` says whether it is set up and whether it runs now; `agora service remove`
-  stops it and removes it. On Windows (a logon task) and macOS (a LaunchAgent in `~/Library/LaunchAgents`); Linux follows.
+  stops it and removes it. On Windows (a logon task) and on Linux with systemd (a user unit in `~/.config/systemd/user`, no root;
+  to start it at boot without logging in, run `loginctl enable-linger` yourself, which Agora never does), and on macOS (a
+  LaunchAgent in `~/Library/LaunchAgents`; macOS may say "Background Items Added" and lists it under Login Items). A login entry
+  of the same name that Agora did not write is left exactly as it is.
 
 ### Getting started
 - A hub or node started by `agora` that crashes is started again 30 seconds later, at most 5 times in 10 minutes; one that
