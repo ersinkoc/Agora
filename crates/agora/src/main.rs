@@ -156,6 +156,8 @@ pub(crate) struct Opts {
     old: bool,
     refuse_return: bool,
     ui: Option<String>,
+    /// ADR-0062 item 4: `agora --resume ask|auto [--save]` and `agora node run --resume auto`.
+    resume: Option<String>,
     save: bool,
     positional: Vec<String>,
 }
@@ -213,6 +215,7 @@ fn parse(args: &[String]) -> Option<Opts> {
             "--log" => o.log = true,
             "--replace" => o.replace = true,
             "--ui" => o.ui = Some(it.next()?.clone()),
+            "--resume" => o.resume = Some(it.next()?.clone()),
             "--save" => o.save = true,
             s if s.starts_with("--") => return None,
             _ => o.positional.push(a.clone()),
@@ -292,6 +295,7 @@ fn main() -> ExitCode {
                 handoff: opts.handoff.as_deref(),
                 home: opts.home.clone(),
                 log: opts.log,
+                resume: opts.resume.as_deref(),
             },
         ),
         ["agent", "start"] => agent_start(&say, &opts),
@@ -460,10 +464,16 @@ fn doctor(say: &Say, o: &Opts) -> ExitCode {
 fn node_run(say: &Say, o: &Opts) -> ExitCode {
     // A crash can leave folder permissions for a confined agent behind (Windows); nothing is running yet, so undo them.
     agora_platform::recover_sandbox_leftovers();
+    if !matches!(o.resume.as_deref(), None | Some("auto" | "ask")) {
+        say.err(key!("cli-bad-arguments"), &[]);
+        return ExitCode::from(2);
+    }
     let h = home();
     // A machine enrolled with a hub reports under the id the hub's certificate names.
     let link = hubcli::load_link(socket_path(o));
     let cfg = NodeConfig {
+        // `agora` passes `--resume auto` unless the owner said no (ADR-0062 item 4).
+        resume_all: o.resume.as_deref() == Some("auto"),
         node_id: link
             .as_ref()
             .map_or_else(|| "local".to_string(), |(id, _)| id.clone()),

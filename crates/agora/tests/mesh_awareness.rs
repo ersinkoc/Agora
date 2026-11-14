@@ -221,6 +221,7 @@ fn agents_see_who_else_is_here_on_this_machine_and_on_others() {
     )
     .unwrap();
     let cfg = NodeConfig {
+        resume_all: false,
         node_id: "alpha".into(),
         socket: dir.join("c.sock"),
         data_dir: dir.join("data"),

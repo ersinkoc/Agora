@@ -48,6 +48,8 @@ fn supported() -> bool {
 struct Env {
     root: PathBuf,
     node: Option<Node>,
+    /// `agora node run --resume auto` (ADR-0062 item 4).
+    resume_all: bool,
 }
 
 impl Env {
@@ -102,7 +104,11 @@ impl Env {
             ),
         )
         .unwrap();
-        let mut e = Self { root, node: None };
+        let mut e = Self {
+            root,
+            node: None,
+            resume_all: false,
+        };
         e.start();
         e
     }
@@ -111,6 +117,7 @@ impl Env {
         self.node = None;
         self.node = Some(
             Node::start(&NodeConfig {
+                resume_all: self.resume_all,
                 node_id: "node-resume".into(),
                 socket: self.root.join("n.sock"),
                 data_dir: self.root.join("data"),
@@ -677,4 +684,33 @@ fn a_resumed_agent_never_gets_its_dont_ask_option_back() {
         .filter(|r| args(r).iter().any(|a| a == "--yolo"))
         .count();
     assert_eq!(yolo, 1);
+}
+
+#[test]
+fn resume_auto_brings_every_agent_back_eight_at_a_time() {
+    if !supported() {
+        return;
+    }
+    // ADR-0062 item 4: `agora node run --resume auto` needs no policy file, covers every kind and folder, and brings back at most
+    // AUTO_RESUME_MAX at once; the others follow a round later. An agent with no session of its own stays offered.
+    let mut e = Env::new("all");
+    let probes: Vec<String> = (0..agora_node::daemon::AUTO_RESUME_MAX + 2)
+        .map(|_| e.launch("probe"))
+        .collect();
+    let plain = e.launch("plain");
+    for p in &probes {
+        e.wait("the probe's session", |e| !e.session(p).is_empty());
+    }
+    e.resume_all = true;
+    e.start();
+    let back = |e: &Env| probes.iter().filter(|p| e.running(p)).count();
+    assert_eq!(back(&e), agora_node::daemon::AUTO_RESUME_MAX);
+    e.wait("the second round", |e| back(e) == probes.len());
+    assert!(!e.running(&plain));
+    assert!(e.node().ledger.get(&plain).unwrap().interrupted());
+
+    // Without it (and without a policy file) nothing comes back by itself.
+    e.resume_all = false;
+    e.start();
+    assert_eq!(back(&e), 0);
 }

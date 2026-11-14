@@ -307,6 +307,7 @@ fn the_terminal_console_answers_an_approval_with_its_own_key_through_the_hub() {
     )
     .unwrap();
     let cfg = agora_node::daemon::NodeConfig {
+        resume_all: false,
         node_id: "node-test".into(),
         socket: dir.join("c.sock"),
         data_dir: data,
@@ -412,6 +413,7 @@ fn the_terminal_console_opens_an_agents_terminal_through_the_hub_types_into_it_a
     )
     .unwrap();
     let cfg = agora_node::daemon::NodeConfig {
+        resume_all: false,
         node_id: "laptop".into(),
         socket: dir.join("c.sock"),
         data_dir: dir.join("data"),
@@ -523,6 +525,7 @@ fn the_terminal_console_follows_a_chat_agents_conversation_sends_a_request_and_s
     )
     .unwrap();
     let cfg = agora_node::daemon::NodeConfig {
+        resume_all: false,
         node_id: "laptop".into(),
         socket: dir.join("c.sock"),
         data_dir: dir.join("data"),
@@ -639,6 +642,7 @@ fn the_terminal_console_gives_a_machine_a_signed_grant_when_its_policy_asks_for_
     // The owner's policy: stopping an agent through the hub needs a grant.
     std::fs::write(data.join("policy"), "signed_commands = agent.stop\n").unwrap();
     let cfg = agora_node::daemon::NodeConfig {
+        resume_all: false,
         node_id: "laptop".into(),
         socket: dir.join("c.sock"),
         data_dir: data,
@@ -745,6 +749,7 @@ fn the_terminal_console_learns_that_typing_was_refused_for_want_of_a_grant() {
     // The owner's policy: typing into a terminal through the hub needs a grant.
     std::fs::write(data.join("policy"), "signed_commands = terminal.input\n").unwrap();
     let cfg = agora_node::daemon::NodeConfig {
+        resume_all: false,
         node_id: "laptop".into(),
         socket: dir.join("c.sock"),
         data_dir: data,
@@ -992,6 +997,7 @@ fn a_signed_in_client_runs_a_command_on_a_node_through_the_hub() {
     let dir = tmp("routed");
     std::fs::create_dir_all(&dir).unwrap();
     let cfg = agora_node::daemon::NodeConfig {
+        resume_all: false,
         node_id: "laptop".into(),
         socket: dir.join("c.sock"),
         data_dir: dir.join("data"),
@@ -1112,6 +1118,7 @@ fn a_clients_terminal_is_relayed_through_the_hub_with_input_and_close() {
     )
     .unwrap();
     let cfg = agora_node::daemon::NodeConfig {
+        resume_all: false,
         node_id: "laptop".into(),
         socket: dir.join("c.sock"),
         data_dir: dir.join("data"),
@@ -1303,6 +1310,7 @@ fn an_agent_messages_an_agent_on_another_node_through_the_hub_and_a_failure_come
         let dir = tmp(name);
         std::fs::create_dir_all(&dir).unwrap();
         let cfg = agora_node::daemon::NodeConfig {
+            resume_all: false,
             node_id: name.into(),
             socket: dir.join("c.sock"),
             data_dir: dir.join("data"),
@@ -1427,6 +1435,7 @@ fn agents_on_two_nodes_share_a_board_claims_leases_and_handoffs_and_it_fails_clo
         let dir = tmp(&format!("board-{name}"));
         std::fs::create_dir_all(&dir).unwrap();
         let cfg = agora_node::daemon::NodeConfig {
+            resume_all: false,
             node_id: name.into(),
             socket: dir.join("c.sock"),
             data_dir: dir.join("data"),
@@ -1679,6 +1688,7 @@ fn a_command_the_policy_lists_needs_a_grant_signed_by_a_trusted_device_and_the_l
     )
     .unwrap();
     let cfg = agora_node::daemon::NodeConfig {
+        resume_all: false,
         node_id: "laptop".into(),
         socket: dir.join("c.sock"),
         data_dir: dir.join("data"),
@@ -1938,6 +1948,7 @@ fn the_terminal_console_picks_a_folder_on_a_machine_and_starts_an_agent_there() 
     )
     .unwrap();
     let cfg = agora_node::daemon::NodeConfig {
+        resume_all: false,
         node_id: "laptop".into(),
         socket: dir.join("c.sock"),
         data_dir: data,
@@ -2103,6 +2114,7 @@ fn a_node_that_ran_before_it_was_enrolled_links_and_its_new_events_arrive() {
     let dir = tmp("before-enroll");
     std::fs::create_dir_all(&dir).unwrap();
     let cfg = |id: &str| agora_node::daemon::NodeConfig {
+        resume_all: false,
         node_id: id.into(),
         socket: dir.join("c.sock"),
         data_dir: dir.join("data"),
@@ -2189,6 +2201,7 @@ fn a_node_enrolled_again_under_another_name_links_and_keeps_the_old_log() {
     let dir = tmp("re-enroll");
     std::fs::create_dir_all(&dir).unwrap();
     let cfg = |id: &str| agora_node::daemon::NodeConfig {
+        resume_all: false,
         node_id: id.into(),
         socket: dir.join("c.sock"),
         data_dir: dir.join("data"),

@@ -2,12 +2,12 @@
 
 cli-usage =
     Kullanım:
-      agora [--ui tui|web|none [--save]]
+      agora [--ui tui|web|none [--save]] [--resume ask|auto [--save]]
       agora web
       agora status
       agora down
       agora service install|remove|status
-      agora node run [--socket YOL] [--manifests DİZİN] [--project YOL]... [--data DİZİN] [--worktrees DİZİN]
+      agora node run [--socket YOL] [--manifests DİZİN] [--project YOL]... [--data DİZİN] [--worktrees DİZİN] [--resume auto]
       agora agent start TÜR [--cwd YOL] [--worktree] [--project AD] [--name AD] [--accept-project-id-change] [--socket YOL]
       agora project init [--cwd YOL] [--socket YOL]
       agora agent stop AJAN_KİMLİĞİ [--socket YOL]
@@ -226,6 +226,8 @@ frontdoor-choose = 1, 2 ya da 3 yazıp Enter'a basın:
 frontdoor-lan-question = Diğer makineleriniz bağlanabilsin mi? [e/H]
 frontdoor-autostart-question = Oturum açtığınızda Agora başlasın mı? [E/h]
 frontdoor-autostart-later = Agora oturum açtığınızda kendiliğinden başlamayacak. İstediğiniz zaman `agora service install` bunu ayarlar.
+frontdoor-resume-question = Yeniden başlatmadan sonra ajanlar kendiliğinden geri gelsin mi? [E/h]
+frontdoor-resume-off = Ajanlar yeniden başlatmadan sonra kendiliğinden geri gelmeyecek; pencere her birini geri getirmeyi önerir. `agora --resume auto --save` bunu yeniden açar.
 frontdoor-join-later = Buradan katılmak henüz yok. Agora'nın çalıştığı makinede `agora hub code` çalıştırın; sonra burada `agora node enroll` ve `agora node run` çalıştırın (bkz. `agora --help`).
 frontdoor-get-started = Agora bu makinede henüz kurulmadı. Bir terminalde `agora` çalıştırıp tek bir soruyu yanıtlayın. (Ayarlar { $path } dosyasında tutulur.)
 frontdoor-set-up-by-hand = Bu makinede elle başlatılmış bir Agora zaten var ({ $path }). `agora` onu henüz devralmıyor: `agora hub run` ve `agora node run` ile devam edin ya da `agora` yeni bir kurulum yapsın diye AGORA_HOME değişkenini yeni bir klasöre yöneltin.

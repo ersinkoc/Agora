@@ -115,6 +115,7 @@ impl Env {
         )
         .unwrap();
         let node = Node::start(&NodeConfig {
+            resume_all: false,
             node_id: NODE.into(),
             socket: root.join("n.sock"),
             data_dir: root.join("data"),
