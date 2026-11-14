@@ -23,7 +23,7 @@ const LAYOUT_KEY = 'agora.changes.layout';
 const ROW_LIMIT = 3000; // rows drawn before "Show all"
 // "Show all" past ROW_LIMIT draws a window of fixed-height rows (one line each, no wrapping): px per row (text-xs, leading-5) and rows
 // drawn beyond each edge of the view.
-const ROW = 20;
+const ROW_REM = 1.25; // leading-5: a row is 1.25 rem, 20 px at the default size and more with a larger text scale (Large text)
 const OVERSCAN = 40;
 const SPAN_LIMIT = 2000; // longest line whose changed part is marked
 
@@ -190,6 +190,8 @@ export function ChangesView({ load, read, changed }: {
   if (files.length === 0) return <div className="flex items-center gap-3 p-4"><p className="muted m-0">{t('changes-none')}</p><button type="button" className="ide-iconbtn" onClick={() => setRound((r) => r + 1)} aria-label={t('changes-refresh')} title={t('changes-refresh')}><Icon name="restore" /></button></div>;
 
   const at = selected !== undefined ? order.indexOf(selected) : -1;
+  // A long change shown whole is drawn as a window of one-line rows (FileBody), where wrapping cannot apply.
+  const windowed = !!file && showAll.has(file.path) && file.lines.length > ROW_LIMIT;
   const filters: Filter[] = ['all', 'modified', 'added', 'deleted', 'renamed'];
 
   return (
@@ -216,7 +218,8 @@ export function ChangesView({ load, read, changed }: {
               className={`px-2 py-0.5 text-xs transition-colors duration-150 ${layout === l ? 'bg-surface-2 text-ink' : 'text-muted hover:text-ink'}`}>{t(`changes-layout-${l}`)}</button>
           ))}
         </div>
-        {layout === 'unified' && <button type="button" className="ide-iconbtn w-auto px-2 text-xs" aria-pressed={wrap} onClick={() => setWrap((w) => !w)}>{t('changes-wrap')}</button>}
+        {layout === 'unified' && <button type="button" className="ide-iconbtn w-auto px-2 text-xs disabled:opacity-50" aria-pressed={wrap && !windowed} disabled={windowed}
+          title={windowed ? t('changes-wrap-long') : undefined} onClick={() => setWrap((w) => !w)}>{t('changes-wrap')}</button>}
         <button type="button" className="ide-iconbtn" onClick={() => setRound((r) => r + 1)} aria-label={t('changes-refresh')} title={t('changes-refresh')}><Icon name="restore" /></button>
       </div>
       {diff.truncated && <p role="status" className="m-0 flex-none border-b border-line bg-needs-you/10 px-3 py-1.5 text-xs text-ink">{truncatedText(files.length, changed)}</p>}
@@ -288,7 +291,9 @@ export function ChangesView({ load, read, changed }: {
 
 const NONE: Set<number> = new Set();
 // A diff cut at 512 KiB: how many files were read, and at least how many the node counts that are not listed. The node counts an
-// untracked folder as one path where the diff lists each file in it, so the difference is a floor, never an overcount.
+// untracked folder as one path where the diff lists each file in it, so for a workspace at its repository's top the difference is a
+// floor. For a workspace that is a folder inside a repository the node's count covers the whole repository while the diff covers the
+// folder, so it can overcount there (a node-side fix: status with the diff's pathspec).
 export function truncatedText(listed: number, changed: number | undefined): string {
   return changed !== undefined && changed > listed
     ? t('changes-truncated-count', { count: listed, total: changed, min: changed - listed })
@@ -438,7 +443,7 @@ function WindowedRows({ segments, split, oneSided, width, pairs, htmlOf, canExpa
   const widest = useMemo(() => items.reduce((w, it) => Math.max(w, it.kind === 'line' ? it.line.text.length
     : it.kind === 'row' ? Math.max(it.row.left?.text.length ?? 0, it.row.right?.text.length ?? 0) * 2 : 0), 0), [items]);
   const box = useRef<HTMLDivElement>(null);
-  const [view, setView] = useState({ top: 0, height: 900 });
+  const [view, setView] = useState({ top: 0, height: 900, row: 20 });
   useLayoutEffect(() => {
     const el = box.current;
     const scroller = el?.closest<HTMLElement>('[data-scroller]');
@@ -446,15 +451,20 @@ function WindowedRows({ segments, split, oneSided, width, pairs, htmlOf, canExpa
     let frame = 0;
     const measure = () => {
       frame = 0;
-      setView({ top: scroller.getBoundingClientRect().top - el.getBoundingClientRect().top, height: scroller.clientHeight });
+      const root = parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
+      setView({ top: scroller.getBoundingClientRect().top - el.getBoundingClientRect().top, height: scroller.clientHeight, row: root * ROW_REM });
     };
     const onScroll = () => { if (!frame) frame = requestAnimationFrame(measure); };
     measure();
     scroller.addEventListener('scroll', onScroll, { passive: true });
     const ro = new ResizeObserver(onScroll);
     ro.observe(scroller);
-    return () => { scroller.removeEventListener('scroll', onScroll); ro.disconnect(); if (frame) cancelAnimationFrame(frame); };
+    // A theme applied meanwhile (an attribute or style on the root) can change the text size, and with it the row height.
+    const mo = new MutationObserver(onScroll);
+    mo.observe(document.documentElement, { attributes: true });
+    return () => { scroller.removeEventListener('scroll', onScroll); ro.disconnect(); mo.disconnect(); if (frame) cancelAnimationFrame(frame); };
   }, []);
+  const ROW = view.row;
   const first = Math.max(0, Math.floor(view.top / ROW) - OVERSCAN);
   const last = Math.min(items.length, Math.ceil((view.top + view.height) / ROW) + OVERSCAN);
   const rows: ReactNode[] = [];

@@ -65,8 +65,10 @@ export function findMatches(lines: string[], query: string, limit = 10_000): Mat
   if (!query) return [];
   // Smart case: a query with a capital letter matches exactly. Otherwise case is ignored by the pattern itself, on the line as it is:
   // a lowercased copy can be longer than the line (`İ` lowercases to two code units), which would move every mark after it.
+  // Ignoring case, each letter matches all its case forms, the Turkish ones too (`i` finds `İ`, `ı` finds `I`), which the `i` flag's
+  // simple folding does not.
   const exact = query !== query.toLowerCase();
-  const re = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), exact ? 'gu' : 'giu');
+  const re = new RegExp([...query].map((c) => (exact ? escapeRe(c) : caseClass(c))).join(''), 'gu');
   const out: Match[] = [];
   for (let i = 0; i < lines.length && out.length < limit; i++) {
     re.lastIndex = 0;
@@ -75,6 +77,13 @@ export function findMatches(lines: string[], query: string, limit = 10_000): Mat
     }
   }
   return out;
+}
+
+const escapeRe = (c: string) => c.replace(/[.*+?^${}()|[\]\\/-]/g, '\\$&');
+function caseClass(c: string): string {
+  const forms = new Set([c, c.toLowerCase(), c.toUpperCase(), c.toLocaleLowerCase('tr'), c.toLocaleUpperCase('tr')]
+    .filter((f) => [...f].length === 1));
+  return forms.size > 1 ? `[${[...forms].map(escapeRe).join('')}]` : escapeRe(c);
 }
 
 export interface Crumb { name: string; path: string }
