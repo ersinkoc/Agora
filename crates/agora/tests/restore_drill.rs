@@ -65,6 +65,8 @@ fn tmp(name: &str) -> PathBuf {
 fn hub(home: &Path, hub_dir: &Path, listen: &str) -> (Proc, String) {
     let mut child = agora(home, &["hub", "run", "--listen", listen, "--hub-dir"])
         .arg(hub_dir)
+        // A revoked certificate ends an open connection at the next recheck (10 s by default): shorter here.
+        .env("AGORA_RECHECK_MS", "200")
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
@@ -290,6 +292,107 @@ fn the_hub_comes_back_from_an_older_backup_and_every_machine_brings_its_present(
         "restore drill: the hub's present was whole {} ms after it started from the backup ({} ms waiting on the machines); lost history ranges: none",
         restarted.elapsed().as_millis(),
         recovered.as_millis()
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The certificate of a machine that is connected is revoked (it enrolled again under the same name, which replaces the old identity):
+/// the open connection ends, the old node is refused when it redials, and the new one connects.
+#[test]
+fn revoking_a_connected_machine_ends_its_connection_and_keeps_it_out() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
+        return;
+    }
+    let root = tmp("revoke");
+    let (hub_home, hub_dir) = (root.join("hub-home"), root.join("hub"));
+    std::fs::create_dir_all(&hub_home).unwrap();
+    let (_hub, addr) = hub(&hub_home, &hub_dir, "127.0.0.1:0");
+    let port = addr.rsplit(':').next().unwrap().to_string();
+    let (_old_home, old_node) = machine(&root, &hub_dir, &port, "alpha");
+    wait_view(&hub_dir, "alpha online", Duration::from_secs(30), |v| {
+        v.nodes.get("alpha").is_some_and(|n| n.online)
+    });
+
+    // Another machine enrolls as `alpha`: the first one's certificate is revoked while its connection is open.
+    let new_home = root.join("alpha-new");
+    std::fs::create_dir_all(new_home.join("manifests")).unwrap();
+    let code_text = run(
+        &new_home,
+        &["hub", "code", "--hub-dir", hub_dir.to_str().unwrap()],
+    );
+    let code = code_text
+        .split("Enrollment code: ")
+        .nth(1)
+        .and_then(|r| r.split(' ').next())
+        .expect(&code_text)
+        .to_string();
+    let revoked = Instant::now();
+    run(
+        &new_home,
+        &[
+            "node",
+            "enroll",
+            "--hub",
+            &format!("wss://localhost:{port}"),
+            "--ca",
+            hub_dir.join("ca.pem").to_str().unwrap(),
+            "--code",
+            &code,
+            "--id",
+            "alpha",
+        ],
+    );
+    let ended = wait_view(
+        &hub_dir,
+        "the revoked connection ends",
+        Duration::from_secs(30),
+        |v| v.nodes.get("alpha").is_some_and(|n| !n.online),
+    );
+    // It keeps redialing with the revoked certificate and stays out.
+    std::thread::sleep(Duration::from_secs(3));
+    assert!(
+        !view(&hub_dir).nodes.get("alpha").is_some_and(|n| n.online),
+        "the old machine came back with a revoked certificate"
+    );
+    drop(old_node);
+
+    // The new machine, with the new certificate, is let in.
+    let repo = root.join("alpha-new-repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("README.md"), "new").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "init"]);
+    let log = std::fs::File::create(root.join("alpha-new.log")).unwrap();
+    let node = agora(&new_home, &["node", "run", "--project"])
+        .arg(&repo)
+        .stdout(Stdio::null())
+        .stderr(log)
+        .spawn()
+        .unwrap();
+    let _new_node = Proc(node);
+    let sock = new_home.join("node.sock");
+    let end = Instant::now() + Duration::from_secs(15);
+    while !sock.exists() {
+        assert!(
+            Instant::now() < end,
+            "the new alpha's node did not start: {}",
+            std::fs::read_to_string(root.join("alpha-new.log")).unwrap_or_default()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let end = Instant::now() + Duration::from_secs(30);
+    while !view(&hub_dir).nodes.get("alpha").is_some_and(|n| n.online) {
+        assert!(
+            Instant::now() < end,
+            "the new alpha never came online; its node said: {}",
+            std::fs::read_to_string(root.join("alpha-new.log")).unwrap_or_default()
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    eprintln!(
+        "revocation drill: the open connection ended within {} ms of the old certificate's revocation; the old node stayed out; the new one connected",
+        ended.as_millis().max(revoked.elapsed().as_millis().min(1))
     );
     let _ = std::fs::remove_dir_all(&root);
 }

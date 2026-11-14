@@ -131,7 +131,7 @@ pub async fn serve_node_within<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    serve_node_from(conn, None, node_id, hub, support, silence).await
+    serve_node_from(conn, None, node_id, hub, support, silence, &|| true).await
 }
 
 /// [`serve_node_within`] when the connection's first frame was already read (it must be the node's `Hello`; ADR-0061 reads it to
@@ -143,11 +143,12 @@ async fn serve_node_from<S>(
     hub: &Arc<Hub>,
     support: &Support,
     silence: Duration,
+    valid: &(dyn Fn() -> bool + Sync),
 ) -> Result<(), ServeError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let result = converse_node(&mut conn, first, node_id, hub, support, silence).await;
+    let result = converse_node(&mut conn, first, node_id, hub, support, silence, valid).await;
     match &result {
         Err(ServeError::Protocol(e)) => {
             // Codes and parameters only: this is the hub's log, not a user's screen.
@@ -172,6 +173,7 @@ async fn converse_node<S>(
     hub: &Arc<Hub>,
     support: &Support,
     silence: Duration,
+    valid: &(dyn Fn() -> bool + Sync),
 ) -> Result<(), ServeError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -213,16 +215,14 @@ where
         give_device_changes(hub, node_id);
     }
     let mut last_heard = tokio::time::Instant::now();
-    let result = stream_events(
-        conn,
-        &mut session,
-        hub,
-        node_id,
-        commands,
-        silence,
-        &mut last_heard,
-    )
-    .await;
+    // A certificate revoked while the connection is open ends it here, inside the conversation, so the end below still records the
+    // node offline (it used to be cancelled from outside, and a revoked machine stayed online in every view).
+    let result = tokio::select! {
+        r = stream_events(conn, &mut session, hub, node_id, commands, silence, &mut last_heard) => r,
+        () = still(valid) => Err(ServeError::Protocol(
+            Error::new(ErrorCode::AuthDeviceRevoked).with("device_id", node_id),
+        )),
+    };
     // However it ended, the router now knows this node is not connected (commands to it fail with `node.offline` at once), unless
     // a newer connection of the node replaced this one: that one is live, and the node is not offline.
     let now = now_ms();
@@ -1728,15 +1728,22 @@ async fn handle(
             if (first.stream_id, first.kind) == (STREAM_COMMANDS, 0) {
                 return serve_node_query(conn, &state.hub, &id.node_id, first).await;
             }
-            // Revoking a node ends its connection, not only its next one.
-            tokio::select! {
-                r = serve_node_from(conn, Some(first), &id.node_id, &state.hub, &state.support, NODE_SILENCE) => r,
-                () = still(|| Enrollment::new(state.hub.store()).is_active(&id.serial_hex).unwrap_or(false)) => {
-                    Err(ServeError::Protocol(
-                        Error::new(ErrorCode::AuthDeviceRevoked).with("device_id", id.node_id.as_str()),
-                    ))
-                }
-            }
+            // Revoking a node ends its connection, not only its next one (checked inside the conversation, so it ends as any other).
+            let active = || {
+                Enrollment::new(state.hub.store())
+                    .is_active(&id.serial_hex)
+                    .unwrap_or(false)
+            };
+            serve_node_from(
+                conn,
+                Some(first),
+                &id.node_id,
+                &state.hub,
+                &state.support,
+                NODE_SILENCE,
+                &active,
+            )
+            .await
         }
         None => serve_unauthenticated(conn, token.as_deref(), state).await,
     }
