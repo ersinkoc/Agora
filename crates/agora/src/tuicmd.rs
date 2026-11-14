@@ -1681,6 +1681,11 @@ fn console(
             .unwrap_or_default();
         if let Some(i) = rows.iter().position(|r| !r.header && r.id == c.selected) {
             c.app.selected = i;
+        } else if let Some(id) = c.app.settle_selection(&rows) {
+            // Nothing selected yet (the start) or the selected agent is gone: the row the tree shows chosen is the one the inspector
+            // and the letters act on, never a heading or nothing.
+            c.selected = id.to_string();
+            redraw = true;
         }
         let mut events = Vec::new();
         let now = window_area();
@@ -1784,7 +1789,15 @@ fn console(
                     }
                     Action::PaneSize { .. } => sized = None,
                     Action::MouseCapture(on) => mouse_mode(on),
-                    Action::Open(_) | Action::Close(_) | Action::Scroll(_) => {}
+                    // Closing a tab only closes the view: the agent keeps running, and the footer says so.
+                    Action::Close(id) => {
+                        let name = c
+                            .snapshot
+                            .as_ref()
+                            .map_or_else(|| id.clone(), |s| agora_tui::split::agent_label(s, &id));
+                        c.notice = say.text(key!("tui-tab-closed"), &[("agent", Arg::Str(name))]);
+                    }
+                    Action::Open(_) | Action::Scroll(_) => {}
                     Action::Quit => {
                         if let Some(p) = preview.take() {
                             p.close(session);
@@ -1981,9 +1994,14 @@ fn draw_console(
                 })
                 .unwrap_or_default();
             let room = room.saturating_sub(waiting.len().saturating_sub(1));
+            // The agent speaks under its name (as in the tree), not its id.
+            let speaker = p.snapshot.as_ref().map_or_else(
+                || local.to_string(),
+                |a| agora_tui::split::agent_name(&a.agent_id, &a.kind),
+            );
             let mut lines = render_chat(
                 &p.entries,
-                local,
+                &speaker,
                 &String::from_utf8_lossy(&p.typed),
                 (usize::from(pane.width), room.max(2)),
                 false,
@@ -2041,7 +2059,12 @@ fn needs_you_count(s: &Snapshot) -> usize {
     let mut agents: std::collections::HashSet<&str> = s
         .agents
         .iter()
-        .filter(|a| a.running && a.state == agora_protocol::v1::AgentState::Blocked as i32)
+        .filter(|a| {
+            a.running
+                && a.state == agora_protocol::v1::AgentState::Blocked as i32
+                // An agent of an offline machine is not known to wait now (its row says the machine is offline).
+                && !s.nodes.iter().any(|n| n.node_id == a.node_id && !n.online)
+        })
         .map(|a| a.agent_id.as_str())
         .collect();
     let mut other = 0;
@@ -2439,9 +2462,7 @@ fn command(
                     lines.push(plain(
                         format!(
                             "{}: {} {}",
-                            a.agent_id
-                                .split_once('/')
-                                .map_or(a.agent_id.as_str(), |(_, l)| l),
+                            agora_tui::split::agent_label(&s, &a.agent_id),
                             a.action,
                             a.detail
                         )

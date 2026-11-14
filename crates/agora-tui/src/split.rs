@@ -8,7 +8,7 @@ use agora_i18n::{key, Arg};
 use agora_protocol::v1::{AgentSnapshot, AgentState, Snapshot};
 use agora_vt::{Style, Terminal};
 
-use crate::render::Text;
+use crate::render::{plain, Text};
 
 /// What one frame shows.
 pub struct View<'a> {
@@ -320,6 +320,22 @@ pub fn agent_name(agent_id: &str, kind: &str) -> String {
 
 /// ADR-0063: the tree as the app shell's rows: a heading per machine (online first, then by name), then its agents, helpers indented
 /// under the agent that started them (ADR-0057). Agents of a machine the hub does not list come last.
+/// The name an agent is shown by everywhere (its kind and accent name, as in the tree); its local id when it is not in the snapshot.
+pub fn agent_label(s: &Snapshot, agent_id: &str) -> String {
+    s.agents
+        .iter()
+        .find(|a| a.agent_id == agent_id)
+        .map_or_else(
+            || local(agent_id).to_string(),
+            |a| agent_name(&a.agent_id, &a.kind),
+        )
+}
+
+/// Whether the machine `node` is known to the hub and offline (ADR-0070: the hub owns presence).
+fn machine_offline(s: &Snapshot, node: &str) -> bool {
+    s.nodes.iter().any(|n| n.node_id == node && !n.online)
+}
+
 pub fn app_rows(s: &Snapshot, now_ms: u64, t: Text<'_>) -> Vec<crate::app::Row> {
     let mut rows = Vec::new();
     let agent_row = |a: &AgentSnapshot, depth: usize| {
@@ -334,10 +350,14 @@ pub fn app_rows(s: &Snapshot, now_ms: u64, t: Text<'_>) -> Vec<crate::app::Row> 
         } else {
             String::new()
         };
+        // An agent whose machine is offline: what it last did is not known now, so it never looks idle (or waiting).
+        let unreachable = a.running && machine_offline(s, &a.node_id);
         let state = if a.interrupted && !a.running {
             t(key!("tui-interrupted"), &[])
         } else if !a.running {
             t(key!("tui-state-finished"), &[])
+        } else if unreachable {
+            t(key!("tui-state-unreachable"), &[])
         } else {
             state_word(st, t)
         };
@@ -346,7 +366,7 @@ pub fn app_rows(s: &Snapshot, now_ms: u64, t: Text<'_>) -> Vec<crate::app::Row> 
             id: a.agent_id.clone(),
             label: format!(" {lead}{}{no_ask}", agent_name(&a.agent_id, &a.kind)),
             state,
-            needs_you: asks || (a.running && st == AgentState::Blocked),
+            needs_you: asks || (a.running && !unreachable && st == AgentState::Blocked),
             terminal: s.terminals.iter().any(|x| x.agent_id == a.agent_id),
             header: false,
         }
@@ -426,11 +446,32 @@ pub fn app_details(s: &Snapshot, selected: &str, width: u16, height: u16, t: Tex
         None => lines.push(t(key!("tui-split-pick"), &[])),
         Some(a) => {
             lines.push(agent_name(&a.agent_id, &a.kind));
-            lines.push(a.agent_id.clone());
-            lines.push(if a.running {
-                state_word(state_of(a), t)
+            // Where it runs, in words (the machine's name and the folder), not its id.
+            let machine = s
+                .nodes
+                .iter()
+                .find(|n| n.node_id == a.node_id)
+                .map_or(a.node_id.as_str(), name);
+            lines.push(if a.folder.is_empty() {
+                t(
+                    key!("tui-agent-on"),
+                    &[("machine", Arg::Str(plain(machine)))],
+                )
             } else {
+                t(
+                    key!("tui-agent-on-in"),
+                    &[
+                        ("machine", Arg::Str(plain(machine))),
+                        ("folder", Arg::Str(plain(&a.folder))),
+                    ],
+                )
+            });
+            lines.push(if !a.running {
                 t(key!("tui-state-finished"), &[])
+            } else if machine_offline(s, &a.node_id) {
+                t(key!("tui-state-unreachable"), &[])
+            } else {
+                state_word(state_of(a), t)
             });
             if !a.parent_agent_id.is_empty() {
                 lines.push(t(
@@ -452,7 +493,7 @@ pub fn app_details(s: &Snapshot, selected: &str, width: u16, height: u16, t: Tex
     if let Some(a) = answered {
         lines.push(String::new());
         lines.push(t(key!("tui-attention"), &[]));
-        let what = format!("{}: {} {}", local(&a.agent_id), a.action, a.detail);
+        let what = format!("{}: {} {}", agent_label(s, &a.agent_id), a.action, a.detail);
         lines.extend(crate::render::wrap_row(
             what.trim(),
             usize::from(width).max(12),
@@ -1035,14 +1076,19 @@ mod tests {
             &d.lines[..3],
             &[
                 agent_name("mac2/agent-1", "claude-code"),
-                "mac2/agent-1".into(),
+                // Where it runs in words, not its id.
+                "tui-agent-on machine=mac2".into(),
                 "tui-state-needs-you".into()
             ]
         );
-        assert!(
-            d.lines
-                .iter()
-                .any(|l| l == "agent-1: files.write src/auth.rs"),
+        // The request names the agent as the tree does; at 40 columns it wraps after the action.
+        let at = d.lines.iter().position(|l| l == "tui-attention").unwrap();
+        assert_eq!(
+            &d.lines[at + 1..at + 3],
+            &[
+                format!("{}: files.write", agent_name("mac2/agent-1", "claude-code")),
+                "src/auth.rs".to_string()
+            ],
             "{:#?}",
             d.lines
         );
@@ -1053,6 +1099,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn an_agent_of_an_offline_machine_never_looks_idle_or_waiting() {
+        let mut s = snapshot();
+        let node = s.agents[0].node_id.clone();
+        let id = s.agents[0].agent_id.clone();
+        s.agents[0].running = true;
+        s.agents[0].state = AgentState::Blocked as i32;
+        s.approvals.retain(|a| a.agent_id != id);
+        for n in &mut s.nodes {
+            n.online = n.node_id != node;
+        }
+        let rows = app_rows(&s, 0, &text);
+        let row = rows.iter().find(|r| r.id == id).unwrap();
+        assert_eq!(row.state, "tui-state-unreachable");
+        assert!(!row.needs_you);
+        let d = app_details(&s, &id, 40, 20, &text);
+        assert!(
+            d.lines.contains(&"tui-state-unreachable".to_string()),
+            "{:?}",
+            d.lines
+        );
+    }
     #[test]
     fn a_start_request_in_the_inspector_counts_as_read_only_when_all_of_it_fits() {
         let mut s = snapshot();

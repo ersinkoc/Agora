@@ -255,6 +255,15 @@ impl Default for App {
 }
 
 impl App {
+    /// The selected row moved off a heading (agents come and go): the first agent row from it on, else before it. Returns the
+    /// selected agent's id, or `None` when the tree has no agent.
+    pub fn settle_selection<'r>(&mut self, rows: &'r [Row]) -> Option<&'r str> {
+        self.selected = settle(rows, self.selected.min(rows.len().saturating_sub(1)), true);
+        rows.get(self.selected)
+            .filter(|r| !r.header)
+            .map(|r| r.id.as_str())
+    }
+
     /// The active tab's agent.
     pub fn active_agent(&self) -> Option<&str> {
         self.tabs.get(self.active).map(String::as_str)
@@ -351,6 +360,7 @@ impl App {
     /// Handles one event and returns what the caller must do, in order.
     pub fn handle(&mut self, event: Event, cx: &Ctx<'_>) -> Vec<Action> {
         let mut out = Vec::new();
+        let tab_before = self.active_agent().map(str::to_string);
         // The rows may have changed since the last event (agents come and go): never act on a heading.
         self.selected = settle(
             cx.rows,
@@ -375,6 +385,16 @@ impl App {
             }
             Event::Key(k) => self.key(k, cx, &mut out),
             Event::Mouse(m) => self.mouse(m, cx, area, &mut out),
+        }
+        // The tree (and so the inspector) follows the tab brought to the front.
+        let tab_now = self.active_agent().map(str::to_string);
+        if tab_now != tab_before {
+            if let Some(i) = tab_now
+                .as_deref()
+                .and_then(|id| cx.rows.iter().position(|r| !r.header && r.id == id))
+            {
+                self.selected = i;
+            }
         }
         // A window narrowed under the inspector takes the keyboard back to the tree.
         if self.focus == Focus::Inspector && self.areas(area).inspector.width == 0 {
@@ -738,9 +758,15 @@ impl App {
         {
             let y = a.tree.y + u16::try_from(i - top).unwrap_or(u16::MAX);
             if row.header {
-                let mut line = vec![Span::styled(row.label.clone(), strong)];
-                if !row.state.is_empty() {
-                    line.push(Span::styled(format!("  {}", row.state), dim));
+                let label = clip_to(&row.label, usize::from(a.tree.width));
+                let room = usize::from(a.tree.width).saturating_sub(text_width(&label) + 2);
+                let mut line = vec![Span::styled(label, strong)];
+                // What the machine says (its memory, or when it was last seen) is cut with an ellipsis, never mid-word silently.
+                if !row.state.is_empty() && room > 1 {
+                    line.push(Span::styled(
+                        format!("  {}", clip_to(&row.state, room)),
+                        dim,
+                    ));
                 }
                 Line::from(line).render(
                     Rect {
@@ -2289,6 +2315,41 @@ mod tests {
         // Display width, not characters: a wide name is cut by columns.
         let (label, _, _) = tree_row_fit(12, "東京東京東京", "Idle", false);
         assert!(text_width(&label) <= 5, "{label}");
+    }
+
+    #[test]
+    fn the_tree_follows_the_tab_brought_to_the_front() {
+        let rows = rows();
+        let mut app = App::default();
+        key(&mut app, &rows, Key::Enter);
+        key(&mut app, &rows, Key::Ctrl(']'));
+        key(&mut app, &rows, Key::Down);
+        key(&mut app, &rows, Key::Enter);
+        assert_eq!(app.selected, 1);
+        // Alt+1 brings the first tab back: the tree (and the inspector) is on its agent again.
+        key(&mut app, &rows, Key::Alt('1'));
+        assert_eq!(app.active_agent(), Some("mac/agent-1"));
+        assert_eq!(app.selected, 0);
+    }
+
+    #[test]
+    fn the_first_agent_is_selected_before_any_key() {
+        let mut rows = rows();
+        rows.insert(
+            0,
+            Row {
+                id: "mac".into(),
+                label: "mac".into(),
+                state: String::new(),
+                needs_you: false,
+                terminal: false,
+                header: true,
+            },
+        );
+        let mut app = App::default();
+        assert_eq!(app.settle_selection(&rows), Some("mac/agent-1"));
+        assert_eq!(app.selected, 1);
+        assert_eq!(app.settle_selection(&[]), None);
     }
 
     #[test]
