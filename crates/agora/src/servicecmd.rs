@@ -16,7 +16,7 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use agora_i18n::{key, Arg};
-use agora_platform::{ServiceSpec, ServiceState};
+use agora_platform::{ServiceProblem, ServiceRefusal, ServiceSpec, ServiceState};
 
 use crate::frontdoor::{self, Machine, Role};
 use crate::{home, Say};
@@ -82,10 +82,97 @@ fn shown(spec: &ServiceSpec) -> String {
         .join(" ")
 }
 
+/// Says why a `service_*` call failed: in the user's words when the platform named the problem (no user service manager in this
+/// session, something in the way of the service file), otherwise with `key` and the system's own reason.
+fn failed(say: &Say, key: &'static str, name: &str, e: &std::io::Error) {
+    match agora_platform::service_problem(e) {
+        Some(ServiceProblem::NoUserManager) => {
+            say.err(key!("service-no-user-manager"), &[("name", name.into())])
+        }
+        Some(ServiceProblem::InTheWay(p)) => say.err(
+            key!("service-in-the-way"),
+            &[("path", p.display().to_string().into())],
+        ),
+        Some(ServiceProblem::NotOurs(p)) => say.err(
+            key!("service-not-ours"),
+            &[
+                ("name", name.into()),
+                ("path", p.display().to_string().into()),
+            ],
+        ),
+        Some(ServiceProblem::Root) => say.err(key!("service-root"), &[]),
+        Some(ServiceProblem::NoConfigFolder) => say.err(key!("service-no-config-folder"), &[]),
+        Some(ServiceProblem::NotLoaded(p)) => say.err(
+            key!("service-not-loaded"),
+            &[
+                ("name", name.into()),
+                ("path", p.display().to_string().into()),
+            ],
+        ),
+        Some(ServiceProblem::Overridden(ps)) => say.err(
+            key!("service-overridden"),
+            &[("name", name.into()), ("paths", paths(ps).into())],
+        ),
+        None => say.err(
+            key,
+            &[("name", name.into()), ("reason", e.to_string().into())],
+        ),
+    }
+}
+
+/// Paths for a message, each in quotes (a path may hold a space or a comma).
+fn paths(ps: &[std::path::PathBuf]) -> String {
+    ps.iter()
+        .map(|p| format!("\"{}\"", p.display()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Whether `agora service` may act in this process (Linux: not as root, and with a folder for the user's units); says why not.
+fn may_act(say: &Say) -> bool {
+    match agora_platform::service_precheck() {
+        Ok(()) => true,
+        Err(e) => {
+            failed(say, key!("frontdoor-failed"), "", &e);
+            false
+        }
+    }
+}
+
+/// Whether the registered service `name` is Agora's own. When it is not (a systemd unit of the same name written by hand), or that
+/// cannot be told, it says so and the caller leaves it alone.
+fn mine(say: &Say, name: &str) -> bool {
+    match agora_platform::service_foreign(name) {
+        Ok(None) => true,
+        Ok(Some(theirs)) => {
+            say.err(
+                key!("service-not-ours"),
+                &[
+                    ("name", name.into()),
+                    ("path", theirs.display().to_string().into()),
+                ],
+            );
+            false
+        }
+        Err(e) => {
+            failed(say, key!("service-status-failed"), name, &e);
+            false
+        }
+    }
+}
+
 /// `agora service install|remove|status`.
 pub fn service(say: &Say, op: &str) -> ExitCode {
     if !agora_platform::SERVICES_SUPPORTED {
         say.err(key!("service-unsupported"), &[]);
+        return ExitCode::from(1);
+    }
+    // Built in, but this machine has no way to use it (Linux without systemd's `systemctl`).
+    if !agora_platform::services_available() {
+        say.err(key!("service-unavailable"), &[]);
+        return ExitCode::from(1);
+    }
+    if !may_act(say) {
         return ExitCode::from(1);
     }
     let h = home();
@@ -101,6 +188,10 @@ pub fn service(say: &Say, op: &str) -> ExitCode {
 }
 
 pub(crate) fn install(say: &Say, h: &Path, m: &Machine) -> ExitCode {
+    // Before anything is written (`sudo` would leave root's folders in the user's Agora folder).
+    if !may_act(say) {
+        return ExitCode::from(1);
+    }
     for d in ["run", "logs"] {
         if let Err(e) = std::fs::create_dir_all(h.join(d)) {
             say.err(
@@ -111,6 +202,7 @@ pub(crate) fn install(say: &Say, h: &Path, m: &Machine) -> ExitCode {
         }
     }
     let mut code = ExitCode::SUCCESS;
+    let mut registered = false;
     for role in roles(m) {
         let label: Arg = role.label(say).into();
         let spec = match spec(say, h, role) {
@@ -125,35 +217,65 @@ pub(crate) fn install(say: &Say, h: &Path, m: &Machine) -> ExitCode {
         };
         // A second `install` changes nothing and says so (to register it anew, `remove` first).
         match agora_platform::service_status(&spec.name) {
-            Ok(ServiceState::Installed { .. }) => {
-                say.out(
-                    key!("service-already"),
-                    &[("role", label), ("name", spec.name.clone().into())],
-                );
+            // A unit of the same name made by hand: left as it is, and this install did not do what was asked.
+            Ok(ServiceState::Installed { .. }) if !mine(say, &spec.name) => {
+                code = ExitCode::from(1);
                 continue;
+            }
+            // Agora's own and enabled: nothing changes, unless systemd also reads other files for it (a drop-in added since).
+            Ok(ServiceState::Installed { enabled: true }) => {
+                match agora_platform::service_drop_ins(&spec.name) {
+                    Ok(others) if others.is_empty() => {
+                        say.out(
+                            key!("service-already"),
+                            &[("role", label), ("name", spec.name.clone().into())],
+                        );
+                        registered = true;
+                    }
+                    Ok(others) => {
+                        say.err(
+                            key!("service-already-overridden"),
+                            &[
+                                ("role", label),
+                                ("name", spec.name.clone().into()),
+                                ("paths", paths(&others).into()),
+                            ],
+                        );
+                        code = ExitCode::from(1);
+                    }
+                    Err(e) => {
+                        failed(say, key!("service-status-failed"), &spec.name, &e);
+                        code = ExitCode::from(1);
+                    }
+                }
+                continue;
+            }
+            // Agora's own but turned off: registered again below, which turns it on (and says so), never "already starts".
+            Ok(ServiceState::Installed { enabled: false }) => {
+                say.out(
+                    key!("service-was-off"),
+                    &[("role", label.clone()), ("name", spec.name.clone().into())],
+                );
             }
             Ok(ServiceState::NotInstalled) => {}
             Err(e) => {
-                say.err(
-                    key!("service-status-failed"),
-                    &[
-                        ("name", spec.name.clone().into()),
-                        ("reason", e.to_string().into()),
-                    ],
-                );
+                failed(say, key!("service-status-failed"), &spec.name, &e);
                 code = ExitCode::from(1);
                 continue;
             }
         }
-        // What the system would change on the way (`%` expands in a Windows task) or cannot carry: refused with the path named.
-        if let Some(bad) = std::iter::once(spec.program.as_os_str())
-            .chain(spec.args.iter().map(OsString::as_os_str))
-            .find(|a| a.to_str().is_none_or(|t| t.contains('%')))
-        {
-            say.err(
-                key!("service-bad-path"),
-                &[("path", bad.to_string_lossy().into_owned().into())],
-            );
+        // What the system would change on the way (`%` expands in a Windows task) or cannot carry (a line break in a systemd unit, a
+        // relative path): refused with the path named.
+        if let Some((bad, why)) = agora_platform::service_refusal(&spec) {
+            let path: Arg = bad.to_string_lossy().into_owned().into();
+            let key = match why {
+                ServiceRefusal::Expands | ServiceRefusal::CannotCarry => key!("service-bad-path"),
+                ServiceRefusal::ControlCharacter => key!("service-bad-path-control"),
+                ServiceRefusal::NotAbsolute => key!("service-bad-path-relative"),
+                ServiceRefusal::Backslash => key!("service-bad-path-backslash"),
+                ServiceRefusal::ProgramCharacter => key!("service-bad-program"),
+            };
+            say.err(key, &[("path", path)]);
             code = ExitCode::from(1);
             continue;
         }
@@ -166,16 +288,11 @@ pub(crate) fn install(say: &Say, h: &Path, m: &Machine) -> ExitCode {
             ],
         );
         if let Err(e) = agora_platform::service_install(&spec) {
-            say.err(
-                key!("service-install-failed"),
-                &[
-                    ("name", spec.name.clone().into()),
-                    ("reason", e.to_string().into()),
-                ],
-            );
+            failed(say, key!("service-install-failed"), &spec.name, &e);
             code = ExitCode::from(1);
             continue;
         }
+        registered = true;
         // Registered. Started now only when nothing holds the role already (a supervisor started now would only refuse the lock).
         if let Some(l) = frontdoor::holder(h, role) {
             say.out(
@@ -206,6 +323,10 @@ pub(crate) fn install(say: &Say, h: &Path, m: &Machine) -> ExitCode {
             }
         }
     }
+    // A systemd user manager runs only while the user is logged in, unless lingering is turned on: Agora says so and never does it.
+    if registered && agora_platform::SERVICES_NEED_LINGER_FOR_BOOT {
+        say.out(key!("service-linger-hint"), &[]);
+    }
     code
 }
 
@@ -223,28 +344,41 @@ fn remove(say: &Say, h: &Path, m: &Machine) -> ExitCode {
                 say.out(key!("service-none"), &[("role", label)]);
                 continue;
             }
+            // A unit of the same name made by hand is not Agora's to stop or remove.
+            Ok(ServiceState::Installed { .. }) if !mine(say, &name) => {
+                code = ExitCode::from(1);
+                continue;
+            }
             Ok(ServiceState::Installed { .. }) => {}
             Err(e) => {
-                say.err(
-                    key!("service-status-failed"),
-                    &[("name", name.into()), ("reason", e.to_string().into())],
-                );
+                failed(say, key!("service-status-failed"), &name, &e);
                 code = ExitCode::from(1);
                 continue;
             }
         }
+        // Drop-ins Agora did not write stay; they are named after the removal.
+        let drop_ins = agora_platform::service_drop_ins(&name).unwrap_or_default();
         frontdoor::stop_role(say, h, Some(m), role, &mut code);
         match agora_platform::service_remove(&name) {
-            Ok(true) => say.out(
-                key!("service-removed"),
-                &[("role", label), ("name", name.into())],
-            ),
+            Ok(true) => {
+                say.out(
+                    key!("service-removed"),
+                    &[("role", label), ("name", name.clone().into())],
+                );
+                let left: Vec<_> = drop_ins
+                    .into_iter()
+                    .filter(|p| std::fs::symlink_metadata(p).is_ok())
+                    .collect();
+                if !left.is_empty() {
+                    say.out(
+                        key!("service-drop-ins-left"),
+                        &[("name", name.into()), ("paths", paths(&left).into())],
+                    );
+                }
+            }
             Ok(false) => say.out(key!("service-none"), &[("role", label)]),
             Err(e) => {
-                say.err(
-                    key!("service-remove-failed"),
-                    &[("name", name.into()), ("reason", e.to_string().into())],
-                );
+                failed(say, key!("service-remove-failed"), &name, &e);
                 code = ExitCode::from(1);
             }
         }
@@ -258,22 +392,41 @@ fn status(say: &Say, h: &Path, m: &Machine) -> ExitCode {
         let name = service_name(role);
         let label: Arg = role.label(say).into();
         match agora_platform::service_status(&name) {
-            Ok(ServiceState::Installed { enabled: true }) => say.out(
-                key!("service-status-installed"),
-                &[("role", label), ("name", name.into())],
-            ),
-            Ok(ServiceState::Installed { enabled: false }) => say.out(
-                key!("service-status-disabled"),
-                &[("role", label), ("name", name.into())],
-            ),
+            Ok(ServiceState::Installed { enabled }) => {
+                say.out(
+                    if enabled {
+                        key!("service-status-installed")
+                    } else {
+                        key!("service-status-disabled")
+                    },
+                    &[("role", label), ("name", name.clone().into())],
+                );
+                // What else systemd reads for it (a drop-in, a unit file not written by Agora) can change what it runs.
+                match agora_platform::service_drop_ins(&name) {
+                    Ok(others) if others.is_empty() => {}
+                    Ok(others) => {
+                        let _ = std::io::Write::write_fmt(
+                            &mut std::io::stdout(),
+                            format_args!(
+                                "  {}\n",
+                                say.text(
+                                    key!("service-status-overridden"),
+                                    &[("paths", paths(&others).into())]
+                                )
+                            ),
+                        );
+                    }
+                    Err(e) => {
+                        failed(say, key!("service-status-failed"), &name, &e);
+                        code = ExitCode::from(1);
+                    }
+                }
+            }
             Ok(ServiceState::NotInstalled) => {
                 say.out(key!("service-status-not-installed"), &[("role", label)])
             }
             Err(e) => {
-                say.err(
-                    key!("service-status-failed"),
-                    &[("name", name.into()), ("reason", e.to_string().into())],
-                );
+                failed(say, key!("service-status-failed"), &name, &e);
                 code = ExitCode::from(1);
             }
         }
