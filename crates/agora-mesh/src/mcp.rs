@@ -86,8 +86,10 @@ fn strings(desc: &str) -> Value {
 pub fn tools() -> Vec<Value> {
     let t = |name: &str, desc: &str, input: Value| json!({"name": name, "description": desc, "inputSchema": input});
     vec![
-        t("agents_list", "List the agents working in a project, with their kind, machine, state, workspace, how long they have \
-           run and what they are doing.",
+        t("agents_list", "List the agents working in a project, on this machine and on other connected machines, with their \
+           kind, machine, state, workspace, how long they have run and what they are doing. Each agent_id is what send_message \
+           takes (agents on other machines are <machine>/<agent>). A row with partial: true means other machines could not be \
+           asked for its project, so agents there may be missing.",
           schema(&[("project", string("Project to list; default all"))], &[])),
         t("workspace_status",
           "Who else works in your workspace and project, on every machine: how many, who is working, waiting or idle, what \
@@ -370,20 +372,7 @@ impl McpConnection {
                 let list = mesh.agents_list(str_arg(&args, "project"));
                 let rows: Vec<Value> = list
                     .iter()
-                    .map(|a| {
-                        let mut row = crate::awareness::extra_fields(mesh, a, now);
-                        for (k, v) in [
-                            ("agent_id", json!(a.id.as_str())),
-                            ("kind", json!(a.kind)),
-                            ("node", json!(a.node)),
-                            ("state", json!(a.state)),
-                            ("worktree", json!(a.worktree)),
-                            ("label", json!(a.label)),
-                        ] {
-                            row.insert(k.into(), v);
-                        }
-                        Value::Object(row)
-                    })
+                    .map(|a| crate::awareness::list_row(mesh, a, now))
                     .collect();
                 reply(id, ok_result(&json!(rows)))
             }

@@ -21,7 +21,15 @@ pub struct Preview {
     /// The last full repaint, applied again when the size it was meant for arrives after it.
     screen: Vec<u8>,
     output_since_screen: bool,
+    /// When to ask the machine for a fresh repaint: after its terminal was resized while output had come since the last repaint.
+    /// Reflowing that output here, size after size, mangled it until the tab was opened again (TUI review); the machine's own
+    /// screen at the new size is the truth.
+    repaint_at: Option<std::time::Instant>,
 }
+
+/// How long after a resize the fresh repaint is asked for: the agent has redrawn for its new size by then, and a burst of resizes
+/// (a window being dragged) asks once.
+const REPAINT_AFTER: Duration = Duration::from_millis(300);
 
 /// What a call to [`Preview::pump`] saw.
 #[derive(Debug, PartialEq, Eq)]
@@ -72,12 +80,27 @@ impl Preview {
             }),
             screen: Vec::new(),
             output_since_screen: false,
+            repaint_at: None,
         })
     }
 
     /// Applies what arrived for this terminal, without waiting.
     pub fn pump(&mut self, session: &mut Session) -> Pumped {
         let mut seen = Pumped::Nothing;
+        if self
+            .repaint_at
+            .is_some_and(|at| at.elapsed() >= REPAINT_AFTER)
+        {
+            self.repaint_at = None;
+            // Watching again starts with the machine's full screen at its current size.
+            let (node, local) = self.agent.split_once('/').unwrap_or(("", &self.agent));
+            let (node, terminal) = (node.to_string(), format!("t-{local}"));
+            session.terminal_close(self.stream);
+            match session.terminal_open(&node, &terminal) {
+                Ok(stream) => self.stream = stream,
+                Err(_) => return Pumped::Ended,
+            }
+        }
         for _ in 0..BATCH {
             match session.terminal_next(self.stream, Duration::ZERO) {
                 TermEvent::Quiet => break,
@@ -101,10 +124,13 @@ impl Preview {
                 }
                 TermEvent::Resized(cols, rows) => {
                     self.term.resize(Size { cols, rows });
-                    // The size that belongs to the repaint just applied: paint it again at that size.
+                    // The size that belongs to the repaint just applied: paint it again at that size. With output since, the
+                    // machine is asked for its screen at the new size instead (see `repaint_at`).
                     if !self.output_since_screen && !self.screen.is_empty() {
                         let screen = self.screen.clone();
                         self.term.feed(&screen);
+                    } else if self.output_since_screen {
+                        self.repaint_at = Some(std::time::Instant::now());
                     }
                     seen = Pumped::Changed;
                 }

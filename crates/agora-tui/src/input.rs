@@ -33,6 +33,9 @@ impl Parser {
     /// Adds bytes and returns the events they complete.
     pub fn push(&mut self, bytes: &[u8]) -> Vec<Event> {
         self.buf.extend_from_slice(bytes);
+        // What came at once. A terminal sends Alt+key as ESC and the key, alone; inside a longer burst (a paste without
+        // bracketed-paste markers) an ESC and a letter are an ESC and a letter, never Alt+Y answering a request (TUI review).
+        let burst = self.buf.len();
         let mut out = Vec::new();
         loop {
             if let Some(p) = self.paste.as_mut() {
@@ -58,6 +61,11 @@ impl Parser {
                 return out;
             }
             match step(&self.buf) {
+                Step::Done(Some(Event::Key(Key::Alt(c))), used) if burst > used => {
+                    self.buf.drain(..used);
+                    out.push(Event::Key(Key::Esc));
+                    out.push(Event::Key(Key::Char(c)));
+                }
                 Step::Done(ev, used) => {
                     self.buf.drain(..used);
                     if let Some(ev) = ev {
@@ -316,6 +324,35 @@ mod tests {
         let mut p = Parser::default();
         assert_eq!(p.push(b"\x1b["), vec![]);
         assert_eq!(p.push(b"B"), vec![k(Key::Down)]);
+    }
+
+    #[test]
+    fn an_esc_and_a_letter_inside_a_longer_burst_is_never_alt() {
+        // A paste without bracketed-paste markers that holds a raw ESC: `ok ESC yes` allowed a request as Alt+Y.
+        assert_eq!(
+            keys(b"ok\x1byes"),
+            vec![
+                k(Key::Char('o')),
+                k(Key::Char('k')),
+                k(Key::Esc),
+                k(Key::Char('y')),
+                k(Key::Char('e')),
+                k(Key::Char('s'))
+            ]
+        );
+        assert_eq!(
+            keys(b"\x1byx"),
+            vec![k(Key::Esc), k(Key::Char('y')), k(Key::Char('x'))]
+        );
+        // Alt+Y as a terminal sends it, alone (also split across two reads), stays Alt+Y; escape sequences are unchanged.
+        assert_eq!(keys(b"\x1by"), vec![k(Key::Alt('y'))]);
+        let mut p = Parser::default();
+        assert_eq!(p.push(b"\x1b"), vec![]);
+        assert_eq!(p.push(b"y"), vec![k(Key::Alt('y'))]);
+        assert_eq!(
+            keys(b"ab\x1b[A"),
+            vec![k(Key::Char('a')), k(Key::Char('b')), k(Key::Up)]
+        );
     }
 
     #[test]
