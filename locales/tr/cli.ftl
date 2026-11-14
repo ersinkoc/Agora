@@ -84,6 +84,8 @@ doctor-agent-missing = { $detail } ({ $from ->
     }): bu makine `{ $program }` programını PATH içinde bulamıyor. Programı oraya kurun ya da düğümü `{ $program }` komutunun çalıştığı bir terminalden başlatın.
 doctor-policy-path-dropped = Node politikasındaki "{ $detail }" satırı node'un kullanamayacağı bir yol içeriyor (göreli, ".." ya da ev klasörü olmayan "~"); ajanlar bu yol olmadan başlar. Tam bir yol ya da "~/" ile başlayan bir yol yazın.
 doctor-policy-path-missing = Node politikasındaki "{ $detail }" satırı henüz var olmayan bir yol içeriyor; yol oluşana kadar ajanlar onsuz başlar.
+doctor-policy-restart = Node, politika dosyası { $detail } dosyasını yalnızca başlarken okur: değiştirdikten sonra node'u yeniden başlatın ("agora node run"). Bir cihaza güvenmek ya da onu kaldırmak yeniden başlatma gerektirmez.
+doctor-policy-changed = Politika dosyası { $detail } bu node başladıktan sonra değişti, bu yüzden değişiklik henüz uygulanmıyor. Uygulamak için node'u yeniden başlatın ("agora node run").
 doctor-manifest-invalid = { $detail } ajan tanımı okunamadı.
 doctor-summary-ok = Agora'nın ihtiyaç duyduğu her şey yerinde.
 doctor-summary-problems = Agora'nın ihtiyaç duyduğu bir şey eksik. SORUN olarak işaretlenenleri düzeltin.

@@ -45,6 +45,10 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
   your devices could approve it there.
 - The terminal client registers its key too, shows its fingerprint when a machine does not trust it, asks another device to
   approve it with `a`, and with `v` shows a device waiting for approval (name, fingerprint, machines) and approves it with `y`.
+- `agora node untrust` says what happened in a sentence and no longer prints its raw log line; the record stays in
+  `<data>/device-trust.log`. `agora doctor` says the node reads its policy file only when it starts and warns when the file changed
+  after the node started. The window says an approval for a project this device may not answer for is refused for good instead of
+  "Try again", and shows each device with the end of its id (`Chrome · Windows · 3f2a`) so two browsers of the same kind can be told apart.
 
 ### Starting agents
 - When a machine does not trust your browser yet, the start window now shows the exact command to run on that machine, with a Copy button, instead of pointing to another page. The same folder spelled several ways on Windows (`D:\x`, `D:/x`, `\\?\D:\x`) is listed once.

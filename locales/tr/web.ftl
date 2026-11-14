@@ -51,6 +51,7 @@ approval-allow = İzin ver
 approval-deny = Reddet
 approval-not-trusted = Bu cihaza o makine henüz güvenmiyor. "Bu cihaz" sayfasını açın ve gösterdiği komutu makinede çalıştırın.
 approval-failed = Yanıt iletilemedi. Yeniden deneyin.
+approval-forbidden = Bu cihazdan bu proje için yanıt veremezsiniz: orada başka projelerle sınırlı. Bu projede çalışan birine sorun.
 start-approval-title = { $node } üzerindeki { $name } ({ $agentKind }), { $kind } başlatmak istiyor
 start-approval-depth = Derinlik
 start-approval-folder = Klasör

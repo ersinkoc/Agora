@@ -32,6 +32,16 @@ export async function startSignedMessage(
   return Uint8Array.from(out);
 }
 
+/** Why an answer to an approval did not go through, as one of the web's own texts. `auth.forbidden` is lasting (this device or this
+ * person may not answer for that project), so it never says to try again. */
+export function approvalFailureKey(code: string | undefined): string {
+  switch (code) {
+    case 'approval.signature_invalid': return 'approval-not-trusted';
+    case 'auth.forbidden': return 'approval-forbidden';
+    default: return 'approval-failed';
+  }
+}
+
 export function toHex(bytes: Uint8Array): string {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
 }

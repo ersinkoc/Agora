@@ -40,4 +40,6 @@
   the freezes need POSIX signals, so Linux and macOS).
 - **`agora doctor`** (implemented: `agora-node::doctor`, local checks only; the redacted bundle and hub connectivity come with the hub client): collects versions, config (redacted), connectivity checks, agent detection status,
   and recent errors into one bundle for bug reports.
+  It also notes that the node reads its policy file (`<data>/policy`) only when it starts, and warns when that file changed after
+  the running node started (compared with its local socket's time), since such a change waits for a restart.
 - **Tracing across hops:** commands carry a trace id from client through hub to node and adapter.

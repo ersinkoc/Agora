@@ -84,6 +84,8 @@ doctor-agent-missing = { $detail } ({ $from ->
     }): this machine cannot find `{ $program }` in its PATH. Install it there, or start the node from a terminal where `{ $program }` runs.
 doctor-policy-path-dropped = The node's policy line "{ $detail }" names a path the node cannot use (relative, "..", or "~" without a home folder); agents start without it. Write a full path or one starting with "~/".
 doctor-policy-path-missing = The node's policy line "{ $detail }" names a path that does not exist yet; agents start without it until it does.
+doctor-policy-restart = The node reads its policy file { $detail } only when it starts: after you change it, restart the node ("agora node run"). Trusting or removing a device needs no restart.
+doctor-policy-changed = The policy file { $detail } changed after this node started, so the change does not apply yet. Restart the node ("agora node run") to apply it.
 doctor-manifest-invalid = The agent description { $detail } could not be read.
 doctor-summary-ok = Everything Agora needs is in place.
 doctor-summary-problems = Something Agora needs is missing. Fix the items marked PROBLEM.

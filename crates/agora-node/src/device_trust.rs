@@ -481,13 +481,10 @@ fn audit(path: &Path, now_ms: u64, action: &str, device: &str, by: &str, outcome
     options.create(true).append(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    // The log only: never the terminal of whoever ran the command (`agora node untrust` says what happened in words of its own).
     if let Ok(mut f) = options.open(path) {
         let _ = f.write_all(line.as_bytes());
     }
-    eprint!(
-        "devices: {}",
-        line.split_once(' ').map_or("", |(_, rest)| rest)
-    );
 }
 
 fn field(out: &mut Vec<u8>, x: &[u8]) {

@@ -109,6 +109,14 @@ export function browserName(ua: string = typeof navigator === 'undefined' ? '' :
   return system ? `${browser} · ${system}` : browser;
 }
 
+// How a device is shown: its name and the end of its id ("Chrome · Windows · 3f2a"), so two browsers of the same kind on the same
+// system can be told apart; its id alone when it has no name.
+export function deviceLabel(name: string | null | undefined, id: string): string {
+  if (!name) return id;
+  const tail = id.slice(id.lastIndexOf('-') + 1).slice(-4);
+  return tail ? `${name} · ${tail}` : name;
+}
+
 // Signs, with this device's key, that `target` is the person's too, for `nodes` (empty: every machine of theirs).
 export async function signEndorsement(device: Device, target: { deviceId: string; publicKey: Uint8Array; name: string }, nodes: string[], nowMs: number,
   subtle: SubtleCrypto = crypto.subtle): Promise<agora.v1.IDeviceEndorsement> {

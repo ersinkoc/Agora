@@ -51,6 +51,7 @@ approval-allow = Allow
 approval-deny = Deny
 approval-not-trusted = This device is not trusted by that machine yet. Open "This device" and run the command it shows on the machine.
 approval-failed = The answer did not go through. Try again.
+approval-forbidden = You cannot answer for this project from this device: it is limited to other projects there. Ask someone who works on it.
 start-approval-title = { $name } ({ $agentKind }) on { $node } asks to start { $kind }
 start-approval-depth = Depth
 start-approval-folder = Folder

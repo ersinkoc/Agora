@@ -379,8 +379,15 @@ fn the_hub_offers_devices_the_owner_decides_and_endorsements_and_revocations_are
     agora(&home, &["node", "untrust", "web-swap", "--data", data_arg]);
 
     // The owner removes one on the machine.
-    let (ok, out, _) = agora(&home, &["node", "untrust", "web-new", "--data", data_arg]);
+    let (ok, out, err) = agora(&home, &["node", "untrust", "web-new", "--data", data_arg]);
     assert!(ok && out.contains("web-new"), "{out}");
+    // A sentence for the person, and the record only in the log: no raw audit line on the terminal.
+    assert!(
+        out.contains("is no longer trusted on this machine") && err.is_empty(),
+        "{out}{err}"
+    );
+    let log = std::fs::read_to_string(data.join("device-trust.log")).unwrap();
+    assert!(log.contains(" untrust web-new by=owner ok"), "{log}");
     assert_eq!(trusted(&file), ["web-old"]);
 
     // ---- the node runs and links to the hub ----
