@@ -5,7 +5,10 @@
 - **Metrics:** hub exposes a Prometheus-format endpoint (opt-in): connected nodes/clients, event lag, queue
   depths, approval latency, terminal bytes/s. Nodes report resource metrics as `NodeResources` events.
   **Built (first slice, architecture review R8):** `agora hub run --metrics` turns on `GET /api/metrics` (the owner's bearer
-  token; 401 without one, 403 for a member or viewer, 404 when the hub runs without `--metrics`). Prometheus text format,
+  token, checked before anything is counted; 401 without one, 403 for a member or viewer). Without `--metrics` the path is
+  answered byte for byte as any unknown path, for GET and HEAD, so nothing tells that it exists. Each scrape renews the owner's
+  session, as any use does: a scraper holding the owner's token keeps it alive for as long as it scrapes. A read-only scrape token
+  is a later slice. Prometheus text format,
   written by hand (`agora-hub::metrics`, no new dependency):
 
   | Name | Kind | What it is |

@@ -267,6 +267,11 @@ impl Hub {
             .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// Whether `GET /api/metrics` was turned on.
+    pub fn metrics_on(&self) -> bool {
+        self.metrics_on.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// The hub's numbers in the Prometheus text format, or `None` when they were not turned on.
     pub fn metrics_text(&self) -> Option<String> {
         if !self.metrics_on.load(std::sync::atomic::Ordering::Relaxed) {
@@ -285,7 +290,7 @@ impl Hub {
             }
         };
         // Read outside the hub's lock: it is a query on the store.
-        let resyncs = self.store.resyncs().map_or(0, |r| r.len());
+        let resyncs = self.store.resync_count().unwrap_or(0);
         Some(
             self.metrics
                 .render(&crate::metrics::Gauges { resyncs, ..gauges }),

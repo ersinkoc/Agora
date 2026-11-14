@@ -353,18 +353,22 @@ impl crate::web::SessionApi for HubSessions {
         }
     }
 
+    fn metrics_on(&self) -> bool {
+        self.hub.metrics_on()
+    }
+
     fn metrics(&self, bearer: Option<&str>) -> (u16, String) {
-        // Off unless the hub was started with `--metrics`: then no one learns it exists.
-        let Some(text) = self.hub.metrics_text() else {
-            return (404, String::new());
-        };
+        // The token first: nobody but the owner makes the hub count anything (#562 review).
         let Some(token) = bearer else {
             return (401, String::new());
         };
         match self.signin().access(token, crate::server::now_ms()) {
             None => (401, String::new()),
             Some(a) if a.role != crate::users::Role::Owner => (403, String::new()),
-            Some(_) => (200, text),
+            Some(_) => self
+                .hub
+                .metrics_text()
+                .map_or((404, String::new()), |text| (200, text)),
         }
     }
 

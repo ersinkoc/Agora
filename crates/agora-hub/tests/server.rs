@@ -2333,6 +2333,19 @@ async fn an_offline_machine_is_forgotten_for_every_client() {
     assert!(view.nodes["n1"].forgotten);
 }
 
+/// The whole raw HTTP response to one request.
+async fn raw(addr: std::net::SocketAddr, method: &str, path: &str, token: Option<&str>) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let auth = token.map_or(String::new(), |t| format!("Authorization: Bearer {t}\r\n"));
+    let mut s = TcpStream::connect(addr).await.unwrap();
+    s.write_all(format!("{method} {path} HTTP/1.1\r\nHost: x\r\n{auth}\r\n").as_bytes())
+        .await
+        .unwrap();
+    let mut out = String::new();
+    s.read_to_string(&mut out).await.unwrap();
+    out
+}
+
 async fn get_metrics(addr: std::net::SocketAddr, token: Option<&str>) -> (u16, String) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let auth = token.map_or(String::new(), |t| format!("Authorization: Bearer {t}\r\n"));
@@ -2379,8 +2392,17 @@ async fn only_the_owner_reads_the_hubs_metrics_and_only_when_they_are_on() {
         .redeem(&signin.create_code_for(Some(&eda.id), now).unwrap(), now)
         .unwrap();
 
-    // Off: not there at all, for anyone.
-    assert_eq!(get_metrics(addr, Some(&owner)).await.0, 404);
+    // Off: answered exactly as an unknown path, for GET and HEAD, with or without the owner's token (#562 review).
+    for method in ["GET", "HEAD"] {
+        for token in [None, Some(owner.as_str())] {
+            assert_eq!(
+                raw(addr, method, "/api/metrics", token).await,
+                raw(addr, method, "/api/nothing", token).await,
+                "{method} with token {}",
+                token.is_some()
+            );
+        }
+    }
     hub.enable_metrics();
     assert_eq!(get_metrics(addr, None).await.0, 401);
     assert_eq!(get_metrics(addr, Some("nope")).await.0, 401);

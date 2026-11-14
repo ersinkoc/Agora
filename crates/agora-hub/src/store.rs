@@ -331,6 +331,13 @@ impl SqliteStore {
     }
 
     /// The recorded resyncs (ADR-0054), oldest first: `(producer, from_seq, to_seq, at_ms)`.
+    /// How many lost ranges resyncs recorded (counted by the database, no rows read).
+    pub fn resync_count(&self) -> Result<usize, StoreError> {
+        let conn = self.lock()?;
+        let n: i64 = conn.query_row("SELECT COUNT(*) FROM resyncs", [], |r| r.get(0))?;
+        Ok(usize::try_from(n).unwrap_or(0))
+    }
+
     pub fn resyncs(&self) -> Result<Vec<(String, u64, u64, u64)>, StoreError> {
         let conn = self.lock()?;
         let mut stmt =
