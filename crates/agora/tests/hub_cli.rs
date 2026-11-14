@@ -1013,3 +1013,49 @@ fn the_screen_password_is_typed_twice_unseen_and_ctrl_c_stops_it() {
         .1
         .contains("A screen password is set"));
 }
+
+/// `agora tui --hub-dir DIR` on the hub's machine, without `--hub` and without `machine.toml`: it dials the port the hub in that
+/// folder really listens on, not the default 7443 (found on the maintainer's hub, which runs on a port of its own).
+#[test]
+fn the_console_with_only_the_hub_folder_dials_the_hubs_real_port() {
+    let root = tmp("tui-port");
+    let (hub_dir, home) = (root.join("hub"), root.join("home"));
+    std::fs::create_dir_all(&home).unwrap();
+    let mut hub = agora(
+        &home,
+        &["hub", "run", "--listen", "127.0.0.1:0", "--hub-dir"],
+    )
+    .arg(&hub_dir)
+    .stdout(Stdio::piped())
+    .stderr(Stdio::null())
+    .spawn()
+    .unwrap();
+    let mut line = String::new();
+    let mut out = BufReader::new(hub.stdout.take().unwrap());
+    out.read_line(&mut line).unwrap();
+    let _hub = Proc(hub);
+    let addr = line
+        .split("running on ")
+        .nth(1)
+        .and_then(|r| r.split(". Its").next())
+        .expect(&line)
+        .trim()
+        .to_string();
+    assert_ne!(
+        addr, "127.0.0.1:7443",
+        "the test needs a port other than the default"
+    );
+
+    let mut tui = agora(&home, &["tui", "--hub-dir"])
+        .arg(&hub_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut err = BufReader::new(tui.stderr.take().unwrap());
+    let _tui = Proc(tui);
+    let mut first = String::new();
+    err.read_line(&mut first).unwrap();
+    assert!(first.contains(&format!("Connecting to {addr}")), "{first}");
+}
