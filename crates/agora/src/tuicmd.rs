@@ -834,11 +834,21 @@ struct ViewWait {
 }
 
 impl ViewWait {
-    fn new() -> Self {
+    /// A request that already waits when the view opens is said from the start, not only one that arrives meanwhile.
+    fn new(say: &Say, ask: &Over<'_>) -> Self {
+        let waiting = ask
+            .c
+            .snapshot
+            .as_ref()
+            .is_some_and(|s| !s.approvals.is_empty());
         Self {
             area: window_area(),
             idle_until: Instant::now() + Duration::from_secs(600),
-            banner: String::new(),
+            banner: if waiting {
+                say.text(key!("tui-view-asked"), &[])
+            } else {
+                String::new()
+            },
         }
     }
 
@@ -2779,7 +2789,7 @@ fn command(
                 let lines = agora_tui::review::lines(&diff);
                 let colors = ask.c.colors;
                 let mut top = 0usize;
-                let mut view = ViewWait::new();
+                let mut view = ViewWait::new(say, ask);
                 loop {
                     let room = usize::from(window_area().height.saturating_sub(2)).max(1);
                     top = agora_tui::review::clamp_top(top, lines.len(), room);
@@ -2814,7 +2824,7 @@ fn command(
                 use agora_tui::files;
                 let mut path = String::new();
                 let mut notice = String::new();
-                let mut view = ViewWait::new();
+                let mut view = ViewWait::new(say, ask);
                 'folder: loop {
                     let entries = match session.files_list(&node, &place, &path) {
                         Ok(e) => files::sorted(e),
