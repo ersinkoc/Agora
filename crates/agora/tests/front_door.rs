@@ -311,3 +311,172 @@ fn a_caller_capturing_the_output_is_not_kept_waiting_by_the_daemons() {
     assert_eq!(code, 0);
     let _ = std::fs::remove_dir_all(home);
 }
+
+/// The process holding a role's lock (its supervisor), if the lock is there.
+fn lock_pid(home: &Path, role: &str) -> Option<u32> {
+    std::fs::read_to_string(home.join(format!("run/{role}.lock")))
+        .ok()?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()
+}
+
+/// The role process its supervisor runs: the supervisor's `agora` child.
+fn supervised_child(supervisor: u32) -> Option<u32> {
+    agora_platform::process_children(supervisor)
+        .ok()?
+        .into_iter()
+        .find(|c| {
+            agora_platform::process_name(*c).is_ok_and(|n| n.to_lowercase().starts_with("agora"))
+        })
+}
+
+fn alive(pid: u32) -> bool {
+    agora_platform::process_start_time(pid).is_some()
+}
+
+/// Kills `pid` outright, so it runs no code of its own on the way out: `SIGKILL` on Unix, `TerminateProcess` on Windows.
+fn kill_outright(pid: u32) {
+    if cfg!(unix) {
+        assert!(Command::new("kill")
+            .args(["-KILL", &pid.to_string()])
+            .status()
+            .unwrap()
+            .success());
+    } else {
+        agora_platform::terminate_process(pid).unwrap();
+    }
+}
+
+/// ADR-0062 item 8: the front door starts the node under a supervisor holding its lock. A node that crashes is started again after
+/// 30 s (and `agora status` says so); a second supervisor on the same folder refuses; a supervisor killed outright takes its node
+/// with it (no orphan); `agora down` stops the supervisor and the node in one command.
+#[test]
+fn the_supervisor_restarts_a_crashed_node_and_never_leaves_it_behind() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return;
+    }
+    let home = tmp("sup");
+    let repo = home.join("proj");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("a.txt"), "x").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "init"]);
+    std::fs::write(
+        home.join("machine.toml"),
+        format!(
+            "roles = [\"node\"]\nui = \"none\"\nnode_projects = [{}]\n",
+            toml_string(&repo.to_string_lossy()),
+        ),
+    )
+    .unwrap();
+    let _down = Down(home.clone());
+    let up = |what: &str| {
+        let (code, out, err) = run(&home, &[]);
+        assert_eq!(code, 0, "{what}: {out}{err}");
+        let supervisor = lock_pid(&home, "node").expect("a node lock");
+        let mut node = None;
+        wait_for(
+            "the node under its supervisor",
+            Duration::from_secs(20),
+            || {
+                node = supervised_child(supervisor);
+                node.is_some()
+            },
+        );
+        (supervisor, node.unwrap())
+    };
+
+    let (supervisor, node) = up("first start");
+    let (_, s, _) = run(&home, &["status"]);
+    assert!(
+        s.contains(&format!("The node is running (process {supervisor}")),
+        "{s}"
+    );
+
+    // A second supervisor on this folder finds the lock held and ends without starting anything.
+    let (code, _, err) = run(&home, &["supervise", "node"]);
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("already looks after the node"), "{err}");
+    assert_eq!(supervised_child(supervisor), Some(node));
+
+    // A crash (after the 10 s that would make it a refusal) is followed by a restart 30 s later.
+    std::thread::sleep(Duration::from_secs(11));
+    agora_platform::terminate_process(node).unwrap();
+    wait_for("the restart notice", Duration::from_secs(10), || {
+        let s = run(&home, &["status"]).1;
+        s.contains("The node is not running: it crashed")
+            && s.contains(&format!(
+                "its supervisor (process {supervisor}) starts it again"
+            ))
+    });
+    let mut again = None;
+    wait_for("the restarted node", Duration::from_secs(60), || {
+        again = supervised_child(supervisor).filter(|p| *p != node);
+        again.is_some() && run(&home, &["agent", "list"]).0 == 0
+    });
+    let again = again.unwrap();
+    let (_, s, _) = run(&home, &["status"]);
+    assert!(s.contains("restarted once in the last 10 minutes"), "{s}");
+    let log = std::fs::read_to_string(home.join("logs/node.log")).unwrap();
+    assert!(
+        log.contains("starting it again in 30 s (restart 1 of 5"),
+        "{log}"
+    );
+
+    // `agora down` while the supervisor waits to restart a second crash: both end at once and nothing starts again.
+    std::thread::sleep(Duration::from_secs(11));
+    agora_platform::terminate_process(again).unwrap();
+    wait_for("the second restart notice", Duration::from_secs(10), || {
+        run(&home, &["status"])
+            .1
+            .contains("The node is not running: it crashed")
+    });
+    let stopping = Instant::now();
+    let (code, out, err) = run(&home, &["down"]);
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(!alive(supervisor), "the supervisor outlived `agora down`");
+    assert!(stopping.elapsed() < Duration::from_secs(10));
+    assert!(!home.join("run/node.lock").exists());
+
+    // The supervisor killed outright: its node does not outlive it.
+    let (supervisor, again) = up("start after the stop during the wait");
+    kill_outright(supervisor);
+    wait_for(
+        "the node to end with its supervisor",
+        Duration::from_secs(10),
+        || !alive(again),
+    );
+
+    // `agora` starts both again; `agora down` stops them in one command.
+    let (supervisor, node) = up("start after the kill");
+    let (code, out, err) = run(&home, &["down"]);
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(out.contains("Stopped the node"), "{out}");
+    wait_for(
+        "the node to end with `agora down`",
+        Duration::from_secs(10),
+        || !alive(node) && !alive(supervisor),
+    );
+
+    // Linux's M1 on #543: a supervisor still waiting for its front door when `agora down` freed the lock never takes the freed lock and
+    // starts the role again (the front door that started it is gone here, as is the lock).
+    let (code, _, err) = run(&home, &["supervise", "node", "--handoff", "1:1"]);
+    assert_eq!(code, 1, "{err}");
+    assert!(
+        err.contains("was stopped while its supervisor was starting"),
+        "{err}"
+    );
+    assert!(!home.join("run/node.lock").exists());
+    let (_, s, _) = run(&home, &["status"]);
+    assert!(s.contains("The node is not running"), "{s}");
+    let log = std::fs::read_to_string(home.join("logs/node.log")).unwrap();
+    assert_eq!(
+        log.matches("Supervisor: the node ended after").count(),
+        2,
+        "the kill and `agora down` are not crashes: {log}"
+    );
+    let _ = std::fs::remove_dir_all(home);
+}
