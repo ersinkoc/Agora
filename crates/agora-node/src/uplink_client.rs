@@ -1,5 +1,5 @@
 //! The node's connection to the hub (ADR-0011): dials `wss://` with the node's client certificate, runs the
-//! [`Uplink`] conversation, and reconnects with backoff when the connection drops. Nodes are autonomous: nothing here
+//! [`Uplink`] conversation, and dials again when the connection drops (see [`redial_wait`]). Nodes are autonomous: nothing here
 //! can stop an agent, and when the hub is unreachable events simply wait in the durable buffer.
 //!
 //! The hub is trusted only through the CA the node was given at enrollment (pinned), never the system roots.
@@ -58,8 +58,54 @@ pub const PING_EVERY: Duration = Duration::from_secs(10);
 pub const SILENCE_DEADLINE: Duration = Duration::from_millis(25_000);
 // One lost or late `PONG` must never drop a healthy link.
 const _: () = assert!(SILENCE_DEADLINE.as_millis() >= 2 * PING_EVERY.as_millis());
-const BACKOFF_MIN: Duration = Duration::from_millis(500);
-const BACKOFF_MAX: Duration = Duration::from_secs(30);
+/// The first wait before dialling the hub again; each failed attempt doubles it, up to a cap.
+const REDIAL_MIN: Duration = Duration::from_millis(500);
+/// The cap while the hub has been away for less than [`REDIAL_FAST_FOR`]: a hub that restarts (an upgrade, a crash, a restart by
+/// hand) is back within seconds, and a refused dial costs it nothing, so the node is back within about this long of the hub.
+/// A cap that kept doubling put up to 30 s between the hub coming back and a node's next dial.
+pub const REDIAL_FAST_MAX: Duration = Duration::from_millis(1500);
+/// After this long without the hub it is probably not restarting (a machine that is off, a network that is gone): the waits
+/// grow to [`REDIAL_SLOW_MAX`], so a node does not dial an absent hub every second and a half for hours.
+pub const REDIAL_FAST_FOR: Duration = Duration::from_secs(300);
+pub const REDIAL_SLOW_MAX: Duration = Duration::from_secs(30);
+/// A connection the hub accepted that lasted this long was healthy, and the next loss starts the schedule over. One that ended
+/// sooner (a hub that accepts and drops at once) keeps it going, so such a hub is not dialled every [`REDIAL_MIN`].
+const REDIAL_STEADY: Duration = Duration::from_secs(2);
+
+/// How long to wait before redial `attempt` (0-based) when the hub has been away for `away`: doubling from [`REDIAL_MIN`] up to
+/// the cap for that time, then shortened by up to a fifth (`jitter` 0..=255) so many nodes do not all dial a hub that just came
+/// back in the same instant.
+pub fn redial_wait(attempt: u32, away: Duration, jitter: u8) -> Duration {
+    let cap = if away < REDIAL_FAST_FOR {
+        REDIAL_FAST_MAX
+    } else {
+        REDIAL_SLOW_MAX
+    };
+    let base = REDIAL_MIN.saturating_mul(1u32 << attempt.min(16)).min(cap);
+    base.saturating_sub(base * u32::from(jitter) / (5 * 255))
+}
+
+/// Where the node is in its redial schedule: failed attempts since the last healthy connection, and when that one was lost.
+#[derive(Default)]
+struct Redial {
+    attempt: u32,
+    away_since: Option<std::time::Instant>,
+}
+
+impl Redial {
+    /// The wait before the next dial, after a connection that ended at `now`. `healthy`: the hub accepted it and kept it for
+    /// [`REDIAL_STEADY`], so the hub went away just now and the schedule starts over. (Before, only a connection that lasted 30 s
+    /// did, so a hub restarted twice within half a minute left its nodes on waits of 16 s and more.)
+    fn next(&mut self, healthy: bool, now: std::time::Instant, jitter: u8) -> Duration {
+        if healthy {
+            *self = Self::default();
+        }
+        let away = now.saturating_duration_since(*self.away_since.get_or_insert(now));
+        let wait = redial_wait(self.attempt, away, jitter);
+        self.attempt = self.attempt.saturating_add(1);
+        wait
+    }
+}
 
 /// Everything needed to dial the hub. PEM texts, as written at enrollment.
 #[derive(Clone)]
@@ -316,6 +362,16 @@ pub async fn run_once(
     sink: &Arc<EventSink>,
     stop: &AtomicBool,
 ) -> Result<(), LinkError> {
+    run_once_noting(link, sink, stop, &AtomicBool::new(false)).await
+}
+
+/// [`run_once`], and sets `accepted` once the hub has taken this connection (its `ResumeOk` arrived).
+async fn run_once_noting(
+    link: &HubLink,
+    sink: &Arc<EventSink>,
+    stop: &AtomicBool,
+    accepted: &AtomicBool,
+) -> Result<(), LinkError> {
     let (tls, host, addr) = split_url(&link.url)?;
     // A dial that hangs (a hub that froze or went away mid-handshake) is given up after the silence deadline and tried again, so
     // a node never waits forever on a connection that will not finish.
@@ -354,6 +410,7 @@ pub async fn run_once(
                 link.mesh.clone(),
                 Liveness::DEFAULT,
                 link.devices.clone(),
+                accepted,
             )
             .await
         };
@@ -444,6 +501,7 @@ async fn converse<S>(
     mesh: Option<Arc<crate::mesh_server::MeshServer>>,
     live: Liveness,
     devices: Option<Arc<crate::device_trust::DeviceTrust>>,
+    accepted: &AtomicBool,
 ) -> Result<(), LinkError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -506,6 +564,7 @@ where
     )
     .map_err(|_| LinkError::Transport("bad resume".into()))?;
     let replay = up.on_resume_ok(&ok)?;
+    accepted.store(true, Ordering::Release);
     send_replay(&mut conn, replay).await?;
 
     let limit = live.deadline;
@@ -1006,7 +1065,7 @@ impl Drop for UplinkHandle {
     }
 }
 
-/// Starts connecting to the hub in the background and keeps doing so, with exponential backoff, until dropped.
+/// Starts connecting to the hub in the background and keeps doing so (see [`redial_wait`]) until dropped.
 pub fn spawn(sink: Arc<EventSink>, link: HubLink) -> std::io::Result<UplinkHandle> {
     let stop = Arc::new(AtomicBool::new(false));
     let thread = {
@@ -1021,13 +1080,19 @@ pub fn spawn(sink: Arc<EventSink>, link: HubLink) -> std::io::Result<UplinkHandl
                     return;
                 };
                 rt.block_on(async {
-                    let mut backoff = BACKOFF_MIN;
+                    let mut redial = Redial::default();
                     let mut last = String::new();
                     while !stop.load(Ordering::Acquire) {
-                        let started = tokio::time::Instant::now();
-                        let r = run_once(&link, &sink, &stop).await;
+                        let started = std::time::Instant::now();
+                        let accepted = AtomicBool::new(false);
+                        let r = run_once_noting(&link, &sink, &stop, &accepted).await;
                         if stop.load(Ordering::Acquire) {
                             break;
+                        }
+                        let healthy =
+                            accepted.load(Ordering::Acquire) && started.elapsed() >= REDIAL_STEADY;
+                        if healthy {
+                            last.clear();
                         }
                         // Why the hub could not be reached, once per change, so a node that never connects is not silent. Codes and
                         // transport detail only: this goes to the node's log, not to the user's screen.
@@ -1042,19 +1107,22 @@ pub fn spawn(sink: Arc<EventSink>, link: HubLink) -> std::io::Result<UplinkHandl
                         }
                         // A process that was suspended dials again at once (ADR-0070): the hub is likely fine, the node was not running.
                         if matches!(r, Err(LinkError::Suspended)) {
-                            backoff = BACKOFF_MIN;
+                            redial = Redial::default();
                             continue;
                         }
-                        // A connection that lasted a while was healthy: start the backoff over.
-                        if started.elapsed() > Duration::from_secs(30) || r.is_ok() {
-                            backoff = BACKOFF_MIN;
+                        let mut jitter = [0u8];
+                        let _ = getrandom::getrandom(&mut jitter);
+                        let wait =
+                            redial.next(healthy || r.is_ok(), std::time::Instant::now(), jitter[0]);
+                        // In short steps, so a node that is stopping does not wait out the whole schedule.
+                        let until = tokio::time::Instant::now() + wait;
+                        while !stop.load(Ordering::Acquire) {
+                            let left = until.saturating_duration_since(tokio::time::Instant::now());
+                            if left.is_zero() {
+                                break;
+                            }
+                            tokio::time::sleep(left.min(Duration::from_millis(100))).await;
                         }
-                        let mut waited = Duration::ZERO;
-                        while waited < backoff && !stop.load(Ordering::Acquire) {
-                            tokio::time::sleep(Duration::from_millis(100)).await;
-                            waited += Duration::from_millis(100);
-                        }
-                        backoff = (backoff * 2).min(BACKOFF_MAX);
                     }
                 });
             })?
@@ -1307,7 +1375,19 @@ mod tests {
                 });
             }
             let started = std::time::Instant::now();
-            let r = converse(conn, &sink, &stop, None, None, None, None, FAST, None).await;
+            let r = converse(
+                conn,
+                &sink,
+                &stop,
+                None,
+                None,
+                None,
+                None,
+                FAST,
+                None,
+                &AtomicBool::new(false),
+            )
+            .await;
             (r, started.elapsed())
         })
     }
@@ -1335,6 +1415,44 @@ mod tests {
         // Right after it ran again, not at the silence deadline counted from then.
         assert!(took >= freeze.0 + freeze.1, "{took:?}");
         assert!(took < freeze.0 + freeze.1 + FAST.deadline, "{took:?}");
+    }
+
+    /// A hub that restarts is dialled again within [`REDIAL_FAST_MAX`] of coming back, however long it was away within the
+    /// first minutes; only a hub away for longer is dialled less often.
+    #[test]
+    fn a_node_redials_a_restarting_hub_within_a_second_and_a_half() {
+        let ms = |a, away_s, j| redial_wait(a, Duration::from_secs(away_s), j).as_millis();
+        assert_eq!(
+            (0..6).map(|a| ms(a, 0, 0)).collect::<Vec<_>>(),
+            [500, 1000, 1500, 1500, 1500, 1500]
+        );
+        // Jitter only shortens a wait, by at most a fifth.
+        assert_eq!(ms(5, 0, 255), 1200);
+        assert_eq!(ms(0, 0, 255), 400);
+        assert!((0..=255).all(|j| ms(40, 299, j) <= 1500));
+        // Away for five minutes: the waits grow to half a minute, and never overflow.
+        assert_eq!(ms(3, 300, 0), 4000);
+        assert_eq!(ms(u32::MAX, 3600, 0), 30_000);
+    }
+
+    /// Before, a connection had to last 30 s to start the schedule over, so a hub restarted twice in a row was redialled after
+    /// 16 s or 30 s the second time (measured: 28 s after a two-second outage).
+    #[test]
+    fn a_healthy_connection_starts_the_schedule_over() {
+        let t0 = std::time::Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        let mut r = Redial::default();
+        // The hub is away for 20 s: eight failed dials, none waiting longer than the fast cap.
+        for s in 0..8 {
+            assert!(r.next(false, at(s * 2), 0) <= REDIAL_FAST_MAX);
+        }
+        // It is back, the node's connection is accepted and kept for 10 s, then the hub restarts again.
+        assert_eq!(r.next(true, at(30), 0), REDIAL_MIN);
+        assert_eq!(r.next(false, at(31), 0), Duration::from_millis(1000));
+        // A connection the hub accepted but did not keep (`healthy` false) does not.
+        assert_eq!(r.next(false, at(32), 0), REDIAL_FAST_MAX);
+        // Five minutes without the hub: the slow schedule.
+        assert!(r.next(false, at(30 + 301), 0) > REDIAL_FAST_MAX);
     }
 
     #[test]
