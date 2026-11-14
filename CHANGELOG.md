@@ -7,6 +7,11 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 ### Getting started
 - `agora --version` prints the version.
 
+### Machines
+- After the hub restarts a machine that has not come back is shown offline, with "last seen" from when the hub last heard
+  from it. Before, a machine that was connected when the hub stopped abruptly (killed, power loss) stayed online until it
+  redialled, or forever if it never did.
+
 ## 0.3.10
 
 ### Machines

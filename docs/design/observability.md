@@ -17,6 +17,14 @@
     order the connections took turns in; `generation` (1, 2, … per node, kept across hub restarts) lets a reader ignore a late
     fact about an older connection. For clients from before ADR-0070 the hub also writes `NodeOffline` when the current
     connection ends; such a client shows a machine that reconnected as offline until it reloads (as before).
+  - **At hub start** (`agora-hub::hub::Hub::open`) no connection exists yet. A node that the view rebuilt from the log shows
+    online (the hub was killed or lost power with its connection open, so no end was recorded; or only an old `NodeOnline` from
+    before ADR-0070 says so) is recorded offline before the server accepts connections: `NodeOffline` for older clients, then
+    `NodeLink { up: false, reason: closed }` for the node's latest connection generation (0 for a node seen only through
+    `NodeOnline`). `closed` is the existing reason closest to "the connection ended"; the schema is unchanged. Its
+    `last_heard_ms` is the node's last time in the log, not the restart, so "last seen" stays true; the events' own `at_ms` is
+    the restart. A node already offline gets nothing, so opening again adds no facts. When the node redials, its next
+    generation's `opened` brings it back online.
   - The projection (and the window's view) takes `online` from the latest presence fact by position: `NodeLink`, or for data an
     older hub wrote, `NodeOnline` / `NodeOffline`. A `NodeLink` from any producer but `hub` is ignored, and a node that sends one
     is refused (`protocol.invalid_message`, field `node_link`).
