@@ -2616,7 +2616,7 @@ fn command(
         }
         // What the selected agent changed (the web's review screen): its diff, whole-screen, until q or Esc.
         'r' if !selected.is_empty() => {
-            let Some((node, target)) = agora_tui::client::diff_target(&s, &selected) else {
+            let Some((node, target)) = agora_tui::client::place_of(&s, &selected) else {
                 c.notice = say.text(key!("tui-review-nowhere"), &[]);
                 return false;
             };
@@ -2650,6 +2650,96 @@ fn command(
                 }
             });
             // The console is drawn whole again over the review.
+            let _ = c.window.invalidate();
+            false
+        }
+        // The selected agent's files (the web's file browser): its folder's entries, Enter into a folder or a file, ⌫ up, q back.
+        'o' if !selected.is_empty() => {
+            let Some((node, place)) = agora_tui::client::place_of(&s, &selected) else {
+                c.notice = say.text(key!("tui-review-nowhere"), &[]);
+                return false;
+            };
+            let title = agora_tui::split::agent_label(&s, &selected);
+            c.notice = over_console(say, c, session, preview, None, rx, |session, ask| {
+                use agora_tui::files;
+                let mut path = String::new();
+                let mut notice = String::new();
+                'folder: loop {
+                    let entries = match session.files_list(&node, &place, &path) {
+                        Ok(e) => files::sorted(e),
+                        Err(code) if !path.is_empty() => {
+                            notice =
+                                say.text(key!("tui-files-failed"), &[("code", Arg::Str(code))]);
+                            path = files::parent(&path);
+                            continue;
+                        }
+                        Err(code) => {
+                            return say.text(key!("tui-files-failed"), &[("code", Arg::Str(code))])
+                        }
+                    };
+                    let mut at = 0usize;
+                    loop {
+                        let _ = ask.c.window.draw(|f| {
+                            files::draw_listing(f, &title, &path, &entries, at, &notice, &text);
+                        });
+                        let key = read_key(ask.rx, Duration::from_secs(600));
+                        notice.clear();
+                        let count = entries.len();
+                        match key {
+                            Some(b'j') if count > 0 => at = (at + 1).min(count - 1),
+                            Some(b'k') => at = at.saturating_sub(1),
+                            Some(b'\r' | b'\n') => {
+                                let Some(e) = entries.get(at) else { continue };
+                                let target = files::child(&path, &e.name);
+                                if e.is_dir {
+                                    path = target;
+                                    continue 'folder;
+                                }
+                                let content = match session.files_read(&node, &place, &target) {
+                                    Ok(data) => files::content(&data),
+                                    Err(code) => {
+                                        notice = say.text(
+                                            key!("tui-files-failed"),
+                                            &[("code", Arg::Str(code))],
+                                        );
+                                        continue;
+                                    }
+                                };
+                                let count = match &content {
+                                    files::Content::Text(l) => l.len(),
+                                    files::Content::Binary(_) => 0,
+                                };
+                                let mut top = 0usize;
+                                loop {
+                                    let room =
+                                        usize::from(window_area().height.saturating_sub(2)).max(1);
+                                    top = top.min(count.saturating_sub(room));
+                                    let _ = ask.c.window.draw(|f| {
+                                        files::draw_file(f, &title, &target, &content, top, &text);
+                                    });
+                                    match read_key(ask.rx, Duration::from_secs(600)) {
+                                        Some(b'j') => top += 1,
+                                        Some(b'k') => top = top.saturating_sub(1),
+                                        Some(b' ' | b'f') => top += room,
+                                        Some(b'b') => top = top.saturating_sub(room),
+                                        Some(b'g') => top = 0,
+                                        Some(b'G') => top = count,
+                                        Some(0x7f | 0x08 | b'h' | b'q' | 0x1b) => break,
+                                        None | Some(3) => return String::new(),
+                                        Some(_) => {}
+                                    }
+                                }
+                            }
+                            Some(0x7f | 0x08 | b'h') if !path.is_empty() => {
+                                path = files::parent(&path);
+                                continue 'folder;
+                            }
+                            None | Some(b'q' | 0x1b | 3) => return String::new(),
+                            Some(_) => {}
+                        }
+                    }
+                }
+            });
             let _ = c.window.invalidate();
             false
         }

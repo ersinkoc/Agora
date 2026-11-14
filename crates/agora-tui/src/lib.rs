@@ -5,6 +5,7 @@ pub mod backend;
 pub mod client;
 pub mod clip;
 pub mod device;
+pub mod files;
 pub mod input;
 pub mod pane;
 pub mod picker;

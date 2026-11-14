@@ -153,7 +153,7 @@ tui-tool-think = Düşünme
 tui-tool-other = Adım
 
 ## The app shell (ADR-0063 stage 2)
-tui-app-keys-tree = Ctrl K komutlar · Enter aç · N seni bekleyen sonraki · y / n cevapla · s başlat · f klasör · x durdur · u devam · r değişiklikler · d kaldır · a onay iste · v cihazlar · Tab sonraki bölüm · i ayrıntılar · q çık
+tui-app-keys-tree = Ctrl K komutlar · Enter aç · N seni bekleyen sonraki · y / n cevapla · s başlat · f klasör · x durdur · u devam · r değişiklikler · o dosyalar · d kaldır · a onay iste · v cihazlar · Tab sonraki bölüm · i ayrıntılar · q çık
 tui-app-keys-terminal = Ctrl-] ya da F12 listeye dön · Tuşların ajana gider · Alt+K komutlar · Alt+1…9 sekmeler · Alt+M fare
 tui-app-keys-terminal-waiting = Seni bekliyor: Alt+Y izin verir · Alt+N reddeder · Ctrl-] ya da F12 listeye dön · Alt+K komutlar
 tui-app-keys-inspector = Tab sonraki bölüm · Esc listeye dön · Ctrl K komutlar
@@ -183,6 +183,12 @@ tui-app-cmd-resume = Seçili ajana devam et (u)
 tui-app-cmd-again = Seçili ajanı yeniden başlat (U)
 tui-app-cmd-remove = Seçili ajanı kaldır (d)
 tui-app-cmd-review = Seçili ajanın değiştirdiklerini gör (r)
+tui-app-cmd-files = Seçili ajanın dosyalarına göz at (o)
+tui-files-empty = Bu klasör boş.
+tui-files-keys = ↑↓ seç · Enter aç · ⌫ yukarı · q ya da Esc geri
+tui-files-file-keys = ↑↓ kaydır · Boşluk / b bir sayfa · g / G baş / son · ⌫, q ya da Esc klasöre dön
+tui-files-binary = İkili bir dosya ({ $size }): gösterilmiyor.
+tui-files-failed = Okunamadı ({ $code }).
 tui-review-files = { $count } dosya değişti
 tui-review-none = Henüz bir şey değişmedi.
 tui-review-keys = ↑↓ kaydır · Boşluk / b bir sayfa · g / G baş / son · q ya da Esc geri
