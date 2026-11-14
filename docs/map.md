@@ -1,6 +1,7 @@
 # Agora on one page
 
 Read this first. The details are in `architecture.md`, `glossary.md` and the ADRs; this page says **what each thing is, who owns it, and how you extend it**.
+What this commit actually supports (decided, built, tested, seen on a real machine) is in [capabilities.md](capabilities.md).
 The rule for building: **small rungs, each one usable alone, none depending on a later one.**
 
 ## The four layers
