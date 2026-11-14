@@ -154,6 +154,25 @@ impl Terminal for AlacrittyTerminal {
         })
     }
 
+    fn history_len(&self) -> usize {
+        self.term.grid().history_size()
+    }
+
+    fn history_cell(&self, back: usize, col: u16) -> Option<Cell> {
+        if back == 0 || back > self.history_len() || col >= self.size.cols {
+            return None;
+        }
+        // Negative lines are the scrollback above the live screen's top (`Line(-1)` scrolled off last).
+        let line = Line(-i32::try_from(back).ok()?);
+        let c = &self.term.grid()[line][Column(usize::from(col))];
+        let spacer = c.flags.contains(Flags::WIDE_CHAR_SPACER);
+        Some(Cell {
+            ch: if spacer || c.c == '\0' { ' ' } else { c.c },
+            spacer,
+            style: style(c.fg, c.bg, c.flags),
+        })
+    }
+
     fn pen(&self) -> Style {
         let t = &self.term.grid().cursor.template;
         style(t.fg, t.bg, t.flags)
