@@ -238,3 +238,4 @@ down-stopped = { $role } durduruldu (süreç { $pid }).
 down-failed = { $role } durdurulamadı: { $reason }
 down-nothing = Durdurulacak bir şey yok: `agora` şu anda çalışan hiçbir şey başlatmamış.
 cli-node-policy-not-understood = node.policy_not_understood: ilke dosyasında bu makinenin anlamadığı bir satır var ({ $line }); düzeltilene kadar hiçbir ajan sormadan başlatılamaz.
+cli-version = Agora { $version }

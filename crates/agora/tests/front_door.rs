@@ -109,6 +109,20 @@ fn wait_for(what: &str, limit: Duration, mut f: impl FnMut() -> bool) {
 }
 
 #[test]
+fn version_prints_the_version_and_needs_no_setup() {
+    let home = tmp("version");
+    for flag in ["--version", "-V", "version"] {
+        let (code, out, _) = run(&home, &[flag]);
+        assert_eq!(code, 0);
+        assert!(
+            out.contains(&format!("Agora {}", env!("CARGO_PKG_VERSION"))),
+            "{out}"
+        );
+    }
+    assert!(!home.join("machine.toml").exists());
+}
+
+#[test]
 fn help_prints_usage_and_a_first_run_without_a_terminal_explains_itself() {
     let home = tmp("first");
     let (code, out, _) = run(&home, &["--help"]);
