@@ -2,7 +2,7 @@ import { useState, useSyncExternalStore } from 'react';
 import { chooseLanguage, getLanguagePreference, subscribeLanguage, t, type LanguagePreference } from '../i18n';
 
 export function LanguagePicker({ compact = false }: { compact?: boolean }) {
-  const preference = useSyncExternalStore(subscribeLanguage, getLanguagePreference);
+  const preference = useSyncExternalStore(subscribeLanguage, getLanguagePreference, getLanguagePreference);
   const [unsaved, setUnsaved] = useState(false);
   return (
     <div className="grid gap-1">

@@ -15,7 +15,7 @@ use agora_tui::preview::{Preview, Pumped};
 use agora_tui::render::{chat_command, plain, render, render_chat, session_line, ChatCommand};
 use agora_tui::split::{frame, reader_frame, start_card_fit, start_card_lines, tree_order, View};
 
-use crate::hubcli::{hub_dir, new_login_code, DEFAULT_LISTEN};
+use crate::hubcli::{hub_dir, new_login_code, own_hub_addr, DEFAULT_LISTEN};
 use crate::{home, Opts, Say};
 
 /// Fewest milliseconds between two refreshes (each one is a fresh snapshot).
@@ -195,6 +195,105 @@ fn device() -> Option<Device> {
     Some(d)
 }
 
+/// The name this terminal registers under (ADR-0061): what the person sees beside its fingerprint on their other devices.
+fn device_name(say: &Say) -> String {
+    let host = std::env::var("HOSTNAME")
+        .or_else(|_| std::env::var("COMPUTERNAME"))
+        .unwrap_or_default();
+    let name = say.text(key!("tui-device-name"), &[("host", Arg::Str(host))]);
+    name.chars().filter(|c| !c.is_control()).take(64).collect()
+}
+
+/// `a`: asks the person's other devices to approve this terminal (ADR-0061). Returns the line to show.
+fn ask_approval(say: &Say, session: &mut Session) -> String {
+    let Some(device) = device() else {
+        return say.text(
+            key!("tui-answer-failed"),
+            &[("code", Arg::Str("device".into()))],
+        );
+    };
+    match session.ask_approval(&device) {
+        Ok(()) => say.text(
+            key!("tui-device-asked"),
+            &[("fingerprint", Arg::Str(device.fingerprint()))],
+        ),
+        Err(code) => say.text(key!("tui-answer-failed"), &[("code", Arg::Str(code))]),
+    }
+}
+
+/// `v`: the first device of the person that waits for approval, shown with its fingerprint and the machines that trust this terminal
+/// (where the approval counts); `y` approves it with this terminal's key (ADR-0061). Returns the line to show.
+fn approve_device(
+    say: &Say,
+    session: &mut Session,
+    snapshot: Option<&Snapshot>,
+    rx: &mpsc::Receiver<u8>,
+) -> String {
+    let fail = |code: String| say.text(key!("tui-answer-failed"), &[("code", Arg::Str(code))]);
+    let Some(device) = device() else {
+        return fail("device".into());
+    };
+    let list = match session.list_devices() {
+        Ok(l) => l,
+        Err(code) => return fail(code),
+    };
+    let Some(waiting) = list.into_iter().find(|d| {
+        d.approval_asked_ms > 0
+                && d.revoked_ms == 0
+                && d.device_id != device.id
+                // Only a device that registered itself with its own key: the hub cannot make up a request.
+                && agora_node::device_trust::registration_verifies(d)
+    }) else {
+        return say.text(
+            key!("tui-devices-none-waiting"),
+            &[("fingerprint", Arg::Str(device.fingerprint()))],
+        );
+    };
+    let machines: Vec<String> = snapshot
+        .map(|s| {
+            s.nodes
+                .iter()
+                .filter(|n| n.trusted_device_ids.contains(&device.id))
+                .map(|n| {
+                    plain(if n.hostname.is_empty() {
+                        &n.node_id
+                    } else {
+                        &n.hostname
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if machines.is_empty() {
+        return say.text(key!("tui-device-cannot-vouch"), &[]);
+    }
+    // The name and the fingerprint come from the hub: shown as plain text, never as terminal control sequences.
+    let name = agora_node::device_trust::shown(&plain(&waiting.name), 40);
+    let fingerprint = agora_tui::device::fingerprint(&waiting.public_key);
+    let mut out = std::io::stdout();
+    let _ = write!(
+        out,
+        "\x1b[H\x1b[2J{}",
+        say.text(
+            key!("tui-device-card"),
+            &[
+                ("name", Arg::Str(name.clone())),
+                ("fingerprint", Arg::Str(fingerprint)),
+                ("machines", Arg::Str(machines.join(", "))),
+            ],
+        )
+        .replace('\n', "\r\n")
+    );
+    let _ = out.flush();
+    if read_key(rx, Duration::from_secs(120)) != Some(b'y') {
+        return String::new();
+    }
+    match session.endorse_device(&device, &waiting) {
+        Ok(()) => say.text(key!("tui-device-approved"), &[("name", Arg::Str(name))]),
+        Err(code) => fail(code),
+    }
+}
+
 /// Answers the first waiting approval. Returns the line to show.
 fn answer(
     say: &Say,
@@ -224,6 +323,7 @@ fn answer(
             &[
                 ("id", Arg::Str(device.id.clone())),
                 ("key", Arg::Str(device.public_key_hex())),
+                ("fingerprint", Arg::Str(device.fingerprint())),
             ],
         ),
         Err(code) => say.text(key!("tui-answer-failed"), &[("code", Arg::Str(code))]),
@@ -248,6 +348,7 @@ fn start_unread(
         color,
         cols,
         rows,
+        now_ms: now_ms(),
     };
     match start_card_fit(&view, text) {
         Some((a, false)) if !read_whole.contains(&a.approval_id) => Some(a.clone()),
@@ -324,6 +425,7 @@ fn ask_grant(
             &[
                 ("id", Arg::Str(device.id.clone())),
                 ("key", Arg::Str(device.public_key_hex())),
+                ("fingerprint", Arg::Str(device.fingerprint())),
             ],
         )),
         Err(code) => Err(fail(code)),
@@ -614,11 +716,14 @@ fn start(
         return say.text(key!("tui-start-nowhere"), &[]);
     };
     let machine = [("machine", Arg::Str(node.clone()))];
-    let kinds = match session.agent_kinds(&node) {
-        Ok(k) if !k.is_empty() => k,
-        Ok(_) => return say.text(key!("tui-start-none"), &machine),
+    let (kinds, missing) = match session.agent_kinds_all(&node) {
+        Ok(all) => split_kinds(say, all),
         Err(code) => return say.text(key!("tui-start-failed"), &[("code", Arg::Str(code))]),
     };
+    if kinds.is_empty() {
+        let none = say.text(key!("tui-start-none"), &machine);
+        return missing.map_or(none.clone(), |m| format!("{none} {m}"));
+    }
     let kinds: Vec<_> = kinds.into_iter().take(9).collect();
     let mut menu = vec![say.text(key!("tui-start-pick"), &machine), String::new()];
     for (i, (_, name)) in kinds.iter().enumerate() {
@@ -629,6 +734,10 @@ fn start(
                 ("name", Arg::Str(plain(name))),
             ],
         ));
+    }
+    if let Some(m) = missing {
+        menu.push(String::new());
+        menu.push(m);
     }
     let mut out = std::io::stdout();
     let _ = write!(out, "\x1b[H\x1b[2J{}", menu.join("\r\n"));
@@ -708,6 +817,7 @@ fn start_in_folder(
             &[
                 ("id", Arg::Str(device.id.clone())),
                 ("key", Arg::Str(device.public_key_hex())),
+                ("fingerprint", Arg::Str(device.fingerprint())),
             ],
         )
     };
@@ -816,11 +926,14 @@ fn start_in_folder(
     };
     // Which agent: the machine's installed kinds by number, as `s` asks.
     let machine = [("machine", Arg::Str(node.clone()))];
-    let kinds = match session.agent_kinds(&node) {
-        Ok(k) if !k.is_empty() => k,
-        Ok(_) => return say.text(key!("tui-start-none"), &machine),
+    let (kinds, missing) = match session.agent_kinds_all(&node) {
+        Ok(all) => split_kinds(say, all),
         Err(code) => return say.text(key!("tui-start-failed"), &[("code", Arg::Str(code))]),
     };
+    if kinds.is_empty() {
+        let none = say.text(key!("tui-start-none"), &machine);
+        return missing.map_or(none.clone(), |m| format!("{none} {m}"));
+    }
     let kinds: Vec<_> = kinds.into_iter().take(9).collect();
     let mut menu = vec![
         say.text(key!("tui-start-pick"), &machine),
@@ -835,6 +948,10 @@ fn start_in_folder(
                 ("name", Arg::Str(plain(name))),
             ],
         ));
+    }
+    if let Some(m) = missing {
+        menu.push(String::new());
+        menu.push(m);
     }
     let mut out = std::io::stdout();
     let _ = write!(out, "\x1b[H\x1b[2J{}", menu.join("\r\n"));
@@ -984,7 +1101,15 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
         say.err(key!("tui-need-hub"), &[]);
         return ExitCode::from(2);
     };
-    let addr = o.hub.clone().unwrap_or_else(|| DEFAULT_LISTEN.to_string());
+    // Without `--hub`: where the hub in that folder says it listens (it may run on a port of its own), else the default.
+    let addr = o
+        .hub
+        .clone()
+        .or_else(|| own_hub_addr(&dir))
+        .unwrap_or_else(|| DEFAULT_LISTEN.to_string());
+    // On the hub's machine (no `--hub`, or `--hub-dir` given with it: the front door's hub on a port of its own, ADR-0062) a sign-in
+    // code is made from the hub's folder whenever one is needed; nobody types one.
+    let local = o.hub.is_none() || o.hub_dir.is_some();
     let hub = Hub {
         addr: addr.clone(),
         ca_pem,
@@ -1044,7 +1169,7 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                 Some(t) => t.clone(),
                 None => {
                     // A code from the flag the first time; on the hub's machine a new one whenever it is needed.
-                    let code = match (&o.code, o.hub.is_none()) {
+                    let code = match (&o.code, local) {
                         (Some(c), _) if first => c.clone(),
                         (_, true) => new_login_code(&dir).map_err(|_| ClientError::Refused)?,
                         _ => return Err(ClientError::Refused),
@@ -1052,16 +1177,25 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                     sign_in(&hub, &code)?
                 }
             };
-            let s = Session::connect(&hub, &t)?;
+            let mut s = Session::connect(&hub, &t)?;
             token = Some(t);
+            // ADR-0061: this terminal's key is registered with the hub at every sign-in (a candidate, never trust by itself).
+            if let Some(d) = device() {
+                let _ = s.register_device(&d, &device_name(say));
+            }
             Ok(s)
         })();
         let mut session = match session {
             Ok(s) => s,
             Err(ClientError::Refused | ClientError::TooMany) => {
                 token = None;
-                if first || o.hub.is_some() {
-                    say.err(key!("tui-signin-failed"), &[]);
+                if first || !local {
+                    // On the hub's machine nobody is asked for a code: the client makes its own.
+                    if local {
+                        say.err(key!("tui-signin-failed-local"), &[]);
+                    } else {
+                        say.err(key!("tui-signin-failed"), &[]);
+                    }
                     return ExitCode::from(1);
                 }
                 std::thread::sleep(Duration::from_secs(2));
@@ -1098,10 +1232,11 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                         color,
                         cols,
                         rows,
+                        now_ms: now_ms(),
                     };
                     let _ = out.write_all(frame(&view, &text).as_bytes());
                 } else {
-                    let lines = render(s, color, keys, selected, notice, cost, &text);
+                    let lines = render(s, color, keys, selected, notice, cost, now_ms(), &text);
                     let _ = write!(out, "\x1b[H\x1b[2J{}{eol}", lines.join(eol));
                 }
                 let _ = out.flush();
@@ -1235,6 +1370,18 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                             dirty_since.get_or_insert_with(Instant::now);
                             draw(&snapshot, &selected, &notice, cost, preview.as_ref());
                         }
+                    }
+                    b'a' => {
+                        notice = ask_approval(say, &mut session);
+                        draw(&snapshot, &selected, &notice, cost, preview.as_ref());
+                    }
+                    b'v' => {
+                        if let Some(p) = preview.take() {
+                            p.close(&mut session);
+                        }
+                        notice = approve_device(say, &mut session, snapshot.as_ref(), &rx);
+                        dirty_since.get_or_insert_with(Instant::now);
+                        draw(&snapshot, &selected, &notice, cost, preview.as_ref());
                     }
                     b's' => {
                         if let Some(sn) = &snapshot {
@@ -1413,6 +1560,30 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
     }
 }
 
+/// A machine's agents split into the ones it can start (numbered in the menu) and one line naming the others: the machine cannot
+/// find their program in its `PATH`. The program names are not in the kinds answer yet, so the line names the agents.
+fn split_kinds(
+    say: &Say,
+    all: Vec<(String, String, bool)>,
+) -> (Vec<(String, String)>, Option<String>) {
+    let mut installed = Vec::new();
+    let mut missing = Vec::new();
+    for (kind, name, ok) in all {
+        if ok {
+            installed.push((kind, name));
+        } else {
+            missing.push(plain(&name));
+        }
+    }
+    let line = (!missing.is_empty()).then(|| {
+        say.text(
+            key!("tui-start-missing"),
+            &[("names", Arg::Str(missing.join(", ")))],
+        )
+    });
+    (installed, line)
+}
+
 #[cfg(test)]
 mod forget_tests {
     use super::*;
@@ -1453,6 +1624,7 @@ mod forget_tests {
             color: false,
             cols: 100,
             rows: 10,
+            now_ms: 0,
         };
         let frame = frame(&view, &text);
         assert!(

@@ -651,6 +651,36 @@ pub(crate) fn restore_mode(saved: &crate::RawMode) {
     }
 }
 
+/// Console settings for typing a secret: no echo, no line editing and no Ctrl-C handling by the console (Ctrl-C arrives as a byte, so
+/// the reader can restore the mode before it stops). Restored when dropped, on every path.
+pub(crate) struct SecretMode(u32);
+
+impl Drop for SecretMode {
+    fn drop(&mut self) {
+        // SAFETY: restoring the mode read earlier from the same handle.
+        unsafe { SetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), self.0) };
+    }
+}
+
+pub(crate) fn secret_mode() -> io::Result<SecretMode> {
+    let mut saved = 0u32;
+    // SAFETY: plain calls on the process's standard input handle; the mode is read before it is changed.
+    unsafe {
+        let stdin = GetStdHandle(STD_INPUT_HANDLE);
+        if GetConsoleMode(stdin, &mut saved) == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "stdin is not a console",
+            ));
+        }
+        let quiet = saved & !(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT | ENABLE_PROCESSED_INPUT);
+        if SetConsoleMode(stdin, quiet) == 0 {
+            return Err(os_error(GetLastError()));
+        }
+    }
+    Ok(SecretMode(saved))
+}
+
 /// Size of the console window on stdout.
 pub(crate) fn terminal_size() -> Option<(u16, u16)> {
     // SAFETY: an all-zero info structure is a valid out-buffer.

@@ -24,6 +24,8 @@ message NodeSnapshot {
   uint32 terminals_open = 7;
   uint64 memory_used_bytes = 8;
   uint64 last_event_ms = 9;
+  // ADR-0061: the last `NodeTrustedDevices` of this node, so a window can tell whether this machine trusts its device.
+  repeated string trusted_device_ids = 10;
 }
 
 message CheckoutSnapshot {

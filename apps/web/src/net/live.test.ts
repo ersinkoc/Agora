@@ -163,6 +163,39 @@ describe('view', () => {
     expect(machines(v).map((m) => [m.name, m.online, m.agentsRunning])).toEqual([['Build box', true, 3], ['Alpha', false, 0]]);
   });
 
+  // ADR-0070: the hub's NodeLink decides whether a machine is online, a reconnect resets nothing, and old facts still count.
+  it('follows the hub\'s presence facts: down and up again by itself, with what the machine runs untouched', () => {
+    const R = v1.NodeLinkReason;
+    const v = emptyView();
+    applyEvent(v, 1, ev('hub', 1, { nodeLink: { nodeId: 'n', up: true, reason: R.NODE_LINK_REASON_OPENED, generation: 1, lastHeardMs: 10 } }));
+    applyEvent(v, 2, ev('n', 1, { nodeOnline: { nodeId: 'n', hostname: 'N' } }));
+    applyEvent(v, 3, ev('n', 2, { agentStarted: { agentId: 'a', nodeId: 'n', worktreeId: 'w', kind: 'claude' } }));
+    applyEvent(v, 4, ev('hub', 2, { nodeOffline: { nodeId: 'n' } }));
+    applyEvent(v, 5, ev('hub', 3, { nodeLink: { nodeId: 'n', up: false, reason: R.NODE_LINK_REASON_SILENT, generation: 1, lastHeardMs: 50_000 } }));
+    expect(machines(v)[0]).toMatchObject({ online: false, lastSeenMs: 50_000 });
+    applyEvent(v, 6, ev('hub', 4, { nodeLink: { nodeId: 'n', up: true, reason: R.NODE_LINK_REASON_OPENED, generation: 2, lastHeardMs: 90_000 } }));
+    expect(machines(v)[0]?.online).toBe(true);
+    expect(tiles(v)[0]?.closed).toBeFalsy();
+  });
+
+  it('ignores a late down from a replaced connection, and presence claimed by a node', () => {
+    const R = v1.NodeLinkReason;
+    const v = fromSnapshot(v1.Snapshot.create({ pos: 1, nodes: [{ nodeId: 'n', hostname: 'N', online: true }] }));
+    applyEvent(v, 2, ev('hub', 1, { nodeLink: { nodeId: 'n', up: true, reason: R.NODE_LINK_REASON_OPENED, generation: 5 } }));
+    applyEvent(v, 3, ev('hub', 2, { nodeLink: { nodeId: 'n', up: false, reason: R.NODE_LINK_REASON_CLOSED, generation: 4 } }));
+    expect(machinesOnline(v)).toBe(1);
+    applyEvent(v, 4, ev('hub', 3, { nodeLink: { nodeId: 'n', up: false, reason: R.NODE_LINK_REASON_REPLACED, generation: 5 } }));
+    expect(machinesOnline(v)).toBe(1);
+    // Right after a snapshot the generation is unknown: a replaced connection's end still changes nothing.
+    const w = fromSnapshot(v1.Snapshot.create({ pos: 1, nodes: [{ nodeId: 'n', hostname: 'N', online: true }] }));
+    applyEvent(w, 2, ev('hub', 1, { nodeLink: { nodeId: 'n', up: false, reason: R.NODE_LINK_REASON_REPLACED, generation: 1 } }));
+    expect(machinesOnline(w)).toBe(1);
+    applyEvent(w, 3, ev('evil', 1, { nodeLink: { nodeId: 'n', up: false, reason: R.NODE_LINK_REASON_CLOSED, generation: 9 } }));
+    expect(machinesOnline(w)).toBe(1);
+    applyEvent(w, 4, ev('hub', 2, { nodeLink: { nodeId: 'n', up: false, reason: R.NODE_LINK_REASON_CLOSED, generation: 1 } }));
+    expect(machinesOnline(w)).toBe(0);
+  });
+
   it('adds up reported token usage', () => {
     const v = emptyView();
     applyEvent(v, 1, ev('n', 1, { agentStarted: { agentId: 'a', nodeId: 'n', worktreeId: 'w', kind: 'claude' } }));

@@ -11,8 +11,26 @@ use std::time::Duration;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, ServerName};
 use tokio::io::copy_bidirectional;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpListener;
 use tokio_rustls::TlsConnector;
+
+/// Connects to `hub` (`host:port`) the way `agora_protocol::dial::connect` does, kept here so the desktop shell does not link the
+/// protocol crate: a loopback name (`localhost`) tries IPv4 first and IPv6 only after it, because on Windows a refused `::1` costs
+/// about two seconds before the next address; any other name keeps the resolver's order.
+async fn dial(hub: &str) -> std::io::Result<tokio::net::TcpStream> {
+    let mut addrs: Vec<SocketAddr> = tokio::net::lookup_host(hub).await?.collect();
+    if addrs.iter().all(|a| a.ip().is_loopback()) {
+        addrs.sort_by_key(SocketAddr::is_ipv6);
+    }
+    let mut last = std::io::Error::new(std::io::ErrorKind::NotFound, "no address");
+    for addr in addrs {
+        match tokio::net::TcpStream::connect(addr).await {
+            Ok(s) => return Ok(s),
+            Err(e) => last = e,
+        }
+    }
+    Err(last)
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum TunnelError {
@@ -165,8 +183,7 @@ pub async fn open(hub: &str, ca_pem: &str, port: u16) -> Result<Tunnel, TunnelEr
             tokio::spawn(async move {
                 // A hub that is down, slow, or that does not present a certificate from the pinned CA ends this one connection and
                 // nothing else; the webview shows its own error page.
-                let Ok(Ok(tcp)) =
-                    tokio::time::timeout(Duration::from_secs(10), TcpStream::connect(&hub)).await
+                let Ok(Ok(tcp)) = tokio::time::timeout(Duration::from_secs(10), dial(&hub)).await
                 else {
                     return;
                 };
@@ -188,7 +205,7 @@ pub async fn open(hub: &str, ca_pem: &str, port: u16) -> Result<Tunnel, TunnelEr
 pub async fn check(hub: &str, ca_pem: &str) -> Result<(), TunnelError> {
     let name = server_name(hub)?;
     let tls = connector(ca_pem)?;
-    let tcp = match tokio::time::timeout(Duration::from_secs(10), TcpStream::connect(hub)).await {
+    let tcp = match tokio::time::timeout(Duration::from_secs(10), dial(hub)).await {
         Ok(Ok(tcp)) => tcp,
         _ => return Err(TunnelError::Unreachable),
     };
@@ -208,6 +225,15 @@ mod tests {
     use super::*;
     use agora_hub::ca::Ca;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+
+    #[tokio::test]
+    async fn localhost_reaches_an_ipv4_hub_first() {
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        let s = dial(&format!("localhost:{port}")).await.unwrap();
+        assert!(s.peer_addr().unwrap().is_ipv4());
+    }
 
     /// A TLS server that answers one line with `hello <line>`, signed by `ca`, for `localhost`.
     async fn hub(ca: &Ca) -> SocketAddr {

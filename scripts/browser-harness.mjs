@@ -50,7 +50,11 @@ export async function startStack({ viewport = { width: 1440, height: 900 }, host
     writeFileSync(join(home, 'manifests/fake.toml'), `kind = "fake-adapter"\ndisplay_name = "Fake chat agent"\nversion = "1"\nmin_engine = 1\n[adapter]\ncommand = [${JSON.stringify(fake)}, "--adapter"]\n`);
     mkdirSync(proj);
     for (const a of [['init', '-q', '-b', 'main'], ['commit', '-q', '--allow-empty', '-m', 'init']]) execFileSync('git', ['-C', proj, ...a], { env });
-    children.push(spawn(bin, ['hub', 'run', '--listen', `127.0.0.1:${port}`, '--hub-dir', hubDir, ...(web ? ['--web', web] : [])], { env, stdio: 'ignore' }));
+    // The hub can be stopped and started again on the same data and port (outage scripts); `close` stops whichever runs.
+    let hub;
+    const startHub = () => { hub = spawn(bin, ['hub', 'run', '--listen', `127.0.0.1:${port}`, '--hub-dir', hubDir, ...(web ? ['--web', web] : [])], { env, stdio: 'ignore' }); children.push(hub); };
+    const stopHub = () => new Promise(resolve => { if (hub.exitCode !== null || hub.signalCode !== null) { resolve(); return; } hub.once('exit', () => resolve()); hub.kill('SIGKILL'); });
+    startHub();
     await new Promise((r) => setTimeout(r, 2500));
     const code = run(['hub', 'code', '--hub-dir', hubDir]).match(/[A-Z0-9]{4}-[A-Z0-9]{4}/)[0];
     run(['node', 'enroll', '--hub', `wss://localhost:${port}`, '--ca', join(hubDir, 'ca.pem'), '--code', code, '--id', 'laptop']);
@@ -115,7 +119,7 @@ export async function startStack({ viewport = { width: 1440, height: 900 }, host
       nodeRun(['node', 'trust', trust[3], trust[4]]);
       return { run: nodeRun, env: nodeEnv, home: nodeHome, stop: () => child.kill() };
     };
-    return { page, run, start, addNode, errors, close, env, bin, origin, work, proj, home, hubDir };
+    return { page, run, start, addNode, errors, close, env, bin, origin, work, proj, home, hubDir, stopHub, startHub };
   } catch (e) {
     await close();
     throw e;

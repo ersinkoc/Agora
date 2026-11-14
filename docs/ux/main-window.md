@@ -22,7 +22,7 @@ An agent whose process is gone moves from its folder to **Closed**, below the ma
 
 ![Hub and machines](screens/network-dark.png)
 
-`#/machines` draws the hub with a live link to every machine it knows (animated when connected, dotted when not), a card per machine (state, system, node version, agents, terminals, memory, cost, last heard) and the agents running there as chips.
+`#/machines` draws the hub with a live link to every machine it knows (animated when connected, dotted when not), a card per machine (state, system, node version, agents, terminals, memory, cost, when it was last heard, or for an offline one "last seen", ADR-0070) and the agents running there as chips. An offline machine also shows "last seen" on its row in the agent list and in its tooltip.
 
 ## Layout (editor-style, 2026-11-12)
 
@@ -30,11 +30,11 @@ The window is laid out like an editor, with the terminal as the content. At most
 
 - **Title bar:** product mark, the search and command field (Ctrl+K), connection state, language, device.
 - **Left, Agents:** a tree of machine, folder, agent. A machine row has a start button (visible on hover and focus). Agents show their state shape, shared-folder label and changed-file count. The project filter and search narrow the tree. Clicking an agent opens it as a tab; clicking the one in front closes it.
-- **Middle, tabs:** one tab per watched agent (state shape, name, close). Tabs can be dragged to reorder. A toggle shows one terminal at a time or the tabs side by side. Above the terminal: machine, folder and branch, changed files, cost, state, History, Files, Full size, and the copyable agent address.
+- **Middle, panes (ADR-0068, [layout.md](layout.md)):** a layout of panes and tab groups: one pane with a tab per watched agent by default, or 1x2, 2x1, 2x2, 3x2 and one large with three small from the **Layout** menu in the title bar, saved by name, exported and imported. Panes are split, resized by their dividers, dragged onto each other, maximized and restored; a pane can follow what needs you or the selected agent. Above each terminal: machine, folder and branch, changed files, cost, state, History, Files, Full size, and the copyable agent address.
 - **Right, Details:** tabs for Needs you (opens first whenever something needs you), Changes, Board, Messages, Spent.
 - **Status bar:** machines online, agents, how many need you, cost so far.
 - **Empty state:** a start button, the agents that are running, and the two keyboard shortcuts.
-- **Phones:** side panels start hidden and open from the title bar.
+- **Phones:** a single column instead of this window: what needs you, machines and agents, then one agent (ADR-0067 rung 2, [phone.md](phone.md)). A tablet keeps this window; on a touch screen its terminals get the key bar.
 
 The older three-column description below stays valid for what each area holds.
 
@@ -65,6 +65,17 @@ permanent section. Labels below use internal terms; the UI uses the vocabulary i
 ## Right column: project context
 - **Files**: lazy tree of the project checkout on the selected agent's node. Badges for added/modified;
   lock icon for files under a lease.
+  Built today (web, read-only; `apps/web/src/components/FilesView.tsx`), in the Files window and in a pane ("Show… → This
+  agent's files", beside its terminal):
+  - The tree marks each changed file with its status letter, and each folder that holds one with a dot. "N changed" lists only
+    the changed files, and a name filter searches every file listed so far.
+  - Open files are tabs. The path bar's folders open the tree down to the file.
+  - The file shows with line numbers and marks in the gutter (added, changed, removed above), read again whenever the node's
+    count of changed files moves. The text is drawn a screenful at a time.
+  - Ctrl F finds in the file. `/` filters the tree. The whole file can be copied.
+  - In a narrow pane the tree sits above the file.
+  - Syntax colours (highlight.js, loaded on demand) for files up to 128 KiB in about 25 languages, chosen by file name.
+  - Not built yet: lease locks, editing.
 - **Changes**: workspace diff summary (+/−); shared folders appear once and have a shared-folder label. No per-agent attribution is implied. Opens the review screen (`review.md`).
 - **Mesh**: project channels with unread counts; task board progress (`task-board.md`).
 - **Usage**: tokens and estimated cost for the selected agent and project (`../design/usage-and-cost.md`).

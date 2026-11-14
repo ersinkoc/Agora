@@ -80,6 +80,11 @@ impl Scope {
                 out.nodes.insert(k.clone(), n.clone());
             }
         }
+        for (k, d) in &view.trusted_devices {
+            if self.node_visible(k) {
+                out.trusted_devices.insert(k.clone(), d.clone());
+            }
+        }
         for (k, c) in &view.checkouts {
             if self.granted(self.checkouts.get(k)) {
                 out.checkouts.insert(k.clone(), c.clone());
@@ -143,7 +148,9 @@ impl Scope {
 
             Body::NodeOnline(e) => self.node_visible(&e.node_id),
             Body::NodeOffline(e) => self.node_visible(&e.node_id),
+            Body::NodeLink(e) => self.node_visible(&e.node_id),
             Body::NodeResources(e) => self.node_visible(&e.node_id),
+            Body::NodeTrustedDevices(_) => self.node_visible(node),
             Body::CheckoutDiscovered(e) => {
                 let p = qualified(&e.node_id, &e.project_id);
                 self.checkouts.insert(q(&e.checkout_id), p.clone());

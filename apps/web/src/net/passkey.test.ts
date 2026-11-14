@@ -27,6 +27,11 @@ describe('passkey', () => {
     expect(sent.map((s) => s.op)).toEqual(['register-begin', 'register-finish']);
     expect(sent[1]?.auth).toBe('Bearer sess');
     expect(sent[1]?.body).toMatchObject({ id: 'cred_1', publicKey: 'CQk', clientDataJSON: 'Bw' });
+    expect(sent[0]?.body).toEqual({});
+    // From another machine with a screen password set, both steps carry it.
+    sent.length = 0;
+    expect(await addPasskey('sess', { fetcher, credentials }, 'open sesame')).toEqual({ ok: true });
+    expect(sent.map((s) => s.body.password)).toEqual(['open sesame', 'open sesame']);
   });
 
   it('signs in and keeps the token; a dismissed prompt is "cancelled", too many tries is reported', async () => {

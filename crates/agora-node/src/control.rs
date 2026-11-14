@@ -102,7 +102,7 @@ impl ControlContext {
             supervisor,
             projects,
             directories: Mutex::new(crate::directory::Bindings::load(
-                worktree_root.join(".directory-bindings.json"),
+                worktree_root.join(crate::directory::BINDINGS_FILE),
             )),
             worktree_root,
             node_id,
@@ -666,7 +666,7 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
             }
             for (id, events) in stopped {
                 if let Some(mesh) = &ctx.mesh {
-                    mesh.unregister(&id);
+                    mesh.unregister_because(&id, "stopped");
                 }
                 if let Some(s) = &ctx.spawn {
                     s.agent_ended(&id);
@@ -1161,6 +1161,11 @@ pub(crate) fn command_name(c: &Cmd) -> &'static str {
         Cmd::GrantCreate(_) => "grant.create",
         Cmd::GrantList(_) => "grant.list",
         Cmd::GrantRevoke(_) => "grant.revoke",
+        Cmd::DeviceRegister(_) => "device.register",
+        Cmd::DeviceList(_) => "device.list",
+        Cmd::DeviceEndorse(_) => "device.endorse",
+        Cmd::DeviceRevoke(_) => "device.revoke",
+        Cmd::DeviceAskApproval(_) => "device.ask_approval",
     }
 }
 

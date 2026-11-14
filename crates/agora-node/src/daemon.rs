@@ -163,6 +163,19 @@ pub fn checkout_id(root: &Path) -> String {
     format!("co-{h:016x}")
 }
 
+/// The kind of a chat agent's item in the fixed words other agents see (`agora_mesh::awareness`); `None` for an item that says
+/// nothing about what it is doing (a notice).
+fn activity_word(item: &agora_adapters::host::ChatItem) -> Option<&'static str> {
+    use agora_adapters::host::ChatItem;
+    match item {
+        ChatItem::Text(_) => Some("writing a reply"),
+        ChatItem::ToolCall { tool, .. } => Some(agora_mesh::awareness::tool_word(tool)),
+        ChatItem::Plan(_) => Some("planning"),
+        ChatItem::Diff { .. } => Some("editing files"),
+        ChatItem::Notice { .. } => None,
+    }
+}
+
 fn state_word(s: AgentState) -> &'static str {
     match s {
         AgentState::Working => "working",
@@ -667,6 +680,13 @@ impl EventSink {
         }));
     }
 
+    /// ADR-0061: the devices this node trusts now (ids only, sorted).
+    pub fn node_trusted_devices(&self, device_ids: Vec<String>) {
+        self.record(Body::NodeTrustedDevices(v1::NodeTrustedDevices {
+            device_ids,
+        }));
+    }
+
     /// Recorded on a clean shutdown. A crash records nothing; the hub notices the dropped connection instead.
     pub fn node_offline(&self, node: &str) {
         self.record(Body::NodeOffline(v1::NodeOffline {
@@ -1144,6 +1164,9 @@ pub struct Node {
     pub grants: Arc<crate::grants::Grants>,
     /// Agents that start agents (ADR-0057).
     pub spawner: Arc<crate::spawn::Spawner>,
+    /// The devices this machine trusts and the endorsements and revocations the hub carries (ADR-0061).
+    pub devices: Arc<crate::device_trust::DeviceTrust>,
+    devices_watch: Option<JoinHandle<()>>,
     node_id: String,
     /// Manifests that could not be loaded, as `(path, reason)` for the log.
     pub manifest_problems: Vec<(PathBuf, String)>,
@@ -1264,6 +1287,11 @@ impl Node {
             Box::new(verifier),
         ));
         approvals.follow_trust_file(&cfg.data_dir.join(crate::approvals::TRUSTED_DEVICES_FILE));
+        let devices = Arc::new(crate::device_trust::DeviceTrust::new(
+            &cfg.node_id,
+            &cfg.data_dir.join(crate::approvals::TRUSTED_DEVICES_FILE),
+        ));
+        approvals.set_device_trust(Arc::clone(&devices));
         let policy_now = read_policy(&cfg.data_dir.join(POLICY_FILE));
         // Limited devices only mean something if the commands they could sign are the ones that need a signature.
         let signed =
@@ -1272,7 +1300,10 @@ impl Node {
             } else {
                 policy_now.signed_commands
             };
+        devices.set_policy_limits(policy_now.device_projects.clone());
         let limits = Arc::new(crate::limits::DeviceLimits::new(policy_now.device_projects));
+        // ADR-0061: a device endorsed by a limited device is limited the same way (kept in the trusted-devices file).
+        limits.follow_trust_file(&cfg.data_dir.join(crate::approvals::TRUSTED_DEVICES_FILE));
         approvals.set_limits(Arc::clone(&limits));
         let grants = Arc::new(
             crate::grants::Grants::new(&cfg.node_id, Arc::clone(&approvals), signed)
@@ -1297,6 +1328,22 @@ impl Node {
                     .into_iter()
                     .find(|v| v.id.as_str() == agent)
                     .map(|v| v.project)
+            }));
+        }
+        {
+            // ADR-0049/0053: where a directory action of a device limited to some projects lands, by the node's own records only: the
+            // folders launches confirmed (the same file the launch writes), the registered checkouts, and the ledger for a resume.
+            let bindings = cfg.worktree_root.join(crate::directory::BINDINGS_FILE);
+            let known: Vec<(String, String, PathBuf)> = projects
+                .iter()
+                .map(|p| (p.id.clone(), p.name.clone(), p.root.clone()))
+                .collect();
+            let ledger = Arc::clone(&ledger);
+            grants.set_place_resolver(Box::new(move |place| match place {
+                crate::grants::Place::Folder(path) => {
+                    crate::directory::known_project(&bindings, &known, path)
+                }
+                crate::grants::Place::Agent(agent) => ledger.get(agent).map(|e| e.project_id),
             }));
         }
         {
@@ -1477,9 +1524,11 @@ impl Node {
                         for e in &events {
                             match e {
                                 SupervisorEvent::Exited { agent, status } if status.success() => {
-                                    mesh.unregister(agent);
+                                    mesh.unregister_because(agent, "finished");
                                 }
-                                SupervisorEvent::GaveUp { agent } => mesh.unregister(agent),
+                                SupervisorEvent::GaveUp { agent } => {
+                                    mesh.unregister_because(agent, "crashed");
+                                }
                                 _ => {}
                             }
                             // ADR-0057: an agent's helper grants and waiting start end when it exits or is stopped.
@@ -1492,7 +1541,7 @@ impl Node {
                         }
                         spawner.tick();
                         for v in views.iter().filter(|v| v.running) {
-                            mesh.set_state(&v.id, state_word(v.state));
+                            mesh.observe(&v.id, state_word(v.state), v.parent.as_ref());
                         }
                         ev.record_bodies(mesh.take_events());
                         // Adapter approval requests enter the queue and are announced; stopped or dead agents leave
@@ -1504,7 +1553,13 @@ impl Node {
                                 SupervisorEvent::Adapter {
                                     agent,
                                     event: AdapterEvent::Chat { item, .. },
-                                } => chat.push_item(agent, item, now),
+                                } => {
+                                    // Other agents see the kind of this item in fixed words (`workspace_status`), never its text.
+                                    if let Some(word) = activity_word(item) {
+                                        mesh.set_activity(agent, word);
+                                    }
+                                    chat.push_item(agent, item, now);
+                                }
                                 SupervisorEvent::Adapter {
                                     agent,
                                     event:
@@ -1515,6 +1570,7 @@ impl Node {
                                             ..
                                         },
                                 } => {
+                                    mesh.set_activity(agent, "asking the user");
                                     if let Some(p) =
                                         approvals.request(agent, approval_id, action, detail, now)
                                     {
@@ -1570,14 +1626,39 @@ impl Node {
                 })?
         };
         let git_watch = {
-            let (sup, ev, stop) = (
+            let (sup, ev, stop, mesh) = (
                 Arc::clone(&supervisor),
                 Arc::clone(&events),
                 Arc::clone(&stop),
+                Arc::clone(&mesh),
             );
             std::thread::Builder::new()
                 .name("agora-git".into())
-                .spawn(move || watch_git(&sup, &ev, &stop, &git_wake))?
+                .spawn(move || watch_git(&sup, &ev, &mesh, &stop, &git_wake))?
+        };
+        // ADR-0061: what this machine trusts, said at start and whenever it changes (the owner's CLI, an endorsement, a revocation, an
+        // expiry), so a window can tell whether this machine trusts its device. The file is small and read every 2 s off every hot path.
+        let devices_watch = {
+            let (ev, stop, devices) =
+                (Arc::clone(&events), Arc::clone(&stop), Arc::clone(&devices));
+            std::thread::Builder::new()
+                .name("agora-devices".into())
+                .spawn(move || {
+                    let mut said: Option<Vec<String>> = None;
+                    while !stop.load(Ordering::Acquire) {
+                        let now = devices.trusted_ids(crate::grants::now_ms());
+                        if said.as_ref() != Some(&now) {
+                            ev.node_trusted_devices(now.clone());
+                            said = Some(now);
+                        }
+                        for _ in 0..20 {
+                            if stop.load(Ordering::Acquire) {
+                                return;
+                            }
+                            std::thread::sleep(Duration::from_millis(100));
+                        }
+                    }
+                })?
         };
         let events_set_aside = events.set_aside().cloned();
         Ok(Self {
@@ -1591,6 +1672,8 @@ impl Node {
             approvals,
             grants,
             spawner,
+            devices,
+            devices_watch: Some(devices_watch),
             node_id: cfg.node_id.clone(),
             manifest_problems,
             policy_problems: read_policy(&cfg.data_dir.join(POLICY_FILE)).problems,
@@ -1643,7 +1726,13 @@ fn memory_moved(reported: u64, now: u64) -> bool {
 }
 
 /// `wake` (set when an agent starts) ends the wait between rounds early, so a new folder's changes are counted at once.
-fn watch_git(sup: &Mutex<Supervisor>, ev: &EventSink, stop: &AtomicBool, wake: &AtomicBool) {
+fn watch_git(
+    sup: &Mutex<Supervisor>,
+    ev: &EventSink,
+    mesh: &crate::mesh_server::MeshServer,
+    stop: &AtomicBool,
+    wake: &AtomicBool,
+) {
     let mut last: std::collections::HashMap<(PathBuf, bool), (u32, u32, u32, String)> =
         std::collections::HashMap::new();
     while !stop.load(Ordering::Acquire) {
@@ -1666,6 +1755,8 @@ fn watch_git(sup: &Mutex<Supervisor>, ev: &EventSink, stop: &AtomicBool, wake: &
             let Ok(st) = git::status(path) else {
                 continue;
             };
+            // Agents see how many files are changed in each other's workspace (`workspace_status`).
+            mesh.set_files_changed(path, st.files_changed);
             let now = (
                 st.files_changed,
                 st.insertions,
@@ -1714,6 +1805,9 @@ impl Drop for Node {
         if let Some(t) = self.git_watch.take() {
             let _ = t.join();
         }
+        if let Some(t) = self.devices_watch.take() {
+            let _ = t.join();
+        }
         if self.crashed {
             // Nothing is said and nothing is stopped: the supervisor, which owns the agents' processes, is never dropped.
             std::mem::forget(Arc::clone(&self.supervisor));
@@ -1730,29 +1824,12 @@ impl Drop for Node {
     }
 }
 
-/// Every `*.toml` agent manifest in `dir`, in file-name order, and each file that could not be read or parsed with the reason.
+/// The node's agent kinds: the built-in manifests, then every `*.toml` in `dir` (a file there replaces the built-in kind of the same
+/// name or adds one; see `crate::manifests`), and each file that could not be read or parsed with the reason.
 /// The node reads them at start and again before it lists or starts agents, so a manifest added later is seen without a restart.
 pub fn load_manifests(dir: &Path) -> (Vec<Manifest>, Vec<(PathBuf, String)>) {
-    let mut found = Vec::new();
-    let mut problems = Vec::new();
-    if let Ok(rd) = std::fs::read_dir(dir) {
-        let mut paths: Vec<PathBuf> = rd
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|x| x == "toml"))
-            .collect();
-        paths.sort();
-        for p in paths {
-            match std::fs::read_to_string(&p)
-                .map_err(|e| e.to_string())
-                .and_then(|s| Manifest::parse(&s).map_err(|e| e.to_string()))
-            {
-                Ok(m) => found.push(m),
-                Err(e) => problems.push((p, e)),
-            }
-        }
-    }
-    (found, problems)
+    let (loaded, problems) = crate::manifests::load(dir);
+    (loaded.into_iter().map(|l| l.manifest).collect(), problems)
 }
 
 #[cfg(test)]

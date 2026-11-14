@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest';
-import { directoryMessage, signDirectory } from './directory';
+import { directoryMessage, directoryReasonKey, resumeReasonKey, signDirectory } from './directory';
 import { thisDevice } from './approval';
 import { applyEvent, emptyView, fromSnapshot, tiles, projectChoices } from './view';
 import { machineKey } from '../model';
@@ -77,4 +77,12 @@ it('carries the "does not ask" badge from the start event and the snapshot (ADR-
   expect(byId.get('n/b')?.skipsPermissions).toBe(false);
   const restored = fromSnapshot(agora.v1.Snapshot.fromObject({ pos: 3, nodes: [{ nodeId: 'n', online: true }], agents: [{ agentId: 'n/a', nodeId: 'n', kind: 'codex', running: true, launchOptions: ['skip-permissions'], skipsPermissions: true }] }));
   expect(tiles(restored)[0]?.skipsPermissions).toBe(true);
+});
+it('says a device limited to other projects is refused, not that the folder or the start failed', () => {
+  expect(directoryReasonKey('auth.forbidden')).toBe('start-directory-forbidden');
+  expect(directoryReasonKey('approval.signature_invalid')).toBe('approval-not-trusted');
+  expect(directoryReasonKey('protocol.capability_missing')).toBe('start-directory-unsupported');
+  expect(directoryReasonKey('protocol.invalid_message')).toBe('start-directory-failed');
+  expect(directoryReasonKey(undefined)).toBe('start-directory-failed');
+  expect(resumeReasonKey('auth.forbidden')).toBe('resume-failed-forbidden');
 });

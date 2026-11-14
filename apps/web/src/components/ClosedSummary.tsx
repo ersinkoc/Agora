@@ -48,7 +48,7 @@ export function ClosedSummary({ agent, cost, now, onReview, onHistory, onFiles, 
           <button type="button" className={agent.interrupted.resumable ? 'button' : 'button button--primary'} disabled={resuming} onClick={() => onResume('again')}>{t('action-start-again')}</button>
         </div>}
         {resumeError && <p role="alert" className="m-0 text-needs-you">{t(resumeReasonKey(resumeError))}</p>}
-        <dl className="m-0 grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1.5 rounded-m border border-line bg-surface-1 p-4 text-[13px]">
+        <dl className="m-0 grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1.5 rounded-m border border-line bg-surface-1 p-4 text-[0.8125rem]">
           <dt className="text-muted">{t('closed-machine')}</dt><dd className="m-0 truncate">{agent.machine}</dd>
           <dt className="text-muted">{t('closed-folder')}</dt><dd className="m-0 break-all font-mono text-xs">{agent.workspace || agent.project || '—'}</dd>
           {agent.branch && <><dt className="text-muted">{t('closed-branch')}</dt><dd className="m-0 font-mono text-xs">{agent.branch}</dd></>}

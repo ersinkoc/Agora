@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package agora.v1;
 
+import "agora/v1/devices.proto";
+
 // ADR-0027: enrollment of a node that has no certificate yet. The hub chooses the identity: node_id is a request.
 
 message EnrollRequest {
@@ -16,4 +18,6 @@ message EnrollResponse {
   // The hub CA to pin.
   string ca_pem = 2;
   uint64 not_after_ms = 3;
+  // ADR-0061: the registered devices (candidates only), so the owner at the machine can say which ones it trusts. Old hubs send none.
+  repeated DeviceInfo devices = 4;
 }

@@ -58,6 +58,33 @@ pub fn interrupted_text(a: &AgentSnapshot, t: Text<'_>) -> String {
     )
 }
 
+/// ADR-0070: what a machine row says about its presence: "online", or "offline · last seen 3 min ago" from when the hub last heard
+/// from it (`last_event_ms`), relative to `now_ms`.
+pub fn presence_text(n: &agora_protocol::v1::NodeSnapshot, now_ms: u64, t: Text<'_>) -> String {
+    if n.online {
+        return t(key!("tui-online"), &[]);
+    }
+    let offline = t(key!("tui-offline"), &[]);
+    if n.last_event_ms == 0 {
+        return offline;
+    }
+    let s = now_ms.saturating_sub(n.last_event_ms) / 1000;
+    let (unit, count) = match s {
+        0..=59 => ("s", s),
+        60..=3599 => ("min", s / 60),
+        3600..=86_399 => ("h", s / 3600),
+        _ => ("d", s / 86_400),
+    };
+    let seen = t(
+        key!("tui-last-seen"),
+        &[
+            ("unit", Arg::Str(unit.into())),
+            ("n", Arg::Num(i64::try_from(count).unwrap_or(i64::MAX))),
+        ],
+    );
+    format!("{offline} · {seen}")
+}
+
 /// The part of a hub-wide id after `<node>/`.
 fn local(id: &str) -> &str {
     id.split_once('/').map_or(id, |(_, rest)| rest)
@@ -65,7 +92,9 @@ fn local(id: &str) -> &str {
 
 /// One screen of lines for a snapshot. `color` off spells states out with a marker and no escape sequences (NO_COLOR).
 /// `selected` is the agent the keyboard points at (Enter opens its terminal); `keys` says the console takes answers from the keyboard (a hint line appears while something waits); `notice` is the last
-/// thing the user did, shown at the bottom; `cost_micro_usd` is the hub's estimate of what the agents cost (0 when unknown).
+/// thing the user did, shown at the bottom; `cost_micro_usd` is the hub's estimate of what the agents cost (0 when unknown);
+/// `now_ms` is the time "last seen" counts from.
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     s: &Snapshot,
     color: bool,
@@ -73,6 +102,7 @@ pub fn render(
     selected: &str,
     notice: &str,
     cost_micro_usd: u64,
+    now_ms: u64,
     t: Text<'_>,
 ) -> Vec<String> {
     let (bold, dim, reset) = if color {
@@ -255,14 +285,7 @@ pub fn render(
         } else {
             &n.hostname
         };
-        let status = t(
-            if n.online {
-                key!("tui-online")
-            } else {
-                key!("tui-offline")
-            },
-            &[],
-        );
+        let status = presence_text(n, now_ms, t);
         out.push(format!("  {id}  {dim}{status}{reset}"));
     }
     out.push(String::new());
@@ -660,6 +683,39 @@ mod tests {
         format!("{id}[{}]", a.join(","))
     }
 
+    /// ADR-0070: an offline machine's row says when it was last heard from, in the largest whole unit.
+    #[test]
+    fn an_offline_machine_says_when_it_was_last_seen() {
+        let node = |online: bool, last: u64| NodeSnapshot {
+            node_id: "vps".into(),
+            online,
+            last_event_ms: last,
+            ..Default::default()
+        };
+        let now = 10_000_000;
+        assert_eq!(presence_text(&node(true, 1), now, &t), "tui-online[]");
+        assert_eq!(presence_text(&node(false, 0), now, &t), "tui-offline[]");
+        assert_eq!(
+            presence_text(&node(false, now - 42_000), now, &t),
+            "tui-offline[] · tui-last-seen[unit=s,n=42]"
+        );
+        assert_eq!(
+            presence_text(&node(false, now - 3 * 60_000 - 5_000), now, &t),
+            "tui-offline[] · tui-last-seen[unit=min,n=3]"
+        );
+        assert_eq!(
+            presence_text(&node(false, now - 2 * 3_600_000), now, &t),
+            "tui-offline[] · tui-last-seen[unit=h,n=2]"
+        );
+        let mut s = snapshot();
+        s.nodes[1].last_event_ms = 1_000;
+        let text = render(&s, false, false, "", "", 0, 61_000, &t).join("\n");
+        assert!(
+            text.contains("vps  tui-offline[] · tui-last-seen[unit=min,n=1]"),
+            "{text}"
+        );
+    }
+
     fn snapshot() -> Snapshot {
         Snapshot {
             nodes: vec![
@@ -714,7 +770,7 @@ mod tests {
 
     #[test]
     fn the_screen_says_what_waits_for_the_user_and_groups_agents_by_project() {
-        let lines = render(&snapshot(), false, true, "", "", 0, &t);
+        let lines = render(&snapshot(), false, true, "", "", 0, 0, &t);
         let text = lines.join("\n");
         assert!(
             text.contains("tui-header[online=1,total=2,agents=2]"),
@@ -739,7 +795,7 @@ mod tests {
         );
         assert!(text.contains("vps") && text.contains("tui-offline[]"));
         assert!(text.contains("tui-hint-answer[]"), "{text}");
-        let quiet = render(&snapshot(), false, false, "", "done!", 0, &t).join("\n");
+        let quiet = render(&snapshot(), false, false, "", "done!", 0, 0, &t).join("\n");
         assert!(
             !quiet.contains("tui-hint-answer") && quiet.contains("done!"),
             "{quiet}"
@@ -761,7 +817,7 @@ mod tests {
                 ..Default::default()
             });
         }
-        let text = render(&snap, false, true, "", "", 0, &t).join("\n");
+        let text = render(&snap, false, true, "", "", 0, 0, &t).join("\n");
         let row = |id: &str| text.lines().find(|l| l.contains(id)).unwrap().to_string();
         assert!(
             row("agent-3").contains("tui-interrupted-resume[]"),
@@ -780,14 +836,14 @@ mod tests {
             agent_id: "laptop/agent-1".into(),
             title: String::new(),
         });
-        let lines = render(&snap, false, true, "laptop/agent-1", "", 0, &t);
+        let lines = render(&snap, false, true, "laptop/agent-1", "", 0, 0, &t);
         let row = lines
             .iter()
             .find(|l| l.contains("agent-1") && l.contains("codex"))
             .expect("row");
         assert!(row.starts_with('>'), "{row}");
         assert!(lines.join("\n").contains("tui-hint-open[]"));
-        let other = render(&snap, false, true, "nobody/agent-9", "", 0, &t).join("\n");
+        let other = render(&snap, false, true, "nobody/agent-9", "", 0, 0, &t).join("\n");
         assert!(!other.contains("tui-hint-open"), "{other}");
     }
 
@@ -1001,7 +1057,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let lines = render(&snap, false, false, "", "", 0, &t);
+        let lines = render(&snap, false, false, "", "", 0, 0, &t);
         let row = lines.iter().find(|l| l.contains("agent-9")).expect("row");
         assert!(row.contains("[tui-badge-no-ask[]]"), "{row}");
         assert_eq!(
@@ -1033,7 +1089,7 @@ mod tests {
         snap.approvals[0].detail =
             r#"{"agent":"agent-1","agent_kind":"codex","node":"laptop","kind":"claude-code","folder":"/w","inside":true,"worktree":true,"depth":1,"prompt":"line one\nline \u001b[2Jtwo\u200b"}"#
                 .into();
-        let lines = render(&snap, false, false, "", "", 0, &t);
+        let lines = render(&snap, false, false, "", "", 0, 0, &t);
         let text = lines.join("\n");
         assert!(
             text.contains("tui-asks-start[agent=agent-1,agent_kind=codex,node=laptop,kind=claude-code,folder=/w,worktree=true,depth=1]"),
@@ -1076,24 +1132,24 @@ mod tests {
         let mut snap = snapshot();
         snap.agents[0].input_tokens = 1000;
         snap.agents[1].output_tokens = 250;
-        let text = render(&snap, false, false, "", "", 0, &t).join("\n");
+        let text = render(&snap, false, false, "", "", 0, 0, &t).join("\n");
         assert!(text.contains("tui-usage[input=1000,output=250]"), "{text}");
         assert!(!text.contains("tui-cost"), "{text}");
-        let priced = render(&snap, false, false, "", "", 1_234_567, &t).join("\n");
+        let priced = render(&snap, false, false, "", "", 1_234_567, 0, &t).join("\n");
         assert!(priced.contains("tui-cost[usd=1.23]"), "{priced}");
     }
 
     #[test]
     fn without_color_there_are_no_escape_sequences() {
-        let text = render(&snapshot(), false, true, "", "", 0, &t).join("\n");
+        let text = render(&snapshot(), false, true, "", "", 0, 0, &t).join("\n");
         assert!(!text.contains('\x1b'));
-        let colored = render(&snapshot(), true, true, "", "", 0, &t).join("\n");
+        let colored = render(&snapshot(), true, true, "", "", 0, 0, &t).join("\n");
         assert!(colored.contains('\x1b'));
     }
 
     #[test]
     fn an_empty_hub_says_nothing_waits_and_there_are_no_agents() {
-        let text = render(&Snapshot::default(), false, true, "", "", 0, &t).join("\n");
+        let text = render(&Snapshot::default(), false, true, "", "", 0, 0, &t).join("\n");
         assert!(
             text.contains("tui-nothing-waiting[]") && text.contains("tui-no-agents[]"),
             "{text}"

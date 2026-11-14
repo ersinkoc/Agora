@@ -107,11 +107,12 @@ fn with_remote_denied_outgoing_messages_fail_with_a_policy_notice_and_incoming_o
         writeln!(conn, "{line}").unwrap();
         let mut out = String::new();
         reader.read_line(&mut out).unwrap();
+        out
     };
     call(
         serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-03-26"}}),
     );
-    call(
+    let sent = call(
         serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
         "params": {"name": "send_message", "arguments": {"to": "n2/b1", "body": "x"}}}),
     );
@@ -119,6 +120,16 @@ fn with_remote_denied_outgoing_messages_fail_with_a_policy_notice_and_incoming_o
     assert_eq!(
         (inbox[0].kind, inbox[0].body.as_str()),
         ("delivery_failed", "node.policy_denied")
+    );
+    // The notice names the message that failed: the id `send_message` answered with.
+    let failed = inbox[0].reply_to.clone().expect("the failed message's id");
+    let sent: serde_json::Value = serde_json::from_str(&sent).unwrap();
+    let text = sent["result"]["content"][0]["text"].as_str().unwrap();
+    let answer: serde_json::Value = serde_json::from_str(text).unwrap();
+    assert_eq!(
+        answer["message_id"].as_str(),
+        Some(failed.as_str()),
+        "{sent}"
     );
     let err = server
         .deliver_remote("n2", "b1", &a1, "hi", &[])

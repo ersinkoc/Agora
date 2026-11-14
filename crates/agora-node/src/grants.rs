@@ -98,6 +98,19 @@ struct State {
 
 type Resolver = Box<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
+/// What a directory action lands in, for a device limited to some projects (ADR-0049, ADR-0052, ADR-0053).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Place<'a> {
+    /// A folder path as the request names it, or for `directory.inspect` also a registered project's id or name.
+    Folder(&'a str),
+    /// The node's own id of an agent (`agent.resume`).
+    Agent(&'a str),
+}
+
+/// The project a [`Place`] belongs to by the node's own records (never by what the request or the folder claims), or `None` when
+/// the node does not know it as part of any project.
+pub type PlaceResolver = Box<dyn Fn(Place<'_>) -> Option<String> + Send + Sync>;
+
 pub struct Grants {
     node_id: String,
     approvals: Arc<NodeApprovals>,
@@ -109,6 +122,8 @@ pub struct Grants {
     project_of: Mutex<Option<Resolver>>,
     /// What each trusted device may sign (ADR-0049).
     limits: Arc<crate::limits::DeviceLimits>,
+    /// Which project a directory action lands in, for limited devices. Unset: a limited device can take no directory action.
+    places: Mutex<Option<PlaceResolver>>,
 }
 
 /// What a command is about, as far as a grant's scope can tell.
@@ -161,7 +176,39 @@ impl Grants {
             directory_nonce_file: None,
             project_of: Mutex::new(None),
             limits: Arc::new(crate::limits::DeviceLimits::default()),
+            places: Mutex::new(None),
         }
+    }
+
+    /// Tells grants which project a folder or an agent belongs to, so a device limited to some projects can take directory actions
+    /// inside them.
+    pub fn set_place_resolver(&self, f: PlaceResolver) {
+        *self.places.lock().unwrap_or_else(|e| e.into_inner()) = Some(f);
+    }
+
+    /// May a device limited to some projects take this directory action? Only inside a project it may act in, judged by the node's
+    /// own records of where that project is: a folder the node already knows for that project (a registered checkout, or a folder an
+    /// agent of that project was launched in) or a folder inside one; for a launch also the project the request was signed for, which
+    /// the launch itself then checks against the folder's identity. Never a new identity (`create_project_id`), never a changed one
+    /// (`accept_identity_change`), never the home folder or a folder the node knows for no project or for another project.
+    fn limited_directory_allowed(&self, device: &str, c: &Cmd) -> bool {
+        let guard = self.places.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(place_of) = guard.as_ref() else {
+            return false;
+        };
+        let (place, signed_project) = match c {
+            Cmd::DirectoryInspect(d) if !d.create_project_id => (Place::Folder(&d.path), None),
+            Cmd::DirectoryList(d) if !d.path.is_empty() => (Place::Folder(&d.path), None),
+            Cmd::AgentLaunch(a) if !a.accept_identity_change => {
+                (Place::Folder(&a.path), Some(a.project_id.as_str()))
+            }
+            Cmd::AgentResume(a) => (Place::Agent(&a.agent_id), None),
+            _ => return false,
+        };
+        let Some(project) = place_of(place) else {
+            return false;
+        };
+        signed_project.is_none_or(|p| p == project) && self.limits.allows_project(device, &project)
     }
 
     pub fn with_directory_nonce_file(mut self, path: std::path::PathBuf) -> Self {
@@ -233,9 +280,6 @@ impl Grants {
         {
             return Err(bad());
         }
-        if !self.limits.allows_scope(&a.device_id, "node") {
-            return Err(Error::new(ErrorCode::AuthForbidden).with("action", "directory"));
-        }
         // ADR-0059: chosen launch options are signed too, under their own domain (a hub can neither add nor remove one).
         let msg = if launch_options.is_empty() && confirmed.is_empty() {
             crate::directory::signed_message(
@@ -268,6 +312,11 @@ impl Grants {
             .verify_device(&a.device_id, &msg, &a.signature)
         {
             return Err(bad());
+        }
+        // Checked after the signature, so only a device this node trusts learns whether a folder lies in its projects.
+        if self.limits.is_limited(&a.device_id) && !self.limited_directory_allowed(&a.device_id, c)
+        {
+            return Err(Error::new(ErrorCode::AuthForbidden).with("action", "directory"));
         }
         let key = format!("{}:{}", a.device_id, a.nonce);
         let mut used = self
