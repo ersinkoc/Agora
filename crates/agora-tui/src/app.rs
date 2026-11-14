@@ -615,6 +615,7 @@ impl App {
             ('x', key!("tui-app-cmd-stop")),
             ('u', key!("tui-app-cmd-resume")),
             ('U', key!("tui-app-cmd-again")),
+            ('r', key!("tui-app-cmd-review")),
             ('d', key!("tui-app-cmd-remove")),
             ('a', key!("tui-app-cmd-ask")),
             ('v', key!("tui-app-cmd-devices")),

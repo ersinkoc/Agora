@@ -2614,6 +2614,45 @@ fn command(
             });
             true
         }
+        // What the selected agent changed (the web's review screen): its diff, whole-screen, until q or Esc.
+        'r' if !selected.is_empty() => {
+            let Some((node, target)) = agora_tui::client::diff_target(&s, &selected) else {
+                c.notice = say.text(key!("tui-review-nowhere"), &[]);
+                return false;
+            };
+            let title = agora_tui::split::agent_label(&s, &selected);
+            c.notice = over_console(say, c, session, preview, None, rx, |session, ask| {
+                let diff = match session.diff(&node, &target) {
+                    Ok(d) => d,
+                    Err(code) => {
+                        return say.text(key!("tui-review-failed"), &[("code", Arg::Str(code))])
+                    }
+                };
+                let lines = agora_tui::review::lines(&diff);
+                let colors = ask.c.colors;
+                let mut top = 0usize;
+                loop {
+                    let room = usize::from(window_area().height.saturating_sub(2)).max(1);
+                    top = agora_tui::review::clamp_top(top, lines.len(), room);
+                    let _ = ask.c.window.draw(|f| {
+                        agora_tui::review::draw(f, &title, &lines, top, colors, &text);
+                    });
+                    match read_key(ask.rx, Duration::from_secs(600)) {
+                        Some(b'j') => top += 1,
+                        Some(b'k') => top = top.saturating_sub(1),
+                        Some(b' ' | b'f') => top += room,
+                        Some(b'b') => top = top.saturating_sub(room),
+                        Some(b'g') => top = 0,
+                        Some(b'G') => top = lines.len(),
+                        None | Some(b'q' | 0x1b | 3 | 0x7f) => return String::new(),
+                        Some(_) => {}
+                    }
+                }
+            });
+            // The console is drawn whole again over the review.
+            let _ = c.window.invalidate();
+            false
+        }
         'c' => {
             if let Some(cmd) = c.note.copy.clone() {
                 let mut out = std::io::stdout();

@@ -165,7 +165,7 @@ tui-tool-think = Thinking
 tui-tool-other = Step
 
 ## The app shell (ADR-0063 stage 2)
-tui-app-keys-tree = Ctrl K commands · Enter open · N next that needs you · y / n answer · s start · f folder · x stop · u resume · d remove · a ask · v devices · Tab next part · i details · q quit
+tui-app-keys-tree = Ctrl K commands · Enter open · N next that needs you · y / n answer · s start · f folder · x stop · u resume · r changes · d remove · a ask · v devices · Tab next part · i details · q quit
 tui-app-keys-terminal = Ctrl-] or F12 back to the list · Your keys go to the agent · Alt+K commands · Alt+1…9 tabs · Alt+M mouse
 tui-app-keys-terminal-waiting = It needs you: Alt+Y allows · Alt+N denies · Ctrl-] or F12 back to the list · Alt+K commands
 tui-app-keys-inspector = Tab next part · Esc back to the list · Ctrl K commands
@@ -194,6 +194,15 @@ tui-app-cmd-stop = Stop the selected agent (x)
 tui-app-cmd-resume = Resume the selected agent (u)
 tui-app-cmd-again = Start the selected agent again (U)
 tui-app-cmd-remove = Remove the selected agent (d)
+tui-app-cmd-review = See what the selected agent changed (r)
+tui-review-files = { $count ->
+        [one] one file changed
+       *[other] { $count } files changed
+    }
+tui-review-none = Nothing changed yet.
+tui-review-keys = ↑↓ scroll · Space / b a page · g / G top / end · q or Esc back
+tui-review-nowhere = This agent has no folder or worktree to show changes for.
+tui-review-failed = Could not read its changes ({ $code }).
 tui-app-cmd-ask = Ask your other devices to approve this terminal (a)
 tui-app-cmd-devices = Approve a device that waits (v)
 tui-app-cmd-mouse = Turn the mouse on or off
