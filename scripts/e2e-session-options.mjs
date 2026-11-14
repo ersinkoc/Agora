@@ -25,9 +25,11 @@ try {
   page.setDefaultTimeout(15000);
   writeFileSync(join(home, 'manifests/fake-acp-a.toml'), acp('fake-acp-a', { AGORA_FAKE_ACP_BYPASS_MODE: '1', AGORA_FAKE_ACP_REFUSE_MODEL: '1' }));
   writeFileSync(join(home, 'manifests/fake-acp-b.toml'), acp('fake-acp-b', { AGORA_FAKE_ACP_BYPASS_MODE: '1' }));
+  writeFileSync(join(home, 'manifests/fake-acp-c.toml'), acp('fake-acp-c', { AGORA_FAKE_ACP_BYPASS_MODE: '1', AGORA_FAKE_ACP_NO_CURRENT: '1' }));
   const id = out => out.match(/agent-\d+/)?.[0];
   const a = id(run(['agent', 'start', 'fake-acp-a', '--cwd', proj]));
   const b = id(run(['agent', 'start', 'fake-acp-b', '--cwd', proj]));
+  const c = id(run(['agent', 'start', 'fake-acp-c', '--cwd', proj]));
   const open = async agent => {
     await page.goto(`${origin}/#/agent/${encodeURIComponent(`laptop/${agent}`)}`);
     await page.waitForSelector('form textarea', { timeout: 30000 });
@@ -70,6 +72,13 @@ try {
   await mode.waitFor({ timeout: 30000 });
   check((await confirmation.count()) === 0, 'moving to another agent closes the open confirmation');
   check(!/does not ask/.test(await mode.locator('option:checked').innerText()), 'and the other agent\'s mode is unchanged');
+
+  // 3b. An agent that does not say which mode or model it runs with: both pickers show "Not reported", not the first option (#418),
+  // so neither a mode that skips permissions nor any other is presented as chosen.
+  await open(c);
+  await mode.waitFor({ timeout: 30000 });
+  check((await mode.locator('option:checked').innerText()) === 'Not reported', `an unknown current mode shows "Not reported": ${await mode.locator('option:checked').innerText()}`);
+  check((await model.locator('option:checked').innerText()) === 'Not reported', `an unknown current model shows "Not reported": ${await model.locator('option:checked').innerText()}`);
 
   // 4. A refused switch is said, and the model stays.
   await open(a);
