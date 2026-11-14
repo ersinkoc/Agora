@@ -583,6 +583,9 @@ pub fn status(worktree: &Path) -> Result<GitStatus, GitError> {
     // A git process costs about a second on a busy Windows machine. The filter question is asked once for both commands that read
     // files, right before the first; the commit comes from the same `status` as the changed paths (`# branch.oid`) instead of a
     // `rev-parse` of its own.
+    // Both commands take the pathspec `.`, like [`diff`]: without one git reports the whole checkout even when run in a folder
+    // inside it (a workspace selected inside a repository, ADR-0053), and the count would include files the diff never lists. At a
+    // checkout's root `.` is everything, so a worktree the node made is counted as before.
     let filters = Filters::of(worktree);
     let git = |args: &[&str]| run(hardened_with(worktree, &filters), args);
     let (files_changed, head_commit) = parse_status_v2(&git(&[
@@ -590,6 +593,8 @@ pub fn status(worktree: &Path) -> Result<GitStatus, GitError> {
         "--porcelain=v2",
         "--branch",
         SUBMODULE_COMMITS_ONLY,
+        "--",
+        ".",
     ])?);
     let (insertions, deletions) = parse_shortstat(&git(&[
         "diff",
@@ -598,6 +603,8 @@ pub fn status(worktree: &Path) -> Result<GitStatus, GitError> {
         SUBMODULE_COMMITS_ONLY,
         "--shortstat",
         "HEAD",
+        "--",
+        ".",
     ])?);
     Ok(GitStatus {
         files_changed,
@@ -666,6 +673,10 @@ pub fn diff(worktree: &Path, path: Option<&str>) -> Result<String, GitError> {
         "--no-ext-diff",
         "--no-textconv",
         SUBMODULE_COMMITS_ONLY,
+        // Names from the folder the diff runs in, like `ls-files` below and like the paths `git.diff` and `files.read` take: without
+        // it a workspace that is a folder inside a repository (ADR-0053) gets tracked files named from the repository's root
+        // (`web/a.txt`) and untracked ones from the folder (`b.txt`). At a checkout's root it changes nothing.
+        "--relative",
         "HEAD",
     ];
     // Always a pathspec: without one git diffs the whole checkout even when run in a folder inside it (a selected workspace),
@@ -1120,6 +1131,182 @@ mod tests {
         assert!(d.contains("+INSIDE") && !d.contains("OUTSIDE"), "{d}");
         // At the checkout's root everything still shows.
         assert!(diff(&r.dir, None).expect("diff").contains("+OUTSIDE"));
+    }
+
+    /// The files one diff names: the new name of each `diff --git` entry (`rename to` for a rename, the second half of `a/P b/P`
+    /// otherwise, split in the middle so a folder named `x b` is not cut at its own " b/", as the web's `parseDiff` does), and
+    /// whether it was deleted.
+    fn diff_paths(d: &str) -> Vec<(String, bool)> {
+        let mut out: Vec<(String, bool)> = Vec::new();
+        for line in d.lines() {
+            if let Some(rest) = line.strip_prefix("diff --git ") {
+                let half = (rest.len() - 5) / 2;
+                let name = if rest.get(2 + half..5 + half) == Some(" b/") {
+                    &rest[5 + half..]
+                } else {
+                    // Two different names: a rename, whose `rename to` follows.
+                    &rest[rest.rfind(" b/").expect("b/") + 3..]
+                };
+                out.push((name.to_string(), false));
+            } else if let Some(to) = line.strip_prefix("rename to ") {
+                out.last_mut().expect("entry").0 = to.to_string();
+            } else if line.starts_with("deleted file mode") {
+                out.last_mut().expect("entry").1 = true;
+            }
+        }
+        out
+    }
+
+    /// A repository whose `web/` folder is the workspace, with changes inside it, outside it and across its edge.
+    fn folder_workspace() -> Repo {
+        let r = Repo::new(None);
+        for (name, body) in [
+            ("web/w.txt", &b"web\n"[..]),
+            ("web/old.txt", b"old one\nstays\n"),
+            ("web/m.txt", b"move me\n"),
+            ("web/img.bin", b"\0\x01\x02"),
+            ("web/x b/f.txt", b"f\n"),
+            ("in.txt", b"in\n"),
+        ] {
+            fs::create_dir_all(r.dir.join(name).parent().expect("parent")).expect("dir");
+            fs::write(r.dir.join(name), body).expect("write");
+        }
+        r.commit("layout");
+        fs::write(r.dir.join("a.txt"), "one\nOUTSIDE\n").expect("write");
+        fs::write(r.dir.join("web/w.txt"), "web\nINSIDE\n").expect("write");
+        fs::write(r.dir.join("web/new.txt"), "new\n").expect("write");
+        fs::write(r.dir.join("web/new.bin"), b"\0\x05").expect("write");
+        fs::write(r.dir.join("web/img.bin"), b"\0\x09\x09").expect("write");
+        fs::write(r.dir.join("web/x b/f.txt"), "f\ng\n").expect("write");
+        fs::create_dir_all(r.dir.join("web/in b")).expect("dir");
+        r.git(&["mv", "web/old.txt", "web/renamed.txt"]);
+        r.git(&["mv", "in.txt", "web/in b/in.txt"]);
+        r.git(&["mv", "web/m.txt", "moved.txt"]);
+        r
+    }
+
+    #[test]
+    fn a_folder_workspace_names_every_file_from_the_folder() {
+        let r = folder_workspace();
+        let web = r.dir.join("web");
+        let d = diff(&web, None).expect("diff");
+        let mut paths = diff_paths(&d);
+        paths.sort();
+        let want = |p: &str, deleted| (p.to_string(), deleted);
+        assert_eq!(
+            paths,
+            vec![
+                want("img.bin", false),
+                want("in b/in.txt", false), // renamed in across the edge: a new file here
+                want("m.txt", true),        // renamed out across the edge: gone from here
+                want("new.bin", false),
+                want("new.txt", false),
+                want("renamed.txt", false), // a rename inside the folder
+                want("w.txt", false),
+                want("x b/f.txt", false),
+            ],
+            "{d}"
+        );
+        assert!(d.contains("rename from old.txt\n"), "{d}");
+        assert!(
+            d.contains("Binary files a/img.bin and b/img.bin differ"),
+            "{d}"
+        );
+        assert!(
+            !d.contains("web/") && !d.contains("OUTSIDE") && !d.contains("moved.txt"),
+            "{d}"
+        );
+        // Each name works as the path of `git.diff` and `files.read` (a deleted file has nothing left to read).
+        let files = crate::files::Files::open(&web, 1 << 20).expect("files");
+        for (p, deleted) in &paths {
+            let one = diff(&web, Some(p)).expect("diff of one file");
+            assert_eq!(diff_paths(&one).len(), 1, "{p}: {one}");
+            assert!(one.contains(&format!(" b/{p}")), "{p}: {one}");
+            assert_eq!(files.read(p).is_ok(), !deleted, "{p}");
+        }
+    }
+
+    #[test]
+    fn a_root_workspace_diff_is_what_git_prints() {
+        let r = folder_workspace();
+        // Without `--relative`, as before: at a checkout's root the flag changes nothing.
+        let mut want = git(
+            &r.dir,
+            &[
+                "diff",
+                "--no-color",
+                "--no-ext-diff",
+                "--no-textconv",
+                SUBMODULE_COMMITS_ONLY,
+                "HEAD",
+                "--",
+                ".",
+            ],
+        )
+        .expect("git diff");
+        let listed = git(
+            &r.dir,
+            &["ls-files", "--others", "--exclude-standard", "-z"],
+        )
+        .expect("ls");
+        let names: Vec<&str> = listed.split('\0').filter(|n| !n.is_empty()).collect();
+        want.push_str(&untracked_diff(&r.dir, &names).expect("untracked"));
+        let d = diff(&r.dir, None).expect("diff");
+        assert_eq!(d, want);
+        assert!(
+            d.contains("diff --git a/web/w.txt b/web/w.txt") && d.contains("+OUTSIDE"),
+            "{d}"
+        );
+    }
+
+    #[test]
+    fn a_workspace_inside_a_checkout_counts_only_its_own_folder() {
+        let r = Repo::new(None);
+        fs::create_dir_all(r.dir.join("web")).expect("dir");
+        fs::write(r.dir.join("web/w.txt"), "web\n").expect("write");
+        fs::write(r.dir.join("web/m.txt"), "move me\n").expect("write");
+        fs::write(r.dir.join("gone.txt"), "bye\n").expect("write");
+        fs::write(r.dir.join("in.txt"), "in\n").expect("write");
+        r.commit("layout");
+        // Outside the folder: a tracked change, an untracked file, a deleted file.
+        fs::write(r.dir.join("a.txt"), "one\nOUTSIDE\n").expect("write");
+        fs::write(r.dir.join("root.txt"), "r\n").expect("write");
+        fs::remove_file(r.dir.join("gone.txt")).expect("rm");
+        // Renames across the boundary, both ways: inside the folder one is a new file, the other a deleted one.
+        fs::create_dir_all(r.dir.join("web/in b")).expect("dir");
+        r.git(&["mv", "in.txt", "web/in b/in.txt"]);
+        r.git(&["mv", "web/m.txt", "moved.txt"]);
+        // Inside: a tracked change and an untracked file whose name has a space.
+        fs::write(r.dir.join("web/w.txt"), "web\nINSIDE\n").expect("write");
+        fs::write(r.dir.join("web/new file.txt"), "n\n").expect("write");
+
+        let web = status(&r.dir.join("web")).expect("status");
+        // web/w.txt, web/new file.txt, web/in b/in.txt (added), web/m.txt (deleted).
+        assert_eq!(
+            (web.files_changed, web.insertions, web.deletions),
+            (4, 2, 1)
+        );
+        assert_eq!(web.head_commit, r.git(&["rev-parse", "HEAD"]).trim());
+        // The diff of the folder lists the same files the count describes, each named from the folder.
+        let d = diff(&r.dir.join("web"), None).expect("diff");
+        for inside in [
+            "diff --git a/w.txt b/w.txt\n",
+            "diff --git a/new file.txt b/new file.txt\n",
+            "diff --git a/in b/in.txt b/in b/in.txt\n",
+            "diff --git a/m.txt b/m.txt\n",
+        ] {
+            assert!(d.contains(inside), "{inside} missing from {d}");
+        }
+        for outside in ["web/", "root.txt", "gone.txt", "OUTSIDE", "moved.txt"] {
+            assert!(!d.contains(outside), "{outside} in {d}");
+        }
+
+        // At the checkout's root (a worktree the node made) everything still counts: the four above plus a.txt, root.txt and
+        // gone.txt; each rename is one entry.
+        let root = status(&r.dir).expect("status");
+        let porcelain = r.git(&["status", "--porcelain"]);
+        assert_eq!(root.files_changed as usize, porcelain.lines().count());
+        assert_eq!(root.files_changed, 7);
     }
 
     #[test]

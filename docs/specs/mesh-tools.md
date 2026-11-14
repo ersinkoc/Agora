@@ -184,6 +184,14 @@ instructions. The words are data for agents, in English like the MCP `instructio
 **`agents_list`** rows keep their fields and add: `workspace` (the agent's folder or worktree on its machine), `project`, `since`
 (seconds it has run, `null` when unknown), `doing`, `files_changed` (changed files in its workspace from the node's own git status,
 `null` until the node looked), `holds` (paths it holds a lease on) and `parent` (the agent that started it, ADR-0057, or `null`).
+The list spans machines like `workspace_status`: for each project in it (the one asked for, or every project of the agents this
+node lists, at most 16) the node asks the hub the same `BoardCall{tool: "workspace_status"}` (no new message), and when the project
+is shared it adds the project's running agents on other online machines (`agent_id` `<node>/<agent>`, which is what `send_message`
+takes; `label` empty, `since` and `files_changed` `null`) and puts the board's claimed task and leases into this node's rows. The hub
+answers only for projects the calling node takes part in, so agents of a project only other machines have are never listed. Every
+row also carries `partial`: `false` when its project is complete (the hub answered, or said the project lives on this machine
+only), `true` when the hub could not be asked about it (same cases as below); the list is then this node's agents alone, as nodes
+are autonomous. Agents on a machine that is offline are not listed.
 
 **`doing`** is, in order: `working on task: <title>` when it holds a claimed task; else, while a chat (ACP or adapter) agent works,
 the kind of its latest item (`running a command`, `editing files`, `reading files`, `planning`, `using a tool`, `writing a

@@ -29,9 +29,10 @@ export function DeviceRequest({ request, machines, onApprove, onLater, inline }:
     const ok = await onApprove(all ? [] : machines.filter((m) => chosen.has(m.id)).map((m) => m.id));
     setState(ok ? 'idle' : 'failed');
   };
+  // Floating, the card is sized by the viewport; inline (the gallery), by its container, so a padded panel on a phone does not overflow.
   return (
     <section role="dialog" aria-labelledby={`device-request-${request.id}`}
-      className={`${inline ? '' : 'fixed bottom-4 end-4 z-40 '}grid w-[min(24rem,calc(100vw-2rem))] gap-3 rounded-m border border-line bg-surface-1 p-4 shadow-card`}>
+      className={`${inline ? 'w-full max-w-[24rem] ' : 'fixed bottom-4 end-4 z-40 w-[min(24rem,calc(100vw-2rem))] '}grid gap-3 rounded-m border border-line bg-surface-1 p-4 shadow-card`}>
       <div className="flex items-start gap-2">
         <Icon name="monitor" className="mt-0.5 size-4 text-accent" />
         <h2 id={`device-request-${request.id}`} className="m-0 flex-1 text-sm font-semibold tracking-normal text-ink normal-case">{t('device-request-title', { name: request.name || request.id })}</h2>
