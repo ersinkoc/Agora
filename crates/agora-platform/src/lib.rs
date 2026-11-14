@@ -163,12 +163,31 @@ pub fn replace_executable(new: &std::path::Path, target: &std::path::Path) -> io
         };
         let mut old = aside(".old");
         if std::fs::remove_file(&old).is_err() && old.exists() {
-            old = aside(&format!(".old-{}", std::process::id()));
-            let _ = std::fs::remove_file(&old);
+            // The program an earlier update moved aside still runs (or a virus scanner still holds a file it just saw): take the first
+            // free name instead, never one that is still held (renaming over a held file fails with a sharing violation).
+            let pid = std::process::id();
+            old = (0..100)
+                .map(|n| aside(&format!(".old-{pid}-{n}")))
+                .find(|p| std::fs::remove_file(p).is_ok() || !p.exists())
+                .ok_or_else(|| io::Error::from(io::ErrorKind::AlreadyExists))?;
         }
-        std::fs::rename(target, &old)?;
-        std::fs::rename(new, target).inspect_err(|_| {
-            let _ = std::fs::rename(&old, target);
+        // A file just written or renamed is often held for a moment by a virus scanner or the search indexer (a sharing violation,
+        // error 32): wait for it briefly instead of failing the update.
+        let rename = |from: &std::path::Path, to: &std::path::Path| {
+            let mut tries = 0;
+            loop {
+                match std::fs::rename(from, to) {
+                    Err(e) if e.raw_os_error() == Some(32) && tries < 40 => {
+                        tries += 1;
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                    r => return r,
+                }
+            }
+        };
+        rename(target, &old)?;
+        rename(new, target).inspect_err(|_| {
+            let _ = rename(&old, target);
         })
     }
 }
