@@ -1,0 +1,34 @@
+{
+  "reviewed_head": "60fcc62026e30584adfd38c2f6211cb9c5a9966d",
+  "reviewer": "linux Codex",
+  "at": "2026-11-14T17:10:25.050952+00:00",
+  "decision": "approve; original P2 verified fixed",
+  "original_proof": {
+    "stored_payload_bytes": 65296746,
+    "before_extra_peak_rust_heap_bytes": 65609682,
+    "after_extra_peak_rust_heap_bytes": 238448,
+    "exit_code": 0,
+    "after_debug_elapsed_us": 494.343
+  },
+  "additional_boundary_tests": {
+    "passed": 2,
+    "failed": 0,
+    "scenarios": [
+      "exactly 8388608 encoded bytes replay",
+      "8388609 encoded bytes snapshot",
+      "resume suffix excludes prefix bytes",
+      "next live event exactly once after either replay or snapshot",
+      "exactly 10000 events replay",
+      "10001 events snapshot",
+      "at-head empty replay",
+      "ahead-of-head u64::MAX snapshot"
+    ]
+  },
+  "native_ci": "All named checks passed including Linux, macOS, Windows Rust and benchmark",
+  "product_changes_retained": false,
+  "limitations": [
+    "Rust allocations exclude SQLite C allocations",
+    "Debug elapsed time is illustrative, not a release benchmark",
+    "In-process synthetic events through NodeSession; no deployed service or coding agent changed"
+  ]
+}
