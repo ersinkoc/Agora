@@ -156,6 +156,9 @@ pub(crate) fn terminate(pid: u32) -> io::Result<()> {
     Ok(())
 }
 
+/// What makes a process detached here: no console of its own and out of this console's Ctrl-C group.
+pub(crate) const DETACHED_FLAGS: u32 = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP;
+
 /// See [`crate::spawn_bound`]: puts this process, once, into a new job that ends every process in it when it is closed, and says
 /// whether it is in one. The handle is never closed: this process holds the only one, so the job closes, and its processes end, exactly
 /// when this process ends. Nested jobs (Windows 8 and later) let this work when this process is already in a job.
@@ -290,10 +293,7 @@ pub(crate) fn spawn_detached(
         si.StartupInfo.hStdInput = handles[0];
         si.StartupInfo.hStdOutput = handles[1];
         si.StartupInfo.hStdError = handles[1];
-        let base = DETACHED_PROCESS
-            | CREATE_NEW_PROCESS_GROUP
-            | EXTENDED_STARTUPINFO_PRESENT
-            | CREATE_UNICODE_ENVIRONMENT;
+        let base = DETACHED_FLAGS | EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT;
         let mut start = |flags: u32| -> io::Result<u32> {
             // SAFETY: an all-zero PROCESS_INFORMATION is a valid out-buffer.
             let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };

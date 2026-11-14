@@ -309,6 +309,12 @@ pub fn supervise(say: &Say, word: &str) -> ExitCode {
         );
         ExitCode::from(1)
     };
+    // Started by a service manager rather than the front door, the folders may not exist yet.
+    for d in ["run", "logs"] {
+        if let Err(e) = std::fs::create_dir_all(h.join(d)) {
+            return fail(&e);
+        }
+    }
     let lock = role.lock(&h);
     match take_lock(&lock) {
         Ok(true) => {}

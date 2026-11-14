@@ -1231,6 +1231,9 @@ pub fn spawn_bound(cmd: &mut std::process::Command) -> io::Result<Bound> {
     #[cfg(windows)]
     {
         let bound = winproc::join_kill_on_close_job();
+        // As `spawn_detached` started it before: no console of its own (a console-less parent's child would get a new one, a
+        // window whose closing would end it) and out of any Ctrl-C group.
+        std::os::windows::process::CommandExt::creation_flags(cmd, winproc::DETACHED_FLAGS);
         Ok(Bound {
             child: cmd.spawn()?,
             bound,
