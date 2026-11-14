@@ -2094,7 +2094,21 @@ fn draw_console(
     let details = c
         .snapshot
         .as_ref()
-        .map(|s| app_details(s, &c.selected, inspector.width, inspector.height, &text).lines)
+        .map(|s| {
+            // Beside the agent's own tab with the keyboard in it: only its request, answered with Alt+Y / Alt+N.
+            if c.app.focus == agora_tui::app::Focus::Terminal {
+                agora_tui::split::app_details_in_tab(
+                    s,
+                    &c.selected,
+                    inspector.width,
+                    inspector.height,
+                    &text,
+                )
+                .lines
+            } else {
+                app_details(s, &c.selected, inspector.width, inspector.height, &text).lines
+            }
+        })
         .unwrap_or_default();
     // The footer's notice: the last thing done, or the hub's counts (machines, agents, what needs the user).
     let notice = if c.notice.is_empty() {

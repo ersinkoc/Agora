@@ -93,6 +93,7 @@ tui-cost = yaklaşık { $usd } USD
 tui-grant-ask = O makine bu işlemi yapmanıza izin vermeden önce onayınızı istiyor. Bir saatliğine izin vermek için y tuşuna basın; başka bir tuşa basarsanız işlem iptal edilir.
 tui-granted = Bir saatliğine izin verildi.
 tui-split-answer = y izin verir, n ilk isteği reddeder
+tui-tab-answer = Alt+Y izin verir, Alt+N reddeder
 tui-chat-answer = Alt+Y izin verir, Alt+N reddeder · yazdıkların taslakta kalır
 tui-chat-answer-first = Önce isteği cevapla (Alt+Y izin verir, Alt+N reddeder); taslağın duruyor.
 tui-view-asked = ! Bir istek seni bekliyor: cevaplamak için q ile geri dön

@@ -96,6 +96,7 @@ tui-cost = about { $usd } USD
 tui-grant-ask = That machine wants your OK before it lets you do this. Press y to allow it for one hour, any other key to cancel.
 tui-granted = Allowed for one hour.
 tui-split-answer = y allows, n denies the first request
+tui-tab-answer = Alt+Y allows it, Alt+N denies it
 tui-chat-answer = Alt+Y allows it, Alt+N denies it · what you type stays in your draft
 tui-chat-answer-first = Answer the request first (Alt+Y allows, Alt+N denies); your draft is kept.
 tui-view-asked = ! A request waits for you: q goes back to answer it
