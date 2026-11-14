@@ -186,7 +186,10 @@ pub(crate) fn profile(sb: &crate::Sandbox) -> String {
     // The node's own folders, closed after everything opened above: in Seatbelt the last matching rule wins, so they stay closed below
     // an allowed folder. A unix socket is reached by `network-outbound`, which file rules do not cover (measured: a confined process
     // connected to a socket below a folder it could not read), so its sockets are closed too, then the agent's own reopened.
-    let denied: Vec<std::path::PathBuf> = sb.deny.iter().filter_map(|p| real(p)).collect();
+    // A protected path that does not exist yet (the control socket while interrupted agents resume, before the control server
+    // starts) is closed all the same: the rule names where it will be, through its nearest existing parent.
+    let denied: Vec<std::path::PathBuf> =
+        sb.deny.iter().filter_map(|p| real_or_future(p)).collect();
     if !denied.is_empty() {
         let paths: Vec<String> = denied.iter().map(|p| quote(p)).collect();
         let to: Vec<String> = denied
@@ -256,6 +259,20 @@ fn sibling_rule(file: &std::path::Path) -> Option<String> {
 }
 
 /// The canonical form of `p`, or, for a path that does not exist yet (a socket made later), its canonical parent joined with its name.
+/// `p` resolved as far as it exists (symbolic links in its existing part followed: `/tmp` is `/private/tmp`), the rest of it as
+/// written. `None` only when not even its root resolves.
+fn real_or_future(p: &std::path::Path) -> Option<std::path::PathBuf> {
+    let mut missing = Vec::new();
+    let mut at = p;
+    loop {
+        if let Ok(real) = std::fs::canonicalize(at) {
+            return Some(missing.iter().rev().fold(real, |acc, part| acc.join(part)));
+        }
+        missing.push(at.file_name()?.to_os_string());
+        at = at.parent()?;
+    }
+}
+
 fn real_or_new(p: &std::path::Path) -> Option<std::path::PathBuf> {
     std::fs::canonicalize(p).ok().or_else(|| {
         Some(
@@ -513,6 +530,58 @@ mod sandbox_tests {
             assert!(text.contains(want), "{want}: {text}\n{p}");
         }
         drop((control, own, other));
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn a_protected_path_made_after_the_profile_is_closed_too() {
+        use std::os::unix::net::UnixListener;
+        // The node resumes interrupted agents before its control server starts: the control socket (and a data folder not made
+        // yet) do not exist when the profile is built, and must be closed once they do.
+        let home = std::path::PathBuf::from(format!("/tmp/agora-later-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(home.join("wt")).unwrap();
+        let sb = crate::Sandbox {
+            read: vec!["/usr".into(), "/bin".into()],
+            write: vec![home.join("wt"), "/tmp".into(), "/dev".into()],
+            offline: false,
+            sockets: vec![],
+            deny: vec![home.join("node.sock"), home.join("later/data")],
+        };
+        let p = super::profile(&sb);
+        // Named through the resolved parent (`/tmp` is `/private/tmp`) and kept as written below it.
+        assert!(
+            p.contains(&format!(
+                "(subpath \"/private{}/node.sock\")",
+                home.display()
+            )),
+            "{p}"
+        );
+        assert!(
+            p.contains(&format!(
+                "(subpath \"/private{}/later/data\")",
+                home.display()
+            )),
+            "{p}"
+        );
+        let control = UnixListener::bind(home.join("node.sock")).unwrap();
+        std::fs::create_dir_all(home.join("later/data")).unwrap();
+        std::fs::write(home.join("later/data/trusted-devices"), "web-1 key\n").unwrap();
+        let h = home.display();
+        let script = format!(
+            "cat {h}/later/data/trusted-devices >/dev/null 2>&1 && echo read-open || echo read-closed; \
+             nc -U -w 1 {h}/node.sock </dev/null 2>/dev/null && echo control-open || echo control-closed; \
+             echo x > {h}/wt/f 2>/dev/null && echo worktree-open || echo worktree-closed;"
+        );
+        let out = std::process::Command::new(super::SANDBOX_EXEC)
+            .args(["-p", &p, "/bin/sh", "-c", &script])
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        for want in ["read-closed", "control-closed", "worktree-open"] {
+            assert!(text.contains(want), "{want}: {text}\n{p}");
+        }
+        drop(control);
         let _ = std::fs::remove_dir_all(home);
     }
 
