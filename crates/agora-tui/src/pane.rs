@@ -100,6 +100,38 @@ impl<'a> TerminalPane<'a> {
     }
 }
 
+/// The text of a selection made in a pane `height` rows tall (in the pane's rows and columns): the screen's characters from its
+/// start to its end in reading order, each line without its trailing blanks, lines joined with `\n`. The right half of a wide
+/// character adds nothing.
+pub fn selected_text(term: &dyn Terminal, height: u16, sel: Selection) -> String {
+    let first = TerminalPane::first_row(term, height);
+    let (a, b) = if sel.from <= sel.to {
+        (sel.from, sel.to)
+    } else {
+        (sel.to, sel.from)
+    };
+    let cols = term.size().cols;
+    let mut lines = Vec::new();
+    for row in a.0..=b.0 {
+        let start = if row == a.0 { a.1 } else { 0 };
+        let end = if row == b.0 {
+            b.1
+        } else {
+            cols.saturating_sub(1)
+        };
+        let mut line = String::new();
+        for col in start..=end.min(cols.saturating_sub(1)) {
+            match term.cell(row + first, col) {
+                Some(c) if c.spacer => {}
+                Some(c) if !c.ch.is_control() => line.push(c.ch),
+                _ => line.push(' '),
+            }
+        }
+        lines.push(line.trim_end().to_string());
+    }
+    lines.join("\n")
+}
+
 impl Widget for TerminalPane<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let area = area.intersection(buf.area);
@@ -382,6 +414,39 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn the_selected_text_is_the_screen_as_drawn_in_reading_order() {
+        let t = term(
+            20,
+            3,
+            b"hello world\r\nsecond   \r\n\xe6\x9d\xb1\xe4\xba\xac ok",
+        );
+        // From "world" to "sec": the rest of the first row, then the start of the second, trailing blanks dropped.
+        let sel = Selection {
+            from: (0, 6),
+            to: (1, 2),
+        };
+        assert_eq!(selected_text(&t, 3, sel), "world\nsec");
+        // Backwards (dragged up) is the same text.
+        let back = Selection {
+            from: sel.to,
+            to: sel.from,
+        };
+        assert_eq!(selected_text(&t, 3, back), "world\nsec");
+        // A wide character is copied once, not with its right half.
+        let wide = Selection {
+            from: (2, 0),
+            to: (2, 6),
+        };
+        assert_eq!(selected_text(&t, 3, wide), "東京 ok");
+        // A pane lower than the screen shows its bottom rows: pane row 0 is screen row 1 here.
+        let low = Selection {
+            from: (0, 0),
+            to: (0, 5),
+        };
+        assert_eq!(selected_text(&t, 2, low), "second");
     }
 
     #[test]

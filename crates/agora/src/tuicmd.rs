@@ -1797,6 +1797,24 @@ fn console(
                             .map_or_else(|| id.clone(), |s| agora_tui::split::agent_label(s, &id));
                         c.notice = say.text(key!("tui-tab-closed"), &[("agent", Arg::Str(name))]);
                     }
+                    // Text selected in the agent's pane goes to the clipboard through the terminal (OSC 52: over SSH too).
+                    Action::Copy(sel) => {
+                        let height = c.app.areas(area).terminal.height;
+                        let text = preview
+                            .as_ref()
+                            .filter(|p| Some(p.agent.as_str()) == c.app.active_agent())
+                            .map(|p| agora_tui::pane::selected_text(p.screen(), height, sel))
+                            .unwrap_or_default();
+                        if !text.is_empty() {
+                            let mut out = std::io::stdout();
+                            let _ = out.write_all(&agora_tui::clip::osc52(&text));
+                            let _ = out.flush();
+                            c.notice = say.text(
+                                key!("tui-copied-text"),
+                                &[("count", Arg::Num(text.chars().count() as i64))],
+                            );
+                        }
+                    }
                     Action::Open(_) | Action::Scroll(_) => {}
                     Action::Quit => {
                         if let Some(p) = preview.take() {

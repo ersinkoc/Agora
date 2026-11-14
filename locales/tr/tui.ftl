@@ -95,6 +95,7 @@ tui-request-answer = y izin verir · n reddeder · başka bir tuş beklemede bı
 tui-note-copy = c komutu kopyalar · herhangi bir tuş bunu kapatır
 tui-note-close = Herhangi bir tuş bunu kapatır.
 tui-copied = Komut panoya kopyalandı.
+tui-copied-text = { $count } karakter panoya kopyalandı.
 tui-split-asks-start = { $kind } başlatmak istiyor
 tui-split-card-more = … { $count } satır daha: tamamını okumak için Enter
 tui-split-read-first = İzin vermeden önce isteğin tamamını okuyun: Enter'a basın.
