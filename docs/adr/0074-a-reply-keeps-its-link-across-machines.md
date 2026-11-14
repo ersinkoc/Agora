@@ -1,6 +1,7 @@
 # 0074. A reply keeps its link to the message it answers, across machines
-Status: Proposed
+Status: Accepted
 Date: 2026-11-16
+Accepted: 2026-11-14 (maintainer's explicit answer to a question listing each Proposed ADR with its summary and "approve as proposed": they ticked 0064, 0065, 0066, 0069, 0071, 0072 and 0074). The open questions' proposed answers stand.
 Origin: the real-machine mesh round trip (macOS and Windows agents, 2026-11-16): `mac/agent-2` sent `win/agent-5` a ping and got the pong back in 607 ms, but the pong's `reply_to` was `null`. The Windows agent confirmed it is not the responder: on one machine the same pong carries `reply_to` (m-6 → m-7). Across machines the link is lost at the uplink.
 
 ## Context

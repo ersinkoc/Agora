@@ -1,6 +1,7 @@
 # 0072. A shared terminal takes the size of the smallest window looking at it
-Status: Proposed
+Status: Accepted
 Date: 2026-11-16
+Accepted: 2026-11-14 (maintainer's explicit answer to a question listing each Proposed ADR with its summary and "approve as proposed": they ticked 0064, 0065, 0066, 0069, 0071, 0072 and 0074). The open questions' proposed answers stand.
 Origin: the maintainer, 2026-11-15: they look at an agent's terminal in the web window, then look at the same agent from another machine's bigger window; the terminal changes size and no longer fits the first window.
 
 ## Context

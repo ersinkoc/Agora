@@ -1,6 +1,7 @@
 # 0071. A diff names every changed file, even when the text is cut
-Status: Proposed
+Status: Accepted
 Date: 2026-11-16
+Accepted: 2026-11-14 (maintainer's explicit answer to a question listing each Proposed ADR with its summary and "approve as proposed": they ticked 0064, 0065, 0066, 0069, 0071, 0072 and 0074). The open questions' proposed answers stand.
 Origin: the independent review of the web review screen (#483, #487, #488, #500, 2026-11-15) found that a diff cut at 512 KiB hides every file after the cut with no warning: the chip says "8 files changed", the review screen lists 2, and the Files tree is missing the change marks of the others. The web alone cannot learn the missing names: `git.diff` returns one string, `FilesChanged` is a stream of watcher batches rather than the list, and walking folders with `files.list` plus a `git.diff` per path spawns many git processes and still misses files under deleted folders.
 
 ## Context

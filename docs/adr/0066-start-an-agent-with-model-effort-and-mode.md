@@ -1,6 +1,7 @@
 # 0066. Start an agent with its model, effort and mode, from the window and from another agent
-Status: Proposed
+Status: Accepted
 Date: 2026-11-14
+Accepted: 2026-11-14 (maintainer's explicit answer to a question listing each Proposed ADR with its summary and "approve as proposed": they ticked 0064, 0065, 0066, 0069, 0071, 0072 and 0074). The open questions' proposed answers stand.
 
 Not accepted. Nothing here may be built until the maintainer accepts it in a message of their own.
 Origin: the maintainer: "an agent should even be able to come to Agora over MCP and say: in my folder open a Codex, pick this model and this effort, run this task, as a fait accompli." Amends ADR-0057 (the `agent_start` tool) and ADR-0059 (launch options).
@@ -9,7 +10,7 @@ Origin: the maintainer: "an agent should even be able to come to Agora over MCP 
 `agent_start { kind, folder?, prompt?, node? }` (ADR-0057) starts any installed kind with the tool's own defaults, and the start window lets you pick machine, folder and kind (and launch options, ADR-0059). Neither can say **which model, how much reasoning effort, or which mode** the new agent should use,
 although every real tool has them (`claude --model`, `codex -m` and `-c model_reasoning_effort=…`, opencode `--model`, ACP `session/set_option`). So "open a Codex with gpt-X at high effort and run this" needs a person in front of that tool's own menus.
 
-## Decision (proposed)
+## Decision
 1. **A manifest declares the settings a kind accepts** (additive, `min_engine` raised): `[[launch.setting]] id = "model" | "effort" | "mode" | <other>`, with `args` as a template (`["-m", "{value}"]`, `["-c", "model_reasoning_effort=\"{value}\""]`), the allowed values or a pattern, a default, and for structured (ACP) kinds a `set_option` mapping (the model and mode lists the agent reports, ADR-0058). Only settings checked on a real version are declared. Values are validated against the list or pattern: never put into a shell, never an argument that can smuggle another flag.
 2. **`agent_start` gains `settings { model?, effort?, mode? }`** (and `options`, the named launch options of ADR-0059). The signed approval card (ADR-0057) shows **every setting and option** next to the kind, folder and prompt, and the signature covers them (a new signing domain version, length-prefixed, like ADR-0059); a setting the manifest does not declare is refused (`agent.setting_unknown`), a value outside its list too (`agent.setting_invalid`).
 3. **The start window and the TUI** offer the same settings, from the manifest: the machine's kind list says what each accepts (model list when the tool reports one, effort levels, modes), remembers the last choice per kind per machine, and shows the badge of the ADR-0059 "does not ask" options as today.

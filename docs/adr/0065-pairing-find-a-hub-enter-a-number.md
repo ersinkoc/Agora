@@ -1,6 +1,7 @@
 # 0065. Pairing: find a hub, enter a number, connected
-Status: Proposed
+Status: Accepted
 Date: 2026-11-14
+Accepted: 2026-11-14 (maintainer's explicit answer to a question listing each Proposed ADR with its summary and "approve as proposed": they ticked 0064, 0065, 0066, 0069, 0071, 0072 and 0074). The open questions' proposed answers stand. For pairing this accepts rung (a), approving on the hub; the `spake2` dependency for rung (b), typing the number, stays a separate decision as written.
 
 Not accepted. Nothing here may be built until the maintainer accepts it in a message of their own.
 Origin: the maintainer: "I do not want to ask for a key with `agora hub login` again and again; it is my machine. Every node must connect to a hub easily, without a million steps: if there is a hub
@@ -11,7 +12,7 @@ Replaces rung 2 of ADR-0062 (the join string stays as the fallback) and supersed
 Joining a machine today needs the hub's CA file, an enrollment code and a long command; signing in a browser needs a code from `agora hub login` each time (the browser session also ended after 12 hours or a closed tab: fixed in #450).
 Both are the same problem: a new party must prove to the hub's owner that it is the one the owner means, without typing secrets across machines.
 
-## Decision (proposed)
+## Decision
 1. **The owner is never asked for a code on the hub's own machine.** `agora`/`agora web` open the interface already signed in (ADR-0062); sessions last 30 days and are extended on use (#450).
 2. **Finding a hub.** A hub answers a small discovery request on the local network (UDP multicast and broadcast on a fixed port, `std` only, no new dependency): its name, address, port, CA fingerprint and whether it accepts new machines right now. A node's "Join" screen lists the hubs found; if none is found, the person types an address (`host[:port]`).
 2a. A hub only answers discovery while it is **open for pairing** (a switch in its interface/CLI: "Add a machine" / `agora pair open`, closing by itself after 10 minutes), so a quiet hub is invisible and a rogue request gets nothing.

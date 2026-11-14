@@ -1,6 +1,7 @@
 # 0064. Workspace hygiene: shared first, worktrees cleaned, the disk never fills
-Status: Proposed
+Status: Accepted
 Date: 2026-11-14
+Accepted: 2026-11-14 (maintainer's explicit answer to a question listing each Proposed ADR with its summary and "approve as proposed": they ticked 0064, 0065, 0066, 0069, 0071, 0072 and 0074). The open questions' proposed answers stand.
 
 Not accepted. Nothing here may be built until the maintainer accepts it in a message of their own.
 Origin: the maintainer: "know that worktrees take disk space: weight the *shared* folder; and do not forget to delete workspaces when they are no longer needed, so the disk does not fill."
@@ -11,7 +12,7 @@ ADR-0052 already makes the **selected existing folder** the default and a separa
 after its agent ended, with its own build output (a Rust `target/` is 4 to 34 GB), and the maintainer's machine went from 24 GB free to 374 GB free by one manual clean-up of 119 old worktrees.
 `remove_worktree` exists and refuses to lose work unless forced; no policy calls it.
 
-## Decision (proposed)
+## Decision
 1. **Shared is the default everywhere and the window says so.** The start window keeps "Separate worktree" off by default and, when it is offered, shows what it costs ("needs about N MB of disk and a branch", from the folder's size) and when it is wise
    (two agents write the same files at once). Starting several agents in one shared folder uses leases (ADR-0039) to avoid collisions, as today.
 2. **The node cleans up the worktrees it created, and only those.** A worktree is removed automatically when ALL hold: the node created it; its agent has ended (or the machine restarted and the agent is not resumable);
