@@ -87,7 +87,10 @@ impl Preview {
     /// Applies what arrived for this terminal, without waiting.
     pub fn pump(&mut self, session: &mut Session) -> Pumped {
         let mut seen = Pumped::Nothing;
-        if self.repaint_at.is_some_and(|at| at.elapsed() >= REPAINT_AFTER) {
+        if self
+            .repaint_at
+            .is_some_and(|at| at.elapsed() >= REPAINT_AFTER)
+        {
             self.repaint_at = None;
             // Watching again starts with the machine's full screen at its current size.
             let (node, local) = self.agent.split_once('/').unwrap_or(("", &self.agent));
