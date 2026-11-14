@@ -4,6 +4,9 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+### Getting started
+- `agora --version` prints the version.
+
 ## 0.3.10
 
 ### Machines

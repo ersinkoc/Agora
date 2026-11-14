@@ -236,6 +236,16 @@ fn main() -> ExitCode {
         say.out(key!("cli-usage"), &[]);
         return ExitCode::SUCCESS;
     }
+    if matches!(
+        args.first().map(String::as_str),
+        Some("--version" | "-V" | "version")
+    ) {
+        say.out(
+            key!("cli-version"),
+            &[("version", env!("CARGO_PKG_VERSION").into())],
+        );
+        return ExitCode::SUCCESS;
+    }
     let words: Vec<&str> = args
         .iter()
         .map(String::as_str)
