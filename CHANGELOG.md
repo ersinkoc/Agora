@@ -16,6 +16,12 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 ### Getting started
 - `agora --version` prints the version.
 
+### Agents working together
+- An agent asking who is in its project (`agents_list`) now sees the project's agents on your other connected machines too, not
+  only the ones on its own machine, named the way it messages them (`<machine>/<agent>`). Agents of projects only another machine
+  has are never shown. When the hub cannot be reached the list still answers with this machine's agents and says that others may
+  be missing (`partial`).
+
 ### Reviewing changes and files
 - Changes larger than 512 KiB say how many files were read and at least how many are not listed, in the review screen and in the
   file browser, so the "files changed" count never silently disagrees with the list.
