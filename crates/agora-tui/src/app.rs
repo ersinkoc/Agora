@@ -445,6 +445,24 @@ impl App {
             }
             return;
         }
+        // Inside a tab every plain key is the agent's; Alt+K opens the commands and Alt+M takes or releases the mouse there too
+        // (anywhere, so the footer can say them once).
+        match k {
+            Key::Alt('k' | 'K') => {
+                self.palette = Some(Palette::default());
+                return;
+            }
+            Key::Alt('m' | 'M') => {
+                self.common(Key::Char('m'), cx.area, out);
+                return;
+            }
+            // Alt+Y / Alt+N answer the request of the agent in front (the caller shows it first when it is not in view).
+            Key::Alt(c @ ('y' | 'Y' | 'n' | 'N')) if self.focus == Focus::Terminal => {
+                out.push(Action::Command(c.to_ascii_lowercase()));
+                return;
+            }
+            _ => {}
+        }
         match self.focus {
             Focus::Terminal => match k {
                 Key::Ctrl(DETACH) | Key::F(BACK) => self.focus = Focus::Tree,
@@ -583,7 +601,7 @@ impl App {
                     Command::Open(r.id.clone()),
                     t(
                         key!("tui-app-cmd-open"),
-                        &[("name", Arg::Str(r.label.clone()))],
+                        &[("name", Arg::Str(r.label.trim().to_string()))],
                     ),
                 )
             })
@@ -972,6 +990,13 @@ impl App {
         let keys = match (self.palette.is_some(), self.focus) {
             (true, _) => key!("tui-app-keys-palette"),
             (false, Focus::Tree) => key!("tui-app-keys-tree"),
+            (false, Focus::Terminal)
+                if self
+                    .active_agent()
+                    .is_some_and(|id| s.rows.iter().any(|r| r.id == id && r.needs_you)) =>
+            {
+                key!("tui-app-keys-terminal-waiting")
+            }
             (false, Focus::Terminal) => key!("tui-app-keys-terminal"),
             (false, Focus::Inspector) => key!("tui-app-keys-inspector"),
         };
@@ -2529,6 +2554,38 @@ mod tests {
         let (label, _, state) = tree_row_fit(12, "東京東京東京", "Idle", false);
         assert_eq!((label.as_str(), state.as_str()), ("東京東京…", ""));
         assert_eq!(text_width(&label), 9);
+    }
+
+    #[test]
+    fn alt_k_and_alt_m_work_inside_a_tab_where_plain_keys_go_to_the_agent() {
+        let rows = rows();
+        let mut app = App::default();
+        key(&mut app, &rows, Key::Enter);
+        assert_eq!(app.focus, Focus::Terminal);
+        // A plain k or m is the agent's.
+        assert_eq!(
+            key(&mut app, &rows, Key::Char('k')),
+            vec![Action::Input(b"k".to_vec())]
+        );
+        assert!(app.palette.is_none());
+        // Alt+K opens the commands, Alt+M releases the mouse; neither reaches the agent.
+        assert_eq!(key(&mut app, &rows, Key::Alt('k')), vec![]);
+        assert!(app.palette.is_some());
+        key(&mut app, &rows, Key::Esc);
+        assert_eq!(
+            key(&mut app, &rows, Key::Alt('m')),
+            vec![Action::MouseCapture(false)]
+        );
+        assert_eq!(app.focus, Focus::Terminal, "the tab keeps the keyboard");
+        // Alt+Y / Alt+N answer the request of the agent in front, as y / n do in the list.
+        assert_eq!(
+            key(&mut app, &rows, Key::Alt('y')),
+            vec![Action::Command('y')]
+        );
+        assert_eq!(
+            key(&mut app, &rows, Key::Alt('N')),
+            vec![Action::Command('n')]
+        );
     }
 
     #[test]

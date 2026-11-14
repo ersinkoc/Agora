@@ -1838,6 +1838,19 @@ fn console(
                         return Next::Quit;
                     }
                     Action::Command(k) => {
+                        // Alt+Y / Alt+N in a chat tab that shows its agent's request: it is in view there.
+                        if matches!(k, 'y' | 'n') {
+                            if let Some(pane) = chat
+                                .as_ref()
+                                .filter(|p| Some(p.agent.as_str()) == c.app.active_agent())
+                            {
+                                c.shown_request = c
+                                    .snapshot
+                                    .as_ref()
+                                    .and_then(|s| waiting_for(s, &pane.agent))
+                                    .map(|a| a.approval_id.clone());
+                            }
+                        }
                         if command(say, session, rx, color, c, &mut preview, area, k) {
                             dirty_since.get_or_insert_with(Instant::now);
                         }
