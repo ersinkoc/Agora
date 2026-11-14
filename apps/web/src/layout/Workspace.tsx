@@ -41,11 +41,13 @@ export interface WorkspaceProps {
   // A panel that is not about one agent (Needs you, Changes, ...); undefined when this window cannot draw it.
   renderPanel: (panel: string) => ReactNode | undefined;
   onFiles?: (a: AgentTileModel) => void;
+  /** The agent's files drawn inside a Files pane; without it the pane offers to open them in a window. */
+  renderFiles?: (a: AgentTileModel) => ReactNode | undefined;
   welcome: ReactNode;
   onStart?: () => void;
 }
 
-export function Workspace({ ws, dispatch, fleet, bindings, narrow, renderAgent, renderPanel, onFiles, welcome, onStart }: WorkspaceProps) {
+export function Workspace({ ws, dispatch, fleet, bindings, narrow, renderAgent, renderPanel, onFiles, renderFiles, welcome, onStart }: WorkspaceProps) {
   const host = useRef<HTMLDivElement>(null);
   const root = displayRoot(ws, narrow);
   const { frames, dividers } = useMemo(() => arrange(root), [root]);
@@ -66,6 +68,11 @@ export function Workspace({ ws, dispatch, fleet, bindings, narrow, renderAgent, 
     { label: t('layout-follow-selection'), checked: followOf(p) === 'selection', run: () => dispatch({ type: 'bind', pane: p.id, bind: { follow: 'selection' }, panel: 'agent' }) },
     ...fleet.filter((a) => !a.closed).map((a, i) => ({ label: t('layout-show-agent', { name: a.name }), divider: i === 0, checked: bindOf(p) === a.id, run: () => dispatch({ type: 'bind', pane: p.id, bind: { agent: a.id }, panel: 'agent' }) })),
     ...GLOBAL_PANELS.map((panel, i) => ({ label: panelLabel(panel), divider: i === 0, checked: p.panel === panel, run: () => dispatch({ type: 'bind', pane: p.id, panel }) })),
+    // A pane bound to one agent shows the agent itself or its files (an editor's file tree next to its terminal).
+    ...(bindOf(p) && renderFiles ? [
+      { label: t('layout-show-agent-itself'), divider: true, checked: p.panel !== 'files', run: () => dispatch({ type: 'bind', pane: p.id, bind: { agent: bindOf(p) as string }, panel: 'agent' }) },
+      { label: t('layout-show-agent-files'), checked: p.panel === 'files', run: () => dispatch({ type: 'bind', pane: p.id, bind: { agent: bindOf(p) as string }, panel: 'files' }) },
+    ] : []),
   ];
   const others = (p: Pane) => all.filter((o) => o.id !== p.id);
   const places: [Place, string][] = [['start', 'layout-place-before'], ['end', 'layout-place-after'], ['top', 'layout-place-above'], ['bottom', 'layout-place-below'], ['center', 'layout-place-tab']];
@@ -182,6 +189,7 @@ export function Workspace({ ws, dispatch, fleet, bindings, narrow, renderAgent, 
       if (bindOf(p)) return <Note>{t('layout-gone')}</Note>;
       return picker(p);
     }
+    if (p.panel === 'files' && renderFiles) { const view = renderFiles(a); if (view) return <Fragment key={a.id}>{view}</Fragment>; }
     if (p.panel === 'files') return <Note>{onFiles ? <button type="button" className="button" onClick={() => onFiles(a)}><Icon name="files" />{t('layout-files-open', { name: a.name })}</button> : t('layout-files-none')}</Note>;
     if (p.panel === 'terminal' && a.terminal === false && !a.closed) return <Note>{t('layout-no-terminal')}</Note>;
     if (p.panel === 'conversation' && a.terminal !== false && !a.closed) return <Note>{t('layout-no-conversation')}</Note>;

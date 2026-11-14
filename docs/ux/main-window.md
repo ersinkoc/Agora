@@ -65,6 +65,16 @@ permanent section. Labels below use internal terms; the UI uses the vocabulary i
 ## Right column: project context
 - **Files**: lazy tree of the project checkout on the selected agent's node. Badges for added/modified;
   lock icon for files under a lease.
+  Built today (web, read-only; `apps/web/src/components/FilesView.tsx`), in the Files window and in a pane ("Show… → This
+  agent's files", beside its terminal):
+  - The tree marks each changed file with its status letter, and each folder that holds one with a dot. "N changed" lists only
+    the changed files, and a name filter searches every file listed so far.
+  - Open files are tabs. The path bar's folders open the tree down to the file.
+  - The file shows with line numbers and marks in the gutter (added, changed, removed above), read again whenever the node's
+    count of changed files moves. The text is drawn a screenful at a time.
+  - Ctrl F finds in the file. `/` filters the tree. The whole file can be copied.
+  - In a narrow pane the tree sits above the file.
+  - Not built yet: lease locks, syntax highlighting, editing.
 - **Changes**: workspace diff summary (+/−); shared folders appear once and have a shared-folder label. No per-agent attribution is implied. Opens the review screen (`review.md`).
 - **Mesh**: project channels with unread counts; task board progress (`task-board.md`).
 - **Usage**: tokens and estimated cost for the selected agent and project (`../design/usage-and-cost.md`).
