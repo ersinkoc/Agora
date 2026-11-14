@@ -86,6 +86,9 @@ Users see plain words; internal terms stay in code and docs (`glossary.md` lists
 ## 3. Design system in code
 - **Tokens first:** colors, type, spacing, radius, motion, and state colors defined once in `design/tokens`
   and generated for the web client (CSS variables), desktop, and TUI (truecolor/256-color mapping).
+- **Themes are token files** (ADR-0068, `themes.md`): built-in Dark, Light, High contrast, Large text, Slate and Sand, plus
+  the person's own, checked for WCAG AA contrast before they are shown. Text and spacing sizes are rem-based so a theme's
+  text size (and the browser's) scales them; components never use pixel font sizes.
 - **Component gallery:** every component rendered in all states, both themes, and an RTL locale; this is the
   review surface for UI pull requests.
 - **Visual regression tests:** screenshot tests for components and key screens in CI.

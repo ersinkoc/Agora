@@ -44,7 +44,7 @@ export function DeviceRequest({ request, machines, onApprove, onLater, inline }:
       <fieldset className="m-0 grid gap-1 border-0 p-0">
         <legend className="mb-1 p-0 text-xs text-muted">{t('device-request-machines')}</legend>
         {machines.map((m) => (
-          <label key={m.id} className="flex items-center gap-2 text-[13px]">
+          <label key={m.id} className="flex items-center gap-2 text-[0.8125rem]">
             <input type="checkbox" checked={chosen.has(m.id)} disabled={state === 'busy'}
               onChange={(e) => setChosen((c) => { const n = new Set(c); if (e.target.checked) n.add(m.id); else n.delete(m.id); return n; })} />
             {m.name}

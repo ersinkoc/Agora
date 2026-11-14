@@ -44,8 +44,8 @@ export function Inspector({ attention, approvals, notice, changed, boards, messa
     <div className="flex h-9 flex-none items-stretch border-b border-line">
       <div role="tablist" aria-label={t('ide-details')} className="flex min-w-0 flex-1 overflow-x-auto quiet-scroll">
         {tabs.map(x => <button key={x.id} type="button" role="tab" aria-selected={active === x.id} onClick={() => setTab(x.id)}
-          className="ide-tab max-w-none border-e-0 px-2.5 text-[12px] whitespace-nowrap">
-          {x.label}{!!x.badge && <span className={`rounded-full px-1.5 text-[11px] ${x.id === 'needs' ? 'bg-needs-you text-on-accent' : 'bg-surface-2 text-muted'}`}>{x.badge}</span>}
+          className="ide-tab max-w-none border-e-0 px-2.5 text-xs whitespace-nowrap">
+          {x.label}{!!x.badge && <span className={`rounded-full px-1.5 text-[0.6875rem] ${x.id === 'needs' ? 'bg-needs-you text-on-accent' : 'bg-surface-2 text-muted'}`}>{x.badge}</span>}
         </button>)}
       </div>
       <button type="button" className="ide-iconbtn m-1" onClick={onCollapse} aria-label={t('ide-hide-panel')} title={t('ide-hide-panel')}><Icon name="panelRight" /></button>

@@ -4,6 +4,14 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+### Themes (ADR-0068, rung 2)
+- The window can be restyled with themes: Dark, Light, High contrast, Large text, Slate and Sand are built in, and **Edit theme**
+  (command palette, or This device → Appearance) opens the theme editor beside your agents. Customize a built-in theme to change
+  its colours, fonts, text size, spacing and corners and see the whole window change as you edit; a change that would make text
+  hard to read (below WCAG AA) is listed and not applied. Choose one theme for light and one for dark and follow the system to
+  switch between them. Themes are kept in this browser, and export and import as a JSON file (`docs/ux/themes.md`, version 1;
+  a file with an unknown or invalid token, or unreadable colours, is refused with the reasons).
+
 ### Devices
 - The hub keeps a list of each person's devices (ADR-0061): a browser or the terminal client registers its key and name when it signs
   in, and `agora hub devices` lists them with the fingerprint people compare, the person, and when each was registered and last used.
