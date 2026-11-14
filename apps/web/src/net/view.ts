@@ -69,6 +69,8 @@ export interface View {
   tasks: Map<string, TaskV>; // the shared board's tasks seen since this window opened (ADR-0039)
   leases: Map<string, LeaseV>;
   withTerminal: Set<string>; // agents that have a terminal; the others (chat agents) are talked to with prompts
+  // ADR-0061: node id -> the devices it says it trusts (its last `NodeTrustedDevices`).
+  trusted?: Map<string, string[]>;
 }
 
 const MAX_MESSAGES = 50;
@@ -89,6 +91,7 @@ export function fromSnapshot(s: agora.v1.Snapshot.$Properties): View {
       memoryBytes: Number(n.memoryUsedBytes ?? 0), build: n.build ?? '', terminalsOpen: n.terminalsOpen ?? 0,
     });
   }
+  for (const n of s.nodes ?? []) if (n.trustedDeviceIds?.length) (v.trusted ??= new Map()).set(n.nodeId ?? '', [...n.trustedDeviceIds]);
   for (const c of s.checkouts ?? []) {
     v.checkouts.set(c.checkoutId ?? '', { nodeId: c.nodeId ?? '', projectId: c.projectId ?? '', path: c.path ?? '' });
   }
@@ -181,6 +184,7 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
       }
       break;
     }
+    case 'nodeTrustedDevices': (v.trusted ??= new Map()).set(producer, [...(e.nodeTrustedDevices.deviceIds ?? [])]); break;
     case 'nodeOffline': {
       const n = v.nodes.get(e.nodeOffline.nodeId);
       if (n) n.online = false;

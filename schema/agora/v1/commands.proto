@@ -3,6 +3,7 @@ syntax = "proto3";
 package agora.v1;
 
 import "agora/v1/common.proto";
+import "agora/v1/devices.proto";
 import "agora/v1/enroll.proto";
 
 // Commands flow client -> hub -> node (docs/specs/protocol.md section 4). Every request has a request_id
@@ -66,6 +67,13 @@ message CommandRequest {
     AgentSetModel agent_set_model = 86;
     // ADR-0060: sent only to a node with the capability `agent.resume`.
     AgentResume agent_resume = 87;
+    // ADR-0061 (87 is ADR-0060's): devices. `DeviceRegister`, `DeviceList` and `DeviceAskApproval` are answered by the hub;
+    // `DeviceEndorse` and `DeviceRevoke` a client sends to the hub, which carries them to the nodes with the capability `device.trust`.
+    DeviceRegister device_register = 88;
+    DeviceList device_list = 89;
+    DeviceEndorse device_endorse = 90;
+    DeviceRevoke device_revoke = 91;
+    DeviceAskApproval device_ask_approval = 92;
   }
 }
 
@@ -101,6 +109,8 @@ message CommandOk {
     AgentLaunchResult agent_launch = 19;
     BoardJoinResult board_join = 20;
     DirectoryEntries directory_entries = 21;
+    // ADR-0061
+    DeviceListResult device_list = 22;
   }
 }
 
