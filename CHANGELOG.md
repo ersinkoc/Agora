@@ -4,6 +4,8 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+## 0.3.9
+
 ### Themes (ADR-0068, rung 2)
 - The window can be restyled with themes: Dark, Light, High contrast, Large text, Slate and Sand are built in, and **Edit theme**
   (command palette, or This device → Appearance) opens the theme editor beside your agents. Customize a built-in theme to change
