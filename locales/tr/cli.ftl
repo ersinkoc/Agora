@@ -46,6 +46,7 @@ cli-agent-kinds-empty = Bu düğümde ajan tanımı yok.
 cli-terminal-detached = { $agent_id } ajanından ayrıldınız.
 cli-attach-needs-terminal = Bağlanmak için etkileşimli bir terminal gerekir.
 cli-node-not-running = { $socket } adresinde dinleyen bir düğüm yok. "agora node run" ile başlatın.
+cli-node-refused = { $socket } adresindeki düğüm bu süreci reddetti. Düğüm yalnızca kendi kullanıcısını kabul eder, sınırlandırılmış bir ajanı asla; komutu düğümü başlatan kullanıcıyla çalıştırın.
 cli-unknown-project = Bu düğümde { $project } adında kayıtlı proje yok.
 cli-ambiguous-project = Birden fazla proje kayıtlı; --project ile birini seçin.
 cli-no-projects = Bu düğümde proje yok. --project YOL ile başlatın.
