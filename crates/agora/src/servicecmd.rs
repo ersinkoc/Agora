@@ -100,7 +100,7 @@ pub fn service(say: &Say, op: &str) -> ExitCode {
     }
 }
 
-fn install(say: &Say, h: &Path, m: &Machine) -> ExitCode {
+pub(crate) fn install(say: &Say, h: &Path, m: &Machine) -> ExitCode {
     for d in ["run", "logs"] {
         if let Err(e) = std::fs::create_dir_all(h.join(d)) {
             say.err(
