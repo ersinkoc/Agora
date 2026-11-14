@@ -258,6 +258,42 @@ files-pick = Okumak için soldan bir dosya seçin.
 files-binary = Bu dosya metin olmadığı için gösterilmiyor.
 files-too-large = Bu dosya okunamadı (çok büyük olabilir).
 files-failed = Bu klasör listelenemedi.
+files-filter = Dosyaları ada göre süz
+files-only-changed = Yalnızca değişen dosyaları göster
+files-changed-count = { $count ->
+    [one] 1 değişen
+   *[other] { $count } değişen
+}
+files-refresh = Klasörleri ve değişiklikleri yeniden oku
+files-no-match = Uyan dosya yok. Henüz açılmamış klasörlerde aranmaz.
+files-deleted = Bu dosya silindi; değişiklikleri inceleme ekranında.
+files-empty = Bu klasör boş.
+files-folder-changed = İçinde değişen dosyalar var
+files-key-filter = dosyaları süz
+files-key-find = dosyada ara
+files-open-files = Açık dosyalar
+files-close-tab = { $name } dosyasını kapat
+files-path = Yol
+files-lines = { $count ->
+    [one] 1 satır
+   *[other] { $count } satır
+}
+files-changed-lines = { $count ->
+    [one] 1 satır değişti
+   *[other] { $count } satır değişti
+}
+files-find = Dosyada ara
+files-find-none = Eşleşme yok
+files-find-at = { $used } / { $total }
+files-find-prev = Önceki eşleşme
+files-find-next = Sonraki eşleşme
+files-find-close = Aramayı kapat
+files-copy = Dosyanın tamamını kopyala
+files-copied = Kopyalandı
+files-reload = Bu dosyayı yeniden oku
+files-mark-add = Son commit'ten bu yana eklendi
+files-mark-mod = Son commit'ten bu yana değişti
+files-mark-del = Son commit'ten bu yana burada satırlar silindi
 filter-placeholder = Ajana, makineye veya projeye göre süz
 filter-none = Eşleşen yok.
 console-drag = Yerlerini değiştirmek için bu çubuğu başka bir terminalin üzerine sürükleyin
@@ -549,6 +585,8 @@ layout-follow-selection = Listede seçilen ajan
 layout-follows-attention = Sizi bekleyeni izler
 layout-follows-selection = Seçimi izler
 layout-show-agent = { $name }
+layout-show-agent-itself = Bu ajan
+layout-show-agent-files = Bu ajanın dosyaları
 layout-panel-agent = Ajan
 layout-panel-empty = Boş bölme
 layout-panel-unknown = Bilinmeyen panel “{ $id }”: bu pencere onu gösteremiyor.

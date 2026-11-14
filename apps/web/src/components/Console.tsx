@@ -6,6 +6,7 @@ import { money, type UsageSummary } from '../net/usage';
 import type { ApprovalModel, BoardModel, MachineModel, MessageModel, ProjectCost } from '../net/view';
 import type { TerminalSource } from '../terminal/source';
 import { DiffDialog } from './DiffDialog';
+import { FilesView } from './FilesView';
 import { PromptBox } from './PromptBox';
 import type { ChatSource } from '../net/chat';
 import { FilesDialog } from './FilesDialog';
@@ -325,7 +326,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
 
         <main className="flex min-h-[70dvh] min-w-0 flex-col lg:min-h-0" aria-label={t('focus-terminal')}>
           <Workspace ws={ws} dispatch={dispatch} fleet={fleet} bindings={bindings} narrow={narrow} renderAgent={agentBody} renderPanel={panel}
-            onFiles={filesOf ? (a) => setBrowsing(a.id) : undefined} onStart={onStart ? () => onStart() : undefined} welcome={welcome} />
+            onFiles={filesOf ? (a) => setBrowsing(a.id) : undefined} renderFiles={filesOf ? (a) => { const f = filesOf(a); return f ? <FilesView files={f} load={loadDiff && a.git !== false ? (path) => loadDiff(a, path) : undefined} changed={a.filesChanged} compact /> : undefined; } : undefined} onStart={onStart ? () => onStart() : undefined} welcome={welcome} />
         </main>
 
         {showDetails && <Inspector attention={attention} approvals={approvals} notice={notice} changed={changed} boards={boards} messages={messages} usage={usage} projects={projects} onOpen={onOpen}
@@ -343,7 +344,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
 
       {start}
       {history && loadHistory && find(history) && <HistoryDialog agent={find(history) as AgentTileModel} load={loadHistory} onClose={() => setHistory(undefined)} />}
-      {browsing && filesOf && find(browsing) && filesOf(find(browsing) as AgentTileModel) && <FilesDialog agent={find(browsing) as AgentTileModel} files={filesOf(find(browsing) as AgentTileModel) as WorkspaceFiles} onClose={() => setBrowsing(undefined)} />}
+      {browsing && filesOf && find(browsing) && filesOf(find(browsing) as AgentTileModel) && <FilesDialog agent={find(browsing) as AgentTileModel} files={filesOf(find(browsing) as AgentTileModel) as WorkspaceFiles} load={loadDiff} onClose={() => setBrowsing(undefined)} />}
       {reviewing && loadDiff && find(reviewing) && <DiffDialog agent={find(reviewing) as AgentTileModel} load={loadDiff} read={filesOf?.(find(reviewing) as AgentTileModel)?.read} onClose={() => setReviewing(undefined)} />}
     </div>
   );

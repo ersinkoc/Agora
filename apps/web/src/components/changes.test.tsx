@@ -29,6 +29,7 @@ describe('the changes view', () => {
     }
     for (const k of ['changes-filter-all', 'changes-layout-unified', 'changes-layout-split']) expect(t(k), k).not.toBe(k);
     expect(t('changes-gap', { count: 4 })).toBe('Show 4 unchanged lines');
+    for (const m of ['add', 'mod', 'del']) expect(t(`files-mark-${m}`), m).not.toBe(`files-mark-${m}`);
   });
 
   it('folds the unchanged lines between hunks until they are opened', () => {
