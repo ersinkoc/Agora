@@ -109,6 +109,10 @@ fn failed(say: &Say, key: &'static str, name: &str, e: &std::io::Error) {
                 ("path", p.display().to_string().into()),
             ],
         ),
+        Some(ServiceProblem::TurnedOffInSettings) => say.err(
+            key!("service-turned-off-in-settings"),
+            &[("name", name.into())],
+        ),
         Some(ServiceProblem::Overridden(ps)) => say.err(
             key!("service-overridden"),
             &[("name", name.into()), ("paths", paths(ps).into())],
@@ -392,6 +396,9 @@ fn status(say: &Say, h: &Path, m: &Machine) -> ExitCode {
         let name = service_name(role);
         let label: Arg = role.label(say).into();
         match agora_platform::service_status(&name) {
+            // One of the same name that Agora did not write (a LaunchAgent or a unit made by hand): named as not Agora's, never as
+            // Agora's login service.
+            Ok(ServiceState::Installed { .. }) if !mine(say, &name) => {}
             Ok(ServiceState::Installed { enabled }) => {
                 say.out(
                     if enabled {

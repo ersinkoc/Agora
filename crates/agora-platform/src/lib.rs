@@ -1589,6 +1589,9 @@ pub enum ServiceProblem {
     /// The service manager would also read these files (drop-ins, or another file of the same name), which can change what the service
     /// runs; nothing was registered.
     Overridden(Vec<PathBuf>),
+    /// Turned off by the user in the system's own settings (macOS: System Settings > General > Login Items & Extensions, "Allow in
+    /// the Background"), which Agora cannot turn on: only the user can, there. Nothing was registered.
+    TurnedOffInSettings,
 }
 
 impl std::fmt::Display for ServiceProblem {
@@ -1607,6 +1610,7 @@ impl std::fmt::Display for ServiceProblem {
             }
             ServiceProblem::NotLoaded(p) => write!(f, "{} was not loaded", p.display()),
             ServiceProblem::Overridden(ps) => write!(f, "also read: {ps:?}"),
+            ServiceProblem::TurnedOffInSettings => f.write_str("turned off in the system settings"),
         }
     }
 }
@@ -1664,6 +1668,29 @@ pub fn service_foreign(name: &str) -> io::Result<Option<PathBuf>> {
         let _ = name;
         Ok(None)
     }
+}
+
+/// The `PATH` a login service gets: the spec's, keeping the order but only full paths an entry can carry (an empty or relative entry
+/// would mean "the folder the service manager runs it from", which is not the installing shell's; a control character or a Unicode
+/// noncharacter cannot go into a unit or a property list). No other variable of the installing shell goes into the entry.
+/// Shared by the systemd unit and the LaunchAgent (Windows applies no variables).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn service_path_variable(env: &[(String, std::ffi::OsString)]) -> Option<String> {
+    let (_, value) = env.iter().find(|(k, _)| k == "PATH")?;
+    let kept: Vec<String> = std::env::split_paths(value)
+        .filter(|p| p.is_absolute())
+        .filter_map(|p| p.to_str().map(str::to_owned))
+        .filter(|p| !p.chars().any(|c| c.is_control() || is_noncharacter(c)))
+        .collect();
+    (!kept.is_empty()).then(|| kept.join(":"))
+}
+
+/// A Unicode noncharacter (U+FDD0..U+FDEF, and the last two code points of every plane, U+FFFE and U+FFFF among them): XML 1.0
+/// cannot carry U+FFFE and U+FFFF, and none of them is ever meant in a path.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn is_noncharacter(c: char) -> bool {
+    let n = u32::from(c);
+    (0xFDD0..=0xFDEF).contains(&n) || n & 0xFFFE == 0xFFFE
 }
 
 /// The [`ServiceProblem`] inside an error a `service_*` function returned, if it is one.

@@ -56,6 +56,18 @@ Not seen on a real machine: a task disabled by Group Policy (no domain here), an
   - a job file of the same label without the marker: `install`, `start` and `remove` each refused it (`NotOurs`), and the file was
     unchanged and never loaded;
   - afterwards no job, no file; launchd's override list keeps an `enabled` line for the scratch label.
+- **macOS, the #563 follow-up** (Linux's review of #563), by macos, macOS 27.2, scratch labels, with the maintainer's OK given in the
+  session for each run:
+  - `bootout` (`agora service remove`) ends a child in the job's process group, but not one in its own session, as an agent in its
+    terminal is: the agents keep running after the service is removed;
+  - **Login Items:** the maintainer switched a scratch LaunchAgent off in System Settings > General > Login Items & Extensions
+    ("Allow in the Background"). launchd unloaded it at once, `launchctl print-disabled` showed nothing, `sfltool dumpbtm` showed
+    `disallowed`, and `+[SMAppService statusForLegacyURL:]` returned 2 (`requiresApproval`; 1 while it was on, 0 once its file was
+    gone). `launchctl enable` did not change it; `launchctl bootstrap` loaded and ran it for that session while it stayed `disallowed`.
+    So `status` reads `SMAppService`, and `install` refuses such a job and says only the user can switch it on there;
+  - BTM marked each scratch job `notified` (the "Background Items Added" notice); its records went away with the job files;
+  - `kill -9` → started again after 10.1 s; an exit 0 → not restarted (the ignored hand check, again).
+  - Not measured: an SSH session with no login at the screen (`launchctl print gui/<uid>` failing → "no login session").
 - **Linux, scratch homes, #543 at 1d59d55 and #548 / #551**, by linux and linux Codex:
   - crash → restart after 30 s;
   - `kill -9` of the supervisor → the node ended within 1.5 s;
