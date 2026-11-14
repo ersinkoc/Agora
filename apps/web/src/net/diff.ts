@@ -101,15 +101,23 @@ function gitHeaderPath(rest: string): string {
   return at >= 0 ? rest.slice(at + 3) : rest;
 }
 
-// `Binary files a/x and b/y differ`: the new name, or undefined for `/dev/null` (a deleted file keeps the name it had).
-function binaryPath(raw: string): string | undefined {
-  const m = /^Binary files (.+) and (.+) differ$/.exec(raw);
-  if (!m) return undefined;
-  const name = unquote(m[2] as string);
-  return name === '/dev/null' ? undefined : name.replace(/^b\//, '');
-}
-
 const HUNK = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@ ?(.*)$/;
+
+// One file's change as a conversation shows it: the hunks of a diff with or without git's `diff --git` line (a chat agent's diff
+// starts at `---`), counted. Headers are skipped; lines before the first `@@` are not part of the change.
+export function parseHunks(text: string): Pick<DiffFile, 'added' | 'removed' | 'lines'> {
+  const out: Pick<DiffFile, 'added' | 'removed' | 'lines'> = { added: 0, removed: 0, lines: [] };
+  let inHunk = false;
+  for (const raw of text.split('\n')) {
+    if (raw.startsWith('@@')) { inHunk = true; out.lines.push({ kind: 'hunk', text: raw }); }
+    else if (!inHunk) continue;
+    else if (raw.startsWith('+')) { out.added++; out.lines.push({ kind: 'add', text: raw.slice(1) }); }
+    else if (raw.startsWith('-')) { out.removed++; out.lines.push({ kind: 'del', text: raw.slice(1) }); }
+    else if (raw.startsWith(' ')) out.lines.push({ kind: 'ctx', text: raw.slice(1) });
+    else if (raw.startsWith('diff --git ')) inHunk = false;
+  }
+  return out;
+}
 
 export function parseDiff(text: string): DiffFile[] {
   const files: DiffFile[] = [];
@@ -166,11 +174,9 @@ export function parseDiff(text: string): DiffFile[] {
       else if (raw.startsWith('deleted file mode')) cur.status = 'deleted';
       else if (raw.startsWith('rename from ')) { cur.oldPath = unquote(raw.slice('rename from '.length)); cur.status = 'renamed'; }
       else if (raw.startsWith('rename to ')) { cur.path = unquote(raw.slice('rename to '.length)); cur.status = 'renamed'; }
-      else if (raw.startsWith('Binary files ') || raw === 'GIT binary patch') {
-        cur.binary = true;
-        const p = binaryPath(raw);
-        if (p !== undefined && cur.status !== 'renamed') cur.path = p;
-      }
+      // The name comes from the header, not from this line: `Binary files a/x and b/y differ` cannot be split where a name itself
+      // holds " and " (`b/Terms and Conditions.pdf`).
+      else if (raw.startsWith('Binary files ') || raw === 'GIT binary patch') cur.binary = true;
       else if (raw.startsWith('+++ ')) {
         // `+++ /dev/null`: the file is gone, and its name came from the `---` line. An emptied file (`@@ -1,3 +0,0 @@`) keeps its name.
         const p = headerPath(raw.slice(4));
@@ -216,16 +222,6 @@ export function splitRows(lines: DiffLine[]): SplitRow[] {
 }
 
 /** For each line of a run of changes, the line it replaces or is replaced by (the same position in the facing run), if any. */
-/** Changed lines whose text is the same on both sides and only the line ending differs (LF and CR LF): each pair counts once. */
-export function lineEndingOnly(lines: DiffLine[], pairs: Map<DiffLine, DiffLine> = pairedLines(lines)): number {
-  let n = 0;
-  for (const l of lines) {
-    const p = l.kind === 'del' ? pairs.get(l) : undefined;
-    if (p && p.text === l.text && !!p.cr !== !!l.cr) n++;
-  }
-  return n;
-}
-
 export function pairedLines(lines: DiffLine[]): Map<DiffLine, DiffLine> {
   const pairs = new Map<DiffLine, DiffLine>();
   for (const r of splitRows(lines)) {
@@ -235,6 +231,16 @@ export function pairedLines(lines: DiffLine[]): Map<DiffLine, DiffLine> {
     }
   }
   return pairs;
+}
+
+/** Changed lines whose text is the same on both sides and only the line ending differs (LF and CR LF): each pair counts once. */
+export function lineEndingOnly(lines: DiffLine[], pairs: Map<DiffLine, DiffLine> = pairedLines(lines)): number {
+  let n = 0;
+  for (const l of lines) {
+    const p = l.kind === 'del' ? pairs.get(l) : undefined;
+    if (p && p.text === l.text && !!p.cr !== !!l.cr) n++;
+  }
+  return n;
 }
 
 /** The part of `a` that differs from `b`, as [start, end) after their common start and common end; undefined when equal. */

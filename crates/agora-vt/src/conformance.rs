@@ -13,6 +13,7 @@ pub fn run_all<T: Terminal>(make: impl Fn(Size) -> T) {
     clear_screen(&make);
     resize_updates_size_and_keeps_in_range_cells(&make);
     bottom_lines_never_include_scrollback(&make);
+    history_is_what_scrolled_off_in_order(&make);
     bottom_non_empty_lines_skip_blank_rows(&make);
     alt_screen_is_separate_and_restores(&make);
     title_from_osc(&make);
@@ -86,6 +87,28 @@ fn bottom_lines_never_include_scrollback<T: Terminal>(make: &impl Fn(Size) -> T)
     // Asking for more rows than the screen has returns the screen, not history.
     assert_eq!(t.bottom_lines(50).len(), 5);
     assert_eq!(t.bottom_lines(2), bottom[3..].to_vec());
+}
+
+/// What scrolled off the live screen, newest first from `back = 1`; a backend that keeps no history says 0 and nothing.
+fn history_is_what_scrolled_off_in_order<T: Terminal>(make: &impl Fn(Size) -> T) {
+    let mut t = make(size(20, 5));
+    for i in 1..=30 {
+        t.feed(format!("line {i}\r\n").as_bytes());
+    }
+    let n = t.history_len();
+    if n == 0 {
+        assert_eq!(t.history_cell(1, 0), None);
+        return;
+    }
+    // The live screen holds lines 27..30 and the empty row after them; line 26 scrolled off last, line 1 first.
+    assert_eq!(n, 26);
+    assert_eq!(t.history_line(1), "line 26");
+    assert_eq!(t.history_line(n), "line 1");
+    assert_eq!(t.history_cell(0, 0), None);
+    assert_eq!(t.history_cell(n + 1, 0), None);
+    assert_eq!(t.history_cell(1, 20), None);
+    // The live screen is untouched by reading history.
+    assert_eq!(t.line(0), "line 27");
 }
 
 fn bottom_non_empty_lines_skip_blank_rows<T: Terminal>(make: &impl Fn(Size) -> T) {

@@ -583,7 +583,7 @@ pub fn chat_command(
 /// `row` cut into pieces of at most `first` characters for the first and `rest` for the others, at the last space that fits when
 /// there is one (the space itself is dropped), else in the middle of the word. Counted in characters: a wide character may overshoot
 /// a little, which is harmless.
-pub(crate) fn wrap_row(row: &str, first: usize, rest: usize) -> Vec<String> {
+pub fn wrap_row(row: &str, first: usize, rest: usize) -> Vec<String> {
     let mut out = Vec::new();
     let mut left: Vec<char> = row.chars().collect();
     while !left.is_empty() {
@@ -601,6 +601,37 @@ pub(crate) fn wrap_row(row: &str, first: usize, rest: usize) -> Vec<String> {
         left.drain(..skip);
     }
     out
+}
+
+/// A tool call as one line: what kind of step it was, then its command, search, address or file (the agent's own title when it named
+/// nothing else). Every part is the agent's text and is made plain.
+pub fn tool_line(c: &crate::tool::Call, t: Text<'_>) -> String {
+    use crate::tool::Action;
+    let word = t(
+        match c.action {
+            Action::Read => key!("tui-tool-read"),
+            Action::Edit => key!("tui-tool-edit"),
+            Action::Run => key!("tui-tool-run"),
+            Action::Search => key!("tui-tool-search"),
+            Action::Fetch => key!("tui-tool-fetch"),
+            Action::Delete => key!("tui-tool-delete"),
+            Action::Move => key!("tui-tool-move"),
+            Action::Think => key!("tui-tool-think"),
+            Action::Other => key!("tui-tool-other"),
+        },
+        &[],
+    );
+    let what = if c.subject.is_empty() {
+        &c.title
+    } else {
+        &c.subject
+    };
+    let what = plain(what).replace('\n', " ");
+    if what.is_empty() {
+        word
+    } else {
+        format!("{word} {what}")
+    }
 }
 
 /// The conversation of an agent that has no terminal, as the last lines that fit `rows` x `cols`, then the line being typed.
@@ -628,7 +659,11 @@ pub fn render_chat(
             )
         };
         let body = match ChatKind::try_from(e.kind).unwrap_or(ChatKind::Unspecified) {
-            ChatKind::ToolCall => t(key!("tui-chat-tool"), &[("text", Arg::Str(plain(&e.text)))]),
+            // A tool call in words, as the web window says it ("Command cargo test"); text that is not a call is shown as it came.
+            ChatKind::ToolCall => match crate::tool::call(&e.text) {
+                Some(c) => tool_line(&c, t),
+                None => t(key!("tui-chat-tool"), &[("text", Arg::Str(plain(&e.text)))]),
+            },
             ChatKind::Plan => format!("{}\n{}", t(key!("tui-chat-plan"), &[]), plain(&e.text)),
             ChatKind::Diff => t(key!("tui-chat-diff"), &[("path", Arg::Str(plain(&e.path)))]),
             ChatKind::Notice => notice_text(e, t),
@@ -654,10 +689,15 @@ pub fn render_chat(
             }
         }
     }
-    let room = rows.saturating_sub(3).max(1);
+    // The hint wraps to the width (a narrow pane showed only its start); the conversation gets what is left.
+    let hint_width = cols.saturating_sub(1).max(10);
+    let hint = wrap_row(&t(key!("tui-chat-hint"), &[]), hint_width, hint_width);
+    let room = rows.saturating_sub(2 + hint.len()).max(1);
     let skip = lines.len().saturating_sub(room);
     let mut out: Vec<String> = lines.into_iter().skip(skip).collect();
-    out.push(format!("{dim}{}{reset}", t(key!("tui-chat-hint"), &[])));
+    for h in hint {
+        out.push(format!("{dim}{h}{reset}"));
+    }
     out.push(format!(
         "{} {}",
         t(key!("tui-chat-input"), &[]),
@@ -942,7 +982,7 @@ mod tests {
         );
         assert!(text.contains("tui-chat-you[]: hello"), "{text}");
         assert!(text.contains("hi]0;owned there"), "{text}");
-        assert!(text.contains("tui-chat-tool[text="), "{text}");
+        assert!(text.contains("tui-tool-other[] ls"), "{text}");
         assert!(lines.last().is_some_and(|l| l.contains("typed")));
         // ADR-0058: a notice is said from its code; its parameters are plain text; an unknown code is named.
         let mut notice = entry(ChatRole::Agent, ChatKind::Notice, "");
@@ -1154,5 +1194,38 @@ mod tests {
             text.contains("tui-nothing-waiting[]") && text.contains("tui-no-agents[]"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn a_tool_call_reads_as_words_and_its_text_cannot_drive_the_terminal() {
+        let t = |id: &str, _: &[(&str, Arg)]| id.to_string();
+        let line = |text: &str| {
+            let e = ChatEntry {
+                role: ChatRole::Agent as i32,
+                kind: ChatKind::ToolCall as i32,
+                text: text.into(),
+                ..Default::default()
+            };
+            render_chat(&[e], "agent-1", "", (100, 10), false, &t).join("\n")
+        };
+        assert!(
+            line(r#"{"tool":"execute","arguments":{"command":"cargo test"}}"#)
+                .contains("tui-tool-run cargo test")
+        );
+        assert!(
+            line(r#"{"tool":"Read src/a.rs","arguments":{"file_path":"/w/src/a.rs"}}"#)
+                .contains("tui-tool-read /w/src/a.rs")
+        );
+        // An agent's command with escapes in it is drawn as plain text.
+        let hostile = line(
+            "{\"tool\":\"execute\",\"arguments\":{\"command\":\"echo \\u001b]0;owned\\u0007 x\"}}",
+        );
+        assert!(
+            !hostile.contains('\x1b') && !hostile.contains('\x07'),
+            "{hostile:?}"
+        );
+        assert!(hostile.contains("tui-tool-run echo"), "{hostile}");
+        // Text that is not a call is said as it came.
+        assert!(line("not json").contains("tui-chat-tool"));
     }
 }

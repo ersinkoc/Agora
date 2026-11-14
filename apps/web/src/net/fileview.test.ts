@@ -62,6 +62,10 @@ describe('search in a file', () => {
     // `İ` lowercases to two code units: the marks still fall on the line as it is.
     expect(findMatches(['İİabc İz'], 'abc')).toEqual([{ line: 0, start: 2, end: 5 }]);
     expect(findMatches(['a.b axb'], 'a.b')).toEqual([{ line: 0, start: 0, end: 3 }]);
+    // Turkish: `i` finds `İ` and `I`, `ı` finds `I`; offsets stay on the line as it is.
+    expect(findMatches(['İstanbul Izmir iç'], 'i').map((m) => m.start)).toEqual([0, 9, 12, 15]);
+    expect(findMatches(['Işık ılık'], 'ı').map((m) => m.start)).toEqual([0, 2, 5, 7]);
+    expect(findMatches(['[a] (b)'], '[a]')).toEqual([{ line: 0, start: 0, end: 3 }]);
   });
   it('finds nothing for an empty query and stops at the limit', () => {
     expect(findMatches(lines, '')).toEqual([]);
