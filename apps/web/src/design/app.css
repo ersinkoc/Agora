@@ -23,10 +23,11 @@
   --radius-m: var(--radius-m);
   --radius-l: var(--radius-l);
   --shadow-card: var(--shadow);
+  --spacing: var(--space-1);
 }
 
 @layer base {
-  html { -webkit-text-size-adjust: 100%; }
+  html { -webkit-text-size-adjust: 100%; font-size: calc(var(--text-scale) * 100%); }
   body { @apply bg-surface-0 text-ink font-sans text-sm antialiased; }
   h1 { @apply text-2xl font-semibold tracking-tight; }
   h2 { @apply text-xs font-semibold uppercase tracking-wider text-muted; }
@@ -37,7 +38,7 @@
 
 @layer components {
   /* The IDE-style window: dense rows, quiet chrome, the terminal is the content. */
-  .ide { @apply grid h-screen min-h-0 overflow-hidden bg-surface-0 text-[13px]; grid-template-rows: auto minmax(0, 1fr) auto; grid-template-columns: minmax(0, 1fr); }
+  .ide { @apply grid h-screen min-h-0 overflow-hidden bg-surface-0 text-[0.8125rem]; grid-template-rows: auto minmax(0, 1fr) auto; grid-template-columns: minmax(0, 1fr); }
   .ide-bar { @apply flex items-center gap-2 border-line bg-surface-1 px-2; }
   .ide-iconbtn { @apply inline-grid size-7 place-items-center rounded-xs text-muted transition-colors duration-150 hover:bg-surface-2 hover:text-ink disabled:opacity-40; }
   .ide-iconbtn[aria-pressed='true'] { @apply bg-surface-2 text-ink; }
@@ -46,18 +47,18 @@
   .ide-tab { @apply flex h-9 min-w-0 max-w-56 flex-none items-center gap-2 border-e border-line px-3 text-muted transition-colors duration-150 hover:bg-surface-2 hover:text-ink; }
   .ide-tab[aria-selected='true'] { @apply bg-surface-0 text-ink; box-shadow: inset 0 2px 0 var(--accent); }
   .ide-chip { @apply inline-flex items-center gap-1.5 rounded-xs border border-line bg-surface-2 px-2 py-0.5 text-xs text-muted; }
-  .ide-kbd { @apply rounded-xs border border-line bg-surface-2 px-1.5 py-0.5 font-mono text-[11px] text-muted; }
+  .ide-kbd { @apply rounded-xs border border-line bg-surface-2 px-1.5 py-0.5 font-mono text-[0.6875rem] text-muted; }
   /* Tab strips scroll sideways without drawing scroll buttons or bars (WebView2 showed arrows). */
   .quiet-scroll { scrollbar-width: none; }
   .quiet-scroll::-webkit-scrollbar { display: none; }
-  .ide-section { @apply px-3 pb-1 pt-3 text-[11px] font-semibold tracking-wider text-muted uppercase; }
+  .ide-section { @apply px-3 pb-1 pt-3 text-[0.6875rem] font-semibold tracking-wider text-muted uppercase; }
   .page { @apply mx-auto grid max-w-3xl gap-6 px-4 py-8; }
   .topbar { @apply flex items-center justify-between gap-4; }
-  .muted { @apply text-[13px] text-muted; }
+  .muted { @apply text-[0.8125rem] text-muted; }
   .link { @apply bg-transparent p-0 text-left text-accent hover:underline; }
   .mono { @apply font-mono break-all select-all; }
   .stack { @apply grid justify-items-start gap-3; }
-  .codebox { @apply rounded-m border border-line bg-surface-2 p-3 text-[13px]; }
+  .codebox { @apply rounded-m border border-line bg-surface-2 p-3 text-[0.8125rem]; }
   .page p, .page h1, .page h2 { margin: 0; }
 
   .button {

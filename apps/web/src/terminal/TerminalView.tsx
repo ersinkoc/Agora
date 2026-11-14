@@ -29,8 +29,11 @@ export function TerminalView({ source, label }: { source: TerminalSource; label:
     observer.observe(el);
     const onSize = () => { renderer.setFontSize(terminalSize()); const s = renderer.fit(); if (s) session.resize(s.cols, s.rows); };
     window.addEventListener('agora-terminal-size', onSize);
+    // A theme can change the terminal's font: the renderer has repainted by now (it listens first), so measure again.
+    window.addEventListener('agora-theme', onSize);
     return () => {
       window.removeEventListener('agora-terminal-size', onSize);
+      window.removeEventListener('agora-theme', onSize);
       observer.disconnect();
       session.close();
       renderer.dispose();

@@ -35,6 +35,8 @@ import { agentOf, assignAttention } from '../layout/streams';
 import { bindOf, defaultLayout, followOf, panesOf } from '../layout/tree';
 import { Workspace } from '../layout/Workspace';
 import { LayoutMenu } from '../layout/LayoutMenu';
+import { subscribePanelRequests, takePanelRequest } from '../layout/requests';
+import { ThemeEditor } from '../themes/ThemeEditor';
 
 const TerminalView = lazy(() => import('../terminal/TerminalView').then((m) => ({ default: m.TerminalView })));
 
@@ -102,6 +104,12 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
     return next === cur.ws && touched === cur.touched ? cur : { ws: next, touched };
   }), []);
   useEffect(() => { saveWorkspace(stored, undefined, 200); }, [stored]);
+  // A panel asked for from outside the window (the command palette, This device), also one asked for just before it opened.
+  useEffect(() => {
+    const take = () => { const panel = takePanelRequest(); if (panel) dispatch({ type: 'show', panel }); };
+    take();
+    return subscribePanelRequests(take);
+  }, [dispatch]);
   const narrow = useSyncExternalStore(subscribeNarrow, isNarrow, () => false);
   const [selection, setSelection] = useState<string | undefined>();
   const [projectFilter, setProjectFilter] = useState('');
@@ -236,8 +244,8 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
           {usage?.perAgent.has(a.id) && <span className="ide-chip">{t('agent-cost', { amount: money(usage.perAgent.get(a.id) ?? 0) })}</span>}
           <StateBadge state={a.state} />
           {a.terminal !== false && !a.closed && <span className="flex items-center" role="group" aria-label={t('terminal-size')}>
-            <button type="button" className="ide-iconbtn w-6 text-[11px] font-semibold" onClick={() => setTerminalSize(terminalSize() - 1)} disabled={terminalSize() <= MIN_SIZE} aria-label={t('terminal-smaller')} title={t('terminal-smaller')}>A−</button>
-            <button type="button" className="ide-iconbtn w-6 text-[13px] font-semibold" onClick={() => setTerminalSize(terminalSize() + 1)} disabled={terminalSize() >= MAX_SIZE} aria-label={t('terminal-larger')} title={t('terminal-larger')}>A+</button>
+            <button type="button" className="ide-iconbtn w-6 text-[0.6875rem] font-semibold" onClick={() => setTerminalSize(terminalSize() - 1)} disabled={terminalSize() <= MIN_SIZE} aria-label={t('terminal-smaller')} title={t('terminal-smaller')}>A−</button>
+            <button type="button" className="ide-iconbtn w-6 text-[0.8125rem] font-semibold" onClick={() => setTerminalSize(terminalSize() + 1)} disabled={terminalSize() >= MAX_SIZE} aria-label={t('terminal-larger')} title={t('terminal-larger')}>A+</button>
           </span>}
           {loadHistory && a.git !== false && <button type="button" className="ide-iconbtn" onClick={() => setHistory(a.id)} aria-label={t('console-history')} title={t('console-history')}><Icon name="history" /></button>}
           {filesOf && <button type="button" className="ide-iconbtn" onClick={() => setBrowsing(a.id)} aria-label={t('console-files')} title={t('console-files')}><Icon name="files" /></button>}
@@ -265,7 +273,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   const panel = (id: string) => PANEL_TAB[id] ? <div className="min-h-0 flex-1 overflow-y-auto p-3">
     <Details tab={PANEL_TAB[id] as DetailsTab} attention={attention} approvals={approvals} notice={notice} changed={changed} boards={boards} messages={messages} usage={usage} projects={projects} onOpen={onOpen}
       onResolve={onResolve} onReview={loadDiff ? setReviewing : undefined} />
-  </div> : undefined;
+  </div> : id === 'theme' ? <div className="min-h-0 flex-1 overflow-y-auto"><ThemeEditor /></div> : undefined;
 
   // Nothing open: a start button, the agents that are running, and the two shortcuts.
   const welcome = (
@@ -295,7 +303,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
     <div className="ide">
       <header className="ide-bar min-h-10 flex-wrap border-b py-1 sm:h-10 sm:flex-nowrap sm:py-0">
         <span aria-hidden className="grid size-6 flex-none place-items-center rounded-xs bg-accent text-xs font-bold text-on-accent">A</span>
-        <h1 className="m-0 me-2 hidden text-[13px] font-semibold tracking-normal sm:block">{t('home-title')}</h1>
+        <h1 className="m-0 me-2 hidden text-[0.8125rem] font-semibold tracking-normal sm:block">{t('home-title')}</h1>
         {!showAgents && <button type="button" className="ide-iconbtn" onClick={() => setShowAgents(true)} aria-label={t('ide-show-agents')} title={t('ide-show-agents')}><Icon name="panelLeft" /></button>}
         <button type="button" onClick={onCommand} disabled={!onCommand} className="mx-auto flex h-7 min-w-0 max-w-md flex-1 items-center gap-2 rounded-xs border border-line bg-surface-0 px-2.5 text-start text-muted transition-colors duration-150 hover:border-accent hover:text-ink">
           <Icon name="search" className="size-3.5" /><span className="min-w-0 flex-1 truncate">{t('ide-command')}</span><kbd className="ide-kbd hidden sm:inline">{commandKey} K</kbd>
@@ -324,7 +332,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
           onResolve={onResolve} onReview={loadDiff ? setReviewing : undefined} onCollapse={() => setShowDetails(false)} />}
       </div>
 
-      <footer className="ide-bar h-6 flex-wrap border-t text-[11px] text-muted" aria-label={t('console-activity')}>
+      <footer className="ide-bar h-6 flex-wrap border-t text-[0.6875rem] text-muted" aria-label={t('console-activity')}>
         <a className="inline-flex items-center gap-1.5 hover:text-ink" href="#/machines"><span aria-hidden className={`size-1.5 rounded-full ${link === 'live' ? 'bg-finished' : 'bg-needs-you'}`} />{t('machines-online', { count: machines.filter((m) => m.online).length })}</a>
         <span>{t('ide-status-agents', { count: fleet.filter((a) => !a.closed).length })}</span>
         {needs > 0 && <button type="button" className="text-needs-you hover:underline" onClick={() => setShowDetails(true)}>{t('ide-status-needs', { count: needs })}</button>}

@@ -30,6 +30,7 @@ export type Action =
   | { type: 'preset'; preset: Preset; agents: readonly string[] }
   | { type: 'bind'; pane: string; bind?: Bind; panel?: string }
   | { type: 'open'; agent: string; background?: boolean }
+  | { type: 'show'; panel: string }
   | { type: 'prune'; alive: ReadonlySet<string> }
   | { type: 'replace'; layout: Layout };
 
@@ -287,6 +288,26 @@ function step(ws: Workspace, action: Action): Workspace {
       const g = groupOf(root, target.id);
       const keep = g ? g.tabs.children[g.tabs.active] : target;
       return set(keep && keep.panel !== 'empty' ? activateIn(added, keep.id) : added);
+    }
+    case 'show': {
+      // A panel that is not about one agent (the theme editor): brought to the front where it is, else put beside the pane in
+      // focus so what it changes stays in view (as a tab there when the limits leave no room for another pane).
+      const shown = panesOf(root).find((p) => p.panel === action.panel);
+      if (shown) return { ...step(ws, { type: 'activate', pane: shown.id }), ...(ws.zoom && ws.zoom !== shown.id ? { zoom: undefined } : {}) };
+      const panes = panesOf(root);
+      const target = panes.find((p) => p.id === ws.focus) ?? panes[0];
+      if (!target) return ws;
+      if (target.panel === 'empty') return step(ws, { type: 'bind', pane: target.id, panel: action.panel });
+      const fits = (n: LayoutNode) => panesOf(n).length <= MAX_PANES && depthOf(n) <= MAX_DEPTH;
+      const split = step(ws, { type: 'split', pane: target.id, direction: 'row', panel: action.panel });
+      if (fits(split.layout.root)) return split;
+      // No room beside it: a tab next to the pane in focus, else next to any pane where a tab fits.
+      const id = freshId(root);
+      for (const p of [target, ...panes.filter((x) => x.id !== target.id)]) {
+        const next = normalise(addTab(root, p.id, { type: 'pane', id, panel: action.panel }));
+        if (next && fits(next)) return set(next, { focus: id, zoom: undefined });
+      }
+      return ws;
     }
     case 'prune': {
       // Agents that are gone: a tab closes; a pane of its own stays in its place, empty, so the arrangement does not shift.

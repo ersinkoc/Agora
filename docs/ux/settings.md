@@ -6,7 +6,8 @@
 - **Agents:** installed kinds, integration level per kind, default mode (terminal or chat), registry sources.
 - **Projects:** default base branch, merge policy, approval policy, retention.
 - **Notifications:** per trigger and channel, quiet hours.
-- **Appearance:** theme, density, terminal font.
+- **Appearance:** theme (`themes.md`: a theme for light and one for dark, the theme editor), density, terminal font. In
+  the web window today: the title bar's scheme buttons, This device → Appearance, and **Edit theme** in the command palette.
 - **Advanced:** diagnostics (`agora doctor` download), backups, telemetry opt-in.
 
 ## Interface language

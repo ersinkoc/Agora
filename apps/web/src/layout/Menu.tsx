@@ -61,7 +61,7 @@ export function Menu({ label, items, children, className = 'ide-iconbtn', align 
       </button>
       {open && (
         <div ref={list} role="menu" aria-label={trail.length ? trail[trail.length - 1]?.label : label} onKeyDown={onKey}
-          className={`absolute top-full z-30 mt-1 grid max-h-[min(24rem,70vh)] min-w-56 max-w-[min(20rem,calc(100vw-2rem))] gap-px overflow-y-auto rounded-s border border-line bg-surface-1 p-1 text-[13px] text-ink shadow-card ${align === 'end' ? 'end-0' : 'start-0'}`}>
+          className={`absolute top-full z-30 mt-1 grid max-h-[min(24rem,70vh)] min-w-56 max-w-[min(20rem,calc(100vw-2rem))] gap-px overflow-y-auto rounded-s border border-line bg-surface-1 p-1 text-[0.8125rem] text-ink shadow-card ${align === 'end' ? 'end-0' : 'start-0'}`}>
           {trail.length > 0 && (
             <button type="button" role="menuitem" className="ide-row gap-1.5 text-muted" onClick={() => setTrail((cur) => cur.slice(0, -1))}>
               <Icon name="chevron" className="size-3 rotate-180 rtl:rotate-0" />{t('layout-menu-back')}

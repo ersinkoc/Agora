@@ -7,7 +7,8 @@
 The centre of the window is a **layout**: a tree of splits, tab groups and panes that the user arranges, saves and shares. The
 layout is plain, versioned JSON so every client (web today; the terminal client and any native client later, ADR-0068 rung 5–6)
 reads and writes the same file. This page is the format's specification and the web window's behaviour. Rung 1 covers the
-model, the presets and saved layouts; themes, the panel registry and keybindings are later rungs and are not described here.
+model, the presets and saved layouts; themes are `themes.md` (rung 2); the panel registry and keybindings are later rungs and are
+not described here.
 
 ## Format, version 1
 
@@ -41,6 +42,7 @@ Bind   = { "agent": string } | { "follow": "attention" | "selection" }
 | `tasks` | shared tasks and files |
 | `messages` | team chat between agents |
 | `usage` | what was spent |
+| `theme` | the theme editor (`themes.md`); added in rung 2, an older window shows it as an unknown panel |
 | `empty` | a chooser: an agent, "what needs you next", "the selected agent", or one of the panels above |
 
 A panel id this client does not know (a newer client's panel) is kept in the layout and drawn as a visible
