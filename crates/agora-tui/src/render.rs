@@ -583,7 +583,7 @@ pub fn chat_command(
 /// `row` cut into pieces of at most `first` characters for the first and `rest` for the others, at the last space that fits when
 /// there is one (the space itself is dropped), else in the middle of the word. Counted in characters: a wide character may overshoot
 /// a little, which is harmless.
-pub(crate) fn wrap_row(row: &str, first: usize, rest: usize) -> Vec<String> {
+pub fn wrap_row(row: &str, first: usize, rest: usize) -> Vec<String> {
     let mut out = Vec::new();
     let mut left: Vec<char> = row.chars().collect();
     while !left.is_empty() {
