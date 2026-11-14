@@ -70,25 +70,10 @@ fn text(s: &std::ffi::OsStr) -> io::Result<&str> {
     Ok(t)
 }
 
-/// This process's user as the task names it: the security identifier (`whoami /user`), which also works for Microsoft and Entra
-/// accounts whose `USERNAME` is not their account name.
+/// This process's user as the task names it: its security identifier, which also works for Microsoft and Entra accounts whose
+/// `USERNAME` is not their account name.
 fn current_user() -> io::Result<String> {
-    let out = checked(
-        Command::new(system32("whoami.exe"))
-            .args(["/user", "/fo", "csv", "/nh"])
-            .stdin(Stdio::null())
-            .output()?,
-    )?;
-    sid_of(&String::from_utf8_lossy(&out.stdout))
-        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))
-}
-
-/// The SID in `whoami /user /fo csv /nh` output: `"domain\user","S-1-5-21-…"`.
-fn sid_of(csv: &str) -> Option<String> {
-    csv.split(',')
-        .map(|f| f.trim().trim_matches('"'))
-        .find(|f| f.starts_with("S-1-"))
-        .map(str::to_string)
+    crate::winconfine::current_user_sid_text()
 }
 
 /// The task file for `spec`, run at `user`'s logon.
@@ -301,15 +286,6 @@ mod tests {
             xml.contains(r#"--home &quot;C:\my home\\&quot; --log"#),
             "{xml}"
         );
-    }
-
-    #[test]
-    fn the_user_is_named_by_its_sid() {
-        assert_eq!(
-            sid_of("\"white\\ersin\",\"S-1-5-21-111-222-333-1001\"\r\n").as_deref(),
-            Some("S-1-5-21-111-222-333-1001")
-        );
-        assert_eq!(sid_of("nothing"), None);
     }
 
     #[test]

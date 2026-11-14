@@ -107,3 +107,20 @@ fn a_symlinked_log_is_refused_and_its_target_untouched() {
     assert_ne!(mode(&target) & 0o100, 0o100, "the target became executable");
     let _ = std::fs::remove_dir_all(d);
 }
+
+/// An existing log others could read (one name, this user's) is made the user's only through its own descriptor.
+#[cfg(unix)]
+#[test]
+fn an_existing_readable_log_is_made_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = tmp("loose");
+    let log = d.join("node.log");
+    std::fs::write(&log, "old\n").unwrap();
+    std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let mut f = agora_platform::open_append_private(&log).unwrap();
+    writeln!(f, "new").unwrap();
+    drop(f);
+    assert_eq!(mode(&log), 0o600);
+    assert_eq!(std::fs::read_to_string(&log).unwrap(), "old\nnew\n");
+    let _ = std::fs::remove_dir_all(d);
+}
