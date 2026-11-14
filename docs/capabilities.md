@@ -40,7 +40,7 @@ L1 is an agent in a terminal read from its screen (a manifest); L2/L3 are struct
 | Resume after the node restarts (session ledger) | ADR-0060 Accepted | yes | node tests | none recorded here |
 | An agent starts helpers, with the user's signed approval | ADR-0057 Accepted | yes | node, hub and web tests | none recorded here |
 | Workspace clean-up and disk limits | ADR-0064 Accepted | not built | — | — |
-| Agent confinement (sandbox) | ADR-0047 Accepted, ADR-0050 Accepted | Linux and macOS yes; Windows built but off by default | sandbox tests on each OS | none recorded here |
+| Agent confinement (sandbox) | ADR-0047 Accepted, ADR-0050 Accepted | Linux and macOS yes; Windows built but off by default | sandbox tests on each OS | [macOS 2026-11-14](reviews/2026-11-14-macos-confinement-and-terminal-client.md): every way out refused; Claude Code and Codex run confined |
 
 ## People, approvals and coordination
 
@@ -64,7 +64,7 @@ L1 is an agent in a terminal read from its screen (a manifest); L2/L3 are struct
 | Screen password for remote sign-in | ADR-0067 Accepted | yes (rung 1) | hub tests | none recorded here |
 | Tailscale and Cloudflare Tunnel | ADR-0067 Accepted | not built (rungs 3 and 4) | — | — |
 | Layouts and themes | ADR-0068 Accepted | layouts and themes yes; panel registry, keybindings and the terminal client not built | web tests; visual baselines | none recorded here |
-| Terminal client (TUI) | ADR-0043 Accepted, ADR-0063 Accepted | yes | terminal-client tests | none recorded here |
+| Terminal client (TUI) | ADR-0043 Accepted, ADR-0063 Accepted | yes | terminal-client tests | [macOS 2026-11-14](reviews/2026-11-14-macos-confinement-and-terminal-client.md): list, tabs, readers, a real Claude Code agent |
 | Desktop app | ADR-0048 Accepted | partly ([phase 7](backlog/phase-7.md) P7-06 in progress) | builds on three systems | none recorded here |
 
 Performance figures, measured and not, are in [design/performance.md](design/performance.md).
