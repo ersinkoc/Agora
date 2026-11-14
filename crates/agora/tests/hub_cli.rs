@@ -1214,3 +1214,71 @@ fn the_console_with_only_the_hub_folder_dials_the_hubs_real_port() {
     err.read_line(&mut first).unwrap();
     assert!(first.contains(&format!("Connecting to {addr}")), "{first}");
 }
+
+/// ADR-0073 from the command line: a machine the hub has not seen for days is listed as old; `forget --old --yes` has the running
+/// hub forget it, and it is listed no more.
+#[test]
+fn an_old_machine_is_listed_as_old_and_forgotten_through_the_running_hub() {
+    use agora_hub::store::EventStore;
+    use agora_protocol::v1::{event::Body, Event, NodeOnline};
+    use prost::Message;
+    let root = tmp("machines");
+    let (hub_dir, home) = (root.join("hub"), root.join("home"));
+    std::fs::create_dir_all(&hub_dir).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    {
+        // A machine last heard from in 2020.
+        let store = SqliteStore::open(&hub_dir.join("hub.db")).unwrap();
+        let ev = Event {
+            producer_id: "old-box".into(),
+            seq: 1,
+            at_ms: 1_600_000_000_000,
+            body: Some(Body::NodeOnline(NodeOnline {
+                node_id: "old-box".into(),
+                ..Default::default()
+            })),
+        };
+        store
+            .append("old-box", 1, ev.at_ms, &ev.encode_to_vec())
+            .unwrap();
+    }
+    let mut hub = agora(
+        &home,
+        &["hub", "run", "--listen", "127.0.0.1:0", "--hub-dir"],
+    )
+    .arg(&hub_dir)
+    .stdout(Stdio::piped())
+    .stderr(Stdio::null())
+    .spawn()
+    .unwrap();
+    let mut line = String::new();
+    let mut out = BufReader::new(hub.stdout.take().unwrap());
+    out.read_line(&mut line).unwrap();
+    let _hub = Proc(hub);
+    let run = |args: &[&str]| {
+        let o = agora(&home, args)
+            .arg("--hub-dir")
+            .arg(&hub_dir)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        (
+            o.status.success(),
+            String::from_utf8_lossy(&o.stdout).into_owned() + &String::from_utf8_lossy(&o.stderr),
+        )
+    };
+    let (ok, listed) = run(&["hub", "machines"]);
+    assert!(ok, "{listed}");
+    assert!(
+        listed.contains("old-box · old, last seen 2020-"),
+        "{listed}"
+    );
+    // Without a terminal to answer and without --yes, nothing is forgotten.
+    let (_, asked) = run(&["hub", "machines", "forget", "--old"]);
+    assert!(asked.contains("Nothing was forgotten"), "{asked}");
+    let (ok, forgot) = run(&["hub", "machines", "forget", "--old", "--yes"]);
+    assert!(ok, "{forgot}");
+    assert!(forgot.contains("old-box is forgotten"), "{forgot}");
+    let (_, after) = run(&["hub", "machines"]);
+    assert!(after.contains("The hub shows no machine"), "{after}");
+}

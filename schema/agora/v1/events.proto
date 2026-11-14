@@ -21,6 +21,8 @@ message Event {
     NodeLink node_link = 14;
     // ADR-0061: the devices this node trusts now.
     NodeTrustedDevices node_trusted_devices = 13;
+    // ADR-0073: the owner had the hub forget this offline machine. Only the hub writes it (producer `hub`); earlier events stay.
+    NodeForgotten node_forgotten = 15;
     // project
     CheckoutDiscovered checkout_discovered = 20;
     WorktreeCreated worktree_created = 21;
@@ -221,6 +223,13 @@ message AgentInterrupted {
 
 message AgentForgotten {
   string agent_id = 1;
+}
+
+// ADR-0073. The live view stops listing the machine and what it ran. A later connection of the same node (`NodeLink` up) lists it
+// again; its agents closed before stay forgotten. `refused_return`: its certificates were revoked as well.
+message NodeForgotten {
+  string node_id = 1;
+  bool refused_return = 2;
 }
 
 message TerminalOpened {

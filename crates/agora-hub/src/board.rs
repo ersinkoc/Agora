@@ -802,6 +802,7 @@ mod tests {
                     memory_used_bytes: 0,
                     last_event_ms: 0,
                     link_generation: 0,
+                    forgotten: false,
                 },
             );
             v.checkouts

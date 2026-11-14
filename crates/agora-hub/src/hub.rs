@@ -321,6 +321,40 @@ impl Hub {
         .map_err(|_| Error::new(ErrorCode::Internal))
     }
 
+    /// ADR-0073: the hub stops listing an offline machine and what it ran. With `refuse_return`, every certificate enrolled under it
+    /// is revoked first, so its next connection is refused until it enrolls again. History stays, and usage still counts.
+    pub fn forget_node(
+        &self,
+        node: &str,
+        refuse_return: bool,
+        now_ms: u64,
+    ) -> Result<(), agora_protocol::Error> {
+        use agora_protocol::{Error, ErrorCode};
+        let mut g = self.lock();
+        match g.view.nodes.get(node) {
+            None => return Err(Error::new(ErrorCode::NodeUnknown).with("node_id", node)),
+            Some(n) if n.online => {
+                return Err(Error::new(ErrorCode::NodeOnline).with("node_id", node))
+            }
+            Some(n) if n.forgotten && !refuse_return => return Ok(()),
+            Some(_) => {}
+        }
+        if refuse_return {
+            crate::enroll::Enrollment::new(&self.store)
+                .revoke(node, now_ms)
+                .map_err(|_| Error::new(ErrorCode::Internal).with("incident_id", "node.forget"))?;
+        }
+        self.emit(
+            &mut g,
+            Body::NodeForgotten(agora_protocol::v1::NodeForgotten {
+                node_id: node.to_string(),
+                refused_return: refuse_return,
+            }),
+            now_ms,
+        )
+        .map_err(|_| Error::new(ErrorCode::Internal).with("incident_id", "node.forget"))
+    }
+
     /// A node's connection ended without it saying goodbye: record that it is offline.
     pub fn node_disconnected(&self, node: &str, now_ms: u64) -> Result<(), StoreError> {
         let mut g = self.lock();
@@ -821,6 +855,83 @@ mod tests {
         let (view, _) = hub.view();
         assert!(view.agents["n1/a"].forgotten);
         assert!(!view.agents["n1/a"].running);
+    }
+
+    #[test]
+    fn an_offline_machine_can_be_forgotten_and_comes_back_when_it_connects() {
+        use agora_protocol::{v1::AgentExited, ErrorCode};
+        let (hub, sup) = (hub(), support());
+        let mut s = open_session(&hub, &sup, "n1");
+        let (reg, _cmds, generation) = hub.node_link_opened("n1", Vec::new(), 1);
+        hub.ingest(&mut s, &online("n1", 1)).unwrap();
+        hub.ingest(&mut s, &agent("n1", 2, "closed")).unwrap();
+        hub.ingest(&mut s, &agent("n1", 3, "running")).unwrap();
+        let exited = Event {
+            producer_id: "n1".into(),
+            seq: 4,
+            at_ms: 4,
+            body: Some(Body::AgentExited(AgentExited {
+                agent_id: "closed".into(),
+                exit_code: 0,
+            })),
+        };
+        hub.ingest(&mut s, &exited.encode_to_vec()).unwrap();
+        // Connected: refused, nothing recorded. Unknown: refused.
+        let before = hub.view().1;
+        assert_eq!(
+            hub.forget_node("n1", false, 5).unwrap_err().code,
+            ErrorCode::NodeOnline
+        );
+        assert_eq!(
+            hub.forget_node("nobody", false, 5).unwrap_err().code,
+            ErrorCode::NodeUnknown
+        );
+        assert_eq!(hub.view().1, before);
+
+        hub.node_link_closed(reg, generation, false, 5, 5);
+        let sub = hub.subscribe(Some(hub.view().1)).unwrap();
+        hub.forget_node("n1", false, 6).unwrap();
+        let heard = sub.live.try_recv().unwrap();
+        assert!(matches!(heard.event.body, Some(Body::NodeForgotten(_))));
+        // Kept in the hub's records, left out of what clients are shown.
+        let (view, _) = hub.view();
+        assert!(view.nodes["n1"].forgotten);
+        assert!(view.agents["n1/closed"].forgotten && view.agents["n1/running"].forgotten);
+        let shown = crate::server::snapshot_of(&view, 0);
+        assert!(shown.nodes.is_empty(), "{:?}", shown.nodes);
+        assert!(shown.agents.is_empty(), "{:?}", shown.agents);
+        // Asking again is harmless.
+        let at = hub.view().1;
+        hub.forget_node("n1", false, 7).unwrap();
+        assert_eq!(hub.view().1, at);
+
+        // It connects again: listed again, with the agent it still runs; the one closed before stays forgotten.
+        let _back = hub.node_link_opened("n1", Vec::new(), 8);
+        let (view, _) = hub.view();
+        assert!(!view.nodes["n1"].forgotten);
+        let shown = crate::server::snapshot_of(&view, 0);
+        assert_eq!(shown.nodes.len(), 1);
+        let agents: Vec<&str> = shown.agents.iter().map(|a| a.agent_id.as_str()).collect();
+        assert_eq!(agents, ["n1/running"]);
+    }
+
+    #[test]
+    fn forgetting_with_refuse_return_revokes_the_machines_certificates() {
+        let (hub, sup) = (hub(), support());
+        let ca = crate::ca::Ca::generate("ca").unwrap();
+        let (_, csr) = crate::ca::new_device_request().unwrap();
+        let mut e = crate::enroll::Enrollment::new(hub.store());
+        let code = e.create_code(1).unwrap();
+        let issued = e.redeem(&ca, &code, "n1", &csr, 2).unwrap();
+        let mut s = open_session(&hub, &sup, "n1");
+        hub.ingest(&mut s, &online("n1", 1)).unwrap();
+        hub.node_disconnected("n1", 3).unwrap();
+        hub.forget_node("n1", true, 4).unwrap();
+        assert!(!crate::enroll::Enrollment::new(hub.store())
+            .is_active(&issued.serial_hex)
+            .unwrap());
+        let (view, _) = hub.view();
+        assert!(view.nodes["n1"].forgotten);
     }
 
     #[test]

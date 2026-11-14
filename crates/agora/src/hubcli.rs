@@ -1462,3 +1462,153 @@ mod listen_file_tests {
         assert_eq!(local_dial_addr(""), None);
     }
 }
+
+/// ADR-0073: a machine not seen for this long is shown as old (the window and the TUI use the same threshold).
+pub(crate) const OLD_AFTER_MS: u64 = 24 * 60 * 60 * 1000;
+
+/// A machine's state as people see it: `online`, `offline`, or `old` (offline and not seen for [`OLD_AFTER_MS`]).
+pub(crate) fn machine_state(online: bool, last_seen_ms: u64, now_ms: u64) -> &'static str {
+    if online {
+        "online"
+    } else if now_ms.saturating_sub(last_seen_ms) >= OLD_AFTER_MS {
+        "old"
+    } else {
+        "offline"
+    }
+}
+
+/// `agora hub machines`: every machine the hub shows, with its state and when it was last seen. `forget NAME` and `forget --old`
+/// (every old machine) ask the running hub to forget them (ADR-0073), after the owner's yes on this terminal (`--yes` for a
+/// script); `--refuse-return` also revokes their certificates. The list is read from the hub's file; forgetting goes through the
+/// running hub, signed in from its folder, so its view and every window hear of it.
+pub fn hub_machines(say: &Say, o: &Opts) -> ExitCode {
+    let dir = hub_dir(o);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+    let view = match SqliteStore::open(&dir.join("hub.db"))
+        .and_then(|s| agora_hub::projection::View::rebuild(&s))
+    {
+        Ok((view, _)) => view,
+        Err(e) => {
+            say.err(key!("cli-hub-failed"), &[("reason", e.to_string().into())]);
+            return ExitCode::from(1);
+        }
+    };
+    let shown = view.shown();
+    let machines: Vec<(&String, &agora_hub::projection::NodeView, &str)> = shown
+        .nodes
+        .iter()
+        .map(|(id, n)| (id, n, machine_state(n.online, n.last_event_ms, now)))
+        .collect();
+    let picked: Vec<&String> = match o.positional.as_slice() {
+        [] if !o.old => {
+            if machines.is_empty() {
+                say.out(key!("cli-machines-none"), &[]);
+            }
+            for (id, n, state) in &machines {
+                say.out(
+                    key!("cli-machine-line"),
+                    &[
+                        ("id", (*id).clone().into()),
+                        ("state", (*state).into()),
+                        ("seen", utc(n.last_event_ms).into()),
+                    ],
+                );
+            }
+            return ExitCode::SUCCESS;
+        }
+        [verb] if verb == "forget" && o.old => machines
+            .iter()
+            .filter(|(_, _, s)| *s == "old")
+            .map(|(id, _, _)| *id)
+            .collect(),
+        [verb, name] if verb == "forget" && !o.old => {
+            match machines.iter().find(|(id, _, _)| *id == name) {
+                Some((id, _, _)) => vec![*id],
+                None => {
+                    say.err(key!("cli-machine-unknown"), &[("id", name.clone().into())]);
+                    return ExitCode::from(1);
+                }
+            }
+        }
+        _ => {
+            say.err(key!("cli-bad-arguments"), &[]);
+            return ExitCode::from(2);
+        }
+    };
+    if picked.is_empty() {
+        say.out(key!("cli-machines-none-old"), &[]);
+        return ExitCode::SUCCESS;
+    }
+    for (id, n, state) in machines.iter().filter(|(id, _, _)| picked.contains(id)) {
+        say.out(
+            key!("cli-machine-line"),
+            &[
+                ("id", (*id).clone().into()),
+                ("state", (*state).into()),
+                ("seen", utc(n.last_event_ms).into()),
+            ],
+        );
+    }
+    if !o.yes {
+        use std::io::{BufRead, IsTerminal, Write};
+        if !std::io::stdin().is_terminal() {
+            say.out(key!("cli-machines-not-asked"), &[]);
+            return ExitCode::SUCCESS;
+        }
+        let question = if o.refuse_return {
+            key!("cli-machines-question-refuse")
+        } else {
+            key!("cli-machines-question")
+        };
+        let mut out = std::io::stdout();
+        let _ = write!(out, "{} ", say.text(question, &[]));
+        let _ = out.flush();
+        let mut answer = String::new();
+        let _ = std::io::stdin().lock().read_line(&mut answer);
+        if !crate::trustcli::is_yes(&answer, &say.text(key!("cli-devices-yes"), &[])) {
+            say.out(key!("cli-machines-declined"), &[]);
+            return ExitCode::SUCCESS;
+        }
+    }
+    let session = (|| {
+        let hub = agora_tui::client::Hub {
+            addr: own_hub_addr(&dir).unwrap_or_else(|| DEFAULT_LISTEN.to_string()),
+            ca_pem: std::fs::read_to_string(dir.join("ca.pem")).map_err(|e| e.to_string())?,
+        };
+        let code = new_login_code(&dir)?;
+        let token = agora_tui::client::sign_in(&hub, &code).map_err(|e| format!("{e:?}"))?;
+        agora_tui::client::Session::connect(&hub, &token).map_err(|e| format!("{e:?}"))
+    })();
+    let mut session = match session {
+        Ok(s) => s,
+        Err(reason) => {
+            say.err(
+                key!("cli-machines-hub-unreachable"),
+                &[("reason", reason.into())],
+            );
+            return ExitCode::from(1);
+        }
+    };
+    let mut code = ExitCode::SUCCESS;
+    for id in picked {
+        let forget = agora_protocol::v1::command_request::Command::NodeForget(
+            agora_protocol::v1::NodeForget {
+                node_id: id.clone(),
+                refuse_return: o.refuse_return,
+            },
+        );
+        match session.command("", forget, std::time::Duration::from_secs(15)) {
+            Ok(()) => say.out(key!("cli-machine-forgotten"), &[("id", id.clone().into())]),
+            Err(e) => {
+                say.err(
+                    key!("cli-machine-not-forgotten"),
+                    &[("id", id.clone().into()), ("code", e.into())],
+                );
+                code = ExitCode::from(1);
+            }
+        }
+    }
+    code
+}

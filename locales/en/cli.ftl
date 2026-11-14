@@ -26,6 +26,7 @@ cli-usage =
       agora hub ssh [add NAME DESTINATION [--port N]] [--hub-dir DIR]
       agora hub backup [FILE] [--keep N] [--hub-dir DIR]
       agora hub restore FILE [--hub-dir DIR]
+      agora hub machines [forget NAME | forget --old] [--refuse-return] [--yes] [--hub-dir DIR]
       agora hub devices [forget DEVICE_ID] [--hub-dir DIR]
       agora node enroll --hub URL --ca FILE --code CODE --id NAME [--yes --fingerprint FP]... [--include-others] [--replace]
       agora panel
@@ -257,3 +258,18 @@ down-failed = Could not stop the { $role }: { $reason }
 down-nothing = Nothing to stop: `agora` did not start anything that is still running.
 cli-node-policy-not-understood = node.policy_not_understood: the policy file has a line this node does not understand ({ $line }), so no agent may start without asking until it is fixed.
 cli-version = Agora { $version }
+cli-machines-none = The hub shows no machine.
+cli-machines-none-old = No machine is old: every machine was seen in the last 24 hours.
+cli-machine-line = { $id } · { $state ->
+    [online] online
+    [old] old, last seen { $seen }
+   *[other] offline, last seen { $seen }
+}
+cli-machine-unknown = The hub shows no machine named { $id }.
+cli-machines-question = Forget these machines? They leave every window; one that connects again comes back. [y/N]
+cli-machines-question-refuse = Forget these machines and refuse them if they connect again? Each would need a new join code. [y/N]
+cli-machines-declined = Nothing was forgotten.
+cli-machines-not-asked = Nothing was forgotten: this terminal cannot answer. Run it in a terminal, or add --yes.
+cli-machines-hub-unreachable = The running hub could not be reached from its folder ({ $reason }). Machines are forgotten by the running hub; start it with "agora" or "agora hub run".
+cli-machine-forgotten = { $id } is forgotten.
+cli-machine-not-forgotten = { $id } was not forgotten ({ $code }).

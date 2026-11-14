@@ -26,6 +26,7 @@ cli-usage =
       agora hub ssh [add AD HEDEF [--port N]] [--hub-dir DIR]
       agora hub backup [DOSYA] [--keep N] [--hub-dir DİZİN]
       agora hub restore DOSYA [--hub-dir DİZİN]
+      agora hub machines [forget AD | forget --old] [--refuse-return] [--yes] [--hub-dir DİZİN]
       agora hub devices [forget CİHAZ_ID] [--hub-dir DİZİN]
       agora node enroll --hub URL --ca FILE --code CODE --id NAME [--yes --fingerprint PARMAK_İZİ]... [--include-others] [--replace]
       agora panel
@@ -254,3 +255,18 @@ down-failed = { $role } durdurulamadı: { $reason }
 down-nothing = Durdurulacak bir şey yok: `agora` şu anda çalışan hiçbir şey başlatmamış.
 cli-node-policy-not-understood = node.policy_not_understood: ilke dosyasında bu makinenin anlamadığı bir satır var ({ $line }); düzeltilene kadar hiçbir ajan sormadan başlatılamaz.
 cli-version = Agora { $version }
+cli-machines-none = Hub hiçbir makine göstermiyor.
+cli-machines-none-old = Eski makine yok: her makine son 24 saatte görüldü.
+cli-machine-line = { $id } · { $state ->
+    [online] çevrimiçi
+    [old] eski, son görülme { $seen }
+   *[other] çevrimdışı, son görülme { $seen }
+}
+cli-machine-unknown = Hub { $id } adında bir makine göstermiyor.
+cli-machines-question = Bu makineler unutulsun mu? Her pencereden kalkarlar; yeniden bağlanan geri gelir. [e/H]
+cli-machines-question-refuse = Bu makineler unutulsun ve yeniden bağlanırlarsa reddedilsin mi? Her biri yeni bir katılım kodu ister. [e/H]
+cli-machines-declined = Hiçbir şey unutulmadı.
+cli-machines-not-asked = Hiçbir şey unutulmadı: bu terminal cevap veremiyor. Bir terminalde çalıştırın ya da --yes ekleyin.
+cli-machines-hub-unreachable = Çalışan hub'a klasöründen ulaşılamadı ({ $reason }). Makineleri çalışan hub unutur; "agora" ya da "agora hub run" ile başlatın.
+cli-machine-forgotten = { $id } unutuldu.
+cli-machine-not-forgotten = { $id } unutulamadı ({ $code }).
