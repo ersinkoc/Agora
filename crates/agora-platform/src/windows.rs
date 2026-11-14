@@ -92,6 +92,25 @@ fn owner_only_descriptor(inherit: bool) -> io::Result<Descriptor> {
 /// Creates the file at `path`, which must not exist yet (`CREATE_NEW`, so a planted file or link is not followed), already owner-only:
 /// the descriptor is given at creation, so there is no moment in which the file carries what its folder passes on and another user
 /// could open it (#320). The handle is not inheritable and the file is not shared while open.
+/// How many names (hard links) an open file has, and whether the handle is a reparse point (a link opened with
+/// `FILE_FLAG_OPEN_REPARSE_POINT`): asked of the handle, so a name swapped after the open cannot change the answer.
+pub(crate) fn link_facts(file: &std::fs::File) -> io::Result<(u32, bool)> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_REPARSE_POINT,
+    };
+    // SAFETY: an all-zero structure is a valid out-buffer.
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    // SAFETY: a live handle owned by `file` and a valid out-pointer.
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle() as HANDLE, &mut info) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok((
+        info.nNumberOfLinks,
+        info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0,
+    ))
+}
+
 pub(crate) fn create_private_new(path: &Path) -> io::Result<std::fs::File> {
     use std::os::windows::ffi::OsStrExt;
     use std::os::windows::io::FromRawHandle;

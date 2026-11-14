@@ -1352,35 +1352,85 @@ pub fn stop_requested() -> bool {
     }
 }
 
-/// Opens `path` to append, creating it readable and writable by the user only (never executable), and refuses a symbolic link there:
-/// a link planted in the Agora folder must neither redirect what is written nor have its target's permissions changed. A log a
-/// process writes for itself (`agora supervise --log`).
+/// Opens `path` to append for a log a process writes for itself (`agora supervise --log`), so that nothing planted in the Agora folder
+/// can redirect what is written or have its permissions changed (`InvalidInput` when it refuses):
+/// - the folder it is in must be a real folder, not a link or junction to elsewhere;
+/// - a new file is created exclusively, readable and writable by the user only (never executable) from its creation on;
+/// - an existing file is opened without following a link, and refused when it is a link, not a regular file, or has another name (a
+///   hard link); its permissions are left as they are.
 pub fn open_append_private(path: &std::path::Path) -> io::Result<std::fs::File> {
-    let link = || io::Error::new(io::ErrorKind::InvalidInput, "a symbolic link");
-    if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
-        return Err(link());
+    let refuse = || io::Error::new(io::ErrorKind::InvalidInput, "a link");
+    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        let m = std::fs::symlink_metadata(dir)?;
+        #[cfg(windows)]
+        let reparse = std::os::windows::fs::MetadataExt::file_attributes(&m) & 0x400 != 0;
+        #[cfg(not(windows))]
+        let reparse = false;
+        if !m.is_dir() || m.file_type().is_symlink() || reparse {
+            return Err(refuse());
+        }
     }
-    let mut options = std::fs::OpenOptions::new();
-    options.create(true).append(true);
+    if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(refuse());
+    }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-        // O_NOFOLLOW closes the moment between the check above and the open.
-        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-        let file = options.open(path)?;
-        // A file that existed keeps its mode on open: make it the user's only.
-        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+        let mut create = std::fs::OpenOptions::new();
+        create
+            .append(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW);
+        let file = match create.open(path) {
+            Ok(f) => return Ok(f),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                let mut existing = std::fs::OpenOptions::new();
+                existing.append(true).custom_flags(libc::O_NOFOLLOW);
+                existing.open(path).map_err(|e| {
+                    if e.raw_os_error() == Some(libc::ELOOP) {
+                        refuse()
+                    } else {
+                        e
+                    }
+                })?
+            }
+            Err(e) => return Err(e),
+        };
+        let m = file.metadata()?;
+        if !m.is_file() || m.nlink() > 1 {
+            return Err(refuse());
+        }
         Ok(file)
     }
     #[cfg(windows)]
     {
-        let file = options.open(path)?;
-        windows::set_owner_only(path, false)?;
+        use std::os::windows::fs::OpenOptionsExt;
+        // Created private from the start (its security descriptor is given at creation), or there already.
+        match windows::create_private_new(path) {
+            Ok(f) => drop(f),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
+        // Opened as itself, never through a link swapped in meanwhile, and checked through the handle.
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        let file = std::fs::OpenOptions::new()
+            .append(true)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)?;
+        let (links, reparse) = windows::link_facts(&file)?;
+        if reparse || links > 1 || !file.metadata()?.is_file() {
+            return Err(refuse());
+        }
         Ok(file)
     }
     #[cfg(not(any(unix, windows)))]
     {
-        options.open(path)
+        let _ = refuse;
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
     }
 }
 
