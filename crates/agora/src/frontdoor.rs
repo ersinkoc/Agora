@@ -537,16 +537,33 @@ pub fn web(say: &Say) -> ExitCode {
 /// A failure to take or change a role's lock, said in words: a guard held too long by another process (stopped or hung) is named with
 /// its file, anything else is passed on as the reason.
 pub(crate) fn lock_failed(say: &Say, lock: &Path, e: &std::io::Error) -> ExitCode {
-    if e.kind() == std::io::ErrorKind::TimedOut {
-        let mut guard = lock.as_os_str().to_owned();
-        guard.push(".guard");
-        say.err(
-            key!("frontdoor-lock-busy"),
-            &[("path", PathBuf::from(guard).display().to_string().into())],
-        );
-        return ExitCode::from(1);
+    let mut guard = lock.as_os_str().to_owned();
+    guard.push(".guard");
+    let path: Arg = PathBuf::from(guard).display().to_string().into();
+    // The refusals of `agora_platform::open_lock_private` / `ensure_private_dir`, named for what they are.
+    let id = match e.kind() {
+        std::io::ErrorKind::TimedOut => key!("frontdoor-lock-busy"),
+        std::io::ErrorKind::InvalidInput => key!("frontdoor-lock-unsafe"),
+        std::io::ErrorKind::PermissionDenied => key!("frontdoor-lock-not-yours"),
+        _ => return failed(say, &e.to_string()),
+    };
+    say.err(id, &[("path", path)]);
+    ExitCode::from(1)
+}
+
+/// [`lock_failed`] after `agora down` stopped (or found ended) the lock's process: a busy guard leaves only its old lock file behind,
+/// which the next start replaces, and is said that way.
+fn down_lock_failed(say: &Say, lock: &Path, e: &std::io::Error) -> ExitCode {
+    if e.kind() != std::io::ErrorKind::TimedOut {
+        return lock_failed(say, lock, e);
     }
-    failed(say, &e.to_string())
+    let mut guard = lock.as_os_str().to_owned();
+    guard.push(".guard");
+    say.err(
+        key!("down-lock-busy"),
+        &[("path", PathBuf::from(guard).display().to_string().into())],
+    );
+    ExitCode::from(1)
 }
 
 fn failed(say: &Say, reason: &str) -> ExitCode {
@@ -857,7 +874,8 @@ fn ensure(say: &Say, home: &Path, m: &Machine, role: Role) -> Result<(), ExitCod
             if let Err(e) = started {
                 // Only this process's own lock: a supervisor may hold it by now.
                 if let Some(me) = LockInfo::of(std::process::id()) {
-                    remove_lock_of(&lock, &me);
+                    // A stale lock of its own is harmless (the next start takes it over), so a busy guard is not a second failure here.
+                    let _ = remove_lock_of(&lock, &me);
                 }
                 say.err(
                     key!("frontdoor-not-ready"),
@@ -1113,13 +1131,12 @@ fn supervised_child(pid: u32) -> Option<u32> {
 
 /// Removes the role's lock only while it still names `l` (the same pid and start time): a supervisor that took the lock after `l`
 /// ended keeps it. An unreadable lock (one being written) is left alone too.
-fn remove_lock_of(lock: &Path, l: &LockInfo) {
-    let Ok(_guard) = guard(lock) else {
-        return;
-    };
+fn remove_lock_of(lock: &Path, l: &LockInfo) -> std::io::Result<()> {
+    let _guard = guard(lock)?;
     if read_lock(lock).is_some_and(|now| now.pid == l.pid && now.start == l.start) {
         let _ = std::fs::remove_file(lock);
     }
+    Ok(())
 }
 
 /// How many holders of one role `agora down` stops in a row: a supervisor that took the lock while the one before was being stopped is
@@ -1142,7 +1159,9 @@ pub(crate) fn stop_role(
             break;
         };
         if !l.alive() {
-            remove_lock_of(&lock, &l);
+            if let Err(e) = remove_lock_of(&lock, &l) {
+                *code = down_lock_failed(say, &lock, &e);
+            }
             break;
         }
         let label: Arg = role.label(say).into();
@@ -1162,12 +1181,17 @@ pub(crate) fn stop_role(
         if l.alive() {
             say.err(
                 key!("down-failed"),
-                &[("role", label), ("reason", "still running".into())],
+                &[
+                    ("role", label),
+                    ("reason", say.text(key!("down-still-running"), &[]).into()),
+                ],
             );
             *code = ExitCode::from(1);
             break;
         }
-        remove_lock_of(&lock, &l);
+        // The process ended; its lock could not be removed only when another process holds the guard (stopped or hung): said, and the
+        // command fails, instead of waiting another round and calling it done.
+        let removed = remove_lock_of(&lock, &l);
         // What the ended process had open (its socket, its port) can linger a moment; status reads them right after.
         if let Some(m) = machine {
             let end = Instant::now() + Duration::from_secs(5);
@@ -1184,6 +1208,10 @@ pub(crate) fn stop_role(
             },
             &[("role", label), ("pid", i64::from(l.pid).into())],
         );
+        if let Err(e) = removed {
+            *code = down_lock_failed(say, &lock, &e);
+            break;
+        }
     }
     stopped_any
 }
@@ -1244,7 +1272,7 @@ mod tests {
         let held = guard(&lock).unwrap();
         let remover = {
             let (lock, stopped) = (lock.clone(), stopped.clone());
-            std::thread::spawn(move || remove_lock_of(&lock, &stopped))
+            std::thread::spawn(move || remove_lock_of(&lock, &stopped).unwrap())
         };
         std::thread::sleep(Duration::from_millis(300));
         assert!(lock.exists(), "the removal did not wait for the guard");
@@ -1275,6 +1303,24 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// Linux's follow-up to #560: when another process holds the guard, removing the lock fails (TimedOut) instead of returning as if
+    /// done, so `agora down` can say so and fail.
+    #[test]
+    fn removing_a_lock_under_a_held_guard_fails() {
+        let dir = tmp("guard-held-remove");
+        let lock = dir.join("run").join("node.lock");
+        let held = guard(&lock).unwrap();
+        let me = LockInfo::of(std::process::id()).unwrap();
+        std::fs::write(&lock, me.text()).unwrap();
+        // A short wait, through the same path `remove_lock_of` takes.
+        let e = guard_within(&lock, Duration::from_millis(200)).unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::TimedOut);
+        drop(held);
+        remove_lock_of(&lock, &me).unwrap();
+        assert!(!lock.exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn down_removes_only_the_lock_of_the_process_it_stopped() {
         let dir = tmp("lock-of");
@@ -1286,13 +1332,13 @@ mod tests {
             version: String::new(),
         };
         std::fs::write(&lock, me.text()).unwrap();
-        remove_lock_of(&lock, &stopped);
+        remove_lock_of(&lock, &stopped).unwrap();
         assert!(lock.exists(), "a newer holder's lock was deleted");
         std::fs::write(&lock, "").unwrap();
-        remove_lock_of(&lock, &me);
+        remove_lock_of(&lock, &me).unwrap();
         assert!(lock.exists(), "a lock being written was deleted");
         std::fs::write(&lock, me.text()).unwrap();
-        remove_lock_of(&lock, &me);
+        remove_lock_of(&lock, &me).unwrap();
         assert!(!lock.exists());
         let _ = std::fs::remove_dir_all(dir);
     }

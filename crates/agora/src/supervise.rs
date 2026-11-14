@@ -452,7 +452,12 @@ pub fn supervise(say: &Say, word: &str, start: &Start) -> ExitCode {
         frontdoor::rotate(&log);
         let file = match agora_platform::open_append_private(&log) {
             Ok(f) => f,
-            Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => {
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::InvalidInput | std::io::ErrorKind::PermissionDenied
+                ) =>
+            {
                 say.err(
                     key!("supervise-log-link"),
                     &[("log", log.display().to_string().into())],

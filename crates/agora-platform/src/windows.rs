@@ -131,7 +131,7 @@ pub(crate) fn open_private(dir: &Path, path: &Path, append: bool) -> io::Result<
     }
     // A file another user owns keeps its owner's rights over it whatever its ACL says: refused.
     if !owned_by_this_user(&file)? {
-        return Err(refuse());
+        return Err(io::Error::from(io::ErrorKind::PermissionDenied));
     }
     set_owner_only_handle(&file, false)?;
     drop(held);
@@ -199,8 +199,11 @@ pub(crate) fn ensure_private_dir(dir: &Path) -> io::Result<()> {
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
         .open(dir)?;
     let (_, reparse) = link_facts(&held)?;
-    if reparse || !held.metadata()?.is_dir() || !owned_by_this_user(&held)? {
+    if reparse || !held.metadata()?.is_dir() {
         return Err(refuse());
+    }
+    if !owned_by_this_user(&held)? {
+        return Err(io::Error::from(io::ErrorKind::PermissionDenied));
     }
     set_owner_only_handle(&held, true)
 }
