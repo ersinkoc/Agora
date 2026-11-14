@@ -149,6 +149,7 @@ impl Scope {
             Body::NodeOnline(e) => self.node_visible(&e.node_id),
             Body::NodeOffline(e) => self.node_visible(&e.node_id),
             Body::NodeLink(e) => self.node_visible(&e.node_id),
+            Body::NodeForgotten(e) => self.node_visible(&e.node_id),
             Body::NodeResources(e) => self.node_visible(&e.node_id),
             Body::NodeTrustedDevices(_) => self.node_visible(node),
             Body::CheckoutDiscovered(e) => {

@@ -130,6 +130,24 @@ pub struct EventSink {
     set_aside: Option<SetAside>,
     /// ADR-0060: learns from every event recorded (see [`crate::ledger::Ledger::observe`]). Never held with another lock.
     ledger: std::sync::OnceLock<Arc<crate::ledger::Ledger>>,
+    /// Usage reports gathered before they are logged ([`crate::usage_merge`]). Never held with `log`.
+    usage: Mutex<crate::usage_merge::UsageMerge>,
+}
+
+impl Drop for EventSink {
+    /// When the sink is dropped in-process, the usage still being gathered is logged. A node ended from outside (`agora down`, a
+    /// restart, a crash: `SIGTERM` or `TerminateProcess` with no handler) does not unwind, so up to [`crate::usage_merge::WINDOW_MS`]
+    /// of each agent's usage is lost then (#522 review; a stop handler that flushes first is the follow-up).
+    fn drop(&mut self) {
+        let rest = self
+            .usage
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take_all();
+        for u in rest {
+            self.write(Body::AgentUsageReported(u));
+        }
+    }
 }
 
 /// An event log found at start whose unacknowledged events name another producer (for example `local`, from runs before the node
@@ -242,6 +260,7 @@ impl EventSink {
             last_online: AtomicU64::new(0),
             set_aside,
             ledger: std::sync::OnceLock::new(),
+            usage: Mutex::new(crate::usage_merge::UsageMerge::default()),
         })
     }
 
@@ -419,6 +438,50 @@ impl EventSink {
     }
 
     fn record(&self, body: Body) {
+        let ended = match &body {
+            // Gathered for a few seconds and logged as one (see `crate::usage_merge`).
+            Body::AgentUsageReported(u) => {
+                let back = self
+                    .usage
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .add(now_ms(), u.clone());
+                if let Some(u) = back {
+                    self.write(Body::AgentUsageReported(u));
+                }
+                return;
+            }
+            Body::AgentExited(e) => Some(e.agent_id.clone()),
+            Body::AgentInterrupted(e) => Some(e.agent_id.clone()),
+            _ => None,
+        };
+        // An agent that ended: what it used is logged before its end.
+        if let Some(agent) = ended {
+            let gathered = self
+                .usage
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take_agent(&agent);
+            for u in gathered {
+                self.write(Body::AgentUsageReported(u));
+            }
+        }
+        self.write(body);
+    }
+
+    /// Logs the usage reports whose gathering window has passed. Called on every supervision tick.
+    pub fn flush_usage(&self) {
+        let due = self
+            .usage
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .due(now_ms());
+        for u in due {
+            self.write(Body::AgentUsageReported(u));
+        }
+    }
+
+    fn write(&self, body: Body) {
         if let Some(ledger) = self.ledger.get() {
             ledger.observe(&body, now_ms());
         }
@@ -1628,6 +1691,7 @@ impl Node {
                                 ev.node_resources(&node_id, running, running, memory);
                             }
                         }
+                        ev.flush_usage();
                         std::thread::sleep(TICK);
                     }
                 })?

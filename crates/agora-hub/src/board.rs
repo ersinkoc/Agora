@@ -131,6 +131,14 @@ struct Joins {
     pending: BTreeMap<String, (u64, BTreeSet<String>)>,
 }
 
+/// A project's board at one moment (see [`Boards::checkpoint`]).
+pub struct Checkpoint(Option<Mesh>);
+
+/// Whether a board tool can change the board (everything but reading the task list).
+pub fn changes_board(tool: &str) -> bool {
+    BOARD_TOOLS.contains(&tool) && tool != "task_list"
+}
+
 #[derive(Default)]
 pub struct Boards {
     by_project: Mutex<BTreeMap<String, Mesh>>,
@@ -317,6 +325,25 @@ impl Boards {
         });
         a.events = mesh.take_events();
         a
+    }
+
+    /// A copy of a project's board as it is now, to put back with [`restore`](Self::restore) when a change cannot be stored.
+    pub fn checkpoint(&self, project: &str) -> Checkpoint {
+        let g = self.by_project.lock().unwrap_or_else(|e| e.into_inner());
+        Checkpoint(g.get(project).cloned())
+    }
+
+    /// Puts a project's board back as [`checkpoint`](Self::checkpoint) saw it (no board then: none now).
+    pub fn restore(&self, project: &str, saved: Checkpoint) {
+        let mut g = self.by_project.lock().unwrap_or_else(|e| e.into_inner());
+        match saved.0 {
+            Some(mesh) => {
+                g.insert(project.to_string(), mesh);
+            }
+            None => {
+                g.remove(project);
+            }
+        }
     }
 
     /// Undoes a handoff whose message could not be delivered: the task goes back to the giver. Returns the audit events.
@@ -802,6 +829,7 @@ mod tests {
                     memory_used_bytes: 0,
                     last_event_ms: 0,
                     link_generation: 0,
+                    forgotten: false,
                 },
             );
             v.checkouts

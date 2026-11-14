@@ -31,7 +31,7 @@ impl Lease {
 }
 
 /// All leases of one project.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct LeaseTable {
     leases: Vec<Lease>,
 }
