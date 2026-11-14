@@ -23,12 +23,16 @@ The review screen opens from an agent's "files changed" chip, from Changes in De
 (`apps/web/src/components/ChangesView.tsx`, read-only):
 
 - Left: the changed files grouped by folder (folders fold), each with a status letter (changed, added, deleted, renamed) and
-  +/− counts; filters by status with counts, and a filter by name. Keys: `j`/`k` (or arrows in the list) move between files.
+  +/− counts; filters by status with counts, and a filter by name. Keys: `j`/`k` (or arrows in the list) move between files,
+  opening a folded folder they reach.
 - Right: one file at a time, unified or side by side (remembered per browser), line numbers on both sides, the changed part
   of a changed line marked, long lines wrapped on request. A new or deleted file is one column. A rename shows the old name;
   a binary file, or one whose name or permissions alone changed, says so.
 - Unchanged lines between hunks are folded. "Show N unchanged lines" or "Whole file" reads the file as it is now
   (`files.read`) and shows them only while it still holds the diff's new side; otherwise it asks to read the changes again.
+  The file's own diff is read again to catch a change inside a folded region, except for a renamed file: a diff of the new
+  name alone cannot pair it with the old one, so only the diff's own lines are checked, and a change made since inside a
+  folded region of a renamed file goes unnoticed. A read that completes after the changes were read again is dropped.
 - A diff the node cuts at 512 KiB says so; the cut-off last file can be read on its own (`git.diff` with a path).
 - Very long files are drawn in parts ("Show all N lines").
 
