@@ -274,6 +274,9 @@ impl SandboxPolicy {
         }
         let mut sb = agora_platform::Sandbox::new(read, write);
         sb.deny = self.protect.clone();
+        // The worktree the node made is the one folder of its home the agent gets back; checked again at every start, so a worktree
+        // the agent turned into a link stays closed.
+        sb.reopen = vec![worktree.to_path_buf()];
         sb
     }
 
@@ -299,6 +302,9 @@ impl SandboxPolicy {
         }
         let mut sb = agora_platform::Sandbox::new(read, write);
         sb.deny = self.protect.clone();
+        // The worktree the node made is the one folder of its home the agent gets back; checked again at every start, so a worktree
+        // the agent turned into a link stays closed.
+        sb.reopen = vec![worktree.to_path_buf()];
         sb
     }
 

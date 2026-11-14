@@ -720,6 +720,11 @@ pub struct Sandbox {
     /// Linux and Windows ignore it today, so there a node home below an allowed folder stays reachable and T16 stays open (see
     /// `docs/security/threat-model.md`).
     pub deny: Vec<PathBuf>,
+    /// The folders below `deny` the agent may use after all (the worktree the node made for it). Each is reopened only while it is a
+    /// real folder whose own name is not a symbolic link: an agent that swapped its worktree for a link to the node's home would
+    /// otherwise have the home opened at its next start. A `read` or `write` entry that resolves below `deny` is never opened.
+    /// macOS only, as `deny`.
+    pub reopen: Vec<PathBuf>,
 }
 
 impl Sandbox {
@@ -868,7 +873,7 @@ pub fn confine_command(cmd: &mut std::process::Command, sandbox: &Sandbox) -> io
         // not (std cannot read them back), so callers confine first and set the streams after.
         let (program, args) = {
             let a: Vec<_> = cmd.get_args().map(ToOwned::to_owned).collect();
-            macos::wrap(sandbox, cmd.get_program(), &a)
+            macos::wrap(sandbox, cmd.get_program(), &a)?
         };
         let mut wrapped = std::process::Command::new(program);
         wrapped.args(args);

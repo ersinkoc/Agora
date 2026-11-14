@@ -933,20 +933,30 @@ pub struct NodeConfig {
     pub limits: NodeLimits,
 }
 
-/// What no confined agent may read, write or connect to, whatever its profile opens (#475, and the security review of #477).
-/// In the usual home layout (data and worktrees side by side) that is the **whole home**: data (trusted devices, policy, ledger),
-/// identity, hub, logs, locks, manifests, adapters, publishers, the registry's keys, the control socket and the agents' mesh
-/// sockets, and anything added there later. The profile opens the agent's own worktree and mesh socket again (an allow-list, not
-/// a list of what to close that has to grow). Otherwise what is known to be the node's: its data, its control socket and the mesh
-/// sockets' folder, and its manifests.
+/// What no confined agent may read, write or connect to, whatever its profile opens (#475, and the security reviews of #477).
+/// When the node has a home of its own (data beside its worktrees or beside its control socket, as `agora node` lays it out, also
+/// with `--worktrees` elsewhere) that is the **whole home**: data (trusted devices, policy, ledger), identity, hub, logs, locks,
+/// manifests, adapters, publishers, the registry's keys, the control socket and the agents' mesh sockets, and anything added there
+/// later. The profile opens the agent's own worktree and mesh socket again (an allow-list, not a list of what to close that has to
+/// grow). Otherwise what is known to be the node's: its data, its control socket and the mesh sockets' folder, and its manifests.
+/// Relative paths are made absolute first (a relative home would otherwise resolve to nothing and close nothing).
 pub fn node_private_paths(cfg: &NodeConfig) -> Vec<PathBuf> {
-    let home = cfg.data_dir.parent();
-    if let Some(h) = home.filter(|h| Some(*h) == cfg.worktree_root.parent()) {
+    let abs = |p: &Path| std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
+    let (data, worktrees, socket, manifests) = (
+        abs(&cfg.data_dir),
+        abs(&cfg.worktree_root),
+        abs(&cfg.socket),
+        abs(&cfg.manifests_dir),
+    );
+    let home = data
+        .parent()
+        .filter(|h| Some(*h) == worktrees.parent() || Some(*h) == socket.parent());
+    if let Some(h) = home {
         let mut out = vec![h.to_path_buf()];
         for p in [
-            Some(cfg.socket.clone()),
-            cfg.socket.parent().map(|d| d.join("m")),
-            Some(cfg.manifests_dir.clone()),
+            Some(socket.clone()),
+            socket.parent().map(|d| d.join("m")),
+            Some(manifests.clone()),
         ]
         .into_iter()
         .flatten()
@@ -957,12 +967,8 @@ pub fn node_private_paths(cfg: &NodeConfig) -> Vec<PathBuf> {
         }
         return out;
     }
-    let mut out = vec![
-        cfg.data_dir.clone(),
-        cfg.socket.clone(),
-        cfg.manifests_dir.clone(),
-    ];
-    if let Some(dir) = cfg.socket.parent() {
+    let mut out = vec![data, socket.clone(), manifests];
+    if let Some(dir) = socket.parent() {
         out.push(dir.join("m"));
     }
     out
@@ -2130,6 +2136,16 @@ mod announce_tests {
         // The usual layout: the whole home (its worktrees are opened again per agent by the profile).
         let p = node_private_paths(&cfg("/h/data", "/h/worktrees"));
         assert_eq!(p, [PathBuf::from("/h")]);
+        // Worktrees elsewhere, data beside the control socket (second review of #477, 3): still the whole home.
+        let p = node_private_paths(&cfg("/h/data", "/w"));
+        assert_eq!(p, [PathBuf::from("/h")]);
+        // A relative home is made absolute (second review of #477, 4), not dropped.
+        let rel = node_private_paths(&cfg("h/data", "h/worktrees"));
+        assert_eq!(
+            rel[0],
+            std::env::current_dir().unwrap().join("h"),
+            "{rel:?}"
+        );
         // Data and worktrees elsewhere: only what is known to be the node's.
         let odd = node_private_paths(&cfg("/srv/agora-data", "/w"));
         for want in ["/srv/agora-data", "/h/node.sock", "/h/m", "/h/manifests"] {
