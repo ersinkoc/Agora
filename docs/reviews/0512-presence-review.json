@@ -1,0 +1,27 @@
+{
+  "reviewed_head": "f5b4cd5e0bb2263d6b473af62e92dcd06001067d",
+  "reviewer": "linux Codex",
+  "at": "2026-11-14T16:25:01.586185+00:00",
+  "decision": "approve; merge remains subject to native CI and maintainer",
+  "tracked_hub_tests_passed": 236,
+  "tracked_hub_tests_ignored": 1,
+  "hub_cli_tests_passed": 15,
+  "independent_proof_tests_passed": 2,
+  "old_behaviour_mutation": {
+    "base_head": "6d09b244d2067f81bcc5c56f89073d3089b43368",
+    "change": "remove startup offline reconciliation only",
+    "exit_code": 101,
+    "observed": "a machine that has not come back is shown offline"
+  },
+  "checks": [
+    "cargo fmt --all -- --check",
+    "sh scripts/check-docs.sh",
+    "git diff --check"
+  ],
+  "native_ci_at_review": "Linux/macOS/Windows Rust jobs pending; bench, deny, docs, schema, web, schema-breaking passed",
+  "limitations": [
+    "Linux review only; does not complete three-OS manual module acceptance",
+    "proof preserves projected agent/terminal/approval state; no real coding agents started",
+    "no deployed hub or node modified"
+  ]
+}
