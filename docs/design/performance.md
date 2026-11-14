@@ -47,6 +47,26 @@ budgets above; CI runs it as an informational step and stores `footprint.json`. 
 | Node cold start ≤ 200 ms | 10 ms | start until the control socket answers a command, in-process |
 | Keystroke → echo, same machine ≤ 16 ms | 0.06–0.2 ms p95 | node portion only (no client, no network) |
 
+### Hub cold start against history size (architecture review R4, 2026-11-14)
+
+The hub rebuilds its view by replaying its whole event log at start (`View::rebuild`), so its cold start grows with history. Measured
+with `crates/agora-hub/tests/startup_measure.rs` (ignored; `AGORA_MEASURE_DB=<copy of a hub.db>`, release build, Linux), on a copy
+of a real hub's log of 20 982 events from 26 hours (5 machines, 17 agents), repeated to make longer histories with the same view:
+
+| Events | Database | Rebuild | `Hub::open` |
+| --- | --- | --- | --- |
+| 20 982 | 2.4 MiB | 18 ms | 43 ms |
+| 209 820 | 22 MiB | 125 ms | 119 ms |
+| 1 049 100 | 110 MiB | 591 ms | 649 ms |
+| 2 098 200 | 220 MiB | 1 160 ms | 1 127 ms |
+
+About 0.55 ms per 1 000 events: the 500 ms budget is passed near 900 000 events. **96% of that log was `AgentUsageReported`**
+(20 104 events; one agent alone wrote 11 751, about 7 a minute). The node now gathers usage reports of one agent, model and currency
+for 5 s and logs one (`agora-node::usage_merge`; sums are exact, so totals do not change). On the same log that leaves 5.5% of the
+usage events, which moves the budget from about three months of such use to years. A projection checkpoint (replaying only the log's
+tail) stays the next step if a hub's history still grows past it; it needs its own design for versioning, corruption fallback and
+backups.
+
 Not measured yet: binary size with web assets, process start (exec) in
 the cold-start figure, macOS and Windows numbers (CI will show macOS-agnostic regressions only through tests).
 

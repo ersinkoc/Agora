@@ -1356,7 +1356,11 @@ mod tests {
         assert!(t
             .revoke(&old.revoke("web-old", "web-new", now + 6), now + 6)
             .unwrap());
-        std::thread::sleep(std::time::Duration::from_millis(5));
+        // The confirmation takes the real clock: it must come after the revocation signed at `now + 6`, or that revocation is the
+        // newer fact and wins (a fixed 5 ms sleep left that to chance: the test failed about one run in two on a fast machine).
+        while crate::grants::now_ms() <= now + 6 {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
         confirm(&file, "web-new", &new.public()).unwrap();
         assert!(!t
             .revoke(
