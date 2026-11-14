@@ -933,6 +933,24 @@ pub struct NodeConfig {
     pub limits: NodeLimits,
 }
 
+/// What no confined agent may read, write or connect to, whatever its profile opens (#475): the node's data (trusted devices, policy,
+/// ledger, sessions), its control socket, the agents' mesh sockets (each agent gets its own back), and, in the usual home layout (data
+/// and worktrees side by side), the home's identity, hub, logs and lock folders. A node home under `/tmp` is then as closed as one
+/// under the home folder.
+pub fn node_private_paths(cfg: &NodeConfig) -> Vec<PathBuf> {
+    let mut out = vec![cfg.data_dir.clone(), cfg.socket.clone()];
+    if let Some(home) = cfg.socket.parent() {
+        out.push(home.join("m"));
+    }
+    let home = cfg.data_dir.parent();
+    if home.is_some() && home == cfg.worktree_root.parent() {
+        if let Some(h) = home {
+            out.extend(["link", "hub", "logs", "run"].iter().map(|d| h.join(d)));
+        }
+    }
+    out
+}
+
 /// Name of the node's policy file in its data directory (written by the machine's owner; the hub cannot change it).
 pub const POLICY_FILE: &str = "policy";
 
@@ -1217,7 +1235,9 @@ impl Node {
             terminal: TerminalOptions::default(),
             limits: cfg.limits,
         });
-        sup.set_sandbox(read_policy(&cfg.data_dir.join(POLICY_FILE)).sandbox);
+        let mut sandbox = read_policy(&cfg.data_dir.join(POLICY_FILE)).sandbox;
+        sandbox.protect = node_private_paths(cfg);
+        sup.set_sandbox(sandbox);
         sup.reserve_ids(ledger.next_id());
         sup.set_skip_permissions(read_policy(&cfg.data_dir.join(POLICY_FILE)).skip_permissions);
         let (found, manifest_problems) = load_manifests(&cfg.manifests_dir);
@@ -2054,6 +2074,40 @@ mod announce_tests {
             && r.approved == r.approval_id[3..].parse::<u32>().unwrap().is_multiple_of(2)));
         assert_eq!(restated(Announce::Present), first, "the ring did not move");
         assert!(restated(Announce::Restart).is_empty());
+    }
+
+    #[test]
+    fn the_nodes_private_paths_cover_its_data_sockets_and_home_folders() {
+        let cfg = |data: &str, worktrees: &str| NodeConfig {
+            node_id: "n".into(),
+            socket: PathBuf::from("/h/node.sock"),
+            data_dir: PathBuf::from(data),
+            worktree_root: PathBuf::from(worktrees),
+            manifests_dir: PathBuf::from("/h/manifests"),
+            projects: vec![],
+            limits: NodeLimits::default(),
+        };
+        let p = node_private_paths(&cfg("/h/data", "/h/worktrees"));
+        for want in [
+            "/h/data",
+            "/h/node.sock",
+            "/h/m",
+            "/h/link",
+            "/h/hub",
+            "/h/logs",
+            "/h/run",
+        ] {
+            assert!(p.contains(&PathBuf::from(want)), "{want}: {p:?}");
+        }
+        // Worktrees stay out: an agent works in its own.
+        assert!(!p.iter().any(|x| x.starts_with("/h/worktrees")));
+        // Data and worktrees elsewhere: only what is known to be the node's.
+        let odd = node_private_paths(&cfg("/srv/agora-data", "/w"));
+        assert!(
+            odd.contains(&PathBuf::from("/srv/agora-data"))
+                && !odd.iter().any(|x| x.ends_with("logs")),
+            "{odd:?}"
+        );
     }
 
     #[test]

@@ -705,8 +705,14 @@ pub struct Sandbox {
     /// No network but the loopback interface and the unix sockets below `sockets` and `write` (ADR-0047 `worktree-offline`).
     /// Refused where [`offline_supported`] is false.
     pub offline: bool,
-    /// Folders whose unix sockets stay reachable when `offline` (the node's mesh sockets).
+    /// The agent's own unix sockets (its mesh socket; offline, also its private temp folder): reachable even below `deny`, and the
+    /// only ones reachable when `offline`.
     pub sockets: Vec<PathBuf>,
+    /// The node's own folders and files (its data, identity, logs, control socket, other agents' mesh sockets): never read or written,
+    /// and no unix socket below them connected to, even when they sit below an allowed folder (a node home under `/tmp`), except
+    /// `sockets`. Enforced where the platform's rules can say "except" (macOS); elsewhere the node keeps them out of the allowed
+    /// folders instead.
+    pub deny: Vec<PathBuf>,
 }
 
 impl Sandbox {

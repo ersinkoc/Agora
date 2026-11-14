@@ -183,6 +183,31 @@ pub(crate) fn profile(sb: &crate::Sandbox) -> String {
             siblings.join(" ")
         ));
     }
+    // The node's own folders, closed after everything opened above: in Seatbelt the last matching rule wins, so they stay closed below
+    // an allowed folder. A unix socket is reached by `network-outbound`, which file rules do not cover (measured: a confined process
+    // connected to a socket below a folder it could not read), so its sockets are closed too, then the agent's own reopened.
+    let denied: Vec<std::path::PathBuf> = sb.deny.iter().filter_map(|p| real(p)).collect();
+    if !denied.is_empty() {
+        let paths: Vec<String> = denied.iter().map(|p| quote(p)).collect();
+        let to: Vec<String> = denied
+            .iter()
+            .map(|p| format!("(remote unix-socket {})", quote(p)))
+            .collect();
+        out.push_str(&format!(
+            "(deny file-read-data file-write* {})\n",
+            paths.join(" ")
+        ));
+        out.push_str(&format!("(deny network-outbound {})\n", to.join(" ")));
+        let own: Vec<String> = sb
+            .sockets
+            .iter()
+            .filter_map(|p| real_or_new(p))
+            .map(|p| format!("(remote unix-socket {})", quote(&p)))
+            .collect();
+        if !own.is_empty() && !sb.offline {
+            out.push_str(&format!("(allow network-outbound {})\n", own.join(" ")));
+        }
+    }
     if sb.offline {
         // ADR-0047 `worktree-offline`: nothing leaves the machine. Seatbelt names only `localhost` (this machine's own addresses) or
         // every host. Connections to this machine stay open (a local model; see the threat model for what else listens there);
@@ -398,6 +423,7 @@ mod sandbox_tests {
             write: vec![dir.join("w"), "/dev".into()],
             offline: true,
             sockets: vec![dir.join("m/own")],
+            deny: vec![],
         };
         let p = super::profile(&sb);
         // `nc` ships with macOS: -z only connects, -G is the connect timeout, `-U -w 1` connects to a unix socket and gives up after a
@@ -439,6 +465,55 @@ mod sandbox_tests {
         }
         drop((own, other, tmux, v4, v6));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_nodes_own_folders_stay_closed_below_an_allowed_folder_and_its_sockets_too() {
+        use std::os::unix::net::UnixListener;
+        // #475: a node home under `/tmp`, which every confined agent may write. Short paths: a unix socket path is limited.
+        let home = std::path::PathBuf::from(format!("/tmp/agora-deny-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        for d in ["data", "m", "wt"] {
+            std::fs::create_dir_all(home.join(d)).unwrap();
+        }
+        std::fs::write(home.join("data/trusted-devices"), "web-1 key\n").unwrap();
+        let control = UnixListener::bind(home.join("node.sock")).unwrap();
+        let own = UnixListener::bind(home.join("m/own")).unwrap();
+        let other = UnixListener::bind(home.join("m/other")).unwrap();
+        let sb = crate::Sandbox {
+            read: vec!["/usr".into(), "/bin".into()],
+            write: vec![home.join("wt"), "/tmp".into(), "/dev".into()],
+            offline: false,
+            sockets: vec![home.join("m/own")],
+            deny: vec![home.join("data"), home.join("node.sock"), home.join("m")],
+        };
+        let p = super::profile(&sb);
+        let h = home.display();
+        let script = format!(
+            "cat {h}/data/trusted-devices >/dev/null 2>&1 && echo read-open || echo read-closed; \
+             echo x > {h}/data/new 2>/dev/null && echo write-open || echo write-closed; \
+             echo x > {h}/wt/f 2>/dev/null && echo worktree-open || echo worktree-closed; \
+             nc -U -w 1 {h}/node.sock </dev/null 2>/dev/null && echo control-open || echo control-closed; \
+             nc -U -w 1 {h}/m/other </dev/null 2>/dev/null && echo other-open || echo other-closed; \
+             nc -U -w 1 {h}/m/own </dev/null 2>/dev/null && echo own-open || echo own-closed;"
+        );
+        let out = std::process::Command::new(super::SANDBOX_EXEC)
+            .args(["-p", &p, "/bin/sh", "-c", &script])
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        for want in [
+            "read-closed",
+            "write-closed",
+            "worktree-open",
+            "control-closed",
+            "other-closed",
+            "own-open",
+        ] {
+            assert!(text.contains(want), "{want}: {text}\n{p}");
+        }
+        drop((control, own, other));
+        let _ = std::fs::remove_dir_all(home);
     }
 
     #[test]

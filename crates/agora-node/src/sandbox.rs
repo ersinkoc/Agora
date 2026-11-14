@@ -43,6 +43,9 @@ pub struct SandboxPolicy {
     /// Kinds whose manifests may ask for more (`sandbox.trust_manifest = kind, kind`). Empty: no manifest widens anything, so a
     /// community manifest can never reach `~/.ssh` by asking.
     pub trusted_kinds: Vec<String>,
+    /// The node's own folders and sockets, closed to every confined agent whatever else is open (set by the node, not the policy
+    /// file): its data (trusted devices, policy, ledger), identity, logs, hub folder, control socket and the agents' mesh sockets.
+    pub protect: Vec<PathBuf>,
 }
 
 /// The system folders every program needs to run.
@@ -269,7 +272,9 @@ impl SandboxPolicy {
             read.extend(needs.read.iter().filter_map(|p| expand(p)));
             write.extend(needs.write.iter().filter_map(|p| expand(p)));
         }
-        agora_platform::Sandbox::new(read, write)
+        let mut sb = agora_platform::Sandbox::new(read, write);
+        sb.deny = self.protect.clone();
+        sb
     }
 
     /// The profile where permissions are granted folder by folder (ADR-0050): the shared Git folder is readable, and only the parts a
@@ -292,7 +297,9 @@ impl SandboxPolicy {
             read.extend(needs.read.iter().filter_map(|p| expand(p)));
             write.extend(needs.write.iter().filter_map(|p| expand(p)));
         }
-        agora_platform::Sandbox::new(read, write)
+        let mut sb = agora_platform::Sandbox::new(read, write);
+        sb.deny = self.protect.clone();
+        sb
     }
 
     /// Whether agents can be started under this policy on this machine.
@@ -467,6 +474,7 @@ mod tests {
             read: vec!["/home/x/.cfg".into()],
             write: vec!["/home/x/.cache/agent".into()],
             trusted_kinds: vec![],
+            protect: vec![],
         };
         let sb = p.profile("k", None, &wt, "/home/x/bin/agent").unwrap();
         // `worktree` leaves the network alone; `worktree-offline` asks for it to be cut, keeping the node's sockets.

@@ -4,6 +4,9 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+### Security
+- macOS: a confined agent (`sandbox = worktree`) can no longer reach the node's own files and sockets: its data (trusted devices, policy, ledger), identity, logs and hub folder, the node's control socket, and the other agents' mesh sockets. Before, it could connect to the control socket (Seatbelt checks unix sockets as network, not as files), and with a node home under `/tmp` it could read and write the node's data (#475). Its own mesh socket stays open.
+
 ### Devices
 - The hub keeps a list of each person's devices (ADR-0061): a browser or the terminal client registers its key and name when it signs
   in, and `agora hub devices` lists them with the fingerprint people compare, the person, and when each was registered and last used.
