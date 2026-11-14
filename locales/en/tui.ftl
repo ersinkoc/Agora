@@ -153,6 +153,17 @@ tui-start-acts = How should it act? Press its number; Enter or any other key ask
 tui-start-confirm-skip = Let the agent act without asking? With "{ $name }" it runs commands and changes files without asking you first, for as long as it runs. Press y to start without asking; any other key keeps asking.
 tui-badge-no-ask = does not ask
 
+## A chat agent's tool call in words (as the web window says it)
+tui-tool-read = Read
+tui-tool-edit = Edit
+tui-tool-run = Command
+tui-tool-search = Search
+tui-tool-fetch = Web page
+tui-tool-delete = Delete
+tui-tool-move = Move
+tui-tool-think = Thinking
+tui-tool-other = Step
+
 ## The app shell (ADR-0063 stage 2)
 tui-app-keys-tree = Ctrl K commands · Enter open · N next that needs you · y / n answer · s start · f folder · x stop · u resume · d remove · a ask · v devices · Tab next part · i details · q quit
 tui-app-keys-terminal = Ctrl-] or F12 back to the list · Your keys go to the agent · Alt+1…9 tabs
