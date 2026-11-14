@@ -7,7 +7,7 @@ import { chatLine, type ChatLine, type ChatSource } from './chat';
 const CHAT_KIND = { SNAPSHOT: 10, ENTRY: 11 } as const;
 import { decodeTerminalFrame, type TerminalEvent } from '../terminal/frames';
 import type { TerminalSource } from '../terminal/source';
-import { decodeFrame, encodeFrame, EVENT_KIND, STREAM_COMMANDS, STREAM_CLOSE, STREAM_EVENTS } from './frame';
+import { CONTROL_KIND, decodeFrame, encodeFrame, EVENT_KIND, STREAM_COMMANDS, STREAM_CLOSE, STREAM_CONTROL, STREAM_EVENTS } from './frame';
 import { applyEvent, emptyView, fromSnapshot, num, type View } from './view';
 
 export type LinkState = 'connecting' | 'live' | 'offline';
@@ -33,8 +33,11 @@ export interface LiveOptions {
   // A machine refused a command until the owner grants it (ADR-0041): what was asked, so the window can ask the owner.
   onGrantRequired?: (node: string, body: CommandBody) => void;
   socket?: SocketFactory;
-  // Waits before reconnect attempt n (0-based); capped exponential by default.
+  // Waits before reconnect attempt n (0-based); capped exponential with jitter by default (`defaultBackoff`).
   backoffMs?: (attempt: number) => number;
+  // Calls `poke` whenever it is a good moment to try the hub again at once; returns how to stop. By default: the browser is
+  // back online, the window became visible, or it got the focus.
+  wake?: (poke: () => void) => () => void;
 }
 
 export type CommandBody = Omit<agora.v1.CommandRequest.$Properties, 'requestId' | 'idempotencyKey' | 'targetNode'>;
@@ -47,16 +50,56 @@ export interface Live {
   terminal(node: string, terminalId: string): TerminalSource;
   // The conversation of an agent that has no terminal (ADR-0038), relayed and resubscribed like a terminal.
   chat(node: string, agentId: string): ChatSource;
+  // Try the hub now ("Retry now"): an unreachable hub is dialled at once instead of after the wait; a live link is checked
+  // with a ping, so one that went silent (the laptop slept) is noticed within `PONG_WITHIN_MS`.
+  retry(): void;
 }
 
 export class CommandError extends Error {
-  constructor(readonly code: string) {
+  // The error's parameters as text (stable values such as `policy`, never user-facing text).
+  constructor(readonly code: string, readonly params: Record<string, string> = {}) {
     super(code);
   }
 }
 
+function paramsOf(p: { [k: string]: agora.v1.IParamValue } | null | undefined): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(p ?? {})) out[k] = v.str ?? (v.int !== undefined && v.int !== null ? String(v.int) : '');
+  return out;
+}
+
 const browserSocket: SocketFactory = (url, protocols) => new WebSocket(url, protocols) as unknown as Socket;
-const defaultBackoff = (n: number) => Math.min(30_000, 500 * 2 ** n);
+
+// A browser cannot see a connection that went silent (a frozen hub, a laptop that slept, a NAT that forgot the connection), so
+// the window pings the hub over the protocol's PING/PONG and starts over when nothing at all comes back in time.
+export const PING_EVERY_MS = 15_000;
+export const PONG_WITHIN_MS = 10_000;
+// The longest wait between two attempts: the window is back within a few seconds of the hub.
+export const RETRY_CAP_MS = 5_000;
+// A connection that has not opened by then is given up and tried again. A hub that froze or slept accepts the TCP connection
+// and answers nothing, and the browser may never report an error for it, so without this the window would stay "Connecting"
+// long after the hub is back. An open connection is checked by the ping instead (`PING_EVERY_MS`, ADR-0070).
+export const OPEN_WITHIN_MS = 8_000;
+
+// Waits before reconnect attempt n (0-based): doubling from 0.5 s up to `RETRY_CAP_MS`, each wait shortened by up to a fifth at
+// random so many windows do not all dial a hub that just came back in the same instant.
+export function defaultBackoff(n: number, random: () => number = Math.random): number {
+  const base = Math.min(RETRY_CAP_MS, 500 * 2 ** Math.min(n, 16));
+  return Math.round(base * (0.8 + 0.2 * random()));
+}
+
+const browserWake = (poke: () => void): (() => void) => {
+  if (typeof window === 'undefined' || typeof document === 'undefined') return () => {};
+  const visible = () => { if (document.visibilityState === 'visible') poke(); };
+  window.addEventListener('online', poke);
+  window.addEventListener('focus', poke);
+  document.addEventListener('visibilitychange', visible);
+  return () => {
+    window.removeEventListener('online', poke);
+    window.removeEventListener('focus', poke);
+    document.removeEventListener('visibilitychange', visible);
+  };
+};
 
 export function connectLive(o: LiveOptions): Live {
   const open = o.socket ?? browserSocket;
@@ -69,6 +112,9 @@ export function connectLive(o: LiveOptions): Live {
   let timer: ReturnType<typeof setTimeout> | undefined;
   let isOpen = false;
   let heard = false; // has this connection delivered anything
+  let received = 0; // messages on this connection, for the ping's deadline
+  let pinger: ReturnType<typeof setInterval> | undefined;
+  let opening: ReturnType<typeof setTimeout> | undefined;
   let refusals = 0;
   let requests = 0;
   let nextStream = 3;
@@ -109,15 +155,66 @@ export function connectLive(o: LiveOptions): Live {
     });
   };
 
+  const quiet = () => {
+    if (pinger) clearInterval(pinger);
+    if (opening) clearTimeout(opening);
+    pinger = undefined;
+    opening = undefined;
+  };
+
+  // This connection is over: fail what waits on it and dial again after the backoff. `mayBeRefusal` is false when the window gave
+  // up on it itself (silent, or never opened), which says nothing about the session.
+  const lost = (s: Socket, mayBeRefusal: boolean) => {
+    if (sock !== s) return; // already given up
+    sock = undefined;
+    quiet();
+    // Only a connection that opened and was dropped without a word counts: an unreachable hub is not a refusal.
+    const dropped = mayBeRefusal && isOpen && !heard;
+    isOpen = false;
+    refusals = heard ? 0 : dropped ? refusals + 1 : refusals;
+    if (refusals >= 2 && !closed) { closed = true; o.onRejected?.(); return; }
+    for (const p of pending.values()) p.reject(new CommandError('node.offline'));
+    pending.clear();
+    if (closed) return;
+    o.onState('offline');
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(start, backoff(attempt++));
+  };
+
+  // Gives up on a connection that the browser still calls open (or still opening) but that is silent.
+  const abandon = (s: Socket) => {
+    lost(s, false);
+    s.onopen = null;
+    s.onmessage = null;
+    s.onclose = null;
+    try { s.close(); } catch { /* already closed */ }
+  };
+
+  // Pings the hub; when nothing at all arrives within `PONG_WITHIN_MS`, the connection is dead.
+  const probe = (s: Socket) => {
+    if (sock !== s || !isOpen) return;
+    const mark = received;
+    s.send(encodeFrame({ streamId: STREAM_CONTROL, kind: CONTROL_KIND.PING, payload: new Uint8Array() }));
+    setTimeout(() => { if (sock === s && received === mark) abandon(s); }, PONG_WITHIN_MS);
+  };
+
   const start = () => {
+    timer = undefined;
     o.onState('connecting');
     generation++;
     const s = open(o.url, ['agora.v1', `agora.bearer.${o.token}`]);
     sock = s;
     s.binaryType = 'arraybuffer';
+    // A connection that has not opened within OPEN_WITHIN_MS is given up by the window itself: the browser's own close may
+    // come much later, or never.
+    opening = setTimeout(() => { if (sock === s && !isOpen) abandon(s); }, OPEN_WITHIN_MS);
     s.onopen = () => {
+      if (opening) clearTimeout(opening);
+      opening = undefined;
       isOpen = true;
       heard = false;
+      quiet();
+      pinger = setInterval(() => probe(s), PING_EVERY_MS);
       const sub = agora.v1.Subscribe.encode(synced ? { afterPos: view.pos } : {}).finish();
       s.send(encodeFrame({ streamId: STREAM_EVENTS, kind: EVENT_KIND.SUBSCRIBE, payload: sub }));
       for (const stream of terminals.keys()) subscribeTerminal(stream);
@@ -127,6 +224,7 @@ export function connectLive(o: LiveOptions): Live {
       if (!(m.data instanceof ArrayBuffer || ArrayBuffer.isView(m.data))) return;
       const bytes = m.data instanceof ArrayBuffer ? new Uint8Array(m.data) : new Uint8Array((m.data as ArrayBufferView).buffer);
       heard = true;
+      received++;
       const f = decodeFrame(bytes);
       if (!f) { s.close(); return; }
       if (f.streamId === STREAM_COMMANDS && f.kind === 1) {
@@ -136,7 +234,7 @@ export function connectLive(o: LiveOptions): Live {
           pending.delete(r.requestId);
           if (r.err) {
             if (p && r.err.code === 'approval.grant_required') o.onGrantRequired?.(p.node, p.body);
-            p?.reject(new CommandError(r.err.code ?? 'error'));
+            p?.reject(new CommandError(r.err.code ?? 'error', paramsOf(r.err.params)));
           }
           else p?.resolve(r.ok ?? agora.v1.CommandOk.create());
         } catch { /* a garbled answer: the request stays pending until the connection ends */ }
@@ -185,19 +283,19 @@ export function connectLive(o: LiveOptions): Live {
       o.onState('live');
       o.onView(view);
     };
-    s.onclose = () => {
-      // Only a connection that opened and was dropped without a word counts: an unreachable hub is not a refusal.
-      const dropped = isOpen && !heard;
-      isOpen = false;
-      refusals = heard ? 0 : dropped ? refusals + 1 : refusals;
-      if (refusals >= 2 && !closed) { closed = true; o.onRejected?.(); return; }
-      for (const p of pending.values()) p.reject(new CommandError('node.offline'));
-      pending.clear();
-      if (closed) return;
-      o.onState('offline');
-      timer = setTimeout(start, backoff(attempt++));
-    };
+    s.onclose = () => lost(s, true);
   };
+
+  // Try now: dial an unreachable hub at once, or check that a live link still answers. A dial already under way is left to
+  // finish (or to time out), so a burst of focus events does not start it over and over.
+  const retry = () => {
+    if (closed) return;
+    if (sock) { if (isOpen) probe(sock); return; }
+    if (timer) clearTimeout(timer);
+    attempt = 0;
+    start();
+  };
+  const unwake = (o.wake ?? browserWake)(retry);
 
   start();
   return {
@@ -234,9 +332,13 @@ export function connectLive(o: LiveOptions): Live {
         };
       },
     }),
+    retry,
     close() {
       closed = true;
+      unwake();
+      quiet();
       if (timer) clearTimeout(timer);
+      if (opening) clearTimeout(opening);
       sock?.close();
     },
   };

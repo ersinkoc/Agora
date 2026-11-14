@@ -1127,6 +1127,86 @@ fn agent_kinds_lists_what_this_node_can_start() {
 }
 
 #[test]
+fn a_node_with_an_empty_manifests_folder_offers_and_starts_every_built_in_kind_and_a_folder_file_overrides_one(
+) {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
+        return;
+    }
+    let e = env("builtin");
+    let empty = e.dir.join("empty-manifests");
+    std::fs::create_dir_all(&empty).unwrap();
+    let n = Node::start(&NodeConfig {
+        node_id: "node-test".into(),
+        socket: e.dir.join("c.sock"),
+        data_dir: e.dir.join("data"),
+        worktree_root: e.dir.join("worktrees"),
+        manifests_dir: empty.clone(),
+        projects: vec![e.repo.clone()],
+        limits: NodeLimits::default(),
+    })
+    .expect("start node");
+    assert!(n.manifest_problems.is_empty());
+    let mut c = Client::connect(&e.dir.join("c.sock")).unwrap();
+    let kinds = |c: &mut Client| -> std::collections::BTreeMap<String, String> {
+        let r = ok(c.call(Cmd::AgentKinds(v1::AgentKinds {})));
+        let Some(Ok_::AgentKinds(list)) = r.result else {
+            panic!("not an AgentKinds result");
+        };
+        list.kinds
+            .into_iter()
+            .map(|k| (k.kind, k.display_name))
+            .collect()
+    };
+    let shipped: Vec<String> = agora_node::manifests::BUILT_IN
+        .iter()
+        .map(|(_, text)| {
+            agora_adapters::Manifest::parse(text)
+                .expect("shipped manifest")
+                .kind
+        })
+        .collect();
+    let listed = kinds(&mut c);
+    assert_eq!(
+        listed.keys().cloned().collect::<Vec<_>>(),
+        {
+            let mut s = shipped.clone();
+            s.push(agora_node::manifests::SHELL_KIND.to_string());
+            s.sort();
+            s
+        },
+        "every shipped kind and the built-in shell, nothing else"
+    );
+    assert_eq!(listed["shell"], "Shell");
+    // With no file at all, the user's shell starts.
+    let started = c.call(start_cmd("shell"));
+    assert!(started.is_ok(), "{started:?}");
+    // What the node looks for is the program's name, for the "not installed" line.
+    let programs: std::collections::BTreeMap<_, _> = n
+        .supervisor
+        .lock()
+        .unwrap()
+        .kinds()
+        .into_iter()
+        .map(|k| (k.kind, k.program))
+        .collect();
+    assert_eq!(programs["wrongstack"], "wstack");
+    // A folder file of the same kind wins, a broken one leaves the built-in kind in place; both without a restart.
+    std::fs::write(
+        empty.join("codex.toml"),
+        "kind = \"codex\"\ndisplay_name = \"Codex here\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"sh\"]\n",
+    )
+    .unwrap();
+    std::fs::write(empty.join("wrongstack.toml"), "kind = \"wrongstack\"\n[").unwrap();
+    let listed = kinds(&mut c);
+    assert_eq!(listed["codex"], "Codex here");
+    assert_eq!(listed["wrongstack"], "WrongStack");
+    let started = c.call(start_cmd("codex"));
+    assert!(started.is_ok(), "{started:?}");
+    drop(n);
+    let _ = std::fs::remove_dir_all(&e.dir);
+}
+
+#[test]
 fn uncommitted_changes_in_an_agents_workspace_are_reported() {
     use v1::event::Body;
     if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
