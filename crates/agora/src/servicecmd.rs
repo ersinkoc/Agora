@@ -47,8 +47,8 @@ fn spec(say: &Say, h: &Path, role: Role) -> std::io::Result<ServiceSpec> {
         h.as_os_str().to_owned(),
         "--log".into(),
     ];
-    // Until the login environment is captured (ADR-0062 item 5), the role gets this shell's PATH, so the agents it finds are the ones
-    // this shell finds.
+    // Until the login environment is captured (ADR-0062 item 5), the role gets this shell's PATH on Linux and macOS, so the agents it
+    // finds are the ones this shell finds. Windows ignores it: a logon task runs with the user's login environment.
     let env = std::env::var_os("PATH")
         .map(|p| vec![("PATH".to_string(), p)])
         .unwrap_or_default();

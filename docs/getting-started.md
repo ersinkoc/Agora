@@ -30,7 +30,9 @@ window again.
 - The first run ends with "Start Agora when you log in? [Y/n]" where that is available (Windows, macOS, and Linux with systemd); Enter says yes.
 - `agora service install`: start this machine's Agora when you log in (for you only, no administrator rights; it says what it
   registers first). `agora service status` says whether it is set up and running; `agora service remove` stops it and removes it.
-  Windows registers a logon task per role (`agora-hub`, `agora-node`). Linux writes a systemd user unit per role into
+  Windows registers a logon task per role (`agora-hub`, `agora-node`). It runs with the environment Windows gives you at login (your
+  user and system `PATH`), not the `PATH` of the window that ran `install`: a program put on `PATH` only in that window is not found
+  by the agents it starts. `install` on a task turned off in Task Scheduler turns it on again and says so. Linux writes a systemd user unit per role into
   `~/.config/systemd/user/` (or `$XDG_CONFIG_HOME/systemd/user/`), owner-only, and runs `systemctl --user daemon-reload` and
   `enable`; it never uses root. A user unit runs while you are logged in: to start it at boot without logging in, run
   `loginctl enable-linger` yourself (Agora never does). It needs a session with your user's systemd running (a desktop login, or an SSH
