@@ -222,6 +222,7 @@ changes-layout = Layout
 changes-layout-unified = Unified
 changes-layout-split = Side by side
 changes-wrap = Wrap lines
+changes-wrap-long = A long change shown whole is drawn one line per row, so it does not wrap; scroll sideways instead.
 changes-refresh = Read the changes again
 changes-list = Changed files
 changes-top-folder = Top folder
@@ -251,7 +252,11 @@ changes-truncated-count = These changes are larger than 512 KiB, so only the fir
         [one] one is
        *[other] { $min } are
     } not listed here. The last file in the list is cut off.
-files-truncated = The changes are larger than 512 KiB, so files after the cut have no change mark. The machine counts { $total } changed files; { $count ->
+files-truncated = The changes are larger than 512 KiB, so files after the cut may have no change mark.
+files-truncated-count = The changes are larger than 512 KiB, so files after the cut have no change mark. The machine counts { $total ->
+        [one] one changed file
+       *[other] { $total } changed files
+    }; { $count ->
         [one] one is
        *[other] { $count } are
     } marked.
