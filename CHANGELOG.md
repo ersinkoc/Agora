@@ -4,6 +4,8 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+## 0.3.12
+
 ### Hub
 - A machine whose certificate is revoked while it is connected (for example, another machine enrolled under its name) is shown
   offline at once. Its connection already ended, but every window kept showing it online until the hub restarted.
