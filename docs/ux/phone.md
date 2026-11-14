@@ -16,7 +16,8 @@ terminals get the key bar when the screen is a touch screen.
    buttons: one tap answers it. Tapping the request's title, or an agent, opens it.
 2. **An agent** (`#/agent/<id>`): **Back** (to the list), its name, state, machine and cost in the top bar; anything it asks, with
    Allow and Deny; then its terminal, or its conversation for a chat agent. **Next · N** in the top bar opens the next thing that
-   needs you.
+   needs you. Above the terminal, **N files changed** opens the review screen ([review.md](review.md)) and **Files** the file
+   browser, each full-screen with Close; a closed agent's summary offers **Review the changes** and **Files** the same way.
 3. The bar at the bottom of the list: **Search** (the command palette: agents, language, pages), **Start**, **Machines**, **This
    device**. The other pages (machines, this device, activity) keep their own frame with Back. **Edit theme** (palette or This
    device) opens the theme editor ([themes.md](themes.md)) as a screen of its own (`#/theme`) with Back.
