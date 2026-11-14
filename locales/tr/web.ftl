@@ -199,6 +199,58 @@ changes-files = { $count ->
 diff-title = { $name } neleri değiştirdi
 diff-close = Kapat
 diff-failed = Değişiklikler o makineden okunamadı.
+changes-summary = { $count ->
+    [one] 1 dosya
+   *[other] { $count } dosya
+}
+changes-filter = Göster
+changes-filter-all = Tümü
+changes-filter-modified = Değişen
+changes-filter-added = Eklenen
+changes-filter-deleted = Silinen
+changes-filter-renamed = Adı değişen
+changes-status-modified = Değişti
+changes-status-added = Eklendi
+changes-status-deleted = Silindi
+changes-status-renamed = Adı değişti
+changes-badge-modified = D
+changes-badge-added = E
+changes-badge-deleted = S
+changes-badge-renamed = A
+changes-search = Ada göre süz
+changes-layout = Görünüm
+changes-layout-unified = Tek sütun
+changes-layout-split = Yan yana
+changes-wrap = Satırları kaydır
+changes-refresh = Değişiklikleri yeniden oku
+changes-list = Değişen dosyalar
+changes-top-folder = Üst klasör
+changes-no-match = Bu süzgece uyan değişen dosya yok.
+changes-pick = Neyin değiştiğini görmek için soldan bir dosya seçin.
+changes-renamed-from = önceki adı { $name }
+changes-whole-file = Tüm dosya
+changes-prev = Önceki dosya
+changes-next = Sonraki dosya
+changes-keys = sonraki ve önceki dosya
+changes-binary = Bu dosya metin olmadığı için değişiklikleri gösterilmiyor.
+changes-no-lines = Bu dosyanın yalnızca adı ya da izinleri değişti.
+changes-no-eol = Dosyanın sonunda satır sonu yok
+changes-gap = { $count ->
+    [one] Değişmeyen 1 satırı göster
+   *[other] Değişmeyen { $count } satırı göster
+}
+changes-gap-rest = Dosyanın kalanını göster
+changes-gap-failed = Değişmeyen satırları göstermek için bu dosya okunamadı.
+changes-retry = Yeniden dene
+changes-stale = Değişiklikler okunduktan sonra dosya değişti, bu yüzden değişmeyen satırlar gösterilmiyor. Değişiklikleri yeniden okuyun.
+changes-truncated = Değişiklikler 512 KiB'tan büyük olduğu için yalnızca ilk kısmı okundu. Listedeki son dosya yarıda kesik.
+changes-partial = Bu dosya yarıda kesik: değişiklikler tek seferde okunamayacak kadar büyüktü.
+changes-load-file = Yalnızca bu dosyayı oku
+changes-load-file-failed = Bu dosya tek başına da okunamayacak kadar büyük.
+changes-show-all = { $count ->
+    [one] 1 satırın tümünü göster
+   *[other] { $count } satırın tümünü göster
+}
 console-files = Dosyalar
 files-title = { $name } dosyaları
 files-tree = Klasörler ve dosyalar
@@ -206,6 +258,42 @@ files-pick = Okumak için soldan bir dosya seçin.
 files-binary = Bu dosya metin olmadığı için gösterilmiyor.
 files-too-large = Bu dosya okunamadı (çok büyük olabilir).
 files-failed = Bu klasör listelenemedi.
+files-filter = Dosyaları ada göre süz
+files-only-changed = Yalnızca değişen dosyaları göster
+files-changed-count = { $count ->
+    [one] 1 değişen
+   *[other] { $count } değişen
+}
+files-refresh = Klasörleri ve değişiklikleri yeniden oku
+files-no-match = Uyan dosya yok. Henüz açılmamış klasörlerde aranmaz.
+files-deleted = Bu dosya silindi; değişiklikleri inceleme ekranında.
+files-empty = Bu klasör boş.
+files-folder-changed = İçinde değişen dosyalar var
+files-key-filter = dosyaları süz
+files-key-find = dosyada ara
+files-open-files = Açık dosyalar
+files-close-tab = { $name } dosyasını kapat
+files-path = Yol
+files-lines = { $count ->
+    [one] 1 satır
+   *[other] { $count } satır
+}
+files-changed-lines = { $count ->
+    [one] 1 satır değişti
+   *[other] { $count } satır değişti
+}
+files-find = Dosyada ara
+files-find-none = Eşleşme yok
+files-find-at = { $used } / { $total }
+files-find-prev = Önceki eşleşme
+files-find-next = Sonraki eşleşme
+files-find-close = Aramayı kapat
+files-copy = Dosyanın tamamını kopyala
+files-copied = Kopyalandı
+files-reload = Bu dosyayı yeniden oku
+files-mark-add = Son commit'ten bu yana eklendi
+files-mark-mod = Son commit'ten bu yana değişti
+files-mark-del = Son commit'ten bu yana burada satırlar silindi
 filter-placeholder = Ajana, makineye veya projeye göre süz
 filter-none = Eşleşen yok.
 console-drag = Yerlerini değiştirmek için bu çubuğu başka bir terminalin üzerine sürükleyin
@@ -497,6 +585,8 @@ layout-follow-selection = Listede seçilen ajan
 layout-follows-attention = Sizi bekleyeni izler
 layout-follows-selection = Seçimi izler
 layout-show-agent = { $name }
+layout-show-agent-itself = Bu ajan
+layout-show-agent-files = Bu ajanın dosyaları
 layout-panel-agent = Ajan
 layout-panel-empty = Boş bölme
 layout-panel-unknown = Bilinmeyen panel “{ $id }”: bu pencere onu gösteremiyor.

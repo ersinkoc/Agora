@@ -199,6 +199,58 @@ changes-files = { $count ->
 diff-title = What { $name } changed
 diff-close = Close
 diff-failed = Could not read the changes from that machine.
+changes-summary = { $count ->
+    [one] 1 file
+   *[other] { $count } files
+}
+changes-filter = Show
+changes-filter-all = All
+changes-filter-modified = Changed
+changes-filter-added = Added
+changes-filter-deleted = Deleted
+changes-filter-renamed = Renamed
+changes-status-modified = Changed
+changes-status-added = Added
+changes-status-deleted = Deleted
+changes-status-renamed = Renamed
+changes-badge-modified = M
+changes-badge-added = A
+changes-badge-deleted = D
+changes-badge-renamed = R
+changes-search = Filter by name
+changes-layout = Layout
+changes-layout-unified = Unified
+changes-layout-split = Side by side
+changes-wrap = Wrap lines
+changes-refresh = Read the changes again
+changes-list = Changed files
+changes-top-folder = Top folder
+changes-no-match = No changed file matches.
+changes-pick = Pick a file on the left to see what changed in it.
+changes-renamed-from = was { $name }
+changes-whole-file = Whole file
+changes-prev = Previous file
+changes-next = Next file
+changes-keys = next and previous file
+changes-binary = This file is not text, so its changes are not shown.
+changes-no-lines = Only the name or the permissions of this file changed.
+changes-no-eol = No line break at the end of the file
+changes-gap = { $count ->
+    [one] Show 1 unchanged line
+   *[other] Show { $count } unchanged lines
+}
+changes-gap-rest = Show the rest of the file
+changes-gap-failed = Could not read this file to show the unchanged lines.
+changes-retry = Try again
+changes-stale = The file has changed since these changes were read, so the unchanged lines are not shown. Read the changes again.
+changes-truncated = These changes are larger than 512 KiB, so only the first part was read. The last file in the list is cut off.
+changes-partial = This file is cut off: the changes were too large to read at once.
+changes-load-file = Read only this file
+changes-load-file-failed = This file alone is still too large to read.
+changes-show-all = { $count ->
+    [one] Show all 1 line
+   *[other] Show all { $count } lines
+}
 console-files = Files
 files-title = Files of { $name }
 files-tree = Folders and files
@@ -206,6 +258,42 @@ files-pick = Pick a file on the left to read it.
 files-binary = This file is not text, so it is not shown.
 files-too-large = This file could not be read (it may be too large).
 files-failed = Could not list this folder.
+files-filter = Filter files by name
+files-only-changed = Show only the changed files
+files-changed-count = { $count ->
+    [one] 1 changed
+   *[other] { $count } changed
+}
+files-refresh = Read the folders and changes again
+files-no-match = No file matches. Folders not opened yet are not searched.
+files-deleted = This file was deleted; its changes are in the review screen.
+files-empty = This folder is empty.
+files-folder-changed = Holds changed files
+files-key-filter = filter files
+files-key-find = find in the file
+files-open-files = Open files
+files-close-tab = Close { $name }
+files-path = Path
+files-lines = { $count ->
+    [one] 1 line
+   *[other] { $count } lines
+}
+files-changed-lines = { $count ->
+    [one] 1 line changed
+   *[other] { $count } lines changed
+}
+files-find = Find in the file
+files-find-none = No match
+files-find-at = { $used } of { $total }
+files-find-prev = Previous match
+files-find-next = Next match
+files-find-close = Close the search
+files-copy = Copy the whole file
+files-copied = Copied
+files-reload = Read this file again
+files-mark-add = Added since the last commit
+files-mark-mod = Changed since the last commit
+files-mark-del = Lines removed here since the last commit
 filter-placeholder = Filter by agent, machine or project
 filter-none = Nothing matches.
 console-drag = Drag this bar onto another terminal to swap their places
@@ -498,6 +586,8 @@ layout-follows-attention = Follows what needs you
 layout-follows-selection = Follows the selection
 layout-show-agent = { $name }
 layout-panel-agent = Agent
+layout-show-agent-itself = This agent
+layout-show-agent-files = This agent's files
 layout-panel-empty = Empty pane
 layout-panel-unknown = Unknown panel “{ $id }”: this window cannot show it.
 layout-drag = Drag onto another pane: an edge puts it beside, the middle makes it a tab
