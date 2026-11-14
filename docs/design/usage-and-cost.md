@@ -10,8 +10,9 @@ Sources, in order of preference:
 
    However usage arrives (adapter, ACP or the agent's own usage file), the node gathers the reports of one agent, model and currency
    for 5 seconds and logs them as one `AgentUsageReported` (`agora-node::usage_merge`). Token and cost counts are growths, so the sum
-   is exact; the context level is the latest. An agent's usage is logged before its end, and a node that stops logs what it was
-   gathering. This keeps the hub's log, which it replays at every start, from being mostly usage reports (performance.md, R4).
+   is exact; the context level is the latest. An agent's usage is logged before its end. A node ended from outside (`agora down`, a restart,
+   a crash) does not log what it was still gathering: up to 5 seconds of each agent's usage is lost then (a stop handler that
+   flushes first is the follow-up). This keeps the hub's log, which it replays at every start, from being mostly usage reports (performance.md, R4).
 2. Telemetry the agent exports (for example OpenTelemetry). The node runs a local OTLP receiver and injects the
    exporter configuration at launch (`[usage] source = "otel"`).
 3. Agent-local usage logs parsed per manifest (`[usage] source = "file"`).

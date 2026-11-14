@@ -135,7 +135,9 @@ pub struct EventSink {
 }
 
 impl Drop for EventSink {
-    /// A node that stops logs the usage it was still gathering.
+    /// When the sink is dropped in-process, the usage still being gathered is logged. A node ended from outside (`agora down`, a
+    /// restart, a crash: `SIGTERM` or `TerminateProcess` with no handler) does not unwind, so up to [`crate::usage_merge::WINDOW_MS`]
+    /// of each agent's usage is lost then (#522 review; a stop handler that flushes first is the follow-up).
     fn drop(&mut self) {
         let rest = self
             .usage
