@@ -680,6 +680,60 @@ fn code_in(text: &str) -> String {
 }
 
 #[test]
+fn the_hubs_first_snapshot_reaches_a_client_that_sends_a_command_at_once() {
+    // Seen on main after #446: `agora tui` registers its device right after connecting, and the hub's first snapshot arrived while
+    // that command waited for its answer; the wait dropped it, the hub never sends it again, and the console stayed at
+    // "Connecting…". A client that asks something at once must still get the snapshot.
+    use agora_tui::client::{sign_in, Hub, Session, Update};
+    let root = tmp("first-snapshot");
+    let (hub_dir, home) = (root.join("hub"), root.join("home"));
+    std::fs::create_dir_all(&home).unwrap();
+    let mut hub = agora(
+        &home,
+        &["hub", "run", "--listen", "127.0.0.1:0", "--hub-dir"],
+    )
+    .arg(&hub_dir)
+    .stdout(Stdio::piped())
+    .stderr(Stdio::null())
+    .spawn()
+    .unwrap();
+    let mut line = String::new();
+    BufReader::new(hub.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    let _hub = Proc(hub);
+    let addr = line
+        .split("running on ")
+        .nth(1)
+        .and_then(|r| r.split(". Its").next())
+        .expect(&line)
+        .trim()
+        .to_string();
+    let login = agora(&home, &["hub", "login", "--hub-dir"])
+        .arg(&hub_dir)
+        .output()
+        .unwrap();
+    let target = Hub {
+        addr,
+        ca_pem: std::fs::read_to_string(hub_dir.join("ca.pem")).unwrap(),
+    };
+    let token = sign_in(&target, &code_in(&String::from_utf8_lossy(&login.stdout))).unwrap();
+    let mut session = Session::connect(&target, &token).unwrap();
+    // A command right away, as the console's device registration is: its answer comes after the snapshot.
+    let _ = session.list_devices();
+    let end = std::time::Instant::now() + Duration::from_secs(10);
+    let mut got = false;
+    while !got && std::time::Instant::now() < end {
+        got = matches!(
+            session.next(Duration::from_millis(200)),
+            Update::Snapshot(_)
+        );
+    }
+    assert!(got, "the first snapshot was lost while the command waited");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn every_capability_a_node_advertises_is_one_the_real_hub_agrees_on() {
     // The real binaries on both ends: the hub's supported list (`hubcli.rs`) and the node's advertised list (`uplink_client.rs`)
     // must both name a capability, or the hub refuses every command that needs it (#378: `directory.list` was missing on the hub

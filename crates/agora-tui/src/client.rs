@@ -138,6 +138,9 @@ pub struct Session {
     next_stream: u32,
     /// An event arrived while a command was waiting for its answer.
     changed: bool,
+    /// A snapshot that arrived while something else was waiting (the hub's first one comes right after subscribing, often while
+    /// the device registration waits for its answer): `next` hands it out first, so it is never lost.
+    snapshot: Option<Box<Snapshot>>,
     /// A machine refused something that was sent without waiting for the answer (typing) because it wants a grant first.
     grant_wanted: bool,
 }
@@ -183,12 +186,17 @@ impl Session {
             term_frames: std::collections::VecDeque::new(),
             next_stream: agora_protocol::frame::FIRST_DYNAMIC_STREAM,
             changed: false,
+            snapshot: None,
             grant_wanted: false,
         })
     }
 
     /// Waits up to `wait` for the hub to say something.
     pub fn next(&mut self, wait: Duration) -> Update {
+        if let Some(s) = self.snapshot.take() {
+            self.changed = false;
+            return Update::Snapshot(s);
+        }
         if std::mem::take(&mut self.changed) {
             return Update::Changed;
         }
@@ -257,6 +265,7 @@ impl Session {
         };
         let conn = &mut self.conn;
         let changed = &mut self.changed;
+        let kept = &mut self.snapshot;
         let term_frames = &mut self.term_frames;
         let grant_wanted = &mut self.grant_wanted;
         self.rt.block_on(async {
@@ -292,11 +301,7 @@ impl Session {
                         None => Ok(CommandOk::default()),
                     };
                 }
-                if f.stream_id == STREAM_EVENTS && f.kind == kinds::POSITIONED_EVENT {
-                    *changed = true;
-                } else if f.stream_id >= agora_protocol::frame::FIRST_DYNAMIC_STREAM {
-                    term_frames.push_back(f);
-                }
+                set_aside(f, changed, kept, term_frames);
             }
         })
     }
@@ -391,6 +396,7 @@ impl Session {
         };
         let conn = &mut self.conn;
         let changed = &mut self.changed;
+        let kept = &mut self.snapshot;
         let term_frames = &mut self.term_frames;
         self.rt.block_on(async {
             conn.send(&Frame {
@@ -419,10 +425,8 @@ impl Session {
                             _ => Ok(stream),
                         };
                     }
-                } else if f.stream_id == STREAM_EVENTS && f.kind == kinds::POSITIONED_EVENT {
-                    *changed = true;
-                } else if f.stream_id >= agora_protocol::frame::FIRST_DYNAMIC_STREAM {
-                    term_frames.push_back(f);
+                } else {
+                    set_aside(f, changed, kept, term_frames);
                 }
             }
         })
@@ -455,6 +459,7 @@ impl Session {
         }
         let conn = &mut self.conn;
         let changed = &mut self.changed;
+        let kept = &mut self.snapshot;
         let queue = &mut self.term_frames;
         let grant_wanted = &mut self.grant_wanted;
         self.rt.block_on(async {
@@ -462,17 +467,15 @@ impl Session {
                 Err(_) => TermEvent::Quiet,
                 Ok(Ok(Some(f))) if f.stream_id == stream => event(&f).unwrap_or(TermEvent::Quiet),
                 Ok(Ok(Some(f))) => {
-                    if f.stream_id == STREAM_EVENTS && f.kind == kinds::POSITIONED_EVENT {
-                        *changed = true;
-                    } else if (f.stream_id, f.kind) == (STREAM_COMMANDS, 1) {
+                    if (f.stream_id, f.kind) == (STREAM_COMMANDS, 1) {
                         // The answer to something typed without waiting: only a missing grant matters.
                         if CommandResponse::decode(f.payload.as_slice())
                             .is_ok_and(|r| refused_for_grant(&r))
                         {
                             *grant_wanted = true;
                         }
-                    } else if f.stream_id >= agora_protocol::frame::FIRST_DYNAMIC_STREAM {
-                        queue.push_back(f);
+                    } else {
+                        set_aside(f, changed, kept, queue);
                     }
                     TermEvent::Quiet
                 }
@@ -505,17 +508,14 @@ impl Session {
         }
         let conn = &mut self.conn;
         let changed = &mut self.changed;
+        let kept = &mut self.snapshot;
         let queue = &mut self.term_frames;
         self.rt.block_on(async {
             match tokio::time::timeout(wait, conn.recv()).await {
                 Err(_) => ChatEvent::Quiet,
                 Ok(Ok(Some(f))) if f.stream_id == stream => take(&f).unwrap_or(ChatEvent::Quiet),
                 Ok(Ok(Some(f))) => {
-                    if f.stream_id == STREAM_EVENTS && f.kind == kinds::POSITIONED_EVENT {
-                        *changed = true;
-                    } else if f.stream_id >= agora_protocol::frame::FIRST_DYNAMIC_STREAM {
-                        queue.push_back(f);
-                    }
+                    set_aside(f, changed, kept, queue);
                     ChatEvent::Quiet
                 }
                 Ok(_) => ChatEvent::Lost,
@@ -1008,6 +1008,85 @@ mod answer_tests {
             answered_approval(&Snapshot::default(), Some("m/agent-1")),
             None
         );
+    }
+}
+
+/// A frame that arrived while something else was waiting for its own: an event marks the hub's state changed, a snapshot is kept
+/// for [`Session::next`] (dropping it lost the hub's first one, which is not sent again: the console stayed at "Connecting…"), and
+/// a frame of a terminal or chat stream is queued for its reader. Anything else is not for a waiting caller.
+fn set_aside(
+    f: Frame,
+    changed: &mut bool,
+    kept: &mut Option<Box<Snapshot>>,
+    queue: &mut std::collections::VecDeque<Frame>,
+) {
+    if f.stream_id == STREAM_EVENTS && f.kind == kinds::POSITIONED_EVENT {
+        *changed = true;
+    } else if f.stream_id == STREAM_EVENTS && f.kind == kinds::SNAPSHOT {
+        if let Ok(s) = Snapshot::decode(f.payload.as_slice()) {
+            *kept = Some(Box::new(s));
+            // The snapshot is newer than any event before it.
+            *changed = false;
+        }
+    } else if f.stream_id >= agora_protocol::frame::FIRST_DYNAMIC_STREAM {
+        queue.push_back(f);
+    }
+}
+
+#[cfg(test)]
+mod set_aside_tests {
+    use super::*;
+
+    #[test]
+    fn a_snapshot_that_arrives_while_something_waits_is_kept_and_events_and_streams_are_not_lost() {
+        let (mut changed, mut kept, mut queue) = (false, None, std::collections::VecDeque::new());
+        let frame = |stream_id, kind, payload: Vec<u8>| Frame {
+            stream_id,
+            kind,
+            seq: None,
+            payload,
+        };
+        set_aside(
+            frame(STREAM_EVENTS, kinds::POSITIONED_EVENT, vec![]),
+            &mut changed,
+            &mut kept,
+            &mut queue,
+        );
+        assert!(changed && kept.is_none());
+        let s = Snapshot {
+            nodes: vec![agora_protocol::v1::NodeSnapshot {
+                node_id: "mac".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        set_aside(
+            frame(STREAM_EVENTS, kinds::SNAPSHOT, s.encode_to_vec()),
+            &mut changed,
+            &mut kept,
+            &mut queue,
+        );
+        assert_eq!(kept.as_deref(), Some(&s));
+        assert!(!changed, "a snapshot supersedes the events before it");
+        set_aside(
+            frame(
+                agora_protocol::frame::FIRST_DYNAMIC_STREAM,
+                0,
+                b"x".to_vec(),
+            ),
+            &mut changed,
+            &mut kept,
+            &mut queue,
+        );
+        assert_eq!(queue.len(), 1);
+        // A frame that is not for a waiting caller changes nothing.
+        set_aside(
+            frame(STREAM_COMMANDS, 1, vec![]),
+            &mut changed,
+            &mut kept,
+            &mut queue,
+        );
+        assert!(!changed && queue.len() == 1 && kept.is_some());
     }
 }
 
