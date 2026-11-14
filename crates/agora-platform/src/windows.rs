@@ -92,10 +92,10 @@ fn owner_only_descriptor(inherit: bool) -> io::Result<Descriptor> {
 /// Creates the file at `path`, which must not exist yet (`CREATE_NEW`, so a planted file or link is not followed), already owner-only:
 /// the descriptor is given at creation, so there is no moment in which the file carries what its folder passes on and another user
 /// could open it (#320). The handle is not inheritable and the file is not shared while open.
-/// See [`crate::open_append_private`]. The folder is opened as itself (never through a link) and held without letting anyone rename or
+/// See [`crate::open_append_private`] (`append`) and [`crate::open_lock_private`] (read and write). The folder is opened as itself (never through a link) and held without letting anyone rename or
 /// delete it until the log is open, so it cannot be swapped for a link meanwhile; the log is then checked through its own handle: one
 /// name, not a link, and really inside the held folder (both final paths). An existing log is made owner-only through its handle.
-pub(crate) fn open_append_private(dir: &Path, path: &Path) -> io::Result<std::fs::File> {
+pub(crate) fn open_private(dir: &Path, path: &Path, append: bool) -> io::Result<std::fs::File> {
     use std::os::windows::fs::OpenOptionsExt;
     use windows_sys::Win32::Storage::FileSystem::{
         FILE_APPEND_DATA, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, READ_CONTROL,
@@ -108,11 +108,14 @@ pub(crate) fn open_append_private(dir: &Path, path: &Path) -> io::Result<std::fs
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
         Err(e) => return Err(e),
     }
-    // FILE_APPEND_DATA without FILE_WRITE_DATA: every write goes to the end, as with `append(true)`.
+    // FILE_APPEND_DATA without FILE_WRITE_DATA: every write goes to the end, as with `append(true)`. A lock file is read and written.
+    let data = if append {
+        FILE_APPEND_DATA
+    } else {
+        windows_sys::Win32::Foundation::GENERIC_READ | GENERIC_WRITE
+    };
     let file = std::fs::OpenOptions::new()
-        .access_mode(
-            FILE_APPEND_DATA | WRITE_DAC | READ_CONTROL | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
-        )
+        .access_mode(data | WRITE_DAC | READ_CONTROL | FILE_READ_ATTRIBUTES | SYNCHRONIZE)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
         .open(path)?;
     let (links, reparse) = link_facts(&file)?;

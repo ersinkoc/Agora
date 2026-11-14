@@ -513,6 +513,21 @@ pub fn web(say: &Say) -> ExitCode {
     open(say, &m, Ui::Web)
 }
 
+/// A failure to take or change a role's lock, said in words: a guard held too long by another process (stopped or hung) is named with
+/// its file, anything else is passed on as the reason.
+pub(crate) fn lock_failed(say: &Say, lock: &Path, e: &std::io::Error) -> ExitCode {
+    if e.kind() == std::io::ErrorKind::TimedOut {
+        let mut guard = lock.as_os_str().to_owned();
+        guard.push(".guard");
+        say.err(
+            key!("frontdoor-lock-busy"),
+            &[("path", PathBuf::from(guard).display().to_string().into())],
+        );
+        return ExitCode::from(1);
+    }
+    failed(say, &e.to_string())
+}
+
 fn failed(say: &Say, reason: &str) -> ExitCode {
     say.err(key!("frontdoor-failed"), &[("reason", reason.into())]);
     ExitCode::from(1)
@@ -659,18 +674,40 @@ pub(crate) enum Claim {
 /// of a role's lock happens under it: taking or replacing it ([`claim`], the front door's handover), and removing it
 /// ([`remove_lock_of`]). So a check of what the lock names and the change that follows are one step for every other process: `agora
 /// down` can never delete a lock that a new supervisor put in place between its check and its removal (Codex's review of #548).
+///
+/// The guard and its `run` folder are private (`agora_platform::open_lock_private`, `ensure_private_dir`): another local user can
+/// neither hold the guard nor make it land on another file. Waiting for it is bounded ([`GUARD_WAIT`]): a holder that is stopped (or
+/// hangs) makes this fail with `TimedOut`, never wait forever.
 fn guard(lock: &Path) -> std::io::Result<std::fs::File> {
+    guard_within(lock, GUARD_WAIT)
+}
+
+/// [`guard`], waiting at most `wait`.
+fn guard_within(lock: &Path, wait: Duration) -> std::io::Result<std::fs::File> {
+    if let Some(dir) = lock.parent().filter(|d| !d.as_os_str().is_empty()) {
+        agora_platform::ensure_private_dir(dir)?;
+    }
     let mut path = lock.as_os_str().to_owned();
     path.push(".guard");
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(PathBuf::from(path))?;
-    file.lock()?;
-    Ok(file)
+    let file = agora_platform::open_lock_private(Path::new(&path))?;
+    let end = Instant::now() + wait;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(std::fs::TryLockError::WouldBlock) if Instant::now() < end => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(std::fs::TryLockError::WouldBlock) => {
+                return Err(std::io::Error::from(std::io::ErrorKind::TimedOut))
+            }
+            Err(std::fs::TryLockError::Error(e)) => return Err(e),
+        }
+    }
 }
+
+/// How long [`guard`] waits for another process to finish changing a role's lock. The longest a holder keeps it is `claim`'s 100 ms
+/// pause, so this is only reached when the holder is stopped or hangs.
+const GUARD_WAIT: Duration = Duration::from_secs(10);
 
 /// Takes the role's lock for this process, replacing a stale one (its process ended, or its pid now belongs to another process).
 pub(crate) fn claim(path: &Path) -> std::io::Result<Claim> {
@@ -765,7 +802,7 @@ fn ensure(say: &Say, home: &Path, m: &Machine, role: Role) -> Result<(), ExitCod
     let lock = role.lock(home);
     let log = role.log(home);
     if holder(home, role).is_none() && !role_answers(home, m, role) {
-        let mine = claim(&lock).map_err(|e| failed(say, &e.to_string()))?;
+        let mine = claim(&lock).map_err(|e| lock_failed(say, &lock, &e))?;
         if let Claim::Mine = mine {
             say.out(
                 key!("frontdoor-starting"),
@@ -1186,6 +1223,22 @@ mod tests {
             read_lock(&lock).map(|l| (l.pid, l.start)),
             Some((me.pid, me.start))
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Linux's review of #551: a holder of the guard that is stopped (or hangs) makes the next change wait a bounded time and fail
+    /// with `TimedOut`, never forever.
+    #[test]
+    fn a_guard_held_by_another_waits_a_bounded_time() {
+        let dir = tmp("guard-wait");
+        let lock = dir.join("run").join("node.lock");
+        let held = guard(&lock).unwrap();
+        let started = Instant::now();
+        let e = guard_within(&lock, Duration::from_millis(300)).unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(5));
+        drop(held);
+        assert!(guard_within(&lock, Duration::from_millis(300)).is_ok());
         let _ = std::fs::remove_dir_all(dir);
     }
 

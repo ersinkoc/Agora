@@ -232,6 +232,7 @@ frontdoor-bad-machine-file = { $path } okunamadı. Düzeltin ya da silip ilk sor
 frontdoor-not-set-up = Agora bu makinede henüz kurulmadı. Önce `agora` çalıştırın.
 frontdoor-no-port = { $port } ve sonrasında boş port bulunamadı.
 frontdoor-failed = Agora başlatılamadı: { $reason }
+frontdoor-lock-busy = Başka bir süreç { $path } dosyasını 10 saniyeden uzun süredir tutuyor (durdurulmuş ya da takılmış olabilir), bu yüzden Agora çalışanları değiştirmedi. `agora status` ile bulun ya da kapatın ve yeniden deneyin.
 frontdoor-role-hub = hub
 frontdoor-role-node = node
 frontdoor-starting = { $role } başlatılıyor…

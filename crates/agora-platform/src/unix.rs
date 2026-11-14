@@ -557,13 +557,14 @@ pub(crate) fn catch_stop_requests() -> io::Result<()> {
     Ok(())
 }
 
-/// See [`crate::open_append_private`]: the folder is opened as itself (`O_DIRECTORY|O_NOFOLLOW`) and the log is created or opened
+/// See [`crate::open_append_private`] (`append`) and [`crate::open_lock_private`] (read and write): the folder is opened as itself (`O_DIRECTORY|O_NOFOLLOW`) and the log is created or opened
 /// relative to that descriptor (`openat` with `O_NOFOLLOW`), so neither can be swapped for a link between a check and the open. A new
 /// log is created exclusively with mode 0600; an existing one must be a regular file with one name, owned by this user, and is made
 /// 0600 through its descriptor when others could read it.
-pub(crate) fn open_append_private(
+pub(crate) fn open_private(
     dir: &std::path::Path,
     name: &std::ffi::OsStr,
+    append: bool,
 ) -> io::Result<std::fs::File> {
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -589,7 +590,12 @@ pub(crate) fn open_append_private(
     .map_err(link_error)?;
     // SAFETY: a descriptor this call just opened and nothing else owns.
     let dir_fd = unsafe { OwnedFd::from_raw_fd(dfd) };
-    let flags = libc::O_WRONLY | libc::O_APPEND | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    let access = if append {
+        libc::O_WRONLY | libc::O_APPEND
+    } else {
+        libc::O_RDWR
+    };
+    let flags = access | libc::O_NOFOLLOW | libc::O_CLOEXEC;
     // SAFETY: a live directory descriptor and a NUL-terminated name.
     let created = unsafe {
         libc::openat(

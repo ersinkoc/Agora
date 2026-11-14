@@ -1389,11 +1389,11 @@ pub fn open_append_private(path: &std::path::Path) -> io::Result<std::fs::File> 
         let name = path
             .file_name()
             .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
-        unix::open_append_private(dir, name)
+        unix::open_private(dir, name, true)
     }
     #[cfg(windows)]
     {
-        windows::open_append_private(dir, path)
+        windows::open_private(dir, path, true)
     }
     #[cfg(not(any(unix, windows)))]
     {
@@ -1403,6 +1403,68 @@ pub fn open_append_private(path: &std::path::Path) -> io::Result<std::fs::File> 
             .append(true)
             .open(path)
     }
+}
+
+/// Opens (creating it) a lock file a process takes with `File::lock`, with every check of [`open_append_private`]: its folder opened as
+/// itself, never through a link; a new file private from its creation (mode 0600, an owner-only ACL); an existing one a regular file
+/// with one name and (Unix) this user's, made private through its handle. Read and write, never truncated. Another local user can then
+/// neither open it to hold the lock nor plant a link that makes the lock land on another file.
+pub fn open_lock_private(path: &std::path::Path) -> io::Result<std::fs::File> {
+    let dir = path
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .unwrap_or(std::path::Path::new("."));
+    #[cfg(unix)]
+    {
+        let name = path
+            .file_name()
+            .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+        unix::open_private(dir, name, false)
+    }
+    #[cfg(windows)]
+    {
+        windows::open_private(dir, path, false)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = dir;
+        std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(path)
+    }
+}
+
+/// Makes `dir` exist as a folder only its user can enter (Unix 0700; Windows an owner-only ACL inherited by what it holds), creating it
+/// when missing. `InvalidInput` when it is a link or not a folder: a private folder is never reached through a link.
+pub fn ensure_private_dir(dir: &std::path::Path) -> io::Result<()> {
+    match std::fs::symlink_metadata(dir) {
+        Ok(m) => {
+            #[cfg(windows)]
+            let reparse = std::os::windows::fs::MetadataExt::file_attributes(&m) & 0x400 != 0;
+            #[cfg(not(windows))]
+            let reparse = false;
+            if !m.is_dir() || m.file_type().is_symlink() || reparse {
+                return Err(io::Error::new(io::ErrorKind::InvalidInput, "a link"));
+            }
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                std::fs::DirBuilder::new()
+                    .recursive(true)
+                    .mode(0o700)
+                    .create(dir)?;
+            }
+            #[cfg(not(unix))]
+            std::fs::create_dir_all(dir)?;
+        }
+        Err(e) => return Err(e),
+    }
+    restrict_to_owner(dir)
 }
 
 /// True where [`service_install`] can register a program to start at the user's login (ADR-0062 item 6): Windows (a logon task).
