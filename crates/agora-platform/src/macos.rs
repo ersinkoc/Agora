@@ -115,6 +115,15 @@ pub(crate) fn sandbox_supported() -> bool {
     std::path::Path::new(SANDBOX_EXEC).exists()
 }
 
+/// `(literal "p")`: that path itself, not what is below it.
+fn literal(p: &std::path::Path) -> String {
+    let s = p
+        .to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    format!("(literal \"{s}\")")
+}
+
 fn quote(p: &std::path::Path) -> String {
     let s = p
         .to_string_lossy()
@@ -134,8 +143,36 @@ fn quote(p: &std::path::Path) -> String {
 /// A `write` entry that is a file also allows files next to it whose names start with its name and a dot (`.claude.json.lock`,
 /// `.claude.json.tmp.123`): programs save a file by writing a sibling and renaming it, or lock it with one, and without them the
 /// save fails while the file itself is writable. Nothing else in that folder opens up.
-pub(crate) fn profile(sb: &crate::Sandbox) -> String {
-    let real = |p: &std::path::Path| std::fs::canonicalize(p).ok();
+///
+/// Refuses ([`crate::SandboxRefusal`]) when a `deny` entry is relative or cannot be resolved (a closed folder that silently fell out
+/// of the profile would leave the node's home open), and when a `reopen` entry is not a plain folder.
+pub(crate) fn profile(sb: &crate::Sandbox) -> io::Result<String> {
+    let refused = |why| io::Error::new(io::ErrorKind::PermissionDenied, why);
+    let mut denied: Vec<std::path::PathBuf> = Vec::new();
+    for p in &sb.deny {
+        match real_or_future(p).filter(|_| p.is_absolute()) {
+            Some(r) => denied.push(r),
+            None => return Err(refused(crate::SandboxRefusal::ProtectedPathUnresolved)),
+        }
+    }
+    // The agent's worktree must still be the folder the node made: one it replaced with a link (into the node's home, or to any
+    // folder it wants written at its next start) refuses the start instead of starting it unable to use its folder, or able to
+    // write where the link points.
+    for p in &sb.reopen {
+        let plain = p.is_absolute()
+            && std::fs::symlink_metadata(p)
+                .is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink());
+        if !plain {
+            return Err(refused(crate::SandboxRefusal::WorktreeNotFolder));
+        }
+    }
+    // A `read` or `write` entry that resolves below a closed folder (`~/.claude` made a link to the node's home) is left out: the
+    // closed folder stays closed whatever the agent left behind for its next start.
+    let real = |p: &std::path::Path| {
+        std::fs::canonicalize(p)
+            .ok()
+            .filter(|r| !denied.iter().any(|d| r.starts_with(d)))
+    };
     let holds_private = |p: &std::path::Path| {
         PRIVATE
             .iter()
@@ -183,6 +220,96 @@ pub(crate) fn profile(sb: &crate::Sandbox) -> String {
             siblings.join(" ")
         ));
     }
+    // The node's own folders, closed after everything opened above: in Seatbelt the last matching rule wins, so they stay closed below
+    // an allowed folder. A unix socket is reached by `network-outbound`, which file rules do not cover (measured: a confined process
+    // connected to a socket below a folder it could not read), so its sockets are closed too, then the agent's own reopened.
+    // A protected path that does not exist yet (the control socket while interrupted agents resume, before the control server
+    // starts) is closed all the same: the rule names where it will be, through its nearest existing parent.
+    if !denied.is_empty() {
+        let paths: Vec<String> = denied.iter().map(|p| quote(p)).collect();
+        let to: Vec<String> = denied
+            .iter()
+            .map(|p| format!("(remote unix-socket {})", quote(p)))
+            .collect();
+        let bind: Vec<String> = denied
+            .iter()
+            .map(|p| format!("(local unix-socket {})", quote(p)))
+            .collect();
+        // Everything below them: contents, metadata and extended attributes (their names and sizes say what is there), writes,
+        // and connecting to or creating a socket there (an agent resumed before the node binds its control socket must not bind
+        // it first).
+        // Each read named: a wildcard `file-read*` deny does not undo an earlier `allow file-read-data` (measured: the data stayed
+        // readable below an allowed `/tmp`), as a wildcard allow does not undo a named deny.
+        out.push_str(&format!(
+            "(deny file-read-data file-read-metadata file-read-xattr file-write* {})\n",
+            paths.join(" ")
+        ));
+        out.push_str(&format!("(deny network-outbound {})\n", to.join(" ")));
+        out.push_str(&format!("(deny network-bind {})\n", bind.join(" ")));
+        // A closed folder cannot be moved or removed by moving a folder above it: below a folder the agent may write (a node home
+        // under `/tmp`), `mv /tmp/home /tmp/x` would carry everything out from under rules that name its path. The folders on the
+        // way to it are closed to writes themselves (their own entry: renaming or removing them), not to what is created in them.
+        let writable: Vec<std::path::PathBuf> = sb.write.iter().filter_map(|p| real(p)).collect();
+        let mut above: Vec<String> = Vec::new();
+        for d in &denied {
+            for a in d.ancestors().skip(1) {
+                if a.parent().is_some() && writable.iter().any(|w| a.starts_with(w)) {
+                    let q = literal(a);
+                    if !above.contains(&q) {
+                        above.push(q);
+                    }
+                }
+            }
+        }
+        if !above.is_empty() {
+            out.push_str(&format!("(deny file-write* {})\n", above.join(" ")));
+        }
+        // What the agent may use below a closed folder is opened again after it: its own worktree (an allow-list: everything else
+        // of the node's home stays closed), with the metadata of the folders on the way, so a path to it can still be walked
+        // (`git` resolves every folder of its working directory). Only while it is still a real folder: the agent could have
+        // replaced it with a link to the home, which would then be opened as its worktree.
+        let inside: Vec<std::path::PathBuf> = sb
+            .reopen
+            .iter()
+            .filter(|p| p.is_absolute())
+            .filter(|p| {
+                std::fs::symlink_metadata(p)
+                    .is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink())
+            })
+            .filter_map(|p| std::fs::canonicalize(p).ok())
+            .filter(|w| denied.iter().any(|d| w.starts_with(d) && w != d))
+            .collect();
+        if !inside.is_empty() {
+            let open: Vec<String> = inside.iter().map(|w| quote(w)).collect();
+            out.push_str(&format!(
+                "(allow file-read-data file-read-metadata file-read-xattr file-write* {})\n",
+                open.join(" ")
+            ));
+            let mut walk: Vec<String> = Vec::new();
+            for w in &inside {
+                for a in w.ancestors().skip(1) {
+                    if denied.iter().any(|d| a.starts_with(d)) {
+                        let q = literal(a);
+                        if !walk.contains(&q) {
+                            walk.push(q);
+                        }
+                    }
+                }
+            }
+            if !walk.is_empty() {
+                out.push_str(&format!("(allow file-read-metadata {})\n", walk.join(" ")));
+            }
+        }
+        let own: Vec<String> = sb
+            .sockets
+            .iter()
+            .filter_map(|p| real_or_new(p))
+            .map(|p| format!("(remote unix-socket {})", quote(&p)))
+            .collect();
+        if !own.is_empty() && !sb.offline {
+            out.push_str(&format!("(allow network-outbound {})\n", own.join(" ")));
+        }
+    }
     if sb.offline {
         // ADR-0047 `worktree-offline`: nothing leaves the machine. Seatbelt names only `localhost` (this machine's own addresses) or
         // every host. Connections to this machine stay open (a local model; see the threat model for what else listens there);
@@ -209,7 +336,7 @@ pub(crate) fn profile(sb: &crate::Sandbox) -> String {
             out.push_str(&format!("(allow network-bind {})\n", own.join(" ")));
         }
     }
-    out
+    Ok(out)
 }
 
 /// `(regex #"^<file>\.[^/]*$")`: the names next to `file` that start with its name and a dot. `None` for a path a raw string
@@ -231,6 +358,20 @@ fn sibling_rule(file: &std::path::Path) -> Option<String> {
 }
 
 /// The canonical form of `p`, or, for a path that does not exist yet (a socket made later), its canonical parent joined with its name.
+/// `p` resolved as far as it exists (symbolic links in its existing part followed: `/tmp` is `/private/tmp`), the rest of it as
+/// written. `None` only when not even its root resolves.
+fn real_or_future(p: &std::path::Path) -> Option<std::path::PathBuf> {
+    let mut missing = Vec::new();
+    let mut at = p;
+    loop {
+        if let Ok(real) = std::fs::canonicalize(at) {
+            return Some(missing.iter().rev().fold(real, |acc, part| acc.join(part)));
+        }
+        missing.push(at.file_name()?.to_os_string());
+        at = at.parent()?;
+    }
+}
+
 fn real_or_new(p: &std::path::Path) -> Option<std::path::PathBuf> {
     std::fs::canonicalize(p).ok().or_else(|| {
         Some(
@@ -246,11 +387,15 @@ pub(crate) fn wrap(
     sb: &crate::Sandbox,
     program: &std::ffi::OsStr,
     args: &[std::ffi::OsString],
-) -> (std::ffi::OsString, Vec<std::ffi::OsString>) {
-    let mut v: Vec<std::ffi::OsString> =
-        vec!["-p".into(), profile(sb).into(), "--".into(), program.into()];
+) -> io::Result<(std::ffi::OsString, Vec<std::ffi::OsString>)> {
+    let mut v: Vec<std::ffi::OsString> = vec![
+        "-p".into(),
+        profile(sb)?.into(),
+        "--".into(),
+        program.into(),
+    ];
     v.extend(args.iter().cloned());
-    (SANDBOX_EXEC.into(), v)
+    Ok((SANDBOX_EXEC.into(), v))
 }
 
 /// See [`crate::opened_path`]: `F_GETPATH`, the path the kernel has for the open vnode (firmlinks shown as `/Users/...`, as
@@ -378,7 +523,7 @@ mod sandbox_tests {
             write: vec![std::env::temp_dir()],
             ..Default::default()
         };
-        let p = super::profile(&sb);
+        let p = super::profile(&sb).unwrap();
         let deny = p.find("(deny file-read-data").unwrap();
         let allow = p.find("(allow file-write*").unwrap();
         assert!(deny < allow, "{p}");
@@ -399,7 +544,7 @@ mod sandbox_tests {
             write: vec![file.clone(), "/dev".into()],
             ..Default::default()
         };
-        let p = super::profile(&sb);
+        let p = super::profile(&sb).unwrap();
         assert!(p.contains("state\\.json\\.[^/]*$"), "{p}");
         // Run it: the save pattern (sibling, then rename over the file) works; another name in the folder is refused.
         let script = format!(
@@ -445,8 +590,9 @@ mod sandbox_tests {
             write: vec![dir.join("w"), "/dev".into()],
             offline: true,
             sockets: vec![dir.join("m/own")],
+            ..Default::default()
         };
-        let p = super::profile(&sb);
+        let p = super::profile(&sb).unwrap();
         // `nc` ships with macOS: -z only connects, -G is the connect timeout, `-U -w 1` connects to a unix socket and gives up after a
         // second of quiet. 192.0.2.1 is TEST-NET (never routed): the sandbox refuses it at once (nc exits silently), while without it
         // the connect waits out the timeout, so the check holds on a machine with no internet too. A refused `nc -l` exits at once.
@@ -489,9 +635,402 @@ mod sandbox_tests {
     }
 
     #[test]
+    fn the_nodes_own_folders_stay_closed_below_an_allowed_folder_and_its_sockets_too() {
+        use std::os::unix::net::UnixListener;
+        // #475: a node home under `/tmp`, which every confined agent may write. Short paths: a unix socket path is limited.
+        let home = std::path::PathBuf::from(format!("/tmp/agora-deny-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        for d in ["data", "m", "wt"] {
+            std::fs::create_dir_all(home.join(d)).unwrap();
+        }
+        std::fs::write(home.join("data/trusted-devices"), "web-1 key\n").unwrap();
+        let control = UnixListener::bind(home.join("node.sock")).unwrap();
+        let own = UnixListener::bind(home.join("m/own")).unwrap();
+        let other = UnixListener::bind(home.join("m/other")).unwrap();
+        let sb = crate::Sandbox {
+            read: vec!["/usr".into(), "/bin".into()],
+            write: vec![home.join("wt"), "/tmp".into(), "/dev".into()],
+            offline: false,
+            sockets: vec![home.join("m/own")],
+            deny: vec![home.join("data"), home.join("node.sock"), home.join("m")],
+            reopen: vec![],
+        };
+        let p = super::profile(&sb).unwrap();
+        let h = home.display();
+        let script = format!(
+            "cat {h}/data/trusted-devices >/dev/null 2>&1 && echo read-open || echo read-closed; \
+             echo x > {h}/data/new 2>/dev/null && echo write-open || echo write-closed; \
+             echo x > {h}/wt/f 2>/dev/null && echo worktree-open || echo worktree-closed; \
+             nc -U -w 1 {h}/node.sock </dev/null 2>/dev/null && echo control-open || echo control-closed; \
+             nc -U -w 1 {h}/m/other </dev/null 2>/dev/null && echo other-open || echo other-closed; \
+             nc -U -w 1 {h}/m/own </dev/null 2>/dev/null && echo own-open || echo own-closed;"
+        );
+        let out = std::process::Command::new(super::SANDBOX_EXEC)
+            .args(["-p", &p, "/bin/sh", "-c", &script])
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        for want in [
+            "read-closed",
+            "write-closed",
+            "worktree-open",
+            "control-closed",
+            "other-closed",
+            "own-open",
+        ] {
+            assert!(text.contains(want), "{want}: {text}\n{p}");
+        }
+        drop((control, own, other));
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn a_protected_path_made_after_the_profile_is_closed_too() {
+        use std::os::unix::net::UnixListener;
+        // The node resumes interrupted agents before its control server starts: the control socket (and a data folder not made
+        // yet) do not exist when the profile is built, and must be closed once they do.
+        let home = std::path::PathBuf::from(format!("/tmp/agora-later-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(home.join("wt")).unwrap();
+        let sb = crate::Sandbox {
+            read: vec!["/usr".into(), "/bin".into()],
+            write: vec![home.join("wt"), "/tmp".into(), "/dev".into()],
+            offline: false,
+            sockets: vec![],
+            deny: vec![home.join("node.sock"), home.join("later/data")],
+            reopen: vec![],
+        };
+        let p = super::profile(&sb).unwrap();
+        // Named through the resolved parent (`/tmp` is `/private/tmp`) and kept as written below it.
+        assert!(
+            p.contains(&format!(
+                "(subpath \"/private{}/node.sock\")",
+                home.display()
+            )),
+            "{p}"
+        );
+        assert!(
+            p.contains(&format!(
+                "(subpath \"/private{}/later/data\")",
+                home.display()
+            )),
+            "{p}"
+        );
+        let control = UnixListener::bind(home.join("node.sock")).unwrap();
+        std::fs::create_dir_all(home.join("later/data")).unwrap();
+        std::fs::write(home.join("later/data/trusted-devices"), "web-1 key\n").unwrap();
+        let h = home.display();
+        let script = format!(
+            "cat {h}/later/data/trusted-devices >/dev/null 2>&1 && echo read-open || echo read-closed; \
+             nc -U -w 1 {h}/node.sock </dev/null 2>/dev/null && echo control-open || echo control-closed; \
+             echo x > {h}/wt/f 2>/dev/null && echo worktree-open || echo worktree-closed;"
+        );
+        let out = std::process::Command::new(super::SANDBOX_EXEC)
+            .args(["-p", &p, "/bin/sh", "-c", &script])
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        for want in ["read-closed", "control-closed", "worktree-open"] {
+            assert!(text.contains(want), "{want}: {text}\n{p}");
+        }
+        drop(control);
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    /// The review of #477 (a node home under `/tmp`): every way out it named, run by a confined shell. Prints what each did.
+    fn run_attacks(home: &std::path::Path, sb: &crate::Sandbox) -> String {
+        let p = super::profile(sb).unwrap();
+        let h = home.display();
+        let w = home.join("worktrees/a").display().to_string();
+        let job = format!("agora-escape-{}", std::process::id());
+        let script = format!(
+            "cd {w}; \
+             mv {h} /tmp/agora-moved-$$ 2>/dev/null && echo rename-OPEN && mv /tmp/agora-moved-$$ {h} || echo rename-closed; \
+             echo x > {h}/publishers 2>/dev/null && echo publishers-OPEN || echo publishers-closed; \
+             echo x > {h}/manifests/evil.toml 2>/dev/null && echo manifests-OPEN || echo manifests-closed; \
+             cat {h}/data/trusted-devices >/dev/null 2>&1 && echo read-OPEN || echo read-closed; \
+             ls {h}/data >/dev/null 2>&1 && echo list-OPEN || echo list-closed; \
+             ln {h}/data/trusted-devices {w}/x 2>/dev/null && cat {w}/x >/dev/null 2>&1 && echo hardlink-OPEN || echo hardlink-closed; \
+             cp -c {h}/data/trusted-devices {w}/c 2>/dev/null && echo clone-OPEN || echo clone-closed; \
+             launchctl submit -l {job} -- /usr/bin/touch {h}/data/escaped 2>/dev/null && echo launchd-OPEN || echo launchd-closed; \
+             ln -s {h}/data {w}/d 2>/dev/null; cat {w}/d/trusted-devices >/dev/null 2>&1 && echo symlink-OPEN || echo symlink-closed; \
+             (cd {h} && cat data/trusted-devices >/dev/null 2>&1) && echo relative-OPEN || echo relative-closed; \
+             echo x > {w}/ok 2>/dev/null && echo worktree-open || echo worktree-CLOSED; \
+             (perl -MIO::Socket::UNIX -e 'IO::Socket::UNIX->new(Type=>SOCK_STREAM(),Local=>$ARGV[0],Listen=>1) or exit 1' {h}/early.sock) 2>/dev/null && echo bind-OPEN || echo bind-closed; \
+             nc -U -w 1 {h}/node.sock </dev/null 2>/dev/null && echo connect-OPEN || echo connect-closed; \
+             ln {h}/node.sock {w}/s 2>/dev/null && nc -U -w 1 {w}/s </dev/null 2>/dev/null && echo socketlink-OPEN || echo socketlink-closed; \
+             cat $(echo {h} | tr a-z A-Z | sed 's#/PRIVATE/TMP#/private/tmp#;s#^/TMP#/tmp#')/data/trusted-devices >/dev/null 2>&1 && echo case-OPEN || echo case-closed; \
+             cat /System/Volumes/Data{h}/data/trusted-devices >/dev/null 2>&1 && echo firmlink-OPEN || echo firmlink-closed; \
+             cat /System/Volumes/Data/private{h}/data/trusted-devices >/dev/null 2>&1 && echo firmlink2-OPEN || echo firmlink2-closed;"
+        );
+        let out = std::process::Command::new(super::SANDBOX_EXEC)
+            .args(["-p", &p, "/bin/sh", "-c", &script])
+            .output()
+            .unwrap();
+        // Should the submit ever get through, its job is not left behind (launchd would run it again and again).
+        let _ = std::process::Command::new("launchctl")
+            .args(["remove", &job])
+            .status();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    fn attack_home(tag: &str) -> std::path::PathBuf {
+        attack_home_in(std::path::Path::new("/tmp"), tag)
+    }
+
+    fn attack_home_in(base: &std::path::Path, tag: &str) -> std::path::PathBuf {
+        let home = base.join(format!(".agora-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        for d in ["data", "m", "manifests", "worktrees/a", "link"] {
+            std::fs::create_dir_all(home.join(d)).unwrap();
+        }
+        std::fs::write(home.join("data/trusted-devices"), "web-1 key\n").unwrap();
+        let _ = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(home.join("worktrees/a"))
+            .status();
+        home
+    }
+
+    #[test]
+    fn a_node_home_resists_every_way_out_the_review_named_wherever_it_is() {
+        // The security reviews of #477: a node home below `/tmp` (writable by every confined agent), below the per-user temp folder
+        // (`/var/folders/.../T`) and below the user's home (`~/.agora`), closed as a whole, the agent's own worktree and mesh socket
+        // opened again.
+        let user_home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+        for base in [Some("/tmp".into()), Some(std::env::temp_dir()), user_home]
+            .into_iter()
+            .flatten()
+        {
+            ways_out(&base);
+        }
+    }
+
+    fn ways_out(base: &std::path::Path) {
+        let home = attack_home_in(base, "ways");
+        let _control = std::os::unix::net::UnixListener::bind(home.join("node.sock")).unwrap();
+        let _own = std::os::unix::net::UnixListener::bind(home.join("m/own")).unwrap();
+        let sb = crate::Sandbox {
+            read: vec![
+                "/usr".into(),
+                "/bin".into(),
+                "/Library".into(),
+                "/System".into(),
+            ],
+            write: vec![home.join("worktrees/a"), "/tmp".into(), "/dev".into()],
+            offline: false,
+            sockets: vec![home.join("m/own")],
+            deny: vec![home.clone()],
+            reopen: vec![home.join("worktrees/a")],
+        };
+        let mut text = run_attacks(&home, &sb);
+        let h = home.display();
+        let own = std::process::Command::new(super::SANDBOX_EXEC)
+            .args([
+                "-p",
+                &super::profile(&sb).unwrap(),
+                "/bin/sh",
+                "-c",
+                &format!("nc -U -w 1 {h}/m/own </dev/null 2>/dev/null && echo own-open || echo own-CLOSED"),
+            ])
+            .output()
+            .unwrap();
+        text.push_str(&String::from_utf8_lossy(&own.stdout));
+        assert!(
+            !text.contains("OPEN") && !text.contains("CLOSED"),
+            "{text}\n{}",
+            super::profile(&sb).unwrap()
+        );
+        for want in [
+            // 1 (HIGH): the home cannot be moved away from under its rules.
+            "rename-closed",
+            // 2 (HIGH): nothing of the home is writable: trust files, manifests.
+            "publishers-closed",
+            "manifests-closed",
+            // 3 (MEDIUM): no socket can be bound there before the node binds its own.
+            "bind-closed",
+            // And the rest the review asked about: contents, listing, links, a relative path, case, firmlinks, the control socket.
+            "read-closed",
+            "list-closed",
+            "hardlink-closed",
+            // Second review (6): a copy-on-write clone (`clonefile`) of a closed file.
+            "clone-closed",
+            // Second review (5): a job handed to launchd runs outside the profile; launchd refuses one from a confined process.
+            "launchd-closed",
+            "symlink-closed",
+            "relative-closed",
+            "connect-closed",
+            "socketlink-closed",
+            "case-closed",
+            "firmlink-closed",
+            "firmlink2-closed",
+            // What the agent keeps: its worktree and its own mesh socket.
+            "worktree-open",
+            "own-open",
+        ] {
+            assert!(text.contains(want), "{want}: {text}");
+        }
+        assert!(home.exists(), "the home was moved");
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    /// What a confined shell can do to the home through `via`, a path the agent made point into it.
+    fn through(sb: &crate::Sandbox, home: &std::path::Path, via: &std::path::Path) -> String {
+        let (h, v) = (home.display(), via.display());
+        let script = format!(
+            "cat {h}/data/trusted-devices >/dev/null 2>&1 && echo read-OPEN || echo read-closed; \
+             cat {v}/data/trusted-devices >/dev/null 2>&1 && echo via-read-OPEN || echo via-read-closed; \
+             ls {v}/data >/dev/null 2>&1 && echo via-list-OPEN || echo via-list-closed; \
+             echo x > {v}/publishers 2>/dev/null && echo via-write-OPEN || echo via-write-closed; \
+             echo x > {h}/data/policy 2>/dev/null && echo policy-OPEN || echo policy-closed;"
+        );
+        let out = std::process::Command::new(super::SANDBOX_EXEC)
+            .args(["-p", &super::profile(sb).unwrap(), "/bin/sh", "-c", &script])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    #[test]
+    fn a_worktree_swapped_for_a_link_refuses_the_next_start() {
+        // Second review of #477 (1), and the third's ask to refuse rather than start: the agent removes its worktree and leaves a
+        // link in its place (to the node's home, into it, or anywhere else it would like written); the node starts it again with the
+        // same worktree path.
+        let home = attack_home("swap");
+        let wt = home.join("worktrees/a");
+        let elsewhere =
+            std::path::PathBuf::from(format!("/tmp/agora-elsewhere-{}", std::process::id()));
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::remove_dir_all(&wt).unwrap();
+        let sb = crate::Sandbox {
+            read: vec!["/usr".into(), "/bin".into()],
+            write: vec![wt.clone(), "/tmp".into(), "/dev".into()],
+            deny: vec![home.clone()],
+            reopen: vec![wt.clone()],
+            ..Default::default()
+        };
+        for target in [home.clone(), home.join("data"), elsewhere.clone()] {
+            std::os::unix::fs::symlink(&target, &wt).unwrap();
+            let e = super::profile(&sb).unwrap_err();
+            assert_eq!(
+                crate::sandbox_refusal(&e),
+                Some(crate::SandboxRefusal::WorktreeNotFolder),
+                "{target:?}"
+            );
+            assert!(super::wrap(&sb, "/bin/sh".as_ref(), &[]).is_err());
+            std::fs::remove_file(&wt).unwrap();
+        }
+        // Gone, or a file: refused too.
+        assert!(super::profile(&sb).is_err());
+        std::fs::write(&wt, "x").unwrap();
+        assert!(super::profile(&sb).is_err());
+        std::fs::remove_file(&wt).unwrap();
+        // And were a link only in the write list, it still opens nothing of the home (an entry resolving into it is dropped).
+        std::os::unix::fs::symlink(home.join("data"), &wt).unwrap();
+        let only_written = crate::Sandbox {
+            reopen: vec![],
+            ..sb.clone()
+        };
+        let p = super::profile(&only_written).unwrap();
+        let (w, h) = (wt.display(), home.display());
+        let out = std::process::Command::new(super::SANDBOX_EXEC)
+            .args([
+                "-p",
+                &p,
+                "/bin/sh",
+                "-c",
+                &format!(
+                    "cat {w}/trusted-devices >/dev/null 2>&1 && echo data-OPEN || echo data-closed; \
+                     cat {h}/data/trusted-devices >/dev/null 2>&1 && echo real-OPEN || echo real-closed; \
+                     echo x > {h}/data/policy 2>/dev/null && echo policy-OPEN || echo policy-closed"
+                ),
+            ])
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            !text.contains("OPEN") && text.contains("data-closed"),
+            "{text}\n{p}"
+        );
+        let _ = std::fs::remove_dir_all(home);
+        let _ = std::fs::remove_dir_all(elsewhere);
+    }
+
+    #[test]
+    fn a_folder_the_agent_may_write_made_a_link_to_the_home_does_not_open_it() {
+        // Second review of #477 (2): an owner's write entry (`~/.claude`) the agent replaced with a link to the node's home, or to a
+        // folder inside it.
+        let home = attack_home("link");
+        let claude = std::path::PathBuf::from(format!("/tmp/agora-claude-{}", std::process::id()));
+        let data =
+            std::path::PathBuf::from(format!("/tmp/agora-claudedata-{}", std::process::id()));
+        let _ = std::fs::remove_file(&claude);
+        let _ = std::fs::remove_file(&data);
+        std::os::unix::fs::symlink(&home, &claude).unwrap();
+        std::os::unix::fs::symlink(home.join("data"), &data).unwrap();
+        let sb = crate::Sandbox {
+            read: vec!["/usr".into(), "/bin".into(), data.clone()],
+            write: vec![home.join("worktrees/a"), claude.clone(), "/dev".into()],
+            deny: vec![home.clone()],
+            reopen: vec![home.join("worktrees/a")],
+            ..Default::default()
+        };
+        let p = super::profile(&sb).unwrap();
+        let mut text = through(&sb, &home, &claude);
+        text.push_str(&through(&sb, &home, &home));
+        let out = std::process::Command::new(super::SANDBOX_EXEC)
+            .args([
+                "-p",
+                &p,
+                "/bin/sh",
+                "-c",
+                &format!(
+                    "cat {}/trusted-devices >/dev/null 2>&1 && echo data-OPEN || echo data-closed; \
+                     echo x > {}/worktrees/a/f 2>/dev/null && echo worktree-open || echo worktree-CLOSED",
+                    data.display(),
+                    home.display()
+                ),
+            ])
+            .output()
+            .unwrap();
+        text.push_str(&String::from_utf8_lossy(&out.stdout));
+        assert!(
+            !text.contains("OPEN") && !text.contains("CLOSED"),
+            "{text}\n{p}"
+        );
+        assert!(text.contains("worktree-open"), "{text}");
+        let _ = std::fs::remove_file(claude);
+        let _ = std::fs::remove_file(data);
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn a_protected_path_that_cannot_be_resolved_fails_the_profile() {
+        // Second review of #477 (4): a relative node home made the rule silently disappear. Now the agent does not start.
+        for deny in ["", "data", "./node.sock"] {
+            let sb = crate::Sandbox {
+                read: vec!["/usr".into()],
+                write: vec![std::env::temp_dir()],
+                deny: vec![deny.into()],
+                ..Default::default()
+            };
+            let e = super::profile(&sb).unwrap_err();
+            assert_eq!(
+                crate::sandbox_refusal(&e),
+                Some(crate::SandboxRefusal::ProtectedPathUnresolved),
+                "{deny:?}"
+            );
+            assert!(
+                super::wrap(&sb, "/bin/sh".as_ref(), &[]).is_err(),
+                "{deny:?}"
+            );
+        }
+    }
+
+    #[test]
     fn a_profile_that_is_not_offline_says_nothing_about_the_network() {
         let sb = crate::Sandbox::new(vec!["/usr".into()], vec![std::env::temp_dir()]);
-        assert!(!super::profile(&sb).contains("network"));
+        assert!(!super::profile(&sb).unwrap().contains("network"));
     }
 
     #[test]
@@ -501,7 +1040,7 @@ mod sandbox_tests {
             write: vec![],
             ..Default::default()
         };
-        let p = super::profile(&sb);
+        let p = super::profile(&sb).unwrap();
         // `/var` is `/private/var`, which holds `/private/var/folders`; it is left out, `/usr` stays.
         assert!(!p.contains("(subpath \"/private/var\")"), "{p}");
         assert!(

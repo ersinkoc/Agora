@@ -2364,14 +2364,13 @@ fn launch_adapter(
     Ok((adapter, session_id, init.capabilities))
 }
 
-/// Offline (ADR-0047 `worktree-offline`): an agent may reach only its own mesh socket and the unix sockets it makes in its private temp
-/// folder; not `/tmp` (a tmux server or an SSH agent there would hand it a way out) and not other agents' sockets.
+/// The unix sockets a confined agent may reach although the node's own folders are closed (its own mesh socket, #475); offline
+/// (ADR-0047 `worktree-offline`) also the ones it makes in its private temp folder, and no others: not `/tmp` (a tmux server or an SSH
+/// agent there would hand it a way out) and not other agents' sockets.
 fn offline_sockets(profile: &mut agora_platform::Sandbox, socket: Option<&Path>, worktree: &Path) {
-    if profile.offline {
-        profile.sockets = socket.map(Path::to_path_buf).into_iter().collect();
-        if agora_platform::PRIVATE_TEMP {
-            profile.sockets.push(crate::sandbox::agent_temp(worktree));
-        }
+    profile.sockets = socket.map(Path::to_path_buf).into_iter().collect();
+    if profile.offline && agora_platform::PRIVATE_TEMP {
+        profile.sockets.push(crate::sandbox::agent_temp(worktree));
     }
 }
 

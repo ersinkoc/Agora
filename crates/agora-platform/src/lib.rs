@@ -711,8 +711,20 @@ pub struct Sandbox {
     /// No network but the loopback interface and the unix sockets below `sockets` and `write` (ADR-0047 `worktree-offline`).
     /// Refused where [`offline_supported`] is false.
     pub offline: bool,
-    /// Folders whose unix sockets stay reachable when `offline` (the node's mesh sockets).
+    /// The agent's own unix sockets (its mesh socket; offline, also its private temp folder): reachable even below `deny`, and the
+    /// only ones reachable when `offline`.
     pub sockets: Vec<PathBuf>,
+    /// The node's own folders and files (its data, identity, logs, control socket, other agents' mesh sockets): never read or written,
+    /// and no unix socket below them connected to, even when they sit below an allowed folder (a node home under `/tmp`), except
+    /// `sockets`, including paths that do not exist yet when the agent starts. Enforced on macOS only (Seatbelt can say "except");
+    /// Linux and Windows ignore it today, so there a node home below an allowed folder stays reachable and T16 stays open (see
+    /// `docs/security/threat-model.md`).
+    pub deny: Vec<PathBuf>,
+    /// The folders below `deny` the agent may use after all (the worktree the node made for it). Each is reopened only while it is a
+    /// real folder whose own name is not a symbolic link: an agent that swapped its worktree for a link to the node's home would
+    /// otherwise have the home opened at its next start. A `read` or `write` entry that resolves below `deny` is never opened.
+    /// macOS only, as `deny`.
+    pub reopen: Vec<PathBuf>,
 }
 
 impl Sandbox {
@@ -789,6 +801,10 @@ pub enum SandboxRefusal {
     BroadWriteGrant,
     /// A folder the agent would write could not be labelled for confined agents.
     LabelFailed,
+    /// One of the node's own paths it must keep closed (`Sandbox::deny`) is relative or cannot be resolved (macOS).
+    ProtectedPathUnresolved,
+    /// The agent's worktree (`Sandbox::reopen`) is no longer a plain folder: a link, or something else, is in its place (macOS).
+    WorktreeNotFolder,
 }
 
 impl SandboxRefusal {
@@ -796,6 +812,8 @@ impl SandboxRefusal {
         match self {
             Self::BroadWriteGrant => "broad_write_grant",
             Self::LabelFailed => "label_failed",
+            Self::ProtectedPathUnresolved => "protected_path_unresolved",
+            Self::WorktreeNotFolder => "worktree_not_folder",
         }
     }
 }
@@ -861,7 +879,7 @@ pub fn confine_command(cmd: &mut std::process::Command, sandbox: &Sandbox) -> io
         // not (std cannot read them back), so callers confine first and set the streams after.
         let (program, args) = {
             let a: Vec<_> = cmd.get_args().map(ToOwned::to_owned).collect();
-            macos::wrap(sandbox, cmd.get_program(), &a)
+            macos::wrap(sandbox, cmd.get_program(), &a)?
         };
         let mut wrapped = std::process::Command::new(program);
         wrapped.args(args);

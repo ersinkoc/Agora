@@ -250,7 +250,7 @@ pub(crate) fn spawn(config: &PtyConfig) -> io::Result<Box<dyn Pty>> {
     let (program, args) = match &config.sandbox {
         Some(sb) => {
             let a: Vec<std::ffi::OsString> = args.iter().map(Into::into).collect();
-            let (p, a) = crate::macos::wrap(sb, program.as_ref(), &a);
+            let (p, a) = crate::macos::wrap(sb, program.as_ref(), &a)?;
             (p, a)
         }
         None => (

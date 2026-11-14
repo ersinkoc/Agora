@@ -996,6 +996,53 @@ pub struct NodeConfig {
     pub limits: NodeLimits,
 }
 
+/// What no confined agent may read, write or connect to, whatever its profile opens (#475, and the security reviews of #477).
+/// When the node has a home of its own (data beside its worktrees or beside its control socket, as `agora node` lays it out, also
+/// with `--worktrees` elsewhere) that is the **whole home**: data (trusted devices, policy, ledger), identity, hub, logs, locks,
+/// manifests, adapters, publishers, the registry's keys, the control socket and the agents' mesh sockets, and anything added there
+/// later. The profile opens the agent's own worktree and mesh socket again (an allow-list, not a list of what to close that has to
+/// grow). Otherwise what is known to be the node's: its data, its control socket and the mesh sockets' folder, and its manifests.
+/// Relative paths are made absolute first (a relative home would otherwise resolve to nothing and close nothing).
+pub fn node_private_paths(cfg: &NodeConfig) -> Vec<PathBuf> {
+    let abs = |p: &Path| std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
+    let (data, worktrees, socket, manifests) = (
+        abs(&cfg.data_dir),
+        abs(&cfg.worktree_root),
+        abs(&cfg.socket),
+        abs(&cfg.manifests_dir),
+    );
+    // Only a folder that is the node's own: never the user's home or a folder above it (`--data ~/x --socket ~/y` would close all
+    // of `~` and drop every owner write entry), never a root, never one holding a project the node serves.
+    let user_home = crate::usage_files::home_dir().map(|h| abs(&h));
+    let home = data.parent().filter(|h| {
+        (Some(*h) == worktrees.parent() || Some(*h) == socket.parent())
+            && h.parent().is_some()
+            && !user_home.as_ref().is_some_and(|u| u.starts_with(h))
+            && !cfg.projects.iter().any(|p| abs(p).starts_with(h))
+    });
+    if let Some(h) = home {
+        let mut out = vec![h.to_path_buf()];
+        for p in [
+            Some(socket.clone()),
+            socket.parent().map(|d| d.join("m")),
+            Some(manifests.clone()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if !p.starts_with(h) {
+                out.push(p);
+            }
+        }
+        return out;
+    }
+    let mut out = vec![data, socket.clone(), manifests];
+    if let Some(dir) = socket.parent() {
+        out.push(dir.join("m"));
+    }
+    out
+}
+
 /// Name of the node's policy file in its data directory (written by the machine's owner; the hub cannot change it).
 pub const POLICY_FILE: &str = "policy";
 
@@ -1293,7 +1340,9 @@ impl Node {
             terminal: TerminalOptions::default(),
             limits: cfg.limits,
         });
-        sup.set_sandbox(read_policy(&cfg.data_dir.join(POLICY_FILE)).sandbox);
+        let mut sandbox = read_policy(&cfg.data_dir.join(POLICY_FILE)).sandbox;
+        sandbox.protect = node_private_paths(cfg);
+        sup.set_sandbox(sandbox);
         sup.reserve_ids(ledger.next_id());
         sup.set_skip_permissions(read_policy(&cfg.data_dir.join(POLICY_FILE)).skip_permissions);
         let (found, manifest_problems) = load_manifests(&cfg.manifests_dir);
@@ -2141,6 +2190,53 @@ mod announce_tests {
             && r.approved == r.approval_id[3..].parse::<u32>().unwrap().is_multiple_of(2)));
         assert_eq!(restated(Announce::Present), first, "the ring did not move");
         assert!(restated(Announce::Restart).is_empty());
+    }
+
+    #[test]
+    fn the_nodes_private_paths_are_its_whole_home_or_what_is_known_to_be_its() {
+        let cfg = |data: &str, worktrees: &str| NodeConfig {
+            node_id: "n".into(),
+            socket: PathBuf::from("/h/node.sock"),
+            data_dir: PathBuf::from(data),
+            worktree_root: PathBuf::from(worktrees),
+            manifests_dir: PathBuf::from("/h/manifests"),
+            projects: vec![],
+            limits: NodeLimits::default(),
+        };
+        // Made absolute as the node makes them (on Windows `/h` is `D:\h`).
+        let a = |p: &str| std::path::absolute(p).unwrap();
+        // The usual layout: the whole home (its worktrees are opened again per agent by the profile).
+        let p = node_private_paths(&cfg("/h/data", "/h/worktrees"));
+        assert_eq!(p, [a("/h")]);
+        // Worktrees elsewhere, data beside the control socket (second review of #477, 3): still the whole home.
+        let p = node_private_paths(&cfg("/h/data", "/w"));
+        assert_eq!(p, [a("/h")]);
+        // The user's home is never taken for the node's (third review of #477): `--data ~/x --socket ~/y`.
+        if let Some(u) = crate::usage_files::home_dir() {
+            let mut c = cfg("/x", "/w");
+            c.data_dir = u.join("x");
+            c.socket = u.join("y");
+            let p = node_private_paths(&c);
+            assert!(!p.contains(&u), "{p:?}");
+            assert!(p.contains(&u.join("x")), "{p:?}");
+        }
+        // Nor one that holds a project the node serves.
+        let mut c = cfg("/h/data", "/h/worktrees");
+        c.projects = vec!["/h/repo".into()];
+        assert!(!node_private_paths(&c).contains(&a("/h")));
+        // A relative home is made absolute (second review of #477, 4), not dropped.
+        let rel = node_private_paths(&cfg("h/data", "h/worktrees"));
+        assert_eq!(
+            rel[0],
+            std::env::current_dir().unwrap().join("h"),
+            "{rel:?}"
+        );
+        // Data and worktrees elsewhere: only what is known to be the node's.
+        let odd = node_private_paths(&cfg("/srv/agora-data", "/w"));
+        for want in ["/srv/agora-data", "/h/node.sock", "/h/m", "/h/manifests"] {
+            assert!(odd.contains(&a(want)), "{want}: {odd:?}");
+        }
+        assert!(!odd.iter().any(|x| x.starts_with(a("/w"))), "{odd:?}");
     }
 
     #[test]
