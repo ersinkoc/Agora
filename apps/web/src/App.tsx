@@ -487,5 +487,6 @@ export function App() {
 }
 
 // The demo window (no hub): the closed demo agent's workspace, so the review screen and the file browser can be seen and tested.
-const demoLoadDiff = (_a: AgentTileModel, path?: string) => demoDiff(path);
-const demoFilesOf = () => demoFiles;
+const DEMO_CHANGED = 'a6';
+const demoLoadDiff = async (a: AgentTileModel, path?: string) => (a.id === DEMO_CHANGED ? demoDiff(path) : '');
+const demoFilesOf = (a: AgentTileModel) => (a.id === DEMO_CHANGED ? demoFiles : undefined);

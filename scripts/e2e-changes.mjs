@@ -22,11 +22,14 @@ try {
   writeFileSync(join(proj, 'src', 'app.txt'), lines(40));
   writeFileSync(join(proj, 'gone.txt'), 'bye\n');
   writeFileSync(join(proj, 'old name.txt'), 'kept as it is\n');
+  writeFileSync(join(proj, 'before.txt'), lines(30));
   git('add', '.');
   git('commit', '-q', '-m', 'files');
   writeFileSync(join(proj, 'src', 'app.txt'), lines(40, { 3: 'line three', 30: 'line thirty' }));
   git('rm', '-q', 'gone.txt');
   git('mv', 'old name.txt', 'new name.txt');
+  git('mv', 'before.txt', 'after.txt');
+  writeFileSync(join(proj, 'after.txt'), lines(30, { 2: 'second', 28: 'twenty-eighth' })); // renamed and edited
   writeFileSync(join(proj, 'notes.md'), '# notes\n\nwritten by the agent\n');
   writeFileSync(join(proj, 'blob.bin'), Buffer.from([0, 1, 2, 3, 0, 255]));
 
@@ -40,13 +43,13 @@ try {
   await list.waitFor();
   const names = async () => (await list.getByRole('option').allInnerTexts()).map((s) => s.split('\n').filter(Boolean)[1] ?? s);
   const shown = await names();
-  check(['app.txt', 'blob.bin', 'gone.txt', 'new name.txt', 'notes.md'].every((n) => shown.includes(n)), `every changed file is listed: ${shown.join(', ')}`);
+  check(['after.txt', 'app.txt', 'blob.bin', 'gone.txt', 'new name.txt', 'notes.md'].every((n) => shown.includes(n)), `every changed file is listed: ${shown.join(', ')}`);
 
   const filter = (name) => page.getByRole('radiogroup', { name: 'Show' }).getByRole('radio', { name: new RegExp(`^${name}`) });
   await filter('Deleted').click();
   check(JSON.stringify(await names()) === JSON.stringify(['gone.txt']), 'the Deleted filter shows only the deleted file');
   await filter('Renamed').click();
-  check(JSON.stringify(await names()) === JSON.stringify(['new name.txt']), 'the rename is one file, not a delete and an add');
+  check(JSON.stringify(await names()) === JSON.stringify(['after.txt', 'new name.txt']), 'a rename is one file, not a delete and an add');
   await filter('All').click();
   await page.getByRole('searchbox', { name: 'Filter by name' }).fill('app');
   check(JSON.stringify(await names()) === JSON.stringify(['app.txt']), 'the name filter narrows the list');
@@ -92,6 +95,12 @@ try {
   await list.getByRole('option', { name: /new name\.txt/ }).click();
   await page.getByText('Only the name or the permissions of this file changed.').waitFor();
   check(await page.getByText('was old name.txt').isVisible(), 'a rename shows the old name');
+  // Renamed and edited: its unchanged lines come from the file under its new name, without a false "changed since".
+  await list.getByRole('option', { name: /after\.txt/ }).click();
+  await page.getByText('twenty-eighth', { exact: true }).waitFor();
+  await page.getByRole('button', { name: /^Show \d+ unchanged lines$/ }).first().click();
+  await page.getByText('line 15', { exact: true }).waitFor();
+  check(!(await page.getByText(/The file has changed since/).count()), 'a renamed and edited file shows its unchanged lines');
 
   // Keys: j and k move through the list in its order (top folder first, then src/).
   await list.focus();

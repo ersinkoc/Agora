@@ -104,6 +104,9 @@ export function ChangesView({ load, read }: {
   // The file as it is now, for its unchanged lines. Those lines belong to the diff on screen only if the file has not changed since:
   // the file is read first, then its own diff again, and a diff that differs from the one shown (a change anywhere, folded regions
   // included) marks the text stale. A change made and undone between the two reads goes unnoticed; it leaves the same file.
+  // A renamed file is not read again: a diff of the new name alone cannot pair it with the old one and shows it as new, so only the
+  // weaker check against the diff's own lines (`matchesFile`) applies. A path the second diff does not name at all (a folder
+  // selected inside a repository lists tracked files from the repository's top) is a failed read, not a changed file.
   const fetchText = useCallback((f: DiffFile): void => {
     if (!read) return;
     const path = f.path;
@@ -112,7 +115,9 @@ export function ChangesView({ load, read }: {
       .then(async (bytes): Promise<FileText> => {
         const text = decodeText(bytes);
         if (text === undefined) return 'failed';
+        if (f.status === 'renamed') return fileLines(text);
         const now = parseDiff(await load(path)).find((x) => x.path === path);
+        if (!now) return 'failed';
         return sameChange(f, now) ? fileLines(text) : 'stale';
       })
       .then((v) => setTexts((x) => ({ ...x, [path]: v })), () => setTexts((x) => ({ ...x, [path]: 'failed' })));
