@@ -54,6 +54,14 @@ A chat agent's conversation (ADR-0038): your requests and its answers, streamed 
 
 `demo-ltr-dark.png` and `demo-rtl-dark.png` show the same console left to right and with the page forced right to left (no RTL translation ships yet, so the text is English): the layout mirrors, the terminals stay left to right.
 
+## On a phone (ADR-0067 rung 2)
+`phone/`, from `scripts/e2e-phone.mjs` with `AGORA_SCREENSHOTS`: the list with a request waiting and one agent with the key bar, at
+360 × 740, 390 × 844 and held sideways (844 × 390); a tablet (768 × 1024) keeping the full window with the key bar; This device on a
+phone. Both themes.
+
+![](phone/phone-390x844-home-dark.png) ![](phone/phone-390x844-agent-dark.png) ![](phone/phone-390x844-home-light.png) ![](phone/phone-390x844-agent-light.png)
+![](phone/phone-844x390-home-light.png) ![](phone/phone-844x390-agent-dark.png)
+
 ## Visual regression baselines
 `apps/web/visual/` holds the reference images that `scripts/visual-regression.mjs` compares against (gallery and sign-in, both
 themes, desktop and phone). They are the contract for how the shared components look: a pull request that changes them updates the

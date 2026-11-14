@@ -31,6 +31,8 @@ import { num } from './net/view';
 import { loadAudit } from './net/audit';
 import { agentTarget } from './components/sessionChoice';
 import { usableId } from './components/launchChoice';
+import { PhoneAgent, PhoneHome, usePhone } from './phone/Phone';
+import { approvalRedirect, phoneScreen } from './phone/nav';
 
 // ADR-0059: why the machine refused the chosen launch option, as a message id (its `policy` parameter, a stable value).
 function optionForbidden(e: unknown): string {
@@ -51,6 +53,8 @@ function useHash(): [string, (h: string) => void] {
 export function App() {
   const language = useSyncExternalStore(subscribeLanguage, getLanguage);
   const [hash, go] = useHash();
+  // ADR-0067 rung 2: a phone gets one column (the list, then one agent); a tablet and a desktop keep the window.
+  const phone = usePhone();
   const [palette, setPalette] = useState(false);
   // With a hub token the fleet comes from the hub; without one (development) the demo data stands in.
   const [hub, setHub] = useState(hubConnection);
@@ -308,6 +312,10 @@ export function App() {
   }, [hub, idle, lockNow]);
   const agents = useMemo(() => (hub ? (live ? tiles(live) : []) : demoAgents), [hub, live]);
   const current = hash.startsWith('#/agent/') ? decodeURIComponent(hash.slice('#/agent/'.length)) : undefined;
+  const approvalsNow = live ? approvalList(live) : hub ? [] : demoApprovals;
+  // On a phone a notice's link to an approval opens the agent that asks (ADR-0046, ADR-0067); answered already, the list.
+  const redirect = phone ? approvalRedirect(phoneScreen(hash), approvalsNow, !hub || live !== undefined) : undefined;
+  useEffect(() => { if (redirect) window.location.replace(redirect); }, [redirect]);
 
   // An agent's id here is the hub-wide key `<node>/<local id>`; its terminal is `t-<local id>` on that node.
   const terminal: TerminalSource | undefined = useMemo(() => {
@@ -424,6 +432,13 @@ export function App() {
     return () => window.removeEventListener('keydown', on);
   }, [next]);
 
+  // ADR-0061: a machine that reported whom it trusts, and not this browser; one that has not reported is not called untrusted.
+  const untrustedOn = hub && device && live?.trusted ? (node: string) => { const ids = live.trusted?.get(node); return !!ids && !ids.includes(device.id); } : undefined;
+  const startWindow = !hub && import.meta.env.DEV && starting ? <StartAgent initialNode={starting.node} projects={demoProjects} machines={demoMachines}
+    loadKinds={async () => [{ kind: 'claude-code', name: 'Claude Code', installed: true }, { kind: 'codex', name: 'Codex', installed: true }, { kind: 'shell', name: 'Shell', installed: true }, { kind: 'gemini', name: 'Gemini CLI', installed: false }]}
+    list={async (_n, path) => demoList(path)} inspect={async (_n, path) => ({ path, projectId: 'demo', gitRoot: path, branch: 'main', portable: false })} onStart={async () => { setStarting(false); return undefined; }} onClose={() => setStarting(false)} /> : starting && live ? <StartAgent initialNode={starting ? starting.node : undefined} trust={device ? { id: device.id, key: device.publicKeyHex } : undefined}
+    askApproval={device ? { can: (node) => canBeApprovedOn(live.trusted, node, mine, device.id), ask: askApproval } : undefined} projects={projectChoices(live)} machines={machines(live)} inspect={inspectDirectory} list={listDirectory} loadKinds={loadKinds} onStart={startAgent} onClose={() => setStarting(false)} /> : undefined;
+
   // Served by the hub (a production build) and not signed in: ask for the code. Development keeps the demo data.
   if (!hub && !import.meta.env.DEV && hash !== '#/gallery' && hash !== '#/demo') {
     return <SignInPage onSubmit={trySignIn} onPasskey={passkeysSupported() ? trySignInPasskey : undefined} notice={signInNotice ? t(signInNotice) : undefined} passwordRequired={info.passwordRequired} key={linkCode ?? ''} initialCode={linkCode} />;
@@ -435,16 +450,21 @@ export function App() {
           fingerprint={device ? prints.get(device.id) : undefined} machines={live ? machines(live) : undefined} trustedOn={trustedOn} others={hub ? others : undefined}
           asked={asked} onAsk={hub && api ? askApproval : undefined} onRemove={hub && api ? removeDevice : undefined}
           security={hub ? <ScreenPasswordSettings passwordSet={info.passwordSet} idle={idle} onIdle={(m) => { setIdleMinutes(m); setIdle(m); }}
-            onSet={async (password, current) => { const r = await setPassword(hub.token, password, current); if (r.ok) refreshInfo(); return r; }} /> : undefined} /> : current !== undefined
+            onSet={async (password, current) => { const r = await setPassword(hub.token, password, current); if (r.ok) refreshInfo(); return r; }} /> : undefined} /> : current !== undefined && phone
+        ? <PhoneAgent agent={selectedAgent} agents={agents} approvals={approvalsNow} machines={live ? machines(live) : hub ? [] : demoMachines} onResolve={resolve} untrusted={untrustedOn} notice={notice ? t(notice) : undefined}
+          source={terminal} chatSource={selectedAgent?.terminal === false ? chatOf(selectedAgent) : undefined} sendPrompt={hub && api ? sendPrompt : undefined} chooseOption={hub && api ? chooseOption : undefined}
+          costMicroUsd={current ? usage?.perAgent.get(current) : undefined} onOpen={open} onBack={() => go('#/')} />
+        : current !== undefined
         ? <Focus agent={selectedAgent} approvals={live ? approvalList(live) : hub ? [] : demoApprovals} onResolve={resolve} chatSource={selectedAgent?.terminal === false ? chatOf(selectedAgent) : undefined} sendPrompt={hub && api ? sendPrompt : undefined} chooseOption={hub && api ? chooseOption : undefined} costMicroUsd={current ? usage?.perAgent.get(current) : undefined} source={terminal} onBack={() => go('#/')} />
+        : phone
+        ? <PhoneHome agents={agents} machines={live ? machines(live) : hub ? [] : demoMachines} approvals={approvalsNow} onResolve={resolve} untrusted={untrustedOn} notice={notice ? t(notice) : undefined}
+          link={hub ? link : 'live'} onRetry={api ? api.retry : undefined} onOpen={open} onCommand={() => setPalette(true)} onLock={hub ? lockNow : undefined} start={startWindow}
+          onStart={hub && api && live ? () => setStarting({}) : (!hub && import.meta.env.DEV ? () => setStarting({}) : undefined)} />
         : <Console agents={agents} machines={live ? machines(live) : []} usage={usage} projects={live && usage ? costByProject(live, usage.perAgent) : []}
           approvals={live ? approvalList(live) : hub ? [] : demoApprovals} messages={live ? recentMessages(live) : []} boards={live ? boards(live) : []} terminalFor={terminalFor} chatOf={hub && api ? chatOf : undefined} sendPrompt={hub && api ? sendPrompt : undefined} chooseOption={hub && api ? chooseOption : undefined} loadDiff={hub && api ? loadDiff : undefined} loadHistory={hub && api ? loadHistory : undefined} filesOf={hub && api ? filesOf : undefined} onOpen={open}
           onResolve={resolve} helperGrants={hub && api ? helperGrants : undefined} revokeGrant={hub && api ? revokeGrant : undefined} notice={notice ? t(notice) : undefined} link={hub ? link : 'live'} onRetry={api ? api.retry : undefined}
           onStart={hub && api && live ? (node) => setStarting({ node }) : (!hub && import.meta.env.DEV ? (node) => setStarting({ node }) : undefined)} onCommand={() => setPalette(true)} onForget={hub && api ? forgetAgent : undefined} onResume={hub && api ? resumeAgent : (!hub && import.meta.env.DEV ? async () => undefined : undefined)} onLock={hub ? lockNow : undefined}
-          start={!hub && import.meta.env.DEV && starting ? <StartAgent initialNode={starting.node} projects={demoProjects} machines={demoMachines}
-            loadKinds={async () => [{ kind: 'claude-code', name: 'Claude Code', installed: true }, { kind: 'codex', name: 'Codex', installed: true }, { kind: 'shell', name: 'Shell', installed: true }, { kind: 'gemini', name: 'Gemini CLI', installed: false }]}
-            list={async (_n, path) => demoList(path)} inspect={async (_n, path) => ({ path, projectId: 'demo', gitRoot: path, branch: 'main', portable: false })} onStart={async () => { setStarting(false); return undefined; }} onClose={() => setStarting(false)} /> : starting && live ? <StartAgent initialNode={starting ? starting.node : undefined} trust={device ? { id: device.id, key: device.publicKeyHex } : undefined}
-            askApproval={device ? { can: (node) => canBeApprovedOn(live.trusted, node, mine, device.id), ask: askApproval } : undefined} projects={projectChoices(live)} machines={machines(live)} inspect={inspectDirectory} list={listDirectory} loadKinds={loadKinds} onStart={startAgent} onClose={() => setStarting(false)} /> : undefined} />}
+          start={startWindow} />}
       {grantAsk && <GrantDialog machine={live?.nodes.get(grantAsk.node)?.hostname || grantAsk.node} kind={grantAsk.ask.kind} busy={grantAsk.busy} failed={grantAsk.failed} onAllow={() => void allowGrant()} onClose={() => setGrantAsk(undefined)} />}
       {palette && <CommandPalette items={items} onClose={() => setPalette(false)} />}
       {hub && live && waiting[0] && <DeviceRequest key={waiting[0].deviceId ?? ''}

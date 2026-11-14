@@ -533,3 +533,24 @@ layout-error-too-deep = This layout is nested too deeply (at most { $max } level
 layout-error-too-many = This layout has too many panes (at most { $max }).
 layout-board-empty = No shared tasks or files yet.
 layout-cost-empty = Nothing spent yet.
+
+## ADR-0067 rung 2: the phone-sized window and the terminal key bar.
+phone-nav = Go to
+phone-search = Search
+phone-start = Start
+phone-machines = Machines
+phone-back = Back to the list
+phone-offline = offline
+phone-no-agents = No agents on this machine.
+phone-needs = Needs you · { $count }
+phone-next = Next · { $count }
+phone-untrusted = { $machine } does not trust this device yet, so it will refuse an answer from here.
+key-bar = Terminal keys
+key-esc = Esc
+key-tab = Tab
+key-ctrl = Ctrl
+key-up = Up
+key-down = Down
+key-left = Left
+key-right = Right
+key-paste = Paste
