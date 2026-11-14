@@ -39,7 +39,7 @@ function BlockView({ block }: { block: Block }) {
     case 'quote': return <blockquote className="m-0 border-s-2 border-line ps-3 whitespace-pre-wrap text-muted"><Inlines parts={block.inlines} /></blockquote>;
     case 'code': return (
       <div className="overflow-hidden rounded-s border border-line bg-surface-1">
-        <div className="flex h-7 items-center justify-between gap-2 border-b border-line ps-3 pe-1 text-[11px] text-muted"><span className="font-mono">{block.lang}</span><CopyButton text={block.text} /></div>
+        <div className="flex h-7 items-center justify-between gap-2 border-b border-line ps-3 pe-1 text-[0.6875rem] text-muted"><span className="font-mono">{block.lang}</span><CopyButton text={block.text} /></div>
         <pre dir="ltr" className="m-0 max-h-80 overflow-auto p-3 font-mono text-xs leading-5">{block.text}</pre>
       </div>
     );
@@ -63,7 +63,7 @@ const ToolStep = memo(function ToolStep({ line }: { line: ChatLine }) {
       <span className="min-w-0 shrink truncate text-ink">{v.title ? <Inlines parts={inlineTitle(v.title)} /> : t(`tool-${v.action}`)}</span>
       {v.subject && !titleSays(v.title, v.subject) && <code dir="ltr" className="min-w-0 flex-1 truncate font-mono text-xs text-muted">{v.subject}</code>}
     </>;
-  const row = 'flex min-w-0 items-center gap-2 px-3 py-1.5 text-[13px]';
+  const row = 'flex min-w-0 items-center gap-2 px-3 py-1.5 text-[0.8125rem]';
   const icon = <Icon name={ICONS[v.action]} className="size-3.5 text-muted" />;
   if (v.details.length === 0 && !v.raw) return <div className={row} title={stamp(line.atMs)}>{icon}{heading}</div>;
   return (
@@ -124,7 +124,7 @@ const DiffEntry = memo(function DiffEntry({ line }: { line: ChatLine }) {
   ) : <pre dir="ltr" className="m-0 max-h-60 overflow-auto p-2 font-mono text-xs">{line.text}</pre>;
   return (
     <details open={d.lines.length <= 24} className="group max-w-full overflow-hidden rounded-s border border-line">
-      <summary className="flex min-w-0 cursor-pointer list-none items-center gap-2 bg-surface-1 px-3 py-1.5 text-[13px] hover:bg-surface-2 [&::-webkit-details-marker]:hidden" title={stamp(line.atMs)}>
+      <summary className="flex min-w-0 cursor-pointer list-none items-center gap-2 bg-surface-1 px-3 py-1.5 text-[0.8125rem] hover:bg-surface-2 [&::-webkit-details-marker]:hidden" title={stamp(line.atMs)}>
         <Icon name="pencil" className="size-3.5 text-muted" />
         <span dir="ltr" className="min-w-0 flex-1 truncate font-mono text-xs"><span className="text-muted">{dir}</span><span className="font-semibold text-ink">{name}</span></span>
         {(d.added > 0 || d.removed > 0) && <span className="flex-none font-mono text-xs"><span className="text-finished">+{d.added}</span> <span className="text-needs-you">−{d.removed}</span></span>}
@@ -148,7 +148,7 @@ const PlanEntry = memo(function PlanEntry({ line, latest }: { line: ChatLine; la
     );
   }
   return (
-    <div className="max-w-[90%] rounded-s border border-line bg-surface-1 px-3 py-2 text-[13px]" title={stamp(line.atMs)}>
+    <div className="max-w-[90%] rounded-s border border-line bg-surface-1 px-3 py-2 text-[0.8125rem]" title={stamp(line.atMs)}>
       <div className="mb-1.5 text-xs font-medium text-muted">{t('chat-plan-steps', { count: steps.length })}</div>
       {list}
     </div>
