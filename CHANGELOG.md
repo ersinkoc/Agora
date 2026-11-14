@@ -4,6 +4,12 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+### Machines (ADR-0073)
+- A machine not seen for more than a day is shown as **old**: on the Machines page in its own folded section, and no longer offered
+  for new agents. **Clean up…** forgets all old machines in one dialog, and **Forget…** forgets one offline machine. Forgotten
+  machines leave every window, while their history and costs stay; one that connects again comes back. A box also refuses them if
+  they connect again, for a lost or retired machine. `agora hub machines` lists machines as online, offline or old, and
+  `agora hub machines forget NAME` or `forget --old` does the same from the hub's machine. Only the hub's owner can forget machines.
 ### Getting started
 - A hub or node started by `agora` that crashes is started again 30 seconds later, at most 5 times in 10 minutes; one that
   stops right after starting (a port taken, a wrong setting) is not retried and its log says why. `agora status` shows a restart
