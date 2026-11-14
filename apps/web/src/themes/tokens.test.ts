@@ -12,7 +12,8 @@ const issues = (p: ParsedTheme): ThemeIssue[] => (p.ok ? [] : p.issues);
 
 describe('theme tokens', () => {
   it('ships Dark and Light exactly as design/tokens.css draws them before the script runs', () => {
-    const css = readFileSync('src/design/tokens.css', 'utf8');
+    // A Windows checkout (core.autocrlf) has CRLF line ends; the selectors below are written with LF.
+    const css = readFileSync('src/design/tokens.css', 'utf8').replace(/\r\n/g, '\n');
     const block = (selector: string) => {
       const i = css.indexOf(selector);
       return css.slice(i, css.indexOf('}', i));
