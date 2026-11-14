@@ -5,6 +5,11 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 ## Next
 
 ### Machines
+- A machine gathers an agent's usage reports for 5 seconds and sends one. A busy agent used to send one after every model call:
+  on the maintainer's hub that was 96% of all events, and the hub reads all of them again each time it starts. Totals are unchanged,
+  the window shows usage at most 5 seconds later, and the hub's start stays fast for years of use instead of months.
+
+### Machines
 - `agora doctor` says who may make this machine act: which commands sent through the hub need a signature from one of your devices
   (and a note when none do, since whoever controls the hub could then send them), how many devices the machine trusts and how many
   of them may act in every project, whether agents may skip their permission questions, and any policy line the node did not
