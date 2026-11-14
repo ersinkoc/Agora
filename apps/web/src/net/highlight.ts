@@ -21,9 +21,11 @@ const BY_EXT: Record<string, string> = {
 
 export function languageOf(path: string): string | undefined {
   const name = path.slice(path.lastIndexOf('/') + 1).toLowerCase();
-  if (BY_NAME[name]) return BY_NAME[name];
+  // Own keys only: a file named `constructor` (or `x.tostring`) must not find Object's members.
+  if (Object.hasOwn(BY_NAME, name)) return BY_NAME[name];
   const dot = name.lastIndexOf('.');
-  return dot > 0 ? BY_EXT[name.slice(dot + 1)] : undefined;
+  const ext = name.slice(dot + 1);
+  return dot > 0 && Object.hasOwn(BY_EXT, ext) ? BY_EXT[ext] : undefined;
 }
 
 const TAG = /<span class="[^"<>]*">|<\/span>/g;

@@ -10,6 +10,10 @@ describe('the language of a file', () => {
     expect(languageOf('README')).toBeUndefined();
     expect(languageOf('.env')).toBeUndefined();
   });
+
+  it('is unknown for names that are Object members', () => {
+    for (const p of ['constructor', 'a/__proto__', 'x.constructor', 'y.toString', 'z.hasOwnProperty']) expect(languageOf(p), p).toBeUndefined();
+  });
 });
 
 describe('highlighted lines', () => {
