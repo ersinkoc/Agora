@@ -305,6 +305,168 @@ fn tree(v: &View<'_>, t: Text<'_>) -> Vec<Row> {
     rows
 }
 
+/// The colour names the web window gives agents, in its order (`apps/web/src/net/view.ts`, `ACCENT_NAMES`).
+const ACCENT_NAMES: [&str; 7] = ["amber", "teal", "violet", "rose", "slate", "sky", "mint"];
+
+/// An agent's name as the web window shows it, "kind · colour", the colour picked from its hub-wide id with the web's hash (31 times the
+/// previous value plus each UTF-16 unit, modulo 2^32), so both clients call the same agent the same thing.
+pub fn agent_name(agent_id: &str, kind: &str) -> String {
+    let h = agent_id
+        .encode_utf16()
+        .fold(0u32, |h, u| h.wrapping_mul(31).wrapping_add(u32::from(u)));
+    let accent = ACCENT_NAMES[usize::try_from(h).unwrap_or(0) % ACCENT_NAMES.len()];
+    format!("{kind} · {accent}")
+}
+
+/// ADR-0063: the tree as the app shell's rows: a heading per machine (online first, then by name), then its agents, helpers indented
+/// under the agent that started them (ADR-0057). Agents of a machine the hub does not list come last.
+pub fn app_rows(s: &Snapshot, now_ms: u64, t: Text<'_>) -> Vec<crate::app::Row> {
+    let mut rows = Vec::new();
+    let agent_row = |a: &AgentSnapshot, depth: usize| {
+        let st = state_of(a);
+        let lead = if depth == 0 {
+            String::new()
+        } else {
+            format!("{}↳ ", "  ".repeat(depth - 1))
+        };
+        let no_ask = if a.skips_permissions {
+            format!(" [{}]", t(key!("tui-badge-no-ask"), &[]))
+        } else {
+            String::new()
+        };
+        let state = if a.interrupted && !a.running {
+            t(key!("tui-interrupted"), &[])
+        } else if !a.running {
+            t(key!("tui-state-finished"), &[])
+        } else {
+            state_word(st, t)
+        };
+        let asks = s.approvals.iter().any(|x| x.agent_id == a.agent_id);
+        crate::app::Row {
+            id: a.agent_id.clone(),
+            label: format!(" {lead}{}{no_ask}", agent_name(&a.agent_id, &a.kind)),
+            state,
+            needs_you: asks || (a.running && st == AgentState::Blocked),
+            terminal: s.terminals.iter().any(|x| x.agent_id == a.agent_id),
+            header: false,
+        }
+    };
+    let mut nodes: Vec<_> = s.nodes.iter().collect();
+    nodes.sort_by(|a, b| b.online.cmp(&a.online).then_with(|| name(a).cmp(name(b))));
+    for n in nodes {
+        rows.push(crate::app::Row {
+            id: n.node_id.clone(),
+            label: format!("{} {}", if n.online { "●" } else { "○" }, name(n)),
+            // ADR-0070: an offline machine says when it was last heard from; an online one, its memory in use.
+            state: if !n.online {
+                crate::render::presence_text(n, now_ms, t)
+            } else if n.memory_used_bytes > 0 {
+                bytes(n.memory_used_bytes)
+            } else {
+                String::new()
+            },
+            needs_you: false,
+            terminal: false,
+            header: true,
+        });
+        let mut agents: Vec<&AgentSnapshot> =
+            s.agents.iter().filter(|a| a.node_id == n.node_id).collect();
+        agents.sort_by(|a, b| a.agent_id.cmp(&b.agent_id));
+        for (a, depth) in crate::render::helper_order(&agents) {
+            rows.push(agent_row(a, depth));
+        }
+    }
+    let mut rest: Vec<&AgentSnapshot> = s
+        .agents
+        .iter()
+        .filter(|a| !s.nodes.iter().any(|n| n.node_id == a.node_id))
+        .collect();
+    rest.sort_by(|a, b| a.agent_id.cmp(&b.agent_id));
+    for a in rest {
+        rows.push(agent_row(a, 0));
+    }
+    rows
+}
+
+/// What the app shell's inspector shows for the selected agent ([`app_details`]).
+pub struct Details {
+    pub lines: Vec<String>,
+    /// The `agent.start` request y / n would answer, by approval id, and whether all of it is on screen in the inspector (ADR-0057: y
+    /// allows a start only once its whole request was in view, here or in the reader).
+    pub start: Option<(String, bool)>,
+}
+
+/// ADR-0063: the inspector's lines for `selected` in a panel of `width` x `height` (zero when the inspector is hidden). When the
+/// request y / n would answer asks to start an agent, the panel shows that request alone, like the old right panel; otherwise the
+/// agent's facts, its session line, and the request it waits on.
+pub fn app_details(s: &Snapshot, selected: &str, width: u16, height: u16, t: Text<'_>) -> Details {
+    let room = usize::from(height);
+    let answered = crate::client::answered_approval(s, Some(selected));
+    if let Some(a) = answered {
+        if let Some(card) = start_card_lines(a, usize::from(width).saturating_sub(1), t) {
+            let mut lines = vec![t(key!("tui-attention"), &[])];
+            lines.extend(card);
+            let whole = width > 0 && lines.len() <= room;
+            if !whole && room >= 2 {
+                let hidden = lines.len() - (room - 1);
+                lines.truncate(room - 1);
+                lines.push(t(
+                    key!("tui-split-card-more"),
+                    &[("count", Arg::Num(i64::try_from(hidden).unwrap_or(i64::MAX)))],
+                ));
+            }
+            return Details {
+                lines,
+                start: Some((a.approval_id.clone(), whole)),
+            };
+        }
+    }
+    let mut lines = Vec::new();
+    match s.agents.iter().find(|a| a.agent_id == selected) {
+        None => lines.push(t(key!("tui-split-pick"), &[])),
+        Some(a) => {
+            lines.push(agent_name(&a.agent_id, &a.kind));
+            lines.push(a.agent_id.clone());
+            lines.push(if a.running {
+                state_word(state_of(a), t)
+            } else {
+                t(key!("tui-state-finished"), &[])
+            });
+            if !a.parent_agent_id.is_empty() {
+                lines.push(t(
+                    key!("tui-started-by"),
+                    &[("agent", Arg::Str(local(&a.parent_agent_id).to_string()))],
+                ));
+            }
+            if a.interrupted && !a.running {
+                lines.push(crate::render::interrupted_text(a, t));
+            }
+            if a.skips_permissions {
+                lines.push(format!("[{}]", t(key!("tui-badge-no-ask"), &[])));
+            }
+            if let Some(l) = crate::render::session_line(a, t) {
+                lines.push(l);
+            }
+            if a.running && !s.terminals.iter().any(|x| x.agent_id == a.agent_id) {
+                lines.push(String::new());
+                lines.push(t(key!("tui-split-chat"), &[]));
+            }
+        }
+    }
+    if let Some(a) = answered {
+        lines.push(String::new());
+        lines.push(t(key!("tui-attention"), &[]));
+        let what = format!("{}: {} {}", local(&a.agent_id), a.action, a.detail);
+        lines.extend(crate::render::wrap_row(
+            what.trim(),
+            usize::from(width).max(12),
+            usize::from(width).max(12),
+        ));
+        lines.push(t(key!("tui-split-answer"), &[]));
+    }
+    Details { lines, start: None }
+}
+
 /// Memory as people read it (1 decimal from GB down, whole MB below).
 fn bytes(b: u64) -> String {
     const MB: u64 = 1 << 20;
@@ -829,5 +991,110 @@ mod tests {
         let rows = plain_rows(&frame(&v, &text), 8);
         assert!(rows[1].contains("│┌─┐ 漢字ok"), "{rows:#?}");
         assert!(rows[2].contains("│└─┘"), "{rows:#?}");
+    }
+
+    #[test]
+    fn app_rows_put_each_machine_over_its_agents_and_mark_what_needs_you() {
+        let mut s = snapshot();
+        s.terminals = vec![agora_protocol::v1::TerminalSnapshot {
+            agent_id: "mac2/agent-2".into(),
+            ..Default::default()
+        }];
+        let rows = app_rows(&s, 0, &text);
+        let ids: Vec<(&str, bool)> = rows.iter().map(|r| (r.id.as_str(), r.header)).collect();
+        assert_eq!(
+            ids,
+            vec![
+                ("mac2", true),
+                ("mac2/agent-1", false),
+                ("mac2/agent-2", false),
+                ("win", true),
+                ("win/agent-1", false)
+            ]
+        );
+        assert!(
+            rows[0].label.starts_with("● mac2") && rows[0].state == "1.5 GB",
+            "{:?}",
+            rows[0]
+        );
+        assert!(rows[3].label.starts_with("○ WHITE"));
+        // ADR-0070: the offline machine's heading says when it was last heard from, not its memory.
+        assert!(rows[3].state.starts_with("tui-"), "{:?}", rows[3]);
+        // agent-1 waits on a request (and is blocked); agent-2 works and has a terminal; agent-1 has none (a chat agent here).
+        assert!(rows[1].needs_you && !rows[1].terminal);
+        assert!(!rows[2].needs_you && rows[2].terminal);
+        assert_eq!(rows[2].state, "tui-state-working");
+        assert_eq!(
+            rows[1].label,
+            format!(" {}", agent_name("mac2/agent-1", "claude-code"))
+        );
+    }
+
+    #[test]
+    fn app_details_show_the_agent_and_the_request_it_waits_on() {
+        let s = snapshot();
+        let d = app_details(&s, "mac2/agent-1", 40, 20, &text);
+        assert_eq!(d.start, None);
+        assert_eq!(
+            &d.lines[..3],
+            &[
+                agent_name("mac2/agent-1", "claude-code"),
+                "mac2/agent-1".into(),
+                "tui-state-needs-you".into()
+            ]
+        );
+        assert!(
+            d.lines
+                .iter()
+                .any(|l| l == "agent-1: files.write src/auth.rs"),
+            "{:#?}",
+            d.lines
+        );
+        assert_eq!(d.lines.last().map(String::as_str), Some("tui-split-answer"));
+        assert_eq!(
+            app_details(&s, "", 40, 20, &text).lines[0],
+            "tui-split-pick"
+        );
+    }
+
+    #[test]
+    fn a_start_request_in_the_inspector_counts_as_read_only_when_all_of_it_fits() {
+        let mut s = snapshot();
+        s.approvals = vec![ApprovalSnapshot {
+            approval_id: "mac2/a9".into(),
+            agent_id: "mac2/agent-1".into(),
+            action: "agent.start".into(),
+            detail: r#"{"node":"mac2","agent":"agent-1","agent_kind":"claude-code","kind":"codex","folder":"/w/proj","inside":true,"worktree":false,"depth":1,"prompt":"Fix the tests.\nThen open a PR."}"#.into(),
+            ..Default::default()
+        }];
+        let tall = app_details(&s, "mac2/agent-2", 40, 30, &text);
+        assert_eq!(tall.start, Some(("mac2/a9".into(), true)));
+        assert!(
+            tall.lines.iter().any(|l| l.contains("Fix the tests.")),
+            "{:#?}",
+            tall.lines
+        );
+        // Too short: the rest is counted, and y must wait for the reader.
+        let short = app_details(&s, "mac2/agent-2", 40, 4, &text);
+        assert_eq!(short.start, Some(("mac2/a9".into(), false)));
+        assert_eq!(short.lines.len(), 4);
+        assert!(
+            short.lines[3].starts_with("tui-split-card-more"),
+            "{:#?}",
+            short.lines
+        );
+        // A hidden inspector shows nothing of it: never read here.
+        assert_eq!(
+            app_details(&s, "mac2/agent-2", 0, 0, &text).start,
+            Some(("mac2/a9".into(), false))
+        );
+    }
+
+    #[test]
+    fn agents_are_named_as_the_web_window_names_them() {
+        // Names seen in the web window for these ids.
+        assert_eq!(agent_name("mac/agent-1", "shell"), "shell · amber");
+        assert_eq!(agent_name("laptop/agent-1", "shell"), "shell · mint");
+        assert_eq!(agent_name("mac.lan/agent-1", "shell"), "shell · violet");
     }
 }

@@ -30,18 +30,24 @@ fn main() -> std::io::Result<()> {
             label: "claude-code · mint".into(),
             state: "working".into(),
             needs_you: false,
+            terminal: true,
+            header: false,
         },
         Row {
             id: "mac/agent-2".into(),
             label: "codex · rose".into(),
             state: "idle".into(),
             needs_you: false,
+            terminal: true,
+            header: false,
         },
         Row {
             id: "win/agent-7".into(),
             label: "wrongstack · amber".into(),
             state: "needs you".into(),
             needs_you: true,
+            terminal: true,
+            header: false,
         },
     ];
     let mut screens: HashMap<String, AlacrittyTerminal> = HashMap::new();
@@ -85,6 +91,7 @@ fn run(
                         terminal: term,
                         details: &details,
                         notice: "",
+                        no_screen: None,
                         colors,
                         t: &text,
                     },
@@ -159,7 +166,7 @@ fn run(
                             execute!(std::io::stdout(), DisableMouseCapture)
                         };
                     }
-                    Action::Scroll(_) => {}
+                    Action::Scroll(_) | Action::Chat(_) | Action::Command(_) => {}
                 }
             }
         }

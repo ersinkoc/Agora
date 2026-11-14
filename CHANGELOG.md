@@ -4,6 +4,9 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+### Terminal client (ADR-0063)
+- `agora tui` is drawn with ratatui: machines and their agents on the left, the agents you open as tabs with their live terminal in the middle (what you type goes to the agent; Ctrl-] or F12 comes back to the list; Alt+1…9 picks a tab), and the selected agent's details and the request it waits on on the right. The mouse works: click a row to select it and again to open it, click a tab, drag the dividers; `m` releases the mouse so the terminal can select text. Ctrl K opens the commands, N goes to the next agent that needs you, and the letters of the earlier console stay (y / n answer, s start, f folder, x stop, u / U resume, d remove). A request to start an agent can be allowed only once all of it was on screen, in the details or in the reader that y opens.
+
 ### Devices
 - The hub keeps a list of each person's devices (ADR-0061): a browser or the terminal client registers its key and name when it signs
   in, and `agora hub devices` lists them with the fingerprint people compare, the person, and when each was registered and last used.
