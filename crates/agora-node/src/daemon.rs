@@ -2197,12 +2197,14 @@ mod announce_tests {
             projects: vec![],
             limits: NodeLimits::default(),
         };
+        // Made absolute as the node makes them (on Windows `/h` is `D:\h`).
+        let a = |p: &str| std::path::absolute(p).unwrap();
         // The usual layout: the whole home (its worktrees are opened again per agent by the profile).
         let p = node_private_paths(&cfg("/h/data", "/h/worktrees"));
-        assert_eq!(p, [PathBuf::from("/h")]);
+        assert_eq!(p, [a("/h")]);
         // Worktrees elsewhere, data beside the control socket (second review of #477, 3): still the whole home.
         let p = node_private_paths(&cfg("/h/data", "/w"));
-        assert_eq!(p, [PathBuf::from("/h")]);
+        assert_eq!(p, [a("/h")]);
         // A relative home is made absolute (second review of #477, 4), not dropped.
         let rel = node_private_paths(&cfg("h/data", "h/worktrees"));
         assert_eq!(
@@ -2213,9 +2215,9 @@ mod announce_tests {
         // Data and worktrees elsewhere: only what is known to be the node's.
         let odd = node_private_paths(&cfg("/srv/agora-data", "/w"));
         for want in ["/srv/agora-data", "/h/node.sock", "/h/m", "/h/manifests"] {
-            assert!(odd.contains(&PathBuf::from(want)), "{want}: {odd:?}");
+            assert!(odd.contains(&a(want)), "{want}: {odd:?}");
         }
-        assert!(!odd.iter().any(|x| x.starts_with("/w")), "{odd:?}");
+        assert!(!odd.iter().any(|x| x.starts_with(a("/w"))), "{odd:?}");
     }
 
     #[test]
