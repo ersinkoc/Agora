@@ -138,6 +138,8 @@ pub struct Session {
     next_stream: u32,
     /// An event arrived while a command was waiting for its answer.
     changed: bool,
+    /// A request for the user's answer arrived since [`Session::take_asked`] was last called (a full-screen view says so).
+    asked: bool,
     /// A snapshot that arrived while something else was waiting (the hub's first one comes right after subscribing, often while
     /// the device registration waits for its answer): `next` hands it out first, so it is never lost.
     snapshot: Option<Box<Snapshot>>,
@@ -186,6 +188,7 @@ impl Session {
             term_frames: std::collections::VecDeque::new(),
             next_stream: agora_protocol::frame::FIRST_DYNAMIC_STREAM,
             changed: false,
+            asked: false,
             snapshot: None,
             grant_wanted: false,
         })
@@ -203,6 +206,7 @@ impl Session {
         }
         let conn = &mut self.conn;
         let queue = &mut self.term_frames;
+        let asked = &mut self.asked;
         self.rt.block_on(async {
             match tokio::time::timeout(wait, conn.recv()).await {
                 Err(_) => Update::Quiet,
@@ -220,12 +224,29 @@ impl Session {
                 Ok(Ok(Some(f)))
                     if f.stream_id == STREAM_EVENTS && f.kind == kinds::POSITIONED_EVENT =>
                 {
+                    if agora_protocol::v1::PositionedEvent::decode(f.payload.as_slice())
+                        .ok()
+                        .and_then(|p| p.event)
+                        .is_some_and(|e| {
+                            matches!(
+                                e.body,
+                                Some(agora_protocol::v1::event::Body::ApprovalRequested(_))
+                            )
+                        })
+                    {
+                        *asked = true;
+                    }
                     Update::Changed
                 }
                 Ok(Ok(Some(_))) => Update::Quiet,
                 Ok(_) => Update::Closed,
             }
         })
+    }
+
+    /// Whether a request for the user's answer arrived since the last call (then cleared).
+    pub fn take_asked(&mut self) -> bool {
+        std::mem::take(&mut self.asked)
     }
 
     /// Runs a command on a machine through the hub (ADR-0029) and waits for its answer. `Err` carries the error code the machine or

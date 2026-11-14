@@ -2600,6 +2600,15 @@ mod tests {
         let mut asking = rows.clone();
         asking[0].request = true;
         asking[0].needs_you = true;
+        // Plain letters are typing, even with a request waiting (a word with y or n never answers it: the TUI review's MUST A).
+        assert_eq!(
+            key(&mut app, &asking, Key::Char('y')),
+            vec![Action::Input(b"y".to_vec())]
+        );
+        assert_eq!(
+            key(&mut app, &asking, Key::Char('n')),
+            vec![Action::Input(b"n".to_vec())]
+        );
         assert_eq!(
             key(&mut app, &asking, Key::Alt('y')),
             vec![Action::Command('y')]

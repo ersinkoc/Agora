@@ -381,9 +381,11 @@ fn read_start(
         let (out, end) = reader_frame(&lines, top, cols, rows, text);
         seen_end |= end;
         ask.frame(out.as_bytes());
-        // Arrow keys come as j / k (`read_key`); Esc as itself.
-        let Some(k) = read_key(ask.rx(), Duration::from_secs(300)) else {
-            return seen_end;
+        // Arrow keys come as j / k (`read_key`); Esc as itself. A resized window draws the reader again for its size.
+        let k = match key_or_resize(ask.rx(), Duration::from_secs(300)) {
+            Some(Some(k)) => k,
+            Some(None) => continue,
+            None => return seen_end,
         };
         match k {
             b'j' => top += 1,
@@ -776,6 +778,103 @@ fn read_key(rx: &mpsc::Receiver<u8>, wait: Duration) -> Option<u8> {
     }
 }
 
+/// Like [`read_key`], but says when the keys are gone for good (the terminal closed): `Err`.
+fn read_key_or_gone(rx: &mpsc::Receiver<u8>, wait: Duration) -> Result<Option<u8>, ()> {
+    match rx.recv_timeout(wait) {
+        Ok(k) if k != 0x1b => Ok(Some(k)),
+        Ok(_) => Ok(Some(
+            match (
+                rx.recv_timeout(Duration::from_millis(15)),
+                rx.recv_timeout(Duration::from_millis(15)),
+            ) {
+                (Ok(b'['), Ok(b'A')) => b'k',
+                (Ok(b'['), Ok(b'B')) => b'j',
+                (Ok(b'['), Ok(b'D')) => 0x7f,
+                (Ok(b'['), Ok(b'C')) => b'\r',
+                _ => 0x1b,
+            },
+        )),
+        Err(mpsc::RecvTimeoutError::Timeout) => Ok(None),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(()),
+    }
+}
+
+/// A key within `wait` (`Some(Some(k))`), or the window resized meanwhile (`Some(None)`: draw again for the new size), or nothing:
+/// no key in time, or the terminal is gone (`None`). For the screens a question draws itself (the folder picker, the reader).
+fn key_or_resize(rx: &mpsc::Receiver<u8>, wait: Duration) -> Option<Option<u8>> {
+    let end = Instant::now() + wait;
+    let area = window_area();
+    while Instant::now() < end {
+        match read_key_or_gone(rx, Duration::from_millis(50)) {
+            Ok(Some(k)) => return Some(Some(k)),
+            Err(()) => return None,
+            Ok(None) if window_area() != area => return Some(None),
+            Ok(None) => {}
+        }
+    }
+    None
+}
+
+/// Why a full-screen view (the diff, the files) wakes: a key, or a reason to draw again.
+enum Wake {
+    Key(u8),
+    /// The window was resized, or something the view shows changed (a request arrived: see [`ViewWait::banner`]).
+    Redraw,
+    /// The terminal closed, the link to the hub went, or nothing happened for ten minutes: the view ends.
+    Gone,
+}
+
+/// A full-screen view's wait, as event-driven as the console's (the TUI review): keys, a resized window, and the hub's events,
+/// which keep being read meanwhile so the snapshot stays current and a new request is said in the view's footer.
+struct ViewWait {
+    area: Area,
+    idle_until: Instant,
+    /// What the view says in its footer for something that wants the user meanwhile; empty when nothing does.
+    banner: String,
+}
+
+impl ViewWait {
+    fn new() -> Self {
+        Self {
+            area: window_area(),
+            idle_until: Instant::now() + Duration::from_secs(600),
+            banner: String::new(),
+        }
+    }
+
+    fn wait(&mut self, say: &Say, ask: &mut Over<'_>, session: &mut Session) -> Wake {
+        loop {
+            match read_key_or_gone(ask.rx, Duration::from_millis(50)) {
+                Ok(Some(k)) => {
+                    self.idle_until = Instant::now() + Duration::from_secs(600);
+                    return Wake::Key(k);
+                }
+                Err(()) => return Wake::Gone,
+                Ok(None) => {}
+            }
+            let now = window_area();
+            if now != self.area {
+                self.area = now;
+                let _ = ask.c.window.resized();
+                return Wake::Redraw;
+            }
+            match session.next(Duration::ZERO) {
+                Update::Snapshot(s) => ask.c.snapshot = Some(*s),
+                Update::Changed => ask.c.stale = true,
+                Update::Closed => return Wake::Gone,
+                Update::Quiet => {}
+            }
+            if session.take_asked() {
+                self.banner = say.text(key!("tui-view-asked"), &[]);
+                return Wake::Redraw;
+            }
+            if Instant::now() >= self.idle_until {
+                return Wake::Gone;
+            }
+        }
+    }
+}
+
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -867,8 +966,11 @@ fn start_in_folder(
                 rows,
             };
             ask.frame(agora_tui::picker::frame(&view, &text).as_bytes());
-            let Some(k) = read_key(ask.rx(), Duration::from_secs(120)) else {
-                return String::new();
+            // A resized window draws the picker again for its size.
+            let k = match key_or_resize(ask.rx(), Duration::from_secs(120)) {
+                Some(Some(k)) => k,
+                Some(None) => continue,
+                None => return String::new(),
             };
             notice.clear();
             let count = folder.entries.len();
@@ -1117,6 +1219,8 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                 armed: None,
                 read_whole: std::collections::HashSet::new(),
                 shown_request: None,
+                stale: false,
+                drafts: std::collections::HashMap::new(),
                 note: Note::default(),
                 colors: if color {
                     ColorMode::from_env(
@@ -1146,6 +1250,8 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                     break;
                 }
             }
+            // The terminal is gone (closed window, lost SSH session): the client ends instead of running on unseen.
+            STDIN_GONE.store(true, std::sync::atomic::Ordering::Release);
         });
     }
     let eol = if keys { "\r\n" } else { "\n" };
@@ -1159,6 +1265,10 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
     // ADR-0060: the first press of u / U, waiting for the same key again (see `resume_key`).
     let mut armed: Option<Armed> = None;
     loop {
+        // No terminal left to show anything in: stop trying to connect.
+        if terminal_gone() {
+            return ExitCode::SUCCESS;
+        }
         if first {
             say.err(key!("tui-connecting"), &hub_arg);
         }
@@ -1307,6 +1417,10 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                     draw(&snapshot, &selected, &notice, cost, preview.as_ref());
                     last_draw = Instant::now();
                 }
+            }
+            // The terminal is gone: end, as the console does.
+            if terminal_gone() {
+                return ExitCode::SUCCESS;
             }
             while let Ok(k) = rx.try_recv() {
                 // Arrow keys and Shift-Tab arrive as `ESC [ x`.
@@ -1577,6 +1691,14 @@ enum Next {
     Reconnect,
 }
 
+/// Set when the keyboard's terminal is gone for good (its stdin ended or failed): every loop ends then. A client whose terminal
+/// closed kept running, signed in and polling (the TUI review found six), since nothing read the end of its input.
+static STDIN_GONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn terminal_gone() -> bool {
+    STDIN_GONE.load(std::sync::atomic::Ordering::Acquire)
+}
+
 /// The console's state that outlives one hub session.
 struct Console {
     window: agora_tui::backend::Window,
@@ -1589,6 +1711,11 @@ struct Console {
     armed: Option<Armed>,
     /// ADR-0057: start requests read whole (in the inspector or the reader), which y may then allow.
     read_whole: std::collections::HashSet<String>,
+    /// The hub said something changed while a full-screen view held the screen: the console asks for a fresh snapshot after it.
+    stale: bool,
+    /// What was typed into each chat agent's line and not sent yet: kept when the conversation is opened again (a fresh snapshot
+    /// reconnects the console, another tab comes to the front), so a draft is never lost.
+    drafts: std::collections::HashMap<String, Vec<u8>>,
     /// A request shown whole outside the inspector (the chat tab's pane shows its agent's): y / n may answer it without asking again.
     shown_request: Option<String>,
     note: Note,
@@ -1602,6 +1729,8 @@ struct Note {
     /// The notice the box was opened for (a new notice opens it again).
     seen: String,
     open: bool,
+    /// The box has been on screen: only a key after that closes it (a key in the same burst as the command must not).
+    drawn: bool,
     /// What `c` puts on the clipboard: the `agora node trust` command the notice asks the user to run.
     copy: Option<String>,
 }
@@ -1706,6 +1835,8 @@ fn console(
         if now != area {
             area = now;
             let _ = c.window.resized();
+            // `resized` clears the screen: draw it again now, not at the next key (seen on Windows: blank after a resize).
+            redraw = true;
             events.push(AppEvent::Resize {
                 cols: area.width,
                 rows: area.height,
@@ -1715,6 +1846,12 @@ fn console(
         while let Ok(b) = rx.try_recv() {
             bytes.push(b);
         }
+        if bytes.is_empty() && terminal_gone() {
+            if let Some(p) = preview.take() {
+                p.close(session);
+            }
+            return Next::Quit;
+        }
         if !bytes.is_empty() {
             typed_at = Some(Instant::now());
         }
@@ -1723,7 +1860,7 @@ fn console(
             events.extend(c.parser.flush());
         }
         // Any key or click closes the box of a long notice (and still does what it does).
-        if c.note.open && !events.is_empty() {
+        if c.note.open && c.note.drawn && !events.is_empty() {
             c.note.open = false;
             redraw = true;
         }
@@ -1757,38 +1894,15 @@ fn console(
                     Action::Input(b) => {
                         let active = c.app.active_agent().map(str::to_string);
                         match chat.as_mut().filter(|p| Some(&p.agent) == active.as_ref()) {
-                            // A request of this agent waits: the pane shows it, y / n answer it (as in the list) and nothing
-                            // typed meanwhile reaches the conversation, so a permission is never answered into a message.
-                            Some(pane)
-                                if c.snapshot
-                                    .as_ref()
-                                    .and_then(|s| waiting_for(s, &pane.agent))
-                                    .is_some() =>
-                            {
-                                if let Some(k) = b.iter().find(|k| matches!(k, b'y' | b'n')) {
-                                    c.selected = pane.agent.clone();
-                                    c.shown_request = c
-                                        .snapshot
-                                        .as_ref()
-                                        .and_then(|s| waiting_for(s, &pane.agent))
-                                        .map(|a| a.approval_id.clone());
-                                    if command(
-                                        say,
-                                        session,
-                                        rx,
-                                        color,
-                                        c,
-                                        &mut preview,
-                                        area,
-                                        char::from(*k),
-                                    ) {
-                                        dirty_since.get_or_insert_with(Instant::now);
-                                    }
-                                }
-                                redraw = true;
-                            }
+                            // Typing in a chat never answers a request, whatever letters it holds (the TUI review: `maybe`
+                            // allowed one): a waiting request is answered with Alt+Y / Alt+N only, and the draft is kept.
                             Some(pane) => {
                                 chat_input(say, session, rx, c, &mut preview, pane, &b);
+                                if pane.typed.is_empty() {
+                                    c.drafts.remove(&pane.agent);
+                                } else {
+                                    c.drafts.insert(pane.agent.clone(), pane.typed.clone());
+                                }
                                 // What was typed is drawn: the shell's own state did not change, the pane's did.
                                 redraw = true;
                             }
@@ -1838,6 +1952,10 @@ fn console(
                         return Next::Quit;
                     }
                     Action::Command(k) => {
+                        // A command's result replaces the last notice: the same long result (the trust command again) opens its
+                        // box again instead of staying cut in the footer.
+                        c.notice.clear();
+                        c.note.seen.clear();
                         // Alt+Y / Alt+N in a chat tab that shows its agent's request: it is in view there.
                         if matches!(k, 'y' | 'n') {
                             if let Some(pane) = chat
@@ -1851,7 +1969,9 @@ fn console(
                                     .map(|a| a.approval_id.clone());
                             }
                         }
-                        if command(say, session, rx, color, c, &mut preview, area, k) {
+                        if command(say, session, rx, color, c, &mut preview, area, k)
+                            | std::mem::take(&mut c.stale)
+                        {
                             dirty_since.get_or_insert_with(Instant::now);
                         }
                     }
@@ -1861,6 +1981,7 @@ fn console(
         if c.notice != c.note.seen {
             c.note.seen = c.notice.clone();
             c.note.open = !c.notice.is_empty();
+            c.note.drawn = false;
             c.note.copy = trust_command().filter(|cmd| c.notice.contains(cmd.as_str()));
             redraw = true;
         }
@@ -1872,6 +1993,7 @@ fn console(
                 c.app.active_agent(),
                 &mut chat,
                 &mut chat_failed,
+                &c.drafts,
             ) {
                 c.notice = say.text(key!("tui-opening-failed"), &[("code", Arg::Str(code))]);
                 redraw = true;
@@ -2038,7 +2160,7 @@ fn draw_console(
                     block
                 })
                 .unwrap_or_default();
-            let room = room.saturating_sub(waiting.len().saturating_sub(1));
+            let room = room.saturating_sub(waiting.len());
             // The agent speaks under its name (as in the tree), not its id.
             let speaker = p.snapshot.as_ref().map_or_else(
                 || local.to_string(),
@@ -2053,11 +2175,17 @@ fn draw_console(
                 &text,
             );
             if !p.note.is_empty() {
-                lines.insert(lines.len().saturating_sub(1), plain(&p.note));
+                let at = lines.len().saturating_sub(1);
+                let width = usize::from(pane.width).max(12);
+                lines.splice(
+                    at..at,
+                    agora_tui::render::wrap_row(&plain(&p.note), width, width),
+                );
             }
+            // The request goes above the line being typed, which stays in view (the draft is kept while it waits).
             if !waiting.is_empty() {
-                lines.pop();
-                lines.extend(waiting);
+                let at = lines.len().saturating_sub(1);
+                lines.splice(at..at, waiting);
             }
             if let Some(h) = head {
                 lines.insert(0, h);
@@ -2078,6 +2206,9 @@ fn draw_console(
             ));
             lines
         });
+    if note.is_some() {
+        c.note.drawn = true;
+    }
     let (app, colors) = (&c.app, c.colors);
     let _ = c.window.draw(|f| {
         app.draw(
@@ -2152,6 +2283,7 @@ fn follow_chat(
     active: Option<&str>,
     chat: &mut Option<ChatPane>,
     failed: &mut Option<String>,
+    drafts: &std::collections::HashMap<String, Vec<u8>>,
 ) -> Result<(), String> {
     let wanted = active.filter(|id| {
         s.agents.iter().any(|a| a.agent_id == *id && a.running)
@@ -2177,7 +2309,7 @@ fn follow_chat(
                 agent: id.to_string(),
                 stream,
                 entries: Vec::new(),
-                typed: Vec::new(),
+                typed: drafts.get(id).cloned().unwrap_or_default(),
                 note: String::new(),
                 confirming: None,
                 snapshot: s.agents.iter().find(|a| a.agent_id == id).cloned(),
@@ -2211,6 +2343,16 @@ fn chat_input(
     for &b in bytes {
         match b {
             b'\r' | b'\n' if paste => pane.typed.push(b' '),
+            // A request of this agent waits: the draft stays until it is answered (Alt+Y / Alt+N), so no message goes out with a
+            // permission pending.
+            b'\r' | b'\n'
+                if c.snapshot
+                    .as_ref()
+                    .and_then(|s| waiting_for(s, &pane.agent))
+                    .is_some() =>
+            {
+                pane.note = say.text(key!("tui-chat-answer-first"), &[]);
+            }
             b'\r' | b'\n' => chat_send(say, session, rx, c, preview, pane),
             0x7f | 0x08 => {
                 // Backspace removes one character, not one byte.
@@ -2614,7 +2756,8 @@ fn command(
             });
             true
         }
-        // What the selected agent changed (the web's review screen): its diff, whole-screen, until q or Esc.
+        // What the selected agent changed (the web's review screen): its diff, whole-screen, until q or Esc. Like the console it
+        // redraws when the window is resized and says when a new request arrives meanwhile.
         'r' if !selected.is_empty() => {
             let Some((node, target)) = agora_tui::client::place_of(&s, &selected) else {
                 c.notice = say.text(key!("tui-review-nowhere"), &[]);
@@ -2631,21 +2774,23 @@ fn command(
                 let lines = agora_tui::review::lines(&diff);
                 let colors = ask.c.colors;
                 let mut top = 0usize;
+                let mut view = ViewWait::new();
                 loop {
                     let room = usize::from(window_area().height.saturating_sub(2)).max(1);
                     top = agora_tui::review::clamp_top(top, lines.len(), room);
+                    let banner = view.banner.clone();
                     let _ = ask.c.window.draw(|f| {
-                        agora_tui::review::draw(f, &title, &lines, top, colors, &text);
+                        agora_tui::review::draw(f, &title, &lines, top, &banner, colors, &text);
                     });
-                    match read_key(ask.rx, Duration::from_secs(600)) {
-                        Some(b'j') => top += 1,
-                        Some(b'k') => top = top.saturating_sub(1),
-                        Some(b' ' | b'f') => top += room,
-                        Some(b'b') => top = top.saturating_sub(room),
-                        Some(b'g') => top = 0,
-                        Some(b'G') => top = lines.len(),
-                        None | Some(b'q' | 0x1b | 3 | 0x7f) => return String::new(),
-                        Some(_) => {}
+                    match view.wait(say, ask, session) {
+                        Wake::Key(b'j') => top += 1,
+                        Wake::Key(b'k') => top = top.saturating_sub(1),
+                        Wake::Key(b' ' | b'f') => top += room,
+                        Wake::Key(b'b') => top = top.saturating_sub(room),
+                        Wake::Key(b'g') => top = 0,
+                        Wake::Key(b'G') => top = lines.len(),
+                        Wake::Gone | Wake::Key(b'q' | 0x1b | 3 | 0x7f) => return String::new(),
+                        Wake::Key(_) | Wake::Redraw => {}
                     }
                 }
             });
@@ -2664,6 +2809,7 @@ fn command(
                 use agora_tui::files;
                 let mut path = String::new();
                 let mut notice = String::new();
+                let mut view = ViewWait::new();
                 'folder: loop {
                     let entries = match session.files_list(&node, &place, &path) {
                         Ok(e) => files::sorted(e),
@@ -2679,16 +2825,21 @@ fn command(
                     };
                     let mut at = 0usize;
                     loop {
+                        let banner = view.banner.clone();
                         let _ = ask.c.window.draw(|f| {
-                            files::draw_listing(f, &title, &path, &entries, at, &notice, &text);
+                            files::draw_listing(
+                                f, &title, &path, &entries, at, &notice, &banner, &text,
+                            );
                         });
-                        let key = read_key(ask.rx, Duration::from_secs(600));
-                        notice.clear();
+                        let wake = view.wait(say, ask, session);
+                        if matches!(wake, Wake::Key(_)) {
+                            notice.clear();
+                        }
                         let count = entries.len();
-                        match key {
-                            Some(b'j') if count > 0 => at = (at + 1).min(count - 1),
-                            Some(b'k') => at = at.saturating_sub(1),
-                            Some(b'\r' | b'\n') => {
+                        match wake {
+                            Wake::Key(b'j') if count > 0 => at = (at + 1).min(count - 1),
+                            Wake::Key(b'k') => at = at.saturating_sub(1),
+                            Wake::Key(b'\r' | b'\n') => {
                                 let Some(e) = entries.get(at) else { continue };
                                 let target = files::child(&path, &e.name);
                                 if e.is_dir {
@@ -2714,28 +2865,31 @@ fn command(
                                     let room =
                                         usize::from(window_area().height.saturating_sub(2)).max(1);
                                     top = top.min(count.saturating_sub(room));
+                                    let banner = view.banner.clone();
                                     let _ = ask.c.window.draw(|f| {
-                                        files::draw_file(f, &title, &target, &content, top, &text);
+                                        files::draw_file(
+                                            f, &title, &target, &content, top, &banner, &text,
+                                        );
                                     });
-                                    match read_key(ask.rx, Duration::from_secs(600)) {
-                                        Some(b'j') => top += 1,
-                                        Some(b'k') => top = top.saturating_sub(1),
-                                        Some(b' ' | b'f') => top += room,
-                                        Some(b'b') => top = top.saturating_sub(room),
-                                        Some(b'g') => top = 0,
-                                        Some(b'G') => top = count,
-                                        Some(0x7f | 0x08 | b'h' | b'q' | 0x1b) => break,
-                                        None | Some(3) => return String::new(),
-                                        Some(_) => {}
+                                    match view.wait(say, ask, session) {
+                                        Wake::Key(b'j') => top += 1,
+                                        Wake::Key(b'k') => top = top.saturating_sub(1),
+                                        Wake::Key(b' ' | b'f') => top += room,
+                                        Wake::Key(b'b') => top = top.saturating_sub(room),
+                                        Wake::Key(b'g') => top = 0,
+                                        Wake::Key(b'G') => top = count,
+                                        Wake::Key(0x7f | 0x08 | b'h' | b'q' | 0x1b) => break,
+                                        Wake::Gone | Wake::Key(3) => return String::new(),
+                                        Wake::Key(_) | Wake::Redraw => {}
                                     }
                                 }
                             }
-                            Some(0x7f | 0x08 | b'h') if !path.is_empty() => {
+                            Wake::Key(0x7f | 0x08 | b'h') if !path.is_empty() => {
                                 path = files::parent(&path);
                                 continue 'folder;
                             }
-                            None | Some(b'q' | 0x1b | 3) => return String::new(),
-                            Some(_) => {}
+                            Wake::Gone | Wake::Key(b'q' | 0x1b | 3) => return String::new(),
+                            Wake::Key(_) | Wake::Redraw => {}
                         }
                     }
                 }

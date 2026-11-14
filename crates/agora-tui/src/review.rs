@@ -87,6 +87,7 @@ pub fn draw(
     title: &str,
     lines: &[(Kind, String)],
     top: usize,
+    banner: &str,
     colors: ColorMode,
     t: Text<'_>,
 ) {
@@ -146,11 +147,14 @@ pub fn draw(
             lines.len()
         )
     };
-    Line::from(vec![
-        Span::styled(at, dim),
-        Span::styled(t(key!("tui-review-keys"), &[]), dim),
-    ])
-    .render(foot, buf);
+    // Something that wants the user meanwhile (a new request) leads the footer.
+    let mut spans = Vec::new();
+    if !banner.is_empty() {
+        spans.push(Span::styled(format!("{banner}  "), strong));
+    }
+    spans.push(Span::styled(at, dim));
+    spans.push(Span::styled(t(key!("tui-review-keys"), &[]), dim));
+    Line::from(spans).render(foot, buf);
 }
 
 #[cfg(test)]
@@ -196,7 +200,7 @@ mod tests {
         let text = |id: &str, _: &[(&str, Arg)]| id.to_string();
         let l = lines(DIFF);
         let mut term = Terminal::new(TestBackend::new(40, 6)).unwrap();
-        term.draw(|f| draw(f, "codex · amber", &l, 4, ColorMode::Full, &text))
+        term.draw(|f| draw(f, "codex · amber", &l, 4, "", ColorMode::Full, &text))
             .unwrap();
         let buf = term.backend().buffer().clone();
         let row = |y: u16| {

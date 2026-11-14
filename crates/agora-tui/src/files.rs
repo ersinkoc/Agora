@@ -112,6 +112,7 @@ pub fn draw_listing(
     entries: &[FileEntry],
     selected: usize,
     notice: &str,
+    banner: &str,
     t: Text<'_>,
 ) {
     let strong = Style::default().add_modifier(Modifier::BOLD);
@@ -164,6 +165,9 @@ pub fn draw_listing(
             .collect()
     };
     let mut foot = Vec::new();
+    if !banner.is_empty() {
+        foot.push(Span::styled(format!("{banner}  "), strong));
+    }
     if !notice.is_empty() {
         foot.push(Span::styled(format!("{notice}  "), strong));
     }
@@ -178,6 +182,7 @@ pub fn draw_file(
     path: &str,
     content: &Content,
     top: usize,
+    banner: &str,
     t: Text<'_>,
 ) {
     let strong = Style::default().add_modifier(Modifier::BOLD);
@@ -220,10 +225,13 @@ pub fn draw_file(
             },
         ),
     };
-    let foot = Line::from(vec![
-        Span::styled(at, dim),
-        Span::styled(t(key!("tui-files-file-keys"), &[]), dim),
-    ]);
+    let mut foot = Vec::new();
+    if !banner.is_empty() {
+        foot.push(Span::styled(format!("{banner}  "), strong));
+    }
+    foot.push(Span::styled(at, dim));
+    foot.push(Span::styled(t(key!("tui-files-file-keys"), &[]), dim));
+    let foot = Line::from(foot);
     frame_parts(f, head, body, foot);
 }
 
@@ -290,7 +298,7 @@ mod tests {
             .map(|i| entry(&format!("f{i:02}"), false, i))
             .collect();
         let mut term = Terminal::new(TestBackend::new(30, 8)).unwrap();
-        term.draw(|f| draw_listing(f, "shell · teal", "src", &entries, 20, "", &text))
+        term.draw(|f| draw_listing(f, "shell · teal", "src", &entries, 20, "", "", &text))
             .unwrap();
         let buf = term.backend().buffer().clone();
         let row = |y: u16| {
