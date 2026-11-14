@@ -8,6 +8,7 @@ pub mod events;
 pub mod ids;
 pub mod lease;
 pub mod project;
+pub mod restart;
 pub mod task;
 pub mod text;
 pub mod worktree;

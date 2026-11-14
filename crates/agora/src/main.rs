@@ -27,6 +27,7 @@ const TERMINAL_STREAM: u32 = 3;
 mod adaptercmd;
 mod frontdoor;
 mod hubcli;
+mod supervise;
 mod trustcli;
 mod tuicmd;
 mod update;
@@ -143,6 +144,8 @@ pub(crate) struct Opts {
     fingerprints: Vec<String>,
     /// ADR-0061: also other people's devices (with their fingerprints), and replacing a key already trusted under the same id.
     include_others: bool,
+    /// `agora supervise`: the front door that started it and holds the lock until it names the supervisor (`PID:START`).
+    handoff: Option<String>,
     replace: bool,
     /// ADR-0073: `agora hub machines forget --old` and `--refuse-return`.
     old: bool,
@@ -200,6 +203,7 @@ fn parse(args: &[String]) -> Option<Opts> {
             "--from-hub" => o.from_hub = true,
             "--fingerprint" => o.fingerprints.push(it.next()?.clone()),
             "--include-others" => o.include_others = true,
+            "--handoff" => o.handoff = Some(it.next()?.clone()),
             "--replace" => o.replace = true,
             "--ui" => o.ui = Some(it.next()?.clone()),
             "--save" => o.save = true,
@@ -228,6 +232,8 @@ fn acp_bridge(args: &[String]) -> ExitCode {
 }
 
 fn main() -> ExitCode {
+    // A role started by its supervisor ends with it (ADR-0062 item 8); first, before any thread exists, as it changes the environment.
+    agora_platform::end_with_supervisor();
     if std::env::args().nth(1).as_deref() == Some("acp-bridge") {
         let args: Vec<String> = std::env::args().skip(2).collect();
         return acp_bridge(&args);
@@ -270,6 +276,8 @@ fn main() -> ExitCode {
         ["status"] => frontdoor::status(&say),
         ["down"] => frontdoor::down(&say),
         ["node", "run"] => node_run(&say, &opts),
+        // Started by the front door, not by people: not in the usage page.
+        ["supervise", role] => supervise::supervise(&say, role, opts.handoff.as_deref()),
         ["agent", "start"] => agent_start(&say, &opts),
         ["project", "init"] => project_init(&say, &opts),
         ["agent", "stop"] => agent_stop(&say, &opts),

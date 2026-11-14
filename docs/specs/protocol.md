@@ -194,6 +194,26 @@ its relay on both sides and the client resubscribes for a fresh snapshot (a hub-
 resends a snapshot"; the result for the client is the same and the node is never slowed). On the node, a thread bridges the
 stream from the node's own control socket to the hub connection through a bounded queue.
 
+Shared terminal size (ADR-0072, Accepted; `agora-hub::router`, no new message): several windows may watch one terminal, and it gets the smallest size
+any of them asked for (tmux's "smallest"), so no window is clipped. The hub keeps, per `(node, terminal_id)`, the last
+`TerminalResize` size of each client connection that has a relay for that terminal, and forwards to the node the smallest
+`cols` and, separately, the smallest `rows` over those connections, only when that differs from the size the hub last sent or saw
+in the terminal's own kind 2 frame (so a size set by a local client is noticed); otherwise it answers the request `ok` itself and
+sends nothing. When a connection closes its terminal stream (kind 255 from the client) or goes away, its size no longer counts and
+the others get the new smallest size (the terminal grows back); the last window leaving changes nothing. A refused subscription
+counts as leaving. A relay the hub ends (slow client, node gone, exit) changes nothing by itself; the client's size counts again
+when it resubscribes on the same connection. Rules: a connection that has not sent a size does not count (a viewer cannot, its
+`terminal.resize` stops at the hub); a size of 0 is forwarded unchanged for the node to refuse as before; a dimension above the
+node's limit (1000) asks for 1000. A `TerminalResize` from a connection that does not watch the terminal has no say while one
+that does has a size there (answered `ok`, nothing sent), and is forwarded unchanged as before when none does (a script). The
+hub-chosen size travels as an ordinary `TerminalResize` under a hub request id; nobody waits for its answer when the hub sends it
+on its own. Within one connection the last size counts (two views of one terminal in one window share it). This is the one
+command whose content the hub chooses (ADR-0072 amends ADR-0029 there, which otherwise forwards commands unchanged); it changes a
+size, never what the policy allows. Clients on the node's own control socket (the terminal client, `agora` commands on that machine) talk to the node
+directly: there the last resize still wins, and the hub's windows see that size in the terminal's resize frame. Clients report the
+size that fits their view and show the terminal at the size of the node's resize frame, never reporting that size back (the web
+window: `apps/web/src/terminal/sizing.ts`; it says its size again right after every subscription).
+
 Client sign-in (`agora-hub::signin`): `agora hub login` (and `agora hub run`, once at start) prints a one-time code (`XXXX-XXXX`, about 39
 bits, 10 minutes, single use). The web app trades it with `POST /api/session` (`{"code": "..."}` → `{"token": "..."}`, 401 for a
 wrong, expired or used code, 429 after five misses in a row) for a session token: 128 random bits, valid 12 hours, stored only as a

@@ -12,14 +12,19 @@ use windows_sys::Win32::Foundation::{
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 };
+use windows_sys::Win32::System::JobObjects::{
+    AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+    SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_BREAKAWAY_OK,
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+};
 use windows_sys::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
 use windows_sys::Win32::System::Threading::{
-    CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess, GetProcessTimes,
-    InitializeProcThreadAttributeList, OpenProcess, QueryFullProcessImageNameW, TerminateProcess,
-    UpdateProcThreadAttribute, CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP,
-    CREATE_UNICODE_ENVIRONMENT, DETACHED_PROCESS, EXTENDED_STARTUPINFO_PRESENT,
-    PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
-    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, STARTF_USESTDHANDLES, STARTUPINFOEXW,
+    CreateProcessW, DeleteProcThreadAttributeList, GetCurrentProcess, GetExitCodeProcess,
+    GetProcessTimes, InitializeProcThreadAttributeList, OpenProcess, QueryFullProcessImageNameW,
+    TerminateProcess, UpdateProcThreadAttribute, CREATE_BREAKAWAY_FROM_JOB,
+    CREATE_NEW_PROCESS_GROUP, CREATE_UNICODE_ENVIRONMENT, DETACHED_PROCESS,
+    EXTENDED_STARTUPINFO_PRESENT, PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION,
+    PROCESS_TERMINATE, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, STARTF_USESTDHANDLES, STARTUPINFOEXW,
 };
 
 fn last_error() -> io::Error {
@@ -151,6 +156,42 @@ pub(crate) fn terminate(pid: u32) -> io::Result<()> {
     Ok(())
 }
 
+/// What makes a process detached here: no console of its own and out of this console's Ctrl-C group.
+pub(crate) const DETACHED_FLAGS: u32 = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP;
+
+/// See [`crate::spawn_bound`]: puts this process, once, into a new job that ends every process in it when it is closed, and says
+/// whether it is in one. The handle is never closed: this process holds the only one, so the job closes, and its processes end, exactly
+/// when this process ends. Nested jobs (Windows 8 and later) let this work when this process is already in a job.
+pub(crate) fn join_kill_on_close_job() -> bool {
+    static JOINED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *JOINED.get_or_init(|| {
+        // SAFETY: plain call.
+        let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if job.is_null() {
+            return false;
+        }
+        // SAFETY: an all-zero limit structure means "no limits".
+        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+        info.BasicLimitInformation.LimitFlags =
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK;
+        // SAFETY: `info` is the structure the class names, with its size; live handles.
+        let joined = unsafe {
+            SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                (&info as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            ) != 0
+                && AssignProcessToJobObject(job, GetCurrentProcess()) != 0
+        };
+        if !joined {
+            // SAFETY: the handle created above, closed once.
+            unsafe { CloseHandle(job) };
+        }
+        joined
+    })
+}
+
 /// See [`crate::spawn_detached`]: no console of its own, out of this console's Ctrl-C group and (when allowed) out of this process's
 /// job. `CreateProcessW` directly, not `std::process::Command`: the standard library starts children with every inheritable handle of
 /// this process, so a caller's output pipe would stay open until the daemon ends. Here only the two handles named in
@@ -252,10 +293,7 @@ pub(crate) fn spawn_detached(
         si.StartupInfo.hStdInput = handles[0];
         si.StartupInfo.hStdOutput = handles[1];
         si.StartupInfo.hStdError = handles[1];
-        let base = DETACHED_PROCESS
-            | CREATE_NEW_PROCESS_GROUP
-            | EXTENDED_STARTUPINFO_PRESENT
-            | CREATE_UNICODE_ENVIRONMENT;
+        let base = DETACHED_FLAGS | EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT;
         let mut start = |flags: u32| -> io::Result<u32> {
             // SAFETY: an all-zero PROCESS_INFORMATION is a valid out-buffer.
             let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };

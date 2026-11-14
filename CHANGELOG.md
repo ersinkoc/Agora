@@ -10,6 +10,11 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
   machines leave every window, while their history and costs stay; one that connects again comes back. A box also refuses them if
   they connect again, for a lost or retired machine. `agora hub machines` lists machines as online, offline or old, and
   `agora hub machines forget NAME` or `forget --old` does the same from the hub's machine. Only the hub's owner can forget machines.
+### Getting started
+- A hub or node started by `agora` that crashes is started again 30 seconds later, at most 5 times in 10 minutes; one that
+  stops right after starting (a port taken, a wrong setting) is not retried and its log says why. `agora status` shows a restart
+  in progress, the restarts of the last 10 minutes and a give-up. `agora down` and a killed supervisor never leave a hub or node
+  running behind them. A hub or node started by an earlier version stays as it is until `agora down` and `agora`.
 
 ### Shared board
 - A change to a shared project's board (create, claim, complete, lease, release, handoff) is answered as done only once the hub has
@@ -42,6 +47,11 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ### Getting started
 - `agora --version` prints the version.
+
+### Terminals
+- A terminal open in two windows at once (say a laptop and a bigger screen elsewhere) now fits both: it takes the size of the
+  smaller window, the bigger one shows it at its top left with a thin line where it ends, and it grows back as soon as the smaller
+  window closes it (ADR-0072). Before, the window that resized last won and the other one was cut off.
 
 ### Agents working together
 - An agent asking who is in its project (`agents_list`) now sees the project's agents on your other connected machines too, not
