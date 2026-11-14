@@ -540,8 +540,13 @@ impl Hub {
         });
     }
 
-    /// The stored events after `after`, or `None` once they come to more than `max_bytes`: then a snapshot is cheaper and bounded.
+    /// The stored events after `after`, or `None` when they come to more than `max_bytes`: then a snapshot is cheaper and bounded.
+    /// The size is asked of the store first, so a replay over budget copies no payload at all (#519 review: a page of 1 000 large
+    /// events was read into memory before the check).
     fn replay(&self, after: u64, max_bytes: usize) -> Result<Option<Vec<Delivered>>, StoreError> {
+        if self.store.payload_bytes_after(after)? > u64::try_from(max_bytes).unwrap_or(u64::MAX) {
+            return Ok(None);
+        }
         let mut backlog = Vec::new();
         let (mut at, mut bytes) = (after, 0usize);
         loop {
