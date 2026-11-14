@@ -45,9 +45,13 @@ window again.
   unit of the same name that you wrote yourself is left exactly
   as it is: `agora service` neither replaces, stops nor removes it. Without `systemctl` it is not available.
   macOS writes a LaunchAgent per role into `~/Library/LaunchAgents/` (owner-only) and loads it with `launchctl`; it never uses root
-  (it refuses `sudo`). macOS may say "Background Items Added" and lists it under Login Items; `install` on one turned off there turns it
-  on again and says so. A LaunchAgent of the same name that you wrote yourself is left exactly as it is. When it is removed, launchd
-  ends what the node started with it.
+  (it refuses `sudo`) and needs your login session (over SSH, be logged in at the screen too). The job gets only the full-path
+  entries of your shell's `PATH`. macOS may say "Background Items Added" and lists it under System Settings > General > Login Items &
+  Extensions ("Allow in the Background"). If you switch it off there, `status` says it is off and `install` says only you can turn it
+  on again there; one turned off with `launchctl disable` is turned on again by `install`. A LaunchAgent of the same name that you
+  wrote yourself is left exactly as it is. Removing it ends the supervisor and the node, but not your agents: each runs in its own
+  terminal session, which launchd does not end (as when the node is started by `agora`). On every system a service already set up is
+  not rewritten by `install` (after moving Agora, or for another `PATH`): run `agora service remove`, then `install`.
 - Logs: `~/.agora/logs/hub.log` and `node.log` (renamed to `.1` when over 5 MiB at a start).
 
 Everything works as before by hand too (`agora hub run`, `agora node enroll`, `agora node run`, `agora tui`); `AGORA_HOME` moves
