@@ -440,6 +440,7 @@ pub fn app_rows(s: &Snapshot, now_ms: u64, t: Text<'_>) -> Vec<crate::app::Row> 
             terminal: s.terminals.iter().any(|x| x.agent_id == a.agent_id),
             header: false,
             group: false,
+            request: asks,
         }
     };
     let mut nodes: Vec<_> = s.nodes.iter().collect();
@@ -460,6 +461,7 @@ pub fn app_rows(s: &Snapshot, now_ms: u64, t: Text<'_>) -> Vec<crate::app::Row> 
             terminal: false,
             header: true,
             group: false,
+            request: false,
         });
         let mut agents: Vec<&AgentSnapshot> =
             s.agents.iter().filter(|a| a.node_id == n.node_id).collect();
@@ -489,6 +491,7 @@ pub fn app_rows(s: &Snapshot, now_ms: u64, t: Text<'_>) -> Vec<crate::app::Row> 
                     terminal: false,
                     header: true,
                     group: true,
+                    request: false,
                 });
             }
             for (a, depth) in crate::render::helper_order(&list) {

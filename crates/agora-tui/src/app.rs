@@ -141,6 +141,9 @@ pub struct Row {
     pub header: bool,
     /// A project's heading under its machine (as the web's folders): drawn dim with a folder mark, where a machine's is bold.
     pub group: bool,
+    /// The agent has a request waiting for the user's answer (y / n). An agent can need the user without one: a question on its
+    /// own screen, answered by typing there.
+    pub request: bool,
 }
 
 /// What an event is handled against: the tree's rows, the window, and the active agent's terminal modes.
@@ -456,8 +459,14 @@ impl App {
                 self.common(Key::Char('m'), cx.area, out);
                 return;
             }
-            // Alt+Y / Alt+N answer the request of the agent in front (the caller shows it first when it is not in view).
-            Key::Alt(c @ ('y' | 'Y' | 'n' | 'N')) if self.focus == Focus::Terminal => {
+            // Alt+Y / Alt+N answer the request of the agent in front (the caller shows it first when it is not in view); without
+            // one they are the agent's keys, never an answer to another agent's request.
+            Key::Alt(c @ ('y' | 'Y' | 'n' | 'N'))
+                if self.focus == Focus::Terminal
+                    && self
+                        .active_agent()
+                        .is_some_and(|id| cx.rows.iter().any(|r| r.id == id && r.request)) =>
+            {
                 out.push(Action::Command(c.to_ascii_lowercase()));
                 return;
             }
@@ -995,7 +1004,7 @@ impl App {
             (false, Focus::Terminal)
                 if self
                     .active_agent()
-                    .is_some_and(|id| s.rows.iter().any(|r| r.id == id && r.needs_you)) =>
+                    .is_some_and(|id| s.rows.iter().any(|r| r.id == id && r.request)) =>
             {
                 key!("tui-app-keys-terminal-waiting")
             }
@@ -1674,6 +1683,7 @@ mod tests {
                 terminal: true,
                 header: false,
                 group: false,
+                request: false,
             })
             .collect()
     }
@@ -2347,6 +2357,7 @@ mod tests {
                 terminal: true,
                 header: false,
                 group: false,
+                request: false,
             })
             .collect();
         let mut app = App::default();
@@ -2397,6 +2408,7 @@ mod tests {
             terminal: true,
             header: false,
             group: false,
+            request: false,
         }];
         let app = App::default();
         let question = vec![
@@ -2579,13 +2591,21 @@ mod tests {
             vec![Action::MouseCapture(false)]
         );
         assert_eq!(app.focus, Focus::Terminal, "the tab keeps the keyboard");
-        // Alt+Y / Alt+N answer the request of the agent in front, as y / n do in the list.
+        // Alt+Y / Alt+N answer the request of the agent in front, as y / n do in the list; without a request (an agent that asks on
+        // its own screen, as Claude Code's folder trust question) they are the agent's keys, never an answer to another's request.
         assert_eq!(
             key(&mut app, &rows, Key::Alt('y')),
+            vec![Action::Input(b"\x1by".to_vec())]
+        );
+        let mut asking = rows.clone();
+        asking[0].request = true;
+        asking[0].needs_you = true;
+        assert_eq!(
+            key(&mut app, &asking, Key::Alt('y')),
             vec![Action::Command('y')]
         );
         assert_eq!(
-            key(&mut app, &rows, Key::Alt('N')),
+            key(&mut app, &asking, Key::Alt('N')),
             vec![Action::Command('n')]
         );
     }
@@ -2618,6 +2638,7 @@ mod tests {
                 terminal: false,
                 header: true,
                 group: false,
+                request: false,
             },
         );
         let mut app = App::default();
@@ -2725,6 +2746,7 @@ mod tests {
             terminal: true,
             header,
             group: false,
+            request: false,
         };
         let rows = vec![
             row("mac", true),
