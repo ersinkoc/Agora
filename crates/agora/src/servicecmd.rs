@@ -219,6 +219,7 @@ pub(crate) fn install(say: &Say, h: &Path, m: &Machine) -> ExitCode {
                 return ExitCode::from(1);
             }
         };
+        let mut was_off = false;
         // A second `install` changes nothing and says so (to register it anew, `remove` first).
         match agora_platform::service_status(&spec.name) {
             // A unit of the same name made by hand: left as it is, and this install did not do what was asked.
@@ -254,13 +255,9 @@ pub(crate) fn install(say: &Say, h: &Path, m: &Machine) -> ExitCode {
                 }
                 continue;
             }
-            // Agora's own but turned off: registered again below, which turns it on (and says so), never "already starts".
-            Ok(ServiceState::Installed { enabled: false }) => {
-                say.out(
-                    key!("service-was-off"),
-                    &[("role", label.clone()), ("name", spec.name.clone().into())],
-                );
-            }
+            // Agora's own but turned off: registered again below, which turns it on (and says so once it did), never "already
+            // starts". One the system refuses to turn on (switched off in macOS's Login Items) gets only that error.
+            Ok(ServiceState::Installed { enabled: false }) => was_off = true,
             Ok(ServiceState::NotInstalled) => {}
             Err(e) => {
                 failed(say, key!("service-status-failed"), &spec.name, &e);
@@ -295,6 +292,12 @@ pub(crate) fn install(say: &Say, h: &Path, m: &Machine) -> ExitCode {
             failed(say, key!("service-install-failed"), &spec.name, &e);
             code = ExitCode::from(1);
             continue;
+        }
+        if was_off {
+            say.out(
+                key!("service-was-off"),
+                &[("role", label.clone()), ("name", spec.name.clone().into())],
+            );
         }
         registered = true;
         // Registered. Started now only when nothing holds the role already (a supervisor started now would only refuse the lock).

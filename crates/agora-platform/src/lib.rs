@@ -1515,13 +1515,18 @@ pub const SERVICES_SUPPORTED: bool = cfg!(any(windows, target_os = "linux", targ
 pub const SERVICES_NEED_LINGER_FOR_BOOT: bool = cfg!(target_os = "linux");
 
 /// Whether this machine can register a login service now: [`SERVICES_SUPPORTED`], and on Linux a `systemctl` (systemd's per-user
-/// services) found on `PATH`. Asked at run time, not when Agora was built: one Linux binary runs with and without systemd.
+/// services) found on `PATH`, on macOS a login session (`launchctl print gui/<uid>`; none over SSH while nobody is logged in at the
+/// screen). Asked at run time, not when Agora was built: one Linux binary runs with and without systemd.
 pub fn services_available() -> bool {
     #[cfg(target_os = "linux")]
     {
         linux::services_available()
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        macservice::available()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         SERVICES_SUPPORTED
     }

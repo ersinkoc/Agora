@@ -15,8 +15,9 @@
 //!   it failed (a non-zero exit, or killed by any signal: `kill -9` and the out-of-memory killer too). Under a service the supervisor
 //!   exits 0 for every end it decides itself (a give-up, a refusal, a clean stop), so those are not restarted. launchd waits its
 //!   default 10 s (`ThrottleInterval`) between starts.
-//! - `AbandonProcessGroup` stays false (launchd's default): when the job is unloaded, what it started is ended with it, so nothing
-//!   an agent left behind outlives the service.
+//! - `AbandonProcessGroup` stays false (launchd's default): when the job is unloaded, its process group is ended with it. The node's
+//!   agents are not in it (each runs in its own terminal session), so they outlive the service, as they outlive a node started by
+//!   `agora` (measured: a child in its own session kept running after `bootout`).
 //! - `remove` unloads it (`launchctl bootout`) and deletes the file, renamed aside first and checked there, so a file put in its place
 //!   meanwhile is never deleted. The caller stops the role through its lock first.
 //! - Refused as root ([`crate::ServiceProblem::Root`]): `sudo` would write root's job, or root's file into the user's folder.
@@ -342,6 +343,13 @@ pub(crate) fn install(spec: &ServiceSpec) -> io::Result<()> {
     if let Some(theirs) = loaded_elsewhere(&spec.name, &path)? {
         return Err(not_ours(theirs));
     }
+    // Switched off in System Settings: only the user can turn it on there, so nothing is written or turned on, and they are told where.
+    if off_in_settings(&path) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            ServiceProblem::TurnedOffInSettings,
+        ));
+    }
     // What was there before, put back when a later step fails: nothing is left half-registered.
     let before = match at_place(&path)? {
         AtPlace::InTheWay => return Err(in_the_way(path)),
@@ -359,16 +367,7 @@ pub(crate) fn install(spec: &ServiceSpec) -> io::Result<()> {
         crate::write_private(&path, body.as_bytes())?;
     }
     // Turned off in System Settings: only the user can turn it on there, so nothing is registered and they are told where.
-    let turned_on = turn_on(&spec.name).and_then(|()| {
-        if off_in_settings(&path) {
-            Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                ServiceProblem::TurnedOffInSettings,
-            ))
-        } else {
-            Ok(())
-        }
-    });
+    let turned_on = turn_on(&spec.name);
     if turned_on.is_err() {
         match before {
             Some(None) => {
@@ -447,12 +446,13 @@ pub(crate) fn remove(name: &str) -> io::Result<bool> {
 
 /// Deletes the job file at `path` only if what is there when it is taken away is still Agora's: it is first renamed aside (one step,
 /// which takes whatever is at the name, never a link's target) and checked there; anything else put in its place meanwhile is
-/// renamed back and named.
+/// renamed back and named. Both renames refuse to replace an existing name (`RENAME_EXCL`), so neither a file that appeared at the
+/// aside name nor one that appeared at the job's place meanwhile is overwritten.
 fn delete_ours(path: &Path) -> io::Result<()> {
     let mut aside = path.as_os_str().to_owned();
     aside.push(format!(".remove-{}", std::process::id()));
     let aside = PathBuf::from(aside);
-    match fs::rename(path, &aside) {
+    match rename_new(path, &aside) {
         Ok(()) => {}
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(e),
@@ -460,14 +460,42 @@ fn delete_ours(path: &Path) -> io::Result<()> {
     match at_place(&aside) {
         Ok(AtPlace::Ours(_)) => fs::remove_file(&aside),
         other => {
-            let _ = fs::rename(&aside, path);
+            // Put back; when something new is at the job's place now, the moved file stays at the aside name and is named.
+            let back = rename_new(&aside, path);
+            let named = if back.is_ok() {
+                path.to_path_buf()
+            } else {
+                aside
+            };
             match other {
-                Ok(AtPlace::Theirs) => Err(not_ours(path.to_path_buf())),
-                Ok(_) => Err(in_the_way(path.to_path_buf())),
+                Ok(AtPlace::Theirs) => Err(not_ours(named)),
+                Ok(_) => Err(in_the_way(named)),
                 Err(e) => Err(e),
             }
         }
     }
+}
+
+/// `rename(from, to)` that fails with `AlreadyExists` instead of replacing an existing `to` (`renamex_np` with `RENAME_EXCL`).
+fn rename_new(from: &Path, to: &Path) -> io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = |p: &Path| {
+        std::ffi::CString::new(p.as_os_str().as_bytes())
+            .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))
+    };
+    let (f, t) = (c(from)?, c(to)?);
+    // SAFETY: both are NUL-terminated paths that live for the call.
+    if unsafe { libc::renamex_np(f.as_ptr(), t.as_ptr(), libc::RENAME_EXCL) } == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// See [`crate::services_available`]: a login session to load a LaunchAgent into (none over SSH while nobody is logged in at the
+/// screen), so the first run does not offer what `install` would then refuse.
+pub(crate) fn available() -> bool {
+    session().is_ok()
 }
 
 /// Whether `name` is turned off for this user with `launchctl disable` (not System Settings: [`off_in_settings`]), from
@@ -789,6 +817,15 @@ mod tests {
         assert!(delete_ours(&f).is_err());
         assert!(fs::symlink_metadata(&f).unwrap().file_type().is_symlink() && real.exists());
         assert_eq!(fs::read_dir(&d).unwrap().count(), 2, "nothing left aside");
+        // A file already at the aside name is never overwritten: the removal stops and the job file stays.
+        fs::remove_file(&f).unwrap();
+        fs::write(&f, plist(&spec()).unwrap()).unwrap();
+        let mut aside = f.as_os_str().to_owned();
+        aside.push(format!(".remove-{}", std::process::id()));
+        fs::write(&aside, "someone else's").unwrap();
+        assert!(delete_ours(&f).is_err());
+        assert!(f.exists());
+        assert_eq!(fs::read_to_string(&aside).unwrap(), "someone else's");
         let _ = fs::remove_dir_all(&d);
     }
 
