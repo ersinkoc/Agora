@@ -23,6 +23,7 @@ try {
   writeFileSync(join(proj, 'src', 'keep.txt'), 'unchanged\n');
   writeFileSync(join(proj, 'big.txt'), lines(20_000));
   writeFileSync(join(proj, 'README.md'), '# project\n');
+  writeFileSync(join(proj, 'src', 'app.ts'), 'export const greeting = "hello"; // said once\n');
   git('add', '.');
   git('commit', '-q', '-m', 'files');
   writeFileSync(join(proj, 'src', 'deep', 'core.txt'), lines(30, { 5: 'line five', 20: 'needle here' }));
@@ -63,6 +64,12 @@ try {
   check(await code.locator('mark').count() === 1, 'search finds and marks the match');
   await page.keyboard.press('Escape');
 
+  // Syntax colours: a TypeScript file gets the highlighter's classes (loaded on demand, after the plain text is shown).
+  await item('app.ts').click();
+  const ts = page.getByRole('region', { name: 'src/app.ts' });
+  check(await ts.locator('.hljs-string').first().waitFor().then(() => true, () => false) && await ts.locator('.hljs-comment').count() === 1, 'a TypeScript file is shown with syntax colours');
+  check((await ts.innerText()).includes('export const greeting = "hello"; // said once'), 'highlighting leaves the text as it is');
+  await page.getByRole('button', { name: 'Close app.ts' }).click();
   await item('keep.txt').click();
   const tabs = page.getByRole('tablist', { name: 'Open files' });
   check(await tabs.getByRole('tab').count() === 2, 'each opened file has a tab');

@@ -74,7 +74,8 @@ permanent section. Labels below use internal terms; the UI uses the vocabulary i
     count of changed files moves. The text is drawn a screenful at a time.
   - Ctrl F finds in the file. `/` filters the tree. The whole file can be copied.
   - In a narrow pane the tree sits above the file.
-  - Not built yet: lease locks, syntax highlighting, editing.
+  - Syntax colours (highlight.js, loaded on demand) for files up to 256 KiB in about 25 languages, chosen by file name.
+  - Not built yet: lease locks, editing.
 - **Changes**: workspace diff summary (+/−); shared folders appear once and have a shared-folder label. No per-agent attribution is implied. Opens the review screen (`review.md`).
 - **Mesh**: project channels with unread counts; task board progress (`task-board.md`).
 - **Usage**: tokens and estimated cost for the selected agent and project (`../design/usage-and-cost.md`).
