@@ -27,10 +27,13 @@ window again.
 - If the hub or the node crashes, it is started again 30 seconds later, at most 5 times in 10 minutes; one that stops right
   after starting (its port is taken, its settings are wrong) is not retried, and its log says why. Each is run by a small
   `agora supervise` process that `agora` starts; stopping or killing it stops what it runs too, so nothing is left behind.
-- The first run ends with "Start Agora when you log in? [Y/n]" where that is available (Windows, and Linux with systemd); Enter says yes.
+- The first run ends with "Start Agora when you log in? [Y/n]" where that is available (Windows, macOS, and Linux with systemd); Enter says yes.
 - `agora service install`: start this machine's Agora when you log in (for you only, no administrator rights; it says what it
   registers first). `agora service status` says whether it is set up and running; `agora service remove` stops it and removes it.
-  Windows registers a logon task per role (`agora-hub`, `agora-node`). Linux writes a systemd user unit per role into
+  Windows registers a logon task per role (`agora-hub`, `agora-node`). It runs with the environment Windows gives you at login (your
+  user and system `PATH`), not the `PATH` of the window that ran `install`: a program put on `PATH` only in that window is not found
+  by the agents it starts. `install` on a task turned off in Task Scheduler turns it on again and says so. A task of the same name
+  that you made yourself (or another tool did) is left exactly as it is: `agora service` neither replaces, starts nor removes it. Linux writes a systemd user unit per role into
   `~/.config/systemd/user/` (or `$XDG_CONFIG_HOME/systemd/user/`), owner-only, and runs `systemctl --user daemon-reload` and
   `enable`; it never uses root. A user unit runs while you are logged in: to start it at boot without logging in, run
   `loginctl enable-linger` yourself (Agora never does). It needs a session with your user's systemd running (a desktop login, or an SSH
@@ -40,7 +43,15 @@ window again.
   `remove` names the drop-ins it leaves. `install` on a unit turned off with `systemctl --user disable` turns it on again and says so. The agents the node starts run inside the unit and end with it
   (`systemctl --user stop`, or a logout without lingering), unlike a node started by `agora`, whose agents outlive the window. A
   unit of the same name that you wrote yourself is left exactly
-  as it is: `agora service` neither replaces, stops nor removes it. Without `systemctl` it is not available. macOS (LaunchAgent) comes next.
+  as it is: `agora service` neither replaces, stops nor removes it. Without `systemctl` it is not available.
+  macOS writes a LaunchAgent per role into `~/Library/LaunchAgents/` (owner-only) and loads it with `launchctl`; it never uses root
+  (it refuses `sudo`) and needs your login session (over SSH, be logged in at the screen too). The job gets only the full-path
+  entries of your shell's `PATH`. macOS may say "Background Items Added" and lists it under System Settings > General > Login Items &
+  Extensions ("Allow in the Background"). If you switch it off there, `status` says it is off and `install` says only you can turn it
+  on again there; one turned off with `launchctl disable` is turned on again by `install`. A LaunchAgent of the same name that you
+  wrote yourself is left exactly as it is. Removing it ends the supervisor and the node, but not your agents: each runs in its own
+  terminal session, which launchd does not end (as when the node is started by `agora`). On every system a service already set up is
+  not rewritten by `install` (after moving Agora, or for another `PATH`): run `agora service remove`, then `install`.
 - Logs: `~/.agora/logs/hub.log` and `node.log` (renamed to `.1` when over 5 MiB at a start).
 
 Everything works as before by hand too (`agora hub run`, `agora node enroll`, `agora node run`, `agora tui`); `AGORA_HOME` moves

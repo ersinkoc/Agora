@@ -26,6 +26,8 @@ use winproc as procinfo;
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_os = "macos")]
+mod macservice;
 #[cfg(target_os = "linux")]
 use linux as procinfo;
 #[cfg(target_os = "macos")]
@@ -840,6 +842,9 @@ pub enum SandboxRefusal {
     ProtectedPathUnresolved,
     /// The agent's worktree (`Sandbox::reopen`) is no longer a plain folder: a link, or something else, is in its place (macOS).
     WorktreeNotFolder,
+    /// A file or folder the agent may write or read is reached through a symbolic link inside a folder it may write, which it could
+    /// have made itself to be given where the link points at its next start (#545, macOS).
+    WritableIsLink,
 }
 
 impl SandboxRefusal {
@@ -849,6 +854,7 @@ impl SandboxRefusal {
             Self::LabelFailed => "label_failed",
             Self::ProtectedPathUnresolved => "protected_path_unresolved",
             Self::WorktreeNotFolder => "worktree_not_folder",
+            Self::WritableIsLink => "writable_is_link",
         }
     }
 }
@@ -1500,23 +1506,27 @@ pub fn ensure_private_dir(dir: &std::path::Path) -> io::Result<()> {
     }
 }
 
-/// True where this build has a way to register a program to start at the user's login (ADR-0062 item 6): Windows (a logon task) and
-/// Linux (a systemd user unit). Whether this machine can use it is [`services_available`], asked at run time. The LaunchAgent
-/// (macOS) half comes next, behind the same functions.
-pub const SERVICES_SUPPORTED: bool = cfg!(any(windows, target_os = "linux"));
+/// True where this build has a way to register a program to start at the user's login (ADR-0062 item 6): Windows (a logon task),
+/// Linux (a systemd user unit) and macOS (a LaunchAgent). Whether this machine can use it is [`services_available`], asked at run time.
+pub const SERVICES_SUPPORTED: bool = cfg!(any(windows, target_os = "linux", target_os = "macos"));
 
 /// True where a login service starts only while the user is logged in unless the system is told otherwise, which Agora never does
 /// itself (Linux: a systemd user manager runs from boot only with `loginctl enable-linger`). The caller says so after installing.
 pub const SERVICES_NEED_LINGER_FOR_BOOT: bool = cfg!(target_os = "linux");
 
 /// Whether this machine can register a login service now: [`SERVICES_SUPPORTED`], and on Linux a `systemctl` (systemd's per-user
-/// services) found on `PATH`. Asked at run time, not when Agora was built: one Linux binary runs with and without systemd.
+/// services) found on `PATH`, on macOS a login session (`launchctl print gui/<uid>`; none over SSH while nobody is logged in at the
+/// screen). Asked at run time, not when Agora was built: one Linux binary runs with and without systemd.
 pub fn services_available() -> bool {
     #[cfg(target_os = "linux")]
     {
         linux::services_available()
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        macservice::available()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         SERVICES_SUPPORTED
     }
@@ -1546,7 +1556,11 @@ pub fn service_refusal(spec: &ServiceSpec) -> Option<(std::ffi::OsString, Servic
     {
         linux::service_refusal(spec)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        macservice::refusal(spec)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         // A Windows task: `%` expands, and every value must be Unicode.
         std::iter::once(spec.program.as_os_str())
@@ -1580,6 +1594,9 @@ pub enum ServiceProblem {
     /// The service manager would also read these files (drop-ins, or another file of the same name), which can change what the service
     /// runs; nothing was registered.
     Overridden(Vec<PathBuf>),
+    /// Turned off by the user in the system's own settings (macOS: System Settings > General > Login Items & Extensions, "Allow in
+    /// the Background"), which Agora cannot turn on: only the user can, there. Nothing was registered.
+    TurnedOffInSettings,
 }
 
 impl std::fmt::Display for ServiceProblem {
@@ -1598,6 +1615,7 @@ impl std::fmt::Display for ServiceProblem {
             }
             ServiceProblem::NotLoaded(p) => write!(f, "{} was not loaded", p.display()),
             ServiceProblem::Overridden(ps) => write!(f, "also read: {ps:?}"),
+            ServiceProblem::TurnedOffInSettings => f.write_str("turned off in the system settings"),
         }
     }
 }
@@ -1605,13 +1623,17 @@ impl std::fmt::Display for ServiceProblem {
 impl std::error::Error for ServiceProblem {}
 
 /// Whether `agora service` may act in this process at all; an error with a [`ServiceProblem`] when not (Linux: run as root, or no
-/// folder for the user's units). The caller asks before writing anything.
+/// folder for the user's units; macOS: run as root). The caller asks before writing anything.
 pub fn service_precheck() -> io::Result<()> {
     #[cfg(target_os = "linux")]
     {
         linux::service_precheck()
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        macservice::precheck()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         Ok(())
     }
@@ -1619,7 +1641,8 @@ pub fn service_precheck() -> io::Result<()> {
 
 /// The files the service manager reads for the service `name` besides Agora's own (Linux: its drop-ins, and the unit file it loaded
 /// when that is not Agora's), which can change what it runs. `status` and a repeated `install` name them; [`service_remove`] does not
-/// delete them, and the caller names those still there afterwards. Empty elsewhere.
+/// delete them, and the caller names those still there afterwards. Empty elsewhere (launchd reads one file per job: a job of the
+/// same label loaded from another file is [`service_foreign`]).
 pub fn service_drop_ins(name: &str) -> io::Result<Vec<PathBuf>> {
     #[cfg(target_os = "linux")]
     {
@@ -1634,17 +1657,49 @@ pub fn service_drop_ins(name: &str) -> io::Result<Vec<PathBuf>> {
 
 /// `Some(file)` when the service `name` is registered but was not written by Agora (Linux: a user unit of the same name made by hand
 /// or by another tool): the caller leaves it alone, neither stopping, replacing nor removing it. `None` when it is Agora's own or not
-/// registered (Windows: always `None`).
+/// registered (Windows: a task of the name without Agora's marker, named by its place in Task Scheduler, `\<name>`; macOS: a file at
+/// the LaunchAgent's place without Agora's marker, or the job loaded from another file).
 pub fn service_foreign(name: &str) -> io::Result<Option<PathBuf>> {
     #[cfg(target_os = "linux")]
     {
         linux::service_foreign(name)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        macservice::foreign(name)
+    }
+    #[cfg(windows)]
+    {
+        winservice::foreign(name)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
         let _ = name;
         Ok(None)
     }
+}
+
+/// The `PATH` a login service gets: the spec's, keeping the order but only full paths an entry can carry (an empty or relative entry
+/// would mean "the folder the service manager runs it from", which is not the installing shell's; a control character or a Unicode
+/// noncharacter cannot go into a unit or a property list). No other variable of the installing shell goes into the entry.
+/// Shared by the systemd unit and the LaunchAgent (Windows applies no variables).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn service_path_variable(env: &[(String, std::ffi::OsString)]) -> Option<String> {
+    let (_, value) = env.iter().find(|(k, _)| k == "PATH")?;
+    let kept: Vec<String> = std::env::split_paths(value)
+        .filter(|p| p.is_absolute())
+        .filter_map(|p| p.to_str().map(str::to_owned))
+        .filter(|p| !p.chars().any(|c| c.is_control() || is_noncharacter(c)))
+        .collect();
+    (!kept.is_empty()).then(|| kept.join(":"))
+}
+
+/// A Unicode noncharacter (U+FDD0..U+FDEF, and the last two code points of every plane, U+FFFE and U+FFFF among them): XML 1.0
+/// cannot carry U+FFFE and U+FFFF, and none of them is ever meant in a path.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn is_noncharacter(c: char) -> bool {
+    let n = u32::from(c);
+    (0xFDD0..=0xFDEF).contains(&n) || n & 0xFFFE == 0xFFFE
 }
 
 /// The [`ServiceProblem`] inside an error a `service_*` function returned, if it is one.
@@ -1687,7 +1742,8 @@ pub enum ServiceState {
 /// Registers `spec` to start at this user's login (it does not start it: [`service_start`]). `Unsupported` where
 /// [`SERVICES_SUPPORTED`] is false; `InvalidInput` for a path or argument the system would change on the way or cannot carry (see
 /// [`service_refusal`]). Linux: an owner-only systemd user unit, then `systemctl --user daemon-reload` and `enable`; a unit that is
-/// already there with the same text is not written again.
+/// already there with the same text is not written again. macOS: an owner-only LaunchAgent in `~/Library/LaunchAgents`, turned on
+/// again (`launchctl enable`) when it was turned off.
 pub fn service_install(spec: &ServiceSpec) -> io::Result<()> {
     #[cfg(windows)]
     {
@@ -1697,7 +1753,11 @@ pub fn service_install(spec: &ServiceSpec) -> io::Result<()> {
     {
         linux::service_install(spec)
     }
-    #[cfg(not(any(windows, target_os = "linux")))]
+    #[cfg(target_os = "macos")]
+    {
+        macservice::install(spec)
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {
         let _ = spec;
         Err(io::Error::from(io::ErrorKind::Unsupported))
@@ -1714,7 +1774,11 @@ pub fn service_start(name: &str) -> io::Result<()> {
     {
         linux::service_start(name)
     }
-    #[cfg(not(any(windows, target_os = "linux")))]
+    #[cfg(target_os = "macos")]
+    {
+        macservice::start(name)
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {
         let _ = name;
         Err(io::Error::from(io::ErrorKind::Unsupported))
@@ -1732,7 +1796,11 @@ pub fn service_remove(name: &str) -> io::Result<bool> {
     {
         linux::service_remove(name)
     }
-    #[cfg(not(any(windows, target_os = "linux")))]
+    #[cfg(target_os = "macos")]
+    {
+        macservice::remove(name)
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {
         let _ = name;
         Err(io::Error::from(io::ErrorKind::Unsupported))
@@ -1750,7 +1818,11 @@ pub fn service_status(name: &str) -> io::Result<ServiceState> {
     {
         linux::service_status(name)
     }
-    #[cfg(not(any(windows, target_os = "linux")))]
+    #[cfg(target_os = "macos")]
+    {
+        macservice::status(name)
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {
         let _ = name;
         Err(io::Error::from(io::ErrorKind::Unsupported))
