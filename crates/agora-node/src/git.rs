@@ -1287,12 +1287,17 @@ mod tests {
             (4, 2, 1)
         );
         assert_eq!(web.head_commit, r.git(&["rev-parse", "HEAD"]).trim());
-        // The diff of the folder lists the same files the count describes (an untracked file is named from the folder).
+        // The diff of the folder lists the same files the count describes, each named from the folder.
         let d = diff(&r.dir.join("web"), None).expect("diff");
-        for inside in ["web/w.txt", "new file.txt", "web/in b/in.txt", "web/m.txt"] {
+        for inside in [
+            "diff --git a/w.txt b/w.txt\n",
+            "diff --git a/new file.txt b/new file.txt\n",
+            "diff --git a/in b/in.txt b/in b/in.txt\n",
+            "diff --git a/m.txt b/m.txt\n",
+        ] {
             assert!(d.contains(inside), "{inside} missing from {d}");
         }
-        for outside in ["root.txt", "gone.txt", "OUTSIDE", "moved.txt"] {
+        for outside in ["web/", "root.txt", "gone.txt", "OUTSIDE", "moved.txt"] {
             assert!(!d.contains(outside), "{outside} in {d}");
         }
 
