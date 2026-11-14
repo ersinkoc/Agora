@@ -22,6 +22,9 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 ### Reviewing changes and files
 - Changes larger than 512 KiB say how many files were read and at least how many are not listed, in the review screen and in the
   file browser, so the "files changed" count never silently disagrees with the list.
+- For an agent working in a folder inside a repository, every changed file in the review is named from that folder, so opening a
+  changed file, its own diff or its unchanged lines works. Before, files git already tracked were named from the repository's
+  top, and showing one of them alone found nothing.
 - For an agent working in a folder inside a repository, the "files changed" count covers only that folder, like its list of
   changes. Before, it also counted files changed elsewhere in the repository.
 - A very long change shown whole ("Show all") and switched to side by side no longer holds the page for seconds: only the rows in

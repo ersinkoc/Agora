@@ -254,7 +254,10 @@ Implemented by the node today: `project.list`, `agent.*`, `terminal.*`, `approva
 `chat.subscribe` (ADR-0038: a conversation stream, below), `git.status`, `git.log` (ADR-0037: newest first, default 30, at most 200), `git.diff`, `files.list` and `files.read`. The git and files commands answer only for the workspace of one of the node's own agents (`worktree_id` is the id
 the node reported in `WorktreeCreated`); a path that is absolute, climbs with `..` or starts with `:` or `-` is refused as
 `protocol.invalid_message`. `git.diff` is the unified diff against HEAD plus the new files git does not track yet (shown as
-all-added, at most 50 files of at most 64 KiB), and an answer is cut at 512 KiB. `files.list` hides `.git`; `files.read` refuses
+all-added, at most 50 files of at most 64 KiB), and an answer is cut at 512 KiB. It covers the workspace folder only and names
+every file from that folder, so each name is a path `git.diff` and `files.read` take: for a workspace that is the folder `web/`
+of a repository, `web/a.txt` is `a.txt`; a rename across the folder's edge shows as the file added or deleted inside it. At a
+repository's root the names are the repository's own. `files.list` hides `.git`; `files.read` refuses
 files above 512 KiB (`files.too_large`) and paths that leave the workspace, symlinks included (`files.outside_root`), checked again on the opened file so a link swapped in after the check is still refused.
 
 ### Selected directories (ADR-0052)
