@@ -80,8 +80,11 @@ async fn tls(hub: &Hub) -> Result<TlsStream<TcpStream>, ClientError> {
     .with_no_client_auth();
     let connector = TlsConnector::from(Arc::new(cfg));
     for name in server_names(&hub.addr) {
-        let Ok(Ok(tcp)) =
-            tokio::time::timeout(Duration::from_secs(10), TcpStream::connect(&hub.addr)).await
+        let Ok(Ok(tcp)) = tokio::time::timeout(
+            Duration::from_secs(10),
+            agora_protocol::dial::connect(&hub.addr),
+        )
+        .await
         else {
             return Err(ClientError::Unreachable);
         };

@@ -51,6 +51,7 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ### Machines
 - A machine that goes quiet without its connection ending (a laptop that slept, a stopped process, a Wi-Fi switch, a NAT that forgot the connection) is shown offline within about 25 seconds, with when it was last seen, in the machine list, its tooltip, the Machines page and the terminal client. When it is back it is online again by itself, and its agents are untouched: offline is not finished (ADR-0070). Nodes ping the hub every 10 s, drop a hub that stopped answering after 25 s, give up a connection attempt that hangs after 25 s and reconnect at once after the machine wakes from sleep. The window pings the hub every 15 s and reconnects when nothing comes back within 10 s. Older nodes and windows keep working with a new hub, and a new window with an older hub shows machines as before.
+- Connecting to a hub at `localhost` no longer waits about two seconds on Windows: nodes, the terminal client, the desktop app and the hub's notifications try `127.0.0.1` first for a loopback name and `::1` only after it.
 ### Getting started
 - Plain `agora` now opens the browser window by default on a desktop. The terminal client is the default only when there is no screen (an SSH session, or Linux with no display); `--ui tui` and `--save` still choose it.
 

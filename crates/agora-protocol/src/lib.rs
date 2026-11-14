@@ -4,6 +4,7 @@
 pub const FILE_DESCRIPTOR_SET: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/agora_descriptor.bin"));
 
+pub mod dial;
 pub mod error;
 pub mod frame;
 pub mod handshake;
