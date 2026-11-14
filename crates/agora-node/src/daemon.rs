@@ -1011,9 +1011,15 @@ pub fn node_private_paths(cfg: &NodeConfig) -> Vec<PathBuf> {
         abs(&cfg.socket),
         abs(&cfg.manifests_dir),
     );
-    let home = data
-        .parent()
-        .filter(|h| Some(*h) == worktrees.parent() || Some(*h) == socket.parent());
+    // Only a folder that is the node's own: never the user's home or a folder above it (`--data ~/x --socket ~/y` would close all
+    // of `~` and drop every owner write entry), never a root, never one holding a project the node serves.
+    let user_home = crate::usage_files::home_dir().map(|h| abs(&h));
+    let home = data.parent().filter(|h| {
+        (Some(*h) == worktrees.parent() || Some(*h) == socket.parent())
+            && h.parent().is_some()
+            && !user_home.as_ref().is_some_and(|u| u.starts_with(h))
+            && !cfg.projects.iter().any(|p| abs(p).starts_with(h))
+    });
     if let Some(h) = home {
         let mut out = vec![h.to_path_buf()];
         for p in [
@@ -2205,6 +2211,19 @@ mod announce_tests {
         // Worktrees elsewhere, data beside the control socket (second review of #477, 3): still the whole home.
         let p = node_private_paths(&cfg("/h/data", "/w"));
         assert_eq!(p, [a("/h")]);
+        // The user's home is never taken for the node's (third review of #477): `--data ~/x --socket ~/y`.
+        if let Some(u) = crate::usage_files::home_dir() {
+            let mut c = cfg("/x", "/w");
+            c.data_dir = u.join("x");
+            c.socket = u.join("y");
+            let p = node_private_paths(&c);
+            assert!(!p.contains(&u), "{p:?}");
+            assert!(p.contains(&u.join("x")), "{p:?}");
+        }
+        // Nor one that holds a project the node serves.
+        let mut c = cfg("/h/data", "/h/worktrees");
+        c.projects = vec!["/h/repo".into()];
+        assert!(!node_private_paths(&c).contains(&a("/h")));
         // A relative home is made absolute (second review of #477, 4), not dropped.
         let rel = node_private_paths(&cfg("h/data", "h/worktrees"));
         assert_eq!(

@@ -23,6 +23,8 @@ agent-publisher_revoked = The adapter for { $kind } comes from { $publisher }, w
 agent-sandbox_unavailable = This machine is set to confine agents ({ $level }), but { $kind } cannot be confined here, so it was not started. { $reason ->
         [broad_write_grant] A folder it would use lets every user write to it.
         [label_failed] A folder it would use cannot be marked for confined agents.
+        [protected_path_unresolved] This machine's own Agora folder cannot be found, so it could not be kept closed to the agent.
+        [worktree_not_folder] Its folder is no longer a plain folder (something, such as a link, was put in its place).
        *[other] {""}
     }
 agent-not_authenticated = { $kind } is not signed in on machine { $node_id }.

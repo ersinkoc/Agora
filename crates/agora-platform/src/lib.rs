@@ -801,6 +801,10 @@ pub enum SandboxRefusal {
     BroadWriteGrant,
     /// A folder the agent would write could not be labelled for confined agents.
     LabelFailed,
+    /// One of the node's own paths it must keep closed (`Sandbox::deny`) is relative or cannot be resolved (macOS).
+    ProtectedPathUnresolved,
+    /// The agent's worktree (`Sandbox::reopen`) is no longer a plain folder: a link, or something else, is in its place (macOS).
+    WorktreeNotFolder,
 }
 
 impl SandboxRefusal {
@@ -808,6 +812,8 @@ impl SandboxRefusal {
         match self {
             Self::BroadWriteGrant => "broad_write_grant",
             Self::LabelFailed => "label_failed",
+            Self::ProtectedPathUnresolved => "protected_path_unresolved",
+            Self::WorktreeNotFolder => "worktree_not_folder",
         }
     }
 }

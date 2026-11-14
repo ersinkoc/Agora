@@ -22,6 +22,8 @@ agent-publisher_revoked = { $kind } bağdaştırıcısı, kayıt defterinin ipta
 agent-sandbox_unavailable = Bu makine ajanları kısıtlayacak şekilde ayarlı ({ $level }), ancak { $kind } burada kısıtlanamıyor; bu yüzden başlatılmadı. { $reason ->
         [broad_write_grant] Kullanacağı bir klasöre her kullanıcı yazabiliyor.
         [label_failed] Kullanacağı bir klasör kısıtlı ajanlar için işaretlenemiyor.
+        [protected_path_unresolved] Bu makinenin kendi Agora klasörü bulunamıyor; ajana kapalı tutulamazdı.
+        [worktree_not_folder] Klasörü artık düz bir klasör değil (yerine bağlantı gibi bir şey konmuş).
        *[other] {""}
     }
 agent-not_authenticated = { $kind }, { $node_id } makinesinde giriş yapmamış.

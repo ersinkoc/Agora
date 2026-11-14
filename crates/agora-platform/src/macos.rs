@@ -144,19 +144,26 @@ fn quote(p: &std::path::Path) -> String {
 /// `.claude.json.tmp.123`): programs save a file by writing a sibling and renaming it, or lock it with one, and without them the
 /// save fails while the file itself is writable. Nothing else in that folder opens up.
 ///
-/// Fails when a `deny` entry is relative or cannot be resolved: a closed folder that silently fell out of the profile would leave the
-/// node's home open.
+/// Refuses ([`crate::SandboxRefusal`]) when a `deny` entry is relative or cannot be resolved (a closed folder that silently fell out
+/// of the profile would leave the node's home open), and when a `reopen` entry is not a plain folder.
 pub(crate) fn profile(sb: &crate::Sandbox) -> io::Result<String> {
+    let refused = |why| io::Error::new(io::ErrorKind::PermissionDenied, why);
     let mut denied: Vec<std::path::PathBuf> = Vec::new();
     for p in &sb.deny {
         match real_or_future(p).filter(|_| p.is_absolute()) {
             Some(r) => denied.push(r),
-            None => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "a protected path cannot be resolved",
-                ))
-            }
+            None => return Err(refused(crate::SandboxRefusal::ProtectedPathUnresolved)),
+        }
+    }
+    // The agent's worktree must still be the folder the node made: one it replaced with a link (into the node's home, or to any
+    // folder it wants written at its next start) refuses the start instead of starting it unable to use its folder, or able to
+    // write where the link points.
+    for p in &sb.reopen {
+        let plain = p.is_absolute()
+            && std::fs::symlink_metadata(p)
+                .is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink());
+        if !plain {
+            return Err(refused(crate::SandboxRefusal::WorktreeNotFolder));
         }
     }
     // A `read` or `write` entry that resolves below a closed folder (`~/.claude` made a link to the node's home) is left out: the
@@ -838,13 +845,16 @@ mod sandbox_tests {
     }
 
     #[test]
-    fn a_worktree_swapped_for_a_link_to_the_home_is_not_opened_at_the_next_start() {
-        // Second review of #477 (1): the agent removes its worktree and leaves a link to the node's home in its place; the node
-        // resumes it with the same worktree path. The home must stay closed.
+    fn a_worktree_swapped_for_a_link_refuses_the_next_start() {
+        // Second review of #477 (1), and the third's ask to refuse rather than start: the agent removes its worktree and leaves a
+        // link in its place (to the node's home, into it, or anywhere else it would like written); the node starts it again with the
+        // same worktree path.
         let home = attack_home("swap");
         let wt = home.join("worktrees/a");
+        let elsewhere =
+            std::path::PathBuf::from(format!("/tmp/agora-elsewhere-{}", std::process::id()));
+        std::fs::create_dir_all(&elsewhere).unwrap();
         std::fs::remove_dir_all(&wt).unwrap();
-        std::os::unix::fs::symlink(&home, &wt).unwrap();
         let sb = crate::Sandbox {
             read: vec!["/usr".into(), "/bin".into()],
             write: vec![wt.clone(), "/tmp".into(), "/dev".into()],
@@ -852,17 +862,29 @@ mod sandbox_tests {
             reopen: vec![wt.clone()],
             ..Default::default()
         };
-        let p = super::profile(&sb).unwrap();
-        assert!(
-            !p.contains("(allow file-read-data file-read-metadata file-read-xattr file-write*"),
-            "{p}"
-        );
-        let text = through(&sb, &home, &wt);
-        assert!(!text.contains("OPEN"), "{text}\n{p}");
-        // A link to a folder inside the home (its data) rather than the home itself.
+        for target in [home.clone(), home.join("data"), elsewhere.clone()] {
+            std::os::unix::fs::symlink(&target, &wt).unwrap();
+            let e = super::profile(&sb).unwrap_err();
+            assert_eq!(
+                crate::sandbox_refusal(&e),
+                Some(crate::SandboxRefusal::WorktreeNotFolder),
+                "{target:?}"
+            );
+            assert!(super::wrap(&sb, "/bin/sh".as_ref(), &[]).is_err());
+            std::fs::remove_file(&wt).unwrap();
+        }
+        // Gone, or a file: refused too.
+        assert!(super::profile(&sb).is_err());
+        std::fs::write(&wt, "x").unwrap();
+        assert!(super::profile(&sb).is_err());
         std::fs::remove_file(&wt).unwrap();
+        // And were a link only in the write list, it still opens nothing of the home (an entry resolving into it is dropped).
         std::os::unix::fs::symlink(home.join("data"), &wt).unwrap();
-        let p = super::profile(&sb).unwrap();
+        let only_written = crate::Sandbox {
+            reopen: vec![],
+            ..sb.clone()
+        };
+        let p = super::profile(&only_written).unwrap();
         let (w, h) = (wt.display(), home.display());
         let out = std::process::Command::new(super::SANDBOX_EXEC)
             .args([
@@ -884,6 +906,7 @@ mod sandbox_tests {
             "{text}\n{p}"
         );
         let _ = std::fs::remove_dir_all(home);
+        let _ = std::fs::remove_dir_all(elsewhere);
     }
 
     #[test]
@@ -902,8 +925,7 @@ mod sandbox_tests {
             read: vec!["/usr".into(), "/bin".into(), data.clone()],
             write: vec![home.join("worktrees/a"), claude.clone(), "/dev".into()],
             deny: vec![home.clone()],
-            // Even named to be opened again: it resolves to the home itself.
-            reopen: vec![home.join("worktrees/a"), claude.clone()],
+            reopen: vec![home.join("worktrees/a")],
             ..Default::default()
         };
         let p = super::profile(&sb).unwrap();
@@ -945,7 +967,12 @@ mod sandbox_tests {
                 deny: vec![deny.into()],
                 ..Default::default()
             };
-            assert!(super::profile(&sb).is_err(), "{deny:?}");
+            let e = super::profile(&sb).unwrap_err();
+            assert_eq!(
+                crate::sandbox_refusal(&e),
+                Some(crate::SandboxRefusal::ProtectedPathUnresolved),
+                "{deny:?}"
+            );
             assert!(
                 super::wrap(&sb, "/bin/sh".as_ref(), &[]).is_err(),
                 "{deny:?}"
