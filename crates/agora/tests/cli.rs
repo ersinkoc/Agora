@@ -252,6 +252,18 @@ fn errors_are_rendered_from_codes_and_exit_nonzero() {
 }
 
 #[test]
+fn the_version_is_printed_alone_for_scripts() {
+    let s = setup("version");
+    for flag in ["--version", "-V", "version"] {
+        let (code, out, err) = cli(&s, &[flag]);
+        assert_eq!(code, 0, "{flag}: {err}");
+        assert_eq!(out.trim(), env!("CARGO_PKG_VERSION"), "{flag}");
+    }
+    let (_, out, _) = cli(&s, &["--help"]);
+    assert!(out.contains("agora --version"), "{out}");
+}
+
+#[test]
 fn without_a_node_the_cli_says_so_and_bad_arguments_print_usage() {
     if !supported() {
         return;

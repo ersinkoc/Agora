@@ -236,6 +236,12 @@ fn main() -> ExitCode {
         say.out(key!("cli-usage"), &[]);
         return ExitCode::SUCCESS;
     }
+    // The version alone, as data (no sentence), so a script can compare it.
+    if matches!(args.as_slice(), [only] if matches!(only.as_str(), "--version" | "-V" | "version"))
+    {
+        println!("{}", env!("CARGO_PKG_VERSION"));
+        return ExitCode::SUCCESS;
+    }
     let words: Vec<&str> = args
         .iter()
         .map(String::as_str)

@@ -23,6 +23,7 @@ window again.
 
 - `agora status`: what runs (process, version, address, data folder, connected hub, agents running, log files).
 - `agora down`: stops the node, then the hub (agents end with the node, as when it is stopped any other way).
+- `agora --version` (or `-V`): the version alone, such as `0.3.10`, for a script to compare; nothing is started.
 - Logs: `~/.agora/logs/hub.log` and `node.log` (renamed to `.1` when over 5 MiB at a start).
 
 Everything works as before by hand too (`agora hub run`, `agora node enroll`, `agora node run`, `agora tui`); `AGORA_HOME` moves

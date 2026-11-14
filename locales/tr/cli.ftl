@@ -5,6 +5,7 @@ cli-usage =
       agora [--ui tui|web|none [--save]]
       agora web
       agora status
+      agora --version
       agora down
       agora node run [--socket YOL] [--manifests DİZİN] [--project YOL]... [--data DİZİN] [--worktrees DİZİN]
       agora agent start TÜR [--cwd YOL] [--worktree] [--project AD] [--name AD] [--accept-project-id-change] [--socket YOL]
