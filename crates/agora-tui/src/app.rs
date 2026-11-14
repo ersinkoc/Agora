@@ -761,8 +761,7 @@ impl App {
                 "  "
             };
             let width = usize::from(a.tree.width);
-            let label_w = 2 + row.label.chars().count();
-            let state_w = row.state.chars().count();
+            let (label, gap, state) = tree_row_fit(width, &row.label, &row.state, row.needs_you);
             let mut spans = vec![
                 Span::styled(
                     marker,
@@ -772,13 +771,12 @@ impl App {
                         Style::default()
                     },
                 ),
-                Span::raw(row.label.clone()),
+                Span::raw(label),
             ];
-            // The state goes to the right edge when the row has room for it; otherwise the label wins (the marker still says "needs you").
-            if label_w + 2 + state_w <= width {
-                spans.push(Span::raw(" ".repeat(width - label_w - state_w)));
+            if !state.is_empty() {
+                spans.push(Span::raw(" ".repeat(gap)));
                 spans.push(Span::styled(
-                    row.state.clone(),
+                    state,
                     if row.needs_you { attention } else { dim },
                 ));
             }
@@ -1025,6 +1023,31 @@ fn footer_fit(width: usize, notice: &str, keys: &str, mouse: &str) -> (String, O
 
 /// The columns the footer keeps for keys before it shows the mouse state too.
 const FOOTER_KEYS: usize = 40;
+
+/// A tree row's label, the gap and its state, fitted to `width` columns (the marker's two included), in display columns. The state
+/// stays at the right edge and the label is shortened for it; "needs you" is never dropped, any other state only when the label
+/// would keep fewer than 4 columns.
+fn tree_row_fit(
+    width: usize,
+    label: &str,
+    state: &str,
+    needs_you: bool,
+) -> (String, usize, String) {
+    let room = width.saturating_sub(2);
+    let state_w = text_width(state);
+    if state.is_empty() || (!needs_you && room < state_w + 1 + 4) {
+        return (clip_to(label, room), 0, String::new());
+    }
+    let state = clip_to(state, room);
+    let label_room = room.saturating_sub(text_width(&state) + 1);
+    let label = if label_room == 0 {
+        String::new()
+    } else {
+        clip_to(label, label_room)
+    };
+    let gap = room.saturating_sub(text_width(&label) + text_width(&state));
+    (label, gap, state)
+}
 
 /// `s` cut to `most` columns, with an ellipsis when it was longer.
 fn clip_to(s: &str, most: usize) -> String {
@@ -2235,6 +2258,34 @@ mod tests {
         assert_eq!(k(Key::Down), Some(b'j'));
         assert_eq!(k(Key::Backspace), Some(0x7f));
         assert_eq!(k(Key::Char('é')), None);
+    }
+
+    #[test]
+    fn a_row_keeps_needs_you_and_shortens_its_label_instead() {
+        // 28 columns: both fit with a one-column gap (the old rule wanted two and dropped the state).
+        let (label, gap, state) = tree_row_fit(28, "acp-fake · amber", "Needs you", true);
+        assert_eq!(
+            (label.as_str(), gap, state.as_str()),
+            ("acp-fake · amber", 1, "Needs you")
+        );
+        // 24 columns: the label gives way, the state stays.
+        let (label, gap, state) = tree_row_fit(24, "acp-fake · amber", "Needs you", true);
+        assert_eq!(state, "Needs you");
+        assert_eq!(text_width(&label) + gap + text_width(&state), 22);
+        assert!(label.ends_with('…'), "{label}");
+        // Room for both: the state at the right edge.
+        let (label, gap, state) = tree_row_fit(40, "shell · amber", "Idle", false);
+        assert_eq!((label.as_str(), state.as_str()), ("shell · amber", "Idle"));
+        assert_eq!(text_width(&label) + gap + text_width(&state), 38);
+        // Very narrow: an ordinary state goes, "needs you" stays.
+        assert_eq!(tree_row_fit(10, "shell · amber", "Idle", false).2, "");
+        assert_eq!(
+            tree_row_fit(10, "shell · amber", "Needs you", true).2,
+            "Needs y…"
+        );
+        // Display width, not characters: a wide name is cut by columns.
+        let (label, _, _) = tree_row_fit(12, "東京東京東京", "Idle", false);
+        assert!(text_width(&label) <= 5, "{label}");
     }
 
     #[test]
