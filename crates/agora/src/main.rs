@@ -27,6 +27,7 @@ const TERMINAL_STREAM: u32 = 3;
 mod adaptercmd;
 mod frontdoor;
 mod hubcli;
+mod servicecmd;
 mod supervise;
 mod trustcli;
 mod tuicmd;
@@ -146,6 +147,10 @@ pub(crate) struct Opts {
     include_others: bool,
     /// `agora supervise`: the front door that started it and holds the lock until it names the supervisor (`PID:START`).
     handoff: Option<String>,
+    /// `agora supervise`: the Agora folder, for a service manager that cannot set `AGORA_HOME` (a Windows task).
+    home: Option<PathBuf>,
+    /// `agora supervise`: write to the role's log file itself (a service manager redirects nothing).
+    log: bool,
     replace: bool,
     /// ADR-0073: `agora hub machines forget --old` and `--refuse-return`.
     old: bool,
@@ -204,6 +209,8 @@ fn parse(args: &[String]) -> Option<Opts> {
             "--fingerprint" => o.fingerprints.push(it.next()?.clone()),
             "--include-others" => o.include_others = true,
             "--handoff" => o.handoff = Some(it.next()?.clone()),
+            "--home" => o.home = Some(it.next()?.into()),
+            "--log" => o.log = true,
             "--replace" => o.replace = true,
             "--ui" => o.ui = Some(it.next()?.clone()),
             "--save" => o.save = true,
@@ -275,9 +282,18 @@ fn main() -> ExitCode {
         ["web"] => frontdoor::web(&say),
         ["status"] => frontdoor::status(&say),
         ["down"] => frontdoor::down(&say),
+        ["service", op @ ("install" | "remove" | "status")] => servicecmd::service(&say, op),
         ["node", "run"] => node_run(&say, &opts),
         // Started by the front door, not by people: not in the usage page.
-        ["supervise", role] => supervise::supervise(&say, role, opts.handoff.as_deref()),
+        ["supervise", role] => supervise::supervise(
+            &say,
+            role,
+            &supervise::Start {
+                handoff: opts.handoff.as_deref(),
+                home: opts.home.clone(),
+                log: opts.log,
+            },
+        ),
         ["agent", "start"] => agent_start(&say, &opts),
         ["project", "init"] => project_init(&say, &opts),
         ["agent", "stop"] => agent_stop(&say, &opts),

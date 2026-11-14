@@ -6,6 +6,7 @@ cli-usage =
       agora web
       agora status
       agora down
+      agora service install|remove|status
       agora node run [--socket YOL] [--manifests DİZİN] [--project YOL]... [--data DİZİN] [--worktrees DİZİN]
       agora agent start TÜR [--cwd YOL] [--worktree] [--project AD] [--name AD] [--accept-project-id-change] [--socket YOL]
       agora project init [--cwd YOL] [--socket YOL]
@@ -255,6 +256,20 @@ down-stopped = { $role } durduruldu (süreç { $pid }).
 down-stopped-supervised = { $role } ve gözeticisi durduruldu (süreç { $pid }).
 down-failed = { $role } durdurulamadı: { $reason }
 down-nothing = Durdurulacak bir şey yok: `agora` şu anda çalışan hiçbir şey başlatmamış.
+service-description = Oturum açtığınızda Agora { $role } sürecini başlatır (ve çalışır tutar).
+service-unsupported = Oturum açınca Agora'yı başlatma bu sistemde henüz yok. Oturum açtıktan sonra `agora` ile başlatın.
+service-registering = { $role } oturum açtığınızda başlasın diye "{ $name }" kaydediliyor. Çalıştırdığı komut: { $command }
+service-installed = { $role } artık oturum açtığınızda başlıyor ("{ $name }") ve şimdi de başlatıldı.
+service-install-failed = "{ $name }" kaydedilemedi: { $reason }
+service-removed = "{ $name }" kaldırıldı: { $role } artık oturum açtığınızda başlamıyor.
+service-none = { $role } oturum açınca başlayacak şekilde ayarlı değildi.
+service-remove-failed = "{ $name }" kaldırılamadı: { $reason }
+service-status-installed = { $role } oturum açtığınızda başlıyor ("{ $name }").
+service-status-disabled = { $role } oturum açınca başlayacak şekilde ayarlı ("{ $name }"), ama bu, sistem ayarlarında kapatılmış.
+service-status-not-installed = { $role } oturum açınca kendiliğinden başlamıyor (`agora service install` bunu ayarlar).
+service-status-failed = "{ $name }" okunamadı: { $reason }
+service-status-running = şu anda çalışıyor (süreç { $pid })
+service-status-stopped = şu anda çalışmıyor
 supervise-not-bound = { $role } başlatılmıyor: bu sistem onun gözeticisine bağlanmasına izin vermedi, bu yüzden `agora down` onu durduramazdı. Elle başlatın (`agora { $role } run`) ya da bunu bildirin.
 supervise-stop-request = Gözetici: durdurulması istendi; { $role } de onunla birlikte durduruldu.
 supervise-stopped = Gözetici: { $role } durdu (çıkış kodu 0); yeniden başlatılmıyor.

@@ -1,0 +1,253 @@
+//! Windows half of `agora service` (ADR-0062 item 6): a logon task for the current user, registered with `schtasks` from a task file,
+//! with no administrator rights. Measured on Windows 11 (M7):
+//! - `schtasks /create /xml` registers a logon task with `InteractiveToken` and `LeastPrivilege` without elevation;
+//! - a console program started by a logon task opens a visible window, so the action runs it under `conhost --headless`;
+//! - ending the task (`schtasks /end`) ends only that conhost, not what it started: the caller stops the role through its lock
+//!   (`agora down`) before removing the task;
+//! - Task Scheduler's restart on failure never fires for a program that ends later, and the supervisor restarts the role itself, so
+//!   the task restarts nothing.
+//!
+//! The task file is written owner-only into the Agora folder and deleted after `schtasks` read it. Every value in it is XML-escaped;
+//! programs are named by their full path under `%SystemRoot%\System32`, never looked up on `PATH`.
+
+use std::ffi::OsString;
+use std::io;
+use std::path::PathBuf;
+use std::process::{Command, Output, Stdio};
+
+use crate::{ServiceSpec, ServiceState};
+
+fn system32(program: &str) -> PathBuf {
+    PathBuf::from(std::env::var_os("SystemRoot").unwrap_or_else(|| OsString::from(r"C:\Windows")))
+        .join("System32")
+        .join(program)
+}
+
+fn schtasks(args: &[&std::ffi::OsStr]) -> io::Result<Output> {
+    Command::new(system32("schtasks.exe"))
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+}
+
+/// What `schtasks` said when it failed (its text is in the system's language: passed on as the reason, never parsed).
+fn checked(out: Output) -> io::Result<Output> {
+    if out.status.success() {
+        return Ok(out);
+    }
+    let said = String::from_utf8_lossy(if out.stderr.is_empty() {
+        &out.stdout
+    } else {
+        &out.stderr
+    })
+    .trim()
+    .to_string();
+    Err(io::Error::other(said))
+}
+
+fn xml_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+fn text(s: &std::ffi::OsStr) -> io::Result<&str> {
+    s.to_str().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "a path or argument is not valid Unicode",
+        )
+    })
+}
+
+/// `DOMAIN\user` of this process's user, as the task names it.
+fn current_user() -> io::Result<String> {
+    let user = std::env::var("USERNAME").map_err(|_| io::Error::other("USERNAME is not set"))?;
+    Ok(match std::env::var("USERDOMAIN") {
+        Ok(domain) if !domain.is_empty() => format!("{domain}\\{user}"),
+        _ => user,
+    })
+}
+
+/// The task file for `spec`, run at `user`'s logon.
+pub(crate) fn task_xml(spec: &ServiceSpec, user: &str) -> io::Result<String> {
+    let mut arguments = String::from("--headless ");
+    arguments.push_str(&crate::conpty::quote_arg(text(spec.program.as_os_str())?));
+    for a in &spec.args {
+        arguments.push(' ');
+        arguments.push_str(&crate::conpty::quote_arg(text(a)?));
+    }
+    let conhost = system32("conhost.exe");
+    let user = xml_escape(user);
+    Ok(format!(
+        r#"<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>{description}</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+      <UserId>{user}</UserId>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>{user}</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <Enabled>true</Enabled>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>{command}</Command>
+      <Arguments>{arguments}</Arguments>
+      <WorkingDirectory>{dir}</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>
+"#,
+        description = xml_escape(&spec.description),
+        command = xml_escape(text(conhost.as_os_str())?),
+        arguments = xml_escape(&arguments),
+        dir = xml_escape(text(spec.work_dir.as_os_str())?),
+    ))
+}
+
+/// See [`crate::service_install`].
+pub(crate) fn install(spec: &ServiceSpec) -> io::Result<()> {
+    let xml = task_xml(spec, &current_user()?)?;
+    // `schtasks` reads a task file in UTF-16 with its byte order mark.
+    let mut bytes = vec![0xFF, 0xFE];
+    for unit in xml.encode_utf16() {
+        bytes.extend_from_slice(&unit.to_le_bytes());
+    }
+    let file = spec.work_dir.join(format!("{}.task.xml", spec.name));
+    crate::write_private(&file, &bytes)?;
+    let created = schtasks(&[
+        "/create".as_ref(),
+        "/tn".as_ref(),
+        spec.name.as_ref(),
+        "/xml".as_ref(),
+        file.as_os_str(),
+        "/f".as_ref(),
+    ]);
+    let _ = std::fs::remove_file(&file);
+    checked(created?)?;
+    checked(schtasks(&[
+        "/run".as_ref(),
+        "/tn".as_ref(),
+        spec.name.as_ref(),
+    ])?)?;
+    Ok(())
+}
+
+/// See [`crate::service_status`]: the task's own file, whose tags are not translated (its listing is).
+pub(crate) fn status(name: &str) -> io::Result<ServiceState> {
+    let out = schtasks(&[
+        "/query".as_ref(),
+        "/tn".as_ref(),
+        name.as_ref(),
+        "/xml".as_ref(),
+    ])?;
+    if !out.status.success() {
+        return Ok(ServiceState::NotInstalled);
+    }
+    // The listing may come as UTF-16; the tags are ASCII either way.
+    let xml: String = String::from_utf8_lossy(&out.stdout)
+        .chars()
+        .filter(|c| *c != '\0')
+        .collect();
+    Ok(ServiceState::Installed {
+        enabled: settings_enabled(&xml),
+    })
+}
+
+/// Whether the task's `<Settings>` leave it enabled (a turned-off task says `<Enabled>false</Enabled>` there).
+fn settings_enabled(xml: &str) -> bool {
+    let settings = xml
+        .split_once("<Settings>")
+        .and_then(|(_, rest)| rest.split_once("</Settings>"))
+        .map_or("", |(s, _)| s);
+    !settings.contains("<Enabled>false</Enabled>")
+}
+
+/// See [`crate::service_remove`].
+pub(crate) fn remove(name: &str) -> io::Result<bool> {
+    if status(name)? == ServiceState::NotInstalled {
+        return Ok(false);
+    }
+    checked(schtasks(&[
+        "/delete".as_ref(),
+        "/tn".as_ref(),
+        name.as_ref(),
+        "/f".as_ref(),
+    ])?)?;
+    Ok(true)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    fn spec() -> ServiceSpec {
+        ServiceSpec {
+            name: "agora-node".into(),
+            description: "Agora node <starts at logon> & more".into(),
+            program: PathBuf::from(r"C:\Program Files\A&B\agora.exe"),
+            args: vec![
+                "supervise".into(),
+                "node".into(),
+                "--home".into(),
+                r"D:\my agora\home".into(),
+                "--log".into(),
+            ],
+            env: Vec::new(),
+            work_dir: PathBuf::from(r"D:\my agora\home"),
+            restart_supervisor_on_signal: false,
+        }
+    }
+
+    #[test]
+    fn the_task_runs_the_supervisor_hidden_with_every_value_escaped() {
+        let xml = task_xml(&spec(), r"WHITE\o'neil").unwrap();
+        assert!(xml.contains("<UserId>WHITE\\o&apos;neil</UserId>"), "{xml}");
+        assert!(xml
+            .contains("<Description>Agora node &lt;starts at logon&gt; &amp; more</Description>"));
+        assert!(xml.contains(r"\System32\conhost.exe</Command>"), "{xml}");
+        assert!(
+            xml.contains(r#"<Arguments>--headless &quot;C:\Program Files\A&amp;B\agora.exe&quot; supervise node --home &quot;D:\my agora\home&quot; --log</Arguments>"#),
+            "{xml}"
+        );
+        assert!(xml.contains(r"<WorkingDirectory>D:\my agora\home</WorkingDirectory>"));
+        assert!(xml.contains("<RunLevel>LeastPrivilege</RunLevel>"));
+        // No restart on failure: the supervisor restarts the role and its give-up stays a give-up.
+        assert!(!xml.contains("RestartOnFailure"));
+    }
+
+    #[test]
+    fn a_turned_off_task_is_told_apart_from_its_trigger() {
+        let on = "<Triggers><LogonTrigger><Enabled>false</Enabled></LogonTrigger></Triggers><Settings><Enabled>true</Enabled></Settings>";
+        let off = "<Triggers><LogonTrigger><Enabled>true</Enabled></LogonTrigger></Triggers><Settings><Enabled>false</Enabled></Settings>";
+        assert!(settings_enabled(on));
+        assert!(!settings_enabled(off));
+    }
+}

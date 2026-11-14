@@ -560,3 +560,64 @@ fn agora_down_racing_supervisors_never_leaves_one_running_unseen() {
     }
     let _ = std::fs::remove_dir_all(home);
 }
+
+/// ADR-0062 item 6: a service manager starts `agora supervise <role> --home <folder> --log` with nothing else set (a Windows task cannot
+/// set `AGORA_HOME` and redirects nothing). `--home` beats the environment, `--log` sends the supervisor's notes and the role's own
+/// output to the role's log, and `agora down` stops it like any supervisor.
+#[test]
+fn a_service_started_supervisor_finds_its_folder_and_writes_its_log() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return;
+    }
+    let home = tmp("svc");
+    let repo = home.join("proj");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("a.txt"), "x").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "init"]);
+    std::fs::write(
+        home.join("machine.toml"),
+        format!(
+            "roles = [\"node\"]\nui = \"none\"\nnode_projects = [{}]\n",
+            toml_string(&repo.to_string_lossy()),
+        ),
+    )
+    .unwrap();
+    let _down = Down(home.clone());
+    // The environment names another folder: `--home` must win. Output goes nowhere: `--log` must write the log itself.
+    let elsewhere = tmp("svc-elsewhere");
+    let mut supervisor = agora(&elsewhere, &[])
+        .args(["supervise", "node", "--home"])
+        .arg(&home)
+        .arg("--log")
+        .current_dir(&elsewhere)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    wait_for(
+        "the node under the service's supervisor",
+        Duration::from_secs(20),
+        || {
+            lock_pid(&home, "node") == Some(supervisor.id())
+                && supervised_child(supervisor.id()).is_some()
+                && run(&home, &["agent", "list"]).0 == 0
+        },
+    );
+    assert!(
+        !elsewhere.join("run").exists(),
+        "it used the environment's folder"
+    );
+    let log = std::fs::read_to_string(home.join("logs/node.log")).unwrap();
+    assert!(log.contains("Node is running"), "{log}");
+    let (code, out, err) = run(&home, &["down"]);
+    assert_eq!(code, 0, "{out}{err}");
+    let end = Instant::now() + Duration::from_secs(10);
+    while supervisor.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < end, "the supervisor outlived `agora down`");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let _ = std::fs::remove_dir_all(elsewhere);
+    let _ = std::fs::remove_dir_all(home);
+}
