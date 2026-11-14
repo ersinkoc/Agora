@@ -27,6 +27,10 @@ window again.
 - If the hub or the node crashes, it is started again 30 seconds later, at most 5 times in 10 minutes; one that stops right
   after starting (its port is taken, its settings are wrong) is not retried, and its log says why. Each is run by a small
   `agora supervise` process that `agora` starts; stopping or killing it stops what it runs too, so nothing is left behind.
+- `agora service install`: start this machine's Agora when you log in (for you only, no administrator rights; it says what it
+  registers first). `agora service status` says whether it is set up and running; `agora service remove` stops it and removes it.
+  Windows registers a logon task per role (`agora-hub`, `agora-node`); the Linux (systemd user unit) and macOS (LaunchAgent)
+  halves come next.
 - Logs: `~/.agora/logs/hub.log` and `node.log` (renamed to `.1` when over 5 MiB at a start).
 
 Everything works as before by hand too (`agora hub run`, `agora node enroll`, `agora node run`, `agora tui`); `AGORA_HOME` moves

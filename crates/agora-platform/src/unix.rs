@@ -557,6 +557,87 @@ pub(crate) fn catch_stop_requests() -> io::Result<()> {
     Ok(())
 }
 
+/// See [`crate::open_append_private`]: the folder is opened as itself (`O_DIRECTORY|O_NOFOLLOW`) and the log is created or opened
+/// relative to that descriptor (`openat` with `O_NOFOLLOW`), so neither can be swapped for a link between a check and the open. A new
+/// log is created exclusively with mode 0600; an existing one must be a regular file with one name, owned by this user, and is made
+/// 0600 through its descriptor when others could read it.
+pub(crate) fn open_append_private(
+    dir: &std::path::Path,
+    name: &std::ffi::OsStr,
+) -> io::Result<std::fs::File> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let refuse = || io::Error::new(io::ErrorKind::InvalidInput, "a link");
+    let link_error = |e: io::Error| match e.raw_os_error() {
+        Some(libc::ELOOP) | Some(libc::ENOTDIR) => refuse(),
+        _ => e,
+    };
+    let cdir = std::ffi::CString::new(dir.as_os_str().as_bytes())
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    let cname = std::ffi::CString::new(name.as_bytes())
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    if name.as_bytes().contains(&b'/') {
+        return Err(io::Error::from(io::ErrorKind::InvalidInput));
+    }
+    // SAFETY: a NUL-terminated path; the descriptor is owned below.
+    let dfd = cvt(unsafe {
+        libc::open(
+            cdir.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    })
+    .map_err(link_error)?;
+    // SAFETY: a descriptor this call just opened and nothing else owns.
+    let dir_fd = unsafe { OwnedFd::from_raw_fd(dfd) };
+    let flags = libc::O_WRONLY | libc::O_APPEND | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    // SAFETY: a live directory descriptor and a NUL-terminated name.
+    let created = unsafe {
+        libc::openat(
+            dir_fd.as_raw_fd(),
+            cname.as_ptr(),
+            flags | libc::O_CREAT | libc::O_EXCL,
+            0o600 as libc::c_uint,
+        )
+    };
+    if created >= 0 {
+        // SAFETY: a descriptor this call just opened.
+        return Ok(unsafe { std::fs::File::from_raw_fd(created) });
+    }
+    let e = io::Error::last_os_error();
+    if e.raw_os_error() != Some(libc::EEXIST) {
+        return Err(link_error(e));
+    }
+    // SAFETY: as above.
+    // O_NONBLOCK: a FIFO (or a device) planted under the log's name must not hold the open until someone reads it; it is refused below,
+    // and a FIFO without a reader is refused at once (ENXIO).
+    let fd =
+        cvt(unsafe { libc::openat(dir_fd.as_raw_fd(), cname.as_ptr(), flags | libc::O_NONBLOCK) })
+            .map_err(|e| match e.raw_os_error() {
+                Some(libc::ENXIO) => refuse(),
+                _ => link_error(e),
+            })?;
+    // SAFETY: a descriptor this call just opened.
+    let file = unsafe { std::fs::File::from_raw_fd(fd) };
+    let m = file.metadata()?;
+    // SAFETY: plain call.
+    let me = unsafe { libc::geteuid() };
+    if !m.is_file() || m.nlink() > 1 || m.uid() != me {
+        return Err(refuse());
+    }
+    // A regular file of this user's: writes block as usual again.
+    // SAFETY: plain calls on a descriptor `file` owns.
+    unsafe {
+        let fl = libc::fcntl(file.as_raw_fd(), libc::F_GETFL);
+        if fl < 0 || libc::fcntl(file.as_raw_fd(), libc::F_SETFL, fl & !libc::O_NONBLOCK) < 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    if m.mode() & 0o077 != 0 {
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(file)
+}
+
 /// See [`crate::wait_unreaped`].
 pub(crate) fn wait_unreaped(pid: u32) -> io::Result<()> {
     let id = libc::id_t::from(pid);

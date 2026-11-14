@@ -2018,7 +2018,14 @@ fn console(
                         let text = preview
                             .as_ref()
                             .filter(|p| Some(p.agent.as_str()) == c.app.active_agent())
-                            .map(|p| agora_tui::pane::selected_text(p.screen(), height, sel))
+                            .map(|p| {
+                                agora_tui::pane::selected_text(
+                                    p.screen(),
+                                    height,
+                                    c.app.scroll,
+                                    sel,
+                                )
+                            })
                             .unwrap_or_default();
                         if !text.is_empty() {
                             let mut out = std::io::stdout();

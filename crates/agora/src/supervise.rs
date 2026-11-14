@@ -352,7 +352,18 @@ fn text(say: &Say, role: Role, rule: &RestartRule, e: &Event) -> String {
 }
 
 /// `agora supervise hub|node [--handoff PID:START]`.
-pub fn supervise(say: &Say, word: &str, handoff: Option<&str>) -> ExitCode {
+/// How `agora supervise` was started.
+pub struct Start<'a> {
+    /// `--handoff PID:START`: the front door that started it.
+    pub handoff: Option<&'a str>,
+    /// `--home`: the Agora folder, instead of `AGORA_HOME` or `~/.agora`.
+    pub home: Option<PathBuf>,
+    /// `--log`: write its notes and the child's output to the role's log itself.
+    pub log: bool,
+}
+
+pub fn supervise(say: &Say, word: &str, start: &Start) -> ExitCode {
+    let handoff = start.handoff;
     let Some(role) = Role::from_name(word) else {
         say.err(key!("cli-bad-arguments"), &[]);
         return ExitCode::from(2);
@@ -365,7 +376,12 @@ pub fn supervise(say: &Say, word: &str, handoff: Option<&str>) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let h = home();
+    // A service passes the folder; a relative one would depend on where the service manager runs it from.
+    if start.home.as_ref().is_some_and(|h| !h.is_absolute()) {
+        say.err(key!("cli-bad-arguments"), &[]);
+        return ExitCode::from(2);
+    }
+    let h = start.home.clone().unwrap_or_else(home);
     let Some(m) = frontdoor::load(&h) else {
         say.err(key!("frontdoor-not-set-up"), &[]);
         return ExitCode::from(1);
@@ -419,6 +435,42 @@ pub fn supervise(say: &Say, word: &str, handoff: Option<&str>) -> ExitCode {
         Ok(c) => c,
         Err(e) => return fail(&e),
     };
+    // Where the notes go: the role's log opened here (`--log`), or this process's error output, which the front door already points
+    // at that log.
+    let mut out: Box<dyn Write> = if start.log {
+        let log = role.log(&h);
+        // Rotation renames by path: never inside a `logs` folder that is a link (the open below refuses it too).
+        if log.parent().is_some_and(|dir| {
+            std::fs::symlink_metadata(dir).is_ok_and(|m| m.file_type().is_symlink() || !m.is_dir())
+        }) {
+            say.err(
+                key!("supervise-log-link"),
+                &[("log", log.display().to_string().into())],
+            );
+            return ExitCode::from(1);
+        }
+        frontdoor::rotate(&log);
+        let file = match agora_platform::open_append_private(&log) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => {
+                say.err(
+                    key!("supervise-log-link"),
+                    &[("log", log.display().to_string().into())],
+                );
+                return ExitCode::from(1);
+            }
+            Err(e) => return fail(&e),
+        };
+        match (file.try_clone(), file.try_clone()) {
+            (Ok(o), Ok(e)) => {
+                cmd.stdout(o).stderr(e);
+            }
+            (Err(e), _) | (_, Err(e)) => return fail(&e),
+        }
+        Box::new(file)
+    } else {
+        Box::new(std::io::stderr())
+    };
     let record = record_path(&h, role);
     // A new supervisor starts a new history.
     let _ = std::fs::remove_file(&record);
@@ -441,7 +493,7 @@ pub fn supervise(say: &Say, word: &str, handoff: Option<&str>) -> ExitCode {
             }
         },
         |e| {
-            let _ = writeln!(std::io::stderr(), "{}", text(say, role, &rule, e));
+            let _ = writeln!(out, "{}", text(say, role, &rule, e));
             if let Some(r) = Record::of(e, unix_ms()) {
                 append_record(&record, &r);
             }

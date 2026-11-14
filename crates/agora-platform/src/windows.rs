@@ -92,6 +92,142 @@ fn owner_only_descriptor(inherit: bool) -> io::Result<Descriptor> {
 /// Creates the file at `path`, which must not exist yet (`CREATE_NEW`, so a planted file or link is not followed), already owner-only:
 /// the descriptor is given at creation, so there is no moment in which the file carries what its folder passes on and another user
 /// could open it (#320). The handle is not inheritable and the file is not shared while open.
+/// See [`crate::open_append_private`]. The folder is opened as itself (never through a link) and held without letting anyone rename or
+/// delete it until the log is open, so it cannot be swapped for a link meanwhile; the log is then checked through its own handle: one
+/// name, not a link, and really inside the held folder (both final paths). An existing log is made owner-only through its handle.
+pub(crate) fn open_append_private(dir: &Path, path: &Path) -> io::Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_APPEND_DATA, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, READ_CONTROL,
+        SYNCHRONIZE, WRITE_DAC,
+    };
+    let refuse = || io::Error::new(io::ErrorKind::InvalidInput, "a link");
+    let held = hold_dir(dir)?;
+    match create_private_new(path) {
+        Ok(f) => drop(f),
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e),
+    }
+    // FILE_APPEND_DATA without FILE_WRITE_DATA: every write goes to the end, as with `append(true)`.
+    let file = std::fs::OpenOptions::new()
+        .access_mode(
+            FILE_APPEND_DATA | WRITE_DAC | READ_CONTROL | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+        )
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    let (links, reparse) = link_facts(&file)?;
+    if reparse || links > 1 || !file.metadata()?.is_file() {
+        return Err(refuse());
+    }
+    let (inside, folder) = (final_path(&file)?, final_path(&held)?);
+    if !inside.to_lowercase().starts_with(&format!(
+        "{}\\",
+        folder.trim_end_matches('\\').to_lowercase()
+    )) {
+        return Err(refuse());
+    }
+    set_owner_only_handle(&file)?;
+    drop(held);
+    Ok(file)
+}
+
+/// Opens folder `dir` as itself (`FILE_FLAG_OPEN_REPARSE_POINT`) without sharing delete, so it can be neither renamed nor removed while
+/// the handle lives; `InvalidInput` when it is a link or junction, or not a folder.
+fn hold_dir(dir: &Path) -> io::Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, SYNCHRONIZE,
+    };
+    let held = std::fs::OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES | SYNCHRONIZE)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(dir)?;
+    let (_, reparse) = link_facts(&held)?;
+    if reparse || !held.metadata()?.is_dir() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "a link"));
+    }
+    Ok(held)
+}
+
+/// The final path of an open file or folder (`GetFinalPathNameByHandleW`), links resolved.
+fn final_path(file: &std::fs::File) -> io::Result<String> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::GetFinalPathNameByHandleW;
+    let mut buf = vec![0u16; 1024];
+    loop {
+        // SAFETY: a live handle and a buffer of `buf.len()` units.
+        let n = unsafe {
+            GetFinalPathNameByHandleW(
+                file.as_raw_handle() as HANDLE,
+                buf.as_mut_ptr(),
+                buf.len() as u32,
+                0,
+            )
+        } as usize;
+        if n == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if n < buf.len() {
+            return Ok(String::from_utf16_lossy(&buf[..n]));
+        }
+        buf.resize(n + 1, 0);
+    }
+}
+
+/// [`set_owner_only`] through an open handle (opened with `WRITE_DAC`), so it applies to exactly the file that was checked.
+fn set_owner_only_handle(file: &std::fs::File) -> io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Security::Authorization::{SetSecurityInfo, SE_FILE_OBJECT};
+    use windows_sys::Win32::Security::{
+        GetSecurityDescriptorDacl, ACL, DACL_SECURITY_INFORMATION,
+        PROTECTED_DACL_SECURITY_INFORMATION,
+    };
+    let sd = owner_only_descriptor(false)?;
+    let (mut present, mut defaulted, mut dacl) = (0i32, 0i32, null_mut::<ACL>());
+    // SAFETY: `sd` is a valid descriptor that outlives every use of `dacl`.
+    if unsafe { GetSecurityDescriptorDacl(sd.0, &mut present, &mut dacl, &mut defaulted) } == 0 {
+        return Err(os_error(unsafe { GetLastError() }));
+    }
+    // SAFETY: a live handle opened with WRITE_DAC and a valid DACL.
+    let err = unsafe {
+        SetSecurityInfo(
+            file.as_raw_handle() as HANDLE,
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            null_mut(),
+            null_mut(),
+            dacl,
+            null(),
+        )
+    };
+    if err == 0 {
+        Ok(())
+    } else {
+        Err(os_error(err))
+    }
+}
+
+/// How many names (hard links) an open file has, and whether the handle is a reparse point (a link opened with
+/// `FILE_FLAG_OPEN_REPARSE_POINT`): asked of the handle, so a name swapped after the open cannot change the answer.
+pub(crate) fn link_facts(file: &std::fs::File) -> io::Result<(u32, bool)> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_REPARSE_POINT,
+    };
+    // SAFETY: an all-zero structure is a valid out-buffer.
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    // SAFETY: a live handle owned by `file` and a valid out-pointer.
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle() as HANDLE, &mut info) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok((
+        info.nNumberOfLinks,
+        info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0,
+    ))
+}
+
 pub(crate) fn create_private_new(path: &Path) -> io::Result<std::fs::File> {
     use std::os::windows::ffi::OsStrExt;
     use std::os::windows::io::FromRawHandle;

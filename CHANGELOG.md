@@ -12,6 +12,12 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
   machines leave every window, while their history and costs stay; one that connects again comes back. A box also refuses them if
   they connect again, for a lost or retired machine. `agora hub machines` lists machines as online, offline or old, and
   `agora hub machines forget NAME` or `forget --old` does the same from the hub's machine. Only the hub's owner can forget machines.
+
+### Starting at login
+- `agora service install` makes this machine's Agora start when you log in: for you only, with no administrator rights, and it
+  says what it registers first. `agora service status` says whether it is set up and whether it runs now; `agora service remove`
+  stops it and removes it. On Windows for now (a logon task); Linux and macOS follow.
+
 ### Getting started
 - A hub or node started by `agora` that crashes is started again 30 seconds later, at most 5 times in 10 minutes; one that
   stops right after starting (a port taken, a wrong setting) is not retried and its log says why. `agora status` shows a restart
@@ -28,6 +34,8 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
   the backlog is read (100 000 events behind took about 155 ms of the hub's time; now well under a millisecond).
 ### Terminal client
 - The terminal client's wheel scrolls an agent's tab back through what it showed, with how far back at the top; typing goes back to the bottom.
+- Text dragged over in a tab scrolled back is the text shown there, earlier lines included, and that is what is copied (before, the
+  highlight and the copy were taken from the live screen).
 
 ## 0.3.11
 

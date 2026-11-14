@@ -18,6 +18,8 @@ mod windows;
 #[cfg(windows)]
 mod winproc;
 #[cfg(windows)]
+mod winservice;
+#[cfg(windows)]
 use winproc as procinfo;
 
 #[cfg(target_os = "linux")]
@@ -1369,6 +1371,132 @@ pub fn stop_requested() -> bool {
     #[cfg(not(unix))]
     {
         false
+    }
+}
+
+/// Opens `path` to append for a log a process writes for itself (`agora supervise --log`), so that nothing planted in the Agora folder
+/// can redirect what is written or change another file's permissions (`InvalidInput` when it refuses):
+/// - the folder it is in is opened as itself, never through a link or junction, and the log is opened against that folder (Unix
+///   `openat`; Windows: the folder is held so it can be neither renamed nor removed, and the log is checked to be inside it);
+/// - a new log is created exclusively, readable and writable by the user only (never executable) from its creation on;
+/// - an existing log is opened without following a link and refused when it is a link, not a regular file, has another name (a hard
+///   link) or (Unix) belongs to another user; it is then made the user's only through its own handle.
+///
+/// The folders above the log's own (the Agora folder and its parents) are the user's choice and are not checked.
+pub fn open_append_private(path: &std::path::Path) -> io::Result<std::fs::File> {
+    let dir = path
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .unwrap_or(std::path::Path::new("."));
+    #[cfg(unix)]
+    {
+        let name = path
+            .file_name()
+            .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+        unix::open_append_private(dir, name)
+    }
+    #[cfg(windows)]
+    {
+        windows::open_append_private(dir, path)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = dir;
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+    }
+}
+
+/// True where [`service_install`] can register a program to start at the user's login (ADR-0062 item 6): Windows (a logon task).
+/// The systemd user unit (Linux) and the LaunchAgent (macOS) halves come next, behind the same functions.
+pub const SERVICES_SUPPORTED: bool = cfg!(windows);
+
+/// A program registered to start when the user logs in, for this user only and without administrator rights (ADR-0062 item 6). The
+/// caller (the `agora service` command) builds it; each system writes it in its own form.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ServiceSpec {
+    /// The service's name in the system (a task, a unit, a launchd label): one name per role, from one constant of the caller.
+    pub name: String,
+    /// A sentence the system's own lists show.
+    pub description: String,
+    /// The program, by its full path.
+    pub program: PathBuf,
+    pub args: Vec<std::ffi::OsString>,
+    /// Variables to set for it (the installing shell's `PATH` until ADR-0062 item 5 captures the login environment). Windows ignores
+    /// them: a logon task gets the user's own environment.
+    pub env: Vec<(String, std::ffi::OsString)>,
+    /// Its working directory (the Agora folder); system files the registration needs for a moment are written there, owner-only.
+    pub work_dir: PathBuf,
+    /// Start the program again when a signal killed it (systemd `Restart=on-abnormal`, launchd `KeepAlive = { Crashed = true }`),
+    /// never after an exit with a code, so a supervisor that gave up or stopped stays ended. Windows has no such setting: ignored.
+    pub restart_supervisor_on_signal: bool,
+}
+
+/// Whether a service is registered (see [`ServiceSpec`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ServiceState {
+    NotInstalled,
+    /// Registered; `enabled` is false when it was turned off outside Agora (a disabled task, Login Items, a policy).
+    Installed {
+        enabled: bool,
+    },
+}
+
+/// Registers `spec` to start at this user's login (it does not start it: [`service_start`]). `Unsupported` where
+/// [`SERVICES_SUPPORTED`] is false; `InvalidInput` for a path or argument the system would change on the way (Windows expands
+/// `%VAR%` in a task's command line) or that is not valid Unicode.
+pub fn service_install(spec: &ServiceSpec) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        winservice::install(spec)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = spec;
+        Err(io::Error::from(io::ErrorKind::Unsupported))
+    }
+}
+
+/// Starts the registered service `name` now, as the system would at login.
+pub fn service_start(name: &str) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        winservice::start(name)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = name;
+        Err(io::Error::from(io::ErrorKind::Unsupported))
+    }
+}
+
+/// Unregisters the service `name`; `Ok(false)` when it was not registered. It does not stop what the service started: the caller
+/// stops the role through its lock first (ending a Windows task ends only its `conhost`).
+pub fn service_remove(name: &str) -> io::Result<bool> {
+    #[cfg(windows)]
+    {
+        winservice::remove(name)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = name;
+        Err(io::Error::from(io::ErrorKind::Unsupported))
+    }
+}
+
+/// Whether the service `name` is registered, and enabled. An error when the system could not say (access denied, a broken scheduler):
+/// never reported as "not registered".
+pub fn service_status(name: &str) -> io::Result<ServiceState> {
+    #[cfg(windows)]
+    {
+        winservice::status(name)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = name;
+        Err(io::Error::from(io::ErrorKind::Unsupported))
     }
 }
 
