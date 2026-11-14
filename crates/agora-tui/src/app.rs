@@ -764,7 +764,6 @@ impl App {
     pub fn draw(&self, f: &mut Frame<'_>, s: &Screen<'_>) {
         let a = self.areas(f.area());
         let buf = f.buffer_mut();
-        let mono = s.colors == ColorMode::Mono;
         let strong = Style::default().add_modifier(Modifier::BOLD);
         let chosen = Style::default().add_modifier(Modifier::REVERSED);
         // Secondary text and dividers: a fixed mid grey (palette 244) where the terminal has 256 colours, since ConPTY drops DIM and
@@ -772,15 +771,9 @@ impl App {
         let dim = match s.colors {
             ColorMode::Mono => Style::default(),
             ColorMode::Ansi16 => Style::default().add_modifier(Modifier::DIM),
-            ColorMode::Full => Style::default().fg(Color::Indexed(244)),
+            ColorMode::Full | ColorMode::Ansi256 => Style::default().fg(Color::Indexed(244)),
         };
-        let attention = if mono {
-            strong
-        } else {
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD)
-        };
+        let attention = attention_style(s.colors);
 
         // The tree.
         if s.rows.is_empty() {
@@ -1136,6 +1129,18 @@ fn footer_fit(width: usize, notice: &str, keys: &str, mouse: &str) -> (String, O
 
 /// The columns the footer keeps for keys before it shows the mouse state too.
 const FOOTER_KEYS: usize = 40;
+
+/// What needs the user, in a colour that reads on a dark and on a light background alike (the review: yellow was unreadable on
+/// white): a burnt orange (palette 166, #d75f00) where there are 256 colours, red with 16 (yellow is the theme's, often pale), bold
+/// in every mode, bold alone without colour.
+pub fn attention_style(colors: ColorMode) -> Style {
+    let bold = Style::default().add_modifier(Modifier::BOLD);
+    match colors {
+        ColorMode::Mono => bold,
+        ColorMode::Ansi16 => bold.fg(Color::Red),
+        ColorMode::Full | ColorMode::Ansi256 => bold.fg(Color::Indexed(166)),
+    }
+}
 
 /// Nothing open (as the web's welcome): what to do first, the agents running now (those that need the user marked), and the two
 /// keys that find everything else. Centred in the pane, at most 64 columns wide.
@@ -2608,6 +2613,40 @@ mod tests {
         let lines = draw(&app, &rows, None, ColorMode::Mono);
         assert!(lines[0].contains(" 2 ! shell "), "{}", lines[0]);
         assert!(!lines[0].contains("tui-app-tabs-waiting"), "{}", lines[0]);
+    }
+
+    #[test]
+    fn needs_you_reads_on_light_and_dark_backgrounds_in_every_mode() {
+        // Never the theme's yellow (pale on white); bold everywhere, so monochrome still stands out.
+        for mode in [
+            ColorMode::Full,
+            ColorMode::Ansi256,
+            ColorMode::Ansi16,
+            ColorMode::Mono,
+        ] {
+            let st = attention_style(mode);
+            assert!(st.add_modifier.contains(Modifier::BOLD), "{mode:?}");
+            assert_ne!(st.fg, Some(Color::Yellow), "{mode:?}");
+            assert_ne!(st.fg, Some(Color::LightYellow), "{mode:?}");
+        }
+        assert_eq!(
+            attention_style(ColorMode::Full).fg,
+            Some(Color::Indexed(166))
+        );
+        assert_eq!(attention_style(ColorMode::Ansi16).fg, Some(Color::Red));
+        assert_eq!(attention_style(ColorMode::Mono).fg, None);
+        // #d75f00 against white and black: at least 3:1 both ways (WCAG for bold text).
+        let lum = |c: f64| {
+            let c = c / 255.0;
+            if c <= 0.039_28 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        let l = 0.2126 * lum(215.0) + 0.7152 * lum(95.0) + 0.0722 * lum(0.0);
+        assert!(1.05 / (l + 0.05) >= 3.0, "on white");
+        assert!((l + 0.05) / 0.05 >= 3.0, "on black");
     }
 
     #[test]

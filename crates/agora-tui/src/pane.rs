@@ -15,6 +15,9 @@ pub enum ColorMode {
     /// 24-bit colour and the 256-colour palette, as the agent asked.
     #[default]
     Full,
+    /// The 256-colour palette without 24-bit colour (macOS Terminal, `TERM=xterm-256color` with no `COLORTERM`): a 24-bit colour is
+    /// drawn as the nearest palette entry instead of whatever the terminal makes of it.
+    Ansi256,
     /// The 16 classic colours: 256-colour and 24-bit colours are drawn as the nearest of them.
     Ansi16,
     /// No colour at all (`NO_COLOR`): attributes (bold, underline, inverse ...) stay.
@@ -22,12 +25,22 @@ pub enum ColorMode {
 }
 
 impl ColorMode {
-    /// The mode the environment asks for: `NO_COLOR` set to anything turns colour off (https://no-color.org).
-    pub fn from_env(no_color: Option<&str>, colorterm: Option<&str>) -> Self {
-        match (no_color, colorterm) {
-            (Some(_), _) => Self::Mono,
-            (None, Some(c)) if c.contains("truecolor") || c.contains("24bit") => Self::Full,
-            _ => Self::Full,
+    /// The mode the environment asks for:
+    /// - `NO_COLOR` set to anything turns colour off (https://no-color.org), and so does `TERM=dumb`;
+    /// - `COLORTERM=truecolor` / `24bit` is 24-bit colour;
+    /// - a `TERM` with `256color` in it is the 256-colour palette, any other `TERM` the 16 colours;
+    /// - no `TERM` at all (Windows consoles, which take 24-bit colour) is 24-bit colour.
+    pub fn from_env(no_color: Option<&str>, colorterm: Option<&str>, term: Option<&str>) -> Self {
+        if no_color.is_some() || term == Some("dumb") {
+            return Self::Mono;
+        }
+        if colorterm.is_some_and(|c| c.contains("truecolor") || c.contains("24bit")) {
+            return Self::Full;
+        }
+        match term {
+            None | Some("") => Self::Full,
+            Some(t) if t.contains("256color") || t.contains("direct") => Self::Ansi256,
+            Some(_) => Self::Ansi16,
         }
     }
 }
@@ -211,8 +224,9 @@ pub fn to_style(s: VtStyle, colors: ColorMode) -> Style {
 pub fn to_color(c: VtColor, colors: ColorMode) -> Color {
     match (c, colors) {
         (VtColor::Default, _) | (_, ColorMode::Mono) => Color::Reset,
-        (VtColor::Indexed(i), ColorMode::Full) => Color::Indexed(i),
+        (VtColor::Indexed(i), ColorMode::Full | ColorMode::Ansi256) => Color::Indexed(i),
         (VtColor::Rgb(r, g, b), ColorMode::Full) => Color::Rgb(r, g, b),
+        (VtColor::Rgb(r, g, b), ColorMode::Ansi256) => Color::Indexed(nearest256(r, g, b)),
         (VtColor::Indexed(i), ColorMode::Ansi16) if i < 16 => Color::Indexed(i),
         (VtColor::Indexed(i), ColorMode::Ansi16) => {
             let (r, g, b) = xterm_rgb(i);
@@ -257,6 +271,20 @@ const ANSI16: [(u8, u8, u8); 16] = [
     (0, 255, 255),
     (255, 255, 255),
 ];
+
+/// The nearest entry of xterm's 256-colour palette above the first 16 (whose look the user's theme decides): the 6×6×6 cube or the
+/// grey ramp.
+fn nearest256(r: u8, g: u8, b: u8) -> u8 {
+    let d = |(x, y, z): (u8, u8, u8)| {
+        let (dr, dg, db) = (
+            i32::from(r) - i32::from(x),
+            i32::from(g) - i32::from(y),
+            i32::from(b) - i32::from(z),
+        );
+        dr * dr + dg * dg + db * db
+    };
+    (16..=255u8).min_by_key(|&i| d(xterm_rgb(i))).unwrap_or(16)
+}
 
 fn nearest16(r: u8, g: u8, b: u8) -> u8 {
     let d = |(x, y, z): (u8, u8, u8)| {
@@ -343,11 +371,47 @@ mod tests {
             (Color::Reset, Color::Reset)
         );
         assert!(mono[(0, 0)].modifier.contains(Modifier::BOLD));
+        // The environment decides the mode (the review: 16 colours were never chosen).
+        for (no_color, colorterm, term, want) in [
+            (
+                Some("1"),
+                Some("truecolor"),
+                Some("xterm-256color"),
+                ColorMode::Mono,
+            ),
+            (None, None, Some("dumb"), ColorMode::Mono),
+            (
+                None,
+                Some("truecolor"),
+                Some("xterm-256color"),
+                ColorMode::Full,
+            ),
+            (None, Some("24bit"), Some("xterm"), ColorMode::Full),
+            (None, None, Some("xterm-256color"), ColorMode::Ansi256),
+            (None, None, Some("tmux-256color"), ColorMode::Ansi256),
+            (None, None, Some("xterm"), ColorMode::Ansi16),
+            (None, None, Some("linux"), ColorMode::Ansi16),
+            (None, None, None, ColorMode::Full),
+        ] {
+            assert_eq!(
+                ColorMode::from_env(no_color, colorterm, term),
+                want,
+                "{no_color:?} {colorterm:?} {term:?}"
+            );
+        }
+        // Without 24-bit colour, a 24-bit colour is the nearest palette entry (never one of the theme's 16).
         assert_eq!(
-            ColorMode::from_env(Some("1"), Some("truecolor")),
-            ColorMode::Mono
+            to_color(VtColor::Rgb(255, 135, 0), ColorMode::Ansi256),
+            Color::Indexed(208)
         );
-        assert_eq!(ColorMode::from_env(None, None), ColorMode::Full);
+        assert_eq!(
+            to_color(VtColor::Rgb(8, 8, 8), ColorMode::Ansi256),
+            Color::Indexed(232)
+        );
+        assert_eq!(
+            to_color(VtColor::Indexed(3), ColorMode::Ansi256),
+            Color::Indexed(3)
+        );
     }
 
     #[test]

@@ -25,6 +25,7 @@ fn main() -> std::io::Result<()> {
     let colors = ColorMode::from_env(
         std::env::var("NO_COLOR").ok().as_deref(),
         std::env::var("COLORTERM").ok().as_deref(),
+        std::env::var("TERM").ok().as_deref(),
     );
     let raw = crossterm::terminal::enable_raw_mode();
     // Whatever `show` returns, raw mode is switched off again before the error (if any) is reported.
