@@ -21,7 +21,9 @@ export function FilesDialog({ agent, files, load, onClose }: {
     <Dialog.Root open onOpenChange={(o) => { if (!o) onClose(); }}>
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 z-40 bg-surface-0/70 backdrop-blur-sm" />
-        <Dialog.Content aria-describedby={undefined} onEscapeKeyDown={(e) => { if ((e.target as Element | null)?.closest?.('[data-finding]')) e.preventDefault(); }} className="fixed inset-2 z-50 flex flex-col overflow-hidden rounded-l border border-line bg-surface-1 shadow-card md:inset-x-[3vw] md:inset-y-[4vh]">
+        {/* The window's one-letter shortcuts (`n`) must not act behind the dialog, from its header and Close button too. */}
+        <Dialog.Content aria-describedby={undefined} onKeyDown={(e) => { if (!e.ctrlKey && !e.metaKey && !e.altKey && e.key.length === 1) e.stopPropagation(); }}
+          onEscapeKeyDown={(e) => { if ((e.target as Element | null)?.closest?.('[data-finding]')) e.preventDefault(); }} className="fixed inset-2 z-50 flex flex-col overflow-hidden rounded-l border border-line bg-surface-1 shadow-card md:inset-x-[3vw] md:inset-y-[4vh]">
           <header className="flex flex-none items-center justify-between gap-3 border-b border-line px-4 py-2.5">
             <div className="min-w-0">
               <Dialog.Title className="m-0 truncate text-base font-semibold tracking-normal text-ink normal-case">{t('files-title', { name: agent.name })}</Dialog.Title>
