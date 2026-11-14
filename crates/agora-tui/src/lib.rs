@@ -10,5 +10,6 @@ pub mod pane;
 pub mod picker;
 pub mod preview;
 pub mod render;
+pub mod review;
 pub mod split;
 pub mod tool;

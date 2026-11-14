@@ -594,6 +594,31 @@ impl Session {
         }
     }
 
+    /// What an agent changed, as a unified diff (what the web's review screen reads): its folder's (`workspace.query` "diff",
+    /// ADR-0053) or its worktree's (`git.diff`). Ids are the node's own (without the `node/` prefix).
+    pub fn diff(&mut self, node: &str, target: &DiffTarget) -> Result<String, String> {
+        let command = match target {
+            DiffTarget::Folder(id) => {
+                command_request::Command::WorkspaceQuery(agora_protocol::v1::WorkspaceQuery {
+                    workspace_id: id.clone(),
+                    operation: "diff".into(),
+                    ..Default::default()
+                })
+            }
+            DiffTarget::Worktree(id) => {
+                command_request::Command::GitDiff(agora_protocol::v1::GitDiff {
+                    worktree_id: id.clone(),
+                    path: String::new(),
+                })
+            }
+        };
+        let ok = self.command_ok(node, command, Duration::from_secs(30))?;
+        match ok.result {
+            Some(command_ok::Result::GitDiff(d)) => Ok(d.diff),
+            _ => Err("protocol.invalid_message".into()),
+        }
+    }
+
     /// What `node` makes of a folder before an agent starts there (ADR-0052 `directory.inspect`): its canonical path and project.
     pub fn inspect_folder(
         &mut self,
@@ -940,6 +965,44 @@ pub fn answered_approval<'a>(
 
 fn refused_for_grant(r: &CommandResponse) -> bool {
     matches!(&r.result, Some(command_response::Result::Err(e)) if e.code == "approval.grant_required")
+}
+
+/// Where an agent's changes are asked for ([`Session::diff`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DiffTarget {
+    /// A folder the agent was started in (a registered workspace), by the node's id for it.
+    Folder(String),
+    /// The agent's worktree, by the node's id for it.
+    Worktree(String),
+}
+
+/// Where to ask about `agent`'s changes, as the web does: the folder it is bound to when there is one, else its worktree; the
+/// machine and the node's own id. `None` when it has neither.
+pub fn diff_target(snapshot: &Snapshot, agent: &str) -> Option<(String, DiffTarget)> {
+    let a = snapshot.agents.iter().find(|a| a.agent_id == agent)?;
+    let local = |id: &str| id.split_once('/').map_or(id, |(_, l)| l).to_string();
+    if let Some(w) = snapshot
+        .agent_workspaces
+        .iter()
+        .find(|b| b.agent_id == agent)
+        .filter(|b| {
+            snapshot
+                .workspaces
+                .iter()
+                .any(|w| w.workspace_id == b.workspace_id)
+        })
+    {
+        return Some((
+            a.node_id.clone(),
+            DiffTarget::Folder(local(&w.workspace_id)),
+        ));
+    }
+    (!a.worktree_id.is_empty()).then(|| {
+        (
+            a.node_id.clone(),
+            DiffTarget::Worktree(local(&a.worktree_id)),
+        )
+    })
 }
 
 /// What a watched terminal said.
