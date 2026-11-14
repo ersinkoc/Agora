@@ -78,9 +78,16 @@ Date: YYYY-MM-DD
 | 0058 | Show an adapter's errors and notices, and choose its model and mode | Accepted |
 | 0059 | Launch options, including "do not ask" modes, chosen when an agent starts | Accepted |
 | 0060 | A node keeps a session ledger and offers Resume after a restart | Accepted |
-| 0070 | The hub owns whether a machine is online | Accepted |
 | 0061 | Trusting your devices on a machine in one step | Accepted |
 | 0062 | `agora up`: one command (or one login) brings a machine back, on every OS | Accepted |
 | 0063 | The terminal client on ratatui and crossterm | Accepted |
+| 0064 | Workspace hygiene: shared first, worktrees cleaned, the disk never fills | Proposed |
+| 0065 | Pairing: find a hub, enter a number, connected | Proposed |
+| 0066 | Start an agent with its model, effort and mode, from the window and from another agent | Proposed |
 | 0067 | Remote access: a screen password, Tailscale and Cloudflare Tunnel, and a phone-sized window | Accepted |
 | 0068 | A customizable workspace: tiled layouts, themes and replaceable panels, in every client | Accepted |
+| 0069 | A missing agent kind says why, and a trust hint names the real binary | Proposed |
+| 0070 | The hub owns whether a machine is online | Accepted |
+| 0071 | A diff names every changed file, even when the text is cut | Proposed |
+| 0072 | A shared terminal takes the size of the smallest window looking at it | Proposed |
+| 0074 | A reply keeps its link to the message it answers, across machines | Proposed |
