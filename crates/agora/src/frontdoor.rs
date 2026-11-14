@@ -434,6 +434,7 @@ pub fn front_door(say: &Say, o: &Opts) -> ExitCode {
         }
     };
     let h = home();
+    let mut first_run = false;
     let m = match load(&h) {
         Some(mut m) => {
             if let Some(u) = ui.filter(|u| o.save && *u != m.ui) {
@@ -487,6 +488,7 @@ pub fn front_door(say: &Say, o: &Opts) -> ExitCode {
                         key!("frontdoor-saved"),
                         &[("path", machine_path(&h).display().to_string().into())],
                     );
+                    first_run = true;
                     m
                 }
                 Ok(None) => return ExitCode::SUCCESS,
@@ -497,7 +499,26 @@ pub fn front_door(say: &Say, o: &Opts) -> ExitCode {
     if let Err(code) = up(say, &h, &m) {
         return code;
     }
+    // ADR-0062 item 6: the end of the first run asks once whether to start Agora at login. Always a question, never automatic; a no
+    // (or no answer) leaves it to `agora service install`.
+    if first_run && agora_platform::SERVICES_SUPPORTED {
+        prompt(
+            &mut std::io::stdout(),
+            &say.text(key!("frontdoor-autostart-question"), &[]),
+        );
+        if wants_autostart(read_answer(&mut std::io::stdin().lock()).as_deref()) {
+            // Registered for the roles that run now; the output says so (they run already, so nothing starts twice).
+            let _ = crate::servicecmd::install(say, &h, &m);
+        } else {
+            say.out(key!("frontdoor-autostart-later"), &[]);
+        }
+    }
     open(say, &m, ui.unwrap_or(m.ui))
+}
+
+/// The answer to "Start Agora when you log in? [Y/n]": Enter or yes is yes, no is no, and no answer at all (the input ended) is no.
+fn wants_autostart(answer: Option<&str>) -> bool {
+    matches!(answer, Some("" | "y" | "yes" | "e" | "evet"))
 }
 
 /// `agora web`: makes sure this machine's Agora runs, then opens it in the browser, signed in.
@@ -1153,6 +1174,18 @@ mod tests {
 
     fn say() -> Say {
         Say(Catalog::for_locale("en"))
+    }
+
+    #[test]
+    fn the_login_question_defaults_to_yes_but_never_answers_itself() {
+        for yes in ["", "y", "yes", "e", "evet"] {
+            assert!(wants_autostart(Some(yes)), "{yes:?}");
+        }
+        for no in ["n", "no", "h", "hayır", "later"] {
+            assert!(!wants_autostart(Some(no)), "{no:?}");
+        }
+        // The input ended (no person answered): nothing is registered.
+        assert!(!wants_autostart(None));
     }
 
     /// Linux's follow-up to #543: `agora down` deletes a lock only while it names the process it stopped. A lock another supervisor
