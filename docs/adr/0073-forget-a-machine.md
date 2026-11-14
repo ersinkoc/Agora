@@ -1,6 +1,7 @@
 # 0073. Old machines are shown as old, and can be cleaned up
-Status: Proposed
+Status: Accepted
 Date: 2026-11-14
+Accepted: 2026-11-14 (maintainer's explicit answer to the question "what is your decision on ADR-0073?": "Onaylıyorum"). The open questions' proposed answers stand: old means not seen for 24 hours; no automatic cleanup for now.
 Origin: module M1 (connectivity and visibility). The maintainer's hub lists `linux`, a test node from 2026-11-12 (version 0.3.2). No
 process for it exists, and it will never come back. `mac2` is an older second node on the same Mac. Neither can be removed: the hub's
 record is append-only, and nothing in the protocol removes a machine.
