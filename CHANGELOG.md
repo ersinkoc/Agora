@@ -4,6 +4,10 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+### Shared board
+- A change to a shared project's board (create, claim, complete, lease, release, handoff) is answered as done only once the hub has
+  stored it. If the hub cannot write it (a full or locked disk), the agent gets an error and the board stays as it was, so a claim an
+  agent was told it has can no longer vanish when the hub restarts.
 ### Hub
 - A window or terminal client that comes back after a long time away (more than 10 000 events or 8 MiB behind) gets a fresh snapshot
   instead of replaying everything it missed. Its return no longer holds up the hub for every machine and every other window while

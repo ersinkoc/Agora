@@ -404,6 +404,60 @@ impl SqliteStore {
         })
     }
 
+    /// The hub's own events, numbered from `first_seq`, and one setting, in one transaction: all of them are stored or none is (a
+    /// board change and its audit events, #517 review). Refused when the producer's numbering is not at `first_seq - 1`. Returns
+    /// each event's position, in order.
+    pub fn append_batch_with_setting(
+        &self,
+        producer: &str,
+        first_seq: u64,
+        events: &[(u64, Vec<u8>)],
+        setting: Option<(&str, &[u8])>,
+    ) -> Result<Vec<u64>, StoreError> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction()?;
+        let last: i64 = tx
+            .query_row(
+                "SELECT last_seq FROM producers WHERE producer = ?1",
+                [producer],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(0);
+        if to_u64(last).checked_add(1) != Some(first_seq) {
+            return Err(StoreError(format!(
+                "{producer} is numbered at {last}, not {}",
+                first_seq.saturating_sub(1)
+            )));
+        }
+        let mut positions = Vec::with_capacity(events.len());
+        let mut seq = first_seq;
+        for (at_ms, payload) in events {
+            tx.execute(
+                "INSERT INTO events (producer, seq, at_ms, payload) VALUES (?1, ?2, ?3, ?4)",
+                params![producer, to_i64(seq)?, to_i64(*at_ms)?, payload],
+            )?;
+            positions.push(to_u64(tx.last_insert_rowid()));
+            seq += 1;
+        }
+        if !events.is_empty() {
+            tx.execute(
+                "INSERT INTO producers (producer, last_seq) VALUES (?1, ?2)
+                 ON CONFLICT(producer) DO UPDATE SET last_seq = excluded.last_seq",
+                params![producer, to_i64(seq - 1)?],
+            )?;
+        }
+        if let Some((key, value)) = setting {
+            tx.execute(
+                "INSERT INTO settings (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![key, value],
+            )?;
+        }
+        tx.commit()?;
+        Ok(positions)
+    }
+
     /// Online, consistent backup into a new file (`VACUUM INTO` takes a snapshot while writers keep working).
     /// Refuses to overwrite: a backup path that exists is almost certainly a mistake.
     pub fn backup_to(&self, dest: &Path) -> Result<(), StoreError> {
