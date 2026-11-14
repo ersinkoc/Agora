@@ -10,6 +10,11 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
   in progress, the restarts of the last 10 minutes and a give-up. `agora down` and a killed supervisor never leave a hub or node
   running behind them.
 
+### Hub
+- A window or terminal client that comes back after a long time away (more than 10 000 events or 8 MiB behind) gets a fresh snapshot
+  instead of replaying everything it missed. Its return no longer holds up the hub for every machine and every other window while
+  the backlog is read (100 000 events behind took about 155 ms of the hub's time; now well under a millisecond).
+
 ## 0.3.11
 
 ### Terminal client (ADR-0063)
