@@ -1,14 +1,16 @@
 import { useMemo, useState } from 'react';
 import { t } from '../i18n';
+import { NoAskBadge } from './NoAskBadge';
 import { forgetReasonKey } from '../net/forget';
-import { helperTree, machineKey, type AgentTileModel } from '../model';
+import { resumeReasonKey } from '../net/directory';
+import { helperTree, machineKey, type AgentTileModel, type ResumeAction } from '../model';
 import { bytesLabel, type MachineModel } from '../net/view';
 import { ago } from '../net/time';
 import { Icon } from './Icon';
 import { StateMark } from './StateBadge';
 
 // The left panel: machine → folder → agent, like a file explorer. Opening an agent puts it in a tab.
-export function Explorer({ fleet, machines, open, current, projects, project, onProject, onToggle, onStart, onCollapse, onDismiss, everyone, forgetError }: {
+export function Explorer({ fleet, machines, open, current, projects, project, onProject, onToggle, onStart, onCollapse, onDismiss, everyone, forgetError, onResume, resuming, resumeError }: {
   fleet: readonly AgentTileModel[];
   machines: readonly MachineModel[];
   open: readonly string[];
@@ -23,6 +25,10 @@ export function Explorer({ fleet, machines, open, current, projects, project, on
   // Removing a closed agent here asks the hub to forget it for every client (ADR-0053), not only this browser.
   everyone?: boolean;
   forgetError?: string;
+  // ADR-0060: agents that were running when their machine stopped are listed under it with Resume (or Start again).
+  onResume?: (agent: AgentTileModel, action: ResumeAction) => void;
+  resuming?: string;
+  resumeError?: { id: string; code: string };
 }) {
   const [filter, setFilter] = useState('');
   const [folded, setFolded] = useState<ReadonlySet<string>>(new Set());
@@ -32,6 +38,7 @@ export function Explorer({ fleet, machines, open, current, projects, project, on
     const groups = new Map<string, Map<string, AgentTileModel[]>>();
     for (const m of machines) if (!q) groups.set(m.id, new Map());
     for (const a of fleet) {
+      if (a.closed && a.interrupted && !groups.has(machineKey(a))) groups.set(machineKey(a), new Map());
       if (a.closed) continue;
       if (q && ![a.name, a.id, a.machine, machineKey(a), a.project ?? '', a.workspace, a.branch ?? ''].some(x => x.toLowerCase().includes(q))) continue;
       const folders = groups.get(machineKey(a)) ?? new Map<string, AgentTileModel[]>();
@@ -44,8 +51,19 @@ export function Explorer({ fleet, machines, open, current, projects, project, on
   // Closed agents wait in their own section until the owner clears them.
   const closed = useMemo(() => {
     const q = filter.trim().toLowerCase();
-    return fleet.filter((a) => a.closed && (!q || [a.name, a.machine, a.project ?? '', a.workspace].some((x) => x.toLowerCase().includes(q))))
+    return fleet.filter((a) => a.closed && !a.interrupted && (!q || [a.name, a.machine, a.project ?? '', a.workspace].some((x) => x.toLowerCase().includes(q))))
       .sort((a, b) => (b.endedMs ?? 0) - (a.endedMs ?? 0));
+  }, [fleet, filter]);
+  // ADR-0060: per machine, the agents its restart interrupted (shown under it, not with the closed ones).
+  const interrupted = useMemo(() => {
+    const q = filter.trim().toLowerCase();
+    const by = new Map<string, AgentTileModel[]>();
+    for (const a of fleet) {
+      if (!a.closed || !a.interrupted) continue;
+      if (q && ![a.name, a.machine, a.project ?? '', a.workspace].some((x) => x.toLowerCase().includes(q))) continue;
+      by.set(machineKey(a), [...(by.get(machineKey(a)) ?? []), a]);
+    }
+    return by;
   }, [fleet, filter]);
   const now = Date.now();
 
@@ -70,15 +88,19 @@ export function Explorer({ fleet, machines, open, current, projects, project, on
       {[...tree.entries()].map(([machine, folders]) => {
         const m = machines.find(x => x.id === machine) ?? machines.find(x => x.name === machine);
         const count = [...folders.values()].reduce((n, l) => n + l.length, 0);
+        const stopped = interrupted.get(machine) ?? [];
         const closed = folded.has(machine);
         const name = m?.name ?? machine;
-        return <section key={machine} data-machine-id={machine} className="mb-0.5">
+        // ADR-0070: an offline machine says when it was last heard from, on the row and in its tooltip.
+        const seen = m && !m.online ? t('machine-last-seen', { when: ago(m.lastSeenMs, now) }) : undefined;
+        return <section key={machine} data-machine-id={machine} data-online={m?.online ? 'true' : 'false'} className="mb-0.5">
           <div className="group flex items-center">
-            <button type="button" className="ide-row flex-1 font-medium" aria-expanded={!closed} aria-label={t('ide-toggle-machine', { name })} onClick={() => fold(machine)}>
+            <button type="button" className="ide-row flex-1 font-medium" aria-expanded={!closed} aria-label={t('ide-toggle-machine', { name })} title={seen ? `${t('machine-offline')} · ${seen}` : undefined} onClick={() => fold(machine)}>
               <Icon name="chevron" className={`size-3.5 text-muted transition-transform duration-150 ${closed ? 'rtl:rotate-180' : 'rotate-90'}`} />
               <span aria-hidden className={`size-2 flex-none rounded-full ${m?.online ? 'bg-finished' : 'bg-unknown'}`} />
               <span className="sr-only">{t(m?.online ? 'machine-online' : 'machine-offline')}</span>
               <span className="min-w-0 flex-1 truncate">{name}{m && m.id !== m.name && <code className="ms-1.5 text-[11px] font-normal text-muted">{m.id}</code>}</span>
+              {seen && <span className="flex-none truncate text-[11px] font-normal text-muted" data-last-seen>{seen}</span>}
               {!!m?.memoryBytes && <span className="font-mono text-[11px] font-normal text-muted" title={t('ide-memory')}>{bytesLabel(m.memoryBytes)}</span>}
               <span className="text-[11px] font-normal text-muted">{count}</span>
             </button>
@@ -91,12 +113,30 @@ export function Explorer({ fleet, machines, open, current, projects, project, on
                 <button type="button" className="ide-row" aria-current={current === a.id ? 'true' : undefined} aria-pressed={open.includes(a.id)} onClick={() => onToggle(a.id)} title={`${a.machine} · ${a.workspace}${a.branch ? ` · ${a.branch}` : ''}${a.parentName ? ` · ${t('helper-started-by', { name: a.parentName })}` : ''}`}>
                   <StateMark state={a.state} />
                   <span className="min-w-0 flex-1 truncate">{a.name}{a.parentName && <span className="ms-1.5 text-[11px] text-muted">{t('helper-started-by', { name: a.parentName })}</span>}</span>
+                  <NoAskBadge agent={a} compact />
                   {a.shared && <span className="flex-none text-[11px] text-muted" title={t('workspace-shared')}>{t('ide-shared')}</span>}
                   {(a.filesChanged ?? 0) > 0 && <span className="font-mono text-[11px] text-needs-you">{a.filesChanged}</span>}
                 </button>
               </li>)}
             </ul>
           </div>)}
+          {!closed && stopped.length > 0 && <div className="ms-3 border-s border-line ps-1" role="group" aria-label={t('interrupted-section')}>
+            <div className="px-2 pt-1.5 pb-0.5 text-[11px] text-muted" title={t('interrupted-hint')}>{t('interrupted-section')}</div>
+            <ul className="m-0 list-none p-0">
+              {stopped.map((a) => <li key={a.id}>
+                <div className="flex items-center">
+                  <button type="button" className="ide-row flex-1 opacity-80" aria-current={current === a.id ? 'true' : undefined} aria-pressed={open.includes(a.id)} onClick={() => onToggle(a.id)} title={`${a.machine} · ${a.workspace}`}>
+                    <span className="[&_.state__mark]:!animate-none"><StateMark state="finished" /></span>
+                    <span className="min-w-0 flex-1 truncate">{a.name}</span>
+                  </button>
+                  {onResume && <button type="button" className="ide-chip me-1 flex-none hover:text-ink" disabled={resuming === a.id} onClick={() => onResume(a, a.interrupted?.stillRunning ? 'stop' : a.interrupted?.resumable ? 'resume' : 'again')}>
+                    {t(a.interrupted?.stillRunning ? 'action-stop-old' : a.interrupted?.resumable ? 'action-resume' : 'action-start-again')}
+                  </button>}
+                </div>
+                {resumeError?.id === a.id && <p role="alert" className="m-0 px-2 pb-1 text-xs text-needs-you">{t(resumeReasonKey(resumeError.code))}</p>}
+              </li>)}
+            </ul>
+          </div>}
         </section>;
       })}
       {closed.length > 0 && <section className="mt-2 border-t border-line pt-1" aria-label={t('closed-section')}>
