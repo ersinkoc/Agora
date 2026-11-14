@@ -891,8 +891,47 @@ impl App {
             } else {
                 Style::default()
             };
-            spans.push(Span::styled(tab_label(i, id, s.rows), style));
+            let needs_you = s.rows.iter().any(|r| r.id == *id && r.needs_you);
+            spans.push(Span::styled(
+                tab_label(i, id, s.rows),
+                if needs_you && i != self.active {
+                    attention
+                } else {
+                    style
+                },
+            ));
             spans.push(Span::raw(" "));
+        }
+        // At the bar's right end: how many agents not in front need the user, so a wait is never missed inside a tab.
+        let waiting = s
+            .rows
+            .iter()
+            .filter(|r| !r.header && r.needs_you && Some(r.id.as_str()) != self.active_agent())
+            .count();
+        if waiting > 0 && !self.tabs.is_empty() {
+            let note = format!(
+                "! {}",
+                (s.t)(
+                    key!("tui-app-tabs-waiting"),
+                    &[(
+                        "count",
+                        Arg::Num(i64::try_from(waiting).unwrap_or(i64::MAX))
+                    )]
+                )
+            );
+            let used: usize = spans.iter().map(Span::width).sum();
+            let free = usize::from(a.tabs.width).saturating_sub(used);
+            // The whole note where it fits, else just the count.
+            let short = format!("! {waiting}");
+            let note = if text_width(&note) < free {
+                note
+            } else {
+                short
+            };
+            if text_width(&note) < free {
+                spans.push(Span::raw(" ".repeat(free - text_width(&note))));
+                spans.push(Span::styled(note, attention));
+            }
         }
         Line::from(spans).render(a.tabs, buf);
 
@@ -902,10 +941,7 @@ impl App {
             Paragraph::new(shown).render(a.terminal, buf);
         } else {
             match (self.active_agent(), s.terminal) {
-                (None, _) => Paragraph::new((s.t)(key!("tui-app-no-agent"), &[]))
-                    .style(dim)
-                    .wrap(Wrap { trim: true })
-                    .render(a.terminal, buf),
+                (None, _) => welcome(s, a.terminal, buf, (strong, dim, attention)),
                 (Some(_), None) => Paragraph::new(
                     s.no_screen
                         .map_or_else(|| (s.t)(key!("tui-app-no-screen"), &[]), str::to_string),
@@ -1100,6 +1136,85 @@ fn footer_fit(width: usize, notice: &str, keys: &str, mouse: &str) -> (String, O
 
 /// The columns the footer keeps for keys before it shows the mouse state too.
 const FOOTER_KEYS: usize = 40;
+
+/// Nothing open (as the web's welcome): what to do first, the agents running now (those that need the user marked), and the two
+/// keys that find everything else. Centred in the pane, at most 64 columns wide.
+fn welcome(
+    s: &Screen<'_>,
+    area: Rect,
+    buf: &mut ratatui::buffer::Buffer,
+    (strong, dim, attention): (Style, Style, Style),
+) {
+    let width = area.width.min(64);
+    let inner = Rect {
+        x: area.x + (area.width - width) / 2,
+        width,
+        ..area
+    };
+    let w = usize::from(width);
+    let mut lines: Vec<Line<'_>> = vec![Line::styled(
+        (s.t)(key!("tui-app-welcome-title"), &[]),
+        strong,
+    )];
+    for l in wrap(&(s.t)(key!("tui-app-no-agent"), &[]), w) {
+        lines.push(Line::styled(l, dim));
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![
+        Span::styled("s  ", strong),
+        Span::raw((s.t)(key!("tui-app-welcome-start"), &[])),
+    ]));
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(
+        (s.t)(key!("tui-app-welcome-running"), &[]),
+        strong,
+    ));
+    let agents: Vec<&Row> = s.rows.iter().filter(|r| !r.header).collect();
+    if agents.is_empty() {
+        lines.push(Line::styled((s.t)(key!("tui-app-welcome-none"), &[]), dim));
+    }
+    // Those that need the user first, then the others, as many as there is room for (six, like the web).
+    let mut shown: Vec<&&Row> = agents.iter().filter(|r| r.needs_you).collect();
+    shown.extend(agents.iter().filter(|r| !r.needs_you));
+    for r in shown.into_iter().take(6) {
+        let (label, gap, state) = tree_row_fit(w, r.label.trim_start(), &r.state, r.needs_you);
+        let mark = if r.needs_you { "! " } else { "  " };
+        lines.push(Line::from(vec![
+            Span::styled(
+                mark,
+                if r.needs_you {
+                    attention
+                } else {
+                    Style::default()
+                },
+            ),
+            Span::raw(label),
+            Span::raw(" ".repeat(gap)),
+            Span::styled(state, if r.needs_you { attention } else { dim }),
+        ]));
+    }
+    lines.push(Line::raw(""));
+    for (k, what) in [
+        ("Ctrl K", key!("tui-app-welcome-search")),
+        ("N", key!("tui-app-welcome-next")),
+    ] {
+        lines.push(Line::from(vec![
+            Span::styled(format!("{k:<8}"), strong),
+            Span::styled((s.t)(what, &[]), dim),
+        ]));
+    }
+    // A little air above it when the pane is tall enough.
+    let top = u16::try_from(lines.len())
+        .ok()
+        .and_then(|n| area.height.checked_sub(n))
+        .map_or(0, |free| (free / 3).min(4));
+    let inner = Rect {
+        y: inner.y + top,
+        height: inner.height.saturating_sub(top),
+        ..inner
+    };
+    Paragraph::new(lines).render(inner, buf);
+}
 
 /// A tree row's label, the gap and its state, fitted to `width` columns (the marker's two included), in display columns. The state
 /// stays at the right edge: "needs you" whole, the label shortened for it; any other state keeps the label at least 10 columns and
@@ -1398,11 +1513,17 @@ fn tab_label(i: usize, id: &str, rows: &[Row]) -> String {
     let name = rows
         .iter()
         .find(|r| r.id == id)
-        .map_or(id, |r| r.label.as_str());
-    if i < 9 {
-        format!(" {} {name} ", i + 1)
+        .map_or(id, |r| r.label.trim_start());
+    // An agent that needs the user says so in its tab too.
+    let mark = if rows.iter().any(|r| r.id == id && r.needs_you) {
+        "! "
     } else {
-        format!(" {name} ")
+        ""
+    };
+    if i < 9 {
+        format!(" {} {mark}{name} ", i + 1)
+    } else {
+        format!(" {mark}{name} ")
     }
 }
 
@@ -2070,7 +2191,23 @@ mod tests {
         let rows = rows();
         let app = App::default();
         let lines = draw(&app, &rows, None, ColorMode::Mono);
-        assert!(lines[1].contains("│tui-app-no-agent"), "{lines:#?}");
+        // The welcome, as the web's: what to do, the start key, who runs (the one that needs you first), the two keys.
+        let all = lines.join("\n");
+        for want in [
+            "│tui-app-welcome-title",
+            "│tui-app-no-agent",
+            "│s  tui-app-welcome-start",
+            "│Ctrl K  tui-app-welcome-search",
+            "│N       tui-app-welcome-next",
+        ] {
+            assert!(all.contains(want), "{want}: {all}");
+        }
+        let running = lines
+            .iter()
+            .position(|l| l.contains("│tui-app-welcome-running"))
+            .unwrap();
+        assert!(lines[running + 1].contains("│! shell"), "{all}");
+        assert!(lines[running + 1].contains("needs you│"), "{all}");
         assert!(lines[2].contains("needs you"));
         let empty = draw(&app, &[], None, ColorMode::Full);
         assert!(empty[0].starts_with("tui-app-tree-empty"));
@@ -2449,6 +2586,28 @@ mod tests {
         assert_eq!(app.selection, Some(sel));
         key(&mut app, &rows, Key::Char('a'));
         assert_eq!(app.selection, None);
+    }
+
+    #[test]
+    fn inside_a_tab_the_bar_says_who_else_needs_you() {
+        let rows = rows();
+        let mut app = App::default();
+        // The first agent in front; the third ("shell") needs the user.
+        key(&mut app, &rows, Key::Enter);
+        let lines = draw(&app, &rows, None, ColorMode::Mono);
+        assert!(
+            // At the bar's right end, just before the inspector's divider.
+            lines[0].contains("! tui-app-tabs-waiting count=1│"),
+            "{}",
+            lines[0]
+        );
+        // Its own tab says it too, and the count leaves out the agent in front.
+        key(&mut app, &rows, Key::Ctrl(']'));
+        key(&mut app, &rows, Key::End);
+        key(&mut app, &rows, Key::Enter);
+        let lines = draw(&app, &rows, None, ColorMode::Mono);
+        assert!(lines[0].contains(" 2 ! shell "), "{}", lines[0]);
+        assert!(!lines[0].contains("tui-app-tabs-waiting"), "{}", lines[0]);
     }
 
     #[test]

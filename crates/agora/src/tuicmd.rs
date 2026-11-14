@@ -153,7 +153,17 @@ fn resume(
         authorization: Some(auth),
     };
     match session.resume_in(node, asked) {
-        Ok(agent) => say.text(key!("tui-resumed"), &[("agent", Arg::Str(agent))]),
+        // Named as the tree names it (the agent keeps its id when it comes back).
+        Ok(agent) => {
+            let name = snapshot
+                .agents
+                .iter()
+                .find(|a| a.agent_id == agent || a.agent_id == selected)
+                .map_or(agent.clone(), |a| {
+                    agora_tui::split::agent_name(&a.agent_id, &a.kind)
+                });
+            say.text(key!("tui-resumed"), &[("agent", Arg::Str(name))])
+        }
         Err(e) if e.code == "approval.signature_invalid" => say.text(
             key!("tui-not-trusted"),
             &[
