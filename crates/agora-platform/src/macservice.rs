@@ -1,8 +1,13 @@
 //! macOS half of `agora service` (ADR-0062 item 6): a LaunchAgent for the current user, in `~/Library/LaunchAgents`, loaded by
 //! launchd into the user's login session (`gui/<uid>`). No administrator rights and nothing outside the user's own folder.
+//! - Every operation first asks launchd for this user's login session (`launchctl print gui/<uid>`): over SSH while the user is not
+//!   logged in at the screen there is none, and nothing is written ([`crate::ServiceProblem::NoUserManager`]).
 //! - `install` writes the job's file (owner-only, renamed into place, never through a planted link) and, when the job was turned off
-//!   (`launchctl disable`, Login Items), turns it on again; launchd reads the file at the next login. `start` loads it now
-//!   (`launchctl bootstrap`, or `kickstart` when it is loaded already).
+//!   (`launchctl disable`), turns it on again; one the user turned off in System Settings > Login Items is refused and named there
+//!   ([`crate::ServiceProblem::TurnedOffInSettings`]: only the user can turn it on), and `status` reads it as off; when that fails, what was at the file's place before is put back. launchd reads the
+//!   file at the next login. `start` loads it now (`launchctl bootstrap`, or `kickstart` when it is loaded already). A job that is
+//!   already registered and on is not written again: a changed spec (Agora moved, another `PATH`) needs `remove`, then `install`.
+//! - The job gets one variable, `PATH`, with only the full-path entries of the installing shell's ([`crate::service_path_variable`]).
 //! - Every file Agora writes starts with [`MARKER`]. A file at the job's place without it (a LaunchAgent made by hand or by another
 //!   tool), a link or a folder there, or a job of the same label that launchd loaded from another file, is never replaced, stopped
 //!   nor removed: [`crate::ServiceProblem::NotOurs`] / [`crate::ServiceProblem::InTheWay`].
@@ -12,7 +17,8 @@
 //!   default 10 s (`ThrottleInterval`) between starts.
 //! - `AbandonProcessGroup` stays false (launchd's default): when the job is unloaded, what it started is ended with it, so nothing
 //!   an agent left behind outlives the service.
-//! - `remove` unloads it (`launchctl bootout`) and deletes the file. The caller stops the role through its lock first.
+//! - `remove` unloads it (`launchctl bootout`) and deletes the file, renamed aside first and checked there, so a file put in its place
+//!   meanwhile is never deleted. The caller stops the role through its lock first.
 //! - Refused as root ([`crate::ServiceProblem::Root`]): `sudo` would write root's job, or root's file into the user's folder.
 //! - Nothing is written to standard output or error: the supervisor writes its own log (`--log`).
 //!
@@ -58,6 +64,19 @@ fn home() -> io::Result<PathBuf> {
         }
         let dir = std::ffi::CStr::from_ptr((*pw).pw_dir);
         Ok(PathBuf::from(OsStr::from_bytes(dir.to_bytes())))
+    }
+}
+
+/// This user's login session (`gui/<uid>`) as launchd has it: none over SSH while the user is not logged in at the screen, and then
+/// nothing can be loaded into it. [`ServiceProblem::NoUserManager`], asked before anything is written or read.
+fn session() -> io::Result<()> {
+    if launchctl(&["print", &domain()])?.status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::NotConnected,
+            ServiceProblem::NoUserManager,
+        ))
     }
 }
 
@@ -157,11 +176,15 @@ fn carry(s: &OsStr) -> Result<&str, ServiceRefusal> {
     if t.chars().any(char::is_control) {
         return Err(ServiceRefusal::ControlCharacter);
     }
+    // U+FFFE and U+FFFF are not control characters, but XML 1.0 cannot carry them (the file would not parse).
+    if t.chars().any(crate::is_noncharacter) {
+        return Err(ServiceRefusal::CannotCarry);
+    }
     Ok(t)
 }
 
-/// See [`crate::service_refusal`]: every value must be Unicode without control characters; the program and the working directory
-/// must be full paths.
+/// See [`crate::service_refusal`]: every value must be Unicode without control characters or noncharacters; the program and the
+/// working directory must be full paths. `PATH` is filtered instead ([`crate::service_path_variable`]).
 pub(crate) fn refusal(spec: &ServiceSpec) -> Option<(std::ffi::OsString, ServiceRefusal)> {
     for p in [&spec.program, &spec.work_dir] {
         if !p.is_absolute() {
@@ -171,7 +194,6 @@ pub(crate) fn refusal(spec: &ServiceSpec) -> Option<(std::ffi::OsString, Service
     std::iter::once(spec.program.as_os_str())
         .chain(spec.args.iter().map(std::ffi::OsString::as_os_str))
         .chain(std::iter::once(spec.work_dir.as_os_str()))
-        .chain(spec.env.iter().map(|(_, v)| v.as_os_str()))
         .find_map(|a| carry(a).err().map(|why| (a.to_owned(), why)))
 }
 
@@ -191,14 +213,14 @@ pub(crate) fn plist(spec: &ServiceSpec) -> io::Result<String> {
     for a in &spec.args {
         args.push_str(&format!("\t\t<string>{}</string>\n", text(a)?));
     }
-    let mut env = String::new();
-    for (k, v) in &spec.env {
-        env.push_str(&format!(
-            "\t\t<key>{}</key>\n\t\t<string>{}</string>\n",
-            text(OsStr::new(k))?,
-            text(v)?
-        ));
-    }
+    // Only `PATH`, and only its full-path entries: an empty or relative one would mean the folder launchd runs it from.
+    let env = match crate::service_path_variable(&spec.env) {
+        Some(path) => format!(
+            "\t\t<key>PATH</key>\n\t\t<string>{}</string>\n",
+            xml_escape(&path)
+        ),
+        None => String::new(),
+    };
     let keep_alive = if spec.restart_supervisor_on_failure {
         "\t<key>KeepAlive</key>\n\t<dict>\n\t\t<key>SuccessfulExit</key>\n\t\t<false/>\n\t</dict>\n"
     } else {
@@ -303,6 +325,7 @@ fn loaded_elsewhere(name: &str, ours: &Path) -> io::Result<Option<PathBuf>> {
 
 /// See [`crate::service_foreign`].
 pub(crate) fn foreign(name: &str) -> io::Result<Option<PathBuf>> {
+    session()?;
     let path = plist_path(name)?;
     match at_place(&path)? {
         AtPlace::Theirs | AtPlace::InTheWay => return Ok(Some(path)),
@@ -313,31 +336,61 @@ pub(crate) fn foreign(name: &str) -> io::Result<Option<PathBuf>> {
 
 pub(crate) fn install(spec: &ServiceSpec) -> io::Result<()> {
     precheck()?;
+    session()?;
     let body = plist(spec)?;
     let path = plist_path(&spec.name)?;
     if let Some(theirs) = loaded_elsewhere(&spec.name, &path)? {
         return Err(not_ours(theirs));
     }
-    match at_place(&path)? {
+    // What was there before, put back when a later step fails: nothing is left half-registered.
+    let before = match at_place(&path)? {
         AtPlace::InTheWay => return Err(in_the_way(path)),
         AtPlace::Theirs => return Err(not_ours(path)),
-        AtPlace::Ours(was) if was == body.as_bytes() => {}
-        AtPlace::Ours(_) | AtPlace::Absent => {
-            if let Some(dir) = path.parent() {
-                fs::create_dir_all(dir)?;
+        AtPlace::Ours(was) if was == body.as_bytes() => None,
+        AtPlace::Ours(was) => Some(Some(was)),
+        AtPlace::Absent => Some(None),
+    };
+    if before.is_some() {
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir)?;
+        }
+        // Written beside it (exclusive, 0600 from its creation) and renamed over it: `rename` replaces the name, never a link's
+        // target.
+        crate::write_private(&path, body.as_bytes())?;
+    }
+    // Turned off in System Settings: only the user can turn it on there, so nothing is registered and they are told where.
+    let turned_on = turn_on(&spec.name).and_then(|()| {
+        if off_in_settings(&path) {
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                ServiceProblem::TurnedOffInSettings,
+            ))
+        } else {
+            Ok(())
+        }
+    });
+    if turned_on.is_err() {
+        match before {
+            Some(None) => {
+                let _ = fs::remove_file(&path);
             }
-            // Written beside it (exclusive, 0600 from its creation) and renamed over it: `rename` replaces the name, never a
-            // link's target.
-            crate::write_private(&path, body.as_bytes())?;
+            Some(Some(was)) => {
+                let _ = crate::write_private(&path, &was);
+            }
+            None => {}
         }
     }
-    // Turned off (`launchctl disable`, Login Items): turned on again, and checked, so `install` never claims a job launchd skips.
-    if disabled(&spec.name)? {
-        checked(&["enable", &target(&spec.name)])?;
-        if disabled(&spec.name)? {
+    turned_on
+}
+
+/// Turned off (`launchctl disable`): turned on again, and read back, so `install` never claims a job launchd skips.
+fn turn_on(name: &str) -> io::Result<()> {
+    if disabled(name)? {
+        checked(&["enable", &target(name)])?;
+        if disabled(name)? {
             return Err(io::Error::other(format!(
                 "launchctl enable {} did not turn it on",
-                target(&spec.name)
+                target(name)
             )));
         }
     }
@@ -346,6 +399,7 @@ pub(crate) fn install(spec: &ServiceSpec) -> io::Result<()> {
 
 pub(crate) fn start(name: &str) -> io::Result<()> {
     precheck()?;
+    session()?;
     let path = plist_path(name)?;
     match at_place(&path)? {
         AtPlace::Ours(_) => {}
@@ -367,6 +421,7 @@ pub(crate) fn start(name: &str) -> io::Result<()> {
 
 pub(crate) fn remove(name: &str) -> io::Result<bool> {
     precheck()?;
+    session()?;
     let path = plist_path(name)?;
     let place = at_place(&path)?;
     // Only a job Agora wrote is unloaded and deleted; one made by hand under the same label is left exactly as it is.
@@ -386,16 +441,36 @@ pub(crate) fn remove(name: &str) -> io::Result<bool> {
     if matches!(place, AtPlace::Absent) {
         return Ok(was_loaded);
     }
-    match fs::symlink_metadata(&path) {
-        Ok(m) if m.is_file() => fs::remove_file(&path)?,
-        Ok(_) => return Err(in_the_way(path)),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e),
-    }
+    delete_ours(&path)?;
     Ok(true)
 }
 
-/// Whether `name` is turned off for this user (`launchctl disable`, or Login Items in System Settings), from
+/// Deletes the job file at `path` only if what is there when it is taken away is still Agora's: it is first renamed aside (one step,
+/// which takes whatever is at the name, never a link's target) and checked there; anything else put in its place meanwhile is
+/// renamed back and named.
+fn delete_ours(path: &Path) -> io::Result<()> {
+    let mut aside = path.as_os_str().to_owned();
+    aside.push(format!(".remove-{}", std::process::id()));
+    let aside = PathBuf::from(aside);
+    match fs::rename(path, &aside) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    }
+    match at_place(&aside) {
+        Ok(AtPlace::Ours(_)) => fs::remove_file(&aside),
+        other => {
+            let _ = fs::rename(&aside, path);
+            match other {
+                Ok(AtPlace::Theirs) => Err(not_ours(path.to_path_buf())),
+                Ok(_) => Err(in_the_way(path.to_path_buf())),
+                Err(e) => Err(e),
+            }
+        }
+    }
+}
+
+/// Whether `name` is turned off for this user with `launchctl disable` (not System Settings: [`off_in_settings`]), from
 /// `launchctl print-disabled`'s `"<label>" => disabled` (or `=> true` on older systems) lines.
 pub(crate) fn disabled_in(listing: &str, name: &str) -> bool {
     let quoted = format!("\"{name}\"");
@@ -417,15 +492,102 @@ fn disabled(name: &str) -> io::Result<bool> {
     Ok(disabled_in(&String::from_utf8_lossy(&out.stdout), name))
 }
 
+/// `SMAppService` statuses ([`login_items_status`]): `requiresApproval` is a job the user turned off in System Settings > General >
+/// Login Items & Extensions. Measured on macOS 27.2: switching a LaunchAgent off there unloads it at once and keeps it from loading
+/// at login, but `launchctl print-disabled` does not show it and `launchctl enable` does not undo it (a `bootstrap` still loads it
+/// for this session only).
+const SM_REQUIRES_APPROVAL: isize = 2;
+
+#[link(name = "objc")]
+extern "C" {
+    fn objc_getClass(name: *const libc::c_char) -> *mut libc::c_void;
+    fn sel_registerName(name: *const libc::c_char) -> *mut libc::c_void;
+    fn class_getClassMethod(cls: *mut libc::c_void, sel: *mut libc::c_void) -> *mut libc::c_void;
+    fn objc_msgSend();
+    fn objc_autoreleasePoolPush() -> *mut libc::c_void;
+    fn objc_autoreleasePoolPop(pool: *mut libc::c_void);
+}
+
+#[link(name = "Foundation", kind = "framework")]
+extern "C" {}
+
+#[link(name = "ServiceManagement", kind = "framework")]
+extern "C" {}
+
+/// `+[SMAppService statusForLegacyURL:]` (macOS 13 and later) for the job file at `path`: whether the user allowed it in System
+/// Settings. `None` where the call does not exist or the path is not Unicode (then only launchd's own list is read).
+fn login_items_status(path: &Path) -> Option<isize> {
+    type ClassStr = unsafe extern "C" fn(
+        *mut libc::c_void,
+        *mut libc::c_void,
+        *const libc::c_char,
+    ) -> *mut libc::c_void;
+    type ClassObj = unsafe extern "C" fn(
+        *mut libc::c_void,
+        *mut libc::c_void,
+        *mut libc::c_void,
+    ) -> *mut libc::c_void;
+    type ClassObjInt =
+        unsafe extern "C" fn(*mut libc::c_void, *mut libc::c_void, *mut libc::c_void) -> isize;
+    let c_path = std::ffi::CString::new(path.to_str()?).ok()?;
+    // SAFETY: Objective-C runtime calls with classes and selectors looked up by their C names; each method is checked to exist
+    // before `objc_msgSend` is called through the exact signature of that method (arm64 and x86_64 pass these the same way as a
+    // plain C call). The objects made are autoreleased inside a pool pushed and popped here.
+    unsafe {
+        let sm = objc_getClass(c"SMAppService".as_ptr());
+        let url_class = objc_getClass(c"NSURL".as_ptr());
+        let string_class = objc_getClass(c"NSString".as_ptr());
+        let status_sel = sel_registerName(c"statusForLegacyURL:".as_ptr());
+        let url_sel = sel_registerName(c"fileURLWithPath:".as_ptr());
+        let string_sel = sel_registerName(c"stringWithUTF8String:".as_ptr());
+        if sm.is_null()
+            || url_class.is_null()
+            || string_class.is_null()
+            || class_getClassMethod(sm, status_sel).is_null()
+            || class_getClassMethod(url_class, url_sel).is_null()
+            || class_getClassMethod(string_class, string_sel).is_null()
+        {
+            return None;
+        }
+        let pool = objc_autoreleasePoolPush();
+        let send = objc_msgSend as unsafe extern "C" fn();
+        let string = std::mem::transmute::<unsafe extern "C" fn(), ClassStr>(send)(
+            string_class,
+            string_sel,
+            c_path.as_ptr(),
+        );
+        let status = if string.is_null() {
+            None
+        } else {
+            let url = std::mem::transmute::<unsafe extern "C" fn(), ClassObj>(send)(
+                url_class, url_sel, string,
+            );
+            (!url.is_null()).then(|| {
+                std::mem::transmute::<unsafe extern "C" fn(), ClassObjInt>(send)(
+                    sm, status_sel, url,
+                )
+            })
+        };
+        objc_autoreleasePoolPop(pool);
+        status
+    }
+}
+
+/// Whether the user turned the job at `path` off in System Settings (see [`SM_REQUIRES_APPROVAL`]).
+fn off_in_settings(path: &Path) -> bool {
+    login_items_status(path) == Some(SM_REQUIRES_APPROVAL)
+}
+
 /// Registered when a file is at the job's place (Agora's or not: the caller asks [`foreign`]) or launchd has the job loaded.
 pub(crate) fn status(name: &str) -> io::Result<ServiceState> {
+    session()?;
     let path = plist_path(name)?;
     let file = !matches!(at_place(&path)?, AtPlace::Absent);
     if !file && loaded_from(name)?.is_none() {
         return Ok(ServiceState::NotInstalled);
     }
     Ok(ServiceState::Installed {
-        enabled: !disabled(name)?,
+        enabled: !disabled(name)? && !off_in_settings(&path),
     })
 }
 
@@ -446,7 +608,13 @@ mod tests {
                 "/Users/a&b <c>/.agora".into(),
                 "--log".into(),
             ],
-            env: vec![("PATH".into(), "/usr/bin:/bin:/Users/a b/.cargo/bin".into())],
+            env: vec![
+                (
+                    "PATH".into(),
+                    "/usr/bin::.:bin:/Users/a b/.cargo/bin".into(),
+                ),
+                ("HOME".into(), "/Users/a b".into()),
+            ],
             work_dir: "/Users/a&b <c>/.agora".into(),
             restart_supervisor_on_failure: true,
         }
@@ -482,7 +650,8 @@ mod tests {
             "<string>/Users/a b/.local/bin/agora</string>\n\t\t<string>supervise</string>\n\t\t<string>node</string>",
             "<string>--home</string>\n\t\t<string>/Users/a&amp;b &lt;c&gt;/.agora</string>\n\t\t<string>--log</string>",
             "<key>WorkingDirectory</key>\n\t<string>/Users/a&amp;b &lt;c&gt;/.agora</string>",
-            "<key>PATH</key>\n\t\t<string>/usr/bin:/bin:/Users/a b/.cargo/bin</string>",
+            // Only the full-path entries of `PATH` (the empty, `.` and `bin` ones would mean launchd's own folder), and no other variable.
+            "<key>EnvironmentVariables</key>\n\t<dict>\n\t\t<key>PATH</key>\n\t\t<string>/usr/bin:/Users/a b/.cargo/bin</string>\n\t</dict>",
             "<key>RunAtLoad</key>\n\t<true/>",
             "<key>KeepAlive</key>\n\t<dict>\n\t\t<key>SuccessfulExit</key>\n\t\t<false/>",
             "<key>AbandonProcessGroup</key>\n\t<false/>",
@@ -553,6 +722,16 @@ mod tests {
             Some(ServiceRefusal::CannotCarry)
         );
         assert_eq!(plist(&s).unwrap_err().kind(), io::ErrorKind::InvalidInput);
+        // U+FFFE and U+FFFF are no control characters, but a property list cannot carry them.
+        for bad in ["/a\u{fffe}", "/a\u{ffff}", "/a\u{fdd0}"] {
+            let mut s = spec();
+            s.work_dir = bad.into();
+            assert_eq!(
+                refusal(&s).map(|(_, w)| w),
+                Some(ServiceRefusal::CannotCarry),
+                "{bad:?}"
+            );
+        }
         // `%` means nothing to launchd: kept.
         let mut s = spec();
         s.args.push("100%".into());
@@ -582,6 +761,44 @@ mod tests {
             read_print_path("gui/501/x = {\n\tstate = running\n}\n"),
             None
         );
+    }
+
+    #[test]
+    fn remove_deletes_only_the_file_that_is_still_agoras_when_it_is_taken_away() {
+        let d = scratch("delete");
+        let f = d.join("job.plist");
+        fs::write(&f, plist(&spec()).unwrap()).unwrap();
+        delete_ours(&f).unwrap();
+        assert!(!f.exists());
+        // Swapped for one made by hand after it was checked: renamed back, named, and kept.
+        let by_hand = plist(&spec())
+            .unwrap()
+            .replacen(MARKER, "<?xml version=\"1.0\"?>\n", 1);
+        fs::write(&f, &by_hand).unwrap();
+        let e = delete_ours(&f).unwrap_err();
+        assert!(matches!(
+            crate::service_problem(&e),
+            Some(ServiceProblem::NotOurs(_))
+        ));
+        assert_eq!(fs::read_to_string(&f).unwrap(), by_hand);
+        // A link: renamed back, the file it points to untouched.
+        let real = d.join("real.plist");
+        fs::write(&real, plist(&spec()).unwrap()).unwrap();
+        fs::remove_file(&f).unwrap();
+        std::os::unix::fs::symlink(&real, &f).unwrap();
+        assert!(delete_ours(&f).is_err());
+        assert!(fs::symlink_metadata(&f).unwrap().file_type().is_symlink() && real.exists());
+        assert_eq!(fs::read_dir(&d).unwrap().count(), 2, "nothing left aside");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn the_system_settings_switch_is_read_through_service_management() {
+        // A job file that launchd never saw is not registered (0) and not turned off; the call exists on every supported macOS.
+        let d = scratch("sm");
+        assert_eq!(login_items_status(&d.join("never.plist")), Some(0));
+        assert!(!off_in_settings(&d.join("never.plist")));
+        let _ = fs::remove_dir_all(&d);
     }
 
     #[test]
@@ -635,10 +852,15 @@ mod tests {
         }
         let _clean = Clean(name.clone(), d.clone());
         let starts = d.join("starts");
+        // Two children like the node's: one in the job's process group, one in its own session (as an agent in its terminal).
         let script = format!(
-            "echo $$ >> '{}'; if [ -e '{}' ]; then exit 0; fi; exec /bin/sleep 600",
-            starts.display(),
-            d.join("exit0").display()
+            "echo $$ >> '{s}'; if [ -e '{e}' ]; then exit 0; fi; \
+             if [ -e '{d}/spawn' ]; then /bin/sleep 600 & echo $! > '{d}/group'; \
+             /usr/bin/perl -MPOSIX -e 'POSIX::setsid(); exec \"/bin/sleep\", 600' & echo $! > '{d}/session'; fi; \
+             exec /bin/sleep 600",
+            s = starts.display(),
+            e = d.join("exit0").display(),
+            d = d.display()
         );
         let spec = ServiceSpec {
             name: name.clone(),
@@ -711,7 +933,39 @@ mod tests {
             status(&name).unwrap(),
             ServiceState::Installed { enabled: true }
         );
+        let alive = |f: &str| {
+            let pid: i32 = fs::read_to_string(d.join(f))
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+            // SAFETY: signal 0 only asks whether the process exists.
+            (pid, unsafe { libc::kill(pid, 0) } == 0)
+        };
+        // Started once more, now with the two children, then removed.
+        fs::remove_file(d.join("exit0")).unwrap();
+        fs::write(d.join("spawn"), "").unwrap();
+        start(&name).unwrap();
+        let t = Instant::now();
+        while !d.join("session").exists() && t.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(alive("group").1 && alive("session").1, "children started");
         assert!(remove(&name).unwrap());
+        std::thread::sleep(Duration::from_millis(500));
+        let (group, session) = (alive("group"), alive("session"));
+        eprintln!(
+            "after bootout: group child alive {}, own-session child alive {}",
+            group.1, session.1
+        );
+        for (pid, alive) in [group, session] {
+            if alive {
+                // SAFETY: a child this test's job started.
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+            }
+        }
+        assert!(!group.1, "a child in the job's process group ends with it");
         assert_eq!(status(&name).unwrap(), ServiceState::NotInstalled);
         assert!(!remove(&name).unwrap());
         // A job file of the same label made by hand: neither replaced, started nor removed.

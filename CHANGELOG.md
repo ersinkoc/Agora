@@ -22,8 +22,9 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
   says what it registers first. `agora service status` says whether it is set up and whether it runs now; `agora service remove`
   stops it and removes it. On Windows (a logon task) and on Linux with systemd (a user unit in `~/.config/systemd/user`, no root;
   to start it at boot without logging in, run `loginctl enable-linger` yourself, which Agora never does), and on macOS (a
-  LaunchAgent in `~/Library/LaunchAgents`; macOS may say "Background Items Added" and lists it under Login Items). A login entry
-  of the same name that Agora did not write is left exactly as it is.
+  LaunchAgent in `~/Library/LaunchAgents`; macOS may say "Background Items Added" and lists it under Login Items, where switching it
+  off is shown by `status` and only you can switch it on again). A login entry of the same name that Agora did not write is left
+  exactly as it is, and `status` says it is not Agora's. The service gets only the full-path entries of your `PATH`.
 
 ### Getting started
 - A hub or node started by `agora` that crashes is started again 30 seconds later, at most 5 times in 10 minutes; one that

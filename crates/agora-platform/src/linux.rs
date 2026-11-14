@@ -758,18 +758,6 @@ fn env_word(s: &str) -> String {
     out
 }
 
-/// The `PATH` the unit gets: the spec's, keeping the order but only full paths that the unit can carry (an empty or relative entry
-/// would mean "the folder systemd runs it from"). No other variable of the installing shell goes into the unit.
-fn unit_path_variable(env: &[(String, std::ffi::OsString)]) -> Option<String> {
-    let (_, value) = env.iter().find(|(k, _)| k == "PATH")?;
-    let kept: Vec<String> = std::env::split_paths(value)
-        .filter(|p| p.is_absolute())
-        .filter_map(|p| p.to_str().map(str::to_owned))
-        .filter(|p| !p.chars().any(char::is_control))
-        .collect();
-    (!kept.is_empty()).then(|| kept.join(":"))
-}
-
 /// The unit file for `spec` (see the notes above); `InvalidInput` for what [`service_refusal`] refuses.
 fn unit_text(spec: &crate::ServiceSpec) -> io::Result<String> {
     let invalid = || io::Error::from(io::ErrorKind::InvalidInput);
@@ -800,7 +788,7 @@ fn unit_text(spec: &crate::ServiceSpec) -> io::Result<String> {
         "{UNIT_MARKER}[Unit]\nDescription={description}\n\n[Service]\nType=simple\nExecStart={exec}\nWorkingDirectory={}\n",
         work_dir.replace('%', "%%")
     );
-    if let Some(path) = unit_path_variable(&spec.env) {
+    if let Some(path) = crate::service_path_variable(&spec.env) {
         unit.push_str(&format!(
             "Environment={}\n",
             env_word(&format!("PATH={path}"))
