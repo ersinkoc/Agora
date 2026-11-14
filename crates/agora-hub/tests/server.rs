@@ -189,15 +189,39 @@ async fn a_node_streams_events_gets_acks_and_goes_offline_when_it_leaves() {
     }
     assert_eq!(next_ack(&mut c).await, 2);
     let (view, pos) = st.hub.view();
-    assert_eq!(pos, 2);
+    assert_eq!(pos, 3, "the hub's NodeLink and the node's two events");
     assert!(view.nodes["laptop"].online);
     assert!(view.agents.contains_key("laptop/agent-1"));
     c.close().await;
     task.await.unwrap();
-    assert!(
-        !st.hub.view().0.nodes["laptop"].online,
-        "recorded offline by the hub"
+    assert!(!st.hub.view().0.nodes["laptop"].online);
+    // ADR-0070: the hub's own presence facts, from this connection: open, then closed.
+    assert_eq!(
+        links(&st, "laptop"),
+        vec![
+            (true, v1::NodeLinkReason::Opened, 1),
+            (false, v1::NodeLinkReason::Closed, 1)
+        ]
     );
+}
+
+/// The `NodeLink` facts the hub recorded for `node`, in log order: `(up, reason, generation)`.
+fn links(st: &Arc<ServerState>, node: &str) -> Vec<(bool, v1::NodeLinkReason, u64)> {
+    let sub = st.hub.subscribe(Some(0)).unwrap();
+    sub.backlog
+        .iter()
+        .filter_map(|d| match &d.event.body {
+            Some(Body::NodeLink(l)) if l.node_id == node => {
+                assert_eq!(d.event.producer_id, "hub", "only the hub writes presence");
+                Some((
+                    l.up,
+                    v1::NodeLinkReason::try_from(l.reason).unwrap(),
+                    l.generation,
+                ))
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 #[tokio::test]
@@ -231,9 +255,61 @@ async fn a_replaced_connection_ending_late_does_not_record_the_node_offline() {
         st.hub.view().0.nodes["laptop"].online,
         "the live connection keeps it online"
     );
+    // The old connection's late end is recorded as `replaced` and changes nothing; the newer connection's `up` stands.
+    assert_eq!(
+        links(&st, "laptop"),
+        vec![
+            (true, v1::NodeLinkReason::Opened, 1),
+            (true, v1::NodeLinkReason::Opened, 2),
+            (false, v1::NodeLinkReason::Replaced, 1),
+        ]
+    );
+    // A window that rebuilds its view from the log agrees.
+    let rebuilt = agora_hub::projection::View::rebuild(st.hub.store())
+        .unwrap()
+        .0;
+    assert!(rebuilt.nodes["laptop"].online);
     new.close().await;
     new_task.await.unwrap();
     assert!(!st.hub.view().0.nodes["laptop"].online);
+}
+
+/// ADR-0070: a node whose connection ended and that dials again is online again by itself, with no reset of what it runs (a link
+/// that goes down and up is not a process start, so no `NodeOnline` is needed or sent).
+#[tokio::test]
+async fn a_node_that_dials_again_is_online_again_by_itself_and_its_agents_are_untouched() {
+    let st = state(None);
+    let (mut old, old_task) = node_conn(&st, "laptop").await;
+    let from = handshake(&mut old).await.from_seq;
+    for (i, b) in [online("laptop"), agent("agent-1")].into_iter().enumerate() {
+        old.send(&f(
+            STREAM_EVENTS,
+            kinds::EVENT,
+            event("laptop", from + i as u64, b),
+        ))
+        .await
+        .unwrap();
+    }
+    assert_eq!(next_ack(&mut old).await, from + 1);
+    old.close().await;
+    old_task.await.unwrap();
+    let view = st.hub.view().0;
+    assert!(!view.nodes["laptop"].online);
+    assert!(
+        view.agents["laptop/agent-1"].running,
+        "offline is not finished"
+    );
+    let (mut new, new_task) = node_conn(&st, "laptop").await;
+    assert_eq!(handshake(&mut new).await.from_seq, from + 2);
+    let view = st.hub.view().0;
+    assert!(
+        view.nodes["laptop"].online,
+        "online again on the new connection"
+    );
+    assert!(view.agents["laptop/agent-1"].running, "nothing was reset");
+    assert_eq!(view.nodes["laptop"].link_generation, 2);
+    new.close().await;
+    new_task.await.unwrap();
 }
 
 #[tokio::test]
@@ -324,7 +400,8 @@ async fn a_client_needs_a_token_then_gets_a_snapshot_and_live_events_and_can_res
         (STREAM_EVENTS, kinds::SNAPSHOT)
     );
     let snap = v1::Snapshot::decode(snap.payload.as_slice()).unwrap();
-    assert_eq!((snap.pos, snap.nodes.len()), (1, 1));
+    // The hub's `NodeLink { up }` (ADR-0070) is position 1, the node's `NodeOnline` 2.
+    assert_eq!((snap.pos, snap.nodes.len()), (2, 1));
     assert_eq!(snap.nodes[0].node_id, "n1");
 
     node.send(&f(
@@ -340,14 +417,14 @@ async fn a_client_needs_a_token_then_gets_a_snapshot_and_live_events_and_can_res
         v1::PositionedEvent::decode(live.payload.as_slice())
             .unwrap()
             .pos,
-        2
+        3
     );
 
     let mut c2 = dial(addr, Some("good-token")).await;
     c2.send(&f(
         STREAM_EVENTS,
         kinds::SUBSCRIBE,
-        v1::Subscribe { after_pos: Some(1) }.encode_to_vec(),
+        v1::Subscribe { after_pos: Some(2) }.encode_to_vec(),
     ))
     .await
     .unwrap();
@@ -357,7 +434,7 @@ async fn a_client_needs_a_token_then_gets_a_snapshot_and_live_events_and_can_res
         v1::PositionedEvent::decode(fr.payload.as_slice())
             .unwrap()
             .pos,
-        2
+        3
     );
 }
 
@@ -1833,8 +1910,124 @@ async fn a_model_switch_for_a_node_without_it_is_refused_and_audited() {
     );
 }
 
-// Silence detection on node links (F1) was taken out of 0.3.8: it needs a hub-owned presence event first (an ADR; see
-// docs/backlog/lan-test-findings.md R1). Its tests return with that design.
+/// Like [`node_conn`], with a short silence deadline (the hub's own is `server::NODE_SILENCE`).
+async fn node_conn_within(
+    state: &Arc<ServerState>,
+    node: &'static str,
+    silence: Duration,
+) -> (Conn<TcpStream>, tokio::task::JoinHandle<bool>) {
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    let st = Arc::clone(state);
+    let task = tokio::spawn(async move {
+        let (s, _) = l.accept().await.unwrap();
+        let (conn, _) = ws::accept_with_token(s).await.unwrap();
+        matches!(
+            server::serve_node_within(conn, node, &st.hub, &st.support, silence).await,
+            Err(server::ServeError::Silent)
+        )
+    });
+    (dial(addr, None).await, task)
+}
+
+#[tokio::test]
+async fn a_node_that_goes_silent_on_an_open_connection_is_closed_and_unreachable_for_commands() {
+    let st = state(None);
+    let silence = Duration::from_millis(400);
+    let (mut c, task) = node_conn_within(&st, "laptop", silence).await;
+    let from = handshake(&mut c).await.from_seq;
+    c.send(&f(
+        STREAM_EVENTS,
+        kinds::EVENT,
+        event("laptop", from, online("laptop")),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(next_ack(&mut c).await, from);
+    // The hub still answers a ping.
+    c.send(&f(STREAM_CONTROL, kinds::PING, b"x".to_vec()))
+        .await
+        .unwrap();
+    let pong = recv(&mut c).await;
+    assert_eq!(
+        (pong.stream_id, pong.kind, pong.payload.as_slice()),
+        (STREAM_CONTROL, kinds::PONG, b"x".as_slice())
+    );
+    assert!(st.hub.view().0.nodes["laptop"].online);
+    // Then nothing: the node froze, but the connection stays open.
+    let started = std::time::Instant::now();
+    let silent = tokio::time::timeout(Duration::from_secs(10), task)
+        .await
+        .expect("the hub must end a silent connection")
+        .unwrap();
+    assert!(silent, "ended for silence");
+    assert!(started.elapsed() >= silence / 2);
+    // Commands to it fail at once with `node.offline`, and the connection is closed so it dials again as soon as it runs.
+    assert!(!st.hub.router().is_connected("laptop"));
+    assert!(closed(&mut c).await, "the hub closed the silent connection");
+    // ADR-0070: recorded offline as silent, with when it was last heard (the ping, before the silence began).
+    let view = st.hub.view().0;
+    assert!(!view.nodes["laptop"].online);
+    assert_eq!(
+        links(&st, "laptop").last().copied(),
+        Some((false, v1::NodeLinkReason::Silent, 1))
+    );
+    let heard = view.nodes["laptop"].last_event_ms;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    assert!(
+        heard <= now.saturating_sub(silence.as_millis() as u64 / 2) && heard + 10_000 > now,
+        "last seen {heard} is about when the ping arrived (now {now})"
+    );
+}
+
+#[tokio::test]
+async fn an_idle_node_that_pings_is_never_dropped() {
+    idle_node_pinging_every(Duration::from_millis(400), 4, 20).await;
+}
+
+/// ADR-0070 compatibility: a node from before it pings every 15 s against the hub's 25 s deadline (3/5 of it). It is never dropped.
+#[tokio::test]
+async fn an_old_node_that_pings_every_15_s_is_never_dropped() {
+    let silence = Duration::from_millis(500);
+    // 15/25 of the deadline between pings.
+    idle_node_pinging_every(silence, 0, 8).await;
+}
+
+/// An idle node that only pings, every `silence / quarters` (or every 3/5 of it when `quarters` is 0), `pings` times.
+async fn idle_node_pinging_every(silence: Duration, quarters: u32, pings: u32) {
+    let every = if quarters == 0 {
+        silence * 3 / 5
+    } else {
+        silence / quarters
+    };
+    let st = state(None);
+    let (mut c, task) = node_conn_within(&st, "laptop", silence).await;
+    let from = handshake(&mut c).await.from_seq;
+    c.send(&f(
+        STREAM_EVENTS,
+        kinds::EVENT,
+        event("laptop", from, online("laptop")),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(next_ack(&mut c).await, from);
+    // Several deadlines with nothing on the link but pings.
+    for _ in 0..pings {
+        tokio::time::sleep(every).await;
+        c.send(&f(STREAM_CONTROL, kinds::PING, Vec::new()))
+            .await
+            .unwrap();
+        let pong = recv(&mut c).await;
+        assert_eq!((pong.stream_id, pong.kind), (STREAM_CONTROL, kinds::PONG));
+    }
+    assert!(!task.is_finished());
+    assert!(st.hub.view().0.nodes["laptop"].online);
+    c.close().await;
+    assert!(!task.await.unwrap(), "ended by the node, not for silence");
+}
 
 #[tokio::test]
 async fn a_window_that_pings_the_hub_gets_a_pong() {
@@ -1861,4 +2054,58 @@ async fn a_window_that_pings_the_hub_gets_a_pong() {
         (pong.stream_id, pong.kind, pong.payload.as_slice()),
         (STREAM_CONTROL, kinds::PONG, b"w1".as_slice())
     );
+}
+
+/// A node frozen past the deadline (a laptop asleep, a stopped process) and then resumed: the hub has closed its connection and
+/// recorded it offline (`NodeLink { up: false, silent }`), so the node sees the end of the stream and dials again, and the new
+/// connection records it online by itself (ADR-0070), with nothing it runs reset.
+#[tokio::test]
+async fn a_node_frozen_past_the_deadline_is_disconnected_then_dials_again_and_is_online() {
+    let st = state(None);
+    let silence = Duration::from_millis(300);
+    let (mut c, task) = node_conn_within(&st, "laptop", silence).await;
+    let from = handshake(&mut c).await.from_seq;
+    for (i, b) in [online("laptop"), agent("agent-1")].into_iter().enumerate() {
+        c.send(&f(
+            STREAM_EVENTS,
+            kinds::EVENT,
+            event("laptop", from + i as u64, b),
+        ))
+        .await
+        .unwrap();
+    }
+    assert_eq!(next_ack(&mut c).await, from + 1);
+    // Frozen: nothing read, nothing sent, for longer than the deadline.
+    tokio::time::sleep(silence * 3).await;
+    assert!(task.await.unwrap(), "ended for silence");
+    assert!(!st.hub.router().is_connected("laptop"));
+    // Resumed: the first thing the node reads is the end of the connection, so it dials again.
+    assert!(closed(&mut c).await, "the hub closed the silent connection");
+    let (mut again, task) = node_conn_within(&st, "laptop", silence).await;
+    handshake(&mut again).await;
+    again
+        .send(&f(STREAM_CONTROL, kinds::PING, Vec::new()))
+        .await
+        .unwrap();
+    let pong = recv(&mut again).await;
+    assert_eq!((pong.stream_id, pong.kind), (STREAM_CONTROL, kinds::PONG));
+    assert!(st.hub.router().is_connected("laptop"));
+    assert!(
+        st.hub.view().0.nodes["laptop"].online,
+        "online again on the new connection"
+    );
+    assert!(
+        st.hub.view().0.agents["laptop/agent-1"].running,
+        "its agents are untouched"
+    );
+    assert_eq!(
+        links(&st, "laptop"),
+        vec![
+            (true, v1::NodeLinkReason::Opened, 1),
+            (false, v1::NodeLinkReason::Silent, 1),
+            (true, v1::NodeLinkReason::Opened, 2),
+        ]
+    );
+    again.close().await;
+    let _ = task.await;
 }

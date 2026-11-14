@@ -11,7 +11,7 @@ import { signDirectory, type DirectoryInfo, type DirectoryListing } from './net/
 import { StartAgent, type KindChoice } from './components/StartAgent';
 import { approvalList, boards, costByProject, projectChoices, recentMessages, machines, machinesOnline, tiles, type ApprovalModel, type View } from './net/view';
 import { freshApprovals, titleWithCount } from './net/alert';
-import { indexedDbStore, signApproval, signStart, thisDevice, type Device } from './net/approval';
+import { approvalFailureKey, indexedDbStore, signApproval, signStart, thisDevice, type Device } from './net/approval';
 import type { StartChoice } from './components/StartApproval';
 import type { HelperGrant } from './components/HelperGrants';
 import { addPasskey, passkeysSupported, signInWithPasskey } from './net/passkey';
@@ -24,7 +24,10 @@ import type { ChatSource } from './net/chat';
 import { commitsOf, type CommitItem } from './net/history';
 import type { WorkspaceFiles } from './net/files';
 import { demoSource } from './terminal/source';
-import { AuditPage, DevicePage, Focus, Gallery, MachinesPage, SignInPage } from './screens';
+import { AuditPage, DevicePage, Focus, Gallery, MachinesPage, SignInPage, type MyDevice } from './screens';
+import { browserName, canBeApprovedOn, deviceLabel, fingerprint, fromHex, registrationVerifies, signAsk, signEndorsement, signRegistration, signRevocation, trustedBy, waitingForApproval, type DeviceInfo } from './net/devices';
+import { DeviceRequest } from './components/DeviceRequest';
+import { num } from './net/view';
 import { loadAudit } from './net/audit';
 import { agentTarget } from './components/sessionChoice';
 import { usableId } from './components/launchChoice';
@@ -83,6 +86,11 @@ export function App() {
   // This browser's own key: what the node checks an approval against (ADR-0028).
   const [device, setDevice] = useState<Device | undefined>();
   const [usage, setUsage] = useState<UsageSummary | undefined>();
+  // ADR-0061: this person's registered devices as the hub lists them, their fingerprints, and the requests put off for now.
+  const [mine, setMine] = useState<DeviceInfo[]>([]);
+  const [prints, setPrints] = useState<Map<string, string>>(new Map());
+  const [later, setLater] = useState<Set<string>>(new Set());
+  const [proven, setProven] = useState<Set<string>>(new Set());
   const [notice, setNotice] = useState<string | undefined>();
   const [starting, setStarting] = useState<{ node?: string } | false>(false);
   // A machine refused a command until the owner allows it (ADR-0041): what was asked, shown as a dialog.
@@ -127,7 +135,7 @@ export function App() {
       if (code === 'agent.option_unconfirmed') return 'start-option-unconfirmed';
       if (code === 'agent.option_invalid') return 'start-option-invalid';
       if (code === 'protocol.capability_missing' && launch.ids.length > 0) return 'start-options-unsupported';
-      return code === 'agent.mode_unsupported' ? 'start-directory-agent-unsupported' : code === 'approval.signature_invalid' ? 'approval-not-trusted' : code === 'protocol.capability_missing' ? 'start-directory-unsupported' : code === 'agent.kind_unknown' ? 'start-kind-unknown' : code === 'node.resource_limit' ? 'start-limit' : 'start-failed';
+      return code === 'agent.mode_unsupported' ? 'start-directory-agent-unsupported' : code === 'approval.signature_invalid' ? 'approval-not-trusted' : code === 'protocol.capability_missing' ? 'start-directory-unsupported' : code === 'agent.kind_unknown' ? 'start-kind-unknown' : code === 'node.resource_limit' ? 'start-limit' : code === 'auth.forbidden' ? 'start-directory-forbidden' : 'start-failed';
     }
   }, [api, device]);
   useEffect(() => {
@@ -166,7 +174,7 @@ export function App() {
       await api.command(a.node, { approvalResolve: { approvalId: a.localId, approved, signerDeviceId: device.id, signature, helperGrant, helpersMayStart } });
     } catch (e) {
       const code = (e as { code?: string }).code;
-      setNotice(code === 'approval.signature_invalid' ? 'approval-not-trusted' : 'approval-failed');
+      setNotice(approvalFailureKey(code));
     }
   }, [api, device]);
   // ADR-0057: an agent's live helper grants, as its machine lists them, and revoking one (no signature: ending access is always allowed).
@@ -196,6 +204,54 @@ export function App() {
       setGrantAsk({ ...g, busy: false, failed: true });
     }
   }, [api, device, grantAsk]);
+  // ADR-0061: this browser registers its key and name with the hub on every connection (a candidate for the person's machines, never
+  // trust by itself), then follows the person's devices: which wait for an approval, which machines trust which.
+  const refreshDevices = useCallback(async () => {
+    if (!api) return;
+    try { setMine((await api.command('', { deviceList: {} })).deviceList?.devices ?? []); } catch { /* an older hub has no device list */ }
+  }, [api]);
+  useEffect(() => {
+    if (!api || !device || !live) return;
+    let stop = false;
+    void signRegistration(device, browserName(), Date.now()).then((r) => api.command('', { deviceRegister: r }))
+      .catch(() => undefined).then(() => { if (!stop) void refreshDevices(); });
+    const timer = setInterval(() => { void refreshDevices(); }, 15_000);
+    return () => { stop = true; clearInterval(timer); };
+  }, [api, device, live !== undefined, refreshDevices]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    let stop = false;
+    const keys: [string, Uint8Array][] = mine.map((d) => [d.deviceId ?? '', d.publicKey ?? new Uint8Array()]);
+    if (device) keys.push([device.id, fromHex(device.publicKeyHex)]);
+    void Promise.all(keys.map(async ([id, k]) => [id, k.length === 65 ? await fingerprint(k) : ''] as const))
+      .then((e) => { if (!stop) setPrints(new Map(e)); }, () => undefined);
+    void Promise.all(mine.map(async (d) => ((await registrationVerifies(d)) ? d.deviceId ?? '' : '')))
+      .then((ids) => { if (!stop) setProven(new Set(ids.filter(Boolean))); }, () => undefined);
+    return () => { stop = true; };
+  }, [mine, device]);
+  const askApproval = useCallback(async (): Promise<boolean> => {
+    if (!api || !device) return false;
+    try { await api.command('', { deviceAskApproval: await signAsk(device, Date.now()) }); void refreshDevices(); return true; } catch { return false; }
+  }, [api, device, refreshDevices]);
+  const approveDevice = useCallback(async (d: DeviceInfo, nodes: string[]): Promise<boolean> => {
+    if (!api || !device || !d.deviceId || !d.publicKey) return false;
+    try {
+      const endorsement = await signEndorsement(device, { deviceId: d.deviceId, publicKey: d.publicKey, name: d.name ?? '' }, nodes, Date.now());
+      await api.command('', { deviceEndorse: { endorsement } });
+      void refreshDevices();
+      return true;
+    } catch { return false; }
+  }, [api, device, refreshDevices]);
+  const removeDevice = useCallback(async (id: string): Promise<boolean> => {
+    if (!api || !device) return false;
+    try { await api.command('', { deviceRevoke: { revocation: await signRevocation(device, id, Date.now()) } }); void refreshDevices(); return true; } catch { return false; }
+  }, [api, device, refreshDevices]);
+  const trustedOn = device ? trustedBy(live?.trusted, device.id) : [];
+  const waiting = device && trustedOn.length ? waitingForApproval(mine, device.id).filter((d) => !later.has(d.deviceId ?? '') && proven.has(d.deviceId ?? '')) : [];
+  const others: MyDevice[] = mine.filter((d) => d.deviceId && d.deviceId !== device?.id).map((d) => ({
+    id: d.deviceId ?? '', name: d.name ?? '', fingerprint: prints.get(d.deviceId ?? '') ?? '', lastUsedMs: num(d.lastUsedMs),
+    trustedOn: trustedBy(live?.trusted, d.deviceId ?? ''), waiting: num(d.approvalAskedMs) > 0, removed: num(d.revokedMs) > 0,
+  }));
+  const asked = num(mine.find((d) => d.deviceId === device?.id)?.approvalAskedMs) > 0;
   // Approvals waiting while the tab is hidden: a count in the title, and a notification if the user allowed it.
   const seenApprovals = useRef<Set<string>>(new Set());
   const baseTitle = useRef(document.title);
@@ -376,6 +432,8 @@ export function App() {
   return (
     <>
       {hash === '#/gallery' ? <Gallery /> : hash === '#/machines' ? <MachinesPage machines={live ? machines(live) : hub ? [] : demoMachines} agents={agents} usage={usage} projects={live && usage ? costByProject(live, usage.perAgent) : []} onBack={() => go('#/')} /> : hash === '#/audit' && hub ? <AuditPage load={(who) => loadAudit(hub.token, who)} onBack={() => go('#/')} /> : hash === '#/device' ? <DevicePage device={device} onBack={() => go('#/')} onAddPasskey={hub && passkeysSupported() ? async (password) => (await addPasskey(hub.token, undefined, password)).ok : undefined} passkeyNeedsPassword={info.passwordRequired}
+          fingerprint={device ? prints.get(device.id) : undefined} machines={live ? machines(live) : undefined} trustedOn={trustedOn} others={hub ? others : undefined}
+          asked={asked} onAsk={hub && api ? askApproval : undefined} onRemove={hub && api ? removeDevice : undefined}
           security={hub ? <ScreenPasswordSettings passwordSet={info.passwordSet} idle={idle} onIdle={(m) => { setIdleMinutes(m); setIdle(m); }}
             onSet={async (password, current) => { const r = await setPassword(hub.token, password, current); if (r.ok) refreshInfo(); return r; }} /> : undefined} /> : current !== undefined
         ? <Focus agent={selectedAgent} approvals={live ? approvalList(live) : hub ? [] : demoApprovals} onResolve={resolve} chatSource={selectedAgent?.terminal === false ? chatOf(selectedAgent) : undefined} sendPrompt={hub && api ? sendPrompt : undefined} chooseOption={hub && api ? chooseOption : undefined} costMicroUsd={current ? usage?.perAgent.get(current) : undefined} source={terminal} onBack={() => go('#/')} />
@@ -385,9 +443,15 @@ export function App() {
           onStart={hub && api && live ? (node) => setStarting({ node }) : (!hub && import.meta.env.DEV ? (node) => setStarting({ node }) : undefined)} onCommand={() => setPalette(true)} onForget={hub && api ? forgetAgent : undefined} onResume={hub && api ? resumeAgent : (!hub && import.meta.env.DEV ? async () => undefined : undefined)} onLock={hub ? lockNow : undefined}
           start={!hub && import.meta.env.DEV && starting ? <StartAgent initialNode={starting.node} projects={demoProjects} machines={demoMachines}
             loadKinds={async () => [{ kind: 'claude-code', name: 'Claude Code', installed: true }, { kind: 'codex', name: 'Codex', installed: true }, { kind: 'shell', name: 'Shell', installed: true }, { kind: 'gemini', name: 'Gemini CLI', installed: false }]}
-            list={async (_n, path) => demoList(path)} inspect={async (_n, path) => ({ path, projectId: 'demo', gitRoot: path, branch: 'main', portable: false })} onStart={async () => { setStarting(false); return undefined; }} onClose={() => setStarting(false)} /> : starting && live ? <StartAgent initialNode={starting ? starting.node : undefined} projects={projectChoices(live)} machines={machines(live)} inspect={inspectDirectory} list={listDirectory} loadKinds={loadKinds} onStart={startAgent} onClose={() => setStarting(false)} /> : undefined} />}
+            list={async (_n, path) => demoList(path)} inspect={async (_n, path) => ({ path, projectId: 'demo', gitRoot: path, branch: 'main', portable: false })} onStart={async () => { setStarting(false); return undefined; }} onClose={() => setStarting(false)} /> : starting && live ? <StartAgent initialNode={starting ? starting.node : undefined} trust={device ? { id: device.id, key: device.publicKeyHex } : undefined}
+            askApproval={device ? { can: (node) => canBeApprovedOn(live.trusted, node, mine, device.id), ask: askApproval } : undefined} projects={projectChoices(live)} machines={machines(live)} inspect={inspectDirectory} list={listDirectory} loadKinds={loadKinds} onStart={startAgent} onClose={() => setStarting(false)} /> : undefined} />}
       {grantAsk && <GrantDialog machine={live?.nodes.get(grantAsk.node)?.hostname || grantAsk.node} kind={grantAsk.ask.kind} busy={grantAsk.busy} failed={grantAsk.failed} onAllow={() => void allowGrant()} onClose={() => setGrantAsk(undefined)} />}
       {palette && <CommandPalette items={items} onClose={() => setPalette(false)} />}
+      {hub && live && waiting[0] && <DeviceRequest key={waiting[0].deviceId ?? ''}
+        request={{ id: waiting[0].deviceId ?? '', name: deviceLabel(waiting[0].name, waiting[0].deviceId ?? ''), fingerprint: prints.get(waiting[0].deviceId ?? '') ?? '' }}
+        machines={machines(live).filter((m) => trustedOn.includes(m.id)).map((m) => ({ id: m.id, name: m.name }))}
+        onApprove={(nodes) => approveDevice(waiting[0]!, nodes)}
+        onLater={() => setLater((l) => new Set(l).add(waiting[0]?.deviceId ?? ''))} />}
     </>
   );
 }

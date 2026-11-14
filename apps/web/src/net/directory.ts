@@ -30,6 +30,16 @@ export function childPath(base: string, name: string): string {
   const sep = base.includes('\\') && !base.includes('/') ? '\\' : '/';
   return base.endsWith(sep) ? base + name : base + sep + name;
 }
+/** Why a folder could not be selected (`directory.inspect`), as one of the web's own texts. `auth.forbidden`: the machine limits this
+ * device (or the hub this person) to other projects, a lasting refusal and not a bad path. */
+export function directoryReasonKey(code: string | undefined): string {
+  switch (code) {
+    case 'approval.signature_invalid': return 'approval-not-trusted';
+    case 'protocol.capability_missing': return 'start-directory-unsupported';
+    case 'auth.forbidden': return 'start-directory-forbidden';
+    default: return 'start-directory-failed';
+  }
+}
 // ADR-0060: why a Resume or Start again did not happen, as one of the web's own texts.
 export function resumeReasonKey(code: string): string {
   switch (code) {
@@ -41,6 +51,7 @@ export function resumeReasonKey(code: string): string {
     case 'approval.signature_invalid': return 'approval-not-trusted';
     case 'protocol.capability_missing': return 'resume-failed-unsupported';
     case 'node.offline': return 'resume-failed-offline';
+    case 'auth.forbidden': return 'resume-failed-forbidden';
     default: return 'resume-failed';
   }
 }

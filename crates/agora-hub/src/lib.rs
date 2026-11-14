@@ -4,6 +4,7 @@ pub mod audit;
 pub mod board;
 pub mod ca;
 pub mod deliver;
+pub mod devices;
 pub mod enroll;
 pub mod hub;
 pub mod notifier;
