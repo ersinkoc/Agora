@@ -3,7 +3,8 @@
 //! It runs the role's own command line (the one `agora` ran before, from `machine.toml`) as a child bound to it
 //! (`agora_platform::spawn_bound`), and starts it again after a crash by the rule of `agora_core::restart`: never after exit code 0,
 //! never after an end soon after the start (a refusal), once per 30 s at most, giving up after 5 restarts in 10 minutes. Every
-//! decision is a line in the role's log and in the owner-only `run/<role>.restarts`, which `agora status` reads.
+//! decision is a line in the role's log and in the owner-only `run/<role>.restarts`, which `agora status` reads. Under a service
+//! (`--log`) every end the supervisor decides itself exits 0, so the service manager restarts only a crash of the supervisor itself.
 //!
 //! The supervisor holds the role's lock (`run/<role>.lock`), so two never run on one Agora folder: the front door takes the lock,
 //! starts the supervisor and writes the supervisor's process id in it; a supervisor started any other way takes the lock itself.
@@ -362,8 +363,21 @@ pub struct Start<'a> {
     pub log: bool,
 }
 
+/// The exit code of an end the supervisor decided itself (a give-up, a refusal, a lock held or lost, a clean stop, a log it will not
+/// write): under a service (`--log`) always 0, so the service manager's "restart on failure" means only a crash of the supervisor
+/// itself (a signal, a panic); the reason stays in the log, in `run/<role>.restarts` and in `agora status`. Started by the front door,
+/// the code is kept: the front door reads it to say at once that the role did not start.
+fn planned_exit(service: bool, code: u8) -> u8 {
+    if service {
+        0
+    } else {
+        code
+    }
+}
+
 pub fn supervise(say: &Say, word: &str, start: &Start) -> ExitCode {
     let handoff = start.handoff;
+    let planned = |code: u8| ExitCode::from(planned_exit(start.log, code));
     let Some(role) = Role::from_name(word) else {
         say.err(key!("cli-bad-arguments"), &[]);
         return ExitCode::from(2);
@@ -384,7 +398,7 @@ pub fn supervise(say: &Say, word: &str, start: &Start) -> ExitCode {
     let h = start.home.clone().unwrap_or_else(home);
     let Some(m) = frontdoor::load(&h) else {
         say.err(key!("frontdoor-not-set-up"), &[]);
-        return ExitCode::from(1);
+        return planned(1);
     };
     let fail = |e: &dyn std::fmt::Display| {
         say.err(
@@ -416,7 +430,7 @@ pub fn supervise(say: &Say, word: &str, start: &Start) -> ExitCode {
                     &[("role", role.label(say).into())],
                 ),
             }
-            return ExitCode::from(1);
+            return planned(1);
         }
         Err(e) => return frontdoor::lock_failed(say, &lock, &e),
     }
@@ -428,7 +442,7 @@ pub fn supervise(say: &Say, word: &str, start: &Start) -> ExitCode {
             key!("supervise-not-bound"),
             &[("role", role.label(say).into())],
         );
-        return ExitCode::from(1);
+        return planned(1);
     }
     // The command line is made once: every restart runs exactly what the front door asked for.
     let mut cmd = match frontdoor::command(&h, &m, role) {
@@ -447,7 +461,7 @@ pub fn supervise(say: &Say, word: &str, start: &Start) -> ExitCode {
                 key!("supervise-log-link"),
                 &[("log", log.display().to_string().into())],
             );
-            return ExitCode::from(1);
+            return planned(1);
         }
         frontdoor::rotate(&log);
         let file = match agora_platform::open_append_private(&log) {
@@ -457,7 +471,7 @@ pub fn supervise(say: &Say, word: &str, start: &Start) -> ExitCode {
                     key!("supervise-log-link"),
                     &[("log", log.display().to_string().into())],
                 );
-                return ExitCode::from(1);
+                return planned(1);
             }
             Err(e) => return fail(&e),
         };
@@ -500,7 +514,7 @@ pub fn supervise(say: &Say, word: &str, start: &Start) -> ExitCode {
         },
     );
     match code {
-        Ok(c) => ExitCode::from(u8::try_from(c).unwrap_or(1)),
+        Ok(c) => planned(u8::try_from(c).unwrap_or(1)),
         Err(e) => fail(&e),
     }
 }
@@ -710,6 +724,16 @@ mod tests {
             .unwrap();
             assert_eq!((rc, starts), (0, 0));
             assert_eq!(events, [blocker]);
+        }
+    }
+
+    /// Linux's decision on #563: under a service every end the supervisor decided is exit 0 (the service manager restarts only a crash
+    /// of the supervisor itself); started by the front door, the code is kept.
+    #[test]
+    fn planned_ends_exit_0_only_under_a_service() {
+        for code in [0, 1, 3, 255] {
+            assert_eq!(planned_exit(true, code), 0, "{code}");
+            assert_eq!(planned_exit(false, code), code, "{code}");
         }
     }
 

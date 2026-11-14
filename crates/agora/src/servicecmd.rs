@@ -62,7 +62,7 @@ fn spec(say: &Say, h: &Path, role: Role) -> std::io::Result<ServiceSpec> {
         args,
         env,
         work_dir: h.to_path_buf(),
-        restart_supervisor_on_signal: true,
+        restart_supervisor_on_failure: true,
     })
 }
 
@@ -334,7 +334,7 @@ mod tests {
             ["supervise", "node", "--home", &h.to_string_lossy(), "--log"]
         );
         assert_eq!(s.work_dir, h);
-        assert!(s.restart_supervisor_on_signal);
+        assert!(s.restart_supervisor_on_failure);
         assert!(shown(&s).contains(&format!("\"{}\"", h.display())));
     }
 }

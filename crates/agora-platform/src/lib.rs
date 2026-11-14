@@ -1488,9 +1488,10 @@ pub struct ServiceSpec {
     pub env: Vec<(String, std::ffi::OsString)>,
     /// Its working directory (the Agora folder); system files the registration needs for a moment are written there, owner-only.
     pub work_dir: PathBuf,
-    /// Start the program again when a signal killed it (systemd `Restart=on-abnormal`, launchd `KeepAlive = { Crashed = true }`),
-    /// never after an exit with a code, so a supervisor that gave up or stopped stays ended. Windows has no such setting: ignored.
-    pub restart_supervisor_on_signal: bool,
+    /// Start the program again when it failed: killed by a signal or an exit with a non-zero code (systemd `Restart=on-failure`, launchd
+    /// `KeepAlive = { SuccessfulExit = false }`). The supervisor exits 0 for every end it decided itself under a service (a give-up, a
+    /// refusal, a clean stop), so only a crash of the supervisor itself is restarted. Windows has no such setting: ignored.
+    pub restart_supervisor_on_failure: bool,
 }
 
 /// Whether a service is registered (see [`ServiceSpec`]).
