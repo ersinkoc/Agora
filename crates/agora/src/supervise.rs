@@ -404,8 +404,8 @@ pub fn supervise(say: &Say, word: &str, start: &Start) -> ExitCode {
     };
     match start.resume {
         None => {}
-        Some("auto") => m.resume_auto = true,
-        Some("ask") => m.resume_auto = false,
+        Some("auto") => m.resume = Some(true),
+        Some("ask") => m.resume = Some(false),
         Some(_) => {
             say.err(key!("cli-bad-arguments"), &[]);
             return planned(2);
