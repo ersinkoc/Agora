@@ -1,0 +1,44 @@
+{
+  "reviewed_head": "b67c89852d07b745542a53cc2f1aef8d43457b02",
+  "reviewer": "linux Codex",
+  "at": "2026-11-14T16:59:13.425255+00:00",
+  "decision": "changes requested",
+  "finding": {
+    "priority": "P2",
+    "path": "crates/agora-hub/src/hub.rs",
+    "line": 548,
+    "summary": "Replay page is fully materialized before the byte budget is checked",
+    "events": 1000,
+    "stored_payload_bytes": 65296746,
+    "each_payload_below_protocol_cap": 1048576,
+    "configured_replay_budget_bytes": 8388608,
+    "additional_peak_rust_heap_bytes": 65609682,
+    "regression_assertion_max_bytes": 16777216,
+    "observed_exit_code": 101,
+    "debug_elapsed_ms": 92.242411
+  },
+  "control": {
+    "temporary_change": "Use events_after(at, 1) only inside replay",
+    "additional_peak_rust_heap_bytes": 9378482,
+    "debug_elapsed_ms": 28.062742,
+    "exit_code": 0,
+    "status": "restored; diagnostic control only, not a proposed production implementation"
+  },
+  "limitations": [
+    "In-process SQLite + negotiated NodeSession and synthetic valid FilesChanged events, no live service or coding agent",
+    "Global allocator measures Rust heap allocations; SQLite C allocations are excluded",
+    "Debug timing is illustrative, not a release benchmark",
+    "Snapshot view is empty, so measured allocation comes from replay rather than a large projected state"
+  ],
+  "tracked_hub_tests": {
+    "passed": 238,
+    "failed": 0,
+    "ignored": 1
+  },
+  "checks_passed": [
+    "cargo fmt --all -- --check",
+    "sh scripts/check-docs.sh",
+    "git diff --check"
+  ],
+  "native_ci": "All native Rust and remaining reported named checks passed at reviewed head"
+}
