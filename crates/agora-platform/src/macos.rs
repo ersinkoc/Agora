@@ -721,7 +721,11 @@ mod sandbox_tests {
     }
 
     fn attack_home(tag: &str) -> std::path::PathBuf {
-        let home = std::path::PathBuf::from(format!("/tmp/agora-{tag}-{}", std::process::id()));
+        attack_home_in(std::path::Path::new("/tmp"), tag)
+    }
+
+    fn attack_home_in(base: &std::path::Path, tag: &str) -> std::path::PathBuf {
+        let home = base.join(format!(".agora-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
         for d in ["data", "m", "manifests", "worktrees/a", "link"] {
             std::fs::create_dir_all(home.join(d)).unwrap();
@@ -735,10 +739,21 @@ mod sandbox_tests {
     }
 
     #[test]
-    fn a_node_home_under_tmp_resists_every_way_out_the_review_named() {
-        // The security review of #477: a node home below `/tmp` (writable by every confined agent), closed as a whole, the agent's
-        // own worktree and mesh socket opened again.
-        let home = attack_home("ways");
+    fn a_node_home_resists_every_way_out_the_review_named_wherever_it_is() {
+        // The security reviews of #477: a node home below `/tmp` (writable by every confined agent), below the per-user temp folder
+        // (`/var/folders/.../T`) and below the user's home (`~/.agora`), closed as a whole, the agent's own worktree and mesh socket
+        // opened again.
+        let user_home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+        for base in [Some("/tmp".into()), Some(std::env::temp_dir()), user_home]
+            .into_iter()
+            .flatten()
+        {
+            ways_out(&base);
+        }
+    }
+
+    fn ways_out(base: &std::path::Path) {
+        let home = attack_home_in(base, "ways");
         let _control = std::os::unix::net::UnixListener::bind(home.join("node.sock")).unwrap();
         let _own = std::os::unix::net::UnixListener::bind(home.join("m/own")).unwrap();
         let sb = crate::Sandbox {
