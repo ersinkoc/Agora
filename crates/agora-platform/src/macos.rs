@@ -466,6 +466,53 @@ pub(crate) fn start_time(pid: u32) -> Option<u64> {
     Some(info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec)
 }
 
+/// See [`crate::end_with_supervisor`]: macOS has no parent-death signal, so a thread waits on a `kqueue` for the supervisor's exit
+/// (`EVFILT_PROC`/`NOTE_EXIT`) and then sends `SIGTERM` to this process. When the supervisor ended before the watch was set (it is
+/// gone, or this process has another parent already), the signal is sent at once.
+pub(crate) fn end_with(supervisor: u32) {
+    let Ok(pid) = libc::pid_t::try_from(supervisor) else {
+        return;
+    };
+    // SAFETY: plain system call.
+    let kq = unsafe { libc::kqueue() };
+    if kq < 0 {
+        return;
+    }
+    // SAFETY: an all-zero kevent is valid; the fields below make it a one-shot exit watch on `pid`.
+    let mut watch: libc::kevent = unsafe { std::mem::zeroed() };
+    watch.ident = pid as libc::uintptr_t;
+    watch.filter = libc::EVFILT_PROC;
+    watch.flags = libc::EV_ADD | libc::EV_ONESHOT;
+    watch.fflags = libc::NOTE_EXIT;
+    // SAFETY: one valid change, no output buffer.
+    let added = unsafe { libc::kevent(kq, &watch, 1, std::ptr::null_mut(), 0, std::ptr::null()) };
+    // SAFETY: plain system calls.
+    if added < 0 || unsafe { libc::getppid() } != pid {
+        unsafe {
+            libc::close(kq);
+            libc::raise(libc::SIGTERM);
+        }
+        return;
+    }
+    let _ = std::thread::Builder::new()
+        .name("agora-supervisor-watch".into())
+        .spawn(move || loop {
+            // SAFETY: an all-zero kevent is a valid output buffer of one entry.
+            let mut fired: libc::kevent = unsafe { std::mem::zeroed() };
+            // SAFETY: no changes, one output entry, no timeout.
+            let n =
+                unsafe { libc::kevent(kq, std::ptr::null(), 0, &mut fired, 1, std::ptr::null()) };
+            if n > 0 {
+                // SAFETY: plain system call.
+                unsafe { libc::raise(libc::SIGTERM) };
+                return;
+            }
+            if n < 0 && io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
+                return;
+            }
+        });
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod sandbox_tests {

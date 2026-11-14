@@ -131,7 +131,9 @@ export function connectLive(o: LiveOptions): Live {
     setTimeout(() => { if (g === generation && !closed) fn(); }, ms);
   };
   const pending = new Map<string, { resolve: (ok: agora.v1.CommandOk.$Properties) => void; reject: (e: CommandError) => void; node: string; body: CommandBody }>();
-  const terminals = new Map<number, { node: string; terminalId: string; onEvent: (e: TerminalEvent) => void }>();
+  // `size`: what fits the window's view of the terminal, said again after every (re)subscription: the hub counts a window's size
+  // only while it watches the terminal, and forgets it with the connection (docs/specs/protocol.md "Shared terminal size").
+  const terminals = new Map<number, { node: string; terminalId: string; onEvent: (e: TerminalEvent) => void; size?: { cols: number; rows: number } }>();
 
   const chats = new Map<number, { node: string; agentId: string; onLines: (lines: ChatLine[], replace: boolean) => void }>();
 
@@ -151,6 +153,12 @@ export function connectLive(o: LiveOptions): Live {
       // The node may be away or the agent gone; try again a little later while someone is watching.
       if (terminals.has(stream)) later(2000, () => subscribeTerminal(stream));
     });
+    // Sent right behind the subscription, so the hub already counts this window as watching when it reads it.
+    if (t.size) sendSize(t.node, t.terminalId, t.size);
+  };
+
+  const sendSize = (node: string, terminalId: string, size: { cols: number; rows: number }) => {
+    request(STREAM_COMMANDS, node, { terminalResize: { terminalId, cols: size.cols, rows: size.rows } }).catch(() => {});
   };
 
   const subscribeChat = (stream: number) => {
@@ -325,7 +333,9 @@ export function connectLive(o: LiveOptions): Live {
             request(STREAM_COMMANDS, node, { terminalInput: { terminalId, data: bytes } }).catch(() => {});
           },
           resize(cols, rows) {
-            request(STREAM_COMMANDS, node, { terminalResize: { terminalId, cols, rows } }).catch(() => {});
+            const t = terminals.get(stream);
+            if (t) t.size = { cols, rows };
+            if (isOpen) sendSize(node, terminalId, { cols, rows });
           },
           close() {
             terminals.delete(stream);

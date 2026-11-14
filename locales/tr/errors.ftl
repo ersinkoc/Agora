@@ -37,6 +37,7 @@ agent-option_forbidden = { $kind }, { $option } seçeneğiyle başlatılmadı: {
 agent-option_invalid = { $kind } başlatılmadı: "{ $option }" başlatma seçeneği onun sunduğu bir seçenek değil (ya da çok fazla seçenek var).
 agent-option_unconfirmed = { $kind }, { $option } seçeneğiyle başlatılmadı: bu seçenek ajanın sormadan çalışmasını sağlar ve başlatma isteğinde bunun için onayınız yoktu.
 agent-running = { $agent_id } hâlâ çalışıyor. Önce durdurun.
+node-online = { $node_id } bağlı. Yalnızca çevrimdışı bir makine unutulabilir.
 agent-not_interrupted = { $agent_id } yarıda kalmadı ya da artık devam ettirilmek üzere sunulmuyor.
 agent-session_missing = { $agent_id } kendi oturumuna devam edemiyor. Bunun yerine yeniden başlatın.
 agent-folder_changed = { $agent_id } ajanının klasörü yok ya da artık başka bir projeye ait: { $path }

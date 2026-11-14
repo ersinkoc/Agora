@@ -1229,6 +1229,145 @@ pub fn terminate_process(pid: u32) -> io::Result<()> {
     }
 }
 
+/// The variable through which [`spawn_bound`] tells a child (on Unix) which process it must end with; [`end_with_supervisor`] reads
+/// and removes it.
+const SUPERVISOR_VAR: &str = "AGORA_SUPERVISOR_PID";
+
+/// Starts `cmd` bound to this process: the child ends when this process ends, however it ends (stopped, killed, crashed), so a
+/// supervisor never leaves its child behind (ADR-0062 item 8).
+///
+/// Windows: the first call puts this process into a job of its own that ends every process in it when it is closed
+/// (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`); only this process holds the job, so it closes when this process ends. The child starts
+/// inside it, so there is no moment when it runs unbound. Processes in the job may still leave it on purpose
+/// (`JOB_OBJECT_LIMIT_BREAKAWAY_OK`), as [`spawn_detached`] does. When this process may not join a job, the child starts unbound
+/// and [`Bound::bound`] says so.
+///
+/// Unix: the child learns this process's id from its environment and must call [`end_with_supervisor`] first thing (Linux:
+/// `PR_SET_PDEATHSIG`; macOS: a `kqueue` exit watch), which ends it with `SIGTERM` when this process ends. Spawn and wait from
+/// the same thread, one that lives as long as the child: Linux ties the signal to the thread that started the child.
+pub fn spawn_bound(cmd: &mut std::process::Command) -> io::Result<Bound> {
+    #[cfg(windows)]
+    {
+        let bound = winproc::join_kill_on_close_job();
+        // As `spawn_detached` started it before: no console of its own (a console-less parent's child would get a new one, a
+        // window whose closing would end it) and out of any Ctrl-C group.
+        std::os::windows::process::CommandExt::creation_flags(cmd, winproc::DETACHED_FLAGS);
+        Ok(Bound {
+            child: cmd.spawn()?,
+            bound,
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        cmd.env(SUPERVISOR_VAR, std::process::id().to_string());
+        Ok(Bound {
+            child: cmd.spawn()?,
+            bound: cfg!(any(target_os = "linux", target_os = "macos")),
+        })
+    }
+}
+
+/// Whether [`spawn_bound`] can bind a child here: a supervisor asks before starting anything, and refuses to start a child that could
+/// outlive it. Windows: joins the job (once) and says whether that worked; Linux and macOS: yes; other systems: no.
+pub fn children_can_be_bound() -> bool {
+    #[cfg(windows)]
+    {
+        winproc::join_kill_on_close_job()
+    }
+    #[cfg(not(windows))]
+    {
+        cfg!(any(target_os = "linux", target_os = "macos"))
+    }
+}
+
+/// A child started by [`spawn_bound`].
+#[derive(Debug)]
+pub struct Bound {
+    pub child: std::process::Child,
+    /// False when the child does not end with this process (Windows: this process could not join a job; a Unix system without a
+    /// parent-exit watch).
+    pub bound: bool,
+}
+
+/// In a child started by [`spawn_bound`]: arranges for this process to end when its supervisor ends, and removes the variable that
+/// named it so nothing this process starts inherits it. Does nothing in a process started any other way. Call it at the very start
+/// of `main`, before any other thread exists (it changes the environment).
+pub fn end_with_supervisor() {
+    let Some(value) = std::env::var_os(SUPERVISOR_VAR) else {
+        return;
+    };
+    std::env::remove_var(SUPERVISOR_VAR);
+    let parent = value.to_str().and_then(|v| v.parse::<u32>().ok());
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if let Some(parent) = parent {
+        procinfo::end_with(parent);
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let _ = parent;
+}
+
+/// Waits until `child` has ended without reaping it (Unix `waitid` with `WNOWAIT`): its pid stays its own, so a stop request passed
+/// on by pid between this and the reaping [`std::process::Child::wait`] cannot reach a process that got the pid again. Windows
+/// passes nothing on by pid and returns at once; the caller's `wait` does the waiting.
+pub fn wait_unreaped(child: &std::process::Child) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        unix::wait_unreaped(child.id())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = child;
+        Ok(())
+    }
+}
+
+/// The signal that ended a process, where there are signals (Unix); `None` for an exit with a code.
+pub fn exit_signal(status: &std::process::ExitStatus) -> Option<i32> {
+    #[cfg(unix)]
+    {
+        std::os::unix::process::ExitStatusExt::signal(status)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = status;
+        None
+    }
+}
+
+/// For a supervisor: from now on `SIGTERM`, `SIGINT` and `SIGHUP` do not end this process; they set [`stop_requested`] and are
+/// passed on as `SIGTERM` to the process named by [`forward_stop_to`]. Windows has no such request for a detached process (`agora
+/// down` ends it with `TerminateProcess`, and the job of [`spawn_bound`] takes the child with it): there this does nothing.
+pub fn catch_stop_requests() -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        unix::catch_stop_requests()
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(())
+    }
+}
+
+/// The process a stop request caught by [`catch_stop_requests`] is passed on to (`None`: no one, between children).
+pub fn forward_stop_to(pid: Option<u32>) {
+    #[cfg(unix)]
+    unix::forward_stop_to(pid);
+    #[cfg(not(unix))]
+    let _ = pid;
+}
+
+/// Whether a stop request was caught since [`catch_stop_requests`].
+pub fn stop_requested() -> bool {
+    #[cfg(unix)]
+    {
+        unix::stop_requested()
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
 /// This machine's name (`gethostname` on Unix, `COMPUTERNAME` on Windows), if it has one.
 pub fn hostname() -> Option<String> {
     #[cfg(unix)]

@@ -430,3 +430,28 @@ describe('refused sessions', () => {
     expect(refused.sockets).toHaveLength(2); // and it stops trying
   });
 });
+
+describe('shared terminal size', () => {
+  it('says the window\'s size again right behind every subscription, after a reconnect too', async () => {
+    const sockets: FakeSocket[] = [];
+    const live = connectLive({
+      url: 'ws://hub/', token: 't', backoffMs: () => 0,
+      socket: (u, p) => { const s = new FakeSocket(u, p); sockets.push(s); return s; },
+      onState: () => {}, onView: () => {},
+    });
+    const first = sockets[0] as FakeSocket;
+    first.onopen?.();
+    const session = live.terminal('laptop', 't-1').connect(() => {});
+    session.resize(120, 40);
+    const commands = (s: FakeSocket) => s.sent.map((b) => decodeFrame(b)).filter((f) => f && f.kind === 0 && (f.streamId === STREAM_COMMANDS || f.streamId >= 3))
+      .map((f) => v1.CommandRequest.decode(f?.payload as Uint8Array));
+    const shape = (s: FakeSocket) => commands(s).map((c) => c.terminalSubscribe ? 'subscribe' : c.terminalResize ? `${c.terminalResize.cols}x${c.terminalResize.rows}` : '?');
+    expect(shape(first)).toEqual(['subscribe', '120x40']);
+    first.onclose?.();
+    await new Promise((r) => setTimeout(r, 10));
+    const second = sockets[1] as FakeSocket;
+    second.onopen?.();
+    expect(shape(second)).toEqual(['subscribe', '120x40']);
+    live.close();
+  });
+});

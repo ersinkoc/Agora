@@ -746,3 +746,32 @@ key-down = Aşağı
 key-left = Sol
 key-right = Sağ
 key-paste = Yapıştır
+
+# ADR-0073: eski makineler, makineleri unutmak
+old-machines-title = { $count ->
+    [one] Bir eski makine
+   *[other] { $count } eski makine
+}
+old-machines-explain = Bir günden uzun süredir görülmedi. Yeni ajanlar için önerilmez. Yeniden bağlanan her zamanki gibi görünür.
+old-machines-cleanup = Temizle…
+forget-machine-action = Unut…
+forget-machine-title = { $name } unutulsun mu?
+forget-machines-title = { $count ->
+    [one] Bir eski makine temizlensin mi?
+   *[other] { $count } eski makine temizlensin mi?
+}
+forget-machines-explain = Unutulan makineler ve biten ajanları her pencereden kalkar. Yaptıkları geçmişte ve maliyetlerde kalır. Yeniden bağlanan makine geri gelir.
+forget-machine-agents = { $count ->
+    [one] o sırada bir ajan çalışıyordu; orada hâlâ çalışıyor olabilir
+   *[other] o sırada { $count } ajan çalışıyordu; orada hâlâ çalışıyor olabilirler
+}
+forget-machines-refuse = Yeniden bağlanırlarsa reddet (her biri yeni bir katılım kodu ister)
+forget-machines-cancel = Kalsın
+forget-machines-confirm = { $count ->
+    [one] Unut
+   *[other] { $count } makineyi unut
+}
+forget-machine-reason-forbidden = Makineleri yalnızca hub'ın sahibi unutabilir.
+forget-machine-reason-online = Yeniden bağlandı, bu yüzden unutulmadı.
+forget-machine-reason-gone = Hub bu makineyi artık tanımıyor.
+forget-machine-reason-other = Hub unutamadı. Yeniden deneyin.

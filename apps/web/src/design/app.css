@@ -95,7 +95,11 @@
   .theme-panel { @apply grid gap-4 rounded-l border border-line bg-surface-0 p-4 text-ink; }
 
   .pane .terminal { border: 0; }
-  .terminal { @apply h-full min-h-0 overflow-hidden rounded-m bg-surface-0 p-2; }
+  /* Its size never depends on the terminal inside: the terminal is shown at the node's size, which may be smaller (a smaller
+     window watches it too) or, set from elsewhere, bigger; what fits this element is what the window reports (sizing.ts). */
+  .terminal { @apply h-full min-h-0 overflow-hidden rounded-m bg-surface-0 p-2; contain: strict; }
+  /* Smaller than this window: it sits at the top left, and a hairline marks where it ends. */
+  .terminal[data-smaller] .xterm-screen { box-shadow: 1px 1px 0 0 var(--border); }
   .page .terminal { height: clamp(320px, 65vh, 720px); @apply border border-line; }
   .approvals { @apply grid gap-4; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
   .approval { @apply flex flex-col gap-2 rounded-m border border-line bg-surface-1 p-4; }

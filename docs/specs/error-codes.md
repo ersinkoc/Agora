@@ -19,6 +19,7 @@ or a local response timeout has a localized retry message.
 | `protocol.producer_mismatch` | `node_id`, `producer_id` | A node sent an event that names another producer (`producer_id`) than its certificate (`node_id`); the hub ends the connection with this code as the WebSocket close reason (protocol.md section 3) |
 | `node.offline` | `node_id` | Target node not connected |
 | `node.unknown` | `node_id` | The hub has never seen this node, or the request named none (ADR-0029) |
+| `node.online` | `node_id` | ADR-0073: the machine is connected, so it cannot be forgotten; only an offline machine can |
 | `node.timeout` | `node_id` | The node did not answer a routed command in time (ADR-0029) |
 | `node.policy_denied` | `node_id`, `rule` | Node local policy rejected the action |
 | `node.resource_limit` | `resource`, `limit` | Limit reached (agents, memory, disk) |

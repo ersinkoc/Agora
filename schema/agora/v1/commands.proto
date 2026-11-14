@@ -74,6 +74,8 @@ message CommandRequest {
     DeviceEndorse device_endorse = 90;
     DeviceRevoke device_revoke = 91;
     DeviceAskApproval device_ask_approval = 92;
+    // ADR-0073: answered by the hub (owner only, capability `node.forget`); refused with `node.online` while the machine is connected.
+    NodeForget node_forget = 93;
   }
 }
 
@@ -580,6 +582,13 @@ message DirectoryEntries {
   // More folders exist than the node answers with (at most 500 per answer).
   bool truncated = 4;
 }
+// ADR-0073. The hub stops listing an offline machine. `refuse_return` also revokes every certificate enrolled under `node_id`, so a
+// later connection is refused (`auth.device_revoked`) until the machine enrolls again.
+message NodeForget {
+  string node_id = 1;
+  bool refuse_return = 2;
+}
+
 // ADR-0053. The hub stops listing a closed agent. Answered by the hub; refused with `agent.running` while the agent runs.
 message AgentForget {
   string agent_id = 1;

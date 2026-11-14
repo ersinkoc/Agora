@@ -527,6 +527,63 @@ pub(crate) fn detach(cmd: &mut Command) {
     }
 }
 
+/// The child a caught stop request is passed on to (0: none), and whether one was caught: see [`crate::catch_stop_requests`].
+static STOP_TARGET: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+static STOP_CAUGHT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+extern "C" fn on_stop_request(_: libc::c_int) {
+    use std::sync::atomic::Ordering::SeqCst;
+    // Only lock-free atomics and `kill`, all async-signal-safe.
+    STOP_CAUGHT.store(true, SeqCst);
+    let pid = STOP_TARGET.load(SeqCst);
+    if pid > 0 {
+        // SAFETY: plain system call on a pid number.
+        unsafe { libc::kill(pid, libc::SIGTERM) };
+    }
+}
+
+/// See [`crate::catch_stop_requests`]. A child started after this gets the default actions back at `exec` (caught signals are reset).
+pub(crate) fn catch_stop_requests() -> io::Result<()> {
+    for sig in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
+        // SAFETY: an all-zero sigaction is valid; the handler only touches atomics and calls `kill`.
+        let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+        action.sa_sigaction = on_stop_request as extern "C" fn(libc::c_int) as libc::sighandler_t;
+        action.sa_flags = libc::SA_RESTART;
+        // SAFETY: valid pointers to a filled action; the old action is not wanted.
+        unsafe { libc::sigemptyset(&mut action.sa_mask) };
+        // SAFETY: as above.
+        cvt(unsafe { libc::sigaction(sig, &action, std::ptr::null_mut()) })?;
+    }
+    Ok(())
+}
+
+/// See [`crate::wait_unreaped`].
+pub(crate) fn wait_unreaped(pid: u32) -> io::Result<()> {
+    let id = libc::id_t::from(pid);
+    loop {
+        // SAFETY: an all-zero siginfo_t is a valid out-buffer.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        // SAFETY: a valid out-pointer; WNOWAIT leaves the child to be reaped by its owner.
+        let r = unsafe { libc::waitid(libc::P_PID, id, &mut info, libc::WEXITED | libc::WNOWAIT) };
+        if r == 0 {
+            return Ok(());
+        }
+        let e = io::Error::last_os_error();
+        if e.kind() != io::ErrorKind::Interrupted {
+            return Err(e);
+        }
+    }
+}
+
+pub(crate) fn forward_stop_to(pid: Option<u32>) {
+    let pid = pid.and_then(|p| i32::try_from(p).ok()).unwrap_or(0);
+    STOP_TARGET.store(pid, std::sync::atomic::Ordering::SeqCst);
+}
+
+pub(crate) fn stop_requested() -> bool {
+    STOP_CAUGHT.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 /// `SIGTERM` to one process (not its group): see [`crate::terminate_process`].
 pub(crate) fn terminate(pid: u32) -> io::Result<()> {
     let pid =

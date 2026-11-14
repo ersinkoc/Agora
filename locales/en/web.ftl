@@ -761,3 +761,32 @@ key-down = Down
 key-left = Left
 key-right = Right
 key-paste = Paste
+
+# ADR-0073: old machines, forgetting machines
+old-machines-title = { $count ->
+    [one] One old machine
+   *[other] { $count } old machines
+}
+old-machines-explain = Not seen for more than a day. They are not offered for new agents. One that connects again is shown as usual.
+old-machines-cleanup = Clean up…
+forget-machine-action = Forget…
+forget-machine-title = Forget { $name }?
+forget-machines-title = { $count ->
+    [one] Clean up one old machine?
+   *[other] Clean up { $count } old machines?
+}
+forget-machines-explain = Forgotten machines and their finished agents leave every window. What they did stays in the history and the costs. A machine that connects again comes back.
+forget-machine-agents = { $count ->
+    [one] one agent was running then; it may still run there
+   *[other] { $count } agents were running then; they may still run there
+}
+forget-machines-refuse = Also refuse them if they connect again (each would need a new join code)
+forget-machines-cancel = Keep
+forget-machines-confirm = { $count ->
+    [one] Forget
+   *[other] Forget { $count }
+}
+forget-machine-reason-forbidden = Only the hub's owner can forget machines.
+forget-machine-reason-online = It is connected again, so it was not forgotten.
+forget-machine-reason-gone = The hub no longer knows this machine.
+forget-machine-reason-other = The hub could not forget it. Try again.

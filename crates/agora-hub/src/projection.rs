@@ -10,7 +10,7 @@
 //! Unknown or out-of-order facts are tolerated (a worktree event for an unseen checkout still records the
 //! worktree); the log is the truth, this is a cache.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use agora_protocol::v1::event::Body;
 use agora_protocol::v1::{AgentState, Event};
@@ -34,6 +34,9 @@ pub struct NodeView {
     /// The generation of the node's latest `NodeLink { up }` (ADR-0070); 0 when none was seen. A `NodeLink` with a lower one is
     /// about a connection that was already replaced and changes nothing.
     pub link_generation: u64,
+    /// ADR-0073: the owner had the hub forget this machine while it was offline. Clients are not shown it, or anything it ran, until
+    /// it connects again. Its records are kept (a machine that comes back has its folders again; usage still counts).
+    pub forgotten: bool,
 }
 
 impl NodeView {
@@ -48,6 +51,7 @@ impl NodeView {
             memory_used_bytes: 0,
             last_event_ms: 0,
             link_generation: 0,
+            forgotten: false,
         }
     }
 }
@@ -159,6 +163,9 @@ pub struct View {
     pub approvals: BTreeMap<String, ApprovalView>,
     /// ADR-0061: node id → the devices it said it trusts (its last `NodeTrustedDevices`).
     pub trusted_devices: BTreeMap<String, Vec<String>>,
+    /// ADR-0073: the position of the latest event that brought a forgotten machine back. A client that last saw an earlier position
+    /// may not hold that machine's records (it joined while they were hidden), so it is given a snapshot, not a replay.
+    pub remembered_at: u64,
 }
 
 /// The hub-wide key of an entity a producer named with a local id.
@@ -172,6 +179,70 @@ pub fn split_key(key: &str) -> Option<(&str, &str)> {
 }
 
 impl View {
+    /// ADR-0073: whether `ev` brings a forgotten machine back: its link opening (from the hub, not about a replaced connection) or its
+    /// process starting.
+    pub fn brings_back(&self, ev: &Event) -> bool {
+        let node = match &ev.body {
+            Some(Body::NodeLink(e)) if ev.producer_id == RESERVED_HUB_ID && e.up => {
+                let replaced = e.reason == agora_protocol::v1::NodeLinkReason::Replaced as i32;
+                match self.nodes.get(&e.node_id) {
+                    Some(n) if !replaced && e.generation >= n.link_generation => e.node_id.as_str(),
+                    _ => return false,
+                }
+            }
+            Some(Body::NodeOnline(e)) => e.node_id.as_str(),
+            _ => return false,
+        };
+        self.nodes.get(node).is_some_and(|n| n.forgotten)
+    }
+
+    /// ADR-0073: a forgotten machine that connects again is listed again, with the agents it still runs. Agents that had closed
+    /// before it was forgotten stay forgotten.
+    fn remember_node(&mut self, node: &str) {
+        let Some(n) = self.nodes.get_mut(node) else {
+            return;
+        };
+        if !std::mem::take(&mut n.forgotten) {
+            return;
+        }
+        for a in self
+            .agents
+            .values_mut()
+            .filter(|a| a.node_id == node && a.running)
+        {
+            a.forgotten = false;
+        }
+    }
+
+    /// ADR-0073: the view clients are shown. A forgotten machine, and everything keyed under it (`<node>/...`: its folders, worktrees,
+    /// terminals, approvals and agents), is left out. Borrowed as it is when no machine is forgotten.
+    pub fn shown(&self) -> std::borrow::Cow<'_, View> {
+        let hidden: BTreeSet<&str> = self
+            .nodes
+            .iter()
+            .filter(|(_, n)| n.forgotten)
+            .map(|(id, _)| id.as_str())
+            .collect();
+        if hidden.is_empty() {
+            return std::borrow::Cow::Borrowed(self);
+        }
+        let mut v = self.clone();
+        let keep = |key: &String| !split_key(key).is_some_and(|(node, _)| hidden.contains(node));
+        v.nodes.retain(|id, _| !hidden.contains(id.as_str()));
+        v.checkouts
+            .retain(|k, c| keep(k) && !hidden.contains(c.0.as_str()));
+        v.worktrees.retain(|k, _| keep(k));
+        v.workspaces
+            .retain(|k, w| keep(k) && !hidden.contains(w.node_id.as_str()));
+        v.agent_workspaces.retain(|k, _| keep(k));
+        v.terminals.retain(|k, _| keep(k));
+        v.approvals.retain(|k, _| keep(k));
+        v.agents.retain(|k, _| keep(k));
+        v.trusted_devices
+            .retain(|id, _| !hidden.contains(id.as_str()));
+        std::borrow::Cow::Owned(v)
+    }
+
     pub fn apply(&mut self, ev: &Event) {
         let producer = ev.producer_id.as_str();
         let q = |id: &str| qualified(&ev.producer_id, id);
@@ -216,6 +287,7 @@ impl View {
                 let prefix = format!("{}/", e.node_id);
                 self.approvals.retain(|k, _| !k.starts_with(&prefix));
                 self.terminals.retain(|k, _| !k.starts_with(&prefix));
+                self.remember_node(&e.node_id);
                 let n = self
                     .nodes
                     .entry(e.node_id.clone())
@@ -255,8 +327,21 @@ impl View {
                         n.link_generation = e.generation;
                     }
                 }
+                if e.up && !stale {
+                    self.remember_node(&e.node_id);
+                }
             }
             Body::NodeLink(_) => {}
+            // ADR-0073: written by the hub only, for a machine that is offline.
+            Body::NodeForgotten(e) if producer == RESERVED_HUB_ID => {
+                if let Some(n) = self.nodes.get_mut(&e.node_id) {
+                    n.forgotten = true;
+                }
+                for a in self.agents.values_mut().filter(|a| a.node_id == e.node_id) {
+                    a.forgotten = true;
+                }
+            }
+            Body::NodeForgotten(_) => {}
             Body::NodeResources(e) => {
                 if let Some(n) = self.nodes.get_mut(&e.node_id) {
                     n.agents_running = e.agents_running;
@@ -510,6 +595,9 @@ impl View {
                 pos = e.pos;
                 // A payload that does not decode was stored by a newer build; skip it rather than fail.
                 if let Ok(ev) = Event::decode(e.payload.as_slice()) {
+                    if view.brings_back(&ev) {
+                        view.remembered_at = pos;
+                    }
                     view.apply(&ev);
                 }
             }

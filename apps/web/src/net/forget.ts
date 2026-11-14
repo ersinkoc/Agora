@@ -7,3 +7,13 @@ export function forgetReasonKey(code: string): string {
     default: return 'closed-reason-other';
   }
 }
+
+// Why the hub did not forget a machine (ADR-0073), in the web's own words.
+export function forgetMachineReasonKey(code: string): string {
+  switch (code) {
+    case 'auth.forbidden': return 'forget-machine-reason-forbidden';
+    case 'node.online': return 'forget-machine-reason-online';
+    case 'node.unknown': return 'forget-machine-reason-gone';
+    default: return 'forget-machine-reason-other';
+  }
+}

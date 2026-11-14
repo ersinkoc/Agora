@@ -26,6 +26,7 @@ cli-usage =
       agora hub ssh [add AD HEDEF [--port N]] [--hub-dir DIR]
       agora hub backup [DOSYA] [--keep N] [--hub-dir DİZİN]
       agora hub restore DOSYA [--hub-dir DİZİN]
+      agora hub machines [forget AD | forget --old] [--refuse-return] [--yes] [--hub-dir DİZİN]
       agora hub devices [forget CİHAZ_ID] [--hub-dir DİZİN]
       agora node enroll --hub URL --ca FILE --code CODE --id NAME [--yes --fingerprint PARMAK_İZİ]... [--include-others] [--replace]
       agora panel
@@ -242,6 +243,7 @@ frontdoor-web-opened = Agora tarayıcınızda, oturum açılmış olarak açıld
 frontdoor-web-url = Oturum açmak için bu adresi tarayıcınızda açın (bir kez, 10 dakika geçerli; süresi dolduysa `agora web` komutunu yeniden çalıştırın): { $url }
 status-machine = Bu makinenin Agora'sı ({ $path }); arayüz: { $ui }
 status-running = { $role } çalışıyor (süreç { $pid }, sürüm { $version })
+status-running-supervised = { $role } çalışıyor (süreç { $pid }, sürüm { $version }; gözeticisi süreç { $supervisor })
 status-running-other = { $role } çalışıyor (`agora` tarafından başlatılmadı)
 status-stopped = { $role } çalışmıyor
 status-hub = dinlediği adres { $addr }; veri klasörü { $dir }
@@ -250,7 +252,48 @@ status-node-not-linked = bir hub'a bağlı değil
 status-agents = çalışan ajan: { $count }
 status-log = günlük: { $log }
 down-stopped = { $role } durduruldu (süreç { $pid }).
+down-stopped-supervised = { $role } ve gözeticisi durduruldu (süreç { $pid }).
 down-failed = { $role } durdurulamadı: { $reason }
 down-nothing = Durdurulacak bir şey yok: `agora` şu anda çalışan hiçbir şey başlatmamış.
+supervise-not-bound = { $role } başlatılmıyor: bu sistem onun gözeticisine bağlanmasına izin vermedi, bu yüzden `agora down` onu durduramazdı. Elle başlatın (`agora { $role } run`) ya da bunu bildirin.
+supervise-stop-request = Gözetici: durdurulması istendi; { $role } de onunla birlikte durduruldu.
+supervise-stopped = Gözetici: { $role } durdu (çıkış kodu 0); yeniden başlatılmıyor.
+supervise-already-running = Gözetici: { $role } burada zaten çalışıyor (bu gözetici başlatmadı), bu yüzden ikincisi başlatılmıyor.
+supervise-lost-lock = Gözetici: { $role } kilidi artık bu gözeticiyi göstermiyor (`agora down` çalıştı ya da başka biri devraldı), bu yüzden { $role } yeniden başlatılmıyor.
+supervise-lock-held = Bu Agora klasöründe { $role } ile zaten başka bir süreç (süreç { $pid }) ilgileniyor; bu gözetici kapanıyor.
+status-restarting = { $role } çalışmıyor: çöktü ({ $end }) ve gözeticisi (süreç { $pid }) onu birazdan yeniden başlatacak ({ $max } yeniden başlatmadan { $count }.).
+status-restarts = son { $window } dakikada { $count } kez yeniden başlatıldı; son çökme: { $end }, { $minutes ->
+    [0] bir dakikadan kısa süre önce
+   *[other] { $minutes } dk önce
+  }
+status-gave-up = { $role } { $max } yeniden başlatmadan sonra yine çöktü ve bir daha başlatılmadı ({ $end }, { $minutes ->
+    [0] bir dakikadan kısa süre önce
+   *[other] { $minutes } dk önce
+  }). Nedeni günlüğünde yazıyor; `agora` onu yeniden başlatır.
+status-refused = { $role } başlar başlamaz kapandı ({ $end }, { $minutes ->
+    [0] bir dakikadan kısa süre önce
+   *[other] { $minutes } dk önce
+  }), bu yüzden yeniden başlatılmadı. Nedeni günlüğünde yazıyor; `agora` yeniden dener.
+supervise-end-code = çıkış kodu { $code }
+supervise-end-signal = { $signal } sinyali
+supervise-refused = Gözetici: { $role } başladıktan { $seconds } sn sonra kapandı ({ $end }); bu bir çökme sayılamayacak kadar erken, bu yüzden yeniden başlatılmıyor. Nedeni yukarıda.
+supervise-restarting = Gözetici: { $role } { $seconds } sn çalıştıktan sonra kapandı ({ $end }); { $wait } sn sonra yeniden başlatılıyor ({ $minutes } dakikada { $max } yeniden başlatmadan { $count }.).
+supervise-gave-up = Gözetici: { $role } { $minutes } dakikada { $max } yeniden başlatmadan sonra yine kapandı ({ $end }); vazgeçiliyor. `agora` onu yeniden başlatır.
+supervise-handoff-lost = { $role } gözeticisi başlarken durduruldu (`agora down` çalıştı), bu yüzden başlatılmıyor.
 cli-node-policy-not-understood = node.policy_not_understood: ilke dosyasında bu makinenin anlamadığı bir satır var ({ $line }); düzeltilene kadar hiçbir ajan sormadan başlatılamaz.
 cli-version = Agora { $version }
+cli-machines-none = Hub hiçbir makine göstermiyor.
+cli-machines-none-old = Eski makine yok: her makine son 24 saatte görüldü.
+cli-machine-line = { $id } · { $state ->
+    [online] çevrimiçi
+    [old] eski, son görülme { $seen }
+   *[other] çevrimdışı, son görülme { $seen }
+}
+cli-machine-unknown = Hub { $id } adında bir makine göstermiyor.
+cli-machines-question = Bu makineler unutulsun mu? Her pencereden kalkarlar; yeniden bağlanan geri gelir. [e/H]
+cli-machines-question-refuse = Bu makineler unutulsun ve yeniden bağlanırlarsa reddedilsin mi? Her biri yeni bir katılım kodu ister. [e/H]
+cli-machines-declined = Hiçbir şey unutulmadı.
+cli-machines-not-asked = Hiçbir şey unutulmadı: bu terminal cevap veremiyor. Bir terminalde çalıştırın ya da --yes ekleyin.
+cli-machines-hub-unreachable = Çalışan hub'a klasöründen ulaşılamadı ({ $reason }). Makineleri çalışan hub unutur; "agora" ya da "agora hub run" ile başlatın.
+cli-machine-forgotten = { $id } unutuldu.
+cli-machine-not-forgotten = { $id } unutulamadı ({ $code }).

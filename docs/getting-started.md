@@ -21,8 +21,12 @@ Three steps on one machine (Linux, macOS or Windows). The details are in ADR-006
 Closing or killing the window changes nothing: the hub, the node and your agents keep running. Next time, `agora` only opens the
 window again.
 
-- `agora status`: what runs (process, version, address, data folder, connected hub, agents running, log files).
+- `agora status`: what runs (process, version, address, data folder, connected hub, agents running, log files), and whether the
+  hub or the node crashed and was started again.
 - `agora down`: stops the node, then the hub (agents end with the node, as when it is stopped any other way).
+- If the hub or the node crashes, it is started again 30 seconds later, at most 5 times in 10 minutes; one that stops right
+  after starting (its port is taken, its settings are wrong) is not retried, and its log says why. Each is run by a small
+  `agora supervise` process that `agora` starts; stopping or killing it stops what it runs too, so nothing is left behind.
 - Logs: `~/.agora/logs/hub.log` and `node.log` (renamed to `.1` when over 5 MiB at a start).
 
 Everything works as before by hand too (`agora hub run`, `agora node enroll`, `agora node run`, `agora tui`); `AGORA_HOME` moves

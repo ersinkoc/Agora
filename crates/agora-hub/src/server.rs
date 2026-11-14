@@ -436,6 +436,9 @@ pub trait ClientAuth {
 
 /// The wire form of the hub's view (ADR-0027). Ids are the hub-wide keys.
 pub fn snapshot_of(view: &View, pos: u64) -> v1::Snapshot {
+    // ADR-0073: forgotten machines and what they ran are not shown.
+    let shown = view.shown();
+    let view: &View = &shown;
     v1::Snapshot {
         workspaces: view.workspaces.values().cloned().collect(),
         agent_workspaces: view
@@ -791,7 +794,7 @@ async fn forward_command<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let req = v1::CommandRequest::decode(payload).map_err(|_| invalid("request"))?;
+    let mut req = v1::CommandRequest::decode(payload).map_err(|_| invalid("request"))?;
     let client_request_id = req.request_id.clone();
     let refuse = |e: Error| error_response(&client_request_id, &e);
     let Caller { who, scope } = caller;
@@ -844,6 +847,40 @@ where
             .await?;
         return Ok(());
     }
+    // ADR-0073: the hub forgets an offline machine. Owner only (machines belong to the owner, not to a project); it names the machine
+    // in the command, not as the target.
+    if let Some(command_request::Command::NodeForget(f)) = &req.command {
+        let resp = if !req.target_node.is_empty() {
+            refuse(Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "target_node"))
+        } else if who.role != crate::users::Role::Owner {
+            audit(hub, who, "node.forget", &f.node_id, "auth.forbidden");
+            refuse(Error::new(ErrorCode::AuthForbidden).with("action", "node.forget"))
+        } else {
+            match hub.forget_node(&f.node_id, f.refuse_return, now_ms()) {
+                Ok(()) => {
+                    let outcome = if f.refuse_return {
+                        "ok refused_return"
+                    } else {
+                        "ok"
+                    };
+                    audit(hub, who, "node.forget", &f.node_id, outcome);
+                    v1::CommandResponse {
+                        request_id: client_request_id,
+                        result: Some(command_response::Result::Ok(v1::CommandOk {
+                            result: Some(command_ok::Result::Empty(v1::Empty {})),
+                        })),
+                    }
+                }
+                Err(e) => {
+                    audit(hub, who, "node.forget", &f.node_id, e.code.as_str());
+                    refuse(e)
+                }
+            }
+        };
+        conn.send(&frame(STREAM_COMMANDS, 1, resp.encode_to_vec()))
+            .await?;
+        return Ok(());
+    }
     // Answered by the hub itself from its own view and prices (ADR-0033); it names no node.
     if matches!(req.command, Some(command_request::Command::UsageReport(_))) {
         let resp = if req.target_node.is_empty() {
@@ -859,6 +896,34 @@ where
         conn.send(&frame(STREAM_COMMANDS, 1, resp.encode_to_vec()))
             .await?;
         return Ok(());
+    }
+    // Shared terminal size: the node gets the smallest size of the windows watching the terminal, and only when it changes.
+    if let Some(command_request::Command::TerminalResize(t)) = req.command.as_mut() {
+        if !req.target_node.is_empty() {
+            use crate::router::Resize;
+            match hub
+                .router()
+                .resize(relays, &req.target_node, &t.terminal_id, t.cols, t.rows)
+            {
+                Resize::Forward((cols, rows)) => {
+                    t.cols = cols.into();
+                    t.rows = rows.into();
+                }
+                Resize::Unchanged => {
+                    audit(hub, who, &audit_action(&req), &req.target_node, "ok");
+                    let resp = v1::CommandResponse {
+                        request_id: client_request_id,
+                        result: Some(command_response::Result::Ok(v1::CommandOk {
+                            result: Some(command_ok::Result::Empty(v1::Empty {})),
+                        })),
+                    };
+                    conn.send(&frame(STREAM_COMMANDS, 1, resp.encode_to_vec()))
+                        .await?;
+                    return Ok(());
+                }
+                Resize::PassThrough => {}
+            }
+        }
     }
     let outcome = (|| {
         let node = crate::router::forwardable(&req)?.to_string();
@@ -882,7 +947,13 @@ where
             return Err(Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "stream_id"));
         }
         let (reply, relay) = if subscribing {
-            let node_stream = hub.router().open_relay(&node, relays, stream_id);
+            let terminal = match &req.command {
+                Some(command_request::Command::TerminalSubscribe(t)) => {
+                    Some(t.terminal_id.as_str())
+                }
+                _ => None,
+            };
+            let node_stream = hub.router().open_relay(&node, relays, stream_id, terminal);
             match hub.router().send_on(&node, req.clone(), node_stream) {
                 Ok(r) => (r, Some(node_stream)),
                 Err(e) => {

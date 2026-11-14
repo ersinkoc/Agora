@@ -194,6 +194,26 @@ its relay on both sides and the client resubscribes for a fresh snapshot (a hub-
 resends a snapshot"; the result for the client is the same and the node is never slowed). On the node, a thread bridges the
 stream from the node's own control socket to the hub connection through a bounded queue.
 
+Shared terminal size (ADR-0072, Accepted; `agora-hub::router`, no new message): several windows may watch one terminal, and it gets the smallest size
+any of them asked for (tmux's "smallest"), so no window is clipped. The hub keeps, per `(node, terminal_id)`, the last
+`TerminalResize` size of each client connection that has a relay for that terminal, and forwards to the node the smallest
+`cols` and, separately, the smallest `rows` over those connections, only when that differs from the size the hub last sent or saw
+in the terminal's own kind 2 frame (so a size set by a local client is noticed); otherwise it answers the request `ok` itself and
+sends nothing. When a connection closes its terminal stream (kind 255 from the client) or goes away, its size no longer counts and
+the others get the new smallest size (the terminal grows back); the last window leaving changes nothing. A refused subscription
+counts as leaving. A relay the hub ends (slow client, node gone, exit) changes nothing by itself; the client's size counts again
+when it resubscribes on the same connection. Rules: a connection that has not sent a size does not count (a viewer cannot, its
+`terminal.resize` stops at the hub); a size of 0 is forwarded unchanged for the node to refuse as before; a dimension above the
+node's limit (1000) asks for 1000. A `TerminalResize` from a connection that does not watch the terminal has no say while one
+that does has a size there (answered `ok`, nothing sent), and is forwarded unchanged as before when none does (a script). The
+hub-chosen size travels as an ordinary `TerminalResize` under a hub request id; nobody waits for its answer when the hub sends it
+on its own. Within one connection the last size counts (two views of one terminal in one window share it). This is the one
+command whose content the hub chooses (ADR-0072 amends ADR-0029 there, which otherwise forwards commands unchanged); it changes a
+size, never what the policy allows. Clients on the node's own control socket (the terminal client, `agora` commands on that machine) talk to the node
+directly: there the last resize still wins, and the hub's windows see that size in the terminal's resize frame. Clients report the
+size that fits their view and show the terminal at the size of the node's resize frame, never reporting that size back (the web
+window: `apps/web/src/terminal/sizing.ts`; it says its size again right after every subscription).
+
 Client sign-in (`agora-hub::signin`): `agora hub login` (and `agora hub run`, once at start) prints a one-time code (`XXXX-XXXX`, about 39
 bits, 10 minutes, single use). The web app trades it with `POST /api/session` (`{"code": "..."}` → `{"token": "..."}`, 401 for a
 wrong, expired or used code, 429 after five misses in a row) for a session token: 128 random bits, valid 12 hours, stored only as a
@@ -272,6 +292,7 @@ create a worktree. New clients refuse an unavailable directory launch rather tha
 | `directory.inspect` / `DirectoryInspect` (81) | `path`, `create_project_id`, `authorization` → `DirectoryInfo` (Ok tag 18): canonical `path`, `project_id`, `git_root`, `branch`, `portable`, `previous_project_id` |
 | `directory.list` / `DirectoryList` (84) | `path` (empty: the user's home folder), `authorization` → `DirectoryEntries` (Ok tag 21): canonical `path`, `parent` (empty at a root), `entries[]` of `{name, is_git}`, `truncated`. Folders only, sorted by name, at most 500 per answer; folders ADR-0052 refuses to launch in are not listed; capability `directory.list` (ADR-0053) |
 | `agent.forget` / `AgentForget` (85) | `agent_id`; answered by the hub, which appends `AgentForgotten` (event 36, `agent_id` is the hub-wide key `<node>/<id>`) and stops listing the agent; `agent.running` while it runs; the earlier events stay in the store (ADR-0053) |
+| `node.forget` / `NodeForget` (93) | `node_id`, `refuse_return`; answered by the hub, owner only (`auth.forbidden` otherwise), with no `target_node` (`protocol.invalid_message` otherwise). `node.online` while the machine is connected, `node.unknown` for one the hub never saw. With `refuse_return` every certificate enrolled under `node_id` is revoked first. The hub appends `NodeForgotten` (event 15, producer `hub`): its snapshot leaves out that machine and everything keyed under it (folders, worktrees, terminals, approvals, agents); a later `NodeLink { up }` (or `NodeOnline`) of the same node lists it again with the agents it still runs, and the ones closed before stay forgotten. A client that joined while the machine was hidden holds none of its records and no event repeats them, so when it comes back the hub lets every live client go, and a client resuming from a position before that return gets a snapshot instead of a replay (`View::remembered_at`, rebuilt at start). History and usage stay (ADR-0073). The web window is served by its hub, so it always matches it; there is no separate client capability |
 | `agent.launch` / `AgentLaunch` (82) | canonical `path`, expected `project_id`, `kind`, `separate_worktree`, `authorization`, `accept_identity_change` → `AgentLaunchResult` (Ok tag 19): `agent_id`, `terminal_id`, `workspace_id`, actual cwd `path` |
 | `workspace.query` / `WorkspaceQuery` (83) | `workspace_id`, `operation` (`list`, `read`, `status`, `diff`, `history`), relative `path`, `limit` → existing file/Git results |
 

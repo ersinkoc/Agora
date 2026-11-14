@@ -6,6 +6,18 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ### Security
 - macOS: a confined agent (`sandbox = worktree`) can no longer reach the node's own files and sockets: the whole node home is closed to it (trusted devices, policy, ledger, identity, logs, hub folder, manifests, adapter trust files, the node's control socket and the other agents' mesh sockets), except its own worktree and mesh socket; the home cannot be renamed away, and no socket can be bound there before the node's own. Before, it could connect to the control socket (Seatbelt checks unix sockets as network, not as files), and with a node home under `/tmp` it could read and write the node's data (#475). Its own mesh socket stays open. Its worktree is given back only while it is still a real folder: an agent that leaves a link in its place is not started again, and says why. A node home that cannot be found stops confined agents from starting instead of leaving the home open, and your own home folder is never taken for the node's.
+### Machines (ADR-0073)
+- A machine not seen for more than a day is shown as **old**: on the Machines page in its own folded section, and no longer offered
+  for new agents. **Clean up…** forgets all old machines in one dialog, and **Forget…** forgets one offline machine. Forgotten
+  machines leave every window, while their history and costs stay; one that connects again comes back. A box also refuses them if
+  they connect again, for a lost or retired machine. `agora hub machines` lists machines as online, offline or old, and
+  `agora hub machines forget NAME` or `forget --old` does the same from the hub's machine. Only the hub's owner can forget machines.
+### Getting started
+- A hub or node started by `agora` that crashes is started again 30 seconds later, at most 5 times in 10 minutes; one that
+  stops right after starting (a port taken, a wrong setting) is not retried and its log says why. `agora status` shows a restart
+  in progress, the restarts of the last 10 minutes and a give-up. `agora down` and a killed supervisor never leave a hub or node
+  running behind them. A hub or node started by an earlier version stays as it is until `agora down` and `agora`.
+
 ### Shared board
 - A change to a shared project's board (create, claim, complete, lease, release, handoff) is answered as done only once the hub has
   stored it. If the hub cannot write it (a full or locked disk), the agent gets an error and the board stays as it was, so a claim an
@@ -14,6 +26,8 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 - A window or terminal client that comes back after a long time away (more than 10 000 events or 8 MiB behind) gets a fresh snapshot
   instead of replaying everything it missed. Its return no longer holds up the hub for every machine and every other window while
   the backlog is read (100 000 events behind took about 155 ms of the hub's time; now well under a millisecond).
+### Terminal client
+- The terminal client's wheel scrolls an agent's tab back through what it showed, with how far back at the top; typing goes back to the bottom.
 
 ## 0.3.11
 
@@ -37,6 +51,11 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ### Getting started
 - `agora --version` prints the version.
+
+### Terminals
+- A terminal open in two windows at once (say a laptop and a bigger screen elsewhere) now fits both: it takes the size of the
+  smaller window, the bigger one shows it at its top left with a thin line where it ends, and it grows back as soon as the smaller
+  window closes it (ADR-0072). Before, the window that resized last won and the other one was cut off.
 
 ### Agents working together
 - An agent asking who is in its project (`agents_list`) now sees the project's agents on your other connected machines too, not

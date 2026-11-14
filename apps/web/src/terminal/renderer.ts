@@ -10,9 +10,10 @@ export interface TerminalRenderer {
   write(bytes: Uint8Array): void;
   /** Clears and repaints from an ANSI snapshot (after a reconnect or when the client fell behind). */
   reset(snapshot: Uint8Array): void;
+  /** Shows the terminal at the size the node reports (which may be smaller than the element: it is shared, see sizing.ts). */
   resize(cols: number, rows: number): void;
-  /** Size that fits the mounted element, to report to the node. */
-  fit(): { cols: number; rows: number } | undefined;
+  /** Size that fits the mounted element, to report to the node. Measures only: the terminal keeps its size. */
+  measure(): { cols: number; rows: number } | undefined;
   onInput(cb: (data: string) => void): void;
   /** Pastes text as the program expects it (bracketed when it asked for that); it arrives through `onInput`. */
   paste(text: string): void;
@@ -91,12 +92,13 @@ export class XtermRenderer implements TerminalRenderer {
   }
 
   resize(cols: number, rows: number): void {
-    this.term.resize(cols, rows);
+    if (cols !== this.term.cols || rows !== this.term.rows) this.term.resize(cols, rows);
   }
 
-  fit(): { cols: number; rows: number } | undefined {
-    this.fitAddon.fit();
-    return { cols: this.term.cols, rows: this.term.rows };
+  measure(): { cols: number; rows: number } | undefined {
+    const d = this.fitAddon.proposeDimensions();
+    if (!d || !Number.isFinite(d.cols) || !Number.isFinite(d.rows) || d.cols < 1 || d.rows < 1) return undefined;
+    return { cols: d.cols, rows: d.rows };
   }
 
   onInput(cb: (data: string) => void): void {
