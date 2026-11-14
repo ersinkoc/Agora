@@ -1,7 +1,7 @@
 kind = "wrongstack"
 display_name = "WrongStack"
-version = "2026.11.09.1"
-min_engine = 1
+version = "2026.11.13.1"
+min_engine = 2
 # ADR-0057: before Enter, the input box under the idle header must hold the typed prompt (and only it), with no approval on screen.
 input_box = 'idle ─╮[^\n]*\n│[^\S\n]*❯[^\S\n]?([^│\n]*?)[^\S\n]*│'
 
@@ -10,6 +10,16 @@ names = ["wstack", "wrongstack"]
 # `--skip` answers every startup question from saved choices (otherwise a launcher menu and a "no project manifest" question
 # wait for a key); `--tui` is the terminal UI the screen rules below were captured from (checked against WrongStack 1.5.3).
 launch = ["wstack", "--skip", "--tui"]
+
+# ADR-0059: chosen in the start window, never preselected; the node's `skip_permissions` policy decides whether it may be used.
+# `--yolo` ("Auto-approve on"; WrongStack still asks for the destructive kinds it gates) checked with `wstack --help` on
+# WrongStack 1.6.0. `--yolo-plus` (never ask) is not offered. `wstack acp serve --help` shows no such flag, so `wrongstack-acp` has
+# no option.
+[[launch.option]]
+id = "skip-permissions"
+label = "option-skip-permissions"
+args = ["--yolo"]
+skips_permissions = true
 
 [mcp]
 # `wstack --mcp-config <file|json>` takes extra MCP servers for the run and accepts a `.mcp.json` (WrongStack 1.5.3 `--help`).

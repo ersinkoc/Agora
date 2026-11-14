@@ -20,7 +20,9 @@ tokio-tungstenite = { version = "0.24", optional = true }
 futures-util = { version = "0.3", optional = true, default-features = false, features = ["sink"] }
 
 [features]
-ws = ["dep:tokio", "dep:tokio-tungstenite", "dep:futures-util"]
+ws = ["dial", "dep:tokio-tungstenite", "dep:futures-util"]
+# Opening a TCP connection the way every hub client should (loopback names try IPv4 first), without the WebSocket layer.
+dial = ["dep:tokio"]
 
 [dev-dependencies]
 # Reflection + proto3 JSON mapping for golden fixtures in both encodings (ADR-0010).

@@ -1,10 +1,20 @@
 kind = "antigravity-acp"
 display_name = "Antigravity (structured)"
-version = "2026.11.13.1"
-min_engine = 1
+version = "2026.11.13.2"
+min_engine = 2
 
 # L2: Antigravity's `agy` CLI as an Agent Client Protocol server over stdio (`agy acp`, agy 1.5.6 `--help` on Windows). Not yet run
 # through `agora acp-bridge` against the real program. The node runs it through the bridge, so there is no terminal. The flag
-# `--dangerously-skip-permissions` is deliberately not used: permission requests must reach the panel.
+# `--dangerously-skip-permissions` is not in the command: permission requests reach the panel unless the person who starts the agent
+# chooses the option below (ADR-0059).
 [structured]
 acp = { argv = ["agy", "acp"] }
+
+# ADR-0059: added to the ACP server command (`agy acp --dangerously-skip-permissions`); never preselected, and the node's
+# `skip_permissions` policy decides whether it may be used. Taken from `agy acp --help` of agy 1.5.6 as the Windows agent saw it
+# (2026-11-13); `agy` is not installed on the machine this was written on, so it was not run here.
+[[launch.option]]
+id = "skip-permissions"
+label = "option-skip-permissions"
+args = ["--dangerously-skip-permissions"]
+skips_permissions = true

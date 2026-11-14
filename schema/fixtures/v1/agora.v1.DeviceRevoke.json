@@ -1,0 +1,8 @@
+{
+  "revocation": {
+    "deviceId": "x",
+    "issuedAtMs": "1",
+    "revokerDeviceId": "x",
+    "signature": "AQID"
+  }
+}

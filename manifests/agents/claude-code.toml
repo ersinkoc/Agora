@@ -1,13 +1,21 @@
 kind = "claude-code"
 display_name = "Claude Code"
-version = "2026.11.09.1"
-min_engine = 1
+version = "2026.11.13.1"
+min_engine = 2
 # ADR-0057: before Enter, the box between its two rules must hold the typed prompt (and only it), with the mode footer and no dialog.
 input_box = '^─{20,}\n❯[^\S\n]?((?s:.*?))\n─{20,}$'
 
 [process]
 names = ["claude"]
 launch = ["claude"]
+
+# ADR-0059: chosen in the start window, never preselected; the node's `skip_permissions` policy decides whether it may be used.
+# `--dangerously-skip-permissions` ("Bypass all permission checks") checked with `claude --help` on Claude Code 2.1.323.
+[[launch.option]]
+id = "skip-permissions"
+label = "option-skip-permissions"
+args = ["--dangerously-skip-permissions"]
+skips_permissions = true
 
 [accounts]
 login = ["claude", "auth", "login"]
@@ -22,6 +30,12 @@ flag = ["--mcp-config", "{config_file}"]
 
 [resume]
 argv = ["claude", "--resume", "{session_id}"]
+
+[session]
+# ADR-0060: the node chooses the session id at the first launch (`--session-id <uuid>`, checked on Claude Code 2.1.319), so `--resume`
+# finds it after a restart without reading any transcript. Claude Code saves no transcript when it inherits a parent session's
+# markers; the node leaves those out of an agent's environment.
+id_args = ["--session-id", "{session_id}"]
 
 [usage]
 # Claude Code writes one JSON line per message to ~/.claude/projects/<cwd>/<session>.jsonl (checked on 2.1.319, ADR-0042). A message

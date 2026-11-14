@@ -111,6 +111,11 @@ impl Registration {
         self.release()
     }
 
+    /// The node this registration is for.
+    pub fn node(&self) -> &str {
+        &self.node
+    }
+
     fn release(&self) -> bool {
         let ours = {
             let mut g = self.router.nodes.lock().unwrap_or_else(|e| e.into_inner());
@@ -305,6 +310,20 @@ impl Router {
         }
     }
 
+    /// The connected nodes that negotiated `capability`, sorted.
+    pub fn nodes_with(&self, capability: &str) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .nodes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|(_, l)| l.capabilities.iter().any(|c| c == capability))
+            .map(|(n, _)| n.clone())
+            .collect();
+        out.sort();
+        out
+    }
+
     pub fn is_connected(&self, node: &str) -> bool {
         self.nodes
             .lock()
@@ -360,10 +379,41 @@ impl Router {
         let switch = match request.command {
             Some(command_request::Command::AgentSetMode(_)) => Some("agent.set_mode"),
             Some(command_request::Command::AgentSetModel(_)) => Some("agent.set_model"),
+            // ADR-0060: a node that cannot resume agents is never sent the command.
+            Some(command_request::Command::AgentResume(_)) => Some("agent.resume"),
             _ => None,
         };
         if let Some(cap) = switch.filter(|cap| !link.capabilities.iter().any(|c| c == cap)) {
             return Err(Error::new(ErrorCode::ProtocolCapabilityMissing).with("capability", cap));
+        }
+        // ADR-0061: endorsements and revocations go only to a node that verifies them.
+        if matches!(
+            request.command,
+            Some(
+                command_request::Command::DeviceEndorse(_)
+                    | command_request::Command::DeviceRevoke(_)
+            )
+        ) && !link.capabilities.iter().any(|c| c == "device.trust")
+        {
+            return Err(
+                Error::new(ErrorCode::ProtocolCapabilityMissing).with("capability", "device.trust")
+            );
+        }
+        // ADR-0059: an older node would start the agent without the options it does not know (it would ask after all): refused here
+        // instead, so the window says so rather than showing an agent that behaves otherwise than chosen.
+        let options = match &request.command {
+            Some(command_request::Command::AgentLaunch(a)) => !a.launch_options.is_empty(),
+            Some(command_request::Command::AgentStart(a)) => !a.launch_options.is_empty(),
+            _ => false,
+        };
+        if options
+            && !link
+                .capabilities
+                .iter()
+                .any(|c| c == "agent.launch_options")
+        {
+            return Err(Error::new(ErrorCode::ProtocolCapabilityMissing)
+                .with("capability", "agent.launch_options"));
         }
         if matches!(
             request.command,
@@ -397,7 +447,13 @@ pub fn forwardable(req: &v1::CommandRequest) -> Result<&str, Error> {
             command_request::Command::Enroll(_)
             | command_request::Command::MeshPost(_)
             | command_request::Command::BoardCall(_)
-            | command_request::Command::BoardJoin(_),
+            | command_request::Command::BoardJoin(_)
+            // ADR-0061: answered or carried by the hub itself, never forwarded as a client's command.
+            | command_request::Command::DeviceRegister(_)
+            | command_request::Command::DeviceList(_)
+            | command_request::Command::DeviceEndorse(_)
+            | command_request::Command::DeviceRevoke(_)
+            | command_request::Command::DeviceAskApproval(_),
         ) => Err(Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "command")),
         Some(_) if req.target_node.is_empty() => {
             Err(Error::new(ErrorCode::NodeUnknown).with("node_id", ""))
@@ -436,6 +492,57 @@ mod tests {
         ));
         assert!(old_rx.try_recv().is_err());
         assert!(r.send("new", request).is_ok());
+        assert!(matches!(new_rx.try_recv(), Ok(ToNode::Command { .. })));
+    }
+
+    #[test]
+    fn a_resume_goes_only_to_a_node_that_offers_it() {
+        let r = Router::new();
+        let (_old, mut old_rx) = r.register("old");
+        let (_new, mut new_rx) = r.register_with_capabilities("new", vec!["agent.resume".into()]);
+        let resume = Some(command_request::Command::AgentResume(
+            v1::AgentResume::default(),
+        ));
+        let mut request = req("old");
+        request.command = resume.clone();
+        let refused = r.send("old", request).err().unwrap();
+        assert_eq!(refused.code, ErrorCode::ProtocolCapabilityMissing);
+        assert!(old_rx.try_recv().is_err());
+        let mut request = req("new");
+        request.command = resume;
+        assert!(r.send("new", request).is_ok());
+        assert!(matches!(new_rx.try_recv(), Ok(ToNode::Command { .. })));
+    }
+
+    #[test]
+    fn a_start_with_launch_options_goes_only_to_a_node_that_knows_them() {
+        let r = Router::new();
+        let (_old, mut old_rx) =
+            r.register_with_capabilities("old", vec!["workspace.directory".into()]);
+        let (_new, mut new_rx) = r.register_with_capabilities(
+            "new",
+            vec!["workspace.directory".into(), "agent.launch_options".into()],
+        );
+        let launch = |options: Vec<String>| {
+            let mut request = req("old");
+            request.command = Some(command_request::Command::AgentLaunch(v1::AgentLaunch {
+                launch_options: options,
+                ..Default::default()
+            }));
+            request
+        };
+        let refused = r
+            .send("old", launch(vec!["skip-permissions".into()]))
+            .err()
+            .unwrap();
+        assert_eq!(refused.code, ErrorCode::ProtocolCapabilityMissing);
+        assert!(old_rx.try_recv().is_err());
+        // Without options an older node still gets the start.
+        assert!(r.send("old", launch(Vec::new())).is_ok());
+        assert!(matches!(old_rx.try_recv(), Ok(ToNode::Command { .. })));
+        assert!(r
+            .send("new", launch(vec!["skip-permissions".into()]))
+            .is_ok());
         assert!(matches!(new_rx.try_recv(), Ok(ToNode::Command { .. })));
     }
 

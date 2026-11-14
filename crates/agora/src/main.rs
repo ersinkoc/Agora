@@ -25,7 +25,9 @@ const DETACH: u8 = 0x1d;
 const TERMINAL_STREAM: u32 = 3;
 
 mod adaptercmd;
+mod frontdoor;
 mod hubcli;
+mod trustcli;
 mod tuicmd;
 mod update;
 
@@ -46,7 +48,24 @@ impl Say {
         eprintln!("{}", self.text(id, args));
     }
 
+    /// A refused request whose `field` names something the person can act on has a sentence of its own
+    /// (`cli-invalid-<field>`, dots as dashes), so it does not read like a protocol bug; the code stays the same.
+    fn field_reason(&self, e: &v1::ErrorInfo, args: &[(&str, Arg)]) -> Option<String> {
+        if e.code != "protocol.invalid_message" {
+            return None;
+        }
+        let Some(Value::Str(field)) = e.params.get("field").and_then(|v| v.value.as_ref()) else {
+            return None;
+        };
+        self.0
+            .render(&format!("cli-invalid-{}", field.replace('.', "-")), args)
+    }
+
     fn remote_error(&self, e: &v1::ErrorInfo) {
+        eprintln!("{}", self.remote_error_text(e));
+    }
+
+    fn remote_error_text(&self, e: &v1::ErrorInfo) -> String {
         let args: Vec<(&str, Arg)> = e
             .params
             .iter()
@@ -56,14 +75,16 @@ impl Say {
                 None => None,
             })
             .collect();
-        let message = self.text(&e.code.replace('.', "-"), &args);
-        self.err(
+        let message = self
+            .field_reason(e, &args)
+            .unwrap_or_else(|| self.text(&e.code.replace('.', "-"), &args));
+        self.text(
             key!("cli-error"),
             &[
                 ("code", e.code.as_str().into()),
                 ("message", message.into()),
             ],
-        );
+        )
     }
 }
 
@@ -117,6 +138,14 @@ pub(crate) struct Opts {
     since: Option<u64>,
     who: Option<String>,
     root_key: Option<PathBuf>,
+    /// ADR-0061: `agora node trust --from-hub`, and the fingerprints `--yes` covers.
+    from_hub: bool,
+    fingerprints: Vec<String>,
+    /// ADR-0061: also other people's devices (with their fingerprints), and replacing a key already trusted under the same id.
+    include_others: bool,
+    replace: bool,
+    ui: Option<String>,
+    save: bool,
     positional: Vec<String>,
 }
 
@@ -163,6 +192,12 @@ fn parse(args: &[String]) -> Option<Opts> {
             "--who" => o.who = Some(it.next()?.clone()),
             "--role" => o.role = Some(it.next()?.clone()),
             "--root-key" => o.root_key = Some(it.next()?.into()),
+            "--from-hub" => o.from_hub = true,
+            "--fingerprint" => o.fingerprints.push(it.next()?.clone()),
+            "--include-others" => o.include_others = true,
+            "--replace" => o.replace = true,
+            "--ui" => o.ui = Some(it.next()?.clone()),
+            "--save" => o.save = true,
             s if s.starts_with("--") => return None,
             _ => o.positional.push(a.clone()),
         }
@@ -170,7 +205,7 @@ fn parse(args: &[String]) -> Option<Opts> {
     Some(o)
 }
 
-fn socket_path(o: &Opts) -> PathBuf {
+pub(crate) fn socket_path(o: &Opts) -> PathBuf {
     o.socket.clone().unwrap_or_else(|| home().join("node.sock"))
 }
 
@@ -194,6 +229,13 @@ fn main() -> ExitCode {
     }
     let say = Say(Catalog::for_locale(&agora_i18n::catalog::locale_from_env()));
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if matches!(
+        args.first().map(String::as_str),
+        Some("--help" | "-h" | "help")
+    ) {
+        say.out(key!("cli-usage"), &[]);
+        return ExitCode::SUCCESS;
+    }
     let words: Vec<&str> = args
         .iter()
         .map(String::as_str)
@@ -207,6 +249,11 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     };
     match words.as_slice() {
+        // ADR-0062: plain `agora` brings this machine's Agora up and opens it.
+        [] => frontdoor::front_door(&say, &opts),
+        ["web"] => frontdoor::web(&say),
+        ["status"] => frontdoor::status(&say),
+        ["down"] => frontdoor::down(&say),
         ["node", "run"] => node_run(&say, &opts),
         ["agent", "start"] => agent_start(&say, &opts),
         ["project", "init"] => project_init(&say, &opts),
@@ -223,19 +270,22 @@ fn main() -> ExitCode {
         ["adapter", "list"] => adaptercmd::list(&say, &opts),
         ["adapter", "remove"] => adaptercmd::remove(&say, &opts),
         ["adapter", "update"] => adaptercmd::update(&say, &opts),
+        ["password", op @ ("set" | "clear" | "status")] => hubcli::password(&say, &opts, op),
         ["hub", "run"] => hubcli::hub_run(&say, &opts),
         ["hub", "code"] => hubcli::hub_code(&say, &opts),
         ["hub", "fingerprint"] => hubcli::hub_fingerprint(&say, &opts),
         ["hub", "login"] => hubcli::hub_login(&say, &opts),
         ["hub", "user"] => hubcli::hub_user(&say, &opts),
         ["hub", "audit"] => hubcli::hub_audit(&say, &opts),
+        ["hub", "devices"] => hubcli::hub_devices(&say, &opts),
         ["hub", "ssh"] => hubcli::hub_ssh(&say, &opts),
         ["hub", "prices"] => hubcli::hub_prices(&say, &opts),
         ["hub", "notify"] => hubcli::hub_notify(&say, &opts),
         ["hub", "backup"] => hubcli::hub_backup(&say, &opts),
         ["hub", "restore"] => hubcli::hub_restore(&say, &opts),
         ["node", "enroll"] => hubcli::node_enroll(&say, &opts),
-        ["node", "trust"] => node_trust(&say, &opts),
+        ["node", "trust"] => trustcli::node_trust(&say, &opts),
+        ["node", "untrust"] => trustcli::node_untrust(&say, &opts),
         ["node", "stdio"] => bridge_stdio(&say, &socket_path(&opts)),
         ["mesh", "stdio"] => match &opts.socket {
             // An agent's MCP client starts this as its mesh server; the node told it which socket is its own.
@@ -322,19 +372,22 @@ fn doctor(say: &Say, o: &Opts) -> ExitCode {
             ("data-dir", _) => key!("doctor-data-dir-unwritable"),
             ("node", Status::Ok) => key!("doctor-node"),
             ("node", _) => key!("doctor-node-not-running"),
-            ("manifests", Status::Ok) => key!("doctor-manifests"),
-            ("manifests", _) => key!("doctor-manifests-missing"),
+            ("manifests", _) => key!("doctor-manifests"),
             ("agent-installed", _) => key!("doctor-agent-installed"),
             ("agent-missing", _) => key!("doctor-agent-missing"),
             ("policy-path-dropped", _) => key!("doctor-policy-path-dropped"),
             ("policy-path-missing", _) => key!("doctor-policy-path-missing"),
+            ("policy-restart", _) => key!("doctor-policy-restart"),
+            ("policy-changed", _) => key!("doctor-policy-changed"),
             _ => key!("doctor-manifest-invalid"),
         };
         let detail: Arg = match (c.id, c.detail.parse::<i64>()) {
             ("manifests", Ok(n)) => Arg::Num(n),
             _ => c.detail.as_str().into(),
         };
-        let text = say.text(sentence, &[("detail", detail)]);
+        let mut args = vec![("detail", detail)];
+        args.extend(c.args.iter().map(|(k, v)| (*k, Arg::from(v.as_str()))));
+        let text = say.text(sentence, &args);
         let status = say.text(
             match c.status {
                 Status::Ok => key!("doctor-status-ok"),
@@ -354,36 +407,6 @@ fn doctor(say: &Say, o: &Opts) -> ExitCode {
     } else {
         say.err(key!("doctor-summary-problems"), &[]);
         ExitCode::from(1)
-    }
-}
-
-/// `agora node trust DEVICE_ID PUBLIC_KEY_HEX`: lets a device answer approvals on this node. Run by the owner on the
-/// machine itself; nothing a hub or client sends can do this.
-fn node_trust(say: &Say, o: &Opts) -> ExitCode {
-    let (Some(id), Some(key)) = (o.positional.first(), o.positional.get(1)) else {
-        say.err(key!("cli-bad-arguments"), &[]);
-        say.err(key!("cli-usage"), &[]);
-        return ExitCode::from(2);
-    };
-    let dir = o.data.clone().unwrap_or_else(|| home().join("data"));
-    let result = std::fs::create_dir_all(&dir)
-        .map_err(|e| e.to_string())
-        .and_then(|()| {
-            agora_node::approvals::trust_device(
-                &dir.join(agora_node::approvals::TRUSTED_DEVICES_FILE),
-                id,
-                key,
-            )
-        });
-    match result {
-        Ok(()) => {
-            say.out(key!("cli-trusted"), &[("id", id.clone().into())]);
-            ExitCode::SUCCESS
-        }
-        Err(e) => {
-            say.err(key!("cli-trust-failed"), &[("reason", e.into())]);
-            ExitCode::from(1)
-        }
     }
 }
 
@@ -420,6 +443,13 @@ fn node_run(say: &Say, o: &Opts) -> ExitCode {
     for (path, reason) in &node.manifest_problems {
         eprintln!("{}: {reason}", path.display());
     }
+    // ADR-0059: a policy line the node did not understand forbids starting agents that do not ask, until it is fixed.
+    for line in &node.policy_problems {
+        say.err(
+            key!("cli-node-policy-not-understood"),
+            &[("line", line.clone().into())],
+        );
+    }
     // Events recorded under another name (before enrollment, as `local`) are never sent to the hub, which would refuse them: kept
     // on disk under a new name, and said here so nothing is lost silently.
     if let Some(s) = &node.events_set_aside {
@@ -444,6 +474,7 @@ fn node_run(say: &Say, o: &Opts) -> ExitCode {
         l.mesh_out = Some(out);
         l.grants = Some(Arc::clone(&node.grants));
         l.mesh = Some(Arc::clone(&node.mesh));
+        l.devices = Some(Arc::clone(&node.devices));
         agora_node::uplink_client::spawn(Arc::clone(&node.events), l).ok()
     });
     // Run until the process is stopped; agents die with it and the socket file is replaced on next start.
@@ -555,6 +586,8 @@ fn agent_start(say: &Say, o: &Opts) -> ExitCode {
         separate_worktree: o.separate_worktree,
         accept_identity_change: o.accept_identity_change,
         authorization: None,
+        launch_options: Vec::new(),
+        confirmed_launch_options: Vec::new(),
     });
     match call(say, &mut c, cmd) {
         Ok(v1::CommandOk {
@@ -821,4 +854,31 @@ fn terminal_attach(say: &Say, o: &Opts) -> ExitCode {
         &[("agent_id", agent.as_str().into())],
     );
     ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod remote_error_tests {
+    use super::*;
+    use agora_protocol::{Error, ErrorCode};
+
+    #[test]
+    fn a_changed_project_identity_says_what_to_do_instead_of_reading_like_a_protocol_bug() {
+        let e = Error::new(ErrorCode::ProtocolInvalidMessage)
+            .with("field", "directory.identity_changed")
+            .to_info();
+        let en = Say(Catalog::english()).remote_error_text(&e);
+        assert!(en.starts_with("Error protocol.invalid_message: "), "{en}");
+        assert!(en.contains("--accept-project-id-change"), "{en}");
+        assert!(!en.contains("not valid"), "{en}");
+        let tr = Say(Catalog::turkish()).remote_error_text(&e);
+        assert!(tr.contains("--accept-project-id-change"), "{tr}");
+        assert!(tr.contains("proje kimliği"), "{tr}");
+        // A field without a sentence of its own keeps the generic one.
+        let other = Error::new(ErrorCode::ProtocolInvalidMessage)
+            .with("field", "directory.project_id")
+            .to_info();
+        let en = Say(Catalog::english()).remote_error_text(&other);
+        assert!(en.contains("field: directory.project_id"), "{en}");
+    }
 }

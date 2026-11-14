@@ -15,7 +15,7 @@ use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
 use std::sync::{Mutex, MutexGuard};
 
 use agora_protocol::v1::event::Body;
-use agora_protocol::v1::{Event, NodeOffline};
+use agora_protocol::v1::{Event, NodeLink, NodeLinkReason, NodeOffline};
 use prost::Message;
 
 use crate::ca::RESERVED_HUB_ID;
@@ -104,6 +104,17 @@ fn spawn_audit(
                 q(&s.parent_agent_id),
                 "agent.start",
                 format!("ok:{}", q(&s.agent_id)),
+            )
+        }
+        // ADR-0059: every start with an option that skips permissions is audited with its options, however it was started (through
+        // the hub or at the machine). The node never gives a helper one.
+        Body::AgentStarted(s)
+            if s.skips_permissions && !view.agents.contains_key(&q(&s.agent_id)) =>
+        {
+            row(
+                q(&s.agent_id),
+                "agent.launch_options",
+                format!("skips_permissions:{}", s.launch_options.join(",")),
             )
         }
         _ => None,
@@ -277,6 +288,87 @@ impl Hub {
             }),
             now_ms,
         )
+    }
+
+    /// ADR-0070: a node's connection is open after the handshake. Registers it with the router (commands reach it from now on) and
+    /// records `NodeLink { up }` under one lock, so the log's order of presence facts is the order the connections really took
+    /// turns in. Returns the registration, the node's commands and this connection's generation. Nothing the node runs is touched:
+    /// a reconnect is not a process start.
+    pub fn node_link_opened(
+        &self,
+        node: &str,
+        capabilities: Vec<String>,
+        now_ms: u64,
+    ) -> (
+        crate::router::Registration,
+        tokio::sync::mpsc::UnboundedReceiver<crate::router::ToNode>,
+        u64,
+    ) {
+        let mut g = self.lock();
+        let generation = g
+            .view
+            .nodes
+            .get(node)
+            .map_or(0, |n| n.link_generation)
+            .saturating_add(1);
+        let (registration, commands) = self.router.register_with_capabilities(node, capabilities);
+        // The router has it either way; a store that cannot write leaves the view as it was until the next fact.
+        let _ = self.emit(
+            &mut g,
+            Body::NodeLink(NodeLink {
+                node_id: node.to_string(),
+                up: true,
+                reason: NodeLinkReason::Opened as i32,
+                generation,
+                last_heard_ms: now_ms,
+            }),
+            now_ms,
+        );
+        (registration, commands, generation)
+    }
+
+    /// ADR-0070: a node's connection ended (`silent`: the hub closed it after its deadline). Unregisters it and records
+    /// `NodeLink { up: false }` under one lock. When a newer connection of the node had already replaced this one, the fact says
+    /// `replaced` and the node stays online; otherwise the hub also records `NodeOffline`, which clients from before ADR-0070
+    /// understand. `last_heard_ms` is when the hub last received anything on this connection. Returns whether the node is now
+    /// offline.
+    pub fn node_link_closed(
+        &self,
+        registration: crate::router::Registration,
+        generation: u64,
+        silent: bool,
+        last_heard_ms: u64,
+        now_ms: u64,
+    ) -> bool {
+        let mut g = self.lock();
+        let node = registration.node().to_string();
+        let current = registration.end();
+        let reason = match (current, silent) {
+            (false, _) => NodeLinkReason::Replaced,
+            (true, true) => NodeLinkReason::Silent,
+            (true, false) => NodeLinkReason::Closed,
+        };
+        if current {
+            let _ = self.emit(
+                &mut g,
+                Body::NodeOffline(NodeOffline {
+                    node_id: node.clone(),
+                }),
+                now_ms,
+            );
+        }
+        let _ = self.emit(
+            &mut g,
+            Body::NodeLink(NodeLink {
+                node_id: node,
+                up: false,
+                reason: reason as i32,
+                generation,
+                last_heard_ms,
+            }),
+            now_ms,
+        );
+        current
     }
 
     /// Records an event the hub itself produced (as the reserved hub producer).
@@ -493,12 +585,52 @@ mod tests {
             kind: "codex".into(),
             level: 1,
             parent_agent_id: "a".into(),
+            launch_options: Vec::new(),
+            skips_permissions: false,
         }));
         let row = spawn_audit(&view, &started).unwrap();
         assert_eq!((row.0.as_str(), row.3.as_str()), ("n1/a", "ok:n1/b"));
         view.apply(&started);
         // Said again (a restart or a resync): not a new start.
         assert!(spawn_audit(&view, &started).is_none());
+    }
+
+    #[test]
+    fn a_start_that_does_not_ask_is_audited_once_with_its_options() {
+        let mut view = crate::projection::View::default();
+        let at = |body| Event {
+            producer_id: "n1".into(),
+            seq: 1,
+            at_ms: 7,
+            body: Some(body),
+        };
+        let started = |skips, options: &[&str]| {
+            at(Body::AgentStarted(AgentStarted {
+                agent_id: "c".into(),
+                project_id: "p".into(),
+                node_id: "n1".into(),
+                worktree_id: String::new(),
+                kind: "codex".into(),
+                level: 1,
+                parent_agent_id: String::new(),
+                launch_options: options.iter().map(|o| (*o).to_string()).collect(),
+                skips_permissions: skips,
+            }))
+        };
+        assert!(spawn_audit(&view, &started(false, &[])).is_none());
+        assert!(spawn_audit(&view, &started(false, &["resume-last"])).is_none());
+        let skip = started(true, &["skip-permissions"]);
+        let row = spawn_audit(&view, &skip).unwrap();
+        assert_eq!(
+            (row.0.as_str(), row.1.as_str(), row.3.as_str()),
+            (
+                "n1/c",
+                "agent.launch_options",
+                "skips_permissions:skip-permissions"
+            )
+        );
+        view.apply(&skip);
+        assert!(spawn_audit(&view, &skip).is_none());
     }
 
     fn support() -> Support {
@@ -558,6 +690,8 @@ mod tests {
                 kind: "shell".into(),
                 level: 2,
                 parent_agent_id: String::new(),
+                launch_options: Vec::new(),
+                skips_permissions: false,
             })),
         }
         .encode_to_vec()

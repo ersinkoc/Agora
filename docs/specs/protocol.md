@@ -13,7 +13,9 @@ connect (WSS + mTLS for nodes, session token for clients)
   ← ResumeOk   { from_seq }  |  ← SnapshotRequired
   → SnapshotRequired                       (node only, when it no longer has from_seq; ADR-0054)
   ... streams ...
-  → / ← Ping / Pong every 15 s; 3 missed = connection lost
+  → / ← Ping / Pong: a node pings every 10 s (15 s before ADR-0070), a window every 15 s; the hub answers each Ping at once
+           with a Pong carrying the same payload. Deadlines (ADR-0070, docs/design/observability.md): the hub closes a node
+           connection silent for 25 s; a node drops a hub link silent for 25 s; a window one with no answer within 10 s
   → / ← Goodbye { reason_code }
 ```
 
@@ -145,6 +147,17 @@ position it saw and gets the backlog, or a snapshot when that position is ahead 
 backup). When a node's connection ends without a goodbye the hub records `NodeOffline` itself as producer `hub` (a name no
 node certificate can carry), in the same log, so live and rebuilt views agree.
 
+Presence (ADR-0070): the hub also records `NodeLink { node_id, up, reason, generation, last_heard_ms }` as producer `hub`, from
+the certificate-authenticated connection only: `up` with reason `opened` when a node's connection is open after the handshake
+(a first connect or a reconnect; it resets nothing, unlike the node's `NodeOnline`), and `up = false` with `closed`, `silent`
+(nothing for 25 s; the hub closed it) or `replaced` (a newer connection of that node was already registered) when it ends.
+`generation` counts the node's connections (1, 2, …, kept across hub restarts); `last_heard_ms` is the hub's clock when it last
+received anything on that connection. A reader takes a machine's `online` from its latest presence fact by log position (this
+event, or `NodeOnline`/`NodeOffline` from an older hub), ignores a `NodeLink` whose generation is below the node's latest `up`,
+never takes `replaced` as offline, and ignores a `NodeLink` from any producer but `hub`; a node that sends one is refused
+(`protocol.invalid_message`, field `node_link`). For clients that predate it the hub keeps writing `NodeOffline` when the
+current connection ends. The snapshot's `NodeSnapshot.last_event_ms` includes `last_heard_ms`, so it is "last seen".
+
 Schema additions (ADR-0025/0026/0027, all new messages, nothing published changed): `agent.list` (`AgentList` -> `AgentListResult` of
 `AgentSummary`; implemented on the node and as `agora agent list`), `EventAck` (hub -> producer, cumulative), `client.proto`
 (`Subscribe`, `Snapshot` with `*Snapshot` tables mirroring the hub view, `PositionedEvent`; named `*Snapshot` because
@@ -182,6 +195,18 @@ bits, 10 minutes, single use). The web app trades it with `POST /api/session` (`
 wrong, expired or used code, 429 after five misses in a row) for a session token: 128 random bits, valid 12 hours, stored only as a
 hash. The token is the bearer credential above. `<hub dir>/token` stays valid for scripts. 
 
+Screen password (ADR-0067, `agora-hub::password`; additive JSON on the same HTTP routes, no protocol message): `GET /api/session` →
+`{"passwordRequired": bool, "passwordSet": bool}` (required only when one is set and the TCP peer is not loopback). `POST /api/session`
+also takes `"password"`; without the right one from a non-loopback peer it is 401 like a bad code (the code is not spent). Wrong codes,
+passwords and passkeys are limited per address (5 tries, then 1 minute doubling to 1 hour; loopback at most 1 minute) and codes and
+passwords also hub-wide (50), 429 while locked out; every 401/429 is answered after 250 ms. `DELETE /api/session` with a bearer ends that
+session ("Lock"). `POST /api/password` (`{"password", "current"?}`, owner session; `current` needed when one is set) sets it and ends
+every other session (400 `{"code":"password.too_short"|"password.too_long"}`, 401 wrong current, 403 not the owner).
+From a non-loopback peer with a password set, `POST /api/passkey/register-begin` and `register-finish` also need `"password"` (401
+without it, counted like a sign-in); changing or clearing the password deletes passkeys added from elsewhere without it (their ids are
+not in the setting `passkeys_vouched`). Passkey `login-finish` counts only toward the per-address limit. The idle lock of a window
+uses `DELETE /api/session`. The hash is a setting (`screen_password`: `pbkdf2-sha256$<rounds>$<salt hex>$<hash hex>`), not a schema change.
+
 Passkeys (`agora-hub::passkey`, WebAuthn, ES256 only, no attestation): a signed-in session adds one with
 `POST /api/passkey/register-begin` (`{}` → `{"challenge","rpId"}`, `Authorization: Bearer <session>`) and `register-finish`
 (`{"id","publicKey"(SPKI),"clientDataJSON"}`, all base64url). Without a session: `login-begin` (→ `{"challenge","rpId","ids"}`) and
@@ -205,7 +230,7 @@ Initial event families:
 
 | Family | Examples |
 | --- | --- |
-| node | `NodeOnline`, `NodeOffline`, `NodeResources` |
+| node | `NodeOnline`, `NodeOffline`, `NodeResources`, `NodeLink` (hub-written presence, ADR-0070) |
 | project | `CheckoutDiscovered`, `WorktreeCreated`, `WorktreeRemoved`, `GitStatusChanged` (the node checks each running agent's workspace every 5 s and reports when the changed-file count, line counts or HEAD differ from the last report) |
 | agent | `AgentStarted`, `AgentStateChanged`, `AgentSessionReported`, `AgentUsageReported`, `AgentExited` |
 | terminal | `TerminalOpened`, `TerminalTitleChanged`, `TerminalClosed` |
@@ -269,8 +294,17 @@ Here `operation` is `inspect` or `launch`; inspect leaves kind/project empty; `o
 or separate-worktree launch respectively. `identity_change` is `0` for inspect and the confirmation flag for launch.
 No field may contain NUL. Expiry must be in the next five minutes (browser signs for two). Used device/nonce pairs
 are persisted until expiry, surviving a node restart; the bounded cache fails closed on corruption or exhaustion.
-Generic start grants cannot authorize a substituted directory. Initially only unrestricted node-trusted owner devices
-may sign these operations; scoped member devices are refused even for their projects. The local owner-only control
+Generic start grants cannot authorize a substituted directory. A device the node limits to some projects (ADR-0049:
+`device.<id>.projects`, or inherited through an endorsement) may sign these operations (and `list`, `resume`) only inside
+those projects, judged after its signature by the node's own records, never by what the request or the folder claims: the
+canonical folder must be one the node already knows for a project, or lie inside one (the nearest known folder decides;
+known folders are the owner-confirmed launch bindings and the checkouts registered with `node run`; a registered project's
+id or name for `inspect`, an id before a name and a name two projects share for none); that project must be one of the device's, and for `launch` also the signed `project_id` (the
+launch then checks the folder's identity against it as for every launch). `resume` uses the project the node's session
+ledger holds for the agent. Refused with `auth.forbidden` (`action: directory`): a folder the node knows for no project or
+for another one (also its parent folders, `..`, the home folder), `inspect` with `create_project_id`, `launch` with
+`identity_change`, an agent the ledger does not place, and any directory action when the node cannot place folders.
+Unlimited devices are unchanged. The local owner-only control
 socket has no extra signature requirement. Workspace diffs are rooted at the selected directory, including an empty requested path; they do not include parent-checkout changes.
 Workspace queries inherit the existing file/Git path, symlink, `.git` and
 size guards and require a workspace used by a managed session. Hub members/viewers can query only granted workspaces.
@@ -288,7 +322,7 @@ output, kind 2 resize (cols, rows as u16 LE), kind 3 exit (i32 LE; negative = si
 gets a fresh snapshot instead of the dropped output; it never slows the terminal. Input and resize are ordinary
 commands. Terminal ids are `t-<agent id>` (one terminal per agent). Implemented commands: `project.list`,
 `agent.start`, `agent.stop`, `agent.prompt`, `terminal.input`, `terminal.resize`, `terminal.subscribe`; the rest
-answer `protocol.capability_missing`. `agent.list` (ADR-0025) and `agent.kinds` (ADR-0030: the node's loaded manifests with display name, integration level and whether the launch program is on `PATH`; invalid manifests omitted; `agora agent kinds`).
+answer `protocol.capability_missing`. `agent.list` (ADR-0025) and `agent.kinds` (ADR-0030: the node's built-in and folder manifests, one per kind (agent-manifest.md, "Where agent kinds come from"), with display name, integration level and whether the launch program is on `PATH`; invalid manifests omitted; `agora agent kinds`).
 
 ## 5. Client state model
 
@@ -388,3 +422,187 @@ All additions; nothing published changed.
   in US dollars as its `micro_usd`, and estimates from the price table only for agents that reported none.
 - **Start failures.** `agent.start` of an adapter agent whose adapter failed with a stable reason answers with that code instead of
   `internal`: `adapter.agent_exited` `{stage, exit_code, stderr_tail}` or `adapter.agent_refused` `{stage}` (`error-codes.md`).
+
+### Session ledger and Resume (ADR-0060)
+
+All additions; nothing published changed.
+
+- **Ledger.** A node keeps `<data>/sessions/ledger.json` (folder `0700`, file `0600` on Unix, an owner-only ACL on Windows; replaced
+  whole through a temporary file in the same folder and a rename; at most 512 entries, 4 MiB read). Per agent: id, kind, project,
+  folder (its workspace path or its own worktree), whether it is a directory agent (ADR-0052) and its separate worktree's Git root
+  and branch, parent agent (ADR-0057), the agent's own session id once reported (`AgentSessionReported`), the launch options of
+  ADR-0059 (recorded from `AgentStarted`, never applied by `agent.resume`: a resumed or restarted-again agent asks before acting,
+  and its `AgentStarted` carries no options, so the "does not ask" badge goes), start time, last state, whether it ended, and when it was found interrupted. Never
+  terminal contents, prompts, or secrets. It learns from the events the node records: written when an agent starts, reports its
+  session and ends; a state change is written with the next write and when the node stops cleanly. The ledger also keeps the next
+  agent id, so an id is never given twice across restarts. A file that cannot be read is renamed (`ledger.json.unreadable-<ms>`),
+  never deleted. Entries are dropped 14 days after they were last touched (an interrupted one 14 days after it was found).
+- **Interrupted.** An agent whose entry had not ended when the node started again was interrupted by the node stopping. Event
+  `AgentInterrupted` (`Event` field 38: `agent_id`, `kind`, `project_id`, `folder`, `parent_agent_id`, `resumable`, `started_at_ms`,
+  `interrupted_at_ms`, `last_state`) says so after the node's `NodeOnline`, and again in every resync announcement, until the agent
+  is resumed or started again (its next `AgentStarted`) or no longer kept. `resumable` is true when the node has the agent's own
+  session id and its kind can resume one (a manifest `[resume]` argv, or an adapter or ACP agent, whose bridge asks the agent for
+  `session/load` when it offers `loadSession` and opens a new session otherwise). The hub keeps the agent with the closed ones
+  (`running` false, state `done`, so it reads "finished") and adds `AgentSnapshot.interrupted` (40), `resumable` (41),
+  `interrupted_at_ms` (42) and `folder` (43); its next `AgentStarted` clears them. An agent the hub never saw (its store was reset)
+  is listed from the event alone. `agent.forget` works on it like on any closed agent.
+- **Still running.** The ledger also records each agent's pid, process group and start time. `AgentInterrupted.still_running` (10,
+  snapshot `AgentSnapshot.still_running` 44) says its process from before the restart still runs (same pid, same start time; a node
+  killed without stopping its agents). Then `agent.resume` answers `agent.still_running`, and `agent.stop` with its id ends exactly
+  that process (its group when it leads one), with `stop_helpers` also its helpers that outlived the node, and says
+  `AgentInterrupted` again without `still_running`; a pid whose start time, boot (Linux `boot_id`) or program name differs is never
+  signalled. `agent.stop` of any interrupted agent succeeds: when its old process has ended meanwhile nothing is signalled, and it is
+  announced again without `still_running`, so clients offer Resume and Start again. Not on Windows, where a node's agents end with it.
+- **Resume.** Command `agent.resume` (`AgentResume`, request field 87: `agent_id` (the node's own id), `new_session`,
+  `authorization`) → `AgentLaunchResult` (Ok tag 19). Node capability `agent.resume`: the hub refuses the command with
+  `protocol.capability_missing` for a node that did not offer it. Same agent id, same folder, same project, same kind. Without
+  `new_session` the node runs the kind's `[resume]` argv with `{session_id}` replaced, or starts the adapter with the session to
+  load; `agent.session_missing` when it has no session id or the kind cannot resume one. With `new_session` (Start again) it starts
+  a new session of the same kind in the same folder and forgets the old session id. Refusals: `agent.not_interrupted` (not held as
+  interrupted), `agent.folder_changed` (the folder is gone, or a directory agent's folder now has another project identity,
+  ADR-0052), `agent.parent_not_running` (a helper is resumed only while the agent that started it runs; its grants and approvals are
+  not restored), and the same node policy and limits as a start (`agent.sandbox_unavailable`, `node.resource_limit`, ...). Over the
+  hub it is signed like `agent.launch`, with the same `DirectoryAuthorization` and message:
+  `directory-action-v1\0node\0resume\0agent_id\0\0\0new_session\00\0nonce\0expires_at_ms` (operation `resume`, the agent's
+  local id in the `path` field, kind and project empty, `option` the `new_session` flag, `identity_change` `0`); a hub cannot resume
+  anything by itself. The local owner-only socket needs no signature. Viewers cannot send it, and the hub audits it like every routed
+  command (action `AgentResume`).
+- **Session ids.** Adapter and ACP agents report theirs (`session/reported`). A terminal agent's comes from its manifest's `[session]`
+  (`docs/specs/agent-manifest.md`): an id the node chooses and passes at the first launch (Claude Code), or one read from the first line
+  of the session file the agent writes (Codex), only when that cannot be confused with another agent's. Without either, a terminal
+  agent is offered Start again only. A resumed helper keeps its parent (stopped with it, listed under it) but may not ask to start
+  helpers and none of its parent's grants cover it until a new decision is signed.
+- **Automatic resume.** The node's own `<data>/policy` may say `resume = auto` with `resume.kinds = a, b` and `resume.folders = /x,
+  /y`: after a start, interrupted agents of a listed kind in a listed folder (or below it) that can resume their own session are
+  resumed without anyone asking (a helper only after its parent was). The default is `resume = ask`; any other value is `ask`. The
+  hub cannot change it.
+
+### Launch options (ADR-0059)
+
+All additions; nothing published changed. Node capability `agent.launch_options`.
+
+- **What may be chosen.** `AgentKind.launch_options` (5) lists a kind's `[[launch.option]]`s as `LaunchOption { id, label,
+  skips_permissions }` (the manifest's order; the arguments stay on the node). A window offers them only for a node with the
+  capability; "Ask before acting" (no option) is always the default and a `skips_permissions` option is never preselected and needs the
+  user's confirmation (the ADR-0058 dialog, Keep asking as the primary button).
+- **The choice.** `AgentStart.launch_options` (7) and `AgentLaunch.launch_options` (7) name the chosen ids; `confirmed_launch_options`
+  (8 on both) names those whose "Let the agent act without asking?" confirmation the window showed and the user accepted. Every id must
+  be `[a-z0-9-]{1,32}` and declared by the node's manifest for the kind, at most 8, no repeats, and each confirmed id must be chosen;
+  otherwise `agent.option_invalid {kind, option}` and nothing starts (so a `!` or `,` in an advertised id gets nowhere). Which options
+  skip permissions is the node's own manifest's word: one not listed as confirmed is refused with `agent.option_unconfirmed {kind,
+  option}`, so a hub that relays `AgentKind.launch_options` relabelled as harmless (the window asks nothing) gets the start refused.
+  The window's list is a display hint only; windows drop advertised ids outside `[a-z0-9-]{1,32}` before offering them. The node adds
+  the arguments to the launch command (terminal kinds) or the ACP server command (structured kinds) for the agent's whole life,
+  restarts and resumes included. Through the hub, `AgentLaunch` with options or confirmations is authorized over its own domain,
+  with both lists length-prefixed (`<count>` then `:<byte length>:<id>` per id: `["a","b"]` is `2:1:a:1:b`, `["a,b"]` is `1:3:a,b`):
+
+  ```
+  directory-action-v3\0node\0launch\0path\0kind\0project_id\0option\0identity_change\0launch_options\0confirmed\0nonce\0expires_at_ms
+  ```
+
+  Shared vectors checked by the node, the terminal client and the web window: `schema/fixtures/signing/directory-action-v3.json`.
+  An `AgentLaunch` without either list keeps `directory-action-v1` exactly as published, so a hub can neither add, remove or swap an
+  option nor add or strip a confirmation. A routed `AgentStart` with options carries no signature and is refused
+  (`agent.option_forbidden` `{kind, option, policy: signature}`); a grant (ADR-0041) never covers one. On the node's own control
+  socket (the owner) no signature is needed. An agent's `agent_start` helper (ADR-0057) never gets an option.
+- **Node policy.** `skip_permissions = forbid | allow | confined_only` (quoted or not) in the node's own policy file (default `allow`
+  when there is no file; any other value, an unknown key, a line without `=`, or an existing file that cannot be read counts as
+  `forbid`, and the node says `node.policy_not_understood` when it starts; the hub cannot change it). A start with a `skips_permissions` option that the policy does not allow is refused
+  before anything starts with `agent.option_forbidden` `{kind, option, policy}` (`policy` is `forbid`, or `confined_only` when the
+  agent's confinement, ADR-0047/0050, would not be active).
+- **What everyone sees.** `AgentStarted.launch_options` (30) and `skips_permissions` (31), carried by the hub in `AgentSnapshot`
+  fields 30 and 31 (30-39 are kept for ADR-0059): a "does not ask" badge on the agent in every client for its whole life. The hub's
+  audit row for such a start names the options (action `AgentLaunch[skip-permissions]`).
+
+### Devices (ADR-0061)
+
+All additions; nothing published changed. A device is a signing key a person uses (a browser's WebCrypto key, the terminal client's
+key; ES256, ADR-0028). The hub keeps each person's **registered** devices; a node trusts devices. The hub's list is only a list of
+candidates: no message from the hub makes a node trust a device. A node trusts a device when its owner says yes on the machine
+(`agora node trust ID KEY`, or the question `agora node enroll` and `agora node trust --from-hub` ask about the registered devices),
+or when a device it already trusts signs an **endorsement** of it. The hub only carries endorsements and revocations.
+
+- **Registration.** `DeviceRegister` (request field 88: `device_id`, `name`, `public_key`, `signed_at_ms`, `signature`) is sent by a
+  signed-in client when it connects; the hub answers it itself and keeps the device under the session's person (`id`, name, key,
+  created, last used, and the proof). A device id matches `[A-Za-z0-9._-]{1,64}`, a name is at most 64 characters with no control,
+  format, bidi or other hidden character (agora-core's list), a key is a 65-byte uncompressed P-256 point. **Proof of possession:**
+  `signature` is the device's own ES256 signature by `public_key` over
+
+  ```
+  "agora-device-register-v1" 0x00 F(device_id) F(name) F(hex(public_key)) F(signed_at_ms)
+  ```
+
+  and `signed_at_ms` is within 10 minutes of the hub's clock (`device.signature_invalid` otherwise), so nobody can register a key they
+  do not hold. `DeviceInfo.signed_at_ms` (10) and `registration_signature` (11) carry the proof to nodes, which verify it again before
+  offering the device, so a hub cannot invent one either. (The person is not in the signed bytes: a browser does not know its hub-side
+  id; the hub binds the device to the session's person, and nodes never rely on that binding for trust.) A device id stays bound to its
+  key and its person: another key or another person under a registered id is refused with `device.key_mismatch`; sending it again
+  updates the name and the time it was last used. At most 64 devices per person that are not revoked (`node.resource_limit`
+  `{resource: devices}`); `agora hub devices forget ID` deletes a revoked one from the list (its revocations stay).
+- **Listing.** `DeviceList` (request field 89) answers `DeviceListResult` (`CommandOk` field 22) with the caller's own devices
+  (`DeviceInfo`: id, name, key, `created_ms`, `last_used_ms`, `user_id`, `approval_asked_ms`, `endorsed_by[]`, `revoked_ms`). A node
+  asks too, on a TLS connection made with its certificate whose first frame is that `CommandRequest` (stream 2, kind 0, before any
+  `Hello`): the hub answers once with every registered device and closes it, so the node's own connection is not replaced. Nothing
+  else is answered on such a connection (`protocol.invalid_message`); without a certificate it is refused like anything but
+  enrollment. The hub offers the capability `device.list`. `EnrollResponse.devices` (4) carries the same list at enrollment. A node is
+  sent only the devices of the people who may act on it: the owner (sessions without a person and people with the owner role) and
+  every person with a grant on one of its projects (ADR-0049).
+- **Asking.** `DeviceAskApproval` (request field 92: `device_id`, `signed_at_ms`, `signature`) marks one of the caller's devices as
+  waiting for another of their devices (`approval_asked_ms`). It is signed by that device's registered key over
+  `"agora-device-ask-v1" 0x00 F(device_id) F(signed_at_ms)`, at most 5 minutes from the hub's clock, so only the device itself can ask; the person's other devices list it and show a card. The first endorsement of it the hub carries
+  clears the mark.
+- **Endorsement.** `DeviceEndorse { endorsement }` (request field 90) from a client: the hub checks that both devices are the caller's,
+  that the key is the registered one (`device.key_mismatch`), that it lasts at most 90 days and has not expired
+  (`device.endorsement_expired`), and that it verifies under the endorser's registered key (`device.signature_invalid`; verified before
+  it is stored), keeps it once (the same signature is not stored twice), and sends the same message to every connected node with the capability `device.trust`
+  (for an endorsement that names machines, only to those), and again to each such node when it connects while it has not expired.
+  A viewer cannot send it (`auth.forbidden`). The signed bytes (`DeviceEndorsement.signature`, ES256 r || s) are
+
+  ```
+  "agora-device-endorse-v1" 0x00 F(device_id) F(hex(public_key)) F(name) F(count of nodes) F(node)... F(issued_at_ms) F(expires_at_ms) F(endorser_device_id)
+  ```
+
+  where `F(x)` is the decimal byte length of `x`, `:`, then `x` in UTF-8; numbers are decimal and the key is lowercase hex. A node
+  accepts it only when: the endorser is a device it trusts there (and that trust has not expired; `device.untrusted`), the signature
+  verifies (`device.signature_invalid`), this node is in `nodes` or `nodes` is empty (`device.not_in_scope`), now is before
+  `expires_at_ms`, `issued_at_ms` is at most 5 minutes ahead of the node's clock and `expires_at_ms - issued_at_ms` is at most 90 days
+  (`device.endorsement_expired`), no revocation of the device was signed at or after `issued_at_ms` (`device.revoked`), and the node
+  does not already trust that id with another key (`device.key_mismatch`). Its trust there begins at the earlier of `issued_at_ms`
+  and the node's clock (a revocation signed now always wins over an endorsement dated ahead). A device the node's policy limits to
+  some projects (ADR-0049) endorses only within them: the new device is limited to the same projects (written as `projects=` on its
+  line, so it survives restarts), and a limited device revokes only itself or devices whose limits are within its own
+  (`auth.forbidden` otherwise). A device's limit is the policy's line for it, what it inherited, and its endorser's limit as it is now
+  (up the chain), all at once: the policy narrows, never widens, an inherited limit, and a demoted endorser takes the devices it
+  endorsed down with it; a renewal by use happens only while the endorser's current limit still covers the device. For a device the node already trusts through an endorsement: its own endorser may renew it, also after it
+  ran out, while that endorser's current limit still covers what it was given (it keeps its endorser and limits); another endorser
+  may take it over only if its current limit covers both the device's current limit and its current endorser's, and only with an
+  endorsement whose start (the earlier of its `issued_at_ms` and the node's clock) is at or after the device's trust ran out
+  (its effective expiry, or its own expiry when its chain is broken);
+  `auth.forbidden` otherwise. A limit naming a project the file cannot hold (empty, or with a comma or a space) refuses the endorsement
+  (`node.policy_denied`, rule `device.projects`). A revocation dated more than 5 minutes ahead of the node's or the hub's clock is
+  refused. The hub carries an endorsement only to machines the device's person may act on, a revocation to every machine. It then
+  trusts the device until `expires_at_ms` (never
+  longer than its endorser's own trust there), and each use of the device on that node renews it to 90 days from the use.
+- **Revocation.** `DeviceRevoke { revocation }` (request field 91): both devices must be the caller's; the hub keeps it and sends it to
+  every node with `device.trust`, now and whenever one connects. Signed bytes:
+
+  ```
+  "agora-device-revoke-v1" 0x00 F(device_id) F(issued_at_ms) F(revoker_device_id)
+  ```
+
+  The hub verifies it under the revoker's registered key before keeping it, keeps each signature once, at most 256 per person
+  (`node.resource_limit` `{resource: revocations}`), and forgets one after 400 days (every endorsement signed before it expired long
+  before). A node applies one signed by a device it trusts at once: the device is no longer trusted there if its trust there began
+  (`since`) at or before `issued_at_ms`, and neither are the devices it endorsed; endorsements of it, and endorsements it signed, at or before `issued_at_ms`
+  are refused from then on. A revocation sent again later never removes trust given after it (an endorsement signed later, or the
+  owner trusting it again on the machine with `agora node trust ID KEY`).
+- **Fingerprint.** What people compare: the first 12 bytes (96 bits) of the SHA-256 of the 65-byte key, lowercase hex in groups of 4
+  hex digits joined by `-` (`f947-3cb5-e304-81be-ecf2-64cd`). Every client shows it wherever a device is named, computed by the client
+  from the key itself, never taken from the hub.
+- **Trusted devices.** Event `NodeTrustedDevices` (`Event` field 13: `device_ids[]`, sorted, never keys), produced by a node when it
+  starts and whenever the set changes; the hub keeps the last one per node in `NodeSnapshot.trusted_device_ids` (10), so a window can
+  tell which machines trust its device. Node capability `device.trust`: the node verifies `DeviceEndorse` and `DeviceRevoke` and reports
+  `NodeTrustedDevices`; the hub never sends either message to a node without it.
+
+Shared vectors for the four signed messages and the fingerprint, checked by the node, the terminal client and the web window:
+`schema/fixtures/signing/device-trust-v1.json`.

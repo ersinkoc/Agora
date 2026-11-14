@@ -5,6 +5,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 pub const METADATA: &str = ".agent-project.json";
+/// The owner-confirmed folder bindings ([`Bindings`]), in the node's worktree folder.
+pub const BINDINGS_FILE: &str = ".directory-bindings.json";
 
 pub fn invalid(field: &'static str) -> Error {
     Error::new(ErrorCode::ProtocolInvalidMessage).with("field", field)
@@ -160,6 +162,56 @@ impl Bindings {
     }
 }
 
+/// The project the node itself knows `requested` to belong to, for a device limited to some projects (ADR-0049, ADR-0053): the
+/// project of the nearest folder that is `requested` or contains it among the owner-confirmed folders in `bindings_file` (written by
+/// launches) and the registered checkouts in `projects` (`(id, root)`), compared as canonical paths. A registered project's id or name
+/// (what `directory.inspect` also accepts; an id before a name, a shared name for none) names its root. `None`: a folder the node knows for no project. What the folder itself
+/// claims (its metadata) is never asked, so a copied identity cannot place a folder in a project.
+pub fn known_project(
+    bindings_file: &Path,
+    projects: &[(String, String, PathBuf)],
+    requested: &str,
+) -> Option<String> {
+    // As `directory.inspect` resolves it (`control::resolve_in`): an id wins over a name, and a name two projects share names
+    // neither, so the project checked here is always the one the action reads.
+    if let Some((id, _, _)) = projects.iter().find(|(id, _, _)| id == requested) {
+        return Some(id.clone());
+    }
+    let mut named = projects.iter().filter(|(_, name, _)| name == requested);
+    match (named.next(), named.next()) {
+        (Some((id, _, _)), None) => return Some(id.clone()),
+        (Some(_), Some(_)) => return None,
+        _ => {}
+    }
+    if requested.is_empty() || requested.len() > 4096 || requested.contains('\0') {
+        return None;
+    }
+    let path = agora_platform::canonicalize_plain(Path::new(requested)).ok()?;
+    let bindings = Bindings::load(bindings_file.to_path_buf());
+    if !bindings.valid {
+        return None;
+    }
+    let roots = projects.iter().filter_map(|(id, _, root)| {
+        Some((agora_platform::canonicalize_plain(root).ok()?, id.clone()))
+    });
+    let found: Vec<(usize, String)> = bindings
+        .ids
+        .iter()
+        .map(|(p, id)| (PathBuf::from(p), id.clone()))
+        .chain(roots)
+        .filter(|(known, _)| path.starts_with(known))
+        .map(|(known, id)| (known.components().count(), id))
+        .collect();
+    let nearest = found.iter().map(|(depth, _)| *depth).max()?;
+    let mut ids = found
+        .into_iter()
+        .filter(|(d, _)| *d == nearest)
+        .map(|(_, id)| id);
+    let id = ids.next()?;
+    // The same folder known as two projects (its identity changed): the node cannot say which, so neither.
+    ids.all(|other| other == id).then_some(id)
+}
+
 /// Most folders one `directory.list` answer carries (ADR-0053); more are reported as `truncated`.
 pub const MAX_LISTED: usize = 500;
 /// Most folder names one listing reads before it sorts and cuts to [`MAX_LISTED`] (`truncated` when there are more).
@@ -288,6 +340,100 @@ pub fn signed_message(
     out.push(0);
     out.extend_from_slice(expires.to_string().as_bytes());
     out
+}
+
+/// ADR-0059: a list as signed: its count, then each item as `:<byte length>:<bytes>` (`["a","b"]` is `2:1:a:1:b`, `["a,b"]` is
+/// `1:3:a,b`), so no two different lists sign the same bytes whatever their items contain.
+pub fn signed_list(items: &[String]) -> String {
+    let mut out = items.len().to_string();
+    for i in items {
+        out.push(':');
+        out.push_str(&i.len().to_string());
+        out.push(':');
+        out.push_str(i);
+    }
+    out
+}
+
+/// ADR-0059: what a device signs for an `agent.launch` that chose launch options: the `directory-action-v1` launch fields under the
+/// domain `directory-action-v3`, then the chosen ids and the ids whose "act without asking" confirmation the window showed and the
+/// user accepted, as two [`signed_list`]s, before the nonce. A launch without either keeps [`signed_message`], so a signature can
+/// neither gain nor lose an option or a confirmation. Shared test vectors: `schema/fixtures/signing/directory-action-v3.json`.
+#[allow(clippy::too_many_arguments)]
+pub fn launch_signed_message(
+    node: &str,
+    path: &str,
+    kind: &str,
+    project: &str,
+    separate_worktree: bool,
+    identity_change: bool,
+    launch_options: &[String],
+    confirmed: &[String],
+    nonce: &str,
+    expires: u64,
+) -> Vec<u8> {
+    let (options, confirmed) = (signed_list(launch_options), signed_list(confirmed));
+    let fields = [
+        node,
+        "launch",
+        path,
+        kind,
+        project,
+        if separate_worktree { "1" } else { "0" },
+        if identity_change { "1" } else { "0" },
+        options.as_str(),
+        confirmed.as_str(),
+        nonce,
+    ];
+    let mut out = b"directory-action-v3".to_vec();
+    for f in fields {
+        out.push(0);
+        out.extend_from_slice(f.as_bytes());
+    }
+    out.push(0);
+    out.extend_from_slice(expires.to_string().as_bytes());
+    out
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod launch_vector_tests {
+    /// The vectors the web window and the terminal client check too (one file, three implementations).
+    #[test]
+    fn the_shared_launch_signing_vectors_match() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../schema/fixtures/signing/directory-action-v3.json");
+        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let list = |x: &serde_json::Value| -> Vec<String> {
+            x.as_array()
+                .unwrap()
+                .iter()
+                .map(|s| s.as_str().unwrap().to_string())
+                .collect()
+        };
+        let mut seen = std::collections::HashSet::new();
+        for c in v["cases"].as_array().unwrap() {
+            let m = super::launch_signed_message(
+                c["node"].as_str().unwrap(),
+                c["path"].as_str().unwrap(),
+                c["kind"].as_str().unwrap(),
+                c["project"].as_str().unwrap(),
+                c["separate"].as_bool().unwrap(),
+                c["identity_change"].as_bool().unwrap(),
+                &list(&c["options"]),
+                &list(&c["confirmed"]),
+                c["nonce"].as_str().unwrap(),
+                c["expires"].as_u64().unwrap(),
+            );
+            let hex: String = m.iter().map(|b| format!("{b:02x}")).collect();
+            assert_eq!(hex, c["hex"].as_str().unwrap(), "{}", c["name"]);
+            assert!(
+                seen.insert(hex),
+                "two cases sign the same bytes: {}",
+                c["name"]
+            );
+        }
+    }
 }
 
 #[cfg(test)]

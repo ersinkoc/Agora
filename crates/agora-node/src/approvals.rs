@@ -300,6 +300,8 @@ impl Verifier for Box<dyn Verifier + Send> {
 #[derive(Default)]
 pub struct P256Verifier {
     keys: std::collections::HashMap<String, Vec<u8>>,
+    /// ADR-0061: devices another device endorsed are trusted until then (milliseconds since the epoch); the others have no end.
+    expires: std::collections::HashMap<String, u64>,
 }
 
 impl P256Verifier {
@@ -318,53 +320,30 @@ impl P256Verifier {
 
     pub fn revoke(&mut self, device_id: &str) {
         self.keys.remove(device_id);
+        self.expires.remove(device_id);
     }
 }
 
 /// Name of the file in the node's data directory that lists the devices whose signatures this node accepts.
 pub const TRUSTED_DEVICES_FILE: &str = "trusted-devices";
 
-fn from_hex(s: &str) -> Option<Vec<u8>> {
-    if !s.len().is_multiple_of(2) || !s.is_ascii() {
-        return None;
-    }
-    (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
-        .collect()
-}
-
-fn valid_device_id(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() <= 64
-        && id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
-}
-
 impl P256Verifier {
-    /// Reads the trusted-devices file: one `<device id> <public key as 130 hex digits>` per line; blank lines and `#`
-    /// comments are skipped. A missing file trusts nothing. Lines that do not parse are skipped (the count of those
-    /// is returned) rather than trusted: a typo must never widen trust.
+    /// Reads the trusted-devices file: one `<device id> <public key as 130 hex digits>` per line, with ADR-0061's optional
+    /// `expires=<ms>` and `via=<device>` after the key (`crate::device_trust`); blank lines and `#` comments are skipped. A missing
+    /// file trusts nothing. Lines that do not parse are skipped (the count of those is returned) rather than trusted: a typo must
+    /// never widen trust.
     pub fn load(path: &std::path::Path) -> (Self, usize) {
         let mut v = Self::new();
-        let mut skipped = 0;
-        let Ok(text) = std::fs::read_to_string(path) else {
-            return (v, 0);
-        };
-        for line in text.lines().map(str::trim) {
-            if line.is_empty() || line.starts_with('#') {
+        let (entries, skipped) = crate::device_trust::read_entries(path);
+        for e in &entries {
+            // An endorsed device lasts no longer than its endorsers up the chain; a broken chain trusts nothing.
+            let Some(end) = crate::device_trust::effective_expiry(&entries, e) else {
                 continue;
-            }
-            let ok = line
-                .split_once(char::is_whitespace)
-                .and_then(|(id, key)| {
-                    let key = from_hex(key.trim())?;
-                    (valid_device_id(id) && v.trust(id, &key)).then_some(())
-                })
-                .is_some();
-            if !ok {
-                skipped += 1;
+            };
+            if v.trust(&e.id, &e.key) {
+                if let Some(at) = end {
+                    v.expires.insert(e.id.clone(), at);
+                }
             }
         }
         (v, skipped)
@@ -374,21 +353,8 @@ impl P256Verifier {
 /// Adds (or replaces) a device in the trusted-devices file. This is the node owner's act on the node itself: the
 /// hub has no way to call it, which is what keeps approvals from being widened remotely (ADR-0020).
 pub fn trust_device(path: &std::path::Path, device_id: &str, key_hex: &str) -> Result<(), String> {
-    let key = from_hex(key_hex).ok_or("the key is not hexadecimal")?;
-    if !valid_device_id(device_id) {
-        return Err("the device id may contain only letters, digits, '.', '_' and '-'".into());
-    }
-    if P256Verifier::new().trust(device_id, &key) {
-        let old = std::fs::read_to_string(path).unwrap_or_default();
-        let mut out: String = old
-            .lines()
-            .filter(|l| l.split_whitespace().next() != Some(device_id))
-            .map(|l| format!("{l}\n"))
-            .collect();
-        out.push_str(&format!("{device_id} {}\n", key_hex.to_ascii_lowercase()));
-        return std::fs::write(path, out).map_err(|e| e.to_string());
-    }
-    Err("the key is not an uncompressed P-256 point (65 bytes)".into())
+    let key = crate::device_trust::from_hex(key_hex).ok_or("the key is not hexadecimal")?;
+    crate::device_trust::confirm(path, device_id, &key)
 }
 
 impl Verifier for P256Verifier {
@@ -396,6 +362,14 @@ impl Verifier for P256Verifier {
         let Some(key) = self.keys.get(device_id) else {
             return false;
         };
+        // ADR-0061: an endorsed device whose trust ran out is no longer trusted, even before the file changes.
+        if self
+            .expires
+            .get(device_id)
+            .is_some_and(|at| crate::grants::now_ms() >= *at)
+        {
+            return false;
+        }
         ring::signature::UnparsedPublicKey::new(&ring::signature::ECDSA_P256_SHA256_FIXED, key)
             .verify(message, signature)
             .is_ok()
@@ -429,6 +403,8 @@ pub struct NodeApprovals {
     /// ADR-0057: live helper grants, kept here beside the approvals that made them so grant listing and revocation (which only
     /// have the approvals) see them too.
     helper_grants: std::sync::Mutex<Vec<HelperGrant>>,
+    /// ADR-0061: renews an endorsed device's trust each time its signature is accepted here.
+    devices: std::sync::Mutex<Option<std::sync::Arc<crate::device_trust::DeviceTrust>>>,
 }
 
 /// "This agent may start up to `remaining` more helpers of `kind` in `folder`" (ADR-0057), from a signed decision. It lives in memory
@@ -536,6 +512,24 @@ impl NodeApprovals {
             limits: std::sync::Mutex::new(None),
             late: std::sync::Mutex::new(Vec::new()),
             helper_grants: std::sync::Mutex::new(Vec::new()),
+            devices: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// ADR-0061: the trust store whose endorsed devices are renewed by use.
+    pub fn set_device_trust(&self, devices: std::sync::Arc<crate::device_trust::DeviceTrust>) {
+        *self.devices.lock().unwrap_or_else(|e| e.into_inner()) = Some(devices);
+    }
+
+    /// A trusted device's signature was just accepted: an endorsed device's trust runs 90 days from now.
+    fn used(&self, device_id: &str) {
+        let devices = self
+            .devices
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(d) = devices {
+            d.renew(device_id, crate::grants::now_ms());
         }
     }
 
@@ -567,7 +561,11 @@ impl NodeApprovals {
     /// Does `device_id` (as the trusted-devices file lists it now) vouch for `message`? Used for grants (ADR-0041).
     pub fn verify_device(&self, device_id: &str, message: &[u8], signature: &[u8]) -> bool {
         self.reload_trust_if_changed();
-        self.q().verify_with(device_id, message, signature)
+        let ok = self.q().verify_with(device_id, message, signature);
+        if ok {
+            self.used(device_id);
+        }
+        ok
     }
 
     /// Replaces the verifier; requests already waiting are judged by the new one.
@@ -646,6 +644,7 @@ impl NodeApprovals {
             }
             Err(e) => return Err(e),
         };
+        self.used(&r.signer_device_id);
         let route = self.r().remove(&r.approval_id);
         route
             .map(|(agent, adapter_approval_id)| Resolution {

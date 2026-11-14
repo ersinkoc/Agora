@@ -80,8 +80,11 @@ async fn tls(hub: &Hub) -> Result<TlsStream<TcpStream>, ClientError> {
     .with_no_client_auth();
     let connector = TlsConnector::from(Arc::new(cfg));
     for name in server_names(&hub.addr) {
-        let Ok(Ok(tcp)) =
-            tokio::time::timeout(Duration::from_secs(10), TcpStream::connect(&hub.addr)).await
+        let Ok(Ok(tcp)) = tokio::time::timeout(
+            Duration::from_secs(10),
+            agora_protocol::dial::connect(&hub.addr),
+        )
+        .await
         else {
             return Err(ClientError::Unreachable);
         };
@@ -135,6 +138,9 @@ pub struct Session {
     next_stream: u32,
     /// An event arrived while a command was waiting for its answer.
     changed: bool,
+    /// A snapshot that arrived while something else was waiting (the hub's first one comes right after subscribing, often while
+    /// the device registration waits for its answer): `next` hands it out first, so it is never lost.
+    snapshot: Option<Box<Snapshot>>,
     /// A machine refused something that was sent without waiting for the answer (typing) because it wants a grant first.
     grant_wanted: bool,
 }
@@ -180,12 +186,18 @@ impl Session {
             term_frames: std::collections::VecDeque::new(),
             next_stream: agora_protocol::frame::FIRST_DYNAMIC_STREAM,
             changed: false,
+            snapshot: None,
             grant_wanted: false,
         })
     }
 
     /// Waits up to `wait` for the hub to say something.
     pub fn next(&mut self, wait: Duration) -> Update {
+        // A kept snapshot first. `changed` is left as it is: `set_aside` cleared it when the snapshot came, so if it is set now an
+        // event arrived after the snapshot, and the next call reports it.
+        if let Some(s) = self.snapshot.take() {
+            return Update::Snapshot(s);
+        }
         if std::mem::take(&mut self.changed) {
             return Update::Changed;
         }
@@ -254,6 +266,7 @@ impl Session {
         };
         let conn = &mut self.conn;
         let changed = &mut self.changed;
+        let kept = &mut self.snapshot;
         let term_frames = &mut self.term_frames;
         let grant_wanted = &mut self.grant_wanted;
         self.rt.block_on(async {
@@ -289,11 +302,7 @@ impl Session {
                         None => Ok(CommandOk::default()),
                     };
                 }
-                if f.stream_id == STREAM_EVENTS && f.kind == kinds::POSITIONED_EVENT {
-                    *changed = true;
-                } else if f.stream_id >= agora_protocol::frame::FIRST_DYNAMIC_STREAM {
-                    term_frames.push_back(f);
-                }
+                set_aside(f, changed, kept, term_frames);
             }
         })
     }
@@ -388,6 +397,7 @@ impl Session {
         };
         let conn = &mut self.conn;
         let changed = &mut self.changed;
+        let kept = &mut self.snapshot;
         let term_frames = &mut self.term_frames;
         self.rt.block_on(async {
             conn.send(&Frame {
@@ -416,10 +426,8 @@ impl Session {
                             _ => Ok(stream),
                         };
                     }
-                } else if f.stream_id == STREAM_EVENTS && f.kind == kinds::POSITIONED_EVENT {
-                    *changed = true;
-                } else if f.stream_id >= agora_protocol::frame::FIRST_DYNAMIC_STREAM {
-                    term_frames.push_back(f);
+                } else {
+                    set_aside(f, changed, kept, term_frames);
                 }
             }
         })
@@ -452,6 +460,7 @@ impl Session {
         }
         let conn = &mut self.conn;
         let changed = &mut self.changed;
+        let kept = &mut self.snapshot;
         let queue = &mut self.term_frames;
         let grant_wanted = &mut self.grant_wanted;
         self.rt.block_on(async {
@@ -459,17 +468,15 @@ impl Session {
                 Err(_) => TermEvent::Quiet,
                 Ok(Ok(Some(f))) if f.stream_id == stream => event(&f).unwrap_or(TermEvent::Quiet),
                 Ok(Ok(Some(f))) => {
-                    if f.stream_id == STREAM_EVENTS && f.kind == kinds::POSITIONED_EVENT {
-                        *changed = true;
-                    } else if (f.stream_id, f.kind) == (STREAM_COMMANDS, 1) {
+                    if (f.stream_id, f.kind) == (STREAM_COMMANDS, 1) {
                         // The answer to something typed without waiting: only a missing grant matters.
                         if CommandResponse::decode(f.payload.as_slice())
                             .is_ok_and(|r| refused_for_grant(&r))
                         {
                             *grant_wanted = true;
                         }
-                    } else if f.stream_id >= agora_protocol::frame::FIRST_DYNAMIC_STREAM {
-                        queue.push_back(f);
+                    } else {
+                        set_aside(f, changed, kept, queue);
                     }
                     TermEvent::Quiet
                 }
@@ -502,17 +509,14 @@ impl Session {
         }
         let conn = &mut self.conn;
         let changed = &mut self.changed;
+        let kept = &mut self.snapshot;
         let queue = &mut self.term_frames;
         self.rt.block_on(async {
             match tokio::time::timeout(wait, conn.recv()).await {
                 Err(_) => ChatEvent::Quiet,
                 Ok(Ok(Some(f))) if f.stream_id == stream => take(&f).unwrap_or(ChatEvent::Quiet),
                 Ok(Ok(Some(f))) => {
-                    if f.stream_id == STREAM_EVENTS && f.kind == kinds::POSITIONED_EVENT {
-                        *changed = true;
-                    } else if f.stream_id >= agora_protocol::frame::FIRST_DYNAMIC_STREAM {
-                        queue.push_back(f);
-                    }
+                    set_aside(f, changed, kept, queue);
                     ChatEvent::Quiet
                 }
                 Ok(_) => ChatEvent::Lost,
@@ -629,7 +633,38 @@ impl Session {
         }
     }
 
+    /// ADR-0060: brings back an interrupted agent (`agent.resume`, signed by this terminal's key for that agent and choice); answers
+    /// its hub-wide id. Errors keep the node's code and parameters for a localized reason.
+    pub fn resume_in(
+        &mut self,
+        node: &str,
+        resume: agora_protocol::v1::AgentResume,
+    ) -> Result<String, ErrorInfo> {
+        let ok = self.command_info(
+            node,
+            command_request::Command::AgentResume(resume),
+            Duration::from_secs(45),
+        )?;
+        match ok.result {
+            Some(command_ok::Result::AgentLaunch(r)) => Ok(format!("{node}/{}", r.agent_id)),
+            _ => Err(ErrorInfo {
+                code: "protocol.invalid_message".into(),
+                ..Default::default()
+            }),
+        }
+    }
+
     pub fn agent_kinds(&mut self, node: &str) -> Result<Vec<(String, String)>, String> {
+        Ok(self
+            .agent_kinds_all(node)?
+            .into_iter()
+            .filter(|(_, _, installed)| *installed)
+            .map(|(kind, name, _)| (kind, name))
+            .collect())
+    }
+
+    /// Every agent a machine offers: `(kind, display name, installed)`, the ones whose program the machine cannot find included.
+    pub fn agent_kinds_all(&mut self, node: &str) -> Result<Vec<(String, String, bool)>, String> {
         let ok = self.command_ok(
             node,
             command_request::Command::AgentKinds(agora_protocol::v1::AgentKinds {}),
@@ -640,16 +675,38 @@ impl Session {
         };
         Ok(k.kinds
             .into_iter()
-            .filter(|k| k.installed)
             .map(|k| {
                 let name = if k.display_name.is_empty() {
                     k.kind.clone()
                 } else {
                     k.display_name
                 };
-                (k.kind, name)
+                (k.kind, name, k.installed)
             })
             .collect())
+    }
+
+    /// ADR-0059: the launch options `kind` offers on `node` (none from an older machine or an unknown kind).
+    pub fn kind_options(
+        &mut self,
+        node: &str,
+        kind: &str,
+    ) -> Result<Vec<agora_protocol::v1::LaunchOption>, String> {
+        let ok = self.command_ok(
+            node,
+            command_request::Command::AgentKinds(agora_protocol::v1::AgentKinds {}),
+            Duration::from_secs(15),
+        )?;
+        let Some(command_ok::Result::AgentKinds(k)) = ok.result else {
+            return Ok(Vec::new());
+        };
+        Ok(usable_options(
+            k.kinds
+                .into_iter()
+                .find(|k| k.kind == kind)
+                .map(|k| k.launch_options)
+                .unwrap_or_default(),
+        ))
     }
 
     /// Starts an agent of `kind` in a project (its hub-wide id) on a machine; returns the agent's own id.
@@ -709,6 +766,63 @@ impl Session {
                 expires_at_ms,
                 signer_device_id: device.id.clone(),
                 signature,
+            }),
+            Duration::from_secs(15),
+        )
+    }
+
+    /// ADR-0061: registers this terminal's key and name with the hub under the signed-in person (a candidate for their machines, never
+    /// trust by itself). Sent after every sign-in; the hub keeps when it was last used.
+    pub fn register_device(&mut self, device: &Device, name: &str) -> Result<(), String> {
+        let registration = device
+            .registration(name, now_ms())
+            .ok_or_else(|| "client.sign".to_string())?;
+        self.command(
+            "",
+            command_request::Command::DeviceRegister(registration),
+            Duration::from_secs(15),
+        )
+    }
+
+    /// ADR-0061: the signed-in person's registered devices, as the hub lists them.
+    pub fn list_devices(&mut self) -> Result<Vec<agora_protocol::v1::DeviceInfo>, String> {
+        let ok = self.command_ok(
+            "",
+            command_request::Command::DeviceList(agora_protocol::v1::DeviceList {}),
+            Duration::from_secs(15),
+        )?;
+        match ok.result {
+            Some(command_ok::Result::DeviceList(l)) => Ok(l.devices),
+            _ => Ok(Vec::new()),
+        }
+    }
+
+    /// ADR-0061: asks the person's other devices to approve this one.
+    pub fn ask_approval(&mut self, device: &Device) -> Result<(), String> {
+        let ask = device
+            .ask(now_ms())
+            .ok_or_else(|| "client.sign".to_string())?;
+        self.command(
+            "",
+            command_request::Command::DeviceAskApproval(ask),
+            Duration::from_secs(15),
+        )
+    }
+
+    /// ADR-0061: this terminal vouches for `target` on every machine of the person; the hub carries it and each machine verifies it.
+    pub fn endorse_device(
+        &mut self,
+        device: &Device,
+        target: &agora_protocol::v1::DeviceInfo,
+    ) -> Result<(), String> {
+        let now = now_ms();
+        let endorsement = device
+            .endorse(target, &[], now)
+            .ok_or_else(|| "client.sign".to_string())?;
+        self.command(
+            "",
+            command_request::Command::DeviceEndorse(agora_protocol::v1::DeviceEndorse {
+                endorsement: Some(endorsement),
             }),
             Duration::from_secs(15),
         )
@@ -895,5 +1009,141 @@ mod answer_tests {
             answered_approval(&Snapshot::default(), Some("m/agent-1")),
             None
         );
+    }
+}
+
+/// A frame that arrived while something else was waiting for its own: an event marks the hub's state changed, a snapshot is kept
+/// for [`Session::next`] (dropping it lost the hub's first one, which is not sent again: the console stayed at "Connecting…"), and
+/// a frame of a terminal or chat stream is queued for its reader. Anything else is not for a waiting caller.
+fn set_aside(
+    f: Frame,
+    changed: &mut bool,
+    kept: &mut Option<Box<Snapshot>>,
+    queue: &mut std::collections::VecDeque<Frame>,
+) {
+    if f.stream_id == STREAM_EVENTS && f.kind == kinds::POSITIONED_EVENT {
+        *changed = true;
+    } else if f.stream_id == STREAM_EVENTS && f.kind == kinds::SNAPSHOT {
+        if let Ok(s) = Snapshot::decode(f.payload.as_slice()) {
+            *kept = Some(Box::new(s));
+            // The snapshot is newer than any event before it.
+            *changed = false;
+        }
+    } else if f.stream_id >= agora_protocol::frame::FIRST_DYNAMIC_STREAM {
+        queue.push_back(f);
+    }
+}
+
+#[cfg(test)]
+mod set_aside_tests {
+    use super::*;
+
+    #[test]
+    fn a_snapshot_that_arrives_while_something_waits_is_kept_and_events_and_streams_are_not_lost() {
+        let (mut changed, mut kept, mut queue) = (false, None, std::collections::VecDeque::new());
+        let frame = |stream_id, kind, payload: Vec<u8>| Frame {
+            stream_id,
+            kind,
+            seq: None,
+            payload,
+        };
+        set_aside(
+            frame(STREAM_EVENTS, kinds::POSITIONED_EVENT, vec![]),
+            &mut changed,
+            &mut kept,
+            &mut queue,
+        );
+        assert!(changed && kept.is_none());
+        let s = Snapshot {
+            nodes: vec![agora_protocol::v1::NodeSnapshot {
+                node_id: "mac".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        set_aside(
+            frame(STREAM_EVENTS, kinds::SNAPSHOT, s.encode_to_vec()),
+            &mut changed,
+            &mut kept,
+            &mut queue,
+        );
+        assert_eq!(kept.as_deref(), Some(&s));
+        assert!(!changed, "a snapshot supersedes the events before it");
+        // An event after the snapshot is newer than it: it stays marked, so the caller asks again after taking the snapshot.
+        set_aside(
+            frame(STREAM_EVENTS, kinds::POSITIONED_EVENT, vec![]),
+            &mut changed,
+            &mut kept,
+            &mut queue,
+        );
+        assert!(changed && kept.is_some());
+        changed = false;
+        set_aside(
+            frame(
+                agora_protocol::frame::FIRST_DYNAMIC_STREAM,
+                0,
+                b"x".to_vec(),
+            ),
+            &mut changed,
+            &mut kept,
+            &mut queue,
+        );
+        assert_eq!(queue.len(), 1);
+        // A frame that is not for a waiting caller changes nothing.
+        set_aside(
+            frame(STREAM_COMMANDS, 1, vec![]),
+            &mut changed,
+            &mut kept,
+            &mut queue,
+        );
+        assert!(!changed && queue.len() == 1 && kept.is_some());
+    }
+}
+
+/// Milliseconds since the Unix epoch (0 before it).
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(0))
+}
+
+/// ADR-0059: the options a hub relayed that this window may offer: ids outside `[a-z0-9-]{1,32}` (a `!` or `,` in one, which a hub
+/// could use to make a signed id look like a confirmation or like two ids) are dropped before anything is shown or signed. The list
+/// is a display hint; the node decides which options skip permissions.
+pub fn usable_options(
+    options: Vec<agora_protocol::v1::LaunchOption>,
+) -> Vec<agora_protocol::v1::LaunchOption> {
+    options
+        .into_iter()
+        .filter(|o| {
+            !o.id.is_empty()
+                && o.id.len() <= 32
+                && o.id
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod launch_option_tests {
+    use super::usable_options;
+    use agora_protocol::v1::LaunchOption;
+
+    #[test]
+    fn ids_a_hub_could_abuse_are_never_offered() {
+        let o = |id: &str, skips| LaunchOption {
+            id: id.into(),
+            label: "option-skip-permissions".into(),
+            skips_permissions: skips,
+        };
+        let kept = usable_options(vec![
+            o("skip-permissions!", false),
+            o("a,b", false),
+            o("Skip", true),
+            o("", true),
+            o("skip-permissions", true),
+        ]);
+        assert_eq!(kept, vec![o("skip-permissions", true)]);
     }
 }

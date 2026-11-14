@@ -1,0 +1,11 @@
+{
+  "agentId": "x",
+  "kind": "x",
+  "projectId": "x",
+  "folder": "x",
+  "parentAgentId": "x",
+  "resumable": true,
+  "startedAtMs": "1",
+  "interruptedAtMs": "1",
+  "lastState": "AGENT_STATE_WORKING"
+}

@@ -13,14 +13,52 @@ pub struct DeviceLimits {
     map: BTreeMap<String, BTreeSet<String>>,
     /// Agent id to project id.
     project_of: Mutex<Option<Resolver>>,
+    /// ADR-0061: the trusted-devices file, what was last read from it, and the limits devices there inherited from a limited endorser
+    /// (`projects=`). A device the policy names keeps the policy's limits.
+    inherited: Mutex<Option<Inherited>>,
 }
+
+type Inherited = (
+    std::path::PathBuf,
+    Option<Vec<u8>>,
+    Vec<crate::device_trust::Entry>,
+);
 
 impl DeviceLimits {
     pub fn new(map: BTreeMap<String, BTreeSet<String>>) -> Self {
         Self {
             map,
             project_of: Mutex::new(None),
+            inherited: Mutex::new(None),
         }
+    }
+
+    /// Follows the trusted-devices file for limits inherited through endorsements (ADR-0061), read again whenever it changes.
+    pub fn follow_trust_file(&self, path: &std::path::Path) {
+        *self.inherited.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some((path.to_path_buf(), None, Vec::new()));
+    }
+
+    /// What `device` may act in: its policy line, what it inherited through an endorsement, and what its endorser may act in now, up
+    /// the chain ([`crate::device_trust::effective_limit`]); `None`: not limited.
+    fn limit(&self, device: &str) -> Option<BTreeSet<String>> {
+        let mut guard = self.inherited.lock().unwrap_or_else(|e| e.into_inner());
+        match guard.as_mut() {
+            None => self.map.get(device).cloned(),
+            Some((path, seen, entries)) => {
+                let now = std::fs::read(&*path).ok();
+                if now != *seen {
+                    *entries = crate::device_trust::read_entries(path).0;
+                    *seen = now;
+                }
+                crate::device_trust::effective_limit(entries, &self.map, device)
+            }
+        }
+    }
+
+    /// Is `device` limited to some projects (by the policy file or through an endorsement)?
+    pub fn is_limited(&self, device: &str) -> bool {
+        self.limit(device).is_some()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -34,12 +72,12 @@ impl DeviceLimits {
 
     /// May `device` act in `project`? A device that is not limited may.
     pub fn allows_project(&self, device: &str, project: &str) -> bool {
-        self.map.get(device).is_none_or(|p| p.contains(project))
+        self.limit(device).is_none_or(|p| p.contains(project))
     }
 
     /// May `device` act for `agent`? A limited device may only when the agent's project is known and its own.
     pub fn allows_agent(&self, device: &str, agent: &str) -> bool {
-        let Some(projects) = self.map.get(device) else {
+        let Some(projects) = self.limit(device) else {
             return true;
         };
         let guard = self.project_of.lock().unwrap_or_else(|e| e.into_inner());
@@ -51,7 +89,7 @@ impl DeviceLimits {
 
     /// May `device` sign a grant of this scope (`node`, `agent:ID`, `project:ID`)? A limited device never signs a whole-machine grant.
     pub fn allows_scope(&self, device: &str, scope: &str) -> bool {
-        if !self.map.contains_key(device) {
+        if self.limit(device).is_none() {
             return true;
         }
         match scope.split_once(':') {
@@ -59,6 +97,17 @@ impl DeviceLimits {
             Some(("agent", id)) => self.allows_agent(device, id),
             _ => false,
         }
+    }
+}
+
+/// A device's limit from the policy file and the one it inherited: both apply (their intersection); either alone applies as is.
+pub fn combine(
+    policy: Option<BTreeSet<String>>,
+    inherited: Option<BTreeSet<String>>,
+) -> Option<BTreeSet<String>> {
+    match (policy, inherited) {
+        (Some(p), Some(i)) => Some(p.intersection(&i).cloned().collect()),
+        (p, i) => p.or(i),
     }
 }
 

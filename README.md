@@ -29,6 +29,11 @@ blocks it ("cannot be verified"): run `xattr -d com.apple.quarantine agora-aarch
 `agora update` checks and installs newer releases the same way once the key is saved as `<agora dir>/release-key`.
 The web window is embedded in the binary, so steps 2 to 4 below work with a release too.
 
+## Get started
+
+Type `agora`. The first time it asks one question; then it starts everything this machine needs in the background and opens
+the terminal client signed in (`agora web` opens the browser). See [docs/getting-started.md](docs/getting-started.md).
+
 ## Try it (from source)
 
 ```sh
@@ -42,10 +47,9 @@ target/release/agora hub run --listen 127.0.0.1:7443
 # 3. A machine: get an enrollment code from the hub, enroll, run the node on a git project
 target/release/agora hub code
 target/release/agora node enroll --hub wss://localhost:7443 --ca ~/.agora/hub/ca.pem --code XXXX-XXXX --id laptop
-#    The node starts agents from manifests in ~/.agora/manifests (format: docs/specs/agent-manifest.md). Manifests for
-#    real agents are not shipped yet; a plain shell shows the whole flow:
-mkdir -p ~/.agora/manifests
-printf 'kind = "shell"\ndisplay_name = "Shell"\nversion = "1"\nmin_engine = 1\n[process]\nlaunch = ["sh"]\n' > ~/.agora/manifests/shell.toml
+#    The node offers every agent in manifests/agents/ built in (Claude Code, Codex, WrongStack, ...; `agora doctor` lists
+#    them and whether each program is found). Files in ~/.agora/manifests replace or add kinds (format:
+#    docs/specs/agent-manifest.md); the built-in Shell (your own shell) shows the whole flow without any agent installed:
 target/release/agora node run --project ~/code/myproject
 #    in the window, "Start an agent"; or in another terminal:
 target/release/agora agent start shell --cwd /path/to/myproject

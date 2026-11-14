@@ -76,5 +76,10 @@ Date: YYYY-MM-DD
 | 0056 | One hub; every node machine can reach the hub's panel | Accepted |
 | 0057 | An agent can start and wait for other agents, with the user's approval | Accepted |
 | 0058 | Show an adapter's errors and notices, and choose its model and mode | Accepted |
-| 0059 | Launch options, including "do not ask" modes, chosen when an agent starts | Proposed |
-| 0060 | A node keeps a session ledger and offers Resume after a restart | Proposed |
+| 0059 | Launch options, including "do not ask" modes, chosen when an agent starts | Accepted |
+| 0060 | A node keeps a session ledger and offers Resume after a restart | Accepted |
+| 0061 | Trusting your devices on a machine in one step | Accepted |
+| 0062 | `agora up`: one command (or one login) brings a machine back, on every OS | Accepted |
+| 0063 | The terminal client on ratatui and crossterm | Accepted |
+| 0067 | Remote access: a screen password, Tailscale and Cloudflare Tunnel, and a phone-sized window | Accepted |
+| 0068 | A customizable workspace: tiled layouts, themes and replaceable panels, in every client | Accepted |

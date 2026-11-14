@@ -4,8 +4,12 @@ use std::collections::{BTreeMap, HashSet};
 
 use serde::Deserialize;
 
-/// Highest manifest `min_engine` this engine can run.
-pub const ENGINE_VERSION: u32 = 1;
+/// Highest manifest `min_engine` this engine can run. 2: `[[launch.option]]` (ADR-0059).
+pub const ENGINE_VERSION: u32 = 2;
+
+/// Most `[[launch.option]]`s one manifest may declare, and most arguments one option may add.
+pub const MAX_LAUNCH_OPTIONS: usize = 8;
+const MAX_OPTION_ARGS: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ManifestError {
@@ -86,6 +90,31 @@ pub struct Resume {
     pub argv: Vec<String>,
 }
 
+/// `[session]` (ADR-0060): how the node learns a terminal agent's own session id, which `[resume]` needs after a restart. Either the
+/// node chooses it (`id_args`) or it reads it from the file the agent writes (`[session.file]`), not both.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionSpec {
+    /// Arguments added to the first launch, with `{session_id}` replaced by an id the node chooses (a random v4 UUID) and records
+    /// before anything else is said about the agent, for example `["--session-id", "{session_id}"]`. Not added to a restart or a resume.
+    #[serde(default)]
+    pub id_args: Vec<String>,
+    pub file: Option<SessionFile>,
+}
+
+/// `[session.file]`: the session file an agent writes, whose first line names the session and its working directory.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionFile {
+    /// Starts with `{home}/`; `*` matches within one path component.
+    pub glob: String,
+    /// The first line must have this value at this path.
+    pub select: Option<UsageSelect>,
+    /// Dotted paths in the first line (a JSON object): the session id, and the working directory it was started in.
+    pub id: String,
+    pub cwd: String,
+}
+
 /// An L3 adapter process that speaks the adapter protocol for this agent kind (docs/specs/adapter-protocol.md).
 /// A kind with `[adapter]` is driven through it instead of a terminal.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -106,6 +135,28 @@ pub struct AcpSpec {
     pub argv: Vec<String>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+}
+
+/// ADR-0059: one `[[launch.option]]`, a named choice made when an agent starts. Its `args` are added to the launch command (a terminal
+/// kind) or to the ACP server command (`[structured] acp`); `label` is a Fluent message id the clients show.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaunchOption {
+    pub id: String,
+    pub label: String,
+    pub args: Vec<String>,
+    /// The option makes the agent act without asking (a permission-skipping flag). Never preselected, confirmed in the window,
+    /// signed, audited and badged; the node's `skip_permissions` policy decides whether it may be used at all.
+    #[serde(default)]
+    pub skips_permissions: bool,
+}
+
+/// `[launch]`: what may be chosen when an agent starts (ADR-0059).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Launch {
+    #[serde(default)]
+    pub option: Vec<LaunchOption>,
 }
 
 /// `[structured]`: the ways an agent can be driven without a terminal. Keys this engine does not know yet (`adapter` as a registry
@@ -200,6 +251,8 @@ pub struct Manifest {
     #[serde(default)]
     pub process: Process,
     pub resume: Option<Resume>,
+    /// ADR-0060: how the node learns the agent's own session id (older engines ignore it).
+    pub session: Option<SessionSpec>,
     #[serde(default)]
     pub rules: Vec<Rule>,
     pub mcp: Option<McpSpec>,
@@ -221,6 +274,9 @@ pub struct Manifest {
     /// ADR-0057: a regex over `bottom_non_empty_lines(12)` (multi-line) whose first capture group is the input box's text. Enter is pressed
     /// only when it holds exactly the typed prompt (whitespace ignored, so a wrapped line still counts).
     pub input_box: Option<String>,
+    /// ADR-0059: `[[launch.option]]`s, in the order the start window lists them.
+    #[serde(default)]
+    pub launch: Launch,
 }
 
 /// Folders an agent asks to read or write when confined; `~/` stands for the home folder.
@@ -238,7 +294,38 @@ fn invalid(field: impl Into<String>) -> ManifestError {
     }
 }
 
+/// A Fluent message id: an ASCII letter, then letters, digits, `-` or `_`.
+fn fluent_id(s: &str) -> bool {
+    let mut c = s.chars();
+    c.next().is_some_and(|c| c.is_ascii_alphabetic())
+        && c.all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        && s.len() <= 64
+}
+
+/// ADR-0059: argument spellings known to make an agent act without asking (`--dangerously-skip-permissions`,
+/// `--dangerously-bypass-approvals-and-sandbox`, any `--dangerously-*`, `--yolo`, `--yolo-plus`, `--yolo-*`).
+pub fn skips_permissions_flag(arg: &str) -> bool {
+    let a = arg.trim().to_ascii_lowercase();
+    a.contains("dangerously")
+        || a == "--yolo"
+        || a.starts_with("--yolo-")
+        || a.starts_with("--yolo=")
+}
+
+/// A launch option id: what a start names and a device signs (comma-joined), so lowercase ASCII, digits and `-` only.
+pub fn valid_option_id(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 32
+        && s.chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
 impl Manifest {
+    /// ADR-0059: the declared option with this id.
+    pub fn launch_option(&self, id: &str) -> Option<&LaunchOption> {
+        self.launch.option.iter().find(|o| o.id == id)
+    }
+
     /// What drives this kind without a terminal, as an adapter command: its own `[adapter]`, or the ACP bridge (`bridge` is the
     /// program that runs `acp-bridge`, the `agora` binary) around `[structured] acp`. `None` for a kind that runs in a terminal.
     pub fn driver(&self, bridge: &std::path::Path) -> Option<AdapterSpec> {
@@ -322,6 +409,21 @@ impl Manifest {
                 return Err(invalid("mcp"));
             }
         }
+        if let Some(sp) = &self.session {
+            let args_ok =
+                sp.id_args.is_empty() || sp.id_args.iter().any(|a| a.contains("{session_id}"));
+            let file_ok = sp.file.as_ref().is_none_or(|f| {
+                f.glob.starts_with("{home}/")
+                    && !f.glob.split('/').any(|c| c == "..")
+                    && !f.glob.contains('\0')
+                    && !f.id.is_empty()
+                    && !f.cwd.is_empty()
+                    && f.select.as_ref().is_none_or(|s| !s.path.is_empty())
+            });
+            if !args_ok || !file_ok || (!sp.id_args.is_empty() && sp.file.is_some()) {
+                return Err(invalid("session"));
+            }
+        }
         for (name, list) in [("ready", &self.ready), ("typed", &self.typed)] {
             for (i, r) in list.iter().enumerate() {
                 if r.state != RuleState::Idle {
@@ -335,12 +437,44 @@ impl Manifest {
                 return Err(invalid("input_box"));
             }
         }
+        self.validate_launch()?;
         for (name, list) in [
             ("rules", &self.rules),
             ("ready", &self.ready),
             ("typed", &self.typed),
         ] {
             Self::validate_rules(name, list)?;
+        }
+        Ok(())
+    }
+
+    fn validate_launch(&self) -> Result<(), ManifestError> {
+        let options = &self.launch.option;
+        if options.len() > MAX_LAUNCH_OPTIONS {
+            return Err(invalid("launch.option"));
+        }
+        let mut ids = HashSet::new();
+        for (i, o) in options.iter().enumerate() {
+            let at = |f: &str| invalid(format!("launch.option[{i}].{f}"));
+            if !valid_option_id(&o.id) || !ids.insert(o.id.as_str()) {
+                return Err(at("id"));
+            }
+            if !fluent_id(&o.label) {
+                return Err(at("label"));
+            }
+            let args_ok = !o.args.is_empty()
+                && o.args.len() <= MAX_OPTION_ARGS
+                && o.args
+                    .iter()
+                    .all(|a| !a.trim().is_empty() && a.len() <= 256 && !a.contains('\0'));
+            if !args_ok {
+                return Err(at("args"));
+            }
+            // A flag known to make an agent act without asking must be declared as such, so a mislabelled option cannot dodge the
+            // node's `skip_permissions` policy, the confirmation or the badge.
+            if !o.skips_permissions && o.args.iter().any(|a| skips_permissions_flag(a)) {
+                return Err(at("skips_permissions"));
+            }
         }
         Ok(())
     }
@@ -385,6 +519,82 @@ impl Manifest {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
+mod launch_tests {
+    use super::*;
+
+    fn with(launch: &str) -> String {
+        format!("kind = \"k\"\ndisplay_name = \"K\"\nversion = \"1\"\nmin_engine = 2\n[process]\nlaunch = [\"k\"]\n{launch}")
+    }
+
+    const SKIP: &str = "[[launch.option]]\nid = \"skip-permissions\"\nlabel = \"option-skip-permissions\"\nargs = [\"--yes\"]\nskips_permissions = true\n";
+
+    #[test]
+    fn launch_options_are_read_in_order_and_harmless_by_default() {
+        let src = format!("{SKIP}[[launch.option]]\nid = \"resume-last\"\nlabel = \"option-resume-last\"\nargs = [\"--continue\"]\n");
+        let m = Manifest::parse(&with(&src)).unwrap();
+        let ids: Vec<_> = m.launch.option.iter().map(|o| o.id.as_str()).collect();
+        assert_eq!(ids, ["skip-permissions", "resume-last"]);
+        assert!(
+            m.launch_option("skip-permissions")
+                .unwrap()
+                .skips_permissions
+        );
+        assert!(!m.launch_option("resume-last").unwrap().skips_permissions);
+        assert!(m.launch_option("other").is_none());
+        assert!(Manifest::parse(&with("")).unwrap().launch.option.is_empty());
+        // Declared as skipping permissions, the same flags load.
+        for flag in ["--dangerously-skip-permissions", "--yolo", "--yolo-plus"] {
+            assert!(
+                Manifest::parse(&with(&SKIP.replace("--yes", flag))).is_ok(),
+                "{flag}"
+            );
+        }
+        assert!(!skips_permissions_flag("--yolonger") && !skips_permissions_flag("--continue"));
+    }
+
+    #[test]
+    fn a_bad_launch_option_is_refused() {
+        for bad in [
+            format!("{SKIP}{SKIP}"),
+            SKIP.replace("skip-permissions\"", "Skip_Permissions\""),
+            SKIP.replace("id = \"skip-permissions\"", "id = \"\""),
+            SKIP.replace("[\"--yes\"]", "[]"),
+            SKIP.replace("[\"--yes\"]", "[\" \"]"),
+            SKIP.replace("option-skip-permissions", "Don't ask"),
+            SKIP.replace("option-skip-permissions", ""),
+            // A known "do not ask" flag declared as harmless.
+            SKIP.replace("skips_permissions = true", "skips_permissions = false")
+                .replace("--yes", "--dangerously-skip-permissions"),
+            SKIP.replace("skips_permissions = true\n", "")
+                .replace("--yes", "--yolo"),
+            SKIP.replace("skips_permissions = true", "skips_permissions = false")
+                .replace("--yes", "--yolo-plus"),
+            SKIP.replace("skips_permissions = true", "skips_permissions = false")
+                .replace("--yes", "--Dangerously-Bypass-Approvals-And-Sandbox"),
+            format!("{SKIP}extra = 1\n"),
+            (0..=MAX_LAUNCH_OPTIONS)
+                .map(|i| SKIP.replace("\"skip-permissions\"", &format!("\"o{i}\"")))
+                .collect::<String>(),
+        ] {
+            assert!(Manifest::parse(&with(&bad)).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn launch_options_need_engine_2() {
+        let src = with(SKIP).replace("min_engine = 2", "min_engine = 3");
+        assert!(matches!(
+            Manifest::parse(&src),
+            Err(ManifestError::EngineTooOld {
+                required: 3,
+                supported: 2
+            })
+        ));
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod usage_tests {
     use super::*;
 
@@ -409,6 +619,34 @@ mod usage_tests {
             GOOD.replace("mode = \"delta\"", "mode = \"sometimes\""),
         ] {
             assert!(Manifest::parse(&with(&bad)).is_err(), "{bad}");
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod session_tests {
+    use super::*;
+
+    const BASE: &str = "kind = \"k\"\ndisplay_name = \"K\"\nversion = \"1\"\nmin_engine = 1\n";
+    const FILE: &str =
+        "[session.file]\nglob = \"{home}/.x/*.jsonl\"\nid = \"payload.id\"\ncwd = \"payload.cwd\"\n";
+
+    #[test]
+    fn a_session_spec_names_its_id_one_way_only() {
+        let ok = Manifest::parse(&format!(
+            "{BASE}[session]\nid_args = [\"--session-id\", \"{{session_id}}\"]\n"
+        ))
+        .unwrap();
+        assert_eq!(ok.session.unwrap().id_args[1], "{session_id}");
+        assert!(Manifest::parse(&format!("{BASE}{FILE}")).is_ok());
+        for bad in [
+            "[session]\nid_args = [\"--session-id\"]\n".to_string(),
+            "[session.file]\nglob = \"/etc/*.jsonl\"\nid = \"a\"\ncwd = \"b\"\n".to_string(),
+            "[session.file]\nglob = \"{home}/../*.jsonl\"\nid = \"a\"\ncwd = \"b\"\n".to_string(),
+            format!("[session]\nid_args = [\"{{session_id}}\"]\n{FILE}"),
+        ] {
+            assert!(Manifest::parse(&format!("{BASE}{bad}")).is_err(), "{bad}");
         }
     }
 }

@@ -1,22 +1,28 @@
 import { StartApproval, type StartChoice } from './components/StartApproval';
 import { HelperGrants } from './components/HelperGrants';
+import { DeviceRequest } from './components/DeviceRequest';
 import { ApprovalBanner } from './components/ApprovalBanner';
 import { AgentAddress } from './components/AgentAddress';
 import { LanguagePicker } from './components/LanguagePicker';
 import { ThemePicker } from './components/ThemePicker';
+import { themeStore } from './themes/store';
+import { themeName } from './themes/messages';
 import { PromptBox } from './components/PromptBox';
 import type { ChatSource } from './net/chat';
 import { AgentTile } from './components/AgentTile';
+import { StartAgent, type KindChoice } from './components/StartAgent';
 import { AttentionStrip } from './components/AttentionStrip';
 import { Icon } from './components/Icon';
 import { NetworkView } from './components/NetworkView';
 import { StateBadge } from './components/StateBadge';
+import { NoAskBadge } from './components/NoAskBadge';
 import type { ApprovalModel, MachineModel, MessageModel, ProjectCost } from './net/view';
 import type { Device } from './net/approval';
+import { deviceLabel } from './net/devices';
 import { money, type UsageSummary } from './net/usage';
 import { demoAgents, demoHelper, demoStartApproval } from './fixtures';
 import { demoSource, type TerminalSource } from './terminal/source';
-import { Suspense, lazy, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { Suspense, lazy, useEffect, useMemo, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { actionKey, outcomeKind, type AuditResult } from './net/audit';
 
 // The terminal emulator is the heaviest part of the client; load it only when a Focus view needs it.
@@ -71,7 +77,17 @@ const demoChat: ChatSource = {
   },
 };
 
-function Themed({ theme }: { theme: 'dark' | 'light' }) {
+// ADR-0059: the start window with a kind that offers "Don't ask", for the gallery (nothing is sent anywhere).
+const demoKinds: KindChoice[] = [{ kind: 'codex', name: 'Codex', installed: true, options: [{ id: 'skip-permissions', label: 'option-skip-permissions', skipsPermissions: true }] }];
+function DemoStart({ onClose }: { onClose: () => void }) {
+  return <StartAgent projects={[{ node: 'laptop', projectId: 'p', label: 'login-fix', path: '/home/dev/code/login-fix' }]}
+    machines={[{ id: 'laptop', name: 'laptop', os: 'linux', online: true, agentsRunning: 1, lastSeenMs: 0 }]}
+    loadKinds={async () => demoKinds}
+    inspect={async (_node, path) => ({ path, projectId: 'p', gitRoot: path, branch: 'main', portable: false })}
+    onStart={async () => { onClose(); return undefined; }} onClose={onClose} />;
+}
+
+function Themed({ theme, onStart }: { theme: 'dark' | 'light'; onStart?: () => void }) {
   return (
     <section className="theme-panel" data-theme={theme}>
       <h2>{t(`theme-${theme}`)}</h2>
@@ -84,8 +100,10 @@ function Themed({ theme }: { theme: 'dark' | 'light' }) {
       <AgentAddress agent={{ ...demoHelper, machineId: 'laptop', id: 'laptop/a8' }} />
       <StartApproval approval={demoStartApproval} start={demoStartApproval.start} onResolve={() => {}} />
       <HelperGrants list={async () => [{ id: 'ap-1', kind: 'codex', folder: '/home/dev/code/login-fix', remaining: 2 }]} revoke={async () => {}} refresh={0} />
+      <DeviceRequest inline request={{ id: 'web-3fa9c1d24e5b6a70', name: 'Firefox · Linux', fingerprint: 'f947-3cb5-e304-81be-ecf2-64cd' }}
+        machines={[{ id: 'laptop', name: 'laptop' }, { id: 'vps-1', name: 'vps-1' }]} onApprove={async () => true} onLater={() => {}} />
       <div className="gallery__row">
-        <button type="button" className="button button--primary">{t('action-start-agent')}</button>
+        <button type="button" className="button button--primary" onClick={onStart}>{t('action-start-agent')}</button>
         <button type="button" className="button">{t('action-open')}</button>
       </div>
     </section>
@@ -94,11 +112,13 @@ function Themed({ theme }: { theme: 'dark' | 'light' }) {
 
 // Every component in every state, both themes: the review surface for UI pull requests.
 export function Gallery() {
+  const [starting, setStarting] = useState(false);
   return (
     <main className="page gallery">
       <h1>{t('gallery-title')}</h1>
-      <Themed theme="dark" />
-      <Themed theme="light" />
+      <Themed theme="dark" onStart={() => setStarting(true)} />
+      <Themed theme="light" onStart={() => setStarting(true)} />
+      {starting && <DemoStart onClose={() => setStarting(false)} />}
     </main>
   );
 }
@@ -132,9 +152,10 @@ export function Focus({ agent, approvals = [], onResolve, source: live, costMicr
   return (
     <div className="ide" style={{ gridTemplateRows: 'auto minmax(0, 1fr)' }}>
       <header className="ide-bar min-h-10 flex-wrap border-b py-1">
-        <button type="button" className="ide-row w-auto flex-none text-[13px] text-muted hover:text-ink" onClick={onBack}><Icon name="chevron" className="size-3.5 rotate-180 rtl:rotate-0" />{t('focus-back')}</button>
-        <h1 className="m-0 truncate text-[13px] font-semibold tracking-normal">{agent.name}</h1>
+        <button type="button" className="ide-row w-auto flex-none text-[0.8125rem] text-muted hover:text-ink" onClick={onBack}><Icon name="chevron" className="size-3.5 rotate-180 rtl:rotate-0" />{t('focus-back')}</button>
+        <h1 className="m-0 truncate text-[0.8125rem] font-semibold tracking-normal">{agent.name}</h1>
         <span title={`${t('focus-why')} ${why}`}><StateBadge state={agent.state} /></span>
+        <NoAskBadge agent={agent} />
         <span className="hidden min-w-0 items-center gap-1.5 truncate text-xs text-muted md:flex"><Icon name="machine" className="size-3.5" />{agent.machine}<Icon name="chevron" className="size-3 rtl:rotate-180" /><Icon name="folder" className="size-3.5" />{agent.project || agent.workspace}{agent.branch && <><Icon name="branch" className="ms-1 size-3.5" /><span className="font-mono">{agent.branch}</span></>}</span>
         <span className="flex-1" />
         {agent.tokens ? <span className="ide-chip">{t('agent-tokens', { count: agent.tokens })}{costMicroUsd !== undefined ? ` · ${t('agent-cost', { amount: money(costMicroUsd) })}` : ''}</span> : null}
@@ -162,8 +183,8 @@ function PageFrame({ title, onBack, children, wide }: { title: string; onBack: (
   return (
     <div className="min-h-screen bg-surface-0">
       <header className="ide-bar sticky top-0 z-10 h-10 border-b">
-        <button type="button" className="ide-row w-auto flex-none text-[13px] text-muted hover:text-ink" onClick={onBack}><Icon name="chevron" className="size-3.5 rotate-180 rtl:rotate-0" />{t('focus-back')}</button>
-        <h1 className="m-0 min-w-0 flex-1 truncate text-[13px] font-semibold tracking-normal">{title}</h1>
+        <button type="button" className="ide-row w-auto flex-none text-[0.8125rem] text-muted hover:text-ink" onClick={onBack}><Icon name="chevron" className="size-3.5 rotate-180 rtl:rotate-0" />{t('focus-back')}</button>
+        <h1 className="m-0 min-w-0 flex-1 truncate text-[0.8125rem] font-semibold tracking-normal">{title}</h1>
         <span className="hidden sm:block"><LanguagePicker compact /></span>
         <ThemePicker />
       </header>
@@ -172,23 +193,110 @@ function PageFrame({ title, onBack, children, wide }: { title: string; onBack: (
   );
 }
 
-// How an owner makes a machine trust this browser: the key is public, the command is for a terminal.
-export function DevicePage({ device, onBack, onAddPasskey }: { device: Device | undefined; onBack: () => void; onAddPasskey?: () => Promise<boolean> }) {
+// ADR-0061: one of the person's devices as "This device" lists it.
+export interface MyDevice { id: string; name: string; fingerprint: string; lastUsedMs: number; trustedOn: string[]; waiting: boolean; removed: boolean }
+
+// How an owner makes a machine trust this browser (ADR-0061): which machines trust it, asking another device of theirs to approve it,
+// or the command to run on the machine. Fingerprints are what people compare, so every device is shown with its own. The screen
+// password and the idle lock live here too (ADR-0067). `passkeyNeedsPassword`: this browser is on another machine and a screen
+// password is set, so adding a passkey needs it (ADR-0067).
+export function DevicePage({ device, onBack, onTheme, onAddPasskey, passkeyNeedsPassword = false, security, fingerprint, machines, trustedOn, others, asked, onAsk, onRemove }: {
+  device: Device | undefined;
+  onBack: () => void;
+  // Opens the theme editor in the window (ADR-0068).
+  onTheme?: () => void;
+  onAddPasskey?: (password?: string) => Promise<boolean>;
+  passkeyNeedsPassword?: boolean;
+  security?: ReactNode;
+  fingerprint?: string;
+  // Every machine, and the ids of the ones that trust this browser.
+  machines?: readonly MachineModel[];
+  trustedOn?: readonly string[];
+  // The person's other devices.
+  others?: readonly MyDevice[];
+  asked?: boolean;
+  onAsk?: () => Promise<boolean>;
+  onRemove?: (id: string) => Promise<boolean>;
+}) {
+  useSyncExternalStore(themeStore.subscribe, themeStore.state, themeStore.state); // the theme's name below follows a change
   const [passkey, setPasskey] = useState<'added' | 'failed' | undefined>();
+  const [password, setPassword] = useState('');
+  const [ask, setAsk] = useState<'asked' | 'failed' | undefined>();
+  const [removing, setRemoving] = useState<{ id: string; failed?: boolean } | undefined>();
+  const name = (id: string) => machines?.find((m) => m.id === id)?.name ?? id;
+  const missing = (machines ?? []).filter((m) => !trustedOn?.includes(m.id));
+  const canVouch = (trustedOn?.length ?? 0) > 0;
   return (
     <PageFrame title={t('device-title')} onBack={onBack}>
       <p>{t('device-intro')}</p>
       {device && (
         <section className="stack">
           <p><span className="muted">{t('device-name')}</span> <span className="mono">{device.id}</span></p>
-          <p className="mono codebox">agora node trust {device.id} {device.publicKeyHex}</p>
+          {fingerprint && <p><span className="muted">{t('device-fingerprint')}</span> <span className="mono text-base tracking-wide">{fingerprint}</span></p>}
+          {machines && machines.length > 0 && (
+            <ul className="machines">
+              {machines.map((m) => (
+                <li key={m.id} className="machine">
+                  <strong>{m.name}</strong>
+                  <span className={trustedOn?.includes(m.id) ? 'muted' : 'text-needs-you'}>{t(trustedOn?.includes(m.id) ? 'device-trusted-here' : 'device-not-trusted-here')}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+          {onAsk && missing.length > 0 && (
+            <div className="stack">
+              <h2 className="m-0">{t('device-add-title')}</h2>
+              <p className="muted m-0">{t('device-add-intro', { fingerprint: fingerprint ?? '' })}</p>
+              <p className="m-0"><button type="button" className="button button--primary" onClick={() => { void onAsk().then((ok) => setAsk(ok ? 'asked' : 'failed')); }}>{t('device-ask')}</button></p>
+              {(ask === 'asked' || (asked && ask === undefined)) && <p role="status" className="m-0">{t('device-asked', { fingerprint: fingerprint ?? '' })}</p>}
+              {ask === 'failed' && <p role="alert" className="m-0">{t('device-ask-failed')}</p>}
+            </div>
+          )}
+          {(missing.length > 0 || !machines?.length) && <>
+            <p className="m-0 muted">{t('device-command-intro')}</p>
+            <p className="mono codebox">agora node trust {device.id} {device.publicKeyHex}</p>
+          </>}
+        </section>
+      )}
+      {others && others.length > 0 && (
+        <section className="stack">
+          <h2 className="m-0">{t('device-others')}</h2>
+          <ul className="machines">
+            {others.map((d) => (
+              <li key={d.id} className="machine">
+                <strong>{deviceLabel(d.name, d.id)}</strong>
+                <span className="mono">{d.fingerprint}</span>
+                <span className="muted">{d.removed ? t('device-removed') : d.waiting ? t('device-waiting') : d.trustedOn.length ? t('device-trusted-on', { machines: d.trustedOn.map(name).join(', ') }) : t('device-trusted-nowhere')}</span>
+                {d.lastUsedMs > 0 && <span className="muted">{t('device-last-used', { when: new Date(d.lastUsedMs).toLocaleString() })}</span>}
+                {onRemove && canVouch && !d.removed && (
+                  <button type="button" className="button px-2 py-1 text-xs" disabled={removing?.id === d.id && !removing.failed}
+                    onClick={() => { setRemoving({ id: d.id }); void onRemove(d.id).then((ok) => setRemoving(ok ? undefined : { id: d.id, failed: true })); }}>{t('device-remove')}</button>
+                )}
+                {removing?.id === d.id && removing.failed && <span role="alert">{t('device-remove-failed')}</span>}
+              </li>
+            ))}
+          </ul>
         </section>
       )}
       {onAddPasskey && (
         <section className="stack">
           <p>{t('device-passkey-intro')}</p>
-          <button type="button" className="button" onClick={() => { void onAddPasskey().then((ok) => setPasskey(ok ? 'added' : 'failed')); }}>{t('device-passkey-add')}</button>
+          {passkeyNeedsPassword && (
+            <label>
+              <span className="muted">{t('signin-password')}</span>{' '}
+              <input type="password" name="passkey-password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" />
+            </label>
+          )}
+          <button type="button" className="button" disabled={passkeyNeedsPassword && !password} onClick={() => { void onAddPasskey(passkeyNeedsPassword ? password : undefined).then((ok) => { setPasskey(ok ? 'added' : 'failed'); setPassword(''); }); }}>{t('device-passkey-add')}</button>
           {passkey && <p role="status">{t(passkey === 'added' ? 'device-passkey-added' : 'device-passkey-failed')}</p>}
+        </section>
+      )}
+      {security}
+      {onTheme && (
+        <section className="stack">
+          <h2 className="m-0">{t('device-appearance')}</h2>
+          <p className="muted m-0">{t('device-appearance-intro', { name: themeName(themeStore.active()) })}</p>
+          <button type="button" className="button" onClick={onTheme}>{t('theme-edit')}</button>
         </section>
       )}
     </PageFrame>
@@ -245,20 +353,31 @@ function actionLabel(action: string): string {
   return text === key ? action : text;
 }
 
-export function SignInPage({ onSubmit, onPasskey, notice }: { onSubmit: (code: string) => void; onPasskey?: () => void; notice?: string }) {
-  const [code, setCode] = useState('');
+// `passwordRequired`: the hub asks this browser for the screen password too (ADR-0067; never on the hub's own machine).
+export function SignInPage({ onSubmit, onPasskey, notice, passwordRequired = false, initialCode = '' }: { onSubmit: (code: string, password?: string) => void; onPasskey?: () => void; notice?: string; passwordRequired?: boolean; initialCode?: string }) {
+  const [code, setCode] = useState(initialCode);
+  const [password, setPassword] = useState('');
   return (
     <main className="page">
       <div className="flex justify-end"><LanguagePicker /></div>
       <h1>{t('signin-title')}</h1>
       <p>{t('signin-intro')}</p>
-      <form onSubmit={(e) => { e.preventDefault(); if (code.trim()) onSubmit(code); }}>
+      <form onSubmit={(e) => { e.preventDefault(); if (code.trim() && (!passwordRequired || password)) onSubmit(code, passwordRequired ? password : undefined); }}>
         <label>
           <span className="muted">{t('signin-code')}</span>{' '}
           <input value={code} onChange={(e) => setCode(e.target.value)} autoComplete="off" autoCapitalize="characters" spellCheck={false} />
         </label>{' '}
+        {passwordRequired && (
+          <>
+            <label>
+              <span className="muted">{t('signin-password')}</span>{' '}
+              <input type="password" name="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" />
+            </label>{' '}
+          </>
+        )}
         <button type="submit" className="button button--primary">{t('signin-action')}</button>
       </form>
+      {passwordRequired && <p className="muted">{t('signin-password-hint')}</p>}
       {onPasskey && <p><button type="button" className="button" onClick={onPasskey}>{t('signin-passkey')}</button></p>}
       {notice && <p role="alert">{notice}</p>}
     </main>

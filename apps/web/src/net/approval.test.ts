@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { signApproval, signedMessage, thisDevice, toHex, type KeyStore } from './approval';
+import { approvalFailureKey, signApproval, signedMessage, thisDevice, toHex, type KeyStore } from './approval';
 
 function memoryStore(): KeyStore {
   let saved: Awaited<ReturnType<KeyStore['load']>>;
@@ -17,7 +17,7 @@ describe('approval signatures', () => {
   it('keeps one device key, whose raw signature verifies against its public key', async () => {
     const store = memoryStore();
     const d = await thisDevice(store);
-    expect(d.id).toMatch(/^web-[0-9a-f]{6}$/);
+    expect(d.id).toMatch(/^web-[0-9a-f]{16}$/); // 64 random bits
     expect(d.publicKeyHex).toHaveLength(130); // 65 bytes
     expect(d.publicKeyHex.startsWith('04')).toBe(true);
     expect((await thisDevice(store)).publicKeyHex).toBe(d.publicKeyHex); // second visit: same key
@@ -34,5 +34,14 @@ describe('approval signatures', () => {
   it('never exposes the private key bytes', async () => {
     const d = await thisDevice(memoryStore());
     await expect(crypto.subtle.exportKey('pkcs8', d.keys.privateKey)).rejects.toBeTruthy();
+  });
+});
+
+describe('why an answer did not go through', () => {
+  it('says a refusal for another project is lasting and never asks to try again', () => {
+    expect(approvalFailureKey('auth.forbidden')).toBe('approval-forbidden');
+    expect(approvalFailureKey('approval.signature_invalid')).toBe('approval-not-trusted');
+    expect(approvalFailureKey('hub.unreachable')).toBe('approval-failed');
+    expect(approvalFailureKey(undefined)).toBe('approval-failed');
   });
 });

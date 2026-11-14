@@ -32,6 +32,16 @@ export async function startSignedMessage(
   return Uint8Array.from(out);
 }
 
+/** Why an answer to an approval did not go through, as one of the web's own texts. `auth.forbidden` is lasting (this device or this
+ * person may not answer for that project), so it never says to try again. */
+export function approvalFailureKey(code: string | undefined): string {
+  switch (code) {
+    case 'approval.signature_invalid': return 'approval-not-trusted';
+    case 'auth.forbidden': return 'approval-forbidden';
+    default: return 'approval-failed';
+  }
+}
+
 export function toHex(bytes: Uint8Array): string {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
 }
@@ -54,7 +64,8 @@ export async function thisDevice(store: KeyStore, subtle: SubtleCrypto = crypto.
   let saved = await store.load();
   if (!saved) {
     const keys = await subtle.generateKey(ALGORITHM, false, ['sign', 'verify']);
-    const suffix = toHex(crypto.getRandomValues(new Uint8Array(3)));
+    // 64 random bits (ids made before ADR-0061's review have 24 and stay valid: they are read back as stored).
+    const suffix = toHex(crypto.getRandomValues(new Uint8Array(8)));
     saved = { id: `web-${suffix}`, keys };
     await store.save(saved);
   }

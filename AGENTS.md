@@ -15,7 +15,7 @@ open **one window** (web/desktop, or TUI) connected to the hub and see every pro
 files, and changes across all machines. Agents talk to each other through a structured **mesh**
 instead of reading each other's screens.
 
-Read before any non-trivial change:
+Read before any non-trivial change (start with `docs/map.md`, one page):
 
 1. `docs/vision.md` — goals and non-goals
 2. `docs/architecture.md` — components, ownership, and data flow

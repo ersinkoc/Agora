@@ -23,6 +23,8 @@ pub struct View<'a> {
     /// The size of the window this is drawn in.
     pub cols: u16,
     pub rows: u16,
+    /// Now, in milliseconds since the Unix epoch: what "last seen" of an offline machine counts from (ADR-0070).
+    pub now_ms: u64,
 }
 
 /// The agents in the order the tree shows them: machines online first, then by name; agents by id within a machine.
@@ -243,8 +245,14 @@ fn tree(v: &View<'_>, t: Text<'_>) -> Vec<Row> {
         } else {
             String::new()
         };
+        // ADR-0070: an offline machine says when it was last heard from.
+        let seen = if n.online {
+            String::new()
+        } else {
+            format!("  {}", crate::render::presence_text(n, v.now_ms, t))
+        };
         rows.push(Row {
-            text: format!("{dot} {}{mem}", name(n)),
+            text: format!("{dot} {}{mem}{seen}", name(n)),
             paint,
             selected: false,
         });
@@ -260,8 +268,23 @@ fn tree(v: &View<'_>, t: Text<'_>) -> Vec<Row> {
             } else {
                 format!("{}↳ ", "  ".repeat(depth - 1))
             };
+            let note = if a.interrupted && !a.running {
+                format!("  · {}", t(key!("tui-interrupted"), &[]))
+            } else {
+                String::new()
+            };
+            // ADR-0059: an agent that acts without asking says so in the tree too.
+            let no_ask = if a.skips_permissions {
+                format!("  [{}]", t(key!("tui-badge-no-ask"), &[]))
+            } else {
+                String::new()
+            };
             rows.push(Row {
-                text: format!("  {lead}{m} {}  {}", local(&a.agent_id), a.kind),
+                text: format!(
+                    "  {lead}{m} {}  {}{note}{no_ask}",
+                    local(&a.agent_id),
+                    a.kind
+                ),
                 paint,
                 selected: a.agent_id == v.selected,
             });
@@ -383,8 +406,18 @@ pub fn frame(v: &View<'_>, t: Text<'_>) -> String {
                     )
                 )
             };
+            let by = if a.interrupted && !a.running {
+                format!("{by}  · {}", crate::render::interrupted_text(a, t))
+            } else {
+                by
+            };
+            let no_ask = if a.skips_permissions {
+                format!("  [{}]", t(key!("tui-badge-no-ask"), &[]))
+            } else {
+                String::new()
+            };
             format!(
-                " {}  {}  {}  {}{by}",
+                " {}  {}  {}  {}{by}{no_ask}",
                 local(&a.agent_id),
                 a.kind,
                 a.node_id,
@@ -568,6 +601,7 @@ mod tests {
             color: false,
             cols: 100,
             rows: 16,
+            now_ms: 0,
         };
         let rows = plain_rows(&frame(&v, &text), 16);
         let left: Vec<&str> = rows
@@ -646,6 +680,7 @@ mod tests {
             color: false,
             cols: 100,
             rows: 10,
+            now_ms: 0,
         };
         let rows = plain_rows(&frame(&v, &text), 10);
         let at = |id: &str| {
@@ -679,6 +714,7 @@ mod tests {
             color: true,
             cols: 100,
             rows: 12,
+            now_ms: 0,
         };
         let f = frame(&v, &text);
         let rows = plain_rows(&f, 12);
@@ -728,6 +764,7 @@ mod tests {
             color: false,
             cols: 80,
             rows: 10,
+            now_ms: 0,
         };
         let f = frame(&v, &text);
         let sgr_free = f.replace("\x1b[?25l", "").replace("\x1b[K", "");
@@ -763,6 +800,7 @@ mod tests {
             color: true,
             cols: 90,
             rows: 12,
+            now_ms: 0,
         };
         let rows = plain_rows(&frame(&v, &text), 12);
         // Ten panel rows (12 minus the status line and the title): the last ten of the agent's screen, the prompt at the bottom.
@@ -786,6 +824,7 @@ mod tests {
             color: false,
             cols: 60,
             rows: 8,
+            now_ms: 0,
         };
         let rows = plain_rows(&frame(&v, &text), 8);
         assert!(rows[1].contains("│┌─┐ 漢字ok"), "{rows:#?}");

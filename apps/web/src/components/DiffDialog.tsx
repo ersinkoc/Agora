@@ -30,7 +30,7 @@ export function DiffDialog({ agent, load, onClose }: { agent: AgentTileModel; lo
               : files.length === 0 ? <p className="muted">{t('changes-none')}</p>
               : files.map((f) => (
                 <section key={f.path} className="mb-5 overflow-hidden rounded-m border border-line">
-                  <h3 className="m-0 flex items-center justify-between gap-3 border-b border-line bg-surface-2 px-3 py-2 font-mono text-[13px] font-semibold">
+                  <h3 className="m-0 flex items-center justify-between gap-3 border-b border-line bg-surface-2 px-3 py-2 font-mono text-[0.8125rem] font-semibold">
                     <span className="truncate">{f.path}</span>
                     <span className="flex-none text-xs"><span className="text-finished">+{f.added}</span> <span className="text-needs-you">−{f.removed}</span></span>
                   </h3>

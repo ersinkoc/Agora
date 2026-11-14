@@ -1,0 +1,12 @@
+{
+  "deviceId": "x",
+  "publicKey": "AQID",
+  "name": "x",
+  "nodes": [
+    "x"
+  ],
+  "issuedAtMs": "1",
+  "expiresAtMs": "1",
+  "endorserDeviceId": "x",
+  "signature": "AQID"
+}

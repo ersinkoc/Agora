@@ -17,7 +17,7 @@ stays on), "only when I am not looking at it", dedupe over 60 s, and a digest fo
 `locales/en/notify.ftl`. Delivery: `agora-hub::deliver` sends to `ntfy` topics and `webhook` URLs (Slack and Discord take the same JSON post) over
 plain HTTP/1.1 with rustls for `https` (system root certificates), 10 s timeouts, one short request per notice. `agora-hub::notifier`
 watches the hub's live events (an approval waits, an agent is blocked or done, a machine went offline), routes them through the
-rules above and sends from a thread of its own. With `<hub dir>/public-url` set to the hub's address, a waiting-approval message ends with a link to it (`/#/approvals/<id>`, ADR-0046). Targets are listed in `<hub dir>/notify`, one `ntfy URL` or `webhook URL` per line;
+rules above and sends from a thread of its own. With `<hub dir>/public-url` set to the hub's address, a waiting-approval message ends with a link to it (`/#/approvals/<id>`, ADR-0046), and a message about an agent that waits or finished ends with a link to that agent (`/#/agent/<node>%2F<id>`, ADR-0067 rung 2); on a phone the approval link opens the agent that asks. Targets are listed in `<hub dir>/notify`, one `ntfy URL` or `webhook URL` per line;
 `hub run` reads it at start. Web Push is not planned (ADR-0051). Not yet: desktop notifications from the hub, email, Teams-style webhooks, the digest
 delivery, stored per-user preferences, the settings screen, (`agora hub notify --ntfy URL | --webhook URL` adds a target, `--test` sends a test message to each, no option lists them).
 
