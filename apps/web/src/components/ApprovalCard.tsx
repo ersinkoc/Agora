@@ -1,6 +1,18 @@
 import { t } from '../i18n';
+import { detailText } from '../net/tool';
 import type { ApprovalModel } from '../net/view';
 import { StartApproval, type StartChoice } from './StartApproval';
+
+// The short form names the command or file; what the agent asked for, in full, stays one click (or key) away before Allow.
+export function FullRequest({ detail }: { detail: string }) {
+  if (detailText(detail) === detail) return null;
+  return (
+    <details className="text-xs text-muted">
+      <summary className="cursor-pointer">{t('approval-full-request')}</summary>
+      <pre dir="ltr" className="m-0 mt-1 max-h-48 overflow-auto font-mono break-all whitespace-pre-wrap">{detail}</pre>
+    </details>
+  );
+}
 
 export function ApprovalCard({ approval, busy, onResolve }: {
   approval: ApprovalModel;
@@ -13,7 +25,8 @@ export function ApprovalCard({ approval, busy, onResolve }: {
     <article className="approval" aria-label={t('approval-title', { name: approval.agentName })}>
       <strong>{t('approval-title', { name: approval.agentName })}</strong>
       <span>{approval.action}</span>
-      {approval.detail && <span className="muted">{approval.detail}</span>}
+      {approval.detail && <span className="muted">{detailText(approval.detail)}</span>}
+      {approval.detail && <FullRequest detail={approval.detail} />}
       <div className="approval__actions">
         <button type="button" className="button button--primary" disabled={busy} onClick={() => onResolve(true)}>{t('approval-allow')}</button>
         <button type="button" className="button" disabled={busy} onClick={() => onResolve(false)}>{t('approval-deny')}</button>

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   byFolder, changedSpan, countByStatus, fileLines, gapLines, gapsOf, isTruncated, MAX_DIFF_BYTES, matchesFile, pairedLines, parseDiff,
-  lineEndingOnly, sameChange, splitRows, unquote,
+  lineEndingOnly, parseHunks, sameChange, splitRows, unquote,
 } from './diff';
 
 const SAMPLE = `diff --git a/a.txt b/a.txt
@@ -287,5 +287,18 @@ describe('the file list', () => {
       ['', ['a.txt', 'fresh.txt']], ['src', ['src/app.ts']], ['src/z', ['src/z/b.ts']],
     ]);
     expect(countByStatus(files)).toEqual({ all: 4, added: 1, modified: 3, deleted: 0, renamed: 0 });
+  });
+});
+
+describe('parseHunks', () => {
+  it('reads a chat agent\'s diff, which has no `diff --git` line', () => {
+    // As the ACP bridge writes it (crates/agora-adapters/src/acp.rs `replace_diff`).
+    const h = parseHunks('--- a/a.rs\n+++ b/a.rs\n@@ -1,1 +1,2 @@\n-old\n+new\n+more\n');
+    expect([h.added, h.removed]).toEqual([2, 1]);
+    expect(h.lines.map((l) => l.kind)).toEqual(['hunk', 'del', 'add', 'add']);
+  });
+  it('reads git\'s output too, and nothing without a hunk', () => {
+    expect(parseHunks(SAMPLE).added).toBe(2);
+    expect(parseHunks('just text')).toEqual({ added: 0, removed: 0, lines: [] });
   });
 });
