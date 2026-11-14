@@ -32,7 +32,8 @@ window again.
   registers first). `agora service status` says whether it is set up and running; `agora service remove` stops it and removes it.
   Windows registers a logon task per role (`agora-hub`, `agora-node`). It runs with the environment Windows gives you at login (your
   user and system `PATH`), not the `PATH` of the window that ran `install`: a program put on `PATH` only in that window is not found
-  by the agents it starts. `install` on a task turned off in Task Scheduler turns it on again and says so. Linux writes a systemd user unit per role into
+  by the agents it starts. `install` on a task turned off in Task Scheduler turns it on again and says so. A task of the same name
+  that you made yourself (or another tool did) is left exactly as it is: `agora service` neither replaces, starts nor removes it. Linux writes a systemd user unit per role into
   `~/.config/systemd/user/` (or `$XDG_CONFIG_HOME/systemd/user/`), owner-only, and runs `systemctl --user daemon-reload` and
   `enable`; it never uses root. A user unit runs while you are logged in: to start it at boot without logging in, run
   `loginctl enable-linger` yourself (Agora never does). It needs a session with your user's systemd running (a desktop login, or an SSH
