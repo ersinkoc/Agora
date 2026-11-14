@@ -27,7 +27,7 @@ window again.
 - If the hub or the node crashes, it is started again 30 seconds later, at most 5 times in 10 minutes; one that stops right
   after starting (its port is taken, its settings are wrong) is not retried, and its log says why. Each is run by a small
   `agora supervise` process that `agora` starts; stopping or killing it stops what it runs too, so nothing is left behind.
-- The first run ends with "Start Agora when you log in? [Y/n]" where that is available (Windows, and Linux with systemd); Enter says yes.
+- The first run ends with "Start Agora when you log in? [Y/n]" where that is available (Windows, macOS, and Linux with systemd); Enter says yes.
 - `agora service install`: start this machine's Agora when you log in (for you only, no administrator rights; it says what it
   registers first). `agora service status` says whether it is set up and running; `agora service remove` stops it and removes it.
   Windows registers a logon task per role (`agora-hub`, `agora-node`). Linux writes a systemd user unit per role into
@@ -40,7 +40,11 @@ window again.
   `remove` names the drop-ins it leaves. `install` on a unit turned off with `systemctl --user disable` turns it on again and says so. The agents the node starts run inside the unit and end with it
   (`systemctl --user stop`, or a logout without lingering), unlike a node started by `agora`, whose agents outlive the window. A
   unit of the same name that you wrote yourself is left exactly
-  as it is: `agora service` neither replaces, stops nor removes it. Without `systemctl` it is not available. macOS (LaunchAgent) comes next.
+  as it is: `agora service` neither replaces, stops nor removes it. Without `systemctl` it is not available.
+  macOS writes a LaunchAgent per role into `~/Library/LaunchAgents/` (owner-only) and loads it with `launchctl`; it never uses root
+  (it refuses `sudo`). macOS may say "Background Items Added" and lists it under Login Items; `install` on one turned off there turns it
+  on again and says so. A LaunchAgent of the same name that you wrote yourself is left exactly as it is. When it is removed, launchd
+  ends what the node started with it.
 - Logs: `~/.agora/logs/hub.log` and `node.log` (renamed to `.1` when over 5 MiB at a start).
 
 Everything works as before by hand too (`agora hub run`, `agora node enroll`, `agora node run`, `agora tui`); `AGORA_HOME` moves
