@@ -2050,6 +2050,10 @@ fn console(
                         mouse_mode(false);
                         return Next::Quit;
                     }
+                    Action::CleanUpOld => {
+                        c.notice = clean_up_old(say, session, c, &mut preview, rx);
+                        dirty_since.get_or_insert_with(Instant::now);
+                    }
                     Action::Command(k) => {
                         // A command's result replaces the last notice: the same long result (the trust command again) opens its
                         // box again instead of staying cut in the footer.
@@ -3059,6 +3063,77 @@ fn command(
         }
         _ => false,
     }
+}
+
+/// ADR-0073 "Clean up old machines": the machines not seen for a day, each with when it was last seen, in a box that asks once:
+/// y forgets them, r forgets them and refuses them if they connect again, any other key keeps them. Returns the line to show.
+fn clean_up_old(
+    say: &Say,
+    session: &mut Session,
+    c: &mut Console,
+    preview: &mut Option<Preview>,
+    rx: &mpsc::Receiver<u8>,
+) -> String {
+    let now = now_ms();
+    let text = |id: &str, args: &[(&str, Arg)]| say.text(id, args);
+    let old: Vec<(String, String)> = c
+        .snapshot
+        .as_ref()
+        .map(|s| {
+            s.nodes
+                .iter()
+                .filter(|n| agora_tui::split::is_old(n, now))
+                .map(|n| {
+                    let name = if n.hostname.is_empty() {
+                        &n.node_id
+                    } else {
+                        &n.hostname
+                    };
+                    (
+                        n.node_id.clone(),
+                        format!(
+                            "  {}  {}",
+                            plain(name),
+                            agora_tui::render::presence_text(n, now, &text)
+                        ),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if old.is_empty() {
+        return say.text(key!("tui-cleanup-none"), &[]);
+    }
+    let count = [(
+        "count",
+        Arg::Num(i64::try_from(old.len()).unwrap_or(i64::MAX)),
+    )];
+    let mut lines = vec![say.text(key!("tui-cleanup-title"), &count), String::new()];
+    lines.extend(old.iter().map(|(_, l)| l.clone()));
+    lines.push(String::new());
+    lines.push(say.text(key!("tui-cleanup-explain"), &[]));
+    lines.push(say.text(key!("tui-cleanup-keys"), &[]));
+    let answer = over_console(say, c, session, preview, None, rx, |_, ask| {
+        ask.key(&lines, Duration::from_secs(120))
+    });
+    let refuse = match answer {
+        Some(b'y') => false,
+        Some(b'r') => true,
+        _ => return String::new(),
+    };
+    let mut forgotten = 0i64;
+    for (id, _) in &old {
+        match session.forget_node(id, refuse) {
+            Ok(()) => forgotten += 1,
+            Err(e) => {
+                return say.text(
+                    key!("tui-cleanup-failed"),
+                    &[("code", Arg::Str(e.code)), ("count", Arg::Num(forgotten))],
+                )
+            }
+        }
+    }
+    say.text(key!("tui-cleanup-done"), &[("count", Arg::Num(forgotten))])
 }
 
 /// A machine's agents split into the ones it can start (numbered in the menu) and one line naming the others: the machine cannot

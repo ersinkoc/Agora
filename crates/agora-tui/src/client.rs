@@ -963,6 +963,19 @@ impl Session {
         .map(|_| ())
     }
 
+    /// ADR-0073: the hub stops listing an offline machine (owner only); `refuse_return` also refuses it if it connects again.
+    pub fn forget_node(&mut self, node_id: &str, refuse_return: bool) -> Result<(), ErrorInfo> {
+        self.command_info(
+            "",
+            command_request::Command::NodeForget(agora_protocol::v1::NodeForget {
+                node_id: node_id.to_string(),
+                refuse_return,
+            }),
+            Duration::from_secs(15),
+        )
+        .map(|_| ())
+    }
+
     /// Keys typed into the terminal (an ordinary routed command; the machine runs them in the order sent). Fire and forget.
     pub fn terminal_input(&mut self, node: &str, terminal_id: &str, data: &[u8]) {
         self.send_nowait(
