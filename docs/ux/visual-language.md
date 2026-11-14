@@ -50,8 +50,8 @@ Users see plain words; internal terms stay in code and docs (`glossary.md` lists
 - **Dark-first, light-equal.** Developers live in dark themes; light theme gets the same care.
 - **Calm surfaces, vivid state.** Neutral, low-contrast chrome; color is reserved for agent state and the
   single brand accent. When everything is calm, the one agent that needs you is impossible to miss.
-  Code (the file browser and the review screen) is content, not chrome: it gets muted syntax colours (`--syntax-*` tokens,
-  both themes), never as loud as a state colour.
+  Code (the file browser and the review screen) is content, not chrome: it gets muted syntax colours, derived from the
+  theme's own colours mixed toward its text colour (`--syntax-*` in `app.css`, not theme tokens), never as loud as a state colour.
 - **State is color + shape + motion + text.** Never color alone (color-blind safe, WCAG 2.2 AA).
 
 ### Agent state language
