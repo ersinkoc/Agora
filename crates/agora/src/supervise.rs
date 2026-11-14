@@ -439,6 +439,16 @@ pub fn supervise(say: &Say, word: &str, start: &Start) -> ExitCode {
     // at that log.
     let mut out: Box<dyn Write> = if start.log {
         let log = role.log(&h);
+        // Rotation renames by path: never inside a `logs` folder that is a link (the open below refuses it too).
+        if log.parent().is_some_and(|dir| {
+            std::fs::symlink_metadata(dir).is_ok_and(|m| m.file_type().is_symlink() || !m.is_dir())
+        }) {
+            say.err(
+                key!("supervise-log-link"),
+                &[("log", log.display().to_string().into())],
+            );
+            return ExitCode::from(1);
+        }
         frontdoor::rotate(&log);
         let file = match agora_platform::open_append_private(&log) {
             Ok(f) => f,

@@ -608,8 +608,14 @@ pub(crate) fn open_append_private(
         return Err(link_error(e));
     }
     // SAFETY: as above.
-    let fd = cvt(unsafe { libc::openat(dir_fd.as_raw_fd(), cname.as_ptr(), flags) })
-        .map_err(link_error)?;
+    // O_NONBLOCK: a FIFO (or a device) planted under the log's name must not hold the open until someone reads it; it is refused below,
+    // and a FIFO without a reader is refused at once (ENXIO).
+    let fd =
+        cvt(unsafe { libc::openat(dir_fd.as_raw_fd(), cname.as_ptr(), flags | libc::O_NONBLOCK) })
+            .map_err(|e| match e.raw_os_error() {
+                Some(libc::ENXIO) => refuse(),
+                _ => link_error(e),
+            })?;
     // SAFETY: a descriptor this call just opened.
     let file = unsafe { std::fs::File::from_raw_fd(fd) };
     let m = file.metadata()?;
@@ -617,6 +623,14 @@ pub(crate) fn open_append_private(
     let me = unsafe { libc::geteuid() };
     if !m.is_file() || m.nlink() > 1 || m.uid() != me {
         return Err(refuse());
+    }
+    // A regular file of this user's: writes block as usual again.
+    // SAFETY: plain calls on a descriptor `file` owns.
+    unsafe {
+        let fl = libc::fcntl(file.as_raw_fd(), libc::F_GETFL);
+        if fl < 0 || libc::fcntl(file.as_raw_fd(), libc::F_SETFL, fl & !libc::O_NONBLOCK) < 0 {
+            return Err(io::Error::last_os_error());
+        }
     }
     if m.mode() & 0o077 != 0 {
         file.set_permissions(std::fs::Permissions::from_mode(0o600))?;

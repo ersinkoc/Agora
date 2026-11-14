@@ -124,3 +124,26 @@ fn an_existing_readable_log_is_made_private() {
     assert_eq!(std::fs::read_to_string(&log).unwrap(), "old\nnew\n");
     let _ = std::fs::remove_dir_all(d);
 }
+
+/// A FIFO under the log's name (Linux's review of #550): refused at once, never waiting for a reader.
+#[cfg(unix)]
+#[test]
+fn a_fifo_log_is_refused_without_waiting() {
+    let d = tmp("fifo");
+    let log = d.join("node.log");
+    assert!(std::process::Command::new("mkfifo")
+        .arg(&log)
+        .status()
+        .unwrap()
+        .success());
+    let (tx, rx) = std::sync::mpsc::channel();
+    let path = log.clone();
+    std::thread::spawn(move || {
+        let _ = tx.send(agora_platform::open_append_private(&path).map(|_| ()));
+    });
+    let got = rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("open_append_private hung on a FIFO");
+    assert_eq!(got.unwrap_err().kind(), ErrorKind::InvalidInput);
+    let _ = std::fs::remove_dir_all(d);
+}
