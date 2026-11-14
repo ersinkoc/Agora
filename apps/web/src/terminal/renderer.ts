@@ -67,7 +67,11 @@ export class XtermRenderer implements TerminalRenderer {
     window.addEventListener('agora-theme', this.repaint);
   }
 
-  private repaint = () => { this.term.options.theme = theme(); };
+  private repaint = () => {
+    this.term.options.theme = theme();
+    const font = token('--font-mono');
+    if (font && font !== this.term.options.fontFamily) this.term.options.fontFamily = font;
+  };
 
   setFontSize(px: number): void {
     this.term.options.fontSize = px;
