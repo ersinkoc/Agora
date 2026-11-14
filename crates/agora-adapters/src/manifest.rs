@@ -401,7 +401,7 @@ impl Manifest {
         }
         if let Some(m) = &self.mcp {
             let ok = match m.method {
-                McpMethod::ConfigFile => m.path.is_some(),
+                McpMethod::ConfigFile => m.path.as_deref().is_some_and(|p| !p.is_empty()),
                 McpMethod::CliFlag => !m.flag.is_empty(),
                 McpMethod::Env => !m.env.is_empty(),
             };
@@ -488,6 +488,11 @@ impl Manifest {
             }
             crate::rules::Region::parse(&r.region).ok_or_else(|| at("region"))?;
             let own = r.contains.is_some() || r.regex.is_some();
+            if r.contains.is_some() && r.regex.is_some() {
+                // Exactly one of `contains`/`regex`, like every condition in `all`/`any`/`not`: the
+                // detector would silently drop a rule that names both.
+                return Err(at("conditions"));
+            }
             if !own && r.all.is_empty() && r.any.is_empty() {
                 // A rule with only `not` would match every screen without that text: too easy to get wrong.
                 return Err(at("conditions"));
@@ -648,5 +653,33 @@ mod session_tests {
         ] {
             assert!(Manifest::parse(&format!("{BASE}{bad}")).is_err(), "{bad}");
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod mcp_tests {
+    use super::*;
+
+    fn load(mcp: &str) -> Result<Manifest, ManifestError> {
+        Manifest::parse(&format!(
+            "kind = \"x\"\ndisplay_name = \"X\"\nversion = \"1\"\nmin_engine = 1\n[mcp]\n{mcp}"
+        ))
+    }
+
+    #[test]
+    fn a_config_file_needs_a_non_empty_path() {
+        assert!(load("method = \"config_file\"\npath = \".mcp.json\"\n").is_ok());
+        // A present-but-empty path is present but unusable: `inject` would resolve it to the worktree
+        // itself and the start would fail late writing a directory. Refused at load, like every other
+        // unusable field, so `agora doctor` can name it.
+        let e = load("method = \"config_file\"\npath = \"\"\n").unwrap_err();
+        assert_eq!(
+            e,
+            ManifestError::Invalid {
+                field: "mcp".into()
+            },
+            "{e}"
+        );
     }
 }

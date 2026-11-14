@@ -709,9 +709,15 @@ impl Mesh {
     ) -> Result<(Message, Vec<AgentId>), MeshError> {
         let info = self.caller(from)?.clone();
         self.check_content(body, refs)?;
-        // Your own node's name in front is just a longer way to say "here".
+        // Your own node's name in front is just a longer way to say "here" — unless the whole address
+        // already names an agent: the hub's board keeps hub-wide `<node>/<agent>` ids (ADR-0053), so on
+        // it "n1/b" for an agent of node n1 is that agent, not "b".
         let to = match split_address(to) {
-            Some((node, agent)) if node == info.node => agent,
+            Some((node, agent))
+                if node == info.node && !self.agents.contains_key(&AgentId::new(to)) =>
+            {
+                agent
+            }
             _ => to,
         };
         if let (Some((node, agent)), "message") = (split_address(to), kind) {
@@ -2181,6 +2187,24 @@ mod tests {
             assert!(m
                 .deliver_remote("n2", "b7", &AgentId::new("a1"), &big, &[], 1)
                 .is_err());
+        }
+
+        #[test]
+        fn a_hub_wide_id_for_an_agent_on_the_callers_own_node_reaches_that_agent() {
+            // The hub's board registers agents under hub-wide `<node>/<agent>` ids (Boards::sync in
+            // agora-hub), so "n1/b" names the agent itself; the node part is not a machine prefix to strip.
+            let mut m = Mesh::new(Limits::default());
+            m.register(agent("n1/a", "p", "n1"));
+            m.register(agent("n1/b", "p", "n1"));
+            m.register(agent("n2/c", "p", "n2"));
+            let me = AgentId::new("n1/a");
+            // Another node: the address names a remote agent.
+            assert!(m.handoff(&me, "n2/c", None, "s", &[], 1_000).is_ok());
+            // The same node: the whole id names a registered agent and must reach it.
+            assert!(
+                m.handoff(&me, "n1/b", None, "s", &[], 1_001).is_ok(),
+                "a handoff to an agent on the caller's own node must reach that agent"
+            );
         }
 
         #[test]
