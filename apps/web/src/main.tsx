@@ -2,7 +2,7 @@ import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { App } from './App';
 import './design/app.css';
-import { initTheme } from './theme';
+import { initTheme } from './themes/store';
 
 initTheme();
 

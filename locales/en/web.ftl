@@ -199,6 +199,78 @@ changes-files = { $count ->
 diff-title = What { $name } changed
 diff-close = Close
 diff-failed = Could not read the changes from that machine.
+changes-summary = { $count ->
+    [one] 1 file
+   *[other] { $count } files
+}
+changes-filter = Show
+changes-filter-all = All
+changes-filter-modified = Changed
+changes-filter-added = Added
+changes-filter-deleted = Deleted
+changes-filter-renamed = Renamed
+changes-status-modified = Changed
+changes-status-added = Added
+changes-status-deleted = Deleted
+changes-status-renamed = Renamed
+changes-badge-modified = M
+changes-badge-added = A
+changes-badge-deleted = D
+changes-badge-renamed = R
+changes-search = Filter by name
+changes-layout = Layout
+changes-layout-unified = Unified
+changes-layout-split = Side by side
+changes-wrap = Wrap lines
+changes-wrap-long = A long change shown whole is drawn one line per row, so it does not wrap; scroll sideways instead.
+changes-refresh = Read the changes again
+changes-list = Changed files
+changes-top-folder = Top folder
+changes-no-match = No changed file matches.
+changes-pick = Pick a file on the left to see what changed in it.
+changes-renamed-from = was { $name }
+changes-whole-file = Whole file
+changes-prev = Previous file
+changes-next = Next file
+changes-keys = next and previous file
+changes-binary = This file is not text, so its changes are not shown.
+changes-no-lines = Only the name or the permissions of this file changed.
+changes-no-eol = No line break at the end of the file
+changes-gap = { $count ->
+    [one] Show 1 unchanged line
+   *[other] Show { $count } unchanged lines
+}
+changes-gap-rest = Show the rest of the file
+changes-gap-failed = Could not read this file to show the unchanged lines.
+changes-retry = Try again
+changes-stale = The file has changed since these changes were read, so the unchanged lines are not shown. Read the changes again.
+changes-truncated = These changes are larger than 512 KiB, so only the first part was read. The last file in the list is cut off.
+changes-truncated-count = These changes are larger than 512 KiB, so only the first { $count ->
+        [one] file was
+       *[other] { $count } files were
+    } read. The machine counts { $total } changed files: at least { $min ->
+        [one] one is
+       *[other] { $min } are
+    } not listed here. The last file in the list is cut off.
+files-truncated = The changes are larger than 512 KiB, so files after the cut may have no change mark.
+files-truncated-count = The changes are larger than 512 KiB, so files after the cut have no change mark. The machine counts { $total ->
+        [one] one changed file
+       *[other] { $total } changed files
+    }; { $count ->
+        [one] one is
+       *[other] { $count } are
+    } marked.
+changes-partial = This file is cut off: the changes were too large to read at once.
+changes-eol = { $count ->
+    [one] One changed line differs only in its line ending (LF or CRLF); its text is the same.
+   *[other] { $count } changed lines differ only in their line endings (LF or CRLF); their text is the same.
+}
+changes-load-file = Read only this file
+changes-load-file-failed = This file alone is still too large to read.
+changes-show-all = { $count ->
+    [one] Show all 1 line
+   *[other] Show all { $count } lines
+}
 console-files = Files
 files-title = Files of { $name }
 files-tree = Folders and files
@@ -206,6 +278,42 @@ files-pick = Pick a file on the left to read it.
 files-binary = This file is not text, so it is not shown.
 files-too-large = This file could not be read (it may be too large).
 files-failed = Could not list this folder.
+files-filter = Filter files by name
+files-only-changed = Show only the changed files
+files-changed-count = { $count ->
+    [one] 1 changed
+   *[other] { $count } changed
+}
+files-refresh = Read the folders and changes again
+files-no-match = No file matches. Folders not opened yet are not searched.
+files-deleted = This file was deleted; its changes are in the review screen.
+files-empty = This folder is empty.
+files-folder-changed = Holds changed files
+files-key-filter = filter files
+files-key-find = find in the file
+files-open-files = Open files
+files-close-tab = Close { $name }
+files-path = Path
+files-lines = { $count ->
+    [one] 1 line
+   *[other] { $count } lines
+}
+files-changed-lines = { $count ->
+    [one] 1 line changed
+   *[other] { $count } lines changed
+}
+files-find = Find in the file
+files-find-none = No match
+files-find-at = { $used } of { $total }
+files-find-prev = Previous match
+files-find-next = Next match
+files-find-close = Close the search
+files-copy = Copy the whole file
+files-copied = Copied
+files-reload = Read this file again
+files-mark-add = Added since the last commit
+files-mark-mod = Changed since the last commit
+files-mark-del = Lines removed here since the last commit
 filter-placeholder = Filter by agent, machine or project
 filter-none = Nothing matches.
 console-drag = Drag this bar onto another terminal to swap their places
@@ -498,6 +606,8 @@ layout-follows-attention = Follows what needs you
 layout-follows-selection = Follows the selection
 layout-show-agent = { $name }
 layout-panel-agent = Agent
+layout-show-agent-itself = This agent
+layout-show-agent-files = This agent's files
 layout-panel-empty = Empty pane
 layout-panel-unknown = Unknown panel “{ $id }”: this window cannot show it.
 layout-drag = Drag onto another pane: an edge puts it beside, the middle makes it a tab
@@ -533,3 +643,93 @@ layout-error-too-deep = This layout is nested too deeply (at most { $max } level
 layout-error-too-many = This layout has too many panes (at most { $max }).
 layout-board-empty = No shared tasks or files yet.
 layout-cost-empty = Nothing spent yet.
+
+## Themes (ADR-0068 rung 2, docs/ux/themes.md)
+theme-editor-title = Theme
+theme-edit = Edit theme
+theme-follows-system = Following the system: showing the { $scheme } theme. Choose one theme for each.
+theme-forced = Always { $scheme }. Follow the system to switch between your two themes by itself.
+theme-for-light = Light theme
+theme-for-dark = Dark theme
+theme-name = Name
+theme-built-in = built in
+theme-built-in-hint = Built-in themes can't be changed. Customize makes a copy you can change.
+theme-customize = Customize
+theme-copy-name = { $name } (mine)
+theme-colours = Colours
+theme-shape = Text and shape
+theme-readability = Readability
+theme-incomplete = Some values are not valid yet; the window keeps the last good ones.
+theme-contrast-ok = All text is readable (WCAG AA).
+theme-contrast-not-applied = Not applied: some text would be hard to read.
+theme-px = { $size } px
+theme-import = Import…
+theme-export = Export
+theme-delete = Delete theme
+theme-reset = Reset to defaults
+theme-import-hint = Themes are kept in this browser. Export one to use it in another browser; Reset brings back Light and Dark and keeps your themes.
+theme-name-dark = Dark
+theme-name-light = Light
+theme-name-high-contrast = High contrast
+theme-name-large-text = Large text
+theme-name-slate = Slate
+theme-name-sand = Sand
+theme-token-surface-0 = Background
+theme-token-surface-1 = Panels
+theme-token-surface-2 = Raised surfaces
+theme-token-border = Lines
+theme-token-text = Text
+theme-token-text-muted = Secondary text
+theme-token-accent = Accent
+theme-token-on-accent = Text on accent
+theme-token-state-working = Working
+theme-token-state-needs-you = Needs you
+theme-token-state-finished = Finished
+theme-token-state-idle = Idle
+theme-token-state-unknown = Unknown
+theme-token-font-ui = Interface font
+theme-token-font-mono = Terminal and code font
+theme-token-text-16 = Text size
+theme-token-space-1 = Spacing
+theme-token-radius-xs = Corners: tiny
+theme-token-radius-s = Corners: small
+theme-token-radius-m = Corners: medium
+theme-token-radius-l = Corners: large
+theme-error-json = This file is not JSON.
+theme-error-invalid = This is not an Agora theme file.
+theme-error-newer = This theme was made by a newer version of Agora.
+theme-error-name = A theme needs a name of 1 to { $max } characters.
+theme-error-scheme = The theme must say whether it is "dark" or "light".
+theme-error-unknown-field = "{ $field }" is not part of a theme file.
+theme-error-unknown-token = "{ $token }" is not a theme token.
+theme-error-derived-token = "{ $token }" follows from "{ $base }": set "{ $base }" instead.
+theme-error-bad-color = { $label } ("{ $token }") must be a colour like #1a2b3c.
+theme-error-bad-size = { $label } ("{ $token }") must be between { $min } and { $max } px.
+theme-error-bad-font = { $label } ("{ $token }") must be a list of font names separated by commas.
+theme-error-contrast = { $fg } on { $bg } is { $ratio }:1; it needs at least { $min }:1 to be readable.
+theme-error-full = You have { $max } themes; delete one first.
+palette-theme-editor = Edit theme
+palette-theme = Theme: { $name }
+device-appearance = Appearance
+device-appearance-intro = This browser shows the { $name } theme. Themes are kept in this browser only.
+
+## ADR-0067 rung 2: the phone-sized window and the terminal key bar.
+phone-nav = Go to
+phone-search = Search
+phone-start = Start
+phone-machines = Machines
+phone-back = Back to the list
+phone-offline = offline
+phone-no-agents = No agents on this machine.
+phone-needs = Needs you · { $count }
+phone-next = Next · { $count }
+phone-untrusted = { $machine } does not trust this device yet, so it will refuse an answer from here.
+key-bar = Terminal keys
+key-esc = Esc
+key-tab = Tab
+key-ctrl = Ctrl
+key-up = Up
+key-down = Down
+key-left = Left
+key-right = Right
+key-paste = Paste

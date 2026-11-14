@@ -199,6 +199,63 @@ changes-files = { $count ->
 diff-title = { $name } neleri değiştirdi
 diff-close = Kapat
 diff-failed = Değişiklikler o makineden okunamadı.
+changes-summary = { $count ->
+    [one] 1 dosya
+   *[other] { $count } dosya
+}
+changes-filter = Göster
+changes-filter-all = Tümü
+changes-filter-modified = Değişen
+changes-filter-added = Eklenen
+changes-filter-deleted = Silinen
+changes-filter-renamed = Adı değişen
+changes-status-modified = Değişti
+changes-status-added = Eklendi
+changes-status-deleted = Silindi
+changes-status-renamed = Adı değişti
+changes-badge-modified = D
+changes-badge-added = E
+changes-badge-deleted = S
+changes-badge-renamed = A
+changes-search = Ada göre süz
+changes-layout = Görünüm
+changes-layout-unified = Tek sütun
+changes-layout-split = Yan yana
+changes-wrap = Satırları kaydır
+changes-wrap-long = Tamamı gösterilen uzun bir değişiklik her satırı tek sıra olarak çizilir, bu yüzden satır kaydırılmaz; yana kaydırın.
+changes-refresh = Değişiklikleri yeniden oku
+changes-list = Değişen dosyalar
+changes-top-folder = Üst klasör
+changes-no-match = Bu süzgece uyan değişen dosya yok.
+changes-pick = Neyin değiştiğini görmek için soldan bir dosya seçin.
+changes-renamed-from = önceki adı { $name }
+changes-whole-file = Tüm dosya
+changes-prev = Önceki dosya
+changes-next = Sonraki dosya
+changes-keys = sonraki ve önceki dosya
+changes-binary = Bu dosya metin olmadığı için değişiklikleri gösterilmiyor.
+changes-no-lines = Bu dosyanın yalnızca adı ya da izinleri değişti.
+changes-no-eol = Dosyanın sonunda satır sonu yok
+changes-gap = { $count ->
+    [one] Değişmeyen 1 satırı göster
+   *[other] Değişmeyen { $count } satırı göster
+}
+changes-gap-rest = Dosyanın kalanını göster
+changes-gap-failed = Değişmeyen satırları göstermek için bu dosya okunamadı.
+changes-retry = Yeniden dene
+changes-stale = Değişiklikler okunduktan sonra dosya değişti, bu yüzden değişmeyen satırlar gösterilmiyor. Değişiklikleri yeniden okuyun.
+changes-truncated = Değişiklikler 512 KiB'tan büyük olduğu için yalnızca ilk kısmı okundu. Listedeki son dosya yarıda kesik.
+changes-truncated-count = Bu değişiklikler 512 KiB'tan büyük, bu yüzden yalnızca ilk { $count } dosya okundu. Makine { $total } değişen dosya sayıyor: en az { $min } tanesi burada listelenmiyor. Listedeki son dosya kesik.
+files-truncated = Değişiklikler 512 KiB'tan büyük, bu yüzden kesimden sonraki dosyalarda değişiklik işareti olmayabilir.
+files-truncated-count = Değişiklikler 512 KiB'tan büyük, bu yüzden kesimden sonraki dosyalarda değişiklik işareti yok. Makine { $total } değişen dosya sayıyor; { $count } tanesi işaretli.
+changes-partial = Bu dosya yarıda kesik: değişiklikler tek seferde okunamayacak kadar büyüktü.
+changes-eol = { $count } değişen satır yalnızca satır sonunda (LF veya CRLF) farklı; metin aynı.
+changes-load-file = Yalnızca bu dosyayı oku
+changes-load-file-failed = Bu dosya tek başına da okunamayacak kadar büyük.
+changes-show-all = { $count ->
+    [one] 1 satırın tümünü göster
+   *[other] { $count } satırın tümünü göster
+}
 console-files = Dosyalar
 files-title = { $name } dosyaları
 files-tree = Klasörler ve dosyalar
@@ -206,6 +263,42 @@ files-pick = Okumak için soldan bir dosya seçin.
 files-binary = Bu dosya metin olmadığı için gösterilmiyor.
 files-too-large = Bu dosya okunamadı (çok büyük olabilir).
 files-failed = Bu klasör listelenemedi.
+files-filter = Dosyaları ada göre süz
+files-only-changed = Yalnızca değişen dosyaları göster
+files-changed-count = { $count ->
+    [one] 1 değişen
+   *[other] { $count } değişen
+}
+files-refresh = Klasörleri ve değişiklikleri yeniden oku
+files-no-match = Uyan dosya yok. Henüz açılmamış klasörlerde aranmaz.
+files-deleted = Bu dosya silindi; değişiklikleri inceleme ekranında.
+files-empty = Bu klasör boş.
+files-folder-changed = İçinde değişen dosyalar var
+files-key-filter = dosyaları süz
+files-key-find = dosyada ara
+files-open-files = Açık dosyalar
+files-close-tab = { $name } dosyasını kapat
+files-path = Yol
+files-lines = { $count ->
+    [one] 1 satır
+   *[other] { $count } satır
+}
+files-changed-lines = { $count ->
+    [one] 1 satır değişti
+   *[other] { $count } satır değişti
+}
+files-find = Dosyada ara
+files-find-none = Eşleşme yok
+files-find-at = { $used } / { $total }
+files-find-prev = Önceki eşleşme
+files-find-next = Sonraki eşleşme
+files-find-close = Aramayı kapat
+files-copy = Dosyanın tamamını kopyala
+files-copied = Kopyalandı
+files-reload = Bu dosyayı yeniden oku
+files-mark-add = Son commit'ten bu yana eklendi
+files-mark-mod = Son commit'ten bu yana değişti
+files-mark-del = Son commit'ten bu yana burada satırlar silindi
 filter-placeholder = Ajana, makineye veya projeye göre süz
 filter-none = Eşleşen yok.
 console-drag = Yerlerini değiştirmek için bu çubuğu başka bir terminalin üzerine sürükleyin
@@ -497,6 +590,8 @@ layout-follow-selection = Listede seçilen ajan
 layout-follows-attention = Sizi bekleyeni izler
 layout-follows-selection = Seçimi izler
 layout-show-agent = { $name }
+layout-show-agent-itself = Bu ajan
+layout-show-agent-files = Bu ajanın dosyaları
 layout-panel-agent = Ajan
 layout-panel-empty = Boş bölme
 layout-panel-unknown = Bilinmeyen panel “{ $id }”: bu pencere onu gösteremiyor.
@@ -533,3 +628,93 @@ layout-error-too-deep = Bu yerleşim çok derin iç içe (en çok { $max } düze
 layout-error-too-many = Bu yerleşimde çok fazla bölme var (en çok { $max }).
 layout-board-empty = Henüz ortak görev ya da dosya yok.
 layout-cost-empty = Henüz harcama yok.
+
+## Temalar (ADR-0068 2. basamak, docs/ux/themes.md)
+theme-editor-title = Tema
+theme-edit = Temayı düzenle
+theme-follows-system = Sistemi izliyor: { $scheme } tema gösteriliyor. Her biri için bir tema seçin.
+theme-forced = Her zaman { $scheme }. İki temanız arasında kendiliğinden geçmek için sistemi izleyin.
+theme-for-light = Açık tema
+theme-for-dark = Koyu tema
+theme-name = Ad
+theme-built-in = yerleşik
+theme-built-in-hint = Yerleşik temalar değiştirilemez. Özelleştir, değiştirebileceğiniz bir kopya oluşturur.
+theme-customize = Özelleştir
+theme-copy-name = { $name } (benim)
+theme-colours = Renkler
+theme-shape = Yazı ve biçim
+theme-readability = Okunabilirlik
+theme-incomplete = Bazı değerler henüz geçerli değil; pencere son geçerli değerleri korur.
+theme-contrast-ok = Tüm yazılar okunabilir (WCAG AA).
+theme-contrast-not-applied = Uygulanmadı: bazı yazılar zor okunur.
+theme-px = { $size } px
+theme-import = İçe aktar…
+theme-export = Dışa aktar
+theme-delete = Temayı sil
+theme-reset = Varsayılanlara dön
+theme-import-hint = Temalar bu tarayıcıda saklanır. Başka bir tarayıcıda kullanmak için dışa aktarın; Varsayılanlara dön, Açık ve Koyu'yu geri getirir ve temalarınızı korur.
+theme-name-dark = Koyu
+theme-name-light = Açık
+theme-name-high-contrast = Yüksek karşıtlık
+theme-name-large-text = Büyük yazı
+theme-name-slate = Arduvaz
+theme-name-sand = Kum
+theme-token-surface-0 = Arka plan
+theme-token-surface-1 = Paneller
+theme-token-surface-2 = Yükseltilmiş yüzeyler
+theme-token-border = Çizgiler
+theme-token-text = Yazı
+theme-token-text-muted = İkincil yazı
+theme-token-accent = Vurgu
+theme-token-on-accent = Vurgu üzerindeki yazı
+theme-token-state-working = Çalışıyor
+theme-token-state-needs-you = Sizi bekliyor
+theme-token-state-finished = Bitti
+theme-token-state-idle = Boşta
+theme-token-state-unknown = Bilinmiyor
+theme-token-font-ui = Arayüz yazı tipi
+theme-token-font-mono = Terminal ve kod yazı tipi
+theme-token-text-16 = Yazı boyutu
+theme-token-space-1 = Boşluk
+theme-token-radius-xs = Köşeler: çok küçük
+theme-token-radius-s = Köşeler: küçük
+theme-token-radius-m = Köşeler: orta
+theme-token-radius-l = Köşeler: büyük
+theme-error-json = Bu dosya JSON değil.
+theme-error-invalid = Bu bir Agora tema dosyası değil.
+theme-error-newer = Bu tema Agora'nın daha yeni bir sürümüyle yapılmış.
+theme-error-name = Temanın 1 ile { $max } karakter arasında bir adı olmalı.
+theme-error-scheme = Tema "dark" (koyu) mu "light" (açık) mı olduğunu belirtmeli.
+theme-error-unknown-field = "{ $field }" bir tema dosyasının parçası değil.
+theme-error-unknown-token = "{ $token }" bir tema değeri değil.
+theme-error-derived-token = "{ $token }", "{ $base }" değerinden türer: onun yerine "{ $base }" ayarlayın.
+theme-error-bad-color = { $label } ("{ $token }") #1a2b3c gibi bir renk olmalı.
+theme-error-bad-size = { $label } ("{ $token }") { $min } ile { $max } px arasında olmalı.
+theme-error-bad-font = { $label } ("{ $token }") virgülle ayrılmış yazı tipi adlarından oluşmalı.
+theme-error-contrast = { $bg } üzerinde { $fg } { $ratio }:1; okunabilir olması için en az { $min }:1 gerekir.
+theme-error-full = { $max } temanız var; önce birini silin.
+palette-theme-editor = Temayı düzenle
+palette-theme = Tema: { $name }
+device-appearance = Görünüm
+device-appearance-intro = Bu tarayıcı { $name } temasını gösteriyor. Temalar yalnızca bu tarayıcıda saklanır.
+
+## ADR-0067 2. basamak: telefon boyutunda pencere ve terminal tuş çubuğu.
+phone-nav = Git
+phone-search = Ara
+phone-start = Başlat
+phone-machines = Makineler
+phone-back = Listeye dön
+phone-offline = çevrim dışı
+phone-no-agents = Bu makinede ajan yok.
+phone-needs = Sizi bekleyenler · { $count }
+phone-next = Sıradaki · { $count }
+phone-untrusted = { $machine } bu cihaza henüz güvenmiyor; buradan verilen yanıtı reddeder.
+key-bar = Terminal tuşları
+key-esc = Esc
+key-tab = Tab
+key-ctrl = Ctrl
+key-up = Yukarı
+key-down = Aşağı
+key-left = Sol
+key-right = Sağ
+key-paste = Yapıştır

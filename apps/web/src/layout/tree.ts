@@ -8,7 +8,7 @@ export const MIN_RATIO = 0.1; // the smallest share a split gives one child
 const MAX_ID = 64;
 
 // The panels this window knows. A layout may name others (a newer client's): they draw an "unknown panel" placeholder.
-export const PANELS = ['terminal', 'conversation', 'agent', 'approvals', 'changes', 'files', 'tasks', 'messages', 'usage', 'empty'] as const;
+export const PANELS = ['terminal', 'conversation', 'agent', 'approvals', 'changes', 'files', 'tasks', 'messages', 'usage', 'theme', 'empty'] as const;
 export type KnownPanel = (typeof PANELS)[number];
 export const isKnownPanel = (id: string): id is KnownPanel => (PANELS as readonly string[]).includes(id);
 // Panels that show one agent, chosen by the pane's binding.

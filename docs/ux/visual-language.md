@@ -50,6 +50,8 @@ Users see plain words; internal terms stay in code and docs (`glossary.md` lists
 - **Dark-first, light-equal.** Developers live in dark themes; light theme gets the same care.
 - **Calm surfaces, vivid state.** Neutral, low-contrast chrome; color is reserved for agent state and the
   single brand accent. When everything is calm, the one agent that needs you is impossible to miss.
+  Code (the file browser and the review screen) is content, not chrome: it gets muted syntax colours, derived from the
+  theme's own colours mixed toward its text colour (`--syntax-*` in `app.css`, not theme tokens), never as loud as a state colour.
 - **State is color + shape + motion + text.** Never color alone (color-blind safe, WCAG 2.2 AA).
 
 ### Agent state language
@@ -86,6 +88,9 @@ Users see plain words; internal terms stay in code and docs (`glossary.md` lists
 ## 3. Design system in code
 - **Tokens first:** colors, type, spacing, radius, motion, and state colors defined once in `design/tokens`
   and generated for the web client (CSS variables), desktop, and TUI (truecolor/256-color mapping).
+- **Themes are token files** (ADR-0068, `themes.md`): built-in Dark, Light, High contrast, Large text, Slate and Sand, plus
+  the person's own, checked for WCAG AA contrast before they are shown. Text and spacing sizes are rem-based so a theme's
+  text size (and the browser's) scales them; components never use pixel font sizes.
 - **Component gallery:** every component rendered in all states, both themes, and an RTL locale; this is the
   review surface for UI pull requests.
 - **Visual regression tests:** screenshot tests for components and key screens in CI.

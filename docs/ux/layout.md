@@ -7,7 +7,8 @@
 The centre of the window is a **layout**: a tree of splits, tab groups and panes that the user arranges, saves and shares. The
 layout is plain, versioned JSON so every client (web today; the terminal client and any native client later, ADR-0068 rung 5–6)
 reads and writes the same file. This page is the format's specification and the web window's behaviour. Rung 1 covers the
-model, the presets and saved layouts; themes, the panel registry and keybindings are later rungs and are not described here.
+model, the presets and saved layouts; themes are `themes.md` (rung 2); the panel registry and keybindings are later rungs and are
+not described here.
 
 ## Format, version 1
 
@@ -41,6 +42,7 @@ Bind   = { "agent": string } | { "follow": "attention" | "selection" }
 | `tasks` | shared tasks and files |
 | `messages` | team chat between agents |
 | `usage` | what was spent |
+| `theme` | the theme editor (`themes.md`); added in rung 2, an older window shows it as an unknown panel |
 | `empty` | a chooser: an agent, "what needs you next", "the selected agent", or one of the panels above |
 
 A panel id this client does not know (a newer client's panel) is kept in the layout and drawn as a visible
@@ -176,7 +178,8 @@ Focus + strip:
 - **Follow attention**: each such pane shows a different agent that needs you, oldest first, keeps it while it still needs you,
   then moves on; with nothing waiting it says so.
 - **Phones** (narrower than 700 px): no tiling; every pane is a tab of one group and only the pane in focus is drawn. The saved
-  layout is unchanged.
+  layout is unchanged. Since ADR-0067 rung 2 a phone shows its own single column instead of the window ([phone.md](phone.md)), so
+  this narrow mode is what the layout engine does if the window is ever drawn that narrow; the saved layout is kept for wider ones.
 - **Until you arrange it** (no layout action yet), the window opens up to four running agents as tabs of one pane, as before;
   any change you make stops that. Reset layout starts over.
 

@@ -24,12 +24,12 @@ function AskApproval({ ask }: { ask: () => Promise<boolean> }) {
   return <div className="flex flex-wrap items-center gap-2">
     <button type="button" className="button button--primary" disabled={state === 'busy' || state === 'asked'}
       onClick={() => { setState('busy'); void ask().then((ok) => setState(ok ? 'asked' : 'failed')); }}>{t('trust-ask')}</button>
-    {state === 'asked' && <span role="status" className="text-[13px] text-muted">{t('trust-asked')}</span>}
-    {state === 'failed' && <span role="alert" className="text-[13px] text-needs-you">{t('device-ask-failed')}</span>}
+    {state === 'asked' && <span role="status" className="text-[0.8125rem] text-muted">{t('trust-asked')}</span>}
+    {state === 'failed' && <span role="alert" className="text-[0.8125rem] text-needs-you">{t('device-ask-failed')}</span>}
   </div>;
 }
 
-const chip = 'inline-flex items-center gap-2 rounded-xs border px-2.5 py-1.5 text-[13px] transition-colors duration-150 disabled:opacity-50';
+const chip = 'inline-flex items-center gap-2 rounded-xs border px-2.5 py-1.5 text-[0.8125rem] transition-colors duration-150 disabled:opacity-50';
 const chipOn = 'border-accent bg-surface-2 text-ink ring-1 ring-accent';
 const chipOff = 'border-line bg-surface-0 text-muted hover:bg-surface-2 hover:text-ink';
 
@@ -151,14 +151,14 @@ export function StartAgent({ projects, machines, initialNode, trust, askApproval
             {info ? <div className="flex items-start gap-2 rounded-xs border border-line bg-surface-0 px-3 py-2">
               <Icon name="folder" className="mt-0.5 size-4 text-accent" />
               <div className="min-w-0 flex-1">
-                <p className="m-0 break-all font-mono text-[13px]">{info.path}</p>
+                <p className="m-0 break-all font-mono text-[0.8125rem]">{info.path}</p>
                 <p className="m-0 mt-0.5 text-xs text-muted">{info.branch ? <><Icon name="branch" className="me-1 inline size-3" />{info.branch} · </> : null}{t('start-in-directory')}</p>
                 {info.portable && <p className="m-0 mt-0.5 break-all text-xs text-muted">{t('start-project-id', { id: info.projectId })}</p>}
               </div>
               <button type="button" className="button px-2 py-1 text-xs" disabled={busy} onClick={() => setInfo(undefined)}>{t('ide-folder-change')}</button>
             </div> : <>
               <div className="flex gap-2">
-                <input value={path} disabled={busy} autoFocus className="min-w-0 flex-1 font-mono text-[13px]" aria-label={t('start-directory')} onChange={e => { typed.current = true; changePath(e.target.value); }} onKeyDown={e => { if (e.key === 'Enter' && path.trim() && !busy) void choose(); }} placeholder={t('start-directory-placeholder')} />
+                <input value={path} disabled={busy} autoFocus className="min-w-0 flex-1 font-mono text-[0.8125rem]" aria-label={t('start-directory')} onChange={e => { typed.current = true; changePath(e.target.value); }} onKeyDown={e => { if (e.key === 'Enter' && path.trim() && !busy) void choose(); }} placeholder={t('start-directory-placeholder')} />
                 <button type="button" className="button button--primary" disabled={!path.trim() || busy} onClick={() => void choose()}>{t('start-select-directory')}</button>
               </div>
               {canBrowse && !browse && <button type="button" className="button justify-self-start px-3 py-1 text-xs" disabled={busy} onClick={() => void look(path.trim().startsWith('/') || /^[A-Za-z]:[\\/]/.test(path.trim()) ? path.trim() : '')}><Icon name="folder" className="size-4" />{t('start-browse')}</button>}
@@ -179,14 +179,14 @@ export function StartAgent({ projects, machines, initialNode, trust, askApproval
                 {browse.listing?.truncated && <p className="muted m-0 text-xs">{t('start-browse-more')}</p>}
               </div>}
               {known.length > 0 && !browse && <div className="grid gap-0.5">
-                <span className="text-[11px] text-muted">{t('ide-folder-known')}</span>
+                <span className="text-[0.6875rem] text-muted">{t('ide-folder-known')}</span>
                 <ul className="m-0 grid max-h-44 list-none gap-0.5 overflow-y-auto p-0">
                   {known.map(p => <li key={p.path}><button type="button" className="ide-row py-1.5" disabled={busy} aria-current={p.path === path ? 'true' : undefined} onClick={() => { changePath(p.path); void choose(p.path); }}>
-                    <Icon name="folder" className="size-4 text-muted" /><span className="min-w-0 flex-1"><span className="block truncate">{p.label}</span><span className="block truncate font-mono text-[11px] text-muted">{p.path}</span></span>
+                    <Icon name="folder" className="size-4 text-muted" /><span className="min-w-0 flex-1"><span className="block truncate">{p.label}</span><span className="block truncate font-mono text-[0.6875rem] text-muted">{p.path}</span></span>
                   </button></li>)}
                 </ul>
               </div>}
-              <label className="flex items-start gap-2 text-[13px]"><input type="checkbox" className="mt-0.5" checked={createIdentity} disabled={busy} onChange={e => setCreateIdentity(e.target.checked)} /><span>{t('start-portable')}{createIdentity && <span className="mt-0.5 block text-xs text-muted">{t('start-portable-explain')}</span>}</span></label>
+              <label className="flex items-start gap-2 text-[0.8125rem]"><input type="checkbox" className="mt-0.5" checked={createIdentity} disabled={busy} onChange={e => setCreateIdentity(e.target.checked)} /><span>{t('start-portable')}{createIdentity && <span className="mt-0.5 block text-xs text-muted">{t('start-portable-explain')}</span>}</span></label>
             </>}
           </div>
 
@@ -196,15 +196,15 @@ export function StartAgent({ projects, machines, initialNode, trust, askApproval
               {kinds === 'loading' ? <p className="muted m-0">{t('start-loading')}</p> : kinds === 'failed' ? <p role="alert" className="m-0">{t('start-kinds-failed')}</p> : kinds.length === 0 ? <p className="muted m-0">{t('start-no-kinds')}</p> :
                 <div className="flex flex-wrap gap-1.5" role="radiogroup" aria-label={t('start-which')}>
                   {kinds.map(k => <button key={k.kind} type="button" role="radio" aria-checked={kind === k.kind} disabled={busy || !k.installed} className={`${chip} ${kind === k.kind ? chipOn : chipOff}`} onClick={() => setKind(k.kind)}>
-                    {k.name}{!k.installed && <span className="text-[11px]">— {t('start-not-installed')}</span>}
+                    {k.name}{!k.installed && <span className="text-[0.6875rem]">— {t('start-not-installed')}</span>}
                   </button>)}
                 </div>}
               {Array.isArray(kinds) && kinds.some(k => !k.installed) && <p className="m-0 text-xs text-muted">{t('start-not-installed-why')}</p>}
             </div>
             {(info.gitRoot || info.previousProjectId) && <div className="grid gap-1.5">
               <h2 className="m-0">{t('ide-options')}</h2>
-              {info.gitRoot && <label className="flex items-center gap-2 text-[13px]"><input type="checkbox" checked={separate} disabled={busy} onChange={e => setSeparate(e.target.checked)} />{t('start-separate-worktree')}</label>}
-              {info.previousProjectId && <label className="flex items-center gap-2 text-[13px]"><input type="checkbox" checked={acceptIdentityChange} disabled={busy} onChange={e => setAcceptIdentityChange(e.target.checked)} />{t('start-identity-change')}</label>}
+              {info.gitRoot && <label className="flex items-center gap-2 text-[0.8125rem]"><input type="checkbox" checked={separate} disabled={busy} onChange={e => setSeparate(e.target.checked)} />{t('start-separate-worktree')}</label>}
+              {info.previousProjectId && <label className="flex items-center gap-2 text-[0.8125rem]"><input type="checkbox" checked={acceptIdentityChange} disabled={busy} onChange={e => setAcceptIdentityChange(e.target.checked)} />{t('start-identity-change')}</label>}
             </div>}
             {offered.length > 0 && <div className="grid gap-1.5">
               <h2 className="m-0">{t('start-how-it-acts')}</h2>
@@ -219,7 +219,7 @@ export function StartAgent({ projects, machines, initialNode, trust, askApproval
                 <button type="button" className="button button--primary px-3 py-1 text-xs" autoFocus onClick={() => setLaunch(keepAsking)}>{t('session-confirm-no')}</button>
               </div>}
               {launch.permission !== ASK && !pendingOption && <p className="m-0 text-xs text-needs-you">{t('start-does-not-ask-note')}</p>}
-              {plain.map((o) => <label key={o.id} className="flex items-center gap-2 text-[13px]"><input type="checkbox" checked={launch.harmless.includes(o.id)} disabled={busy} onChange={e => { const on = e.target.checked; setLaunch((s) => toggleHarmless(s, o.id, on)); }} />{labelOf(o, t)}</label>)}
+              {plain.map((o) => <label key={o.id} className="flex items-center gap-2 text-[0.8125rem]"><input type="checkbox" checked={launch.harmless.includes(o.id)} disabled={busy} onChange={e => { const on = e.target.checked; setLaunch((s) => toggleHarmless(s, o.id, on)); }} />{labelOf(o, t)}</label>)}
             </div>}
           </>}
           {error && <p role="alert" className="m-0 text-needs-you">{error === 'approval-not-trusted' && trust ? t('trust-hint', { machine: online.find(m => m.id === node)?.name ?? node }) : t(error)}</p>}

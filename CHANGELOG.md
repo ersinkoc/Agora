@@ -7,6 +7,43 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 ### Terminal client (ADR-0063)
 - `agora tui` is drawn with ratatui: machines and their agents on the left, the agents you open as tabs with their live terminal in the middle (what you type goes to the agent; Ctrl-] or F12 comes back to the list; Alt+1…9 picks a tab), and the selected agent's details and the request it waits on on the right. The mouse works: click a row to select it and again to open it, click a tab, drag the dividers; `m` releases the mouse so the terminal can select text. A chat agent opens as a tab too: its conversation, and a line to type a request into (Enter sends it; `/mode` and `/model` switch, as before). Ctrl K opens the commands, N goes to the next agent that needs you, and the letters of the earlier console stay (y / n answer, s start, f folder, x stop, u / U resume, d remove). A request to start an agent can be allowed only once all of it was on screen, in the details or in the reader that y opens. Their questions (which agent to start, allow this machine, stop its helpers too, approve a device) open in a box over the console instead of clearing the screen. In a window of 80–140 columns the agent's terminal now gets the room: the details panel shows itself only when the terminal keeps at least 60 columns (i shows or hides it at any width), the footer shows whole keys with Ctrl K first, and Ctrl K also lists every letter's action (start, stop, allow…). Dragging over an agent's terminal selects text and copies it to the clipboard (OSC 52, over SSH too). Colours follow the terminal: 16 colours where `TERM` has no 256, the 256-colour palette without `COLORTERM=truecolor` (macOS Terminal), and "needs you" in an orange that reads on light and dark backgrounds. Inside a tab, Alt+K opens the commands, Alt+M takes or releases the mouse, and Alt+Y / Alt+N answer the request of the agent in front. r shows what the selected agent changed: its diff, coloured, scrolled with the arrows and Space. o browses its files: a folder's entries, Enter into a folder or a file, ⌫ up. Typing in a chat never answers a request (Alt+Y / Alt+N do, and the draft is kept); the diff, the files and the readers follow a resized window and say when a new request arrives; and `agora tui` ends when its terminal closes.
 - A chat agent's tool calls read as words, as in the web window: "Command cargo test", "Read src/auth.rs", "Search TODO", instead of the raw `{"tool": …}` text.
+### Machines
+- `agora doctor` says who may make this machine act: which commands sent through the hub need a signature from one of your devices
+  (and a note when none do, since whoever controls the hub could then send them), how many devices the machine trusts and how many
+  of them may act in every project, whether agents may skip their permission questions, and any policy line the node did not
+  understand.
+- After the hub restarts a machine that has not come back is shown offline, with "last seen" from when the hub last heard
+  from it. Before, a machine that was connected when the hub stopped abruptly (killed, power loss) stayed online until it
+  redialled, or forever if it never did.
+
+### Getting started
+- `agora --version` prints the version.
+
+### Reviewing changes and files
+- Changes larger than 512 KiB say how many files were read and at least how many are not listed, in the review screen and in the
+  file browser, so the "files changed" count never silently disagrees with the list.
+- For an agent working in a folder inside a repository, the "files changed" count covers only that folder, like its list of
+  changes. Before, it also counted files changed elsewhere in the repository.
+- A very long change shown whole ("Show all") and switched to side by side no longer holds the page for seconds: only the rows in
+  view are drawn.
+- Files in a folder whose name contains " b/" keep their real path; lines that changed only between LF and CRLF are noted as such;
+  finding in a file marks the right characters after letters such as `İ`.
+- The file tree works from the keyboard as one Tab stop: arrows, Right and Left to open, enter, leave and close folders, Home and End.
+
+## 0.3.10
+
+### Machines
+- On macOS a machine no longer keeps a CPU core busy while anything stays connected to it: each idle connection to the node (from the terminal client, an agent's bridge or the command line) spun at 100%. A connection accepted from the node's listener now waits for data as it should.
+
+## 0.3.9
+
+### Themes (ADR-0068, rung 2)
+- The window can be restyled with themes: Dark, Light, High contrast, Large text, Slate and Sand are built in, and **Edit theme**
+  (command palette, or This device → Appearance) opens the theme editor beside your agents. Customize a built-in theme to change
+  its colours, fonts, text size, spacing and corners and see the whole window change as you edit; a change that would make text
+  hard to read (below WCAG AA) is listed and not applied. Choose one theme for light and one for dark and follow the system to
+  switch between them. Themes are kept in this browser, and export and import as a JSON file (`docs/ux/themes.md`, version 1;
+  a file with an unknown or invalid token, or unreadable colours, is refused with the reasons).
 
 ### Devices
 - The hub keeps a list of each person's devices (ADR-0061): a browser or the terminal client registers its key and name when it signs
@@ -60,9 +97,21 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ### Machines
 - A machine that goes quiet without its connection ending (a laptop that slept, a stopped process, a Wi-Fi switch, a NAT that forgot the connection) is shown offline within about 25 seconds, with when it was last seen, in the machine list, its tooltip, the Machines page and the terminal client. When it is back it is online again by itself, and its agents are untouched: offline is not finished (ADR-0070). Nodes ping the hub every 10 s, drop a hub that stopped answering after 25 s, give up a connection attempt that hangs after 25 s and reconnect at once after the machine wakes from sleep. The window pings the hub every 15 s and reconnects when nothing comes back within 10 s. Older nodes and windows keep working with a new hub, and a new window with an older hub shows machines as before.
+- After the hub restarts, machines and the open window are back within about a second and a half, so something that happens right after the restart (a new agent) shows up at once instead of up to 16 to 30 seconds later. Machines retry a hub that is away at most every 1.5 s for its first five minutes (then up to every 30 s), and start over after each good connection; a machine dialling a hub on the same machine gives each attempt half a second, so on Windows a refused attempt no longer takes two seconds; the window retries at most every 1.5 s (5 s after about five minutes) and no longer says "Connecting to your hub…" while it is connected and nothing new has happened.
 - Connecting to a hub at `localhost` no longer waits about two seconds on Windows: nodes, the terminal client, the desktop app and the hub's notifications try `127.0.0.1` first for a loopback name and `::1` only after it.
 ### Getting started
 - Plain `agora` now opens the browser window by default on a desktop. The terminal client is the default only when there is no screen (an SSH session, or Linux with no display); `--ui tui` and `--save` still choose it.
+### On a phone (ADR-0067, rung 2)
+- On a phone the window is one column: what needs you first, with Allow and Deny one tap away (signed by the phone's device key and
+  checked on the machine, as everywhere), then each machine with its agents; tapping an agent opens its terminal or conversation
+  with Back at the top and **Next** to the next thing that needs you. Held sideways it works the same. Tablets and desktops keep
+  the full window.
+- On a touch screen every terminal has a key bar: Esc, Tab, Ctrl (for the next key), the arrows and Paste, sending what a program
+  expects (arrows follow the program's cursor mode; Ctrl+c is `0x03`). The touch keyboard stays open while you press them.
+- Every control on a phone is at least 44 px; the window keeps out of the notch and the home indicator and stays above the touch
+  keyboard. Installing it to the home screen gets PNG and maskable icons and an iOS icon.
+- With the hub's `public-url` set, a notice about an agent that waits or finished links to that agent; an approval's link opens the
+  agent that asks. See `docs/ux/phone.md`.
 
 ## 0.3.8
 

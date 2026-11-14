@@ -196,6 +196,33 @@ describe('operations', () => {
     expect(shape(ws.layout.root)).toEqual({ row: ['empty', { tabs: ['b'], active: 0 }] });
     expect(reduce(ws, { type: 'prune', alive: new Set(['b']) })).toBe(ws);
   });
+  it('shows a panel (the theme editor): in an empty window, beside the pane in focus, or where it already is', () => {
+    let ws = reduce(ws0(), { type: 'show', panel: 'theme' });
+    expect(shape(ws.layout.root)).toBe('theme');
+    ws = run(grid('2x1', ['a', 'b']), { type: 'focus', pane: panesOf(grid('2x1', ['a', 'b']).layout.root)[0]!.id }, { type: 'show', panel: 'theme' });
+    expect(shape(ws.layout.root)).toEqual({ row: ['a', 'theme', 'b'] });
+    expect(findPane(ws.layout, ws.focus)?.panel).toBe('theme');
+    // Shown already, behind a tab or outside the maximized pane: brought to the front, nothing added.
+    ws = run(grid('1x1', ['a', 'b']), { type: 'show', panel: 'theme' });
+    const theme = panesOf(ws.layout.root).find((p) => p.panel === 'theme')!.id;
+    ws = run(ws, { type: 'maximize', pane: panesOf(ws.layout.root)[0]!.id }, { type: 'show', panel: 'theme' });
+    expect(ws.zoom).toBeUndefined();
+    expect(visiblePanes(ws).map((p) => p.id)).toContain(theme);
+    expect(panesOf(ws.layout.root).filter((p) => p.panel === 'theme')).toHaveLength(1);
+    expect(isValid(ws.layout)).toBe(true);
+  });
+  it('showing a panel near the limits never breaks them', () => {
+    const full = grid('3x2', Array.from({ length: MAX_PANES }, (_, i) => `a${i}`));
+    const ws = reduce(full, { type: 'show', panel: 'theme' });
+    expect(panesOf(ws.layout.root)).toHaveLength(MAX_PANES);
+    expect(panesOf(ws.layout.root).some((p) => p.panel === 'theme')).toBe(false); // already at the limit: refused
+    // Nested as deep as allowed: the panel still finds a place (beside, or as a tab), and the tree stays valid.
+    let deep = grid('1x1', ['a']);
+    for (let i = 0; i < 20; i++) deep = reduce(deep, { type: 'split', pane: deep.focus as string, direction: i % 2 ? 'row' : 'column', panel: 'terminal' });
+    const shown = reduce(deep, { type: 'show', panel: 'theme' });
+    expect(panesOf(shown.layout.root).some((p) => p.panel === 'theme')).toBe(true);
+    expect(isValid(shown.layout)).toBe(true);
+  });
   it('refuses a split beyond the pane limit', () => {
     let ws = grid('3x2', Array.from({ length: MAX_PANES }, (_, i) => `a${i}`));
     const before = ws;

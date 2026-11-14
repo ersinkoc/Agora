@@ -20,6 +20,17 @@ pub fn order(mut addrs: Vec<SocketAddr>) -> Vec<SocketAddr> {
     addrs
 }
 
+/// How long one address of a loopback name is tried by [`connect_bounded`]. A listener on this machine answers a connection at
+/// once, or refuses it at once, except on Windows, where a refused connection is retried for about two seconds before it fails:
+/// a node waiting for a restarting hub on the same machine would spend most of each redial there. Generous for a loaded machine.
+pub const LOOPBACK_ATTEMPT: Duration = Duration::from_millis(500);
+
+/// The limit for each attempt on `addrs` in [`connect_bounded`]: [`LOOPBACK_ATTEMPT`] when every address is loopback (the same
+/// rule as [`order`]), none otherwise (the operating system's own connect timeout, as before).
+pub fn attempt_limit(addrs: &[SocketAddr]) -> Option<Duration> {
+    (!addrs.is_empty() && addrs.iter().all(|a| a.ip().is_loopback())).then_some(LOOPBACK_ATTEMPT)
+}
+
 fn no_address() -> io::Error {
     io::Error::new(io::ErrorKind::NotFound, "no address")
 }
@@ -45,6 +56,29 @@ pub async fn connect(host_port: &str) -> io::Result<tokio::net::TcpStream> {
     let mut last = no_address();
     for addr in addrs {
         match tokio::net::TcpStream::connect(addr).await {
+            Ok(s) => return Ok(s),
+            Err(e) => last = e,
+        }
+    }
+    Err(last)
+}
+
+/// [`connect`], but each address of a loopback name is given up after [`LOOPBACK_ATTEMPT`] (see [`attempt_limit`]) and counts as
+/// refused; other names are not bounded here. For a client that dials again on its own schedule (the node's uplink).
+#[cfg(feature = "dial")]
+pub async fn connect_bounded(host_port: &str) -> io::Result<tokio::net::TcpStream> {
+    let addrs = order(tokio::net::lookup_host(host_port).await?.collect());
+    let limit = attempt_limit(&addrs);
+    let mut last = no_address();
+    for addr in addrs {
+        let attempt = tokio::net::TcpStream::connect(addr);
+        let r = match limit {
+            Some(limit) => tokio::time::timeout(limit, attempt)
+                .await
+                .unwrap_or_else(|_| Err(io::Error::from(io::ErrorKind::TimedOut))),
+            None => attempt.await,
+        };
+        match r {
             Ok(s) => return Ok(s),
             Err(e) => last = e,
         }
@@ -119,6 +153,39 @@ mod tests {
         let port = l.local_addr().unwrap().port();
         let s = connect_timeout(("localhost", port), Duration::from_secs(5)).unwrap();
         assert!(s.peer_addr().unwrap().is_ipv4());
+    }
+
+    #[test]
+    fn only_loopback_names_get_the_short_attempt_limit() {
+        assert_eq!(
+            attempt_limit(&[a("[::1]:7000"), a("127.0.0.1:7000")]),
+            Some(LOOPBACK_ATTEMPT)
+        );
+        assert_eq!(attempt_limit(&[a("127.0.0.2:1")]), Some(LOOPBACK_ATTEMPT));
+        assert_eq!(attempt_limit(&[a("192.0.2.1:443")]), None);
+        assert_eq!(attempt_limit(&[a("[2001:db8::1]:443")]), None);
+        // Loopback mixed with a routable address is not a loopback name.
+        assert_eq!(attempt_limit(&[a("[::1]:443"), a("192.0.2.1:443")]), None);
+        assert_eq!(attempt_limit(&[]), None);
+        assert!(LOOPBACK_ATTEMPT <= Duration::from_millis(500));
+    }
+
+    #[cfg(feature = "dial")]
+    #[tokio::test]
+    async fn connect_bounded_reaches_a_listener_and_fails_fast_without_one() {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        let s = connect_bounded(&format!("localhost:{port}")).await.unwrap();
+        assert!(s.peer_addr().unwrap().is_ipv4());
+        drop((s, l));
+        // Nobody listens now: refused (or, on Windows, given up) within the limit for each address.
+        let started = std::time::Instant::now();
+        assert!(connect_bounded(&format!("localhost:{port}")).await.is_err());
+        assert!(
+            started.elapsed() < LOOPBACK_ATTEMPT * 3,
+            "{:?}",
+            started.elapsed()
+        );
     }
 
     #[cfg(feature = "dial")]

@@ -19,7 +19,7 @@ use agora_tui::render::{chat_command, plain, render, render_chat, session_line, 
 use agora_tui::split::{app_details, app_rows};
 use agora_tui::split::{frame, reader_frame, start_card_fit, start_card_lines, tree_order, View};
 
-use crate::hubcli::{hub_dir, new_login_code, DEFAULT_LISTEN};
+use crate::hubcli::{hub_dir, new_login_code, own_hub_addr, DEFAULT_LISTEN};
 use crate::{home, Opts, Say};
 
 /// Fewest milliseconds between two refreshes (each one is a fresh snapshot).
@@ -1176,7 +1176,12 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
         say.err(key!("tui-need-hub"), &[]);
         return ExitCode::from(2);
     };
-    let addr = o.hub.clone().unwrap_or_else(|| DEFAULT_LISTEN.to_string());
+    // Without `--hub`: where the hub in that folder says it listens (it may run on a port of its own), else the default.
+    let addr = o
+        .hub
+        .clone()
+        .or_else(|| own_hub_addr(&dir))
+        .unwrap_or_else(|| DEFAULT_LISTEN.to_string());
     // On the hub's machine (no `--hub`, or `--hub-dir` given with it: the front door's hub on a port of its own, ADR-0062) a sign-in
     // code is made from the hub's folder whenever one is needed; nobody types one.
     let local = o.hub.is_none() || o.hub_dir.is_some();
