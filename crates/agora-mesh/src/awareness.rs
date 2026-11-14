@@ -126,6 +126,71 @@ pub fn extra_fields(mesh: &Mesh, a: &AgentInfo, now_ms: u64) -> Map<String, Valu
     m
 }
 
+/// One `agents_list` row for an agent registered on this broker: `agent_id`, `kind`, `node`, `state`, `worktree`, `label`, the
+/// [`extra_fields`], and `partial: true` (other machines were not asked; the node sets it `false` per project with
+/// [`list_complete`] or [`merge_shared_list`]).
+pub fn list_row(mesh: &Mesh, a: &AgentInfo, now_ms: u64) -> Value {
+    let mut row = extra_fields(mesh, a, now_ms);
+    for (k, v) in [
+        ("agent_id", json!(a.id.as_str())),
+        ("kind", json!(a.kind)),
+        ("node", json!(a.node)),
+        ("state", json!(a.state)),
+        ("worktree", json!(a.worktree)),
+        ("label", json!(a.label)),
+        ("partial", json!(true)),
+    ] {
+        row.insert(k.into(), v);
+    }
+    Value::Object(row)
+}
+
+/// The rows of `project` in an `agents_list` answer are complete: the hub said the project lives on this machine only.
+pub fn list_complete(rows: &mut [Value], project: &str) {
+    for r in rows.iter_mut().filter(|r| r["project"] == project) {
+        r["partial"] = json!(false);
+    }
+}
+
+/// Adds the hub's view of a shared `project` (its `workspace_status` answer, ADR-0039) to `agents_list` rows: the project's agents
+/// on other online machines, addressed `<node>/<agent>` as `send_message` takes them, and the board's claimed task and leases put
+/// into this node's own rows (which otherwise stay as they are: they know more). The project's rows are then complete.
+pub fn merge_shared_list(rows: &mut Vec<Value>, hub: &Value, project: &str, own_node: &str) {
+    let prefix = format!("{own_node}/");
+    let mut extra: Vec<Value> = Vec::new();
+    for row in hub["agents"].as_array().into_iter().flatten() {
+        let Some(id) = row["id"].as_str() else {
+            continue;
+        };
+        let task = row["task"].as_str();
+        if let Some(local_id) = id.strip_prefix(&prefix) {
+            if let Some(mine) = rows
+                .iter_mut()
+                .find(|r| r["agent_id"] == local_id && r["project"] == project)
+            {
+                if let Some(t) = task {
+                    mine["doing"] = json!(doing(Some(t), "", None));
+                }
+                if let Some(h) = row["holds"].as_u64().filter(|h| *h > 0) {
+                    mine["holds"] = json!(h);
+                }
+            }
+            continue;
+        }
+        let state = clean(row["state"].as_str().unwrap_or("unknown"), 16);
+        let workspace = clean(row["workspace"].as_str().unwrap_or(""), PATH_MAX);
+        extra.push(json!({
+            "agent_id": clean(id, 160), "kind": clean(row["kind"].as_str().unwrap_or(""), 64),
+            "node": clean(row["machine"].as_str().unwrap_or(""), 128), "doing": doing(task, &state, None),
+            "state": state, "worktree": workspace, "label": "", "project": project, "workspace": workspace,
+            "since": Value::Null, "files_changed": Value::Null, "holds": row["holds"].as_u64().unwrap_or(0),
+            "parent": row["parent"].as_str().map(|p| clean(p, 160)), "partial": false,
+        }));
+    }
+    rows.extend(extra.into_iter().take(MAX_AGENTS));
+    list_complete(rows, project);
+}
+
 /// `workspace_status` from this broker alone: the caller's project as this node knows it. `partial` is `true` (other machines were
 /// not asked); the node sets it `false` when the hub said the project lives here only, or merges the hub's answer with
 /// [`merge_shared`].
@@ -451,5 +516,47 @@ mod tests {
             "{summary}"
         );
         assert!(!summary.contains("hub could not"));
+    }
+
+    #[test]
+    fn a_shared_list_adds_other_machines_addressable_and_only_completes_that_project() {
+        let mut m = Mesh::new(Limits::default());
+        m.join(info("agent-1", "/w", "mac", "working"), 0);
+        let mut other = info("agent-2", "/v", "mac", "idle");
+        other.project = "q".into();
+        m.join(other, 0);
+        let mut rows: Vec<Value> = m
+            .agents_list(None)
+            .iter()
+            .map(|a| list_row(&m, a, 0))
+            .collect();
+        assert!(rows.iter().all(|r| r["partial"] == true));
+        let hub = json!({
+            "machines_online": 2,
+            "agents": [
+                {"id": "mac/agent-1", "kind": "codex", "machine": "mac", "state": "working", "holds": 2, "task": "ship it"},
+                {"id": "pc/agent-9", "kind": "claude\u{0007}", "machine": "pc", "state": "blocked", "holds": 0,
+                 "task": null, "workspace": "C:\\w", "parent": null},
+            ],
+        });
+        merge_shared_list(&mut rows, &hub, "p", "mac");
+        assert_eq!(rows.len(), 3);
+        let mine = rows.iter().find(|r| r["agent_id"] == "agent-1").unwrap();
+        assert_eq!(mine["holds"], 2);
+        assert_eq!(mine["doing"], "working on task: ship it");
+        assert_eq!(mine["partial"], false);
+        let theirs = rows.iter().find(|r| r["agent_id"] == "pc/agent-9").unwrap();
+        assert_eq!(theirs["node"], "pc");
+        assert_eq!(theirs["kind"], "claude");
+        assert_eq!(theirs["project"], "p");
+        assert_eq!(theirs["worktree"], "C:\\w");
+        assert_eq!(theirs["doing"], "waiting for approval");
+        assert_eq!(theirs["since"], Value::Null);
+        assert_eq!(theirs["partial"], false);
+        // The other project was not part of the hub's answer: still partial.
+        let q = rows.iter().find(|r| r["agent_id"] == "agent-2").unwrap();
+        assert_eq!(q["partial"], true);
+        list_complete(&mut rows, "q");
+        assert!(rows.iter().all(|r| r["partial"] == false));
     }
 }

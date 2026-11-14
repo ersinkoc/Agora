@@ -1016,6 +1016,19 @@ impl ResumePolicy {
     }
 }
 
+impl Policy {
+    /// The routed commands this node gates behind a device-signed grant (ADR-0041), as the node applies them when it starts: the
+    /// `signed_commands` line, or, without one, the team default when some device is limited to projects (ADR-0049), since limited
+    /// devices only mean something if the commands they could sign are the ones that need a signature. Empty: none is gated.
+    pub fn effective_signed_commands(&self) -> crate::grants::SignedCommands {
+        if self.signed_commands.0.is_empty() && !self.device_projects.is_empty() {
+            crate::grants::SignedCommands::team_default()
+        } else {
+            self.signed_commands.clone()
+        }
+    }
+}
+
 impl Default for Policy {
     fn default() -> Self {
         Self {
@@ -1330,13 +1343,7 @@ impl Node {
         ));
         approvals.set_device_trust(Arc::clone(&devices));
         let policy_now = read_policy(&cfg.data_dir.join(POLICY_FILE));
-        // Limited devices only mean something if the commands they could sign are the ones that need a signature.
-        let signed =
-            if policy_now.signed_commands.0.is_empty() && !policy_now.device_projects.is_empty() {
-                crate::grants::SignedCommands::team_default()
-            } else {
-                policy_now.signed_commands
-            };
+        let signed = policy_now.effective_signed_commands();
         devices.set_policy_limits(policy_now.device_projects.clone());
         let limits = Arc::new(crate::limits::DeviceLimits::new(policy_now.device_projects));
         // ADR-0061: a device endorsed by a limited device is limited the same way (kept in the trusted-devices file).

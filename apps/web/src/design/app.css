@@ -119,3 +119,27 @@
 
 /* xterm paints its scroll area black by default; let the pane's own (themed) background show. */
 .xterm .xterm-viewport { background-color: transparent !important; }
+
+/* Syntax colours (highlight.js classes) for the file browser and the review screen. Derived from the theme's own colours, each
+   mixed toward the text colour so it reads as calmer than a state colour, and so every theme (built-in or a user's, ADR-0068)
+   colours code to match with no tokens of its own. These are not theme tokens and theme files cannot set them. */
+:root {
+  --syntax-keyword: color-mix(in oklab, var(--accent) 80%, var(--text));
+  --syntax-string: color-mix(in oklab, var(--state-finished) 70%, var(--text));
+  --syntax-comment: var(--text-muted);
+  --syntax-number: color-mix(in oklab, var(--state-needs-you) 70%, var(--text));
+  --syntax-function: color-mix(in oklab, var(--state-working) 75%, var(--text));
+  --syntax-type: color-mix(in oklab, color-mix(in oklab, var(--state-working) 50%, var(--state-finished)) 70%, var(--text));
+  --syntax-attr: color-mix(in oklab, color-mix(in oklab, var(--accent) 50%, var(--state-needs-you)) 70%, var(--text));
+  --syntax-meta: var(--text-muted);
+}
+.hljs-keyword, .hljs-selector-tag, .hljs-literal, .hljs-tag, .hljs-name { color: var(--syntax-keyword); }
+.hljs-string, .hljs-regexp, .hljs-char.escape_ { color: var(--syntax-string); }
+.hljs-comment, .hljs-quote { color: var(--syntax-comment); font-style: italic; }
+.hljs-number, .hljs-symbol, .hljs-bullet { color: var(--syntax-number); }
+.hljs-title, .hljs-section, .hljs-selector-id, .hljs-selector-class { color: var(--syntax-function); }
+.hljs-type, .hljs-built_in, .hljs-title.class_ { color: var(--syntax-type); }
+.hljs-attr, .hljs-attribute, .hljs-variable, .hljs-template-variable, .hljs-property, .hljs-params { color: var(--syntax-attr); }
+.hljs-meta, .hljs-doctag, .hljs-subst { color: var(--syntax-meta); }
+.hljs-emphasis { font-style: italic; }
+.hljs-strong { font-weight: 600; }

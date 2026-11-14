@@ -46,6 +46,7 @@ cli-agent-kinds-empty = Bu düğümde ajan tanımı yok.
 cli-terminal-detached = { $agent_id } ajanından ayrıldınız.
 cli-attach-needs-terminal = Bağlanmak için etkileşimli bir terminal gerekir.
 cli-node-not-running = { $socket } adresinde dinleyen bir düğüm yok. "agora node run" ile başlatın.
+cli-node-refused = { $socket } adresindeki düğüm bu süreci reddetti. Düğüm yalnızca kendi kullanıcısını kabul eder, sınırlandırılmış bir ajanı asla; komutu düğümü başlatan kullanıcıyla çalıştırın.
 cli-unknown-project = Bu düğümde { $project } adında kayıtlı proje yok.
 cli-ambiguous-project = Birden fazla proje kayıtlı; --project ile birini seçin.
 cli-no-projects = Bu düğümde proje yok. --project YOL ile başlatın.
@@ -86,6 +87,20 @@ doctor-policy-path-dropped = Node politikasındaki "{ $detail }" satırı node'u
 doctor-policy-path-missing = Node politikasındaki "{ $detail }" satırı henüz var olmayan bir yol içeriyor; yol oluşana kadar ajanlar onsuz başlar.
 doctor-policy-restart = Node, politika dosyası { $detail } dosyasını yalnızca başlarken okur: değiştirdikten sonra node'u yeniden başlatın ("agora node run"). Bir cihaza güvenmek ya da onu kaldırmak yeniden başlatma gerektirmez.
 doctor-policy-changed = Politika dosyası { $detail } bu node başladıktan sonra değişti, bu yüzden değişiklik henüz uygulanmıyor. Uygulamak için node'u yeniden başlatın ("agora node run").
+doctor-signed-commands = Hub üzerinden bu makineye gelen komutlar, güvendiğin cihazlarından birinin imzasını ister: { $detail }.
+doctor-signed-commands-team = Bazı cihazlar belirli projelerle sınırlı; bu yüzden hub üzerinden gelen ve bir şeyi değiştiren her komut, güvenilen bir cihazın imzasını ister: { $detail }.
+doctor-signed-commands-none = Hub üzerinden bu makineye gelen komutlar (bir ajanı durdurmak, terminaline yazmak, dosya yazmak) cihazının imzası olmadan çalışır; yani hub'ı ele geçiren biri de bunları gönderebilir. Pencereden bir klasörde ajan başlatmak her zaman imzalıdır. İmza istemek için { $detail } dosyasına şu satırı ekleyip düğümü yeniden başlat: signed_commands = agent.start, agent.stop, agent.prompt, terminal.input, files.write
+doctor-devices = { $detail ->
+    [one] Bu makinede bir cihaz güvenilir
+   *[other] Bu makinede { $detail } cihaz güvenilir
+}; bunlardan { $unlimited } tanesi her projede işlem yapabilir.
+doctor-devices-none = Bu makinede henüz güvenilen bir cihaz yok, bu yüzden imzalı hiçbir isteği kabul etmez: pencereden gelen onaylar ve başlatmalar burada reddedilir. Tarayıcına ya da terminaline "agora node trust --from-hub" ile güven.
+doctor-skip-permissions = { $detail ->
+    [allow] Ajanlar, senin onayın ve imzanla, izin sorularını atlayan bir kipte başlatılabilir (politika: skip_permissions = allow).
+    [confined_only] Ajanlar izin sorularını yalnızca sınırlandırılmışken atlayabilir (politika: skip_permissions = confined_only).
+   *[other] Hiçbir ajan izin sorularını atlayan bir kipte başlatılamaz (politika: skip_permissions = forbid).
+}
+doctor-policy-problems = Düğümün politika dosyasındaki { $detail } satır anlaşılamadı; bunlar düzelene kadar hiçbir ajan izin sorularını atlayamaz.
 doctor-manifest-invalid = { $detail } ajan tanımı okunamadı.
 doctor-summary-ok = Agora'nın ihtiyaç duyduğu her şey yerinde.
 doctor-summary-problems = Agora'nın ihtiyaç duyduğu bir şey eksik. SORUN olarak işaretlenenleri düzeltin.
@@ -238,3 +253,4 @@ down-stopped = { $role } durduruldu (süreç { $pid }).
 down-failed = { $role } durdurulamadı: { $reason }
 down-nothing = Durdurulacak bir şey yok: `agora` şu anda çalışan hiçbir şey başlatmamış.
 cli-node-policy-not-understood = node.policy_not_understood: ilke dosyasında bu makinenin anlamadığı bir satır var ({ $line }); düzeltilene kadar hiçbir ajan sormadan başlatılamaz.
+cli-version = Agora { $version }

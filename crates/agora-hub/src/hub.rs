@@ -122,11 +122,23 @@ fn spawn_audit(
 }
 
 impl Hub {
-    /// Opens the hub on a store, rebuilding the view from the log.
+    /// Opens the hub on a store, rebuilding the view from the log. See [`Hub::open_at`].
     pub fn open(store: SqliteStore) -> Result<Self, StoreError> {
+        Self::open_at(store, crate::server::now_ms())
+    }
+
+    /// Opens the hub on a store, rebuilding the view from the log, at `now_ms` (hub clock).
+    ///
+    /// ADR-0070: presence is the hub's fact about live connections, and a hub that has just opened has none. A node the rebuilt
+    /// view shows online (its last presence fact says so: the hub stopped without recording the end of its connection, or the
+    /// fact is an old `NodeOnline` from before ADR-0070) is recorded offline here, before any connection is accepted: `NodeOffline`
+    /// for clients from before ADR-0070, then `NodeLink { up: false, reason: closed }` for the node's latest connection, with
+    /// `last_heard_ms` the last time the log heard of the node (not now), so "last seen" stays true. Nothing is recorded for a node
+    /// already offline, so opening again adds nothing.
+    pub fn open_at(store: SqliteStore, now_ms: u64) -> Result<Self, StoreError> {
         let (view, pos) = View::rebuild(&store)?;
         let hub_seq = store.acked(RESERVED_HUB_ID)?;
-        Ok(Self {
+        let hub = Self {
             boards: crate::board::Boards::new(),
             prices: std::sync::RwLock::new((crate::usage::Catalog::bundled(), 0)),
             store,
@@ -137,7 +149,38 @@ impl Hub {
                 hub_seq,
                 subs: Vec::new(),
             }),
-        })
+        };
+        {
+            let mut g = hub.lock();
+            let stale: Vec<(String, u64, u64)> = g
+                .view
+                .nodes
+                .iter()
+                .filter(|(_, n)| n.online)
+                .map(|(id, n)| (id.clone(), n.link_generation, n.last_event_ms))
+                .collect();
+            for (node, generation, last_heard_ms) in stale {
+                hub.emit(
+                    &mut g,
+                    Body::NodeOffline(NodeOffline {
+                        node_id: node.clone(),
+                    }),
+                    now_ms,
+                )?;
+                hub.emit(
+                    &mut g,
+                    Body::NodeLink(NodeLink {
+                        node_id: node,
+                        up: false,
+                        reason: NodeLinkReason::Closed as i32,
+                        generation,
+                        last_heard_ms,
+                    }),
+                    now_ms,
+                )?;
+            }
+        }
+        Ok(hub)
     }
 
     /// Replaces the price table (overrides already applied) and says when it was refreshed (ms since the epoch; 0 for the
@@ -860,6 +903,149 @@ mod tests {
         assert_eq!(again.view(), live_view);
         again.node_disconnected("n1", 70).unwrap();
         assert_eq!(again.store().acked(RESERVED_HUB_ID).unwrap(), 3);
+    }
+
+    /// ADR-0070: right after the hub opens no connection exists, so a node the log leaves online (the hub was killed with its
+    /// connection open, or only an old `NodeOnline` says so) is recorded offline, once, with "last seen" from the log.
+    #[test]
+    fn opening_the_hub_records_nodes_the_log_leaves_online_as_offline_once() {
+        use agora_protocol::v1::NodeResources;
+        let store = SqliteStore::open_in_memory().unwrap();
+        let put = |producer: &str, seq: u64, at_ms: u64, body: Body| {
+            let e = Event {
+                producer_id: producer.into(),
+                seq,
+                at_ms,
+                body: Some(body),
+            };
+            store
+                .append(producer, seq, at_ms, &e.encode_to_vec())
+                .unwrap();
+        };
+        let link = |node: &str, up: bool, reason: NodeLinkReason, generation, heard| {
+            Body::NodeLink(NodeLink {
+                node_id: node.into(),
+                up,
+                reason: reason as i32,
+                generation,
+                last_heard_ms: heard,
+            })
+        };
+        let started = |node: &str| {
+            Body::NodeOnline(NodeOnline {
+                node_id: node.into(),
+                hostname: "h".into(),
+                os: "linux".into(),
+                build: "b".into(),
+            })
+        };
+        // "up": its connection (generation 2) was open when the hub was killed; it was last heard at 500.
+        put("up", 1, 10, started("up"));
+        put(
+            "hub",
+            1,
+            11,
+            link("up", true, NodeLinkReason::Opened, 1, 11),
+        );
+        put(
+            "hub",
+            2,
+            20,
+            link("up", false, NodeLinkReason::Closed, 1, 19),
+        );
+        put(
+            "hub",
+            3,
+            30,
+            link("up", true, NodeLinkReason::Opened, 2, 30),
+        );
+        put(
+            "up",
+            2,
+            500,
+            Body::NodeResources(NodeResources {
+                node_id: "up".into(),
+                ..NodeResources::default()
+            }),
+        );
+        // "down": its last fact is offline already.
+        put("down", 1, 40, started("down"));
+        put(
+            "hub",
+            4,
+            41,
+            link("down", true, NodeLinkReason::Opened, 1, 41),
+        );
+        put(
+            "hub",
+            5,
+            60,
+            link("down", false, NodeLinkReason::Silent, 1, 45),
+        );
+        // "old": seen only through a `NodeOnline` from before ADR-0070.
+        put("old", 1, 70, started("old"));
+        let before = store.events_after(0, 100).unwrap().len();
+
+        let hub = Hub::open_at(store, 9_000).unwrap();
+        let (view, _) = hub.view();
+        for (node, seen) in [("up", 500), ("down", 45), ("old", 70)] {
+            assert!(!view.nodes[node].online, "{node} is offline");
+            assert_eq!(view.nodes[node].last_event_ms, seen, "{node} last seen");
+        }
+        let added: Vec<Event> = hub
+            .store()
+            .events_after(0, 100)
+            .unwrap()
+            .iter()
+            .skip(before)
+            .filter_map(decode)
+            .map(|d| d.event)
+            .collect();
+        assert!(added
+            .iter()
+            .all(|e| e.producer_id == RESERVED_HUB_ID && e.at_ms == 9_000));
+        // The hub's numbering continues where the log left it.
+        assert_eq!(
+            added.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            [6, 7, 8, 9]
+        );
+        let mut facts: Vec<(String, Option<(u64, u64)>)> = added
+            .into_iter()
+            .map(|e| match e.body {
+                Some(Body::NodeOffline(o)) => (o.node_id, None),
+                Some(Body::NodeLink(l)) => {
+                    assert!(!l.up);
+                    assert_eq!(l.reason, NodeLinkReason::Closed as i32);
+                    (l.node_id, Some((l.generation, l.last_heard_ms)))
+                }
+                other => panic!("unexpected {other:?}"),
+            })
+            .collect();
+        facts.sort();
+        assert_eq!(
+            facts,
+            [
+                ("old".to_string(), None),
+                ("old".to_string(), Some((0, 70))),
+                ("up".to_string(), None),
+                ("up".to_string(), Some((2, 500))),
+            ]
+        );
+        // A rebuilt view agrees with the live one, and opening again records nothing.
+        let live = hub.view();
+        let store = SqliteStore::open_in_memory().unwrap();
+        for e in hub.store().events_after(0, 100).unwrap() {
+            store
+                .append(&e.producer, e.seq, e.at_ms, &e.payload)
+                .unwrap();
+        }
+        let again = Hub::open_at(store, 10_000).unwrap();
+        assert_eq!(again.view(), live);
+        assert_eq!(again.store().acked(RESERVED_HUB_ID).unwrap(), 9);
+        // The next connection of "up" is a newer generation and brings it back online.
+        let (_reg, _cmds, generation) = again.node_link_opened("up", Vec::new(), 10_001);
+        assert_eq!(generation, 3);
+        assert!(again.view().0.nodes["up"].online);
     }
 
     #[test]

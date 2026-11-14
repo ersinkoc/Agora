@@ -16,7 +16,8 @@ terminals get the key bar when the screen is a touch screen.
    buttons: one tap answers it. Tapping the request's title, or an agent, opens it.
 2. **An agent** (`#/agent/<id>`): **Back** (to the list), its name, state, machine and cost in the top bar; anything it asks, with
    Allow and Deny; then its terminal, or its conversation for a chat agent. **Next · N** in the top bar opens the next thing that
-   needs you.
+   needs you. Above the terminal, **N files changed** opens the review screen ([review.md](review.md)) and **Files** the file
+   browser, each full-screen with Close; a closed agent's summary offers **Review the changes** and **Files** the same way.
 3. The bar at the bottom of the list: **Search** (the command palette: agents, language, pages), **Start**, **Machines**, **This
    device**. The other pages (machines, this device, activity) keep their own frame with Back. **Edit theme** (palette or This
    device) opens the theme editor ([themes.md](themes.md)) as a screen of its own (`#/theme`) with Back.
@@ -69,7 +70,8 @@ approvals do.
 
 `scripts/e2e-phone.mjs` at 360 × 740, 390 × 844, 844 × 390 and 768 × 1024 on an emulated touch screen, and with the High
 contrast and Large text themes at 360 and 390 px (44 px targets, the key bar fits); screenshots in both themes
-in `docs/screenshots/phone/`. Unit tests: `apps/web/src/terminal/keys.test.ts`, `apps/web/src/phone/nav.test.ts`.
+in `docs/screenshots/phone/`. `scripts/e2e-phone-changes.mjs` opens the review screen and the file browser at 390 × 844 and the
+review screen again at 360 × 740 (fits, no sideways scroll). Unit tests: `apps/web/src/terminal/keys.test.ts`, `apps/web/src/phone/nav.test.ts`.
 
 ## Not in this rung
 

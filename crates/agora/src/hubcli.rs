@@ -44,6 +44,26 @@ const HUB_CAPABILITIES: &[&str] = &[
     "device.list",
 ];
 
+/// `<hub dir>/listen`: the address the running hub bound, written at every start.
+pub(crate) const LISTEN_FILE: &str = "listen";
+
+/// The address a client on the hub's own machine dials, from `<hub dir>/listen`. A hub listening on every address
+/// (`0.0.0.0` or `::`) is reached on loopback. `None` when the file is missing or unreadable.
+pub(crate) fn own_hub_addr(dir: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(dir.join(LISTEN_FILE)).ok()?;
+    local_dial_addr(text.trim())
+}
+
+fn local_dial_addr(listen: &str) -> Option<String> {
+    let addr: std::net::SocketAddr = listen.parse().ok()?;
+    let ip = match addr.ip() {
+        std::net::IpAddr::V4(ip) if ip.is_unspecified() => std::net::Ipv4Addr::LOCALHOST.into(),
+        std::net::IpAddr::V6(ip) if ip.is_unspecified() => std::net::Ipv6Addr::LOCALHOST.into(),
+        ip => ip,
+    };
+    Some(std::net::SocketAddr::new(ip, addr.port()).to_string())
+}
+
 pub(crate) fn hub_dir(o: &Opts) -> PathBuf {
     o.hub_dir.clone().unwrap_or_else(|| home().join("hub"))
 }
@@ -230,6 +250,10 @@ pub fn hub_run(say: &Say, o: &Opts) -> ExitCode {
                     .await
                     .map_err(|e| e.to_string())?;
             let addr = listener.local_addr().map_err(|e| e.to_string())?;
+            // Where this hub really listens (a port of its own, or `:0`), for a client on this machine that only has the folder
+            // (`agora tui --hub-dir`). Best effort: a client without it falls back to the default address, as before.
+            let _ =
+                agora_platform::write_private(&dir.join(LISTEN_FILE), addr.to_string().as_bytes());
             say.out(
                 key!("cli-hub-listening"),
                 &[
@@ -1412,5 +1436,29 @@ mod tests {
             ["hub-0000000000004.db", "hub-0000000000005.db", "notes.txt"]
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[cfg(test)]
+mod listen_file_tests {
+    use super::local_dial_addr;
+
+    #[test]
+    fn a_client_on_the_hubs_machine_dials_the_port_the_hub_bound() {
+        assert_eq!(
+            local_dial_addr("127.0.0.1:7445").as_deref(),
+            Some("127.0.0.1:7445")
+        );
+        assert_eq!(
+            local_dial_addr("0.0.0.0:7446").as_deref(),
+            Some("127.0.0.1:7446")
+        );
+        assert_eq!(local_dial_addr("[::]:7447").as_deref(), Some("[::1]:7447"));
+        assert_eq!(
+            local_dial_addr("192.168.1.5:7448").as_deref(),
+            Some("192.168.1.5:7448")
+        );
+        assert_eq!(local_dial_addr("not an address"), None);
+        assert_eq!(local_dial_addr(""), None);
     }
 }

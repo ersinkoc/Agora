@@ -156,7 +156,9 @@ received anything on that connection. A reader takes a machine's `online` from i
 event, or `NodeOnline`/`NodeOffline` from an older hub), ignores a `NodeLink` whose generation is below the node's latest `up`,
 never takes `replaced` as offline, and ignores a `NodeLink` from any producer but `hub`; a node that sends one is refused
 (`protocol.invalid_message`, field `node_link`). For clients that predate it the hub keeps writing `NodeOffline` when the
-current connection ends. The snapshot's `NodeSnapshot.last_event_ms` includes `last_heard_ms`, so it is "last seen".
+current connection ends. A hub that starts has no connection: every node its rebuilt view shows online is recorded offline
+before it accepts connections (`NodeOffline`, then `NodeLink { up: false, reason: closed }` for the node's latest generation,
+or 0, with `last_heard_ms` the node's last time in the log). The snapshot's `NodeSnapshot.last_event_ms` includes `last_heard_ms`, so it is "last seen".
 
 Schema additions (ADR-0025/0026/0027, all new messages, nothing published changed): `agent.list` (`AgentList` -> `AgentListResult` of
 `AgentSummary`; implemented on the node and as `agora agent list`), `EventAck` (hub -> producer, cumulative), `client.proto`
@@ -252,7 +254,10 @@ Implemented by the node today: `project.list`, `agent.*`, `terminal.*`, `approva
 `chat.subscribe` (ADR-0038: a conversation stream, below), `git.status`, `git.log` (ADR-0037: newest first, default 30, at most 200), `git.diff`, `files.list` and `files.read`. The git and files commands answer only for the workspace of one of the node's own agents (`worktree_id` is the id
 the node reported in `WorktreeCreated`); a path that is absolute, climbs with `..` or starts with `:` or `-` is refused as
 `protocol.invalid_message`. `git.diff` is the unified diff against HEAD plus the new files git does not track yet (shown as
-all-added, at most 50 files of at most 64 KiB), and an answer is cut at 512 KiB. `files.list` hides `.git`; `files.read` refuses
+all-added, at most 50 files of at most 64 KiB), and an answer is cut at 512 KiB. It covers the workspace folder only and names
+every file from that folder, so each name is a path `git.diff` and `files.read` take: for a workspace that is the folder `web/`
+of a repository, `web/a.txt` is `a.txt`; a rename across the folder's edge shows as the file added or deleted inside it. At a
+repository's root the names are the repository's own. `files.list` hides `.git`; `files.read` refuses
 files above 512 KiB (`files.too_large`) and paths that leave the workspace, symlinks included (`files.outside_root`), checked again on the opened file so a link swapped in after the check is still refused.
 
 ### Selected directories (ADR-0052)
@@ -278,7 +283,9 @@ with a valid UUID. An owner confirms its association; metadata is not an access 
 `WorkspaceRegistered` (event tag 24: `workspace_id`, `node_id`, `project_id`, `path`, `git_root`, `branch`,
 `managed_worktree`, `files_changed`) and `AgentWorkspaceBound` (35: `agent_id`, `workspace_id`) precede `AgentStarted`.
 That `AgentStarted` leaves legacy `worktree_id` empty. `WorkspaceStatusChanged` (25) carries changed-file/line counts
-and HEAD for the workspace. Node workspace IDs are `directory:<canonical cwd>`; the hub qualifies IDs with the
+and HEAD for the workspace. The counts (here, in `GitStatusChanged`, `git.status` and the mesh's `files_changed`) cover the
+workspace folder only, the same scope as `git.diff`: for a folder inside a repository, changes elsewhere in the repository
+are not counted, and a rename across the folder's edge counts as the file added or removed inside it. Node workspace IDs are `directory:<canonical cwd>`; the hub qualifies IDs with the
 producer node and does not trust a supplied `node_id`. `Snapshot.workspaces` (10) and `agent_workspaces` (11) retain
 these associations through replay/reload. Published worktree messages/fixtures remain unchanged.
 

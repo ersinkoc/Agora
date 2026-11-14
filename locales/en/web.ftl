@@ -199,6 +199,78 @@ changes-files = { $count ->
 diff-title = What { $name } changed
 diff-close = Close
 diff-failed = Could not read the changes from that machine.
+changes-summary = { $count ->
+    [one] 1 file
+   *[other] { $count } files
+}
+changes-filter = Show
+changes-filter-all = All
+changes-filter-modified = Changed
+changes-filter-added = Added
+changes-filter-deleted = Deleted
+changes-filter-renamed = Renamed
+changes-status-modified = Changed
+changes-status-added = Added
+changes-status-deleted = Deleted
+changes-status-renamed = Renamed
+changes-badge-modified = M
+changes-badge-added = A
+changes-badge-deleted = D
+changes-badge-renamed = R
+changes-search = Filter by name
+changes-layout = Layout
+changes-layout-unified = Unified
+changes-layout-split = Side by side
+changes-wrap = Wrap lines
+changes-wrap-long = A long change shown whole is drawn one line per row, so it does not wrap; scroll sideways instead.
+changes-refresh = Read the changes again
+changes-list = Changed files
+changes-top-folder = Top folder
+changes-no-match = No changed file matches.
+changes-pick = Pick a file on the left to see what changed in it.
+changes-renamed-from = was { $name }
+changes-whole-file = Whole file
+changes-prev = Previous file
+changes-next = Next file
+changes-keys = next and previous file
+changes-binary = This file is not text, so its changes are not shown.
+changes-no-lines = Only the name or the permissions of this file changed.
+changes-no-eol = No line break at the end of the file
+changes-gap = { $count ->
+    [one] Show 1 unchanged line
+   *[other] Show { $count } unchanged lines
+}
+changes-gap-rest = Show the rest of the file
+changes-gap-failed = Could not read this file to show the unchanged lines.
+changes-retry = Try again
+changes-stale = The file has changed since these changes were read, so the unchanged lines are not shown. Read the changes again.
+changes-truncated = These changes are larger than 512 KiB, so only the first part was read. The last file in the list is cut off.
+changes-truncated-count = These changes are larger than 512 KiB, so only the first { $count ->
+        [one] file was
+       *[other] { $count } files were
+    } read. The machine counts { $total } changed files: at least { $min ->
+        [one] one is
+       *[other] { $min } are
+    } not listed here. The last file in the list is cut off.
+files-truncated = The changes are larger than 512 KiB, so files after the cut may have no change mark.
+files-truncated-count = The changes are larger than 512 KiB, so files after the cut have no change mark. The machine counts { $total ->
+        [one] one changed file
+       *[other] { $total } changed files
+    }; { $count ->
+        [one] one is
+       *[other] { $count } are
+    } marked.
+changes-partial = This file is cut off: the changes were too large to read at once.
+changes-eol = { $count ->
+    [one] One changed line differs only in its line ending (LF or CRLF); its text is the same.
+   *[other] { $count } changed lines differ only in their line endings (LF or CRLF); their text is the same.
+}
+changes-load-file = Read only this file
+changes-load-file-failed = This file alone is still too large to read.
+changes-show-all = { $count ->
+    [one] Show all 1 line
+   *[other] Show all { $count } lines
+}
 console-files = Files
 files-title = Files of { $name }
 files-tree = Folders and files
@@ -206,6 +278,42 @@ files-pick = Pick a file on the left to read it.
 files-binary = This file is not text, so it is not shown.
 files-too-large = This file could not be read (it may be too large).
 files-failed = Could not list this folder.
+files-filter = Filter files by name
+files-only-changed = Show only the changed files
+files-changed-count = { $count ->
+    [one] 1 changed
+   *[other] { $count } changed
+}
+files-refresh = Read the folders and changes again
+files-no-match = No file matches. Folders not opened yet are not searched.
+files-deleted = This file was deleted; its changes are in the review screen.
+files-empty = This folder is empty.
+files-folder-changed = Holds changed files
+files-key-filter = filter files
+files-key-find = find in the file
+files-open-files = Open files
+files-close-tab = Close { $name }
+files-path = Path
+files-lines = { $count ->
+    [one] 1 line
+   *[other] { $count } lines
+}
+files-changed-lines = { $count ->
+    [one] 1 line changed
+   *[other] { $count } lines changed
+}
+files-find = Find in the file
+files-find-none = No match
+files-find-at = { $used } of { $total }
+files-find-prev = Previous match
+files-find-next = Next match
+files-find-close = Close the search
+files-copy = Copy the whole file
+files-copied = Copied
+files-reload = Read this file again
+files-mark-add = Added since the last commit
+files-mark-mod = Changed since the last commit
+files-mark-del = Lines removed here since the last commit
 filter-placeholder = Filter by agent, machine or project
 filter-none = Nothing matches.
 console-drag = Drag this bar onto another terminal to swap their places
@@ -221,8 +329,36 @@ history-failed = Could not read the history from that machine.
 history-no-subject = (no message)
 chat-empty = Nothing said yet. Tell it what to do below.
 chat-log = Conversation
-chat-tool = Tool
 chat-plan = Plan
+chat-plan-steps =
+    { $count ->
+        [one] Plan · { $count } step
+       *[other] Plan · { $count } steps
+    }
+chat-plan-earlier =
+    { $count ->
+        [one] Earlier plan · { $count } step
+       *[other] Earlier plan · { $count } steps
+    }
+chat-steps-earlier =
+    { $count ->
+        [one] { $count } earlier step
+       *[other] { $count } earlier steps
+    }
+chat-working = Working…
+chat-copy = Copy
+chat-copied = Copied
+# What an agent asked to do, when it gave no title of its own. Neutral: the call may still be running or be refused.
+tool-read = Read
+tool-edit = Edit
+tool-run = Command
+tool-search = Search
+tool-fetch = Web page
+tool-delete = Delete
+tool-move = Move
+tool-think = Thinking
+tool-other = Step
+approval-full-request = Full request
 notice-adapter-turn_failed = The agent's turn failed (error { $rpc_code }). Its provider may have refused the request; try again or choose another model. { $stderr_tail }
 notice-adapter-turn_stopped = The agent stopped its turn ({ $stop_reason }).
 notice-adapter-turn_empty = The agent ended its turn without saying anything. Its provider may have refused the request. { $stderr_tail }
@@ -498,6 +634,8 @@ layout-follows-attention = Follows what needs you
 layout-follows-selection = Follows the selection
 layout-show-agent = { $name }
 layout-panel-agent = Agent
+layout-show-agent-itself = This agent
+layout-show-agent-files = This agent's files
 layout-panel-empty = Empty pane
 layout-panel-unknown = Unknown panel “{ $id }”: this window cannot show it.
 layout-drag = Drag onto another pane: an edge puts it beside, the middle makes it a tab

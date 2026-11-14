@@ -128,6 +128,32 @@ pub trait Terminal: Send {
     /// Window title set by the program (OSC 0/2), if any.
     fn title(&self) -> Option<String>;
 
+    /// Lines kept above the live screen (scrollback), 0 when the backend keeps none. For showing a user what scrolled away
+    /// (the terminal client's wheel); detection never reads it (it reads the live bottom only).
+    fn history_len(&self) -> usize {
+        0
+    }
+
+    /// The cell at `col` of the scrollback line `back` rows above the live screen's top (1 = the line that scrolled off last,
+    /// [`history_len`](Self::history_len) = the oldest kept); `None` out of range.
+    fn history_cell(&self, back: usize, col: u16) -> Option<Cell> {
+        let _ = (back, col);
+        None
+    }
+
+    /// Text of a scrollback line with trailing blanks removed (see [`history_cell`](Self::history_cell)).
+    fn history_line(&self, back: usize) -> String {
+        let mut s = String::new();
+        for col in 0..self.size().cols {
+            match self.history_cell(back, col) {
+                Some(Cell { spacer: true, .. }) | None => {}
+                Some(c) => s.push(c.ch),
+            }
+        }
+        s.truncate(s.trim_end().len());
+        s
+    }
+
     /// Text of one live-screen row with trailing blanks removed.
     fn line(&self, row: u16) -> String {
         let cols = self.size().cols;
