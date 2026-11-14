@@ -596,25 +596,78 @@ impl Session {
 
     /// What an agent changed, as a unified diff (what the web's review screen reads): its folder's (`workspace.query` "diff",
     /// ADR-0053) or its worktree's (`git.diff`). Ids are the node's own (without the `node/` prefix).
-    pub fn diff(&mut self, node: &str, target: &DiffTarget) -> Result<String, String> {
+    pub fn diff(&mut self, node: &str, target: &Place) -> Result<String, String> {
         let command = match target {
-            DiffTarget::Folder(id) => {
+            Place::Folder(id) => {
                 command_request::Command::WorkspaceQuery(agora_protocol::v1::WorkspaceQuery {
                     workspace_id: id.clone(),
                     operation: "diff".into(),
                     ..Default::default()
                 })
             }
-            DiffTarget::Worktree(id) => {
-                command_request::Command::GitDiff(agora_protocol::v1::GitDiff {
+            Place::Worktree(id) => command_request::Command::GitDiff(agora_protocol::v1::GitDiff {
+                worktree_id: id.clone(),
+                path: String::new(),
+            }),
+        };
+        let ok = self.command_ok(node, command, Duration::from_secs(30))?;
+        match ok.result {
+            Some(command_ok::Result::GitDiff(d)) => Ok(d.diff),
+            _ => Err("protocol.invalid_message".into()),
+        }
+    }
+
+    /// The entries of `path` (relative, empty for the top) in an agent's folder or worktree, as the web's file browser lists them.
+    pub fn files_list(
+        &mut self,
+        node: &str,
+        place: &Place,
+        path: &str,
+    ) -> Result<Vec<agora_protocol::v1::FileEntry>, String> {
+        let command = match place {
+            Place::Folder(id) => {
+                command_request::Command::WorkspaceQuery(agora_protocol::v1::WorkspaceQuery {
+                    workspace_id: id.clone(),
+                    operation: "list".into(),
+                    path: path.to_string(),
+                    ..Default::default()
+                })
+            }
+            Place::Worktree(id) => {
+                command_request::Command::FilesList(agora_protocol::v1::FilesList {
                     worktree_id: id.clone(),
-                    path: String::new(),
+                    path: path.to_string(),
                 })
             }
         };
         let ok = self.command_ok(node, command, Duration::from_secs(30))?;
         match ok.result {
-            Some(command_ok::Result::GitDiff(d)) => Ok(d.diff),
+            Some(command_ok::Result::FilesList(l)) => Ok(l.entries),
+            _ => Err("protocol.invalid_message".into()),
+        }
+    }
+
+    /// The bytes of the file at `path` in an agent's folder or worktree.
+    pub fn files_read(&mut self, node: &str, place: &Place, path: &str) -> Result<Vec<u8>, String> {
+        let command = match place {
+            Place::Folder(id) => {
+                command_request::Command::WorkspaceQuery(agora_protocol::v1::WorkspaceQuery {
+                    workspace_id: id.clone(),
+                    operation: "read".into(),
+                    path: path.to_string(),
+                    ..Default::default()
+                })
+            }
+            Place::Worktree(id) => {
+                command_request::Command::FilesRead(agora_protocol::v1::FilesRead {
+                    worktree_id: id.clone(),
+                    path: path.to_string(),
+                })
+            }
+        };
+        let ok = self.command_ok(node, command, Duration::from_secs(30))?;
+        match ok.result {
+            Some(command_ok::Result::FilesRead(r)) => Ok(r.data),
             _ => Err("protocol.invalid_message".into()),
         }
     }
@@ -967,18 +1020,18 @@ fn refused_for_grant(r: &CommandResponse) -> bool {
     matches!(&r.result, Some(command_response::Result::Err(e)) if e.code == "approval.grant_required")
 }
 
-/// Where an agent's changes are asked for ([`Session::diff`]).
+/// Where an agent works, for asking its node about it ([`Session::diff`], [`Session::files_list`], [`Session::files_read`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum DiffTarget {
+pub enum Place {
     /// A folder the agent was started in (a registered workspace), by the node's id for it.
     Folder(String),
     /// The agent's worktree, by the node's id for it.
     Worktree(String),
 }
 
-/// Where to ask about `agent`'s changes, as the web does: the folder it is bound to when there is one, else its worktree; the
+/// Where to ask about `agent`'s work (its changes, its files), as the web does: the folder it is bound to when there is one, else its worktree; the
 /// machine and the node's own id. `None` when it has neither.
-pub fn diff_target(snapshot: &Snapshot, agent: &str) -> Option<(String, DiffTarget)> {
+pub fn place_of(snapshot: &Snapshot, agent: &str) -> Option<(String, Place)> {
     let a = snapshot.agents.iter().find(|a| a.agent_id == agent)?;
     let local = |id: &str| id.split_once('/').map_or(id, |(_, l)| l).to_string();
     if let Some(w) = snapshot
@@ -992,17 +1045,9 @@ pub fn diff_target(snapshot: &Snapshot, agent: &str) -> Option<(String, DiffTarg
                 .any(|w| w.workspace_id == b.workspace_id)
         })
     {
-        return Some((
-            a.node_id.clone(),
-            DiffTarget::Folder(local(&w.workspace_id)),
-        ));
+        return Some((a.node_id.clone(), Place::Folder(local(&w.workspace_id))));
     }
-    (!a.worktree_id.is_empty()).then(|| {
-        (
-            a.node_id.clone(),
-            DiffTarget::Worktree(local(&a.worktree_id)),
-        )
-    })
+    (!a.worktree_id.is_empty()).then(|| (a.node_id.clone(), Place::Worktree(local(&a.worktree_id))))
 }
 
 /// What a watched terminal said.

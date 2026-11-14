@@ -165,7 +165,7 @@ tui-tool-think = Thinking
 tui-tool-other = Step
 
 ## The app shell (ADR-0063 stage 2)
-tui-app-keys-tree = Ctrl K commands · Enter open · N next that needs you · y / n answer · s start · f folder · x stop · u resume · r changes · d remove · a ask · v devices · Tab next part · i details · q quit
+tui-app-keys-tree = Ctrl K commands · Enter open · N next that needs you · y / n answer · s start · f folder · x stop · u resume · r changes · o files · d remove · a ask · v devices · Tab next part · i details · q quit
 tui-app-keys-terminal = Ctrl-] or F12 back to the list · Your keys go to the agent · Alt+K commands · Alt+1…9 tabs · Alt+M mouse
 tui-app-keys-terminal-waiting = It needs you: Alt+Y allows · Alt+N denies · Ctrl-] or F12 back to the list · Alt+K commands
 tui-app-keys-inspector = Tab next part · Esc back to the list · Ctrl K commands
@@ -195,6 +195,12 @@ tui-app-cmd-resume = Resume the selected agent (u)
 tui-app-cmd-again = Start the selected agent again (U)
 tui-app-cmd-remove = Remove the selected agent (d)
 tui-app-cmd-review = See what the selected agent changed (r)
+tui-app-cmd-files = Browse the selected agent's files (o)
+tui-files-empty = This folder is empty.
+tui-files-keys = ↑↓ choose · Enter open · ⌫ up · q or Esc back
+tui-files-file-keys = ↑↓ scroll · Space / b a page · g / G top / end · ⌫, q or Esc back to the folder
+tui-files-binary = A binary file ({ $size }): not shown.
+tui-files-failed = Could not read it ({ $code }).
 tui-review-files = { $count ->
         [one] one file changed
        *[other] { $count } files changed
