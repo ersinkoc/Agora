@@ -1102,8 +1102,8 @@ fn footer_fit(width: usize, notice: &str, keys: &str, mouse: &str) -> (String, O
 const FOOTER_KEYS: usize = 40;
 
 /// A tree row's label, the gap and its state, fitted to `width` columns (the marker's two included), in display columns. The state
-/// stays at the right edge and the label is shortened for it; "needs you" is never dropped, any other state only when the label
-/// would keep fewer than 4 columns.
+/// stays at the right edge: "needs you" whole, the label shortened for it; any other state keeps the label at least 10 columns and
+/// is shortened itself ("stopped with its m…"), dropped only when fewer than 3 columns are left for it.
 fn tree_row_fit(
     width: usize,
     label: &str,
@@ -1111,11 +1111,19 @@ fn tree_row_fit(
     needs_you: bool,
 ) -> (String, usize, String) {
     let room = width.saturating_sub(2);
-    let state_w = text_width(state);
-    if state.is_empty() || (!needs_you && room < state_w + 1 + 4) {
+    if state.is_empty() {
         return (clip_to(label, room), 0, String::new());
     }
-    let state = clip_to(state, room);
+    let state = if needs_you {
+        clip_to(state, room)
+    } else {
+        let keep = text_width(label).min(10);
+        let state_room = room.saturating_sub(keep + 1);
+        if state_room < 3 {
+            return (clip_to(label, room), 0, String::new());
+        }
+        clip_to(state, state_room)
+    };
     let label_room = room.saturating_sub(text_width(&state) + 1);
     let label = if label_room == 0 {
         String::new()
@@ -2354,6 +2362,14 @@ mod tests {
         let (label, gap, state) = tree_row_fit(40, "shell · amber", "Idle", false);
         assert_eq!((label.as_str(), state.as_str()), ("shell · amber", "Idle"));
         assert_eq!(text_width(&label) + gap + text_width(&state), 38);
+        // A long state is shortened, not dropped: the label keeps 10 columns.
+        let (label, _, state) =
+            tree_row_fit(28, "acp-fake · amber", "stopped with its machine", false);
+        assert_eq!(text_width(&label), 10, "{label}");
+        assert!(
+            state.starts_with("stopped") && state.ends_with('…'),
+            "{state}"
+        );
         // Very narrow: an ordinary state goes, "needs you" stays.
         assert_eq!(tree_row_fit(10, "shell · amber", "Idle", false).2, "");
         assert_eq!(
@@ -2361,8 +2377,10 @@ mod tests {
             "Needs y…"
         );
         // Display width, not characters: a wide name is cut by columns.
-        let (label, _, _) = tree_row_fit(12, "東京東京東京", "Idle", false);
-        assert!(text_width(&label) <= 5, "{label}");
+        // (Too narrow for "Idle" too: the label takes the row, four wide characters and the ellipsis in 10 columns.)
+        let (label, _, state) = tree_row_fit(12, "東京東京東京", "Idle", false);
+        assert_eq!((label.as_str(), state.as_str()), ("東京東京…", ""));
+        assert_eq!(text_width(&label), 9);
     }
 
     #[test]
