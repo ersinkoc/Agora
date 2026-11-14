@@ -1003,14 +1003,9 @@ impl App {
                 .wrap(Wrap { trim: true })
                 .render(a.terminal, buf),
                 (Some(_), Some(term)) => {
-                    let first = TerminalPane::first_row(term, a.terminal.height);
-                    let selection = self.selection.map(|sel| Selection {
-                        from: (sel.from.0 + first, sel.from.1),
-                        to: (sel.to.0 + first, sel.to.1),
-                    });
                     TerminalPane::new(term)
                         .colors(s.colors)
-                        .selection(selection)
+                        .selection(self.selection)
                         .scroll(self.scroll)
                         .render(a.terminal, buf);
                     // Scrolled back: say how far, and how to get back, at the pane's top right.
