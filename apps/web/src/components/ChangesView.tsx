@@ -144,6 +144,8 @@ export function ChangesView({ load, read }: {
   };
 
   const onKey = (e: KeyboardEvent<HTMLDivElement>) => {
+    // The window's one-letter shortcuts (`n`, the next agent that needs you) must not act behind this view.
+    if (!e.ctrlKey && !e.metaKey && !e.altKey && e.key.length === 1) e.stopPropagation();
     const el = e.target as HTMLElement;
     if (el.closest('input, textarea, select, [contenteditable="true"]') || e.altKey || e.ctrlKey || e.metaKey) return;
     if (e.key === 'j') { e.preventDefault(); step(1); }
