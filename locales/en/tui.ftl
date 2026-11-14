@@ -33,6 +33,15 @@ tui-state-working = Working
 tui-state-needs-you = Needs you
 tui-state-idle = Idle
 tui-state-finished = Finished
+tui-state-unreachable = Machine offline
+tui-agent-on = on { $machine }
+tui-agent-on-in = on { $machine } in { $folder }
+tui-agent-changes = { $files } { $files ->
+        [one] file
+       *[other] files
+    } changed · +{ $plus } −{ $minus }
+tui-agent-tokens = { $input } in · { $output } out
+tui-agent-cost = { $amount } { $currency } so far
 tui-state-unknown = Unknown
 tui-no-project = (no project)
 tui-hint-answer = Press y to allow, n to deny the first request above.
@@ -87,13 +96,30 @@ tui-cost = about { $usd } USD
 tui-grant-ask = That machine wants your OK before it lets you do this. Press y to allow it for one hour, any other key to cancel.
 tui-granted = Allowed for one hour.
 tui-split-answer = y allows, n denies the first request
+tui-chat-answer = Alt+Y allows it, Alt+N denies it · what you type stays in your draft
+tui-chat-answer-first = Answer the request first (Alt+Y allows, Alt+N denies); your draft is kept.
+tui-view-asked = ! A request waits for you: q goes back to answer it
+tui-request-answer = y allows it · n denies it · any other key leaves it waiting
+tui-note-copy = c copies the command · any key closes this
+tui-note-close = Any key closes this.
+tui-copied = Copied the command to the clipboard.
+tui-copied-text = Copied { $count ->
+        [one] one character
+       *[other] { $count } characters
+    } to the clipboard.
 tui-split-asks-start = asks to start { $kind }
 tui-split-card-more = … { $count } more lines: press Enter to read all
 tui-split-read-first = Read the whole request before allowing it: press Enter.
 tui-reader-keys = j / k or the arrows scroll · space goes a page down · q goes back
 tui-split-pick = Pick an agent on the left
 tui-split-no-screen = Opening its terminal…
-tui-split-status = { $online }/{ $total } machines · { $agents } agents · { $waiting } need you
+tui-split-status = { $online }/{ $total } { $total ->
+        [one] machine
+       *[other] machines
+    } · { $agents } { $agents ->
+        [one] agent
+       *[other] agents
+    } · { $waiting } need you
 tui-split-keys = ↑↓ choose · Enter open · s start · f folder · x stop · u resume · d remove · a ask · v devices · q quit
 tui-split-chat = No terminal: Enter opens its conversation
 tui-folder-title = Start an agent in a folder on { $machine }
@@ -128,3 +154,68 @@ option-ask = Ask before acting
 tui-start-acts = How should it act? Press its number; Enter or any other key asks before acting.
 tui-start-confirm-skip = Let the agent act without asking? With "{ $name }" it runs commands and changes files without asking you first, for as long as it runs. Press y to start without asking; any other key keeps asking.
 tui-badge-no-ask = does not ask
+
+## A chat agent's tool call in words (as the web window says it)
+tui-tool-read = Read
+tui-tool-edit = Edit
+tui-tool-run = Command
+tui-tool-search = Search
+tui-tool-fetch = Web page
+tui-tool-delete = Delete
+tui-tool-move = Move
+tui-tool-think = Thinking
+tui-tool-other = Step
+
+## The app shell (ADR-0063 stage 2)
+tui-app-keys-tree = Ctrl K commands · Enter open · N next that needs you · y / n answer · s start · f folder · x stop · u resume · r changes · o files · d remove · a ask · v devices · Tab next part · i details · q quit
+tui-app-keys-terminal = Ctrl-] or F12 back to the list · Your keys go to the agent · Alt+K commands · Alt+1…9 tabs · Alt+M mouse
+tui-app-keys-terminal-waiting = It needs you: Alt+Y allows · Alt+N denies · Ctrl-] or F12 back to the list · Alt+K commands
+tui-app-keys-inspector = Tab next part · Esc back to the list · Ctrl K commands
+tui-app-keys-palette = Type to filter · ↑↓ choose · Enter run · Esc close
+tui-app-mouse-on = mouse on (m releases it to select text)
+tui-app-mouse-off = mouse off (m takes it back)
+tui-app-no-agent = Choose an agent on the left and press Enter to see its terminal here.
+tui-app-welcome-title = Pick up where you left off
+tui-app-welcome-start = Start an agent
+tui-app-welcome-running = Running now
+tui-app-welcome-none = No agent is running yet.
+tui-app-welcome-search = Search and commands
+tui-app-welcome-next = Jump to the next agent that needs you
+tui-app-tabs-waiting = { $count } waiting · Ctrl-] N
+tui-app-no-screen = This agent's terminal is opening.
+tui-app-tree-empty = No agents yet.
+tui-app-palette-title = Commands
+tui-app-palette-none = Nothing matches.
+tui-app-cmd-open = Open { $name }
+tui-app-cmd-next = Go to the next agent that needs you
+tui-app-cmd-allow = Allow the request that waits (y)
+tui-app-cmd-deny = Deny the request that waits (n)
+tui-app-cmd-start = Start an agent (s)
+tui-app-cmd-folder = Start an agent in a folder (f)
+tui-app-cmd-stop = Stop the selected agent (x)
+tui-app-cmd-resume = Resume the selected agent (u)
+tui-app-cmd-again = Start the selected agent again (U)
+tui-app-cmd-remove = Remove the selected agent (d)
+tui-app-cmd-review = See what the selected agent changed (r)
+tui-app-cmd-files = Browse the selected agent's files (o)
+tui-files-empty = This folder is empty.
+tui-files-keys = ↑↓ choose · Enter open · ⌫ up · q or Esc back
+tui-files-file-keys = ↑↓ scroll · Space / b a page · g / G top / end · ⌫, q or Esc back to the folder
+tui-files-binary = A binary file ({ $size }): not shown.
+tui-files-failed = Could not read it ({ $code }).
+tui-review-files = { $count ->
+        [one] one file changed
+       *[other] { $count } files changed
+    }
+tui-review-none = Nothing changed yet.
+tui-review-keys = ↑↓ scroll · Space / b a page · g / G top / end · q or Esc back
+tui-review-nowhere = This agent has no folder or worktree to show changes for.
+tui-review-failed = Could not read its changes ({ $code }).
+tui-app-cmd-ask = Ask your other devices to approve this terminal (a)
+tui-app-cmd-devices = Approve a device that waits (v)
+tui-app-cmd-mouse = Turn the mouse on or off
+tui-app-cmd-inspector = Show or hide the details
+tui-app-cmd-close = Close this tab
+tui-tab-closed = Closed the tab. { $agent } keeps running; x stops it.
+tui-app-cmd-quit = Quit
+tui-app-start-read = You read the whole request. Press y to allow it or n to deny it.
