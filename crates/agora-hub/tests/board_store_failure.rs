@@ -150,3 +150,112 @@ fn a_board_change_the_hub_cannot_store_is_refused_and_undone() {
     assert_eq!(tasks(&reopened)[0]["owner"], "beta/a");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// #517 review (Codex, docs/reviews/0517-board-atomicity-proof.rs on codex/review-517-board-storage): faults made with SQLite
+// triggers. The board and its audit events must be stored together or not at all.
+struct Scratch(std::path::PathBuf);
+impl Scratch {
+    fn new(name: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!("agora-517-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        Self(dir)
+    }
+}
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+fn fixture(name: &str) -> (Scratch, std::path::PathBuf, Hub) {
+    let scratch = Scratch::new(name);
+    let file = scratch.0.join("hub.db");
+    {
+        let store = SqliteStore::open(&file).unwrap();
+        shared_project(&store);
+    }
+    let hub = open(&file);
+    (scratch, file, hub)
+}
+#[test]
+fn a_refused_two_path_lease_publishes_no_partial_grant() {
+    let (_scratch, file, hub) = fixture("partial");
+    ok(call(
+        &hub,
+        "alpha",
+        "task_create",
+        json!({"title":"seed","depends_on":[]}),
+    ));
+    let pos = hub.view().1;
+    let sub = hub.subscribe(Some(pos)).unwrap();
+    let conn = rusqlite::Connection::open(&file).unwrap();
+    let seq = hub.store().acked("hub").unwrap();
+    conn.execute_batch(&format!("CREATE TRIGGER review_fail_second_event BEFORE INSERT ON events WHEN NEW.producer='hub' AND NEW.seq={} BEGIN SELECT RAISE(ABORT,'review event failure'); END;",seq+2)).unwrap();
+    let verdict = call(
+        &hub,
+        "alpha",
+        "lease_acquire",
+        json!({"paths":["src/a.rs","src/b.rs"],"ttl_s":60,"reason":"review"}),
+    );
+    assert!(
+        matches!(verdict,Verdict::Invalid(ref e) if e.code.as_str()=="internal"),
+        "{verdict:?}"
+    );
+    conn.execute_batch("DROP TRIGGER review_fail_second_event")
+        .unwrap();
+    let status = ok(call(&hub, "alpha", "workspace_status", json!({})));
+    let projected = hub.view().0.leases;
+    let delivered: Vec<_> = sub.live.try_iter().collect();
+    eprintln!("refused_batch={verdict:?}; board_leases={}; projected_leases={projected:?}; delivered={delivered:?}; log_advance={}",status["leases"],hub.view().1-pos);
+    assert_eq!(status["leases"], json!([]));
+    // Verify the authoritative broker freed the path while the window still holds the refused grant.
+    ok(call(
+        &hub,
+        "beta",
+        "lease_acquire",
+        json!({"paths":["src/a.rs"],"ttl_s":60,"reason":"retry"}),
+    ));
+    let double = hub.view().0.leases;
+    eprintln!("projection_after_beta_acquires_same_path={double:?}");
+    assert!(
+        projected.is_empty(),
+        "refused lease batch leaked a grant into the view and live subscribers"
+    );
+    assert!(
+        delivered.is_empty(),
+        "refused lease batch published audit events"
+    );
+}
+#[test]
+fn a_refused_claim_never_reappears_after_a_restart() {
+    let (_scratch, file, hub) = fixture("compensation");
+    let created = ok(call(
+        &hub,
+        "alpha",
+        "task_create",
+        json!({"title":"fix login","depends_on":[]}),
+    ));
+    let task = created["task_id"].as_str().unwrap().to_string();
+    let conn = rusqlite::Connection::open(&file).unwrap();
+    conn.execute_batch("CREATE TRIGGER review_fail_event BEFORE INSERT ON events WHEN NEW.producer='hub' BEGIN SELECT RAISE(ABORT,'review event failure'); END;
+ CREATE TRIGGER review_fail_undo BEFORE UPDATE ON settings WHEN NEW.key='board.p' AND json_extract(CAST(NEW.value AS TEXT),'$.tasks[0].owner') IS NULL BEGIN SELECT RAISE(ABORT,'review compensation failure'); END;").unwrap();
+    let verdict = call(&hub, "beta", "task_claim", json!({"task_id":task}));
+    assert!(
+        matches!(verdict,Verdict::Invalid(ref e) if e.code.as_str()=="internal"),
+        "{verdict:?}"
+    );
+    let memory = tasks(&hub);
+    let saved: Value =
+        serde_json::from_slice(&hub.store().setting("board.p").unwrap().unwrap()).unwrap();
+    assert!(memory[0]["owner"].is_null());
+    conn.execute_batch("DROP TRIGGER review_fail_event; DROP TRIGGER review_fail_undo;")
+        .unwrap();
+    drop(conn);
+    drop(hub);
+    let reopened = open(&file);
+    let after = tasks(&reopened);
+    eprintln!("refused_claim={verdict:?}; memory_before_restart={memory:?}; saved_after_refusal={saved}; board_after_restart={after:?}; client_tasks={:?}",reopened.view().0.tasks);
+    assert!(
+        after[0]["owner"].is_null(),
+        "a refused claim became owned after restarting the hub"
+    );
+}
