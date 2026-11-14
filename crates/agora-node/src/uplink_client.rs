@@ -37,12 +37,27 @@ pub const CAPABILITIES: &[&str] = &[
     // ADR-0058
     "agent.set_mode",
     "agent.set_model",
+    // ADR-0060
+    "agent.resume",
+    // ADR-0059
+    "agent.launch_options",
+    // ADR-0061: verifies the endorsements and revocations the hub carries, and reports `NodeTrustedDevices`.
+    "device.trust",
 ];
 
 /// Events sent per step; the hub acknowledges after each batch.
 const BATCH: usize = 64;
 const TICK: Duration = Duration::from_millis(50);
-const PING_EVERY: Duration = Duration::from_secs(15);
+/// How often the node pings the hub. A healthy hub answers every `PING` with a `PONG`, so even a node with nothing to say hears
+/// from the hub at least this often, and neither side ever takes a quiet link for a dead one.
+pub const PING_EVERY: Duration = Duration::from_secs(10);
+/// A link on which nothing at all (a `PONG` or any other frame) arrived for this long is dropped and dialled again, although
+/// the operating system may still call it open: a frozen hub, a laptop that slept, a Wi-Fi switch or a NAT that forgot the
+/// connection all look like that. Two and a half pings, so one late or lost `PONG` is not enough. The hub uses the same
+/// deadline for its side (`agora_hub::server::NODE_SILENCE`).
+pub const SILENCE_DEADLINE: Duration = Duration::from_millis(25_000);
+// One lost or late `PONG` must never drop a healthy link.
+const _: () = assert!(SILENCE_DEADLINE.as_millis() >= 2 * PING_EVERY.as_millis());
 const BACKOFF_MIN: Duration = Duration::from_millis(500);
 const BACKOFF_MAX: Duration = Duration::from_secs(30);
 
@@ -64,6 +79,9 @@ pub struct HubLink {
     /// The node's mesh, for the hub's `BoardJoin` (ADR-0039 amendment B), which is answered here and never through the control
     /// socket. `None`: `BoardJoin` is refused.
     pub mesh: Option<Arc<crate::mesh_server::MeshServer>>,
+    /// The machine's trusted devices (ADR-0061): the hub's `DeviceEndorse` and `DeviceRevoke` are verified and applied here, never
+    /// through the control socket. `None`: both are refused.
+    pub devices: Option<Arc<crate::device_trust::DeviceTrust>>,
 }
 
 type Done = Box<dyn FnOnce(Result<Option<crate::mesh_server::BoardReply>, String>) + Send>;
@@ -202,6 +220,12 @@ pub enum LinkError {
     Uplink(UplinkError),
     /// The hub closed the connection.
     Closed,
+    /// Nothing arrived from the hub for [`SILENCE_DEADLINE`], or a frame could not be sent for as long: the link is dead
+    /// even if the connection still looks open.
+    Silent,
+    /// The node's process was suspended (the machine slept, the process was stopped) for longer than [`PING_EVERY`]: the link is
+    /// given up and dialled again at once, without waiting for the silence deadline or the backoff (ADR-0070).
+    Suspended,
     /// The hub answered with this error code (for enrollment: a wrong, expired or used code is `auth.unauthenticated`).
     Refused(String),
 }
@@ -293,43 +317,123 @@ pub async fn run_once(
     stop: &AtomicBool,
 ) -> Result<(), LinkError> {
     let (tls, host, addr) = split_url(&link.url)?;
-    let tcp = TcpStream::connect(&addr)
-        .await
-        .map_err(|e| LinkError::Transport(e.to_string()))?;
-    // Keystrokes and echoes are small frames; do not let Nagle's algorithm hold them back.
-    let _ = tcp.set_nodelay(true);
-    if tls {
-        let name = ServerName::try_from(host.clone()).map_err(|e| LinkError::Bad(e.to_string()))?;
-        let stream = connector(link)?
-            .connect(name, tcp)
+    // A dial that hangs (a hub that froze or went away mid-handshake) is given up after the silence deadline and tried again, so
+    // a node never waits forever on a connection that will not finish.
+    let dial = async {
+        let tcp = agora_protocol::dial::connect(&addr)
             .await
             .map_err(|e| LinkError::Transport(e.to_string()))?;
-        let conn = ws::connect(stream, &link.url).await?;
-        converse(
-            conn,
-            sink,
-            stop,
-            link.commands.as_deref(),
-            link.mesh_out.as_deref(),
-            link.grants.clone(),
-            link.mesh.clone(),
-        )
-        .await
-    } else {
-        let conn = ws::connect(tcp, &link.url).await?;
-        converse(
-            conn,
-            sink,
-            stop,
-            link.commands.as_deref(),
-            link.mesh_out.as_deref(),
-            link.grants.clone(),
-            link.mesh.clone(),
-        )
-        .await
+        // Keystrokes and echoes are small frames; do not let Nagle's algorithm hold them back.
+        let _ = tcp.set_nodelay(true);
+        let stream = if tls {
+            let name =
+                ServerName::try_from(host.clone()).map_err(|e| LinkError::Bad(e.to_string()))?;
+            let s = connector(link)?
+                .connect(name, tcp)
+                .await
+                .map_err(|e| LinkError::Transport(e.to_string()))?;
+            Dialled::Tls(Box::new(s))
+        } else {
+            Dialled::Plain(tcp)
+        };
+        Ok::<_, LinkError>(stream)
+    };
+    let stream = match tokio::time::timeout(SILENCE_DEADLINE, dial).await {
+        Ok(r) => r?,
+        Err(_) => return Err(LinkError::Silent),
+    };
+    macro_rules! talk {
+        ($conn:expr) => {
+            converse(
+                $conn,
+                sink,
+                stop,
+                link.commands.as_deref(),
+                link.mesh_out.as_deref(),
+                link.grants.clone(),
+                link.mesh.clone(),
+                Liveness::DEFAULT,
+                link.devices.clone(),
+            )
+            .await
+        };
+    }
+    match stream {
+        Dialled::Tls(s) => talk!(within(SILENCE_DEADLINE, ws::connect(*s, &link.url)).await?),
+        Dialled::Plain(s) => talk!(within(SILENCE_DEADLINE, ws::connect(s, &link.url)).await?),
     }
 }
 
+enum Dialled {
+    Tls(Box<tokio_rustls::client::TlsStream<TcpStream>>),
+    Plain(TcpStream),
+}
+
+/// The WebSocket upgrade, given up after `limit`.
+async fn within<T>(
+    limit: Duration,
+    f: impl std::future::Future<Output = Result<T, TransportError>>,
+) -> Result<T, LinkError> {
+    match tokio::time::timeout(limit, f).await {
+        Ok(r) => Ok(r?),
+        Err(_) => Err(LinkError::Silent),
+    }
+}
+
+/// How a connection tells a live hub from a silent one: [`PING_EVERY`] and [`SILENCE_DEADLINE`] in production, shorter in tests.
+#[derive(Clone, Copy, Debug)]
+struct Liveness {
+    ping_every: Duration,
+    deadline: Duration,
+    /// A wait for the next frame that took longer than this means the process was not running (see [`Wake`]).
+    suspended_after: Duration,
+}
+
+impl Liveness {
+    const DEFAULT: Self = Self {
+        ping_every: PING_EVERY,
+        deadline: SILENCE_DEADLINE,
+        suspended_after: PING_EVERY,
+    };
+}
+
+/// When the conversation last waited for the hub, on two clocks. The wait is at most [`TICK`], so one that took longer than a ping
+/// interval means the process did not run in between: the machine slept or the process was stopped. The monotonic clock sees a
+/// stopped process; the wall clock also sees a machine that slept (on some systems the monotonic clock stands still in sleep). A
+/// wall clock set forward by hand redials once, which costs nothing.
+#[derive(Clone, Copy)]
+struct Wake {
+    mono: std::time::Instant,
+    wall: std::time::SystemTime,
+}
+
+impl Wake {
+    fn now() -> Self {
+        Self {
+            mono: std::time::Instant::now(),
+            wall: std::time::SystemTime::now(),
+        }
+    }
+
+    /// Whether more than `limit` passed since this mark on either clock.
+    fn jumped(&self, limit: Duration) -> bool {
+        self.mono.elapsed() > limit || self.wall.elapsed().is_ok_and(|d| d > limit)
+    }
+}
+
+/// Sends one frame, but never waits longer than `limit` for it: a hub that stopped reading (frozen, or gone without a word)
+/// fills the socket's buffer, and a send that waits forever would keep this connection from noticing that it is dead.
+async fn put<S>(conn: &mut Conn<S>, f: &Frame, limit: Duration) -> Result<(), LinkError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    match tokio::time::timeout(limit, conn.send(f)).await {
+        Ok(r) => Ok(r?),
+        Err(_) => Err(LinkError::Silent),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn converse<S>(
     mut conn: Conn<S>,
     sink: &Arc<EventSink>,
@@ -338,6 +442,8 @@ async fn converse<S>(
     mesh_out: Option<&MeshOut>,
     grants: Option<Arc<crate::grants::Grants>>,
     mesh: Option<Arc<crate::mesh_server::MeshServer>>,
+    live: Liveness,
+    devices: Option<Arc<crate::device_trust::DeviceTrust>>,
 ) -> Result<(), LinkError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -402,25 +508,45 @@ where
     let replay = up.on_resume_ok(&ok)?;
     send_replay(&mut conn, replay).await?;
 
+    let limit = live.deadline;
     let mut last_ping = tokio::time::Instant::now();
+    // When the hub was last heard from: any frame counts, a `PONG` is only what an idle hub sends.
+    let mut last_heard = tokio::time::Instant::now();
+    let mut waited = Wake::now();
     while !stop.load(Ordering::Acquire) {
-        for payload in up.next_batch(BATCH)? {
-            conn.send(&frame(STREAM_EVENTS, kinds::EVENT, payload))
-                .await?;
+        // First: after a suspension the silence deadline has passed too, but this one redials at once.
+        if waited.jumped(live.suspended_after) {
+            return Err(LinkError::Suspended);
         }
-        if last_ping.elapsed() >= PING_EVERY {
-            conn.send(&frame(STREAM_CONTROL, kinds::PING, Vec::new()))
-                .await?;
+        if last_heard.elapsed() >= live.deadline {
+            return Err(LinkError::Silent);
+        }
+        for payload in up.next_batch(BATCH)? {
+            put(
+                &mut conn,
+                &frame(STREAM_EVENTS, kinds::EVENT, payload),
+                limit,
+            )
+            .await?;
+        }
+        if last_ping.elapsed() >= live.ping_every {
+            put(
+                &mut conn,
+                &frame(STREAM_CONTROL, kinds::PING, Vec::new()),
+                limit,
+            )
+            .await?;
             last_ping = tokio::time::Instant::now();
         }
+        waited = Wake::now();
         let received = tokio::select! {
             r = tokio::time::timeout(TICK, conn.recv()) => r,
             Some(answer) = answers.recv() => {
-                conn.send(&frame(STREAM_COMMANDS, 1, answer.encode_to_vec())).await?;
+                put(&mut conn, &frame(STREAM_COMMANDS, 1, answer.encode_to_vec()), limit).await?;
                 continue;
             }
             Some(f) = relay_rx.recv() => {
-                conn.send(&f).await?;
+                put(&mut conn, &f, limit).await?;
                 continue;
             }
             Some(job) = async { match jobs.as_mut() { Some(j) => j.recv().await, None => std::future::pending().await } } => {
@@ -451,10 +577,13 @@ where
                     }),
                 };
                 posts.waiting.insert(id, done);
-                conn.send(&frame(STREAM_COMMANDS, 0, req.encode_to_vec())).await?;
+                put(&mut conn, &frame(STREAM_COMMANDS, 0, req.encode_to_vec()), limit).await?;
                 continue;
             }
         };
+        if let Ok(Ok(Some(_))) = &received {
+            last_heard = tokio::time::Instant::now();
+        }
         match received {
             Err(_) => {}
             Ok(Ok(None)) => return Err(LinkError::Closed),
@@ -472,6 +601,21 @@ where
                     };
                     // ADR-0039 amendment B: only the hub asks a node to hand over its local board work, so it is answered here,
                     // where the hub's commands enter, and never through the local control socket.
+                    // ADR-0061: what the hub carries from a person's device is verified here against this machine's trusted devices.
+                    if matches!(
+                        req.command,
+                        Some(
+                            command_request::Command::DeviceEndorse(_)
+                                | command_request::Command::DeviceRevoke(_)
+                        )
+                    ) {
+                        let devices = devices.clone();
+                        let tx = answers_tx.clone();
+                        tokio::task::spawn_blocking(move || {
+                            let _ = tx.send(device_answer(devices.as_deref(), req));
+                        });
+                        continue;
+                    }
                     if let Some(command_request::Command::BoardJoin(j)) = &req.command {
                         let mesh = mesh.clone();
                         let tx = answers_tx.clone();
@@ -676,6 +820,41 @@ fn board_join_answer(
     }
 }
 
+/// The node's answer to the hub's `DeviceEndorse` or `DeviceRevoke` (ADR-0061).
+fn device_answer(
+    devices: Option<&crate::device_trust::DeviceTrust>,
+    req: CommandRequest,
+) -> CommandResponse {
+    use agora_protocol::{Error, ErrorCode};
+    let now = crate::grants::now_ms();
+    let invalid = |f: &str| Error::new(ErrorCode::ProtocolInvalidMessage).with("field", f);
+    let result = match (devices, req.command) {
+        (None, _) => {
+            Err(Error::new(ErrorCode::ProtocolCapabilityMissing).with("capability", "device.trust"))
+        }
+        (Some(d), Some(command_request::Command::DeviceEndorse(e))) => match e.endorsement {
+            Some(e) => d.endorse(&e, now).map(|_| ()),
+            None => Err(invalid("endorsement")),
+        },
+        (Some(d), Some(command_request::Command::DeviceRevoke(r))) => match r.revocation {
+            Some(r) => d.revoke(&r, now).map(|_| ()),
+            None => Err(invalid("revocation")),
+        },
+        (Some(_), _) => Err(invalid("command")),
+    };
+    CommandResponse {
+        request_id: req.request_id,
+        result: Some(match result {
+            Ok(()) => command_response::Result::Ok(agora_protocol::v1::CommandOk {
+                result: Some(agora_protocol::v1::command_ok::Result::Empty(
+                    agora_protocol::v1::Empty {},
+                )),
+            }),
+            Err(e) => command_response::Result::Err(e.to_info()),
+        }),
+    }
+}
+
 /// Runs a routed command on this node's control socket and returns its answer (an error answer when it cannot).
 /// Terminal streams are not relayed by this path (they need a stream of their own), so they are refused.
 fn run_local(
@@ -698,6 +877,18 @@ fn run_local_on(
         request_id: req.request_id.clone(),
         result: Some(command_response::Result::Err(e.to_info())),
     };
+    // ADR-0059: launch options come through the hub only on a signed `AgentLaunch` (its signature covers them); a routed
+    // `AgentStart` carries no signature, so one with options is refused whatever grant is live (a grant never covers one).
+    if let Some(command_request::Command::AgentStart(a)) = &req.command {
+        if let Some(option) = a.launch_options.first() {
+            return fail(
+                Error::new(ErrorCode::AgentOptionForbidden)
+                    .with("kind", a.kind.as_str())
+                    .with("option", option.as_str())
+                    .with("policy", "signature"),
+            );
+        }
+    }
     // ADR-0041: grants are made and judged here, where the hub's commands enter the node. A command the policy lists
     // runs only under a live grant; the local socket never passes through this function.
     if grants.is_none()
@@ -707,6 +898,7 @@ fn run_local_on(
                 command_request::Command::DirectoryInspect(_)
                     | command_request::Command::DirectoryList(_)
                     | command_request::Command::AgentLaunch(_)
+                    | command_request::Command::AgentResume(_)
             )
         )
     {
@@ -732,7 +924,8 @@ fn run_local_on(
             Some(
                 c @ (command_request::Command::DirectoryInspect(_)
                 | command_request::Command::DirectoryList(_)
-                | command_request::Command::AgentLaunch(_)),
+                | command_request::Command::AgentLaunch(_)
+                | command_request::Command::AgentResume(_)),
             ) => {
                 if let Err(e) = g.directory_action(c, now) {
                     return fail(e);
@@ -847,6 +1040,11 @@ pub fn spawn(sink: Arc<EventSink>, link: HubLink) -> std::io::Result<UplinkHandl
                         } else {
                             last.clear();
                         }
+                        // A process that was suspended dials again at once (ADR-0070): the hub is likely fine, the node was not running.
+                        if matches!(r, Err(LinkError::Suspended)) {
+                            backoff = BACKOFF_MIN;
+                            continue;
+                        }
                         // A connection that lasted a while was healthy: start the backoff over.
                         if started.elapsed() > Duration::from_secs(30) || r.is_ok() {
                             backoff = BACKOFF_MIN;
@@ -864,6 +1062,56 @@ pub fn spawn(sink: Arc<EventSink>, link: HubLink) -> std::io::Result<UplinkHandl
     Ok(UplinkHandle {
         stop,
         thread: Some(thread),
+    })
+}
+
+/// ADR-0061: the devices registered on the hub (candidates only), asked on a connection of its own made with this node's certificate,
+/// so the node's running connection is not replaced. Blocks the calling thread; for `agora node trust --from-hub`.
+pub fn list_devices(link: &HubLink) -> Result<Vec<agora_protocol::v1::DeviceInfo>, LinkError> {
+    use agora_protocol::v1::{command_ok, DeviceList};
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| LinkError::Transport(e.to_string()))?;
+    rt.block_on(async {
+        let (tls, host, addr) = split_url(&link.url)?;
+        if !tls {
+            // Without TLS the hub cannot tell who is asking, so it would not answer.
+            return Err(LinkError::Bad("asking for devices needs wss://".into()));
+        }
+        let tcp = agora_protocol::dial::connect(&addr)
+            .await
+            .map_err(|e| LinkError::Transport(e.to_string()))?;
+        let name = ServerName::try_from(host).map_err(|e| LinkError::Bad(e.to_string()))?;
+        let stream = connector(link)?
+            .connect(name, tcp)
+            .await
+            .map_err(|e| LinkError::Transport(e.to_string()))?;
+        let mut conn = ws::connect(stream, &link.url).await?;
+        let req = CommandRequest {
+            request_id: "devices".into(),
+            idempotency_key: String::new(),
+            target_node: String::new(),
+            command: Some(command_request::Command::DeviceList(DeviceList {})),
+        };
+        conn.send(&frame(STREAM_COMMANDS, 0, req.encode_to_vec()))
+            .await?;
+        let f = match tokio::time::timeout(Duration::from_secs(15), conn.recv()).await {
+            Ok(Ok(Some(f))) => f,
+            Ok(Ok(None)) => return Err(LinkError::Closed),
+            Ok(Err(e)) => return Err(e.into()),
+            Err(_) => return Err(LinkError::Transport("the hub did not answer".into())),
+        };
+        let resp = CommandResponse::decode(f.payload.as_slice())
+            .map_err(|_| LinkError::Transport("bad response".into()))?;
+        match resp.result {
+            Some(command_response::Result::Ok(ok)) => match ok.result {
+                Some(command_ok::Result::DeviceList(l)) => Ok(l.devices),
+                _ => Err(LinkError::Transport("unexpected answer".into())),
+            },
+            Some(command_response::Result::Err(e)) => Err(LinkError::Refused(e.code)),
+            None => Err(LinkError::Transport("empty answer".into())),
+        }
     })
 }
 
@@ -901,7 +1149,7 @@ pub fn enroll(
             .map_err(|e| bad(&e))?
             .with_root_certificates(roots)
             .with_no_client_auth();
-        let tcp = TcpStream::connect(&addr)
+        let tcp = agora_protocol::dial::connect(&addr)
             .await
             .map_err(|e| LinkError::Transport(e.to_string()))?;
         let name = ServerName::try_from(host).map_err(|e| bad(&e))?;
@@ -966,5 +1214,211 @@ mod tests {
         );
         assert!(split_url("http://x").is_err());
         assert!(split_url("wss://").is_err());
+    }
+
+    /// What the fake hub does once the handshake is over.
+    #[derive(Clone, Copy)]
+    enum Hub {
+        /// Answers every `PING` with a `PONG` and says nothing else: an idle but healthy hub.
+        Answers,
+        /// Keeps the connection open and never sends or reads anything again: a frozen hub, a sleeping laptop, a dead NAT entry.
+        Stalls,
+    }
+
+    const FAST: Liveness = Liveness {
+        ping_every: Duration::from_millis(50),
+        deadline: Duration::from_millis(400),
+        suspended_after: Duration::from_millis(250),
+    };
+
+    /// Runs a node's conversation against a fake hub on loopback until it ends or `stop_after` passes; returns how it ended
+    /// and how long it took.
+    fn talk(name: &str, hub: Hub, stop_after: Duration) -> (Result<(), LinkError>, Duration) {
+        talk_frozen(name, hub, stop_after, None)
+    }
+
+    /// [`talk`], with the whole runtime (the node's conversation and the fake hub alike) blocked for `freeze.1` after `freeze.0`:
+    /// what a stopped process or a sleeping machine looks like from inside.
+    fn talk_frozen(
+        name: &str,
+        hub: Hub,
+        stop_after: Duration,
+        freeze: Option<(Duration, Duration)>,
+    ) -> (Result<(), LinkError>, Duration) {
+        let dir = std::env::temp_dir().join(format!("agora-link-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let sink = Arc::new(EventSink::open(&dir, "n1").unwrap());
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = l.local_addr().unwrap();
+            tokio::spawn(async move {
+                let (s, _) = l.accept().await.unwrap();
+                let mut c = ws::accept(s).await.unwrap();
+                let hello = c.recv().await.unwrap().unwrap();
+                assert_eq!(hello.kind, kinds::HELLO);
+                let welcome = Welcome {
+                    chosen_generation: 1,
+                    ..Default::default()
+                };
+                c.send(&frame(
+                    STREAM_CONTROL,
+                    kinds::WELCOME,
+                    welcome.encode_to_vec(),
+                ))
+                .await
+                .unwrap();
+                let resume = c.recv().await.unwrap().unwrap();
+                assert_eq!(resume.kind, kinds::RESUME);
+                let ok = ResumeOk { from_seq: 1 };
+                c.send(&frame(STREAM_CONTROL, kinds::RESUME_OK, ok.encode_to_vec()))
+                    .await
+                    .unwrap();
+                match hub {
+                    Hub::Answers => {
+                        while let Ok(Some(f)) = c.recv().await {
+                            if (f.stream_id, f.kind) == (STREAM_CONTROL, kinds::PING) {
+                                let _ =
+                                    c.send(&frame(STREAM_CONTROL, kinds::PONG, f.payload)).await;
+                            }
+                        }
+                    }
+                    Hub::Stalls => {
+                        tokio::time::sleep(Duration::from_secs(60)).await;
+                        drop(c);
+                    }
+                }
+            });
+            let tcp = TcpStream::connect(addr).await.unwrap();
+            let conn = ws::connect(tcp, &format!("ws://{addr}/")).await.unwrap();
+            let stop = Arc::new(AtomicBool::new(false));
+            let stopper = Arc::clone(&stop);
+            tokio::spawn(async move {
+                tokio::time::sleep(stop_after).await;
+                stopper.store(true, Ordering::Release);
+            });
+            if let Some((after, length)) = freeze {
+                tokio::spawn(async move {
+                    tokio::time::sleep(after).await;
+                    std::thread::sleep(length);
+                });
+            }
+            let started = std::time::Instant::now();
+            let r = converse(conn, &sink, &stop, None, None, None, None, FAST, None).await;
+            (r, started.elapsed())
+        })
+    }
+
+    #[test]
+    fn a_hub_that_goes_silent_is_dropped_after_the_deadline_so_the_node_dials_again() {
+        let (r, took) = talk("stalls", Hub::Stalls, Duration::from_secs(10));
+        assert!(matches!(r, Err(LinkError::Silent)), "{r:?}");
+        assert!(took >= FAST.deadline, "{took:?}");
+        assert!(took < Duration::from_secs(5), "{took:?}");
+    }
+
+    /// ADR-0070: after the process was suspended (here: the runtime blocked, as a stopped process is), the node gives the link up
+    /// at once instead of waiting for the silence deadline, and dials again without a backoff.
+    #[test]
+    fn a_node_that_was_suspended_gives_the_link_up_at_once() {
+        let freeze = (Duration::from_millis(200), Duration::from_millis(800));
+        let (r, took) = talk_frozen(
+            "suspended",
+            Hub::Answers,
+            Duration::from_secs(10),
+            Some(freeze),
+        );
+        assert!(matches!(r, Err(LinkError::Suspended)), "{r:?}");
+        // Right after it ran again, not at the silence deadline counted from then.
+        assert!(took >= freeze.0 + freeze.1, "{took:?}");
+        assert!(took < freeze.0 + freeze.1 + FAST.deadline, "{took:?}");
+    }
+
+    #[test]
+    fn a_short_wait_is_not_a_suspension() {
+        let w = Wake::now();
+        assert!(!w.jumped(Duration::from_secs(10)));
+        let earlier = Wake {
+            mono: std::time::Instant::now(),
+            wall: std::time::SystemTime::now() - Duration::from_secs(60),
+        };
+        assert!(
+            earlier.jumped(Duration::from_secs(10)),
+            "the wall clock saw a sleep"
+        );
+    }
+
+    #[test]
+    fn an_idle_hub_that_answers_pings_is_never_dropped() {
+        // Five deadlines with nothing but pings and pongs on the link.
+        let (r, took) = talk("answers", Hub::Answers, FAST.deadline * 5);
+        assert!(r.is_ok(), "{r:?}");
+        assert!(took >= FAST.deadline * 5, "{took:?}");
+    }
+
+    /// ADR-0059: a routed `AgentStart` that chose launch options carries no signature over them, so it is refused where the hub's
+    /// commands enter the node, with or without grants, and even under a live grant for `agent.start` (a grant never covers one).
+    #[test]
+    fn a_routed_start_with_launch_options_is_refused_even_under_a_grant() {
+        struct Fake;
+        impl crate::approvals::Verifier for Fake {
+            fn verify(&self, device: &str, message: &[u8], signature: &[u8]) -> bool {
+                device == "dev" && signature == message
+            }
+        }
+        let approvals = std::sync::Arc::new(crate::approvals::NodeApprovals::new(
+            "node-a",
+            Box::new(Fake),
+        ));
+        let grants = crate::grants::Grants::new(
+            "node-a",
+            approvals,
+            crate::grants::SignedCommands(vec!["agent.start".into()]),
+        );
+        let now = crate::grants::now_ms();
+        let commands = vec!["agent.start".to_string()];
+        let expires = now + 60_000;
+        let message = crate::grants::signed_message("node-a", "g", "node", &commands, expires);
+        grants
+            .create(
+                &agora_protocol::v1::GrantCreate {
+                    grant_id: "g".into(),
+                    scope: "node".into(),
+                    commands,
+                    expires_at_ms: expires,
+                    signer_device_id: "dev".into(),
+                    signature: message,
+                },
+                now,
+            )
+            .unwrap();
+        let start = |options: Vec<String>| CommandRequest {
+            request_id: "r".into(),
+            command: Some(command_request::Command::AgentStart(
+                agora_protocol::v1::AgentStart {
+                    kind: "codex".into(),
+                    launch_options: options,
+                    ..Default::default()
+                },
+            )),
+            ..Default::default()
+        };
+        for g in [None, Some(&grants)] {
+            let resp = run_local(None, start(vec!["skip-permissions".into()]), g);
+            let Some(command_response::Result::Err(e)) = resp.result else {
+                panic!("not refused: {resp:?}");
+            };
+            assert_eq!(e.code, "agent.option_forbidden");
+            assert!(e.params.contains_key("policy"));
+        }
+        // Without options the grant lets it through to the node (here: no control socket, so `commands.routed`).
+        let resp = run_local(None, start(Vec::new()), Some(&grants));
+        let Some(command_response::Result::Err(e)) = resp.result else {
+            panic!("{resp:?}");
+        };
+        assert_eq!(e.code, "node.policy_denied");
     }
 }

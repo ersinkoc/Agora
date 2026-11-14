@@ -36,6 +36,25 @@ pub const LOCAL_SOCKETS_SUPPORTED: bool = cfg!(any(unix, windows));
 /// True where [`spawn`] can start a PTY.
 pub const PTY_SUPPORTED: bool = cfg!(any(unix, windows));
 
+/// The user's shell, for the node's built-in `shell` kind: on Unix `$SHELL` when it names an existing file, else `sh`; on Windows
+/// `%ComSpec%` when set, else `cmd.exe`.
+pub fn default_shell() -> String {
+    #[cfg(windows)]
+    {
+        std::env::var("ComSpec")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "cmd.exe".to_string())
+    }
+    #[cfg(not(windows))]
+    {
+        std::env::var("SHELL")
+            .ok()
+            .filter(|s| std::path::Path::new(s).is_file())
+            .unwrap_or_else(|| "sh".to_string())
+    }
+}
+
 /// A connected local (same-machine) stream, used for the node's control socket.
 pub struct LocalStream {
     #[cfg(unix)]
@@ -547,6 +566,71 @@ impl Drop for RawMode {
     }
 }
 
+/// Reads one line from the terminal on stdin without showing what is typed (a password), without its line ending. Fails with
+/// `Unsupported` when stdin is not a terminal (a secret is never read from a pipe or a file by accident) and with `Interrupted` on
+/// Ctrl-C; the terminal's settings are restored on every path, Ctrl-C included. A caller that shows a prompt should use
+/// [`read_secret_line_with_prompt`]: a prompt printed before this call can be answered before echo is off, and that answer is shown.
+pub fn read_secret_line() -> io::Result<String> {
+    read_secret(None)
+}
+
+/// [`read_secret_line`] that writes `prompt` (and a line break) to stderr only once echo is off, so nothing typed or pasted in answer
+/// to it is ever shown. On Unix, input that arrived before the prompt (typed ahead, and already shown by the terminal as it came) is
+/// discarded when echo is switched off, so it never becomes part of the secret; the person types it again after the prompt.
+pub fn read_secret_line_with_prompt(prompt: &str) -> io::Result<String> {
+    read_secret(Some(prompt))
+}
+
+fn read_secret(prompt: Option<&str>) -> io::Result<String> {
+    #[cfg(unix)]
+    let mode = unix::secret_mode(prompt.is_some())?;
+    #[cfg(windows)]
+    let mode = windows::secret_mode()?;
+    #[cfg(not(any(unix, windows)))]
+    let mode: () = return Err(unsupported_io("reading a password"));
+    if let Some(prompt) = prompt {
+        use std::io::Write;
+        let mut err = io::stderr().lock();
+        // A prompt that cannot be shown does not stop the read: the terminal is still the one typed into.
+        let _ = writeln!(err, "{prompt}");
+        let _ = err.flush();
+    }
+    let line = secret_from(&mut io::stdin().lock());
+    drop(mode);
+    // The Enter (or Ctrl-C) that ended it was not echoed.
+    eprintln!();
+    line
+}
+
+/// The line editing [`read_secret_line`] does itself, with the terminal's own switched off: Enter ends the line, Backspace removes the
+/// last character, Ctrl-U the whole line, Ctrl-C is `Interrupted`, Ctrl-D on an empty line is `UnexpectedEof`; other control bytes
+/// are dropped.
+pub fn secret_from(input: &mut impl io::Read) -> io::Result<String> {
+    let mut line: Vec<u8> = Vec::new();
+    let mut byte = [0u8; 1];
+    loop {
+        if input.read(&mut byte)? == 0 {
+            if line.is_empty() {
+                return Err(io::ErrorKind::UnexpectedEof.into());
+            }
+            break;
+        }
+        match byte[0] {
+            b'\r' | b'\n' => break,
+            0x03 => return Err(io::ErrorKind::Interrupted.into()),
+            0x04 if line.is_empty() => return Err(io::ErrorKind::UnexpectedEof.into()),
+            0x15 => line.clear(),
+            0x08 | 0x7f => {
+                // One character, however many bytes it took.
+                while line.pop().is_some_and(|b| (0x80..0xc0).contains(&b)) {}
+            }
+            b if b < 0x20 => {}
+            b => line.push(b),
+        }
+    }
+    String::from_utf8(line).map_err(|_| io::ErrorKind::InvalidData.into())
+}
+
 /// Size of the terminal on stdout as `(cols, rows)`, or `None` when stdout is not a terminal.
 pub fn terminal_size() -> Option<(u16, u16)> {
     #[cfg(unix)]
@@ -585,6 +669,31 @@ pub struct PtyConfig {
     /// The agent's own identity under confinement, from [`new_agent_identity`]: the confined process runs with it, and its mesh endpoint
     /// ([`local_listen_agent`]) admits exactly it. `None` makes a fresh one (or means nothing where agents are not confined this way).
     pub identity: Option<String>,
+    /// Inherited environment variables the process must not get: exact names, or a prefix ending in `*` (`CLAUDE_CODE_*`). Variables
+    /// in `env` are set whatever this says.
+    pub env_remove: Vec<String>,
+}
+
+/// Whether an inherited variable `name` is one [`PtyConfig::env_remove`] leaves out (on Windows names compare without case).
+pub fn env_removed(name: &std::ffi::OsStr, patterns: &[String]) -> bool {
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    let eq = |a: &str, b: &str| {
+        if cfg!(windows) {
+            a.eq_ignore_ascii_case(b)
+        } else {
+            a == b
+        }
+    };
+    patterns.iter().any(|p| match p.strip_suffix('*') {
+        Some(prefix) => {
+            name.len() >= prefix.len()
+                && name.is_char_boundary(prefix.len())
+                && eq(&name[..prefix.len()], prefix)
+        }
+        None => eq(name, p),
+    })
 }
 
 /// File-system confinement for a process and everything it starts: it may read (and run programs from) `read` and `write`, and
@@ -783,6 +892,7 @@ impl PtyConfig {
             limits: ProcessLimits::default(),
             sandbox: None,
             identity: None,
+            env_remove: Vec::new(),
         }
     }
 }
@@ -895,6 +1005,73 @@ pub fn process_name(pid: u32) -> io::Result<String> {
     }
 }
 
+/// What tells a running process apart from a later one that got the same pid (ADR-0060): its process group, its start time in a
+/// unit of the system's own (compared, never shown), the boot it started in (Linux `boot_id`; empty where the start time already
+/// tells boots apart) and its program's name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessIdentity {
+    pub pid: u32,
+    pub group: u32,
+    pub started: u64,
+    pub boot: String,
+    pub name: String,
+}
+
+/// The [`ProcessIdentity`] of a running process. `Unsupported` on Windows, where a node's agents are in a job object that ends them
+/// with the node, so none can outlive it to be found again.
+pub fn process_identity(pid: u32) -> io::Result<ProcessIdentity> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        procinfo::identity(pid)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = pid;
+        Err(unsupported())
+    }
+}
+
+/// Whether the process `id` names still runs: the same pid with the same start time, in the same boot, running the same program (a
+/// reused pid is not it, and neither is a record that names nothing: an empty name never matches).
+pub fn process_still_running(id: &ProcessIdentity) -> bool {
+    id.pid > 1
+        && !id.name.is_empty()
+        && process_identity(id.pid).is_ok_and(|now| {
+            now.started == id.started && now.boot == id.boot && now.name == id.name
+        })
+}
+
+/// Ends the process `id` names (ADR-0060), and with it its process group when it leads one (an agent's terminal does), only if it
+/// still runs with the same start time: a pid that was given to another process is never touched. `Ok(false)` when it was not
+/// running. Never this process's own group.
+pub fn kill_process_if_same(id: &ProcessIdentity) -> io::Result<bool> {
+    if !process_still_running(id) {
+        return Ok(false);
+    }
+    #[cfg(unix)]
+    {
+        let pid =
+            i32::try_from(id.pid).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+        // SAFETY: getpgrp has no preconditions.
+        let own = unsafe { libc::getpgrp() };
+        let group = i32::try_from(id.group).unwrap_or(0);
+        // SAFETY: plain signals to a process group, or a process, checked to be the recorded one just above.
+        let r = if group == pid && group > 1 && group != own {
+            unsafe { libc::killpg(group, libc::SIGKILL) }
+        } else {
+            unsafe { libc::kill(pid, libc::SIGKILL) }
+        };
+        if r != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(true)
+    }
+    #[cfg(not(unix))]
+    {
+        Err(unsupported())
+    }
+}
+
 /// Current working directory of a process.
 pub fn process_cwd(pid: u32) -> io::Result<PathBuf> {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -940,6 +1117,175 @@ pub fn process_children(pid: u32) -> io::Result<Vec<u32>> {
     {
         let _ = pid;
         Err(unsupported())
+    }
+}
+
+/// Starts `cmd` detached from this process, its terminal and its session (ADR-0062): it survives the terminal closing, the SSH session
+/// ending and this process being killed. Standard input is empty; standard output and error are appended to `log` (created readable by
+/// the user only). Unix: a new session (`setsid`), so no terminal hangup or Ctrl-C reaches it; Windows: `DETACHED_PROCESS` and
+/// `CREATE_NEW_PROCESS_GROUP`. Returns its process id. A thread of this process reaps it if it ends while this process still runs,
+/// so it never lingers as a zombie. Nothing else of this process is inherited: no other descriptor or handle (a caller reading this
+/// process's output to its end is never kept waiting by the daemon).
+///
+/// On Windows the process also leaves this process's job (`CREATE_BREAKAWAY_FROM_JOB`), so closing the terminal that started it does
+/// not end it; when the job forbids that, it is started inside the job and [`Detached::in_job`] says so.
+pub fn spawn_detached(
+    cmd: &mut std::process::Command,
+    log: &std::path::Path,
+) -> io::Result<Detached> {
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let out = options.open(log)?;
+    #[cfg(windows)]
+    {
+        windows::set_owner_only(log, false)?;
+        winproc::spawn_detached(cmd, &out)
+    }
+    #[cfg(not(windows))]
+    {
+        cmd.stdin(std::process::Stdio::null())
+            .stdout(out.try_clone()?)
+            .stderr(out);
+        #[cfg(unix)]
+        unix::detach(cmd);
+        let mut child = cmd.spawn()?;
+        let pid = child.id();
+        let _ = std::thread::Builder::new()
+            .name("agora-reap".into())
+            .spawn(move || {
+                let _ = child.wait();
+            });
+        Ok(Detached { pid, in_job: false })
+    }
+}
+
+/// A process started by [`spawn_detached`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Detached {
+    pub pid: u32,
+    /// Windows only: the caller's job forbade leaving it, so the process still ends when that job is closed.
+    pub in_job: bool,
+}
+
+/// When process `pid` started, in a unit of the system's own (only compared for equality), or `None` when no such process runs (an
+/// ended one that was not reaped yet counts as ended). A pid with the same start time is the same process, not a recycled pid: what
+/// lock files compare. Where the start time cannot be read, a live process reports 0.
+pub fn process_start_time(pid: u32) -> Option<u64> {
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    {
+        procinfo::start_time(pid)
+    }
+    #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+    {
+        unix::alive(pid).then_some(0)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
+/// Asks process `pid` to end: `SIGTERM` on Unix, `TerminateProcess` on Windows.
+pub fn terminate_process(pid: u32) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        unix::terminate(pid)
+    }
+    #[cfg(windows)]
+    {
+        winproc::terminate(pid)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+        Err(io::Error::from(io::ErrorKind::Unsupported))
+    }
+}
+
+/// This machine's name (`gethostname` on Unix, `COMPUTERNAME` on Windows), if it has one.
+pub fn hostname() -> Option<String> {
+    #[cfg(unix)]
+    {
+        unix::hostname()
+    }
+    #[cfg(windows)]
+    {
+        std::env::var("COMPUTERNAME")
+            .ok()
+            .filter(|n| !n.trim().is_empty())
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        None
+    }
+}
+
+/// Opens `url` in the user's browser: `open` on macOS, `cmd /c start` on Windows, `xdg-open` elsewhere. An error means no browser
+/// could be asked (the caller then shows the address); a helper still running after a few seconds counts as success.
+pub fn open_url(url: &str) -> io::Result<()> {
+    use std::process::{Command, Stdio};
+    #[cfg(target_os = "macos")]
+    let mut cmd = Command::new("open");
+    #[cfg(windows)]
+    let mut cmd = {
+        let mut c = Command::new("cmd");
+        // The empty argument is the window title `start` takes first; without it a quoted URL would become the title.
+        c.args(["/c", "start", ""]);
+        c
+    };
+    #[cfg(not(any(target_os = "macos", windows)))]
+    let mut cmd = Command::new("xdg-open");
+    let mut child = cmd
+        .arg(url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return if status.success() {
+                Ok(())
+            } else {
+                Err(io::Error::other("no browser opened the address"))
+            };
+        }
+        if std::time::Instant::now() > end {
+            // Still working (some helpers wait for the browser): leave it be, and reap it from a thread.
+            let _ = std::thread::Builder::new().spawn(move || {
+                let _ = child.wait();
+            });
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod detached_tests {
+    #[test]
+    fn a_live_process_keeps_its_start_time_and_an_ended_one_has_none() {
+        let me = std::process::id();
+        let first = super::process_start_time(me);
+        assert!(first.is_some());
+        assert_eq!(super::process_start_time(me), first);
+        if !cfg!(any(unix, windows)) {
+            return;
+        }
+        let exe = std::env::current_exe().unwrap();
+        let mut child = std::process::Command::new(exe)
+            .arg("--list")
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        assert_eq!(super::process_start_time(pid), None);
+        assert!(super::hostname().is_some_and(|h| !h.is_empty()));
     }
 }
 
@@ -1210,5 +1556,32 @@ mod procinfo_tests {
     fn missing_process_is_an_error() {
         assert!(process_name(u32::MAX - 1).is_err());
         assert!(process_tree(u32::MAX - 1).is_err());
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod secret_tests {
+    use super::secret_from;
+    use std::io::ErrorKind;
+
+    fn read(bytes: &[u8]) -> std::io::Result<String> {
+        secret_from(&mut &bytes[..])
+    }
+
+    #[test]
+    fn a_secret_line_is_edited_here_and_ctrl_c_stops_it() {
+        assert_eq!(read(b"open sesame\r").unwrap(), "open sesame");
+        assert_eq!(read(b"abx\x7fc\n").unwrap(), "abc");
+        assert_eq!(read("güz\u{e7}\x7f\x7fel\r".as_bytes()).unwrap(), "güel");
+        assert_eq!(read(b"junk\x15ok\r").unwrap(), "ok");
+        assert_eq!(read(b"a\x1bb\r").unwrap(), "ab");
+        assert_eq!(
+            read(b"secr\x03et\r").unwrap_err().kind(),
+            ErrorKind::Interrupted
+        );
+        assert_eq!(read(b"\x04").unwrap_err().kind(), ErrorKind::UnexpectedEof);
+        assert_eq!(read(b"").unwrap_err().kind(), ErrorKind::UnexpectedEof);
+        assert_eq!(read(b"\xff\r").unwrap_err().kind(), ErrorKind::InvalidData);
     }
 }

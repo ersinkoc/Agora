@@ -286,15 +286,28 @@ fn doctor_reports_agents_and_exits_zero_on_a_healthy_machine() {
     let expected = if agora_platform::PTY_SUPPORTED { 0 } else { 1 };
     assert_eq!(code, expected, "{out}{err}");
     assert!(out.contains("Git is available"), "{out}");
-    assert!(out.contains("1 agent description loaded."), "{out}");
-    // The manifest launches `sh`: doctor says whether it is installed, and a missing one is a note, not a failure.
+    // The built-in kinds and the folder's `shell`.
+    let loaded = agora_node::manifests::BUILT_IN.len() + 1;
+    assert!(
+        out.contains(&format!("{loaded} agent descriptions loaded.")),
+        "{out}"
+    );
+    // The manifest launches `sh`: doctor says where the kind came from and whether its program is found; a missing one is a note,
+    // not a failure.
     if agora_platform::PTY_SUPPORTED {
         if sh_on_path() {
-            assert!(out.contains("shell is installed."), "{out}");
+            assert!(
+                out.contains("shell (from the manifests folder): `sh` is found."),
+                "{out}"
+            );
         } else {
-            assert!(out.contains("[note] shell is not installed"), "{out}");
+            assert!(
+                out.contains("[note] shell (from the manifests folder): this machine cannot find `sh` in its PATH"),
+                "{out}"
+            );
         }
     }
+    assert!(out.contains("codex (built in): "), "{out}");
     // No node is running in this setup: a note, not a failure.
     assert!(out.contains("[note] No node is running"), "{out}");
 }
@@ -494,16 +507,16 @@ fn a_node_owner_can_trust_a_device_and_bad_input_trusts_nothing() {
     };
     assert!(run(&["node", "trust", "phone", &key]).status.success());
     let file = home.join("data/trusted-devices");
-    assert_eq!(
-        std::fs::read_to_string(&file).unwrap(),
-        format!("phone {key}\n")
+    // One line, the id and the key as before; ADR-0061 adds when its trust began (`since=`).
+    let written = std::fs::read_to_string(&file).unwrap();
+    assert!(
+        written.starts_with(&format!("phone {key} since=")),
+        "{written}"
     );
+    assert_eq!(written.lines().count(), 1);
     assert!(!run(&["node", "trust", "phone", "zz"]).status.success());
     assert!(!run(&["node", "trust", "phone"]).status.success());
-    assert_eq!(
-        std::fs::read_to_string(&file).unwrap(),
-        format!("phone {key}\n")
-    );
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), written);
     let _ = std::fs::remove_dir_all(&home);
 }
 

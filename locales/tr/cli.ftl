@@ -2,6 +2,10 @@
 
 cli-usage =
     Kullanım:
+      agora [--ui tui|web|none [--save]]
+      agora web
+      agora status
+      agora down
       agora node run [--socket YOL] [--manifests DİZİN] [--project YOL]... [--data DİZİN] [--worktrees DİZİN]
       agora agent start TÜR [--cwd YOL] [--worktree] [--project AD] [--name AD] [--accept-project-id-change] [--socket YOL]
       agora project init [--cwd YOL] [--socket YOL]
@@ -16,14 +20,18 @@ cli-usage =
       agora hub code [--hub-dir DIR]
       agora hub ssh install AD [--yes] [--unsigned] [--release-url URL] [--hub-dir DIR]
       agora hub login [--hub-dir DİZİN]
+      agora password set|clear|status [--hub-dir DİZİN]
       agora hub notify [--ntfy URL | --webhook URL | --test] [--hub-dir DIR]
       agora hub prices update [--url URL] [--hub-dir DIR]
       agora hub ssh [add AD HEDEF [--port N]] [--hub-dir DIR]
       agora hub backup [DOSYA] [--keep N] [--hub-dir DİZİN]
       agora hub restore DOSYA [--hub-dir DİZİN]
-      agora node enroll --hub URL --ca FILE --code CODE --id NAME
+      agora hub devices [forget CİHAZ_ID] [--hub-dir DİZİN]
+      agora node enroll --hub URL --ca FILE --code CODE --id NAME [--yes --fingerprint PARMAK_İZİ]... [--include-others] [--replace]
       agora panel
       agora node trust CİHAZ_ID AÇIK_ANAHTAR_HEX [--data DİZİN]
+      agora node trust --from-hub [--yes --fingerprint PARMAK_İZİ]... [--include-others] [--replace] [--data DİZİN]
+      agora node untrust CİHAZ_ID [--data DİZİN]
       agora tui [--hub ADRES:PORT --ca DOSYA --code KOD] [--hub-dir DİZİN]
       agora update [--check] [--version X] [--release-url URL] [--release-key DOSYA] [--unsigned]
       agora adapter install AD [--registry URL] [--root-key DOSYA] [--yes] | update [AD] | list | remove AD
@@ -43,6 +51,7 @@ cli-ambiguous-project = Birden fazla proje kayıtlı; --project ile birini seçi
 cli-no-projects = Bu düğümde proje yok. --project YOL ile başlatın.
 cli-bad-arguments = Komut satırı argümanları anlaşılamadı.
 cli-error = Hata { $code }: { $message }
+cli-invalid-directory-identity_changed = Bu klasörün proje kimliği, burada son kez ajan başlatıldığından beri değişti. Yine de başlatmak için --accept-project-id-change ekleyin.
 
 doctor-status-ok = tamam
 doctor-status-warn = not
@@ -65,11 +74,18 @@ doctor-manifests = { $detail ->
         [one] 1 ajan tanımı yüklendi.
        *[other] { $detail } ajan tanımı yüklendi.
     }
-doctor-manifests-missing = { $detail } adresinde ajan tanımları klasörü yok.
-doctor-agent-installed = { $detail } kurulu.
-doctor-agent-missing = { $detail } bu makinede kurulu değil.
+doctor-agent-installed = { $detail } ({ $from ->
+        [built-in] yerleşik
+       *[folder] tanımlar klasöründen
+    }): `{ $program }` bulundu.
+doctor-agent-missing = { $detail } ({ $from ->
+        [built-in] yerleşik
+       *[folder] tanımlar klasöründen
+    }): bu makine `{ $program }` programını PATH içinde bulamıyor. Programı oraya kurun ya da düğümü `{ $program }` komutunun çalıştığı bir terminalden başlatın.
 doctor-policy-path-dropped = Node politikasındaki "{ $detail }" satırı node'un kullanamayacağı bir yol içeriyor (göreli, ".." ya da ev klasörü olmayan "~"); ajanlar bu yol olmadan başlar. Tam bir yol ya da "~/" ile başlayan bir yol yazın.
 doctor-policy-path-missing = Node politikasındaki "{ $detail }" satırı henüz var olmayan bir yol içeriyor; yol oluşana kadar ajanlar onsuz başlar.
+doctor-policy-restart = Node, politika dosyası { $detail } dosyasını yalnızca başlarken okur: değiştirdikten sonra node'u yeniden başlatın ("agora node run"). Bir cihaza güvenmek ya da onu kaldırmak yeniden başlatma gerektirmez.
+doctor-policy-changed = Politika dosyası { $detail } bu node başladıktan sonra değişti, bu yüzden değişiklik henüz uygulanmıyor. Uygulamak için node'u yeniden başlatın ("agora node run").
 doctor-manifest-invalid = { $detail } ajan tanımı okunamadı.
 doctor-summary-ok = Agora'nın ihtiyaç duyduğu her şey yerinde.
 doctor-summary-problems = Agora'nın ihtiyaç duyduğu bir şey eksik. SORUN olarak işaretlenenleri düzeltin.
@@ -79,8 +95,48 @@ cli-hub-notify = Bildirimler { $file } dosyasındaki { $count } hedefe gidiyor.
 cli-hub-notify-skipped = { $file } dosyasının { $count } satırı anlaşılamadı ve yok sayılıyor. Her satır `ntfy URL` ya da `webhook URL` olmalı.
 cli-hub-web = Web uygulaması: https://{ $addr }/ . { $code } koduyla giriş yapın (10 dakika geçerli; yenisi için `agora hub login`). Hub sertifikasını kendi sertifika yetkilisi (CA) imzaladığı için bu yetkiliye güvenene kadar tarayıcı uyarı verir.
 cli-hub-login = Web uygulaması için giriş kodu: { $code } (10 dakika geçerli). Hub adresini tarayıcıda açıp kodu girin.
-cli-trusted = { $id } cihazı artık bu makinedeki onaylara yanıt verebilir. Uygulanması için bu makinedeki düğümü yeniden başlatın.
+cli-password-prompt = Yeni ekran parolası (yazarken görünmez):
+cli-password-repeat = Bir kez daha yazın:
+cli-password-needs-terminal = Ekran parolasını ayarlamak etkileşimli bir terminal ister: parola hiçbir zaman bir borudan ya da dosyadan okunmaz.
+cli-password-too-short = Bu çok kısa: en az { $min } karakter kullanın.
+cli-password-too-long = Bu çok uzun.
+cli-password-mismatch = İkisi aynı değil; hiçbir şey değişmedi.
+cli-password-set = Ekran parolası ayarlandı. Başka bir makineden giriş artık bu parolayı ister; bu makinenin kendi tarayıcısına hiç sorulmaz. Açık { $count } oturum kapatıldı.
+cli-password-cleared = Ekran parolası kaldırıldı. Giriş kodu yine tek başına yeterli. Açık { $count } oturum kapatıldı.
+cli-password-on = Ekran parolası ayarlı: başka makinelerden girişler bu parolayı ister.
+cli-password-off = Ekran parolası ayarlı değil: giriş kodu tek başına yeterli.
+cli-trusted = { $id } cihazı artık bu makinedeki onaylara yanıt verebilir.
 cli-trust-failed = Bu cihaz güvenilir olarak kaydedilemedi: { $reason }
+cli-devices-offer = Hub, bu makinenin henüz güvenmediği { $count ->
+        [one] bir cihaz
+       *[other] { $count } cihaz
+    } listeliyor. Her parmak izini, pencerede "Bu cihaz" altında gösterilenle karşılaştırın:
+cli-devices-line =   { $name } ({ $id }) · kayıt { $when }
+cli-devices-line-user =   { $name } ({ $id }) · { $user } kişisinin · kayıt { $when }
+cli-devices-fingerprint =     parmak izi { $fingerprint }
+cli-devices-replaces =     Bu makine { $id } cihazına başka bir anahtarla zaten güveniyor: buna güvenmek onu değiştirir (yalnızca --replace ile).
+cli-devices-unproven = Hub { $id } cihazını kendi imzası olmadan (anahtarın elde tutulduğunun kanıtı) listeliyor; önerilmiyor.
+cli-devices-others = Bu hub'daki başka kişilerin cihazları ({ $count }); yalnızca --include-others ve parmak izleriyle güvenilir:
+cli-devices-others-need-flag = Hiçbir cihaza güvenilmedi: bu cihazlar hub sahibinin değil. Birine güvenmek için --yes --include-others --fingerprint PARMAK_İZİ verin.
+cli-devices-replace-refused = Güvenilmedi: { $id } cihazına burada başka bir anahtarla zaten güveniliyor. Değiştirmek için --replace verin.
+cli-devices-question = Bu cihazlara bu makinede güvenilsin mi? [e/H]
+cli-devices-yes = e, evet, y, yes
+cli-devices-trusted = { $name } ({ $id }, { $fingerprint }) bu makinede güvenilir oldu.
+cli-devices-none = Hub'da henüz kayıtlı cihaz yok. Pencereden oturum açın, sonra burada "agora node trust --from-hub" çalıştırın.
+cli-devices-none-new = Hub'da kayıtlı her cihaza bu makinede zaten güveniliyor.
+cli-devices-declined = Hiçbir cihaza güvenilmedi.
+cli-devices-not-asked = Hiçbir cihaza güvenilmedi: bu etkileşimli bir terminal değil. Bu makinede "agora node trust --from-hub" çalıştırın ya da her cihaz için --yes ile --fingerprint verin.
+cli-devices-unmatched = Hub'ın listelediği hiçbir cihazın parmak izi { $fingerprint } değil; güvenilmedi.
+cli-devices-not-enrolled = Bu makine bir hub'a kayıtlı değil. Önce "agora node enroll" çalıştırın.
+cli-devices-failed = Cihazlar hub'dan alınamadı ({ $reason }).
+cli-untrusted = { $id } cihazına artık bu makinede güvenilmiyor.
+cli-untrust-unknown = { $id } cihazına bu makinede zaten güvenilmiyordu. Hub onun daha önceki bir onayını getirse de reddedilir.
+cli-hub-device-forgotten = { $id } cihazı artık listelenmiyor. Makineler onu reddetmeye devam eder.
+cli-hub-device-not-forgotten = { $id } bu hub'da kaldırılmış bir cihaz değil; yalnızca kaldırılmış cihazlar unutulabilir.
+cli-hub-devices-none = Henüz kayıtlı cihaz yok. Bir tarayıcı ya da terminal istemcisi oturum açtığında kendini kaydeder.
+cli-hub-device-line = { $name } · { $fingerprint } · { $id } · { $user } · kayıt { $created } · son kullanım { $used }{ $state }
+cli-device-state-revoked = {" "}· kaldırıldı
+cli-device-state-waiting = {" "}· onay bekliyor
 cli-hub-backup = Yedek { $path } dosyasına yazıldı.
 cli-hub-restored = Veritabanı yedekten { $path } konumuna geri yüklendi. Önceki veritabanı aynı klasörde before-restore adıyla saklanıyor.
 cli-hub-failed = Hub komutu başarısız oldu: { $reason }
@@ -143,3 +199,42 @@ cli-project-identity = Proje kimliği: { $id } (klasör: { $path }). .agent-proj
 
 cli-panel = Hub'ın panelini tarayıcıda şu adreste açın: { $url }. Bu makinenin tarayıcısı hub'ın sertifikasına güvenmeli: { $ca } dosyasını sertifika otoritesi olarak içe aktarın (Windows'ta: certutil -user -addstore Root { $ca }). Giriş için hub makinesinde "agora hub login" ile alınan kodu kullanın.
 cli-panel-none = Bu makine bir hub'a kayıtlı değil, açılacak panel yok. Önce "agora node enroll" ile kaydedin.
+
+# ADR-0062: yalın `agora` (ön kapı), `agora web`, `agora status`, `agora down`.
+frontdoor-welcome = Agora'ya hoş geldiniz. Bu makine ne yapsın?
+frontdoor-choice-here = 1) Agora'yı burada başlat: ajanlarınız bu makinede çalışır, onları buradan açarsınız
+frontdoor-choice-alone = 2) Yalnızca bu makine, tek başına
+frontdoor-choice-join = 3) Başka bir makinede çalışan bir Agora'ya katıl
+frontdoor-choose = 1, 2 ya da 3 yazıp Enter'a basın:
+frontdoor-lan-question = Diğer makineleriniz bağlanabilsin mi? [e/H]
+frontdoor-join-later = Buradan katılmak henüz yok. Agora'nın çalıştığı makinede `agora hub code` çalıştırın; sonra burada `agora node enroll` ve `agora node run` çalıştırın (bkz. `agora --help`).
+frontdoor-get-started = Agora bu makinede henüz kurulmadı. Bir terminalde `agora` çalıştırıp tek bir soruyu yanıtlayın. (Ayarlar { $path } dosyasında tutulur.)
+frontdoor-set-up-by-hand = Bu makinede elle başlatılmış bir Agora zaten var ({ $path }). `agora` onu henüz devralmıyor: `agora hub run` ve `agora node run` ile devam edin ya da `agora` yeni bir kurulum yapsın diye AGORA_HOME değişkenini yeni bir klasöre yöneltin.
+frontdoor-saved = { $path } dosyasına kaydedildi.
+frontdoor-bad-machine-file = { $path } okunamadı. Düzeltin ya da silip ilk soruyu yeniden yanıtlamak için `agora` komutunu tekrar çalıştırın.
+frontdoor-not-set-up = Agora bu makinede henüz kurulmadı. Önce `agora` çalıştırın.
+frontdoor-no-port = { $port } ve sonrasında boş port bulunamadı.
+frontdoor-failed = Agora başlatılamadı: { $reason }
+frontdoor-role-hub = hub
+frontdoor-role-node = node
+frontdoor-starting = { $role } başlatılıyor…
+frontdoor-in-job = { $role } kendisini başlatan terminalin iş nesnesinden (job) ayrılamadı; bu yüzden o terminal kapanınca o da kapanır. Çalışmaya devam etmesi için `agora` komutunu o işin dışındaki bir terminalden (ya da bir hizmetten) başlatın.
+frontdoor-not-ready = { $role } { $seconds } sn içinde başlamadı. Yazdıkları: { $log }
+frontdoor-not-linked = Bu makine { $seconds } sn içinde hub'ına bağlanmadı. Yazdıkları: { $log }
+frontdoor-running = Agora bu makinede çalışıyor. Bu pencereyi kapatsanız da çalışmaya devam eder; `agora status` durumu gösterir, `agora down` durdurur.
+frontdoor-web-failed = Tarayıcıda oturum açılamadı: { $reason }. `agora web` komutunu yeniden çalıştırın; `agora status` Agora'nın çalışıp çalışmadığını gösterir.
+frontdoor-web-opened = Agora tarayıcınızda, oturum açılmış olarak açıldı.
+frontdoor-web-url = Oturum açmak için bu adresi tarayıcınızda açın (bir kez, 10 dakika geçerli; süresi dolduysa `agora web` komutunu yeniden çalıştırın): { $url }
+status-machine = Bu makinenin Agora'sı ({ $path }); arayüz: { $ui }
+status-running = { $role } çalışıyor (süreç { $pid }, sürüm { $version })
+status-running-other = { $role } çalışıyor (`agora` tarafından başlatılmadı)
+status-stopped = { $role } çalışmıyor
+status-hub = dinlediği adres { $addr }; veri klasörü { $dir }
+status-node-linked = { $hub } adresine { $id } olarak bağlı
+status-node-not-linked = bir hub'a bağlı değil
+status-agents = çalışan ajan: { $count }
+status-log = günlük: { $log }
+down-stopped = { $role } durduruldu (süreç { $pid }).
+down-failed = { $role } durdurulamadı: { $reason }
+down-nothing = Durdurulacak bir şey yok: `agora` şu anda çalışan hiçbir şey başlatmamış.
+cli-node-policy-not-understood = node.policy_not_understood: ilke dosyasında bu makinenin anlamadığı bir satır var ({ $line }); düzeltilene kadar hiçbir ajan sormadan başlatılamaz.
