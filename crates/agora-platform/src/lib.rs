@@ -422,11 +422,17 @@ pub fn local_connect(path: &std::path::Path) -> io::Result<LocalStream> {
 }
 
 impl LocalListener {
-    /// Wait for the next client.
+    /// Wait for the next client. The stream it returns blocks (its reads wait, up to their timeout), whether or not this listener
+    /// does.
     pub fn accept(&self) -> io::Result<LocalStream> {
         #[cfg(unix)]
         {
-            self.inner.accept().map(|(inner, _)| LocalStream { inner })
+            // macOS and the BSDs hand an accepted socket the listener's O_NONBLOCK (Linux does not). A listener made non-blocking
+            // for its accept loop must not make every connection non-blocking: a read with a timeout would return WouldBlock at
+            // once, and a loop that waits on it spins a core (seen on macOS: each idle control connection at 100% CPU).
+            let (inner, _) = self.inner.accept()?;
+            inner.set_nonblocking(false)?;
+            Ok(LocalStream { inner })
         }
         #[cfg(windows)]
         {
