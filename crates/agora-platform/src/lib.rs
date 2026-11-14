@@ -26,6 +26,8 @@ use winproc as procinfo;
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_os = "macos")]
+mod macservice;
 #[cfg(target_os = "linux")]
 use linux as procinfo;
 #[cfg(target_os = "macos")]
@@ -1405,9 +1407,9 @@ pub fn open_append_private(path: &std::path::Path) -> io::Result<std::fs::File> 
     }
 }
 
-/// True where [`service_install`] can register a program to start at the user's login (ADR-0062 item 6): Windows (a logon task).
-/// The systemd user unit (Linux) and the LaunchAgent (macOS) halves come next, behind the same functions.
-pub const SERVICES_SUPPORTED: bool = cfg!(windows);
+/// True where [`service_install`] can register a program to start at the user's login (ADR-0062 item 6): Windows (a logon task) and
+/// macOS (a LaunchAgent). The systemd user unit (Linux) half comes next, behind the same functions.
+pub const SERVICES_SUPPORTED: bool = cfg!(any(windows, target_os = "macos"));
 
 /// A program registered to start when the user logs in, for this user only and without administrator rights (ADR-0062 item 6). The
 /// caller (the `agora service` command) builds it; each system writes it in its own form.
@@ -1448,7 +1450,11 @@ pub fn service_install(spec: &ServiceSpec) -> io::Result<()> {
     {
         winservice::install(spec)
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        macservice::install(spec)
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         let _ = spec;
         Err(io::Error::from(io::ErrorKind::Unsupported))
@@ -1461,7 +1467,11 @@ pub fn service_start(name: &str) -> io::Result<()> {
     {
         winservice::start(name)
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        macservice::start(name)
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         let _ = name;
         Err(io::Error::from(io::ErrorKind::Unsupported))
@@ -1475,7 +1485,11 @@ pub fn service_remove(name: &str) -> io::Result<bool> {
     {
         winservice::remove(name)
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        macservice::remove(name)
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         let _ = name;
         Err(io::Error::from(io::ErrorKind::Unsupported))
@@ -1489,7 +1503,11 @@ pub fn service_status(name: &str) -> io::Result<ServiceState> {
     {
         winservice::status(name)
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        macservice::status(name)
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         let _ = name;
         Err(io::Error::from(io::ErrorKind::Unsupported))
