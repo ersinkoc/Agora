@@ -1516,6 +1516,8 @@ pub enum ServiceRefusal {
     NotAbsolute,
     /// A backslash in the working directory (systemd writes it unquoted, and a `\` at a line's end joins the next line).
     Backslash,
+    /// A quote (`"`, `'`) or a backslash in the program's path: systemd refuses to run such an executable.
+    ProgramCharacter,
 }
 
 /// The first path or argument of `spec` this system's service entry cannot carry as it is, and why; `None` when all can. The caller
@@ -1596,8 +1598,9 @@ pub fn service_precheck() -> io::Result<()> {
     }
 }
 
-/// The files that change the service `name` besides its own (Linux: its drop-ins), which [`service_remove`] does not delete: the
-/// caller names those still there afterwards. Empty elsewhere.
+/// The files the service manager reads for the service `name` besides Agora's own (Linux: its drop-ins, and the unit file it loaded
+/// when that is not Agora's), which can change what it runs. `status` and a repeated `install` name them; [`service_remove`] does not
+/// delete them, and the caller names those still there afterwards. Empty elsewhere.
 pub fn service_drop_ins(name: &str) -> io::Result<Vec<PathBuf>> {
     #[cfg(target_os = "linux")]
     {

@@ -341,7 +341,14 @@ impl Systemd {
     /// See [`crate::service_drop_ins`].
     fn drop_ins(&self, name: &str) -> io::Result<Vec<PathBuf>> {
         check_name(name)?;
-        Ok(self.loaded_from(name)?.1)
+        let (fragment, mut others) = self.loaded_from(name)?;
+        let path = self.unit_path(name);
+        if let Some(f) = fragment {
+            if f != path && fs::canonicalize(&f).ok() != fs::canonicalize(&path).ok() {
+                others.insert(0, f);
+            }
+        }
+        Ok(others)
     }
 
     fn unit_path(&self, name: &str) -> PathBuf {
@@ -513,10 +520,34 @@ fn read_show(text: &str) -> (Option<PathBuf>, Vec<PathBuf>) {
         if let Some(v) = line.strip_prefix("FragmentPath=") {
             fragment = (!v.trim().is_empty()).then(|| PathBuf::from(v.trim()));
         } else if let Some(v) = line.strip_prefix("DropInPaths=") {
-            drop_ins = v.split_whitespace().map(PathBuf::from).collect();
+            drop_ins = split_drop_ins(v);
         }
     }
     (fragment, drop_ins)
+}
+
+/// `DropInPaths=` separates its paths by spaces, and a path may hold one: every drop-in ends in `.conf`, so words are joined until one
+/// does (a last word without it is kept as it is).
+fn split_drop_ins(v: &str) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for word in v.split(' ') {
+        if word.is_empty() && cur.is_empty() {
+            continue;
+        }
+        if !cur.is_empty() {
+            cur.push(' ');
+        }
+        cur.push_str(word);
+        if word.ends_with(".conf") {
+            out.push(PathBuf::from(std::mem::take(&mut cur)));
+        }
+    }
+    let rest = cur.trim();
+    if !rest.is_empty() {
+        out.push(PathBuf::from(rest));
+    }
+    out
 }
 
 pub(crate) fn service_precheck() -> io::Result<()> {
@@ -658,6 +689,11 @@ pub(crate) fn service_refusal(
         if !p.is_absolute() {
             return Err(NotAbsolute);
         }
+        // systemd refuses an executable whose path holds a quote or a backslash ("Executable path contains special characters",
+        // measured with `systemd-analyze verify`, systemd 259).
+        if !folder && t.contains(['"', '\'', '\\']) {
+            return Err(crate::ServiceRefusal::ProgramCharacter);
+        }
         if folder && t != t.trim() {
             return Err(CannotCarry);
         }
@@ -682,8 +718,14 @@ pub(crate) fn service_refusal(
     None
 }
 
-/// A word of `ExecStart=`: in double quotes, with `\` and `"` escaped (systemd unescapes C style), `%` as `%%` (a specifier) and `$`
-/// as `$$` (a variable). No shell reads it.
+/// The executable, the first word of `ExecStart=`: in double quotes with `%` as `%%`. systemd expands no variable there and does not
+/// undo `$$` (measured), so `$` stays as it is; quotes and backslashes are refused before ([`service_refusal`]).
+fn exec_program(s: &str) -> String {
+    format!("\"{}\"", s.replace('%', "%%"))
+}
+
+/// An argument of `ExecStart=`: in double quotes, with `\` and `"` escaped (systemd unescapes C style), `%` as `%%` (a specifier) and
+/// `$` as `$$` (a variable). No shell reads it.
 fn exec_word(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
@@ -742,7 +784,7 @@ fn unit_text(spec: &crate::ServiceSpec) -> io::Result<String> {
     {
         return Err(invalid());
     }
-    let mut exec = exec_word(spec.program.to_str().ok_or_else(invalid)?);
+    let mut exec = exec_program(spec.program.to_str().ok_or_else(invalid)?);
     for a in &spec.args {
         exec.push(' ');
         exec.push_str(&exec_word(a.to_str().ok_or_else(invalid)?));
@@ -1229,6 +1271,93 @@ esac
         assert!(!f.unit().exists());
     }
 
+    /// The executable is the first word: systemd expands no variable there and does not undo `$$`, so `$` stays as it is; `%` is still
+    /// a specifier; a quote or a backslash makes systemd refuse it, so Agora refuses it first.
+    #[test]
+    fn the_program_path_is_written_as_systemd_runs_it() {
+        let mut s = spec(Path::new("/home/u/h"));
+        s.program = PathBuf::from("/opt/d$X/p%q/my apps/agora");
+        s.args[1] = "n$o%de".into();
+        let text = unit_text(&s).unwrap();
+        assert!(
+            text.contains("ExecStart=\"/opt/d$X/p%%q/my apps/agora\" \"supervise\" \"n$$o%%de\" "),
+            "{text}"
+        );
+        for bad in ["/opt/q\"x/agora", "/opt/a'b/agora", "/opt/b\\c/agora"] {
+            let mut s = spec(Path::new("/home/u/h"));
+            s.program = PathBuf::from(bad);
+            assert_eq!(
+                service_refusal(&s).unwrap().1,
+                ServiceRefusal::ProgramCharacter,
+                "{bad}"
+            );
+            assert!(unit_text(&s).is_err());
+        }
+    }
+
+    /// The same unit checked by systemd itself, offline (`systemd-analyze verify` in a scratch folder: it loads the file and starts
+    /// nothing). Skipped, with a note, where systemd-analyze is not installed.
+    #[test]
+    fn systemd_itself_accepts_the_unit_with_odd_paths() {
+        let Some(analyze) = std::env::var_os("PATH").and_then(|p| {
+            std::env::split_paths(&p)
+                .filter(|d| d.is_absolute())
+                .map(|d| d.join("systemd-analyze"))
+                .find(|p| p.is_file())
+        }) else {
+            eprintln!("note: systemd-analyze not found; the unit was not checked by systemd");
+            return;
+        };
+        let f = Fake::new("analyze");
+        let bin = f.dir.join("d$X p%q");
+        fs::create_dir_all(&bin).unwrap();
+        let program = bin.join("agora");
+        fs::write(&program, "#!/bin/sh\n").unwrap();
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+        let home = f.dir.join("home 50% $HOME 'q' \"d\"");
+        fs::create_dir_all(&home).unwrap();
+        let mut s = spec(&home);
+        s.program = program;
+        s.env = vec![("PATH".into(), "/usr/bin:/a b/%x:/c\"d".into())];
+        let unit = f.dir.join("agora-analyze.service");
+        fs::write(&unit, unit_text(&s).unwrap()).unwrap();
+        let scratch = f.dir.join("scratch");
+        fs::create_dir_all(&scratch).unwrap();
+        let out = std::process::Command::new(analyze)
+            .args(["verify", "--man=no", "--generators=no"])
+            .arg(&unit)
+            .env_clear()
+            .env("HOME", &scratch)
+            .env("XDG_CONFIG_HOME", scratch.join("cfg"))
+            .env("XDG_RUNTIME_DIR", scratch.join("run"))
+            .env("PATH", "/usr/bin:/bin")
+            .output()
+            .unwrap();
+        let said = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(out.status.success(), "{said}");
+        assert!(
+            !said.contains("not executable") && !said.contains("special characters"),
+            "{said}"
+        );
+    }
+
+    #[test]
+    fn a_drop_in_path_with_a_space_stays_whole() {
+        assert_eq!(
+            split_drop_ins("/x/my dir/a.conf /y/b.conf /z/two  spaces.conf"),
+            vec![
+                PathBuf::from("/x/my dir/a.conf"),
+                PathBuf::from("/y/b.conf"),
+                PathBuf::from("/z/two  spaces.conf")
+            ]
+        );
+        assert!(split_drop_ins("").is_empty());
+    }
+
     #[test]
     fn show_is_read_by_its_keys() {
         assert_eq!(
@@ -1326,12 +1455,10 @@ esac
                 io::ErrorKind::InvalidInput
             );
         }
-        // In the program, inside ExecStart's quotes, it is escaped.
+        // In an argument, inside its quotes, it is escaped.
         let mut s = spec(Path::new("/home/u/h"));
-        s.program = PathBuf::from("/opt/a\\b/agora");
-        assert!(unit_text(&s)
-            .unwrap()
-            .contains("ExecStart=\"/opt/a\\\\b/agora\""));
+        s.args[1] = "a\\b".into();
+        assert!(unit_text(&s).unwrap().contains(" \"a\\\\b\" "));
     }
 
     /// Root (`sudo`) is refused before anything is written, and so is a missing HOME, each with its own problem.

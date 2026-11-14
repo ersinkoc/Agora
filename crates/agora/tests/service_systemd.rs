@@ -282,6 +282,39 @@ fn service_install_status_remove_drive_a_user_unit_through_systemctl() {
     assert!(out.contains("nothing changed"), "{out}");
     assert_eq!(stat("%i", &s.unit()), inode);
 
+    // Turned off outside Agora (`systemctl --user disable`): install never says "already starts"; it turns it on again and says so.
+    std::fs::remove_file(s.base.join("bin/enabled-agora-node.service")).unwrap();
+    let (code, out) = s.run(&["service", "status"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("turned off"), "{out}");
+    let (code, out) = s.run(&["service", "install"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("it is turned on again"), "{out}");
+    assert!(!out.contains("already starts"), "{out}");
+    assert!(s.base.join("bin/enabled-agora-node.service").exists());
+    assert_eq!(stat("%i", &s.unit()), inode);
+
+    // A drop-in added after the install (in a folder with a space): status names it, quoted and whole, and install says it is there
+    // instead of "already".
+    let late = s.base.join("cfg/systemd/user/agora-node.service.d");
+    std::fs::create_dir_all(&late).unwrap();
+    std::fs::write(late.join("my late.conf"), "[Service]\nExecStart=\n").unwrap();
+    let quoted = format!("\"{}\"", late.join("my late.conf").display());
+    let (code, out) = s.run(&["service", "status"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.contains("systemd also reads") && out.contains(&quoted),
+        "{out}"
+    );
+    let (code, out) = s.run(&["service", "install"]);
+    assert_eq!(code, 1, "{out}");
+    assert!(
+        out.contains("but systemd also reads") && out.contains(&quoted),
+        "{out}"
+    );
+    assert!(!out.contains("nothing changed;"), "{out}");
+    std::fs::remove_dir_all(&late).unwrap();
+
     let (code, out) = s.run(&["service", "status"]);
     assert_eq!(code, 0, "{out}");
     assert!(
@@ -333,9 +366,10 @@ fn service_install_status_remove_drive_a_user_unit_through_systemctl() {
     assert!(out.contains("would not run only what Agora wrote"), "{out}");
     assert!(out.contains("10-local-build.conf"), "{out}");
     assert!(!s.unit().exists(), "the refused unit was left behind");
+    // The first install and the one that turned it on again; the refused one enabled nothing.
     assert_eq!(
         s.log().matches("enable agora-node").count(),
-        1,
+        2,
         "{}",
         s.log()
     );

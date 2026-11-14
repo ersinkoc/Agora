@@ -36,7 +36,8 @@ window again.
   `loginctl enable-linger` yourself (Agora never does). It needs a session with your user's systemd running (a desktop login, or an SSH
   login while your user manager runs, for example with lingering on; not `su` or `sudo`, and it refuses to run as root); without
   one it says so and changes nothing. It also refuses when systemd would read other files for the same unit (drop-ins such as
-  `agora-node.service.d/`), and `remove` names the drop-ins it leaves. The agents the node starts run inside the unit and end with it
+  `agora-node.service.d/`), `status` and a repeated `install` name any drop-in added later, and
+  `remove` names the drop-ins it leaves. `install` on a unit turned off with `systemctl --user disable` turns it on again and says so. The agents the node starts run inside the unit and end with it
   (`systemctl --user stop`, or a logout without lingering), unlike a node started by `agora`, whose agents outlive the window. A
   unit of the same name that you wrote yourself is left exactly
   as it is: `agora service` neither replaces, stops nor removes it. Without `systemctl` it is not available. macOS (LaunchAgent) comes next.
