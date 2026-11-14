@@ -1,39 +1,14 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { t } from '../i18n';
 import type { AgentTileModel } from '../model';
 import { mergeLines, noticeText, type ChatLine, type ChatSource } from '../net/chat';
+import { Entry, groupLines, ToolSteps } from './ChatEntry';
 import { SessionBar } from './SessionBar';
+import { StateMark } from './StateBadge';
 import type { OptionKind } from './sessionChoice';
 
-function Line({ line }: { line: ChatLine }) {
-  if (line.role === 'user') {
-    return <div className="ms-auto max-w-[85%] rounded-m bg-accent/15 px-3 py-2 break-words whitespace-pre-wrap">{line.text}</div>;
-  }
-  if (line.kind === 'notice') {
-    // Something went wrong or changed in the conversation (ADR-0058): said by the window, from the code the agent's adapter sent.
-    return <div role="note" className="max-w-[90%] rounded-s border border-needs-you/50 bg-surface-1 px-3 py-1.5 text-xs break-words whitespace-pre-wrap text-muted">{noticeText(line, t)}</div>;
-  }
-  if (line.kind === 'tool') {
-    return <div className="max-w-[90%] rounded-s border border-line bg-surface-0 px-3 py-1.5 font-mono text-xs break-all text-muted"><span className="font-sans font-medium text-ink">{t('chat-tool')}</span> {line.text}</div>;
-  }
-  if (line.kind === 'plan') {
-    return (
-      <div className="max-w-[90%] rounded-s border border-line px-3 py-2 text-[0.8125rem]">
-        <div className="muted mb-1">{t('chat-plan')}</div>
-        <ol className="m-0 list-decimal ps-5">{line.text.split('\n').map((p, i) => <li key={i}>{p}</li>)}</ol>
-      </div>
-    );
-  }
-  if (line.kind === 'diff') {
-    return (
-      <div className="max-w-full overflow-hidden rounded-s border border-line">
-        <div className="border-b border-line bg-surface-2 px-3 py-1 font-mono text-xs">{line.path}</div>
-        <pre className="m-0 max-h-60 overflow-auto p-2 font-mono text-xs">{line.text}</pre>
-      </div>
-    );
-  }
-  return <div className="max-w-[90%] break-words whitespace-pre-wrap">{line.text}</div>;
-}
+// A notice (ADR-0058): something went wrong or changed in the conversation, said by the window from the code the adapter sent.
+const notice = (line: ChatLine) => <div role="note" className="max-w-[90%] rounded-s border border-needs-you/50 bg-surface-1 px-3 py-1.5 text-xs break-words whitespace-pre-wrap text-muted">{noticeText(line, t)}</div>;
 
 // A chat agent has no terminal: you talk to it with requests and read its answers, as a conversation the node keeps (ADR-0038).
 export function PromptBox({ agent, send, source, choose }: { agent: AgentTileModel; send?: (a: AgentTileModel, text: string) => Promise<boolean>; source?: ChatSource; choose?: (agentKey: string, kind: OptionKind, id: string) => Promise<boolean> }) {
@@ -42,6 +17,7 @@ export function PromptBox({ agent, send, source, choose }: { agent: AgentTileMod
   const [busy, setBusy] = useState(false);
   const [lines, setLines] = useState<ChatLine[]>([]);
   const end = useRef<HTMLDivElement>(null);
+  const groups = useMemo(() => groupLines(lines), [lines]);
 
   useEffect(() => {
     if (!source) return;
@@ -49,7 +25,7 @@ export function PromptBox({ agent, send, source, choose }: { agent: AgentTileMod
     const sub = source.connect((incoming, replace) => setLines((held) => (replace ? incoming : mergeLines(held, incoming))));
     return () => sub.close();
   }, [source]);
-  useEffect(() => { end.current?.scrollIntoView?.({ block: 'end' }); }, [lines.length]);
+  useEffect(() => { end.current?.scrollIntoView?.({ block: 'end' }); }, [lines.length, agent.state]);
 
   const go = async () => {
     const body = text.trim();
@@ -64,9 +40,12 @@ export function PromptBox({ agent, send, source, choose }: { agent: AgentTileMod
     <div className="flex h-full min-h-0 flex-col gap-3 rounded-m bg-surface-0 p-3">
       {/* Keyed by the agent: another agent on screen gets a fresh bar, so nothing left open carries over; usage updates keep it. */}
       {agent.session && <SessionBar key={agent.id} agentKey={agent.id} session={agent.session} disabled={agent.closed} choose={choose} />}
-      <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto" aria-live="polite" aria-label={t('chat-log')}>
+      <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto [&>*]:shrink-0" aria-live="polite" aria-label={t('chat-log')}>
         {lines.length === 0 && <p className="muted m-0">{t(source ? 'chat-empty' : 'prompt-intro')}</p>}
-        {lines.map((l) => <Line key={l.id} line={l} />)}
+        {groups.map((g) => g.kind === 'steps'
+          ? <ToolSteps key={`s${g.lines[0]?.id ?? 0}`} lines={g.lines} />
+          : <Entry key={g.line.id} line={g.line} latestPlan={g.latestPlan} notice={notice} />)}
+        {agent.state === 'working' && !agent.closed && lines.length > 0 && <div role="status" className="flex items-center gap-2 text-xs text-muted"><StateMark state="working" />{t('chat-working')}</div>}
         <div ref={end} />
       </div>
       <form className="flex flex-none flex-col gap-2" onSubmit={(e) => { e.preventDefault(); void go(); }}>
