@@ -1,6 +1,8 @@
 //! Agents know who else is here (docs/specs/mesh-tools.md, "Awareness"): a real node whose agents are `agora-fake-agent`
 //! processes asks `workspace_status` on its own, through an in-process hub that knows a second machine with the same project,
-//! and with the hub gone (`partial`); a stopped agent leaves one `presence` notice in the other agent's inbox.
+//! and with the hub gone (`partial`); `agents_list` lists the other machine's agent of the shared project (never one of a project
+//! only that machine has), and only this machine's, marked `partial`, when the hub is gone; a stopped agent leaves one `presence`
+//! notice in the other agent's inbox.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -312,6 +314,9 @@ fn agents_see_who_else_is_here_on_this_machine_and_on_others() {
     beta.node_online("beta");
     beta.checkout_discovered("beta", &project, Path::new("/elsewhere/proj"));
     beta.agent_started(&AgentId::new("b"), &project, "beta", "", "codex");
+    // A project only the second machine has: its agents are never listed to this machine's agents.
+    beta.checkout_discovered("beta", "only-beta", Path::new("/elsewhere/other"));
+    beta.agent_started(&AgentId::new("c"), "only-beta", "beta", "", "codex");
     let hub = Arc::new(Hub::open(SqliteStore::open_in_memory().unwrap()).unwrap());
     link(&hub, &node.events, "alpha");
     link(&hub, &beta, "beta");
@@ -356,11 +361,83 @@ fn agents_see_who_else_is_here_on_this_machine_and_on_others() {
     );
     assert!(!format!("{st}").contains("SECRET"), "{st}");
 
+    // agents_list spans the machines of the shared project too, and its ids are what send_message takes.
+    let ids = |list: &Value| -> Vec<String> {
+        let mut v: Vec<String> = list
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["agent_id"].as_str().unwrap().to_string())
+            .collect();
+        v.sort();
+        v
+    };
+    let mut want = vec![a1.clone(), a2.clone(), "beta/b".to_string()];
+    want.sort();
+    for args in [json!({}), json!({"project": project})] {
+        let list = m1.tool("agents_list", args);
+        assert_eq!(ids(&list), want, "{list}");
+        assert!(
+            list.as_array()
+                .unwrap()
+                .iter()
+                .all(|r| r["partial"] == false),
+            "{list}"
+        );
+        let b = list
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["agent_id"] == "beta/b")
+            .unwrap();
+        assert_eq!(b["node"], "beta");
+        assert_eq!(b["kind"], "codex");
+        assert_eq!(b["project"], json!(project));
+        assert_eq!(b["doing"], "working on task: review the login");
+        assert!(
+            !format!("{list}").contains("only-beta") && !format!("{list}").contains("SECRET"),
+            "{list}"
+        );
+    }
+    // Naming the project this machine does not take part in lists nobody: the hub does not answer for it.
+    let list = m1.tool("agents_list", json!({"project": "only-beta"}));
+    assert_eq!(list, json!([]), "{list}");
+
     // The hub cannot be reached: this machine's answer, marked partial.
     node.mesh.set_remote(Arc::new(HubLink(None)));
     let st = m1.tool("workspace_status", json!({}));
     assert_eq!(st["partial"], true);
     assert_eq!(st["agents"].as_array().unwrap().len(), 2);
+    let list = m1.tool("agents_list", json!({}));
+    let mut here = vec![a1.clone(), a2.clone()];
+    here.sort();
+    assert_eq!(ids(&list), here, "{list}");
+    assert!(
+        list.as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["partial"] == true),
+        "{list}"
+    );
+
+    // The other machine goes offline: the hub answers without its agents, like workspace_status.
+    hub.node_disconnected("beta", agora_hub::server::now_ms())
+        .unwrap();
+    node.mesh
+        .set_remote(Arc::new(HubLink(Some(Arc::clone(&hub)))));
+    let list = m1.tool("agents_list", json!({}));
+    assert_eq!(ids(&list), here, "{list}");
+    assert!(
+        list.as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["partial"] == false),
+        "{list}"
+    );
+    let st = m1.tool("workspace_status", json!({}));
+    assert_eq!(st["agents"].as_array().unwrap().len(), 2, "{st}");
+    assert_eq!(st["machines_online"], 1, "{st}");
+    node.mesh.set_remote(Arc::new(HubLink(None)));
 
     // Stopping the other agent leaves exactly one notice in this one's inbox; it is never typed into its terminal.
     local

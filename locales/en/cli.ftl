@@ -87,6 +87,23 @@ doctor-policy-path-dropped = The node's policy line "{ $detail }" names a path t
 doctor-policy-path-missing = The node's policy line "{ $detail }" names a path that does not exist yet; agents start without it until it does.
 doctor-policy-restart = The node reads its policy file { $detail } only when it starts: after you change it, restart the node ("agora node run"). Trusting or removing a device needs no restart.
 doctor-policy-changed = The policy file { $detail } changed after this node started, so the change does not apply yet. Restart the node ("agora node run") to apply it.
+doctor-signed-commands = Commands sent to this machine through the hub need a signature from one of your trusted devices: { $detail }.
+doctor-signed-commands-team = Some devices are limited to certain projects, so every command sent through the hub that changes something needs a signature from a trusted device: { $detail }.
+doctor-signed-commands-none = Commands sent to this machine through the hub (stop an agent, type into its terminal, write a file) run without a signature from your device, so whoever controls the hub could send them. Starting an agent in a folder from the window is always signed. To require a signature, add this line to { $detail } and restart the node: signed_commands = agent.start, agent.stop, agent.prompt, terminal.input, files.write
+doctor-devices = { $detail ->
+    [one] One device is trusted on this machine
+   *[other] { $detail } devices are trusted on this machine
+}; { $unlimited } of them may act in every project.
+doctor-devices-none = No device is trusted on this machine yet, so it accepts no signed request: approvals and starts from the window are refused here. Trust your browser or terminal with "agora node trust --from-hub".
+doctor-skip-permissions = { $detail ->
+    [allow] Agents may be started in a mode that skips their permission questions, after your confirmation and signature (policy: skip_permissions = allow).
+    [confined_only] Agents may skip their permission questions only while they are confined (policy: skip_permissions = confined_only).
+   *[other] No agent may be started in a mode that skips its permission questions (policy: skip_permissions = forbid).
+}
+doctor-policy-problems = { $detail ->
+    [one] One line
+   *[other] { $detail } lines
+} of the node's policy file could not be understood; until they are fixed, no agent may skip its permission questions.
 doctor-manifest-invalid = The agent description { $detail } could not be read.
 doctor-summary-ok = Everything Agora needs is in place.
 doctor-summary-problems = Something Agora needs is missing. Fix the items marked PROBLEM.

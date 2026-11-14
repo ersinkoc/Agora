@@ -17,6 +17,14 @@
     order the connections took turns in; `generation` (1, 2, … per node, kept across hub restarts) lets a reader ignore a late
     fact about an older connection. For clients from before ADR-0070 the hub also writes `NodeOffline` when the current
     connection ends; such a client shows a machine that reconnected as offline until it reloads (as before).
+  - **At hub start** (`agora-hub::hub::Hub::open`) no connection exists yet. A node that the view rebuilt from the log shows
+    online (the hub was killed or lost power with its connection open, so no end was recorded; or only an old `NodeOnline` from
+    before ADR-0070 says so) is recorded offline before the server accepts connections: `NodeOffline` for older clients, then
+    `NodeLink { up: false, reason: closed }` for the node's latest connection generation (0 for a node seen only through
+    `NodeOnline`). `closed` is the existing reason closest to "the connection ended"; the schema is unchanged. Its
+    `last_heard_ms` is the node's last time in the log, not the restart, so "last seen" stays true; the events' own `at_ms` is
+    the restart. A node already offline gets nothing, so opening again adds no facts. When the node redials, its next
+    generation's `opened` brings it back online.
   - The projection (and the window's view) takes `online` from the latest presence fact by position: `NodeLink`, or for data an
     older hub wrote, `NodeOnline` / `NodeOffline`. A `NodeLink` from any producer but `hub` is ignored, and a node that sends one
     is refused (`protocol.invalid_message`, field `node_link`).
@@ -55,4 +63,8 @@
   and recent errors into one bundle for bug reports.
   It also notes that the node reads its policy file (`<data>/policy`) only when it starts, and warns when that file changed after
   the running node started (compared with its local socket's time), since such a change waits for a restart.
+  It states who may make the machine act, as the node applies its files when it starts: which commands routed through the hub
+  need a device-signed grant (the `signed_commands` line, the team default a limited device turns on, or none: a note, since a
+  compromised hub could then send them, threat model T1), how many devices are trusted and how many of them may act in every
+  project, the `skip_permissions` setting, and how many policy lines the node did not understand.
 - **Tracing across hops:** commands carry a trace id from client through hub to node and adapter.

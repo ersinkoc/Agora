@@ -103,6 +103,17 @@ impl SqliteStore {
         Self::init(Connection::open_in_memory()?)
     }
 
+    /// The total size of the stored payloads after `after`, without reading them: SQLite answers `length()` of a blob from the
+    /// record header (a replay decides from this whether to read the events at all, before any is copied into memory).
+    pub fn payload_bytes_after(&self, after: u64) -> Result<u64, StoreError> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare_cached(
+            "SELECT COALESCE(SUM(length(payload)), 0) FROM events WHERE pos > ?1",
+        )?;
+        let total: i64 = stmt.query_row(params![to_i64(after)?], |r| r.get(0))?;
+        Ok(to_u64(total))
+    }
+
     fn init(conn: Connection) -> Result<Self, StoreError> {
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
         if version > SCHEMA_VERSION {

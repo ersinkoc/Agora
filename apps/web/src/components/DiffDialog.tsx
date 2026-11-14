@@ -39,7 +39,7 @@ export function DiffDialog({ agent, load, read, onClose }: {
             <Dialog.Close className="button">{t('diff-close')}</Dialog.Close>
           </header>
           <div className="min-h-0 flex-1">
-            <ChangesView load={loadFor} read={read ? readFor : undefined} />
+            <ChangesView load={loadFor} read={read ? readFor : undefined} changed={agent.filesChanged} />
           </div>
         </Dialog.Content>
       </Dialog.Portal>

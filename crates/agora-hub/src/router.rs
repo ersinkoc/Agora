@@ -4,7 +4,8 @@
 //! its request id (the hub picks a fresh one so two clients cannot collide) and the answer is mapped back. The hub
 //! never edits what a command says; the node runs it through the same handler as a local command, with the same policy.
 //! The one exception is a terminal's size: several windows may watch one terminal, and the hub sends the node the smallest
-//! size any of them asked for, so no window is clipped (see [`Router::resize`] and docs/specs/protocol.md, "Shared terminal size").
+//! size any of them asked for, so no window is clipped (ADR-0072, which amends ADR-0029 here; see [`Router::resize`] and
+//! docs/specs/protocol.md, "Shared terminal size").
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};

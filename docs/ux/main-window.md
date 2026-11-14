@@ -34,7 +34,7 @@ The window is laid out like an editor, with the terminal as the content. At most
 - **Right, Details:** tabs for Needs you (opens first whenever something needs you), Changes, Board, Messages, Spent.
 - **Status bar:** machines online, agents, how many need you, cost so far.
 - **Empty state:** a start button, the agents that are running, and the two keyboard shortcuts.
-- **One terminal in several windows:** a terminal open in more than one window (two machines, or a phone and a laptop) has the size of the smallest of them, so it fits every one; a bigger window shows it at its top left with a thin line where it ends, and gets its own size back as soon as the smaller window closes it. A terminal client on the machine itself still sets the size it wants (docs/specs/protocol.md, "Shared terminal size").
+- **One terminal in several windows:** a terminal open in more than one window (two machines, or a phone and a laptop) has the size of the smallest of them, so it fits every one; a bigger window shows it at its top left with a thin line where it ends, and gets its own size back as soon as the smaller window closes it. A terminal client on the machine itself still sets the size it wants (ADR-0072; docs/specs/protocol.md, "Shared terminal size").
 - **Phones:** a single column instead of this window: what needs you, machines and agents, then one agent (ADR-0067 rung 2, [phone.md](phone.md)). A tablet keeps this window; on a touch screen its terminals get the key bar.
 
 The older three-column description below stays valid for what each area holds.
@@ -73,7 +73,11 @@ permanent section. Labels below use internal terms; the UI uses the vocabulary i
   - Open files are tabs. The path bar's folders open the tree down to the file.
   - The file shows with line numbers and marks in the gutter (added, changed, removed above), read again whenever the node's
     count of changed files moves. The text is drawn a screenful at a time.
-  - Ctrl F finds in the file. `/` filters the tree. The whole file can be copied.
+  - Ctrl F finds in the file (a query with a capital letter matches case exactly; otherwise every case form matches, Turkish `i`/`İ`
+    and `ı`/`I` included). `/` filters the tree. The whole file can be copied.
+  - The tree is one Tab stop: arrows move between the items shown, Right opens a folder and goes into it, Left goes back up and
+    closes it, Home and End go to the ends.
+  - When the changes are larger than 512 KiB, the files after the cut carry no mark, and the tree says so with the machine's count.
   - In a narrow pane the tree sits above the file.
   - Syntax colours (highlight.js, loaded on demand) for files up to 128 KiB in about 25 languages, chosen by file name.
   - Not built yet: lease locks, editing.

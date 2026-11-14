@@ -144,7 +144,9 @@ Hub core (`agora-hub::hub`): store, view and subscriber fan-out are one step und
 snapshot (or backlog) and registers for live events together sees every event once, in order, even while several nodes
 ingest. A subscriber that falls more than 1024 events behind is dropped, never waited for; it reconnects with the last
 position it saw and gets the backlog, or a snapshot when that position is ahead of the log (a hub restored from an older
-backup). When a node's connection ends without a goodbye the hub records `NodeOffline` itself as producer `hub` (a name no
+backup) or more than 10 000 events or 8 MiB of them behind (`MAX_REPLAY_EVENTS`, `MAX_REPLAY_BYTES`): replay runs under the hub's
+lock, so its cost is bounded instead of growing with how long the client was away (a client 100 000 events behind held the lock for
+about 155 ms before; its snapshot now takes well under a millisecond). When a node's connection ends without a goodbye the hub records `NodeOffline` itself as producer `hub` (a name no
 node certificate can carry), in the same log, so live and rebuilt views agree.
 
 Presence (ADR-0070): the hub also records `NodeLink { node_id, up, reason, generation, last_heard_ms }` as producer `hub`, from
@@ -156,7 +158,9 @@ received anything on that connection. A reader takes a machine's `online` from i
 event, or `NodeOnline`/`NodeOffline` from an older hub), ignores a `NodeLink` whose generation is below the node's latest `up`,
 never takes `replaced` as offline, and ignores a `NodeLink` from any producer but `hub`; a node that sends one is refused
 (`protocol.invalid_message`, field `node_link`). For clients that predate it the hub keeps writing `NodeOffline` when the
-current connection ends. The snapshot's `NodeSnapshot.last_event_ms` includes `last_heard_ms`, so it is "last seen".
+current connection ends. A hub that starts has no connection: every node its rebuilt view shows online is recorded offline
+before it accepts connections (`NodeOffline`, then `NodeLink { up: false, reason: closed }` for the node's latest generation,
+or 0, with `last_heard_ms` the node's last time in the log). The snapshot's `NodeSnapshot.last_event_ms` includes `last_heard_ms`, so it is "last seen".
 
 Schema additions (ADR-0025/0026/0027, all new messages, nothing published changed): `agent.list` (`AgentList` -> `AgentListResult` of
 `AgentSummary`; implemented on the node and as `agora agent list`), `EventAck` (hub -> producer, cumulative), `client.proto`
@@ -190,7 +194,7 @@ its relay on both sides and the client resubscribes for a fresh snapshot (a hub-
 resends a snapshot"; the result for the client is the same and the node is never slowed). On the node, a thread bridges the
 stream from the node's own control socket to the hub connection through a bounded queue.
 
-Shared terminal size (`agora-hub::router`, no new message): several windows may watch one terminal, and it gets the smallest size
+Shared terminal size (ADR-0072, Accepted; `agora-hub::router`, no new message): several windows may watch one terminal, and it gets the smallest size
 any of them asked for (tmux's "smallest"), so no window is clipped. The hub keeps, per `(node, terminal_id)`, the last
 `TerminalResize` size of each client connection that has a relay for that terminal, and forwards to the node the smallest
 `cols` and, separately, the smallest `rows` over those connections, only when that differs from the size the hub last sent or saw
@@ -204,8 +208,8 @@ node's limit (1000) asks for 1000. A `TerminalResize` from a connection that doe
 that does has a size there (answered `ok`, nothing sent), and is forwarded unchanged as before when none does (a script). The
 hub-chosen size travels as an ordinary `TerminalResize` under a hub request id; nobody waits for its answer when the hub sends it
 on its own. Within one connection the last size counts (two views of one terminal in one window share it). This is the one
-command whose content the hub chooses (ADR-0029 otherwise forwards commands unchanged); it changes a size, never what the policy
-allows. Clients on the node's own control socket (the terminal client, `agora` commands on that machine) talk to the node
+command whose content the hub chooses (ADR-0072 amends ADR-0029 there, which otherwise forwards commands unchanged); it changes a
+size, never what the policy allows. Clients on the node's own control socket (the terminal client, `agora` commands on that machine) talk to the node
 directly: there the last resize still wins, and the hub's windows see that size in the terminal's resize frame. Clients report the
 size that fits their view and show the terminal at the size of the node's resize frame, never reporting that size back (the web
 window: `apps/web/src/terminal/sizing.ts`; it says its size again right after every subscription).
@@ -272,7 +276,10 @@ Implemented by the node today: `project.list`, `agent.*`, `terminal.*`, `approva
 `chat.subscribe` (ADR-0038: a conversation stream, below), `git.status`, `git.log` (ADR-0037: newest first, default 30, at most 200), `git.diff`, `files.list` and `files.read`. The git and files commands answer only for the workspace of one of the node's own agents (`worktree_id` is the id
 the node reported in `WorktreeCreated`); a path that is absolute, climbs with `..` or starts with `:` or `-` is refused as
 `protocol.invalid_message`. `git.diff` is the unified diff against HEAD plus the new files git does not track yet (shown as
-all-added, at most 50 files of at most 64 KiB), and an answer is cut at 512 KiB. `files.list` hides `.git`; `files.read` refuses
+all-added, at most 50 files of at most 64 KiB), and an answer is cut at 512 KiB. It covers the workspace folder only and names
+every file from that folder, so each name is a path `git.diff` and `files.read` take: for a workspace that is the folder `web/`
+of a repository, `web/a.txt` is `a.txt`; a rename across the folder's edge shows as the file added or deleted inside it. At a
+repository's root the names are the repository's own. `files.list` hides `.git`; `files.read` refuses
 files above 512 KiB (`files.too_large`) and paths that leave the workspace, symlinks included (`files.outside_root`), checked again on the opened file so a link swapped in after the check is still refused.
 
 ### Selected directories (ADR-0052)
@@ -298,7 +305,9 @@ with a valid UUID. An owner confirms its association; metadata is not an access 
 `WorkspaceRegistered` (event tag 24: `workspace_id`, `node_id`, `project_id`, `path`, `git_root`, `branch`,
 `managed_worktree`, `files_changed`) and `AgentWorkspaceBound` (35: `agent_id`, `workspace_id`) precede `AgentStarted`.
 That `AgentStarted` leaves legacy `worktree_id` empty. `WorkspaceStatusChanged` (25) carries changed-file/line counts
-and HEAD for the workspace. Node workspace IDs are `directory:<canonical cwd>`; the hub qualifies IDs with the
+and HEAD for the workspace. The counts (here, in `GitStatusChanged`, `git.status` and the mesh's `files_changed`) cover the
+workspace folder only, the same scope as `git.diff`: for a folder inside a repository, changes elsewhere in the repository
+are not counted, and a rename across the folder's edge counts as the file added or removed inside it. Node workspace IDs are `directory:<canonical cwd>`; the hub qualifies IDs with the
 producer node and does not trust a supplied `node_id`. `Snapshot.workspaces` (10) and `agent_workspaces` (11) retain
 these associations through replay/reload. Published worktree messages/fixtures remain unchanged.
 

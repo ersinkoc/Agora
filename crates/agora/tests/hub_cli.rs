@@ -1014,6 +1014,161 @@ fn the_screen_password_is_typed_twice_unseen_and_ctrl_c_stops_it() {
         .contains("A screen password is set"));
 }
 
+/// Starts `agora hub run` on `listen` over `hub_dir`; returns the process and the address it says it runs on.
+fn start_hub(home: &Path, hub_dir: &Path, listen: &str) -> (Child, String) {
+    let mut hub = agora(home, &["hub", "run", "--listen", listen, "--hub-dir"])
+        .arg(hub_dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    let mut out = BufReader::new(hub.stdout.take().unwrap());
+    out.read_line(&mut line).unwrap();
+    // Keep reading what the hub prints so it never blocks on a full pipe.
+    std::thread::spawn(move || std::io::copy(&mut out, &mut std::io::sink()));
+    let addr = line
+        .split("running on ")
+        .nth(1)
+        .and_then(|r| r.split(". Its").next())
+        .expect(&line)
+        .trim()
+        .to_string();
+    (hub, addr)
+}
+
+/// What a signed-in window is shown first: the hub's snapshot.
+fn first_snapshot(home: &Path, hub_dir: &Path, addr: &str) -> agora_protocol::v1::Snapshot {
+    use agora_tui::client::{sign_in, Hub, Session, Update};
+    let login = agora(home, &["hub", "login", "--hub-dir"])
+        .arg(hub_dir)
+        .output()
+        .unwrap();
+    let target = Hub {
+        addr: addr.to_string(),
+        ca_pem: std::fs::read_to_string(hub_dir.join("ca.pem")).unwrap(),
+    };
+    let token = sign_in(&target, &code_in(&String::from_utf8_lossy(&login.stdout))).unwrap();
+    let mut session = Session::connect(&target, &token).unwrap();
+    let end = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < end {
+        if let Update::Snapshot(s) = session.next(Duration::from_millis(200)) {
+            return *s;
+        }
+    }
+    panic!("no snapshot from the hub at {addr}");
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+}
+
+#[test]
+fn a_machine_that_has_not_come_back_after_the_hub_is_killed_is_shown_offline() {
+    // Seen on the maintainer's hub (ADR-0070, #467): the view is rebuilt from the log, so a machine whose connection was open
+    // when the hub was killed (no end of it was ever recorded) stayed online after the hub started again, until it redialled,
+    // or forever when it never did. Presence is about live connections, and a hub that has just started has none.
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return;
+    }
+    let root = tmp("presence-at-open");
+    let (hub_dir, home, node_home) = (root.join("hub"), root.join("home"), root.join("node"));
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&node_home).unwrap();
+
+    let (hub, addr) = start_hub(&home, &hub_dir, "127.0.0.1:0");
+    let mut hub = Proc(hub);
+    let port = addr.rsplit(':').next().unwrap().to_string();
+    let out = agora(&home, &["hub", "code", "--hub-dir"])
+        .arg(&hub_dir)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let code = text
+        .split("Enrollment code: ")
+        .nth(1)
+        .and_then(|r| r.split(' ').next())
+        .expect(&text)
+        .to_string();
+    let out = agora(
+        &node_home,
+        &[
+            "node",
+            "enroll",
+            "--hub",
+            &format!("wss://localhost:{port}"),
+            "--ca",
+        ],
+    )
+    .arg(hub_dir.join("ca.pem"))
+    .args(["--code", &code, "--id", "laptop"])
+    .output()
+    .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let node = agora(&node_home, &["node", "run"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let _node = Proc(node);
+    let online = |s: &agora_protocol::v1::Snapshot| {
+        s.nodes
+            .iter()
+            .find(|n| n.node_id == "laptop")
+            .map(|n| (n.online, n.last_event_ms))
+    };
+    let end = Instant::now() + Duration::from_secs(30);
+    while online(&first_snapshot(&home, &hub_dir, &addr)).map(|o| o.0) != Some(true) {
+        assert!(Instant::now() < end, "the node never came online");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    // The hub is killed (SIGKILL on Unix, this exact process): it records nothing about the node's connection.
+    hub.0.kill().unwrap();
+    hub.0.wait().unwrap();
+    let killed_at = now_ms();
+    // It starts again on the same directory, on another port, so the node cannot redial it: the machine is shown offline, with
+    // "last seen" from before the kill, not the restart.
+    let (again, other) = start_hub(&home, &hub_dir, "127.0.0.1:0");
+    let mut again = Proc(again);
+    assert_ne!(other, addr);
+    // #508: the restarted hub rewrites its `listen` file; only `agora tui --hub-dir` reads it, never the node (it dials the
+    // address it enrolled with), so the node stays unable to reach this hub.
+    let listen = || {
+        std::fs::read_to_string(hub_dir.join("listen"))
+            .unwrap()
+            .trim()
+            .to_string()
+    };
+    assert_eq!(listen(), other);
+    let (up, seen) = online(&first_snapshot(&home, &hub_dir, &other)).unwrap();
+    assert!(!up, "a machine that has not come back is shown offline");
+    assert!(
+        seen > 0 && seen <= killed_at,
+        "last seen {seen} vs killed at {killed_at}"
+    );
+
+    // Killed again and started where the node dials: it comes back online by itself.
+    again.0.kill().unwrap();
+    again.0.wait().unwrap();
+    let (back, addr) = start_hub(&home, &hub_dir, &format!("127.0.0.1:{port}"));
+    let _back = Proc(back);
+    assert_eq!(listen(), addr);
+    let end = Instant::now() + Duration::from_secs(30);
+    while online(&first_snapshot(&home, &hub_dir, &addr)).map(|o| o.0) != Some(true) {
+        assert!(Instant::now() < end, "the node never came back online");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let _ = std::fs::remove_dir_all(root);
+}
+
 /// `agora tui --hub-dir DIR` on the hub's machine, without `--hub` and without `machine.toml`: it dials the port the hub in that
 /// folder really listens on, not the default 7443 (found on the maintainer's hub, which runs on a port of its own).
 #[test]

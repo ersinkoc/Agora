@@ -40,6 +40,23 @@ try {
   // The marks arrive with the workspace's diff, read alongside the folders.
   check(await item('src').locator('[title="Holds changed files"]').waitFor().then(() => true, () => false), 'a folder holding a changed file is marked');
   check(await item('notes.md').getByText('A', { exact: true }).waitFor().then(() => true, () => false), 'a new file carries its status letter');
+  // Keys: the tree is one Tab stop; arrows move, Right opens a folder and goes into it, Left goes back up and closes it.
+  check(await tree.locator('[role=treeitem][tabindex="0"]').count() === 1, 'the tree is a single Tab stop');
+  const focusedName = () => page.evaluate(() => document.activeElement?.getAttribute('data-path'));
+  await item('src').focus();
+  await page.keyboard.press('ArrowRight');
+  await item('deep').waitFor();
+  check(await item('src').getAttribute('aria-expanded') === 'true', 'Right opens a folder');
+  await page.keyboard.press('ArrowRight');
+  check(await focusedName() === 'src/deep', 'Right again moves into it');
+  await page.keyboard.press('ArrowLeft');
+  check(await focusedName() === 'src', 'Left goes to the parent');
+  await page.keyboard.press('ArrowLeft');
+  check(await item('src').getAttribute('aria-expanded') === 'false', 'Left again closes it');
+  await page.keyboard.press('ArrowDown');
+  const below = await focusedName();
+  check(!!below && below !== 'src' && await tree.locator(`[role=treeitem][tabindex="0"][data-path="${below}"]`).count() === 1,
+    `Down moves to the next item (${below}), which becomes the Tab stop`);
   await item('src').click();
   await item('deep').click();
   await item('core.txt').click();
