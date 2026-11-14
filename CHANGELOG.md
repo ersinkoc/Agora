@@ -26,6 +26,8 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
   the backlog is read (100 000 events behind took about 155 ms of the hub's time; now well under a millisecond).
 ### Terminal client
 - The terminal client's wheel scrolls an agent's tab back through what it showed, with how far back at the top; typing goes back to the bottom.
+- Text dragged over in a tab scrolled back is the text shown there, earlier lines included, and that is what is copied (before, the
+  highlight and the copy were taken from the live screen).
 
 ## 0.3.11
 

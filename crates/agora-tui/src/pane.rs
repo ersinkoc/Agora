@@ -3,7 +3,7 @@
 //! The agent's own escape sequences never reach the user's terminal: `agora-vt` has already interpreted them, and this widget only
 //! writes cells (a character and a style). Control characters that a program left in a cell are drawn as spaces.
 
-use agora_vt::{Color as VtColor, Style as VtStyle, Terminal};
+use agora_vt::{Cell, Color as VtColor, Style as VtStyle, Terminal};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -53,7 +53,8 @@ impl ColorMode {
     }
 }
 
-/// A rectangular part of the agent's screen the user selected, in screen rows and columns, both ends included.
+/// A part of the agent's terminal the user selected, in the pane's rows and columns as drawn (scrolled back too: a row may show the
+/// scrollback), both ends included.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Selection {
     pub from: (u16, u16),
@@ -125,6 +126,19 @@ impl<'a> TerminalPane<'a> {
         below.saturating_sub(height).min(rows - height)
     }
 
+    /// `style` of the pane's cell at row `y`, column `x`, inverted when it is selected: inside text the agent already shows inverse
+    /// (SGR 7) a selection turns inversion off, so its edges stay visible.
+    fn selected(&self, style: Style, y: u16, x: u16) -> Style {
+        if !self.selection.is_some_and(|s| s.contains(y, x)) {
+            return style;
+        }
+        if style.add_modifier.contains(Modifier::REVERSED) {
+            style.remove_modifier(Modifier::REVERSED)
+        } else {
+            style.add_modifier(Modifier::REVERSED)
+        }
+    }
+
     /// Where the agent's cursor is inside `area`, when it is visible and on a drawn cell (for `Frame::set_cursor_position`).
     pub fn cursor_position(term: &dyn Terminal, area: Rect) -> Option<Position> {
         let c = term.cursor();
@@ -136,11 +150,23 @@ impl<'a> TerminalPane<'a> {
     }
 }
 
-/// The text of a selection made in a pane `height` rows tall (in the pane's rows and columns): the screen's characters from its
-/// start to its end in reading order, each line without its trailing blanks, lines joined with `\n`. The right half of a wide
-/// character adds nothing.
-pub fn selected_text(term: &dyn Terminal, height: u16, sel: Selection) -> String {
+/// The cell a pane `height` rows tall, scrolled `back` lines, draws at its row `y`, column `col`: a screen row, or a line of the
+/// scrollback when scrolled back far enough. One mapping for drawing and copying, so what is copied is what is shown.
+fn shown_cell(term: &dyn Terminal, height: u16, back: usize, y: u16, col: u16) -> Option<Cell> {
     let first = TerminalPane::first_row(term, height);
+    let back = back.min(TerminalPane::max_scroll(term, height));
+    let shown = i64::from(first) + i64::from(y) - i64::try_from(back).unwrap_or(i64::MAX);
+    if shown < 0 {
+        term.history_cell(usize::try_from(-shown).unwrap_or(usize::MAX), col)
+    } else {
+        term.cell(u16::try_from(shown).ok()?, col)
+    }
+}
+
+/// The text of a selection made in a pane `height` rows tall and scrolled `back` lines (in the pane's rows and columns): the
+/// characters drawn from its start to its end in reading order, scrollback included, each line without its trailing blanks, lines
+/// joined with `\n`. The right half of a wide character adds nothing.
+pub fn selected_text(term: &dyn Terminal, height: u16, back: usize, sel: Selection) -> String {
     let (a, b) = if sel.from <= sel.to {
         (sel.from, sel.to)
     } else {
@@ -157,7 +183,7 @@ pub fn selected_text(term: &dyn Terminal, height: u16, sel: Selection) -> String
         };
         let mut line = String::new();
         for col in start..=end.min(cols.saturating_sub(1)) {
-            match term.cell(row + first, col) {
+            match shown_cell(term, height, back, row, col) {
                 Some(c) if c.spacer => {}
                 Some(c) if !c.ch.is_control() => line.push(c.ch),
                 _ => line.push(' '),
@@ -190,7 +216,7 @@ impl Widget for TerminalPane<'_> {
                     let Some(cell) = self.term.history_cell(line, x) else {
                         continue;
                     };
-                    out.set_style(to_style(cell.style, self.colors));
+                    out.set_style(self.selected(to_style(cell.style, self.colors), y, x));
                     let ch = if cell.spacer || cell.ch.is_control() {
                         ' '
                     } else {
@@ -214,17 +240,7 @@ impl Widget for TerminalPane<'_> {
                 let Some(cell) = self.term.cell(row, x) else {
                     continue;
                 };
-                let mut style = to_style(cell.style, self.colors);
-                // A selection inverts what is there: inside text the agent already shows inverse (SGR 7), it turns inversion off,
-                // so the selection's edges stay visible.
-                if self.selection.is_some_and(|s| s.contains(row, x)) {
-                    style = if style.add_modifier.contains(Modifier::REVERSED) {
-                        style.remove_modifier(Modifier::REVERSED)
-                    } else {
-                        style.add_modifier(Modifier::REVERSED)
-                    };
-                }
-                out.set_style(style);
+                out.set_style(self.selected(to_style(cell.style, self.colors), y, x));
                 if cell.spacer {
                     // The right half of a wide character: ratatui skips it when it draws the left half.
                     out.set_symbol(" ");
@@ -543,25 +559,25 @@ mod tests {
             from: (0, 6),
             to: (1, 2),
         };
-        assert_eq!(selected_text(&t, 3, sel), "world\nsec");
+        assert_eq!(selected_text(&t, 3, 0, sel), "world\nsec");
         // Backwards (dragged up) is the same text.
         let back = Selection {
             from: sel.to,
             to: sel.from,
         };
-        assert_eq!(selected_text(&t, 3, back), "world\nsec");
+        assert_eq!(selected_text(&t, 3, 0, back), "world\nsec");
         // A wide character is copied once, not with its right half.
         let wide = Selection {
             from: (2, 0),
             to: (2, 6),
         };
-        assert_eq!(selected_text(&t, 3, wide), "東京 ok");
+        assert_eq!(selected_text(&t, 3, 0, wide), "東京 ok");
         // A pane lower than the screen shows its bottom rows: pane row 0 is screen row 1 here.
         let low = Selection {
             from: (0, 0),
             to: (0, 5),
         };
-        assert_eq!(selected_text(&t, 2, low), "second");
+        assert_eq!(selected_text(&t, 2, 0, low), "second");
     }
 
     #[test]
@@ -588,6 +604,51 @@ mod tests {
         assert_eq!(TerminalPane::max_scroll(&t, 5), 26);
         assert_eq!(draw(26)[0], "line 1");
         assert_eq!(draw(500)[0], "line 1");
+    }
+
+    #[test]
+    fn scrolled_back_the_selection_is_on_the_lines_shown_and_copies_them() {
+        // #538 review: an agent printed 30 lines and the pane is scrolled 10 back. Each row of the pane, the scrollback's too, copies
+        // what it shows, and the highlight sits on the rows dragged over.
+        let mut lines = String::new();
+        for i in 1..=30 {
+            lines.push_str(&format!("line {i}\r\n"));
+        }
+        let t = term(20, 5, lines.as_bytes());
+        let area = Rect::new(0, 0, 20, 5);
+        for back in [0, 3, 10, 26] {
+            let mut buf = Buffer::empty(area);
+            let sel = Selection {
+                from: (1, 0),
+                to: (1, 19),
+            };
+            TerminalPane::new(&t)
+                .scroll(back)
+                .selection(Some(sel))
+                .render(area, &mut buf);
+            for y in 0..5 {
+                let row = Selection {
+                    from: (y, 0),
+                    to: (y, 19),
+                };
+                assert_eq!(
+                    selected_text(&t, 5, back, row),
+                    line(&buf, y),
+                    "{back} back, row {y}"
+                );
+            }
+            let inv = |x: u16, y: u16| buf[(x, y)].modifier.contains(Modifier::REVERSED);
+            assert!(
+                inv(0, 1) && inv(5, 1) && !inv(0, 0) && !inv(0, 2),
+                "{back} back"
+            );
+        }
+        // Ten back, rows 0 to 2 show lines 17 to 19: what is dragged over is what is copied.
+        let sel = Selection {
+            from: (0, 0),
+            to: (2, 6),
+        };
+        assert_eq!(selected_text(&t, 5, 10, sel), "line 17\nline 18\nline 19");
     }
 
     #[test]
