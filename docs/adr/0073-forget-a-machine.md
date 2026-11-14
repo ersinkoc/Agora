@@ -1,4 +1,4 @@
-# 0073. Forgetting a machine the hub no longer needs to show
+# 0073. Old machines are shown as old, and can be cleaned up
 Status: Proposed
 Date: 2026-11-14
 Origin: module M1 (connectivity and visibility). The maintainer's hub lists `linux`, a test node from 2026-11-12 (version 0.3.2). No
@@ -18,7 +18,20 @@ record is append-only, and nothing in the protocol removes a machine.
 
 A new client command and a new event are schema changes, so this needs an ADR (AGENTS.md).
 
+Revised 2026-11-14 after the maintainer's answer: "even if we remember old machines, we must see them as old and clean them up".
+Remembering a machine is not enough. A machine nobody has seen for a long time must look different from one that is off for an hour,
+and getting rid of several of them must be one action, not one per machine.
+
 ## Decision
+
+0. **A machine not seen for more than 24 hours is shown as old.** "Old" is computed by each client from the last-seen time it
+   already has (ADR-0070: `NodeSnapshot.last_event_ms`, `NodeLink.last_heard_ms`). No message changes, and the hub stores no new
+   state for it. A machine that connects again is simply online again. Where it shows:
+   - **Window:** the Machines page lists old machines in their own collapsed section, **Old machines (n)**, under the online and
+     offline ones. Each row says "last seen <date>". The start window does not offer old machines. The machine tree and the agent
+     list show an old machine's closed agents only inside that section.
+   - **TUI:** the same grouping in the tree, folded by default.
+   - **CLI:** `agora hub machines` prints `old` as the state, with the last-seen date.
 
 1. **Command `NodeForget { node_id, refuse_return: bool }`**, answered by the hub itself (no node is involved, as with `AgentForget`).
    - It is **refused with `node.online` while the machine is connected**. Forget only what is offline, so a mistake cannot hide a
@@ -50,12 +63,23 @@ A new client command and a new event are schema changes, so this needs an ADR (A
      seen and how many agents were running at that time ("they may still be running there"). It says that the machine and its closed
      agents disappear from every window, and that the machine comes back if it connects again. One checkbox: **Also refuse it if it
      connects again** (it will need a new join code). The action is not offered for an online machine.
-   - **TUI:** the same action on a machine row, with the same question.
+   - **Clean up old machines:** the Old machines section has one button, **Clean up…**. It opens one dialog that lists every old
+     machine (name, last seen, agents that were running then) with a checkbox each, all ticked. It also has the same **Also refuse
+     them if they connect again** checkbox. Confirming sends one `NodeForget` per ticked machine. No new message is needed, and each
+     forget is audited on its own.
+   - **TUI:** the same action on a machine row, with the same question, and **Clean up old machines** in the command palette.
    - **CLI:** `agora hub machines` lists the machines with their state and last seen. `agora hub machines forget NAME [--refuse-return]`
-     sends the command to the running hub, signing in from the hub folder as `agora tui --hub-dir` does. No store file is edited behind
+     and `agora hub machines forget --old [--refuse-return]` (every old machine, listed and confirmed first) send the command to the
+     running hub, signing in from the hub folder as `agora tui --hub-dir` does. No store file is edited behind
      the running hub's back.
 
 ## Open questions (proposed answers)
+
+- **When is a machine old?** Proposed: not seen for 24 hours. A laptop shut over a weekend shows as old on Monday until it connects,
+  which costs nothing: it is only a grouping. The threshold is one constant in the clients, so it can change without a protocol
+  change.
+- **Should old machines be cleaned up automatically?** Proposed: no. Cleanup is one click for all of them, and forgetting stays the
+  owner's act, recorded in the audit trail. An automatic cleanup after N days can be added later as an owner setting.
 
 - **Should forgetting a machine with running agents need a second confirmation?** Proposed: no. The dialog already states the count, the
   machine is offline, and the agents come back if the machine does.
@@ -73,7 +97,7 @@ A new client command and a new event are schema changes, so this needs an ADR (A
   rejected with `auth.device_revoked`.
 - The web Machines page, the TUI and the CLI get the action. Text lives in `locales/{en,tr}`. Screenshots are taken in both themes.
 - Not decided here: deleting a machine's events (rejected: append-only and the audit trail), forgetting machines automatically after N
-  days offline, and removing a machine's data from the machine itself (that is `agora down` and the owner's own act there).
+  days offline (see the open questions), and removing a machine's data from the machine itself (that is `agora down` and the owner's own act there).
 
 ## Alternatives considered
 
