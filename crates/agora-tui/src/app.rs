@@ -14,7 +14,7 @@ use agora_vt::{Modes, Terminal};
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Clear, Paragraph, Widget};
+use ratatui::widgets::{Block, Clear, Paragraph, Widget, Wrap};
 use ratatui::Frame;
 
 use crate::pane::{ColorMode, TerminalPane};
@@ -31,6 +31,9 @@ const BACK: u8 = 12;
 const MIN_TREE: u16 = 12;
 const MIN_MIDDLE: u16 = 20;
 const MIN_INSPECTOR: u16 = 16;
+/// The columns the terminal keeps before the inspector shows itself: an agent's screen narrower than this is hard to use, so a
+/// window too narrow for both shows the inspector only when asked (`i`).
+const ROOMY_MIDDLE: u16 = 60;
 /// Lines a mouse wheel step scrolls an agent's screen.
 const WHEEL: i32 = 3;
 
@@ -175,6 +178,8 @@ enum Divider {
 enum Command {
     Open(String),
     NextNeedsYou,
+    /// One of the caller's letters for the selected agent (y allow, s start, x stop…), so every action can be found here.
+    Letter(char),
     ToggleMouse,
     ToggleInspector,
     CloseTab,
@@ -201,12 +206,22 @@ pub struct Areas {
     pub inspector_divider: Option<u16>,
 }
 
+/// Whether the inspector is shown: by default when the window has room for it beside a usable terminal; `i` shows or hides it
+/// whatever the width.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Panel {
+    #[default]
+    Auto,
+    Shown,
+    Hidden,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct App {
     pub focus: Focus,
     pub tree_width: u16,
     pub inspector_width: u16,
-    pub inspector: bool,
+    pub inspector: Panel,
     /// Open agents, by hub-wide id, in tab order.
     pub tabs: Vec<String>,
     pub active: usize,
@@ -225,7 +240,7 @@ impl Default for App {
             focus: Focus::Tree,
             tree_width: 28,
             inspector_width: 32,
-            inspector: true,
+            inspector: Panel::Auto,
             tabs: Vec::new(),
             active: 0,
             selected: 0,
@@ -264,10 +279,15 @@ impl App {
                 .min(self.tree_width)
         };
         let rest = body.width.saturating_sub(tree_w + u16::from(tree_w > 0));
-        let show_inspector = self.inspector && rest > MIN_MIDDLE + MIN_INSPECTOR;
+        // The terminal keeps ROOMY_MIDDLE columns before the inspector shows itself; asked for, it keeps only MIN_MIDDLE.
+        let keep = match self.inspector {
+            Panel::Auto => ROOMY_MIDDLE,
+            Panel::Shown => MIN_MIDDLE,
+            Panel::Hidden => body.width,
+        };
+        let show_inspector = rest > keep + MIN_INSPECTOR;
         let inspector_w = if show_inspector {
-            self.inspector_width
-                .clamp(MIN_INSPECTOR, rest - MIN_MIDDLE - 1)
+            self.inspector_width.clamp(MIN_INSPECTOR, rest - keep - 1)
         } else {
             0
         };
@@ -354,6 +374,10 @@ impl App {
             Event::Key(k) => self.key(k, cx, &mut out),
             Event::Mouse(m) => self.mouse(m, cx, area, &mut out),
         }
+        // A window narrowed under the inspector takes the keyboard back to the tree.
+        if self.focus == Focus::Inspector && self.areas(area).inspector.width == 0 {
+            self.focus = Focus::Tree;
+        }
         self.selected = settle(
             cx.rows,
             self.selected.min(cx.rows.len().saturating_sub(1)),
@@ -411,39 +435,51 @@ impl App {
                 Key::Char('w') => self.close_tab(out),
                 Key::Char('<') => self.tree_width = self.tree_width.saturating_sub(2).max(MIN_TREE),
                 Key::Char('>') => self.tree_width = self.tree_width.saturating_add(2),
-                k => self.common(k, out),
+                k => self.common(k, cx.area, out),
             },
             Focus::Inspector => match k {
                 Key::Esc => self.focus = Focus::Tree,
-                k => self.common(k, out),
+                k => self.common(k, cx.area, out),
             },
         }
     }
 
     /// Keys shared by the tree and the inspector.
-    fn common(&mut self, k: Key, out: &mut Vec<Action>) {
+    fn common(&mut self, k: Key, area: Rect, out: &mut Vec<Action>) {
         match k {
-            Key::Tab => self.focus = self.next_focus(true),
-            Key::BackTab => self.focus = self.next_focus(false),
+            Key::Tab => self.focus = self.next_focus(true, area),
+            Key::BackTab => self.focus = self.next_focus(false, area),
             Key::Ctrl('k') => self.palette = Some(Palette::default()),
             Key::Char('m') => {
                 self.mouse = !self.mouse;
                 self.drag = None;
                 out.push(Action::MouseCapture(self.mouse));
             }
-            Key::Char('i') => self.inspector = !self.inspector,
+            Key::Char('i') => self.toggle_inspector(area),
             Key::Char('q') | Key::Ctrl('c') => out.push(Action::Quit),
             Key::Char(c) if c.is_alphanumeric() => out.push(Action::Command(c)),
             _ => {}
         }
     }
 
-    fn next_focus(&self, forward: bool) -> Focus {
+    /// `i`: hides the inspector when it is in view, shows it (even in a narrow window) when it is not.
+    fn toggle_inspector(&mut self, area: Rect) {
+        self.inspector = if self.areas(area).inspector.width > 0 {
+            Panel::Hidden
+        } else {
+            Panel::Shown
+        };
+        if self.focus == Focus::Inspector && self.inspector == Panel::Hidden {
+            self.focus = Focus::Tree;
+        }
+    }
+
+    fn next_focus(&self, forward: bool, area: Rect) -> Focus {
         let mut order = vec![Focus::Tree];
         if !self.tabs.is_empty() {
             order.push(Focus::Terminal);
         }
-        if self.inspector {
+        if self.areas(area).inspector.width > 0 {
             order.push(Focus::Inspector);
         }
         let at = order.iter().position(|f| *f == self.focus).unwrap_or(0);
@@ -516,6 +552,20 @@ impl App {
             })
             .collect();
         all.push((Command::NextNeedsYou, t(key!("tui-app-cmd-next"), &[])));
+        for (c, label) in [
+            ('y', key!("tui-app-cmd-allow")),
+            ('n', key!("tui-app-cmd-deny")),
+            ('s', key!("tui-app-cmd-start")),
+            ('f', key!("tui-app-cmd-folder")),
+            ('x', key!("tui-app-cmd-stop")),
+            ('u', key!("tui-app-cmd-resume")),
+            ('U', key!("tui-app-cmd-again")),
+            ('d', key!("tui-app-cmd-remove")),
+            ('a', key!("tui-app-cmd-ask")),
+            ('v', key!("tui-app-cmd-devices")),
+        ] {
+            all.push((Command::Letter(c), t(label, &[])));
+        }
         all.push((Command::ToggleMouse, t(key!("tui-app-cmd-mouse"), &[])));
         all.push((
             Command::ToggleInspector,
@@ -571,8 +621,9 @@ impl App {
                         }
                     }
                     Some(Command::NextNeedsYou) => self.next_needs_you(cx.rows, out),
-                    Some(Command::ToggleMouse) => self.common(Key::Char('m'), out),
-                    Some(Command::ToggleInspector) => self.inspector = !self.inspector,
+                    Some(Command::Letter(c)) => out.push(Action::Command(c)),
+                    Some(Command::ToggleMouse) => self.common(Key::Char('m'), cx.area, out),
+                    Some(Command::ToggleInspector) => self.toggle_inspector(cx.area),
                     Some(Command::CloseTab) => self.close_tab(out),
                     Some(Command::Quit) => out.push(Action::Quit),
                     None => {}
@@ -620,6 +671,8 @@ impl App {
             MouseKind::Drag => match self.drag {
                 Some(Divider::Tree) => self.tree_width = m.col.saturating_sub(area.x).max(MIN_TREE),
                 Some(Divider::Inspector) => {
+                    // A width the user chose: kept even where the inspector would leave the terminal less than ROOMY_MIDDLE.
+                    self.inspector = Panel::Shown;
                     self.inspector_width =
                         area.right().saturating_sub(m.col + 1).max(MIN_INSPECTOR);
                 }
@@ -785,12 +838,14 @@ impl App {
             match (self.active_agent(), s.terminal) {
                 (None, _) => Paragraph::new((s.t)(key!("tui-app-no-agent"), &[]))
                     .style(dim)
+                    .wrap(Wrap { trim: true })
                     .render(a.terminal, buf),
                 (Some(_), None) => Paragraph::new(
                     s.no_screen
                         .map_or_else(|| (s.t)(key!("tui-app-no-screen"), &[]), str::to_string),
                 )
                 .style(dim)
+                .wrap(Wrap { trim: true })
                 .render(a.terminal, buf),
                 (Some(_), Some(term)) => TerminalPane::new(term)
                     .colors(s.colors)
@@ -819,12 +874,20 @@ impl App {
             },
             &[],
         );
-        let mut footer = vec![
-            Span::styled((s.t)(keys, &[]), dim),
-            Span::styled(format!(" · {mouse}"), dim),
-        ];
-        if !s.notice.is_empty() {
-            footer.insert(0, Span::styled(format!("{}  ", s.notice), strong));
+        let notice = if s.notice.is_empty() {
+            String::new()
+        } else {
+            format!("{}  ", s.notice)
+        };
+        let (keys, mouse) = footer_fit(
+            usize::from(a.footer.width),
+            &notice,
+            &(s.t)(keys, &[]),
+            &mouse,
+        );
+        let mut footer = vec![Span::styled(notice, strong), Span::styled(keys, dim)];
+        if let Some(m) = mouse {
+            footer.push(Span::styled(m, dim));
         }
         Line::from(footer).render(a.footer, buf);
 
@@ -903,6 +966,33 @@ impl App {
         }
     }
 }
+
+/// The footer's keys as they fit beside the notice: whole items (the words between ` · `), as many as fit from the first, never a
+/// word cut in half; and the mouse state after them, kept when the footer has room for it and a few keys too (whether the mouse is
+/// held is what decides whether text can be selected). The notice is never shortened here.
+fn footer_fit(width: usize, notice: &str, keys: &str, mouse: &str) -> (String, Option<String>) {
+    let mut room = width.saturating_sub(text_width(notice));
+    let mouse = format!(" · {mouse}");
+    let mouse = (room >= text_width(&mouse) + FOOTER_KEYS).then_some(mouse);
+    room -= mouse.as_deref().map_or(0, text_width);
+    let mut shown = String::new();
+    for item in keys.split(" · ") {
+        let add = if shown.is_empty() {
+            item.to_string()
+        } else {
+            format!(" · {item}")
+        };
+        if text_width(&add) > room {
+            break;
+        }
+        room -= text_width(&add);
+        shown.push_str(&add);
+    }
+    (shown, mouse)
+}
+
+/// The columns the footer keeps for keys before it shows the mouse state too.
+const FOOTER_KEYS: usize = 40;
 
 /// The box a question is asked in, in the middle of `area`, and its lines wrapped to the box: as wide as its longest line (up to the
 /// screen less a margin), as tall as the wrapped lines. Lines that do not fit the screen's height are cut at the bottom.
@@ -1331,16 +1421,74 @@ mod tests {
                 a.terminal.width,
                 a.terminal.height
             ),
-            (29, 1, 58, 28)
+            (29, 1, 60, 28)
         );
-        assert_eq!(a.inspector_divider, Some(87));
-        assert_eq!((a.inspector.x, a.inspector.width), (88, 32));
+        // The inspector gives up two of its 32 columns so the terminal keeps ROOMY_MIDDLE.
+        assert_eq!(a.inspector_divider, Some(89));
+        assert_eq!((a.inspector.x, a.inspector.width), (90, 30));
         assert_eq!((a.footer.y, a.footer.height), (29, 1));
         // Every column is used exactly once.
         assert_eq!(
             a.tree.width + 1 + a.terminal.width + 1 + a.inspector.width,
             AREA.width
         );
+    }
+
+    #[test]
+    fn the_inspector_shows_itself_only_beside_a_usable_terminal_and_i_forces_it() {
+        let rows = rows();
+        let mut app = App::default();
+        let narrow = Rect { width: 100, ..AREA };
+        // 100 columns: tree 28, terminal 71, no inspector (it would leave the terminal 38).
+        let a = app.areas(narrow);
+        assert_eq!((a.terminal.width, a.inspector.width), (71, 0));
+        // i shows it anyway, then hides it; Tab reaches it only while it is in view.
+        let at100 = Ctx {
+            area: narrow,
+            ..cx(&rows)
+        };
+        app.handle(Event::Key(Key::Char('i')), &at100);
+        assert_eq!(app.inspector, Panel::Shown);
+        let a = app.areas(narrow);
+        assert!(a.inspector.width >= MIN_INSPECTOR, "{a:?}");
+        assert!(a.terminal.width >= MIN_MIDDLE);
+        app.handle(Event::Key(Key::Tab), &at100);
+        assert_eq!(app.focus, Focus::Inspector);
+        app.handle(Event::Key(Key::Char('i')), &at100);
+        assert_eq!(app.inspector, Panel::Hidden);
+        assert_eq!(
+            app.focus,
+            Focus::Tree,
+            "the hidden inspector gives the keyboard back"
+        );
+        assert_eq!(app.areas(AREA).inspector.width, 0, "hidden at any width");
+        // A window narrowed under the focused inspector gives the keyboard back to the tree.
+        let mut app = App::default();
+        app.handle(Event::Key(Key::Tab), &cx(&rows));
+        assert_eq!(app.focus, Focus::Inspector);
+        app.handle(
+            Event::Resize {
+                cols: 100,
+                rows: 30,
+            },
+            &cx(&rows),
+        );
+        assert_eq!(app.focus, Focus::Tree);
+    }
+
+    #[test]
+    fn the_footer_shows_whole_keys_and_the_mouse_when_there_is_room() {
+        let keys = "Ctrl K commands · Enter open · s start · q quit";
+        assert_eq!(
+            footer_fit(200, "Started.  ", keys, "mouse on"),
+            (keys.to_string(), Some(" · mouse on".to_string()))
+        );
+        // Narrow: the keys that fit whole, never a cut word; the mouse state waits for room.
+        let (shown, mouse) = footer_fit(40, "Started.  ", keys, "mouse on");
+        assert_eq!(shown, "Ctrl K commands · Enter open");
+        assert_eq!(mouse, None);
+        let (shown, _) = footer_fit(12, "", keys, "mouse on");
+        assert_eq!(shown, "");
     }
 
     #[test]
@@ -1374,7 +1522,7 @@ mod tests {
             acts,
             vec![
                 Action::Open("mac/agent-2".into()),
-                Action::PaneSize { cols: 58, rows: 28 }
+                Action::PaneSize { cols: 60, rows: 28 }
             ]
         );
         assert_eq!(app.focus, Focus::Terminal);
@@ -1525,6 +1673,20 @@ mod tests {
     }
 
     #[test]
+    fn the_palette_also_runs_the_letters() {
+        let rows = rows();
+        let mut app = App::default();
+        key(&mut app, &rows, Key::Ctrl('k'));
+        // The test's words are the message ids: "tui-app-cmd-stop".
+        for c in "cmd-stop".chars() {
+            key(&mut app, &rows, Key::Char(c));
+        }
+        assert_eq!(app.commands(&cx(&rows)).len(), 1);
+        assert_eq!(key(&mut app, &rows, Key::Enter), vec![Action::Command('x')]);
+        assert!(app.palette.is_none());
+    }
+
+    #[test]
     fn m_releases_the_mouse_and_a_released_mouse_does_nothing() {
         let rows = rows();
         let mut app = App::default();
@@ -1555,14 +1717,19 @@ mod tests {
         click(&mut app, &rows, MouseKind::Down, 28, 5);
         let acts = click(&mut app, &rows, MouseKind::Drag, 40, 5);
         assert_eq!(app.tree_width, 40);
-        assert_eq!(acts, vec![Action::PaneSize { cols: 46, rows: 28 }]);
+        // A wider tree narrows the inspector first: the terminal keeps its ROOMY_MIDDLE columns, so its size is not sent again.
+        assert_eq!(acts, vec![]);
+        assert_eq!(app.areas(AREA).terminal.width, ROOMY_MIDDLE);
         click(&mut app, &rows, MouseKind::Up, 40, 5);
-        // The inspector's divider.
+        // The inspector's divider: a width the user drags is kept even if the terminal gets less.
         let x = app.areas(AREA).inspector_divider.unwrap();
+        assert_eq!(app.areas(AREA).inspector.width, 18);
         click(&mut app, &rows, MouseKind::Down, x, 3);
-        click(&mut app, &rows, MouseKind::Drag, x + 5, 3);
-        assert_eq!(app.inspector_width, 32 - 5);
-        click(&mut app, &rows, MouseKind::Up, x + 5, 3);
+        let acts = click(&mut app, &rows, MouseKind::Drag, x - 10, 3);
+        assert_eq!(app.inspector_width, 28);
+        assert_eq!(app.inspector, Panel::Shown);
+        assert_eq!(acts, vec![Action::PaneSize { cols: 50, rows: 28 }]);
+        click(&mut app, &rows, MouseKind::Up, x - 10, 3);
         // The tree cannot squeeze the terminal below its minimum.
         click(&mut app, &rows, MouseKind::Down, 40, 5);
         click(&mut app, &rows, MouseKind::Drag, 110, 5);
@@ -1606,7 +1773,8 @@ mod tests {
             },
             &cx(&rows),
         );
-        assert_eq!(acts, vec![Action::PaneSize { cols: 38, rows: 18 }]);
+        // 100 columns: no room for the inspector beside a usable terminal, so the terminal gets all but the tree.
+        assert_eq!(acts, vec![Action::PaneSize { cols: 71, rows: 18 }]);
         let again = app.handle(
             Event::Resize {
                 cols: 100,
