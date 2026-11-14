@@ -1249,6 +1249,19 @@ pub fn spawn_bound(cmd: &mut std::process::Command) -> io::Result<Bound> {
     }
 }
 
+/// Whether [`spawn_bound`] can bind a child here: a supervisor asks before starting anything, and refuses to start a child that could
+/// outlive it. Windows: joins the job (once) and says whether that worked; Linux and macOS: yes; other systems: no.
+pub fn children_can_be_bound() -> bool {
+    #[cfg(windows)]
+    {
+        winproc::join_kill_on_close_job()
+    }
+    #[cfg(not(windows))]
+    {
+        cfg!(any(target_os = "linux", target_os = "macos"))
+    }
+}
+
 /// A child started by [`spawn_bound`].
 #[derive(Debug)]
 pub struct Bound {

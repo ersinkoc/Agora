@@ -60,7 +60,7 @@ impl End {
 /// What the supervisor did, for its log and its record.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Event {
-    /// The child could not be tied to the supervisor (it may outlive it).
+    /// The child could not be tied to the supervisor, so it is not started (it could outlive the supervisor).
     NotBound,
     /// A stop request reached the supervisor; the child was stopped with it.
     StopRequest,
@@ -105,13 +105,18 @@ pub(crate) fn run(
         }
         let mut b = start()?;
         if !b.bound {
+            // It could outlive this supervisor, out of reach of `agora down`: not left running (checked before starting anything
+            // too, by `children_can_be_bound`).
+            let _ = b.child.kill();
+            let _ = b.child.wait();
             note(&Event::NotBound);
+            return Ok(1);
         }
         let began = ms(Instant::now());
         agora_platform::forward_stop_to(Some(b.child.id()));
-        // A request caught between the start and the line above was not passed on: pass it on now.
+        // A request caught between the start and the line above was not passed on: pass it on now, as the handler would have.
         if agora_platform::stop_requested() {
-            let _ = b.child.kill();
+            let _ = agora_platform::terminate_process(b.child.id());
         }
         // Wait without reaping, so the pid a stop request is passed on to stays this child's until the target is cleared.
         let ended = agora_platform::wait_unreaped(&b.child);
@@ -402,6 +407,13 @@ pub fn supervise(say: &Say, word: &str, handoff: Option<&str>) -> ExitCode {
     if let Err(e) = agora_platform::catch_stop_requests() {
         return fail(&e);
     }
+    if !agora_platform::children_can_be_bound() {
+        say.err(
+            key!("supervise-not-bound"),
+            &[("role", role.label(say).into())],
+        );
+        return ExitCode::from(1);
+    }
     // The command line is made once: every restart runs exactly what the front door asked for.
     let mut cmd = match frontdoor::command(&h, &m, role) {
         Ok(c) => c,
@@ -498,6 +510,12 @@ pub(crate) fn status_lines(
                     key!("status-restarts"),
                     &[
                         ("count", i64::try_from(recent).unwrap_or(i64::MAX).into()),
+                        (
+                            "window",
+                            i64::try_from(rule.window_ms / 60_000)
+                                .unwrap_or(i64::MAX)
+                                .into(),
+                        ),
                         ("end", end_text(say, c.end).into()),
                         ("minutes", minutes(c.at).into()),
                     ],

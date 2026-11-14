@@ -252,14 +252,14 @@ status-log = günlük: { $log }
 down-stopped = { $role } durduruldu (süreç { $pid }).
 down-failed = { $role } durdurulamadı: { $reason }
 down-nothing = Durdurulacak bir şey yok: `agora` şu anda çalışan hiçbir şey başlatmamış.
-supervise-not-bound = Gözetici: bu sistem { $role } sürecinin gözeticisine bağlanmasına izin vermedi; gözetici durdurulursa { $role } çalışmaya devam edebilir.
+supervise-not-bound = { $role } başlatılmıyor: bu sistem onun gözeticisine bağlanmasına izin vermedi, bu yüzden `agora down` onu durduramazdı. Elle başlatın (`agora { $role } run`) ya da bunu bildirin.
 supervise-stop-request = Gözetici: durdurulması istendi; { $role } de onunla birlikte durduruldu.
 supervise-stopped = Gözetici: { $role } durdu (çıkış kodu 0); yeniden başlatılmıyor.
 supervise-already-running = Gözetici: { $role } burada zaten çalışıyor (bu gözetici başlatmadı), bu yüzden ikincisi başlatılmıyor.
 supervise-lost-lock = Gözetici: { $role } kilidi artık bu gözeticiyi göstermiyor (`agora down` çalıştı ya da başka biri devraldı), bu yüzden { $role } yeniden başlatılmıyor.
 supervise-lock-held = Bu Agora klasöründe { $role } ile zaten başka bir süreç (süreç { $pid }) ilgileniyor; bu gözetici kapanıyor.
 status-restarting = { $role } çalışmıyor: çöktü ({ $end }) ve gözeticisi (süreç { $pid }) onu birazdan yeniden başlatacak ({ $max } yeniden başlatmadan { $count }.).
-status-restarts = son 10 dakikada { $count } kez yeniden başlatıldı; son çökme: { $end }, { $minutes ->
+status-restarts = son { $window } dakikada { $count } kez yeniden başlatıldı; son çökme: { $end }, { $minutes ->
     [0] bir dakikadan kısa süre önce
    *[other] { $minutes } dk önce
   }

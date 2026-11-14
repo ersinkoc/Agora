@@ -426,7 +426,23 @@ fn the_supervisor_restarts_a_crashed_node_and_never_leaves_it_behind() {
         "{log}"
     );
 
+    // `agora down` while the supervisor waits to restart a second crash: both end at once and nothing starts again.
+    std::thread::sleep(Duration::from_secs(11));
+    agora_platform::terminate_process(again).unwrap();
+    wait_for("the second restart notice", Duration::from_secs(10), || {
+        run(&home, &["status"])
+            .1
+            .contains("The node is not running: it crashed")
+    });
+    let stopping = Instant::now();
+    let (code, out, err) = run(&home, &["down"]);
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(!alive(supervisor), "the supervisor outlived `agora down`");
+    assert!(stopping.elapsed() < Duration::from_secs(10));
+    assert!(!home.join("run/node.lock").exists());
+
     // The supervisor killed outright: its node does not outlive it.
+    let (supervisor, again) = up("start after the stop during the wait");
     kill_outright(supervisor);
     wait_for(
         "the node to end with its supervisor",
@@ -459,7 +475,7 @@ fn the_supervisor_restarts_a_crashed_node_and_never_leaves_it_behind() {
     let log = std::fs::read_to_string(home.join("logs/node.log")).unwrap();
     assert_eq!(
         log.matches("Supervisor: the node ended after").count(),
-        1,
+        2,
         "the kill and `agora down` are not crashes: {log}"
     );
     let _ = std::fs::remove_dir_all(home);

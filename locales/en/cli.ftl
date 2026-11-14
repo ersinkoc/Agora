@@ -255,7 +255,7 @@ status-log = log: { $log }
 down-stopped = Stopped the { $role } (process { $pid }).
 down-failed = Could not stop the { $role }: { $reason }
 down-nothing = Nothing to stop: `agora` did not start anything that is still running.
-supervise-not-bound = Supervisor: this system did not let the { $role } be tied to its supervisor, so stopping the supervisor may leave the { $role } running.
+supervise-not-bound = The { $role } is not started: this system did not let it be tied to its supervisor, so `agora down` could not stop it. Start it by hand (`agora { $role } run`) or report this.
 supervise-stop-request = Supervisor: asked to stop; the { $role } was stopped with it.
 supervise-stopped = Supervisor: the { $role } stopped (exit code 0); it is not started again.
 supervise-already-running = Supervisor: the { $role } already runs here (it was not started by this supervisor), so another one is not started.
@@ -263,8 +263,8 @@ supervise-lost-lock = Supervisor: the { $role }'s lock no longer names this supe
 supervise-lock-held = Another process (process { $pid }) already looks after the { $role } on this Agora folder; this supervisor ends.
 status-restarting = The { $role } is not running: it crashed ({ $end }) and its supervisor (process { $pid }) starts it again shortly (restart { $count } of { $max }).
 status-restarts = { $count ->
-    [one] restarted once in the last 10 minutes
-   *[other] restarted { $count } times in the last 10 minutes
+    [one] restarted once in the last { $window } minutes
+   *[other] restarted { $count } times in the last { $window } minutes
   }; the last crash: { $end }, { $minutes ->
     [0] less than a minute ago
    *[other] { $minutes } min ago
