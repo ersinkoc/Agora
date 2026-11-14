@@ -1331,6 +1331,22 @@ impl Node {
             }));
         }
         {
+            // ADR-0049/0053: where a directory action of a device limited to some projects lands, by the node's own records only: the
+            // folders launches confirmed (the same file the launch writes), the registered checkouts, and the ledger for a resume.
+            let bindings = cfg.worktree_root.join(crate::directory::BINDINGS_FILE);
+            let known: Vec<(String, String, PathBuf)> = projects
+                .iter()
+                .map(|p| (p.id.clone(), p.name.clone(), p.root.clone()))
+                .collect();
+            let ledger = Arc::clone(&ledger);
+            grants.set_place_resolver(Box::new(move |place| match place {
+                crate::grants::Place::Folder(path) => {
+                    crate::directory::known_project(&bindings, &known, path)
+                }
+                crate::grants::Place::Agent(agent) => ledger.get(agent).map(|e| e.project_id),
+            }));
+        }
+        {
             // What this node says when the hub's record of it cannot be continued (ADR-0054, ADR-0055): who it is (only when the hub
             // lost this process's start), its checkouts, and its present. Each lock is taken alone and released before the next, and
             // before anything is recorded (see `announce`).

@@ -311,6 +311,7 @@ start-separate-worktree = Create an isolated working copy
 start-identity-change = Associate this folder with its changed project identity
 start-directory-unsupported = This machine needs an update to start agents in selected folders.
 start-directory-failed = The folder could not be selected. Check its path and permissions.
+start-directory-forbidden = This device is limited to other projects on this machine. Choose a folder of a project you work in, or ask the machine's owner.
 workspace-shared = Shared folder · changes belong to the workspace
 filter-project = Project
 filter-all-projects = All projects
@@ -446,6 +447,7 @@ resume-failed-gone = That machine no longer offers it.
 resume-failed-unsupported = That machine cannot resume agents yet. Update it.
 resume-failed-still-running = Its process from before the restart is still running. Stop it first.
 resume-failed-offline = That machine is offline.
+resume-failed-forbidden = This device is limited to other projects on this machine, so it cannot start this agent.
 
 # ADR-0059: launch options (manifest `[[launch.option]]` labels)
 option-skip-permissions = Don't ask

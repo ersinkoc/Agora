@@ -2,7 +2,7 @@ import * as Dialog from '@radix-ui/react-dialog';
 import { useEffect, useRef, useState } from 'react';
 import { t } from '../i18n';
 import type { MachineModel, ProjectChoice } from '../net/view';
-import { childPath, type DirectoryInfo, type DirectoryListing } from '../net/directory';
+import { childPath, directoryReasonKey, type DirectoryInfo, type DirectoryListing } from '../net/directory';
 import { Icon } from './Icon';
 import { machineFor } from './startChoice';
 import { ASK, chosenIds, confirmedIds, confirmSkip, harmless, initialLaunch, keepAsking, labelOf, pickPermission, skipping, toggleHarmless, usableOptions, type LaunchOptionChoice } from './launchChoice';
@@ -68,7 +68,7 @@ export function StartAgent({ projects, machines, initialNode, trust, askApproval
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   // The folder picker: what the machine answered for the folder being looked at.
-  const [browse, setBrowse] = useState<{ listing?: DirectoryListing; busy: boolean; failed?: boolean } | undefined>();
+  const [browse, setBrowse] = useState<{ listing?: DirectoryListing; busy: boolean; failed?: boolean; forbidden?: boolean } | undefined>();
   const [canBrowse, setCanBrowse] = useState(!!list);
   const look = async (at: string) => {
     if (!list) return;
@@ -77,7 +77,7 @@ export function StartAgent({ projects, machines, initialNode, trust, askApproval
     catch (e) {
       // A machine without the command: keep the typed path, and do not offer the picker again.
       if ((e as { code?: string }).code === 'protocol.capability_missing') { setCanBrowse(false); setBrowse(undefined); }
-      else setBrowse((b) => ({ listing: b?.listing, busy: false, failed: true }));
+      else setBrowse((b) => ({ listing: b?.listing, busy: false, failed: true, forbidden: (e as { code?: string }).code === 'auth.forbidden' }));
     }
   };
   useEffect(() => { setBrowse(undefined); setCanBrowse(!!list); }, [node, list]);
@@ -109,7 +109,7 @@ export function StartAgent({ projects, machines, initialNode, trust, askApproval
   const choose = async (at = path) => {
     setBusy(true); setError(undefined);
     try { setInfo(await inspect(node, at, createIdentity)); }
-    catch (e) { setError((e as { code?: string }).code === 'approval.signature_invalid' ? 'approval-not-trusted' : (e as { code?: string }).code === 'protocol.capability_missing' ? 'start-directory-unsupported' : 'start-directory-failed'); }
+    catch (e) { setError(directoryReasonKey((e as { code?: string }).code)); }
     finally { setBusy(false); }
   };
   const go = async () => {
@@ -169,7 +169,7 @@ export function StartAgent({ projects, machines, initialNode, trust, askApproval
                   <button type="button" className="button button--primary px-2 py-1 text-xs" disabled={!browse.listing || busy} onClick={() => { const p = browse.listing?.path ?? ''; setBrowse(undefined); changePath(p); void choose(p); }}>{t('start-select-directory')}</button>
                   <button type="button" className="ide-iconbtn" onClick={() => setBrowse(undefined)} aria-label={t('start-browse-close')} title={t('start-browse-close')}><Icon name="close" className="size-4" /></button>
                 </div>
-                {browse.failed && <p role="alert" className="m-0 text-xs text-needs-you">{t('start-browse-failed')}</p>}
+                {browse.failed && <p role="alert" className="m-0 text-xs text-needs-you">{t(browse.forbidden ? 'start-directory-forbidden' : 'start-browse-failed')}</p>}
                 <ul className="m-0 grid max-h-52 list-none gap-0.5 overflow-y-auto p-0">
                   {browse.listing?.entries.length === 0 && <li className="muted px-2 py-1 text-xs">{t('start-browse-empty')}</li>}
                   {browse.listing?.entries.map((e) => <li key={e.name}><button type="button" className="ide-row py-1" disabled={browse.busy} onClick={() => void look(childPath(browse.listing?.path ?? '', e.name))}>
