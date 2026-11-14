@@ -244,6 +244,9 @@ pub struct App {
     /// the next click, key or tab).
     pub selection: Option<Selection>,
     selecting: bool,
+    /// Lines the active tab is scrolled back from its live bottom (the wheel); 0 follows the agent. The caller clamps it to what the
+    /// tab's screen holds ([`TerminalPane::max_scroll`]).
+    pub scroll: usize,
     drag: Option<Divider>,
     pane: Option<(u16, u16)>,
 }
@@ -262,6 +265,7 @@ impl Default for App {
             mouse: true,
             selection: None,
             selecting: false,
+            scroll: 0,
             drag: None,
             pane: None,
         }
@@ -394,6 +398,7 @@ impl App {
                 if self.palette.is_some() {
                     self.palette_type(&text, cx);
                 } else if self.focus == Focus::Terminal && self.active_agent().is_some() {
+                    self.scroll = 0;
                     out.push(Action::Input(paste_bytes(&text, cx.modes)));
                 }
             }
@@ -404,6 +409,7 @@ impl App {
         let tab_now = self.active_agent().map(str::to_string);
         if tab_now != tab_before {
             self.selection = None;
+            self.scroll = 0;
             if let Some(i) = tab_now
                 .as_deref()
                 .and_then(|id| cx.rows.iter().position(|r| !r.header && r.id == id))
@@ -477,6 +483,8 @@ impl App {
                 Key::Ctrl(DETACH) | Key::F(BACK) => self.focus = Focus::Tree,
                 k if self.active_agent().is_some() => {
                     if let Some(bytes) = key_bytes(&k, cx.modes) {
+                        // Typing goes to the agent at its live bottom.
+                        self.scroll = 0;
                         out.push(Action::Input(bytes));
                     }
                 }
@@ -786,6 +794,14 @@ impl App {
             MouseKind::ScrollUp | MouseKind::ScrollDown => {
                 let up = m.kind == MouseKind::ScrollUp;
                 if a.terminal.contains(at) && self.active_agent().is_some() {
+                    // Back into the tab's history and forward again; a selection made at the old place is dropped.
+                    let step = usize::try_from(WHEEL).unwrap_or(3);
+                    self.scroll = if up {
+                        self.scroll.saturating_add(step)
+                    } else {
+                        self.scroll.saturating_sub(step)
+                    };
+                    self.selection = None;
                     out.push(Action::Scroll(if up { -WHEEL } else { WHEEL }));
                 } else if a.tree.contains(at) {
                     self.selected = step_row(cx.rows, self.selected, !up);
@@ -995,7 +1011,33 @@ impl App {
                     TerminalPane::new(term)
                         .colors(s.colors)
                         .selection(selection)
+                        .scroll(self.scroll)
                         .render(a.terminal, buf);
+                    // Scrolled back: say how far, and how to get back, at the pane's top right.
+                    let back = self
+                        .scroll
+                        .min(TerminalPane::max_scroll(term, a.terminal.height));
+                    if back > 0 {
+                        let note = format!(
+                            " {} ",
+                            (s.t)(
+                                key!("tui-app-scrolled"),
+                                &[("count", Arg::Num(i64::try_from(back).unwrap_or(i64::MAX)))]
+                            )
+                        );
+                        let w = u16::try_from(text_width(&note))
+                            .unwrap_or(u16::MAX)
+                            .min(a.terminal.width);
+                        Line::styled(note, chosen).render(
+                            Rect {
+                                x: a.terminal.right().saturating_sub(w),
+                                width: w,
+                                height: a.terminal.height.min(1),
+                                ..a.terminal
+                            },
+                            buf,
+                        );
+                    }
                 }
             }
         }
@@ -1141,7 +1183,10 @@ impl App {
                     });
                 }
             } else if let (Some(_), Some(term)) = (self.active_agent(), s.terminal) {
-                cursor = TerminalPane::cursor_position(term, a.terminal);
+                // No cursor while scrolled back: it belongs to the live bottom.
+                if self.scroll == 0 {
+                    cursor = TerminalPane::cursor_position(term, a.terminal);
+                }
             }
         }
         if let Some(lines) = s.dialog {
@@ -2772,6 +2817,31 @@ mod tests {
         let l = 0.2126 * lum(215.0) + 0.7152 * lum(95.0) + 0.0722 * lum(0.0);
         assert!(1.05 / (l + 0.05) >= 3.0, "on white");
         assert!((l + 0.05) / 0.05 >= 3.0, "on black");
+    }
+
+    #[test]
+    fn the_wheel_scrolls_a_tab_back_and_typing_returns_to_the_bottom() {
+        let rows = rows();
+        let mut app = App::default();
+        key(&mut app, &rows, Key::Enter);
+        let t = app.areas(AREA).terminal;
+        click(&mut app, &rows, MouseKind::ScrollUp, t.x + 2, t.y + 2);
+        click(&mut app, &rows, MouseKind::ScrollUp, t.x + 2, t.y + 2);
+        assert_eq!(app.scroll, 6);
+        click(&mut app, &rows, MouseKind::ScrollDown, t.x + 2, t.y + 2);
+        assert_eq!(app.scroll, 3);
+        // A key for the agent goes to its live bottom.
+        assert_eq!(
+            key(&mut app, &rows, Key::Char('a')),
+            vec![Action::Input(b"a".to_vec())]
+        );
+        assert_eq!(app.scroll, 0);
+        // Another tab starts at its bottom too.
+        click(&mut app, &rows, MouseKind::ScrollUp, t.x + 2, t.y + 2);
+        key(&mut app, &rows, Key::Ctrl(']'));
+        key(&mut app, &rows, Key::Down);
+        key(&mut app, &rows, Key::Enter);
+        assert_eq!(app.scroll, 0);
     }
 
     #[test]

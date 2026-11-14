@@ -18,6 +18,8 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 - A window or terminal client that comes back after a long time away (more than 10 000 events or 8 MiB behind) gets a fresh snapshot
   instead of replaying everything it missed. Its return no longer holds up the hub for every machine and every other window while
   the backlog is read (100 000 events behind took about 155 ms of the hub's time; now well under a millisecond).
+### Terminal client
+- The terminal client's wheel scrolls an agent's tab back through what it showed, with how far back at the top; typing goes back to the bottom.
 
 ## 0.3.11
 
