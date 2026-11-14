@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { agora } from '../gen/agora.js';
 import { CONTROL_KIND, decodeFrame, encodeFrame, EVENT_KIND, STREAM_CONTROL, STREAM_EVENTS } from './frame';
-import { connectLive, defaultBackoff, OPEN_WITHIN_MS, PING_EVERY_MS, PONG_WITHIN_MS, RETRY_CAP_MS, type LinkState, type Socket } from './live';
+import { connectLive, defaultBackoff, OPEN_WITHIN_MS, PING_EVERY_MS, PONG_WITHIN_MS, RETRY_CAP_MS, RETRY_FAST_ATTEMPTS, RETRY_SLOW_CAP_MS, type LinkState, type Socket } from './live';
 
 class FakeSocket implements Socket {
   binaryType = '';
@@ -48,7 +48,7 @@ describe('window to hub liveness', () => {
     t.goLive();
     expect(t.states.at(-1)).toBe('live');
     vi.advanceTimersByTime(PING_EVERY_MS);
-    expect(t.last().pings()).toBe(1);
+    expect(t.last().pings()).toBe(2); // the first when it opened
     // Nothing comes back, but the browser never reports the connection closed.
     vi.advanceTimersByTime(PONG_WITHIN_MS);
     expect(t.states.at(-1)).toBe('offline');
@@ -79,7 +79,8 @@ describe('window to hub liveness', () => {
     }
     expect(t.sockets).toHaveLength(1);
     expect(t.states.at(-1)).toBe('live');
-    expect(t.last().pings()).toBe(40);
+    expect(t.last().pings()).toBe(41); // one when it opened
+
     t.live.close();
   });
 
@@ -132,17 +133,41 @@ describe('coming back quickly', () => {
   beforeEach(() => { vi.useFakeTimers(); });
   afterEach(() => { vi.useRealTimers(); });
 
-  it('waits at most five seconds between attempts, with jitter', () => {
+  it('waits at most a second and a half between attempts while the hub restarts, with jitter, then up to five seconds', () => {
+    expect(RETRY_CAP_MS).toBe(1500);
     expect(defaultBackoff(0, () => 1)).toBe(500);
     expect(defaultBackoff(0, () => 0)).toBe(400);
-    expect(defaultBackoff(2, () => 1)).toBe(2000);
-    for (const n of [4, 5, 10, 40, 1000]) {
+    expect(defaultBackoff(1, () => 1)).toBe(1000);
+    for (const n of [2, 4, 5, 10, 40, RETRY_FAST_ATTEMPTS - 1]) {
       expect(defaultBackoff(n, () => 1)).toBe(RETRY_CAP_MS);
       expect(defaultBackoff(n, () => 0)).toBe(RETRY_CAP_MS * 0.8);
     }
+    for (const n of [RETRY_FAST_ATTEMPTS, 1000]) expect(defaultBackoff(n, () => 1)).toBe(RETRY_SLOW_CAP_MS);
     const seen = new Set(Array.from({ length: 50 }, () => defaultBackoff(6)));
     expect(seen.size).toBeGreaterThan(1);
     for (const ms of seen) expect(ms).toBeLessThanOrEqual(RETRY_CAP_MS);
+  });
+
+  it('a reconnect the hub has nothing new for goes live when the hub answers its ping, not at the next event', () => {
+    const t = setup();
+    t.goLive();
+    t.last().close(); // the hub restarted
+    vi.advanceTimersByTime(1000);
+    t.last().onopen?.();
+    // It subscribed from its position and pinged at once; nothing happened since, so the hub sends only the PONG.
+    expect(t.last().pings()).toBe(1);
+    expect(t.states.at(-1)).toBe('connecting');
+    t.last().frame(STREAM_CONTROL, CONTROL_KIND.PONG, new Uint8Array());
+    expect(t.states.at(-1)).toBe('live');
+    t.live.close();
+  });
+
+  it('a first connection is not live on a PONG alone: it waits for the snapshot', () => {
+    const t = setup();
+    t.last().onopen?.();
+    t.last().frame(STREAM_CONTROL, CONTROL_KIND.PONG, new Uint8Array());
+    expect(t.states.at(-1)).toBe('connecting');
+    t.live.close();
   });
 
   it('the browser coming online, the window becoming visible or getting the focus dials at once', () => {
@@ -175,7 +200,7 @@ describe('coming back quickly', () => {
     const t = setup();
     t.goLive();
     t.poke(); // the laptop woke up and the window became visible
-    expect(t.last().pings()).toBe(1);
+    expect(t.last().pings()).toBe(2); // the first when it opened
     vi.advanceTimersByTime(PONG_WITHIN_MS);
     expect(t.states.at(-1)).toBe('offline');
     t.live.close();
