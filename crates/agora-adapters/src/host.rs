@@ -882,6 +882,16 @@ mod tests {
             assert!(super::inheritable(ok, true), "{ok}");
             assert!(super::inheritable(ok, false), "{ok}");
         }
+        // ADR-0060: a parent Claude Code session's markers never reach an adapter (it would save no transcript): not in the list.
+        for marker in [
+            "CLAUDECODE",
+            "CLAUDE_CODE_CHILD_SESSION",
+            "CLAUDE_CODE_ENTRYPOINT",
+            "CLAUDE_CODE_SSE_PORT",
+        ] {
+            assert!(!super::inheritable(marker, true), "{marker}");
+            assert!(!super::inheritable(marker, false), "{marker}");
+        }
         for secret in [
             "OPENAI_API_KEY",
             "ANTHROPIC_API_KEY",

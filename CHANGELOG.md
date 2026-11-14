@@ -4,6 +4,105 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+### Devices
+- The hub keeps a list of each person's devices (ADR-0061): a browser or the terminal client registers its key and name when it signs
+  in, and `agora hub devices` lists them with the fingerprint people compare, the person, and when each was registered and last used.
+  The list is only a list of candidates: a machine trusts none of them because the hub lists it. A device can ask another device of
+  the same person to approve it, and the hub carries the signed approval (an endorsement) or removal to the machines, which verify it
+  themselves; machines report which devices they trust, so the window can show it.
+- Trusting your devices on a machine is one step (ADR-0061). `agora node enroll` now lists the devices registered on the hub, each as
+  name · fingerprint · when it was registered, and asks on that machine's terminal "Trust these devices on this machine? [y/N]"
+  (a script or any terminal that cannot answer is a no). `agora node trust --from-hub` asks the same on a machine that is already
+  enrolled, and `--yes --fingerprint FP` (repeatable) trusts exactly the devices with those fingerprints without asking.
+  `agora node untrust ID` stops trusting a device at once. `agora node trust ID KEY` works as before, and a newly trusted device
+  is used without restarting the node.
+- A machine accepts an approval of a new device (an endorsement) only from a device it already trusts, for that machine, signed and
+  not expired: it lasts at most 90 days, is renewed each time the device is used there, and never outlasts the device that approved
+  it. A removal signed by a trusted device takes effect at once and an older approval cannot bring the device back. Each one the
+  machine applies or refuses is written to `<data>/device-trust.log`. The trusted-devices file keeps its format (owner-only, one
+  device per line; lines add `since=`, and an approved device's line `expires=` and `via=`).
+- What the machine shows before you say yes cannot be faked by the hub: names are shown without control, escape, bidi or hidden
+  characters and cut at 40 characters, and each device's fingerprint (now 96 bits, `f947-3cb5-e304-81be-ecf2-64cd`) is computed on
+  the machine and printed on its own line; `--fingerprint` takes the whole fingerprint. Only devices registered with their own
+  signature are offered, only the hub owner's by default (other people's need `--include-others` and their fingerprints), and a
+  device whose id the machine already trusts with another key needs `--replace`. Removing a device also removes the devices it
+  approved; approvals are at most two deep and never outlast the approving device; a removal the hub sends again never undoes a
+  newer approval or `agora node trust`; changes to the trusted-devices file wait for each other across processes.
+- A device limited to some projects on a machine (`device.<id>.projects`) can approve only a device limited to the same projects,
+  and can remove only itself or such devices. A removal signed right after an approval always wins, even if the approval was dated
+  a few minutes ahead, and approvals or removals dated in the future are refused. A machine is offered only the devices of the
+  people who may work on it. A machine's policy can narrow such a device's limit but never widen it, only the device that
+  approved a device can renew that approval (keeping its limits), and approvals reach only the machines their person works on.
+  Limiting or narrowing a device on a machine limits the devices it approved too, at once; the device that approved a device can
+  renew it even after it ran out; another trusted device can take it over only if it is at least as wide as the device and the
+  one that approved it, and only with an approval signed after it ran out
+  (by the machine's clock). Approvals a device signed before it was removed stay refused, even if it is trusted again.
+- The window registers this browser with the hub when it connects. "This device" shows its fingerprint, which machines trust it,
+  "Ask another device to approve" for the ones that do not (the command to run on the machine stays as the fallback), and your
+  other devices with their fingerprints, where they are trusted, and Remove. On a device the machines already trust, a card shows
+  a device waiting for approval with its name, fingerprint and the machines it would be trusted on; Approve signs it with that
+  device's key. The start window offers "Ask another device to approve" when a machine does not trust this browser and another of
+  your devices could approve it there.
+- The terminal client registers its key too, shows its fingerprint when a machine does not trust it, asks another device to
+  approve it with `a`, and with `v` shows a device waiting for approval (name, fingerprint, machines) and approves it with `y`.
+- `agora node untrust` says what happened in a sentence and no longer prints its raw log line; the record stays in
+  `<data>/device-trust.log`. `agora doctor` says the node reads its policy file only when it starts and warns when the file changed
+  after the node started. The window says an approval for a project this device may not answer for is refused for good instead of
+  "Try again", and shows each device with the end of its id (`Chrome · Windows · 3f2a`) so two browsers of the same kind can be told apart.
+
+### Starting agents
+- When a machine does not trust your browser yet, the start window now shows the exact command to run on that machine, with a Copy button, instead of pointing to another page. The same folder spelled several ways on Windows (`D:\x`, `D:/x`, `\\?\D:\x`) is listed once.
+- A device limited to some projects on a machine can now start, resume, inspect and browse folders inside its own projects there (folders the machine already knows for them, and folders inside those); elsewhere it is refused, as before, and the window now says the device is limited to other projects instead of "The folder could not be selected".
+
+### Machines
+- A machine that goes quiet without its connection ending (a laptop that slept, a stopped process, a Wi-Fi switch, a NAT that forgot the connection) is shown offline within about 25 seconds, with when it was last seen, in the machine list, its tooltip, the Machines page and the terminal client. When it is back it is online again by itself, and its agents are untouched: offline is not finished (ADR-0070). Nodes ping the hub every 10 s, drop a hub that stopped answering after 25 s, give up a connection attempt that hangs after 25 s and reconnect at once after the machine wakes from sleep. The window pings the hub every 15 s and reconnects when nothing comes back within 10 s. Older nodes and windows keep working with a new hub, and a new window with an older hub shows machines as before.
+- Connecting to a hub at `localhost` no longer waits about two seconds on Windows: nodes, the terminal client, the desktop app and the hub's notifications try `127.0.0.1` first for a loopback name and `::1` only after it.
+### Getting started
+- Plain `agora` now opens the browser window by default on a desktop. The terminal client is the default only when there is no screen (an SSH session, or Linux with no display); `--ui tui` and `--save` still choose it.
+
+## 0.3.8
+
+### Getting started
+- Type `agora` and it works (ADR-0062, first rung). The first time it asks one question (start Agora here, just this machine, or join; joining from here comes later) and keeps the answer in `~/.agora/machine.toml`. Then it starts this machine's hub and node in the background when they are not running, connects the node to the hub by itself (no code to copy), and opens the terminal client signed in. `agora web` opens the browser signed in; `agora --ui web|tui|none` opens that for one run, and with `--save` makes it what plain `agora` opens. Closing or killing the window leaves the hub, the node and the agents running. `agora status` shows what runs and where its logs are (`~/.agora/logs`), `agora down` stops it. `agora --help` prints the usage. See `docs/getting-started.md`.
+
+### Signing in
+- A browser stays signed in: the session token is kept for 30 days (it was 12 hours and was forgotten when the tab closed) and every use extends it, so you are not asked for a code again each time you open the window. Signing out ends it at once.
+- A screen password (ADR-0067): `agora password set|clear|status` on the hub's machine, or This device in the window. A sign-in from another machine then needs its code and the password; the browser on the hub's own machine is never asked, and a passkey replaces the password on its device. Wrong codes and passwords are limited per address and for the whole hub with a lockout that grows up to an hour (never more than a minute on the hub's own machine), and every attempt is in the Activity page with its address and browser. Setting or changing the password signs out every other window.
+- **Lock** in the title bar signs the window out; agents keep running. This device can also sign the window out the same way after 5 to 60 minutes idle (off by default). Adding a passkey from another machine needs the screen password too, and setting or changing the password removes passkeys added from elsewhere without it. See `docs/ux/screen-password.md`.
+
+### Layouts (ADR-0068, rung 1)
+- The window's centre is a layout you arrange: several terminals and chats side by side. The Layout menu in the title bar gives one pane with tabs, two side by side, two stacked, 2 × 2, 3 × 2 and one large with three small, filled with the agents you watch; panes split right or down, resize by dragging their dividers (or with the arrow keys), drag onto each other (beside, or as a tab), swap and move from the pane menu, and maximize and restore. A pane can show an agent, follow what needs you next (each such pane shows a different waiting agent, oldest first) or follow the agent selected in the list, or show Needs you, Changes, Shared tasks, Messages or Spent. Layouts are saved by name, exported and imported as JSON (`docs/ux/layout.md`, version 1; one from a newer version is refused with a message), and kept across reloads; the tabs you had open become the first layout. Only panes on screen hold a terminal stream; on a phone the panes are tabs of one group.
+
+### Agents
+- Agents know who else is here. A new mesh tool, `workspace_status`, tells an agent how many agents work in its workspace and project, on which machines (other machines through the hub when the project is shared; marked partial when the hub cannot be asked), who is working, waiting for approval or idle, what each is doing in a few words (its claimed task, or the kind of its latest step, or its state; never its prompt or screen), how many files each has changed, who holds which paths and which tasks are open, with a one-line summary. `agents_list` rows carry the same facts. When an agent on the same machine starts or ends, the other agents of the project get a short `presence` note in their inbox (at most 10 a minute). Agents are told to check `workspace_status` when they start and before editing shared files.
+- A machine now remembers its agents across its own restart (ADR-0060): kind, folder, project, the agent that started it, its own session id once it reports one, and whether it ended. The record stays on that machine, readable by its owner only, holds no prompts, terminal contents or secrets, and forgets an agent after 14 days. An agent id is never given twice, so an agent that was running when the machine stopped keeps its place in the window.
+- After a machine restarts, the agents that were running on it are reported as interrupted and can be resumed under the same id, in the same folder and project, continuing their own conversation (`agent.resume`, signed by a trusted device like a start). Claude Code gets a session id chosen by the machine at start (`--session-id`), Codex's is read from its own session file when that cannot be confused with another one, structured agents report theirs. An agent without one can be started again in its folder. A resume is refused when the folder is gone or changed identity, and a helper comes back only while the agent that started it runs, without its old grants. A machine's owner can let agents of chosen kinds in chosen folders come back by themselves (`resume = auto`, `resume.kinds`, `resume.folders` in the node's policy file); the default is to ask.
+- The window lists agents that stopped with their machine under that machine ("Stopped with the machine") with **Resume** (continue its conversation) or **Start again** (a new one in the same folder); the closed-agent page says what happened and offers the same. In the terminal client such an agent's row says so, `u` resumes it and `U` starts it again.
+- An agent whose process kept running after its machine's node was killed is shown as still running from before the restart: it can be stopped, and only then resumed, so two processes never continue one conversation.
+- Codex waiting for approval to run a tool of an MCP server ("Allow the agora-mesh MCP server to run tool …?", codex-cli 0.169.0) is shown as needing you, not as idle (manifest rule `mcp_tool_approval`, from a screen captured on macOS).
+- A machine whose node runs inside a Claude Code session no longer passes that session's markers (`CLAUDECODE`, `CLAUDE_CODE_*`) to the Claude Code agents it starts, which made them save no transcript.
+- A new machine offers every shipped agent (Claude Code, Codex, WrongStack, opencode, Antigravity) without copying any file: the `agora` program now carries the shipped agent descriptions built in. A file in the node's manifests folder with the same kind replaces the built-in one, a new kind adds one, and a file that cannot be read is named by `agora doctor` while the built-in kind stays. A Shell (your own shell: `$SHELL`, or `%ComSpec%` on Windows) is built in too, so `agora agent start shell` and the start window work on a fresh machine. `agora doctor` lists every agent with where it came from (built in or the folder) and the program it looks for, and says when this machine cannot find that program in its PATH.
+- The start window and the terminal client say why an agent is greyed out: the machine cannot find its program in its PATH, so install it there or start the node from a terminal where it runs. The terminal client now lists those agents too instead of leaving them out.
+
+### Trust
+- The command that makes a machine trust your device says what to do when `agora` is not found on that machine (a downloaded release is not on PATH): run it in the folder of the agora program (`./agora`, or `.\agora.exe` on Windows). `agora node trust` no longer tells you to restart the node: the node picks the change up by itself.
+
+### Launch options (ADR-0059)
+- Agent manifests can declare launch options (`[[launch.option]]`, manifest engine 2), such as a flag that lets the agent act without asking. The shipped manifests declare the flag of the version it was checked on: Claude Code `--dangerously-skip-permissions` (2.1.323), Codex `--dangerously-bypass-approvals-and-sandbox` (0.167.1), WrongStack `--yolo` (1.6.0) and Antigravity's `agy acp --dangerously-skip-permissions` (1.5.6). The protocol carries the choice (`launch_options` on `AgentStart`, `AgentLaunch`, `AgentKind`, `AgentStarted` and the agent snapshot) and the error `agent.option_forbidden`; the node does not use them yet.
+- Machines: the node starts an agent with the launch options its start chose, on the agent's command line (terminal agents) or on its ACP server command (structured agents), for the agent's whole life, restarts and resumes included. The owner decides per machine in the node's policy file with `skip_permissions = forbid | allow | confined_only` (default `allow`; any other value forbids; the hub cannot change it); a start the policy refuses is refused before anything starts (`agent.option_forbidden`), and `confined_only` needs the agent's confinement (`sandbox = worktree`). Through the hub only a signed `agent.launch` may carry options and its signature covers them (`directory-action-v3`), so the hub can neither add nor remove one; a routed `agent.start` with options is refused and a grant never covers one. Agents an agent starts (`agent_start`) never get an option. The hub keeps the options in the agent snapshot and audits every start with one that skips permissions; nodes offer the capability `agent.launch_options` and the hub sends options only to nodes that offer it.
+- Windows: the start window lists the agent's launch options under "How it acts". "Ask before acting" is always the default and "Don't ask" is never preselected: choosing it asks "Let the agent act without asking?" first, with Keep asking as the main button, and the browser signs the choice with the start (with the ids you confirmed as a separate signed list, which the machine requires; ids that are not `[a-z0-9-]` are not offered). An agent started that way carries a "Does not ask" badge in the tree, on its tile and in its pane header for as long as it is listed. The terminal client asks the same two questions when it starts an agent (any key but `y` keeps asking) and shows "does not ask" on the agent's row, in the split view's tree and in its title.
+- The node itself decides which launch options skip permissions: the ids the user confirmed are sent and signed as a separate list (length-prefixed, `directory-action-v3`), the node refuses an unconfirmed one (`agent.option_unconfirmed`) and any id outside `[a-z0-9-]{1,32}` (`agent.option_invalid`), so a hub that shows it to the window as harmless cannot get it signed unknowingly. A policy file line the node does not understand (a typo such as `skip_permission = forbid`), or an existing policy file it cannot read, forbids such options and is reported at start (`node.policy_not_understood`); quoted values (`"forbid"`) are read as unquoted ones. A manifest that declares a known skip flag (`--dangerously-*`, `--yolo*`) without `skips_permissions = true` does not load.
+
+### Machines
+- `agora agent start` in a folder whose project identity changed (after `agora project init`) says so and names `--accept-project-id-change`, instead of "The request was not valid (field: directory.identity_changed)".
+- `agora node trust` no longer tells you to restart the node: the node reads its trusted devices again when the file changes.
+
+### Window
+- After a hub outage the window comes back within 5 s of the hub (it waited up to 30 s between attempts, and an attempt made while the hub was frozen or asleep could hang for a minute after it was back: an attempt that has not connected within 8 s is now given up and tried again), sooner when the browser is back online, the tab becomes visible or the window gets the focus, and the "Hub unreachable" banner has a "Retry now" button.
+
+### Agents
+- A `delivery_failed` notice for a message to another machine names the message that failed: its `reply_to` is the `message_id` that `send_message` answered with, so an agent with several messages in flight knows which one did not arrive. Nothing is resent.
+
 ## 0.3.7
 
 ### Agents
@@ -71,6 +170,7 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 ### Closed agents
 - A closed agent is always shown as finished; before, one that ended while it was waiting kept a spinning orange mark and counted as waiting for you.
 - The ✕ on a closed agent in the list and **Clear closed** now remove it for everyone when the hub can (ADR-0053). If the hub refuses (a permission, or the agent is running again) the reason is shown and nothing is hidden; only a hub that does not know the command hides it in this browser. What you cleared stays hidden only while the agent is closed.
+
 ### Starting agents
 - The start window picks up a machine that comes online after it was opened, instead of leaving nothing selected and no folders to choose from.
 
@@ -87,6 +187,7 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 ## 0.3.3
 ### Machines
 - A machine that was cut off from the hub for a long time sends what it saved much faster when the link comes back.
+
 
 ### Starting agents
 - **Browse folders:** the start window can list a machine's folders (ADR-0053): click **Browse folders**, step into a folder or up one, see which are Git projects, and use the folder you are in. Only folder names are listed, protected folders never show, and each listing is signed by this device. A machine that has not been updated keeps the typed path.
@@ -138,6 +239,7 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 - Machines, This device and Audit share the window's title bar. Alt+1…9 picks a tab, Ctrl/⌘+B hides the agent list. A long "shared folder" label no longer pushes an agent's name out of the list.
 - The window is laid out like an editor: the agents as a tree on the left (machine, folder, agent), the terminals you watch as tabs in the middle (or side by side), details in tabs on the right, a status bar at the bottom. Search and commands are one click or Ctrl+K from the title bar.
 - Starting an agent is one window: pick the machine, then a known folder in one click (or type a path), then the agent; the resolved folder is shown before anything starts.
+
 ### Starting agents
 - A start that fails after creating a separate working copy cleans up that copy and its unchanged branch. Branches with new commits or another working copy stay available; starts in existing folders preserve those folders.
 

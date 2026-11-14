@@ -5,8 +5,6 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use agora_adapters::manifest::Manifest;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
     Ok,
@@ -23,6 +21,8 @@ pub struct Check {
     pub status: Status,
     /// Version, path, count or name, whatever the sentence needs as `$detail`.
     pub detail: String,
+    /// More named values for the sentence, beside `$detail` (an agent kind's `$program` and `$from`).
+    pub args: Vec<(&'static str, String)>,
 }
 
 fn check(id: &'static str, status: Status, detail: impl Into<String>) -> Check {
@@ -30,6 +30,7 @@ fn check(id: &'static str, status: Status, detail: impl Into<String>) -> Check {
         id,
         status,
         detail: detail.into(),
+        args: Vec::new(),
     }
 }
 
@@ -103,18 +104,32 @@ pub fn run(inputs: &Inputs) -> Vec<Check> {
 
     out.push(data_dir(&inputs.data_dir));
 
-    out.push(
-        if agora_platform::LOCAL_SOCKETS_SUPPORTED
-            && agora_platform::local_connect(&inputs.socket).is_ok()
-        {
-            check("node", Status::Ok, inputs.socket.display().to_string())
-        } else {
-            check("node", Status::Warn, inputs.socket.display().to_string())
-        },
-    );
+    let running = agora_platform::LOCAL_SOCKETS_SUPPORTED
+        && agora_platform::local_connect(&inputs.socket).is_ok();
+    out.push(if running {
+        check("node", Status::Ok, inputs.socket.display().to_string())
+    } else {
+        check("node", Status::Warn, inputs.socket.display().to_string())
+    });
 
+    out.extend(policy_read_at_start(&policy_file, &inputs.socket, running));
     out.extend(manifests(&inputs.manifests_dir));
     out
+}
+
+/// The node reads its policy file (`<data>/policy`: limited devices, signed commands, the sandbox) only when it starts, unlike the
+/// trusted-devices file, which it follows. With a policy file: a note that a change needs a restart, and a warning when the file
+/// changed after the running node started (its socket was made then; where that cannot be told, only the note). Detail: the path.
+fn policy_read_at_start(policy: &Path, socket: &Path, running: bool) -> Option<Check> {
+    let changed = std::fs::metadata(policy).ok()?.modified().ok()?;
+    let detail = policy.display().to_string();
+    let started = running
+        .then(|| std::fs::metadata(socket).ok()?.modified().ok())
+        .flatten();
+    Some(match started {
+        Some(at) if changed > at => check("policy-changed", Status::Warn, detail),
+        _ => check("policy-restart", Status::Ok, detail),
+    })
 }
 
 /// One note per `sandbox.read` / `sandbox.write` entry the node cannot use: dropped (`policy-path-dropped`: relative, `..`, `~` with
@@ -155,44 +170,36 @@ fn data_dir(dir: &Path) -> Check {
     )
 }
 
+/// Every agent kind the node offers (the built-in ones and the folder's, `crate::manifests`): where it came from (`$from`: `built-in`
+/// or `folder`), the program looked for (`$program`) and whether it is found. A folder file that cannot be read is named; its
+/// built-in kind, if any, stays. A missing folder is fine: the built-in kinds still load.
 fn manifests(dir: &Path) -> Vec<Check> {
-    let Ok(rd) = std::fs::read_dir(dir) else {
-        return vec![check("manifests", Status::Warn, dir.display().to_string())];
-    };
-    let mut paths: Vec<PathBuf> = rd
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|x| x == "toml"))
-        .collect();
-    paths.sort();
-    let mut out = Vec::new();
-    let mut loaded = 0;
-    for p in paths {
+    let (loaded, problems) = crate::manifests::load(dir);
+    let mut out = vec![check("manifests", Status::Ok, loaded.len().to_string())];
+    for l in loaded {
+        let program = crate::manifests::program(&l.manifest)
+            .unwrap_or_default()
+            .to_string();
+        let installed = !program.is_empty() && on_path(&program);
+        let mut c = check(
+            if installed {
+                "agent-installed"
+            } else {
+                "agent-missing"
+            },
+            if installed { Status::Ok } else { Status::Warn },
+            l.manifest.kind,
+        );
+        c.args = vec![("program", program), ("from", l.source.name().to_string())];
+        out.push(c);
+    }
+    for (p, _) in problems {
         let name = p
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        match std::fs::read_to_string(&p)
-            .map_err(|e| e.to_string())
-            .and_then(|s| Manifest::parse(&s).map_err(|e| e.to_string()))
-        {
-            Ok(m) => {
-                loaded += 1;
-                let installed = m.process.launch.first().is_some_and(|l| on_path(l));
-                out.push(check(
-                    if installed {
-                        "agent-installed"
-                    } else {
-                        "agent-missing"
-                    },
-                    if installed { Status::Ok } else { Status::Warn },
-                    m.kind,
-                ));
-            }
-            Err(_) => out.push(check("manifest-invalid", Status::Warn, name)),
-        }
+        out.push(check("manifest-invalid", Status::Warn, name));
     }
-    out.insert(0, check("manifests", Status::Ok, loaded.to_string()));
     out
 }
 
@@ -230,10 +237,64 @@ mod tests {
         assert_eq!(find(&checks, "version")[0].status, Status::Ok);
         assert_eq!(find(&checks, "data-dir")[0].status, Status::Ok);
         assert_eq!(find(&checks, "node")[0].status, Status::Warn);
-        assert_eq!(find(&checks, "manifests")[0].status, Status::Warn);
+        // No manifests folder: the built-in kinds still load.
+        assert_eq!(find(&checks, "manifests")[0].status, Status::Ok);
+        assert_eq!(
+            find(&checks, "manifests")[0].detail,
+            (crate::manifests::BUILT_IN.len() + 1).to_string()
+        );
         // Where terminals are unsupported (Windows for now) that is a reported problem, not a healthy machine.
         let git_ok = find(&checks, "git")[0].status == Status::Ok;
         assert_eq!(healthy(&checks), git_ok && agora_platform::PTY_SUPPORTED);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_policy_file_is_said_to_need_a_restart_and_a_change_after_the_start_is_a_warning() {
+        let d = tmp("policy-restart");
+        let policy = d.join("policy");
+        let socket = d.join("node.sock");
+        let at = |p: &Path, t: std::time::SystemTime| {
+            std::fs::File::options()
+                .write(true)
+                .open(p)
+                .unwrap()
+                .set_modified(t)
+                .unwrap();
+        };
+        let now = std::time::SystemTime::now();
+        let minute = std::time::Duration::from_secs(60);
+        // No policy file: nothing to say.
+        assert!(policy_read_at_start(&policy, &socket, true).is_none());
+        std::fs::write(&policy, "device.web-1.projects = shop\n").unwrap();
+        std::fs::write(&socket, "").unwrap();
+        // No node running, or one started after the last change: the note.
+        for running in [false, true] {
+            at(&socket, now);
+            at(&policy, now - minute);
+            let c = policy_read_at_start(&policy, &socket, running).unwrap();
+            assert_eq!((c.id, c.status), ("policy-restart", Status::Ok));
+            assert_eq!(c.detail, policy.display().to_string());
+        }
+        // Changed after the running node started: the warning, which is a note and not a problem.
+        at(&socket, now - minute);
+        at(&policy, now);
+        let c = policy_read_at_start(&policy, &socket, true).unwrap();
+        assert_eq!((c.id, c.status), ("policy-changed", Status::Warn));
+        assert!(healthy(&[c]));
+        // Where the start cannot be told (no socket file, e.g. a named pipe), only the note.
+        std::fs::remove_file(&socket).unwrap();
+        assert_eq!(
+            policy_read_at_start(&policy, &socket, true).unwrap().id,
+            "policy-restart"
+        );
+        // `run` says it too.
+        let checks = run(&Inputs {
+            data_dir: d.clone(),
+            socket: d.join("nope.sock"),
+            manifests_dir: d.join("manifests"),
+        });
+        assert_eq!(find(&checks, "policy-restart").len(), 1);
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -307,9 +368,20 @@ mod tests {
         std::fs::write(m.join("c.toml"), "not = [valid").unwrap();
         let checks = manifests(&m);
         assert_eq!(checks[0].id, "manifests");
-        assert_eq!(checks[0].detail, "2");
-        assert_eq!(find(&checks, "agent-installed")[0].detail, "demo");
-        assert_eq!(find(&checks, "agent-missing")[0].detail, "ghost");
+        assert_eq!(
+            checks[0].detail,
+            (crate::manifests::BUILT_IN.len() + 3).to_string()
+        );
+        let of = |kind: &str| checks.iter().find(|c| c.detail == kind).unwrap();
+        assert_eq!(of("demo").id, "agent-installed");
+        assert_eq!(
+            of("demo").args,
+            [("program", present.to_string()), ("from", "folder".into())]
+        );
+        assert_eq!(of("ghost").id, "agent-missing");
+        assert_eq!(of("ghost").args[0].1, "definitely-not-installed-xyz");
+        assert_eq!(of("codex").args[1].1, "built-in");
+        assert_eq!(of("codex").args[0].1, "codex");
         assert_eq!(find(&checks, "manifest-invalid")[0].detail, "c.toml");
         let _ = std::fs::remove_dir_all(&d);
     }

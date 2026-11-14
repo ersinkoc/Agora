@@ -1,7 +1,7 @@
 kind = "codex"
 display_name = "Codex"
-version = "2026.11.11.2"
-min_engine = 1
+version = "2026.11.13.1"
+min_engine = 2
 # ADR-0057: before Enter, the last `› ` row (the input box) must hold the typed prompt (and only it), above the shortcuts footer and
 # with no dialog. A prompt long enough to wrap does not match, so it is left for the user rather than sent half-checked.
 input_box = '^›[^\S\n]+([^\n]*?)[^\S\n]*$'
@@ -9,6 +9,16 @@ input_box = '^›[^\S\n]+([^\n]*?)[^\S\n]*$'
 [process]
 names = ["codex"]
 launch = ["codex"]
+
+# ADR-0059: chosen in the start window, never preselected; the node's `skip_permissions` policy decides whether it may be used.
+# `--dangerously-bypass-approvals-and-sandbox` ("Skip all confirmation prompts and execute commands without sandboxing") checked with
+# `codex --help` and `codex resume --help` on codex-cli 0.167.1. It also turns off Codex's own sandbox: the node's confinement
+# (`sandbox = worktree`, and `skip_permissions = confined_only`) is what still keeps it in its folder.
+[[launch.option]]
+id = "skip-permissions"
+label = "option-skip-permissions"
+args = ["--dangerously-bypass-approvals-and-sandbox"]
+skips_permissions = true
 
 [accounts]
 login = ["codex", "login"]
@@ -25,6 +35,15 @@ flag = [
 
 [resume]
 argv = ["codex", "resume", "{session_id}"]
+
+[session.file]
+# ADR-0060: no flag sets Codex's session id. The first line of ~/.codex/sessions/YYYY/MM/DD/rollout-<time>-<id>.jsonl is
+# `{"type":"session_meta","payload":{"id":...,"cwd":...}}` (checked on codex-cli 0.167.0 and 0.167.1); the node takes the newest one
+# written after the agent started in its folder, and none when two Codex agents started in that folder at about the same time.
+glob = "{home}/.codex/sessions/*/*/*/rollout-*.jsonl"
+select = { path = "type", equals = "session_meta" }
+id = "payload.id"
+cwd = "payload.cwd"
 
 [usage]
 # Codex appends `token_count` events with the running total of the session to ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl
@@ -70,6 +89,16 @@ state = "blocked"
 priority = 950
 region = "bottom_non_empty_lines(12)"
 all = [{ contains = "trust these files" }, { contains = "trust decision" }]
+
+# Before it runs a tool of an MCP server (the mesh's `agora-mesh` among them), Codex asks for approval in a numbered menu
+# ("Allow the agora-mesh MCP server to run tool \"agents_list\"?", `› 1. Allow`, `enter to submit | esc to cancel`) and waits;
+# the `›` row would otherwise read as the idle prompt. Captured on codex-cli 0.169.0 (fixtures/codex/mcp_tool_approval.screen).
+[[rules]]
+id = "mcp_tool_approval"
+state = "blocked"
+priority = 900
+region = "bottom_non_empty_lines(12)"
+all = [{ contains = "MCP server to run tool" }, { contains = "esc to cancel" }]
 
 [[rules]]
 id = "esc_to_interrupt"

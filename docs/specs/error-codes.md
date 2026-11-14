@@ -33,10 +33,25 @@ or a local response timeout has a localized retry message.
 | `agent.not_authenticated` | `kind`, `node_id` | Agent account not logged in on that node |
 | `agent.blocked` | `agent_id` | Agent waits for input; prompt not sent |
 | `agent.mode_unsupported` | `kind`, `mode` | e.g. chat mode for an L1 agent |
+| `agent.option_forbidden` | `kind`, `option`, `policy` | ADR-0059: a start chose a launch option (`option`, the first refused id) that may not be used; nothing was started. `policy`: `forbid` (the node's `skip_permissions` policy does not allow an option that skips permissions), `confined_only` (it allows one only for a confined agent and this one would not be confined), `signature` (a routed `AgentStart` with options: only a signed `AgentLaunch` or the node's own socket may carry them) |
+| `agent.option_invalid` | `kind`, `option` | ADR-0059: a launch option id that is not `[a-z0-9-]{1,32}` (so `!` or `,` in it), that the node's manifest for `kind` does not declare, that is repeated, or a confirmation for an id that was not chosen; more than 8 (`option` empty). Nothing was started |
+| `agent.option_unconfirmed` | `kind`, `option` | ADR-0059: the node's own manifest says `option` makes the agent act without asking, and the start did not list it in `confirmed_launch_options` (signed with the start): the window did not show the confirmation for it, for example because a hub relabelled it as harmless. Nothing was started |
 | `agent.running` | `agent_id` | the agent still runs, so it cannot be forgotten (ADR-0053) |
+| `agent.not_interrupted` | `agent_id` | ADR-0060: `agent.resume` names an agent the node does not hold as interrupted (never seen, running, resumed already, or no longer kept after 14 days) |
+| `agent.session_missing` | `agent_id` | ADR-0060: Resume needs the agent's own session id and a kind that can resume one; the node has neither, so only Start again (`new_session`) is possible |
+| `agent.folder_changed` | `agent_id`, `path` | ADR-0060: the agent's folder is gone or now has another project identity (ADR-0052); nothing was started |
+| `agent.parent_not_running` | `agent_id`, `parent_agent_id` | ADR-0060: a helper (ADR-0057) is resumed only while the agent that started it runs |
+| `agent.still_running` | `agent_id` | ADR-0060: the agent's process from before the node's restart still runs (a node killed without stopping its agents); stop it first (`agent.stop` ends exactly that process), then resume |
 | `approval.expired` | `approval_id` | |
 | `approval.signature_invalid` | `approval_id` | |
 | `approval.grant_required` | `command` | ADR-0041: the node's `signed_commands` policy lists this command and no live grant covers it |
+| `device.unknown` | `device_id` | ADR-0061: the hub has no device with this id registered to the caller (another person's device looks the same) |
+| `device.key_mismatch` | `device_id` | ADR-0061: the id is registered (or trusted on the machine) with another key; a device id stays bound to its key |
+| `device.untrusted` | `device_id`, `node_id` | ADR-0061: the device that signed an endorsement or revocation (`device_id`) is not one this machine trusts, or its trust there expired |
+| `device.signature_invalid` | `device_id` | ADR-0061: the registration, ask, endorsement or revocation of `device_id` does not verify under the key that must have signed it, or its time is too far from the receiver's clock |
+| `device.endorsement_expired` | `device_id` | ADR-0061: the endorsement has expired, lasts longer than 90 days, or was signed in the future |
+| `device.not_in_scope` | `device_id`, `node_id` | ADR-0061: the endorsement names other machines than this one |
+| `device.revoked` | `device_id` | ADR-0061: a revocation of the device was signed at or after this endorsement |
 | `lease.held` | `path`, `holder_agent_id`, `expires_at` | `expires_at` is when the conflicting lease ends, in milliseconds since the epoch |
 | `board.unavailable` | `project_id` | A shared project's board cannot be reached (hub unreachable), or a lease or claim waits while the project's nodes hand over their local work (up to 5 s, ADR-0039 amendment B); the agent keeps working locally (ADR-0039) |
 | `mesh.recipient_unknown` | `to` | |

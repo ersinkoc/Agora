@@ -37,7 +37,7 @@
 
 @layer components {
   /* The IDE-style window: dense rows, quiet chrome, the terminal is the content. */
-  .ide { @apply grid h-screen min-h-0 overflow-hidden bg-surface-0 text-[13px]; grid-template-rows: auto minmax(0, 1fr) auto; }
+  .ide { @apply grid h-screen min-h-0 overflow-hidden bg-surface-0 text-[13px]; grid-template-rows: auto minmax(0, 1fr) auto; grid-template-columns: minmax(0, 1fr); }
   .ide-bar { @apply flex items-center gap-2 border-line bg-surface-1 px-2; }
   .ide-iconbtn { @apply inline-grid size-7 place-items-center rounded-xs text-muted transition-colors duration-150 hover:bg-surface-2 hover:text-ink disabled:opacity-40; }
   .ide-iconbtn[aria-pressed='true'] { @apply bg-surface-2 text-ink; }

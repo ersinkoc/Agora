@@ -27,10 +27,29 @@ agent-sandbox_unavailable = Bu makine ajanları kısıtlayacak şekilde ayarlı 
 agent-not_authenticated = { $kind }, { $node_id } makinesinde giriş yapmamış.
 agent-blocked = { $agent_id } ajanı girdi bekliyor, bu yüzden mesaj gönderilmedi.
 agent-mode_unsupported = { $kind }, { $mode } modunu desteklemiyor.
+agent-option_forbidden = { $kind }, { $option } seçeneğiyle başlatılmadı: { $policy ->
+        [confined_only] bu makine bir ajanın sormadan çalışmasına yalnızca klasörüyle sınırlıyken izin veriyor ve burada sınırlanamazdı.
+        [signature] böyle başlatmak için başlatma isteğinin cihazınızca imzalanması gerekir.
+       *[other] bu makine ajanların sormadan çalışmasına izin vermiyor.
+    }
+agent-option_invalid = { $kind } başlatılmadı: "{ $option }" başlatma seçeneği onun sunduğu bir seçenek değil (ya da çok fazla seçenek var).
+agent-option_unconfirmed = { $kind }, { $option } seçeneğiyle başlatılmadı: bu seçenek ajanın sormadan çalışmasını sağlar ve başlatma isteğinde bunun için onayınız yoktu.
 agent-running = { $agent_id } hâlâ çalışıyor. Önce durdurun.
+agent-not_interrupted = { $agent_id } yarıda kalmadı ya da artık devam ettirilmek üzere sunulmuyor.
+agent-session_missing = { $agent_id } kendi oturumuna devam edemiyor. Bunun yerine yeniden başlatın.
+agent-folder_changed = { $agent_id } ajanının klasörü yok ya da artık başka bir projeye ait: { $path }
+agent-still_running = { $agent_id } makinenin düğümü yeniden başlamadan önceki haliyle hâlâ çalışıyor. Önce durdurun, sonra devam ettirin.
+agent-parent_not_running = { $agent_id } ajanını { $parent_agent_id } başlattı. Önce o ajanı devam ettirin.
 approval-expired = { $approval_id } onayının süresi doldu.
 approval-signature_invalid = { $approval_id } onayı doğrulanamadı.
 approval-grant_required = Bu makine önce sizden izin istiyor: { $command }.
+device-unknown = Hub'da sizin { $device_id } adlı bir cihazınız yok.
+device-key_mismatch = { $device_id } cihazı başka bir anahtarla biliniyor.
+device-untrusted = { $device_id } cihazına { $node_id } makinesinde güvenilmiyor.
+device-signature_invalid = { $device_id } cihazı için imza doğrulanamadı.
+device-endorsement_expired = { $device_id } cihazının onayının süresi dolmuş ya da çok uzun.
+device-not_in_scope = { $device_id } cihazının onayı { $node_id } makinesi için değil.
+device-revoked = { $device_id } cihazı onaylandıktan sonra kaldırıldı.
 lease-held = { $path }, { $expires_at } zamanına kadar { $holder_agent_id } ajanı tarafından kullanılıyor.
 board-unavailable = { $project_id } için ortak panoya şu anda ulaşılamıyor. Çalışmanız bu makinede devam ediyor.
 mesh-recipient_unknown = { $to } adında bir ajan veya kanal yok.

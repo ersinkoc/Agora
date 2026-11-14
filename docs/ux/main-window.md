@@ -22,7 +22,7 @@ An agent whose process is gone moves from its folder to **Closed**, below the ma
 
 ![Hub and machines](screens/network-dark.png)
 
-`#/machines` draws the hub with a live link to every machine it knows (animated when connected, dotted when not), a card per machine (state, system, node version, agents, terminals, memory, cost, last heard) and the agents running there as chips.
+`#/machines` draws the hub with a live link to every machine it knows (animated when connected, dotted when not), a card per machine (state, system, node version, agents, terminals, memory, cost, when it was last heard, or for an offline one "last seen", ADR-0070) and the agents running there as chips. An offline machine also shows "last seen" on its row in the agent list and in its tooltip.
 
 ## Layout (editor-style, 2026-11-12)
 
@@ -30,7 +30,7 @@ The window is laid out like an editor, with the terminal as the content. At most
 
 - **Title bar:** product mark, the search and command field (Ctrl+K), connection state, language, device.
 - **Left, Agents:** a tree of machine, folder, agent. A machine row has a start button (visible on hover and focus). Agents show their state shape, shared-folder label and changed-file count. The project filter and search narrow the tree. Clicking an agent opens it as a tab; clicking the one in front closes it.
-- **Middle, tabs:** one tab per watched agent (state shape, name, close). Tabs can be dragged to reorder. A toggle shows one terminal at a time or the tabs side by side. Above the terminal: machine, folder and branch, changed files, cost, state, History, Files, Full size, and the copyable agent address.
+- **Middle, panes (ADR-0068, [layout.md](layout.md)):** a layout of panes and tab groups: one pane with a tab per watched agent by default, or 1x2, 2x1, 2x2, 3x2 and one large with three small from the **Layout** menu in the title bar, saved by name, exported and imported. Panes are split, resized by their dividers, dragged onto each other, maximized and restored; a pane can follow what needs you or the selected agent. Above each terminal: machine, folder and branch, changed files, cost, state, History, Files, Full size, and the copyable agent address.
 - **Right, Details:** tabs for Needs you (opens first whenever something needs you), Changes, Board, Messages, Spent.
 - **Status bar:** machines online, agents, how many need you, cost so far.
 - **Empty state:** a start button, the agents that are running, and the two keyboard shortcuts.

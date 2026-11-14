@@ -80,6 +80,11 @@ impl Scope {
                 out.nodes.insert(k.clone(), n.clone());
             }
         }
+        for (k, d) in &view.trusted_devices {
+            if self.node_visible(k) {
+                out.trusted_devices.insert(k.clone(), d.clone());
+            }
+        }
         for (k, c) in &view.checkouts {
             if self.granted(self.checkouts.get(k)) {
                 out.checkouts.insert(k.clone(), c.clone());
@@ -143,7 +148,9 @@ impl Scope {
 
             Body::NodeOnline(e) => self.node_visible(&e.node_id),
             Body::NodeOffline(e) => self.node_visible(&e.node_id),
+            Body::NodeLink(e) => self.node_visible(&e.node_id),
             Body::NodeResources(e) => self.node_visible(&e.node_id),
+            Body::NodeTrustedDevices(_) => self.node_visible(node),
             Body::CheckoutDiscovered(e) => {
                 let p = qualified(&e.node_id, &e.project_id);
                 self.checkouts.insert(q(&e.checkout_id), p.clone());
@@ -165,6 +172,15 @@ impl Scope {
             Body::AgentStarted(e) => {
                 let p = qualified(&e.node_id, &e.project_id);
                 self.agents.insert(q(&e.agent_id), p.clone());
+                self.projects.contains(&p)
+            }
+            // ADR-0060: the agent may be one the hub never saw start (its store was reset), so it teaches the project too.
+            Body::AgentInterrupted(e) => {
+                let p = self
+                    .agents
+                    .entry(q(&e.agent_id))
+                    .or_insert_with(|| qualified(node, &e.project_id))
+                    .clone();
                 self.projects.contains(&p)
             }
             Body::AgentStateChanged(e) => self.granted(self.agents.get(&q(&e.agent_id))),
@@ -234,6 +250,7 @@ impl Scope {
                         || self.granted(self.worktrees.get(&q(&c.worktree_id))))
             }
             C::AgentStop(c) => self.granted(self.agents.get(&q(&c.agent_id))),
+            C::AgentResume(c) => self.granted(self.agents.get(&q(&c.agent_id))),
             // ADR-0053: named by the hub-wide key, so it is not qualified again.
             C::AgentForget(c) => self.granted(self.agents.get(&c.agent_id)),
             C::AgentPrompt(c) => self.granted(self.agents.get(&q(&c.agent_id))),
@@ -299,6 +316,8 @@ mod tests {
                 kind: "k".into(),
                 level: 0,
                 parent_agent_id: String::new(),
+                launch_options: Vec::new(),
+                skips_permissions: false,
             }),
         )
     }
