@@ -2332,3 +2332,57 @@ async fn an_offline_machine_is_forgotten_for_every_client() {
     let (view, _) = st.hub.view();
     assert!(view.nodes["n1"].forgotten);
 }
+
+/// #558 review: a certificate revoked between the node's Hello and its Resume ends the connection too (the handshake is watched as
+/// the conversation is), and the node is never recorded online.
+#[tokio::test]
+async fn a_certificate_revoked_during_the_handshake_ends_the_connection() {
+    // The recheck of a live connection's certificate, shortened for this test (the default is 10 s).
+    std::env::set_var("AGORA_RECHECK_MS", "50");
+    let st = state(None);
+    let valid = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    let (st2, v2) = (Arc::clone(&st), Arc::clone(&valid));
+    let task = tokio::spawn(async move {
+        let (s, _) = l.accept().await.unwrap();
+        let (conn, _) = ws::accept_with_token(s).await.unwrap();
+        let check = move || v2.load(std::sync::atomic::Ordering::SeqCst);
+        server::serve_node_while(
+            conn,
+            "n1",
+            &st2.hub,
+            &st2.support,
+            Duration::from_secs(30),
+            &check,
+        )
+        .await
+    });
+    let mut c = dial(addr, None).await;
+    let hello = v1::Hello {
+        role: v1::Role::Node as i32,
+        protocol_generations: vec![1],
+        capabilities: vec![],
+        build: "t".into(),
+        locale: None,
+    };
+    c.send(&f(STREAM_CONTROL, kinds::HELLO, hello.encode_to_vec()))
+        .await
+        .unwrap();
+    let w = recv(&mut c).await;
+    assert_eq!((w.stream_id, w.kind), (STREAM_CONTROL, kinds::WELCOME));
+    // It holds the connection without resuming; its certificate is revoked meanwhile.
+    valid.store(false, std::sync::atomic::Ordering::SeqCst);
+    assert!(closed(&mut c).await, "the revoked node kept its connection");
+    // The hub waits up to 5 s for the close to be answered; this peer just goes away.
+    drop(c);
+    let ended = tokio::time::timeout(Duration::from_secs(10), task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(&ended, Err(server::ServeError::Protocol(e)) if e.code.as_str() == "auth.device_revoked"),
+        "{ended:?}"
+    );
+    assert!(!st.hub.view().0.nodes.get("n1").is_some_and(|n| n.online));
+}
