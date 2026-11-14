@@ -222,6 +222,7 @@ changes-layout = Layout
 changes-layout-unified = Unified
 changes-layout-split = Side by side
 changes-wrap = Wrap lines
+changes-wrap-long = A long change shown whole is drawn one line per row, so it does not wrap; scroll sideways instead.
 changes-refresh = Read the changes again
 changes-list = Changed files
 changes-top-folder = Top folder
@@ -244,7 +245,26 @@ changes-gap-failed = Could not read this file to show the unchanged lines.
 changes-retry = Try again
 changes-stale = The file has changed since these changes were read, so the unchanged lines are not shown. Read the changes again.
 changes-truncated = These changes are larger than 512 KiB, so only the first part was read. The last file in the list is cut off.
+changes-truncated-count = These changes are larger than 512 KiB, so only the first { $count ->
+        [one] file was
+       *[other] { $count } files were
+    } read. The machine counts { $total } changed files: at least { $min ->
+        [one] one is
+       *[other] { $min } are
+    } not listed here. The last file in the list is cut off.
+files-truncated = The changes are larger than 512 KiB, so files after the cut may have no change mark.
+files-truncated-count = The changes are larger than 512 KiB, so files after the cut have no change mark. The machine counts { $total ->
+        [one] one changed file
+       *[other] { $total } changed files
+    }; { $count ->
+        [one] one is
+       *[other] { $count } are
+    } marked.
 changes-partial = This file is cut off: the changes were too large to read at once.
+changes-eol = { $count ->
+    [one] One changed line differs only in its line ending (LF or CRLF); its text is the same.
+   *[other] { $count } changed lines differ only in their line endings (LF or CRLF); their text is the same.
+}
 changes-load-file = Read only this file
 changes-load-file-failed = This file alone is still too large to read.
 changes-show-all = { $count ->
@@ -309,8 +329,36 @@ history-failed = Could not read the history from that machine.
 history-no-subject = (no message)
 chat-empty = Nothing said yet. Tell it what to do below.
 chat-log = Conversation
-chat-tool = Tool
 chat-plan = Plan
+chat-plan-steps =
+    { $count ->
+        [one] Plan · { $count } step
+       *[other] Plan · { $count } steps
+    }
+chat-plan-earlier =
+    { $count ->
+        [one] Earlier plan · { $count } step
+       *[other] Earlier plan · { $count } steps
+    }
+chat-steps-earlier =
+    { $count ->
+        [one] { $count } earlier step
+       *[other] { $count } earlier steps
+    }
+chat-working = Working…
+chat-copy = Copy
+chat-copied = Copied
+# What an agent asked to do, when it gave no title of its own. Neutral: the call may still be running or be refused.
+tool-read = Read
+tool-edit = Edit
+tool-run = Command
+tool-search = Search
+tool-fetch = Web page
+tool-delete = Delete
+tool-move = Move
+tool-think = Thinking
+tool-other = Step
+approval-full-request = Full request
 notice-adapter-turn_failed = The agent's turn failed (error { $rpc_code }). Its provider may have refused the request; try again or choose another model. { $stderr_tail }
 notice-adapter-turn_stopped = The agent stopped its turn ({ $stop_reason }).
 notice-adapter-turn_empty = The agent ended its turn without saying anything. Its provider may have refused the request. { $stderr_tail }

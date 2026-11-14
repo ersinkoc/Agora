@@ -72,7 +72,11 @@ permanent section. Labels below use internal terms; the UI uses the vocabulary i
   - Open files are tabs. The path bar's folders open the tree down to the file.
   - The file shows with line numbers and marks in the gutter (added, changed, removed above), read again whenever the node's
     count of changed files moves. The text is drawn a screenful at a time.
-  - Ctrl F finds in the file. `/` filters the tree. The whole file can be copied.
+  - Ctrl F finds in the file (a query with a capital letter matches case exactly; otherwise every case form matches, Turkish `i`/`İ`
+    and `ı`/`I` included). `/` filters the tree. The whole file can be copied.
+  - The tree is one Tab stop: arrows move between the items shown, Right opens a folder and goes into it, Left goes back up and
+    closes it, Home and End go to the ends.
+  - When the changes are larger than 512 KiB, the files after the cut carry no mark, and the tree says so with the machine's count.
   - In a narrow pane the tree sits above the file.
   - Syntax colours (highlight.js, loaded on demand) for files up to 128 KiB in about 25 languages, chosen by file name.
   - Not built yet: lease locks, editing.

@@ -48,6 +48,18 @@ try {
   if (shotDir) await page.screenshot({ path: join(shotDir, 'e2e-phone-files.png') });
   await page.getByRole('button', { name: 'Close', exact: true }).click();
   check(/#\/agent\//.test(page.url()), 'closing it returns to the agent');
+
+  // The narrowest phone the window supports: the review screen still fits, its list and Close reachable, no sideways page scroll.
+  await page.setViewportSize({ width: 360, height: 740 });
+  await page.getByRole('button', { name: /^2 files changed$/ }).click();
+  await list.waitFor();
+  await page.getByText('TWO', { exact: true }).waitFor();
+  const fits = await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth);
+  const close = await page.getByRole('button', { name: 'Close', exact: true }).boundingBox();
+  check(fits && (await list.getByRole('option').count()) === 2 && !!close && close.x + close.width <= 360,
+    'at 360 px the review screen fits: both files listed, Close in view, no sideways scroll');
+  if (shotDir) await page.screenshot({ path: join(shotDir, 'e2e-phone-review-360.png') });
+  await page.getByRole('button', { name: 'Close', exact: true }).click();
   check(errors.length === 0, `no page errors${errors.length ? `: ${errors.join('; ')}` : ''}`);
 } catch (e) {
   failed = true;

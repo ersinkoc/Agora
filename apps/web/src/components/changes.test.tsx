@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { setLanguage, t } from '../i18n';
 import { parseDiff } from '../net/diff';
-import { segmentsOf } from './ChangesView';
+import { segmentsOf, truncatedText } from './ChangesView';
 
 const DIFF = `diff --git a/src/app.ts b/src/app.ts
 --- a/src/app.ts
@@ -38,6 +38,14 @@ describe('the changes view', () => {
     const now = Array.from({ length: n }, (_, i) => (i === 0 ? 'A' : i === n - 1 ? 'B' : 'x'));
     const lines = segmentsOf(f as never, 'all', now).flatMap((s) => (s.kind === 'lines' ? s.lines : []));
     expect(lines.length).toBeGreaterThanOrEqual(n);
+  });
+
+  it('says how many files a cut diff leaves out, never more than the node counts', () => {
+    expect(truncatedText(2, 8)).toContain('at least 6 are not listed');
+    expect(truncatedText(1, 2)).toContain('at least one is not listed');
+    // The node counts an untracked folder as one path, so it can count fewer than the diff lists: no number is made up then.
+    expect(truncatedText(5, 3)).toBe(t('changes-truncated'));
+    expect(truncatedText(2, undefined)).toBe(t('changes-truncated'));
   });
 
   it('folds the unchanged lines between hunks until they are opened', () => {
