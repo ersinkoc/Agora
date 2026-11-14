@@ -154,7 +154,8 @@ tui-tool-other = Adım
 
 ## The app shell (ADR-0063 stage 2)
 tui-app-keys-tree = Ctrl K komutlar · Enter aç · N seni bekleyen sonraki · y / n cevapla · s başlat · f klasör · x durdur · u devam · d kaldır · a onay iste · v cihazlar · Tab sonraki bölüm · i ayrıntılar · q çık
-tui-app-keys-terminal = Ctrl-] ya da F12 listeye dön · Tuşların ajana gider · Alt+1…9 sekmeler
+tui-app-keys-terminal = Ctrl-] ya da F12 listeye dön · Tuşların ajana gider · Alt+K komutlar · Alt+1…9 sekmeler · Alt+M fare
+tui-app-keys-terminal-waiting = Seni bekliyor: Alt+Y izin verir · Alt+N reddeder · Ctrl-] ya da F12 listeye dön · Alt+K komutlar
 tui-app-keys-inspector = Tab sonraki bölüm · Esc listeye dön · Ctrl K komutlar
 tui-app-keys-palette = Süzmek için yaz · ↑↓ seç · Enter çalıştır · Esc kapat
 tui-app-mouse-on = fare açık (metin seçmek için m ile bırak)

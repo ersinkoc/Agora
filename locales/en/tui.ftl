@@ -166,7 +166,8 @@ tui-tool-other = Step
 
 ## The app shell (ADR-0063 stage 2)
 tui-app-keys-tree = Ctrl K commands · Enter open · N next that needs you · y / n answer · s start · f folder · x stop · u resume · d remove · a ask · v devices · Tab next part · i details · q quit
-tui-app-keys-terminal = Ctrl-] or F12 back to the list · Your keys go to the agent · Alt+1…9 tabs
+tui-app-keys-terminal = Ctrl-] or F12 back to the list · Your keys go to the agent · Alt+K commands · Alt+1…9 tabs · Alt+M mouse
+tui-app-keys-terminal-waiting = It needs you: Alt+Y allows · Alt+N denies · Ctrl-] or F12 back to the list · Alt+K commands
 tui-app-keys-inspector = Tab next part · Esc back to the list · Ctrl K commands
 tui-app-keys-palette = Type to filter · ↑↓ choose · Enter run · Esc close
 tui-app-mouse-on = mouse on (m releases it to select text)
