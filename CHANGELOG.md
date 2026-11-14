@@ -4,6 +4,11 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+### Shared board
+- A change to a shared project's board (create, claim, complete, lease, release, handoff) is answered as done only once the hub has
+  stored it. If the hub cannot write it (a full or locked disk), the agent gets an error and the board stays as it was, so a claim an
+  agent was told it has can no longer vanish when the hub restarts.
+
 ### Machines
 - `agora doctor` says who may make this machine act: which commands sent through the hub need a signature from one of your devices
   (and a note when none do, since whoever controls the hub could then send them), how many devices the machine trusts and how many

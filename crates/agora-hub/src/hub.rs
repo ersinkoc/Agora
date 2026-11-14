@@ -492,25 +492,58 @@ impl Hub {
     ) -> crate::board::Answer {
         let mut g = self.lock();
         let key = self.restore_board(&call.project_id, now_ms);
+        let project = call.project_id.as_str();
+        // A change is answered as done only once it is stored. Until then the board as it was is kept aside, to be put back.
+        let before = crate::board::changes_board(&call.tool).then(|| {
+            (
+                self.boards.checkpoint(project),
+                self.store.setting(&key).ok().flatten(),
+            )
+        });
         let mut a = self.boards.call(
             &g.view,
             node,
             &call.from_agent,
-            &call.project_id,
+            project,
             &call.tool,
             &call.arguments_json,
             now_ms,
         );
-        if !a.events.is_empty() {
-            // Tasks changed: keep the board in the store (best effort; the call already succeeded).
-            if let Some(bytes) = self.boards.snapshot(&call.project_id, now_ms) {
-                let _ = self.store.set_setting(&key, &bytes);
+        if a.events.is_empty() {
+            return a;
+        }
+        let stored = match self.boards.snapshot(project, now_ms) {
+            Some(bytes) => self.store.set_setting(&key, &bytes).is_ok(),
+            None => true,
+        };
+        // The board's audit events go to the log in the same step: a board that changed without its events would show one thing
+        // to the agents and another to every window.
+        let logged = stored
+            && std::mem::take(&mut a.events)
+                .into_iter()
+                .all(|body| self.emit(&mut g, body, now_ms).is_ok());
+        if logged {
+            return a;
+        }
+        if let Some((board, saved)) = before {
+            self.boards.restore(project, board);
+            // The stored copy too, if it was written before the events failed (best effort: the store just refused a write).
+            if stored {
+                let _ = match saved {
+                    Some(bytes) => self.store.set_setting(&key, &bytes),
+                    None => self.store.set_setting(&key, b""),
+                };
             }
         }
-        for body in std::mem::take(&mut a.events) {
-            let _ = self.emit(&mut g, body, now_ms);
+        crate::board::Answer {
+            verdict: crate::board::Verdict::Invalid(
+                agora_protocol::Error::new(agora_protocol::ErrorCode::Internal)
+                    .with("incident_id", "board.store"),
+            ),
+            events: Vec::new(),
+            handoff: None,
+            fanout: None,
         }
-        a
     }
 
     /// Restores an uninitialized board and returns its storage key. Callers hold the hub lock so calls and joins cannot
