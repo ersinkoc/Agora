@@ -80,7 +80,7 @@ the supervisor reads the exit status without copying anything.
 ### Data path
 - **Terminal bytes are not events.** They flow on their own streams, are relayed by the hub without decoding
   or storing, and use shared buffers (no copies per client).
-- **Direct path** (ADR-0023, proposed): when a client can reach a node directly (same machine or LAN), terminal
+- **Direct path** (ADR-0023, accepted, not built yet: terminal streams still go through the hub relay): when a client can reach a node directly (same machine or LAN), terminal
   streams and file transfers go client ↔ node; the hub keeps control, auth, and state. This removes the
   hairpin when the hub runs far away.
 - **Input beats output.** Keystrokes and approvals ride the highest-priority stream; output is chunked small
@@ -128,7 +128,7 @@ the supervisor reads the exit status without copying anything.
   the base at the exact threshold for every scenario.
 - **CI gate:** a reduced benchmark suite runs on every PR touching hot-path crates; a regression above 10% on
   any budget scenario's throughput, or a p95 latency above its ceiling, fails the build. Base and head are built on the same runner and measured alternately (three
-  rounds each, best of each metric per side), so drift on a shared runner hits both sides alike. The full suite runs nightly.
+  rounds each, best of each metric per side), so drift on a shared runner hits both sides alike. It runs on every push to `main` and every pull request; there is no nightly run yet.
 - **Latency tracing:** every input and command carries timestamps per hop (client, hub, node, adapter) so the
   breakdown is visible, not guessed.
 - **Performance HUD:** a developer overlay in the client (also usable by users as "connection details") shows

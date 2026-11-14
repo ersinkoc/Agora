@@ -7,6 +7,33 @@ for f in docs/adr/[0-9][0-9][0-9][0-9]-*.md; do
   n=$(basename "$f" | cut -c1-4)
   grep -q "| $n |" docs/adr/README.md || { echo "ADR $n missing from docs/adr/README.md"; fail=1; }
 done
+# The index says each ADR's status as its file does (architecture review R7: one status, not two that drift apart).
+for f in docs/adr/[0-9][0-9][0-9][0-9]-*.md; do
+  n=$(basename "$f" | cut -c1-4)
+  file_status=$(sed -n 's/^Status: *\([A-Za-z]*\).*/\1/p' "$f" | head -n 1)
+  index_status=$(grep "^| $n |" docs/adr/README.md | head -n 1 | awk -F'|' '{gsub(/ /, "", $(NF-1)); print $(NF-1)}')
+  if [ -n "$index_status" ] && [ "$file_status" != "$index_status" ]; then
+    echo "ADR $n: docs/adr/README.md says $index_status, $f says $file_status"; fail=1
+  fi
+done
+# A document outside docs/adr that calls an ADR proposed is wrong once that ADR is accepted (dated reviews in docs/reviews are records
+# of their day and are not rewritten).
+for hit in $(grep -rnoiE "ADR-[0-9]{4}[,:]? *\(?proposed" --include='*.md' docs README.md 2>/dev/null | grep -v -e '^docs/adr/' -e '^docs/reviews/' | tr ' ' '_'); do
+  n=$(printf '%s' "$hit" | sed -n 's/.*ADR-\([0-9]\{4\}\).*/\1/p')
+  f=$(ls docs/adr/"$n"-*.md 2>/dev/null | head -n 1)
+  [ -n "$f" ] || continue
+  if grep -q '^Status: *Accepted' "$f"; then
+    echo "$(printf '%s' "$hit" | cut -d: -f1-2): calls ADR-$n proposed, but $f is Accepted"; fail=1
+  fi
+done
+# docs/capabilities.md says each ADR's decision as its file does.
+for pair in $(grep -oE "ADR-[0-9]{4} (Accepted|Proposed|Superseded|Rejected)" docs/capabilities.md | tr ' ' '='); do
+  n=$(printf '%s' "$pair" | cut -c5-8); claimed=${pair#*=}
+  f=$(ls docs/adr/"$n"-*.md 2>/dev/null | head -n 1)
+  if [ -z "$f" ]; then echo "docs/capabilities.md: ADR-$n does not exist"; fail=1; continue; fi
+  actual=$(sed -n 's/^Status: *\([A-Za-z]*\).*/\1/p' "$f" | head -n 1)
+  [ "$actual" = "$claimed" ] || { echo "docs/capabilities.md: ADR-$n is $actual, the table says $claimed"; fail=1; }
+done
 # Every Fluent key used must exist in the source locale (placeholder until the i18n lint exists).
 [ -f locales/en/main.ftl ] || { echo "locales/en/main.ftl missing"; fail=1; }
 exit $fail

@@ -82,7 +82,8 @@ at launch (`--accept-project-id-change` in the CLI).
 
 ## Status
 
-Pre-alpha. This describes the current source tree; see [CHANGELOG.md](CHANGELOG.md) for release-by-release changes.
+Pre-alpha. This describes the current source tree; see [CHANGELOG.md](CHANGELOG.md) for release-by-release changes. What is decided,
+built, tested and seen on a real machine, capability by capability, is in [docs/capabilities.md](docs/capabilities.md).
 
 - **One console across machines:** live terminals side by side, agent states, workspace files, diffs, commits, messages and estimated spend.
 - **Structured conversations:** chat, plans, tool calls, diffs and approvals for ACP agents through `agora acp-bridge` and for external adapters.
