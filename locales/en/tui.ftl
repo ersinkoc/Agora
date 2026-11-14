@@ -88,6 +88,7 @@ tui-grant-ask = That machine wants your OK before it lets you do this. Press y t
 tui-granted = Allowed for one hour.
 tui-split-answer = y allows, n denies the first request
 tui-chat-answer = y allows it, n denies it · typing is off until it is answered
+tui-request-answer = y allows it · n denies it · any other key leaves it waiting
 tui-note-copy = c copies the command · any key closes this
 tui-note-close = Any key closes this.
 tui-copied = Copied the command to the clipboard.

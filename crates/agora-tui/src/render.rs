@@ -654,10 +654,15 @@ pub fn render_chat(
             }
         }
     }
-    let room = rows.saturating_sub(3).max(1);
+    // The hint wraps to the width (a narrow pane showed only its start); the conversation gets what is left.
+    let hint_width = cols.saturating_sub(1).max(10);
+    let hint = wrap_row(&t(key!("tui-chat-hint"), &[]), hint_width, hint_width);
+    let room = rows.saturating_sub(2 + hint.len()).max(1);
     let skip = lines.len().saturating_sub(room);
     let mut out: Vec<String> = lines.into_iter().skip(skip).collect();
-    out.push(format!("{dim}{}{reset}", t(key!("tui-chat-hint"), &[])));
+    for h in hint {
+        out.push(format!("{dim}{h}{reset}"));
+    }
     out.push(format!(
         "{} {}",
         t(key!("tui-chat-input"), &[]),

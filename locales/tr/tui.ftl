@@ -88,6 +88,7 @@ tui-grant-ask = O makine bu işlemi yapmanıza izin vermeden önce onayınızı 
 tui-granted = Bir saatliğine izin verildi.
 tui-split-answer = y izin verir, n ilk isteği reddeder
 tui-chat-answer = y izin verir, n reddeder · cevaplanana kadar yazamazsın
+tui-request-answer = y izin verir · n reddeder · başka bir tuş beklemede bırakır
 tui-note-copy = c komutu kopyalar · herhangi bir tuş bunu kapatır
 tui-note-close = Herhangi bir tuş bunu kapatır.
 tui-copied = Komut panoya kopyalandı.

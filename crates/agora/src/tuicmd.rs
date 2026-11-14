@@ -1106,6 +1106,7 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                 notice: String::new(),
                 armed: None,
                 read_whole: std::collections::HashSet::new(),
+                shown_request: None,
                 note: Note::default(),
                 colors: if color {
                     ColorMode::from_env(None, std::env::var("COLORTERM").ok().as_deref())
@@ -1574,6 +1575,8 @@ struct Console {
     armed: Option<Armed>,
     /// ADR-0057: start requests read whole (in the inspector or the reader), which y may then allow.
     read_whole: std::collections::HashSet<String>,
+    /// A request shown whole outside the inspector (the chat tab's pane shows its agent's): y / n may answer it without asking again.
+    shown_request: Option<String>,
     note: Note,
     colors: ColorMode,
 }
@@ -1745,6 +1748,11 @@ fn console(
                             {
                                 if let Some(k) = b.iter().find(|k| matches!(k, b'y' | b'n')) {
                                     c.selected = pane.agent.clone();
+                                    c.shown_request = c
+                                        .snapshot
+                                        .as_ref()
+                                        .and_then(|s| waiting_for(s, &pane.agent))
+                                        .map(|a| a.approval_id.clone());
                                     if command(
                                         say,
                                         session,
@@ -1964,7 +1972,11 @@ fn draw_console(
                             .into_iter()
                             .take(4),
                     );
-                    block.push(say.text(key!("tui-chat-answer"), &[]));
+                    block.extend(agora_tui::render::wrap_row(
+                        &say.text(key!("tui-chat-answer"), &[]),
+                        width,
+                        width,
+                    ));
                     block
                 })
                 .unwrap_or_default();
@@ -2411,10 +2423,47 @@ fn command(
                     return false;
                 }
             }
-            if let Some((id, true)) = details.start {
+            if let Some((id, true)) = details.start.clone() {
                 c.read_whole.insert(id);
             }
-            c.notice = answer(say, session, &s, &selected, k == 'y');
+            // Any other request is answered only once it was in view: in the inspector, in the chat tab that shows it, or else in a
+            // box that shows it now and takes the answer.
+            let mut allow = k == 'y';
+            let waiting = agora_tui::client::answered_approval(&s, Some(&selected)).cloned();
+            if let (Some(a), None) = (waiting, details.start.as_ref()) {
+                let in_view = (inspector.width > 0
+                    && details.lines.len() <= usize::from(inspector.height))
+                    || c.shown_request.as_deref() == Some(a.approval_id.as_str());
+                if !in_view {
+                    let mut lines = vec![say.text(key!("tui-attention"), &[])];
+                    lines.push(plain(
+                        format!(
+                            "{}: {} {}",
+                            a.agent_id
+                                .split_once('/')
+                                .map_or(a.agent_id.as_str(), |(_, l)| l),
+                            a.action,
+                            a.detail
+                        )
+                        .trim(),
+                    ));
+                    lines.push(String::new());
+                    lines.push(say.text(key!("tui-request-answer"), &[]));
+                    let key = over_console(say, c, session, preview, None, rx, |_, ask| {
+                        ask.key(&lines, Duration::from_secs(120))
+                    });
+                    match key {
+                        Some(b'y') => allow = true,
+                        Some(b'n') => allow = false,
+                        _ => {
+                            c.notice = String::new();
+                            return false;
+                        }
+                    }
+                }
+            }
+            c.shown_request = None;
+            c.notice = answer(say, session, &s, &selected, allow);
             true
         }
         // ADR-0061: ask the person's other devices to approve this terminal (a), or approve one that waits (v).
