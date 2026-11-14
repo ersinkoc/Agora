@@ -17,7 +17,7 @@ cli-usage =
       agora terminal attach AGENT_ID [--socket PATH]
       agora node stdio [--socket PATH]
       agora mesh stdio --socket PATH
-      agora hub run [--listen ADDR] [--hub-dir DIR] [--name HOST]... [--web DIR]
+      agora hub run [--listen ADDR] [--hub-dir DIR] [--name HOST]... [--web DIR] [--metrics]
       agora hub code [--hub-dir DIR]
       agora hub ssh install NAME [--yes] [--unsigned] [--release-url URL] [--hub-dir DIR]
       agora hub login [--hub-dir DIR]

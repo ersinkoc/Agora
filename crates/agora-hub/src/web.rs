@@ -63,6 +63,12 @@ pub trait SessionApi: Send + Sync {
     fn audit(&self, _bearer: Option<&str>, _query: &str) -> (u16, String) {
         (404, String::new())
     }
+
+    /// `GET /api/metrics` (architecture review R8): the hub's own numbers in the Prometheus text format, for the owner only, and only
+    /// when the hub was started with `--metrics`; 404 otherwise.
+    fn metrics(&self, _bearer: Option<&str>) -> (u16, String) {
+        (404, String::new())
+    }
 }
 
 pub enum SignInReply {
@@ -427,6 +433,19 @@ where
             &mut stream,
             status,
             "application/json",
+            out.as_bytes(),
+            false,
+        )
+        .await?;
+        return Ok(First::Answered);
+    }
+    if method == "GET" && path == "/api/metrics" {
+        let (status, out) =
+            sessions.map_or((404, String::new()), |api| api.metrics(bearer().as_deref()));
+        respond(
+            &mut stream,
+            status,
+            "text/plain; version=0.0.4",
             out.as_bytes(),
             false,
         )

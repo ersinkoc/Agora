@@ -4,6 +4,10 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+### Hub
+- `agora hub run --metrics` lets the hub's owner read its own numbers at `/api/metrics` (Prometheus format): events stored, how long
+  each one held the hub, machines online, windows following, slow windows let go, approvals waiting and resyncs. Off unless asked for.
+
 ### Security
 - macOS: a confined agent (`sandbox = worktree`) can no longer reach the node's own files and sockets: the whole node home is closed to it (trusted devices, policy, ledger, identity, logs, hub folder, manifests, adapter trust files, the node's control socket and the other agents' mesh sockets), except its own worktree and mesh socket; the home cannot be renamed away, and no socket can be bound there before the node's own. Before, it could connect to the control socket (Seatbelt checks unix sockets as network, not as files), and with a node home under `/tmp` it could read and write the node's data (#475). Its own mesh socket stays open. Its worktree is given back only while it is still a real folder: an agent that leaves a link in its place is not started again, and says why. A node home that cannot be found stops confined agents from starting instead of leaving the home open, and your own home folder is never taken for the node's.
 ### Machines (ADR-0073)

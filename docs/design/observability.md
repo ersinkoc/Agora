@@ -4,6 +4,24 @@
   environment values. Log files rotate; level adjustable at runtime.
 - **Metrics:** hub exposes a Prometheus-format endpoint (opt-in): connected nodes/clients, event lag, queue
   depths, approval latency, terminal bytes/s. Nodes report resource metrics as `NodeResources` events.
+  **Built (first slice, architecture review R8):** `agora hub run --metrics` turns on `GET /api/metrics` (the owner's bearer
+  token; 401 without one, 403 for a member or viewer, 404 when the hub runs without `--metrics`). Prometheus text format,
+  written by hand (`agora-hub::metrics`, no new dependency):
+
+  | Name | Kind | What it is |
+  | --- | --- | --- |
+  | `agora_hub_events_ingested_total` | counter | events from machines the hub stored |
+  | `agora_hub_lock_wait_seconds` | histogram | how long a machine's event waited for the hub's lock |
+  | `agora_hub_ingest_seconds` | histogram | how long the hub held its lock for one machine event, storing it included: every client and every other machine waits that long |
+  | `agora_hub_subscribers_dropped_total` | counter | windows and terminal clients let go because their queue was full (too slow) or closed |
+  | `agora_hub_nodes_known`, `agora_hub_nodes_online` | gauge | machines the hub knows, and those connected now |
+  | `agora_hub_subscribers` | gauge | windows and terminal clients following the hub now |
+  | `agora_hub_approvals_waiting` | gauge | approvals not answered yet |
+  | `agora_hub_events_stored` | gauge | the position of the last event in the hub's log |
+  | `agora_hub_resyncs_total` | counter | lost ranges recorded by resyncs (ADR-0054) |
+
+  Counting costs two clock reads and a few atomics per stored event: 50 000 ingests measured 15.4–15.6 µs each with it and
+  15.3–16.0 µs without (noise). Not yet: approval latency, per-subscriber queue depth, relay resets, terminal bytes/s.
 - **Health:** heartbeats; the window shows node health (connected, lagging, offline since).
 - **Presence (ADR-0070):** whether a machine is online is a fact the hub owns, written from the certificate-authenticated
   connection only (`agora-hub::hub::{node_link_opened, node_link_closed}`):

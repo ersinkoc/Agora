@@ -155,6 +155,8 @@ pub(crate) struct Opts {
     /// ADR-0073: `agora hub machines forget --old` and `--refuse-return`.
     old: bool,
     refuse_return: bool,
+    /// `agora hub run --metrics`: the hub answers `GET /api/metrics` (owner only).
+    metrics: bool,
     ui: Option<String>,
     save: bool,
     positional: Vec<String>,
@@ -193,6 +195,7 @@ fn parse(args: &[String]) -> Option<Opts> {
             "--webhook" => o.webhook = Some(it.next()?.clone()),
             "--test" => o.test = true,
             "--yes" => o.yes = true,
+            "--metrics" => o.metrics = true,
             "--old" => o.old = true,
             "--refuse-return" => o.refuse_return = true,
             "--unsigned" => o.unsigned = true,

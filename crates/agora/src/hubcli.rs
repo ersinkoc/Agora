@@ -178,6 +178,10 @@ pub fn hub_run(say: &Say, o: &Opts) -> ExitCode {
         let has_web = web_assets(o).is_some();
         let store = SqliteStore::open(&dir.join("hub.db")).map_err(|e| e.to_string())?;
         let hub = Arc::new(Hub::open(store).map_err(|e| e.to_string())?);
+        // R8: `GET /api/metrics` answers (owner only) when asked for at start.
+        if o.metrics {
+            hub.enable_metrics();
+        }
         // Where notifications go, if the owner listed any (docs/design/notifications.md).
         let notify_file = dir.join("notify");
         if let Ok(text) = std::fs::read_to_string(&notify_file) {
