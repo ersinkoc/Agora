@@ -528,6 +528,10 @@ impl App {
                 out.push(Action::MouseCapture(self.mouse));
             }
             Key::Char('i') => self.toggle_inspector(area),
+            // Alt+Y / Alt+N answer in the list as y / n do (the same keys as inside a tab).
+            Key::Alt(c @ ('y' | 'Y' | 'n' | 'N')) => {
+                out.push(Action::Command(c.to_ascii_lowercase()))
+            }
             Key::Char('q') | Key::Ctrl('c') => out.push(Action::Quit),
             Key::Char(c) if c.is_alphanumeric() => out.push(Action::Command(c)),
             _ => {}
@@ -722,8 +726,15 @@ impl App {
                 } else if m.row < a.footer.y && Some(m.col) == a.inspector_divider {
                     self.drag = Some(Divider::Inspector);
                 } else if a.tree.contains(at) {
-                    let i = usize::from(m.row - a.tree.y)
-                        + tree_top(self.selected, a.tree.height, cx.rows.len());
+                    let (top, kept) = tree_window(self.selected, a.tree.height, cx.rows);
+                    let y = usize::from(m.row - a.tree.y);
+                    let offset = usize::from(kept.is_some());
+                    // The kept heading on the first line is a heading: a click there selects nothing.
+                    let i = if y < offset {
+                        usize::MAX
+                    } else {
+                        top + y - offset
+                    };
                     if i < cx.rows.len() && !cx.rows[i].header {
                         // A click on the selected row opens it (so a double click opens and stays open).
                         if i == self.selected {
@@ -828,15 +839,16 @@ impl App {
                 .style(dim)
                 .render(a.tree, buf);
         }
-        let top = tree_top(self.selected, a.tree.height, s.rows.len());
-        for (i, row) in s
-            .rows
-            .iter()
-            .enumerate()
-            .skip(top)
-            .take(usize::from(a.tree.height))
-        {
-            let y = a.tree.y + u16::try_from(i - top).unwrap_or(u16::MAX);
+        let (top, kept) = tree_window(self.selected, a.tree.height, s.rows);
+        let offset = u16::from(kept.is_some());
+        let shown = kept.map(|m| (0u16, m)).into_iter().chain(
+            (top..s.rows.len())
+                .take(usize::from(a.tree.height.saturating_sub(offset)))
+                .map(|i| (offset + u16::try_from(i - top).unwrap_or(u16::MAX), i)),
+        );
+        for (line, i) in shown {
+            let row = &s.rows[i];
+            let y = a.tree.y + line;
             if row.header {
                 let label = clip_to(&row.label, usize::from(a.tree.width));
                 let room = usize::from(a.tree.width).saturating_sub(text_width(&label) + 2);
@@ -1588,6 +1600,23 @@ fn matches(label: &str, query: &str) -> bool {
 }
 
 /// The first tree row shown, so the selected row stays on screen.
+/// The tree's rows in view: the first one shown, and the machine heading kept at the top while that machine's agents scroll below
+/// it (TUI review: headings scrolled out of view). With a kept heading the rows start one line lower.
+fn tree_window(selected: usize, height: u16, rows: &[Row]) -> (usize, Option<usize>) {
+    let top = tree_top(selected, height, rows.len());
+    if top == 0 || height < 3 {
+        return (top, None);
+    }
+    let first = tree_top(selected, height - 1, rows.len());
+    match rows[..=first.min(rows.len().saturating_sub(1))]
+        .iter()
+        .rposition(|r| r.header && !r.group)
+    {
+        Some(m) if m < first => (first, Some(m)),
+        _ => (top, None),
+    }
+}
+
 fn tree_top(selected: usize, height: u16, rows: usize) -> usize {
     let h = usize::from(height.max(1));
     if rows <= h {
@@ -2813,6 +2842,107 @@ mod tests {
         key(&mut app, &rows, Key::Down);
         key(&mut app, &rows, Key::Enter);
         assert_eq!(app.scroll, 0);
+    }
+
+    #[test]
+    fn the_machine_heading_stays_in_view_while_its_agents_scroll() {
+        let mut rows = vec![Row {
+            id: "mac".into(),
+            label: "● mac".into(),
+            state: String::new(),
+            needs_you: false,
+            terminal: false,
+            header: true,
+            group: false,
+            request: false,
+        }];
+        rows.extend((1..=40).map(|i| Row {
+            id: format!("mac/agent-{i}"),
+            label: format!("shell {i}"),
+            state: "idle".into(),
+            needs_you: false,
+            terminal: true,
+            header: false,
+            group: false,
+            request: false,
+        }));
+        // Near the top nothing is kept; far down the heading is on the first line and the chosen row still in view.
+        assert_eq!(tree_window(3, 10, &rows), (0, None));
+        let (top, kept) = tree_window(30, 10, &rows);
+        assert_eq!(kept, Some(0));
+        assert!(top <= 30 && 30 < top + 9, "{top}");
+        let mut app = App {
+            selected: 30,
+            ..App::default()
+        };
+        let cx = Ctx {
+            area: Rect::new(0, 0, 80, 11),
+            ..cx(&rows)
+        };
+        let lines = {
+            let mut tui = Tui::new(TestBackend::new(80, 11)).unwrap();
+            tui.draw(|f| {
+                app.draw(
+                    f,
+                    &Screen {
+                        rows: &rows,
+                        terminal: None,
+                        details: &[],
+                        notice: "",
+                        no_screen: None,
+                        conversation: None,
+                        dialog: None,
+                        note: None,
+                        colors: ColorMode::Mono,
+                        t: &text,
+                    },
+                )
+            })
+            .unwrap();
+            let buf = tui.backend().buffer().clone();
+            (0..11)
+                .map(|y| {
+                    (0..28)
+                        .map(|x| buf[(x, y)].symbol().to_string())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+        };
+        assert!(lines[0].starts_with("● mac"), "{lines:#?}");
+        assert!(lines.iter().any(|l| l.contains("shell 30")), "{lines:#?}");
+        // A click on the kept heading selects nothing; one on the line below selects the first row shown.
+        app.handle(
+            Event::Mouse(Mouse {
+                kind: MouseKind::Down,
+                col: 2,
+                row: 0,
+            }),
+            &cx,
+        );
+        assert_eq!(app.selected, 30);
+        app.handle(
+            Event::Mouse(Mouse {
+                kind: MouseKind::Down,
+                col: 2,
+                row: 1,
+            }),
+            &cx,
+        );
+        assert_eq!(app.selected, top);
+    }
+
+    #[test]
+    fn alt_y_and_alt_n_answer_in_the_list_too() {
+        let rows = rows();
+        let mut app = App::default();
+        assert_eq!(
+            key(&mut app, &rows, Key::Alt('n')),
+            vec![Action::Command('n')]
+        );
+        assert_eq!(
+            key(&mut app, &rows, Key::Alt('Y')),
+            vec![Action::Command('y')]
+        );
     }
 
     #[test]

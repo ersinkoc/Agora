@@ -35,7 +35,7 @@ pub fn tree_order(s: &Snapshot) -> Vec<String> {
     for n in nodes {
         let mut agents: Vec<&AgentSnapshot> =
             s.agents.iter().filter(|a| a.node_id == n.node_id).collect();
-        agents.sort_by(|a, b| a.agent_id.cmp(&b.agent_id));
+        agents.sort_by(|a, b| by_number(&a.agent_id).cmp(&by_number(&b.agent_id)));
         // Helpers right after the agent that started them (ADR-0057), the order the rows are drawn in.
         out.extend(
             crate::render::helper_order(&agents)
@@ -49,7 +49,7 @@ pub fn tree_order(s: &Snapshot) -> Vec<String> {
         .iter()
         .filter(|a| !s.nodes.iter().any(|n| n.node_id == a.node_id))
         .collect();
-    rest.sort_by(|a, b| a.agent_id.cmp(&b.agent_id));
+    rest.sort_by(|a, b| by_number(&a.agent_id).cmp(&by_number(&b.agent_id)));
     out.extend(rest.into_iter().map(|a| a.agent_id.clone()));
     out
 }
@@ -258,7 +258,7 @@ fn tree(v: &View<'_>, t: Text<'_>) -> Vec<Row> {
         });
         let mut agents: Vec<&AgentSnapshot> =
             s.agents.iter().filter(|a| a.node_id == n.node_id).collect();
-        agents.sort_by(|a, b| a.agent_id.cmp(&b.agent_id));
+        agents.sort_by(|a, b| by_number(&a.agent_id).cmp(&by_number(&b.agent_id)));
         // A helper is drawn under the agent that started it, one step in per level (ADR-0057).
         for (a, depth) in crate::render::helper_order(&agents) {
             let st = state_of(a);
@@ -397,8 +397,26 @@ fn project_name(s: &Snapshot, a: &AgentSnapshot) -> String {
     plain(
         &checkout
             .or_else(|| Some(folder(&a.folder)).filter(|n| !n.is_empty()))
-            .unwrap_or_else(|| a.project_id.clone()),
+            .unwrap_or_else(|| project_from_id(&a.project_id)),
     )
+}
+
+/// A readable name from a project id when the machine has no checkout of it: the repository's name of
+/// `github.com/owner/Agora#db6f…` ("Agora"), else `project` and the start of its hash, never the bare id.
+fn project_from_id(id: &str) -> String {
+    let (name, hash) = id.split_once('#').unwrap_or((id, ""));
+    let name = name
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or_default();
+    if !name.is_empty() {
+        return name.to_string();
+    }
+    if hash.is_empty() {
+        return String::new();
+    }
+    format!("project {}", hash.chars().take(7).collect::<String>())
 }
 
 /// Whether the machine `node` is known to the hub and offline (ADR-0070: the hub owns presence).
@@ -465,7 +483,7 @@ pub fn app_rows(s: &Snapshot, now_ms: u64, t: Text<'_>) -> Vec<crate::app::Row> 
         });
         let mut agents: Vec<&AgentSnapshot> =
             s.agents.iter().filter(|a| a.node_id == n.node_id).collect();
-        agents.sort_by(|a, b| a.agent_id.cmp(&b.agent_id));
+        agents.sort_by(|a, b| by_number(&a.agent_id).cmp(&by_number(&b.agent_id)));
         // As the web's tree: the machine's agents under their project's folder name, the folders in name order; agents of no
         // project and no folder stay right under the machine.
         let mut groups: Vec<(String, Vec<&AgentSnapshot>)> = Vec::new();
@@ -504,11 +522,34 @@ pub fn app_rows(s: &Snapshot, now_ms: u64, t: Text<'_>) -> Vec<crate::app::Row> 
         .iter()
         .filter(|a| !s.nodes.iter().any(|n| n.node_id == a.node_id))
         .collect();
-    rest.sort_by(|a, b| a.agent_id.cmp(&b.agent_id));
+    rest.sort_by(|a, b| by_number(&a.agent_id).cmp(&by_number(&b.agent_id)));
     for a in rest {
         rows.push(agent_row(a, 0));
     }
+    tell_apart(&mut rows);
     rows
+}
+
+/// An agent id's order in the tree: by machine, then by its number (`agent-2` before `agent-10`, not after it as text).
+fn by_number(id: &str) -> (&str, u64, &str) {
+    let (machine, local) = id.split_once('/').unwrap_or(("", id));
+    let digits = local.trim_start_matches(|c: char| !c.is_ascii_digit());
+    (machine, digits.parse().unwrap_or(u64::MAX), local)
+}
+
+/// Agents that would read the same (dozens of `shell · rose` once there are many: eight accent names) get their number after the
+/// name, so every row says which agent it is.
+fn tell_apart(rows: &mut [crate::app::Row]) {
+    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for r in rows.iter().filter(|r| !r.header) {
+        *seen.entry(r.label.trim().to_string()).or_default() += 1;
+    }
+    for r in rows.iter_mut().filter(|r| !r.header) {
+        if seen.get(r.label.trim()).is_some_and(|n| *n > 1) {
+            let number = local(&r.id).trim_start_matches("agent-");
+            r.label = format!("{} {number}", r.label);
+        }
+    }
 }
 
 /// What the app shell's inspector shows for the selected agent ([`app_details`]).
@@ -1319,6 +1360,59 @@ mod tests {
             .lines
             .iter()
             .any(|l| l.contains("tui-agent-tokens") || l.contains("tui-agent-changes")));
+    }
+
+    #[test]
+    fn agents_that_would_read_the_same_get_their_number() {
+        let mut s = snapshot();
+        let shell = |id: &str| AgentSnapshot {
+            agent_id: id.into(),
+            node_id: "mac2".into(),
+            kind: "shell".into(),
+            running: true,
+            ..Default::default()
+        };
+        // Find two ids whose accent names collide, as dozens of shells do.
+        let base = agent_name("mac2/agent-10", "shell");
+        let twin = (11..400)
+            .map(|i| format!("mac2/agent-{i}"))
+            .find(|id| agent_name(id, "shell") == base)
+            .unwrap();
+        s.agents.push(shell("mac2/agent-10"));
+        s.agents.push(shell(&twin));
+        let rows = app_rows(&s, 0, &text);
+        let labels: Vec<&str> = rows
+            .iter()
+            .filter(|r| r.id == "mac2/agent-10" || r.id == twin)
+            .map(|r| r.label.trim())
+            .collect();
+        assert_eq!(labels.len(), 2);
+        assert_ne!(labels[0], labels[1], "{labels:?}");
+        assert!(
+            labels.contains(&format!("{base} 10").as_str()),
+            "{labels:?}"
+        );
+        // A name no other agent has stays as it is.
+        let codex = rows.iter().find(|r| r.id == "mac2/agent-2").unwrap();
+        assert_eq!(codex.label.trim(), agent_name("mac2/agent-2", "codex"));
+    }
+
+    #[test]
+    fn agents_are_in_number_order() {
+        let mut ids = vec!["m/agent-10", "m/agent-2", "m/agent-1", "a/agent-3"];
+        ids.sort_by_key(|id| by_number(id));
+        assert_eq!(ids, ["a/agent-3", "m/agent-1", "m/agent-2", "m/agent-10"]);
+    }
+
+    #[test]
+    fn a_project_without_a_checkout_is_named_from_its_id_never_shown_bare() {
+        assert_eq!(
+            project_from_id("github.com/ersinkoc/Agora#db6f7d11b75c"),
+            "Agora"
+        );
+        assert_eq!(project_from_id("#68539ee0a1b2"), "project 68539ee");
+        assert_eq!(project_from_id("local/notes/"), "notes");
+        assert_eq!(project_from_id(""), "");
     }
 
     #[test]
