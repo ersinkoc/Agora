@@ -309,12 +309,12 @@ fn main() -> ExitCode {
 /// - `mesh stdio --socket PATH` is what an agent's MCP client starts as its mesh server: it carries the MCP
 ///   conversation to that agent's own endpoint on the node.
 fn bridge_stdio(say: &Say, path: &std::path::Path) -> ExitCode {
-    let Ok(sock) = agora_platform::local_connect(path) else {
-        say.err(
-            key!("cli-node-not-running"),
-            &[("socket", path.display().to_string().into())],
-        );
-        return ExitCode::from(1);
+    let sock = match agora_platform::local_connect(path) {
+        Ok(sock) => sock,
+        Err(e) => {
+            say_unreachable(say, path, &e);
+            return ExitCode::from(1);
+        }
     };
     let Ok(mut from_node) = sock.try_clone() else {
         return ExitCode::from(1);
@@ -485,13 +485,27 @@ fn node_run(say: &Say, o: &Opts) -> ExitCode {
 
 fn connect(say: &Say, o: &Opts) -> Result<Client, ExitCode> {
     let path = socket_path(o);
-    Client::connect(&path).map_err(|_| {
-        say.err(
-            key!("cli-node-not-running"),
-            &[("socket", path.display().to_string().into())],
-        );
+    Client::connect(&path).map_err(|e| {
+        say_unreachable(say, &path, &e);
         ExitCode::from(1)
     })
+}
+
+/// Why the node's control socket could not be opened: refused (another user, or a confined agent: the socket is owner-only and a
+/// sandbox may not reach it, T16) is not the same as no node at all, and saying "no node is listening" for it hides a refusal.
+fn unreachable_key(e: &std::io::Error) -> &'static str {
+    if e.kind() == std::io::ErrorKind::PermissionDenied {
+        key!("cli-node-refused")
+    } else {
+        key!("cli-node-not-running")
+    }
+}
+
+fn say_unreachable(say: &Say, path: &std::path::Path, e: &std::io::Error) {
+    say.err(
+        unreachable_key(e),
+        &[("socket", path.display().to_string().into())],
+    );
 }
 
 /// Send one command; print the error (and return failure) if the node refuses it.
@@ -854,6 +868,32 @@ fn terminal_attach(say: &Say, o: &Opts) -> ExitCode {
         &[("agent_id", agent.as_str().into())],
     );
     ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod unreachable_tests {
+    use super::*;
+    use std::io::{Error, ErrorKind};
+
+    #[test]
+    fn a_refused_control_socket_is_not_worded_as_a_stopped_node() {
+        assert_eq!(
+            unreachable_key(&Error::from(ErrorKind::PermissionDenied)),
+            "cli-node-refused"
+        );
+        assert_eq!(
+            unreachable_key(&Error::from(ErrorKind::NotFound)),
+            "cli-node-not-running"
+        );
+        assert_eq!(
+            unreachable_key(&Error::from(ErrorKind::ConnectionRefused)),
+            "cli-node-not-running"
+        );
+        for c in [Catalog::english(), Catalog::turkish()] {
+            let t = c.render("cli-node-refused", &[("socket", "S".into())]);
+            assert!(t.as_deref().is_some_and(|t| t.contains('S')), "{t:?}");
+        }
+    }
 }
 
 #[cfg(test)]
