@@ -4,6 +4,16 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+### Getting started
+- `agora --version` prints the version.
+
+## 0.3.10
+
+### Machines
+- On macOS a machine no longer keeps a CPU core busy while anything stays connected to it: each idle connection to the node (from the terminal client, an agent's bridge or the command line) spun at 100%. A connection accepted from the node's listener now waits for data as it should.
+
+## 0.3.9
+
 ### Themes (ADR-0068, rung 2)
 - The window can be restyled with themes: Dark, Light, High contrast, Large text, Slate and Sand are built in, and **Edit theme**
   (command palette, or This device → Appearance) opens the theme editor beside your agents. Customize a built-in theme to change
