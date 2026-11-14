@@ -1672,7 +1672,7 @@ fn console(
         let rows = c
             .snapshot
             .as_ref()
-            .map(|s| app_rows(s, &text))
+            .map(|s| app_rows(s, now_ms(), &text))
             .unwrap_or_default();
         if let Some(i) = rows.iter().position(|r| !r.header && r.id == c.selected) {
             c.app.selected = i;
@@ -1939,6 +1939,18 @@ fn command(
                 c.read_whole.insert(id);
             }
             c.notice = answer(say, session, &s, &selected, k == 'y');
+            true
+        }
+        // ADR-0061: ask the person's other devices to approve this terminal (a), or approve one that waits (v).
+        'a' => {
+            c.notice = ask_approval(say, session);
+            false
+        }
+        'v' => {
+            let snapshot = c.snapshot.clone();
+            c.notice = full_screen(c, session, preview, |session| {
+                approve_device(say, session, snapshot.as_ref(), rx)
+            });
             true
         }
         'f' => {

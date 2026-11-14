@@ -320,7 +320,7 @@ pub fn agent_name(agent_id: &str, kind: &str) -> String {
 
 /// ADR-0063: the tree as the app shell's rows: a heading per machine (online first, then by name), then its agents, helpers indented
 /// under the agent that started them (ADR-0057). Agents of a machine the hub does not list come last.
-pub fn app_rows(s: &Snapshot, t: Text<'_>) -> Vec<crate::app::Row> {
+pub fn app_rows(s: &Snapshot, now_ms: u64, t: Text<'_>) -> Vec<crate::app::Row> {
     let mut rows = Vec::new();
     let agent_row = |a: &AgentSnapshot, depth: usize| {
         let st = state_of(a);
@@ -357,7 +357,10 @@ pub fn app_rows(s: &Snapshot, t: Text<'_>) -> Vec<crate::app::Row> {
         rows.push(crate::app::Row {
             id: n.node_id.clone(),
             label: format!("{} {}", if n.online { "●" } else { "○" }, name(n)),
-            state: if n.memory_used_bytes > 0 {
+            // ADR-0070: an offline machine says when it was last heard from; an online one, its memory in use.
+            state: if !n.online {
+                crate::render::presence_text(n, now_ms, t)
+            } else if n.memory_used_bytes > 0 {
                 bytes(n.memory_used_bytes)
             } else {
                 String::new()
@@ -997,7 +1000,7 @@ mod tests {
             agent_id: "mac2/agent-2".into(),
             ..Default::default()
         }];
-        let rows = app_rows(&s, &text);
+        let rows = app_rows(&s, 0, &text);
         let ids: Vec<(&str, bool)> = rows.iter().map(|r| (r.id.as_str(), r.header)).collect();
         assert_eq!(
             ids,
@@ -1015,6 +1018,8 @@ mod tests {
             rows[0]
         );
         assert!(rows[3].label.starts_with("○ WHITE"));
+        // ADR-0070: the offline machine's heading says when it was last heard from, not its memory.
+        assert!(rows[3].state.starts_with("tui-"), "{:?}", rows[3]);
         // agent-1 waits on a request (and is blocked); agent-2 works and has a terminal; agent-1 has none (a chat agent here).
         assert!(rows[1].needs_you && !rows[1].terminal);
         assert!(!rows[2].needs_you && rows[2].terminal);

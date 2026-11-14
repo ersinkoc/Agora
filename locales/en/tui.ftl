@@ -130,7 +130,7 @@ tui-start-confirm-skip = Let the agent act without asking? With "{ $name }" it r
 tui-badge-no-ask = does not ask
 
 ## The app shell (ADR-0063 stage 2)
-tui-app-keys-tree = Enter open · N next that needs you · y / n answer · s start · f folder · x stop · u resume · d remove · Ctrl K commands · Tab next part · i details · q quit
+tui-app-keys-tree = Enter open · N next that needs you · y / n answer · s start · f folder · x stop · u resume · d remove · a ask · v devices · Ctrl K commands · Tab next part · i details · q quit
 tui-app-keys-terminal = Your keys go to the agent · Ctrl-] or F12 back to the list · Alt+1…9 tabs
 tui-app-keys-inspector = Tab next part · Esc back to the list · Ctrl K commands
 tui-app-keys-palette = Type to filter · ↑↓ choose · Enter run · Esc close
