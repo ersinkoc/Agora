@@ -100,6 +100,8 @@ pub struct Router {
     next_stream: AtomicU32,
     /// Terminal relays ended because the window's queue was full or gone (`GET /api/metrics`).
     relays_dropped: AtomicU64,
+    /// Bytes of terminal frames passed on to windows (`GET /api/metrics`; a rate of it is the terminals' bytes per second).
+    terminal_bytes: AtomicU64,
 }
 
 impl Default for Router {
@@ -111,6 +113,7 @@ impl Default for Router {
             next: AtomicU64::new(0),
             next_stream: AtomicU32::new(agora_protocol::frame::FIRST_DYNAMIC_STREAM),
             relays_dropped: AtomicU64::new(0),
+            terminal_bytes: AtomicU64::new(0),
         }
     }
 }
@@ -371,6 +374,11 @@ impl Router {
         self.relays_dropped.load(Ordering::Relaxed)
     }
 
+    /// Bytes of terminal frames passed on to windows so far.
+    pub fn terminal_bytes(&self) -> u64 {
+        self.terminal_bytes.load(Ordering::Relaxed)
+    }
+
     pub fn relay_frame(&self, node: &str, stream: u32, kind: u8, payload: Vec<u8>) {
         let key = (node.to_string(), stream);
         let mut relays = self.relays.lock().unwrap_or_else(|e| e.into_inner());
@@ -403,11 +411,15 @@ impl Router {
             }
             return;
         }
+        let bytes = payload.len() as u64;
         let sent = r.to_client.try_send(RelayFrame {
             stream: r.client_stream,
             kind,
             payload,
         });
+        if sent.is_ok() {
+            self.terminal_bytes.fetch_add(bytes, Ordering::Relaxed);
+        }
         let exited = kind == 3;
         if sent.is_err() || exited {
             if sent.is_err() {
@@ -904,6 +916,8 @@ mod tests {
         assert!(matches!(node_rx.try_recv(), Ok(ToNode::Close { stream: s }) if s == stream));
         // Counted for `GET /api/metrics`: one relay let go for a window that could not keep up.
         assert_eq!(r.relays_dropped(), 1);
+        // The frames that reached the window are counted in bytes; the dropped one is not.
+        assert!(r.terminal_bytes() >= 4, "{}", r.terminal_bytes());
         // Frames for a relay that is gone are ignored.
         r.relay_frame("n", stream, 0, vec![0]);
     }

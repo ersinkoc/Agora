@@ -2463,6 +2463,7 @@ async fn only_the_owner_reads_the_hubs_metrics_and_only_when_they_are_on() {
         "agora_hub_approval_wait_seconds_sum 12\n",
         "agora_hub_approval_wait_seconds_count 1\n",
         "agora_hub_relays_dropped_total 0\n",
+        "agora_hub_terminal_bytes_total 0\n",
     ] {
         assert!(text.contains(line), "missing {line:?} in:\n{text}");
     }

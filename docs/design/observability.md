@@ -22,11 +22,12 @@
   | `agora_hub_approvals_waiting` | gauge | approvals not answered yet |
   | `agora_hub_approval_wait_seconds` | histogram | how long an agent waited for a person's answer (buckets 1 s to 1 h), from the asking machine's times of the request and the answer |
   | `agora_hub_relays_dropped_total` | counter | terminal relays let go because the window could not keep up (or was gone) |
+  | `agora_hub_terminal_bytes_total` | counter | bytes of terminal frames passed on to windows (`rate()` of it is the terminals' bytes per second) |
   | `agora_hub_events_stored` | gauge | the position of the last event in the hub's log |
   | `agora_hub_resyncs_total` | counter | lost ranges recorded by resyncs (ADR-0054) |
 
   Counting costs two clock reads and a few atomics per stored event: 50 000 ingests measured 15.4–15.6 µs each with it and
-  15.3–16.0 µs without (noise). Not yet: per-subscriber queue depth and terminal bytes/s.
+  15.3–16.0 µs without (noise). Not yet: per-subscriber queue depth (the subscribers' `sync_channel` does not say its length; it needs a counted wrapper on every send and receive, so `agora_hub_subscribers_dropped_total` stands in for it: a subscriber is let go when its queue is full).
 - **Health:** heartbeats; the window shows node health (connected, lagging, offline since).
 - **Presence (ADR-0070):** whether a machine is online is a fact the hub owns, written from the certificate-authenticated
   connection only (`agora-hub::hub::{node_link_opened, node_link_closed}`):
