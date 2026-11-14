@@ -222,6 +222,12 @@ fn the_hub_comes_back_from_an_older_backup_and_every_machine_brings_its_present(
         ],
     );
 
+    // A third machine is enrolled after the backup: the restored hub has never heard of its certificate.
+    let (gamma, gamma_node) = machine(&root, &hub_dir, &port, "gamma");
+    wait_view(&hub_dir, "gamma online", Duration::from_secs(30), |v| {
+        v.nodes.get("gamma").is_some_and(|n| n.online)
+    });
+
     // Work after the backup: a second agent on alpha, and beta's agent ends.
     run(
         &alpha,
@@ -288,9 +294,57 @@ fn the_hub_comes_back_from_an_older_backup_and_every_machine_brings_its_present(
         lost.is_empty(),
         "history recorded as lost although the machines still held it: {lost:?}"
     );
+    let whole = restarted.elapsed();
+
+    // The machine enrolled after the backup is refused: its certificate is unknown to the restored hub (it fails closed). It has to
+    // be enrolled again, and then it connects.
+    std::thread::sleep(Duration::from_secs(3));
+    assert!(
+        !view(&hub_dir).nodes.get("gamma").is_some_and(|n| n.online),
+        "a certificate the restored hub never issued was accepted"
+    );
+    drop(gamma_node);
+    let code_text = run(
+        &gamma,
+        &["hub", "code", "--hub-dir", hub_dir.to_str().unwrap()],
+    );
+    let code = code_text
+        .split("Enrollment code: ")
+        .nth(1)
+        .and_then(|r| r.split(' ').next())
+        .expect(&code_text)
+        .to_string();
+    run(
+        &gamma,
+        &[
+            "node",
+            "enroll",
+            "--hub",
+            &format!("wss://localhost:{port}"),
+            "--ca",
+            hub_dir.join("ca.pem").to_str().unwrap(),
+            "--code",
+            &code,
+            "--id",
+            "gamma",
+        ],
+    );
+    let node = agora(&gamma, &["node", "run", "--project"])
+        .arg(root.join("gamma-repo"))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let _gamma_again = Proc(node);
+    wait_view(
+        &hub_dir,
+        "gamma back after enrolling again",
+        Duration::from_secs(30),
+        |v| v.nodes.get("gamma").is_some_and(|n| n.online),
+    );
     eprintln!(
-        "restore drill: the hub's present was whole {} ms after it started from the backup ({} ms waiting on the machines); lost history ranges: none",
-        restarted.elapsed().as_millis(),
+        "restore drill: the hub's present was whole {} ms after it started from the backup ({} ms waiting on the machines); lost history ranges: none; the machine enrolled after the backup was refused until it enrolled again",
+        whole.as_millis(),
         recovered.as_millis()
     );
     let _ = std::fs::remove_dir_all(&root);
