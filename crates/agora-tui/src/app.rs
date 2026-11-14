@@ -157,6 +157,9 @@ pub struct Screen<'a> {
     /// A chat agent's conversation, drawn in the pane instead of a terminal: its lines as they fit the pane, the last one being the
     /// line being typed (the cursor goes to its end).
     pub conversation: Option<&'a [String]>,
+    /// A question asked over the shell (start which agent, allow this machine, stop its helpers too…): its lines, drawn in a box in
+    /// the middle over everything else. The keys it takes are in its own lines; the shell does not handle them meanwhile.
+    pub dialog: Option<&'a [String]>,
     pub colors: ColorMode,
     pub t: Text<'a>,
 }
@@ -891,10 +894,136 @@ impl App {
                 cursor = TerminalPane::cursor_position(term, a.terminal);
             }
         }
+        if let Some(lines) = s.dialog {
+            dialog(f.area(), f.buffer_mut(), lines);
+            cursor = None;
+        }
         if let Some(p) = cursor {
             f.set_cursor_position(p);
         }
     }
+}
+
+/// The box a question is asked in, in the middle of `area`, and its lines wrapped to the box: as wide as its longest line (up to the
+/// screen less a margin), as tall as the wrapped lines. Lines that do not fit the screen's height are cut at the bottom.
+pub fn dialog_layout(area: Rect, lines: &[String]) -> (Rect, Vec<String>) {
+    let most = area.width.saturating_sub(4).max(1);
+    let longest = lines.iter().map(|l| text_width(l)).max().unwrap_or(0);
+    let width = u16::try_from(longest + 4)
+        .unwrap_or(u16::MAX)
+        .clamp(24.min(most), most);
+    let inner = usize::from(width.saturating_sub(4)).max(1);
+    let wrapped: Vec<String> = lines.iter().flat_map(|l| wrap(l, inner)).collect();
+    let height = u16::try_from(wrapped.len() + 2)
+        .unwrap_or(u16::MAX)
+        .min(area.height.saturating_sub(2).max(1));
+    let r = Rect {
+        x: area.x + (area.width - width) / 2,
+        y: area.y + (area.height - height) / 2,
+        width,
+        height,
+    };
+    (r, wrapped)
+}
+
+fn text_width(s: &str) -> usize {
+    Span::raw(s).width()
+}
+
+/// One line broken at spaces into lines at most `width` columns wide; a word longer than that is broken where it reaches the edge.
+fn wrap(line: &str, width: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut now = String::new();
+    for word in line.split(' ') {
+        let gap = usize::from(!now.is_empty());
+        if !now.is_empty() && text_width(&now) + gap + text_width(word) > width {
+            out.push(std::mem::take(&mut now));
+        } else if gap == 1 {
+            now.push(' ');
+        }
+        for c in word.chars() {
+            let mut b = [0u8; 4];
+            if text_width(&now) + text_width(c.encode_utf8(&mut b)) > width && !now.is_empty() {
+                out.push(std::mem::take(&mut now));
+            }
+            now.push(c);
+        }
+    }
+    out.push(now);
+    out
+}
+
+/// Which of a question's lines is at a cell of the window: `None` outside the box (a click there cancels), `Some(None)` on the box
+/// but not on a line (its border, a cut line), `Some(Some(i))` on line `i` (any of its wrapped rows).
+pub fn dialog_line_at(area: Rect, lines: &[String], col: u16, row: u16) -> Option<Option<usize>> {
+    let (r, _) = dialog_layout(area, lines);
+    if !r.contains(Position { x: col, y: row }) {
+        return None;
+    }
+    let inner = usize::from(r.width.saturating_sub(4)).max(1);
+    let last = r.y + r.height.saturating_sub(1);
+    if row <= r.y || row >= last {
+        return Some(None);
+    }
+    let mut at = usize::from(row - r.y - 1);
+    for (i, l) in lines.iter().enumerate() {
+        let rows = wrap(l, inner).len();
+        if at < rows {
+            return Some(Some(i));
+        }
+        at -= rows;
+    }
+    Some(None)
+}
+
+/// The key a question reads for an event while it is open, as the questions read keys (arrows as `j` / `k`, Left and Backspace as
+/// DEL, Right and Enter as CR): a click outside the box is Esc, a click on a numbered line (`3  Codex`) is its number.
+pub fn dialog_key(event: &Event, area: Rect, lines: &[String]) -> Option<u8> {
+    match event {
+        Event::Key(k) => match *k {
+            Key::Char(c) if c.is_ascii() => u8::try_from(c).ok(),
+            Key::Ctrl(c) if c.is_ascii_alphabetic() => {
+                u8::try_from(c.to_ascii_lowercase()).ok().map(|b| b & 0x1f)
+            }
+            Key::Enter | Key::Right => Some(b'\r'),
+            Key::Esc => Some(0x1b),
+            Key::Up => Some(b'k'),
+            Key::Down => Some(b'j'),
+            Key::Left | Key::Backspace => Some(0x7f),
+            _ => None,
+        },
+        Event::Mouse(Mouse {
+            kind: MouseKind::Down,
+            col,
+            row,
+        }) => match dialog_line_at(area, lines, *col, *row) {
+            None => Some(0x1b),
+            Some(Some(i)) => {
+                let line = lines[i].trim_start();
+                let mut chars = line.chars();
+                match (chars.next(), chars.next()) {
+                    (Some(d @ '1'..='9'), Some(' ')) => u8::try_from(d).ok(),
+                    _ => None,
+                }
+            }
+            Some(None) => None,
+        },
+        _ => None,
+    }
+}
+
+fn dialog(area: Rect, buf: &mut ratatui::buffer::Buffer, lines: &[String]) {
+    let (r, wrapped) = dialog_layout(area, lines);
+    Clear.render(r, buf);
+    let block = Block::bordered();
+    let inner = block.inner(r);
+    block.render(r, buf);
+    let inner = Rect {
+        x: inner.x + 1,
+        width: inner.width.saturating_sub(2),
+        ..inner
+    };
+    Paragraph::new(wrapped.into_iter().map(Line::raw).collect::<Vec<_>>()).render(inner, buf);
 }
 
 /// The shell's event for a terminal event read with crossterm; `None` for what the shell does not use (key releases, focus changes,
@@ -1170,6 +1299,7 @@ mod tests {
                     notice: "",
                     no_screen: None,
                     conversation: None,
+                    dialog: None,
                     colors,
                     t: &text,
                 },
@@ -1530,6 +1660,7 @@ mod tests {
                     notice: "",
                     no_screen: None,
                     conversation: None,
+                    dialog: None,
                     colors: ColorMode::Mono,
                     t: &text,
                 },
@@ -1572,6 +1703,7 @@ mod tests {
                         notice: "",
                         no_screen: None,
                         conversation: None,
+                        dialog: None,
                         colors,
                         t: &text,
                     },
@@ -1715,6 +1847,7 @@ mod tests {
                     notice: "",
                     no_screen: None,
                     conversation: None,
+                    dialog: None,
                     colors: ColorMode::Full,
                     t: &text,
                 },
@@ -1732,6 +1865,137 @@ mod tests {
             .collect();
         assert!(screen.contains("name=agent16"), "{screen}");
         assert!(!screen.contains("name=agent1 "), "{screen}");
+    }
+
+    #[test]
+    fn a_question_is_drawn_in_a_box_over_the_shell() {
+        let rows = vec![Row {
+            id: "mac/agent-1".into(),
+            label: "agent1".into(),
+            state: "idle".into(),
+            needs_you: false,
+            terminal: true,
+            header: false,
+        }];
+        let app = App::default();
+        let question = vec![
+            "Start which agent on mac?".to_string(),
+            String::new(),
+            "1  Claude Code".to_string(),
+            "2  Codex".to_string(),
+        ];
+        let mut tui = Tui::new(TestBackend::new(AREA.width, AREA.height)).unwrap();
+        tui.draw(|f| {
+            app.draw(
+                f,
+                &Screen {
+                    rows: &rows,
+                    terminal: None,
+                    details: &[],
+                    notice: "",
+                    no_screen: None,
+                    conversation: None,
+                    dialog: Some(&question),
+                    colors: ColorMode::Full,
+                    t: &text,
+                },
+            )
+        })
+        .unwrap();
+        let buf = tui.backend().buffer().clone();
+        let line = |y: u16| -> String {
+            (0..AREA.width)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect()
+        };
+        let screen: Vec<String> = (0..AREA.height).map(line).collect();
+        let all = screen.join("\n");
+        // The shell stays in view around the box: its tree row is still there.
+        assert!(all.contains("agent1"), "{all}");
+        let (r, _) = dialog_layout(AREA, &question);
+        assert!(screen[usize::from(r.y)].contains('┌'), "{all}");
+        for (i, q) in question.iter().enumerate() {
+            assert!(
+                screen[usize::from(r.y) + 1 + i].contains(q.as_str()),
+                "{all}"
+            );
+        }
+        assert_eq!(r.height, 6);
+        // In the middle of the screen.
+        assert_eq!(r.x, (AREA.width - r.width) / 2);
+        assert_eq!(r.y, (AREA.height - r.height) / 2);
+    }
+
+    #[test]
+    fn a_long_question_wraps_inside_its_box() {
+        let area = Rect::new(0, 0, 30, 20);
+        let long = vec![
+            "This machine has not been allowed to take orders from this terminal yet".to_string(),
+        ];
+        let (r, wrapped) = dialog_layout(area, &long);
+        assert_eq!(r.width, 26);
+        assert!(
+            wrapped.iter().all(|l| Span::raw(l.as_str()).width() <= 22),
+            "{wrapped:?}"
+        );
+        assert_eq!(wrapped.join(" "), long[0]);
+        assert_eq!(usize::from(r.height), wrapped.len() + 2);
+        // A word longer than the box is broken at its edge; a screen too low for the question cuts it.
+        assert_eq!(wrap("abcdefghij", 4), ["abcd", "efgh", "ij"]);
+        assert_eq!(wrap("", 4), [""]);
+        let (low, _) = dialog_layout(Rect::new(0, 0, 30, 5), &long);
+        assert_eq!(low.height, 3);
+    }
+
+    #[test]
+    fn a_click_on_a_numbered_line_picks_it_and_a_click_outside_cancels() {
+        let question = vec![
+            "Start which agent on mac? Press its number, any other key cancels.".to_string(),
+            String::new(),
+            "1  Claude Code".to_string(),
+            "2  Codex".to_string(),
+        ];
+        let area = Rect::new(0, 0, 40, 20);
+        let (r, wrapped) = dialog_layout(area, &question);
+        // The first line wraps; the numbered lines come after its rows and the empty line.
+        let first_rows = wrapped.len() - 3;
+        assert!(first_rows > 1, "{wrapped:?}");
+        let click = |col: u16, row: u16| {
+            dialog_key(
+                &Event::Mouse(Mouse {
+                    kind: MouseKind::Down,
+                    col,
+                    row,
+                }),
+                area,
+                &question,
+            )
+        };
+        let x = r.x + 3;
+        let codex = r.y + 1 + u16::try_from(first_rows + 2).unwrap();
+        assert_eq!(click(x, codex), Some(b'2'));
+        assert_eq!(click(x, codex - 1), Some(b'1'));
+        // The question's text, the empty line and the border pick nothing; outside the box is Esc.
+        assert_eq!(click(x, r.y + 1), None);
+        assert_eq!(click(x, r.y + 1 + u16::try_from(first_rows).unwrap()), None);
+        assert_eq!(click(x, r.y), None);
+        assert_eq!(click(0, 0), Some(0x1b));
+        // A release, a drag or the wheel do nothing.
+        let up = Event::Mouse(Mouse {
+            kind: MouseKind::Up,
+            col: x,
+            row: codex,
+        });
+        assert_eq!(dialog_key(&up, area, &question), None);
+        // Keys read as the questions read them.
+        let k = |k: Key| dialog_key(&Event::Key(k), area, &question);
+        assert_eq!(k(Key::Char('y')), Some(b'y'));
+        assert_eq!(k(Key::Ctrl('c')), Some(3));
+        assert_eq!(k(Key::Esc), Some(0x1b));
+        assert_eq!(k(Key::Enter), Some(b'\r'));
+        assert_eq!(k(Key::Down), Some(b'j'));
+        assert_eq!(k(Key::Backspace), Some(0x7f));
+        assert_eq!(k(Key::Char('é')), None);
     }
 
     #[test]
@@ -1808,6 +2072,7 @@ mod tests {
                     notice: "",
                     no_screen: None,
                     conversation: Some(&conversation),
+                    dialog: None,
                     colors: ColorMode::Full,
                     t: &text,
                 },

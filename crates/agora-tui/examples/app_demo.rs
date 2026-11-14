@@ -93,6 +93,7 @@ fn run(
                         notice: "",
                         no_screen: None,
                         conversation: None,
+                        dialog: None,
                         colors,
                         t: &text,
                     },
