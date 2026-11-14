@@ -4,6 +4,11 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+### Hub
+- A window or terminal client that comes back after a long time away (more than 10 000 events or 8 MiB behind) gets a fresh snapshot
+  instead of replaying everything it missed. Its return no longer holds up the hub for every machine and every other window while
+  the backlog is read (100 000 events behind took about 155 ms of the hub's time; now well under a millisecond).
+
 ### Machines
 - `agora doctor` says who may make this machine act: which commands sent through the hub need a signature from one of your devices
   (and a note when none do, since whoever controls the hub could then send them), how many devices the machine trusts and how many
