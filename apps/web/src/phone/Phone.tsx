@@ -12,6 +12,9 @@ import { NoAskBadge } from '../components/NoAskBadge';
 import { ThemePicker } from '../components/ThemePicker';
 import { PromptBox } from '../components/PromptBox';
 import { ClosedSummary } from '../components/ClosedSummary';
+import { DiffDialog } from '../components/DiffDialog';
+import { FilesDialog } from '../components/FilesDialog';
+import type { WorkspaceFiles } from '../net/files';
 import { StartApproval, type StartChoice } from '../components/StartApproval';
 import { ThemeEditor } from '../themes/ThemeEditor';
 import { PHONE_QUERY, byMachine, needsYou } from './nav';
@@ -177,7 +180,7 @@ export function PhoneHome({ agents, machines, approvals, onResolve, untrusted, n
 }
 
 // One agent: Back, its name and state, what it asks, then its terminal (with the key bar) or its conversation.
-export function PhoneAgent({ agent, agents, approvals, machines, onResolve, untrusted, notice, source, chatSource, sendPrompt, chooseOption, costMicroUsd, onOpen, onBack }: PhoneCommon & {
+export function PhoneAgent({ agent, agents, approvals, machines, onResolve, untrusted, notice, source, chatSource, sendPrompt, chooseOption, costMicroUsd, loadDiff, filesOf, onOpen, onBack }: PhoneCommon & {
   agent: AgentTileModel | undefined;
   agents: readonly AgentTileModel[];
   source?: TerminalSource;
@@ -185,10 +188,16 @@ export function PhoneAgent({ agent, agents, approvals, machines, onResolve, untr
   sendPrompt?: (agent: AgentTileModel, text: string) => Promise<boolean>;
   chooseOption?: (agentKey: string, kind: 'mode' | 'model', id: string) => Promise<boolean>;
   costMicroUsd?: number;
+  /** What the agent changed (the review screen) and its files (the file browser), as on the desktop; absent without a hub. */
+  loadDiff?: (agent: AgentTileModel, path?: string) => Promise<string>;
+  filesOf?: (agent: AgentTileModel) => WorkspaceFiles | undefined;
   onOpen: (id: string) => void;
   onBack: () => void;
 }) {
   const [now] = useState(() => Date.now());
+  const [shown, setShown] = useState<'changes' | 'files' | undefined>();
+  const files = agent && filesOf ? filesOf(agent) : undefined;
+  const changed = agent?.filesChanged ?? 0;
   // Without a hub (development) the terminal is the local stand-in, as in the full-size view.
   const preview = agent?.preview ?? '';
   const demo = useMemo(() => demoSource(preview), [preview]);
@@ -209,8 +218,14 @@ export function PhoneAgent({ agent, agents, approvals, machines, onResolve, untr
       </>}>
       {notice && <p role="alert" className="phone-notice">{notice}</p>}
       {!agent ? <div className="grid justify-items-start gap-3 p-4"><p className="m-0">{t('focus-not-found')}</p><button type="button" className="button" onClick={onBack}>{t('phone-back')}</button></div> : <>
+        {!agent.closed && (changed > 0 && loadDiff || files) && (
+          <div className="phone-tools">
+            {changed > 0 && loadDiff && <button type="button" className="phone-chipbtn text-needs-you" onClick={() => setShown('changes')}>{t('changes-files', { count: changed })}</button>}
+            {files && <button type="button" className="phone-chipbtn" onClick={() => setShown('files')}><Icon name="files" className="size-4" />{t('console-files')}</button>}
+          </div>
+        )}
         {mine.length > 0 && <div className="phone-asks">{mine.map((x) => <ApprovalCard key={x.id} approval={x} machine={machineName(machines, x.node)} untrusted={!!untrusted?.(x.node)} onResolve={onResolve} />)}</div>}
-        {agent.closed ? <div className="min-h-0 flex-1 overflow-y-auto"><ClosedSummary agent={agent} now={now} onDismiss={() => { dismiss([agent.id]); onBack(); }} /></div>
+        {agent.closed ? <div className="min-h-0 flex-1 overflow-y-auto"><ClosedSummary agent={agent} now={now} onReview={loadDiff ? () => setShown('changes') : undefined} onFiles={files ? () => setShown('files') : undefined} onDismiss={() => { dismiss([agent.id]); onBack(); }} /></div>
           : <div className="phone-pane" aria-label={agent.terminal === false ? t('chat-log') : t('focus-terminal')}>
             {agent.terminal === false ? <PromptBox agent={agent} source={chatSource} send={sendPrompt} choose={chooseOption} /> : (
               <Suspense fallback={<div className="terminal" aria-busy="true" />}>
@@ -218,6 +233,8 @@ export function PhoneAgent({ agent, agents, approvals, machines, onResolve, untr
               </Suspense>
             )}
           </div>}
+        {shown === 'changes' && loadDiff && <DiffDialog agent={agent} load={loadDiff} read={files?.read} onClose={() => setShown(undefined)} />}
+        {shown === 'files' && files && <FilesDialog agent={agent} files={files} load={loadDiff} onClose={() => setShown(undefined)} />}
       </>}
     </PhoneShell>
   );

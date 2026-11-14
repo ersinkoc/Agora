@@ -176,6 +176,8 @@ body {
 .phone-card__hint { display: grid; gap: var(--space-2); margin: 0; color: var(--text-muted); font-size: var(--text-13); }
 .phone-card__actions { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-2); }
 
+/* What the agent changed and its files, one tap each (they open the review screen and the file browser full-screen). */
+.phone-tools { display: flex; flex: none; flex-wrap: wrap; gap: var(--space-2); padding: var(--space-2) var(--space-2) 0; }
 .phone-asks { display: grid; gap: var(--space-2); padding: var(--space-2); max-height: 50%; overflow-y: auto; flex: none; }
 .phone-pane { display: flex; flex-direction: column; flex: 1; min-height: 0; padding: var(--space-1); padding-bottom: calc(env(safe-area-inset-bottom) + var(--space-1)); }
 .phone-pane .terminal { border: 0; }
