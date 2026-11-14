@@ -28,6 +28,13 @@ case "$1" in
     echo "Failed to get unit file state for $2: No such file or directory" >&2; exit 1;;
   enable) touch "$d/enabled-$2";;
   disable) [ "$2" = --now ] && shift; rm -f "$d/enabled-$2";;
+  show)
+    u="$6"; dir="$XDG_CONFIG_HOME/systemd/user"; f=""
+    [ -f "$dir/$u" ] && f="$dir/$u"
+    echo "FragmentPath=$f"
+    di=""
+    for x in "$dir/$u.d/"*.conf; do [ -e "$x" ] && di="$di $x"; done
+    echo "DropInPaths=${di# }";;
   daemon-reload|start) ;;
   *) exit 98;;
 esac
@@ -108,6 +115,14 @@ impl Scratch {
     }
 
     fn run_with_path(&self, path: &Path, args: &[&str]) -> (i32, String) {
+        self.run_full(path, &self.home(), args)
+    }
+
+    fn run_in(&self, home: &Path, args: &[&str]) -> (i32, String) {
+        self.run_full(&self.path(), home, args)
+    }
+
+    fn run_full(&self, path: &Path, home: &Path, args: &[&str]) -> (i32, String) {
         let out = Command::new(AGORA)
             .args(args)
             .env_clear()
@@ -119,7 +134,7 @@ impl Scratch {
                 "DBUS_SESSION_BUS_ADDRESS",
                 "unix:path=/nonexistent/agora-test-bus",
             )
-            .env("AGORA_HOME", self.home())
+            .env("AGORA_HOME", home)
             .env("AGORA_LANG", "en")
             .stdin(Stdio::null())
             .output()
@@ -135,6 +150,10 @@ impl Scratch {
     }
 
     fn run(&self, args: &[&str]) -> (i32, String) {
+        self.run_with_path(&self.path(), args)
+    }
+
+    fn path(&self) -> PathBuf {
         let path = std::env::join_paths(
             std::iter::once(self.base.join("bin")).chain(
                 ["/usr/local/bin", "/usr/bin", "/bin"]
@@ -143,7 +162,7 @@ impl Scratch {
             ),
         )
         .unwrap();
-        self.run_with_path(Path::new(&path), args)
+        PathBuf::from(path)
     }
 }
 
@@ -184,7 +203,8 @@ fn service_install_status_remove_drive_a_user_unit_through_systemctl() {
     assert_eq!(
         s.log(),
         "--user is-enabled agora-node.service\n--user is-enabled agora-node.service\n\
-         --user daemon-reload\n--user enable agora-node.service\n--user start agora-node.service\n"
+         --user daemon-reload\n--user show -p FragmentPath -p DropInPaths agora-node.service\n\
+         --user enable agora-node.service\n--user start agora-node.service\n"
     );
 
     // Again: nothing changes, and it says so.
@@ -221,7 +241,7 @@ fn service_install_status_remove_drive_a_user_unit_through_systemctl() {
     std::fs::write(s.unit(), theirs).unwrap();
     std::fs::write(s.base.join("bin/enabled-agora-node.service"), "").unwrap();
     let (code, out) = s.run(&["service", "install"]);
-    assert_eq!(code, 0, "{out}");
+    assert_eq!(code, 1, "{out}");
     assert!(out.contains("but not by Agora"), "{out}");
     let (code, out) = s.run(&["service", "remove"]);
     assert_eq!(code, 1, "{out}");
@@ -229,6 +249,41 @@ fn service_install_status_remove_drive_a_user_unit_through_systemctl() {
     assert_eq!(std::fs::read_to_string(s.unit()).unwrap(), theirs);
     assert_eq!(s.log().matches("disable").count(), 1, "{}", s.log());
     std::fs::remove_file(s.unit()).unwrap();
+    std::fs::remove_file(s.base.join("bin/enabled-agora-node.service")).unwrap();
+
+    // The hand-made unit is gone but its drop-in stays: it would change what Agora's unit runs, so nothing is registered.
+    let drop_in_dir = s.base.join("cfg/systemd/user/agora-node.service.d");
+    std::fs::create_dir_all(&drop_in_dir).unwrap();
+    let drop_in = drop_in_dir.join("10-local-build.conf");
+    std::fs::write(
+        &drop_in,
+        "[Service]\nExecStart=\nExecStart=/usr/bin/agora node run\n",
+    )
+    .unwrap();
+    let (code, out) = s.run(&["service", "install"]);
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("would not run only what Agora wrote"), "{out}");
+    assert!(out.contains("10-local-build.conf"), "{out}");
+    assert!(!s.unit().exists(), "the refused unit was left behind");
+    assert_eq!(
+        s.log().matches("enable agora-node").count(),
+        1,
+        "{}",
+        s.log()
+    );
+    // A drop-in that appears after the install is named by remove, and left.
+    std::fs::rename(&drop_in, s.base.join("aside.conf")).unwrap();
+    let (code, out) = s.run(&["service", "install"]);
+    assert_eq!(code, 0, "{out}");
+    std::fs::rename(s.base.join("aside.conf"), &drop_in).unwrap();
+    let (code, out) = s.run(&["service", "remove"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.contains("were not written by Agora and are left"),
+        "{out}"
+    );
+    assert!(drop_in.exists() && !s.unit().exists());
+    std::fs::remove_dir_all(&drop_in_dir).unwrap();
 
     // Never anything but the user's own manager: no root, no lingering.
     assert!(
@@ -245,6 +300,21 @@ fn service_install_status_remove_drive_a_user_unit_through_systemctl() {
     assert!(!out.contains("does not start by itself"), "{out}");
     let (code, out) = s.run(&["service", "install"]);
     assert_eq!(code, 1, "{out}");
+    assert!(!s.unit().exists());
+
+    std::fs::remove_file(s.base.join("bin/mode")).unwrap();
+
+    // A folder ending in a backslash would break the unit (a line continuation): refused, nothing written.
+    let odd = s.base.join("odd\\");
+    std::fs::create_dir_all(&odd).unwrap();
+    std::fs::write(
+        odd.join("machine.toml"),
+        "roles = [\"node\"]\nui = \"none\"\n",
+    )
+    .unwrap();
+    let (code, out) = s.run_in(&odd, &["service", "install"]);
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("backslash"), "{out}");
     assert!(!s.unit().exists());
 
     // No systemctl at all: not available on this machine.

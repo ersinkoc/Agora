@@ -100,10 +100,41 @@ fn failed(say: &Say, key: &'static str, name: &str, e: &std::io::Error) {
                 ("path", p.display().to_string().into()),
             ],
         ),
+        Some(ServiceProblem::Root) => say.err(key!("service-root"), &[]),
+        Some(ServiceProblem::NoConfigFolder) => say.err(key!("service-no-config-folder"), &[]),
+        Some(ServiceProblem::NotLoaded(p)) => say.err(
+            key!("service-not-loaded"),
+            &[
+                ("name", name.into()),
+                ("path", p.display().to_string().into()),
+            ],
+        ),
+        Some(ServiceProblem::Overridden(ps)) => say.err(
+            key!("service-overridden"),
+            &[("name", name.into()), ("paths", paths(ps).into())],
+        ),
         None => say.err(
             key,
             &[("name", name.into()), ("reason", e.to_string().into())],
         ),
+    }
+}
+
+fn paths(ps: &[std::path::PathBuf]) -> String {
+    ps.iter()
+        .map(|p| p.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Whether `agora service` may act in this process (Linux: not as root, and with a folder for the user's units); says why not.
+fn may_act(say: &Say) -> bool {
+    match agora_platform::service_precheck() {
+        Ok(()) => true,
+        Err(e) => {
+            failed(say, key!("frontdoor-failed"), "", &e);
+            false
+        }
     }
 }
 
@@ -140,6 +171,9 @@ pub fn service(say: &Say, op: &str) -> ExitCode {
         say.err(key!("service-unavailable"), &[]);
         return ExitCode::from(1);
     }
+    if !may_act(say) {
+        return ExitCode::from(1);
+    }
     let h = home();
     let Some(m) = frontdoor::load(&h) else {
         say.err(key!("frontdoor-not-set-up"), &[]);
@@ -153,6 +187,10 @@ pub fn service(say: &Say, op: &str) -> ExitCode {
 }
 
 pub(crate) fn install(say: &Say, h: &Path, m: &Machine) -> ExitCode {
+    // Before anything is written (`sudo` would leave root's folders in the user's Agora folder).
+    if !may_act(say) {
+        return ExitCode::from(1);
+    }
     for d in ["run", "logs"] {
         if let Err(e) = std::fs::create_dir_all(h.join(d)) {
             say.err(
@@ -178,7 +216,11 @@ pub(crate) fn install(say: &Say, h: &Path, m: &Machine) -> ExitCode {
         };
         // A second `install` changes nothing and says so (to register it anew, `remove` first).
         match agora_platform::service_status(&spec.name) {
-            Ok(ServiceState::Installed { .. }) if !mine(say, &spec.name) => continue,
+            // A unit of the same name made by hand: left as it is, and this install did not do what was asked.
+            Ok(ServiceState::Installed { .. }) if !mine(say, &spec.name) => {
+                code = ExitCode::from(1);
+                continue;
+            }
             Ok(ServiceState::Installed { .. }) => {
                 say.out(
                     key!("service-already"),
@@ -202,6 +244,7 @@ pub(crate) fn install(say: &Say, h: &Path, m: &Machine) -> ExitCode {
                 ServiceRefusal::Expands | ServiceRefusal::CannotCarry => key!("service-bad-path"),
                 ServiceRefusal::ControlCharacter => key!("service-bad-path-control"),
                 ServiceRefusal::NotAbsolute => key!("service-bad-path-relative"),
+                ServiceRefusal::Backslash => key!("service-bad-path-backslash"),
             };
             say.err(key, &[("path", path)]);
             code = ExitCode::from(1);
@@ -284,12 +327,26 @@ fn remove(say: &Say, h: &Path, m: &Machine) -> ExitCode {
                 continue;
             }
         }
+        // Drop-ins Agora did not write stay; they are named after the removal.
+        let drop_ins = agora_platform::service_drop_ins(&name).unwrap_or_default();
         frontdoor::stop_role(say, h, Some(m), role, &mut code);
         match agora_platform::service_remove(&name) {
-            Ok(true) => say.out(
-                key!("service-removed"),
-                &[("role", label), ("name", name.into())],
-            ),
+            Ok(true) => {
+                say.out(
+                    key!("service-removed"),
+                    &[("role", label), ("name", name.clone().into())],
+                );
+                let left: Vec<_> = drop_ins
+                    .into_iter()
+                    .filter(|p| std::fs::symlink_metadata(p).is_ok())
+                    .collect();
+                if !left.is_empty() {
+                    say.out(
+                        key!("service-drop-ins-left"),
+                        &[("name", name.into()), ("paths", paths(&left).into())],
+                    );
+                }
+            }
             Ok(false) => say.out(key!("service-none"), &[("role", label)]),
             Err(e) => {
                 failed(say, key!("service-remove-failed"), &name, &e);

@@ -278,25 +278,65 @@ impl Systemd {
     /// `systemctl` from `PATH`, and the user unit folder systemd reads first: `$XDG_CONFIG_HOME/systemd/user` when that is a full
     /// path (the XDG rule), otherwise `$HOME/.config/systemd/user`.
     fn from_env() -> io::Result<Self> {
-        let config = std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .filter(|p| p.is_absolute())
-            .or_else(|| {
-                std::env::var_os("HOME")
-                    .map(PathBuf::from)
-                    .filter(|p| p.is_absolute())
-                    .map(|h| h.join(".config"))
-            })
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::NotFound,
-                    "neither XDG_CONFIG_HOME nor HOME is set",
-                )
-            })?;
+        // SAFETY: plain call.
+        let euid = unsafe { libc::geteuid() };
+        let unit_dir = unit_dir_for(
+            euid,
+            std::env::var_os("XDG_CONFIG_HOME"),
+            std::env::var_os("HOME"),
+        )?;
         Ok(Systemd {
             systemctl: PathBuf::from("systemctl"),
-            unit_dir: config.join("systemd").join("user"),
+            unit_dir,
         })
+    }
+
+    /// `systemctl --user show` of the unit: the file systemd loaded it from (empty when it found none) and its drop-ins.
+    fn loaded_from(&self, name: &str) -> io::Result<(Option<PathBuf>, Vec<PathBuf>)> {
+        let out = self.run(&[
+            "show",
+            "-p",
+            "FragmentPath",
+            "-p",
+            "DropInPaths",
+            &unit_name(name),
+        ])?;
+        if !out.status.success() {
+            return Err(failure(&out));
+        }
+        Ok(read_show(&String::from_utf8_lossy(&out.stdout)))
+    }
+
+    /// Whether systemd runs exactly the unit at `path`: loaded from that file, with no drop-in (`<name>.service.d/`, `agora-.service.d/`,
+    /// `service.d/`, `/etc/systemd/user`, …) that could change what it runs. `Err` names what else it reads.
+    fn runs_only(&self, name: &str, path: &std::path::Path) -> io::Result<()> {
+        let (fragment, drop_ins) = self.loaded_from(name)?;
+        let Some(fragment) = fragment else {
+            return Err(io::Error::other(crate::ServiceProblem::NotLoaded(
+                path.to_path_buf(),
+            )));
+        };
+        let same = |a: &std::path::Path, b: &std::path::Path| {
+            a == b
+                || fs::canonicalize(a)
+                    .ok()
+                    .is_some_and(|a| fs::canonicalize(b).ok() == Some(a))
+        };
+        let mut others = drop_ins;
+        if !same(&fragment, path) {
+            others.insert(0, fragment);
+        }
+        if others.is_empty() {
+            Ok(())
+        } else {
+            Err(io::Error::other(crate::ServiceProblem::Overridden(others)))
+        }
+    }
+
+    /// See [`crate::service_drop_ins`].
+    fn drop_ins(&self, name: &str) -> io::Result<Vec<PathBuf>> {
+        check_name(name)?;
+        Ok(self.loaded_from(name)?.1)
     }
 
     fn unit_path(&self, name: &str) -> PathBuf {
@@ -337,15 +377,27 @@ impl Systemd {
         }
         let text = unit_text(&spec)?;
         let path = self.unit_path(&spec.name);
-        let new = fs::symlink_metadata(&path).is_err();
-        write_unit(&self.unit_dir, &path, &text)?;
+        let before = write_unit(&self.unit_dir, &path, &text)?;
+        // Enabled only once systemd is seen to run exactly this file: a drop-in or another unit file of the same name would change
+        // what it runs, and is named instead.
         let registered = self
             .checked(&["daemon-reload"])
+            .and_then(|()| self.runs_only(&spec.name, &path))
             .and_then(|()| self.checked(&["enable", &unit_name(&spec.name)]));
-        if registered.is_err() && new {
-            // Leave nothing half-registered behind: a unit that was not there before is taken back.
-            let _ = fs::remove_file(&path);
-            let _ = self.checked(&["daemon-reload"]);
+        if registered.is_err() {
+            // Leave nothing half-registered behind: what was there before is put back (nothing, or Agora's earlier unit).
+            match &before {
+                Before::Absent => {
+                    let _ = fs::remove_file(&path);
+                }
+                Before::Other(was) => {
+                    let _ = crate::write_private(&path, was);
+                }
+                Before::Same => {}
+            }
+            if !matches!(before, Before::Same) {
+                let _ = self.checked(&["daemon-reload"]);
+            }
         }
         registered
     }
@@ -407,6 +459,67 @@ impl Systemd {
         self.checked(&["daemon-reload"])?;
         Ok(true)
     }
+}
+
+/// What was at the unit's place before [`write_unit`].
+enum Before {
+    Absent,
+    /// The same text: nothing was written.
+    Same,
+    /// An earlier unit Agora wrote, with other text.
+    Other(Vec<u8>),
+}
+
+/// The user unit folder systemd reads first: `$XDG_CONFIG_HOME/systemd/user` when that is a full path (the XDG rule), otherwise
+/// `$HOME/.config/systemd/user`. Refused for root ([`crate::ServiceProblem::Root`]): `sudo` would register root's own service, or
+/// leave root's files in the user's folder.
+fn unit_dir_for(
+    euid: u32,
+    xdg: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+) -> io::Result<PathBuf> {
+    if euid == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            crate::ServiceProblem::Root,
+        ));
+    }
+    xdg.map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| {
+            home.map(PathBuf::from)
+                .filter(|p| p.is_absolute())
+                .map(|h| h.join(".config"))
+        })
+        .map(|c| c.join("systemd").join("user"))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                crate::ServiceProblem::NoConfigFolder,
+            )
+        })
+}
+
+/// `FragmentPath=` and `DropInPaths=` of `systemctl show` (the drop-ins separated by spaces).
+fn read_show(text: &str) -> (Option<PathBuf>, Vec<PathBuf>) {
+    let mut fragment = None;
+    let mut drop_ins = Vec::new();
+    for line in text.lines() {
+        if let Some(v) = line.strip_prefix("FragmentPath=") {
+            fragment = (!v.trim().is_empty()).then(|| PathBuf::from(v.trim()));
+        } else if let Some(v) = line.strip_prefix("DropInPaths=") {
+            drop_ins = v.split_whitespace().map(PathBuf::from).collect();
+        }
+    }
+    (fragment, drop_ins)
+}
+
+pub(crate) fn service_precheck() -> io::Result<()> {
+    Systemd::from_env().map(|_| ())
+}
+
+pub(crate) fn service_drop_ins(name: &str) -> io::Result<Vec<PathBuf>> {
+    Systemd::from_env()?.drop_ins(name)
 }
 
 fn unit_name(name: &str) -> String {
@@ -508,10 +621,12 @@ fn read_is_enabled(out: &std::process::Output) -> io::Result<crate::ServiceState
     }
     let stdout = String::from_utf8_lossy(&out.stdout);
     match stdout.lines().next().map(str::trim).unwrap_or("") {
-        "enabled" | "enabled-runtime" | "static" | "indirect" | "generated" | "alias"
-        | "transient" => Ok(Installed { enabled: true }),
-        // Present, but it does not start by itself: turned off (`disable`, `mask`) or linked in by hand.
-        "disabled" | "linked" | "linked-runtime" | "masked" | "masked-runtime" | "bad" => {
+        // Only an enabled unit starts at login.
+        "enabled" | "enabled-runtime" => Ok(Installed { enabled: true }),
+        // Present, but it does not start at login by its own `[Install]`: turned off (`disable`, `mask`), linked in by hand, or a
+        // unit Agora would not have made (static, indirect, generated, an alias, transient).
+        "disabled" | "linked" | "linked-runtime" | "masked" | "masked-runtime" | "bad"
+        | "static" | "indirect" | "generated" | "alias" | "transient" => {
             Ok(Installed { enabled: false })
         }
         "not-found" => Ok(NotInstalled),
@@ -540,6 +655,10 @@ pub(crate) fn service_refusal(
         }
         if folder && t != t.trim() {
             return Err(CannotCarry);
+        }
+        // `WorkingDirectory=` is not quoted: a `\` at a line's end joins the next line, and no other use of it is relied on.
+        if folder && t.contains('\\') {
+            return Err(crate::ServiceRefusal::Backslash);
         }
         Ok(())
     };
@@ -626,7 +745,7 @@ fn unit_text(spec: &crate::ServiceSpec) -> io::Result<String> {
     let description: String = spec
         .description
         .chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
+        .map(|c| if c.is_control() || c == '\\' { ' ' } else { c })
         .collect::<String>()
         .trim()
         .replace('%', "%%");
@@ -648,9 +767,9 @@ fn unit_text(spec: &crate::ServiceSpec) -> io::Result<String> {
     Ok(unit)
 }
 
-/// Writes the unit at `path` in `dir` (made 0700 when missing), owner-only and atomically; `Ok(false)` when the same text is there
-/// already. A link or anything but a plain file at `path` is refused, never followed or replaced.
-fn write_unit(dir: &std::path::Path, path: &std::path::Path, text: &str) -> io::Result<bool> {
+/// Writes the unit at `path` in `dir` (made 0700 when missing), owner-only and atomically, and says what was there. A link, anything
+/// but a plain file, or a unit Agora did not write at `path` is refused, never followed or replaced.
+fn write_unit(dir: &std::path::Path, path: &std::path::Path, text: &str) -> io::Result<Before> {
     use std::io::Read;
     use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
     fs::DirBuilder::new()
@@ -671,19 +790,21 @@ fn write_unit(dir: &std::path::Path, path: &std::path::Path, text: &str) -> io::
             let mut was = Vec::new();
             f.read_to_end(&mut was)?;
             if was == text.as_bytes() {
-                return Ok(false);
+                return Ok(Before::Same);
             }
             // A unit Agora did not write is never replaced.
             if !was.starts_with(UNIT_MARKER.as_bytes()) {
                 return Err(not_ours(path.to_path_buf()));
             }
+            crate::write_private(path, text.as_bytes())?;
+            return Ok(Before::Other(was));
         }
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
         Err(e) => return Err(e),
     }
     // Written beside it (exclusive, 0600 from its creation) and renamed over it: `rename` replaces the name, never a link's target.
     crate::write_private(path, text.as_bytes())?;
-    Ok(true)
+    Ok(Before::Absent)
 }
 
 pub(crate) fn service_install(spec: &crate::ServiceSpec) -> io::Result<()> {
@@ -742,6 +863,14 @@ case "$1" in
     if [ "$mode" = failenable ]; then echo "Failed to enable unit: boom" >&2; exit 1; fi
     touch "$d/enabled-$2";;
   disable) [ "$2" = --now ] && shift; rm -f "$d/enabled-$2";;
+  show)
+    u="$6"; f=""
+    [ -f "$d/units/$u" ] && f="$d/units/$u"
+    [ "$mode" = elsewhere ] && f=""
+    echo "FragmentPath=$f"
+    di=""
+    for x in "$d/units/$u.d/"*.conf "$d/units/agora-.service.d/"*.conf; do [ -e "$x" ] && di="$di $x"; done
+    echo "DropInPaths=${di# }";;
   daemon-reload|start) ;;
   *) exit 98;;
 esac
@@ -828,8 +957,10 @@ esac
 
     #[test]
     fn tricky_paths_are_quoted_for_systemd_without_a_shell() {
-        let home = Path::new("/home/u/my \"q\" 'x' 50% $HOME ${X} ö\\ ş/");
+        let home = Path::new("/home/u/my \"q\" 'x' 50% $HOME ${X} ö ş/");
         let mut s = spec(home);
+        // A backslash is refused in the folder, but an argument carries it escaped inside its quotes.
+        s.args[3] = "/home/u/my \"q\" 'x' 50% $HOME ${X} ö\\ ş/".into();
         s.program = PathBuf::from("/opt/my apps/agora");
         s.description = "100%\nsure".into();
         let text = unit_text(&s).unwrap();
@@ -841,7 +972,7 @@ esac
             "{text}"
         );
         assert!(
-            text.contains("WorkingDirectory=/home/u/my \"q\" 'x' 50%% $HOME ${X} ö\\ ş/\n"),
+            text.contains("WorkingDirectory=/home/u/my \"q\" 'x' 50%% $HOME ${X} ö ş/\n"),
             "{text}"
         );
         assert!(text.contains("Description=100%% sure\n"), "{text}");
@@ -920,7 +1051,8 @@ esac
         assert!(fs::read_to_string(&unit).unwrap().contains("ExecStart="));
         assert_eq!(
             f.log(),
-            "--user daemon-reload\n--user enable agora-node.service\n"
+            "--user daemon-reload\n--user show -p FragmentPath -p DropInPaths agora-node.service\n\
+             --user enable agora-node.service\n"
         );
         assert_eq!(
             f.systemd.status("agora-node").unwrap(),
@@ -1051,6 +1183,175 @@ esac
         assert_eq!(f.systemd.foreign("agora-node").unwrap(), None);
         f.systemd.install(&spec(&f.dir)).unwrap();
         assert_eq!(f.systemd.foreign("agora-node").unwrap(), None);
+    }
+
+    /// A drop-in left from a hand-made unit (`agora-node.service.d/`, `agora-.service.d/`) would change what Agora's unit runs: the
+    /// install is refused and taken back, nothing is enabled; `drop_ins` names them for `remove`.
+    #[test]
+    fn a_drop_in_or_another_unit_file_refuses_the_install_and_takes_it_back() {
+        for dir in ["agora-node.service.d", "agora-.service.d"] {
+            let f = Fake::new(&format!("dropin-{dir}"));
+            let d = f.dir.join("units").join(dir);
+            fs::create_dir_all(&d).unwrap();
+            fs::write(
+                d.join("10-local-build.conf"),
+                "[Service]\nExecStart=\nExecStart=/x\n",
+            )
+            .unwrap();
+            let e = f.systemd.install(&spec(&f.dir)).unwrap_err();
+            assert_eq!(
+                crate::service_problem(&e),
+                Some(&ServiceProblem::Overridden(vec![
+                    d.join("10-local-build.conf")
+                ]))
+            );
+            assert!(!f.unit().exists(), "the unit was not taken back");
+            assert!(!f.log().contains("enable"), "{}", f.log());
+            assert!(f.log().ends_with("--user daemon-reload\n"), "{}", f.log());
+            assert_eq!(
+                f.systemd.drop_ins("agora-node").unwrap(),
+                vec![d.join("10-local-build.conf")]
+            );
+        }
+        // systemd reads its units from another folder: refused, named, taken back.
+        let f = Fake::new("elsewhere");
+        f.mode("elsewhere");
+        let e = f.systemd.install(&spec(&f.dir)).unwrap_err();
+        assert_eq!(
+            crate::service_problem(&e),
+            Some(&ServiceProblem::NotLoaded(f.unit()))
+        );
+        assert!(!f.unit().exists());
+    }
+
+    #[test]
+    fn show_is_read_by_its_keys() {
+        assert_eq!(
+            read_show("DropInPaths=/a/x.conf /b/y.conf\nFragmentPath=/u/agora-node.service\n"),
+            (
+                Some(PathBuf::from("/u/agora-node.service")),
+                vec![PathBuf::from("/a/x.conf"), PathBuf::from("/b/y.conf")]
+            )
+        );
+        assert_eq!(
+            read_show("FragmentPath=\nDropInPaths=\n"),
+            (None, Vec::new())
+        );
+    }
+
+    /// Only `enabled` starts at login; every other state systemctl can answer is present but not starting by itself.
+    #[test]
+    fn each_is_enabled_answer_maps_to_one_state() {
+        use std::os::unix::process::ExitStatusExt;
+        let out = |word: &str, code: i32, err: &str| std::process::Output {
+            status: std::process::ExitStatus::from_raw(code << 8),
+            stdout: if word.is_empty() {
+                Vec::new()
+            } else {
+                format!("{word}\n").into_bytes()
+            },
+            stderr: err.as_bytes().to_vec(),
+        };
+        for w in ["enabled", "enabled-runtime"] {
+            assert_eq!(
+                read_is_enabled(&out(w, 0, "")).unwrap(),
+                ServiceState::Installed { enabled: true },
+                "{w}"
+            );
+        }
+        for w in [
+            "disabled",
+            "static",
+            "indirect",
+            "generated",
+            "alias",
+            "transient",
+            "masked",
+            "masked-runtime",
+            "linked",
+            "linked-runtime",
+            "bad",
+        ] {
+            let code = if w == "disabled" || w.starts_with("masked") || w == "bad" {
+                1
+            } else {
+                0
+            };
+            assert_eq!(
+                read_is_enabled(&out(w, code, "")).unwrap(),
+                ServiceState::Installed { enabled: false },
+                "{w}"
+            );
+        }
+        assert_eq!(
+            read_is_enabled(&out("not-found", 4, "")).unwrap(),
+            ServiceState::NotInstalled
+        );
+        assert_eq!(
+            read_is_enabled(&out(
+                "",
+                1,
+                "Failed to get unit file state for x.service: No such file or directory"
+            ))
+            .unwrap(),
+            ServiceState::NotInstalled
+        );
+        let e =
+            read_is_enabled(&out("", 1, "Failed to connect to bus: No medium found")).unwrap_err();
+        assert_eq!(
+            crate::service_problem(&e),
+            Some(&ServiceProblem::NoUserManager)
+        );
+        assert!(read_is_enabled(&out("", 1, "Access denied")).is_err());
+        assert!(read_is_enabled(&out("something-new", 0, "")).is_err());
+    }
+
+    /// A folder with a backslash is refused (`WorkingDirectory=` is unquoted; a trailing one would join the next line).
+    #[test]
+    fn a_backslash_in_the_folder_is_refused() {
+        for home in ["/home/u/home\\", "/home/u/a\\b"] {
+            let s = spec(Path::new(home));
+            assert_eq!(
+                service_refusal(&s).unwrap().1,
+                ServiceRefusal::Backslash,
+                "{home}"
+            );
+            assert_eq!(
+                unit_text(&s).unwrap_err().kind(),
+                io::ErrorKind::InvalidInput
+            );
+        }
+        // In the program, inside ExecStart's quotes, it is escaped.
+        let mut s = spec(Path::new("/home/u/h"));
+        s.program = PathBuf::from("/opt/a\\b/agora");
+        assert!(unit_text(&s)
+            .unwrap()
+            .contains("ExecStart=\"/opt/a\\\\b/agora\""));
+    }
+
+    /// Root (`sudo`) is refused before anything is written, and so is a missing HOME, each with its own problem.
+    #[test]
+    fn root_and_a_missing_home_are_refused() {
+        let e = unit_dir_for(0, Some("/h/.config".into()), Some("/h".into())).unwrap_err();
+        assert_eq!(crate::service_problem(&e), Some(&ServiceProblem::Root));
+        let e = unit_dir_for(1000, None, None).unwrap_err();
+        assert_eq!(
+            crate::service_problem(&e),
+            Some(&ServiceProblem::NoConfigFolder)
+        );
+        let e = unit_dir_for(1000, Some("rel".into()), Some("also-rel".into())).unwrap_err();
+        assert_eq!(
+            crate::service_problem(&e),
+            Some(&ServiceProblem::NoConfigFolder)
+        );
+        assert_eq!(
+            unit_dir_for(1000, Some("rel".into()), Some("/h".into())).unwrap(),
+            PathBuf::from("/h/.config/systemd/user")
+        );
+        assert_eq!(
+            unit_dir_for(1000, Some("/x".into()), Some("/h".into())).unwrap(),
+            PathBuf::from("/x/systemd/user")
+        );
     }
 
     #[test]

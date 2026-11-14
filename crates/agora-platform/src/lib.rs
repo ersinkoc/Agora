@@ -1514,6 +1514,8 @@ pub enum ServiceRefusal {
     ControlCharacter,
     /// Not a full path: the program and the working directory must start at the root.
     NotAbsolute,
+    /// A backslash in the working directory (systemd writes it unquoted, and a `\` at a line's end joins the next line).
+    Backslash,
 }
 
 /// The first path or argument of `spec` this system's service entry cannot carry as it is, and why; `None` when all can. The caller
@@ -1548,6 +1550,15 @@ pub enum ServiceProblem {
     /// A service of the same name is registered, but Agora did not write it (a unit made by hand): it is neither replaced, stopped
     /// nor removed. The path is its file, or its name when it is registered from elsewhere.
     NotOurs(PathBuf),
+    /// Run as root (`sudo`): a login service is the user's own, and root would leave its files in the user's folder. Nothing is done.
+    Root,
+    /// Neither `XDG_CONFIG_HOME` nor `HOME` names a full path, so there is no folder for the user's service files.
+    NoConfigFolder,
+    /// After reloading, the service manager did not find the service file that was just written (it reads another folder).
+    NotLoaded(PathBuf),
+    /// The service manager would also read these files (drop-ins, or another file of the same name), which can change what the service
+    /// runs; nothing was registered.
+    Overridden(Vec<PathBuf>),
 }
 
 impl std::fmt::Display for ServiceProblem {
@@ -1560,11 +1571,44 @@ impl std::fmt::Display for ServiceProblem {
             ServiceProblem::NotOurs(p) => {
                 write!(f, "{} was not written by this program", p.display())
             }
+            ServiceProblem::Root => f.write_str("refused as root"),
+            ServiceProblem::NoConfigFolder => {
+                f.write_str("neither XDG_CONFIG_HOME nor HOME is set")
+            }
+            ServiceProblem::NotLoaded(p) => write!(f, "{} was not loaded", p.display()),
+            ServiceProblem::Overridden(ps) => write!(f, "also read: {ps:?}"),
         }
     }
 }
 
 impl std::error::Error for ServiceProblem {}
+
+/// Whether `agora service` may act in this process at all; an error with a [`ServiceProblem`] when not (Linux: run as root, or no
+/// folder for the user's units). The caller asks before writing anything.
+pub fn service_precheck() -> io::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::service_precheck()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Ok(())
+    }
+}
+
+/// The files that change the service `name` besides its own (Linux: its drop-ins), which [`service_remove`] does not delete: the
+/// caller names those still there afterwards. Empty elsewhere.
+pub fn service_drop_ins(name: &str) -> io::Result<Vec<PathBuf>> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::service_drop_ins(name)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = name;
+        Ok(Vec::new())
+    }
+}
 
 /// `Some(file)` when the service `name` is registered but was not written by Agora (Linux: a user unit of the same name made by hand
 /// or by another tool): the caller leaves it alone, neither stopping, replacing nor removing it. `None` when it is Agora's own or not
