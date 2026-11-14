@@ -32,8 +32,9 @@ The review screen opens from an agent's "files changed" chip, from Changes in De
 - A diff the node cuts at 512 KiB says so; the cut-off last file can be read on its own (`git.diff` with a path).
 - Very long files are drawn in parts ("Show all N lines").
 
-Syntax colours (highlight.js, loaded on demand; about 25 languages by file name; files up to 256 KiB) colour each diff line
-on its own, and lines of the file as it is now from a pass over the whole file once it has been read.
+Syntax colours (highlight.js, loaded on demand; about 25 languages by file name) colour each diff line on its own (in
+batches, so no task blocks the page for long; up to 512 KiB of lines), and lines of the file as it is now from a pass over
+the whole file (up to 128 KiB) once it has been read.
 
 Not built yet: base-branch comparison, inline comments to the agent, merge/rebase/discard, conflicts and
 the multi-agent comparison. Unchanged lines of a file that changed again after the diff was read, or of a deleted file, would
