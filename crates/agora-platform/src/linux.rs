@@ -257,15 +257,17 @@ const UNIT_MARKER: &str = "# Login service (ADR-0062 item 6): written and remove
 
 /// See [`crate::services_available`]: an executable `systemctl` in a full-path folder of `PATH`.
 pub(crate) fn services_available() -> bool {
+    std::env::var_os("PATH").is_some_and(|p| systemctl_in(&p).is_some())
+}
+
+/// The first executable `systemctl` in the full-path folders of `path`, by its full path. Empty and relative entries are skipped, so
+/// a `systemctl` planted in whatever folder Agora runs from is never run; every call uses this path, never the bare name.
+fn systemctl_in(path: &std::ffi::OsStr) -> Option<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
-    std::env::var_os("PATH").is_some_and(|p| {
-        std::env::split_paths(&p)
-            .filter(|d| d.is_absolute())
-            .any(|d| {
-                fs::metadata(d.join("systemctl"))
-                    .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-            })
-    })
+    std::env::split_paths(path)
+        .filter(|d| d.is_absolute())
+        .map(|d| d.join("systemctl"))
+        .find(|p| fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0))
 }
 
 /// The systemctl to run and the folder of user units; tests give a fake systemctl and a scratch folder.
@@ -285,8 +287,11 @@ impl Systemd {
             std::env::var_os("XDG_CONFIG_HOME"),
             std::env::var_os("HOME"),
         )?;
+        let systemctl = std::env::var_os("PATH")
+            .and_then(|p| systemctl_in(&p))
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "systemctl"))?;
         Ok(Systemd {
-            systemctl: PathBuf::from("systemctl"),
+            systemctl,
             unit_dir,
         })
     }
@@ -1352,6 +1357,32 @@ esac
             unit_dir_for(1000, Some("/x".into()), Some("/h".into())).unwrap(),
             PathBuf::from("/x/systemd/user")
         );
+    }
+
+    /// `systemctl` is run by the full path found in a full-path folder of `PATH`: empty, `.` and relative entries are skipped.
+    #[test]
+    fn systemctl_is_found_only_in_full_path_folders() {
+        let f = Fake::new("lookup");
+        let planted = f.dir.join("rel");
+        fs::create_dir_all(&planted).unwrap();
+        fs::copy(f.dir.join("systemctl"), planted.join("systemctl")).unwrap();
+        // Relative entries first: only the full-path folder counts.
+        let path = std::env::join_paths([
+            PathBuf::from(""),
+            PathBuf::from("."),
+            PathBuf::from("rel"),
+            f.dir.clone(),
+        ])
+        .unwrap();
+        assert_eq!(systemctl_in(&path), Some(f.dir.join("systemctl")));
+        let only_relative =
+            std::env::join_paths([PathBuf::from("rel"), PathBuf::from("")]).unwrap();
+        assert_eq!(systemctl_in(&only_relative), None);
+        // A file that is not executable is not taken.
+        let plain = f.dir.join("plain");
+        fs::create_dir_all(&plain).unwrap();
+        fs::write(plain.join("systemctl"), "").unwrap();
+        assert_eq!(systemctl_in(plain.as_os_str()), None);
     }
 
     #[test]

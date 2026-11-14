@@ -61,6 +61,37 @@ fn chmod(mode: &str, path: &Path) {
         .success());
 }
 
+/// The words of an `ExecStart=` line as systemd reads the ones Agora writes: each in double quotes, `\\` and `\"` unescaped, `%%` a
+/// `%` and `$$` a `$`.
+fn exec_words(line: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '"' {
+            assert_eq!(c, ' ', "unquoted text in {line}");
+            continue;
+        }
+        let mut w = String::new();
+        loop {
+            match chars.next().expect("a closing quote") {
+                '"' => break,
+                '\\' => w.push(chars.next().unwrap()),
+                '%' | '$' => {
+                    let d = chars.next().unwrap();
+                    assert!(
+                        d == '%' || d == '$',
+                        "a lone specifier or variable in {line}"
+                    );
+                    w.push(d);
+                }
+                c => w.push(c),
+            }
+        }
+        words.push(w);
+    }
+    words
+}
+
 struct Scratch {
     base: PathBuf,
 }
@@ -206,6 +237,43 @@ fn service_install_status_remove_drive_a_user_unit_through_systemctl() {
          --user daemon-reload\n--user show -p FragmentPath -p DropInPaths agora-node.service\n\
          --user enable agora-node.service\n--user start agora-node.service\n"
     );
+
+    // The unit's own command, read back as systemd reads it, is the supervisor with this folder; a planned end of it (here: the
+    // folder is not set up) exits 0, which `Restart=on-failure` never restarts, so it cannot loop (#564).
+    let exec = unit
+        .lines()
+        .find_map(|l| l.strip_prefix("ExecStart="))
+        .unwrap();
+    let words = exec_words(exec);
+    assert_eq!(
+        words,
+        [
+            AGORA,
+            "supervise",
+            "node",
+            "--home",
+            home.to_str().unwrap(),
+            "--log"
+        ]
+    );
+    let toml = s.home().join("machine.toml");
+    std::fs::rename(&toml, s.base.join("machine.toml.aside")).unwrap();
+    let ended = Command::new(&words[0])
+        .args(&words[1..])
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("AGORA_LANG", "en")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    std::fs::rename(s.base.join("machine.toml.aside"), &toml).unwrap();
+    assert_eq!(
+        ended.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&ended.stderr)
+    );
+    assert!(unit.contains("Restart=on-failure\n") && !unit.contains("Restart=always"));
 
     // Again: nothing changes, and it says so.
     let inode = stat("%i", &s.unit());
