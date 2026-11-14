@@ -59,6 +59,9 @@ the keyboard's own paste works in the terminal. The mapping lives in `apps/web/s
 - With the touch keyboard open the window follows the visible part of the page (`visualViewport`; `interactive-widget=resizes-content`
   where the browser supports it), so the key bar sits above the keyboard.
 - Held sideways the bars are slimmer and the bottom bar lays its labels beside the icons; the terminal takes the full width.
+- A phone watching a terminal that a bigger window also shows makes it phone-sized for both while it is open (the smallest
+  window wins, so the phone is never cut off); the bigger window gets its size back when the phone leaves the terminal. Opening the
+  keyboard shrinks the phone's view, and with it the shared terminal, until it closes.
 
 ## Install
 

@@ -7,6 +7,11 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 ### Getting started
 - `agora --version` prints the version.
 
+### Terminals
+- A terminal open in two windows at once (say a laptop and a bigger screen elsewhere) now fits both: it takes the size of the
+  smaller window, the bigger one shows it at its top left with a thin line where it ends, and it grows back as soon as the smaller
+  window closes it. Before, the window that resized last won and the other one was cut off.
+
 ## 0.3.10
 
 ### Machines

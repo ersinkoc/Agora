@@ -5,6 +5,7 @@ import type { TerminalSession, TerminalSource } from './source';
 import { terminalSize } from './prefs';
 import { KeyBar, useTouch } from './KeyBar';
 import { keyBytes, withCtrl, type BarKey } from './keys';
+import { TerminalSizing } from './sizing';
 
 // Binds a renderer to a source. Input goes straight to the source (it outranks output, ADR-0022); output is
 // written as it arrives; the renderer is torn down with the component. On a touch screen the key bar sits under it (ADR-0067).
@@ -24,24 +25,37 @@ export function TerminalView({ source, label }: { source: TerminalSource; label:
     const r: TerminalRenderer = new XtermRenderer();
     renderer.current = r;
     r.mount(el);
-    const s = source.connect((e) => {
+    // The window reports what fits it; the terminal is shown at the size the node reports, which is the smallest of the windows
+    // watching it (sizing.ts). The element says which, for a bigger window's edge and for tests.
+    let s: TerminalSession | undefined;
+    const sizing = new TerminalSizing({
+      measure: () => r.measure(),
+      show: (z) => {
+        r.resize(z.cols, z.rows);
+        el.dataset.cols = String(z.cols);
+        el.dataset.rows = String(z.rows);
+        el.toggleAttribute('data-smaller', sizing.smaller());
+      },
+      report: (z) => {
+        s?.resize(z.cols, z.rows);
+        el.toggleAttribute('data-smaller', sizing.smaller());
+      },
+    });
+    s = source.connect((e) => {
       if (e.type === 'data') r.write(e.bytes);
       else if (e.type === 'snapshot') r.reset(e.bytes);
-      else if (e.type === 'resize') r.resize(e.cols, e.rows);
+      else if (e.type === 'resize') sizing.resized({ cols: e.cols, rows: e.rows });
     });
-    session.current = s;
+    const live = s;
+    session.current = live;
     r.onInput((d) => {
       if (ctrlRef.current) { ctrlRef.current = false; setCtrl(false); d = withCtrl(d); }
-      s.sendInput(inputBytes(d));
+      live.sendInput(inputBytes(d));
     });
-    const size = r.fit();
-    if (size) s.resize(size.cols, size.rows);
-    const observer = new ResizeObserver(() => {
-      const z = r.fit();
-      if (z) s.resize(z.cols, z.rows);
-    });
+    sizing.viewportChanged();
+    const observer = new ResizeObserver(() => sizing.viewportChanged());
     observer.observe(el);
-    const onSize = () => { r.setFontSize(terminalSize()); const z = r.fit(); if (z) s.resize(z.cols, z.rows); };
+    const onSize = () => { r.setFontSize(terminalSize()); sizing.viewportChanged(); };
     window.addEventListener('agora-terminal-size', onSize);
     // A theme can change the terminal's font: the renderer has repainted by now (it listens first), so measure again.
     window.addEventListener('agora-theme', onSize);
@@ -49,7 +63,7 @@ export function TerminalView({ source, label }: { source: TerminalSource; label:
       window.removeEventListener('agora-terminal-size', onSize);
       window.removeEventListener('agora-theme', onSize);
       observer.disconnect();
-      s.close();
+      live.close();
       r.dispose();
       renderer.current = undefined;
       session.current = undefined;

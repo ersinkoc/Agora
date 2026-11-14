@@ -34,6 +34,7 @@ The window is laid out like an editor, with the terminal as the content. At most
 - **Right, Details:** tabs for Needs you (opens first whenever something needs you), Changes, Board, Messages, Spent.
 - **Status bar:** machines online, agents, how many need you, cost so far.
 - **Empty state:** a start button, the agents that are running, and the two keyboard shortcuts.
+- **One terminal in several windows:** a terminal open in more than one window (two machines, or a phone and a laptop) has the size of the smallest of them, so it fits every one; a bigger window shows it at its top left with a thin line where it ends, and gets its own size back as soon as the smaller window closes it. A terminal client on the machine itself still sets the size it wants (docs/specs/protocol.md, "Shared terminal size").
 - **Phones:** a single column instead of this window: what needs you, machines and agents, then one agent (ADR-0067 rung 2, [phone.md](phone.md)). A tablet keeps this window; on a touch screen its terminals get the key bar.
 
 The older three-column description below stays valid for what each area holds.

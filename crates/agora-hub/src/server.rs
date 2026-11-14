@@ -791,7 +791,7 @@ async fn forward_command<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let req = v1::CommandRequest::decode(payload).map_err(|_| invalid("request"))?;
+    let mut req = v1::CommandRequest::decode(payload).map_err(|_| invalid("request"))?;
     let client_request_id = req.request_id.clone();
     let refuse = |e: Error| error_response(&client_request_id, &e);
     let Caller { who, scope } = caller;
@@ -860,6 +860,34 @@ where
             .await?;
         return Ok(());
     }
+    // Shared terminal size: the node gets the smallest size of the windows watching the terminal, and only when it changes.
+    if let Some(command_request::Command::TerminalResize(t)) = req.command.as_mut() {
+        if !req.target_node.is_empty() {
+            use crate::router::Resize;
+            match hub
+                .router()
+                .resize(relays, &req.target_node, &t.terminal_id, t.cols, t.rows)
+            {
+                Resize::Forward((cols, rows)) => {
+                    t.cols = cols.into();
+                    t.rows = rows.into();
+                }
+                Resize::Unchanged => {
+                    audit(hub, who, &audit_action(&req), &req.target_node, "ok");
+                    let resp = v1::CommandResponse {
+                        request_id: client_request_id,
+                        result: Some(command_response::Result::Ok(v1::CommandOk {
+                            result: Some(command_ok::Result::Empty(v1::Empty {})),
+                        })),
+                    };
+                    conn.send(&frame(STREAM_COMMANDS, 1, resp.encode_to_vec()))
+                        .await?;
+                    return Ok(());
+                }
+                Resize::PassThrough => {}
+            }
+        }
+    }
     let outcome = (|| {
         let node = crate::router::forwardable(&req)?.to_string();
         if !hub.node_known(&node) {
@@ -882,7 +910,13 @@ where
             return Err(Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "stream_id"));
         }
         let (reply, relay) = if subscribing {
-            let node_stream = hub.router().open_relay(&node, relays, stream_id);
+            let terminal = match &req.command {
+                Some(command_request::Command::TerminalSubscribe(t)) => {
+                    Some(t.terminal_id.as_str())
+                }
+                _ => None,
+            };
+            let node_stream = hub.router().open_relay(&node, relays, stream_id, terminal);
             match hub.router().send_on(&node, req.clone(), node_stream) {
                 Ok(r) => (r, Some(node_stream)),
                 Err(e) => {

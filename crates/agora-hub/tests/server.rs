@@ -2109,3 +2109,156 @@ async fn a_node_frozen_past_the_deadline_is_disconnected_then_dials_again_and_is
     again.close().await;
     let _ = task.await;
 }
+
+fn terminal_cmd(stream: u32, id: &str, command: command_request::Command) -> Frame {
+    let req = v1::CommandRequest {
+        request_id: id.into(),
+        idempotency_key: String::new(),
+        target_node: "n9".into(),
+        command: Some(command),
+    };
+    f(stream, 0, req.encode_to_vec())
+}
+
+fn subscribe_to(stream: u32, id: &str) -> Frame {
+    terminal_cmd(
+        stream,
+        id,
+        command_request::Command::TerminalSubscribe(v1::TerminalSubscribe {
+            terminal_id: "t-a".into(),
+            format: String::new(),
+        }),
+    )
+}
+
+fn resize_to(id: &str, cols: u32, rows: u32) -> Frame {
+    terminal_cmd(
+        STREAM_COMMANDS,
+        id,
+        command_request::Command::TerminalResize(v1::TerminalResize {
+            terminal_id: "t-a".into(),
+            cols,
+            rows,
+        }),
+    )
+}
+
+/// The next command the node is sent (closes of relayed streams are skipped), answered with an empty ok.
+async fn node_command(node: &mut Conn<TcpStream>) -> v1::CommandRequest {
+    loop {
+        let fr = recv(node).await;
+        if fr.kind != 0 || !(fr.stream_id == STREAM_COMMANDS || fr.stream_id >= 3) {
+            continue;
+        }
+        let req = v1::CommandRequest::decode(fr.payload.as_slice()).unwrap();
+        let ok = v1::CommandResponse {
+            request_id: req.request_id.clone(),
+            result: Some(command_response::Result::Ok(v1::CommandOk {
+                result: Some(command_ok::Result::Empty(v1::Empty {})),
+            })),
+        };
+        node.send(&f(STREAM_COMMANDS, 1, ok.encode_to_vec()))
+            .await
+            .unwrap();
+        return req;
+    }
+}
+
+fn size_of(req: &v1::CommandRequest) -> (u32, u32) {
+    match &req.command {
+        Some(command_request::Command::TerminalResize(t)) => (t.cols, t.rows),
+        other => panic!("expected a resize, got {other:?}"),
+    }
+}
+
+async fn signed_in(addr: std::net::SocketAddr) -> Conn<TcpStream> {
+    let mut c = dial(addr, Some("good-token")).await;
+    c.send(&f(
+        STREAM_EVENTS,
+        kinds::SUBSCRIBE,
+        v1::Subscribe::default().encode_to_vec(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(recv(&mut c).await.kind, kinds::SNAPSHOT);
+    c
+}
+
+/// The answer to `id` on stream 1 (terminal frames in between are skipped).
+async fn answer_to(c: &mut Conn<TcpStream>, id: &str) -> v1::CommandResponse {
+    loop {
+        let fr = recv(c).await;
+        if (fr.stream_id, fr.kind) == (STREAM_COMMANDS, 1) {
+            let r = v1::CommandResponse::decode(fr.payload.as_slice()).unwrap();
+            if r.request_id == id {
+                return r;
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn windows_sharing_a_terminal_give_it_the_smallest_size_and_it_grows_back_when_the_small_one_leaves(
+) {
+    let st = state(None);
+    let addr = start(Arc::clone(&st)).await;
+    let (mut node, _t) = node_conn(&st, "n9").await;
+    handshake(&mut node).await;
+    node.send(&f(
+        STREAM_EVENTS,
+        kinds::EVENT,
+        event("n9", 1, online("n9")),
+    ))
+    .await
+    .unwrap();
+    next_ack(&mut node).await;
+
+    // The big window watches first: its size goes through.
+    let mut big = signed_in(addr).await;
+    big.send(&subscribe_to(3, "s1")).await.unwrap();
+    assert!(matches!(
+        node_command(&mut node).await.command,
+        Some(command_request::Command::TerminalSubscribe(_))
+    ));
+    assert!(matches!(
+        answer_to(&mut big, "s1").await.result,
+        Some(command_response::Result::Ok(_))
+    ));
+    big.send(&resize_to("r1", 200, 50)).await.unwrap();
+    assert_eq!(size_of(&node_command(&mut node).await), (200, 50));
+    answer_to(&mut big, "r1").await;
+
+    // A smaller window opens the same terminal: the node is sent the smallest of each.
+    let mut small = signed_in(addr).await;
+    small.send(&subscribe_to(3, "s2")).await.unwrap();
+    node_command(&mut node).await;
+    answer_to(&mut small, "s2").await;
+    small.send(&resize_to("r2", 100, 60)).await.unwrap();
+    assert_eq!(size_of(&node_command(&mut node).await), (100, 50));
+    answer_to(&mut small, "r2").await;
+
+    // The big window saying its size again changes nothing: the hub answers, the node hears nothing.
+    big.send(&resize_to("r3", 200, 50)).await.unwrap();
+    assert!(matches!(
+        answer_to(&mut big, "r3").await.result,
+        Some(command_response::Result::Ok(_))
+    ));
+
+    // The small window closes: the big one gets its own size back, once.
+    drop(small);
+    assert_eq!(size_of(&node_command(&mut node).await), (200, 50));
+    // It reopens and shrinks the terminal again.
+    let mut small = signed_in(addr).await;
+    small.send(&subscribe_to(3, "s3")).await.unwrap();
+    node_command(&mut node).await;
+    answer_to(&mut small, "s3").await;
+    small.send(&resize_to("r4", 100, 60)).await.unwrap();
+    assert_eq!(size_of(&node_command(&mut node).await), (100, 50));
+    answer_to(&mut small, "r4").await;
+    // Closing only its terminal view does the same as closing the window.
+    small
+        .send(&f(3, agora_protocol::frame::STREAM_CLOSE, Vec::new()))
+        .await
+        .unwrap();
+    assert_eq!(size_of(&node_command(&mut node).await), (200, 50));
+}

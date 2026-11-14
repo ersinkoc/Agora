@@ -77,3 +77,9 @@ contrast, Large text, Slate, Sand, and a change refused because text would be ha
 
 ![](adr68-theme-editor-dark.png) ![](adr68-theme-editor-light.png)
 ![](adr68-theme-contrast-warning-dark.png) ![](adr68-theme-contrast-warning-light.png)
+
+One shell watched from a 1600 × 900 window and a 900 × 600 one (`shared-size/`, `scripts/e2e-shared-size.mjs`): both show the
+smaller window's size; the bigger window has it at its top left with a hairline where it ends.
+
+![](shared-size/shared-size-big-dark.png) ![](shared-size/shared-size-big-light.png)
+![](shared-size/shared-size-small-dark.png) ![](shared-size/shared-size-small-light.png)
