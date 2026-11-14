@@ -78,4 +78,5 @@ Date: YYYY-MM-DD
 | 0058 | Show an adapter's errors and notices, and choose its model and mode | Accepted |
 | 0059 | Launch options, including "do not ask" modes, chosen when an agent starts | Accepted |
 | 0060 | A node keeps a session ledger and offers Resume after a restart | Accepted |
+| 0069 | A missing agent kind says why, and a trust hint names the real binary | Proposed |
 | 0061 | Trusting your devices on a machine in one step | Accepted |
