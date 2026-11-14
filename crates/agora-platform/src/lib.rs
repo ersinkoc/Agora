@@ -1648,8 +1648,8 @@ pub fn service_drop_ins(name: &str) -> io::Result<Vec<PathBuf>> {
 
 /// `Some(file)` when the service `name` is registered but was not written by Agora (Linux: a user unit of the same name made by hand
 /// or by another tool): the caller leaves it alone, neither stopping, replacing nor removing it. `None` when it is Agora's own or not
-/// registered (Windows: always `None`; macOS: a file at the LaunchAgent's place without Agora's marker, or the job loaded from
-/// another file).
+/// registered (Windows: a task of the name without Agora's marker, named by its place in Task Scheduler, `\<name>`; macOS: a file at
+/// the LaunchAgent's place without Agora's marker, or the job loaded from another file).
 pub fn service_foreign(name: &str) -> io::Result<Option<PathBuf>> {
     #[cfg(target_os = "linux")]
     {
@@ -1659,7 +1659,11 @@ pub fn service_foreign(name: &str) -> io::Result<Option<PathBuf>> {
     {
         macservice::foreign(name)
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(windows)]
+    {
+        winservice::foreign(name)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
         let _ = name;
         Ok(None)
