@@ -115,6 +115,15 @@ pub(crate) fn sandbox_supported() -> bool {
     std::path::Path::new(SANDBOX_EXEC).exists()
 }
 
+/// `(literal "p")`: that path itself, not what is below it.
+fn literal(p: &std::path::Path) -> String {
+    let s = p
+        .to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    format!("(literal \"{s}\")")
+}
+
 fn quote(p: &std::path::Path) -> String {
     let s = p
         .to_string_lossy()
@@ -196,11 +205,68 @@ pub(crate) fn profile(sb: &crate::Sandbox) -> String {
             .iter()
             .map(|p| format!("(remote unix-socket {})", quote(p)))
             .collect();
+        let bind: Vec<String> = denied
+            .iter()
+            .map(|p| format!("(local unix-socket {})", quote(p)))
+            .collect();
+        // Everything below them: contents, metadata and extended attributes (their names and sizes say what is there), writes,
+        // and connecting to or creating a socket there (an agent resumed before the node binds its control socket must not bind
+        // it first).
+        // Each read named: a wildcard `file-read*` deny does not undo an earlier `allow file-read-data` (measured: the data stayed
+        // readable below an allowed `/tmp`), as a wildcard allow does not undo a named deny.
         out.push_str(&format!(
-            "(deny file-read-data file-write* {})\n",
+            "(deny file-read-data file-read-metadata file-read-xattr file-write* {})\n",
             paths.join(" ")
         ));
         out.push_str(&format!("(deny network-outbound {})\n", to.join(" ")));
+        out.push_str(&format!("(deny network-bind {})\n", bind.join(" ")));
+        // A closed folder cannot be moved or removed by moving a folder above it: below a folder the agent may write (a node home
+        // under `/tmp`), `mv /tmp/home /tmp/x` would carry everything out from under rules that name its path. The folders on the
+        // way to it are closed to writes themselves (their own entry: renaming or removing them), not to what is created in them.
+        let writable: Vec<std::path::PathBuf> = sb.write.iter().filter_map(|p| real(p)).collect();
+        let mut above: Vec<String> = Vec::new();
+        for d in &denied {
+            for a in d.ancestors().skip(1) {
+                if a.parent().is_some() && writable.iter().any(|w| a.starts_with(w)) {
+                    let q = literal(a);
+                    if !above.contains(&q) {
+                        above.push(q);
+                    }
+                }
+            }
+        }
+        if !above.is_empty() {
+            out.push_str(&format!("(deny file-write* {})\n", above.join(" ")));
+        }
+        // What the agent may use below a closed folder is opened again after it: its own worktree (an allow-list: everything else
+        // of the node's home stays closed), with the metadata of the folders on the way, so a path to it can still be walked
+        // (`git` resolves every folder of its working directory).
+        let inside: Vec<std::path::PathBuf> = writable
+            .iter()
+            .filter(|w| denied.iter().any(|d| w.starts_with(d)))
+            .cloned()
+            .collect();
+        if !inside.is_empty() {
+            let open: Vec<String> = inside.iter().map(|w| quote(w)).collect();
+            out.push_str(&format!(
+                "(allow file-read-data file-read-metadata file-read-xattr file-write* {})\n",
+                open.join(" ")
+            ));
+            let mut walk: Vec<String> = Vec::new();
+            for w in &inside {
+                for a in w.ancestors().skip(1) {
+                    if denied.iter().any(|d| a.starts_with(d)) {
+                        let q = literal(a);
+                        if !walk.contains(&q) {
+                            walk.push(q);
+                        }
+                    }
+                }
+            }
+            if !walk.is_empty() {
+                out.push_str(&format!("(allow file-read-metadata {})\n", walk.join(" ")));
+            }
+        }
         let own: Vec<String> = sb
             .sockets
             .iter()
@@ -582,6 +648,116 @@ mod sandbox_tests {
             assert!(text.contains(want), "{want}: {text}\n{p}");
         }
         drop(control);
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    /// The review of #477 (a node home under `/tmp`): every way out it named, run by a confined shell. Prints what each did.
+    fn run_attacks(home: &std::path::Path, sb: &crate::Sandbox) -> String {
+        let p = super::profile(sb);
+        let h = home.display();
+        let w = home.join("worktrees/a").display().to_string();
+        let script = format!(
+            "cd {w}; \
+             mv {h} /tmp/agora-moved-$$ 2>/dev/null && echo rename-OPEN && mv /tmp/agora-moved-$$ {h} || echo rename-closed; \
+             echo x > {h}/publishers 2>/dev/null && echo publishers-OPEN || echo publishers-closed; \
+             echo x > {h}/manifests/evil.toml 2>/dev/null && echo manifests-OPEN || echo manifests-closed; \
+             cat {h}/data/trusted-devices >/dev/null 2>&1 && echo read-OPEN || echo read-closed; \
+             ls {h}/data >/dev/null 2>&1 && echo list-OPEN || echo list-closed; \
+             ln {h}/data/trusted-devices {w}/x 2>/dev/null && cat {w}/x >/dev/null 2>&1 && echo hardlink-OPEN || echo hardlink-closed; \
+             ln -s {h}/data {w}/d 2>/dev/null; cat {w}/d/trusted-devices >/dev/null 2>&1 && echo symlink-OPEN || echo symlink-closed; \
+             (cd {h} && cat data/trusted-devices >/dev/null 2>&1) && echo relative-OPEN || echo relative-closed; \
+             echo x > {w}/ok 2>/dev/null && echo worktree-open || echo worktree-CLOSED; \
+             (perl -MIO::Socket::UNIX -e 'IO::Socket::UNIX->new(Type=>SOCK_STREAM(),Local=>$ARGV[0],Listen=>1) or exit 1' {h}/early.sock) 2>/dev/null && echo bind-OPEN || echo bind-closed; \
+             nc -U -w 1 {h}/node.sock </dev/null 2>/dev/null && echo connect-OPEN || echo connect-closed; \
+             ln {h}/node.sock {w}/s 2>/dev/null && nc -U -w 1 {w}/s </dev/null 2>/dev/null && echo socketlink-OPEN || echo socketlink-closed; \
+             cat $(echo {h} | tr a-z A-Z | sed 's#/PRIVATE/TMP#/private/tmp#;s#^/TMP#/tmp#')/data/trusted-devices >/dev/null 2>&1 && echo case-OPEN || echo case-closed; \
+             cat /System/Volumes/Data{h}/data/trusted-devices >/dev/null 2>&1 && echo firmlink-OPEN || echo firmlink-closed; \
+             cat /System/Volumes/Data/private{h}/data/trusted-devices >/dev/null 2>&1 && echo firmlink2-OPEN || echo firmlink2-closed;"
+        );
+        let out = std::process::Command::new(super::SANDBOX_EXEC)
+            .args(["-p", &p, "/bin/sh", "-c", &script])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    fn attack_home(tag: &str) -> std::path::PathBuf {
+        let home = std::path::PathBuf::from(format!("/tmp/agora-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        for d in ["data", "m", "manifests", "worktrees/a", "link"] {
+            std::fs::create_dir_all(home.join(d)).unwrap();
+        }
+        std::fs::write(home.join("data/trusted-devices"), "web-1 key\n").unwrap();
+        let _ = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(home.join("worktrees/a"))
+            .status();
+        home
+    }
+
+    #[test]
+    fn a_node_home_under_tmp_resists_every_way_out_the_review_named() {
+        // The security review of #477: a node home below `/tmp` (writable by every confined agent), closed as a whole, the agent's
+        // own worktree and mesh socket opened again.
+        let home = attack_home("ways");
+        let _control = std::os::unix::net::UnixListener::bind(home.join("node.sock")).unwrap();
+        let _own = std::os::unix::net::UnixListener::bind(home.join("m/own")).unwrap();
+        let sb = crate::Sandbox {
+            read: vec![
+                "/usr".into(),
+                "/bin".into(),
+                "/Library".into(),
+                "/System".into(),
+            ],
+            write: vec![home.join("worktrees/a"), "/tmp".into(), "/dev".into()],
+            offline: false,
+            sockets: vec![home.join("m/own")],
+            deny: vec![home.clone()],
+        };
+        let mut text = run_attacks(&home, &sb);
+        let h = home.display();
+        let own = std::process::Command::new(super::SANDBOX_EXEC)
+            .args([
+                "-p",
+                &super::profile(&sb),
+                "/bin/sh",
+                "-c",
+                &format!("nc -U -w 1 {h}/m/own </dev/null 2>/dev/null && echo own-open || echo own-CLOSED"),
+            ])
+            .output()
+            .unwrap();
+        text.push_str(&String::from_utf8_lossy(&own.stdout));
+        assert!(
+            !text.contains("OPEN") && !text.contains("CLOSED"),
+            "{text}\n{}",
+            super::profile(&sb)
+        );
+        for want in [
+            // 1 (HIGH): the home cannot be moved away from under its rules.
+            "rename-closed",
+            // 2 (HIGH): nothing of the home is writable: trust files, manifests.
+            "publishers-closed",
+            "manifests-closed",
+            // 3 (MEDIUM): no socket can be bound there before the node binds its own.
+            "bind-closed",
+            // And the rest the review asked about: contents, listing, links, a relative path, case, firmlinks, the control socket.
+            "read-closed",
+            "list-closed",
+            "hardlink-closed",
+            "symlink-closed",
+            "relative-closed",
+            "connect-closed",
+            "socketlink-closed",
+            "case-closed",
+            "firmlink-closed",
+            "firmlink2-closed",
+            // What the agent keeps: its worktree and its own mesh socket.
+            "worktree-open",
+            "own-open",
+        ] {
+            assert!(text.contains(want), "{want}: {text}");
+        }
+        assert!(home.exists(), "the home was moved");
         let _ = std::fs::remove_dir_all(home);
     }
 

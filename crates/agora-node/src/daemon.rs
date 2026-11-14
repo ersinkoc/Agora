@@ -933,20 +933,37 @@ pub struct NodeConfig {
     pub limits: NodeLimits,
 }
 
-/// What no confined agent may read, write or connect to, whatever its profile opens (#475): the node's data (trusted devices, policy,
-/// ledger, sessions), its control socket, the agents' mesh sockets (each agent gets its own back), and, in the usual home layout (data
-/// and worktrees side by side), the home's identity, hub, logs and lock folders. A node home under `/tmp` is then as closed as one
-/// under the home folder.
+/// What no confined agent may read, write or connect to, whatever its profile opens (#475, and the security review of #477).
+/// In the usual home layout (data and worktrees side by side) that is the **whole home**: data (trusted devices, policy, ledger),
+/// identity, hub, logs, locks, manifests, adapters, publishers, the registry's keys, the control socket and the agents' mesh
+/// sockets, and anything added there later. The profile opens the agent's own worktree and mesh socket again (an allow-list, not
+/// a list of what to close that has to grow). Otherwise what is known to be the node's: its data, its control socket and the mesh
+/// sockets' folder, and its manifests.
 pub fn node_private_paths(cfg: &NodeConfig) -> Vec<PathBuf> {
-    let mut out = vec![cfg.data_dir.clone(), cfg.socket.clone()];
-    if let Some(home) = cfg.socket.parent() {
-        out.push(home.join("m"));
-    }
     let home = cfg.data_dir.parent();
-    if home.is_some() && home == cfg.worktree_root.parent() {
-        if let Some(h) = home {
-            out.extend(["link", "hub", "logs", "run"].iter().map(|d| h.join(d)));
+    if let Some(h) = home.filter(|h| Some(*h) == cfg.worktree_root.parent()) {
+        let mut out = vec![h.to_path_buf()];
+        for p in [
+            Some(cfg.socket.clone()),
+            cfg.socket.parent().map(|d| d.join("m")),
+            Some(cfg.manifests_dir.clone()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if !p.starts_with(h) {
+                out.push(p);
+            }
         }
+        return out;
+    }
+    let mut out = vec![
+        cfg.data_dir.clone(),
+        cfg.socket.clone(),
+        cfg.manifests_dir.clone(),
+    ];
+    if let Some(dir) = cfg.socket.parent() {
+        out.push(dir.join("m"));
     }
     out
 }
@@ -2093,7 +2110,7 @@ mod announce_tests {
     }
 
     #[test]
-    fn the_nodes_private_paths_cover_its_data_sockets_and_home_folders() {
+    fn the_nodes_private_paths_are_its_whole_home_or_what_is_known_to_be_its() {
         let cfg = |data: &str, worktrees: &str| NodeConfig {
             node_id: "n".into(),
             socket: PathBuf::from("/h/node.sock"),
@@ -2103,27 +2120,15 @@ mod announce_tests {
             projects: vec![],
             limits: NodeLimits::default(),
         };
+        // The usual layout: the whole home (its worktrees are opened again per agent by the profile).
         let p = node_private_paths(&cfg("/h/data", "/h/worktrees"));
-        for want in [
-            "/h/data",
-            "/h/node.sock",
-            "/h/m",
-            "/h/link",
-            "/h/hub",
-            "/h/logs",
-            "/h/run",
-        ] {
-            assert!(p.contains(&PathBuf::from(want)), "{want}: {p:?}");
-        }
-        // Worktrees stay out: an agent works in its own.
-        assert!(!p.iter().any(|x| x.starts_with("/h/worktrees")));
+        assert_eq!(p, [PathBuf::from("/h")]);
         // Data and worktrees elsewhere: only what is known to be the node's.
         let odd = node_private_paths(&cfg("/srv/agora-data", "/w"));
-        assert!(
-            odd.contains(&PathBuf::from("/srv/agora-data"))
-                && !odd.iter().any(|x| x.ends_with("logs")),
-            "{odd:?}"
-        );
+        for want in ["/srv/agora-data", "/h/node.sock", "/h/m", "/h/manifests"] {
+            assert!(odd.contains(&PathBuf::from(want)), "{want}: {odd:?}");
+        }
+        assert!(!odd.iter().any(|x| x.starts_with("/w")), "{odd:?}");
     }
 
     #[test]

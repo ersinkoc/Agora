@@ -5,7 +5,7 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 ## Next
 
 ### Security
-- macOS: a confined agent (`sandbox = worktree`) can no longer reach the node's own files and sockets: its data (trusted devices, policy, ledger), identity, logs and hub folder, the node's control socket, and the other agents' mesh sockets. Before, it could connect to the control socket (Seatbelt checks unix sockets as network, not as files), and with a node home under `/tmp` it could read and write the node's data (#475). Its own mesh socket stays open.
+- macOS: a confined agent (`sandbox = worktree`) can no longer reach the node's own files and sockets: the whole node home is closed to it (trusted devices, policy, ledger, identity, logs, hub folder, manifests, adapter trust files, the node's control socket and the other agents' mesh sockets), except its own worktree and mesh socket; the home cannot be renamed away, and no socket can be bound there before the node's own. Before, it could connect to the control socket (Seatbelt checks unix sockets as network, not as files), and with a node home under `/tmp` it could read and write the node's data (#475). Its own mesh socket stays open.
 
 ## 0.3.10
 
