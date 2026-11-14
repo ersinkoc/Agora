@@ -280,7 +280,9 @@ with a valid UUID. An owner confirms its association; metadata is not an access 
 `WorkspaceRegistered` (event tag 24: `workspace_id`, `node_id`, `project_id`, `path`, `git_root`, `branch`,
 `managed_worktree`, `files_changed`) and `AgentWorkspaceBound` (35: `agent_id`, `workspace_id`) precede `AgentStarted`.
 That `AgentStarted` leaves legacy `worktree_id` empty. `WorkspaceStatusChanged` (25) carries changed-file/line counts
-and HEAD for the workspace. Node workspace IDs are `directory:<canonical cwd>`; the hub qualifies IDs with the
+and HEAD for the workspace. The counts (here, in `GitStatusChanged`, `git.status` and the mesh's `files_changed`) cover the
+workspace folder only, the same scope as `git.diff`: for a folder inside a repository, changes elsewhere in the repository
+are not counted, and a rename across the folder's edge counts as the file added or removed inside it. Node workspace IDs are `directory:<canonical cwd>`; the hub qualifies IDs with the
 producer node and does not trust a supplied `node_id`. `Snapshot.workspaces` (10) and `agent_workspaces` (11) retain
 these associations through replay/reload. Published worktree messages/fixtures remain unchanged.
 
