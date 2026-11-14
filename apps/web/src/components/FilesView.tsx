@@ -3,6 +3,8 @@ import { t } from '../i18n';
 import { baseName, parseDiff, type DiffFile, type DiffStatus } from '../net/diff';
 import { ancestors, changedFolders, changeMarks, crumbs, findMatches, statusByPath, type ChangeMark, type Match } from '../net/fileview';
 import { decodeText, formatSize, joinPath, type FileItem, type WorkspaceFiles } from '../net/files';
+import { markRanges } from '../net/highlight';
+import { useHighlightedFile } from '../highlight/useHighlight';
 import { StatusBadge } from './ChangesView';
 import { Icon } from './Icon';
 import { Resizer } from './Resizer';
@@ -140,6 +142,7 @@ export function FilesView({ files, load, changed, compact = false }: {
     return c && !c.binary ? changeMarks(c) : new Map<number, ChangeMark>();
   }, [changes, active]);
   const matches = useMemo(() => (lines && finding ? findMatches(lines, needle) : []), [lines, needle, finding]);
+  const html = useHighlightedFile(active, lines);
   const current = matches.length > 0 ? matches[Math.min(hit, matches.length - 1)] : undefined;
 
   const onKey = (e: KeyboardEvent<HTMLDivElement>) => {
@@ -270,7 +273,7 @@ export function FilesView({ files, load, changed, compact = false }: {
               {content === undefined || content === 'loading' ? <p className="muted p-4" aria-busy="true">{t('start-loading')}</p>
                 : content === 'binary' ? <p className="muted p-4">{t('files-binary')}</p>
                 : content === 'failed' ? <p role="alert" className="p-4">{activeStatus === 'deleted' ? t('files-deleted') : t('files-too-large')}</p>
-                : <CodeView key={active} label={active ?? ''} lines={content.lines} marks={marks} matches={finding ? matches : []} current={current} />}
+                : <CodeView key={active} label={active ?? ''} lines={content.lines} html={html} marks={marks} matches={finding ? matches : []} current={current} />}
             </div>
             {active !== undefined && changeOf(active) && marks.size === 0 && activeStatus === 'renamed' && (
               <p className="m-0 flex-none border-t border-line px-3 py-1 text-[0.6875rem] text-muted">{t('changes-renamed-from', { name: changeOf(active)?.oldPath ?? '' })}</p>
@@ -327,7 +330,7 @@ export function keepLetters(e: KeyboardEvent<HTMLElement>): void {
 const MARK_CLASS: Record<ChangeMark, string> = { add: 'bg-finished', mod: 'bg-working', del: 'bg-needs-you' };
 
 // A file's lines with numbers and change marks, drawn a screenful at a time. Lines do not wrap; the view scrolls sideways.
-function CodeView({ label, lines, marks, matches, current }: { label: string; lines: string[]; marks: Map<number, ChangeMark>; matches: Match[]; current?: Match }) {
+function CodeView({ label, lines, html, marks, matches, current }: { label: string; lines: string[]; html?: string[]; marks: Map<number, ChangeMark>; matches: Match[]; current?: Match }) {
   const box = useRef<HTMLDivElement>(null);
   const [top, setTop] = useState(0);
   const [height, setHeight] = useState(600);
@@ -368,7 +371,9 @@ function CodeView({ label, lines, marks, matches, current }: { label: string; li
           <span className="select-none pe-2 ps-3 text-end text-muted/70" style={{ width: `calc(${digits}ch + 1.25rem)` }}>{i + 1}</span>
           <span className={`my-0.5 w-[3px] flex-none rounded-full ${mark ? MARK_CLASS[mark] : ''} ${mark === 'del' ? 'h-1 self-end' : ''}`} title={mark ? t(`files-mark-${mark}`) : undefined} />
         </span>
-        <span className="whitespace-pre ps-3 pe-6">{found ? highlight(text, found, current) : text || ' '}</span>
+        {html?.[i] !== undefined
+          ? <span className="whitespace-pre ps-3 pe-6" dangerouslySetInnerHTML={{ __html: (found ? markRanges(html[i] as string, found.map((m) => ({ start: m.start, end: m.end, cls: isCurrent(m, current) ? CURRENT_MATCH : MATCH }))) : html[i] as string) || ' ' }} />
+          : <span className="whitespace-pre ps-3 pe-6">{found ? highlight(text, found, current) : text || ' '}</span>}
       </div>,
     );
   }
@@ -382,14 +387,19 @@ function CodeView({ label, lines, marks, matches, current }: { label: string; li
   );
 }
 
+// Search matches; the same classes mark plain text (below) and highlighted HTML (`markRanges`, whose output is the highlighter's
+// escaped text in its own tags plus these marks).
+const MATCH = 'rounded-[2px] text-inherit bg-accent/25';
+const CURRENT_MATCH = 'rounded-[2px] text-inherit bg-accent/60 outline outline-1 outline-accent';
+const isCurrent = (m: Match, current?: Match) => !!current && current.line === m.line && current.start === m.start;
+
 function highlight(text: string, found: Match[], current?: Match): ReactNode {
   const out: ReactNode[] = [];
   let at = 0;
   for (const m of found) {
     if (m.start < at) continue;
     out.push(text.slice(at, m.start));
-    const isCurrent = current && current.line === m.line && current.start === m.start;
-    out.push(<mark key={m.start} className={`rounded-[2px] text-inherit ${isCurrent ? 'bg-accent/60 outline outline-1 outline-accent' : 'bg-accent/25'}`}>{text.slice(m.start, m.end)}</mark>);
+    out.push(<mark key={m.start} className={isCurrent(m, current) ? CURRENT_MATCH : MATCH}>{text.slice(m.start, m.end)}</mark>);
     at = m.end;
   }
   out.push(text.slice(at));
