@@ -6,6 +6,7 @@ cli-usage =
       agora web
       agora status
       agora down
+      agora service install|remove|status
       agora node run [--socket PATH] [--manifests DIR] [--project PATH]... [--data DIR] [--worktrees DIR]
       agora agent start KIND [--cwd PATH] [--worktree] [--project NAME] [--name NAME] [--accept-project-id-change] [--socket PATH]
       agora project init [--cwd PATH] [--socket PATH]
@@ -226,6 +227,8 @@ frontdoor-choice-alone = 2) Just this machine, alone
 frontdoor-choice-join = 3) Join an Agora that runs on another machine
 frontdoor-choose = Type 1, 2 or 3 and press Enter:
 frontdoor-lan-question = Let other machines of yours connect? [y/N]
+frontdoor-autostart-question = Start Agora when you log in? [Y/n]
+frontdoor-autostart-later = Agora will not start by itself when you log in. `agora service install` sets that up whenever you want.
 frontdoor-join-later = Joining from here is not available yet. On the machine that runs Agora, run `agora hub code`; then here run `agora node enroll` and `agora node run` (see `agora --help`).
 frontdoor-get-started = Agora is not set up on this machine yet. Run `agora` in a terminal and answer one question. (Settings are kept in { $path }.)
 frontdoor-set-up-by-hand = This machine already has an Agora started by hand ({ $path }). `agora` does not take it over yet: keep using `agora hub run` and `agora node run`, or set AGORA_HOME to a new folder to let `agora` set one up there.
@@ -234,6 +237,9 @@ frontdoor-bad-machine-file = { $path } could not be read. Fix it, or delete it a
 frontdoor-not-set-up = Agora is not set up on this machine yet. Run `agora` first.
 frontdoor-no-port = No free port was found from { $port } on.
 frontdoor-failed = Agora could not start: { $reason }
+frontdoor-lock-busy = Another process has held { $path } for more than 10 seconds (it may be stopped or hung), so Agora did not change what runs. Find it with `agora status`, or end it, and try again.
+frontdoor-lock-unsafe = { $path } (or its folder) is a link, a second name of another file, or not a plain file or folder, so Agora did not use it. Remove it, and Agora makes a new one.
+frontdoor-lock-not-yours = { $path } (or its folder) belongs to another user, so Agora did not use it. Remove it, or give it back to your user.
 frontdoor-role-hub = hub
 frontdoor-role-node = node
 frontdoor-starting = Starting the { $role }…
@@ -257,7 +263,45 @@ status-log = log: { $log }
 down-stopped = Stopped the { $role } (process { $pid }).
 down-stopped-supervised = Stopped the { $role } and its supervisor (process { $pid }).
 down-failed = Could not stop the { $role }: { $reason }
+down-still-running = it was still running 10 seconds after being asked to stop
+down-lock-busy = The process ended, but another process has held { $path } for more than 10 seconds (it may be stopped or hung), so its old lock file stays: harmless, the next start replaces it. Find that process, or end it.
 down-nothing = Nothing to stop: `agora` did not start anything that is still running.
+service-description = Starts the Agora { $role } when you log in (it keeps it running).
+service-unsupported = Starting Agora when you log in is not available on this system yet. Start it with `agora` after logging in.
+service-registering = Registering "{ $name }" to start the { $role } when you log in. It runs: { $command }
+service-installed = The { $role } now starts when you log in ("{ $name }"), and it was started now.
+service-already = The { $role } already starts when you log in ("{ $name }"); nothing changed. To register it anew, run `agora service remove` first.
+service-installed-running = The { $role } now starts when you log in ("{ $name }"). It runs already (process { $pid }), so it was not started again.
+service-installed-not-started = The { $role } now starts when you log in ("{ $name }"), but it could not be started now: { $reason }. `agora` starts it.
+service-bad-path = "{ $path }" cannot go into the login entry: it contains `%` (the system would read it as a variable) or characters it cannot carry. Move Agora or its folder to a plain path.
+supervise-log-link = The log { $log } (or its folder) is a link, a second name of another file, or not a plain file of yours, so the supervisor does not write to it. Remove it, and `agora` makes a new one.
+service-install-failed = Could not register "{ $name }": { $reason }
+service-removed = "{ $name }" is removed: the { $role } no longer starts when you log in.
+service-none = The { $role } was not set to start when you log in.
+service-remove-failed = Could not remove "{ $name }": { $reason }
+service-status-installed = The { $role } starts when you log in ("{ $name }").
+service-status-disabled = The { $role } is set to start when you log in ("{ $name }"), but that is turned off in this system's settings.
+service-status-not-installed = The { $role } does not start by itself when you log in (`agora service install` sets that up).
+service-status-failed = Could not read "{ $name }": { $reason }
+service-status-running = running now (process { $pid })
+service-status-stopped = not running now
+service-unavailable = Starting Agora when you log in is not available on this machine: it needs systemd's per-user services (`systemctl`), which were not found. Start it with `agora` after logging in.
+service-no-user-manager = Could not reach your user's service manager for "{ $name }": this session has no systemd user bus (for example `su`, or an SSH session while your user manager is not running). Log in on this machine and try again; nothing was changed.
+service-in-the-way = { $path } is a link or not a plain file, so Agora does not replace it. If it is not yours to keep, remove it and try again.
+service-bad-path-control = "{ $path }" cannot go into the login entry: it contains a line break or another control character. Move Agora or its folder to a plain path.
+service-bad-path-relative = "{ $path }" cannot go into the login entry: it is not a full path. Run Agora by its full path, or name its folder with a full path.
+service-not-ours = "{ $name }" is already set up on this machine, but not by Agora ({ $path }), so Agora leaves it exactly as it is: it neither replaces, stops nor removes it. To let Agora set it up, remove or rename that one yourself first.
+service-root = `agora service` sets up a login service for your own user, so it does not run as root (with `sudo`). Run it as yourself, without `sudo`; nothing was changed.
+service-no-config-folder = There is no folder for your login services: neither XDG_CONFIG_HOME nor HOME names a full path. Set HOME and try again; nothing was changed.
+service-not-loaded = After reloading, systemd did not find "{ $name }" at { $path }; it reads its user units from another folder (its own XDG_CONFIG_HOME). Nothing was registered.
+service-overridden = "{ $name }" would not run only what Agora wrote: systemd also reads { $paths }, which can change what it runs. Nothing was registered. Remove or move those files yourself if you do not need them, and try again.
+service-drop-ins-left = These files that change "{ $name }" were not written by Agora and are left as they are: { $paths }
+service-bad-path-backslash = "{ $path }" cannot go into the login entry: a folder with a backslash (\) cannot be written safely into a systemd unit. Move Agora's folder to a path without one.
+service-bad-program = "{ $path }" cannot be started by systemd: the program's path contains a quote or a backslash. Move Agora to a path without one.
+service-was-off = The { $role } was set up to start when you log in ("{ $name }") but that was turned off; it is turned on again.
+service-already-overridden = The { $role } is set up to start when you log in ("{ $name }"), but systemd also reads { $paths }, which can change what it runs. Nothing was changed; remove or move those files yourself if you do not need them.
+service-status-overridden = systemd also reads { $paths } for it, which can change what it runs
+service-linger-hint = This starts Agora when you log in. To start it at boot without logging in, run `loginctl enable-linger` yourself; Agora did not do that.
 supervise-not-bound = The { $role } is not started: this system did not let it be tied to its supervisor, so `agora down` could not stop it. Start it by hand (`agora { $role } run`) or report this.
 supervise-stop-request = Supervisor: asked to stop; the { $role } was stopped with it.
 supervise-stopped = Supervisor: the { $role } stopped (exit code 0); it is not started again.

@@ -87,7 +87,7 @@ pub(crate) struct Machine {
 }
 
 impl Machine {
-    fn has(&self, role: &str) -> bool {
+    pub(crate) fn has(&self, role: &str) -> bool {
         self.roles.iter().any(|r| r == role)
     }
 
@@ -434,6 +434,7 @@ pub fn front_door(say: &Say, o: &Opts) -> ExitCode {
         }
     };
     let h = home();
+    let mut first_run = false;
     let m = match load(&h) {
         Some(mut m) => {
             if let Some(u) = ui.filter(|u| o.save && *u != m.ui) {
@@ -487,6 +488,7 @@ pub fn front_door(say: &Say, o: &Opts) -> ExitCode {
                         key!("frontdoor-saved"),
                         &[("path", machine_path(&h).display().to_string().into())],
                     );
+                    first_run = true;
                     m
                 }
                 Ok(None) => return ExitCode::SUCCESS,
@@ -497,7 +499,27 @@ pub fn front_door(say: &Say, o: &Opts) -> ExitCode {
     if let Err(code) = up(say, &h, &m) {
         return code;
     }
+    // ADR-0062 item 6: the end of the first run asks once whether to start Agora at login. Always a question, never automatic; a no
+    // (or no answer) leaves it to `agora service install`.
+    // Only where this machine can register one (Linux: systemd's `systemctl`, found at run time).
+    if first_run && agora_platform::services_available() {
+        prompt(
+            &mut std::io::stdout(),
+            &say.text(key!("frontdoor-autostart-question"), &[]),
+        );
+        if wants_autostart(read_answer(&mut std::io::stdin().lock()).as_deref()) {
+            // Registered for the roles that run now; the output says so (they run already, so nothing starts twice).
+            let _ = crate::servicecmd::install(say, &h, &m);
+        } else {
+            say.out(key!("frontdoor-autostart-later"), &[]);
+        }
+    }
     open(say, &m, ui.unwrap_or(m.ui))
+}
+
+/// The answer to "Start Agora when you log in? [Y/n]": Enter or yes is yes, no is no, and no answer at all (the input ended) is no.
+fn wants_autostart(answer: Option<&str>) -> bool {
+    matches!(answer, Some("" | "y" | "yes" | "e" | "evet"))
 }
 
 /// `agora web`: makes sure this machine's Agora runs, then opens it in the browser, signed in.
@@ -511,6 +533,38 @@ pub fn web(say: &Say) -> ExitCode {
         return code;
     }
     open(say, &m, Ui::Web)
+}
+
+/// A failure to take or change a role's lock, said in words: a guard held too long by another process (stopped or hung) is named with
+/// its file, anything else is passed on as the reason.
+pub(crate) fn lock_failed(say: &Say, lock: &Path, e: &std::io::Error) -> ExitCode {
+    let mut guard = lock.as_os_str().to_owned();
+    guard.push(".guard");
+    let path: Arg = PathBuf::from(guard).display().to_string().into();
+    // The refusals of `agora_platform::open_lock_private` / `ensure_private_dir`, named for what they are.
+    let id = match e.kind() {
+        std::io::ErrorKind::TimedOut => key!("frontdoor-lock-busy"),
+        std::io::ErrorKind::InvalidInput => key!("frontdoor-lock-unsafe"),
+        std::io::ErrorKind::PermissionDenied => key!("frontdoor-lock-not-yours"),
+        _ => return failed(say, &e.to_string()),
+    };
+    say.err(id, &[("path", path)]);
+    ExitCode::from(1)
+}
+
+/// [`lock_failed`] after `agora down` stopped (or found ended) the lock's process: a busy guard leaves only its old lock file behind,
+/// which the next start replaces, and is said that way.
+fn down_lock_failed(say: &Say, lock: &Path, e: &std::io::Error) -> ExitCode {
+    if e.kind() != std::io::ErrorKind::TimedOut {
+        return lock_failed(say, lock, e);
+    }
+    let mut guard = lock.as_os_str().to_owned();
+    guard.push(".guard");
+    say.err(
+        key!("down-lock-busy"),
+        &[("path", PathBuf::from(guard).display().to_string().into())],
+    );
+    ExitCode::from(1)
 }
 
 fn failed(say: &Say, reason: &str) -> ExitCode {
@@ -588,7 +642,7 @@ impl Role {
         home.join("run").join(format!("{}.lock", self.name()))
     }
 
-    fn log(self, home: &Path) -> PathBuf {
+    pub(crate) fn log(self, home: &Path) -> PathBuf {
         home.join("logs").join(format!("{}.log", self.name()))
     }
 
@@ -644,7 +698,7 @@ pub(crate) fn read_lock(path: &Path) -> Option<LockInfo> {
 }
 
 /// The live holder of a role's lock, if any.
-fn holder(home: &Path, role: Role) -> Option<LockInfo> {
+pub(crate) fn holder(home: &Path, role: Role) -> Option<LockInfo> {
     read_lock(&role.lock(home)).filter(LockInfo::alive)
 }
 
@@ -655,10 +709,50 @@ pub(crate) enum Claim {
     Held,
 }
 
+/// Holds `<lock>.guard` exclusively (an OS file lock, released when the returned file is dropped or the process ends). Every change
+/// of a role's lock happens under it: taking or replacing it ([`claim`], the front door's handover), and removing it
+/// ([`remove_lock_of`]). So a check of what the lock names and the change that follows are one step for every other process: `agora
+/// down` can never delete a lock that a new supervisor put in place between its check and its removal (Codex's review of #548).
+///
+/// The guard and its `run` folder are private (`agora_platform::open_lock_private`, `ensure_private_dir`): another local user can
+/// neither hold the guard nor make it land on another file. Waiting for it is bounded ([`GUARD_WAIT`]): a holder that is stopped (or
+/// hangs) makes this fail with `TimedOut`, never wait forever.
+fn guard(lock: &Path) -> std::io::Result<std::fs::File> {
+    guard_within(lock, GUARD_WAIT)
+}
+
+/// [`guard`], waiting at most `wait`.
+fn guard_within(lock: &Path, wait: Duration) -> std::io::Result<std::fs::File> {
+    if let Some(dir) = lock.parent().filter(|d| !d.as_os_str().is_empty()) {
+        agora_platform::ensure_private_dir(dir)?;
+    }
+    let mut path = lock.as_os_str().to_owned();
+    path.push(".guard");
+    let file = agora_platform::open_lock_private(Path::new(&path))?;
+    let end = Instant::now() + wait;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(std::fs::TryLockError::WouldBlock) if Instant::now() < end => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(std::fs::TryLockError::WouldBlock) => {
+                return Err(std::io::Error::from(std::io::ErrorKind::TimedOut))
+            }
+            Err(std::fs::TryLockError::Error(e)) => return Err(e),
+        }
+    }
+}
+
+/// How long [`guard`] waits for another process to finish changing a role's lock. The longest a holder keeps it is `claim`'s 100 ms
+/// pause, so this is only reached when the holder is stopped or hangs.
+const GUARD_WAIT: Duration = Duration::from_secs(10);
+
 /// Takes the role's lock for this process, replacing a stale one (its process ended, or its pid now belongs to another process).
 pub(crate) fn claim(path: &Path) -> std::io::Result<Claim> {
     let me = LockInfo::of(std::process::id())
         .ok_or_else(|| std::io::Error::other("own start time unknown"))?;
+    let _guard = guard(path)?;
     for _ in 0..3 {
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create_new(true);
@@ -685,12 +779,26 @@ pub(crate) fn claim(path: &Path) -> std::io::Result<Claim> {
 }
 
 /// Renames a log over 5 MiB to `<log>.1` before a new start.
-fn rotate(log: &Path) {
-    if std::fs::metadata(log).is_ok_and(|m| m.len() > LOG_LIMIT) {
+///
+/// Only a plain file in a real folder is renamed: a `logs` folder that is a link (or a log that is one) is left as it is, and the open
+/// that follows refuses it (#556), so a rename never lands in another folder.
+pub(crate) fn rotate(log: &Path) {
+    let real_folder = log.parent().is_none_or(|dir| {
+        std::fs::symlink_metadata(dir)
+            .is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink() && !is_reparse(&m))
+    });
+    let plain_big_file = std::fs::symlink_metadata(log)
+        .is_ok_and(|m| m.is_file() && !is_reparse(&m) && m.len() > LOG_LIMIT);
+    if real_folder && plain_big_file {
         let mut old = log.as_os_str().to_owned();
         old.push(".1");
         let _ = std::fs::rename(log, PathBuf::from(old));
     }
+}
+
+/// A Windows junction or other reparse point (which `is_symlink` does not always name); never true elsewhere.
+fn is_reparse(m: &std::fs::Metadata) -> bool {
+    agora_platform::is_reparse_point(m)
 }
 
 /// Whether the role answers: the hub on its port, the node on its control socket.
@@ -747,7 +855,7 @@ fn ensure(say: &Say, home: &Path, m: &Machine, role: Role) -> Result<(), ExitCod
     let lock = role.lock(home);
     let log = role.log(home);
     if holder(home, role).is_none() && !role_answers(home, m, role) {
-        let mine = claim(&lock).map_err(|e| failed(say, &e.to_string()))?;
+        let mine = claim(&lock).map_err(|e| lock_failed(say, &lock, &e))?;
         if let Claim::Mine = mine {
             say.out(
                 key!("frontdoor-starting"),
@@ -764,9 +872,7 @@ fn ensure(say: &Say, home: &Path, m: &Machine, role: Role) -> Result<(), ExitCod
                             &[("role", role.label(say).into())],
                         );
                         eprintln!("{text}");
-                        let _ = std::fs::OpenOptions::new()
-                            .append(true)
-                            .open(&log)
+                        let _ = agora_platform::open_append_private(&log)
                             .and_then(|mut f| writeln!(f, "{text}"));
                     }
                     d.pid
@@ -774,9 +880,27 @@ fn ensure(say: &Say, home: &Path, m: &Machine, role: Role) -> Result<(), ExitCod
                 .and_then(|pid| {
                     LockInfo::of(pid).ok_or_else(|| std::io::Error::other("ended at once"))
                 })
-                .and_then(|l| agora_platform::write_private(&lock, l.text().as_bytes()));
+                .and_then(|l| {
+                    let _guard = guard(&lock)?;
+                    agora_platform::write_private(&lock, l.text().as_bytes())
+                });
             if let Err(e) = started {
-                let _ = std::fs::remove_file(&lock);
+                // Only this process's own lock: a supervisor may hold it by now.
+                if let Some(me) = LockInfo::of(std::process::id()) {
+                    // A stale lock of its own is harmless (the next start takes it over), so a busy guard is not a second failure here.
+                    let _ = remove_lock_of(&lock, &me);
+                }
+                // The log refused (a link, a second name, another user's file): said in words, with its path.
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::InvalidInput | std::io::ErrorKind::PermissionDenied
+                ) {
+                    say.err(
+                        key!("supervise-log-link"),
+                        &[("log", log.display().to_string().into())],
+                    );
+                    return Err(ExitCode::from(1));
+                }
                 say.err(
                     key!("frontdoor-not-ready"),
                     &[
@@ -1031,15 +1155,90 @@ fn supervised_child(pid: u32) -> Option<u32> {
 
 /// Removes the role's lock only while it still names `l` (the same pid and start time): a supervisor that took the lock after `l`
 /// ended keeps it. An unreadable lock (one being written) is left alone too.
-fn remove_lock_of(lock: &Path, l: &LockInfo) {
+fn remove_lock_of(lock: &Path, l: &LockInfo) -> std::io::Result<()> {
+    let _guard = guard(lock)?;
     if read_lock(lock).is_some_and(|now| now.pid == l.pid && now.start == l.start) {
         let _ = std::fs::remove_file(lock);
     }
+    Ok(())
 }
 
 /// How many holders of one role `agora down` stops in a row: a supervisor that took the lock while the one before was being stopped is
 /// stopped too.
 const DOWN_ROUNDS: usize = 3;
+
+/// Stops whoever holds `role`'s lock (its supervisor and the role with it), up to [`DOWN_ROUNDS`] holders in a row, saying so. Returns
+/// whether it stopped one; a failure is said and makes `code` 1.
+pub(crate) fn stop_role(
+    say: &Say,
+    h: &Path,
+    machine: Option<&Machine>,
+    role: Role,
+    code: &mut ExitCode,
+) -> bool {
+    let lock = role.lock(h);
+    let mut stopped_any = false;
+    for _ in 0..DOWN_ROUNDS {
+        let Some(l) = read_lock(&lock) else {
+            break;
+        };
+        if !l.alive() {
+            if let Err(e) = remove_lock_of(&lock, &l) {
+                *code = down_lock_failed(say, &lock, &e);
+            }
+            break;
+        }
+        let label: Arg = role.label(say).into();
+        let supervised = supervised_child(l.pid).is_some();
+        if let Err(e) = agora_platform::terminate_process(l.pid) {
+            say.err(
+                key!("down-failed"),
+                &[("role", label), ("reason", e.to_string().into())],
+            );
+            *code = ExitCode::from(1);
+            break;
+        }
+        let end = Instant::now() + Duration::from_secs(10);
+        while l.alive() && Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        if l.alive() {
+            say.err(
+                key!("down-failed"),
+                &[
+                    ("role", label),
+                    ("reason", say.text(key!("down-still-running"), &[]).into()),
+                ],
+            );
+            *code = ExitCode::from(1);
+            break;
+        }
+        // The process ended; its lock could not be removed only when another process holds the guard (stopped or hung): said, and the
+        // command fails, instead of waiting another round and calling it done.
+        let removed = remove_lock_of(&lock, &l);
+        // What the ended process had open (its socket, its port) can linger a moment; status reads them right after.
+        if let Some(m) = machine {
+            let end = Instant::now() + Duration::from_secs(5);
+            while role_answers(h, m, role) && Instant::now() < end {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+        stopped_any = true;
+        say.out(
+            if supervised {
+                key!("down-stopped-supervised")
+            } else {
+                key!("down-stopped")
+            },
+            &[("role", label), ("pid", i64::from(l.pid).into())],
+        );
+        if let Err(e) = removed {
+            *code = down_lock_failed(say, &lock, &e);
+            break;
+        }
+    }
+    stopped_any
+}
 
 /// `agora down`: stops what the front door started, the node first, then the hub.
 pub fn down(say: &Say) -> ExitCode {
@@ -1048,55 +1247,7 @@ pub fn down(say: &Say) -> ExitCode {
     let mut code = ExitCode::SUCCESS;
     let mut stopped_any = false;
     for role in [Role::Node, Role::Hub] {
-        let lock = role.lock(&h);
-        for _ in 0..DOWN_ROUNDS {
-            let Some(l) = read_lock(&lock) else {
-                break;
-            };
-            if !l.alive() {
-                remove_lock_of(&lock, &l);
-                break;
-            }
-            let label: Arg = role.label(say).into();
-            let supervised = supervised_child(l.pid).is_some();
-            if let Err(e) = agora_platform::terminate_process(l.pid) {
-                say.err(
-                    key!("down-failed"),
-                    &[("role", label), ("reason", e.to_string().into())],
-                );
-                code = ExitCode::from(1);
-                break;
-            }
-            let end = Instant::now() + Duration::from_secs(10);
-            while l.alive() && Instant::now() < end {
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            if l.alive() {
-                say.err(
-                    key!("down-failed"),
-                    &[("role", label), ("reason", "still running".into())],
-                );
-                code = ExitCode::from(1);
-                break;
-            }
-            remove_lock_of(&lock, &l);
-            // What the ended process had open (its socket, its port) can linger a moment; status reads them right after.
-            if let Some(m) = &machine {
-                let end = Instant::now() + Duration::from_secs(5);
-                while role_answers(&h, m, role) && Instant::now() < end {
-                    std::thread::sleep(Duration::from_millis(100));
-                }
-            }
-            stopped_any = true;
-            say.out(
-                if supervised {
-                    key!("down-stopped-supervised")
-                } else {
-                    key!("down-stopped")
-                },
-                &[("role", label), ("pid", i64::from(l.pid).into())],
-            );
-        }
+        stopped_any |= stop_role(say, &h, machine.as_ref(), role, &mut code);
     }
     if !stopped_any && code == ExitCode::SUCCESS {
         say.out(key!("down-nothing"), &[]);
@@ -1114,8 +1265,86 @@ mod tests {
         Say(Catalog::for_locale("en"))
     }
 
+    #[test]
+    fn the_login_question_defaults_to_yes_but_never_answers_itself() {
+        for yes in ["", "y", "yes", "e", "evet"] {
+            assert!(wants_autostart(Some(yes)), "{yes:?}");
+        }
+        for no in ["n", "no", "h", "hayır", "later"] {
+            assert!(!wants_autostart(Some(no)), "{no:?}");
+        }
+        // The input ended (no person answered): nothing is registered.
+        assert!(!wants_autostart(None));
+    }
+
     /// Linux's follow-up to #543: `agora down` deletes a lock only while it names the process it stopped. A lock another supervisor
     /// took in the meantime, or one still being written, stays.
+    /// Codex's review of #548: the check of what the lock names and its removal are one step against a supervisor replacing it. Here
+    /// the "supervisor" holds the guard while it replaces the lock; the removal that started meanwhile waits for it, then sees the new
+    /// holder and keeps the lock. Without the guard it would have deleted the lock it checked a moment before.
+    #[test]
+    fn removing_a_lock_waits_for_a_replacement_in_progress() {
+        let dir = tmp("guard");
+        let lock = dir.join("node.lock");
+        let me = LockInfo::of(std::process::id()).unwrap();
+        let stopped = LockInfo {
+            pid: me.pid,
+            start: me.start + 1,
+            version: String::new(),
+        };
+        std::fs::write(&lock, stopped.text()).unwrap();
+        let held = guard(&lock).unwrap();
+        let remover = {
+            let (lock, stopped) = (lock.clone(), stopped.clone());
+            std::thread::spawn(move || remove_lock_of(&lock, &stopped).unwrap())
+        };
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(lock.exists(), "the removal did not wait for the guard");
+        // The replacement: a new holder writes its lock, then lets go.
+        std::fs::write(&lock, me.text()).unwrap();
+        drop(held);
+        remover.join().unwrap();
+        assert_eq!(
+            read_lock(&lock).map(|l| (l.pid, l.start)),
+            Some((me.pid, me.start))
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Linux's review of #551: a holder of the guard that is stopped (or hangs) makes the next change wait a bounded time and fail
+    /// with `TimedOut`, never forever.
+    #[test]
+    fn a_guard_held_by_another_waits_a_bounded_time() {
+        let dir = tmp("guard-wait");
+        let lock = dir.join("run").join("node.lock");
+        let held = guard(&lock).unwrap();
+        let started = Instant::now();
+        let e = guard_within(&lock, Duration::from_millis(300)).unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(5));
+        drop(held);
+        assert!(guard_within(&lock, Duration::from_millis(300)).is_ok());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Linux's follow-up to #560: when another process holds the guard, removing the lock fails (TimedOut) instead of returning as if
+    /// done, so `agora down` can say so and fail.
+    #[test]
+    fn removing_a_lock_under_a_held_guard_fails() {
+        let dir = tmp("guard-held-remove");
+        let lock = dir.join("run").join("node.lock");
+        let held = guard(&lock).unwrap();
+        let me = LockInfo::of(std::process::id()).unwrap();
+        std::fs::write(&lock, me.text()).unwrap();
+        // A short wait, through the same path `remove_lock_of` takes.
+        let e = guard_within(&lock, Duration::from_millis(200)).unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::TimedOut);
+        drop(held);
+        remove_lock_of(&lock, &me).unwrap();
+        assert!(!lock.exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn down_removes_only_the_lock_of_the_process_it_stopped() {
         let dir = tmp("lock-of");
@@ -1127,13 +1356,13 @@ mod tests {
             version: String::new(),
         };
         std::fs::write(&lock, me.text()).unwrap();
-        remove_lock_of(&lock, &stopped);
+        remove_lock_of(&lock, &stopped).unwrap();
         assert!(lock.exists(), "a newer holder's lock was deleted");
         std::fs::write(&lock, "").unwrap();
-        remove_lock_of(&lock, &me);
+        remove_lock_of(&lock, &me).unwrap();
         assert!(lock.exists(), "a lock being written was deleted");
         std::fs::write(&lock, me.text()).unwrap();
-        remove_lock_of(&lock, &me);
+        remove_lock_of(&lock, &me).unwrap();
         assert!(!lock.exists());
         let _ = std::fs::remove_dir_all(dir);
     }

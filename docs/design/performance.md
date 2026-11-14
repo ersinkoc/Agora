@@ -80,7 +80,7 @@ the supervisor reads the exit status without copying anything.
 ### Data path
 - **Terminal bytes are not events.** They flow on their own streams, are relayed by the hub without decoding
   or storing, and use shared buffers (no copies per client).
-- **Direct path** (ADR-0023, proposed): when a client can reach a node directly (same machine or LAN), terminal
+- **Direct path** (ADR-0023, accepted, not built yet: terminal streams still go through the hub relay): when a client can reach a node directly (same machine or LAN), terminal
   streams and file transfers go client ↔ node; the hub keeps control, auth, and state. This removes the
   hairpin when the hub runs far away.
 - **Input beats output.** Keystrokes and approvals ride the highest-priority stream; output is chunked small
@@ -128,7 +128,7 @@ the supervisor reads the exit status without copying anything.
   the base at the exact threshold for every scenario.
 - **CI gate:** a reduced benchmark suite runs on every PR touching hot-path crates; a regression above 10% on
   any budget scenario's throughput, or a p95 latency above its ceiling, fails the build. Base and head are built on the same runner and measured alternately (three
-  rounds each, best of each metric per side), so drift on a shared runner hits both sides alike. The full suite runs nightly.
+  rounds each, best of each metric per side), so drift on a shared runner hits both sides alike. It runs on every push to `main` and every pull request; there is no nightly run yet.
 - **Latency tracing:** every input and command carries timestamps per hop (client, hub, node, adapter) so the
   breakdown is visible, not guessed.
 - **Performance HUD:** a developer overlay in the client (also usable by users as "connection details") shows
@@ -176,21 +176,31 @@ frame (holding the echo back by up to one more frame), and the loop slept 15 ms 
 capped at 60 a second, a key that changes nothing on screen draws nothing, and while the user types (a key in the last second) the loop
 reads keys every 2 ms; idle, it sleeps as before.
 
-### Large lists: the agent tree and a large diff (architecture review R6, 2026-11-14)
+### Large lists: the static agent tree and a large diff (architecture review R6, 2026-11-14)
 
 `node scripts/perf-tree.mjs` starts a hub on a throw-away home, seeds it with `scripts/perf-seed-agents.py` (machines x projects x
-agents; `AGORA_PERF_FLEET`) and measures the agent tree in headless Chromium (software rendering, 1440x900). The tree is not
-virtualized: every row is in the DOM.
+agents; `AGORA_PERF_FLEET`) and measures the tree in headless Chromium (software rendering, 1440x900). No node connects and no
+terminal streams: the seeded machines are offline after the hub opens. Every tree row is in the DOM. Existing artifacts can be
+supplied with `AGORA_PERF_BIN` and `AGORA_PERF_WEB_DIR` instead of building another target.
 
-| Fleet | First load (all rows drawn) | Scroll the whole tree, frame gap | Click an agent → next frame | Full re-render (filter keeping every row) | DOM / heap |
-| --- | --- | --- | --- | --- | --- |
-| **500 agents**, 50 projects, 10 machines (the budget) | 133 ms | 16.6 ms p50, 18.1 p95, no long task | 25.6 ms p50, 30.1 p95 | 20.5 ms p50, 30.3 p95 | 3 810 tree nodes, 11 MB |
-| 2 000 agents, 100 projects, 20 machines | 237 ms | 53.8 ms p50, 69.8 p95, 112 long tasks | 85.6 ms p50, 101 p95 | 72.9 ms p50, 78.3 p95 | 14 920 tree nodes, 43 MB |
+The load endpoint is a warm reload until all rows exist in the DOM (`domRowsReadyMs`), not a paint measurement. Picking is a
+programmatic row click to the next frame. Filtering changes only Explorer's local state (`filterToFrameMs`); it does not measure
+App's view-to-model work or a complete live-view update.
 
-So the budget (500 agents across 50 projects at 60 fps, picking within 50 ms) is met without windowing, and the cost grows about
-linearly: windowing the tree (flattened visible rows, a viewport with overscan) becomes necessary somewhere between 1 000 and
-2 000 agents, and is not built until a fleet gets near that. The re-render figure is also the cost of every event that changes the
-view, since the whole tree is derived again.
+Re-measured after #557 separated the Long Tasks observer by phase. Each entry belongs to the phase in which its task started;
+scroll includes returning to the top and one settling frame. Pending observer records are drained after the final phase. The
+script reports scroll, pick, filter and outside-phase counts separately, with their total. Evidence and the post-scroll control:
+[measurement record](../reviews/0557-perf-phases.md).
+
+| Static fleet | Reload → DOM rows ready | Scroll frame gap, p50 / p95 | Pick → frame, p50 / p95 | Filter → frame, p50 / p95 | Long tasks: scroll / pick / filter | Tree DOM / heap |
+| --- | --- | --- | --- | --- | --- | --- |
+| **500 agents**, 50 projects, 10 machines | 139 ms | 16.9 / 24.4 ms | 29.0 / 37.4 ms | 21.3 / 31.3 ms | 0 / 0 / 0 | 3 810 nodes / 11 MB |
+| 2 000 agents, 100 projects, 20 machines | 395 ms | 62.0 / 93.8 ms | 82.4 / 93.2 ms | 75.6 / 111.5 ms | 89 / 10 / 26 | 14 820 nodes / 38 MB |
+
+The 500-agent static case stays below the 50 ms selection budget and has no long tasks, but its slowest frame tail misses a
+60 Hz interval. The 2 000-agent case clearly misses both scroll and selection budgets. These runs do not certify the budget for
+busy live fleets or change any budget; larger-tree work still needs measurements of those workloads and windowing where required.
+The old scroll long-task count included later picks and filters and is superseded by these phase-specific results.
 
 **A diff of 10 000 changed lines** is drawn as a window since #511, in the review screen and in `DiffDialog` (it uses the same
 `ChangesView`): `scripts/e2e-changes-large.mjs` opens a file rewritten whole (20 000 rows), Show all and side by side with **no

@@ -560,3 +560,166 @@ fn agora_down_racing_supervisors_never_leaves_one_running_unseen() {
     }
     let _ = std::fs::remove_dir_all(home);
 }
+
+/// ADR-0062 item 6: a service manager starts `agora supervise <role> --home <folder> --log` with nothing else set (a Windows task cannot
+/// set `AGORA_HOME` and redirects nothing). `--home` beats the environment, `--log` sends the supervisor's notes and the role's own
+/// output to the role's log, and `agora down` stops it like any supervisor.
+#[test]
+fn a_service_started_supervisor_finds_its_folder_and_writes_its_log() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return;
+    }
+    let home = tmp("svc");
+    let repo = home.join("proj");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("a.txt"), "x").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "init"]);
+    std::fs::write(
+        home.join("machine.toml"),
+        format!(
+            "roles = [\"node\"]\nui = \"none\"\nnode_projects = [{}]\n",
+            toml_string(&repo.to_string_lossy()),
+        ),
+    )
+    .unwrap();
+    let _down = Down(home.clone());
+    // The environment names another folder: `--home` must win. Output goes nowhere: `--log` must write the log itself.
+    let elsewhere = tmp("svc-elsewhere");
+    let mut supervisor = agora(&elsewhere, &[])
+        .args(["supervise", "node", "--home"])
+        .arg(&home)
+        .arg("--log")
+        .current_dir(&elsewhere)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    wait_for(
+        "the node under the service's supervisor",
+        Duration::from_secs(20),
+        || {
+            lock_pid(&home, "node") == Some(supervisor.id())
+                && supervised_child(supervisor.id()).is_some()
+                && run(&home, &["agent", "list"]).0 == 0
+        },
+    );
+    assert!(
+        !elsewhere.join("run").exists(),
+        "it used the environment's folder"
+    );
+    let log = std::fs::read_to_string(home.join("logs/node.log")).unwrap();
+    assert!(log.contains("Node is running"), "{log}");
+    let (code, out, err) = run(&home, &["down"]);
+    assert_eq!(code, 0, "{out}{err}");
+    let end = Instant::now() + Duration::from_secs(10);
+    while supervisor.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < end, "the supervisor outlived `agora down`");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let _ = std::fs::remove_dir_all(elsewhere);
+    let _ = std::fs::remove_dir_all(home);
+}
+
+/// Linux's decision on #563: under a service (`--log`) every end the supervisor decides itself exits 0, so the service manager restarts
+/// only a crash of the supervisor; without `--log` (the front door's supervisor) the code says the role did not start.
+#[test]
+fn a_service_supervisor_exits_0_for_its_own_decisions() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return;
+    }
+    let home = tmp("exit0");
+    // A project folder that does not exist: the node refuses at once.
+    std::fs::write(
+        home.join("machine.toml"),
+        format!(
+            "roles = [\"node\"]\nui = \"none\"\nnode_projects = [{}]\n",
+            toml_string(&home.join("missing").to_string_lossy()),
+        ),
+    )
+    .unwrap();
+    let _down = Down(home.clone());
+    let home_arg = home.to_string_lossy().into_owned();
+    // A refusal: 0 under a service, non-zero for the front door's supervisor.
+    let (code, out, err) = run(&home, &["supervise", "node", "--home", &home_arg, "--log"]);
+    assert_eq!(code, 0, "{out}{err}");
+    let log = std::fs::read_to_string(home.join("logs/node.log")).unwrap();
+    assert!(log.contains("too soon to be a crash"), "{log}");
+    let (code, _, err) = run(&home, &["supervise", "node"]);
+    assert_ne!(code, 0, "{err}");
+
+    // A lock another live process holds: 0 under a service, 1 otherwise.
+    let mut holder = agora(&home, &["supervise", "node", "--home", &home_arg, "--log"]);
+    std::fs::write(
+        home.join("machine.toml"),
+        "roles = [\"node\"]\nui = \"none\"\nnode_projects = []\n",
+    )
+    .unwrap();
+    let mut holder = holder
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    wait_for(
+        "the first supervisor's lock",
+        Duration::from_secs(20),
+        || lock_pid(&home, "node") == Some(holder.id()),
+    );
+    let (code, _, err) = run(&home, &["supervise", "node", "--home", &home_arg, "--log"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(err.contains("already looks after the node"), "{err}");
+    let (code, _, err) = run(&home, &["supervise", "node"]);
+    assert_eq!(code, 1, "{err}");
+    let (code, out, err) = run(&home, &["down"]);
+    assert_eq!(code, 0, "{out}{err}");
+    let end = Instant::now() + Duration::from_secs(10);
+    while holder.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < end, "the supervisor outlived `agora down`");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let _ = std::fs::remove_dir_all(home);
+}
+
+/// #556: the front door's own log is opened as the supervisor's is. A `logs` folder that is a link to another folder is refused with
+/// the log named: nothing is written there and nothing in it is rotated, and nothing starts.
+#[test]
+fn a_linked_logs_folder_is_refused_by_the_front_door() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return;
+    }
+    let home = tmp("loglink");
+    let repo = home.join("proj");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("a.txt"), "x").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "init"]);
+    std::fs::write(
+        home.join("machine.toml"),
+        format!(
+            "roles = [\"node\"]\nui = \"none\"\nnode_projects = [{}]\n",
+            toml_string(&repo.to_string_lossy()),
+        ),
+    )
+    .unwrap();
+    let _down = Down(home.clone());
+    let elsewhere = home.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    // Over the rotation limit, so a rotation through the link would rename it.
+    let big = "x".repeat(6 * 1024 * 1024);
+    std::fs::write(elsewhere.join("node.log"), &big).unwrap();
+    agora_platform::link_dir(&elsewhere, &home.join("logs")).unwrap();
+    let (code, out, err) = run(&home, &[]);
+    assert_ne!(code, 0, "{out}{err}");
+    assert!(err.contains("node.log"), "{err}");
+    assert!(err.contains("is a link"), "{err}");
+    assert_eq!(
+        std::fs::metadata(elsewhere.join("node.log")).unwrap().len(),
+        big.len() as u64,
+        "the log in the link's target was written to or rotated"
+    );
+    assert!(!elsewhere.join("node.log.1").exists());
+    assert!(lock_pid(&home, "node").is_none_or(|p| !alive(p)));
+    let _ = std::fs::remove_dir_all(home);
+}
