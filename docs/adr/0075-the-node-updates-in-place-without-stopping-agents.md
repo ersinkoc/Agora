@@ -23,16 +23,23 @@ Passing handles to a second process meets three problems in today's code:
 1. **Agents are the node's children.** The supervisor waits for them (exit status, restart policy), signals their process groups, and
    the ledger records their pid and start time (ADR-0060). A second process is not their parent: it cannot wait for them. Linux
    could fix that with `PR_SET_CHILD_SUBREAPER` only for orphans, and macOS has no equivalent.
-2. **The node is bound to its supervisor.** That uses `PR_SET_PDEATHSIG` on Linux and a `kqueue` watch on the node's pid on macOS
-   (ADR-0062 item 8). The role lock holds the node's `pid:start-time`. A new process breaks all three, and needs a lock handover
+2. **The node is bound to its supervisor.** That uses `PR_SET_PDEATHSIG` on Linux, and on macOS a `kqueue` thread inside the node
+   that watches the supervisor's pid (ADR-0062 item 8). The role lock holds the node's `pid:start-time`. A new process breaks all three, and needs a lock handover
    while two nodes are alive.
 3. **Two processes at once.** Between start and handover, two nodes would read and write the same ledger, sockets and data folder.
 
 ## Decision
 1. **Unix: the node re-executes itself (`execve`) in its own process.** It keeps the same pid and the same start time, and runs the
-   new binary on disk. Agents stay its children. The supervisor binding and the lock stay valid: `PR_SET_PDEATHSIG` survives
-   `execve` for a binary that is not set-user-ID, and the `kqueue` watch follows the pid. At no moment do two nodes run. This
-   replaces the `SCM_RIGHTS`-to-a-new-process step of ADR-0019 on Unix.
+   new binary on disk. Agents stay its children. At no moment do two nodes run. This replaces the `SCM_RIGHTS`-to-a-new-process step
+   of ADR-0019 on Unix. What keeps the node bound to its supervisor:
+   - **Linux:** `PR_SET_PDEATHSIG` survives `execve` for a binary that is not set-user-ID; nothing to do.
+   - **macOS:** the watch is a `kqueue` thread inside the node, armed by `end_with_supervisor` from `AGORA_SUPERVISOR_PID`, which
+     the node removes from its environment at start. `execve` ends that thread. So the re-exec passes `AGORA_SUPERVISOR_PID` back in
+     the new image's environment, only when the node was started bound. The new image re-arms the watch first thing, as at any start.
+     If the supervisor ended in between, the new image ends at once, as a node started after its supervisor ended does. Without this,
+     a killed supervisor would leave the re-executed node running (review of #582, windows).
+   - **The lock:** its `pid:start-time` stays valid. Its `version` field names the old build until the new image rewrites it under
+     the lock's guard, which it does right after reading the handoff file.
 2. **What crosses the exec.** Open descriptors cross; `FD_CLOEXEC` is cleared right before `execve`, and only on the ones named in
    the handoff file:
    - PTY masters;
@@ -95,6 +102,9 @@ Passing handles to a second process meets three problems in today's code:
 - No hot-path change. The drain pauses only control commands, never terminal input or output.
 - Tests on Linux and macOS with `agora-fake-agent`:
   - a handoff to the same binary keeps the node's pid, each agent's pid and a live PTY round trip;
+  - on macOS, killing the supervisor after a handoff ends the re-executed node (the watch is re-armed); on Linux the same test checks
+    `PR_SET_PDEATHSIG`;
+  - the lock's `version` names the new build after the handoff;
   - the ledger is unchanged;
   - a mesh bridge reconnects;
   - a handoff file the new binary refuses falls back to restart-and-resume;
