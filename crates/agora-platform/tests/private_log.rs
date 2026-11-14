@@ -147,3 +147,52 @@ fn a_fifo_log_is_refused_without_waiting() {
     assert_eq!(got.unwrap_err().kind(), ErrorKind::InvalidInput);
     let _ = std::fs::remove_dir_all(d);
 }
+
+/// The guard of a role's lock (Linux's review of #551): private from its creation, never a link or a second name, never truncated,
+/// and its folder private too.
+#[test]
+fn a_lock_file_is_private_and_never_a_link() {
+    let d = tmp("lock");
+    let run = d.join("run");
+    agora_platform::ensure_private_dir(&run).unwrap();
+    #[cfg(unix)]
+    assert_eq!(mode(&run), 0o700);
+    let guard = run.join("node.lock.guard");
+    let f = agora_platform::open_lock_private(&guard).unwrap();
+    f.lock().unwrap();
+    drop(f);
+    #[cfg(unix)]
+    assert_eq!(mode(&guard), 0o600);
+    // Kept as it is: never truncated.
+    std::fs::write(&guard, "x").unwrap();
+    drop(agora_platform::open_lock_private(&guard).unwrap());
+    assert_eq!(std::fs::read_to_string(&guard).unwrap(), "x");
+    // A second name for another file is refused.
+    let other = d.join("other.txt");
+    std::fs::write(&other, "keep").unwrap();
+    let hard = run.join("hub.lock.guard");
+    std::fs::hard_link(&other, &hard).unwrap();
+    assert_eq!(
+        agora_platform::open_lock_private(&hard).unwrap_err().kind(),
+        ErrorKind::InvalidInput
+    );
+    // A link to another file is refused, and a run folder that is a link is refused.
+    let link = run.join("x.lock.guard");
+    if symlink_file(&other, &link) {
+        assert_eq!(
+            agora_platform::open_lock_private(&link).unwrap_err().kind(),
+            ErrorKind::InvalidInput
+        );
+    }
+    let linked_run = d.join("linked-run");
+    if symlink_dir(&run, &linked_run) {
+        assert_eq!(
+            agora_platform::ensure_private_dir(&linked_run)
+                .unwrap_err()
+                .kind(),
+            ErrorKind::InvalidInput
+        );
+    }
+    assert_eq!(std::fs::read_to_string(&other).unwrap(), "keep");
+    let _ = std::fs::remove_dir_all(d);
+}

@@ -163,12 +163,31 @@ pub fn replace_executable(new: &std::path::Path, target: &std::path::Path) -> io
         };
         let mut old = aside(".old");
         if std::fs::remove_file(&old).is_err() && old.exists() {
-            old = aside(&format!(".old-{}", std::process::id()));
-            let _ = std::fs::remove_file(&old);
+            // The program an earlier update moved aside still runs (or a virus scanner still holds a file it just saw): take the first
+            // free name instead, never one that is still held (renaming over a held file fails with a sharing violation).
+            let pid = std::process::id();
+            old = (0..100)
+                .map(|n| aside(&format!(".old-{pid}-{n}")))
+                .find(|p| std::fs::remove_file(p).is_ok() || !p.exists())
+                .ok_or_else(|| io::Error::from(io::ErrorKind::AlreadyExists))?;
         }
-        std::fs::rename(target, &old)?;
-        std::fs::rename(new, target).inspect_err(|_| {
-            let _ = std::fs::rename(&old, target);
+        // A file just written or renamed is often held for a moment by a virus scanner or the search indexer (a sharing violation,
+        // error 32): wait for it briefly instead of failing the update.
+        let rename = |from: &std::path::Path, to: &std::path::Path| {
+            let mut tries = 0;
+            loop {
+                match std::fs::rename(from, to) {
+                    Err(e) if e.raw_os_error() == Some(32) && tries < 40 => {
+                        tries += 1;
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                    r => return r,
+                }
+            }
+        };
+        rename(target, &old)?;
+        rename(new, target).inspect_err(|_| {
+            let _ = rename(&old, target);
         })
     }
 }
@@ -306,6 +325,20 @@ pub fn symlink(target: &std::path::Path, link: &std::path::Path) -> io::Result<(
     {
         let _ = (target, link);
         Err(unsupported_io("symbolic links"))
+    }
+}
+
+/// Whether `m` (from `symlink_metadata`) is a reparse point: a Windows junction or symbolic link. Always false on other systems, where
+/// [`std::fs::FileType::is_symlink`] says it.
+pub fn is_reparse_point(m: &std::fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        std::os::windows::fs::MetadataExt::file_attributes(m) & 0x400 != 0
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = m;
+        false
     }
 }
 
@@ -1159,14 +1192,11 @@ pub fn spawn_detached(
     cmd: &mut std::process::Command,
     log: &std::path::Path,
 ) -> io::Result<Detached> {
-    let mut options = std::fs::OpenOptions::new();
-    options.create(true).append(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    let out = options.open(log)?;
+    // The log is opened as the supervisor's own is: against its folder, never through a link or a second name, private from its
+    // creation (#556). `InvalidInput` / `PermissionDenied` when it refuses.
+    let out = open_append_private(log)?;
     #[cfg(windows)]
     {
-        windows::set_owner_only(log, false)?;
         winproc::spawn_detached(cmd, &out)
     }
     #[cfg(not(windows))]
@@ -1389,11 +1419,11 @@ pub fn open_append_private(path: &std::path::Path) -> io::Result<std::fs::File> 
         let name = path
             .file_name()
             .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
-        unix::open_append_private(dir, name)
+        unix::open_private(dir, name, true)
     }
     #[cfg(windows)]
     {
-        windows::open_append_private(dir, path)
+        windows::open_private(dir, path, true)
     }
     #[cfg(not(any(unix, windows)))]
     {
@@ -1405,9 +1435,222 @@ pub fn open_append_private(path: &std::path::Path) -> io::Result<std::fs::File> 
     }
 }
 
-/// True where [`service_install`] can register a program to start at the user's login (ADR-0062 item 6): Windows (a logon task).
-/// The systemd user unit (Linux) and the LaunchAgent (macOS) halves come next, behind the same functions.
-pub const SERVICES_SUPPORTED: bool = cfg!(windows);
+/// Refusals: `InvalidInput` for a link, a second name or not a plain file or folder; `PermissionDenied` for one another user owns.
+///
+/// Opens (creating it) a lock file a process takes with `File::lock`, with every check of [`open_append_private`]: its folder opened as
+/// itself, never through a link; a new file private from its creation (mode 0600, an owner-only ACL); an existing one a regular file
+/// with one name and (Unix) this user's, made private through its handle. Read and write, never truncated. Another local user can then
+/// neither open it to hold the lock nor plant a link that makes the lock land on another file.
+pub fn open_lock_private(path: &std::path::Path) -> io::Result<std::fs::File> {
+    let dir = path
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .unwrap_or(std::path::Path::new("."));
+    #[cfg(unix)]
+    {
+        let name = path
+            .file_name()
+            .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+        unix::open_private(dir, name, false)
+    }
+    #[cfg(windows)]
+    {
+        windows::open_private(dir, path, false)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = dir;
+        std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(path)
+    }
+}
+
+/// Makes `dir` exist as a folder only its user can enter (Unix 0700; Windows an owner-only ACL inherited by what it holds), creating it
+/// when missing. `InvalidInput` when it is a link or not a folder, or belongs to another user: a private folder is never reached
+/// through a link, and is checked and changed through one handle of the folder itself.
+pub fn ensure_private_dir(dir: &std::path::Path) -> io::Result<()> {
+    if std::fs::symlink_metadata(dir).is_err_and(|e| e.kind() == io::ErrorKind::NotFound) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(dir)?;
+        }
+        #[cfg(not(unix))]
+        std::fs::create_dir_all(dir)?;
+    }
+    // Checked and made private through one handle of the folder itself: never through a link, and only when it is this user's.
+    #[cfg(unix)]
+    {
+        unix::ensure_private_dir(dir)
+    }
+    #[cfg(windows)]
+    {
+        windows::ensure_private_dir(dir)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        restrict_to_owner(dir)
+    }
+}
+
+/// True where this build has a way to register a program to start at the user's login (ADR-0062 item 6): Windows (a logon task) and
+/// Linux (a systemd user unit). Whether this machine can use it is [`services_available`], asked at run time. The LaunchAgent
+/// (macOS) half comes next, behind the same functions.
+pub const SERVICES_SUPPORTED: bool = cfg!(any(windows, target_os = "linux"));
+
+/// True where a login service starts only while the user is logged in unless the system is told otherwise, which Agora never does
+/// itself (Linux: a systemd user manager runs from boot only with `loginctl enable-linger`). The caller says so after installing.
+pub const SERVICES_NEED_LINGER_FOR_BOOT: bool = cfg!(target_os = "linux");
+
+/// Whether this machine can register a login service now: [`SERVICES_SUPPORTED`], and on Linux a `systemctl` (systemd's per-user
+/// services) found on `PATH`. Asked at run time, not when Agora was built: one Linux binary runs with and without systemd.
+pub fn services_available() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        linux::services_available()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        SERVICES_SUPPORTED
+    }
+}
+
+/// Why a path or argument of a [`ServiceSpec`] cannot go into this system's service entry as it is (see [`service_refusal`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ServiceRefusal {
+    /// The system would read part of it as a variable (Windows expands `%VAR%` in a task's command line).
+    Expands,
+    /// Not valid Unicode, or a form the entry cannot carry (systemd drops spaces at the start or end of a folder).
+    CannotCarry,
+    /// A line break, a NUL or another control character (a systemd unit is read line by line).
+    ControlCharacter,
+    /// Not a full path: the program and the working directory must start at the root.
+    NotAbsolute,
+    /// A backslash in the working directory (systemd writes it unquoted, and a `\` at a line's end joins the next line).
+    Backslash,
+    /// A quote (`"`, `'`) or a backslash in the program's path: systemd refuses to run such an executable.
+    ProgramCharacter,
+}
+
+/// The first path or argument of `spec` this system's service entry cannot carry as it is, and why; `None` when all can. The caller
+/// asks before saying what it registers; [`service_install`] refuses the same ones with `InvalidInput`.
+pub fn service_refusal(spec: &ServiceSpec) -> Option<(std::ffi::OsString, ServiceRefusal)> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::service_refusal(spec)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // A Windows task: `%` expands, and every value must be Unicode.
+        std::iter::once(spec.program.as_os_str())
+            .chain(spec.args.iter().map(std::ffi::OsString::as_os_str))
+            .find_map(|a| match a.to_str() {
+                None => Some((a.to_owned(), ServiceRefusal::CannotCarry)),
+                Some(t) if t.contains('%') => Some((a.to_owned(), ServiceRefusal::Expands)),
+                Some(_) => None,
+            })
+    }
+}
+
+/// A service failure the caller words itself (carried inside the `io::Error` the `service_*` functions return; see
+/// [`service_problem`]). Its English `Display` is for logs only.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ServiceProblem {
+    /// The user's service manager cannot be reached from this session (systemd: no user bus, as in an SSH session without a user
+    /// manager, or no systemd at all).
+    NoUserManager,
+    /// Something Agora did not write is at the service file's place (a link, a folder), and Agora does not replace it.
+    InTheWay(PathBuf),
+    /// A service of the same name is registered, but Agora did not write it (a unit made by hand): it is neither replaced, stopped
+    /// nor removed. The path is its file, or its name when it is registered from elsewhere.
+    NotOurs(PathBuf),
+    /// Run as root (`sudo`): a login service is the user's own, and root would leave its files in the user's folder. Nothing is done.
+    Root,
+    /// Neither `XDG_CONFIG_HOME` nor `HOME` names a full path, so there is no folder for the user's service files.
+    NoConfigFolder,
+    /// After reloading, the service manager did not find the service file that was just written (it reads another folder).
+    NotLoaded(PathBuf),
+    /// The service manager would also read these files (drop-ins, or another file of the same name), which can change what the service
+    /// runs; nothing was registered.
+    Overridden(Vec<PathBuf>),
+}
+
+impl std::fmt::Display for ServiceProblem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ServiceProblem::NoUserManager => {
+                f.write_str("the user's service manager cannot be reached")
+            }
+            ServiceProblem::InTheWay(p) => write!(f, "{} is not a plain file", p.display()),
+            ServiceProblem::NotOurs(p) => {
+                write!(f, "{} was not written by this program", p.display())
+            }
+            ServiceProblem::Root => f.write_str("refused as root"),
+            ServiceProblem::NoConfigFolder => {
+                f.write_str("neither XDG_CONFIG_HOME nor HOME is set")
+            }
+            ServiceProblem::NotLoaded(p) => write!(f, "{} was not loaded", p.display()),
+            ServiceProblem::Overridden(ps) => write!(f, "also read: {ps:?}"),
+        }
+    }
+}
+
+impl std::error::Error for ServiceProblem {}
+
+/// Whether `agora service` may act in this process at all; an error with a [`ServiceProblem`] when not (Linux: run as root, or no
+/// folder for the user's units). The caller asks before writing anything.
+pub fn service_precheck() -> io::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::service_precheck()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Ok(())
+    }
+}
+
+/// The files the service manager reads for the service `name` besides Agora's own (Linux: its drop-ins, and the unit file it loaded
+/// when that is not Agora's), which can change what it runs. `status` and a repeated `install` name them; [`service_remove`] does not
+/// delete them, and the caller names those still there afterwards. Empty elsewhere.
+pub fn service_drop_ins(name: &str) -> io::Result<Vec<PathBuf>> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::service_drop_ins(name)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = name;
+        Ok(Vec::new())
+    }
+}
+
+/// `Some(file)` when the service `name` is registered but was not written by Agora (Linux: a user unit of the same name made by hand
+/// or by another tool): the caller leaves it alone, neither stopping, replacing nor removing it. `None` when it is Agora's own or not
+/// registered (Windows: always `None`).
+pub fn service_foreign(name: &str) -> io::Result<Option<PathBuf>> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::service_foreign(name)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = name;
+        Ok(None)
+    }
+}
+
+/// The [`ServiceProblem`] inside an error a `service_*` function returned, if it is one.
+pub fn service_problem(e: &io::Error) -> Option<&ServiceProblem> {
+    e.get_ref()?.downcast_ref::<ServiceProblem>()
+}
 
 /// A program registered to start when the user logs in, for this user only and without administrator rights (ADR-0062 item 6). The
 /// caller (the `agora service` command) builds it; each system writes it in its own form.
@@ -1425,9 +1668,10 @@ pub struct ServiceSpec {
     pub env: Vec<(String, std::ffi::OsString)>,
     /// Its working directory (the Agora folder); system files the registration needs for a moment are written there, owner-only.
     pub work_dir: PathBuf,
-    /// Start the program again when a signal killed it (systemd `Restart=on-abnormal`, launchd `KeepAlive = { Crashed = true }`),
-    /// never after an exit with a code, so a supervisor that gave up or stopped stays ended. Windows has no such setting: ignored.
-    pub restart_supervisor_on_signal: bool,
+    /// Start the program again when it failed: killed by a signal or an exit with a non-zero code (systemd `Restart=on-failure`, launchd
+    /// `KeepAlive = { SuccessfulExit = false }`). The supervisor exits 0 for every end it decided itself under a service (a give-up, a
+    /// refusal, a clean stop), so only a crash of the supervisor itself is restarted. Windows has no such setting: ignored.
+    pub restart_supervisor_on_failure: bool,
 }
 
 /// Whether a service is registered (see [`ServiceSpec`]).
@@ -1441,14 +1685,19 @@ pub enum ServiceState {
 }
 
 /// Registers `spec` to start at this user's login (it does not start it: [`service_start`]). `Unsupported` where
-/// [`SERVICES_SUPPORTED`] is false; `InvalidInput` for a path or argument the system would change on the way (Windows expands
-/// `%VAR%` in a task's command line) or that is not valid Unicode.
+/// [`SERVICES_SUPPORTED`] is false; `InvalidInput` for a path or argument the system would change on the way or cannot carry (see
+/// [`service_refusal`]). Linux: an owner-only systemd user unit, then `systemctl --user daemon-reload` and `enable`; a unit that is
+/// already there with the same text is not written again.
 pub fn service_install(spec: &ServiceSpec) -> io::Result<()> {
     #[cfg(windows)]
     {
         winservice::install(spec)
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::service_install(spec)
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = spec;
         Err(io::Error::from(io::ErrorKind::Unsupported))
@@ -1461,7 +1710,11 @@ pub fn service_start(name: &str) -> io::Result<()> {
     {
         winservice::start(name)
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::service_start(name)
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = name;
         Err(io::Error::from(io::ErrorKind::Unsupported))
@@ -1475,21 +1728,29 @@ pub fn service_remove(name: &str) -> io::Result<bool> {
     {
         winservice::remove(name)
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::service_remove(name)
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = name;
         Err(io::Error::from(io::ErrorKind::Unsupported))
     }
 }
 
-/// Whether the service `name` is registered, and enabled. An error when the system could not say (access denied, a broken scheduler):
-/// never reported as "not registered".
+/// Whether the service `name` is registered, and enabled. An error when the system could not say (access denied, a broken scheduler,
+/// no user service manager in this session: [`ServiceProblem::NoUserManager`]): never reported as "not registered".
 pub fn service_status(name: &str) -> io::Result<ServiceState> {
     #[cfg(windows)]
     {
         winservice::status(name)
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::service_status(name)
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = name;
         Err(io::Error::from(io::ErrorKind::Unsupported))

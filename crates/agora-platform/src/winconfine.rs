@@ -1135,14 +1135,16 @@ pub(crate) fn current_user_sid_text() -> io::Result<String> {
     let mut needed = 0u32;
     // SAFETY: the documented size query.
     unsafe { GetTokenInformation(own.0, TokenUser, null_mut(), 0, &mut needed) };
-    let mut buf = vec![0u8; (needed as usize).max(std::mem::size_of::<TOKEN_USER>())];
+    // u64 units: the structure read from it needs pointer alignment, which a byte vector does not promise.
+    let bytes = (needed as usize).max(std::mem::size_of::<TOKEN_USER>());
+    let mut buf = vec![0u64; bytes.div_ceil(8)];
     // SAFETY: `buf` is `needed` bytes.
     if unsafe {
         GetTokenInformation(
             own.0,
             TokenUser,
             buf.as_mut_ptr().cast(),
-            buf.len() as u32,
+            (buf.len() * 8) as u32,
             &mut needed,
         )
     } == 0
@@ -1152,6 +1154,40 @@ pub(crate) fn current_user_sid_text() -> io::Result<String> {
     // SAFETY: GetTokenInformation(TokenUser) wrote a TOKEN_USER at the start of `buf`.
     let user = unsafe { &*(buf.as_ptr().cast::<TOKEN_USER>()) };
     sid_text(user.User.Sid)
+}
+
+/// The SID that owns what this process creates (its token's default owner: the user, or the Administrators group when the process runs
+/// elevated), as text.
+pub(crate) fn current_owner_sid_text() -> io::Result<String> {
+    use windows_sys::Win32::Security::{TokenOwner, TOKEN_OWNER};
+    let mut own: HANDLE = null_mut();
+    // SAFETY: the pseudo handle of this process and an out pointer.
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut own) } == 0 {
+        return Err(last_error());
+    }
+    let own = Token(own);
+    let mut needed = 0u32;
+    // SAFETY: the documented size query.
+    unsafe { GetTokenInformation(own.0, TokenOwner, null_mut(), 0, &mut needed) };
+    // u64 units: the structure read from it needs pointer alignment, which a byte vector does not promise.
+    let bytes = (needed as usize).max(std::mem::size_of::<TOKEN_OWNER>());
+    let mut buf = vec![0u64; bytes.div_ceil(8)];
+    // SAFETY: `buf` is `needed` bytes.
+    if unsafe {
+        GetTokenInformation(
+            own.0,
+            TokenOwner,
+            buf.as_mut_ptr().cast(),
+            (buf.len() * 8) as u32,
+            &mut needed,
+        )
+    } == 0
+    {
+        return Err(last_error());
+    }
+    // SAFETY: GetTokenInformation(TokenOwner) wrote a TOKEN_OWNER at the start of `buf`.
+    let owner = unsafe { &*(buf.as_ptr().cast::<TOKEN_OWNER>()) };
+    sid_text(owner.Owner)
 }
 
 /// `S-1-...` for a SID.

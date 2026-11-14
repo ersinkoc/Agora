@@ -27,10 +27,20 @@ window again.
 - If the hub or the node crashes, it is started again 30 seconds later, at most 5 times in 10 minutes; one that stops right
   after starting (its port is taken, its settings are wrong) is not retried, and its log says why. Each is run by a small
   `agora supervise` process that `agora` starts; stopping or killing it stops what it runs too, so nothing is left behind.
+- The first run ends with "Start Agora when you log in? [Y/n]" where that is available (Windows, and Linux with systemd); Enter says yes.
 - `agora service install`: start this machine's Agora when you log in (for you only, no administrator rights; it says what it
   registers first). `agora service status` says whether it is set up and running; `agora service remove` stops it and removes it.
-  Windows registers a logon task per role (`agora-hub`, `agora-node`); the Linux (systemd user unit) and macOS (LaunchAgent)
-  halves come next.
+  Windows registers a logon task per role (`agora-hub`, `agora-node`). Linux writes a systemd user unit per role into
+  `~/.config/systemd/user/` (or `$XDG_CONFIG_HOME/systemd/user/`), owner-only, and runs `systemctl --user daemon-reload` and
+  `enable`; it never uses root. A user unit runs while you are logged in: to start it at boot without logging in, run
+  `loginctl enable-linger` yourself (Agora never does). It needs a session with your user's systemd running (a desktop login, or an SSH
+  login while your user manager runs, for example with lingering on; not `su` or `sudo`, and it refuses to run as root); without
+  one it says so and changes nothing. It also refuses when systemd would read other files for the same unit (drop-ins such as
+  `agora-node.service.d/`), `status` and a repeated `install` name any drop-in added later, and
+  `remove` names the drop-ins it leaves. `install` on a unit turned off with `systemctl --user disable` turns it on again and says so. The agents the node starts run inside the unit and end with it
+  (`systemctl --user stop`, or a logout without lingering), unlike a node started by `agora`, whose agents outlive the window. A
+  unit of the same name that you wrote yourself is left exactly
+  as it is: `agora service` neither replaces, stops nor removes it. Without `systemctl` it is not available. macOS (LaunchAgent) comes next.
 - Logs: `~/.agora/logs/hub.log` and `node.log` (renamed to `.1` when over 5 MiB at a start).
 
 Everything works as before by hand too (`agora hub run`, `agora node enroll`, `agora node run`, `agora tui`); `AGORA_HOME` moves
