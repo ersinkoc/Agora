@@ -1,6 +1,8 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { t } from '../i18n';
 import { decodeText } from '../net/files';
+import { markRanges } from '../net/highlight';
+import { useHighlightedFile, useHighlightedLines } from '../highlight/useHighlight';
 import {
   baseName, byFolder, changedSpan, countByStatus, fileLines, gapLines, gapsOf, isTruncated, matchesFile, pairedLines, parseDiff,
   sameChange, splitRows, type DiffFile, type DiffLine, type DiffStatus, type Gap,
@@ -299,6 +301,14 @@ function FileBody({ file, layout, wrap, text, opened, canExpand, onOpenGap, show
   onLoadSingle: () => void; onRetryText: () => void;
 }) {
   const pairs = useMemo(() => pairedLines(file.lines), [file]);
+  // Syntax colours: each line of the diff on its own, and, once the file as it is now has been read (for unchanged lines), every
+  // line of its new side from that whole-file pass, which knows about comments and strings that span lines.
+  const lineTexts = useMemo(() => file.lines.map((l) => (l.kind === 'hunk' ? '' : l.text)), [file]);
+  const lineHtml = useHighlightedLines(file.path, lineTexts);
+  const fileHtml = useHighlightedFile(file.path, Array.isArray(text) ? text : undefined);
+  const index = useMemo(() => new Map(file.lines.map((l, i) => [l, i])), [file]);
+  const htmlOf = (l: DiffLine): string | undefined =>
+    fileHtml && l.newNo !== undefined && l.kind !== 'del' ? fileHtml[l.newNo - 1] : lineHtml[index.get(l) ?? -1];
   const segments = useMemo(() => segmentsOf(file, opened, text), [file, opened, text]);
   const width = `calc(${Math.max(2, String(Math.max(...file.lines.map((l) => Math.max(l.oldNo ?? 0, l.newNo ?? 0)), Array.isArray(text) ? text.length : 0)).length)}ch + 1rem)`;
   // A new or deleted file has one side only: one column, and no hunk heading (`@@ -0,0 +1,7 @@` says nothing).
@@ -340,8 +350,8 @@ function FileBody({ file, layout, wrap, text, opened, canExpand, onOpenGap, show
     const lines = (oneSided ? s.lines.filter((l) => l.kind !== 'hunk') : s.lines).slice(0, budget);
     budget -= lines.length;
     drawn.push(layout === 'split' && !oneSided
-      ? <Fragment key={`s${i}`}>{splitRows(lines).map((r, j) => <SplitRowView key={j} row={r} pairs={pairs} width={width} />)}</Fragment>
-      : <Fragment key={`u${i}`}>{lines.map((l, j) => <UnifiedRow key={j} line={l} pairs={pairs} width={width} />)}</Fragment>);
+      ? <Fragment key={`s${i}`}>{splitRows(lines).map((r, j) => <SplitRowView key={j} row={r} pairs={pairs} width={width} htmlOf={htmlOf} />)}</Fragment>
+      : <Fragment key={`u${i}`}>{lines.map((l, j) => <UnifiedRow key={j} line={l} pairs={pairs} width={width} htmlOf={htmlOf} />)}</Fragment>);
   });
 
   return (
@@ -360,16 +370,24 @@ function FileBody({ file, layout, wrap, text, opened, canExpand, onOpenGap, show
 const ROW_BG: Record<DiffLine['kind'], string> = { add: 'bg-finished/12', del: 'bg-needs-you/12', ctx: '', hunk: 'bg-surface-2 text-muted' };
 const MARK_BG: Record<'add' | 'del', string> = { add: 'bg-finished/30', del: 'bg-needs-you/30' };
 
-function Code({ line, pairs }: { line: DiffLine; pairs: Map<DiffLine, DiffLine> }) {
+type HtmlOf = (l: DiffLine) => string | undefined;
+
+function Code({ line, pairs, htmlOf }: { line: DiffLine; pairs: Map<DiffLine, DiffLine>; htmlOf: HtmlOf }) {
   const other = pairs.get(line);
   const span = (line.kind === 'add' || line.kind === 'del') && other && line.text.length < SPAN_LIMIT && other.text.length < SPAN_LIMIT
     ? worthMarking(line.text, changedSpan(line.text, other.text)) : undefined;
+  const marked = !!span && span[1] > span[0] && (line.kind === 'add' || line.kind === 'del');
+  const markCls = `rounded-[2px] text-inherit ${line.kind === 'add' || line.kind === 'del' ? MARK_BG[line.kind] : ''}`;
+  const html = htmlOf(line);
   const text = line.text || ' ';
   return (
     <>
-      {span && span[1] > span[0] && (line.kind === 'add' || line.kind === 'del')
-        ? <>{line.text.slice(0, span[0])}<mark className={`rounded-[2px] text-inherit ${MARK_BG[line.kind]}`}>{line.text.slice(span[0], span[1])}</mark>{line.text.slice(span[1])}</>
-        : text}
+      {html !== undefined
+        // The highlighter's escaped text in its own tags, with the changed part marked by text offset.
+        ? <span dangerouslySetInnerHTML={{ __html: (marked && span ? markRanges(html, [{ start: span[0], end: span[1], cls: markCls }]) : html) || ' ' }} />
+        : marked && span
+          ? <>{line.text.slice(0, span[0])}<mark className={markCls}>{line.text.slice(span[0], span[1])}</mark>{line.text.slice(span[1])}</>
+          : text}
       {line.noEol && <span className="ms-2 select-none font-sans text-[0.6875rem] text-muted" title={t('changes-no-eol')}>⏎̸</span>}
     </>
   );
@@ -387,24 +405,24 @@ function worthMarking(text: string, span: [number, number] | undefined): [number
 const gutter = 'select-none px-2 text-end text-muted/70';
 const codeCell = 'pe-4 whitespace-pre [[data-wrap=true]_&]:whitespace-pre-wrap [[data-wrap=true]_&]:[overflow-wrap:anywhere]';
 
-function UnifiedRow({ line, pairs, width }: { line: DiffLine; pairs: Map<DiffLine, DiffLine>; width: string }) {
+function UnifiedRow({ line, pairs, width, htmlOf }: { line: DiffLine; pairs: Map<DiffLine, DiffLine>; width: string; htmlOf: HtmlOf }) {
   if (line.kind === 'hunk') return <div className={`${ROW_BG.hunk} px-3 py-0.5`}>{line.text}</div>;
   return (
     <div className={`grid ${ROW_BG[line.kind]}`} style={{ gridTemplateColumns: `${width} ${width} 1.5rem minmax(0,1fr)` }}>
       <span className={gutter}>{line.oldNo ?? ''}</span>
       <span className={gutter}>{line.newNo ?? ''}</span>
       <span className={`select-none text-center ${line.kind === 'add' ? 'text-finished' : line.kind === 'del' ? 'text-needs-you' : 'text-muted'}`} aria-hidden>{line.kind === 'add' ? '+' : line.kind === 'del' ? '−' : ''}</span>
-      <span className={codeCell}><Code line={line} pairs={pairs} /></span>
+      <span className={codeCell}><Code line={line} pairs={pairs} htmlOf={htmlOf} /></span>
     </div>
   );
 }
 
-function SplitRowView({ row, pairs, width }: { row: ReturnType<typeof splitRows>[number]; pairs: Map<DiffLine, DiffLine>; width: string }) {
+function SplitRowView({ row, pairs, width, htmlOf }: { row: ReturnType<typeof splitRows>[number]; pairs: Map<DiffLine, DiffLine>; width: string; htmlOf: HtmlOf }) {
   if (row.hunk) return <div className={`${ROW_BG.hunk} px-3 py-0.5`}>{row.hunk.text}</div>;
   const side = (l: DiffLine | undefined, no: number | undefined) => (
     <>
       <span className={`${gutter} ${l ? ROW_BG[l.kind] : 'bg-surface-1'}`}>{no ?? ''}</span>
-      <span className={`${codeCell} border-line ${l ? ROW_BG[l.kind] : 'bg-surface-1'}`}>{l ? <Code line={l} pairs={pairs} /> : ''}</span>
+      <span className={`${codeCell} border-line ${l ? ROW_BG[l.kind] : 'bg-surface-1'}`}>{l ? <Code line={l} pairs={pairs} htmlOf={htmlOf} /> : ''}</span>
     </>
   );
   return (
