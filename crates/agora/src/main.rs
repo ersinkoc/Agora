@@ -144,6 +144,9 @@ pub(crate) struct Opts {
     /// ADR-0061: also other people's devices (with their fingerprints), and replacing a key already trusted under the same id.
     include_others: bool,
     replace: bool,
+    /// ADR-0073: `agora hub machines forget --old` and `--refuse-return`.
+    old: bool,
+    refuse_return: bool,
     ui: Option<String>,
     save: bool,
     positional: Vec<String>,
@@ -182,6 +185,8 @@ fn parse(args: &[String]) -> Option<Opts> {
             "--webhook" => o.webhook = Some(it.next()?.clone()),
             "--test" => o.test = true,
             "--yes" => o.yes = true,
+            "--old" => o.old = true,
+            "--refuse-return" => o.refuse_return = true,
             "--unsigned" => o.unsigned = true,
             "--release-url" => o.release_url = Some(it.next()?.clone()),
             "--release-key" => o.release_key = Some(it.next()?.into()),
@@ -288,6 +293,7 @@ fn main() -> ExitCode {
         ["hub", "user"] => hubcli::hub_user(&say, &opts),
         ["hub", "audit"] => hubcli::hub_audit(&say, &opts),
         ["hub", "devices"] => hubcli::hub_devices(&say, &opts),
+        ["hub", "machines"] => hubcli::hub_machines(&say, &opts),
         ["hub", "ssh"] => hubcli::hub_ssh(&say, &opts),
         ["hub", "prices"] => hubcli::hub_prices(&say, &opts),
         ["hub", "notify"] => hubcli::hub_notify(&say, &opts),

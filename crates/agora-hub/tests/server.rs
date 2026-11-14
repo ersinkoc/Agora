@@ -2109,3 +2109,73 @@ async fn a_node_frozen_past_the_deadline_is_disconnected_then_dials_again_and_is
     again.close().await;
     let _ = task.await;
 }
+
+async fn forget_node(client: &mut Conn<TcpStream>, id: &str, target: &str) -> v1::CommandResponse {
+    let req = v1::CommandRequest {
+        request_id: "fn".into(),
+        idempotency_key: String::new(),
+        target_node: target.into(),
+        command: Some(command_request::Command::NodeForget(v1::NodeForget {
+            node_id: id.into(),
+            refuse_return: false,
+        })),
+    };
+    client
+        .send(&f(STREAM_COMMANDS, 0, req.encode_to_vec()))
+        .await
+        .unwrap();
+    response(client).await
+}
+
+/// ADR-0073: the owner forgets an offline machine; every client hears it. A connected machine is refused, and so is a request that
+/// names a target machine (the hub answers it).
+#[tokio::test]
+async fn an_offline_machine_is_forgotten_for_every_client() {
+    let st = state(None);
+    let addr = start(Arc::clone(&st)).await;
+    let (mut node, _t) = node_conn(&st, "n1").await;
+    handshake(&mut node).await;
+    node.send(&f(
+        STREAM_EVENTS,
+        kinds::EVENT,
+        event("n1", 1, online("n1")),
+    ))
+    .await
+    .unwrap();
+    next_ack(&mut node).await;
+    let mut client = dial(addr, Some("good-token")).await;
+    client
+        .send(&f(
+            STREAM_EVENTS,
+            kinds::SUBSCRIBE,
+            v1::Subscribe::default().encode_to_vec(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(recv(&mut client).await.kind, kinds::SNAPSHOT);
+    assert_eq!(
+        err_code(&forget_node(&mut client, "n1", "").await),
+        "node.online"
+    );
+    assert_eq!(
+        err_code(&forget_node(&mut client, "n1", "n1").await),
+        "protocol.invalid_message"
+    );
+    // The machine goes away; once the hub has it offline, forgetting it works and is heard as an event.
+    drop(node);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let r = forget_node(&mut client, "n1", "").await;
+        if matches!(r.result, Some(command_response::Result::Ok(_))) {
+            break;
+        }
+        assert_eq!(err_code(&r), "node.online");
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the machine never went offline"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let (view, _) = st.hub.view();
+    assert!(view.nodes["n1"].forgotten);
+}
