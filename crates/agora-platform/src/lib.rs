@@ -1438,33 +1438,34 @@ pub fn open_lock_private(path: &std::path::Path) -> io::Result<std::fs::File> {
 }
 
 /// Makes `dir` exist as a folder only its user can enter (Unix 0700; Windows an owner-only ACL inherited by what it holds), creating it
-/// when missing. `InvalidInput` when it is a link or not a folder: a private folder is never reached through a link.
+/// when missing. `InvalidInput` when it is a link or not a folder, or belongs to another user: a private folder is never reached
+/// through a link, and is checked and changed through one handle of the folder itself.
 pub fn ensure_private_dir(dir: &std::path::Path) -> io::Result<()> {
-    match std::fs::symlink_metadata(dir) {
-        Ok(m) => {
-            #[cfg(windows)]
-            let reparse = std::os::windows::fs::MetadataExt::file_attributes(&m) & 0x400 != 0;
-            #[cfg(not(windows))]
-            let reparse = false;
-            if !m.is_dir() || m.file_type().is_symlink() || reparse {
-                return Err(io::Error::new(io::ErrorKind::InvalidInput, "a link"));
-            }
+    if std::fs::symlink_metadata(dir).is_err_and(|e| e.kind() == io::ErrorKind::NotFound) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(dir)?;
         }
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::DirBuilderExt;
-                std::fs::DirBuilder::new()
-                    .recursive(true)
-                    .mode(0o700)
-                    .create(dir)?;
-            }
-            #[cfg(not(unix))]
-            std::fs::create_dir_all(dir)?;
-        }
-        Err(e) => return Err(e),
+        #[cfg(not(unix))]
+        std::fs::create_dir_all(dir)?;
     }
-    restrict_to_owner(dir)
+    // Checked and made private through one handle of the folder itself: never through a link, and only when it is this user's.
+    #[cfg(unix)]
+    {
+        unix::ensure_private_dir(dir)
+    }
+    #[cfg(windows)]
+    {
+        windows::ensure_private_dir(dir)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        restrict_to_owner(dir)
+    }
 }
 
 /// True where [`service_install`] can register a program to start at the user's login (ADR-0062 item 6): Windows (a logon task).

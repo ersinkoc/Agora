@@ -644,6 +644,40 @@ pub(crate) fn open_private(
     Ok(file)
 }
 
+/// See [`crate::ensure_private_dir`]: the folder (created by the caller when missing) is opened as itself (`O_DIRECTORY|O_NOFOLLOW`),
+/// must be owned by this user, and is made 0700 through that descriptor when others could enter it.
+pub(crate) fn ensure_private_dir(dir: &std::path::Path) -> io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let refuse = || io::Error::new(io::ErrorKind::InvalidInput, "a link");
+    let cdir = std::ffi::CString::new(dir.as_os_str().as_bytes())
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    // SAFETY: a NUL-terminated path; the descriptor is owned below.
+    let fd = cvt(unsafe {
+        libc::open(
+            cdir.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    })
+    .map_err(|e| match e.raw_os_error() {
+        Some(libc::ELOOP) | Some(libc::ENOTDIR) => refuse(),
+        _ => e,
+    })?;
+    // SAFETY: a descriptor this call just opened and nothing else owns.
+    let held = unsafe { OwnedFd::from_raw_fd(fd) };
+    // SAFETY: an all-zero stat is a valid out-buffer; a live descriptor.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    cvt(unsafe { libc::fstat(held.as_raw_fd(), &mut st) })?;
+    // SAFETY: plain call.
+    if st.st_uid != unsafe { libc::geteuid() } {
+        return Err(refuse());
+    }
+    if st.st_mode & 0o077 != 0 {
+        // SAFETY: a live descriptor of this user's folder.
+        cvt(unsafe { libc::fchmod(held.as_raw_fd(), 0o700) })?;
+    }
+    Ok(())
+}
+
 /// See [`crate::wait_unreaped`].
 pub(crate) fn wait_unreaped(pid: u32) -> io::Result<()> {
     let id = libc::id_t::from(pid);
