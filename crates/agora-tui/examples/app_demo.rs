@@ -92,6 +92,7 @@ fn run(
                         details: &details,
                         notice: "",
                         no_screen: None,
+                        conversation: None,
                         colors,
                         t: &text,
                     },
@@ -166,7 +167,7 @@ fn run(
                             execute!(std::io::stdout(), DisableMouseCapture)
                         };
                     }
-                    Action::Scroll(_) | Action::Chat(_) | Action::Command(_) => {}
+                    Action::Scroll(_) | Action::Command(_) => {}
                 }
             }
         }

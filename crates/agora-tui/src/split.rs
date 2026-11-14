@@ -447,10 +447,6 @@ pub fn app_details(s: &Snapshot, selected: &str, width: u16, height: u16, t: Tex
             if let Some(l) = crate::render::session_line(a, t) {
                 lines.push(l);
             }
-            if a.running && !s.terminals.iter().any(|x| x.agent_id == a.agent_id) {
-                lines.push(String::new());
-                lines.push(t(key!("tui-split-chat"), &[]));
-            }
         }
     }
     if let Some(a) = answered {

@@ -114,8 +114,6 @@ pub enum Action {
     },
     /// Capture the mouse (true) or leave it to the terminal so text can be selected (false).
     MouseCapture(bool),
-    /// Enter on an agent without a terminal (a chat agent): the caller opens its conversation.
-    Chat(String),
     /// A letter the shell has no use for, pressed in the tree or the inspector: the caller's command for the selected agent
     /// (start, stop, answer, resume…).
     Command(char),
@@ -131,7 +129,7 @@ pub struct Row {
     /// The state in words ("working", "needs you"…): monochrome terminals rely on it.
     pub state: String,
     pub needs_you: bool,
-    /// Whether the agent has a terminal to show; Enter on one without opens its conversation instead ([`Action::Chat`]).
+    /// Whether the agent has a terminal; one without (a chat agent) is shown as its conversation ([`Screen::conversation`]).
     pub terminal: bool,
     /// A heading (a machine), drawn in bold and never selected: the keys and the mouse step over it.
     pub header: bool,
@@ -156,6 +154,9 @@ pub struct Screen<'a> {
     pub notice: &'a str,
     /// What the pane says when the active tab has no screen, instead of "opening" (for example: the agent has finished).
     pub no_screen: Option<&'a str>,
+    /// A chat agent's conversation, drawn in the pane instead of a terminal: its lines as they fit the pane, the last one being the
+    /// line being typed (the cursor goes to its end).
+    pub conversation: Option<&'a [String]>,
     pub colors: ColorMode,
     pub t: Text<'a>,
 }
@@ -453,13 +454,8 @@ impl App {
 
     /// Enter on a row: its terminal in a tab, or its conversation when it has no terminal.
     fn enter(&mut self, row: &Row, out: &mut Vec<Action>) {
-        if row.header {
-            return;
-        }
-        if row.terminal {
+        if !row.header {
             self.open(&row.id, out);
-        } else {
-            out.push(Action::Chat(row.id.clone()));
         }
     }
 
@@ -778,20 +774,25 @@ impl App {
         }
         Line::from(spans).render(a.tabs, buf);
 
-        // The terminal.
-        match (self.active_agent(), s.terminal) {
-            (None, _) => Paragraph::new((s.t)(key!("tui-app-no-agent"), &[]))
+        // The terminal, or the conversation of an agent that has none.
+        if let (Some(_), Some(lines)) = (self.active_agent(), s.conversation) {
+            let shown: Vec<Line<'_>> = lines.iter().map(|l| Line::raw(l.clone())).collect();
+            Paragraph::new(shown).render(a.terminal, buf);
+        } else {
+            match (self.active_agent(), s.terminal) {
+                (None, _) => Paragraph::new((s.t)(key!("tui-app-no-agent"), &[]))
+                    .style(dim)
+                    .render(a.terminal, buf),
+                (Some(_), None) => Paragraph::new(
+                    s.no_screen
+                        .map_or_else(|| (s.t)(key!("tui-app-no-screen"), &[]), str::to_string),
+                )
                 .style(dim)
                 .render(a.terminal, buf),
-            (Some(_), None) => Paragraph::new(
-                s.no_screen
-                    .map_or_else(|| (s.t)(key!("tui-app-no-screen"), &[]), str::to_string),
-            )
-            .style(dim)
-            .render(a.terminal, buf),
-            (Some(_), Some(term)) => TerminalPane::new(term)
-                .colors(s.colors)
-                .render(a.terminal, buf),
+                (Some(_), Some(term)) => TerminalPane::new(term)
+                    .colors(s.colors)
+                    .render(a.terminal, buf),
+            }
         }
 
         // The inspector.
@@ -874,7 +875,19 @@ impl App {
                 y: inner.y,
             });
         } else if self.focus == Focus::Terminal {
-            if let (Some(_), Some(term)) = (self.active_agent(), s.terminal) {
+            if let (Some(_), Some(lines)) = (self.active_agent(), s.conversation) {
+                let row = u16::try_from(lines.len().saturating_sub(1)).unwrap_or(u16::MAX);
+                let col = lines.last().map_or(0, |l| l.chars().count());
+                if row < a.terminal.height && a.terminal.width > 0 {
+                    cursor = Some(Position {
+                        x: a.terminal.x
+                            + u16::try_from(col)
+                                .unwrap_or(u16::MAX)
+                                .min(a.terminal.width - 1),
+                        y: a.terminal.y + row,
+                    });
+                }
+            } else if let (Some(_), Some(term)) = (self.active_agent(), s.terminal) {
                 cursor = TerminalPane::cursor_position(term, a.terminal);
             }
         }
@@ -1156,6 +1169,7 @@ mod tests {
                     details: &details,
                     notice: "",
                     no_screen: None,
+                    conversation: None,
                     colors,
                     t: &text,
                 },
@@ -1515,6 +1529,7 @@ mod tests {
                     details: &[],
                     notice: "",
                     no_screen: None,
+                    conversation: None,
                     colors: ColorMode::Mono,
                     t: &text,
                 },
@@ -1556,6 +1571,7 @@ mod tests {
                         details: &[],
                         notice: "",
                         no_screen: None,
+                        conversation: None,
                         colors,
                         t: &text,
                     },
@@ -1698,6 +1714,7 @@ mod tests {
                     details: &[],
                     notice: "",
                     no_screen: None,
+                    conversation: None,
                     colors: ColorMode::Full,
                     t: &text,
                 },
@@ -1766,5 +1783,46 @@ mod tests {
             key(&mut app, &rows, Key::Char(c));
         }
         assert_eq!(app.commands(&cx(&rows)).len(), 1);
+    }
+
+    #[test]
+    fn a_chat_agent_opens_as_a_tab_with_its_conversation_and_the_cursor_on_the_typed_line() {
+        let mut rows = rows();
+        rows[1].terminal = false;
+        let mut app = App::default();
+        key(&mut app, &rows, Key::Down);
+        assert_eq!(
+            key(&mut app, &rows, Key::Enter)[0],
+            Action::Open("mac/agent-2".into())
+        );
+        assert_eq!(app.focus, Focus::Terminal);
+        let conversation = vec!["You: hello".to_string(), "codex: hi".into(), "> wri".into()];
+        let mut tui = Tui::new(TestBackend::new(AREA.width, AREA.height)).unwrap();
+        tui.draw(|f| {
+            app.draw(
+                f,
+                &Screen {
+                    rows: &rows,
+                    terminal: None,
+                    details: &[],
+                    notice: "",
+                    no_screen: None,
+                    conversation: Some(&conversation),
+                    colors: ColorMode::Full,
+                    t: &text,
+                },
+            )
+        })
+        .unwrap();
+        let buf = tui.backend().buffer().clone();
+        let line = |y: u16| {
+            (0..AREA.width)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect::<String>()
+        };
+        assert!(line(1).contains("│You: hello"), "{}", line(1));
+        assert!(line(3).contains("│> wri"));
+        let cursor = tui.backend_mut().get_cursor_position().unwrap();
+        assert_eq!((cursor.x, cursor.y), (29 + 5, 3));
     }
 }
