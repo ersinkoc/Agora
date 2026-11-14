@@ -565,8 +565,17 @@ impl Hub {
     }
 
     fn publish(g: &mut Inner, d: Delivered) {
+        let back = g.view.brings_back(&d.event);
         g.view.apply(&d.event);
         g.pos = d.pos;
+        // ADR-0073: a forgotten machine came back. A client that joined while it was hidden holds none of its folders or agents, and
+        // no event will say them again; every client is let go, reconnects from its position and, being before this one, gets a
+        // snapshot (see `subscribe_within`).
+        if back {
+            g.view.remembered_at = d.pos;
+            g.subs.clear();
+            return;
+        }
         // `try_send`: a full queue means the subscriber is too slow; drop it rather than stall every other node.
         g.subs.retain(|s| match s.try_send(d.clone()) {
             Ok(()) => true,
@@ -613,7 +622,9 @@ impl Hub {
         let (tx, rx) = sync_channel(SUBSCRIBER_BUFFER);
         // Positions only grow (one per stored event), so `pos - n` bounds the number of events to replay before any is read.
         let backlog = match after {
-            Some(n) if n <= g.pos && g.pos - n <= max_events => self.replay(n, max_bytes)?,
+            Some(n) if n <= g.pos && g.pos - n <= max_events && n >= g.view.remembered_at => {
+                self.replay(n, max_bytes)?
+            }
             _ => None,
         };
         let sub = match backlog {
@@ -945,6 +956,65 @@ mod tests {
         assert_eq!(shown.nodes.len(), 1);
         let agents: Vec<&str> = shown.agents.iter().map(|a| a.agent_id.as_str()).collect();
         assert_eq!(agents, ["n1/running"]);
+    }
+
+    #[test]
+    fn a_client_that_joined_while_a_machine_was_forgotten_gets_its_records_when_it_comes_back() {
+        // #535 review (Codex): a client that subscribed while the machine was hidden holds none of its folders or agents, and the
+        // machine's return is only a `NodeLink`; it must be given a snapshot, not a replay.
+        use agora_protocol::v1::CheckoutDiscovered;
+        let (hub, sup) = (hub(), support());
+        let mut s = open_session(&hub, &sup, "n1");
+        let (reg, _cmds, generation) = hub.node_link_opened("n1", Vec::new(), 1);
+        hub.ingest(&mut s, &online("n1", 1)).unwrap();
+        let checkout = Event {
+            producer_id: "n1".into(),
+            seq: 2,
+            at_ms: 2,
+            body: Some(Body::CheckoutDiscovered(CheckoutDiscovered {
+                checkout_id: "c".into(),
+                node_id: "n1".into(),
+                project_id: "p".into(),
+                path: "/repo".into(),
+            })),
+        };
+        hub.ingest(&mut s, &checkout.encode_to_vec()).unwrap();
+        hub.ingest(&mut s, &agent("n1", 3, "running")).unwrap();
+        hub.node_link_closed(reg, generation, false, 4, 4);
+        hub.forget_node("n1", false, 5).unwrap();
+
+        // This client joins while the machine is hidden: its snapshot has none of it.
+        let joined = hub.subscribe(None).unwrap();
+        let (view, at) = joined.snapshot.clone().unwrap();
+        let shown = crate::server::snapshot_of(&view, at);
+        assert!(shown.nodes.is_empty() && shown.checkouts.is_empty() && shown.agents.is_empty());
+
+        // The machine comes back: every live client is let go...
+        let _back = hub.node_link_opened("n1", Vec::new(), 6);
+        assert!(
+            joined.live.try_recv().is_err(),
+            "a live client was kept: it would only hear NodeLink"
+        );
+        // ...and resuming from where it was gives a snapshot with the machine's folders and running agent, not a replay.
+        let again = hub.subscribe(Some(at)).unwrap();
+        assert!(again.backlog.is_empty());
+        let (view, pos) = again.snapshot.expect("a snapshot");
+        let shown = crate::server::snapshot_of(&view, pos);
+        assert_eq!(shown.nodes.len(), 1);
+        assert_eq!(shown.checkouts.len(), 1);
+        assert_eq!(
+            shown
+                .agents
+                .iter()
+                .map(|a| a.agent_id.as_str())
+                .collect::<Vec<_>>(),
+            ["n1/running"]
+        );
+        // A client that resumes from after the return replays as usual.
+        let after = hub.subscribe(Some(pos)).unwrap();
+        assert!(after.snapshot.is_none());
+        // The hub restarting keeps the rule: the rebuilt view knows where the machine came back.
+        assert_eq!(View::rebuild(hub.store()).unwrap().0.remembered_at, pos);
     }
 
     #[test]
