@@ -461,7 +461,7 @@ export function App() {
           security={hub ? <ScreenPasswordSettings passwordSet={info.passwordSet} idle={idle} onIdle={(m) => { setIdleMinutes(m); setIdle(m); }}
             onSet={async (password, current) => { const r = await setPassword(hub.token, password, current); if (r.ok) refreshInfo(); return r; }} /> : undefined} /> : hash === '#/theme' && phone ? <PhoneTheme onBack={() => go('#/')} />
         : current !== undefined && phone
-        ? <PhoneAgent agent={selectedAgent} agents={agents} approvals={approvalsNow} machines={live ? machines(live) : hub ? [] : demoMachines} onResolve={resolve} untrusted={untrustedOn} notice={notice ? t(notice) : undefined}
+        ? <PhoneAgent agent={selectedAgent} agents={agents} approvals={approvalsNow} loadDiff={hub && api ? loadDiff : !hub ? demoLoadDiff : undefined} filesOf={hub && api ? filesOf : !hub ? demoFilesOf : undefined} machines={live ? machines(live) : hub ? [] : demoMachines} onResolve={resolve} untrusted={untrustedOn} notice={notice ? t(notice) : undefined}
           source={terminal} chatSource={selectedAgent?.terminal === false ? chatOf(selectedAgent) : undefined} sendPrompt={hub && api ? sendPrompt : undefined} chooseOption={hub && api ? chooseOption : undefined}
           costMicroUsd={current ? usage?.perAgent.get(current) : undefined} onOpen={open} onBack={() => go('#/')} />
         : current !== undefined
