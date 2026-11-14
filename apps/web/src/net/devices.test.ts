@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import vectors from '../../../../schema/fixtures/signing/device-trust-v1.json';
 import { thisDevice, toHex, type KeyStore } from './approval';
 import { applyEvent, fromSnapshot } from './view';
-import { askMessage, browserName, canBeApprovedOn, endorseMessage, fingerprint, fromHex, registerMessage, registrationVerifies, revokeMessage, signAsk, signEndorsement, signRegistration, trustedBy, waitingForApproval } from './devices';
+import { askMessage, browserName, canBeApprovedOn, deviceLabel, endorseMessage, fingerprint, fromHex, registerMessage, registrationVerifies, revokeMessage, signAsk, signEndorsement, signRegistration, trustedBy, waitingForApproval } from './devices';
 
 function memoryStore(): KeyStore {
   let saved: Awaited<ReturnType<KeyStore['load']>>;
@@ -85,5 +85,20 @@ describe('device endorsements (ADR-0061)', () => {
     expect(trustedBy(v.trusted, 'web-old')).toEqual(['laptop', 'vps']);
     applyEvent(v, 3, { producerId: 'laptop', seq: 1, body: 'nodeTrustedDevices', nodeTrustedDevices: { deviceIds: [] } } as never);
     expect(trustedBy(v.trusted, 'web-old')).toEqual(['vps']);
+  });
+});
+
+describe('device labels', () => {
+  it('tells two browsers of the same kind on the same system apart by the end of their ids', () => {
+    const a = deviceLabel('Chrome · Windows', 'web-0123456789ab3f2a');
+    const b = deviceLabel('Chrome · Windows', 'web-0123456789ab77c1');
+    expect(a).toBe('Chrome · Windows · 3f2a');
+    expect(b).toBe('Chrome · Windows · 77c1');
+    expect(a).not.toBe(b);
+    // Short ids from before ADR-0061's review, an id without a dash, and no name.
+    expect(deviceLabel('Firefox · Linux', 'web-abc')).toBe('Firefox · Linux · abc');
+    expect(deviceLabel('Terminal', 'tui7d9e')).toBe('Terminal · 7d9e');
+    expect(deviceLabel('', 'web-0123')).toBe('web-0123');
+    expect(deviceLabel(undefined, 'web-0123')).toBe('web-0123');
   });
 });

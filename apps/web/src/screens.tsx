@@ -16,6 +16,7 @@ import { StateBadge } from './components/StateBadge';
 import { NoAskBadge } from './components/NoAskBadge';
 import type { ApprovalModel, MachineModel, MessageModel, ProjectCost } from './net/view';
 import type { Device } from './net/approval';
+import { deviceLabel } from './net/devices';
 import { money, type UsageSummary } from './net/usage';
 import { demoAgents, demoHelper, demoStartApproval } from './fixtures';
 import { demoSource, type TerminalSource } from './terminal/source';
@@ -258,7 +259,7 @@ export function DevicePage({ device, onBack, onAddPasskey, passkeyNeedsPassword 
           <ul className="machines">
             {others.map((d) => (
               <li key={d.id} className="machine">
-                <strong>{d.name || d.id}</strong>
+                <strong>{deviceLabel(d.name, d.id)}</strong>
                 <span className="mono">{d.fingerprint}</span>
                 <span className="muted">{d.removed ? t('device-removed') : d.waiting ? t('device-waiting') : d.trustedOn.length ? t('device-trusted-on', { machines: d.trustedOn.map(name).join(', ') }) : t('device-trusted-nowhere')}</span>
                 {d.lastUsedMs > 0 && <span className="muted">{t('device-last-used', { when: new Date(d.lastUsedMs).toLocaleString() })}</span>}
