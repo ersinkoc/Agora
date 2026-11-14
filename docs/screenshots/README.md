@@ -57,10 +57,12 @@ A chat agent's conversation (ADR-0038): your requests and its answers, streamed 
 ## On a phone (ADR-0067 rung 2)
 `phone/`, from `scripts/e2e-phone.mjs` with `AGORA_SCREENSHOTS`: the list with a request waiting and one agent with the key bar, at
 360 × 740, 390 × 844 and held sideways (844 × 390); a tablet (768 × 1024) keeping the full window with the key bar; This device on a
-phone. Both themes.
+phone. Both themes, and the High contrast and Large text themes at 360 and 390 px (`*-high-contrast.png`, `*-large-text.png`,
+plus the theme editor as a phone screen).
 
 ![](phone/phone-390x844-home-dark.png) ![](phone/phone-390x844-agent-dark.png) ![](phone/phone-390x844-home-light.png) ![](phone/phone-390x844-agent-light.png)
 ![](phone/phone-844x390-home-light.png) ![](phone/phone-844x390-agent-dark.png)
+![](phone/phone-360x740-home-large-text.png) ![](phone/phone-360x740-agent-large-text.png) ![](phone/phone-390x844-home-high-contrast.png) ![](phone/phone-390x844-theme-editor-large-text.png)
 
 ## Visual regression baselines
 `apps/web/visual/` holds the reference images that `scripts/visual-regression.mjs` compares against (gallery and sign-in, both

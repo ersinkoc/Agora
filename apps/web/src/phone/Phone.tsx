@@ -13,6 +13,7 @@ import { ThemePicker } from '../components/ThemePicker';
 import { PromptBox } from '../components/PromptBox';
 import { ClosedSummary } from '../components/ClosedSummary';
 import { StartApproval, type StartChoice } from '../components/StartApproval';
+import { ThemeEditor } from '../themes/ThemeEditor';
 import { PHONE_QUERY, byMachine, needsYou } from './nav';
 import './phone.css';
 
@@ -218,6 +219,19 @@ export function PhoneAgent({ agent, agents, approvals, machines, onResolve, untr
             )}
           </div>}
       </>}
+    </PhoneShell>
+  );
+}
+
+// The theme editor (ADR-0068 rung 2) on a phone: a screen with Back, since the phone has no panels.
+export function PhoneTheme({ onBack }: { onBack: () => void }) {
+  return (
+    <PhoneShell label={t('theme-editor-title')}
+      top={<>
+        <button type="button" className="phone-iconbtn" onClick={onBack} aria-label={t('phone-back')} title={t('phone-back')}><Icon name="chevron" className="size-5 rotate-180 rtl:rotate-0" /></button>
+        <h1 className="m-0 min-w-0 flex-1 truncate text-base font-semibold tracking-normal">{t('theme-editor-title')}</h1>
+      </>}>
+      <ThemeEditor />
     </PhoneShell>
   );
 }

@@ -1,7 +1,8 @@
 // End-to-end check of the phone-sized window (ADR-0067 rung 2) in a real browser: a shell agent and a chat agent asking permission,
 // then at 360 × 740, 390 × 844, 844 × 390 (a phone held sideways) and 768 × 1024 (a tablet) on a touch screen: the list shows what
 // needs you first with Allow in reach, every control is at least 44 px, an agent opens in one column with Back, the key bar sends
-// Esc, an arrow and Ctrl+C to the shell, and Allow answers the request (signed by this browser, as anywhere else).
+// Esc, an arrow and Ctrl+C to the shell, and Allow answers the request (signed by this browser, as anywhere else). With the High
+// contrast and Large text themes the 44 px targets and the key bar still hold, and the theme editor opens as a screen.
 //
 //   cargo build -p agora -p agora-fake-agent && (cd apps/web && npm ci && npm run build)
 //   PW_DIR=<dir with node_modules/playwright-core> node scripts/e2e-phone.mjs
@@ -17,6 +18,9 @@ const check = (ok, what) => { console.log(`${ok ? 'ok  ' : 'FAIL'} ${what}`); if
 const shots = process.env.AGORA_SCREENSHOTS;
 if (shots) mkdirSync(shots, { recursive: true });
 let stack;
+
+// Whether the phone's screen scrolls sideways (something wider than the phone pushes the rest off it).
+const sideways = (page) => page.evaluate(() => { const m = document.querySelector('.phone__main'); return !!m && m.scrollWidth > m.clientWidth + 1; });
 
 // Controls a finger presses in the phone window (and the key bar) that are smaller than 44 px.
 const tooSmall = (page) => page.evaluate(() => [...document.querySelectorAll('.phone button, .phone a[href], .key-bar button')]
@@ -75,6 +79,7 @@ try {
     check(/needs you/i.test(first), `${tag}: "Needs you" comes first (${first.replace(/\s+/g, ' ')})`);
     const small = await tooSmall(page);
     check(small.length === 0, `${tag}: every control on the list is at least 44 px${small.length ? `: ${small.join(', ')}` : ''}`);
+    check(!(await sideways(page)), `${tag}: nothing on the list is wider than the screen`);
     for (const scheme of ['light', 'dark']) {
       await page.emulateMedia({ colorScheme: scheme });
       await page.waitForTimeout(400); // colours change with a short transition
@@ -112,6 +117,46 @@ try {
     await page.waitForTimeout(400);
     if (shots) await page.screenshot({ path: join(shots, `phone-390x844-device-${scheme}.png`) });
   }
+
+  // ADR-0068 themes on a phone: High contrast and Large text keep 44 px targets and a key bar that fits; the theme editor is a
+  // screen of its own with Back.
+  const pickTheme = async (name) => {
+    await page.goto(`${origin}/#/`);
+    await page.locator('.phone').getByRole('button', { name: 'Search', exact: true }).click();
+    await page.keyboard.type(name);
+    await page.keyboard.press('Enter');
+    await page.waitForTimeout(400);
+  };
+  await page.emulateMedia({ colorScheme: 'dark' });
+  for (const [theme, file] of [['Theme: High contrast', 'high-contrast'], ['Theme: Large text', 'large-text']]) {
+    for (const [w, h] of [[360, 740], [390, 844]]) {
+      const tag = `${w}x${h} ${file}`;
+      await page.setViewportSize({ width: w, height: h });
+      await pickTheme(theme);
+      await page.waitForSelector('.phone', { timeout: 10000 });
+      const small = await tooSmall(page);
+      check(small.length === 0, `${tag}: every control on the list is at least 44 px${small.length ? `: ${small.join(', ')}` : ''}`);
+      check(!(await sideways(page)), `${tag}: nothing on the list is wider than the screen`);
+      if (shots) await page.screenshot({ path: join(shots, `phone-${w}x${h}-home-${file}.png`) });
+      await page.goto(`${origin}/#/agent/${encodeURIComponent(shell)}`);
+      await page.waitForSelector('.key-bar', { timeout: 10000 });
+      await page.waitForTimeout(300);
+      const small2 = await tooSmall(page);
+      check(small2.length === 0, `${tag}: every control on the agent is at least 44 px${small2.length ? `: ${small2.join(', ')}` : ''}`);
+      const fits = await page.evaluate(() => { const b = document.querySelector('.key-bar'); return !!b && b.scrollWidth <= b.clientWidth; });
+      check(fits, `${tag}: the whole key bar fits the width`);
+      if (shots) await page.screenshot({ path: join(shots, `phone-${w}x${h}-agent-${file}.png`) });
+    }
+  }
+  await page.setViewportSize({ width: 390, height: 844 });
+  await pickTheme('Edit theme');
+  await page.waitForFunction(() => location.hash === '#/theme', null, { timeout: 5000 }).catch(() => {});
+  check(await page.locator('.phone section[aria-label="Theme"]').count() === 1, 'on a phone, Edit theme opens the editor as a screen of its own');
+  if (shots) await page.screenshot({ path: join(shots, 'phone-390x844-theme-editor-large-text.png') });
+  await page.getByRole('button', { name: 'Back to the list', exact: true }).click();
+  await page.waitForFunction(() => location.hash === '#/', null, { timeout: 5000 });
+  check(true, 'Back leaves the theme editor for the list');
+  await pickTheme('Theme: Dark');
 
   // The key bar's bytes reach the program: `cat -v` shows Esc and an arrow as text; Ctrl then c ends it.
   await page.setViewportSize({ width: 390, height: 844 });

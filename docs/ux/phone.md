@@ -18,7 +18,8 @@ terminals get the key bar when the screen is a touch screen.
    Allow and Deny; then its terminal, or its conversation for a chat agent. **Next · N** in the top bar opens the next thing that
    needs you.
 3. The bar at the bottom of the list: **Search** (the command palette: agents, language, pages), **Start**, **Machines**, **This
-   device**. The other pages (machines, this device, activity) keep their own frame with Back.
+   device**. The other pages (machines, this device, activity) keep their own frame with Back. **Edit theme** (palette or This
+   device) opens the theme editor ([themes.md](themes.md)) as a screen of its own (`#/theme`) with Back.
 
 A notice's link to an approval (`#/approvals/<node>%2F<id>`, ADR-0046) opens the agent that asks once the window knows the request;
 one already answered opens the list. A notice about an agent that waits or finished links to that agent (`#/agent/<node>%2F<id>`),
@@ -66,7 +67,8 @@ approvals do.
 
 ## Checked by
 
-`scripts/e2e-phone.mjs` at 360 × 740, 390 × 844, 844 × 390 and 768 × 1024 on an emulated touch screen; screenshots in both themes
+`scripts/e2e-phone.mjs` at 360 × 740, 390 × 844, 844 × 390 and 768 × 1024 on an emulated touch screen, and with the High
+contrast and Large text themes at 360 and 390 px (44 px targets, the key bar fits); screenshots in both themes
 in `docs/screenshots/phone/`. Unit tests: `apps/web/src/terminal/keys.test.ts`, `apps/web/src/phone/nav.test.ts`.
 
 ## Not in this rung

@@ -17,6 +17,7 @@ describe('phone navigation (ADR-0067 rung 2)', () => {
     expect(phoneScreen('#/agent/laptop%2Fa1')).toEqual({ kind: 'agent', id: 'laptop/a1' });
     expect(phoneScreen('#/approvals/laptop%2Fp%201')).toEqual({ kind: 'approval', id: 'laptop/p 1' });
     expect(phoneScreen('#/machines')).toEqual({ kind: 'page' });
+    expect(phoneScreen('#/theme')).toEqual({ kind: 'theme' });
     expect(phoneScreen('#/device')).toEqual({ kind: 'page' });
     // Anything unknown, or an address that does not decode, is the list.
     expect(phoneScreen('#/nope')).toEqual({ kind: 'home' });
@@ -27,6 +28,7 @@ describe('phone navigation (ADR-0067 rung 2)', () => {
   it('goes back to the list from an agent or a page, and nowhere from the list', () => {
     expect(backOf({ kind: 'agent', id: 'x' })).toBe('#/');
     expect(backOf({ kind: 'page' })).toBe('#/');
+    expect(backOf({ kind: 'theme' })).toBe('#/');
     expect(backOf({ kind: 'home' })).toBeUndefined();
   });
 

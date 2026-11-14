@@ -105,7 +105,7 @@ body {
   background: var(--surface-1);
 }
 
-.phone-section { display: grid; gap: var(--space-2); padding: var(--space-3); }
+.phone-section { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-2); padding: var(--space-3); }
 .phone-section + .phone-section { padding-top: 0; }
 .phone-section__title {
   display: flex;
@@ -140,6 +140,8 @@ body {
 
 .phone-card {
   display: grid;
+  /* One column that never grows past the screen: a long name truncates instead of pushing Deny off it. */
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--space-2);
   padding: var(--space-3);
   border: 1px solid var(--border);
@@ -200,7 +202,8 @@ body {
   background: var(--surface-2);
   color: var(--text);
   font-family: var(--font-mono);
-  font-size: var(--text-12);
+  /* The label grows with the theme's text size up to what a 44 px key holds, so the row still fits a 360 px phone. */
+  font-size: min(var(--text-12), calc(var(--tap) * 0.3));
   touch-action: manipulation;
   user-select: none;
   -webkit-user-select: none;
