@@ -93,6 +93,8 @@ struct Node {
     seen: Out,
     done: Option<std::thread::JoinHandle<std::io::Result<()>>>,
     next: u64,
+    /// A delayed notification delivered after `turn_end` takes its starting offset, before the prompt is sent.
+    before_prompt: Option<Value>,
 }
 
 impl Node {
@@ -123,10 +125,16 @@ impl Node {
             seen: out,
             done: Some(done),
             next: 0,
+            before_prompt: None,
         }
     }
 
     fn call(&mut self, method: &str, params: Value) -> Value {
+        if method == "session/prompt" {
+            if let Some(notification) = self.before_prompt.take() {
+                writeln!(self.seen, "{notification}").unwrap();
+            }
+        }
         self.next += 1;
         let id = self.next;
         self.to_bridge
@@ -333,8 +341,13 @@ fn turn_end(n: &mut Node, prompt: &str) -> String {
     let end = Instant::now() + Duration::from_secs(10);
     loop {
         let msgs = n.messages();
-        if let Some(m) = msgs[before..].iter().find(|m| idle(m)) {
-            return m["params"]["message"].as_str().unwrap_or("").to_string();
+        // session/start's initial IDLE can arrive after `before`. Only an IDLE after this prompt's WORKING ends its turn.
+        if let Some(working) = msgs[before..].iter().position(|m| {
+            m["method"] == "state/update" && m["params"]["state"] == "AGENT_STATE_WORKING"
+        }) {
+            if let Some(m) = msgs[before + working + 1..].iter().find(|m| idle(m)) {
+                return m["params"]["message"].as_str().unwrap_or("").to_string();
+            }
         }
         assert!(
             Instant::now() < end,
@@ -683,6 +696,18 @@ fn an_empty_turn_carries_what_the_agent_wrote_to_stderr_during_it() {
         notices(&n)[2],
         json!({"code": "adapter.turn_empty", "params": {}})
     );
+}
+
+#[test]
+fn a_delayed_startup_idle_cannot_end_the_first_prompt() {
+    let mut n = started();
+    // session/start may reply before its initial IDLE reaches the node. Force that notification into the prompt's window;
+    // the real fake agent still supplies this turn's WORKING, notice and closing IDLE.
+    n.before_prompt = Some(json!({
+        "jsonrpc": "2.0", "method": "state/update", "params": {"state": "AGENT_STATE_IDLE"}
+    }));
+    assert_eq!(turn_end(&mut n, "silent"), "adapter.turn_empty");
+    assert_eq!(notices(&n)[0]["code"], "adapter.turn_empty");
 }
 
 /// The node's `mcp_servers` (the agent's own mesh server) reach the agent's `session/new` as ACP stdio servers.
