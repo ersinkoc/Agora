@@ -37,6 +37,15 @@ Not seen on a real machine: a task disabled by Group Policy (no domain here), an
   - a crash is restarted after 30 s;
   - `agora down` leaves nothing.
   - Recorded on #543 (https://github.com/ersinkoc/Agora/pull/543).
+- **macOS, `agora service` as a LaunchAgent**, by macos, on a scratch folder (`/tmp/agl`), with the label `agora-node`:
+  - `install` writes `~/Library/LaunchAgents/agora-node.plist` (owner-only, `plutil -lint` OK), loads it and starts supervisor → node;
+    `status` → "starts when you log in … running now";
+  - a second `install` changes nothing; after `launchctl disable`, `status` → "turned off in this system's settings";
+  - `kill -9` of the supervisor takes its node with it, and launchd does **not** start it again (`KeepAlive = { Crashed = true }`
+    counts only crash signals); after SIGABRT it is back within 1 s; after SIGTERM (a clean stop) it stays ended;
+  - `remove` → "Stopped the node and its supervisor … removed": the job unloaded, the file gone, no processes; a second `remove`
+    → "was not set to start".
+  - Left behind: launchd keeps an `"agora-node" => enabled` line in its own override list after a `disable`/`enable`.
 - **Linux, scratch homes, #543 at 1d59d55 and #548 / #551**, by linux and linux Codex:
   - crash → restart after 30 s;
   - `kill -9` of the supervisor → the node ended within 1.5 s;

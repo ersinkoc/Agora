@@ -2,8 +2,10 @@
 //! launchd into the user's login session (`gui/<uid>`). No administrator rights and nothing outside the user's own folder.
 //! - `install` only writes the job's file (owner-only, renamed into place, never through a planted link). launchd reads it at the
 //!   next login; `start` loads it now (`launchctl bootstrap`, or `kickstart` when it is loaded already).
-//! - `RunAtLoad`: it starts at login. `KeepAlive = { Crashed = true }` when asked: launchd starts the supervisor again only after a
-//!   signal killed it, never after it exited (a supervisor that gave up or was stopped by `agora down` stays ended).
+//! - `RunAtLoad`: it starts at login. `KeepAlive = { Crashed = true }` when asked: launchd starts the supervisor again after a crash,
+//!   never after it exited (a supervisor that gave up or was stopped by `agora down` stays ended). Measured on macOS 27.2: after
+//!   SIGABRT it was back within 1 s; after SIGTERM (a clean stop) and after SIGKILL it was not. launchd counts only crash signals,
+//!   and its other choice, `SuccessfulExit = false`, would also restart a supervisor that gave up (it exits with the role's code).
 //! - `AbandonProcessGroup` stays false (launchd's default): when the job is unloaded, what it started is ended with it, so nothing
 //!   an agent left behind outlives the service.
 //! - `remove` unloads it (`launchctl bootout`) and deletes the file. The caller stops the role through its lock first.
