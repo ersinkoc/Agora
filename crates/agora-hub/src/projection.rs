@@ -134,6 +134,8 @@ pub struct ApprovalView {
     pub action: String,
     pub detail: String,
     pub expires_at_ms: u64,
+    /// When the machine asked (its clock): with the answer's time, also the machine's, how long the agent waited.
+    pub requested_at_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -527,6 +529,7 @@ impl View {
                         action: e.action.clone(),
                         detail: e.detail.clone(),
                         expires_at_ms: e.expires_at_ms,
+                        requested_at_ms: ev.at_ms,
                     },
                 );
             }

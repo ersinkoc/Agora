@@ -56,6 +56,8 @@ struct Inner {
     subs: Vec<SyncSender<Delivered>>,
     /// Subscribers let go because their queue was full (a slow window) or closed (`GET /api/metrics`).
     subs_dropped: u64,
+    /// How long an agent waited for a person's answer (`GET /api/metrics`).
+    approval_wait: crate::metrics::Histogram,
 }
 
 pub struct Hub {
@@ -161,6 +163,7 @@ impl Hub {
                 hub_seq,
                 subs: Vec::new(),
                 subs_dropped: 0,
+                approval_wait: crate::metrics::Histogram::with_bounds(&crate::metrics::ANSWER_US),
             }),
         };
         {
@@ -285,6 +288,8 @@ impl Hub {
                 subscribers: g.subs.len(),
                 subscribers_dropped: g.subs_dropped,
                 approvals_waiting: g.view.approvals.len(),
+                approval_wait: g.approval_wait.snapshot(),
+                relays_dropped: self.router.relays_dropped(),
                 events_stored: g.pos,
                 resyncs: 0,
             }
@@ -669,6 +674,15 @@ impl Hub {
     }
 
     fn publish(g: &mut Inner, d: Delivered) {
+        // An answer to a waiting approval: how long the agent waited, both times on the asking machine's clock.
+        if let Some(Body::ApprovalResolved(r)) = &d.event.body {
+            let key = crate::projection::qualified(&d.event.producer_id, &r.approval_id);
+            if let Some(a) = g.view.approvals.get(&key) {
+                let waited = d.event.at_ms.saturating_sub(a.requested_at_ms);
+                g.approval_wait
+                    .observe(std::time::Duration::from_millis(waited));
+            }
+        }
         let back = g.view.brings_back(&d.event);
         g.view.apply(&d.event);
         g.pos = d.pos;
