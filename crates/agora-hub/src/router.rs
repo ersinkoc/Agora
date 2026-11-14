@@ -3,8 +3,11 @@
 //! A node's connection registers here for as long as it lives. A client's command is forwarded unchanged except for
 //! its request id (the hub picks a fresh one so two clients cannot collide) and the answer is mapped back. The hub
 //! never edits what a command says; the node runs it through the same handler as a local command, with the same policy.
+//! The one exception is a terminal's size: several windows may watch one terminal, and the hub sends the node the smallest
+//! size any of them asked for, so no window is clipped (ADR-0072, which amends ADR-0029 here; see [`Router::resize`] and
+//! docs/specs/protocol.md, "Shared terminal size").
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -45,14 +48,54 @@ struct Link {
 struct Relay {
     client: u64,
     client_stream: u32,
+    /// The terminal this relay shows; `None` for a chat.
+    terminal: Option<String>,
     to_client: mpsc::Sender<RelayFrame>,
     closed: Arc<Mutex<Vec<u32>>>,
 }
 
+/// A terminal size: `(cols, rows)`.
+pub type Size = (u16, u16);
+
+/// The largest terminal the node accepts (`agora-node` control, `TerminalResize`); a bigger window asks for this.
+pub const MAX_COLS: u16 = 1000;
+pub const MAX_ROWS: u16 = 1000;
+
+/// What the hub does with a client's `TerminalResize`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Resize {
+    /// Forward it with this size (the smallest of the windows watching the terminal).
+    Forward(Size),
+    /// The terminal already has the size the windows watching it need: answered by the hub, nothing is sent.
+    Unchanged,
+    /// Nobody watches the terminal through the hub: forwarded as it is, as before shared sizes.
+    PassThrough,
+}
+
+/// The sizes windows asked for one terminal, and the size the hub last knew it to have.
+#[derive(Default)]
+struct Shared {
+    /// Client connection → the size it last asked for. Counts only while that client has a relay for the terminal.
+    asked: HashMap<u64, Size>,
+    /// The size the hub last sent the node or saw in the terminal's own resize frame; `None` when unknown.
+    applied: Option<Size>,
+}
+
+/// The smallest size over the clients in `viewers` that asked for one: the minimum of the columns and, separately, of the rows.
+fn smallest(asked: &HashMap<u64, Size>, viewers: &HashSet<u64>) -> Option<Size> {
+    asked
+        .iter()
+        .filter(|(c, _)| viewers.contains(c))
+        .map(|(_, s)| *s)
+        .reduce(|a, b| (a.0.min(b.0), a.1.min(b.1)))
+}
+
 pub struct Router {
     nodes: Mutex<HashMap<String, Link>>,
-    /// `(node, stream on the node's connection)` → the client stream it feeds.
+    /// `(node, stream on the node's connection)` → the client stream it feeds. Locked before `sizes` when both are held.
     relays: Mutex<HashMap<(String, u32), Relay>>,
+    /// `(node, terminal id)` → the sizes the windows watching it asked for.
+    sizes: Mutex<HashMap<(String, String), Shared>>,
     next: AtomicU64,
     next_stream: AtomicU32,
 }
@@ -62,6 +105,7 @@ impl Default for Router {
         Self {
             nodes: Mutex::default(),
             relays: Mutex::default(),
+            sizes: Mutex::default(),
             next: AtomicU64::new(0),
             next_stream: AtomicU32::new(agora_protocol::frame::FIRST_DYNAMIC_STREAM),
         }
@@ -203,9 +247,15 @@ impl Router {
         )
     }
 
-    /// Reserves the stream a node will write a client's terminal on. Frames the node writes on it are queued for the
-    /// client under `client_stream`.
-    pub fn open_relay(&self, node: &str, client: &ClientRelays, client_stream: u32) -> u32 {
+    /// Reserves the stream a node will write a client's terminal (or, with `terminal` `None`, chat) on. Frames the node writes
+    /// on it are queued for the client under `client_stream`. A window that comes back to a terminal counts for its size again.
+    pub fn open_relay(
+        &self,
+        node: &str,
+        client: &ClientRelays,
+        client_stream: u32,
+        terminal: Option<&str>,
+    ) -> u32 {
         let stream = self.next_stream.fetch_add(1, Ordering::Relaxed);
         self.relays
             .lock()
@@ -215,11 +265,100 @@ impl Router {
                 Relay {
                     client: client.id,
                     client_stream,
+                    terminal: terminal.map(str::to_string),
                     to_client: client.tx.clone(),
                     closed: Arc::clone(&client.closed),
                 },
             );
+        if let Some(t) = terminal {
+            self.reshape(node, t);
+        }
         stream
+    }
+
+    /// A client's `TerminalResize` for `terminal` on `node` (tmux's "smallest" policy). The hub remembers the size of a client
+    /// that watches the terminal (has a relay for it) and forwards the smallest columns and the smallest rows over the clients
+    /// watching it, only when that differs from what the terminal has. A client that does not watch the terminal has no say
+    /// while others watch it (it does not see the screen), and is passed through as before when nobody does (a script).
+    /// A zero size is passed through for the node to refuse, as before; a size beyond the node's limits asks for the limit.
+    pub fn resize(
+        &self,
+        client: &ClientRelays,
+        node: &str,
+        terminal: &str,
+        cols: u32,
+        rows: u32,
+    ) -> Resize {
+        if cols == 0 || rows == 0 {
+            return Resize::PassThrough;
+        }
+        let size = (
+            u16::try_from(cols).unwrap_or(u16::MAX).min(MAX_COLS),
+            u16::try_from(rows).unwrap_or(u16::MAX).min(MAX_ROWS),
+        );
+        let relays = self.relays.lock().unwrap_or_else(|e| e.into_inner());
+        let viewers = viewers(&relays, node, terminal);
+        let mut sizes = self.sizes.lock().unwrap_or_else(|e| e.into_inner());
+        let key = (node.to_string(), terminal.to_string());
+        if !viewers.contains(&client.id) {
+            let watched = sizes
+                .get(&key)
+                .and_then(|s| smallest(&s.asked, &viewers))
+                .is_some();
+            if watched {
+                return Resize::Unchanged;
+            }
+            // The node gets a size the hub did not choose: from now on it is unknown.
+            if let Some(s) = sizes.get_mut(&key) {
+                s.applied = None;
+            }
+            return Resize::PassThrough;
+        }
+        let shared = sizes.entry(key).or_default();
+        shared.asked.insert(client.id, size);
+        match smallest(&shared.asked, &viewers) {
+            Some(min) if shared.applied != Some(min) => {
+                shared.applied = Some(min);
+                Resize::Forward(min)
+            }
+            _ => Resize::Unchanged,
+        }
+    }
+
+    /// The set of windows watching `terminal` changed: sends the node the new smallest size when it differs from what the
+    /// terminal has. Nothing is sent when no watching window has asked for a size (the terminal keeps the one it has).
+    fn reshape(&self, node: &str, terminal: &str) {
+        let send = {
+            let relays = self.relays.lock().unwrap_or_else(|e| e.into_inner());
+            let viewers = viewers(&relays, node, terminal);
+            let mut sizes = self.sizes.lock().unwrap_or_else(|e| e.into_inner());
+            match sizes.get_mut(&(node.to_string(), terminal.to_string())) {
+                Some(shared) => match smallest(&shared.asked, &viewers) {
+                    Some(min) if shared.applied != Some(min) => {
+                        shared.applied = Some(min);
+                        Some(min)
+                    }
+                    _ => None,
+                },
+                None => None,
+            }
+        };
+        if let Some((cols, rows)) = send {
+            let req = v1::CommandRequest {
+                request_id: String::new(),
+                idempotency_key: String::new(),
+                target_node: String::new(),
+                command: Some(command_request::Command::TerminalResize(
+                    v1::TerminalResize {
+                        terminal_id: terminal.to_string(),
+                        cols: cols.into(),
+                        rows: rows.into(),
+                    },
+                )),
+            };
+            // Nobody waits for this answer: a terminal that is gone stays gone, and the windows see the node's resize frame.
+            let _ = self.send(node, req);
+        }
     }
 
     /// A frame from a node on a dynamic stream: queued for the client. A client whose queue is full is not waited for;
@@ -230,6 +369,23 @@ impl Router {
         let Some(r) = relays.get(&key) else {
             return;
         };
+        // The terminal's own size (kind 2, rare) and its end (kind 3) keep the shared-size book right: a size set by a local
+        // client is known, so the next change of watchers sends what they need. Output (kind 0) does not get here.
+        if kind == 2 || kind == 3 {
+            if let Some(t) = &r.terminal {
+                let mut sizes = self.sizes.lock().unwrap_or_else(|e| e.into_inner());
+                let k = (node.to_string(), t.clone());
+                if kind == 3 {
+                    sizes.remove(&k);
+                } else if let ([c0, c1, r0, r1], Some(s)) = (payload.as_slice(), sizes.get_mut(&k))
+                {
+                    s.applied = Some((
+                        u16::from_le_bytes([*c0, *c1]),
+                        u16::from_le_bytes([*r0, *r1]),
+                    ));
+                }
+            }
+        }
         if kind == agora_protocol::frame::STREAM_CLOSE {
             if let Some(r) = relays.remove(&key) {
                 r.closed
@@ -261,10 +417,14 @@ impl Router {
 
     /// Ends a relay whose subscription the node refused, or whose command could not be delivered.
     pub fn drop_relay(&self, node: &str, stream: u32) {
-        self.relays
+        let gone = self
+            .relays
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(&(node.to_string(), stream));
+        if let Some(t) = gone.and_then(|r| r.terminal) {
+            self.reshape(node, &t);
+        }
     }
 
     fn tell_node(&self, node: &str, msg: ToNode) {
@@ -278,22 +438,52 @@ impl Router {
         }
     }
 
-    /// Ends one client stream (or all of a client's) and tells the nodes to stop writing on them.
+    /// Ends one client stream (or all of a client's) and tells the nodes to stop writing on them. A window that stopped watching
+    /// a terminal (or left) no longer counts for its size: the others get the size they need, which may be bigger.
     fn close_client_stream(&self, client: u64, only: Option<u32>) {
-        let ended: Vec<(String, u32)> = {
+        let (ended, left) = {
             let mut relays = self.relays.lock().unwrap_or_else(|e| e.into_inner());
             let keys: Vec<_> = relays
                 .iter()
                 .filter(|(_, r)| r.client == client && only.is_none_or(|s| s == r.client_stream))
                 .map(|(k, _)| k.clone())
                 .collect();
+            let mut left: Vec<(String, String)> = Vec::new();
             for k in &keys {
-                relays.remove(k);
+                if let Some(t) = relays.remove(k).and_then(|r| r.terminal) {
+                    left.push((k.0.clone(), t));
+                }
             }
-            keys
+            left.sort();
+            left.dedup();
+            // Its size is forgotten where it no longer watches (a second view of the same terminal keeps it), or everywhere when
+            // the connection ended.
+            let mut sizes = self.sizes.lock().unwrap_or_else(|e| e.into_inner());
+            match only {
+                None => {
+                    for s in sizes.values_mut() {
+                        s.asked.remove(&client);
+                    }
+                }
+                Some(_) => {
+                    for (node, t) in &left {
+                        if !viewers(&relays, node, t).contains(&client) {
+                            if let Some(s) = sizes.get_mut(&(node.clone(), t.clone())) {
+                                s.asked.remove(&client);
+                            }
+                        }
+                    }
+                }
+            }
+            // A terminal nobody asked a size for is forgotten (the book stays as small as the terminals being watched).
+            sizes.retain(|_, s| !s.asked.is_empty());
+            (keys, left)
         };
         for (node, stream) in ended {
             self.tell_node(&node, ToNode::Close { stream });
+        }
+        for (node, t) in left {
+            self.reshape(&node, &t);
         }
     }
 
@@ -306,6 +496,18 @@ impl Router {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .push(r.client_stream);
+            }
+        }
+        // A node that comes back may have new terminals of any size: what the hub knew of them is not true any more. The sizes
+        // windows asked for stay, and count again when they subscribe through the new connection.
+        for (k, s) in self
+            .sizes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter_mut()
+        {
+            if k.0 == node {
+                s.applied = None;
             }
         }
     }
@@ -433,6 +635,15 @@ impl Router {
             .map_err(|_| offline())?;
         Ok(rx)
     }
+}
+
+/// The client connections that have a relay for `terminal` on `node`.
+fn viewers(relays: &HashMap<(String, u32), Relay>, node: &str, terminal: &str) -> HashSet<u64> {
+    relays
+        .iter()
+        .filter(|((n, _), r)| n == node && r.terminal.as_deref() == Some(terminal))
+        .map(|(_, r)| r.client)
+        .collect()
 }
 
 /// What a client may ask the hub to forward: everything except enrollment, which only an unauthenticated peer may do
@@ -649,11 +860,11 @@ mod tests {
         let r = Router::new();
         let (old, _rx1) = r.register("n");
         let (client, _frames) = r.client();
-        r.open_relay("n", &client, 9);
+        r.open_relay("n", &client, 9, None);
         // The new connection never writes on the old one's streams: the client is told at once and resubscribes.
         let (new, _rx2) = r.register("n");
         assert_eq!(client.take_closed(), vec![9]);
-        let s = r.open_relay("n", &client, 11);
+        let s = r.open_relay("n", &client, 11, None);
         assert!(!old.end(), "replaced");
         assert!(r.is_connected("n"));
         assert!(client.take_closed().is_empty(), "the new relay lives on");
@@ -667,7 +878,7 @@ mod tests {
         let r = Router::new();
         let (_reg, mut node_rx) = r.register("n");
         let (client, mut frames) = r.client();
-        let stream = r.open_relay("n", &client, 7);
+        let stream = r.open_relay("n", &client, 7, None);
         r.relay_frame("n", stream, 1, b"snap".to_vec());
         let f = frames.try_recv().unwrap();
         assert_eq!(
@@ -689,15 +900,15 @@ mod tests {
         let r = Router::new();
         let (reg, mut node_rx) = r.register("n");
         let (client, _frames) = r.client();
-        let s1 = r.open_relay("n", &client, 3);
-        let s2 = r.open_relay("n", &client, 4);
+        let s1 = r.open_relay("n", &client, 3, None);
+        let s2 = r.open_relay("n", &client, 4, None);
         client.close(3);
         assert!(matches!(node_rx.try_recv(), Ok(ToNode::Close { stream }) if stream == s1));
         drop(reg); // the node leaves: the other relay ends for the client
         assert_eq!(client.take_closed(), vec![4]);
         let _ = s2;
         let (reg2, mut node_rx2) = r.register("n");
-        let s3 = r.open_relay("n", &client, 9);
+        let s3 = r.open_relay("n", &client, 9, None);
         drop(client);
         assert!(matches!(node_rx2.try_recv(), Ok(ToNode::Close { stream }) if stream == s3));
         drop(reg2);
@@ -708,11 +919,206 @@ mod tests {
         let r = Router::new();
         let (_reg, _rx) = r.register("n");
         let (client, mut frames) = r.client();
-        let s = r.open_relay("n", &client, 5);
+        let s = r.open_relay("n", &client, 5, None);
         r.relay_frame("n", s, 3, vec![0, 0, 0, 0]);
         assert_eq!(frames.try_recv().unwrap().kind, 3);
         r.relay_frame("n", s, 0, vec![1]);
         assert!(frames.try_recv().is_err(), "nothing after the exit");
+    }
+
+    /// The sizes the node was sent since the last call (closes are skipped).
+    fn sent_sizes(rx: &mut mpsc::UnboundedReceiver<ToNode>) -> Vec<(String, u32, u32)> {
+        let mut out = Vec::new();
+        while let Ok(m) = rx.try_recv() {
+            if let ToNode::Command { request, .. } = m {
+                if let Some(command_request::Command::TerminalResize(t)) = request.command {
+                    out.push((t.terminal_id, t.cols, t.rows));
+                }
+            }
+        }
+        out
+    }
+
+    fn sz(t: &str, cols: u32, rows: u32) -> Vec<(String, u32, u32)> {
+        vec![(t.to_string(), cols, rows)]
+    }
+
+    #[test]
+    fn two_windows_on_one_terminal_get_the_smallest_size_and_only_changes_are_sent() {
+        let r = Router::new();
+        let (_reg, mut rx) = r.register("n");
+        let (small, _f1) = r.client();
+        let (big, _f2) = r.client();
+        r.open_relay("n", &small, 3, Some("t-a"));
+        r.open_relay("n", &big, 3, Some("t-a"));
+        assert!(sent_sizes(&mut rx).is_empty(), "nobody asked yet");
+        assert_eq!(
+            r.resize(&big, "n", "t-a", 200, 50),
+            Resize::Forward((200, 50))
+        );
+        assert_eq!(
+            r.resize(&small, "n", "t-a", 100, 60),
+            Resize::Forward((100, 50))
+        );
+        // The same again, or a bigger window growing, changes nothing the terminal needs.
+        assert_eq!(r.resize(&small, "n", "t-a", 100, 60), Resize::Unchanged);
+        assert_eq!(
+            r.resize(&big, "n", "t-a", 220, 70),
+            Resize::Forward((100, 60))
+        );
+        assert_eq!(r.resize(&big, "n", "t-a", 230, 80), Resize::Unchanged);
+        // Another terminal is its own book.
+        r.open_relay("n", &small, 5, Some("t-b"));
+        assert_eq!(
+            r.resize(&small, "n", "t-b", 80, 24),
+            Resize::Forward((80, 24))
+        );
+        assert!(
+            sent_sizes(&mut rx).is_empty(),
+            "the client's own command carries the size"
+        );
+    }
+
+    #[test]
+    fn when_the_small_window_stops_watching_or_leaves_the_others_grow_back() {
+        let r = Router::new();
+        let (_reg, mut rx) = r.register("n");
+        let (small, _f1) = r.client();
+        let (big, _f2) = r.client();
+        r.open_relay("n", &small, 3, Some("t-a"));
+        r.open_relay("n", &big, 4, Some("t-a"));
+        r.resize(&big, "n", "t-a", 200, 50);
+        r.resize(&small, "n", "t-a", 100, 40);
+        small.close(3);
+        assert_eq!(sent_sizes(&mut rx), sz("t-a", 200, 50));
+        // It comes back: its size was forgotten with its view, so nothing changes until it says it again.
+        r.open_relay("n", &small, 6, Some("t-a"));
+        assert!(sent_sizes(&mut rx).is_empty());
+        assert_eq!(
+            r.resize(&small, "n", "t-a", 100, 40),
+            Resize::Forward((100, 40))
+        );
+        // The window closes (its connection ends): the other grows back once.
+        drop(small);
+        assert_eq!(sent_sizes(&mut rx), sz("t-a", 200, 50));
+        // The last one leaving sends nothing: the terminal keeps its size.
+        drop(big);
+        assert!(sent_sizes(&mut rx).is_empty());
+    }
+
+    #[test]
+    fn a_second_view_of_the_same_terminal_in_one_window_keeps_its_size_when_the_first_closes() {
+        let r = Router::new();
+        let (_reg, mut rx) = r.register("n");
+        let (one, _f1) = r.client();
+        let (other, _f2) = r.client();
+        r.open_relay("n", &one, 3, Some("t-a"));
+        r.open_relay("n", &one, 4, Some("t-a"));
+        r.open_relay("n", &other, 3, Some("t-a"));
+        r.resize(&other, "n", "t-a", 200, 50);
+        r.resize(&one, "n", "t-a", 90, 30);
+        one.close(3);
+        assert!(
+            sent_sizes(&mut rx).is_empty(),
+            "still watching through stream 4"
+        );
+        one.close(4);
+        assert_eq!(sent_sizes(&mut rx), sz("t-a", 200, 50));
+    }
+
+    #[test]
+    fn a_window_whose_relay_the_hub_ended_counts_again_when_it_resubscribes() {
+        let r = Router::new();
+        let (reg, mut rx) = r.register("n");
+        let (small, _f1) = r.client();
+        let (big, _f2) = r.client();
+        r.open_relay("n", &small, 3, Some("t-a"));
+        r.open_relay("n", &big, 3, Some("t-a"));
+        r.resize(&big, "n", "t-a", 200, 50);
+        r.resize(&small, "n", "t-a", 100, 40);
+        // The node reconnects: every relay ends and the terminal's size is unknown.
+        drop(reg);
+        let (_reg2, mut rx2) = r.register("n");
+        assert!(sent_sizes(&mut rx).is_empty());
+        r.open_relay("n", &big, 7, Some("t-a"));
+        assert_eq!(sent_sizes(&mut rx2), sz("t-a", 200, 50));
+        r.open_relay("n", &small, 7, Some("t-a"));
+        assert_eq!(sent_sizes(&mut rx2), sz("t-a", 100, 40));
+    }
+
+    #[test]
+    fn a_window_that_does_not_watch_the_terminal_has_no_say_while_others_do() {
+        let r = Router::new();
+        let (_reg, _rx) = r.register("n");
+        let (script, _f1) = r.client();
+        let (viewer, _f2) = r.client();
+        // Nobody watches through the hub: as before, the size goes as asked (and a zero size is the node's to refuse).
+        assert_eq!(r.resize(&script, "n", "t-a", 120, 40), Resize::PassThrough);
+        assert_eq!(r.resize(&script, "n", "t-a", 0, 40), Resize::PassThrough);
+        r.open_relay("n", &viewer, 3, Some("t-a"));
+        assert_eq!(
+            r.resize(&script, "n", "t-a", 120, 40),
+            Resize::PassThrough,
+            "the viewer has not asked yet"
+        );
+        assert_eq!(
+            r.resize(&viewer, "n", "t-a", 100, 30),
+            Resize::Forward((100, 30))
+        );
+        assert_eq!(r.resize(&script, "n", "t-a", 50, 10), Resize::Unchanged);
+        assert_eq!(r.resize(&viewer, "n", "t-a", 100, 30), Resize::Unchanged);
+    }
+
+    #[test]
+    fn a_size_beyond_the_nodes_limits_asks_for_the_limit() {
+        let r = Router::new();
+        let (_reg, _rx) = r.register("n");
+        let (c, _f) = r.client();
+        r.open_relay("n", &c, 3, Some("t-a"));
+        assert_eq!(
+            r.resize(&c, "n", "t-a", 5000, 70_000),
+            Resize::Forward((MAX_COLS, MAX_ROWS))
+        );
+        assert_eq!(r.resize(&c, "n", "t-a", 0, 10), Resize::PassThrough);
+        assert_eq!(r.resize(&c, "n", "t-a", 1, 1), Resize::Forward((1, 1)));
+    }
+
+    #[test]
+    fn a_size_set_elsewhere_is_seen_in_the_terminals_frames_and_corrected_on_the_next_change() {
+        let r = Router::new();
+        let (_reg, mut rx) = r.register("n");
+        let (c, _f) = r.client();
+        let s = r.open_relay("n", &c, 3, Some("t-a"));
+        assert_eq!(
+            r.resize(&c, "n", "t-a", 100, 30),
+            Resize::Forward((100, 30))
+        );
+        // A terminal client on the node's own socket made it bigger: the hub sees the resize frame it relays.
+        let mut frame = 140u16.to_le_bytes().to_vec();
+        frame.extend_from_slice(&45u16.to_le_bytes());
+        r.relay_frame("n", s, 2, frame);
+        assert_eq!(
+            r.resize(&c, "n", "t-a", 100, 30),
+            Resize::Forward((100, 30))
+        );
+        // The terminal ends: its book goes with it.
+        r.relay_frame("n", s, 3, vec![0; 4]);
+        assert!(r.sizes.lock().unwrap().is_empty());
+        assert!(sent_sizes(&mut rx).is_empty());
+    }
+
+    #[test]
+    fn a_refused_subscription_no_longer_counts() {
+        let r = Router::new();
+        let (_reg, mut rx) = r.register("n");
+        let (a, _f1) = r.client();
+        let (b, _f2) = r.client();
+        r.open_relay("n", &a, 3, Some("t-a"));
+        r.resize(&a, "n", "t-a", 200, 50);
+        let s = r.open_relay("n", &b, 3, Some("t-a"));
+        r.resize(&b, "n", "t-a", 80, 20);
+        r.drop_relay("n", s);
+        assert_eq!(sent_sizes(&mut rx), sz("t-a", 200, 50));
     }
 
     #[test]
