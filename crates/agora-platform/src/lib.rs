@@ -309,6 +309,20 @@ pub fn symlink(target: &std::path::Path, link: &std::path::Path) -> io::Result<(
     }
 }
 
+/// Whether `m` (from `symlink_metadata`) is a reparse point: a Windows junction or symbolic link. Always false on other systems, where
+/// [`std::fs::FileType::is_symlink`] says it.
+pub fn is_reparse_point(m: &std::fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        std::os::windows::fs::MetadataExt::file_attributes(m) & 0x400 != 0
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = m;
+        false
+    }
+}
+
 /// Creates a link at `link` to the folder `target` that any user may make: a symbolic link on Unix, a junction on Windows (where a
 /// symbolic link needs a privilege). Tests that swap a folder for a link use it, so they run on every system instead of skipping.
 pub fn link_dir(target: &std::path::Path, link: &std::path::Path) -> io::Result<()> {
@@ -1159,14 +1173,11 @@ pub fn spawn_detached(
     cmd: &mut std::process::Command,
     log: &std::path::Path,
 ) -> io::Result<Detached> {
-    let mut options = std::fs::OpenOptions::new();
-    options.create(true).append(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    let out = options.open(log)?;
+    // The log is opened as the supervisor's own is: against its folder, never through a link or a second name, private from its
+    // creation (#556). `InvalidInput` / `PermissionDenied` when it refuses.
+    let out = open_append_private(log)?;
     #[cfg(windows)]
     {
-        windows::set_owner_only(log, false)?;
         winproc::spawn_detached(cmd, &out)
     }
     #[cfg(not(windows))]

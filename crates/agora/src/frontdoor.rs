@@ -778,12 +778,26 @@ pub(crate) fn claim(path: &Path) -> std::io::Result<Claim> {
 }
 
 /// Renames a log over 5 MiB to `<log>.1` before a new start.
+///
+/// Only a plain file in a real folder is renamed: a `logs` folder that is a link (or a log that is one) is left as it is, and the open
+/// that follows refuses it (#556), so a rename never lands in another folder.
 pub(crate) fn rotate(log: &Path) {
-    if std::fs::metadata(log).is_ok_and(|m| m.len() > LOG_LIMIT) {
+    let real_folder = log.parent().is_none_or(|dir| {
+        std::fs::symlink_metadata(dir)
+            .is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink() && !is_reparse(&m))
+    });
+    let plain_big_file = std::fs::symlink_metadata(log)
+        .is_ok_and(|m| m.is_file() && !is_reparse(&m) && m.len() > LOG_LIMIT);
+    if real_folder && plain_big_file {
         let mut old = log.as_os_str().to_owned();
         old.push(".1");
         let _ = std::fs::rename(log, PathBuf::from(old));
     }
+}
+
+/// A Windows junction or other reparse point (which `is_symlink` does not always name); never true elsewhere.
+fn is_reparse(m: &std::fs::Metadata) -> bool {
+    agora_platform::is_reparse_point(m)
 }
 
 /// Whether the role answers: the hub on its port, the node on its control socket.
@@ -857,9 +871,7 @@ fn ensure(say: &Say, home: &Path, m: &Machine, role: Role) -> Result<(), ExitCod
                             &[("role", role.label(say).into())],
                         );
                         eprintln!("{text}");
-                        let _ = std::fs::OpenOptions::new()
-                            .append(true)
-                            .open(&log)
+                        let _ = agora_platform::open_append_private(&log)
                             .and_then(|mut f| writeln!(f, "{text}"));
                     }
                     d.pid
@@ -876,6 +888,17 @@ fn ensure(say: &Say, home: &Path, m: &Machine, role: Role) -> Result<(), ExitCod
                 if let Some(me) = LockInfo::of(std::process::id()) {
                     // A stale lock of its own is harmless (the next start takes it over), so a busy guard is not a second failure here.
                     let _ = remove_lock_of(&lock, &me);
+                }
+                // The log refused (a link, a second name, another user's file): said in words, with its path.
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::InvalidInput | std::io::ErrorKind::PermissionDenied
+                ) {
+                    say.err(
+                        key!("supervise-log-link"),
+                        &[("log", log.display().to_string().into())],
+                    );
+                    return Err(ExitCode::from(1));
                 }
                 say.err(
                     key!("frontdoor-not-ready"),

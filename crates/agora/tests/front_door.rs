@@ -680,3 +680,46 @@ fn a_service_supervisor_exits_0_for_its_own_decisions() {
     }
     let _ = std::fs::remove_dir_all(home);
 }
+
+/// #556: the front door's own log is opened as the supervisor's is. A `logs` folder that is a link to another folder is refused with
+/// the log named: nothing is written there and nothing in it is rotated, and nothing starts.
+#[test]
+fn a_linked_logs_folder_is_refused_by_the_front_door() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return;
+    }
+    let home = tmp("loglink");
+    let repo = home.join("proj");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("a.txt"), "x").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "init"]);
+    std::fs::write(
+        home.join("machine.toml"),
+        format!(
+            "roles = [\"node\"]\nui = \"none\"\nnode_projects = [{}]\n",
+            toml_string(&repo.to_string_lossy()),
+        ),
+    )
+    .unwrap();
+    let _down = Down(home.clone());
+    let elsewhere = home.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    // Over the rotation limit, so a rotation through the link would rename it.
+    let big = "x".repeat(6 * 1024 * 1024);
+    std::fs::write(elsewhere.join("node.log"), &big).unwrap();
+    agora_platform::link_dir(&elsewhere, &home.join("logs")).unwrap();
+    let (code, out, err) = run(&home, &[]);
+    assert_ne!(code, 0, "{out}{err}");
+    assert!(err.contains("node.log"), "{err}");
+    assert!(err.contains("is a link"), "{err}");
+    assert_eq!(
+        std::fs::metadata(elsewhere.join("node.log")).unwrap().len(),
+        big.len() as u64,
+        "the log in the link's target was written to or rotated"
+    );
+    assert!(!elsewhere.join("node.log.1").exists());
+    assert!(lock_pid(&home, "node").is_none_or(|p| !alive(p)));
+    let _ = std::fs::remove_dir_all(home);
+}
