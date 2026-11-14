@@ -22,6 +22,9 @@ prost = "0.14"
 serde_json = "1"
 # This device's ES256 key for answering approvals (ADR-0028); already in the tree through rustls.
 ring = "0.17"
+# ADR-0063: the terminal client draws with ratatui over crossterm (both MIT; exact versions at least two weeks old; only what is used).
+ratatui = { version = "=0.30.2", default-features = false, features = ["crossterm"] }
+crossterm = { version = "=0.29.0", default-features = false }
 
 [dev-dependencies]
 agora-node = { path = "../agora-node" }

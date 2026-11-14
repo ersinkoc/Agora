@@ -135,7 +135,7 @@ export function App() {
       if (code === 'agent.option_unconfirmed') return 'start-option-unconfirmed';
       if (code === 'agent.option_invalid') return 'start-option-invalid';
       if (code === 'protocol.capability_missing' && launch.ids.length > 0) return 'start-options-unsupported';
-      return code === 'agent.mode_unsupported' ? 'start-directory-agent-unsupported' : code === 'approval.signature_invalid' ? 'approval-not-trusted' : code === 'protocol.capability_missing' ? 'start-directory-unsupported' : code === 'agent.kind_unknown' ? 'start-kind-unknown' : code === 'node.resource_limit' ? 'start-limit' : 'start-failed';
+      return code === 'agent.mode_unsupported' ? 'start-directory-agent-unsupported' : code === 'approval.signature_invalid' ? 'approval-not-trusted' : code === 'protocol.capability_missing' ? 'start-directory-unsupported' : code === 'agent.kind_unknown' ? 'start-kind-unknown' : code === 'node.resource_limit' ? 'start-limit' : code === 'auth.forbidden' ? 'start-directory-forbidden' : 'start-failed';
     }
   }, [api, device]);
   useEffect(() => {

@@ -4,9 +4,9 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
-### Terminal client
-- A chat agent's tool calls read as words in `agora tui`, as in the web window: "Command cargo test", "Read src/auth.rs", "Search TODO", instead of the raw `{"tool": …}` text.
-
+### Terminal client (ADR-0063)
+- `agora tui` is drawn with ratatui: machines and their agents on the left, the agents you open as tabs with their live terminal in the middle (what you type goes to the agent; Ctrl-] or F12 comes back to the list; Alt+1…9 picks a tab), and the selected agent's details and the request it waits on on the right. The mouse works: click a row to select it and again to open it, click a tab, drag the dividers; `m` releases the mouse so the terminal can select text. A chat agent opens as a tab too: its conversation, and a line to type a request into (Enter sends it; `/mode` and `/model` switch, as before). Ctrl K opens the commands, N goes to the next agent that needs you, and the letters of the earlier console stay (y / n answer, s start, f folder, x stop, u / U resume, d remove). A request to start an agent can be allowed only once all of it was on screen, in the details or in the reader that y opens. Their questions (which agent to start, allow this machine, stop its helpers too, approve a device) open in a box over the console instead of clearing the screen. In a window of 80–140 columns the agent's terminal now gets the room: the details panel shows itself only when the terminal keeps at least 60 columns (i shows or hides it at any width), the footer shows whole keys with Ctrl K first, and Ctrl K also lists every letter's action (start, stop, allow…). Dragging over an agent's terminal selects text and copies it to the clipboard (OSC 52, over SSH too). Colours follow the terminal: 16 colours where `TERM` has no 256, the 256-colour palette without `COLORTERM=truecolor` (macOS Terminal), and "needs you" in an orange that reads on light and dark backgrounds.
+- A chat agent's tool calls read as words, as in the web window: "Command cargo test", "Read src/auth.rs", "Search TODO", instead of the raw `{"tool": …}` text.
 
 ### Devices
 - The hub keeps a list of each person's devices (ADR-0061): a browser or the terminal client registers its key and name when it signs
@@ -56,6 +56,7 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ### Starting agents
 - When a machine does not trust your browser yet, the start window now shows the exact command to run on that machine, with a Copy button, instead of pointing to another page. The same folder spelled several ways on Windows (`D:\x`, `D:/x`, `\\?\D:\x`) is listed once.
+- A device limited to some projects on a machine can now start, resume, inspect and browse folders inside its own projects there (folders the machine already knows for them, and folders inside those); elsewhere it is refused, as before, and the window now says the device is limited to other projects instead of "The folder could not be selected".
 
 ### Machines
 - A machine that goes quiet without its connection ending (a laptop that slept, a stopped process, a Wi-Fi switch, a NAT that forgot the connection) is shown offline within about 25 seconds, with when it was last seen, in the machine list, its tooltip, the Machines page and the terminal client. When it is back it is online again by itself, and its agents are untouched: offline is not finished (ADR-0070). Nodes ping the hub every 10 s, drop a hub that stopped answering after 25 s, give up a connection attempt that hangs after 25 s and reconnect at once after the machine wakes from sleep. The window pings the hub every 15 s and reconnects when nothing comes back within 10 s. Older nodes and windows keep working with a new hub, and a new window with an older hub shows machines as before.

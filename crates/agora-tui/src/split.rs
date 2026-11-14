@@ -8,7 +8,7 @@ use agora_i18n::{key, Arg};
 use agora_protocol::v1::{AgentSnapshot, AgentState, Snapshot};
 use agora_vt::{Style, Terminal};
 
-use crate::render::Text;
+use crate::render::{plain, Text};
 
 /// What one frame shows.
 pub struct View<'a> {
@@ -303,6 +303,324 @@ fn tree(v: &View<'_>, t: Text<'_>) -> Vec<Row> {
         });
     }
     rows
+}
+
+/// The colour names the web window gives agents, in its order (`apps/web/src/net/view.ts`, `ACCENT_NAMES`).
+const ACCENT_NAMES: [&str; 7] = ["amber", "teal", "violet", "rose", "slate", "sky", "mint"];
+
+/// An agent's name as the web window shows it, "kind · colour", the colour picked from its hub-wide id with the web's hash (31 times the
+/// previous value plus each UTF-16 unit, modulo 2^32), so both clients call the same agent the same thing.
+pub fn agent_name(agent_id: &str, kind: &str) -> String {
+    let h = agent_id
+        .encode_utf16()
+        .fold(0u32, |h, u| h.wrapping_mul(31).wrapping_add(u32::from(u)));
+    let accent = ACCENT_NAMES[usize::try_from(h).unwrap_or(0) % ACCENT_NAMES.len()];
+    format!("{kind} · {accent}")
+}
+
+/// ADR-0063: the tree as the app shell's rows: a heading per machine (online first, then by name), then its agents, helpers indented
+/// under the agent that started them (ADR-0057). Agents of a machine the hub does not list come last.
+/// The name an agent is shown by everywhere (its kind and accent name, as in the tree); its local id when it is not in the snapshot.
+pub fn agent_label(s: &Snapshot, agent_id: &str) -> String {
+    s.agents
+        .iter()
+        .find(|a| a.agent_id == agent_id)
+        .map_or_else(
+            || local(agent_id).to_string(),
+            |a| agent_name(&a.agent_id, &a.kind),
+        )
+}
+
+/// An agent's tokens and, when the hub could price them, what they cost so far ("12.3k in · 4.1k out · 0.02 USD"). Nothing when it
+/// reported neither.
+fn usage_line(a: &AgentSnapshot, t: Text<'_>) -> Option<String> {
+    let short = |n: u64| {
+        if n >= 1_000_000 {
+            format!("{:.1}M", n as f64 / 1e6)
+        } else if n >= 1_000 {
+            format!("{:.1}k", n as f64 / 1e3)
+        } else {
+            n.to_string()
+        }
+    };
+    let mut parts = Vec::new();
+    if a.input_tokens + a.output_tokens > 0 {
+        parts.push(t(
+            key!("tui-agent-tokens"),
+            &[
+                ("input", Arg::Str(short(a.input_tokens))),
+                ("output", Arg::Str(short(a.output_tokens))),
+            ],
+        ));
+    }
+    if let Some(c) = a.cost_micros.filter(|c| *c > 0) {
+        let amount = c as f64 / 1e6;
+        let amount = if amount >= 0.01 {
+            format!("{amount:.2}")
+        } else {
+            format!("{amount:.4}")
+        };
+        let currency = if a.currency.is_empty() {
+            "USD".to_string()
+        } else {
+            plain(&a.currency)
+        };
+        parts.push(t(
+            key!("tui-agent-cost"),
+            &[
+                ("amount", Arg::Str(amount)),
+                ("currency", Arg::Str(currency)),
+            ],
+        ));
+    }
+    (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
+/// The name of the project an agent works in, as the web shows it: the folder name of its project's checkout on its machine, else
+/// of the folder it runs in, else the project's id; empty when it has none of them.
+fn project_name(s: &Snapshot, a: &AgentSnapshot) -> String {
+    let folder = |path: &str| {
+        path.trim_end_matches(['/', '\\'])
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or_default()
+            .to_string()
+    };
+    let checkout = s
+        .checkouts
+        .iter()
+        .find(|c| {
+            !a.project_id.is_empty() && c.project_id == a.project_id && c.node_id == a.node_id
+        })
+        .map(|c| folder(&c.path))
+        .filter(|n| !n.is_empty());
+    plain(
+        &checkout
+            .or_else(|| Some(folder(&a.folder)).filter(|n| !n.is_empty()))
+            .unwrap_or_else(|| a.project_id.clone()),
+    )
+}
+
+/// Whether the machine `node` is known to the hub and offline (ADR-0070: the hub owns presence).
+fn machine_offline(s: &Snapshot, node: &str) -> bool {
+    s.nodes.iter().any(|n| n.node_id == node && !n.online)
+}
+
+pub fn app_rows(s: &Snapshot, now_ms: u64, t: Text<'_>) -> Vec<crate::app::Row> {
+    let mut rows = Vec::new();
+    let agent_row = |a: &AgentSnapshot, depth: usize| {
+        let st = state_of(a);
+        let lead = if depth == 0 {
+            String::new()
+        } else {
+            format!("{}↳ ", "  ".repeat(depth - 1))
+        };
+        let no_ask = if a.skips_permissions {
+            format!(" [{}]", t(key!("tui-badge-no-ask"), &[]))
+        } else {
+            String::new()
+        };
+        // An agent whose machine is offline: what it last did is not known now, so it never looks idle (or waiting).
+        let unreachable = a.running && machine_offline(s, &a.node_id);
+        let state = if a.interrupted && !a.running {
+            t(key!("tui-interrupted"), &[])
+        } else if !a.running {
+            t(key!("tui-state-finished"), &[])
+        } else if unreachable {
+            t(key!("tui-state-unreachable"), &[])
+        } else {
+            state_word(st, t)
+        };
+        let asks = s.approvals.iter().any(|x| x.agent_id == a.agent_id);
+        crate::app::Row {
+            id: a.agent_id.clone(),
+            label: format!(" {lead}{}{no_ask}", agent_name(&a.agent_id, &a.kind)),
+            state,
+            needs_you: asks || (a.running && !unreachable && st == AgentState::Blocked),
+            terminal: s.terminals.iter().any(|x| x.agent_id == a.agent_id),
+            header: false,
+            group: false,
+        }
+    };
+    let mut nodes: Vec<_> = s.nodes.iter().collect();
+    nodes.sort_by(|a, b| b.online.cmp(&a.online).then_with(|| name(a).cmp(name(b))));
+    for n in nodes {
+        rows.push(crate::app::Row {
+            id: n.node_id.clone(),
+            label: format!("{} {}", if n.online { "●" } else { "○" }, name(n)),
+            // ADR-0070: an offline machine says when it was last heard from; an online one, its memory in use.
+            state: if !n.online {
+                crate::render::presence_text(n, now_ms, t)
+            } else if n.memory_used_bytes > 0 {
+                bytes(n.memory_used_bytes)
+            } else {
+                String::new()
+            },
+            needs_you: false,
+            terminal: false,
+            header: true,
+            group: false,
+        });
+        let mut agents: Vec<&AgentSnapshot> =
+            s.agents.iter().filter(|a| a.node_id == n.node_id).collect();
+        agents.sort_by(|a, b| a.agent_id.cmp(&b.agent_id));
+        // As the web's tree: the machine's agents under their project's folder name, the folders in name order; agents of no
+        // project and no folder stay right under the machine.
+        let mut groups: Vec<(String, Vec<&AgentSnapshot>)> = Vec::new();
+        for a in agents {
+            let name = project_name(s, a);
+            match groups.iter_mut().find(|(g, _)| *g == name) {
+                Some((_, list)) => list.push(a),
+                None => groups.push((name, vec![a])),
+            }
+        }
+        groups.sort_by(|a, b| {
+            (!a.0.is_empty())
+                .cmp(&!b.0.is_empty())
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        for (name, list) in groups {
+            if !name.is_empty() {
+                rows.push(crate::app::Row {
+                    id: format!("{}#{name}", n.node_id),
+                    label: format!("  {name}/"),
+                    state: String::new(),
+                    needs_you: false,
+                    terminal: false,
+                    header: true,
+                    group: true,
+                });
+            }
+            for (a, depth) in crate::render::helper_order(&list) {
+                rows.push(agent_row(a, depth));
+            }
+        }
+    }
+    let mut rest: Vec<&AgentSnapshot> = s
+        .agents
+        .iter()
+        .filter(|a| !s.nodes.iter().any(|n| n.node_id == a.node_id))
+        .collect();
+    rest.sort_by(|a, b| a.agent_id.cmp(&b.agent_id));
+    for a in rest {
+        rows.push(agent_row(a, 0));
+    }
+    rows
+}
+
+/// What the app shell's inspector shows for the selected agent ([`app_details`]).
+pub struct Details {
+    pub lines: Vec<String>,
+    /// The `agent.start` request y / n would answer, by approval id, and whether all of it is on screen in the inspector (ADR-0057: y
+    /// allows a start only once its whole request was in view, here or in the reader).
+    pub start: Option<(String, bool)>,
+}
+
+/// ADR-0063: the inspector's lines for `selected` in a panel of `width` x `height` (zero when the inspector is hidden). When the
+/// request y / n would answer asks to start an agent, the panel shows that request alone, like the old right panel; otherwise the
+/// agent's facts, its session line, and the request it waits on.
+pub fn app_details(s: &Snapshot, selected: &str, width: u16, height: u16, t: Text<'_>) -> Details {
+    let room = usize::from(height);
+    let answered = crate::client::answered_approval(s, Some(selected));
+    if let Some(a) = answered {
+        if let Some(card) = start_card_lines(a, usize::from(width).saturating_sub(1), t) {
+            let mut lines = vec![t(key!("tui-attention"), &[])];
+            lines.extend(card);
+            let whole = width > 0 && lines.len() <= room;
+            if !whole && room >= 2 {
+                let hidden = lines.len() - (room - 1);
+                lines.truncate(room - 1);
+                lines.push(t(
+                    key!("tui-split-card-more"),
+                    &[("count", Arg::Num(i64::try_from(hidden).unwrap_or(i64::MAX)))],
+                ));
+            }
+            return Details {
+                lines,
+                start: Some((a.approval_id.clone(), whole)),
+            };
+        }
+    }
+    let mut lines = Vec::new();
+    match s.agents.iter().find(|a| a.agent_id == selected) {
+        None => lines.push(t(key!("tui-split-pick"), &[])),
+        Some(a) => {
+            lines.push(agent_name(&a.agent_id, &a.kind));
+            // Where it runs, in words (the machine's name and the folder), not its id.
+            let machine = s
+                .nodes
+                .iter()
+                .find(|n| n.node_id == a.node_id)
+                .map_or(a.node_id.as_str(), name);
+            lines.push(if a.folder.is_empty() {
+                t(
+                    key!("tui-agent-on"),
+                    &[("machine", Arg::Str(plain(machine)))],
+                )
+            } else {
+                t(
+                    key!("tui-agent-on-in"),
+                    &[
+                        ("machine", Arg::Str(plain(machine))),
+                        ("folder", Arg::Str(plain(&a.folder))),
+                    ],
+                )
+            });
+            lines.push(if !a.running {
+                t(key!("tui-state-finished"), &[])
+            } else if machine_offline(s, &a.node_id) {
+                t(key!("tui-state-unreachable"), &[])
+            } else {
+                state_word(state_of(a), t)
+            });
+            if !a.parent_agent_id.is_empty() {
+                lines.push(t(
+                    key!("tui-started-by"),
+                    &[("agent", Arg::Str(local(&a.parent_agent_id).to_string()))],
+                ));
+            }
+            if a.interrupted && !a.running {
+                lines.push(crate::render::interrupted_text(a, t));
+            }
+            if a.skips_permissions {
+                lines.push(format!("[{}]", t(key!("tui-badge-no-ask"), &[])));
+            }
+            if let Some(l) = crate::render::session_line(a, t) {
+                lines.push(l);
+            }
+            // What it changed in its worktree, and what it used: as the web's inspector shows them.
+            if let Some(w) = s
+                .worktrees
+                .iter()
+                .find(|w| !a.worktree_id.is_empty() && w.worktree_id == a.worktree_id)
+                .filter(|w| w.files_changed > 0)
+            {
+                lines.push(t(
+                    key!("tui-agent-changes"),
+                    &[
+                        ("files", Arg::Num(i64::from(w.files_changed))),
+                        ("plus", Arg::Num(i64::from(w.insertions))),
+                        ("minus", Arg::Num(i64::from(w.deletions))),
+                    ],
+                ));
+            }
+            if let Some(l) = usage_line(a, t) {
+                lines.push(l);
+            }
+        }
+    }
+    if let Some(a) = answered {
+        lines.push(String::new());
+        lines.push(t(key!("tui-attention"), &[]));
+        let what = format!("{}: {} {}", agent_label(s, &a.agent_id), a.action, a.detail);
+        lines.extend(crate::render::wrap_row(
+            what.trim(),
+            usize::from(width).max(12),
+            usize::from(width).max(12),
+        ));
+        lines.push(t(key!("tui-split-answer"), &[]));
+    }
+    Details { lines, start: None }
 }
 
 /// Memory as people read it (1 decimal from GB down, whole MB below).
@@ -829,5 +1147,229 @@ mod tests {
         let rows = plain_rows(&frame(&v, &text), 8);
         assert!(rows[1].contains("│┌─┐ 漢字ok"), "{rows:#?}");
         assert!(rows[2].contains("│└─┘"), "{rows:#?}");
+    }
+
+    #[test]
+    fn app_rows_put_each_machine_over_its_agents_and_mark_what_needs_you() {
+        let mut s = snapshot();
+        s.terminals = vec![agora_protocol::v1::TerminalSnapshot {
+            agent_id: "mac2/agent-2".into(),
+            ..Default::default()
+        }];
+        let rows = app_rows(&s, 0, &text);
+        let ids: Vec<(&str, bool)> = rows.iter().map(|r| (r.id.as_str(), r.header)).collect();
+        assert_eq!(
+            ids,
+            vec![
+                ("mac2", true),
+                ("mac2/agent-1", false),
+                ("mac2/agent-2", false),
+                ("win", true),
+                ("win/agent-1", false)
+            ]
+        );
+        assert!(
+            rows[0].label.starts_with("● mac2") && rows[0].state == "1.5 GB",
+            "{:?}",
+            rows[0]
+        );
+        assert!(rows[3].label.starts_with("○ WHITE"));
+        // ADR-0070: the offline machine's heading says when it was last heard from, not its memory.
+        assert!(rows[3].state.starts_with("tui-"), "{:?}", rows[3]);
+        // agent-1 waits on a request (and is blocked); agent-2 works and has a terminal; agent-1 has none (a chat agent here).
+        assert!(rows[1].needs_you && !rows[1].terminal);
+        assert!(!rows[2].needs_you && rows[2].terminal);
+        assert_eq!(rows[2].state, "tui-state-working");
+        assert_eq!(
+            rows[1].label,
+            format!(" {}", agent_name("mac2/agent-1", "claude-code"))
+        );
+    }
+
+    #[test]
+    fn app_details_show_the_agent_and_the_request_it_waits_on() {
+        let s = snapshot();
+        let d = app_details(&s, "mac2/agent-1", 40, 20, &text);
+        assert_eq!(d.start, None);
+        assert_eq!(
+            &d.lines[..3],
+            &[
+                agent_name("mac2/agent-1", "claude-code"),
+                // Where it runs in words, not its id.
+                "tui-agent-on machine=mac2".into(),
+                "tui-state-needs-you".into()
+            ]
+        );
+        // The request names the agent as the tree does; at 40 columns it wraps after the action.
+        let at = d.lines.iter().position(|l| l == "tui-attention").unwrap();
+        assert_eq!(
+            &d.lines[at + 1..at + 3],
+            &[
+                format!("{}: files.write", agent_name("mac2/agent-1", "claude-code")),
+                "src/auth.rs".to_string()
+            ],
+            "{:#?}",
+            d.lines
+        );
+        assert_eq!(d.lines.last().map(String::as_str), Some("tui-split-answer"));
+        assert_eq!(
+            app_details(&s, "", 40, 20, &text).lines[0],
+            "tui-split-pick"
+        );
+    }
+
+    #[test]
+    fn the_inspector_says_what_an_agent_changed_and_used() {
+        let mut s = snapshot();
+        s.worktrees = vec![agora_protocol::v1::WorktreeSnapshot {
+            worktree_id: "w1".into(),
+            files_changed: 3,
+            insertions: 12,
+            deletions: 4,
+            ..Default::default()
+        }];
+        let a = &mut s.agents[0]; // mac2/agent-2
+        a.worktree_id = "w1".into();
+        a.input_tokens = 12_345;
+        a.output_tokens = 678;
+        a.cost_micros = Some(20_000);
+        a.currency = "USD".into();
+        let d = app_details(&s, "mac2/agent-2", 60, 20, &text);
+        assert!(
+            d.lines
+                .contains(&"tui-agent-changes files=3 plus=12 minus=4".to_string()),
+            "{:#?}",
+            d.lines
+        );
+        assert!(
+            d.lines.contains(
+                &"tui-agent-tokens input=12.3k output=678 · tui-agent-cost amount=0.02 currency=USD"
+                    .to_string()
+            ),
+            "{:#?}",
+            d.lines
+        );
+        // Nothing reported, nothing said (never a guessed zero).
+        let d = app_details(&s, "mac2/agent-1", 60, 20, &text);
+        assert!(!d
+            .lines
+            .iter()
+            .any(|l| l.contains("tui-agent-tokens") || l.contains("tui-agent-changes")));
+    }
+
+    #[test]
+    fn a_machines_agents_sit_under_their_projects_folder_names() {
+        let mut s = snapshot();
+        s.checkouts = vec![
+            agora_protocol::v1::CheckoutSnapshot {
+                node_id: "mac2".into(),
+                project_id: "p-web".into(),
+                path: "/Users/me/code/web/".into(),
+                ..Default::default()
+            },
+            agora_protocol::v1::CheckoutSnapshot {
+                node_id: "mac2".into(),
+                project_id: "p-api".into(),
+                path: "/Users/me/code/api".into(),
+                ..Default::default()
+            },
+        ];
+        s.agents[0].project_id = "p-web".into(); // mac2/agent-2
+        s.agents[1].project_id = "p-api".into(); // mac2/agent-1
+                                                 // No project, a folder of its own (an agent started in a folder): grouped by that folder's name.
+        s.agents.push(AgentSnapshot {
+            agent_id: "mac2/agent-3".into(),
+            node_id: "mac2".into(),
+            kind: "shell".into(),
+            folder: "/tmp/notes".into(),
+            running: true,
+            ..Default::default()
+        });
+        let rows = app_rows(&s, 0, &text);
+        let mac2 = rows.iter().position(|r| r.id == "mac2").unwrap();
+        let shown: Vec<(&str, bool)> = rows[mac2 + 1..]
+            .iter()
+            .take_while(|r| !r.header || r.group)
+            .map(|r| (r.label.trim(), r.group))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                ("api/", true),
+                (agent_name("mac2/agent-1", "claude-code").as_str(), false),
+                ("notes/", true),
+                (agent_name("mac2/agent-3", "shell").as_str(), false),
+                ("web/", true),
+                (agent_name("mac2/agent-2", "codex").as_str(), false),
+            ]
+        );
+        // A folder heading is a heading: never selected, never "needs you".
+        assert!(rows
+            .iter()
+            .filter(|r| r.group)
+            .all(|r| r.header && !r.needs_you));
+    }
+
+    #[test]
+    fn an_agent_of_an_offline_machine_never_looks_idle_or_waiting() {
+        let mut s = snapshot();
+        let node = s.agents[0].node_id.clone();
+        let id = s.agents[0].agent_id.clone();
+        s.agents[0].running = true;
+        s.agents[0].state = AgentState::Blocked as i32;
+        s.approvals.retain(|a| a.agent_id != id);
+        for n in &mut s.nodes {
+            n.online = n.node_id != node;
+        }
+        let rows = app_rows(&s, 0, &text);
+        let row = rows.iter().find(|r| r.id == id).unwrap();
+        assert_eq!(row.state, "tui-state-unreachable");
+        assert!(!row.needs_you);
+        let d = app_details(&s, &id, 40, 20, &text);
+        assert!(
+            d.lines.contains(&"tui-state-unreachable".to_string()),
+            "{:?}",
+            d.lines
+        );
+    }
+    #[test]
+    fn a_start_request_in_the_inspector_counts_as_read_only_when_all_of_it_fits() {
+        let mut s = snapshot();
+        s.approvals = vec![ApprovalSnapshot {
+            approval_id: "mac2/a9".into(),
+            agent_id: "mac2/agent-1".into(),
+            action: "agent.start".into(),
+            detail: r#"{"node":"mac2","agent":"agent-1","agent_kind":"claude-code","kind":"codex","folder":"/w/proj","inside":true,"worktree":false,"depth":1,"prompt":"Fix the tests.\nThen open a PR."}"#.into(),
+            ..Default::default()
+        }];
+        let tall = app_details(&s, "mac2/agent-2", 40, 30, &text);
+        assert_eq!(tall.start, Some(("mac2/a9".into(), true)));
+        assert!(
+            tall.lines.iter().any(|l| l.contains("Fix the tests.")),
+            "{:#?}",
+            tall.lines
+        );
+        // Too short: the rest is counted, and y must wait for the reader.
+        let short = app_details(&s, "mac2/agent-2", 40, 4, &text);
+        assert_eq!(short.start, Some(("mac2/a9".into(), false)));
+        assert_eq!(short.lines.len(), 4);
+        assert!(
+            short.lines[3].starts_with("tui-split-card-more"),
+            "{:#?}",
+            short.lines
+        );
+        // A hidden inspector shows nothing of it: never read here.
+        assert_eq!(
+            app_details(&s, "mac2/agent-2", 0, 0, &text).start,
+            Some(("mac2/a9".into(), false))
+        );
+    }
+
+    #[test]
+    fn agents_are_named_as_the_web_window_names_them() {
+        // Names seen in the web window for these ids.
+        assert_eq!(agent_name("mac/agent-1", "shell"), "shell · amber");
+        assert_eq!(agent_name("laptop/agent-1", "shell"), "shell · mint");
+        assert_eq!(agent_name("mac.lan/agent-1", "shell"), "shell · violet");
     }
 }

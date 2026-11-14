@@ -9,10 +9,14 @@ use std::time::{Duration, Instant};
 
 use agora_i18n::{key, Arg};
 use agora_protocol::v1::{param_value::Value, ChatEntry, ErrorInfo, Snapshot};
+use agora_tui::app::{Action, App, Area, Ctx, Event as AppEvent, Row, Screen as AppScreen};
 use agora_tui::client::{sign_in, ChatEvent, ClientError, Hub, Session, TermEvent, Update};
 use agora_tui::device::Device;
+use agora_tui::input::Parser;
+use agora_tui::pane::ColorMode;
 use agora_tui::preview::{Preview, Pumped};
 use agora_tui::render::{chat_command, plain, render, render_chat, session_line, ChatCommand};
+use agora_tui::split::{app_details, app_rows};
 use agora_tui::split::{frame, reader_frame, start_card_fit, start_card_lines, tree_order, View};
 
 use crate::hubcli::{hub_dir, new_login_code, DEFAULT_LISTEN};
@@ -149,7 +153,17 @@ fn resume(
         authorization: Some(auth),
     };
     match session.resume_in(node, asked) {
-        Ok(agent) => say.text(key!("tui-resumed"), &[("agent", Arg::Str(agent))]),
+        // Named as the tree names it (the agent keeps its id when it comes back).
+        Ok(agent) => {
+            let name = snapshot
+                .agents
+                .iter()
+                .find(|a| a.agent_id == agent || a.agent_id == selected)
+                .map_or(agent.clone(), |a| {
+                    agora_tui::split::agent_name(&a.agent_id, &a.kind)
+                });
+            say.text(key!("tui-resumed"), &[("agent", Arg::Str(name))])
+        }
         Err(e) if e.code == "approval.signature_invalid" => say.text(
             key!("tui-not-trusted"),
             &[
@@ -227,7 +241,7 @@ fn approve_device(
     say: &Say,
     session: &mut Session,
     snapshot: Option<&Snapshot>,
-    rx: &mpsc::Receiver<u8>,
+    ask: &mut dyn Asker,
 ) -> String {
     let fail = |code: String| say.text(key!("tui-answer-failed"), &[("code", Arg::Str(code))]);
     let Some(device) = device() else {
@@ -270,22 +284,15 @@ fn approve_device(
     // The name and the fingerprint come from the hub: shown as plain text, never as terminal control sequences.
     let name = agora_node::device_trust::shown(&plain(&waiting.name), 40);
     let fingerprint = agora_tui::device::fingerprint(&waiting.public_key);
-    let mut out = std::io::stdout();
-    let _ = write!(
-        out,
-        "\x1b[H\x1b[2J{}",
-        say.text(
-            key!("tui-device-card"),
-            &[
-                ("name", Arg::Str(name.clone())),
-                ("fingerprint", Arg::Str(fingerprint)),
-                ("machines", Arg::Str(machines.join(", "))),
-            ],
-        )
-        .replace('\n', "\r\n")
+    let card = say.text(
+        key!("tui-device-card"),
+        &[
+            ("name", Arg::Str(name.clone())),
+            ("fingerprint", Arg::Str(fingerprint)),
+            ("machines", Arg::Str(machines.join(", "))),
+        ],
     );
-    let _ = out.flush();
-    if read_key(rx, Duration::from_secs(120)) != Some(b'y') {
+    if ask.key(&lines_of(&card), Duration::from_secs(120)) != Some(b'y') {
         return String::new();
     }
     match session.endorse_device(&device, &waiting) {
@@ -359,7 +366,7 @@ fn start_unread(
 /// The full-screen reader of a start request (ADR-0057). Returns whether its last line was in view before the reader was left.
 fn read_start(
     a: &agora_protocol::v1::ApprovalSnapshot,
-    rx: &mpsc::Receiver<u8>,
+    ask: &mut dyn Asker,
     text: agora_tui::render::Text<'_>,
 ) -> bool {
     let mut top = 0usize;
@@ -373,11 +380,9 @@ fn read_start(
         top = top.min(lines.len().saturating_sub(room));
         let (out, end) = reader_frame(&lines, top, cols, rows, text);
         seen_end |= end;
-        let mut o = std::io::stdout();
-        let _ = o.write_all(out.as_bytes());
-        let _ = o.flush();
+        ask.frame(out.as_bytes());
         // Arrow keys come as j / k (`read_key`); Esc as itself.
-        let Some(k) = read_key(rx, Duration::from_secs(300)) else {
+        let Some(k) = read_key(ask.rx(), Duration::from_secs(300)) else {
             return seen_end;
         };
         match k {
@@ -397,23 +402,13 @@ const GRANT_TTL: Duration = Duration::from_secs(60 * 60);
 fn ask_grant(
     say: &Say,
     session: &mut Session,
-    rx: &mpsc::Receiver<u8>,
+    ask: &mut dyn Asker,
     node: &str,
     scope: &str,
     commands: &[&str],
 ) -> Result<bool, String> {
-    let mut out = std::io::stdout();
-    let _ = write!(out, "\x1b[H\x1b[2J{}", say.text(key!("tui-grant-ask"), &[]));
-    let _ = out.flush();
-    let end = Instant::now() + Duration::from_secs(30);
-    let yes = loop {
-        match rx.recv_timeout(Duration::from_millis(200)) {
-            Ok(k) => break k == b'y',
-            Err(mpsc::RecvTimeoutError::Timeout) if Instant::now() < end => {}
-            Err(_) => break false,
-        }
-    };
-    if !yes {
+    let question = lines_of(&say.text(key!("tui-grant-ask"), &[]));
+    if ask.key(&question, Duration::from_secs(30)) != Some(b'y') {
         return Ok(false);
     }
     let fail = |code: String| say.text(key!("tui-answer-failed"), &[("code", Arg::Str(code))]);
@@ -445,7 +440,7 @@ enum Tried<T> {
 fn with_grant<T>(
     say: &Say,
     session: &mut Session,
-    rx: &mpsc::Receiver<u8>,
+    ask: &mut dyn Asker,
     (node, scope, commands): (&str, &str, &[&str]),
     mut action: impl FnMut(&mut Session) -> Result<T, String>,
 ) -> Tried<T> {
@@ -456,7 +451,7 @@ fn with_grant<T>(
     {
         return Tried::Done(first);
     }
-    match ask_grant(say, session, rx, node, scope, commands) {
+    match ask_grant(say, session, ask, node, scope, commands) {
         Ok(true) => Tried::Done(action(session)),
         Ok(false) => Tried::Declined,
         Err(line) => Tried::Line(line),
@@ -509,7 +504,7 @@ fn attach(
         // What was typed was refused until the owner allows it: ask, and show the screen again either way (the typed keys are lost).
         if session.take_grant_wanted() {
             let scope = format!("agent:{local}");
-            let _ = ask_grant(say, session, rx, node, &scope, &TYPING);
+            let _ = ask_grant(say, session, &mut Plain(rx), node, &scope, &TYPING);
             session.terminal_close(stream);
             stream = session.terminal_open(node, &terminal)?;
             if let Some((cols, rows)) = size {
@@ -614,7 +609,7 @@ fn chat(
                             note = match with_grant(
                                 say,
                                 session,
-                                rx,
+                                &mut Plain(rx),
                                 (node, &scope, &[command]),
                                 |s| s.set_option(node, local, model, &id),
                             ) {
@@ -636,9 +631,13 @@ fn chat(
                     }
                     if !line.is_empty() {
                         let scope = format!("agent:{local}");
-                        note = match with_grant(say, session, rx, (node, &scope, &TYPING), |s| {
-                            s.prompt(node, local, &line)
-                        }) {
+                        note = match with_grant(
+                            say,
+                            session,
+                            &mut Plain(rx),
+                            (node, &scope, &TYPING),
+                            |s| s.prompt(node, local, &line),
+                        ) {
                             Tried::Done(Ok(())) | Tried::Declined => String::new(),
                             Tried::Done(Err(code)) => {
                                 say.text(key!("tui-send-failed"), &[("code", Arg::Str(code))])
@@ -695,7 +694,7 @@ fn start(
     session: &mut Session,
     snapshot: &Snapshot,
     selected: &str,
-    rx: &mpsc::Receiver<u8>,
+    ask: &mut dyn Asker,
 ) -> String {
     let from_selected = snapshot.agents.iter().find(|a| a.agent_id == selected);
     let target = from_selected
@@ -739,18 +738,8 @@ fn start(
         menu.push(String::new());
         menu.push(m);
     }
-    let mut out = std::io::stdout();
-    let _ = write!(out, "\x1b[H\x1b[2J{}", menu.join("\r\n"));
-    let _ = out.flush();
     // Wait for one key; anything but a listed number cancels.
-    let end = Instant::now() + Duration::from_secs(30);
-    let pick = loop {
-        match rx.recv_timeout(Duration::from_millis(200)) {
-            Ok(k) => break Some(k),
-            Err(mpsc::RecvTimeoutError::Timeout) if Instant::now() < end => {}
-            Err(_) => break None,
-        }
-    };
+    let pick = ask.key(&menu, Duration::from_secs(30));
     let Some(index) = pick.and_then(|k| (b'1'..=b'9').contains(&k).then(|| usize::from(k - b'1')))
     else {
         return String::new();
@@ -759,7 +748,7 @@ fn start(
         return String::new();
     };
     let scope = format!("project:{project}");
-    match with_grant(say, session, rx, (&node, &scope, &["agent.start"]), |s| {
+    match with_grant(say, session, ask, (&node, &scope, &["agent.start"]), |s| {
         s.start_agent(&node, &project, kind)
     }) {
         Tried::Done(Ok(agent)) => say.text(key!("tui-started"), &[("agent", Arg::Str(agent))]),
@@ -802,7 +791,7 @@ fn start_in_folder(
     session: &mut Session,
     snapshot: &Snapshot,
     selected: &str,
-    rx: &mpsc::Receiver<u8>,
+    ask: &mut dyn Asker,
     color: bool,
 ) -> String {
     let Some(device) = device() else {
@@ -877,10 +866,8 @@ fn start_in_folder(
                 cols,
                 rows,
             };
-            let mut out = std::io::stdout();
-            let _ = out.write_all(agora_tui::picker::frame(&view, &text).as_bytes());
-            let _ = out.flush();
-            let Some(k) = read_key(rx, Duration::from_secs(120)) else {
+            ask.frame(agora_tui::picker::frame(&view, &text).as_bytes());
+            let Some(k) = read_key(ask.rx(), Duration::from_secs(120)) else {
                 return String::new();
             };
             notice.clear();
@@ -953,10 +940,8 @@ fn start_in_folder(
         menu.push(String::new());
         menu.push(m);
     }
-    let mut out = std::io::stdout();
-    let _ = write!(out, "\x1b[H\x1b[2J{}", menu.join("\r\n"));
-    let _ = out.flush();
-    let Some(index) = read_key(rx, Duration::from_secs(60))
+    let Some(index) = ask
+        .key(&menu, Duration::from_secs(60))
         .and_then(|k| (b'1'..=b'9').contains(&k).then(|| usize::from(k - b'1')))
     else {
         return String::new();
@@ -967,13 +952,8 @@ fn start_in_folder(
     // A folder whose project changed since an agent last ran there needs the user's yes (ADR-0052).
     let accept = !info.previous_project_id.is_empty();
     if accept {
-        let _ = write!(
-            out,
-            "\x1b[H\x1b[2J{}",
-            say.text(key!("tui-folder-identity"), &[])
-        );
-        let _ = out.flush();
-        if read_key(rx, Duration::from_secs(60)) != Some(b'y') {
+        let question = lines_of(&say.text(key!("tui-folder-identity"), &[]));
+        if ask.key(&question, Duration::from_secs(60)) != Some(b'y') {
             return String::new();
         }
     }
@@ -1007,9 +987,7 @@ fn start_in_folder(
                 &[("n", Arg::Num(i as i64 + 2)), ("name", Arg::Str(label(o)))],
             ));
         }
-        let _ = write!(out, "\x1b[H\x1b[2J{}", menu.join("\r\n"));
-        let _ = out.flush();
-        let Some(k) = read_key(rx, Duration::from_secs(60)) else {
+        let Some(k) = ask.key(&menu, Duration::from_secs(60)) else {
             return String::new();
         };
         if matches!(k, 0x1b | b'q' | 3) {
@@ -1020,17 +998,12 @@ fn start_in_folder(
             .then(|| skips.get(usize::from(k - b'2')))
             .flatten();
         if let Some(o) = picked {
-            let _ = write!(
-                out,
-                "\x1b[H\x1b[2J{}",
-                say.text(
-                    key!("tui-start-confirm-skip"),
-                    &[("name", Arg::Str(label(o)))]
-                )
-            );
-            let _ = out.flush();
+            let question = lines_of(&say.text(
+                key!("tui-start-confirm-skip"),
+                &[("name", Arg::Str(label(o)))],
+            ));
             // Confirmed here: signed with the start; the node refuses an option that skips permissions without it.
-            if read_key(rx, Duration::from_secs(60)) == Some(b'y') {
+            if ask.key(&question, Duration::from_secs(60)) == Some(b'y') {
                 launch_options.push(o.id.clone());
                 confirmed_launch_options.push(o.id.clone());
             }
@@ -1130,8 +1103,38 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
             }
         }
     }
-    let _full = FullScreen(keys);
-    if keys {
+    // ADR-0063: with a keyboard the console is the app shell, drawn with ratatui on the alternate screen (left again when it is
+    // dropped); without one (output piped) the plain list, as before.
+    let mut console_state = if keys {
+        match agora_tui::backend::Screen::enter() {
+            Ok(window) => Some(Console {
+                window,
+                app: App::default(),
+                parser: Parser::default(),
+                snapshot: None,
+                selected: String::new(),
+                notice: String::new(),
+                armed: None,
+                read_whole: std::collections::HashSet::new(),
+                shown_request: None,
+                note: Note::default(),
+                colors: if color {
+                    ColorMode::from_env(
+                        None,
+                        std::env::var("COLORTERM").ok().as_deref(),
+                        std::env::var("TERM").ok().as_deref(),
+                    )
+                } else {
+                    ColorMode::Mono
+                },
+            }),
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+    let _full = FullScreen(keys && console_state.is_none());
+    if keys && console_state.is_none() {
         let _ = write!(std::io::stdout(), "\x1b[?1049h");
     }
     let (tx, rx) = mpsc::channel::<u8>();
@@ -1204,6 +1207,12 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
             }
         };
         first = false;
+        if let Some(c) = console_state.as_mut() {
+            match console(say, &mut session, &rx, &hub_arg, color, c) {
+                Next::Quit => return ExitCode::SUCCESS,
+                Next::Reconnect => continue,
+            }
+        }
         let mut dirty_since: Option<Instant> = None;
         // ADR-0057: the `agent.start` requests read whole in the reader, which y may then allow even where the panel cannot show them.
         let mut read_whole: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -1361,7 +1370,14 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                             if let Some(p) = preview.take() {
                                 p.close(&mut session);
                             }
-                            notice = start_in_folder(say, &mut session, sn, &selected, &rx, color);
+                            notice = start_in_folder(
+                                say,
+                                &mut session,
+                                sn,
+                                &selected,
+                                &mut Plain(&rx),
+                                color,
+                            );
                             dirty_since.get_or_insert_with(Instant::now);
                             draw(&snapshot, &selected, &notice, cost, preview.as_ref());
                         }
@@ -1374,13 +1390,14 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                         if let Some(p) = preview.take() {
                             p.close(&mut session);
                         }
-                        notice = approve_device(say, &mut session, snapshot.as_ref(), &rx);
+                        notice =
+                            approve_device(say, &mut session, snapshot.as_ref(), &mut Plain(&rx));
                         dirty_since.get_or_insert_with(Instant::now);
                         draw(&snapshot, &selected, &notice, cost, preview.as_ref());
                     }
                     b's' => {
                         if let Some(sn) = &snapshot {
-                            notice = start(say, &mut session, sn, &selected, &rx);
+                            notice = start(say, &mut session, sn, &selected, &mut Plain(&rx));
                             dirty_since.get_or_insert_with(Instant::now);
                             draw(&snapshot, &selected, &notice, cost, preview.as_ref());
                         }
@@ -1442,22 +1459,17 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                                     .count()
                             });
                             let with_helpers = helpers == 0 || {
-                                let mut out = std::io::stdout();
-                                let _ = write!(
-                                    out,
-                                    "\x1b[H\x1b[2J{}",
-                                    say.text(
-                                        key!("tui-stop-helpers"),
-                                        &[("count", Arg::Num(helpers as i64))]
-                                    )
+                                let question = say.text(
+                                    key!("tui-stop-helpers"),
+                                    &[("count", Arg::Num(helpers as i64))],
                                 );
-                                let _ = out.flush();
-                                !matches!(rx.recv_timeout(Duration::from_secs(30)), Ok(b'n'))
+                                Plain(&rx).key(&lines_of(&question), Duration::from_secs(30))
+                                    != Some(b'n')
                             };
                             notice = match with_grant(
                                 say,
                                 &mut session,
-                                &rx,
+                                &mut Plain(&rx),
                                 (node, &scope, &TYPING),
                                 |s| s.stop_agent_with(node, local, helpers > 0 && with_helpers),
                             ) {
@@ -1498,7 +1510,7 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                                 agora_platform::terminal_size().unwrap_or((100, 30)),
                             )
                         }) {
-                            if read_start(&a, &rx, &text) {
+                            if read_start(&a, &mut Plain(&rx), &text) {
                                 read_whole.insert(a.approval_id.clone());
                             }
                         }
@@ -1552,6 +1564,1053 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                 last_refresh = Instant::now();
             }
         }
+    }
+}
+
+/// The console's shortest time between two frames: 60 a second, the ADR-0022 budget for a keystroke's echo.
+const FRAME: Duration = Duration::from_millis(16);
+
+/// What the console does after its loop ends.
+enum Next {
+    Quit,
+    /// The link was lost or a fresh snapshot is due: connect again and come back.
+    Reconnect,
+}
+
+/// The console's state that outlives one hub session.
+struct Console {
+    window: agora_tui::backend::Window,
+    app: App,
+    parser: Parser,
+    snapshot: Option<Snapshot>,
+    /// The selected agent, by hub-wide id (the tree's rows move as agents come and go).
+    selected: String,
+    notice: String,
+    armed: Option<Armed>,
+    /// ADR-0057: start requests read whole (in the inspector or the reader), which y may then allow.
+    read_whole: std::collections::HashSet<String>,
+    /// A request shown whole outside the inspector (the chat tab's pane shows its agent's): y / n may answer it without asking again.
+    shown_request: Option<String>,
+    note: Note,
+    colors: ColorMode,
+}
+
+/// A notice too long for the footer is shown whole in a box above it until the next key (the trust command must be readable and
+/// copyable); `c` copies the command in it, when it has one.
+#[derive(Default)]
+struct Note {
+    /// The notice the box was opened for (a new notice opens it again).
+    seen: String,
+    open: bool,
+    /// What `c` puts on the clipboard: the `agora node trust` command the notice asks the user to run.
+    copy: Option<String>,
+}
+
+/// The `agora node trust` command this terminal's notices ask the user to run on a machine.
+fn trust_command() -> Option<String> {
+    device().map(|d| format!("agora node trust {} {}", d.id, d.public_key_hex()))
+}
+
+/// The terminal reports mouse presses, drags and the wheel (SGR encoding) while the console holds the mouse, and pastes come
+/// bracketed; both are switched off while a question is asked, which reads plain bytes.
+fn mouse_mode(on: bool) {
+    let mut out = std::io::stdout();
+    let _ = out.write_all(if on {
+        b"\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?2004h"
+    } else {
+        b"\x1b[?1000l\x1b[?1002l\x1b[?1006l\x1b[?2004l"
+    });
+    let _ = out.flush();
+}
+
+fn window_area() -> Area {
+    let (cols, rows) = agora_platform::terminal_size().unwrap_or((100, 30));
+    Area::new(0, 0, cols, rows)
+}
+
+/// ADR-0063: the console on the app shell. The tree (machines, agents), the open agents as tabs with their live terminals (typing goes
+/// to the agent; Ctrl-] or F12 back), the inspector, and the letters of the earlier console for the selected agent (y / n answer, s
+/// start, f folder, x stop, u / U resume, d remove), whose questions are asked in a box over the console; the folder picker and the
+/// reader of a long start request still take the whole screen.
+fn console(
+    say: &Say,
+    session: &mut Session,
+    rx: &mpsc::Receiver<u8>,
+    hub_arg: &[(&str, Arg)],
+    color: bool,
+    c: &mut Console,
+) -> Next {
+    let text = |id: &str, args: &[(&str, Arg)]| say.text(id, args);
+    let mut dirty_since: Option<Instant> = None;
+    let mut last_refresh = Instant::now();
+    let mut preview: Option<Preview> = None;
+    // The open chat agent's conversation (one at a time, the active tab's), and an agent whose conversation could not be opened (not
+    // tried again until another tab comes to the front).
+    let mut chat: Option<ChatPane> = None;
+    let mut chat_failed: Option<String> = None;
+    let mut redraw = true;
+    let mut last_draw = Instant::now() - Duration::from_secs(1);
+    let mut area = window_area();
+    // The agent whose terminal was last sized to the pane, so a tab brought to the front is sized once.
+    let mut sized: Option<(String, u16, u16)> = None;
+    mouse_mode(c.app.mouse);
+    let mut fresh = true;
+    let mut typed_at: Option<Instant> = None;
+    loop {
+        // Watching a terminal: wake often, so typing echoes and output looks live; with a frame waiting to be drawn, wake when it may
+        // be (any frame from the hub wakes this at once anyway).
+        let mut wait = Duration::from_millis(if preview.is_some() || chat.is_some() {
+            15
+        } else {
+            50
+        });
+        if redraw {
+            wait = wait.min(FRAME.saturating_sub(last_draw.elapsed()));
+        }
+        // Input outranks output (ADR-0022): keys arrive on another channel than the hub's frames, so while the user types (a key in the
+        // last second) the wait is short enough that a key is read within a couple of milliseconds; idle, the console sleeps longer.
+        if typed_at.is_some_and(|t| t.elapsed() < Duration::from_secs(1)) {
+            wait = wait.min(Duration::from_millis(2));
+        }
+        match session.next(wait) {
+            Update::Snapshot(s) => {
+                c.snapshot = Some(*s);
+                dirty_since = None;
+                redraw = true;
+            }
+            Update::Changed => {
+                dirty_since.get_or_insert_with(Instant::now);
+            }
+            Update::Quiet => {}
+            Update::Closed => {
+                say.err(key!("tui-lost"), hub_arg);
+                std::thread::sleep(Duration::from_secs(2));
+                return Next::Reconnect;
+            }
+        }
+        let rows = c
+            .snapshot
+            .as_ref()
+            .map(|s| app_rows(s, now_ms(), &text))
+            .unwrap_or_default();
+        if let Some(i) = rows.iter().position(|r| !r.header && r.id == c.selected) {
+            c.app.selected = i;
+        } else if let Some(id) = c.app.settle_selection(&rows) {
+            // Nothing selected yet (the start) or the selected agent is gone: the row the tree shows chosen is the one the inspector
+            // and the letters act on, never a heading or nothing.
+            c.selected = id.to_string();
+            redraw = true;
+        }
+        let mut events = Vec::new();
+        let now = window_area();
+        if now != area {
+            area = now;
+            let _ = c.window.resized();
+            events.push(AppEvent::Resize {
+                cols: area.width,
+                rows: area.height,
+            });
+        }
+        let mut bytes = Vec::new();
+        while let Ok(b) = rx.try_recv() {
+            bytes.push(b);
+        }
+        if !bytes.is_empty() {
+            typed_at = Some(Instant::now());
+        }
+        events.extend(c.parser.push(&bytes));
+        if bytes.is_empty() {
+            events.extend(c.parser.flush());
+        }
+        // Any key or click closes the box of a long notice (and still does what it does).
+        if c.note.open && !events.is_empty() {
+            c.note.open = false;
+            redraw = true;
+        }
+        for ev in events {
+            // A key that only goes to the agent changes nothing on screen until the agent answers: drawing for it would hold the
+            // echo back by up to a frame (ADR-0022). Anything else is drawn.
+            let before = c.app.clone();
+            let modes = preview
+                .as_ref()
+                .map(|p| p.screen().modes())
+                .unwrap_or_default();
+            let acts = c.app.handle(
+                ev,
+                &Ctx {
+                    rows: &rows,
+                    area,
+                    modes,
+                    t: &text,
+                },
+            );
+            if c.app != before || acts.iter().any(|a| !matches!(a, Action::Input(_))) {
+                redraw = true;
+            }
+            c.selected = rows
+                .get(c.app.selected)
+                .filter(|r| !r.header)
+                .map(|r| r.id.clone())
+                .unwrap_or_default();
+            for act in acts {
+                match act {
+                    Action::Input(b) => {
+                        let active = c.app.active_agent().map(str::to_string);
+                        match chat.as_mut().filter(|p| Some(&p.agent) == active.as_ref()) {
+                            // A request of this agent waits: the pane shows it, y / n answer it (as in the list) and nothing
+                            // typed meanwhile reaches the conversation, so a permission is never answered into a message.
+                            Some(pane)
+                                if c.snapshot
+                                    .as_ref()
+                                    .and_then(|s| waiting_for(s, &pane.agent))
+                                    .is_some() =>
+                            {
+                                if let Some(k) = b.iter().find(|k| matches!(k, b'y' | b'n')) {
+                                    c.selected = pane.agent.clone();
+                                    c.shown_request = c
+                                        .snapshot
+                                        .as_ref()
+                                        .and_then(|s| waiting_for(s, &pane.agent))
+                                        .map(|a| a.approval_id.clone());
+                                    if command(
+                                        say,
+                                        session,
+                                        rx,
+                                        color,
+                                        c,
+                                        &mut preview,
+                                        area,
+                                        char::from(*k),
+                                    ) {
+                                        dirty_since.get_or_insert_with(Instant::now);
+                                    }
+                                }
+                                redraw = true;
+                            }
+                            Some(pane) => {
+                                chat_input(say, session, rx, c, &mut preview, pane, &b);
+                                // What was typed is drawn: the shell's own state did not change, the pane's did.
+                                redraw = true;
+                            }
+                            None => {
+                                if let Some((node, local)) =
+                                    active.as_deref().and_then(|a| a.split_once('/'))
+                                {
+                                    session.terminal_input(node, &format!("t-{local}"), &b);
+                                }
+                            }
+                        }
+                    }
+                    Action::PaneSize { .. } => sized = None,
+                    Action::MouseCapture(on) => mouse_mode(on),
+                    // Closing a tab only closes the view: the agent keeps running, and the footer says so.
+                    Action::Close(id) => {
+                        let name = c
+                            .snapshot
+                            .as_ref()
+                            .map_or_else(|| id.clone(), |s| agora_tui::split::agent_label(s, &id));
+                        c.notice = say.text(key!("tui-tab-closed"), &[("agent", Arg::Str(name))]);
+                    }
+                    // Text selected in the agent's pane goes to the clipboard through the terminal (OSC 52: over SSH too).
+                    Action::Copy(sel) => {
+                        let height = c.app.areas(area).terminal.height;
+                        let text = preview
+                            .as_ref()
+                            .filter(|p| Some(p.agent.as_str()) == c.app.active_agent())
+                            .map(|p| agora_tui::pane::selected_text(p.screen(), height, sel))
+                            .unwrap_or_default();
+                        if !text.is_empty() {
+                            let mut out = std::io::stdout();
+                            let _ = out.write_all(&agora_tui::clip::osc52(&text));
+                            let _ = out.flush();
+                            c.notice = say.text(
+                                key!("tui-copied-text"),
+                                &[("count", Arg::Num(text.chars().count() as i64))],
+                            );
+                        }
+                    }
+                    Action::Open(_) | Action::Scroll(_) => {}
+                    Action::Quit => {
+                        if let Some(p) = preview.take() {
+                            p.close(session);
+                        }
+                        mouse_mode(false);
+                        return Next::Quit;
+                    }
+                    Action::Command(k) => {
+                        if command(say, session, rx, color, c, &mut preview, area, k) {
+                            dirty_since.get_or_insert_with(Instant::now);
+                        }
+                    }
+                }
+            }
+        }
+        if c.notice != c.note.seen {
+            c.note.seen = c.notice.clone();
+            c.note.open = !c.notice.is_empty();
+            c.note.copy = trust_command().filter(|cmd| c.notice.contains(cmd.as_str()));
+            redraw = true;
+        }
+        if let Some(s) = &c.snapshot {
+            follow(session, s, c.app.active_agent().unwrap_or(""), &mut preview);
+            if let Err(code) = follow_chat(
+                session,
+                s,
+                c.app.active_agent(),
+                &mut chat,
+                &mut chat_failed,
+            ) {
+                c.notice = say.text(key!("tui-opening-failed"), &[("code", Arg::Str(code))]);
+                redraw = true;
+            }
+        }
+        if let Some(pane) = chat.as_mut() {
+            match session.chat_next(pane.stream, Duration::from_millis(1)) {
+                ChatEvent::Lines(lines, replace) => {
+                    if replace {
+                        pane.entries = lines;
+                    } else {
+                        let last = pane.entries.last().map_or(0, |e| e.entry_id);
+                        pane.entries
+                            .extend(lines.into_iter().filter(|e| e.entry_id > last));
+                    }
+                    redraw = true;
+                }
+                ChatEvent::Ended => {
+                    if let Some(p) = chat.take() {
+                        session.terminal_close(p.stream);
+                    }
+                    redraw = true;
+                }
+                ChatEvent::Lost => {
+                    say.err(key!("tui-lost"), hub_arg);
+                    std::thread::sleep(Duration::from_secs(2));
+                    return Next::Reconnect;
+                }
+                ChatEvent::Quiet => {}
+            }
+        }
+        // The open agent's terminal takes the pane's size (as `agora terminal attach` takes the window's), once per agent and size.
+        let pane = c.app.areas(area).terminal;
+        if let Some(active) = c.app.active_agent() {
+            let want = (active.to_string(), pane.width, pane.height);
+            if sized.as_ref() != Some(&want) && pane.width > 0 && pane.height > 0 {
+                if let Some((node, local)) = active.split_once('/') {
+                    session.terminal_resize(node, &format!("t-{local}"), pane.width, pane.height);
+                }
+                sized = Some(want);
+            }
+        }
+        if let Some(p) = preview.as_mut() {
+            match p.pump(session) {
+                Pumped::Nothing => {}
+                Pumped::Changed => redraw = true,
+                Pumped::Ended => {
+                    preview = None;
+                    redraw = true;
+                }
+                Pumped::Lost => {
+                    say.err(key!("tui-lost"), hub_arg);
+                    std::thread::sleep(Duration::from_secs(2));
+                    return Next::Reconnect;
+                }
+            }
+        }
+        // At most one frame per FRAME (ADR-0022: an echo within 16 ms), however fast the agent writes; input was handled before this.
+        // The first frame of a run is drawn over a cleared screen: lines written meanwhile ("connecting…", a lost link) must not stay
+        // under it.
+        if redraw && last_draw.elapsed() >= FRAME {
+            if std::mem::take(&mut fresh) {
+                let _ = c.window.invalidate();
+            }
+            draw_console(say, c, &rows, preview.as_ref(), chat.as_ref(), area, None);
+            last_draw = Instant::now();
+            redraw = false;
+        }
+        if dirty_since.is_some() && last_refresh.elapsed() >= Duration::from_millis(REFRESH_MS) {
+            // The hub answers a new subscription with a fresh snapshot; a live feed applying single events is later work.
+            if let Some(p) = preview.take() {
+                p.close(session);
+            }
+            return Next::Reconnect;
+        }
+        if dirty_since.is_none() {
+            last_refresh = Instant::now();
+        }
+    }
+}
+
+fn draw_console(
+    say: &Say,
+    c: &mut Console,
+    rows: &[Row],
+    preview: Option<&Preview>,
+    chat: Option<&ChatPane>,
+    area: Area,
+    dialog: Option<&[String]>,
+) {
+    let text = |id: &str, args: &[(&str, Arg)]| say.text(id, args);
+    let inspector = c.app.areas(area).inspector;
+    let details = c
+        .snapshot
+        .as_ref()
+        .map(|s| app_details(s, &c.selected, inspector.width, inspector.height, &text).lines)
+        .unwrap_or_default();
+    // The footer's notice: the last thing done, or the hub's counts (machines, agents, what needs the user).
+    let notice = if c.notice.is_empty() {
+        c.snapshot.as_ref().map_or_else(String::new, |s| {
+            let waiting = needs_you_count(s);
+            say.text(
+                key!("tui-split-status"),
+                &[
+                    (
+                        "online",
+                        Arg::Num(s.nodes.iter().filter(|n| n.online).count() as i64),
+                    ),
+                    ("total", Arg::Num(s.nodes.len() as i64)),
+                    (
+                        "agents",
+                        Arg::Num(s.agents.iter().filter(|a| a.running).count() as i64),
+                    ),
+                    ("waiting", Arg::Num(waiting as i64)),
+                ],
+            )
+        })
+    } else {
+        c.notice.clone()
+    };
+    let term = preview
+        .filter(|p| Some(p.agent.as_str()) == c.app.active_agent())
+        .map(Preview::screen);
+    // An open tab whose agent has finished says so, instead of "opening".
+    let ended = c.app.active_agent().is_some_and(|id| {
+        c.snapshot
+            .as_ref()
+            .is_some_and(|s| s.agents.iter().any(|a| a.agent_id == id && !a.running))
+    });
+    let ended_text = say.text(key!("tui-state-finished"), &[]);
+    let no_screen = ended.then_some(ended_text.as_str());
+    // A chat agent's conversation as it fits the pane: what it runs with first, then its lines, a note, and the line being typed.
+    let pane = c.app.areas(area).terminal;
+    let conversation = chat
+        .filter(|p| Some(p.agent.as_str()) == c.app.active_agent())
+        .map(|p| {
+            let local = p.agent.split_once('/').map_or(p.agent.as_str(), |(_, l)| l);
+            let head = p
+                .snapshot
+                .as_ref()
+                .and_then(|a| session_line(a, &text))
+                .map(|l| plain(&l));
+            let room = usize::from(pane.height)
+                .saturating_sub(usize::from(head.is_some()) + usize::from(!p.note.is_empty()));
+            // A request of this agent that waits takes the input line's place: what it asks, and the keys that answer it.
+            let waiting: Vec<String> = c
+                .snapshot
+                .as_ref()
+                .and_then(|s| waiting_for(s, &p.agent))
+                .map(|a| {
+                    let width = usize::from(pane.width).max(12);
+                    let what = plain(format!("{} {}", a.action, a.detail).trim());
+                    let mut block = vec![say.text(key!("tui-attention"), &[])];
+                    block.extend(
+                        agora_tui::render::wrap_row(&what, width, width)
+                            .into_iter()
+                            .take(4),
+                    );
+                    block.extend(agora_tui::render::wrap_row(
+                        &say.text(key!("tui-chat-answer"), &[]),
+                        width,
+                        width,
+                    ));
+                    block
+                })
+                .unwrap_or_default();
+            let room = room.saturating_sub(waiting.len().saturating_sub(1));
+            // The agent speaks under its name (as in the tree), not its id.
+            let speaker = p.snapshot.as_ref().map_or_else(
+                || local.to_string(),
+                |a| agora_tui::split::agent_name(&a.agent_id, &a.kind),
+            );
+            let mut lines = render_chat(
+                &p.entries,
+                &speaker,
+                &String::from_utf8_lossy(&p.typed),
+                (usize::from(pane.width), room.max(2)),
+                false,
+                &text,
+            );
+            if !p.note.is_empty() {
+                lines.insert(lines.len().saturating_sub(1), plain(&p.note));
+            }
+            if !waiting.is_empty() {
+                lines.pop();
+                lines.extend(waiting);
+            }
+            if let Some(h) = head {
+                lines.insert(0, h);
+            }
+            lines
+        });
+    // A notice too long for the footer, whole in a box while it is new.
+    let note: Option<Vec<String>> =
+        (c.note.open && notice.chars().count() > usize::from(area.width) * 2 / 3).then(|| {
+            let mut lines = lines_of(&notice);
+            lines.push(say.text(
+                if c.note.copy.is_some() {
+                    key!("tui-note-copy")
+                } else {
+                    key!("tui-note-close")
+                },
+                &[],
+            ));
+            lines
+        });
+    let (app, colors) = (&c.app, c.colors);
+    let _ = c.window.draw(|f| {
+        app.draw(
+            f,
+            &AppScreen {
+                rows,
+                terminal: term,
+                details: &details,
+                notice: &notice,
+                no_screen,
+                conversation: conversation.as_deref(),
+                dialog,
+                note: note.as_deref(),
+                colors,
+                t: &text,
+            },
+        );
+    });
+}
+
+/// How many things need the user: each agent that waits (blocked, or with a request) once, however many ways it waits, and each
+/// request that belongs to no agent.
+fn needs_you_count(s: &Snapshot) -> usize {
+    let mut agents: std::collections::HashSet<&str> = s
+        .agents
+        .iter()
+        .filter(|a| {
+            a.running
+                && a.state == agora_protocol::v1::AgentState::Blocked as i32
+                // An agent of an offline machine is not known to wait now (its row says the machine is offline).
+                && !s.nodes.iter().any(|n| n.node_id == a.node_id && !n.online)
+        })
+        .map(|a| a.agent_id.as_str())
+        .collect();
+    let mut other = 0;
+    for a in &s.approvals {
+        if a.agent_id.is_empty() {
+            other += 1;
+        } else {
+            agents.insert(a.agent_id.as_str());
+        }
+    }
+    agents.len() + other
+}
+
+/// The request of `agent` that waits for an answer, if one does (only its own, never another agent's).
+fn waiting_for<'a>(
+    s: &'a Snapshot,
+    agent: &str,
+) -> Option<&'a agora_protocol::v1::ApprovalSnapshot> {
+    s.approvals.iter().find(|a| a.agent_id == agent)
+}
+
+/// A chat agent's conversation shown in the console's pane (ADR-0063): its stream, what came, and the line being typed.
+struct ChatPane {
+    agent: String,
+    stream: u32,
+    entries: Vec<ChatEntry>,
+    typed: Vec<u8>,
+    note: String,
+    /// ADR-0058: the line that asked to confirm a mode that does not ask; typing it again switches.
+    confirming: Option<String>,
+    /// What it runs with, as opened and as switched here.
+    snapshot: Option<agora_protocol::v1::AgentSnapshot>,
+}
+
+/// The conversation follows the active tab: opened when a chat agent's tab comes to the front, closed when another does. An agent
+/// whose conversation could not be opened is not tried again until another tab has been in front.
+fn follow_chat(
+    session: &mut Session,
+    s: &Snapshot,
+    active: Option<&str>,
+    chat: &mut Option<ChatPane>,
+    failed: &mut Option<String>,
+) -> Result<(), String> {
+    let wanted = active.filter(|id| {
+        s.agents.iter().any(|a| a.agent_id == *id && a.running)
+            && !s.terminals.iter().any(|t| t.agent_id == *id)
+    });
+    if chat.as_ref().map(|p| p.agent.as_str()) == wanted {
+        return Ok(());
+    }
+    if let Some(p) = chat.take() {
+        session.terminal_close(p.stream);
+    }
+    let Some(id) = wanted else {
+        *failed = None;
+        return Ok(());
+    };
+    if failed.as_deref() == Some(id) {
+        return Ok(());
+    }
+    let (node, local) = id.split_once('/').unwrap_or(("", id));
+    match session.chat_open(node, local) {
+        Ok(stream) => {
+            *chat = Some(ChatPane {
+                agent: id.to_string(),
+                stream,
+                entries: Vec::new(),
+                typed: Vec::new(),
+                note: String::new(),
+                confirming: None,
+                snapshot: s.agents.iter().find(|a| a.agent_id == id).cloned(),
+            });
+            *failed = None;
+            Ok(())
+        }
+        Err(code) => {
+            *failed = Some(id.to_string());
+            Err(code)
+        }
+    }
+}
+
+/// One key (or a paste) typed into a chat agent's tab: text goes to the line, Backspace takes a character back, Enter sends it (or
+/// switches the mode or model it names, as the full-screen chat did). Keys that are escape sequences (arrows) are ignored.
+fn chat_input(
+    say: &Say,
+    session: &mut Session,
+    rx: &mpsc::Receiver<u8>,
+    c: &mut Console,
+    preview: &mut Option<Preview>,
+    pane: &mut ChatPane,
+    bytes: &[u8],
+) {
+    if bytes.first() == Some(&0x1b) {
+        return;
+    }
+    // A paste is one chunk of several bytes: its line breaks are spaces, it is sent with Enter like typed text.
+    let paste = bytes.len() > 1 && std::str::from_utf8(bytes).is_ok_and(|t| t.chars().count() > 1);
+    for &b in bytes {
+        match b {
+            b'\r' | b'\n' if paste => pane.typed.push(b' '),
+            b'\r' | b'\n' => chat_send(say, session, rx, c, preview, pane),
+            0x7f | 0x08 => {
+                // Backspace removes one character, not one byte.
+                while pane.typed.pop().is_some_and(|b| b & 0xC0 == 0x80) {}
+            }
+            b if b >= 0x20 => pane.typed.push(b),
+            _ => {}
+        }
+    }
+}
+
+fn chat_send(
+    say: &Say,
+    session: &mut Session,
+    rx: &mpsc::Receiver<u8>,
+    c: &mut Console,
+    preview: &mut Option<Preview>,
+    pane: &mut ChatPane,
+) {
+    let line = String::from_utf8_lossy(&pane.typed).trim().to_string();
+    pane.typed.clear();
+    let (node, local) = pane.agent.split_once('/').unwrap_or(("", &pane.agent));
+    let (node, local) = (node.to_string(), local.to_string());
+    let scope = format!("agent:{local}");
+    let asked = chat_command(&line, pane.snapshot.as_ref(), pane.confirming.as_deref());
+    pane.confirming = None;
+    pane.note = match asked {
+        ChatCommand::Unknown { id, offered } => say.text(
+            key!("tui-option-unknown"),
+            &[("id", Arg::Str(id)), ("ids", Arg::Str(offered.join(", ")))],
+        ),
+        ChatCommand::Confirm { id } => {
+            pane.confirming = Some(line);
+            say.text(key!("tui-option-confirm"), &[("id", Arg::Str(id))])
+        }
+        ChatCommand::Switch { model, id } => {
+            // The same per-agent grant the web client asks for: this one switch for this agent.
+            let command = if model {
+                "agent.set_model"
+            } else {
+                "agent.set_mode"
+            };
+            let tried = over_console(say, c, session, preview, Some(pane), rx, |session, ask| {
+                with_grant(say, session, ask, (&node, &scope, &[command]), |s| {
+                    s.set_option(&node, &local, model, &id)
+                })
+            });
+            match tried {
+                Tried::Done(Ok(())) => {
+                    if let Some(a) = pane.snapshot.as_mut() {
+                        agora_tui::render::switched(a, model, &id);
+                    }
+                    say.text(key!("tui-option-switched"), &[])
+                }
+                Tried::Done(Err(code)) => {
+                    say.text(key!("tui-send-failed"), &[("code", Arg::Str(code))])
+                }
+                Tried::Declined => String::new(),
+                Tried::Line(l) => l,
+            }
+        }
+        ChatCommand::Prompt if line.is_empty() => String::new(),
+        ChatCommand::Prompt => {
+            let tried = over_console(say, c, session, preview, Some(pane), rx, |session, ask| {
+                with_grant(say, session, ask, (&node, &scope, &TYPING), |s| {
+                    s.prompt(&node, &local, &line)
+                })
+            });
+            match tried {
+                Tried::Done(Ok(())) | Tried::Declined => String::new(),
+                Tried::Done(Err(code)) => {
+                    say.text(key!("tui-send-failed"), &[("code", Arg::Str(code))])
+                }
+                Tried::Line(l) => l,
+            }
+        }
+    };
+}
+
+/// Where a question is asked and its answer read: over the console as a dialog ([`Over`]), or over the whole screen in the earlier
+/// split view ([`Plain`]).
+trait Asker {
+    /// The keys the user types.
+    fn rx(&self) -> &mpsc::Receiver<u8>;
+    /// Shows a question, one string per line.
+    fn show(&mut self, lines: &[String]);
+    /// Writes a screen the question drew itself (the folder picker, the reader of a start request).
+    fn frame(&mut self, bytes: &[u8]);
+    /// Shows `lines` and waits up to `wait` for one key (arrows as `read_key` reads them).
+    fn key(&mut self, lines: &[String], wait: Duration) -> Option<u8> {
+        self.show(lines);
+        read_key(self.rx(), wait)
+    }
+}
+
+/// The text of a question as lines.
+fn lines_of(text: &str) -> Vec<String> {
+    text.split('\n').map(str::to_string).collect()
+}
+
+/// The earlier split view's questions: each takes the whole screen.
+struct Plain<'a>(&'a mpsc::Receiver<u8>);
+
+impl Asker for Plain<'_> {
+    fn rx(&self) -> &mpsc::Receiver<u8> {
+        self.0
+    }
+
+    fn show(&mut self, lines: &[String]) {
+        self.frame(format!("\x1b[H\x1b[2J{}", lines.join("\r\n")).as_bytes());
+    }
+
+    fn frame(&mut self, bytes: &[u8]) {
+        let mut out = std::io::stdout();
+        let _ = out.write_all(bytes);
+        let _ = out.flush();
+    }
+}
+
+/// ADR-0063: a question asked in a box over the console, which stays in view around it (its tree, tabs and inspector as they were).
+struct Over<'a> {
+    say: &'a Say,
+    c: &'a mut Console,
+    chat: Option<&'a ChatPane>,
+    rx: &'a mpsc::Receiver<u8>,
+    /// A screen the question drew itself is on the terminal: the next box is drawn over a cleared one.
+    stale: bool,
+    /// The terminal reports the mouse: while a box is open (when the console holds the mouse), never while a screen the question
+    /// drew itself reads plain bytes.
+    mouse: bool,
+}
+
+impl Asker for Over<'_> {
+    fn rx(&self) -> &mpsc::Receiver<u8> {
+        self.rx
+    }
+
+    fn show(&mut self, lines: &[String]) {
+        if std::mem::take(&mut self.stale) {
+            let _ = self.c.window.invalidate();
+        }
+        if self.c.app.mouse && !self.mouse {
+            mouse_mode(true);
+            self.mouse = true;
+        }
+        let text = |id: &str, args: &[(&str, Arg)]| self.say.text(id, args);
+        let rows = self
+            .c
+            .snapshot
+            .as_ref()
+            .map(|s| app_rows(s, now_ms(), &text))
+            .unwrap_or_default();
+        draw_console(
+            self.say,
+            self.c,
+            &rows,
+            None,
+            self.chat,
+            window_area(),
+            Some(lines),
+        );
+    }
+
+    fn frame(&mut self, bytes: &[u8]) {
+        if std::mem::take(&mut self.mouse) {
+            mouse_mode(false);
+        }
+        self.stale = true;
+        Plain(self.rx).frame(bytes);
+    }
+
+    /// Keys and clicks through the console's own reader: a click on a numbered line is its number, a click outside the box cancels
+    /// (`dialog_key`). A window resized meanwhile gets the box drawn again for its size.
+    fn key(&mut self, lines: &[String], wait: Duration) -> Option<u8> {
+        self.show(lines);
+        let end = Instant::now() + wait;
+        let mut area = window_area();
+        loop {
+            let left = end.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return None;
+            }
+            let events = match self.rx.recv_timeout(left.min(Duration::from_millis(50))) {
+                Ok(b) => {
+                    let mut bytes = vec![b];
+                    while let Ok(b) = self.rx.try_recv() {
+                        bytes.push(b);
+                    }
+                    self.c.parser.push(&bytes)
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => self.c.parser.flush(),
+                Err(mpsc::RecvTimeoutError::Disconnected) => return None,
+            };
+            if let Some(k) = events
+                .iter()
+                .find_map(|e| agora_tui::app::dialog_key(e, area, lines))
+            {
+                return Some(k);
+            }
+            if window_area() != area {
+                area = window_area();
+                let _ = self.c.window.resized();
+                self.show(lines);
+            }
+        }
+    }
+}
+
+/// Asks over the console (`run` shows its questions with the [`Over`] it is given): the panel's terminal is let go meanwhile, the
+/// mouse is reported only while a box is open, and the console is drawn again afterwards. Returns what `run` said.
+#[allow(clippy::too_many_arguments)]
+fn over_console<T>(
+    say: &Say,
+    c: &mut Console,
+    session: &mut Session,
+    preview: &mut Option<Preview>,
+    chat: Option<&ChatPane>,
+    rx: &mpsc::Receiver<u8>,
+    run: impl FnOnce(&mut Session, &mut Over<'_>) -> T,
+) -> T {
+    if let Some(p) = preview.take() {
+        p.close(session);
+    }
+    // The mouse stays as the console had it while a box is open; a screen the question draws itself switches it off.
+    let mouse = c.app.mouse;
+    let mut ask = Over {
+        say,
+        c,
+        chat,
+        rx,
+        stale: false,
+        mouse,
+    };
+    let out = run(session, &mut ask);
+    let stale = ask.stale;
+    mouse_mode(c.app.mouse);
+    if stale {
+        let _ = c.window.invalidate();
+    }
+    out
+}
+
+/// A letter for the selected agent. Returns whether the hub's state will change (a fresh snapshot is wanted).
+#[allow(clippy::too_many_arguments)]
+fn command(
+    say: &Say,
+    session: &mut Session,
+    rx: &mpsc::Receiver<u8>,
+    color: bool,
+    c: &mut Console,
+    preview: &mut Option<Preview>,
+    area: Area,
+    k: char,
+) -> bool {
+    let text = |id: &str, args: &[(&str, Arg)]| say.text(id, args);
+    let Some(s) = c.snapshot.clone() else {
+        return false;
+    };
+    let selected = c.selected.clone();
+    match k {
+        'y' | 'n' => {
+            // ADR-0057: a start request is allowed only once all of it was in view: in the inspector, or in the reader, which y opens.
+            let inspector = c.app.areas(area).inspector;
+            let details = app_details(&s, &selected, inspector.width, inspector.height, &text);
+            if let Some((id, false)) = details.start.clone() {
+                if k == 'y' && !c.read_whole.contains(&id) {
+                    if let Some(a) = s.approvals.iter().find(|a| a.approval_id == id).cloned() {
+                        let read = over_console(say, c, session, preview, None, rx, |_, ask| {
+                            read_start(&a, ask, &text)
+                        });
+                        if read {
+                            c.read_whole.insert(id);
+                            c.notice = say.text(key!("tui-app-start-read"), &[]);
+                        } else {
+                            c.notice = say.text(key!("tui-split-read-first"), &[]);
+                        }
+                    }
+                    return false;
+                }
+            }
+            if let Some((id, true)) = details.start.clone() {
+                c.read_whole.insert(id);
+            }
+            // Any other request is answered only once it was in view: in the inspector, in the chat tab that shows it, or else in a
+            // box that shows it now and takes the answer.
+            let mut allow = k == 'y';
+            let waiting = agora_tui::client::answered_approval(&s, Some(&selected)).cloned();
+            if let (Some(a), None) = (waiting, details.start.as_ref()) {
+                let in_view = (inspector.width > 0
+                    && details.lines.len() <= usize::from(inspector.height))
+                    || c.shown_request.as_deref() == Some(a.approval_id.as_str());
+                if !in_view {
+                    let mut lines = vec![say.text(key!("tui-attention"), &[])];
+                    lines.push(plain(
+                        format!(
+                            "{}: {} {}",
+                            agora_tui::split::agent_label(&s, &a.agent_id),
+                            a.action,
+                            a.detail
+                        )
+                        .trim(),
+                    ));
+                    lines.push(String::new());
+                    lines.push(say.text(key!("tui-request-answer"), &[]));
+                    let key = over_console(say, c, session, preview, None, rx, |_, ask| {
+                        ask.key(&lines, Duration::from_secs(120))
+                    });
+                    match key {
+                        Some(b'y') => allow = true,
+                        Some(b'n') => allow = false,
+                        _ => {
+                            c.notice = String::new();
+                            return false;
+                        }
+                    }
+                }
+            }
+            c.shown_request = None;
+            c.notice = answer(say, session, &s, &selected, allow);
+            true
+        }
+        // ADR-0061: ask the person's other devices to approve this terminal (a), or approve one that waits (v).
+        'a' => {
+            c.notice = ask_approval(say, session);
+            false
+        }
+        'v' => {
+            let snapshot = c.snapshot.clone();
+            c.notice = over_console(say, c, session, preview, None, rx, |session, ask| {
+                approve_device(say, session, snapshot.as_ref(), ask)
+            });
+            true
+        }
+        'f' => {
+            c.notice = over_console(say, c, session, preview, None, rx, |session, ask| {
+                start_in_folder(say, session, &s, &selected, ask, color)
+            });
+            true
+        }
+        's' => {
+            c.notice = over_console(say, c, session, preview, None, rx, |session, ask| {
+                start(say, session, &s, &selected, ask)
+            });
+            true
+        }
+        // ADR-0060: an agent that stopped with its machine comes back (u) or starts again in its folder (U).
+        'u' | 'U' => {
+            let local = selected
+                .split_once('/')
+                .map_or(selected.as_str(), |(_, l)| l);
+            let agent = [("agent", Arg::Str(local.to_string()))];
+            let byte = if k == 'u' { b'u' } else { b'U' };
+            c.notice = match resume_key(&s, &selected, byte, &mut c.armed, Instant::now()) {
+                ResumeKey::NotInterrupted => say.text(key!("tui-resume-not-interrupted"), &[]),
+                ResumeKey::CannotResume => say.text(key!("tui-resume-cannot"), &[]),
+                ResumeKey::StillRunning => say.text(key!("tui-resume-still-running"), &[]),
+                ResumeKey::Confirm { fresh: false } => say.text(key!("tui-resume-confirm"), &agent),
+                ResumeKey::Confirm { fresh: true } => say.text(key!("tui-again-confirm"), &agent),
+                ResumeKey::Go { fresh } => resume(say, session, &s, &selected, fresh),
+            };
+            true
+        }
+        'd' if !selected.is_empty() => {
+            // A closed agent leaves every client's list; a running one is stopped first (x).
+            let running = s.agents.iter().any(|a| a.agent_id == selected && a.running);
+            c.notice = if running {
+                say.text(key!("tui-forget-running"), &[])
+            } else {
+                forget_notice(say, session.forget_agent(&selected))
+            };
+            true
+        }
+        'x' if !selected.is_empty() => {
+            let (node, local) = selected.split_once('/').unwrap_or(("", &selected));
+            let (node, local) = (node.to_string(), local.to_string());
+            let scope = format!("agent:{local}");
+            // ADR-0057: an agent that started helpers asks whether they stop too; yes unless the user says no.
+            let helpers = s
+                .agents
+                .iter()
+                .filter(|a| a.running && a.parent_agent_id == selected)
+                .count();
+            c.notice = over_console(say, c, session, preview, None, rx, |session, ask| {
+                let with_helpers = helpers == 0 || {
+                    let question = say.text(
+                        key!("tui-stop-helpers"),
+                        &[("count", Arg::Num(helpers as i64))],
+                    );
+                    ask.key(&lines_of(&question), Duration::from_secs(30)) != Some(b'n')
+                };
+                match with_grant(say, session, ask, (&node, &scope, &TYPING), |s| {
+                    s.stop_agent_with(&node, &local, helpers > 0 && with_helpers)
+                }) {
+                    Tried::Done(Ok(())) => say.text(key!("tui-stopped"), &[]),
+                    Tried::Done(Err(code)) => {
+                        say.text(key!("tui-stop-failed"), &[("code", Arg::Str(code))])
+                    }
+                    Tried::Declined => String::new(),
+                    Tried::Line(l) => l,
+                }
+            });
+            true
+        }
+        'c' => {
+            if let Some(cmd) = c.note.copy.clone() {
+                let mut out = std::io::stdout();
+                let _ = out.write_all(&agora_tui::clip::osc52(&cmd));
+                let _ = out.flush();
+                c.notice = say.text(key!("tui-copied"), &[]);
+            }
+            false
+        }
+        _ => false,
     }
 }
 
@@ -1814,5 +2873,36 @@ mod forget_tests {
             .to_info();
         let line = forget_notice(&tr, Err(untrusted));
         assert!(!line.contains(['\u{1b}', '\n', '\u{202e}']));
+    }
+
+    #[test]
+    fn an_agent_that_waits_counts_once_in_the_footer() {
+        let blocked = |id: &str| agora_protocol::v1::AgentSnapshot {
+            agent_id: id.into(),
+            running: true,
+            state: agora_protocol::v1::AgentState::Blocked as i32,
+            ..Default::default()
+        };
+        let request = |agent: &str| agora_protocol::v1::ApprovalSnapshot {
+            agent_id: agent.into(),
+            ..Default::default()
+        };
+        // One agent, blocked and with its request: one thing needs the user (the review saw "2 need you").
+        let snap = Snapshot {
+            agents: vec![blocked("n/agent-1")],
+            approvals: vec![request("n/agent-1")],
+            ..Default::default()
+        };
+        assert_eq!(needs_you_count(&snap), 1);
+        // Two agents (one with two requests), and a request of no agent: three.
+        let snap = Snapshot {
+            agents: vec![blocked("n/agent-1")],
+            approvals: vec![request("n/agent-2"), request("n/agent-2"), request("")],
+            ..Default::default()
+        };
+        assert_eq!(needs_you_count(&snap), 3);
+        // Only its own request is the chat tab's to answer.
+        assert!(waiting_for(&snap, "n/agent-1").is_none());
+        assert!(waiting_for(&snap, "n/agent-2").is_some());
     }
 }
