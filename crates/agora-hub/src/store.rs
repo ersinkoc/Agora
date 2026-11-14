@@ -103,6 +103,17 @@ impl SqliteStore {
         Self::init(Connection::open_in_memory()?)
     }
 
+    /// The total size of the stored payloads after `after`, without reading them: SQLite answers `length()` of a blob from the
+    /// record header (a replay decides from this whether to read the events at all, before any is copied into memory).
+    pub fn payload_bytes_after(&self, after: u64) -> Result<u64, StoreError> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare_cached(
+            "SELECT COALESCE(SUM(length(payload)), 0) FROM events WHERE pos > ?1",
+        )?;
+        let total: i64 = stmt.query_row(params![to_i64(after)?], |r| r.get(0))?;
+        Ok(to_u64(total))
+    }
+
     fn init(conn: Connection) -> Result<Self, StoreError> {
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
         if version > SCHEMA_VERSION {
@@ -391,6 +402,60 @@ impl SqliteStore {
             },
             None => Append::Applied { pos },
         })
+    }
+
+    /// The hub's own events, numbered from `first_seq`, and one setting, in one transaction: all of them are stored or none is (a
+    /// board change and its audit events, #517 review). Refused when the producer's numbering is not at `first_seq - 1`. Returns
+    /// each event's position, in order.
+    pub fn append_batch_with_setting(
+        &self,
+        producer: &str,
+        first_seq: u64,
+        events: &[(u64, Vec<u8>)],
+        setting: Option<(&str, &[u8])>,
+    ) -> Result<Vec<u64>, StoreError> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction()?;
+        let last: i64 = tx
+            .query_row(
+                "SELECT last_seq FROM producers WHERE producer = ?1",
+                [producer],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(0);
+        if to_u64(last).checked_add(1) != Some(first_seq) {
+            return Err(StoreError(format!(
+                "{producer} is numbered at {last}, not {}",
+                first_seq.saturating_sub(1)
+            )));
+        }
+        let mut positions = Vec::with_capacity(events.len());
+        let mut seq = first_seq;
+        for (at_ms, payload) in events {
+            tx.execute(
+                "INSERT INTO events (producer, seq, at_ms, payload) VALUES (?1, ?2, ?3, ?4)",
+                params![producer, to_i64(seq)?, to_i64(*at_ms)?, payload],
+            )?;
+            positions.push(to_u64(tx.last_insert_rowid()));
+            seq += 1;
+        }
+        if !events.is_empty() {
+            tx.execute(
+                "INSERT INTO producers (producer, last_seq) VALUES (?1, ?2)
+                 ON CONFLICT(producer) DO UPDATE SET last_seq = excluded.last_seq",
+                params![producer, to_i64(seq - 1)?],
+            )?;
+        }
+        if let Some((key, value)) = setting {
+            tx.execute(
+                "INSERT INTO settings (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![key, value],
+            )?;
+        }
+        tx.commit()?;
+        Ok(positions)
     }
 
     /// Online, consistent backup into a new file (`VACUUM INTO` takes a snapshot while writers keep working).
