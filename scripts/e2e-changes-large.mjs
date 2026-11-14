@@ -70,6 +70,15 @@ try {
   await body.evaluate((el) => { el.scrollTop = el.scrollHeight; });
   await page.getByText('const v10000 = 10000 + 1;', { exact: true }).waitFor();
   check(true, 'scrolling to the end shows the last line');
+  const wrapButton = page.getByRole('button', { name: 'Wrap lines', exact: true });
+  check(await wrapButton.isDisabled() && !!(await wrapButton.getAttribute('title')), 'Wrap is off in the windowed view, and says why');
+  // A larger text scale (as the Large text theme sets on the root) makes every row taller; the window follows, nothing is clipped.
+  await page.evaluate(() => { document.documentElement.style.fontSize = '125%'; });
+  await page.waitForTimeout(400);
+  const row = await body.locator('[data-windowed] > div > div').last().evaluate((el) => ({ h: el.getBoundingClientRect().height, inner: el.firstElementChild?.getBoundingClientRect().height ?? 0 }));
+  check(Math.abs(row.h - 25) < 0.6 && row.inner <= row.h + 0.6, `at a 125% text scale a windowed row is ${row.h} px and holds its line (${row.inner} px)`);
+  await page.evaluate(() => { document.documentElement.style.fontSize = ''; });
+  await page.waitForTimeout(300);
   const split = await longest('side by side', () => page.getByRole('radio', { name: 'Side by side' }).click());
   // The window itself measures 0 ms; the click also removes the ROW_LIMIT rows drawn before it at once, which on a busy machine has
   // measured up to about 51 ms (one run in six). Before the window: about 1 500 ms. Hence twice the budget here, not the budget itself.

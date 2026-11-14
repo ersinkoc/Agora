@@ -222,6 +222,7 @@ changes-layout = Görünüm
 changes-layout-unified = Tek sütun
 changes-layout-split = Yan yana
 changes-wrap = Satırları kaydır
+changes-wrap-long = Tamamı gösterilen uzun bir değişiklik her satırı tek sıra olarak çizilir, bu yüzden satır kaydırılmaz; yana kaydırın.
 changes-refresh = Değişiklikleri yeniden oku
 changes-list = Değişen dosyalar
 changes-top-folder = Üst klasör
@@ -245,7 +246,8 @@ changes-retry = Yeniden dene
 changes-stale = Değişiklikler okunduktan sonra dosya değişti, bu yüzden değişmeyen satırlar gösterilmiyor. Değişiklikleri yeniden okuyun.
 changes-truncated = Değişiklikler 512 KiB'tan büyük olduğu için yalnızca ilk kısmı okundu. Listedeki son dosya yarıda kesik.
 changes-truncated-count = Bu değişiklikler 512 KiB'tan büyük, bu yüzden yalnızca ilk { $count } dosya okundu. Makine { $total } değişen dosya sayıyor: en az { $min } tanesi burada listelenmiyor. Listedeki son dosya kesik.
-files-truncated = Değişiklikler 512 KiB'tan büyük, bu yüzden kesimden sonraki dosyalarda değişiklik işareti yok. Makine { $total } değişen dosya sayıyor; { $count } tanesi işaretli.
+files-truncated = Değişiklikler 512 KiB'tan büyük, bu yüzden kesimden sonraki dosyalarda değişiklik işareti olmayabilir.
+files-truncated-count = Değişiklikler 512 KiB'tan büyük, bu yüzden kesimden sonraki dosyalarda değişiklik işareti yok. Makine { $total } değişen dosya sayıyor; { $count } tanesi işaretli.
 changes-partial = Bu dosya yarıda kesik: değişiklikler tek seferde okunamayacak kadar büyüktü.
 changes-eol = { $count } değişen satır yalnızca satır sonunda (LF veya CRLF) farklı; metin aynı.
 changes-load-file = Yalnızca bu dosyayı oku
@@ -312,8 +314,36 @@ history-failed = Geçmiş o makineden okunamadı.
 history-no-subject = (mesaj yok)
 chat-empty = Henüz bir şey söylenmedi. Aşağıdan ona ne yapacağını söyleyin.
 chat-log = Konuşma
-chat-tool = Araç
 chat-plan = Plan
+chat-plan-steps =
+    { $count ->
+        [one] Plan · { $count } adım
+       *[other] Plan · { $count } adım
+    }
+chat-plan-earlier =
+    { $count ->
+        [one] Önceki plan · { $count } adım
+       *[other] Önceki plan · { $count } adım
+    }
+chat-steps-earlier =
+    { $count ->
+        [one] { $count } önceki adım
+       *[other] { $count } önceki adım
+    }
+chat-working = Çalışıyor…
+chat-copy = Kopyala
+chat-copied = Kopyalandı
+# Ajanın yapmak istediği iş, kendi başlığını vermediğinde. Nötr: iş sürüyor ya da reddedilmiş olabilir.
+tool-read = Okuma
+tool-edit = Düzenleme
+tool-run = Komut
+tool-search = Arama
+tool-fetch = Web sayfası
+tool-delete = Silme
+tool-move = Taşıma
+tool-think = Düşünme
+tool-other = Adım
+approval-full-request = İsteğin tamamı
 notice-adapter-turn_failed = Ajanın sırası başarısız oldu (hata { $rpc_code }). Sağlayıcısı isteği reddetmiş olabilir; yeniden deneyin ya da başka bir model seçin. { $stderr_tail }
 notice-adapter-turn_stopped = Ajan sırasını kendisi bitirdi ({ $stop_reason }).
 notice-adapter-turn_empty = Ajan hiçbir şey söylemeden sırasını bitirdi. Sağlayıcısı isteği reddetmiş olabilir. { $stderr_tail }

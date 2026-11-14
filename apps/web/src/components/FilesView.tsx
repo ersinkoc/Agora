@@ -96,7 +96,10 @@ export function FilesView({ files, load, changed, compact = false }: {
   const treeRef = useRef<HTMLDivElement>(null);
   const [cursor, setCursor] = useState<string | undefined>();
   useLayoutEffect(() => {
-    const items = [...(treeRef.current?.querySelectorAll<HTMLElement>('[role=treeitem]') ?? [])];
+    // Only items that can take the focus: a deleted file in the flat list is a disabled button, and a Tab stop there would be lost.
+    const all = [...(treeRef.current?.querySelectorAll<HTMLElement>('[role=treeitem]') ?? [])];
+    for (const el of all) el.tabIndex = -1;
+    const items = all.filter((el) => !el.hasAttribute('disabled'));
     const target = items.find((el) => el.dataset.path === cursor) ?? items.find((el) => el.getAttribute('aria-selected') === 'true') ?? items[0];
     for (const el of items) el.tabIndex = el === target ? 0 : -1;
   });
@@ -112,7 +115,10 @@ export function FilesView({ files, load, changed, compact = false }: {
     else if (e.key === 'Home') go(0);
     else if (e.key === 'End') go(items.length - 1);
     else if (e.key === 'ArrowRight') {
-      if (el.getAttribute('aria-expanded') === 'false') { e.preventDefault(); el.click(); } else if (el.getAttribute('aria-expanded') === 'true') go(at + 1);
+      // Into an open folder only when its first child is shown (a folder still listing, empty or failed has none: stay).
+      if (el.getAttribute('aria-expanded') === 'false') { e.preventDefault(); el.click(); }
+      else if (el.getAttribute('aria-expanded') === 'true' && Number(items[at + 1]?.getAttribute('aria-level') ?? 0) === level + 1) go(at + 1);
+      else if (el.getAttribute('aria-expanded') === 'true') e.preventDefault();
     } else if (e.key === 'ArrowLeft') {
       if (el.getAttribute('aria-expanded') === 'true') { e.preventDefault(); el.click(); return; }
       for (let i = at - 1; i >= 0; i--) if (Number(items[i]?.getAttribute('aria-level') ?? 1) < level) { go(i); return; }
@@ -223,7 +229,7 @@ export function FilesView({ files, load, changed, compact = false }: {
           </button>}
           <button type="button" className="ide-iconbtn" onClick={() => setRound((r) => r + 1)} aria-label={t('files-refresh')} title={t('files-refresh')}><Icon name="restore" /></button>
         </div>
-        {cut && <p role="status" className="m-0 flex-none border-b border-line bg-needs-you/10 px-3 py-1.5 text-xs text-ink">{t('files-truncated', { count: status.size, total: Math.max(changed ?? 0, status.size) })}</p>}
+        {cut && <p role="status" className="m-0 flex-none border-b border-line bg-needs-you/10 px-3 py-1.5 text-xs text-ink">{changed !== undefined && changed > status.size ? t('files-truncated-count', { count: status.size, total: changed }) : t('files-truncated')}</p>}
         <div ref={treeRef} className="min-h-0 flex-1 overflow-auto py-1" role="tree" aria-label={t('files-tree')} onKeyDown={onTreeKey}
           onFocus={(e) => { const p = (e.target as HTMLElement).dataset.path; if (p !== undefined) setCursor(p); }}>
           {flat ? (

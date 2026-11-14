@@ -315,39 +315,9 @@ fn status_reply(
         let info = m.agent_info(conn.agent())?;
         (status, info.project.clone(), info.node.clone())
     };
-    let link = remote.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    // `Some(None)`: the hub says the project lives on this machine only. `None`: the hub could not be asked.
-    let hub: Option<Option<Value>> = match link {
-        None => None,
-        Some(_) if matches!(shares.get(&project), Some((false, at)) if at.elapsed() < LOCAL_FOR) => {
-            Some(None)
-        }
-        Some(link) => {
-            let (tx, rx) = std::sync::mpsc::channel();
-            let asked = Instant::now();
-            link.board(
-                conn.agent().as_str(),
-                &project,
-                "workspace_status",
-                "{}",
-                Box::new(move |r| {
-                    let _ = tx.send(r);
-                }),
-            );
-            match rx.recv_timeout(STATUS_WAIT) {
-                Ok(Ok(r)) if r.shared => serde_json::from_str::<Value>(&r.result_json)
-                    .ok()
-                    .filter(|v| v.get("isError").and_then(Value::as_bool) != Some(true))
-                    .and_then(|v| agora_mesh::mcp::tool_result_value(&v))
-                    .map(Some),
-                Ok(Ok(_)) => {
-                    shares.set_not_shared_since(&project, asked);
-                    Some(None)
-                }
-                _ => None,
-            }
-        }
-    };
+    let hub = hub_status(conn.agent(), std::slice::from_ref(&project), remote, shares)
+        .pop()
+        .flatten();
     match hub {
         Some(Some(h)) => agora_mesh::awareness::merge_shared(&mut status, &h, &node),
         Some(None) => {
@@ -359,6 +329,132 @@ fn status_reply(
     Some(Message::Response {
         id,
         result: agora_mesh::mcp::ok_tool_result(&status),
+    })
+}
+
+/// The hub's `workspace_status` view of each of `projects` (ADR-0039), asked for all at once and waited on for at most
+/// [`STATUS_WAIT`] in total, in the order of `projects`. `Some(Some(v))`: the project is shared and `v` is the hub's answer;
+/// `Some(None)`: the hub says the project lives on this machine only (complete); `None`: the hub could not be asked (no hub,
+/// `mesh.remote = false`, an error, or no answer in time). The hub answers only for projects this node takes part in.
+fn hub_status(
+    agent: &AgentId,
+    projects: &[String],
+    remote: &RemoteSlot,
+    shares: &Shares,
+) -> Vec<Option<Option<Value>>> {
+    let mut out: Vec<Option<Option<Value>>> = vec![None; projects.len()];
+    let Some(link) = remote.lock().unwrap_or_else(|e| e.into_inner()).clone() else {
+        return out;
+    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    let asked = Instant::now();
+    let mut waiting = 0usize;
+    for (i, project) in projects.iter().enumerate() {
+        if matches!(shares.get(project), Some((false, at)) if at.elapsed() < LOCAL_FOR) {
+            out[i] = Some(None);
+            continue;
+        }
+        let tx = tx.clone();
+        waiting += 1;
+        link.board(
+            agent.as_str(),
+            project,
+            "workspace_status",
+            "{}",
+            Box::new(move |r| {
+                let _ = tx.send((i, r));
+            }),
+        );
+    }
+    // A link that drops a callback without calling it ends the wait at once, as when nothing is left to answer.
+    drop(tx);
+    let deadline = asked + STATUS_WAIT;
+    while waiting > 0 {
+        let Ok((i, r)) = rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) else {
+            break;
+        };
+        waiting -= 1;
+        out[i] = match r {
+            Ok(r) if r.shared => serde_json::from_str::<Value>(&r.result_json)
+                .ok()
+                .filter(|v| v.get("isError").and_then(Value::as_bool) != Some(true))
+                .and_then(|v| agora_mesh::mcp::tool_result_value(&v))
+                .map(Some),
+            Ok(_) => {
+                shares.set_not_shared_since(&projects[i], asked);
+                Some(None)
+            }
+            Err(_) => None,
+        };
+    }
+    out
+}
+
+/// At most this many projects are asked about in one `agents_list`; rows of any others stay `partial`.
+const LIST_PROJECTS: usize = 16;
+
+/// `agents_list`: this node's broker lists its own agents; for each project in the list (the one asked for, or every project of
+/// the listed agents) that is shared (ADR-0039) the hub adds the project's agents on other online machines, as `workspace_status`
+/// does. A project the hub could not be asked about keeps its rows `partial: true` (nodes are autonomous: the list still answers,
+/// from this node alone). `None` when the line is not that call (or the caller is not registered: the broker answers).
+fn list_reply(
+    conn: &McpConnection,
+    line: &str,
+    mesh: &Arc<Mutex<Mesh>>,
+    remote: &RemoteSlot,
+    shares: &Shares,
+) -> Option<Message> {
+    if !conn.initialized() {
+        return None;
+    }
+    let Ok(Message::Request { id, method, params }) = agora_protocol::jsonrpc::parse_line(line)
+    else {
+        return None;
+    };
+    let args = params.get("arguments").cloned().unwrap_or(json!({}));
+    if method != "tools/call"
+        || params.get("name").and_then(Value::as_str) != Some("agents_list")
+        || !args.is_object()
+    {
+        return None;
+    }
+    let filter = args.get("project").and_then(Value::as_str);
+    let (mut rows, node) = {
+        let m = mesh.lock().unwrap_or_else(|e| e.into_inner());
+        let node = m.agent_info(conn.agent())?.node.clone();
+        let now = now_ms();
+        let rows: Vec<Value> = m
+            .agents_list(filter)
+            .iter()
+            .map(|a| agora_mesh::awareness::list_row(&m, a, now))
+            .collect();
+        (rows, node)
+    };
+    let mut projects: Vec<String> = match filter {
+        Some(p) => vec![p.to_string()],
+        None => rows
+            .iter()
+            .filter_map(|r| r["project"].as_str().map(str::to_string))
+            .collect(),
+    };
+    projects.sort();
+    projects.dedup();
+    projects.truncate(LIST_PROJECTS);
+    for (project, hub) in projects
+        .iter()
+        .zip(hub_status(conn.agent(), &projects, remote, shares))
+    {
+        match hub {
+            Some(Some(h)) => {
+                agora_mesh::awareness::merge_shared_list(&mut rows, &h, project, &node)
+            }
+            Some(None) => agora_mesh::awareness::list_complete(&mut rows, project),
+            None => {}
+        }
+    }
+    Some(Message::Response {
+        id,
+        result: agora_mesh::mcp::ok_tool_result(&json!(rows)),
     })
 }
 
@@ -1092,7 +1188,9 @@ fn serve(
                         continue;
                     }
                 }
-                if let Some(msg) = status_reply(&conn, &text, mesh, remote, shares) {
+                if let Some(msg) = status_reply(&conn, &text, mesh, remote, shares)
+                    .or_else(|| list_reply(&conn, &text, mesh, remote, shares))
+                {
                     if send(&mut writer, &msg).is_err() {
                         break;
                     }

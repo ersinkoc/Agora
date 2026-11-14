@@ -138,6 +138,8 @@ pub struct Session {
     next_stream: u32,
     /// An event arrived while a command was waiting for its answer.
     changed: bool,
+    /// A request for the user's answer arrived since [`Session::take_asked`] was last called (a full-screen view says so).
+    asked: bool,
     /// A snapshot that arrived while something else was waiting (the hub's first one comes right after subscribing, often while
     /// the device registration waits for its answer): `next` hands it out first, so it is never lost.
     snapshot: Option<Box<Snapshot>>,
@@ -186,6 +188,7 @@ impl Session {
             term_frames: std::collections::VecDeque::new(),
             next_stream: agora_protocol::frame::FIRST_DYNAMIC_STREAM,
             changed: false,
+            asked: false,
             snapshot: None,
             grant_wanted: false,
         })
@@ -203,6 +206,7 @@ impl Session {
         }
         let conn = &mut self.conn;
         let queue = &mut self.term_frames;
+        let asked = &mut self.asked;
         self.rt.block_on(async {
             match tokio::time::timeout(wait, conn.recv()).await {
                 Err(_) => Update::Quiet,
@@ -220,12 +224,29 @@ impl Session {
                 Ok(Ok(Some(f)))
                     if f.stream_id == STREAM_EVENTS && f.kind == kinds::POSITIONED_EVENT =>
                 {
+                    if agora_protocol::v1::PositionedEvent::decode(f.payload.as_slice())
+                        .ok()
+                        .and_then(|p| p.event)
+                        .is_some_and(|e| {
+                            matches!(
+                                e.body,
+                                Some(agora_protocol::v1::event::Body::ApprovalRequested(_))
+                            )
+                        })
+                    {
+                        *asked = true;
+                    }
                     Update::Changed
                 }
                 Ok(Ok(Some(_))) => Update::Quiet,
                 Ok(_) => Update::Closed,
             }
         })
+    }
+
+    /// Whether a request for the user's answer arrived since the last call (then cleared).
+    pub fn take_asked(&mut self) -> bool {
+        std::mem::take(&mut self.asked)
     }
 
     /// Runs a command on a machine through the hub (ADR-0029) and waits for its answer. `Err` carries the error code the machine or
@@ -594,6 +615,84 @@ impl Session {
         }
     }
 
+    /// What an agent changed, as a unified diff (what the web's review screen reads): its folder's (`workspace.query` "diff",
+    /// ADR-0053) or its worktree's (`git.diff`). Ids are the node's own (without the `node/` prefix).
+    pub fn diff(&mut self, node: &str, target: &Place) -> Result<String, String> {
+        let command = match target {
+            Place::Folder(id) => {
+                command_request::Command::WorkspaceQuery(agora_protocol::v1::WorkspaceQuery {
+                    workspace_id: id.clone(),
+                    operation: "diff".into(),
+                    ..Default::default()
+                })
+            }
+            Place::Worktree(id) => command_request::Command::GitDiff(agora_protocol::v1::GitDiff {
+                worktree_id: id.clone(),
+                path: String::new(),
+            }),
+        };
+        let ok = self.command_ok(node, command, Duration::from_secs(30))?;
+        match ok.result {
+            Some(command_ok::Result::GitDiff(d)) => Ok(d.diff),
+            _ => Err("protocol.invalid_message".into()),
+        }
+    }
+
+    /// The entries of `path` (relative, empty for the top) in an agent's folder or worktree, as the web's file browser lists them.
+    pub fn files_list(
+        &mut self,
+        node: &str,
+        place: &Place,
+        path: &str,
+    ) -> Result<Vec<agora_protocol::v1::FileEntry>, String> {
+        let command = match place {
+            Place::Folder(id) => {
+                command_request::Command::WorkspaceQuery(agora_protocol::v1::WorkspaceQuery {
+                    workspace_id: id.clone(),
+                    operation: "list".into(),
+                    path: path.to_string(),
+                    ..Default::default()
+                })
+            }
+            Place::Worktree(id) => {
+                command_request::Command::FilesList(agora_protocol::v1::FilesList {
+                    worktree_id: id.clone(),
+                    path: path.to_string(),
+                })
+            }
+        };
+        let ok = self.command_ok(node, command, Duration::from_secs(30))?;
+        match ok.result {
+            Some(command_ok::Result::FilesList(l)) => Ok(l.entries),
+            _ => Err("protocol.invalid_message".into()),
+        }
+    }
+
+    /// The bytes of the file at `path` in an agent's folder or worktree.
+    pub fn files_read(&mut self, node: &str, place: &Place, path: &str) -> Result<Vec<u8>, String> {
+        let command = match place {
+            Place::Folder(id) => {
+                command_request::Command::WorkspaceQuery(agora_protocol::v1::WorkspaceQuery {
+                    workspace_id: id.clone(),
+                    operation: "read".into(),
+                    path: path.to_string(),
+                    ..Default::default()
+                })
+            }
+            Place::Worktree(id) => {
+                command_request::Command::FilesRead(agora_protocol::v1::FilesRead {
+                    worktree_id: id.clone(),
+                    path: path.to_string(),
+                })
+            }
+        };
+        let ok = self.command_ok(node, command, Duration::from_secs(30))?;
+        match ok.result {
+            Some(command_ok::Result::FilesRead(r)) => Ok(r.data),
+            _ => Err("protocol.invalid_message".into()),
+        }
+    }
+
     /// What `node` makes of a folder before an agent starts there (ADR-0052 `directory.inspect`): its canonical path and project.
     pub fn inspect_folder(
         &mut self,
@@ -940,6 +1039,36 @@ pub fn answered_approval<'a>(
 
 fn refused_for_grant(r: &CommandResponse) -> bool {
     matches!(&r.result, Some(command_response::Result::Err(e)) if e.code == "approval.grant_required")
+}
+
+/// Where an agent works, for asking its node about it ([`Session::diff`], [`Session::files_list`], [`Session::files_read`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Place {
+    /// A folder the agent was started in (a registered workspace), by the node's id for it.
+    Folder(String),
+    /// The agent's worktree, by the node's id for it.
+    Worktree(String),
+}
+
+/// Where to ask about `agent`'s work (its changes, its files), as the web does: the folder it is bound to when there is one, else its worktree; the
+/// machine and the node's own id. `None` when it has neither.
+pub fn place_of(snapshot: &Snapshot, agent: &str) -> Option<(String, Place)> {
+    let a = snapshot.agents.iter().find(|a| a.agent_id == agent)?;
+    let local = |id: &str| id.split_once('/').map_or(id, |(_, l)| l).to_string();
+    if let Some(w) = snapshot
+        .agent_workspaces
+        .iter()
+        .find(|b| b.agent_id == agent)
+        .filter(|b| {
+            snapshot
+                .workspaces
+                .iter()
+                .any(|w| w.workspace_id == b.workspace_id)
+        })
+    {
+        return Some((a.node_id.clone(), Place::Folder(local(&w.workspace_id))));
+    }
+    (!a.worktree_id.is_empty()).then(|| (a.node_id.clone(), Place::Worktree(local(&a.worktree_id))))
 }
 
 /// What a watched terminal said.

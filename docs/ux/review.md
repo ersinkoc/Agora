@@ -38,7 +38,8 @@ The review screen opens from an agent's "files changed" chip, from Changes in De
   on its own (`git.diff` with a path). Naming every file after the cut needs the node's list of paths (ADR pending, option A of
   the web review follow-up).
 - Very long files are drawn in parts ("Show all N lines"). Shown whole, past 3 000 rows, only the rows near the view are drawn,
-  one line high each and unwrapped (scroll sideways), so neither "Show all" nor side by side holds the page.
+  one line high each (1.25 rem, so they follow the text size) and unwrapped (scroll sideways; Wrap is off there), so neither
+  "Show all" nor side by side holds the page.
 - Lines that changed only from LF to CRLF (or back) look the same on both sides; a note says how many there are.
 
 Syntax colours (highlight.js, loaded on demand; about 25 languages by file name) colour each diff line on its own (in
