@@ -295,6 +295,12 @@ fn the_hub_comes_back_from_an_older_backup_and_every_machine_brings_its_present(
         "history recorded as lost although the machines still held it: {lost:?}"
     );
     let whole = restarted.elapsed();
+    // The recovery target the maintainer approved (backup-restore.md): the present is whole within 5 s of the hub starting.
+    assert!(
+        whole <= Duration::from_secs(5),
+        "the restored hub's present took {} ms, over the 5 s recovery target",
+        whole.as_millis()
+    );
 
     // The machine enrolled after the backup is refused: its certificate is unknown to the restored hub (it fails closed). It has to
     // be enrolled again, and then it connects.
