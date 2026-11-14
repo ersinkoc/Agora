@@ -65,7 +65,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   chatOf?: (agent: AgentTileModel) => ChatSource | undefined;
   sendPrompt?: (agent: AgentTileModel, text: string) => Promise<boolean>;
   chooseOption?: (agentKey: string, kind: 'mode' | 'model', id: string) => Promise<boolean>;
-  loadDiff?: (agent: AgentTileModel) => Promise<string>;
+  loadDiff?: (agent: AgentTileModel, path?: string) => Promise<string>;
   loadHistory?: (agent: AgentTileModel) => Promise<CommitItem[]>;
   filesOf?: (agent: AgentTileModel) => WorkspaceFiles | undefined;
   onOpen: (agentId: string) => void;
@@ -344,7 +344,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
       {start}
       {history && loadHistory && find(history) && <HistoryDialog agent={find(history) as AgentTileModel} load={loadHistory} onClose={() => setHistory(undefined)} />}
       {browsing && filesOf && find(browsing) && filesOf(find(browsing) as AgentTileModel) && <FilesDialog agent={find(browsing) as AgentTileModel} files={filesOf(find(browsing) as AgentTileModel) as WorkspaceFiles} onClose={() => setBrowsing(undefined)} />}
-      {reviewing && loadDiff && find(reviewing) && <DiffDialog agent={find(reviewing) as AgentTileModel} load={loadDiff} onClose={() => setReviewing(undefined)} />}
+      {reviewing && loadDiff && find(reviewing) && <DiffDialog agent={find(reviewing) as AgentTileModel} load={loadDiff} read={filesOf?.(find(reviewing) as AgentTileModel)?.read} onClose={() => setReviewing(undefined)} />}
     </div>
   );
 }

@@ -199,6 +199,58 @@ changes-files = { $count ->
 diff-title = What { $name } changed
 diff-close = Close
 diff-failed = Could not read the changes from that machine.
+changes-summary = { $count ->
+    [one] 1 file
+   *[other] { $count } files
+}
+changes-filter = Show
+changes-filter-all = All
+changes-filter-modified = Changed
+changes-filter-added = Added
+changes-filter-deleted = Deleted
+changes-filter-renamed = Renamed
+changes-status-modified = Changed
+changes-status-added = Added
+changes-status-deleted = Deleted
+changes-status-renamed = Renamed
+changes-badge-modified = M
+changes-badge-added = A
+changes-badge-deleted = D
+changes-badge-renamed = R
+changes-search = Filter by name
+changes-layout = Layout
+changes-layout-unified = Unified
+changes-layout-split = Side by side
+changes-wrap = Wrap lines
+changes-refresh = Read the changes again
+changes-list = Changed files
+changes-top-folder = Top folder
+changes-no-match = No changed file matches.
+changes-pick = Pick a file on the left to see what changed in it.
+changes-renamed-from = was { $name }
+changes-whole-file = Whole file
+changes-prev = Previous file
+changes-next = Next file
+changes-keys = next and previous file
+changes-binary = This file is not text, so its changes are not shown.
+changes-no-lines = Only the name or the permissions of this file changed.
+changes-no-eol = No line break at the end of the file
+changes-gap = { $count ->
+    [one] Show 1 unchanged line
+   *[other] Show { $count } unchanged lines
+}
+changes-gap-rest = Show the rest of the file
+changes-gap-failed = Could not read this file to show the unchanged lines.
+changes-retry = Try again
+changes-stale = The file has changed since these changes were read, so the unchanged lines are not shown. Read the changes again.
+changes-truncated = These changes are larger than 512 KiB, so only the first part was read. The last file in the list is cut off.
+changes-partial = This file is cut off: the changes were too large to read at once.
+changes-load-file = Read only this file
+changes-load-file-failed = This file alone is still too large to read.
+changes-show-all = { $count ->
+    [one] Show all 1 line
+   *[other] Show all { $count } lines
+}
 console-files = Files
 files-title = Files of { $name }
 files-tree = Folders and files
