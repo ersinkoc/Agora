@@ -84,3 +84,4 @@ Date: YYYY-MM-DD
 | 0063 | The terminal client on ratatui and crossterm | Accepted |
 | 0067 | Remote access: a screen password, Tailscale and Cloudflare Tunnel, and a phone-sized window | Accepted |
 | 0068 | A customizable workspace: tiled layouts, themes and replaceable panels, in every client | Accepted |
+| 0073 | Forgetting a machine the hub no longer needs to show | Proposed |
