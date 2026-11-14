@@ -61,15 +61,13 @@ target/release/agora agent start shell --cwd /path/to/myproject
 #    (`agora hub login` makes another). Your agents and their terminals appear in the window.
 ```
 
-To use an installed coding agent, copy its manifest into the node's manifest folder, then start that kind. For example,
-from the repository root, with Codex installed and signed in on the node machine:
+To use an installed coding agent, start its kind; for example, with Codex installed and signed in on the node machine:
 
 ```sh
-cp manifests/agents/codex.toml ~/.agora/manifests/
 target/release/agora agent start codex --cwd /path/to/myproject
 ```
 
-The node reloads manifests before listing or starting agents. A manifest does not install the agent or sign in to its account.
+A manifest does not install the agent or sign in to its account.
 See [agent manifests](manifests/agents/README.md) for the available kinds and integration details.
 
 Agents start in the folder you select. In the web app, choose a machine, a project or another folder, then the agent.
