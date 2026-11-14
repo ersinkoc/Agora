@@ -5,6 +5,10 @@
 //! login (and, where it can tell a signal from an exit, starts a supervisor that a signal killed again). Registration is per user,
 //! never with administrator rights; the per-system code is in `agora_platform` (`service_install`, `service_remove`,
 //! `service_status`). Before registering, the command says what it registers.
+//!
+//! `install` is idempotent: a role whose service is registered already is left as it is, and the command says so. `remove` stops the
+//! role through its lock whoever started it (the service, `agora`, or a supervisor started by hand), exactly as `agora down` does, and
+//! then unregisters the service: after it, nothing of that role runs or starts at login.
 
 use std::ffi::OsString;
 use std::path::Path;
@@ -116,6 +120,14 @@ fn install(say: &Say, h: &Path, m: &Machine) -> ExitCode {
                 return ExitCode::from(1);
             }
         };
+        // A second `install` changes nothing and says so (to register it anew, `remove` first).
+        if let Ok(ServiceState::Installed { .. }) = agora_platform::service_status(&spec.name) {
+            say.out(
+                key!("service-already"),
+                &[("role", label), ("name", spec.name.clone().into())],
+            );
+            continue;
+        }
         say.out(
             key!("service-registering"),
             &[

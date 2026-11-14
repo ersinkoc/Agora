@@ -263,6 +263,7 @@ service-description = Starts the Agora { $role } when you log in (it keeps it ru
 service-unsupported = Starting Agora when you log in is not available on this system yet. Start it with `agora` after logging in.
 service-registering = Registering "{ $name }" to start the { $role } when you log in. It runs: { $command }
 service-installed = The { $role } now starts when you log in ("{ $name }"), and it was started now.
+service-already = The { $role } already starts when you log in ("{ $name }"); nothing changed. To register it anew, run `agora service remove` first.
 service-install-failed = Could not register "{ $name }": { $reason }
 service-removed = "{ $name }" is removed: the { $role } no longer starts when you log in.
 service-none = The { $role } was not set to start when you log in.

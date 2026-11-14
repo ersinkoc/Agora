@@ -260,6 +260,7 @@ service-description = Oturum açtığınızda Agora { $role } sürecini başlat�
 service-unsupported = Oturum açınca Agora'yı başlatma bu sistemde henüz yok. Oturum açtıktan sonra `agora` ile başlatın.
 service-registering = { $role } oturum açtığınızda başlasın diye "{ $name }" kaydediliyor. Çalıştırdığı komut: { $command }
 service-installed = { $role } artık oturum açtığınızda başlıyor ("{ $name }") ve şimdi de başlatıldı.
+service-already = { $role } zaten oturum açtığınızda başlıyor ("{ $name }"); hiçbir şey değişmedi. Yeniden kaydetmek için önce `agora service remove` çalıştırın.
 service-install-failed = "{ $name }" kaydedilemedi: { $reason }
 service-removed = "{ $name }" kaldırıldı: { $role } artık oturum açtığınızda başlamıyor.
 service-none = { $role } oturum açınca başlayacak şekilde ayarlı değildi.
