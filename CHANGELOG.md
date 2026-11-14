@@ -4,6 +4,12 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+### Machines
+- `agora doctor` says who may make this machine act: which commands sent through the hub need a signature from one of your devices
+  (and a note when none do, since whoever controls the hub could then send them), how many devices the machine trusts and how many
+  of them may act in every project, whether agents may skip their permission questions, and any policy line the node did not
+  understand.
+
 ### Getting started
 - `agora --version` prints the version.
 
