@@ -171,6 +171,7 @@ tui-app-welcome-none = Henüz çalışan bir ajan yok.
 tui-app-welcome-search = Arama ve komutlar
 tui-app-welcome-next = Sizi bekleyen sıradaki ajana geç
 tui-app-tabs-waiting = { $count } bekliyor · Ctrl-] N
+tui-app-self-terminal = Bu sekme bu istemcinin çalıştığı terminal; boyutuna dokunulmuyor (her seferinde bu pencereyi küçültürdü).
 tui-app-no-screen = Bu ajanın terminali açılıyor.
 tui-app-tree-empty = Henüz ajan yok.
 tui-app-palette-title = Komutlar
