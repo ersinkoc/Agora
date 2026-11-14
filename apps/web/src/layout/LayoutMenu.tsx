@@ -69,7 +69,7 @@ function SaveDialog({ onSave, onClose }: { onSave: (name: string) => void; onClo
   return (
     <Shell title={t('layout-save-title')} onClose={onClose}>
       <form className="grid gap-3" onSubmit={(e) => { e.preventDefault(); if (name.trim()) onSave(name); }}>
-        <label className="grid gap-1 text-[13px]">{t('layout-save-name')}
+        <label className="grid gap-1 text-[0.8125rem]">{t('layout-save-name')}
           <input autoFocus value={name} maxLength={MAX_NAME} onChange={(e) => setName(e.target.value)} />
         </label>
         {taken && <p className="muted m-0">{t('layout-save-replaces')}</p>}
@@ -120,11 +120,11 @@ function ImportDialog({ onImport, onClose }: { onImport: (l: import('./tree').La
   };
   return (
     <Shell title={t('layout-import-title')} onClose={onClose}>
-      <label className="grid gap-1 text-[13px]">{t('layout-import-paste')}
+      <label className="grid gap-1 text-[0.8125rem]">{t('layout-import-paste')}
         <textarea className="min-h-40 rounded-s border border-line bg-surface-0 p-2 font-mono text-xs text-ink" value={text} spellCheck={false}
           aria-invalid={!!error} aria-describedby={error ? 'layout-import-error' : undefined} onChange={(e) => { setText(e.target.value); setError(undefined); }} />
       </label>
-      <label className="grid gap-1 text-[13px]">{t('layout-import-file')}
+      <label className="grid gap-1 text-[0.8125rem]">{t('layout-import-file')}
         <input type="file" accept=".json,application/json" className="text-xs" onChange={(e) => {
           const f = e.target.files?.[0];
           if (f) void f.text().then((s) => { setText(s); setError(undefined); }).catch(() => setError('json'));

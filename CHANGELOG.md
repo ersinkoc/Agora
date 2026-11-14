@@ -7,6 +7,21 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 ### Security
 - macOS: a confined agent (`sandbox = worktree`) can no longer reach the node's own files and sockets: its data (trusted devices, policy, ledger), identity, logs and hub folder, the node's control socket, and the other agents' mesh sockets. Before, it could connect to the control socket (Seatbelt checks unix sockets as network, not as files), and with a node home under `/tmp` it could read and write the node's data (#475). Its own mesh socket stays open.
 
+## 0.3.10
+
+### Machines
+- On macOS a machine no longer keeps a CPU core busy while anything stays connected to it: each idle connection to the node (from the terminal client, an agent's bridge or the command line) spun at 100%. A connection accepted from the node's listener now waits for data as it should.
+
+## 0.3.9
+
+### Themes (ADR-0068, rung 2)
+- The window can be restyled with themes: Dark, Light, High contrast, Large text, Slate and Sand are built in, and **Edit theme**
+  (command palette, or This device → Appearance) opens the theme editor beside your agents. Customize a built-in theme to change
+  its colours, fonts, text size, spacing and corners and see the whole window change as you edit; a change that would make text
+  hard to read (below WCAG AA) is listed and not applied. Choose one theme for light and one for dark and follow the system to
+  switch between them. Themes are kept in this browser, and export and import as a JSON file (`docs/ux/themes.md`, version 1;
+  a file with an unknown or invalid token, or unreadable colours, is refused with the reasons).
+
 ### Devices
 - The hub keeps a list of each person's devices (ADR-0061): a browser or the terminal client registers its key and name when it signs
   in, and `agora hub devices` lists them with the fingerprint people compare, the person, and when each was registered and last used.
@@ -55,12 +70,25 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ### Starting agents
 - When a machine does not trust your browser yet, the start window now shows the exact command to run on that machine, with a Copy button, instead of pointing to another page. The same folder spelled several ways on Windows (`D:\x`, `D:/x`, `\\?\D:\x`) is listed once.
+- A device limited to some projects on a machine can now start, resume, inspect and browse folders inside its own projects there (folders the machine already knows for them, and folders inside those); elsewhere it is refused, as before, and the window now says the device is limited to other projects instead of "The folder could not be selected".
 
 ### Machines
 - A machine that goes quiet without its connection ending (a laptop that slept, a stopped process, a Wi-Fi switch, a NAT that forgot the connection) is shown offline within about 25 seconds, with when it was last seen, in the machine list, its tooltip, the Machines page and the terminal client. When it is back it is online again by itself, and its agents are untouched: offline is not finished (ADR-0070). Nodes ping the hub every 10 s, drop a hub that stopped answering after 25 s, give up a connection attempt that hangs after 25 s and reconnect at once after the machine wakes from sleep. The window pings the hub every 15 s and reconnects when nothing comes back within 10 s. Older nodes and windows keep working with a new hub, and a new window with an older hub shows machines as before.
+- After the hub restarts, machines and the open window are back within about a second and a half, so something that happens right after the restart (a new agent) shows up at once instead of up to 16 to 30 seconds later. Machines retry a hub that is away at most every 1.5 s for its first five minutes (then up to every 30 s), and start over after each good connection; a machine dialling a hub on the same machine gives each attempt half a second, so on Windows a refused attempt no longer takes two seconds; the window retries at most every 1.5 s (5 s after about five minutes) and no longer says "Connecting to your hub…" while it is connected and nothing new has happened.
 - Connecting to a hub at `localhost` no longer waits about two seconds on Windows: nodes, the terminal client, the desktop app and the hub's notifications try `127.0.0.1` first for a loopback name and `::1` only after it.
 ### Getting started
 - Plain `agora` now opens the browser window by default on a desktop. The terminal client is the default only when there is no screen (an SSH session, or Linux with no display); `--ui tui` and `--save` still choose it.
+### On a phone (ADR-0067, rung 2)
+- On a phone the window is one column: what needs you first, with Allow and Deny one tap away (signed by the phone's device key and
+  checked on the machine, as everywhere), then each machine with its agents; tapping an agent opens its terminal or conversation
+  with Back at the top and **Next** to the next thing that needs you. Held sideways it works the same. Tablets and desktops keep
+  the full window.
+- On a touch screen every terminal has a key bar: Esc, Tab, Ctrl (for the next key), the arrows and Paste, sending what a program
+  expects (arrows follow the program's cursor mode; Ctrl+c is `0x03`). The touch keyboard stays open while you press them.
+- Every control on a phone is at least 44 px; the window keeps out of the notch and the home indicator and stays above the touch
+  keyboard. Installing it to the home screen gets PNG and maskable icons and an iOS icon.
+- With the hub's `public-url` set, a notice about an agent that waits or finished links to that agent; an approval's link opens the
+  agent that asks. See `docs/ux/phone.md`.
 
 ## 0.3.8
 

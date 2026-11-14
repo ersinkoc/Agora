@@ -21,7 +21,7 @@ function Tree({ dir, depth, listings, open, load, toggle, pick, picked }: {
         return (
           <li key={path}>
             <button type="button" aria-expanded={f.isDir ? open.has(path) : undefined}
-              className={`flex w-full items-center gap-1.5 rounded-s px-2 py-1 text-left font-mono text-[13px] hover:bg-surface-2 ${picked === path ? 'bg-surface-2 text-accent' : ''}`}
+              className={`flex w-full items-center gap-1.5 rounded-s px-2 py-1 text-left font-mono text-[0.8125rem] hover:bg-surface-2 ${picked === path ? 'bg-surface-2 text-accent' : ''}`}
               style={{ paddingLeft: 8 + depth * 14 }} onClick={() => (f.isDir ? toggle(path) : pick(path, f.size))}>
               <span aria-hidden className="w-3 flex-none text-muted">{f.isDir ? (open.has(path) ? '▾' : '▸') : ''}</span>
               <span className="truncate">{f.name}</span>
@@ -79,7 +79,7 @@ export function FilesDialog({ agent, files, onClose }: { agent: AgentTileModel; 
             <div className="min-h-0 overflow-auto">
               {!picked ? <p className="muted p-4">{t('files-pick')}</p> : (
                 <>
-                  <p className="m-0 flex items-center justify-between gap-3 border-b border-line bg-surface-2 px-4 py-2 font-mono text-[13px] font-semibold"><span className="truncate">{picked.path}</span><span className="flex-none text-xs font-normal text-muted">{formatSize(picked.size)}</span></p>
+                  <p className="m-0 flex items-center justify-between gap-3 border-b border-line bg-surface-2 px-4 py-2 font-mono text-[0.8125rem] font-semibold"><span className="truncate">{picked.path}</span><span className="flex-none text-xs font-normal text-muted">{formatSize(picked.size)}</span></p>
                   {content === 'loading' ? <p className="muted p-4">{t('start-loading')}</p>
                     : content === 'binary' ? <p className="muted p-4">{t('files-binary')}</p>
                     : content === 'failed' ? <p role="alert" className="p-4">{t('files-too-large')}</p>

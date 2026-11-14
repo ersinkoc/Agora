@@ -294,8 +294,17 @@ Here `operation` is `inspect` or `launch`; inspect leaves kind/project empty; `o
 or separate-worktree launch respectively. `identity_change` is `0` for inspect and the confirmation flag for launch.
 No field may contain NUL. Expiry must be in the next five minutes (browser signs for two). Used device/nonce pairs
 are persisted until expiry, surviving a node restart; the bounded cache fails closed on corruption or exhaustion.
-Generic start grants cannot authorize a substituted directory. Initially only unrestricted node-trusted owner devices
-may sign these operations; scoped member devices are refused even for their projects. The local owner-only control
+Generic start grants cannot authorize a substituted directory. A device the node limits to some projects (ADR-0049:
+`device.<id>.projects`, or inherited through an endorsement) may sign these operations (and `list`, `resume`) only inside
+those projects, judged after its signature by the node's own records, never by what the request or the folder claims: the
+canonical folder must be one the node already knows for a project, or lie inside one (the nearest known folder decides;
+known folders are the owner-confirmed launch bindings and the checkouts registered with `node run`; a registered project's
+id or name for `inspect`, an id before a name and a name two projects share for none); that project must be one of the device's, and for `launch` also the signed `project_id` (the
+launch then checks the folder's identity against it as for every launch). `resume` uses the project the node's session
+ledger holds for the agent. Refused with `auth.forbidden` (`action: directory`): a folder the node knows for no project or
+for another one (also its parent folders, `..`, the home folder), `inspect` with `create_project_id`, `launch` with
+`identity_change`, an agent the ledger does not place, and any directory action when the node cannot place folders.
+Unlimited devices are unchanged. The local owner-only control
 socket has no extra signature requirement. Workspace diffs are rooted at the selected directory, including an empty requested path; they do not include parent-checkout changes.
 Workspace queries inherit the existing file/Git path, symlink, `.git` and
 size guards and require a workspace used by a managed session. Hub members/viewers can query only granted workspaces.

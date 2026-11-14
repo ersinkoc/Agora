@@ -25,10 +25,10 @@ function box(r: Rect, top?: string): CSSProperties {
 // The panel names the user sees for each panel id (UI vocabulary, not internal terms).
 const PANEL_LABEL: Record<string, string> = {
   terminal: 'focus-terminal', conversation: 'chat-log', agent: 'layout-panel-agent', approvals: 'attention-title', changes: 'ide-tab-changes',
-  files: 'console-files', tasks: 'board-title', messages: 'ide-tab-messages', usage: 'ide-tab-cost', empty: 'layout-panel-empty',
+  files: 'console-files', tasks: 'board-title', messages: 'ide-tab-messages', usage: 'ide-tab-cost', theme: 'theme-editor-title', empty: 'layout-panel-empty',
 };
 export const panelLabel = (panel: string) => (PANEL_LABEL[panel] ? t(PANEL_LABEL[panel] as string) : t('layout-panel-unknown', { id: panel }));
-const GLOBAL_PANELS = ['approvals', 'changes', 'tasks', 'messages', 'usage'];
+const GLOBAL_PANELS = ['approvals', 'changes', 'tasks', 'messages', 'usage', 'theme'];
 
 export interface WorkspaceProps {
   ws: WorkspaceState;
@@ -154,7 +154,7 @@ export function Workspace({ ws, dispatch, fleet, bindings, narrow, renderAgent, 
             {onStart && focused && <button type="button" className="ide-iconbtn m-1 flex-none" onClick={() => onStart()} aria-label={t('ide-new-tab')} title={t('ide-new-tab')}><Icon name="plus" /></button>}
           </div>
         ) : (
-          <div className="flex min-w-0 flex-1 cursor-grab items-center gap-2 px-3 text-[13px]" title={t('layout-drag')} {...dragProps(front)}>
+          <div className="flex min-w-0 flex-1 cursor-grab items-center gap-2 px-3 text-[0.8125rem]" title={t('layout-drag')} {...dragProps(front)}>
             {a ? <StateMark state={a.state} /> : <Icon name="layout" className="size-3.5 text-muted" />}
             <span className="min-w-0 truncate font-medium">{label(front)}</span>
             {a && <NoAskBadge agent={a} compact />}

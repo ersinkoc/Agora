@@ -113,5 +113,13 @@ the node keeps every agent running and catches up 1.5 s after the hub is back (g
 - **R2** The window came back up to 30 s after the hub. Fixed: at most 5 s with jitter, at once on `online`, visible, focus and "Retry now".
 - **R3** A `delivery_failed` notice did not say which message failed. Fixed: `reply_to` is the failed message's id. A resend queue after
   reconnect is not done (a behaviour change for an ADR).
+- **R5** After a hub restart a new agent reached the open window only 8 to 16 s later in about half the runs (macOS and Windows,
+  after ADR-0070), and "Connecting to your hub…" stayed 10 to 20 s with nothing happening. Cause: the node's redial waits doubled
+  to 30 s and started over only after a connection that lasted 30 s, so the node dialled 8, 16 or 30 s after the hub was back (the
+  window, at most 5 s, was not the bottleneck); and the window went live only on an event. Fixed: the node redials at most every
+  1.5 s for 5 minutes and starts over after each accepted connection, the window waits at most 1.5 s and goes live on the hub's
+  answer to a ping sent right after it subscribes. Measured on Linux with `scripts/e2e-hub-restart.mjs` (hub down 0 to 20 s,
+  rounds back to back): before 0.6 to 30.4 s (15 rounds, median 14.4 s; once a few restarts had grown the waits, every round took
+  20 to 30 s, and the window left "Connecting" only when a node came back), after 0.3 to 1.5 s (24 rounds, median 1.0 s).
 - **R4** `agent start` after `project init` printed "The request was not valid (field: directory.identity_changed)". Fixed: the CLI names
   `--accept-project-id-change` (`cli-invalid-directory-identity_changed`); the wire error is unchanged.

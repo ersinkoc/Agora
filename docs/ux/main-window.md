@@ -34,7 +34,7 @@ The window is laid out like an editor, with the terminal as the content. At most
 - **Right, Details:** tabs for Needs you (opens first whenever something needs you), Changes, Board, Messages, Spent.
 - **Status bar:** machines online, agents, how many need you, cost so far.
 - **Empty state:** a start button, the agents that are running, and the two keyboard shortcuts.
-- **Phones:** side panels start hidden and open from the title bar.
+- **Phones:** a single column instead of this window: what needs you, machines and agents, then one agent (ADR-0067 rung 2, [phone.md](phone.md)). A tablet keeps this window; on a touch screen its terminals get the key bar.
 
 The older three-column description below stays valid for what each area holds.
 

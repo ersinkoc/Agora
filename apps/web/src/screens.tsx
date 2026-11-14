@@ -5,6 +5,8 @@ import { ApprovalBanner } from './components/ApprovalBanner';
 import { AgentAddress } from './components/AgentAddress';
 import { LanguagePicker } from './components/LanguagePicker';
 import { ThemePicker } from './components/ThemePicker';
+import { themeStore } from './themes/store';
+import { themeName } from './themes/messages';
 import { PromptBox } from './components/PromptBox';
 import type { ChatSource } from './net/chat';
 import { AgentTile } from './components/AgentTile';
@@ -20,7 +22,7 @@ import { deviceLabel } from './net/devices';
 import { money, type UsageSummary } from './net/usage';
 import { demoAgents, demoHelper, demoStartApproval } from './fixtures';
 import { demoSource, type TerminalSource } from './terminal/source';
-import { Suspense, lazy, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { Suspense, lazy, useEffect, useMemo, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { actionKey, outcomeKind, type AuditResult } from './net/audit';
 
 // The terminal emulator is the heaviest part of the client; load it only when a Focus view needs it.
@@ -150,8 +152,8 @@ export function Focus({ agent, approvals = [], onResolve, source: live, costMicr
   return (
     <div className="ide" style={{ gridTemplateRows: 'auto minmax(0, 1fr)' }}>
       <header className="ide-bar min-h-10 flex-wrap border-b py-1">
-        <button type="button" className="ide-row w-auto flex-none text-[13px] text-muted hover:text-ink" onClick={onBack}><Icon name="chevron" className="size-3.5 rotate-180 rtl:rotate-0" />{t('focus-back')}</button>
-        <h1 className="m-0 truncate text-[13px] font-semibold tracking-normal">{agent.name}</h1>
+        <button type="button" className="ide-row w-auto flex-none text-[0.8125rem] text-muted hover:text-ink" onClick={onBack}><Icon name="chevron" className="size-3.5 rotate-180 rtl:rotate-0" />{t('focus-back')}</button>
+        <h1 className="m-0 truncate text-[0.8125rem] font-semibold tracking-normal">{agent.name}</h1>
         <span title={`${t('focus-why')} ${why}`}><StateBadge state={agent.state} /></span>
         <NoAskBadge agent={agent} />
         <span className="hidden min-w-0 items-center gap-1.5 truncate text-xs text-muted md:flex"><Icon name="machine" className="size-3.5" />{agent.machine}<Icon name="chevron" className="size-3 rtl:rotate-180" /><Icon name="folder" className="size-3.5" />{agent.project || agent.workspace}{agent.branch && <><Icon name="branch" className="ms-1 size-3.5" /><span className="font-mono">{agent.branch}</span></>}</span>
@@ -181,8 +183,8 @@ function PageFrame({ title, onBack, children, wide }: { title: string; onBack: (
   return (
     <div className="min-h-screen bg-surface-0">
       <header className="ide-bar sticky top-0 z-10 h-10 border-b">
-        <button type="button" className="ide-row w-auto flex-none text-[13px] text-muted hover:text-ink" onClick={onBack}><Icon name="chevron" className="size-3.5 rotate-180 rtl:rotate-0" />{t('focus-back')}</button>
-        <h1 className="m-0 min-w-0 flex-1 truncate text-[13px] font-semibold tracking-normal">{title}</h1>
+        <button type="button" className="ide-row w-auto flex-none text-[0.8125rem] text-muted hover:text-ink" onClick={onBack}><Icon name="chevron" className="size-3.5 rotate-180 rtl:rotate-0" />{t('focus-back')}</button>
+        <h1 className="m-0 min-w-0 flex-1 truncate text-[0.8125rem] font-semibold tracking-normal">{title}</h1>
         <span className="hidden sm:block"><LanguagePicker compact /></span>
         <ThemePicker />
       </header>
@@ -198,9 +200,11 @@ export interface MyDevice { id: string; name: string; fingerprint: string; lastU
 // or the command to run on the machine. Fingerprints are what people compare, so every device is shown with its own. The screen
 // password and the idle lock live here too (ADR-0067). `passkeyNeedsPassword`: this browser is on another machine and a screen
 // password is set, so adding a passkey needs it (ADR-0067).
-export function DevicePage({ device, onBack, onAddPasskey, passkeyNeedsPassword = false, security, fingerprint, machines, trustedOn, others, asked, onAsk, onRemove }: {
+export function DevicePage({ device, onBack, onTheme, onAddPasskey, passkeyNeedsPassword = false, security, fingerprint, machines, trustedOn, others, asked, onAsk, onRemove }: {
   device: Device | undefined;
   onBack: () => void;
+  // Opens the theme editor in the window (ADR-0068).
+  onTheme?: () => void;
   onAddPasskey?: (password?: string) => Promise<boolean>;
   passkeyNeedsPassword?: boolean;
   security?: ReactNode;
@@ -214,6 +218,7 @@ export function DevicePage({ device, onBack, onAddPasskey, passkeyNeedsPassword 
   onAsk?: () => Promise<boolean>;
   onRemove?: (id: string) => Promise<boolean>;
 }) {
+  useSyncExternalStore(themeStore.subscribe, themeStore.state, themeStore.state); // the theme's name below follows a change
   const [passkey, setPasskey] = useState<'added' | 'failed' | undefined>();
   const [password, setPassword] = useState('');
   const [ask, setAsk] = useState<'asked' | 'failed' | undefined>();
@@ -287,6 +292,13 @@ export function DevicePage({ device, onBack, onAddPasskey, passkeyNeedsPassword 
         </section>
       )}
       {security}
+      {onTheme && (
+        <section className="stack">
+          <h2 className="m-0">{t('device-appearance')}</h2>
+          <p className="muted m-0">{t('device-appearance-intro', { name: themeName(themeStore.active()) })}</p>
+          <button type="button" className="button" onClick={onTheme}>{t('theme-edit')}</button>
+        </section>
+      )}
     </PageFrame>
   );
 }

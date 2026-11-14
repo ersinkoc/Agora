@@ -74,17 +74,23 @@ const browserSocket: SocketFactory = (url, protocols) => new WebSocket(url, prot
 // the window pings the hub over the protocol's PING/PONG and starts over when nothing at all comes back in time.
 export const PING_EVERY_MS = 15_000;
 export const PONG_WITHIN_MS = 10_000;
-// The longest wait between two attempts: the window is back within a few seconds of the hub.
-export const RETRY_CAP_MS = 5_000;
+// The longest wait between two attempts while the hub has been away for a few minutes at most (a restart): the window is back
+// within about this long of the hub, and a refused dial costs the hub nothing.
+export const RETRY_CAP_MS = 1_500;
+// After this many attempts (about five minutes of a hub that refuses at once) the hub is probably not restarting, and the waits
+// grow to `RETRY_SLOW_CAP_MS`.
+export const RETRY_FAST_ATTEMPTS = 200;
+export const RETRY_SLOW_CAP_MS = 5_000;
 // A connection that has not opened by then is given up and tried again. A hub that froze or slept accepts the TCP connection
 // and answers nothing, and the browser may never report an error for it, so without this the window would stay "Connecting"
 // long after the hub is back. An open connection is checked by the ping instead (`PING_EVERY_MS`, ADR-0070).
 export const OPEN_WITHIN_MS = 8_000;
 
-// Waits before reconnect attempt n (0-based): doubling from 0.5 s up to `RETRY_CAP_MS`, each wait shortened by up to a fifth at
-// random so many windows do not all dial a hub that just came back in the same instant.
+// Waits before reconnect attempt n (0-based): doubling from 0.5 s up to `RETRY_CAP_MS` (`RETRY_SLOW_CAP_MS` after
+// `RETRY_FAST_ATTEMPTS`), each wait shortened by up to a fifth at random so many windows do not all dial a hub that just came back
+// in the same instant.
 export function defaultBackoff(n: number, random: () => number = Math.random): number {
-  const base = Math.min(RETRY_CAP_MS, 500 * 2 ** Math.min(n, 16));
+  const base = Math.min(n < RETRY_FAST_ATTEMPTS ? RETRY_CAP_MS : RETRY_SLOW_CAP_MS, 500 * 2 ** Math.min(n, 16));
   return Math.round(base * (0.8 + 0.2 * random()));
 }
 
@@ -217,6 +223,10 @@ export function connectLive(o: LiveOptions): Live {
       pinger = setInterval(() => probe(s), PING_EVERY_MS);
       const sub = agora.v1.Subscribe.encode(synced ? { afterPos: view.pos } : {}).finish();
       s.send(encodeFrame({ streamId: STREAM_EVENTS, kind: EVENT_KIND.SUBSCRIBE, payload: sub }));
+      // The hub answers a subscription with nothing when nothing happened since our position (a hub that restarted with no
+      // machine connected yet), so the window would say "Connecting" until the next event. The hub sends what the subscription
+      // owes before it reads the next frame, so its answer to this ping says the window is up to date: live.
+      probe(s);
       for (const stream of terminals.keys()) subscribeTerminal(stream);
       for (const stream of chats.keys()) subscribeChat(stream);
     };
@@ -260,6 +270,11 @@ export function connectLive(o: LiveOptions): Live {
         }
         const e = decodeTerminalFrame(f.kind, f.payload);
         if (e) t.onEvent(e);
+        return;
+      }
+      if (f.streamId === STREAM_CONTROL && f.kind === CONTROL_KIND.PONG && synced) {
+        attempt = 0;
+        o.onState('live');
         return;
       }
       if (f.streamId !== STREAM_EVENTS) return;
