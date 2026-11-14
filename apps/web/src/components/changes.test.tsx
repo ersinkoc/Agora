@@ -31,6 +31,14 @@ describe('the changes view', () => {
     expect(t('changes-gap', { count: 4 })).toBe('Show 4 unchanged lines');
   });
 
+  it('opens a gap and a file larger than a call takes arguments', () => {
+    const n = 170_000;
+    const [f] = parseDiff(`diff --git a/big.txt b/big.txt\n--- a/big.txt\n+++ b/big.txt\n@@ -1,1 +1,1 @@\n-a\n+A\n@@ -${n},1 +${n},1 @@\n-b\n+B\n`);
+    const now = Array.from({ length: n }, (_, i) => (i === 0 ? 'A' : i === n - 1 ? 'B' : 'x'));
+    const lines = segmentsOf(f as never, 'all', now).flatMap((s) => (s.kind === 'lines' ? s.lines : []));
+    expect(lines.length).toBeGreaterThanOrEqual(n);
+  });
+
   it('folds the unchanged lines between hunks until they are opened', () => {
     const [f] = parseDiff(DIFF);
     const folded = segmentsOf(f as never, new Set(), undefined);

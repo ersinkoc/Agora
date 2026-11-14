@@ -49,15 +49,19 @@ export function ChangesView({ load, read }: {
   const [listWidth, setListWidth] = useState(288);
   const [closedFolders, setClosedFolders] = useState<Set<string>>(new Set());
   // Per file path: the gaps shown (by `Gap.before`), the whole file shown, the file's current text, a file loaded on its own.
-  const [opened, setOpened] = useState<Record<string, Set<number>>>({});
+  // Maps, not objects: a file may be named `constructor` or `__proto__`.
+  const [opened, setOpened] = useState<Map<string, Set<number>>>(new Map());
   const [whole, setWhole] = useState<Set<string>>(new Set());
-  const [texts, setTexts] = useState<Record<string, FileText>>({});
-  const [single, setSingle] = useState<Record<string, DiffFile | 'loading' | 'failed'>>({});
+  const [texts, setTexts] = useState<Map<string, FileText>>(new Map());
+  const [single, setSingle] = useState<Map<string, DiffFile | 'loading' | 'failed'>>(new Map());
   const [showAll, setShowAll] = useState<Set<string>>(new Set());
   const body = useRef<HTMLDivElement>(null);
+  // The refresh a read belongs to: a read that completes after a refresh (with success or failure) is dropped.
+  const generation = useRef(0);
 
   useEffect(() => {
     let live = true;
+    generation.current++;
     setDiff('loading');
     load().then(
       (text) => {
@@ -68,10 +72,10 @@ export function ChangesView({ load, read }: {
       },
       () => { if (live) setDiff('failed'); },
     );
-    setOpened({});
+    setOpened(new Map());
     setWhole(new Set());
-    setTexts({});
-    setSingle({});
+    setTexts(new Map());
+    setSingle(new Map());
     return () => { live = false; };
   }, [load, round]);
 
@@ -87,11 +91,16 @@ export function ChangesView({ load, read }: {
   const totals = useMemo(() => files.reduce((s, f) => ({ added: s.added + f.added, removed: s.removed + f.removed }), { added: 0, removed: 0 }), [files]);
 
   const listed = files.find((f) => f.path === selected);
-  const loaded = selected !== undefined ? single[selected] : undefined;
+  const loaded = selected !== undefined ? single.get(selected) : undefined;
   const file = loaded && loaded !== 'loading' && loaded !== 'failed' ? loaded : listed;
 
   const select = useCallback((path: string | undefined) => {
     setSelected(path);
+    // A file reached with the keys inside a closed folder opens that folder, so the selection is never hidden.
+    if (path !== undefined) {
+      const folder = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
+      setClosedFolders((c) => { if (!c.has(folder)) return c; const n = new Set(c); n.delete(folder); return n; });
+    }
     body.current?.scrollTo({ top: 0 });
     if (path) document.getElementById(optionId(path))?.scrollIntoView({ block: 'nearest' });
   }, []);
@@ -110,7 +119,9 @@ export function ChangesView({ load, read }: {
   const fetchText = useCallback((f: DiffFile): void => {
     if (!read) return;
     const path = f.path;
-    setTexts((x) => (x[path] && x[path] !== 'failed' ? x : { ...x, [path]: 'loading' }));
+    const gen = generation.current;
+    const put = (v: FileText) => { if (gen === generation.current) setTexts((x) => new Map(x).set(path, v)); };
+    setTexts((x) => { const v = x.get(path); return v && v !== 'failed' ? x : new Map(x).set(path, 'loading'); });
     read(path)
       .then(async (bytes): Promise<FileText> => {
         const text = decodeText(bytes);
@@ -120,26 +131,29 @@ export function ChangesView({ load, read }: {
         if (!now) return 'failed';
         return sameChange(f, now) ? fileLines(text) : 'stale';
       })
-      .then((v) => setTexts((x) => ({ ...x, [path]: v })), () => setTexts((x) => ({ ...x, [path]: 'failed' })));
+      .then(put, () => put('failed'));
   }, [read, load]);
   // Also checked against the diff's own lines, which needs no second read.
   const textOf = (f: DiffFile): FileText | undefined => {
-    const x = texts[f.path];
+    const x = texts.get(f.path);
     return Array.isArray(x) && !matchesFile(f, x) ? 'stale' : x;
   };
+  const needsText = (f: DiffFile) => { const x = texts.get(f.path); return x === undefined || x === 'failed'; };
   const openGap = (f: DiffFile, gap: Gap) => {
-    setOpened((o) => ({ ...o, [f.path]: new Set([...(o[f.path] ?? []), gap.before]) }));
-    if (texts[f.path] === undefined || texts[f.path] === 'failed') fetchText(f);
+    setOpened((o) => new Map(o).set(f.path, new Set(o.get(f.path)).add(gap.before)));
+    if (needsText(f)) fetchText(f);
   };
   const toggleWhole = (f: DiffFile) => {
     setWhole((w) => { const n = new Set(w); if (n.has(f.path)) n.delete(f.path); else n.add(f.path); return n; });
-    if (texts[f.path] === undefined || texts[f.path] === 'failed') fetchText(f);
+    if (needsText(f)) fetchText(f);
   };
   const loadSingle = (path: string) => {
-    setSingle((s) => ({ ...s, [path]: 'loading' }));
+    const gen = generation.current;
+    const put = (v: DiffFile | 'failed') => { if (gen === generation.current) setSingle((s) => new Map(s).set(path, v)); };
+    setSingle((s) => new Map(s).set(path, 'loading'));
     load(path).then(
-      (text) => setSingle((s) => { const f = parseDiff(text).find((x) => x.path === path); return { ...s, [path]: f && !f.partial ? f : 'failed' }; }),
-      () => setSingle((s) => ({ ...s, [path]: 'failed' })),
+      (text) => { const f = parseDiff(text).find((x) => x.path === path); put(f && !f.partial ? f : 'failed'); },
+      () => put('failed'),
     );
   };
 
@@ -244,9 +258,9 @@ export function ChangesView({ load, read }: {
               </div>
               <div ref={body} className="min-h-0 flex-1 overflow-auto bg-surface-0" tabIndex={-1}>
                 <FileBody key={`${file.path}:${layout}`} file={file} layout={layout} wrap={wrap || layout === 'split'} text={textOf(file)}
-                  opened={whole.has(file.path) ? 'all' : opened[file.path] ?? new Set()} canExpand={!!read} onOpenGap={(g) => openGap(file, g)}
+                  opened={whole.has(file.path) ? 'all' : opened.get(file.path) ?? NONE} canExpand={!!read} onOpenGap={(g) => openGap(file, g)}
                   showAll={showAll.has(file.path)} onShowAll={() => setShowAll((s) => new Set([...s, file.path]))}
-                  single={selected !== undefined ? single[selected] : undefined} onLoadSingle={() => loadSingle(file.path)} onRetryText={() => fetchText(file)} />
+                  single={selected !== undefined ? single.get(selected) : undefined} onLoadSingle={() => loadSingle(file.path)} onRetryText={() => fetchText(file)} />
               </div>
             </>
           )}
@@ -259,7 +273,8 @@ export function ChangesView({ load, read }: {
   );
 }
 
-const optionId = (path: string) => `changes-${encodeURIComponent(path).replace(/%/g, '_')}`;
+const NONE: Set<number> = new Set();
+const optionId = (path: string) =>`changes-${encodeURIComponent(path).replace(/%/g, '_')}`;
 
 type Segment = { kind: 'lines'; lines: DiffLine[] } | { kind: 'gap'; gap: Gap };
 
@@ -271,7 +286,8 @@ export function segmentsOf(file: DiffFile, opened: Set<number> | 'all', text: Fi
   const out: Segment[] = [];
   const add = (ls: DiffLine[]) => {
     const last = out[out.length - 1];
-    if (last?.kind === 'lines') last.lines.push(...ls); else out.push({ kind: 'lines', lines: [...ls] });
+    // A loop, not `push(...ls)`: a gap can hold more lines than a call takes arguments.
+    if (last?.kind === 'lines') { for (const l of ls) last.lines.push(l); } else out.push({ kind: 'lines', lines: ls.slice() });
   };
   const gapAt = (i: number) => {
     const g = gaps.get(i);
@@ -300,7 +316,9 @@ function FileBody({ file, layout, wrap, text, opened, canExpand, onOpenGap, show
 }) {
   const pairs = useMemo(() => pairedLines(file.lines), [file]);
   const segments = useMemo(() => segmentsOf(file, opened, text), [file, opened, text]);
-  const width = `calc(${Math.max(2, String(Math.max(...file.lines.map((l) => Math.max(l.oldNo ?? 0, l.newNo ?? 0)), Array.isArray(text) ? text.length : 0)).length)}ch + 1rem)`;
+  // A reduction, not `Math.max(...lines)`: a diff can hold more lines than a call takes arguments.
+  const top = useMemo(() => file.lines.reduce((m, l) => Math.max(m, l.oldNo ?? 0, l.newNo ?? 0), Array.isArray(text) ? text.length : 0), [file, text]);
+  const width = `calc(${Math.max(2, String(top).length)}ch + 1rem)`;
   // A new or deleted file has one side only: one column, and no hunk heading (`@@ -0,0 +1,7 @@` says nothing).
   const oneSided = file.status === 'added' || file.status === 'deleted';
 

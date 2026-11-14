@@ -100,6 +100,29 @@ describe('unquote', () => {
     expect(unquote('plain/name.txt')).toBe('plain/name.txt');
     expect(unquote('"a/\\303\\274ber \\"q\\" tab\\t.txt"')).toBe('a/über "q" tab\t.txt');
   });
+
+  it('keeps a literal character outside the BMP whole (core.quotePath=false)', () => {
+    expect(unquote('"a/emoji\\"😀.txt"')).toBe('a/emoji"😀.txt');
+    expect(unquote('"😀\\360\\237\\230\\200"')).toBe('😀😀');
+  });
+});
+
+describe('deleted or emptied', () => {
+  it('calls a file deleted only for `+++ /dev/null`, not one emptied to nothing', () => {
+    const files = parseDiff([
+      'diff --git a/empty.txt b/empty.txt', '--- a/empty.txt', '+++ b/empty.txt', '@@ -1,2 +0,0 @@', '-one', '-two',
+      'diff --git a/gone.txt b/gone.txt', '--- a/gone.txt', '+++ /dev/null', '@@ -1 +0,0 @@', '-bye', '',
+    ].join('\n'));
+    expect(files.map((f) => [f.path, f.status])).toEqual([['empty.txt', 'modified'], ['gone.txt', 'deleted']]);
+  });
+
+  it('reads the real git diff of a quoted emoji name', () => {
+    const [f] = parseDiff([
+      'diff --git "a/emoji\\"😀.txt" "b/emoji\\"😀.txt"', 'new file mode 100644', 'index 0000000..ce01362', '--- /dev/null',
+      '+++ "b/emoji\\"😀.txt"', '@@ -0,0 +1 @@', '+hello', '',
+    ].join('\n'));
+    expect(f?.path).toBe('emoji"😀.txt');
+  });
 });
 
 describe('side by side', () => {

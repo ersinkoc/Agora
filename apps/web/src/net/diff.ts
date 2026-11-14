@@ -55,10 +55,13 @@ export function unquote(s: string): string {
   if (s.length < 2 || !s.startsWith('"') || !s.endsWith('"')) return s;
   const bytes: number[] = [];
   const body = s.slice(1, -1);
+  const utf8 = new TextEncoder();
   for (let i = 0; i < body.length; i++) {
-    const c = body[i] as string;
+    // One code point at a time: a character outside the BMP is two UTF-16 units, and each alone would encode as U+FFFD.
+    const c = String.fromCodePoint(body.codePointAt(i) ?? 0);
     if (c !== '\\') {
-      for (const b of new TextEncoder().encode(c)) bytes.push(b);
+      for (const b of utf8.encode(c)) bytes.push(b);
+      i += c.length - 1;
       continue;
     }
     const n = body[i + 1] ?? '';
@@ -147,18 +150,17 @@ export function parseDiff(text: string): DiffFile[] {
       else if (raw.startsWith('rename from ')) { cur.oldPath = unquote(raw.slice('rename from '.length)); cur.status = 'renamed'; }
       else if (raw.startsWith('rename to ')) { cur.path = unquote(raw.slice('rename to '.length)); cur.status = 'renamed'; }
       else if (raw.startsWith('Binary files ') || raw === 'GIT binary patch') cur.binary = true;
-      else if (raw.startsWith('+++ ')) { const p = headerPath(raw.slice(4)); if (p !== undefined) cur.path = p; }
+      else if (raw.startsWith('+++ ')) {
+        // `+++ /dev/null`: the file is gone, and its name came from the `---` line. An emptied file (`@@ -1,3 +0,0 @@`) keeps its name.
+        const p = headerPath(raw.slice(4));
+        if (p === undefined) cur.status = 'deleted'; else cur.path = p;
+      }
       else if (raw.startsWith('--- ')) {
         const p = headerPath(raw.slice(4));
         if (p === undefined) cur.status = 'added';
         else if (cur.status !== 'renamed') cur.path = p;
       }
     }
-  }
-  for (const f of files) {
-    // `+++ /dev/null`: the file is gone, and its name came from the `---` line.
-    if (f.status === 'modified' && f.hunks.length > 0 && f.lines.every((l) => l.kind === 'hunk' || l.kind === 'del')
-      && f.hunks.every((h) => h.newLines === 0 && h.newStart === 0)) f.status = 'deleted';
   }
   if (isTruncated(text) && files.length > 0) (files[files.length - 1] as DiffFile).partial = true;
   return files;
