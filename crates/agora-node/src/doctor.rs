@@ -71,7 +71,8 @@ pub fn run(inputs: &Inputs) -> Vec<Check> {
 
     // What the node's policy asks for, and whether this machine can do it (ADR-0047).
     let policy_file = inputs.data_dir.join(crate::daemon::POLICY_FILE);
-    let sandbox = crate::daemon::read_policy(&policy_file).sandbox;
+    let policy = crate::daemon::read_policy(&policy_file);
+    let sandbox = policy.sandbox.clone();
     let level = sandbox.level;
     // Whether the level the policy asks for can be enforced here (`worktree-offline` needs network rules too); with `off`, whether
     // confinement would be possible at all.
@@ -92,6 +93,7 @@ pub fn run(inputs: &Inputs) -> Vec<Check> {
     if level != crate::sandbox::Level::Off {
         out.extend(policy_paths(&policy_file));
     }
+    out.extend(authority(&inputs.data_dir, &policy, now_ms()));
 
     out.push(match Command::new("git").arg("--version").output() {
         Ok(o) if o.status.success() => check(
@@ -114,6 +116,75 @@ pub fn run(inputs: &Inputs) -> Vec<Check> {
 
     out.extend(policy_read_at_start(&policy_file, &inputs.socket, running));
     out.extend(manifests(&inputs.manifests_dir));
+    out
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+}
+
+/// Who may make this machine act, as the node applies its policy file and trusted-devices file when it starts (the architecture
+/// review's R1: setup and diagnostics state the effective rules, so nobody assumes a protection that is not configured).
+/// - `signed-commands` (detail: the gated commands), `signed-commands-team` (no `signed_commands` line, but a device limited to
+///   projects turns on the team default) or `signed-commands-none` (a note; detail: the policy file): whether commands routed through
+///   the hub need a device-signed grant (ADR-0041). Without one, whoever controls the hub can send them (threat model T1); starting
+///   an agent in a folder from the window is signed regardless (ADR-0052).
+/// - `devices` (detail: how many devices are trusted now; `$unlimited`: how many of them may act in every project) or `devices-none`.
+/// - `skip-permissions` (detail: `allow`, `forbid` or `confined_only`; ADR-0059).
+/// - `policy-problems` (detail: how many lines the node did not understand; any of them forbids skipping permissions).
+fn authority(data_dir: &Path, policy: &crate::daemon::Policy, now_ms: u64) -> Vec<Check> {
+    let mut out = Vec::new();
+    let signed = policy.effective_signed_commands();
+    out.push(if signed.0.is_empty() {
+        check(
+            "signed-commands-none",
+            Status::Warn,
+            data_dir
+                .join(crate::daemon::POLICY_FILE)
+                .display()
+                .to_string(),
+        )
+    } else if policy.signed_commands.0.is_empty() {
+        check("signed-commands-team", Status::Ok, signed.0.join(", "))
+    } else {
+        check("signed-commands", Status::Ok, signed.0.join(", "))
+    });
+
+    let (entries, _) =
+        crate::device_trust::read_entries(&data_dir.join(crate::approvals::TRUSTED_DEVICES_FILE));
+    let live: Vec<&crate::device_trust::Entry> = entries
+        .iter()
+        .filter(|e| crate::device_trust::alive(&entries, e, now_ms))
+        .collect();
+    out.push(if live.is_empty() {
+        check("devices-none", Status::Warn, "")
+    } else {
+        let unlimited = live
+            .iter()
+            .filter(|e| {
+                crate::device_trust::effective_limit(&entries, &policy.device_projects, &e.id)
+                    .is_none()
+            })
+            .count();
+        let mut c = check("devices", Status::Ok, live.len().to_string());
+        c.args = vec![("unlimited", unlimited.to_string())];
+        c
+    });
+
+    out.push(check(
+        "skip-permissions",
+        Status::Ok,
+        policy.skip_permissions.name(),
+    ));
+    if !policy.problems.is_empty() {
+        out.push(check(
+            "policy-problems",
+            Status::Warn,
+            policy.problems.len().to_string(),
+        ));
+    }
     out
 }
 
@@ -402,5 +473,90 @@ mod tests {
     fn on_path_finds_real_programs_only() {
         assert!(on_path(if cfg!(windows) { "cmd" } else { "sh" }));
         assert!(!on_path("definitely-not-installed-xyz"));
+    }
+
+    fn authority_of(name: &str, policy: &str, trusted: &str) -> Vec<Check> {
+        let d = tmp(name);
+        if !policy.is_empty() {
+            std::fs::write(d.join(crate::daemon::POLICY_FILE), policy).unwrap();
+        }
+        if !trusted.is_empty() {
+            std::fs::write(d.join(crate::approvals::TRUSTED_DEVICES_FILE), trusted).unwrap();
+        }
+        let p = crate::daemon::read_policy(&d.join(crate::daemon::POLICY_FILE));
+        let out = authority(&d, &p, 1_000);
+        let _ = std::fs::remove_dir_all(&d);
+        out
+    }
+
+    fn key(n: u8) -> String {
+        format!("04{}", format!("{n:02x}").repeat(64))
+    }
+
+    #[test]
+    fn without_a_policy_the_routed_commands_are_said_to_need_no_signature() {
+        let c = authority_of("authority-default", "", "");
+        let none = find(&c, "signed-commands-none");
+        assert_eq!(none.len(), 1, "{c:?}");
+        assert_eq!(none[0].status, Status::Warn);
+        assert!(none[0].detail.ends_with("policy"), "{}", none[0].detail);
+        assert_eq!(find(&c, "devices-none")[0].status, Status::Warn);
+        assert_eq!(find(&c, "skip-permissions")[0].detail, "allow");
+        assert!(find(&c, "policy-problems").is_empty());
+    }
+
+    #[test]
+    fn a_signed_commands_line_is_listed_as_the_node_applies_it() {
+        let c = authority_of(
+            "authority-listed",
+            "signed_commands = agent.start, terminal.*\nskip_permissions = confined_only\n",
+            &format!("laptop {}\n", key(1)),
+        );
+        let s = find(&c, "signed-commands");
+        assert_eq!(s[0].status, Status::Ok);
+        assert_eq!(s[0].detail, "agent.start, terminal.*");
+        let d = find(&c, "devices");
+        assert_eq!(
+            (d[0].detail.as_str(), d[0].args.clone()),
+            ("1", vec![("unlimited", "1".to_string())])
+        );
+        assert_eq!(find(&c, "skip-permissions")[0].detail, "confined_only");
+    }
+
+    #[test]
+    fn a_limited_device_turns_on_the_team_default_and_is_not_counted_as_unlimited() {
+        let c = authority_of(
+            "authority-team",
+            "device.phone.projects = web\n",
+            &format!("laptop {}\nphone {}\n", key(1), key(2)),
+        );
+        let t = find(&c, "signed-commands-team");
+        assert_eq!(t.len(), 1, "{c:?}");
+        assert_eq!(
+            t[0].detail,
+            crate::grants::SignedCommands::team_default().0.join(", ")
+        );
+        let d = find(&c, "devices");
+        assert_eq!(d[0].detail, "2");
+        assert_eq!(d[0].args, vec![("unlimited", "1".to_string())]);
+    }
+
+    #[test]
+    fn an_expired_device_is_not_counted_and_a_misread_policy_is_a_note() {
+        let c = authority_of(
+            "authority-expired",
+            "skip_permission = forbid\n",
+            &format!(
+                "laptop {} expires=500\nphone {} expires=5000\n",
+                key(1),
+                key(2)
+            ),
+        );
+        // At 1 000 ms the laptop's trust has ended and the phone's has not.
+        assert_eq!(find(&c, "devices")[0].detail, "1", "{c:?}");
+        let p = find(&c, "policy-problems");
+        assert_eq!((p[0].status, p[0].detail.as_str()), (Status::Warn, "1"));
+        // An unreadable line forbids skipping permissions; the doctor says what the node does.
+        assert_eq!(find(&c, "skip-permissions")[0].detail, "forbid");
     }
 }

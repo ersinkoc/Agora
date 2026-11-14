@@ -389,10 +389,17 @@ fn doctor(say: &Say, o: &Opts) -> ExitCode {
             ("policy-path-missing", _) => key!("doctor-policy-path-missing"),
             ("policy-restart", _) => key!("doctor-policy-restart"),
             ("policy-changed", _) => key!("doctor-policy-changed"),
+            ("signed-commands", _) => key!("doctor-signed-commands"),
+            ("signed-commands-team", _) => key!("doctor-signed-commands-team"),
+            ("signed-commands-none", _) => key!("doctor-signed-commands-none"),
+            ("devices", _) => key!("doctor-devices"),
+            ("devices-none", _) => key!("doctor-devices-none"),
+            ("skip-permissions", _) => key!("doctor-skip-permissions"),
+            ("policy-problems", _) => key!("doctor-policy-problems"),
             _ => key!("doctor-manifest-invalid"),
         };
         let detail: Arg = match (c.id, c.detail.parse::<i64>()) {
-            ("manifests", Ok(n)) => Arg::Num(n),
+            ("manifests" | "devices" | "policy-problems", Ok(n)) => Arg::Num(n),
             _ => c.detail.as_str().into(),
         };
         let mut args = vec![("detail", detail)];
