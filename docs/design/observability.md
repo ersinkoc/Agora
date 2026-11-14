@@ -34,7 +34,10 @@
   each wait shortened by up to a fifth at random) while the hub has been away for less than 5 minutes (`REDIAL_FAST_FOR`): a
   hub that restarts is reached within about 1.5 s of listening again. After that the waits double up to 30 s. A connection the hub
   accepted and kept for 2 s starts the schedule over; one it dropped sooner does not, so a hub that accepts and drops at once is
-  not dialled every half second. (Before, the waits doubled to 30 s and only a connection that lasted 30 s started them over: a
+  not dialled every half second. Each address of a loopback hub name is given up after 0.5 s and counts as refused
+  (`agora_protocol::dial::connect_bounded`, `LOOPBACK_ATTEMPT`): on Windows a refused connection to `127.0.0.1` with no listener
+  takes about 2 s (SYN retransmits), which made a redial cycle 2 s + 1.5 s. Other names keep the system's connect timeout
+  (bounded by the 25 s dial deadline). (Before, the waits doubled to 30 s and only a connection that lasted 30 s started them over: a
   new agent reached the window up to 30 s after a hub restart, `scripts/e2e-hub-restart.mjs`.)
 - **The window** pings the hub every 15 s over the same `PING`/`PONG` while its socket is open and starts over when nothing at
   all comes back within 10 s (`PING_EVERY_MS`, `PONG_WITHIN_MS`); "Retry now" and waking up (online, visible, focus) ping a live

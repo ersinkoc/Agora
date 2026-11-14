@@ -374,9 +374,10 @@ async fn run_once_noting(
 ) -> Result<(), LinkError> {
     let (tls, host, addr) = split_url(&link.url)?;
     // A dial that hangs (a hub that froze or went away mid-handshake) is given up after the silence deadline and tried again, so
-    // a node never waits forever on a connection that will not finish.
+    // a node never waits forever on a connection that will not finish. Each address of a loopback name is given up after half a
+    // second (`dial::connect_bounded`): on Windows a refused one would otherwise take two seconds of every redial.
     let dial = async {
-        let tcp = agora_protocol::dial::connect(&addr)
+        let tcp = agora_protocol::dial::connect_bounded(&addr)
             .await
             .map_err(|e| LinkError::Transport(e.to_string()))?;
         // Keystrokes and echoes are small frames; do not let Nagle's algorithm hold them back.
@@ -1147,7 +1148,7 @@ pub fn list_devices(link: &HubLink) -> Result<Vec<agora_protocol::v1::DeviceInfo
             // Without TLS the hub cannot tell who is asking, so it would not answer.
             return Err(LinkError::Bad("asking for devices needs wss://".into()));
         }
-        let tcp = agora_protocol::dial::connect(&addr)
+        let tcp = agora_protocol::dial::connect_bounded(&addr)
             .await
             .map_err(|e| LinkError::Transport(e.to_string()))?;
         let name = ServerName::try_from(host).map_err(|e| LinkError::Bad(e.to_string()))?;
@@ -1217,7 +1218,7 @@ pub fn enroll(
             .map_err(|e| bad(&e))?
             .with_root_certificates(roots)
             .with_no_client_auth();
-        let tcp = agora_protocol::dial::connect(&addr)
+        let tcp = agora_protocol::dial::connect_bounded(&addr)
             .await
             .map_err(|e| LinkError::Transport(e.to_string()))?;
         let name = ServerName::try_from(host).map_err(|e| bad(&e))?;
