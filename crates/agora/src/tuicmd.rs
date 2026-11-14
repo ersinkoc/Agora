@@ -1906,13 +1906,7 @@ fn draw_console(
     // The footer's notice: the last thing done, or the hub's counts (machines, agents, what needs the user).
     let notice = if c.notice.is_empty() {
         c.snapshot.as_ref().map_or_else(String::new, |s| {
-            let waiting = s.approvals.len()
-                + s.agents
-                    .iter()
-                    .filter(|a| {
-                        a.running && a.state == agora_protocol::v1::AgentState::Blocked as i32
-                    })
-                    .count();
+            let waiting = needs_you_count(s);
             say.text(
                 key!("tui-split-status"),
                 &[
@@ -2027,6 +2021,26 @@ fn draw_console(
             },
         );
     });
+}
+
+/// How many things need the user: each agent that waits (blocked, or with a request) once, however many ways it waits, and each
+/// request that belongs to no agent.
+fn needs_you_count(s: &Snapshot) -> usize {
+    let mut agents: std::collections::HashSet<&str> = s
+        .agents
+        .iter()
+        .filter(|a| a.running && a.state == agora_protocol::v1::AgentState::Blocked as i32)
+        .map(|a| a.agent_id.as_str())
+        .collect();
+    let mut other = 0;
+    for a in &s.approvals {
+        if a.agent_id.is_empty() {
+            other += 1;
+        } else {
+            agents.insert(a.agent_id.as_str());
+        }
+    }
+    agents.len() + other
 }
 
 /// The request of `agent` that waits for an answer, if one does (only its own, never another agent's).
@@ -2757,5 +2771,36 @@ mod forget_tests {
             .to_info();
         let line = forget_notice(&tr, Err(untrusted));
         assert!(!line.contains(['\u{1b}', '\n', '\u{202e}']));
+    }
+
+    #[test]
+    fn an_agent_that_waits_counts_once_in_the_footer() {
+        let blocked = |id: &str| agora_protocol::v1::AgentSnapshot {
+            agent_id: id.into(),
+            running: true,
+            state: agora_protocol::v1::AgentState::Blocked as i32,
+            ..Default::default()
+        };
+        let request = |agent: &str| agora_protocol::v1::ApprovalSnapshot {
+            agent_id: agent.into(),
+            ..Default::default()
+        };
+        // One agent, blocked and with its request: one thing needs the user (the review saw "2 need you").
+        let snap = Snapshot {
+            agents: vec![blocked("n/agent-1")],
+            approvals: vec![request("n/agent-1")],
+            ..Default::default()
+        };
+        assert_eq!(needs_you_count(&snap), 1);
+        // Two agents (one with two requests), and a request of no agent: three.
+        let snap = Snapshot {
+            agents: vec![blocked("n/agent-1")],
+            approvals: vec![request("n/agent-2"), request("n/agent-2"), request("")],
+            ..Default::default()
+        };
+        assert_eq!(needs_you_count(&snap), 3);
+        // Only its own request is the chat tab's to answer.
+        assert!(waiting_for(&snap, "n/agent-1").is_none());
+        assert!(waiting_for(&snap, "n/agent-2").is_some());
     }
 }
