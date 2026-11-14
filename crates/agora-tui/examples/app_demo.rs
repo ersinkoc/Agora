@@ -169,7 +169,7 @@ fn run(
                             execute!(std::io::stdout(), DisableMouseCapture)
                         };
                     }
-                    Action::Scroll(_) | Action::Command(_) => {}
+                    Action::Scroll(_) | Action::Command(_) | Action::Copy(_) => {}
                 }
             }
         }

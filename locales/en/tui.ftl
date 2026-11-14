@@ -95,6 +95,10 @@ tui-request-answer = y allows it · n denies it · any other key leaves it waiti
 tui-note-copy = c copies the command · any key closes this
 tui-note-close = Any key closes this.
 tui-copied = Copied the command to the clipboard.
+tui-copied-text = Copied { $count ->
+        [one] one character
+       *[other] { $count } characters
+    } to the clipboard.
 tui-split-asks-start = asks to start { $kind }
 tui-split-card-more = … { $count } more lines: press Enter to read all
 tui-split-read-first = Read the whole request before allowing it: press Enter.

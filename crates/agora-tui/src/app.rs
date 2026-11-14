@@ -17,7 +17,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph, Widget, Wrap};
 use ratatui::Frame;
 
-use crate::pane::{ColorMode, TerminalPane};
+use crate::pane::{ColorMode, Selection, TerminalPane};
 
 use crate::render::Text;
 /// The window's area type, for callers that do not depend on ratatui themselves.
@@ -120,6 +120,9 @@ pub enum Action {
     /// A letter the shell has no use for, pressed in the tree or the inspector: the caller's command for the selected agent
     /// (start, stop, answer, resume…).
     Command(char),
+    /// Text was selected with the mouse in the active agent's pane: copy it. In the pane's rows and columns, both ends included (the
+    /// caller maps them to the screen's rows as drawn, see [`TerminalPane::first_row`]).
+    Copy(Selection),
     Quit,
 }
 
@@ -232,6 +235,10 @@ pub struct App {
     pub palette: Option<Palette>,
     /// Whether the window captures the mouse (ADR-0063: on by default, `m` releases it for selecting text).
     pub mouse: bool,
+    /// What is selected with the mouse in the active agent's pane, in the pane's rows and columns (kept after it was copied, until
+    /// the next click, key or tab).
+    pub selection: Option<Selection>,
+    selecting: bool,
     drag: Option<Divider>,
     pane: Option<(u16, u16)>,
 }
@@ -248,6 +255,8 @@ impl Default for App {
             selected: 0,
             palette: None,
             mouse: true,
+            selection: None,
+            selecting: false,
             drag: None,
             pane: None,
         }
@@ -389,6 +398,7 @@ impl App {
         // The tree (and so the inspector) follows the tab brought to the front.
         let tab_now = self.active_agent().map(str::to_string);
         if tab_now != tab_before {
+            self.selection = None;
             if let Some(i) = tab_now
                 .as_deref()
                 .and_then(|id| cx.rows.iter().position(|r| !r.header && r.id == id))
@@ -418,6 +428,9 @@ impl App {
     }
 
     fn key(&mut self, k: Key, cx: &Ctx<'_>, out: &mut Vec<Action>) {
+        if self.selection.is_some() {
+            self.selection = None;
+        }
         if self.palette.is_some() {
             self.palette_key(k, cx, out);
             return;
@@ -663,6 +676,8 @@ impl App {
         let at = Position { x: m.col, y: m.row };
         match m.kind {
             MouseKind::Down => {
+                self.selection = None;
+                self.selecting = false;
                 if m.row < a.footer.y && Some(m.col) == a.tree_divider {
                     self.drag = Some(Divider::Tree);
                 } else if m.row < a.footer.y && Some(m.col) == a.inspector_divider {
@@ -686,6 +701,13 @@ impl App {
                     }
                 } else if a.terminal.contains(at) && !self.tabs.is_empty() {
                     self.focus = Focus::Terminal;
+                    // A press in the pane starts a selection; a drag makes it, the release copies it.
+                    let cell = (m.row - a.terminal.y, m.col - a.terminal.x);
+                    self.selection = Some(Selection {
+                        from: cell,
+                        to: cell,
+                    });
+                    self.selecting = true;
                 } else if a.inspector.contains(at) {
                     self.focus = Focus::Inspector;
                 }
@@ -698,9 +720,27 @@ impl App {
                     self.inspector_width =
                         area.right().saturating_sub(m.col + 1).max(MIN_INSPECTOR);
                 }
+                None if self.selecting => {
+                    if let Some(sel) = self.selection.as_mut() {
+                        let t = a.terminal;
+                        sel.to = (
+                            m.row.clamp(t.y, t.bottom().saturating_sub(1)) - t.y,
+                            m.col.clamp(t.x, t.right().saturating_sub(1)) - t.x,
+                        );
+                    }
+                }
                 None => {}
             },
-            MouseKind::Up => self.drag = None,
+            MouseKind::Up => {
+                self.drag = None;
+                if std::mem::take(&mut self.selecting) {
+                    match self.selection {
+                        Some(sel) if sel.from != sel.to => out.push(Action::Copy(sel)),
+                        // A plain click selects nothing.
+                        _ => self.selection = None,
+                    }
+                }
+            }
             MouseKind::ScrollUp | MouseKind::ScrollDown => {
                 let up = m.kind == MouseKind::ScrollUp;
                 if a.terminal.contains(at) && self.active_agent().is_some() {
@@ -873,9 +913,17 @@ impl App {
                 .style(dim)
                 .wrap(Wrap { trim: true })
                 .render(a.terminal, buf),
-                (Some(_), Some(term)) => TerminalPane::new(term)
-                    .colors(s.colors)
-                    .render(a.terminal, buf),
+                (Some(_), Some(term)) => {
+                    let first = TerminalPane::first_row(term, a.terminal.height);
+                    let selection = self.selection.map(|sel| Selection {
+                        from: (sel.from.0 + first, sel.from.1),
+                        to: (sel.to.0 + first, sel.to.1),
+                    });
+                    TerminalPane::new(term)
+                        .colors(s.colors)
+                        .selection(selection)
+                        .render(a.terminal, buf);
+                }
             }
         }
 
@@ -2350,6 +2398,39 @@ mod tests {
         assert_eq!(app.settle_selection(&rows), Some("mac/agent-1"));
         assert_eq!(app.selected, 1);
         assert_eq!(app.settle_selection(&[]), None);
+    }
+
+    #[test]
+    fn a_drag_in_the_pane_selects_and_copies_a_click_does_not() {
+        let rows = rows();
+        let mut app = App::default();
+        key(&mut app, &rows, Key::Enter);
+        let t = app.areas(AREA).terminal;
+        // A plain click: nothing to copy, no selection left.
+        assert_eq!(
+            click(&mut app, &rows, MouseKind::Down, t.x + 2, t.y + 1),
+            vec![]
+        );
+        assert_eq!(
+            click(&mut app, &rows, MouseKind::Up, t.x + 2, t.y + 1),
+            vec![]
+        );
+        assert_eq!(app.selection, None);
+        // Press, drag (past the pane's edge: clamped), release: copied, in the pane's rows and columns.
+        click(&mut app, &rows, MouseKind::Down, t.x + 2, t.y + 1);
+        click(&mut app, &rows, MouseKind::Drag, t.right() + 5, t.y + 3);
+        let sel = Selection {
+            from: (1, 2),
+            to: (3, t.width - 1),
+        };
+        assert_eq!(
+            click(&mut app, &rows, MouseKind::Up, t.right() + 5, t.y + 3),
+            vec![Action::Copy(sel)]
+        );
+        // It stays shown until the next key.
+        assert_eq!(app.selection, Some(sel));
+        key(&mut app, &rows, Key::Char('a'));
+        assert_eq!(app.selection, None);
     }
 
     #[test]
