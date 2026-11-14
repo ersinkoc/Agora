@@ -24,6 +24,7 @@ agent-sandbox_unavailable = This machine is set to confine agents ({ $level }), 
         [broad_write_grant] A folder it would use lets every user write to it.
         [label_failed] A folder it would use cannot be marked for confined agents.
         [protected_path_unresolved] This machine's own Agora folder cannot be found, so it could not be kept closed to the agent.
+        [writable_is_link] A file or folder it may write is a link, which it could have put there itself. List the place the link points to instead.
         [worktree_not_folder] Its folder is no longer a plain folder (something, such as a link, was put in its place).
        *[other] {""}
     }

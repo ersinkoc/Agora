@@ -23,6 +23,7 @@ agent-sandbox_unavailable = Bu makine ajanları kısıtlayacak şekilde ayarlı 
         [broad_write_grant] Kullanacağı bir klasöre her kullanıcı yazabiliyor.
         [label_failed] Kullanacağı bir klasör kısıtlı ajanlar için işaretlenemiyor.
         [protected_path_unresolved] Bu makinenin kendi Agora klasörü bulunamıyor; ajana kapalı tutulamazdı.
+        [writable_is_link] Yazabileceği bir dosya ya da klasör bir bağlantı; onu kendisi koymuş olabilir. Bunun yerine bağlantının gösterdiği yeri listeleyin.
         [worktree_not_folder] Klasörü artık düz bir klasör değil (yerine bağlantı gibi bir şey konmuş).
        *[other] {""}
     }

@@ -166,6 +166,18 @@ pub(crate) fn profile(sb: &crate::Sandbox) -> io::Result<String> {
             return Err(refused(crate::SandboxRefusal::WorktreeNotFolder));
         }
     }
+    // #545: an entry is resolved through links when the profile is built, so a link the agent made where it may write would widen
+    // its next start (`ln -s ~/.zshrc ~/.claude.json`, `ln -s ~ ~/.claude`, the shared Git folder's `refs` made a link to `~`).
+    // Refused, as a swapped worktree is. A link the agent cannot have made is followed: one outside every `write` entry (an owner's
+    // `~/.gitconfig` kept in a dotfiles folder), or one in a folder this user cannot write (`/tmp`, `/var` in `/`).
+    if sb
+        .write
+        .iter()
+        .chain(sb.read.iter())
+        .any(|e| through_agents_link(e, &sb.write))
+    {
+        return Err(refused(crate::SandboxRefusal::WritableIsLink));
+    }
     // A `read` or `write` entry that resolves below a closed folder (`~/.claude` made a link to the node's home) is left out: the
     // closed folder stays closed whatever the agent left behind for its next start.
     let real = |p: &std::path::Path| {
@@ -337,6 +349,24 @@ pub(crate) fn profile(sb: &crate::Sandbox) -> io::Result<String> {
         }
     }
     Ok(out)
+}
+
+/// Whether `entry`, or a folder on its way, is a symbolic link the agent could have made: inside one of the `writes` entries (as
+/// written: that is where the agent could write in its last run) and in a folder this user may write (`/tmp` itself is a link in
+/// `/`, which nobody but root writes; `/private/tmp` and `~` are writable). A folder that cannot be checked counts as writable.
+fn through_agents_link(entry: &std::path::Path, writes: &[std::path::PathBuf]) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let writable = |d: &std::path::Path| {
+        std::ffi::CString::new(d.as_os_str().as_bytes()).map_or(true, |c| {
+            // SAFETY: `c` is a NUL-terminated path that lives for the call.
+            unsafe { libc::access(c.as_ptr(), libc::W_OK) == 0 }
+        })
+    };
+    entry.ancestors().any(|c| {
+        writes.iter().any(|w| c.starts_with(w))
+            && std::fs::symlink_metadata(c).is_ok_and(|m| m.file_type().is_symlink())
+            && c.parent().is_none_or(writable)
+    })
 }
 
 /// `(regex #"^<file>\.[^/]*$")`: the names next to `file` that start with its name and a dot. `None` for a path a raw string
@@ -925,32 +955,15 @@ mod sandbox_tests {
         std::fs::write(&wt, "x").unwrap();
         assert!(super::profile(&sb).is_err());
         std::fs::remove_file(&wt).unwrap();
-        // And were a link only in the write list, it still opens nothing of the home (an entry resolving into it is dropped).
+        // And were it a link only in the write list, the start is refused too (#545).
         std::os::unix::fs::symlink(home.join("data"), &wt).unwrap();
         let only_written = crate::Sandbox {
             reopen: vec![],
             ..sb.clone()
         };
-        let p = super::profile(&only_written).unwrap();
-        let (w, h) = (wt.display(), home.display());
-        let out = std::process::Command::new(super::SANDBOX_EXEC)
-            .args([
-                "-p",
-                &p,
-                "/bin/sh",
-                "-c",
-                &format!(
-                    "cat {w}/trusted-devices >/dev/null 2>&1 && echo data-OPEN || echo data-closed; \
-                     cat {h}/data/trusted-devices >/dev/null 2>&1 && echo real-OPEN || echo real-closed; \
-                     echo x > {h}/data/policy 2>/dev/null && echo policy-OPEN || echo policy-closed"
-                ),
-            ])
-            .output()
-            .unwrap();
-        let text = String::from_utf8_lossy(&out.stdout);
-        assert!(
-            !text.contains("OPEN") && text.contains("data-closed"),
-            "{text}\n{p}"
+        assert_eq!(
+            crate::sandbox_refusal(&super::profile(&only_written).unwrap_err()),
+            Some(crate::SandboxRefusal::WritableIsLink)
         );
         let _ = std::fs::remove_dir_all(home);
         let _ = std::fs::remove_dir_all(elsewhere);
@@ -974,6 +987,16 @@ mod sandbox_tests {
             deny: vec![home.clone()],
             reopen: vec![home.join("worktrees/a")],
             ..Default::default()
+        };
+        // The write entry made a link: refused (#545).
+        assert_eq!(
+            crate::sandbox_refusal(&super::profile(&sb).unwrap_err()),
+            Some(crate::SandboxRefusal::WritableIsLink)
+        );
+        // A read entry that is a link outside every write entry is followed, and opens nothing of the home all the same.
+        let sb = crate::Sandbox {
+            write: vec![home.join("worktrees/a"), "/dev".into()],
+            ..sb
         };
         let p = super::profile(&sb).unwrap();
         let mut text = through(&sb, &home, &claude);
@@ -1002,6 +1025,94 @@ mod sandbox_tests {
         let _ = std::fs::remove_file(claude);
         let _ = std::fs::remove_file(data);
         let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn a_link_the_agent_makes_where_it_may_write_refuses_its_next_start() {
+        // #545: owner write entries were followed through links. The agent replaces one with a link (a file to `.zshrc`, a folder to
+        // the user's home, a folder on the way to a read entry, the shared Git folder's `refs`), and was given where it points at its
+        // next start. A scratch "user home" under /tmp stands in for `~`.
+        let u = std::path::PathBuf::from(format!("/tmp/agora-545-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&u);
+        for d in [".claude/a", "repo/.git/refs", "secret"] {
+            std::fs::create_dir_all(u.join(d)).unwrap();
+        }
+        std::fs::write(u.join(".claude.json"), "{}").unwrap();
+        std::fs::write(u.join(".zshrc"), "# rc\n").unwrap();
+        std::fs::write(u.join(".claude/a/b.json"), "{}").unwrap();
+        let sb = crate::Sandbox {
+            read: vec!["/usr".into(), "/bin".into(), u.join(".claude/a/b.json")],
+            write: vec![
+                u.join(".claude.json"),
+                u.join(".claude"),
+                u.join("repo/.git/refs"),
+                "/tmp".into(),
+                "/dev".into(),
+            ],
+            ..Default::default()
+        };
+        // Before: allowed, and `/tmp` (itself a link, in `/`) is fine.
+        let p = super::profile(&sb).unwrap();
+        let (h, run) = (u.display(), |p: &str, script: &str| {
+            let out = std::process::Command::new(super::SANDBOX_EXEC)
+                .args(["-p", p, "/bin/sh", "-c", script])
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        });
+        for (name, attack) in [
+            (
+                "file",
+                format!("rm {h}/.claude.json && ln -s {h}/.zshrc {h}/.claude.json"),
+            ),
+            (
+                "folder",
+                format!("rm -rf {h}/.claude && ln -s {h} {h}/.claude"),
+            ),
+            (
+                "on-the-way",
+                format!("rm -rf {h}/.claude/a && ln -s {h}/secret {h}/.claude/a"),
+            ),
+            (
+                "git-refs",
+                format!("rm -rf {h}/repo/.git/refs && ln -s {h} {h}/repo/.git/refs"),
+            ),
+        ] {
+            // The confined agent can make the link (the escape #545 describes)...
+            let made = run(&p, &format!("{attack} && echo made"));
+            assert!(made.contains("made"), "{name}: {made}");
+            // ...and its next start is refused instead of given where it points.
+            let e = super::profile(&sb).unwrap_err();
+            assert_eq!(
+                crate::sandbox_refusal(&e),
+                Some(crate::SandboxRefusal::WritableIsLink),
+                "{name}"
+            );
+            // Put back for the next case.
+            let _ = std::fs::remove_dir_all(&u);
+            for d in [".claude/a", "repo/.git/refs", "secret"] {
+                std::fs::create_dir_all(u.join(d)).unwrap();
+            }
+            std::fs::write(u.join(".claude.json"), "{}").unwrap();
+            std::fs::write(u.join(".zshrc"), "# rc\n").unwrap();
+            std::fs::write(u.join(".claude/a/b.json"), "{}").unwrap();
+            assert!(super::profile(&sb).is_ok(), "{name}: restored");
+        }
+        // An owner's own link outside what the agent may write (a dotfiles `.gitconfig`) is followed.
+        std::os::unix::fs::symlink(u.join(".zshrc"), u.join(".gitconfig")).unwrap();
+        let dotfiles = crate::Sandbox {
+            read: vec![u.join(".gitconfig")],
+            write: vec![u.join(".claude"), "/dev".into()],
+            ..Default::default()
+        };
+        assert!(super::profile(&dotfiles).is_ok());
+        // The same link where the agent may write (here all of `/tmp`) could be its own: refused.
+        let mine = crate::Sandbox {
+            write: vec!["/tmp".into()],
+            ..dotfiles
+        };
+        assert!(super::profile(&mine).is_err());
+        let _ = std::fs::remove_dir_all(&u);
     }
 
     #[test]
