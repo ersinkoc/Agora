@@ -29,11 +29,12 @@ export function FilesView({ files, load, changed, compact = false }: {
   /** In a pane: the tree starts narrower and the hints are left out. */
   compact?: boolean;
 }) {
-  const [listings, setListings] = useState<Record<string, Listing>>({});
+  // Maps, not objects: a file or folder may be named `constructor` or `__proto__`.
+  const [listings, setListings] = useState<Map<string, Listing>>(new Map());
   const [open, setOpen] = useState<Set<string>>(new Set());
   const [tabs, setTabs] = useState<Tab[]>([]);
   const [active, setActive] = useState<string | undefined>();
-  const [contents, setContents] = useState<Record<string, Content>>({});
+  const [contents, setContents] = useState<Map<string, Content>>(new Map());
   const [changes, setChanges] = useState<DiffFile[]>([]);
   const [onlyChanged, setOnlyChanged] = useState(false);
   const [query, setQuery] = useState('');
@@ -45,18 +46,22 @@ export function FilesView({ files, load, changed, compact = false }: {
   const [round, setRound] = useState(0);
   const filterRef = useRef<HTMLInputElement>(null);
   const findRef = useRef<HTMLInputElement>(null);
+  // The refresh a listing belongs to: one that completes after Refresh is dropped.
+  const generation = useRef(0);
 
   // A folder that cannot be listed is tried twice more, a little later each time (just after an agent starts, the node may not hold
   // its workspace yet); then it says so, with a way to try again.
   const list = useCallback((dir: string) => {
-    setListings((l) => (l[dir] === undefined || l[dir] === 'failed' ? { ...l, [dir]: 'loading' } : l));
+    const gen = generation.current;
+    const put = (v: Listing) => { if (gen === generation.current) setListings((l) => new Map(l).set(dir, v)); };
+    setListings((l) => { const v = l.get(dir); return v === undefined || v === 'failed' ? new Map(l).set(dir, 'loading') : l; });
     const attempt = (n: number) => files.list(dir).then(
-      (items) => setListings((l) => ({ ...l, [dir]: [...items].sort((a, b) => Number(b.isDir) - Number(a.isDir) || a.name.localeCompare(b.name)) })),
-      () => { if (n < 2) setTimeout(() => attempt(n + 1), 1000 * (n + 1)); else setListings((l) => ({ ...l, [dir]: 'failed' })); },
+      (items) => put([...items].sort((a, b) => Number(b.isDir) - Number(a.isDir) || a.name.localeCompare(b.name))),
+      () => { if (gen !== generation.current) return; if (n < 2) setTimeout(() => attempt(n + 1), 1000 * (n + 1)); else put('failed'); },
     );
     attempt(0);
   }, [files]);
-  useEffect(() => { setListings({}); list(''); }, [list, round]);
+  useEffect(() => { generation.current++; setListings(new Map()); list(''); }, [list, round]);
   // The caller may pass a new function on every render (a pane does); the diff is read on opening and when asked, not on each one.
   const loadRef = useRef(load);
   loadRef.current = load;
@@ -83,23 +88,24 @@ export function FilesView({ files, load, changed, compact = false }: {
   const changeOf = (path: string) => changes.find((c) => c.path === path);
 
   const read = useCallback((path: string) => {
-    setContents((c) => ({ ...c, [path]: 'loading' }));
+    setContents((c) => new Map(c).set(path, 'loading'));
     files.read(path).then(
       (b) => setContents((c) => {
         const text = decodeText(b);
-        if (text === undefined) return { ...c, [path]: 'binary' };
+        if (text === undefined) return new Map(c).set(path, 'binary');
         const lines = text.split('\n').map((l) => (l.endsWith('\r') ? l.slice(0, -1) : l));
         if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop();
-        return { ...c, [path]: { lines, bytes: b.length } };
+        return new Map(c).set(path, { lines, bytes: b.length });
       }),
-      () => setContents((c) => ({ ...c, [path]: 'failed' })),
+      () => setContents((c) => new Map(c).set(path, 'failed')),
     );
   }, [files]);
   const openFile = (path: string, size: number) => {
     setTabs((ts) => (ts.some((x) => x.path === path) ? ts : [...ts, { path, size }].slice(-MAX_TABS)));
     setActive(path);
     setHit(0);
-    if (contents[path] === undefined || contents[path] === 'failed') read(path);
+    const had = contents.get(path);
+    if (had === undefined || had === 'failed') read(path);
   };
   const closeTab = (path: string) => {
     const at = tabs.findIndex((x) => x.path === path);
@@ -112,7 +118,7 @@ export function FilesView({ files, load, changed, compact = false }: {
   const reveal = (path: string, andSelf = false) => {
     const dirs = [...ancestors(path), ...(andSelf ? [path] : [])];
     setOpen((o) => new Set([...o, ...dirs]));
-    for (const d of dirs) if (listings[d] === undefined) list(d);
+    for (const d of dirs) if (!listings.has(d)) list(d);
     setOnlyChanged(false);
     setQuery('');
   };
@@ -120,7 +126,7 @@ export function FilesView({ files, load, changed, compact = false }: {
   // Every file listed so far, for the name filter (folders not opened yet are not searched; the changed files always are).
   const known = useMemo(() => {
     const out = new Map<string, number>();
-    for (const [dir, l] of Object.entries(listings)) if (Array.isArray(l)) for (const f of l) if (!f.isDir) out.set(joinPath(dir, f.name), f.size);
+    for (const [dir, l] of listings) if (Array.isArray(l)) for (const f of l) if (!f.isDir) out.set(joinPath(dir, f.name), f.size);
     for (const c of changes) if (!out.has(c.path)) out.set(c.path, -1);
     return out;
   }, [listings, changes]);
@@ -133,7 +139,7 @@ export function FilesView({ files, load, changed, compact = false }: {
       .slice(0, 500);
   }, [known, query, onlyChanged, status]);
 
-  const content = active !== undefined ? contents[active] : undefined;
+  const content = active !== undefined ? contents.get(active) : undefined;
   const lines = content && typeof content === 'object' ? content.lines : undefined;
   const marks = useMemo(() => {
     const c = active !== undefined ? changes.find((x) => x.path === active) : undefined;
@@ -284,10 +290,10 @@ export function FilesView({ files, load, changed, compact = false }: {
 }
 
 function TreeLevel({ dir, depth, listings, open, list, toggle, pick, active, status, folders }: {
-  dir: string; depth: number; listings: Record<string, Listing>; open: Set<string>; list: (dir: string) => void; toggle: (path: string) => void;
+  dir: string; depth: number; listings: Map<string, Listing>; open: Set<string>; list: (dir: string) => void; toggle: (path: string) => void;
   pick: (path: string, size: number) => void; active?: string; status: Map<string, DiffStatus>; folders: Set<string>;
 }) {
-  const l = listings[dir];
+  const l = listings.get(dir);
   useEffect(() => { if (l === undefined) list(dir); }, [dir, l, list]);
   const pad = { paddingInlineStart: 8 + depth * 14 };
   if (l === undefined || l === 'loading') return <p className="muted m-0 px-2 py-1 text-xs" style={pad}>…</p>;
