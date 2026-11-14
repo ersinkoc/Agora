@@ -3,16 +3,22 @@ import { t } from '../i18n';
 import { ago } from '../net/time';
 import { machineKey, type AgentTileModel } from '../model';
 import { money, type UsageSummary } from '../net/usage';
-import { bytesLabel, type MachineModel } from '../net/view';
+import { bytesLabel, isOld, type MachineModel } from '../net/view';
+import { ForgetMachines } from './ForgetMachines';
 import { Icon } from './Icon';
 import { StateMark } from './StateBadge';
 
 const ROW = 104;
 
 // The hub in the middle, every machine it knows around it: who is connected right now, what runs there, when it was last heard.
-export function NetworkView({ machines, agents, usage, hubName }: { machines: readonly MachineModel[]; agents: readonly AgentTileModel[]; usage?: UsageSummary; hubName: string }) {
+// ADR-0073: machines not seen for a day are listed apart, as old, folded; an offline machine can be forgotten, and the old ones cleaned
+// up in one go (`onForget` absent: no such actions, as in the demo).
+export function NetworkView({ machines: all, agents, usage, hubName, onForget }: { machines: readonly MachineModel[]; agents: readonly AgentTileModel[]; usage?: UsageSummary; hubName: string; onForget?: (ids: string[], refuseReturn: boolean) => Promise<Map<string, string | undefined>> }) {
   const [now, setNow] = useState(Date.now());
   useEffect(() => { const id = setInterval(() => setNow(Date.now()), 5000); return () => clearInterval(id); }, []);
+  const machines = all.filter((m) => !isOld(m, now));
+  const old = all.filter((m) => isOld(m, now));
+  const [forgetting, setForgetting] = useState<{ list: MachineModel[]; cleanup: boolean } | undefined>();
   const online = machines.filter(m => m.online).length;
   // The lines end at the middle of each card as it really is laid out (cards grow with the agents listed in them).
   const list = useRef<HTMLUListElement>(null);
@@ -69,6 +75,7 @@ export function NetworkView({ machines, agents, usage, hubName }: { machines: re
             {m.build && <span className="ide-chip font-mono" title={t('network-build')}>{m.build}</span>}
             <span className="flex-1" />
             <span className="text-xs text-muted">{m.online ? t('network-heard', { when: ago(m.lastSeenMs, now) }) : t('network-last-seen', { when: ago(m.lastSeenMs, now) })}</span>
+            {!m.online && onForget && <button type="button" className="button px-2 py-0.5 text-xs" onClick={() => setForgetting({ list: [m], cleanup: false })}>{t('forget-machine-action')}</button>}
           </div>
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted">
             <code dir="ltr" className="break-all">{m.id}</code>
@@ -83,5 +90,21 @@ export function NetworkView({ machines, agents, usage, hubName }: { machines: re
         </li>;
       })}
     </ul>
+    {old.length > 0 && <details className="md:col-span-3 rounded-m border border-dashed border-line bg-surface-1 p-3">
+      <summary className="cursor-pointer text-sm font-semibold">{t('old-machines-title', { count: old.length })}</summary>
+      <p className="muted mb-2 mt-1 text-xs">{t('old-machines-explain')}</p>
+      <ul className="m-0 grid list-none gap-2 p-0">
+        {old.map((m) => <li key={m.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 opacity-80">
+          <Icon name="machine" className="size-4 text-muted" />
+          <strong className="min-w-0 truncate">{m.name}</strong>
+          <code dir="ltr" className="text-xs text-muted">{m.id}</code>
+          <span className="flex-1" />
+          <span className="text-xs text-muted">{t('network-last-seen', { when: ago(m.lastSeenMs, now) })}</span>
+          {onForget && <button type="button" className="button px-2 py-0.5 text-xs" onClick={() => setForgetting({ list: [m], cleanup: false })}>{t('forget-machine-action')}</button>}
+        </li>)}
+      </ul>
+      {onForget && <div className="mt-3 flex justify-end"><button type="button" className="button" onClick={() => setForgetting({ list: old, cleanup: true })}>{t('old-machines-cleanup')}</button></div>}
+    </details>}
+    {forgetting && onForget && <ForgetMachines machines={forgetting.list} now={now} cleanup={forgetting.cleanup} onForget={onForget} onClose={() => setForgetting(undefined)} />}
   </div>;
 }

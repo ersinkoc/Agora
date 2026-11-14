@@ -24,6 +24,16 @@ An agent whose process is gone moves from its folder to **Closed**, below the ma
 
 `#/machines` draws the hub with a live link to every machine it knows (animated when connected, dotted when not), a card per machine (state, system, node version, agents, terminals, memory, cost, when it was last heard, or for an offline one "last seen", ADR-0070) and the agents running there as chips. An offline machine also shows "last seen" on its row in the agent list and in its tooltip.
 
+**Old machines** (ADR-0073): a machine not seen for more than a day is listed apart, folded, under **n old machines**, and is not
+offered for new agents. An offline machine has **Forget…**, and the old ones have **Clean up…**: one dialog lists them, ticked,
+with when each was last seen and how many agents were running then, and one box also refuses them if they connect again (a new join
+code is needed then). The hub forgets them for every window (`node.forget`, owner only); what they did stays in the history and the
+costs, and a machine that connects again comes back with the agents it still runs. `agora hub machines` does the same from the hub's
+machine.
+
+![Old machines](screens/old-machines-dark.png)
+![Cleaning up old machines](screens/old-machines-cleanup-light.png)
+
 ## Layout (editor-style, 2026-11-12)
 
 The window is laid out like an editor, with the terminal as the content. At most two side panels are visible (visual-language.md); each hides with its button.

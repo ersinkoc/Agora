@@ -384,10 +384,10 @@ export function SignInPage({ onSubmit, onPasskey, notice, passwordRequired = fal
   );
 }
 
-export function MachinesPage({ machines, agents = [], usage, projects = [], onBack }: { machines: readonly MachineModel[]; agents?: readonly AgentTileModel[]; usage?: UsageSummary; projects?: readonly ProjectCost[]; onBack: () => void }) {
+export function MachinesPage({ machines, agents = [], usage, projects = [], onBack, onForget }: { machines: readonly MachineModel[]; agents?: readonly AgentTileModel[]; usage?: UsageSummary; projects?: readonly ProjectCost[]; onBack: () => void; onForget?: (ids: string[], refuseReturn: boolean) => Promise<Map<string, string | undefined>> }) {
   return (
     <PageFrame wide title={t('machines-title')} onBack={onBack}>
-      <NetworkView machines={machines} agents={agents} usage={usage} hubName={window.location.host} />
+      <NetworkView machines={machines} agents={agents} usage={usage} hubName={window.location.host} onForget={onForget} />
       {projects.length > 0 && (
         <section className="stack" aria-label={t('usage-projects')}>
           <h2>{t('usage-projects')}</h2>

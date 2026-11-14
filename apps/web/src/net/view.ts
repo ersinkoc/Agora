@@ -15,7 +15,8 @@ export function num(x: Num): number {
 
 // `linkGen`: the generation of the latest `NodeLink { up }` this window saw (ADR-0070); unknown (0) for a node it only knows from the
 // snapshot.
-export interface NodeV { hostname: string; os: string; online: boolean; lastEventMs: number; agentsRunning: number; memoryBytes?: number; build?: string; terminalsOpen?: number; linkGen?: number }
+// `forgotten`: the owner had the hub forget it (ADR-0073); it and what it runs are not shown until it connects again.
+export interface NodeV { hostname: string; os: string; online: boolean; lastEventMs: number; agentsRunning: number; memoryBytes?: number; build?: string; terminalsOpen?: number; linkGen?: number; forgotten?: boolean }
 export interface WorkspaceV { nodeId: string; projectId: string; path: string; gitRoot: string; branch: string; managed: boolean; filesChanged: number }
 export interface WorktreeV { checkoutId: string; path: string; branch: string; filesChanged: number }
 export interface AgentV {
@@ -181,6 +182,20 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
       if (!stale) {
         n.online = !!b.up;
         if (b.up) n.linkGen = gen;
+        // ADR-0073: a forgotten machine that connects again is shown again, with what it still runs.
+        if (b.up) n.forgotten = false;
+      }
+      break;
+    }
+    // ADR-0073: only the hub writes it, for an offline machine. Its closed agents stay forgotten for good; what still runs there is
+    // kept, hidden with the machine, and shown again if it comes back.
+    case 'nodeForgotten': {
+      if (producer !== 'hub') break;
+      const id = e.nodeForgotten.nodeId ?? '';
+      const n = v.nodes.get(id);
+      if (n) n.forgotten = true;
+      for (const [key, a] of [...v.agents]) {
+        if (a.nodeId === id && !a.running) { v.agents.delete(key); v.agentWorkspaces.delete(key); v.withTerminal.delete(key); }
       }
       break;
     }
@@ -451,6 +466,34 @@ export function approvalList(v: View): ApprovalModel[] {
       };
     })
     .sort((a, b) => a.expiresAtMs - b.expiresAtMs);
+}
+
+// ADR-0073: a machine not seen for a day is shown as old (the hub's `agora hub machines` uses the same threshold).
+export const OLD_AFTER_MS = 24 * 60 * 60 * 1000;
+
+export function isOld(m: { online: boolean; lastSeenMs: number }, now: number): boolean {
+  return !m.online && now - m.lastSeenMs >= OLD_AFTER_MS;
+}
+
+// ADR-0073: the view as people see it: a forgotten machine and everything that belongs to it (its folders, worktrees, terminals,
+// approvals and agents) are left out. A new object either way, so React sees the change.
+export function shown(v: View): View {
+  const hidden = new Set([...v.nodes].filter(([, n]) => n.forgotten).map(([id]) => id));
+  if (hidden.size === 0) return { ...v };
+  const under = (key: string) => hidden.has(key.split('/')[0] ?? '');
+  const keep = <T,>(m: Map<string, T>, ok: (k: string, x: T) => boolean) => new Map([...m].filter(([k, x]) => ok(k, x)));
+  return {
+    ...v,
+    nodes: keep(v.nodes, (id) => !hidden.has(id)),
+    checkouts: keep(v.checkouts, (k, c) => !under(k) && !hidden.has(c.nodeId)),
+    workspaces: keep(v.workspaces, (k, w) => !under(k) && !hidden.has(w.nodeId)),
+    worktrees: keep(v.worktrees, (k) => !under(k)),
+    agents: keep(v.agents, (k, a) => !under(k) && !hidden.has(a.nodeId)),
+    agentWorkspaces: keep(v.agentWorkspaces, (k) => !under(k)),
+    approvals: keep(v.approvals, (k) => !under(k)),
+    withTerminal: new Set([...v.withTerminal].filter((k) => !under(k))),
+    trusted: v.trusted && keep(v.trusted, (id) => !hidden.has(id)),
+  };
 }
 
 export interface MachineModel { id: string; name: string; os: string; online: boolean; agentsRunning: number; lastSeenMs: number; memoryBytes?: number; build?: string; terminalsOpen?: number }
