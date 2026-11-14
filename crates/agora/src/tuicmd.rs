@@ -1958,7 +1958,19 @@ fn console(
                             );
                         }
                     }
-                    Action::Open(_) | Action::Scroll(_) => {}
+                    // The wheel moved the tab's view (App.scroll): never further back than its screen and history hold.
+                    Action::Scroll(_) => {
+                        let height = c.app.areas(area).terminal.height;
+                        if let Some(p) = preview
+                            .as_ref()
+                            .filter(|p| Some(p.agent.as_str()) == c.app.active_agent())
+                        {
+                            c.app.scroll = c.app.scroll.min(
+                                agora_tui::pane::TerminalPane::max_scroll(p.screen(), height),
+                            );
+                        }
+                    }
+                    Action::Open(_) => {}
                     Action::Quit => {
                         if let Some(p) = preview.take() {
                             p.close(session);

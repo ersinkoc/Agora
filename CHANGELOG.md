@@ -4,6 +4,9 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+### Terminal client
+- The terminal client's wheel scrolls an agent's tab back through what it showed, with how far back at the top; typing goes back to the bottom.
+
 ## 0.3.11
 
 ### Terminal client (ADR-0063)

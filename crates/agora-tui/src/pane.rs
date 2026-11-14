@@ -69,6 +69,8 @@ pub struct TerminalPane<'a> {
     term: &'a dyn Terminal,
     colors: ColorMode,
     selection: Option<Selection>,
+    /// Lines scrolled back from the live bottom (the wheel): the screen's rows above the area first, then the scrollback.
+    scroll: usize,
 }
 
 impl<'a> TerminalPane<'a> {
@@ -77,6 +79,7 @@ impl<'a> TerminalPane<'a> {
             term,
             colors: ColorMode::Full,
             selection: None,
+            scroll: 0,
         }
     }
 
@@ -90,6 +93,18 @@ impl<'a> TerminalPane<'a> {
     pub fn selection(mut self, selection: Option<Selection>) -> Self {
         self.selection = selection;
         self
+    }
+
+    /// Draws `lines` back from the live bottom (clamped to what there is: [`max_scroll`](Self::max_scroll)).
+    #[must_use]
+    pub fn scroll(mut self, lines: usize) -> Self {
+        self.scroll = lines;
+        self
+    }
+
+    /// How far back the area can be scrolled: the screen's rows above it, then every line of scrollback.
+    pub fn max_scroll(term: &dyn Terminal, height: u16) -> usize {
+        usize::from(Self::first_row(term, height)) + term.history_len()
     }
 
     /// The first screen row drawn in an area `height` rows tall: 0 when the screen fits, else what keeps the cursor's row visible.
@@ -153,8 +168,32 @@ impl Widget for TerminalPane<'_> {
         }
         let size = self.term.size();
         let first = Self::first_row(self.term, area.height);
+        let back = self.scroll.min(Self::max_scroll(self.term, area.height));
         for y in 0..area.height {
-            let row = first + y;
+            // Scrolled back: the rows above `first` are earlier screen rows, then (negative) the scrollback, newest first.
+            let shown = i64::from(first) + i64::from(y) - i64::try_from(back).unwrap_or(i64::MAX);
+            if shown < 0 {
+                let line = usize::try_from(-shown).unwrap_or(usize::MAX);
+                for x in 0..area.width {
+                    let Some(out) = buf.cell_mut(Position::new(area.x + x, area.y + y)) else {
+                        continue;
+                    };
+                    out.reset();
+                    let Some(cell) = self.term.history_cell(line, x) else {
+                        continue;
+                    };
+                    out.set_style(to_style(cell.style, self.colors));
+                    let ch = if cell.spacer || cell.ch.is_control() {
+                        ' '
+                    } else {
+                        cell.ch
+                    };
+                    let mut b = [0u8; 4];
+                    out.set_symbol(ch.encode_utf8(&mut b));
+                }
+                continue;
+            }
+            let row = u16::try_from(shown).unwrap_or(u16::MAX);
             for x in 0..area.width {
                 let pos = Position::new(area.x + x, area.y + y);
                 let Some(out) = buf.cell_mut(pos) else {
@@ -511,6 +550,32 @@ mod tests {
             to: (0, 5),
         };
         assert_eq!(selected_text(&t, 2, low), "second");
+    }
+
+    #[test]
+    fn a_scrolled_pane_shows_the_lines_that_scrolled_away() {
+        let mut lines = String::new();
+        for i in 1..=30 {
+            lines.push_str(&format!("line {i}\r\n"));
+        }
+        let t = term(20, 5, lines.as_bytes());
+        let draw = |back: usize| {
+            let area = Rect::new(0, 0, 20, 5);
+            let mut buf = Buffer::empty(area);
+            TerminalPane::new(&t).scroll(back).render(area, &mut buf);
+            (0..5).map(|y| line(&buf, y)).collect::<Vec<_>>()
+        };
+        // The live bottom: lines 27..30 and the empty row.
+        assert_eq!(draw(0)[0], "line 27");
+        // Three back: the three lines that scrolled off last come first.
+        assert_eq!(
+            draw(3),
+            ["line 24", "line 25", "line 26", "line 27", "line 28"]
+        );
+        // As far back as there is, and no further.
+        assert_eq!(TerminalPane::max_scroll(&t, 5), 26);
+        assert_eq!(draw(26)[0], "line 1");
+        assert_eq!(draw(500)[0], "line 1");
     }
 
     #[test]

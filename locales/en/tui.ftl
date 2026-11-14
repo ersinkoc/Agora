@@ -183,6 +183,10 @@ tui-app-welcome-none = No agent is running yet.
 tui-app-welcome-search = Search and commands
 tui-app-welcome-next = Jump to the next agent that needs you
 tui-app-tabs-waiting = { $count } waiting · Ctrl-] N
+tui-app-scrolled = ↑ { $count ->
+        [one] one line back
+       *[other] { $count } lines back
+    } · type to go back down
 tui-app-no-screen = This agent's terminal is opening.
 tui-app-tree-empty = No agents yet.
 tui-app-palette-title = Commands
