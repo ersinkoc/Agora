@@ -6,6 +6,7 @@ cli-usage =
       agora web
       agora status
       agora down
+      agora service install|remove|status
       agora node run [--socket PATH] [--manifests DIR] [--project PATH]... [--data DIR] [--worktrees DIR]
       agora agent start KIND [--cwd PATH] [--worktree] [--project NAME] [--name NAME] [--accept-project-id-change] [--socket PATH]
       agora project init [--cwd PATH] [--socket PATH]
@@ -258,6 +259,25 @@ down-stopped = Stopped the { $role } (process { $pid }).
 down-stopped-supervised = Stopped the { $role } and its supervisor (process { $pid }).
 down-failed = Could not stop the { $role }: { $reason }
 down-nothing = Nothing to stop: `agora` did not start anything that is still running.
+service-description = Starts the Agora { $role } when you log in (it keeps it running).
+service-unsupported = Starting Agora when you log in is not available on this system yet. Start it with `agora` after logging in.
+service-registering = Registering "{ $name }" to start the { $role } when you log in. It runs: { $command }
+service-installed = The { $role } now starts when you log in ("{ $name }"), and it was started now.
+service-already = The { $role } already starts when you log in ("{ $name }"); nothing changed. To register it anew, run `agora service remove` first.
+service-installed-running = The { $role } now starts when you log in ("{ $name }"). It runs already (process { $pid }), so it was not started again.
+service-installed-not-started = The { $role } now starts when you log in ("{ $name }"), but it could not be started now: { $reason }. `agora` starts it.
+service-bad-path = "{ $path }" cannot go into the login entry: it contains `%` (the system would read it as a variable) or characters it cannot carry. Move Agora or its folder to a plain path.
+supervise-log-link = The log { $log } (or its folder) is a link, a second name of another file, or not a plain file of yours, so the supervisor does not write to it. Remove it, and `agora` makes a new one.
+service-install-failed = Could not register "{ $name }": { $reason }
+service-removed = "{ $name }" is removed: the { $role } no longer starts when you log in.
+service-none = The { $role } was not set to start when you log in.
+service-remove-failed = Could not remove "{ $name }": { $reason }
+service-status-installed = The { $role } starts when you log in ("{ $name }").
+service-status-disabled = The { $role } is set to start when you log in ("{ $name }"), but that is turned off in this system's settings.
+service-status-not-installed = The { $role } does not start by itself when you log in (`agora service install` sets that up).
+service-status-failed = Could not read "{ $name }": { $reason }
+service-status-running = running now (process { $pid })
+service-status-stopped = not running now
 supervise-not-bound = The { $role } is not started: this system did not let it be tied to its supervisor, so `agora down` could not stop it. Start it by hand (`agora { $role } run`) or report this.
 supervise-stop-request = Supervisor: asked to stop; the { $role } was stopped with it.
 supervise-stopped = Supervisor: the { $role } stopped (exit code 0); it is not started again.

@@ -87,7 +87,7 @@ pub(crate) struct Machine {
 }
 
 impl Machine {
-    fn has(&self, role: &str) -> bool {
+    pub(crate) fn has(&self, role: &str) -> bool {
         self.roles.iter().any(|r| r == role)
     }
 
@@ -588,7 +588,7 @@ impl Role {
         home.join("run").join(format!("{}.lock", self.name()))
     }
 
-    fn log(self, home: &Path) -> PathBuf {
+    pub(crate) fn log(self, home: &Path) -> PathBuf {
         home.join("logs").join(format!("{}.log", self.name()))
     }
 
@@ -644,7 +644,7 @@ pub(crate) fn read_lock(path: &Path) -> Option<LockInfo> {
 }
 
 /// The live holder of a role's lock, if any.
-fn holder(home: &Path, role: Role) -> Option<LockInfo> {
+pub(crate) fn holder(home: &Path, role: Role) -> Option<LockInfo> {
     read_lock(&role.lock(home)).filter(LockInfo::alive)
 }
 
@@ -685,7 +685,7 @@ pub(crate) fn claim(path: &Path) -> std::io::Result<Claim> {
 }
 
 /// Renames a log over 5 MiB to `<log>.1` before a new start.
-fn rotate(log: &Path) {
+pub(crate) fn rotate(log: &Path) {
     if std::fs::metadata(log).is_ok_and(|m| m.len() > LOG_LIMIT) {
         let mut old = log.as_os_str().to_owned();
         old.push(".1");
@@ -1041,6 +1041,68 @@ fn remove_lock_of(lock: &Path, l: &LockInfo) {
 /// stopped too.
 const DOWN_ROUNDS: usize = 3;
 
+/// Stops whoever holds `role`'s lock (its supervisor and the role with it), up to [`DOWN_ROUNDS`] holders in a row, saying so. Returns
+/// whether it stopped one; a failure is said and makes `code` 1.
+pub(crate) fn stop_role(
+    say: &Say,
+    h: &Path,
+    machine: Option<&Machine>,
+    role: Role,
+    code: &mut ExitCode,
+) -> bool {
+    let lock = role.lock(h);
+    let mut stopped_any = false;
+    for _ in 0..DOWN_ROUNDS {
+        let Some(l) = read_lock(&lock) else {
+            break;
+        };
+        if !l.alive() {
+            remove_lock_of(&lock, &l);
+            break;
+        }
+        let label: Arg = role.label(say).into();
+        let supervised = supervised_child(l.pid).is_some();
+        if let Err(e) = agora_platform::terminate_process(l.pid) {
+            say.err(
+                key!("down-failed"),
+                &[("role", label), ("reason", e.to_string().into())],
+            );
+            *code = ExitCode::from(1);
+            break;
+        }
+        let end = Instant::now() + Duration::from_secs(10);
+        while l.alive() && Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        if l.alive() {
+            say.err(
+                key!("down-failed"),
+                &[("role", label), ("reason", "still running".into())],
+            );
+            *code = ExitCode::from(1);
+            break;
+        }
+        remove_lock_of(&lock, &l);
+        // What the ended process had open (its socket, its port) can linger a moment; status reads them right after.
+        if let Some(m) = machine {
+            let end = Instant::now() + Duration::from_secs(5);
+            while role_answers(h, m, role) && Instant::now() < end {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+        stopped_any = true;
+        say.out(
+            if supervised {
+                key!("down-stopped-supervised")
+            } else {
+                key!("down-stopped")
+            },
+            &[("role", label), ("pid", i64::from(l.pid).into())],
+        );
+    }
+    stopped_any
+}
+
 /// `agora down`: stops what the front door started, the node first, then the hub.
 pub fn down(say: &Say) -> ExitCode {
     let h = home();
@@ -1048,55 +1110,7 @@ pub fn down(say: &Say) -> ExitCode {
     let mut code = ExitCode::SUCCESS;
     let mut stopped_any = false;
     for role in [Role::Node, Role::Hub] {
-        let lock = role.lock(&h);
-        for _ in 0..DOWN_ROUNDS {
-            let Some(l) = read_lock(&lock) else {
-                break;
-            };
-            if !l.alive() {
-                remove_lock_of(&lock, &l);
-                break;
-            }
-            let label: Arg = role.label(say).into();
-            let supervised = supervised_child(l.pid).is_some();
-            if let Err(e) = agora_platform::terminate_process(l.pid) {
-                say.err(
-                    key!("down-failed"),
-                    &[("role", label), ("reason", e.to_string().into())],
-                );
-                code = ExitCode::from(1);
-                break;
-            }
-            let end = Instant::now() + Duration::from_secs(10);
-            while l.alive() && Instant::now() < end {
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            if l.alive() {
-                say.err(
-                    key!("down-failed"),
-                    &[("role", label), ("reason", "still running".into())],
-                );
-                code = ExitCode::from(1);
-                break;
-            }
-            remove_lock_of(&lock, &l);
-            // What the ended process had open (its socket, its port) can linger a moment; status reads them right after.
-            if let Some(m) = &machine {
-                let end = Instant::now() + Duration::from_secs(5);
-                while role_answers(&h, m, role) && Instant::now() < end {
-                    std::thread::sleep(Duration::from_millis(100));
-                }
-            }
-            stopped_any = true;
-            say.out(
-                if supervised {
-                    key!("down-stopped-supervised")
-                } else {
-                    key!("down-stopped")
-                },
-                &[("role", label), ("pid", i64::from(l.pid).into())],
-            );
-        }
+        stopped_any |= stop_role(say, &h, machine.as_ref(), role, &mut code);
     }
     if !stopped_any && code == ExitCode::SUCCESS {
         say.out(key!("down-nothing"), &[]);
