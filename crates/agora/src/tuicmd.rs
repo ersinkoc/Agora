@@ -1106,6 +1106,8 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                 notice: String::new(),
                 armed: None,
                 read_whole: std::collections::HashSet::new(),
+                shown_request: None,
+                note: Note::default(),
                 colors: if color {
                     ColorMode::from_env(None, std::env::var("COLORTERM").ok().as_deref())
                 } else {
@@ -1573,7 +1575,26 @@ struct Console {
     armed: Option<Armed>,
     /// ADR-0057: start requests read whole (in the inspector or the reader), which y may then allow.
     read_whole: std::collections::HashSet<String>,
+    /// A request shown whole outside the inspector (the chat tab's pane shows its agent's): y / n may answer it without asking again.
+    shown_request: Option<String>,
+    note: Note,
     colors: ColorMode,
+}
+
+/// A notice too long for the footer is shown whole in a box above it until the next key (the trust command must be readable and
+/// copyable); `c` copies the command in it, when it has one.
+#[derive(Default)]
+struct Note {
+    /// The notice the box was opened for (a new notice opens it again).
+    seen: String,
+    open: bool,
+    /// What `c` puts on the clipboard: the `agora node trust` command the notice asks the user to run.
+    copy: Option<String>,
+}
+
+/// The `agora node trust` command this terminal's notices ask the user to run on a machine.
+fn trust_command() -> Option<String> {
+    device().map(|d| format!("agora node trust {} {}", d.id, d.public_key_hex()))
 }
 
 /// The terminal reports mouse presses, drags and the wheel (SGR encoding) while the console holds the mouse, and pastes come
@@ -1682,6 +1703,11 @@ fn console(
         if bytes.is_empty() {
             events.extend(c.parser.flush());
         }
+        // Any key or click closes the box of a long notice (and still does what it does).
+        if c.note.open && !events.is_empty() {
+            c.note.open = false;
+            redraw = true;
+        }
         for ev in events {
             // A key that only goes to the agent changes nothing on screen until the agent answers: drawing for it would hold the
             // echo back by up to a frame (ADR-0022). Anything else is drawn.
@@ -1712,7 +1738,41 @@ fn console(
                     Action::Input(b) => {
                         let active = c.app.active_agent().map(str::to_string);
                         match chat.as_mut().filter(|p| Some(&p.agent) == active.as_ref()) {
-                            Some(pane) => chat_input(say, session, rx, c, &mut preview, pane, &b),
+                            // A request of this agent waits: the pane shows it, y / n answer it (as in the list) and nothing
+                            // typed meanwhile reaches the conversation, so a permission is never answered into a message.
+                            Some(pane)
+                                if c.snapshot
+                                    .as_ref()
+                                    .and_then(|s| waiting_for(s, &pane.agent))
+                                    .is_some() =>
+                            {
+                                if let Some(k) = b.iter().find(|k| matches!(k, b'y' | b'n')) {
+                                    c.selected = pane.agent.clone();
+                                    c.shown_request = c
+                                        .snapshot
+                                        .as_ref()
+                                        .and_then(|s| waiting_for(s, &pane.agent))
+                                        .map(|a| a.approval_id.clone());
+                                    if command(
+                                        say,
+                                        session,
+                                        rx,
+                                        color,
+                                        c,
+                                        &mut preview,
+                                        area,
+                                        char::from(*k),
+                                    ) {
+                                        dirty_since.get_or_insert_with(Instant::now);
+                                    }
+                                }
+                                redraw = true;
+                            }
+                            Some(pane) => {
+                                chat_input(say, session, rx, c, &mut preview, pane, &b);
+                                // What was typed is drawn: the shell's own state did not change, the pane's did.
+                                redraw = true;
+                            }
                             None => {
                                 if let Some((node, local)) =
                                     active.as_deref().and_then(|a| a.split_once('/'))
@@ -1739,6 +1799,12 @@ fn console(
                     }
                 }
             }
+        }
+        if c.notice != c.note.seen {
+            c.note.seen = c.notice.clone();
+            c.note.open = !c.notice.is_empty();
+            c.note.copy = trust_command().filter(|cmd| c.notice.contains(cmd.as_str()));
+            redraw = true;
         }
         if let Some(s) = &c.snapshot {
             follow(session, s, c.app.active_agent().unwrap_or(""), &mut preview);
@@ -1848,13 +1914,7 @@ fn draw_console(
     // The footer's notice: the last thing done, or the hub's counts (machines, agents, what needs the user).
     let notice = if c.notice.is_empty() {
         c.snapshot.as_ref().map_or_else(String::new, |s| {
-            let waiting = s.approvals.len()
-                + s.agents
-                    .iter()
-                    .filter(|a| {
-                        a.running && a.state == agora_protocol::v1::AgentState::Blocked as i32
-                    })
-                    .count();
+            let waiting = needs_you_count(s);
             say.text(
                 key!("tui-split-status"),
                 &[
@@ -1898,6 +1958,29 @@ fn draw_console(
                 .map(|l| plain(&l));
             let room = usize::from(pane.height)
                 .saturating_sub(usize::from(head.is_some()) + usize::from(!p.note.is_empty()));
+            // A request of this agent that waits takes the input line's place: what it asks, and the keys that answer it.
+            let waiting: Vec<String> = c
+                .snapshot
+                .as_ref()
+                .and_then(|s| waiting_for(s, &p.agent))
+                .map(|a| {
+                    let width = usize::from(pane.width).max(12);
+                    let what = plain(format!("{} {}", a.action, a.detail).trim());
+                    let mut block = vec![say.text(key!("tui-attention"), &[])];
+                    block.extend(
+                        agora_tui::render::wrap_row(&what, width, width)
+                            .into_iter()
+                            .take(4),
+                    );
+                    block.extend(agora_tui::render::wrap_row(
+                        &say.text(key!("tui-chat-answer"), &[]),
+                        width,
+                        width,
+                    ));
+                    block
+                })
+                .unwrap_or_default();
+            let room = room.saturating_sub(waiting.len().saturating_sub(1));
             let mut lines = render_chat(
                 &p.entries,
                 local,
@@ -1909,9 +1992,27 @@ fn draw_console(
             if !p.note.is_empty() {
                 lines.insert(lines.len().saturating_sub(1), plain(&p.note));
             }
+            if !waiting.is_empty() {
+                lines.pop();
+                lines.extend(waiting);
+            }
             if let Some(h) = head {
                 lines.insert(0, h);
             }
+            lines
+        });
+    // A notice too long for the footer, whole in a box while it is new.
+    let note: Option<Vec<String>> =
+        (c.note.open && notice.chars().count() > usize::from(area.width) * 2 / 3).then(|| {
+            let mut lines = lines_of(&notice);
+            lines.push(say.text(
+                if c.note.copy.is_some() {
+                    key!("tui-note-copy")
+                } else {
+                    key!("tui-note-close")
+                },
+                &[],
+            ));
             lines
         });
     let (app, colors) = (&c.app, c.colors);
@@ -1926,11 +2027,40 @@ fn draw_console(
                 no_screen,
                 conversation: conversation.as_deref(),
                 dialog,
+                note: note.as_deref(),
                 colors,
                 t: &text,
             },
         );
     });
+}
+
+/// How many things need the user: each agent that waits (blocked, or with a request) once, however many ways it waits, and each
+/// request that belongs to no agent.
+fn needs_you_count(s: &Snapshot) -> usize {
+    let mut agents: std::collections::HashSet<&str> = s
+        .agents
+        .iter()
+        .filter(|a| a.running && a.state == agora_protocol::v1::AgentState::Blocked as i32)
+        .map(|a| a.agent_id.as_str())
+        .collect();
+    let mut other = 0;
+    for a in &s.approvals {
+        if a.agent_id.is_empty() {
+            other += 1;
+        } else {
+            agents.insert(a.agent_id.as_str());
+        }
+    }
+    agents.len() + other
+}
+
+/// The request of `agent` that waits for an answer, if one does (only its own, never another agent's).
+fn waiting_for<'a>(
+    s: &'a Snapshot,
+    agent: &str,
+) -> Option<&'a agora_protocol::v1::ApprovalSnapshot> {
+    s.approvals.iter().find(|a| a.agent_id == agent)
 }
 
 /// A chat agent's conversation shown in the console's pane (ADR-0063): its stream, what came, and the line being typed.
@@ -2293,10 +2423,47 @@ fn command(
                     return false;
                 }
             }
-            if let Some((id, true)) = details.start {
+            if let Some((id, true)) = details.start.clone() {
                 c.read_whole.insert(id);
             }
-            c.notice = answer(say, session, &s, &selected, k == 'y');
+            // Any other request is answered only once it was in view: in the inspector, in the chat tab that shows it, or else in a
+            // box that shows it now and takes the answer.
+            let mut allow = k == 'y';
+            let waiting = agora_tui::client::answered_approval(&s, Some(&selected)).cloned();
+            if let (Some(a), None) = (waiting, details.start.as_ref()) {
+                let in_view = (inspector.width > 0
+                    && details.lines.len() <= usize::from(inspector.height))
+                    || c.shown_request.as_deref() == Some(a.approval_id.as_str());
+                if !in_view {
+                    let mut lines = vec![say.text(key!("tui-attention"), &[])];
+                    lines.push(plain(
+                        format!(
+                            "{}: {} {}",
+                            a.agent_id
+                                .split_once('/')
+                                .map_or(a.agent_id.as_str(), |(_, l)| l),
+                            a.action,
+                            a.detail
+                        )
+                        .trim(),
+                    ));
+                    lines.push(String::new());
+                    lines.push(say.text(key!("tui-request-answer"), &[]));
+                    let key = over_console(say, c, session, preview, None, rx, |_, ask| {
+                        ask.key(&lines, Duration::from_secs(120))
+                    });
+                    match key {
+                        Some(b'y') => allow = true,
+                        Some(b'n') => allow = false,
+                        _ => {
+                            c.notice = String::new();
+                            return false;
+                        }
+                    }
+                }
+            }
+            c.shown_request = None;
+            c.notice = answer(say, session, &s, &selected, allow);
             true
         }
         // ADR-0061: ask the person's other devices to approve this terminal (a), or approve one that waits (v).
@@ -2380,6 +2547,15 @@ fn command(
                 }
             });
             true
+        }
+        'c' => {
+            if let Some(cmd) = c.note.copy.clone() {
+                let mut out = std::io::stdout();
+                let _ = out.write_all(&agora_tui::clip::osc52(&cmd));
+                let _ = out.flush();
+                c.notice = say.text(key!("tui-copied"), &[]);
+            }
+            false
         }
         _ => false,
     }
@@ -2644,5 +2820,36 @@ mod forget_tests {
             .to_info();
         let line = forget_notice(&tr, Err(untrusted));
         assert!(!line.contains(['\u{1b}', '\n', '\u{202e}']));
+    }
+
+    #[test]
+    fn an_agent_that_waits_counts_once_in_the_footer() {
+        let blocked = |id: &str| agora_protocol::v1::AgentSnapshot {
+            agent_id: id.into(),
+            running: true,
+            state: agora_protocol::v1::AgentState::Blocked as i32,
+            ..Default::default()
+        };
+        let request = |agent: &str| agora_protocol::v1::ApprovalSnapshot {
+            agent_id: agent.into(),
+            ..Default::default()
+        };
+        // One agent, blocked and with its request: one thing needs the user (the review saw "2 need you").
+        let snap = Snapshot {
+            agents: vec![blocked("n/agent-1")],
+            approvals: vec![request("n/agent-1")],
+            ..Default::default()
+        };
+        assert_eq!(needs_you_count(&snap), 1);
+        // Two agents (one with two requests), and a request of no agent: three.
+        let snap = Snapshot {
+            agents: vec![blocked("n/agent-1")],
+            approvals: vec![request("n/agent-2"), request("n/agent-2"), request("")],
+            ..Default::default()
+        };
+        assert_eq!(needs_you_count(&snap), 3);
+        // Only its own request is the chat tab's to answer.
+        assert!(waiting_for(&snap, "n/agent-1").is_none());
+        assert!(waiting_for(&snap, "n/agent-2").is_some());
     }
 }

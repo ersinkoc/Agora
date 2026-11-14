@@ -94,6 +94,7 @@ fn run(
                         no_screen: None,
                         conversation: None,
                         dialog: None,
+                        note: None,
                         colors,
                         t: &text,
                     },

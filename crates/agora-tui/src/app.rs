@@ -163,6 +163,8 @@ pub struct Screen<'a> {
     /// A question asked over the shell (start which agent, allow this machine, stop its helpers too…): its lines, drawn in a box in
     /// the middle over everything else. The keys it takes are in its own lines; the shell does not handle them meanwhile.
     pub dialog: Option<&'a [String]>,
+    /// The last notice shown whole in a box above the footer (one too long for the footer, until the next key): its lines.
+    pub note: Option<&'a [String]>,
     pub colors: ColorMode,
     pub t: Text<'a>,
 }
@@ -759,8 +761,7 @@ impl App {
                 "  "
             };
             let width = usize::from(a.tree.width);
-            let label_w = 2 + row.label.chars().count();
-            let state_w = row.state.chars().count();
+            let (label, gap, state) = tree_row_fit(width, &row.label, &row.state, row.needs_you);
             let mut spans = vec![
                 Span::styled(
                     marker,
@@ -770,13 +771,12 @@ impl App {
                         Style::default()
                     },
                 ),
-                Span::raw(row.label.clone()),
+                Span::raw(label),
             ];
-            // The state goes to the right edge when the row has room for it; otherwise the label wins (the marker still says "needs you").
-            if label_w + 2 + state_w <= width {
-                spans.push(Span::raw(" ".repeat(width - label_w - state_w)));
+            if !state.is_empty() {
+                spans.push(Span::raw(" ".repeat(gap)));
                 spans.push(Span::styled(
-                    row.state.clone(),
+                    state,
                     if row.needs_you { attention } else { dim },
                 ));
             }
@@ -856,7 +856,10 @@ impl App {
         // The inspector.
         if a.inspector.width > 0 {
             let lines: Vec<Line<'_>> = s.details.iter().map(|d| Line::raw(d.clone())).collect();
-            Paragraph::new(lines).render(a.inspector, buf);
+            // Lines longer than the panel wrap (a start request's card is already cut to it, so its fit is unchanged).
+            Paragraph::new(lines)
+                .wrap(Wrap { trim: false })
+                .render(a.inspector, buf);
         }
 
         // The footer: the keys for where the keyboard is, the mouse state, the last notice.
@@ -874,10 +877,14 @@ impl App {
             },
             &[],
         );
-        let notice = if s.notice.is_empty() {
+        // A notice shown whole in the box above is not repeated here; one too long for the footer is cut with an ellipsis.
+        let notice = if s.notice.is_empty() || s.note.is_some() {
             String::new()
         } else {
-            format!("{}  ", s.notice)
+            format!(
+                "{}  ",
+                clip_to(s.notice, usize::from(a.footer.width) * 2 / 3)
+            )
         };
         let (keys, mouse) = footer_fit(
             usize::from(a.footer.width),
@@ -890,6 +897,32 @@ impl App {
             footer.push(Span::styled(m, dim));
         }
         Line::from(footer).render(a.footer, buf);
+
+        // A notice too long for the footer, whole, in a box just above it (until the next key).
+        if let Some(lines) = s.note {
+            let body = Rect {
+                height: f.area().height.saturating_sub(1),
+                ..f.area()
+            };
+            let r = note_area(body, lines);
+            let buf = f.buffer_mut();
+            Clear.render(r, buf);
+            let block = Block::bordered();
+            let inner = block.inner(r);
+            block.render(r, buf);
+            let inner = Rect {
+                x: inner.x + 1,
+                width: inner.width.saturating_sub(2),
+                ..inner
+            };
+            let width = usize::from(inner.width).max(1);
+            let wrapped: Vec<Line<'_>> = lines
+                .iter()
+                .flat_map(|l| wrap(l, width))
+                .map(Line::raw)
+                .collect();
+            Paragraph::new(wrapped).render(inner, buf);
+        }
 
         // The palette, over everything.
         let mut cursor = None;
@@ -993,6 +1026,65 @@ fn footer_fit(width: usize, notice: &str, keys: &str, mouse: &str) -> (String, O
 
 /// The columns the footer keeps for keys before it shows the mouse state too.
 const FOOTER_KEYS: usize = 40;
+
+/// A tree row's label, the gap and its state, fitted to `width` columns (the marker's two included), in display columns. The state
+/// stays at the right edge and the label is shortened for it; "needs you" is never dropped, any other state only when the label
+/// would keep fewer than 4 columns.
+fn tree_row_fit(
+    width: usize,
+    label: &str,
+    state: &str,
+    needs_you: bool,
+) -> (String, usize, String) {
+    let room = width.saturating_sub(2);
+    let state_w = text_width(state);
+    if state.is_empty() || (!needs_you && room < state_w + 1 + 4) {
+        return (clip_to(label, room), 0, String::new());
+    }
+    let state = clip_to(state, room);
+    let label_room = room.saturating_sub(text_width(&state) + 1);
+    let label = if label_room == 0 {
+        String::new()
+    } else {
+        clip_to(label, label_room)
+    };
+    let gap = room.saturating_sub(text_width(&label) + text_width(&state));
+    (label, gap, state)
+}
+
+/// `s` cut to `most` columns, with an ellipsis when it was longer.
+fn clip_to(s: &str, most: usize) -> String {
+    if text_width(s) <= most {
+        return s.to_string();
+    }
+    let mut out = String::new();
+    for c in s.chars() {
+        let mut b = [0u8; 4];
+        if text_width(&out) + text_width(c.encode_utf8(&mut b)) + 1 > most {
+            break;
+        }
+        out.push(c);
+    }
+    out.push('…');
+    out
+}
+
+/// The box of a long notice: the body's width less a margin, as tall as its wrapped lines (at most half the body), at its bottom.
+pub fn note_area(body: Rect, lines: &[String]) -> Rect {
+    let width = body.width.saturating_sub(2).max(1);
+    let inner = usize::from(width.saturating_sub(4)).max(1);
+    let rows: usize = lines.iter().map(|l| wrap(l, inner).len()).sum();
+    let height = u16::try_from(rows + 2)
+        .unwrap_or(u16::MAX)
+        .min((body.height / 2).max(3))
+        .min(body.height);
+    Rect {
+        x: body.x + (body.width - width) / 2,
+        y: body.bottom().saturating_sub(height),
+        width,
+        height,
+    }
+}
 
 /// The box a question is asked in, in the middle of `area`, and its lines wrapped to the box: as wide as its longest line (up to the
 /// screen less a margin), as tall as the wrapped lines. Lines that do not fit the screen's height are cut at the bottom.
@@ -1390,6 +1482,7 @@ mod tests {
                     no_screen: None,
                     conversation: None,
                     dialog: None,
+                    note: None,
                     colors,
                     t: &text,
                 },
@@ -1829,6 +1922,7 @@ mod tests {
                     no_screen: None,
                     conversation: None,
                     dialog: None,
+                    note: None,
                     colors: ColorMode::Mono,
                     t: &text,
                 },
@@ -1872,6 +1966,7 @@ mod tests {
                         no_screen: None,
                         conversation: None,
                         dialog: None,
+                        note: None,
                         colors,
                         t: &text,
                     },
@@ -2016,6 +2111,7 @@ mod tests {
                     no_screen: None,
                     conversation: None,
                     dialog: None,
+                    note: None,
                     colors: ColorMode::Full,
                     t: &text,
                 },
@@ -2064,6 +2160,7 @@ mod tests {
                     no_screen: None,
                     conversation: None,
                     dialog: Some(&question),
+                    note: None,
                     colors: ColorMode::Full,
                     t: &text,
                 },
@@ -2167,6 +2264,34 @@ mod tests {
     }
 
     #[test]
+    fn a_row_keeps_needs_you_and_shortens_its_label_instead() {
+        // 28 columns: both fit with a one-column gap (the old rule wanted two and dropped the state).
+        let (label, gap, state) = tree_row_fit(28, "acp-fake · amber", "Needs you", true);
+        assert_eq!(
+            (label.as_str(), gap, state.as_str()),
+            ("acp-fake · amber", 1, "Needs you")
+        );
+        // 24 columns: the label gives way, the state stays.
+        let (label, gap, state) = tree_row_fit(24, "acp-fake · amber", "Needs you", true);
+        assert_eq!(state, "Needs you");
+        assert_eq!(text_width(&label) + gap + text_width(&state), 22);
+        assert!(label.ends_with('…'), "{label}");
+        // Room for both: the state at the right edge.
+        let (label, gap, state) = tree_row_fit(40, "shell · amber", "Idle", false);
+        assert_eq!((label.as_str(), state.as_str()), ("shell · amber", "Idle"));
+        assert_eq!(text_width(&label) + gap + text_width(&state), 38);
+        // Very narrow: an ordinary state goes, "needs you" stays.
+        assert_eq!(tree_row_fit(10, "shell · amber", "Idle", false).2, "");
+        assert_eq!(
+            tree_row_fit(10, "shell · amber", "Needs you", true).2,
+            "Needs y…"
+        );
+        // Display width, not characters: a wide name is cut by columns.
+        let (label, _, _) = tree_row_fit(12, "東京東京東京", "Idle", false);
+        assert!(text_width(&label) <= 5, "{label}");
+    }
+
+    #[test]
     fn machine_headings_are_drawn_and_never_selected() {
         let row = |id: &str, header: bool| Row {
             id: id.into(),
@@ -2241,6 +2366,7 @@ mod tests {
                     no_screen: None,
                     conversation: Some(&conversation),
                     dialog: None,
+                    note: None,
                     colors: ColorMode::Full,
                     t: &text,
                 },
