@@ -842,6 +842,9 @@ pub enum SandboxRefusal {
     ProtectedPathUnresolved,
     /// The agent's worktree (`Sandbox::reopen`) is no longer a plain folder: a link, or something else, is in its place (macOS).
     WorktreeNotFolder,
+    /// A file or folder the agent may write or read is reached through a symbolic link inside a folder it may write, which it could
+    /// have made itself to be given where the link points at its next start (#545, macOS).
+    WritableIsLink,
 }
 
 impl SandboxRefusal {
@@ -851,6 +854,7 @@ impl SandboxRefusal {
             Self::LabelFailed => "label_failed",
             Self::ProtectedPathUnresolved => "protected_path_unresolved",
             Self::WorktreeNotFolder => "worktree_not_folder",
+            Self::WritableIsLink => "writable_is_link",
         }
     }
 }
