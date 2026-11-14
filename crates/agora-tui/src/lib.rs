@@ -1,7 +1,9 @@
 //! Secondary terminal client for SSH-only use.
 
+pub mod backend;
 pub mod client;
 pub mod device;
+pub mod pane;
 pub mod picker;
 pub mod preview;
 pub mod render;
