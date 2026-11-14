@@ -130,8 +130,8 @@ tui-start-confirm-skip = Ajan sormadan çalışsın mı? "{ $name }" seçiliyken
 tui-badge-no-ask = sormuyor
 
 ## The app shell (ADR-0063 stage 2)
-tui-app-keys-tree = Enter aç · N seni bekleyen sonraki · y / n cevapla · s başlat · f klasör · x durdur · u devam · d kaldır · a onay iste · v cihazlar · Ctrl K komutlar · Tab sonraki bölüm · i ayrıntılar · q çık
-tui-app-keys-terminal = Tuşların ajana gider · Ctrl-] ya da F12 listeye dön · Alt+1…9 sekmeler
+tui-app-keys-tree = Ctrl K komutlar · Enter aç · N seni bekleyen sonraki · y / n cevapla · s başlat · f klasör · x durdur · u devam · d kaldır · a onay iste · v cihazlar · Tab sonraki bölüm · i ayrıntılar · q çık
+tui-app-keys-terminal = Ctrl-] ya da F12 listeye dön · Tuşların ajana gider · Alt+1…9 sekmeler
 tui-app-keys-inspector = Tab sonraki bölüm · Esc listeye dön · Ctrl K komutlar
 tui-app-keys-palette = Süzmek için yaz · ↑↓ seç · Enter çalıştır · Esc kapat
 tui-app-mouse-on = fare açık (metin seçmek için m ile bırak)
@@ -143,6 +143,16 @@ tui-app-palette-title = Komutlar
 tui-app-palette-none = Eşleşen yok.
 tui-app-cmd-open = { $name } aç
 tui-app-cmd-next = Seni bekleyen sonraki ajana git
+tui-app-cmd-allow = Bekleyen isteğe izin ver (y)
+tui-app-cmd-deny = Bekleyen isteği reddet (n)
+tui-app-cmd-start = Ajan başlat (s)
+tui-app-cmd-folder = Bir klasörde ajan başlat (f)
+tui-app-cmd-stop = Seçili ajanı durdur (x)
+tui-app-cmd-resume = Seçili ajana devam et (u)
+tui-app-cmd-again = Seçili ajanı yeniden başlat (U)
+tui-app-cmd-remove = Seçili ajanı kaldır (d)
+tui-app-cmd-ask = Bu terminalin onayını diğer cihazlarından iste (a)
+tui-app-cmd-devices = Bekleyen bir cihazı onayla (v)
 tui-app-cmd-mouse = Fareyi aç ya da kapat
 tui-app-cmd-inspector = Ayrıntıları göster ya da gizle
 tui-app-cmd-close = Bu sekmeyi kapat
