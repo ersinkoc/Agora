@@ -13,8 +13,9 @@ connect (WSS + mTLS for nodes, session token for clients)
   ← ResumeOk   { from_seq }  |  ← SnapshotRequired
   → SnapshotRequired                       (node only, when it no longer has from_seq; ADR-0054)
   ... streams ...
-  → / ← Ping / Pong: a node pings every 15 s; the hub answers each Ping (a node's or a window's) at once with a Pong carrying
-           the same payload. No deadline is enforced yet (silence detection needs a hub-owned presence event, an ADR)
+  → / ← Ping / Pong: a node pings every 10 s (15 s before ADR-0070), a window every 15 s; the hub answers each Ping at once
+           with a Pong carrying the same payload. Deadlines (ADR-0070, docs/design/observability.md): the hub closes a node
+           connection silent for 25 s; a node drops a hub link silent for 25 s; a window one with no answer within 10 s
   → / ← Goodbye { reason_code }
 ```
 
@@ -146,6 +147,17 @@ position it saw and gets the backlog, or a snapshot when that position is ahead 
 backup). When a node's connection ends without a goodbye the hub records `NodeOffline` itself as producer `hub` (a name no
 node certificate can carry), in the same log, so live and rebuilt views agree.
 
+Presence (ADR-0070): the hub also records `NodeLink { node_id, up, reason, generation, last_heard_ms }` as producer `hub`, from
+the certificate-authenticated connection only: `up` with reason `opened` when a node's connection is open after the handshake
+(a first connect or a reconnect; it resets nothing, unlike the node's `NodeOnline`), and `up = false` with `closed`, `silent`
+(nothing for 25 s; the hub closed it) or `replaced` (a newer connection of that node was already registered) when it ends.
+`generation` counts the node's connections (1, 2, …, kept across hub restarts); `last_heard_ms` is the hub's clock when it last
+received anything on that connection. A reader takes a machine's `online` from its latest presence fact by log position (this
+event, or `NodeOnline`/`NodeOffline` from an older hub), ignores a `NodeLink` whose generation is below the node's latest `up`,
+never takes `replaced` as offline, and ignores a `NodeLink` from any producer but `hub`; a node that sends one is refused
+(`protocol.invalid_message`, field `node_link`). For clients that predate it the hub keeps writing `NodeOffline` when the
+current connection ends. The snapshot's `NodeSnapshot.last_event_ms` includes `last_heard_ms`, so it is "last seen".
+
 Schema additions (ADR-0025/0026/0027, all new messages, nothing published changed): `agent.list` (`AgentList` -> `AgentListResult` of
 `AgentSummary`; implemented on the node and as `agora agent list`), `EventAck` (hub -> producer, cumulative), `client.proto`
 (`Subscribe`, `Snapshot` with `*Snapshot` tables mirroring the hub view, `PositionedEvent`; named `*Snapshot` because
@@ -218,7 +230,7 @@ Initial event families:
 
 | Family | Examples |
 | --- | --- |
-| node | `NodeOnline`, `NodeOffline`, `NodeResources` |
+| node | `NodeOnline`, `NodeOffline`, `NodeResources`, `NodeLink` (hub-written presence, ADR-0070) |
 | project | `CheckoutDiscovered`, `WorktreeCreated`, `WorktreeRemoved`, `GitStatusChanged` (the node checks each running agent's workspace every 5 s and reports when the changed-file count, line counts or HEAD differ from the last report) |
 | agent | `AgentStarted`, `AgentStateChanged`, `AgentSessionReported`, `AgentUsageReported`, `AgentExited` |
 | terminal | `TerminalOpened`, `TerminalTitleChanged`, `TerminalClosed` |
@@ -282,8 +294,17 @@ Here `operation` is `inspect` or `launch`; inspect leaves kind/project empty; `o
 or separate-worktree launch respectively. `identity_change` is `0` for inspect and the confirmation flag for launch.
 No field may contain NUL. Expiry must be in the next five minutes (browser signs for two). Used device/nonce pairs
 are persisted until expiry, surviving a node restart; the bounded cache fails closed on corruption or exhaustion.
-Generic start grants cannot authorize a substituted directory. Initially only unrestricted node-trusted owner devices
-may sign these operations; scoped member devices are refused even for their projects. The local owner-only control
+Generic start grants cannot authorize a substituted directory. A device the node limits to some projects (ADR-0049:
+`device.<id>.projects`, or inherited through an endorsement) may sign these operations (and `list`, `resume`) only inside
+those projects, judged after its signature by the node's own records, never by what the request or the folder claims: the
+canonical folder must be one the node already knows for a project, or lie inside one (the nearest known folder decides;
+known folders are the owner-confirmed launch bindings and the checkouts registered with `node run`; a registered project's
+id or name for `inspect`, an id before a name and a name two projects share for none); that project must be one of the device's, and for `launch` also the signed `project_id` (the
+launch then checks the folder's identity against it as for every launch). `resume` uses the project the node's session
+ledger holds for the agent. Refused with `auth.forbidden` (`action: directory`): a folder the node knows for no project or
+for another one (also its parent folders, `..`, the home folder), `inspect` with `create_project_id`, `launch` with
+`identity_change`, an agent the ledger does not place, and any directory action when the node cannot place folders.
+Unlimited devices are unchanged. The local owner-only control
 socket has no extra signature requirement. Workspace diffs are rooted at the selected directory, including an empty requested path; they do not include parent-checkout changes.
 Workspace queries inherit the existing file/Git path, symlink, `.git` and
 size guards and require a workspace used by a managed session. Hub members/viewers can query only granted workspaces.
@@ -492,3 +513,96 @@ All additions; nothing published changed. Node capability `agent.launch_options`
 - **What everyone sees.** `AgentStarted.launch_options` (30) and `skips_permissions` (31), carried by the hub in `AgentSnapshot`
   fields 30 and 31 (30-39 are kept for ADR-0059): a "does not ask" badge on the agent in every client for its whole life. The hub's
   audit row for such a start names the options (action `AgentLaunch[skip-permissions]`).
+
+### Devices (ADR-0061)
+
+All additions; nothing published changed. A device is a signing key a person uses (a browser's WebCrypto key, the terminal client's
+key; ES256, ADR-0028). The hub keeps each person's **registered** devices; a node trusts devices. The hub's list is only a list of
+candidates: no message from the hub makes a node trust a device. A node trusts a device when its owner says yes on the machine
+(`agora node trust ID KEY`, or the question `agora node enroll` and `agora node trust --from-hub` ask about the registered devices),
+or when a device it already trusts signs an **endorsement** of it. The hub only carries endorsements and revocations.
+
+- **Registration.** `DeviceRegister` (request field 88: `device_id`, `name`, `public_key`, `signed_at_ms`, `signature`) is sent by a
+  signed-in client when it connects; the hub answers it itself and keeps the device under the session's person (`id`, name, key,
+  created, last used, and the proof). A device id matches `[A-Za-z0-9._-]{1,64}`, a name is at most 64 characters with no control,
+  format, bidi or other hidden character (agora-core's list), a key is a 65-byte uncompressed P-256 point. **Proof of possession:**
+  `signature` is the device's own ES256 signature by `public_key` over
+
+  ```
+  "agora-device-register-v1" 0x00 F(device_id) F(name) F(hex(public_key)) F(signed_at_ms)
+  ```
+
+  and `signed_at_ms` is within 10 minutes of the hub's clock (`device.signature_invalid` otherwise), so nobody can register a key they
+  do not hold. `DeviceInfo.signed_at_ms` (10) and `registration_signature` (11) carry the proof to nodes, which verify it again before
+  offering the device, so a hub cannot invent one either. (The person is not in the signed bytes: a browser does not know its hub-side
+  id; the hub binds the device to the session's person, and nodes never rely on that binding for trust.) A device id stays bound to its
+  key and its person: another key or another person under a registered id is refused with `device.key_mismatch`; sending it again
+  updates the name and the time it was last used. At most 64 devices per person that are not revoked (`node.resource_limit`
+  `{resource: devices}`); `agora hub devices forget ID` deletes a revoked one from the list (its revocations stay).
+- **Listing.** `DeviceList` (request field 89) answers `DeviceListResult` (`CommandOk` field 22) with the caller's own devices
+  (`DeviceInfo`: id, name, key, `created_ms`, `last_used_ms`, `user_id`, `approval_asked_ms`, `endorsed_by[]`, `revoked_ms`). A node
+  asks too, on a TLS connection made with its certificate whose first frame is that `CommandRequest` (stream 2, kind 0, before any
+  `Hello`): the hub answers once with every registered device and closes it, so the node's own connection is not replaced. Nothing
+  else is answered on such a connection (`protocol.invalid_message`); without a certificate it is refused like anything but
+  enrollment. The hub offers the capability `device.list`. `EnrollResponse.devices` (4) carries the same list at enrollment. A node is
+  sent only the devices of the people who may act on it: the owner (sessions without a person and people with the owner role) and
+  every person with a grant on one of its projects (ADR-0049).
+- **Asking.** `DeviceAskApproval` (request field 92: `device_id`, `signed_at_ms`, `signature`) marks one of the caller's devices as
+  waiting for another of their devices (`approval_asked_ms`). It is signed by that device's registered key over
+  `"agora-device-ask-v1" 0x00 F(device_id) F(signed_at_ms)`, at most 5 minutes from the hub's clock, so only the device itself can ask; the person's other devices list it and show a card. The first endorsement of it the hub carries
+  clears the mark.
+- **Endorsement.** `DeviceEndorse { endorsement }` (request field 90) from a client: the hub checks that both devices are the caller's,
+  that the key is the registered one (`device.key_mismatch`), that it lasts at most 90 days and has not expired
+  (`device.endorsement_expired`), and that it verifies under the endorser's registered key (`device.signature_invalid`; verified before
+  it is stored), keeps it once (the same signature is not stored twice), and sends the same message to every connected node with the capability `device.trust`
+  (for an endorsement that names machines, only to those), and again to each such node when it connects while it has not expired.
+  A viewer cannot send it (`auth.forbidden`). The signed bytes (`DeviceEndorsement.signature`, ES256 r || s) are
+
+  ```
+  "agora-device-endorse-v1" 0x00 F(device_id) F(hex(public_key)) F(name) F(count of nodes) F(node)... F(issued_at_ms) F(expires_at_ms) F(endorser_device_id)
+  ```
+
+  where `F(x)` is the decimal byte length of `x`, `:`, then `x` in UTF-8; numbers are decimal and the key is lowercase hex. A node
+  accepts it only when: the endorser is a device it trusts there (and that trust has not expired; `device.untrusted`), the signature
+  verifies (`device.signature_invalid`), this node is in `nodes` or `nodes` is empty (`device.not_in_scope`), now is before
+  `expires_at_ms`, `issued_at_ms` is at most 5 minutes ahead of the node's clock and `expires_at_ms - issued_at_ms` is at most 90 days
+  (`device.endorsement_expired`), no revocation of the device was signed at or after `issued_at_ms` (`device.revoked`), and the node
+  does not already trust that id with another key (`device.key_mismatch`). Its trust there begins at the earlier of `issued_at_ms`
+  and the node's clock (a revocation signed now always wins over an endorsement dated ahead). A device the node's policy limits to
+  some projects (ADR-0049) endorses only within them: the new device is limited to the same projects (written as `projects=` on its
+  line, so it survives restarts), and a limited device revokes only itself or devices whose limits are within its own
+  (`auth.forbidden` otherwise). A device's limit is the policy's line for it, what it inherited, and its endorser's limit as it is now
+  (up the chain), all at once: the policy narrows, never widens, an inherited limit, and a demoted endorser takes the devices it
+  endorsed down with it; a renewal by use happens only while the endorser's current limit still covers the device. For a device the node already trusts through an endorsement: its own endorser may renew it, also after it
+  ran out, while that endorser's current limit still covers what it was given (it keeps its endorser and limits); another endorser
+  may take it over only if its current limit covers both the device's current limit and its current endorser's, and only with an
+  endorsement whose start (the earlier of its `issued_at_ms` and the node's clock) is at or after the device's trust ran out
+  (its effective expiry, or its own expiry when its chain is broken);
+  `auth.forbidden` otherwise. A limit naming a project the file cannot hold (empty, or with a comma or a space) refuses the endorsement
+  (`node.policy_denied`, rule `device.projects`). A revocation dated more than 5 minutes ahead of the node's or the hub's clock is
+  refused. The hub carries an endorsement only to machines the device's person may act on, a revocation to every machine. It then
+  trusts the device until `expires_at_ms` (never
+  longer than its endorser's own trust there), and each use of the device on that node renews it to 90 days from the use.
+- **Revocation.** `DeviceRevoke { revocation }` (request field 91): both devices must be the caller's; the hub keeps it and sends it to
+  every node with `device.trust`, now and whenever one connects. Signed bytes:
+
+  ```
+  "agora-device-revoke-v1" 0x00 F(device_id) F(issued_at_ms) F(revoker_device_id)
+  ```
+
+  The hub verifies it under the revoker's registered key before keeping it, keeps each signature once, at most 256 per person
+  (`node.resource_limit` `{resource: revocations}`), and forgets one after 400 days (every endorsement signed before it expired long
+  before). A node applies one signed by a device it trusts at once: the device is no longer trusted there if its trust there began
+  (`since`) at or before `issued_at_ms`, and neither are the devices it endorsed; endorsements of it, and endorsements it signed, at or before `issued_at_ms`
+  are refused from then on. A revocation sent again later never removes trust given after it (an endorsement signed later, or the
+  owner trusting it again on the machine with `agora node trust ID KEY`).
+- **Fingerprint.** What people compare: the first 12 bytes (96 bits) of the SHA-256 of the 65-byte key, lowercase hex in groups of 4
+  hex digits joined by `-` (`f947-3cb5-e304-81be-ecf2-64cd`). Every client shows it wherever a device is named, computed by the client
+  from the key itself, never taken from the hub.
+- **Trusted devices.** Event `NodeTrustedDevices` (`Event` field 13: `device_ids[]`, sorted, never keys), produced by a node when it
+  starts and whenever the set changes; the hub keeps the last one per node in `NodeSnapshot.trusted_device_ids` (10), so a window can
+  tell which machines trust its device. Node capability `device.trust`: the node verifies `DeviceEndorse` and `DeviceRevoke` and reports
+  `NodeTrustedDevices`; the hub never sends either message to a node without it.
+
+Shared vectors for the four signed messages and the fingerprint, checked by the node, the terminal client and the web window:
+`schema/fixtures/signing/device-trust-v1.json`.

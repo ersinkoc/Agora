@@ -15,7 +15,7 @@ use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
 use std::sync::{Mutex, MutexGuard};
 
 use agora_protocol::v1::event::Body;
-use agora_protocol::v1::{Event, NodeOffline};
+use agora_protocol::v1::{Event, NodeLink, NodeLinkReason, NodeOffline};
 use prost::Message;
 
 use crate::ca::RESERVED_HUB_ID;
@@ -288,6 +288,87 @@ impl Hub {
             }),
             now_ms,
         )
+    }
+
+    /// ADR-0070: a node's connection is open after the handshake. Registers it with the router (commands reach it from now on) and
+    /// records `NodeLink { up }` under one lock, so the log's order of presence facts is the order the connections really took
+    /// turns in. Returns the registration, the node's commands and this connection's generation. Nothing the node runs is touched:
+    /// a reconnect is not a process start.
+    pub fn node_link_opened(
+        &self,
+        node: &str,
+        capabilities: Vec<String>,
+        now_ms: u64,
+    ) -> (
+        crate::router::Registration,
+        tokio::sync::mpsc::UnboundedReceiver<crate::router::ToNode>,
+        u64,
+    ) {
+        let mut g = self.lock();
+        let generation = g
+            .view
+            .nodes
+            .get(node)
+            .map_or(0, |n| n.link_generation)
+            .saturating_add(1);
+        let (registration, commands) = self.router.register_with_capabilities(node, capabilities);
+        // The router has it either way; a store that cannot write leaves the view as it was until the next fact.
+        let _ = self.emit(
+            &mut g,
+            Body::NodeLink(NodeLink {
+                node_id: node.to_string(),
+                up: true,
+                reason: NodeLinkReason::Opened as i32,
+                generation,
+                last_heard_ms: now_ms,
+            }),
+            now_ms,
+        );
+        (registration, commands, generation)
+    }
+
+    /// ADR-0070: a node's connection ended (`silent`: the hub closed it after its deadline). Unregisters it and records
+    /// `NodeLink { up: false }` under one lock. When a newer connection of the node had already replaced this one, the fact says
+    /// `replaced` and the node stays online; otherwise the hub also records `NodeOffline`, which clients from before ADR-0070
+    /// understand. `last_heard_ms` is when the hub last received anything on this connection. Returns whether the node is now
+    /// offline.
+    pub fn node_link_closed(
+        &self,
+        registration: crate::router::Registration,
+        generation: u64,
+        silent: bool,
+        last_heard_ms: u64,
+        now_ms: u64,
+    ) -> bool {
+        let mut g = self.lock();
+        let node = registration.node().to_string();
+        let current = registration.end();
+        let reason = match (current, silent) {
+            (false, _) => NodeLinkReason::Replaced,
+            (true, true) => NodeLinkReason::Silent,
+            (true, false) => NodeLinkReason::Closed,
+        };
+        if current {
+            let _ = self.emit(
+                &mut g,
+                Body::NodeOffline(NodeOffline {
+                    node_id: node.clone(),
+                }),
+                now_ms,
+            );
+        }
+        let _ = self.emit(
+            &mut g,
+            Body::NodeLink(NodeLink {
+                node_id: node,
+                up: false,
+                reason: reason as i32,
+                generation,
+                last_heard_ms,
+            }),
+            now_ms,
+        );
+        current
     }
 
     /// Records an event the hub itself produced (as the reserved hub producer).

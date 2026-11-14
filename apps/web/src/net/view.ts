@@ -13,7 +13,9 @@ export function num(x: Num): number {
   return typeof x === 'number' ? x : Number(x.toString());
 }
 
-export interface NodeV { hostname: string; os: string; online: boolean; lastEventMs: number; agentsRunning: number; memoryBytes?: number; build?: string; terminalsOpen?: number }
+// `linkGen`: the generation of the latest `NodeLink { up }` this window saw (ADR-0070); unknown (0) for a node it only knows from the
+// snapshot.
+export interface NodeV { hostname: string; os: string; online: boolean; lastEventMs: number; agentsRunning: number; memoryBytes?: number; build?: string; terminalsOpen?: number; linkGen?: number }
 export interface WorkspaceV { nodeId: string; projectId: string; path: string; gitRoot: string; branch: string; managed: boolean; filesChanged: number }
 export interface WorktreeV { checkoutId: string; path: string; branch: string; filesChanged: number }
 export interface AgentV {
@@ -67,6 +69,8 @@ export interface View {
   tasks: Map<string, TaskV>; // the shared board's tasks seen since this window opened (ADR-0039)
   leases: Map<string, LeaseV>;
   withTerminal: Set<string>; // agents that have a terminal; the others (chat agents) are talked to with prompts
+  // ADR-0061: node id -> the devices it says it trusts (its last `NodeTrustedDevices`).
+  trusted?: Map<string, string[]>;
 }
 
 const MAX_MESSAGES = 50;
@@ -87,6 +91,7 @@ export function fromSnapshot(s: agora.v1.Snapshot.$Properties): View {
       memoryBytes: Number(n.memoryUsedBytes ?? 0), build: n.build ?? '', terminalsOpen: n.terminalsOpen ?? 0,
     });
   }
+  for (const n of s.nodes ?? []) if (n.trustedDeviceIds?.length) (v.trusted ??= new Map()).set(n.nodeId ?? '', [...n.trustedDeviceIds]);
   for (const c of s.checkouts ?? []) {
     v.checkouts.set(c.checkoutId ?? '', { nodeId: c.nodeId ?? '', projectId: c.projectId ?? '', path: c.path ?? '' });
   }
@@ -153,9 +158,33 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
       for (const a of v.agents.values()) if (a.nodeId === b.nodeId && a.running) { a.running = false; a.state = 4 /* done */; }
       for (const k of [...v.approvals.keys()]) if (k.startsWith(`${b.nodeId}/`)) v.approvals.delete(k);
       for (const k of [...v.withTerminal]) if (k.startsWith(`${b.nodeId}/`)) v.withTerminal.delete(k);
-      v.nodes.set(b.nodeId, { hostname: b.hostname ?? '', os: b.os ?? '', online: true, lastEventMs: at, agentsRunning: v.nodes.get(b.nodeId)?.agentsRunning ?? 0 });
+      const was = v.nodes.get(b.nodeId);
+      v.nodes.set(b.nodeId, { hostname: b.hostname ?? '', os: b.os ?? '', online: true, lastEventMs: Math.max(at, was?.lastEventMs ?? 0), agentsRunning: was?.agentsRunning ?? 0, linkGen: was?.linkGen });
       break;
     }
+    // ADR-0070: the hub's record of a node's connection decides whether the machine is online; it never touches what the machine runs
+    // (a link that goes down and up is not a process start). Only the hub writes it. A fact about a connection older than the latest
+    // one that opened, or about a replaced one, changes nothing but "last seen".
+    case 'nodeLink': {
+      if (producer !== 'hub') break;
+      const b = e.nodeLink;
+      const id = b.nodeId ?? '';
+      let n = v.nodes.get(id);
+      if (!n) {
+        if (!b.up) break;
+        n = { hostname: '', os: '', online: true, lastEventMs: 0, agentsRunning: 0 };
+        v.nodes.set(id, n);
+      }
+      n.lastEventMs = Math.max(n.lastEventMs, num(b.lastHeardMs));
+      const gen = num(b.generation);
+      const stale = gen < (n.linkGen ?? 0) || b.reason === agora.v1.NodeLinkReason.NODE_LINK_REASON_REPLACED;
+      if (!stale) {
+        n.online = !!b.up;
+        if (b.up) n.linkGen = gen;
+      }
+      break;
+    }
+    case 'nodeTrustedDevices': (v.trusted ??= new Map()).set(producer, [...(e.nodeTrustedDevices.deviceIds ?? [])]); break;
     case 'nodeOffline': {
       const n = v.nodes.get(e.nodeOffline.nodeId);
       if (n) n.online = false;

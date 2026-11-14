@@ -90,6 +90,16 @@ priority = 950
 region = "bottom_non_empty_lines(12)"
 all = [{ contains = "trust these files" }, { contains = "trust decision" }]
 
+# Before it runs a tool of an MCP server (the mesh's `agora-mesh` among them), Codex asks for approval in a numbered menu
+# ("Allow the agora-mesh MCP server to run tool \"agents_list\"?", `› 1. Allow`, `enter to submit | esc to cancel`) and waits;
+# the `›` row would otherwise read as the idle prompt. Captured on codex-cli 0.169.0 (fixtures/codex/mcp_tool_approval.screen).
+[[rules]]
+id = "mcp_tool_approval"
+state = "blocked"
+priority = 900
+region = "bottom_non_empty_lines(12)"
+all = [{ contains = "MCP server to run tool" }, { contains = "esc to cancel" }]
+
 [[rules]]
 id = "esc_to_interrupt"
 state = "working"

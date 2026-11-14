@@ -45,6 +45,13 @@ or a local response timeout has a localized retry message.
 | `approval.expired` | `approval_id` | |
 | `approval.signature_invalid` | `approval_id` | |
 | `approval.grant_required` | `command` | ADR-0041: the node's `signed_commands` policy lists this command and no live grant covers it |
+| `device.unknown` | `device_id` | ADR-0061: the hub has no device with this id registered to the caller (another person's device looks the same) |
+| `device.key_mismatch` | `device_id` | ADR-0061: the id is registered (or trusted on the machine) with another key; a device id stays bound to its key |
+| `device.untrusted` | `device_id`, `node_id` | ADR-0061: the device that signed an endorsement or revocation (`device_id`) is not one this machine trusts, or its trust there expired |
+| `device.signature_invalid` | `device_id` | ADR-0061: the registration, ask, endorsement or revocation of `device_id` does not verify under the key that must have signed it, or its time is too far from the receiver's clock |
+| `device.endorsement_expired` | `device_id` | ADR-0061: the endorsement has expired, lasts longer than 90 days, or was signed in the future |
+| `device.not_in_scope` | `device_id`, `node_id` | ADR-0061: the endorsement names other machines than this one |
+| `device.revoked` | `device_id` | ADR-0061: a revocation of the device was signed at or after this endorsement |
 | `lease.held` | `path`, `holder_agent_id`, `expires_at` | `expires_at` is when the conflicting lease ends, in milliseconds since the epoch |
 | `board.unavailable` | `project_id` | A shared project's board cannot be reached (hub unreachable), or a lease or claim waits while the project's nodes hand over their local work (up to 5 s, ADR-0039 amendment B); the agent keeps working locally (ADR-0039) |
 | `mesh.recipient_unknown` | `to` | |
