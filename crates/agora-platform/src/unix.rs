@@ -627,8 +627,11 @@ pub(crate) fn open_private(
     let m = file.metadata()?;
     // SAFETY: plain call.
     let me = unsafe { libc::geteuid() };
-    if !m.is_file() || m.nlink() > 1 || m.uid() != me {
+    if !m.is_file() || m.nlink() > 1 {
         return Err(refuse());
+    }
+    if m.uid() != me {
+        return Err(io::Error::from(io::ErrorKind::PermissionDenied));
     }
     // A regular file of this user's: writes block as usual again.
     // SAFETY: plain calls on a descriptor `file` owns.
@@ -669,7 +672,7 @@ pub(crate) fn ensure_private_dir(dir: &std::path::Path) -> io::Result<()> {
     cvt(unsafe { libc::fstat(held.as_raw_fd(), &mut st) })?;
     // SAFETY: plain call.
     if st.st_uid != unsafe { libc::geteuid() } {
-        return Err(refuse());
+        return Err(io::Error::from(io::ErrorKind::PermissionDenied));
     }
     if st.st_mode & 0o077 != 0 {
         // SAFETY: a live descriptor of this user's folder.

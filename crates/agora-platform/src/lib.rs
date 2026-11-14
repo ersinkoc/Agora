@@ -1405,6 +1405,8 @@ pub fn open_append_private(path: &std::path::Path) -> io::Result<std::fs::File> 
     }
 }
 
+/// Refusals: `InvalidInput` for a link, a second name or not a plain file or folder; `PermissionDenied` for one another user owns.
+///
 /// Opens (creating it) a lock file a process takes with `File::lock`, with every check of [`open_append_private`]: its folder opened as
 /// itself, never through a link; a new file private from its creation (mode 0600, an owner-only ACL); an existing one a regular file
 /// with one name and (Unix) this user's, made private through its handle. Read and write, never truncated. Another local user can then

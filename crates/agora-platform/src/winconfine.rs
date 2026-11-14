@@ -1135,14 +1135,16 @@ pub(crate) fn current_user_sid_text() -> io::Result<String> {
     let mut needed = 0u32;
     // SAFETY: the documented size query.
     unsafe { GetTokenInformation(own.0, TokenUser, null_mut(), 0, &mut needed) };
-    let mut buf = vec![0u8; (needed as usize).max(std::mem::size_of::<TOKEN_USER>())];
+    // u64 units: the structure read from it needs pointer alignment, which a byte vector does not promise.
+    let bytes = (needed as usize).max(std::mem::size_of::<TOKEN_USER>());
+    let mut buf = vec![0u64; bytes.div_ceil(8)];
     // SAFETY: `buf` is `needed` bytes.
     if unsafe {
         GetTokenInformation(
             own.0,
             TokenUser,
             buf.as_mut_ptr().cast(),
-            buf.len() as u32,
+            (buf.len() * 8) as u32,
             &mut needed,
         )
     } == 0
@@ -1167,14 +1169,16 @@ pub(crate) fn current_owner_sid_text() -> io::Result<String> {
     let mut needed = 0u32;
     // SAFETY: the documented size query.
     unsafe { GetTokenInformation(own.0, TokenOwner, null_mut(), 0, &mut needed) };
-    let mut buf = vec![0u8; (needed as usize).max(std::mem::size_of::<TOKEN_OWNER>())];
+    // u64 units: the structure read from it needs pointer alignment, which a byte vector does not promise.
+    let bytes = (needed as usize).max(std::mem::size_of::<TOKEN_OWNER>());
+    let mut buf = vec![0u64; bytes.div_ceil(8)];
     // SAFETY: `buf` is `needed` bytes.
     if unsafe {
         GetTokenInformation(
             own.0,
             TokenOwner,
             buf.as_mut_ptr().cast(),
-            buf.len() as u32,
+            (buf.len() * 8) as u32,
             &mut needed,
         )
     } == 0
