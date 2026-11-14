@@ -98,6 +98,8 @@ pub struct Router {
     sizes: Mutex<HashMap<(String, String), Shared>>,
     next: AtomicU64,
     next_stream: AtomicU32,
+    /// Terminal relays ended because the window's queue was full or gone (`GET /api/metrics`).
+    relays_dropped: AtomicU64,
 }
 
 impl Default for Router {
@@ -108,6 +110,7 @@ impl Default for Router {
             sizes: Mutex::default(),
             next: AtomicU64::new(0),
             next_stream: AtomicU32::new(agora_protocol::frame::FIRST_DYNAMIC_STREAM),
+            relays_dropped: AtomicU64::new(0),
         }
     }
 }
@@ -363,6 +366,11 @@ impl Router {
 
     /// A frame from a node on a dynamic stream: queued for the client. A client whose queue is full is not waited for;
     /// its relay is closed on both sides and it resubscribes. A terminal exit ends the relay after the frame.
+    /// How many terminal relays ended because the window could not keep up (or was gone).
+    pub fn relays_dropped(&self) -> u64 {
+        self.relays_dropped.load(Ordering::Relaxed)
+    }
+
     pub fn relay_frame(&self, node: &str, stream: u32, kind: u8, payload: Vec<u8>) {
         let key = (node.to_string(), stream);
         let mut relays = self.relays.lock().unwrap_or_else(|e| e.into_inner());
@@ -402,6 +410,9 @@ impl Router {
         });
         let exited = kind == 3;
         if sent.is_err() || exited {
+            if sent.is_err() {
+                self.relays_dropped.fetch_add(1, Ordering::Relaxed);
+            }
             if let Some(r) = relays.remove(&key) {
                 if sent.is_err() {
                     r.closed
@@ -891,6 +902,8 @@ mod tests {
         }
         assert_eq!(client.take_closed(), vec![7]);
         assert!(matches!(node_rx.try_recv(), Ok(ToNode::Close { stream: s }) if s == stream));
+        // Counted for `GET /api/metrics`: one relay let go for a window that could not keep up.
+        assert_eq!(r.relays_dropped(), 1);
         // Frames for a relay that is gone are ignored.
         r.relay_frame("n", stream, 0, vec![0]);
     }
