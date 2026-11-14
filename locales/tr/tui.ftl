@@ -22,6 +22,12 @@ tui-blocked = { $agent } sizi bekliyor
 tui-machines = Makineler
 tui-online = çevrimiçi
 tui-offline = çevrimdışı
+tui-last-seen = son görülme { $unit ->
+        [s] { $n } sn
+        [min] { $n } dk
+        [h] { $n } sa
+       *[d] { $n } gün
+    } önce
 tui-no-agents = Henüz ajan yok. Web uygulamasından ya da "agora agent start" ile bir tane başlatın.
 tui-state-working = Çalışıyor
 tui-state-needs-you = Sizi bekliyor
@@ -32,7 +38,17 @@ tui-no-project = (proje yok)
 tui-hint-answer = Yukarıdaki ilk isteğe izin vermek için y, reddetmek için n tuşuna basın.
 tui-allowed = İzin verildi.
 tui-denied = Reddedildi.
-tui-not-trusted = Bu cihaza o makine henüz güvenmiyor. O makinede şunu çalıştırın: agora node trust { $id } { $key }   (`agora` orada bulunamazsa komutu agora programının klasöründe çalıştırın: ./agora, Windows'ta .\agora.exe)
+tui-not-trusted = Bu cihaza o makinede henüz güvenilmiyor. O makinede şunu çalıştırın: agora node trust { $id } { $key }   (`agora` orada bulunamazsa komutu agora programının klasöründe çalıştırın: ./agora, Windows'ta .\agora.exe). Ya da başka bir cihazınızdan bunu onaylamasını istemek için a tuşuna basın (parmak izi { $fingerprint }).
+tui-device-name = { $host } üzerindeki terminal
+tui-device-asked = İstendi. Bu terminali ({ $fingerprint }) makinelerinizin güvendiği başka bir cihazınızda onaylayın: pencerede ya da onun terminal istemcisinde v ile.
+tui-devices-none-waiting = Onay bekleyen bir cihazınız yok. Bu terminalin parmak izi: { $fingerprint }
+tui-device-cannot-vouch = Henüz hiçbir makine bu terminale güvenmiyor; onayı hiçbir yerde geçmez.
+tui-device-card =
+    { $name } makinelerinizde güvenilir olmak istiyor.
+    Parmak izi: { $fingerprint } (o cihazın gösterdiğiyle karşılaştırın)
+    Bu terminale güvenilen yerlerde ona da güvenilecek: { $machines }
+    Bu terminalin anahtarıyla onaylamak için y'ye, vazgeçmek için başka bir tuşa basın.
+tui-device-approved = { $name } onaylandı. Her makine onayı kendisi denetler; denetleyince cihaz güvenilir görünür.
 tui-answer-failed = Yanıtınız gönderilemedi ({ $code }).
 tui-hint-open = Tab: sonraki ajan · Enter: aç · x: durdur · s: yeni başlat (Ctrl-] geri döner)
 tui-opening-failed = Bu terminal açılamadı ({ $code }).
@@ -78,7 +94,7 @@ tui-reader-keys = j / k ya da oklar kaydırır · boşluk bir sayfa iner · q ge
 tui-split-pick = Soldan bir ajan seç
 tui-split-no-screen = Terminali açılıyor…
 tui-split-status = { $online }/{ $total } makine · { $agents } ajan · { $waiting } seni bekliyor
-tui-split-keys = ↑↓ seç · Enter aç · s başlat · f klasör · x durdur · u devam et · d kaldır · q çık
+tui-split-keys = ↑↓ seç · Enter aç · s başlat · f klasör · x durdur · u devam et · d kaldır · a onay iste · v cihazlar · q çık
 tui-split-chat = Terminali yok: Enter konuşmasını açar
 tui-folder-title = { $machine } üzerinde bir klasörde ajan başlat
 tui-folder-keys = ↑↓ seç · Enter aç · ⌫ yukarı · Boşluk burada başlat · m makine · Esc vazgeç

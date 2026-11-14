@@ -801,6 +801,7 @@ mod tests {
                     terminals_open: 0,
                     memory_used_bytes: 0,
                     last_event_ms: 0,
+                    link_generation: 0,
                 },
             );
             v.checkouts
