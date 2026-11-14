@@ -531,25 +531,68 @@ impl Hub {
     ) -> crate::board::Answer {
         let mut g = self.lock();
         let key = self.restore_board(&call.project_id, now_ms);
+        let project = call.project_id.as_str();
+        // A change is answered as done only once it is stored, and the board with its audit events is stored in one transaction:
+        // all of it or none (#517 review: a partly written change published one grant of a refused lease batch, and a failed undo
+        // brought a refused claim back after a restart). Until then the board as it was is kept aside, to be put back.
+        let before =
+            crate::board::changes_board(&call.tool).then(|| self.boards.checkpoint(project));
         let mut a = self.boards.call(
             &g.view,
             node,
             &call.from_agent,
-            &call.project_id,
+            project,
             &call.tool,
             &call.arguments_json,
             now_ms,
         );
-        if !a.events.is_empty() {
-            // Tasks changed: keep the board in the store (best effort; the call already succeeded).
-            if let Some(bytes) = self.boards.snapshot(&call.project_id, now_ms) {
-                let _ = self.store.set_setting(&key, &bytes);
+        if a.events.is_empty() {
+            return a;
+        }
+        let first = g.hub_seq + 1;
+        let events: Vec<Event> = std::mem::take(&mut a.events)
+            .into_iter()
+            .zip(first..)
+            .map(|(body, seq)| Event {
+                producer_id: RESERVED_HUB_ID.to_string(),
+                seq,
+                at_ms: now_ms,
+                body: Some(body),
+            })
+            .collect();
+        let payloads: Vec<(u64, Vec<u8>)> =
+            events.iter().map(|e| (now_ms, e.encode_to_vec())).collect();
+        let snapshot = self.boards.snapshot(project, now_ms);
+        let stored = self.store.append_batch_with_setting(
+            RESERVED_HUB_ID,
+            first,
+            &payloads,
+            snapshot.as_deref().map(|bytes| (key.as_str(), bytes)),
+        );
+        match stored {
+            Ok(positions) => {
+                g.hub_seq = first + events.len() as u64 - 1;
+                // Only now does anyone hear of it: the view, the windows and the nodes.
+                for (pos, event) in positions.into_iter().zip(events) {
+                    Self::publish(&mut g, Delivered { pos, event });
+                }
+                a
+            }
+            Err(_) => {
+                if let Some(board) = before {
+                    self.boards.restore(project, board);
+                }
+                crate::board::Answer {
+                    verdict: crate::board::Verdict::Invalid(
+                        agora_protocol::Error::new(agora_protocol::ErrorCode::Internal)
+                            .with("incident_id", "board.store"),
+                    ),
+                    events: Vec::new(),
+                    handoff: None,
+                    fanout: None,
+                }
             }
         }
-        for body in std::mem::take(&mut a.events) {
-            let _ = self.emit(&mut g, body, now_ms);
-        }
-        a
     }
 
     /// Restores an uninitialized board and returns its storage key. Callers hold the hub lock so calls and joins cannot

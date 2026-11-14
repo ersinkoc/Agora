@@ -11,6 +11,10 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
   they connect again, for a lost or retired machine. `agora hub machines` lists machines as online, offline or old, and
   `agora hub machines forget NAME` or `forget --old` does the same from the hub's machine. Only the hub's owner can forget machines.
 
+### Shared board
+- A change to a shared project's board (create, claim, complete, lease, release, handoff) is answered as done only once the hub has
+  stored it. If the hub cannot write it (a full or locked disk), the agent gets an error and the board stays as it was, so a claim an
+  agent was told it has can no longer vanish when the hub restarts.
 ### Hub
 - A window or terminal client that comes back after a long time away (more than 10 000 events or 8 MiB behind) gets a fresh snapshot
   instead of replaying everything it missed. Its return no longer holds up the hub for every machine and every other window while
@@ -21,6 +25,12 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 ### Terminal client (ADR-0063)
 - `agora tui` is drawn with ratatui: machines and their agents on the left, the agents you open as tabs with their live terminal in the middle (what you type goes to the agent; Ctrl-] or F12 comes back to the list; Alt+1…9 picks a tab), and the selected agent's details and the request it waits on on the right. The mouse works: click a row to select it and again to open it, click a tab, drag the dividers; `m` releases the mouse so the terminal can select text. A chat agent opens as a tab too: its conversation, and a line to type a request into (Enter sends it; `/mode` and `/model` switch, as before). Ctrl K opens the commands, N goes to the next agent that needs you, and the letters of the earlier console stay (y / n answer, s start, f folder, x stop, u / U resume, d remove). A request to start an agent can be allowed only once all of it was on screen, in the details or in the reader that y opens. Their questions (which agent to start, allow this machine, stop its helpers too, approve a device) open in a box over the console instead of clearing the screen. In a window of 80–140 columns the agent's terminal now gets the room: the details panel shows itself only when the terminal keeps at least 60 columns (i shows or hides it at any width), the footer shows whole keys with Ctrl K first, and Ctrl K also lists every letter's action (start, stop, allow…). Dragging over an agent's terminal selects text and copies it to the clipboard (OSC 52, over SSH too). Colours follow the terminal: 16 colours where `TERM` has no 256, the 256-colour palette without `COLORTERM=truecolor` (macOS Terminal), and "needs you" in an orange that reads on light and dark backgrounds. Inside a tab, Alt+K opens the commands, Alt+M takes or releases the mouse, and Alt+Y / Alt+N answer the request of the agent in front. r shows what the selected agent changed: its diff, coloured, scrolled with the arrows and Space. o browses its files: a folder's entries, Enter into a folder or a file, ⌫ up. Typing in a chat never answers a request (Alt+Y / Alt+N do, and the draft is kept); the diff, the files and the readers follow a resized window and say when a new request arrives; and `agora tui` ends when its terminal closes.
 - A chat agent's tool calls read as words, as in the web window: "Command cargo test", "Read src/auth.rs", "Search TODO", instead of the raw `{"tool": …}` text.
+### Machines
+- A machine gathers an agent's usage reports for 5 seconds and sends one. A busy agent used to send one after every model call:
+  on the maintainer's hub that was 96% of all events, and the hub reads all of them again each time it starts. Totals are unchanged,
+  the window shows usage at most 5 seconds later, and the hub's start stays fast for years of use instead of months. When a
+  machine's node is stopped or restarted, up to the last 5 seconds of usage are not counted.
+
 ### Machines
 - `agora doctor` says who may make this machine act: which commands sent through the hub need a signature from one of your devices
   (and a note when none do, since whoever controls the hub could then send them), how many devices the machine trusts and how many
