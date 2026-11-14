@@ -8,7 +8,7 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 - A hub or node started by `agora` that crashes is started again 30 seconds later, at most 5 times in 10 minutes; one that
   stops right after starting (a port taken, a wrong setting) is not retried and its log says why. `agora status` shows a restart
   in progress, the restarts of the last 10 minutes and a give-up. `agora down` and a killed supervisor never leave a hub or node
-  running behind them.
+  running behind them. A hub or node started by an earlier version stays as it is until `agora down` and `agora`.
 
 ## 0.3.11
 

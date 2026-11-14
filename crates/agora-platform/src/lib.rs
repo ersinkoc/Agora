@@ -1275,6 +1275,34 @@ pub fn end_with_supervisor() {
     let _ = parent;
 }
 
+/// Waits until `child` has ended without reaping it (Unix `waitid` with `WNOWAIT`): its pid stays its own, so a stop request passed
+/// on by pid between this and the reaping [`std::process::Child::wait`] cannot reach a process that got the pid again. Windows
+/// passes nothing on by pid and returns at once; the caller's `wait` does the waiting.
+pub fn wait_unreaped(child: &std::process::Child) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        unix::wait_unreaped(child.id())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = child;
+        Ok(())
+    }
+}
+
+/// The signal that ended a process, where there are signals (Unix); `None` for an exit with a code.
+pub fn exit_signal(status: &std::process::ExitStatus) -> Option<i32> {
+    #[cfg(unix)]
+    {
+        std::os::unix::process::ExitStatusExt::signal(status)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = status;
+        None
+    }
+}
+
 /// For a supervisor: from now on `SIGTERM`, `SIGINT` and `SIGHUP` do not end this process; they set [`stop_requested`] and are
 /// passed on as `SIGTERM` to the process named by [`forward_stop_to`]. Windows has no such request for a detached process (`agora
 /// down` ends it with `TerminateProcess`, and the job of [`spawn_bound`] takes the child with it): there this does nothing.

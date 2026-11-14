@@ -255,24 +255,33 @@ status-log = log: { $log }
 down-stopped = Stopped the { $role } (process { $pid }).
 down-failed = Could not stop the { $role }: { $reason }
 down-nothing = Nothing to stop: `agora` did not start anything that is still running.
-status-restarting = restarting after a crash (exit code { $code }): restart { $count } of { $max }
-status-restarts = { $count ->
-    [one] restarted once in the last 10 minutes
-   *[other] restarted { $count } times in the last 10 minutes
-  }; the last crash: exit code { $code }, { $minutes ->
-    [0] less than a minute ago
-   *[other] { $minutes } min ago
-  }
-status-gave-up = The { $role } crashed again after { $max } restarts and was not started again (exit code { $code }, { $minutes } min ago). Its log says why; `agora` starts it again.
-status-refused = The { $role } ended right after starting (exit code { $code }, { $minutes } min ago), so it was not started again. Its log says why; `agora` tries again.
 supervise-not-bound = Supervisor: this system did not let the { $role } be tied to its supervisor, so stopping the supervisor may leave the { $role } running.
 supervise-stop-request = Supervisor: asked to stop; the { $role } was stopped with it.
 supervise-stopped = Supervisor: the { $role } stopped (exit code 0); it is not started again.
-supervise-refused = Supervisor: the { $role } ended { $seconds } s after starting (exit code { $code }), too soon to be a crash, so it is not started again. The reason is above.
-supervise-restarting = Supervisor: the { $role } ended after { $seconds } s (exit code { $code }); starting it again in { $wait } s (restart { $count } of { $max } in { $minutes } minutes).
-supervise-gave-up = Supervisor: the { $role } ended again (exit code { $code }) after { $max } restarts in { $minutes } minutes; giving up. `agora` starts it again.
 supervise-already-running = Supervisor: the { $role } already runs here (it was not started by this supervisor), so another one is not started.
 supervise-lost-lock = Supervisor: the { $role }'s lock no longer names this supervisor (`agora down` ran, or another took over), so the { $role } is not started again.
 supervise-lock-held = Another process (process { $pid }) already looks after the { $role } on this Agora folder; this supervisor ends.
+status-restarting = The { $role } is not running: it crashed ({ $end }) and its supervisor (process { $pid }) starts it again shortly (restart { $count } of { $max }).
+status-restarts = { $count ->
+    [one] restarted once in the last 10 minutes
+   *[other] restarted { $count } times in the last 10 minutes
+  }; the last crash: { $end }, { $minutes ->
+    [0] less than a minute ago
+   *[other] { $minutes } min ago
+  }
+status-gave-up = The { $role } crashed again after { $max } restarts and was not started again ({ $end }, { $minutes ->
+    [0] less than a minute ago
+   *[other] { $minutes } min ago
+  }). Its log says why; `agora` starts it again.
+status-refused = The { $role } ended right after starting ({ $end }, { $minutes ->
+    [0] less than a minute ago
+   *[other] { $minutes } min ago
+  }), so it was not started again. Its log says why; `agora` tries again.
+supervise-end-code = exit code { $code }
+supervise-end-signal = signal { $signal }
+supervise-refused = Supervisor: the { $role } ended { $seconds } s after starting ({ $end }), too soon to be a crash, so it is not started again. The reason is above.
+supervise-restarting = Supervisor: the { $role } ended after { $seconds } s ({ $end }); starting it again in { $wait } s (restart { $count } of { $max } in { $minutes } minutes).
+supervise-gave-up = Supervisor: the { $role } ended again ({ $end }) after { $max } restarts in { $minutes } minutes; giving up. `agora` starts it again.
+supervise-handoff-lost = The { $role } was stopped while its supervisor was starting (`agora down` ran), so it is not started.
 cli-node-policy-not-understood = node.policy_not_understood: the policy file has a line this node does not understand ({ $line }), so no agent may start without asking until it is fixed.
 cli-version = Agora { $version }

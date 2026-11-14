@@ -557,6 +557,24 @@ pub(crate) fn catch_stop_requests() -> io::Result<()> {
     Ok(())
 }
 
+/// See [`crate::wait_unreaped`].
+pub(crate) fn wait_unreaped(pid: u32) -> io::Result<()> {
+    let id = libc::id_t::from(pid);
+    loop {
+        // SAFETY: an all-zero siginfo_t is a valid out-buffer.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        // SAFETY: a valid out-pointer; WNOWAIT leaves the child to be reaped by its owner.
+        let r = unsafe { libc::waitid(libc::P_PID, id, &mut info, libc::WEXITED | libc::WNOWAIT) };
+        if r == 0 {
+            return Ok(());
+        }
+        let e = io::Error::last_os_error();
+        if e.kind() != io::ErrorKind::Interrupted {
+            return Err(e);
+        }
+    }
+}
+
 pub(crate) fn forward_stop_to(pid: Option<u32>) {
     let pid = pid.and_then(|p| i32::try_from(p).ok()).unwrap_or(0);
     STOP_TARGET.store(pid, std::sync::atomic::Ordering::SeqCst);

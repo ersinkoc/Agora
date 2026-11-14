@@ -621,7 +621,7 @@ impl LockInfo {
         })
     }
 
-    fn text(&self) -> String {
+    pub(crate) fn text(&self) -> String {
         format!("{} {} {}\n", self.pid, self.start, self.version)
     }
 
@@ -728,11 +728,16 @@ pub(crate) fn command(
 }
 
 /// The command line of `role`'s supervisor (`agora supervise <role>`), which runs [`command`] and starts it again after a crash.
+/// The supervisor waits only for this process (`--handoff PID:START`, the holder of the lock now) to hand the lock over; any other
+/// holder makes it refuse at once, so a supervisor never takes a lock that `agora down` just freed.
 fn supervisor_command(home: &Path, role: Role) -> std::io::Result<std::process::Command> {
+    let me = LockInfo::of(std::process::id())
+        .ok_or_else(|| std::io::Error::other("own start time unknown"))?;
     let mut cmd = std::process::Command::new(std::env::current_exe()?);
     cmd.env("AGORA_HOME", home)
         .current_dir(home)
-        .args(["supervise", role.name()]);
+        .args(["supervise", role.name(), "--handoff"])
+        .arg(format!("{}:{}", me.pid, me.start));
     Ok(cmd)
 }
 
@@ -939,7 +944,21 @@ pub fn status(say: &Say) -> ExitCode {
         let log: Arg = role.log(&h).display().to_string().into();
         let label: Arg = role.label(say).into();
         let (held, answers) = (holder(&h, role), role_answers(&h, &m, role));
+        let waiting = held
+            .as_ref()
+            .filter(|_| !answers)
+            .and_then(|l| crate::supervise::waiting_restart(&h, role).map(|r| (l.pid, r)));
         match (held.clone(), answers) {
+            // Its supervisor runs, the role does not: it crashed and starts again shortly.
+            (Some(_), _) if waiting.is_some() => {
+                if let Some((pid, r)) = &waiting {
+                    let _ = writeln!(
+                        std::io::stdout(),
+                        "{}",
+                        crate::supervise::restarting_line(say, role, *pid, r)
+                    );
+                }
+            }
             (Some(l), _) => say.out(
                 key!("status-running"),
                 &[

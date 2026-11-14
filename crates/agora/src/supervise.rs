@@ -31,6 +31,32 @@ const HANDOFF: Duration = Duration::from_secs(5);
 /// The lines kept in `run/<role>.restarts`.
 const RECORD_LINES: usize = 20;
 
+/// How a child ended: an exit code, or (Unix) the signal that killed it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct End {
+    pub code: i32,
+    /// 0 when it exited with `code`.
+    pub signal: i32,
+}
+
+impl End {
+    fn of(status: &std::process::ExitStatus) -> End {
+        End {
+            code: status.code().unwrap_or(-1),
+            signal: agora_platform::exit_signal(status).unwrap_or(0),
+        }
+    }
+
+    /// The child's end as the supervisor's own exit code: never 0 (a signal or an out-of-range code becomes 1).
+    fn failure(self) -> i32 {
+        if self.signal == 0 && (1..=255).contains(&self.code) {
+            self.code
+        } else {
+            1
+        }
+    }
+}
+
 /// What the supervisor did, for its log and its record.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Event {
@@ -41,16 +67,16 @@ pub(crate) enum Event {
     /// The child exited with code 0.
     Stopped,
     /// The child ended too soon after its start to be a crash.
-    Refused { code: i32, up_ms: u64 },
+    Refused { end: End, up_ms: u64 },
     /// The child crashed and starts again after `wait_ms`.
     Restarting {
-        code: i32,
+        end: End,
         up_ms: u64,
         wait_ms: u64,
         count: usize,
     },
     /// The child crashed once more after the allowed restarts.
-    GaveUp { code: i32 },
+    GaveUp { end: End },
     /// Before a start: the role already answers here (started by hand), so starting another would fight over its socket or port.
     AlreadyRunning,
     /// Before a start: the lock no longer names this supervisor (`agora down` ran, or another took over).
@@ -87,14 +113,16 @@ pub(crate) fn run(
         if agora_platform::stop_requested() {
             let _ = b.child.kill();
         }
-        let status = b.child.wait();
+        // Wait without reaping, so the pid a stop request is passed on to stays this child's until the target is cleared.
+        let ended = agora_platform::wait_unreaped(&b.child);
         agora_platform::forward_stop_to(None);
-        let status = status?;
+        ended?;
+        let status = b.child.wait()?;
         if agora_platform::stop_requested() {
             note(&Event::StopRequest);
             return Ok(0);
         }
-        let code = status.code().unwrap_or(-1);
+        let end = End::of(&status);
         let now = ms(Instant::now());
         let up_ms = now.saturating_sub(began);
         let ending = if status.success() {
@@ -108,16 +136,16 @@ pub(crate) fn run(
                 return Ok(0);
             }
             Next::Refused => {
-                note(&Event::Refused { code, up_ms });
-                return Ok(failure(code));
+                note(&Event::Refused { end, up_ms });
+                return Ok(end.failure());
             }
             Next::GiveUp => {
-                note(&Event::GaveUp { code });
-                return Ok(failure(code));
+                note(&Event::GaveUp { end });
+                return Ok(end.failure());
             }
             Next::Restart { wait_ms, count } => {
                 note(&Event::Restarting {
-                    code,
+                    end,
                     up_ms,
                     wait_ms,
                     count,
@@ -131,37 +159,42 @@ pub(crate) fn run(
     }
 }
 
-/// A failed child's code as the supervisor's own: never 0 (a signal or an out-of-range code becomes 1).
-fn failure(code: i32) -> i32 {
-    if (1..=255).contains(&code) {
-        code
-    } else {
-        1
-    }
-}
-
-/// Makes this process the holder of the role's lock: waits for the front door that started it to write its id, or takes a missing or
-/// stale lock. False when another live process holds it.
-fn take_lock(lock: &Path) -> std::io::Result<bool> {
+/// Makes this process the holder of the role's lock. Started by the front door (`handoff`: the front door's pid and start time), it
+/// waits only for that process to write this one's id, and refuses when the lock is anything else (missing: `agora down` freed it
+/// meanwhile, and the role must stay stopped). Started any other way, it takes a missing or stale lock and refuses a live holder at
+/// once. True when this process holds it.
+fn take_lock(lock: &Path, handoff: Option<(u32, u64)>) -> std::io::Result<bool> {
     let me = LockInfo::of(std::process::id())
         .ok_or_else(|| std::io::Error::other("own start time unknown"))?;
     let end = Instant::now() + HANDOFF;
     loop {
-        match frontdoor::read_lock(lock) {
-            Some(l) if l.pid == me.pid && l.start == me.start => return Ok(true),
-            Some(l) if l.alive() => {
-                if Instant::now() > end {
-                    return Ok(false);
-                }
-            }
-            _ => {
-                if let Claim::Mine = frontdoor::claim(lock)? {
-                    return Ok(true);
+        let held = frontdoor::read_lock(lock);
+        if held
+            .as_ref()
+            .is_some_and(|l| l.pid == me.pid && l.start == me.start)
+        {
+            return Ok(true);
+        }
+        match handoff {
+            Some(from) => match held {
+                Some(l) if (l.pid, l.start) == from && l.alive() && Instant::now() < end => {}
+                _ => return Ok(false),
+            },
+            None => {
+                return match held {
+                    Some(l) if l.alive() => Ok(false),
+                    _ => Ok(matches!(frontdoor::claim(lock)?, Claim::Mine)),
                 }
             }
         }
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+/// `--handoff PID:START`.
+fn parse_handoff(text: &str) -> Option<(u32, u64)> {
+    let (pid, start) = text.split_once(':')?;
+    Some((pid.parse().ok()?, start.parse().ok()?))
 }
 
 fn unix_ms() -> u64 {
@@ -176,12 +209,12 @@ pub(crate) fn record_path(home: &Path, role: Role) -> PathBuf {
     home.join("run").join(format!("{}.restarts", role.name()))
 }
 
-/// One line of the record: when (Unix milliseconds), what, the exit code, how long the child had run, the restart number.
+/// One line of the record: when (Unix milliseconds), what, the exit code, how long the child had run, the restart number, the signal.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Record {
     pub at: u64,
     pub kind: String,
-    pub code: i32,
+    pub end: End,
     pub up_ms: u64,
     pub count: usize,
 }
@@ -189,36 +222,43 @@ pub(crate) struct Record {
 impl Record {
     fn line(&self) -> String {
         format!(
-            "{} {} {} {} {}",
-            self.at, self.kind, self.code, self.up_ms, self.count
+            "{} {} {} {} {} {}",
+            self.at, self.kind, self.end.code, self.up_ms, self.count, self.end.signal
         )
     }
 
     fn parse(line: &str) -> Option<Record> {
         let mut w = line.split_whitespace();
+        let at = w.next()?.parse().ok()?;
+        let kind = w.next()?.to_string();
+        let code = w.next()?.parse().ok()?;
+        let up_ms = w.next()?.parse().ok()?;
+        let count = w.next()?.parse().ok()?;
+        let signal = w.next().and_then(|v| v.parse().ok()).unwrap_or(0);
         Some(Record {
-            at: w.next()?.parse().ok()?,
-            kind: w.next()?.to_string(),
-            code: w.next()?.parse().ok()?,
-            up_ms: w.next()?.parse().ok()?,
-            count: w.next()?.parse().ok()?,
+            at,
+            kind,
+            end: End { code, signal },
+            up_ms,
+            count,
         })
     }
 
     fn of(e: &Event, at: u64) -> Option<Record> {
-        let (kind, code, up_ms, count) = match e {
+        let clean = End { code: 0, signal: 0 };
+        let (kind, end, up_ms, count) = match e {
             Event::Restarting {
-                code, up_ms, count, ..
-            } => ("restart", *code, *up_ms, *count),
-            Event::Refused { code, up_ms } => ("refused", *code, *up_ms, 0),
-            Event::GaveUp { code } => ("gave-up", *code, 0, 0),
-            Event::Stopped | Event::StopRequest => ("stopped", 0, 0, 0),
+                end, up_ms, count, ..
+            } => ("restart", *end, *up_ms, *count),
+            Event::Refused { end, up_ms } => ("refused", *end, *up_ms, 0),
+            Event::GaveUp { end } => ("gave-up", *end, 0, 0),
+            Event::Stopped | Event::StopRequest => ("stopped", clean, 0, 0),
             _ => return None,
         };
         Some(Record {
             at,
             kind: kind.into(),
-            code,
+            end,
             up_ms,
             count,
         })
@@ -242,6 +282,21 @@ fn append_record(path: &Path, r: &Record) {
     let _ = agora_platform::write_private(path, text.as_bytes());
 }
 
+/// "exit code 3" or "signal 9", for the messages below.
+fn end_text(say: &Say, end: End) -> String {
+    if end.signal != 0 {
+        say.text(
+            key!("supervise-end-signal"),
+            &[("signal", i64::from(end.signal).into())],
+        )
+    } else {
+        say.text(
+            key!("supervise-end-code"),
+            &[("code", i64::from(end.code).into())],
+        )
+    }
+}
+
 /// The log line of an event.
 fn text(say: &Say, role: Role, rule: &RestartRule, e: &Event) -> String {
     let r: Arg = role.label(say).into();
@@ -252,16 +307,16 @@ fn text(say: &Say, role: Role, rule: &RestartRule, e: &Event) -> String {
         Event::NotBound => say.text(key!("supervise-not-bound"), &[("role", r)]),
         Event::StopRequest => say.text(key!("supervise-stop-request"), &[("role", r)]),
         Event::Stopped => say.text(key!("supervise-stopped"), &[("role", r)]),
-        Event::Refused { code, up_ms } => say.text(
+        Event::Refused { end, up_ms } => say.text(
             key!("supervise-refused"),
             &[
                 ("role", r),
-                ("code", i64::from(*code).into()),
+                ("end", end_text(say, *end).into()),
                 ("seconds", secs(*up_ms).into()),
             ],
         ),
         Event::Restarting {
-            code,
+            end,
             up_ms,
             wait_ms,
             count,
@@ -269,7 +324,7 @@ fn text(say: &Say, role: Role, rule: &RestartRule, e: &Event) -> String {
             key!("supervise-restarting"),
             &[
                 ("role", r),
-                ("code", i64::from(*code).into()),
+                ("end", end_text(say, *end).into()),
                 ("seconds", secs(*up_ms).into()),
                 ("wait", secs(*wait_ms).into()),
                 ("count", i64::try_from(*count).unwrap_or(i64::MAX).into()),
@@ -277,11 +332,11 @@ fn text(say: &Say, role: Role, rule: &RestartRule, e: &Event) -> String {
                 ("minutes", minutes.into()),
             ],
         ),
-        Event::GaveUp { code } => say.text(
+        Event::GaveUp { end } => say.text(
             key!("supervise-gave-up"),
             &[
                 ("role", r),
-                ("code", i64::from(*code).into()),
+                ("end", end_text(say, *end).into()),
                 ("max", max.into()),
                 ("minutes", minutes.into()),
             ],
@@ -291,11 +346,19 @@ fn text(say: &Say, role: Role, rule: &RestartRule, e: &Event) -> String {
     }
 }
 
-/// `agora supervise hub|node`.
-pub fn supervise(say: &Say, word: &str) -> ExitCode {
+/// `agora supervise hub|node [--handoff PID:START]`.
+pub fn supervise(say: &Say, word: &str, handoff: Option<&str>) -> ExitCode {
     let Some(role) = Role::from_name(word) else {
         say.err(key!("cli-bad-arguments"), &[]);
         return ExitCode::from(2);
+    };
+    let handoff = match handoff.map(parse_handoff) {
+        None => None,
+        Some(Some(h)) => Some(h),
+        Some(None) => {
+            say.err(key!("cli-bad-arguments"), &[]);
+            return ExitCode::from(2);
+        }
     };
     let h = home();
     let Some(m) = frontdoor::load(&h) else {
@@ -316,14 +379,22 @@ pub fn supervise(say: &Say, word: &str) -> ExitCode {
         }
     }
     let lock = role.lock(&h);
-    match take_lock(&lock) {
+    match take_lock(&lock, handoff) {
         Ok(true) => {}
         Ok(false) => {
-            let pid = frontdoor::read_lock(&lock).map_or(0, |l| i64::from(l.pid));
-            say.err(
-                key!("supervise-lock-held"),
-                &[("role", role.label(say).into()), ("pid", pid.into())],
-            );
+            match frontdoor::read_lock(&lock).filter(LockInfo::alive) {
+                Some(l) => say.err(
+                    key!("supervise-lock-held"),
+                    &[
+                        ("role", role.label(say).into()),
+                        ("pid", i64::from(l.pid).into()),
+                    ],
+                ),
+                None => say.err(
+                    key!("supervise-handoff-lost"),
+                    &[("role", role.label(say).into())],
+                ),
+            }
             return ExitCode::from(1);
         }
         Err(e) => return fail(&e),
@@ -370,6 +441,32 @@ pub fn supervise(say: &Say, word: &str) -> ExitCode {
     }
 }
 
+/// The crash after which the role's supervisor is waiting to start it again, when that is where it is (the last thing recorded is a
+/// restart). Only meaningful while the supervisor is alive and the role does not answer.
+pub(crate) fn waiting_restart(home: &Path, role: Role) -> Option<Record> {
+    read_record(home, role)
+        .pop()
+        .filter(|r| r.kind == "restart")
+}
+
+/// The header `agora status` shows instead of "running" while the supervisor (`pid`) waits to start the role again.
+pub(crate) fn restarting_line(say: &Say, role: Role, pid: u32, r: &Record) -> String {
+    let rule = RestartRule::default();
+    say.text(
+        key!("status-restarting"),
+        &[
+            ("role", role.label(say).into()),
+            ("pid", i64::from(pid).into()),
+            ("end", end_text(say, r.end).into()),
+            ("count", i64::try_from(r.count).unwrap_or(i64::MAX).into()),
+            (
+                "max",
+                i64::try_from(rule.max_restarts).unwrap_or(i64::MAX).into(),
+            ),
+        ],
+    )
+}
+
 /// The lines `agora status` adds under a role about its supervisor's restarts, if any.
 pub(crate) fn status_lines(
     say: &Say,
@@ -384,7 +481,7 @@ pub(crate) fn status_lines(
         return Vec::new();
     };
     let now = unix_ms();
-    let minutes_ago = i64::try_from(now.saturating_sub(last.at) / 60_000).unwrap_or(i64::MAX);
+    let minutes = |at: u64| i64::try_from(now.saturating_sub(at) / 60_000).unwrap_or(i64::MAX);
     let max = i64::try_from(rule.max_restarts).unwrap_or(i64::MAX);
     let recent = records
         .iter()
@@ -392,17 +489,8 @@ pub(crate) fn status_lines(
         .count();
     let role_arg = || -> Arg { role.label(say).into() };
     match last.kind.as_str() {
-        "restart" if supervisor_alive && !answers => vec![say.text(
-            key!("status-restarting"),
-            &[
-                ("code", i64::from(last.code).into()),
-                (
-                    "count",
-                    i64::try_from(last.count).unwrap_or(i64::MAX).into(),
-                ),
-                ("max", max.into()),
-            ],
-        )],
+        // The header says it (`restarting_line`).
+        "restart" if supervisor_alive && !answers => Vec::new(),
         "restart" | "stopped" if recent > 0 => {
             let crash = records.iter().rev().find(|r| r.kind == "restart");
             crash.map_or_else(Vec::new, |c| {
@@ -410,13 +498,8 @@ pub(crate) fn status_lines(
                     key!("status-restarts"),
                     &[
                         ("count", i64::try_from(recent).unwrap_or(i64::MAX).into()),
-                        ("code", i64::from(c.code).into()),
-                        (
-                            "minutes",
-                            i64::try_from(now.saturating_sub(c.at) / 60_000)
-                                .unwrap_or(i64::MAX)
-                                .into(),
-                        ),
+                        ("end", end_text(say, c.end).into()),
+                        ("minutes", minutes(c.at).into()),
                     ],
                 )]
             })
@@ -425,17 +508,17 @@ pub(crate) fn status_lines(
             key!("status-gave-up"),
             &[
                 ("role", role_arg()),
-                ("code", i64::from(last.code).into()),
+                ("end", end_text(say, last.end).into()),
                 ("max", max.into()),
-                ("minutes", minutes_ago.into()),
+                ("minutes", minutes(last.at).into()),
             ],
         )],
         "refused" if !supervisor_alive && !answers => vec![say.text(
             key!("status-refused"),
             &[
                 ("role", role_arg()),
-                ("code", i64::from(last.code).into()),
-                ("minutes", minutes_ago.into()),
+                ("end", end_text(say, last.end).into()),
+                ("minutes", minutes(last.at).into()),
             ],
         )],
         _ => Vec::new(),
@@ -509,8 +592,8 @@ mod tests {
             .iter()
             .filter(|e| !matches!(e, Event::NotBound))
             .map(|e| match e {
-                Event::Restarting { code, count, .. } => format!("restart {code} {count}"),
-                Event::GaveUp { code } => format!("gave up {code}"),
+                Event::Restarting { end, count, .. } => format!("restart {} {count}", end.code),
+                Event::GaveUp { end } => format!("gave up {}", end.code),
                 other => format!("{other:?}"),
             })
             .collect();
@@ -529,7 +612,13 @@ mod tests {
         let (rc, starts, events) = supervise_child(0, 4);
         assert_eq!((rc, starts), (4, 1));
         assert!(
-            matches!(events.last(), Some(Event::Refused { code: 4, .. })),
+            matches!(
+                events.last(),
+                Some(Event::Refused {
+                    end: End { code: 4, signal: 0 },
+                    ..
+                })
+            ),
             "{events:?}"
         );
     }
@@ -556,11 +645,64 @@ mod tests {
 
     #[test]
     fn a_failure_code_is_never_0() {
-        assert_eq!(failure(3), 3);
-        assert_eq!(failure(255), 255);
-        assert_eq!(failure(-1), 1);
-        assert_eq!(failure(0), 1);
-        assert_eq!(failure(-1073741510), 1);
+        let code = |code| End { code, signal: 0 }.failure();
+        assert_eq!(code(3), 3);
+        assert_eq!(code(255), 255);
+        assert_eq!(code(-1), 1);
+        assert_eq!(code(0), 1);
+        assert_eq!(code(-1073741510), 1);
+        assert_eq!(
+            End {
+                code: -1,
+                signal: 9
+            }
+            .failure(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_handoff_names_a_pid_and_a_start_time() {
+        assert_eq!(parse_handoff("12:345"), Some((12, 345)));
+        assert_eq!(parse_handoff("12"), None);
+        assert_eq!(parse_handoff("x:1"), None);
+    }
+
+    /// Linux's M1 on #543: a supervisor started by the front door must not take a lock that is gone (freed by `agora down`) or held by
+    /// someone other than that front door; one started without a handoff takes a missing lock but never a live holder's.
+    #[test]
+    fn a_handed_off_supervisor_takes_only_its_own_lock() {
+        let dir = std::env::temp_dir().join(format!("agora-handoff-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let lock = dir.join("node.lock");
+        let me = LockInfo::of(std::process::id()).unwrap();
+        let from = (me.pid, me.start);
+        // Missing (freed by `agora down` meanwhile): refused, and still missing.
+        assert!(!take_lock(&lock, Some((1, 1))).unwrap());
+        assert!(!lock.exists());
+        // Held by another live process: refused at once, with a handoff naming someone else or without one.
+        let mut other = child(20_000, 0).spawn().unwrap();
+        let held = LockInfo::of(other.id()).unwrap();
+        std::fs::write(&lock, held.text()).unwrap();
+        let started = Instant::now();
+        assert!(!take_lock(&lock, Some((1, 1))).unwrap());
+        assert!(!take_lock(&lock, None).unwrap());
+        assert!(started.elapsed() < HANDOFF);
+        // Held by the front door handing over, which then ends without writing this supervisor's id: refused once it is gone.
+        let from_other = (held.pid, held.start);
+        let _ = other.kill();
+        let _ = other.wait();
+        assert!(!take_lock(&lock, Some(from_other)).unwrap());
+        // Without a handoff, a missing lock is taken.
+        std::fs::remove_file(&lock).unwrap();
+        assert!(take_lock(&lock, None).unwrap());
+        assert_eq!(
+            frontdoor::read_lock(&lock).map(|l| (l.pid, l.start)),
+            Some(from)
+        );
+        // A lock naming this process is its own, with or without a handoff.
+        assert!(take_lock(&lock, Some((1, 1))).unwrap());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -570,7 +712,7 @@ mod tests {
         let path = dir.join("node.restarts");
         for i in 0..25 {
             let e = Event::Restarting {
-                code: i,
+                end: End { code: i, signal: 0 },
                 up_ms: 1000,
                 wait_ms: 30_000,
                 count: 1,
@@ -583,7 +725,7 @@ mod tests {
             .filter_map(Record::parse)
             .collect();
         assert_eq!(lines.len(), RECORD_LINES);
-        assert_eq!(lines[0].code, 5);
+        assert_eq!(lines[0].end.code, 5);
         assert_eq!(lines.last().unwrap().kind, "restart");
         assert_eq!(Record::of(&Event::AlreadyRunning, 0), None);
         let _ = std::fs::remove_dir_all(dir);

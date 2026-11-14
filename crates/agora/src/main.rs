@@ -144,6 +144,8 @@ pub(crate) struct Opts {
     fingerprints: Vec<String>,
     /// ADR-0061: also other people's devices (with their fingerprints), and replacing a key already trusted under the same id.
     include_others: bool,
+    /// `agora supervise`: the front door that started it and holds the lock until it names the supervisor (`PID:START`).
+    handoff: Option<String>,
     replace: bool,
     ui: Option<String>,
     save: bool,
@@ -196,6 +198,7 @@ fn parse(args: &[String]) -> Option<Opts> {
             "--from-hub" => o.from_hub = true,
             "--fingerprint" => o.fingerprints.push(it.next()?.clone()),
             "--include-others" => o.include_others = true,
+            "--handoff" => o.handoff = Some(it.next()?.clone()),
             "--replace" => o.replace = true,
             "--ui" => o.ui = Some(it.next()?.clone()),
             "--save" => o.save = true,
@@ -269,7 +272,7 @@ fn main() -> ExitCode {
         ["down"] => frontdoor::down(&say),
         ["node", "run"] => node_run(&say, &opts),
         // Started by the front door, not by people: not in the usage page.
-        ["supervise", role] => supervise::supervise(&say, role),
+        ["supervise", role] => supervise::supervise(&say, role, opts.handoff.as_deref()),
         ["agent", "start"] => agent_start(&say, &opts),
         ["project", "init"] => project_init(&say, &opts),
         ["agent", "stop"] => agent_stop(&say, &opts),

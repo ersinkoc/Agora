@@ -406,9 +406,11 @@ fn the_supervisor_restarts_a_crashed_node_and_never_leaves_it_behind() {
     std::thread::sleep(Duration::from_secs(11));
     agora_platform::terminate_process(node).unwrap();
     wait_for("the restart notice", Duration::from_secs(10), || {
-        run(&home, &["status"])
-            .1
-            .contains("restarting after a crash")
+        let s = run(&home, &["status"]).1;
+        s.contains("The node is not running: it crashed")
+            && s.contains(&format!(
+                "its supervisor (process {supervisor}) starts it again"
+            ))
     });
     let mut again = None;
     wait_for("the restarted node", Duration::from_secs(60), || {
@@ -442,6 +444,18 @@ fn the_supervisor_restarts_a_crashed_node_and_never_leaves_it_behind() {
         Duration::from_secs(10),
         || !alive(node) && !alive(supervisor),
     );
+
+    // Linux's M1 on #543: a supervisor still waiting for its front door when `agora down` freed the lock never takes the freed lock and
+    // starts the role again (the front door that started it is gone here, as is the lock).
+    let (code, _, err) = run(&home, &["supervise", "node", "--handoff", "1:1"]);
+    assert_eq!(code, 1, "{err}");
+    assert!(
+        err.contains("was stopped while its supervisor was starting"),
+        "{err}"
+    );
+    assert!(!home.join("run/node.lock").exists());
+    let (_, s, _) = run(&home, &["status"]);
+    assert!(s.contains("The node is not running"), "{s}");
     let log = std::fs::read_to_string(home.join("logs/node.log")).unwrap();
     assert_eq!(
         log.matches("Supervisor: the node ended after").count(),
