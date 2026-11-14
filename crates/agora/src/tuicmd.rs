@@ -2140,6 +2140,9 @@ struct Over<'a> {
     rx: &'a mpsc::Receiver<u8>,
     /// A screen the question drew itself is on the terminal: the next box is drawn over a cleared one.
     stale: bool,
+    /// The terminal reports the mouse: while a box is open (when the console holds the mouse), never while a screen the question
+    /// drew itself reads plain bytes.
+    mouse: bool,
 }
 
 impl Asker for Over<'_> {
@@ -2150,6 +2153,10 @@ impl Asker for Over<'_> {
     fn show(&mut self, lines: &[String]) {
         if std::mem::take(&mut self.stale) {
             let _ = self.c.window.invalidate();
+        }
+        if self.c.app.mouse && !self.mouse {
+            mouse_mode(true);
+            self.mouse = true;
         }
         let text = |id: &str, args: &[(&str, Arg)]| self.say.text(id, args);
         let rows = self
@@ -2170,13 +2177,52 @@ impl Asker for Over<'_> {
     }
 
     fn frame(&mut self, bytes: &[u8]) {
+        if std::mem::take(&mut self.mouse) {
+            mouse_mode(false);
+        }
         self.stale = true;
         Plain(self.rx).frame(bytes);
     }
+
+    /// Keys and clicks through the console's own reader: a click on a numbered line is its number, a click outside the box cancels
+    /// (`dialog_key`). A window resized meanwhile gets the box drawn again for its size.
+    fn key(&mut self, lines: &[String], wait: Duration) -> Option<u8> {
+        self.show(lines);
+        let end = Instant::now() + wait;
+        let mut area = window_area();
+        loop {
+            let left = end.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return None;
+            }
+            let events = match self.rx.recv_timeout(left.min(Duration::from_millis(50))) {
+                Ok(b) => {
+                    let mut bytes = vec![b];
+                    while let Ok(b) = self.rx.try_recv() {
+                        bytes.push(b);
+                    }
+                    self.c.parser.push(&bytes)
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => self.c.parser.flush(),
+                Err(mpsc::RecvTimeoutError::Disconnected) => return None,
+            };
+            if let Some(k) = events
+                .iter()
+                .find_map(|e| agora_tui::app::dialog_key(e, area, lines))
+            {
+                return Some(k);
+            }
+            if window_area() != area {
+                area = window_area();
+                let _ = self.c.window.resized();
+                self.show(lines);
+            }
+        }
+    }
 }
 
-/// Asks over the console (`run` shows its questions with the [`Over`] it is given): the panel's terminal is let go and the mouse
-/// released meanwhile (the questions read plain bytes), and the console is drawn again afterwards. Returns what `run` said.
+/// Asks over the console (`run` shows its questions with the [`Over`] it is given): the panel's terminal is let go meanwhile, the
+/// mouse is reported only while a box is open, and the console is drawn again afterwards. Returns what `run` said.
 #[allow(clippy::too_many_arguments)]
 fn over_console<T>(
     say: &Say,
@@ -2190,13 +2236,15 @@ fn over_console<T>(
     if let Some(p) = preview.take() {
         p.close(session);
     }
-    mouse_mode(false);
+    // The mouse stays as the console had it while a box is open; a screen the question draws itself switches it off.
+    let mouse = c.app.mouse;
     let mut ask = Over {
         say,
         c,
         chat,
         rx,
         stale: false,
+        mouse,
     };
     let out = run(session, &mut ask);
     let stale = ask.stale;

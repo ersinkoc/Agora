@@ -953,6 +953,65 @@ fn wrap(line: &str, width: usize) -> Vec<String> {
     out
 }
 
+/// Which of a question's lines is at a cell of the window: `None` outside the box (a click there cancels), `Some(None)` on the box
+/// but not on a line (its border, a cut line), `Some(Some(i))` on line `i` (any of its wrapped rows).
+pub fn dialog_line_at(area: Rect, lines: &[String], col: u16, row: u16) -> Option<Option<usize>> {
+    let (r, _) = dialog_layout(area, lines);
+    if !r.contains(Position { x: col, y: row }) {
+        return None;
+    }
+    let inner = usize::from(r.width.saturating_sub(4)).max(1);
+    let last = r.y + r.height.saturating_sub(1);
+    if row <= r.y || row >= last {
+        return Some(None);
+    }
+    let mut at = usize::from(row - r.y - 1);
+    for (i, l) in lines.iter().enumerate() {
+        let rows = wrap(l, inner).len();
+        if at < rows {
+            return Some(Some(i));
+        }
+        at -= rows;
+    }
+    Some(None)
+}
+
+/// The key a question reads for an event while it is open, as the questions read keys (arrows as `j` / `k`, Left and Backspace as
+/// DEL, Right and Enter as CR): a click outside the box is Esc, a click on a numbered line (`3  Codex`) is its number.
+pub fn dialog_key(event: &Event, area: Rect, lines: &[String]) -> Option<u8> {
+    match event {
+        Event::Key(k) => match *k {
+            Key::Char(c) if c.is_ascii() => u8::try_from(c).ok(),
+            Key::Ctrl(c) if c.is_ascii_alphabetic() => {
+                u8::try_from(c.to_ascii_lowercase()).ok().map(|b| b & 0x1f)
+            }
+            Key::Enter | Key::Right => Some(b'\r'),
+            Key::Esc => Some(0x1b),
+            Key::Up => Some(b'k'),
+            Key::Down => Some(b'j'),
+            Key::Left | Key::Backspace => Some(0x7f),
+            _ => None,
+        },
+        Event::Mouse(Mouse {
+            kind: MouseKind::Down,
+            col,
+            row,
+        }) => match dialog_line_at(area, lines, *col, *row) {
+            None => Some(0x1b),
+            Some(Some(i)) => {
+                let line = lines[i].trim_start();
+                let mut chars = line.chars();
+                match (chars.next(), chars.next()) {
+                    (Some(d @ '1'..='9'), Some(' ')) => u8::try_from(d).ok(),
+                    _ => None,
+                }
+            }
+            Some(None) => None,
+        },
+        _ => None,
+    }
+}
+
 fn dialog(area: Rect, buf: &mut ratatui::buffer::Buffer, lines: &[String]) {
     let (r, wrapped) = dialog_layout(area, lines);
     Clear.render(r, buf);
@@ -1886,6 +1945,57 @@ mod tests {
         assert_eq!(wrap("", 4), [""]);
         let (low, _) = dialog_layout(Rect::new(0, 0, 30, 5), &long);
         assert_eq!(low.height, 3);
+    }
+
+    #[test]
+    fn a_click_on_a_numbered_line_picks_it_and_a_click_outside_cancels() {
+        let question = vec![
+            "Start which agent on mac? Press its number, any other key cancels.".to_string(),
+            String::new(),
+            "1  Claude Code".to_string(),
+            "2  Codex".to_string(),
+        ];
+        let area = Rect::new(0, 0, 40, 20);
+        let (r, wrapped) = dialog_layout(area, &question);
+        // The first line wraps; the numbered lines come after its rows and the empty line.
+        let first_rows = wrapped.len() - 3;
+        assert!(first_rows > 1, "{wrapped:?}");
+        let click = |col: u16, row: u16| {
+            dialog_key(
+                &Event::Mouse(Mouse {
+                    kind: MouseKind::Down,
+                    col,
+                    row,
+                }),
+                area,
+                &question,
+            )
+        };
+        let x = r.x + 3;
+        let codex = r.y + 1 + u16::try_from(first_rows + 2).unwrap();
+        assert_eq!(click(x, codex), Some(b'2'));
+        assert_eq!(click(x, codex - 1), Some(b'1'));
+        // The question's text, the empty line and the border pick nothing; outside the box is Esc.
+        assert_eq!(click(x, r.y + 1), None);
+        assert_eq!(click(x, r.y + 1 + u16::try_from(first_rows).unwrap()), None);
+        assert_eq!(click(x, r.y), None);
+        assert_eq!(click(0, 0), Some(0x1b));
+        // A release, a drag or the wheel do nothing.
+        let up = Event::Mouse(Mouse {
+            kind: MouseKind::Up,
+            col: x,
+            row: codex,
+        });
+        assert_eq!(dialog_key(&up, area, &question), None);
+        // Keys read as the questions read them.
+        let k = |k: Key| dialog_key(&Event::Key(k), area, &question);
+        assert_eq!(k(Key::Char('y')), Some(b'y'));
+        assert_eq!(k(Key::Ctrl('c')), Some(3));
+        assert_eq!(k(Key::Esc), Some(0x1b));
+        assert_eq!(k(Key::Enter), Some(b'\r'));
+        assert_eq!(k(Key::Down), Some(b'j'));
+        assert_eq!(k(Key::Backspace), Some(0x7f));
+        assert_eq!(k(Key::Char('é')), None);
     }
 
     #[test]
