@@ -144,7 +144,9 @@ Hub core (`agora-hub::hub`): store, view and subscriber fan-out are one step und
 snapshot (or backlog) and registers for live events together sees every event once, in order, even while several nodes
 ingest. A subscriber that falls more than 1024 events behind is dropped, never waited for; it reconnects with the last
 position it saw and gets the backlog, or a snapshot when that position is ahead of the log (a hub restored from an older
-backup). When a node's connection ends without a goodbye the hub records `NodeOffline` itself as producer `hub` (a name no
+backup) or more than 10 000 events or 8 MiB of them behind (`MAX_REPLAY_EVENTS`, `MAX_REPLAY_BYTES`): replay runs under the hub's
+lock, so its cost is bounded instead of growing with how long the client was away (a client 100 000 events behind held the lock for
+about 155 ms before; its snapshot now takes well under a millisecond). When a node's connection ends without a goodbye the hub records `NodeOffline` itself as producer `hub` (a name no
 node certificate can carry), in the same log, so live and rebuilt views agree.
 
 Presence (ADR-0070): the hub also records `NodeLink { node_id, up, reason, generation, last_heard_ms }` as producer `hub`, from

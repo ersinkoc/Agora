@@ -1264,6 +1264,7 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                 read_whole: std::collections::HashSet::new(),
                 shown_request: None,
                 stale: false,
+                not_sized: std::collections::HashSet::new(),
                 drafts: std::collections::HashMap::new(),
                 open_failed_notice: None,
                 notice_at: Instant::now(),
@@ -1273,6 +1274,10 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                         None,
                         std::env::var("COLORTERM").ok().as_deref(),
                         std::env::var("TERM").ok().as_deref(),
+                        std::env::var("WT_SESSION")
+                            .or_else(|_| std::env::var("TERM_PROGRAM"))
+                            .ok()
+                            .as_deref(),
                     )
                 } else {
                     ColorMode::Mono
@@ -1772,6 +1777,8 @@ struct Console {
     read_whole: std::collections::HashSet<String>,
     /// The hub said something changed while a full-screen view held the screen: the console asks for a fresh snapshot after it.
     stale: bool,
+    /// Agents whose terminal is never sized to the pane: the one this client itself runs in (see the console's size loop).
+    not_sized: std::collections::HashSet<String>,
     /// What was typed into each chat agent's line and not sent yet: kept when the conversation is opened again (a fresh snapshot
     /// reconnects the console, another tab comes to the front), so a draft is never lost.
     drafts: std::collections::HashMap<String, Vec<u8>>,
@@ -1903,6 +1910,16 @@ fn console(
         let mut events = Vec::new();
         let now = window_area();
         if now != area {
+            // The window took exactly the size last given to the open tab's terminal: this client runs in that terminal
+            // (`agora tui` started in an agent's shell, then that agent opened). Sizing it again would shrink this window again,
+            // down to nothing (seen on Windows: 1x17 for good), so that agent's terminal is left at its size from now on. A pane is
+            // always smaller than the window, so this never matches an ordinary resize.
+            if let Some((agent, w, h)) = sized.as_ref() {
+                if (*w, *h) == (now.width, now.height) && !c.not_sized.contains(agent) {
+                    c.not_sized.insert(agent.clone());
+                    c.notice = say.text(key!("tui-app-self-terminal"), &[]);
+                }
+            }
             area = now;
             let _ = c.window.resized();
             // `resized` clears the screen: draw it again now, not at the next key (seen on Windows: blank after a resize).
@@ -2142,7 +2159,11 @@ fn console(
         let pane = c.app.areas(area).terminal;
         if let Some(active) = c.app.active_agent() {
             let want = (active.to_string(), pane.width, pane.height);
-            if sized.as_ref() != Some(&want) && pane.width > 0 && pane.height > 0 {
+            if sized.as_ref() != Some(&want)
+                && pane.width > 0
+                && pane.height > 0
+                && !c.not_sized.contains(active)
+            {
                 if let Some((node, local)) = active.split_once('/') {
                     session.terminal_resize(node, &format!("t-{local}"), pane.width, pane.height);
                 }

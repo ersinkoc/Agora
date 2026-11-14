@@ -187,6 +187,7 @@ tui-app-scrolled = ↑ { $count ->
         [one] one line back
        *[other] { $count } lines back
     } · type to go back down
+tui-app-self-terminal = This tab is the terminal this client runs in, so its size is left alone (sizing it would shrink this window each time).
 tui-app-no-screen = This agent's terminal is opening.
 tui-app-tree-empty = No agents yet.
 tui-app-palette-title = Commands

@@ -26,6 +26,11 @@ use crate::store::{Append, EventStore, SqliteStore, StoreError};
 /// Events a subscriber may have queued before it is considered too slow and dropped.
 pub const SUBSCRIBER_BUFFER: usize = 1024;
 const PAGE: usize = 1000;
+/// A subscriber that resumes from a position replays at most this many events, or this many bytes of them; further behind, it gets
+/// a fresh snapshot instead (architecture review R3). Replay runs under the hub lock, so its cost must not grow with how long a
+/// client was away: every node's ingest and every other client waits while it runs.
+pub const MAX_REPLAY_EVENTS: u64 = 10_000;
+pub const MAX_REPLAY_BYTES: usize = 8 << 20;
 
 /// One event with its place in the global log.
 #[derive(Debug, Clone, PartialEq)]
@@ -492,25 +497,68 @@ impl Hub {
     ) -> crate::board::Answer {
         let mut g = self.lock();
         let key = self.restore_board(&call.project_id, now_ms);
+        let project = call.project_id.as_str();
+        // A change is answered as done only once it is stored, and the board with its audit events is stored in one transaction:
+        // all of it or none (#517 review: a partly written change published one grant of a refused lease batch, and a failed undo
+        // brought a refused claim back after a restart). Until then the board as it was is kept aside, to be put back.
+        let before =
+            crate::board::changes_board(&call.tool).then(|| self.boards.checkpoint(project));
         let mut a = self.boards.call(
             &g.view,
             node,
             &call.from_agent,
-            &call.project_id,
+            project,
             &call.tool,
             &call.arguments_json,
             now_ms,
         );
-        if !a.events.is_empty() {
-            // Tasks changed: keep the board in the store (best effort; the call already succeeded).
-            if let Some(bytes) = self.boards.snapshot(&call.project_id, now_ms) {
-                let _ = self.store.set_setting(&key, &bytes);
+        if a.events.is_empty() {
+            return a;
+        }
+        let first = g.hub_seq + 1;
+        let events: Vec<Event> = std::mem::take(&mut a.events)
+            .into_iter()
+            .zip(first..)
+            .map(|(body, seq)| Event {
+                producer_id: RESERVED_HUB_ID.to_string(),
+                seq,
+                at_ms: now_ms,
+                body: Some(body),
+            })
+            .collect();
+        let payloads: Vec<(u64, Vec<u8>)> =
+            events.iter().map(|e| (now_ms, e.encode_to_vec())).collect();
+        let snapshot = self.boards.snapshot(project, now_ms);
+        let stored = self.store.append_batch_with_setting(
+            RESERVED_HUB_ID,
+            first,
+            &payloads,
+            snapshot.as_deref().map(|bytes| (key.as_str(), bytes)),
+        );
+        match stored {
+            Ok(positions) => {
+                g.hub_seq = first + events.len() as u64 - 1;
+                // Only now does anyone hear of it: the view, the windows and the nodes.
+                for (pos, event) in positions.into_iter().zip(events) {
+                    Self::publish(&mut g, Delivered { pos, event });
+                }
+                a
+            }
+            Err(_) => {
+                if let Some(board) = before {
+                    self.boards.restore(project, board);
+                }
+                crate::board::Answer {
+                    verdict: crate::board::Verdict::Invalid(
+                        agora_protocol::Error::new(agora_protocol::ErrorCode::Internal)
+                            .with("incident_id", "board.store"),
+                    ),
+                    events: Vec::new(),
+                    handoff: None,
+                    fanout: None,
+                }
             }
         }
-        for body in std::mem::take(&mut a.events) {
-            let _ = self.emit(&mut g, body, now_ms);
-        }
-        a
     }
 
     /// Restores an uninitialized board and returns its storage key. Callers hold the hub lock so calls and joins cannot
@@ -535,28 +583,55 @@ impl Hub {
         });
     }
 
+    /// The stored events after `after`, or `None` when they come to more than `max_bytes`: then a snapshot is cheaper and bounded.
+    /// The size is asked of the store first, so a replay over budget copies no payload at all (#519 review: a page of 1 000 large
+    /// events was read into memory before the check).
+    fn replay(&self, after: u64, max_bytes: usize) -> Result<Option<Vec<Delivered>>, StoreError> {
+        if self.store.payload_bytes_after(after)? > u64::try_from(max_bytes).unwrap_or(u64::MAX) {
+            return Ok(None);
+        }
+        let mut backlog = Vec::new();
+        let (mut at, mut bytes) = (after, 0usize);
+        loop {
+            let page = self.store.events_after(at, PAGE)?;
+            let Some(last) = page.last() else { break };
+            at = last.pos;
+            bytes += page.iter().map(|e| e.payload.len()).sum::<usize>();
+            if bytes > max_bytes {
+                return Ok(None);
+            }
+            backlog.extend(page.iter().filter_map(decode));
+        }
+        Ok(Some(backlog))
+    }
+
     /// Subscribes from `after` (the last position the subscriber saw), or from the start with `None`. If `after`
-    /// is ahead of the log (the hub was restored from an older backup) the subscriber gets a snapshot instead.
+    /// is ahead of the log (the hub was restored from an older backup), or further behind than [`MAX_REPLAY_EVENTS`] or
+    /// [`MAX_REPLAY_BYTES`] of replay, the subscriber gets a snapshot instead.
     pub fn subscribe(&self, after: Option<u64>) -> Result<Subscription, StoreError> {
+        self.subscribe_within(after, MAX_REPLAY_EVENTS, MAX_REPLAY_BYTES)
+    }
+
+    fn subscribe_within(
+        &self,
+        after: Option<u64>,
+        max_events: u64,
+        max_bytes: usize,
+    ) -> Result<Subscription, StoreError> {
         let mut g = self.lock();
         let (tx, rx) = sync_channel(SUBSCRIBER_BUFFER);
-        let sub = match after {
-            Some(n) if n <= g.pos => {
-                let mut backlog = Vec::new();
-                let mut at = n;
-                loop {
-                    let page = self.store.events_after(at, PAGE)?;
-                    let Some(last) = page.last() else { break };
-                    at = last.pos;
-                    backlog.extend(page.iter().filter_map(decode));
-                }
-                Subscription {
-                    snapshot: None,
-                    backlog,
-                    live: rx,
-                }
-            }
-            _ => Subscription {
+        // Positions only grow (one per stored event), so `pos - n` bounds the number of events to replay before any is read.
+        let backlog = match after {
+            Some(n) if n <= g.pos && g.pos - n <= max_events => self.replay(n, max_bytes)?,
+            _ => None,
+        };
+        let sub = match backlog {
+            Some(backlog) => Subscription {
+                snapshot: None,
+                backlog,
+                live: rx,
+            },
+            None => Subscription {
                 snapshot: Some((g.view.clone(), g.pos)),
                 backlog: Vec::new(),
                 live: rx,
@@ -835,6 +910,53 @@ mod tests {
         hub.ingest(&mut s, &agent("n1", 2, "a")).unwrap();
         let live = sub.live.try_recv().unwrap();
         assert_eq!(live.pos, 2);
+    }
+
+    #[test]
+    fn a_subscriber_too_far_behind_gets_a_snapshot_not_an_unbounded_replay() {
+        let (hub, sup) = (hub(), support());
+        let mut s = open_session(&hub, &sup, "n1");
+        for i in 1..=6 {
+            hub.ingest(&mut s, &agent("n1", i, &format!("a{i}")))
+                .unwrap();
+        }
+        let head = hub.view().1;
+        // Within the budget: the backlog, as before.
+        let near = hub.subscribe_within(Some(head - 2), 2, usize::MAX).unwrap();
+        assert!(near.snapshot.is_none());
+        assert_eq!(near.backlog.len(), 2);
+        // More events behind than the budget: a snapshot at the head, nothing replayed.
+        let far = hub.subscribe_within(Some(head - 3), 2, usize::MAX).unwrap();
+        assert!(far.backlog.is_empty());
+        let (view, pos) = far.snapshot.expect("a snapshot");
+        assert_eq!(pos, head);
+        assert_eq!(view.agents.len(), 6);
+        // More bytes than the budget, though few events: a snapshot too.
+        let heavy = hub.subscribe_within(Some(head - 2), 10, 1).unwrap();
+        assert!(heavy.backlog.is_empty() && heavy.snapshot.is_some());
+        // The snapshot/live boundary: the next event reaches the far subscriber live, once, right after the snapshot's position.
+        hub.ingest(&mut s, &agent("n1", 7, "a7")).unwrap();
+        let next = far.live.try_recv().unwrap();
+        assert_eq!(next.pos, head + 1);
+        assert!(far.live.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_client_away_for_more_than_the_replay_budget_resumes_from_a_snapshot() {
+        let (hub, sup) = (hub(), support());
+        let mut s = open_session(&hub, &sup, "n1");
+        let first = hub.view().1;
+        let total = MAX_REPLAY_EVENTS + 1;
+        for i in 1..=total {
+            hub.ingest(&mut s, &agent("n1", i, "a")).unwrap();
+        }
+        let sub = hub.subscribe(Some(first)).unwrap();
+        assert!(
+            sub.backlog.is_empty(),
+            "replayed {} events",
+            sub.backlog.len()
+        );
+        assert_eq!(sub.snapshot.map(|(_, pos)| pos), Some(hub.view().1));
     }
 
     #[test]
