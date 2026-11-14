@@ -90,4 +90,5 @@ Date: YYYY-MM-DD
 | 0070 | The hub owns whether a machine is online | Accepted |
 | 0071 | A diff names every changed file, even when the text is cut | Accepted |
 | 0072 | A shared terminal takes the size of the smallest window looking at it | Accepted |
+| 0073 | Old machines are shown as old, and can be cleaned up | Accepted |
 | 0074 | A reply keeps its link to the message it answers, across machines | Accepted |
