@@ -392,7 +392,8 @@ fn the_supervisor_restarts_a_crashed_node_and_never_leaves_it_behind() {
     let (supervisor, node) = up("first start");
     let (_, s, _) = run(&home, &["status"]);
     assert!(
-        s.contains(&format!("The node is running (process {supervisor}")),
+        s.contains(&format!("The node is running (process {node}, version"))
+            && s.contains(&format!("its supervisor is process {supervisor})")),
         "{s}"
     );
 
@@ -454,7 +455,12 @@ fn the_supervisor_restarts_a_crashed_node_and_never_leaves_it_behind() {
     let (supervisor, node) = up("start after the kill");
     let (code, out, err) = run(&home, &["down"]);
     assert_eq!(code, 0, "{out}{err}");
-    assert!(out.contains("Stopped the node"), "{out}");
+    assert!(
+        out.contains(&format!(
+            "Stopped the node and its supervisor (process {supervisor})"
+        )),
+        "{out}"
+    );
     wait_for(
         "the node to end with `agora down`",
         Duration::from_secs(10),
@@ -478,5 +484,79 @@ fn the_supervisor_restarts_a_crashed_node_and_never_leaves_it_behind() {
         2,
         "the kill and `agora down` are not crashes: {log}"
     );
+    let _ = std::fs::remove_dir_all(home);
+}
+
+/// Linux's follow-up to #543: `agora down` racing supervisors started by hand (a service manager starts them without a front door).
+/// Whatever the timing, nothing may keep running unseen: every supervisor left after `agora down` holds the lock (so `agora status`
+/// shows it and the next `agora down` stops it), and `agora down` never deletes a lock another supervisor took meanwhile.
+#[test]
+fn agora_down_racing_supervisors_never_leaves_one_running_unseen() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return;
+    }
+    let home = tmp("race");
+    let repo = home.join("proj");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("a.txt"), "x").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "init"]);
+    std::fs::write(
+        home.join("machine.toml"),
+        format!(
+            "roles = [\"node\"]\nui = \"none\"\nnode_projects = [{}]\n",
+            toml_string(&repo.to_string_lossy()),
+        ),
+    )
+    .unwrap();
+    let _down = Down(home.clone());
+    for round in 0..6 {
+        let mut supervisors: Vec<std::process::Child> = (0..2)
+            .map(|_| {
+                agora(&home, &["supervise", "node"])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .unwrap()
+            })
+            .collect();
+        // Vary the moment `agora down` comes in: before, during and after the supervisors take the lock.
+        std::thread::sleep(Duration::from_millis(30 * round));
+        let (code, out, err) = run(&home, &["down"]);
+        assert_eq!(code, 0, "round {round}: {out}{err}");
+        // Let the late ones settle (refuse, or start their node).
+        std::thread::sleep(Duration::from_secs(3));
+        for c in &mut supervisors {
+            if c.try_wait().unwrap().is_none() {
+                assert_eq!(
+                    lock_pid(&home, "node"),
+                    Some(c.id()),
+                    "round {round}: supervisor {} runs without holding the lock ({out})",
+                    c.id()
+                );
+            }
+        }
+        // The next `agora down` stops whatever is left, node included.
+        let (code, out, err) = run(&home, &["down"]);
+        assert_eq!(code, 0, "round {round}: {out}{err}");
+        for c in &mut supervisors {
+            let end = Instant::now() + Duration::from_secs(10);
+            while c.try_wait().unwrap().is_none() {
+                assert!(
+                    Instant::now() < end,
+                    "round {round}: supervisor {} outlived two `agora down`",
+                    c.id()
+                );
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+        assert!(
+            !home.join("run/node.lock").exists(),
+            "round {round}: a lock is left"
+        );
+        let (_, s, _) = run(&home, &["status"]);
+        assert!(s.contains("The node is not running"), "round {round}: {s}");
+    }
     let _ = std::fs::remove_dir_all(home);
 }
