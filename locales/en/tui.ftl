@@ -128,3 +128,22 @@ option-ask = Ask before acting
 tui-start-acts = How should it act? Press its number; Enter or any other key asks before acting.
 tui-start-confirm-skip = Let the agent act without asking? With "{ $name }" it runs commands and changes files without asking you first, for as long as it runs. Press y to start without asking; any other key keeps asking.
 tui-badge-no-ask = does not ask
+
+## The app shell (ADR-0063 stage 2)
+tui-app-keys-tree = ↑↓ choose · Enter open · Tab next part · Ctrl K commands · N next that needs you · Alt+1…9 tabs · w close tab · i details · q quit
+tui-app-keys-terminal = Your keys go to the agent · Ctrl-] or F12 back to the list · Alt+1…9 tabs
+tui-app-keys-inspector = Tab next part · Esc back to the list · Ctrl K commands
+tui-app-keys-palette = Type to filter · ↑↓ choose · Enter run · Esc close
+tui-app-mouse-on = mouse on (m releases it to select text)
+tui-app-mouse-off = mouse off (m takes it back)
+tui-app-no-agent = Choose an agent on the left and press Enter to see its terminal here.
+tui-app-no-screen = This agent's terminal is opening.
+tui-app-tree-empty = No agents yet.
+tui-app-palette-title = Commands
+tui-app-palette-none = Nothing matches.
+tui-app-cmd-open = Open { $name }
+tui-app-cmd-next = Go to the next agent that needs you
+tui-app-cmd-mouse = Turn the mouse on or off
+tui-app-cmd-inspector = Show or hide the details
+tui-app-cmd-close = Close this tab
+tui-app-cmd-quit = Quit

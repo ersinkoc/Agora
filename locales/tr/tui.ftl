@@ -128,3 +128,22 @@ option-ask = Önce sorsun
 tui-start-acts = Nasıl çalışsın? Numarasına basın; Enter ya da başka bir tuş önce sordurur.
 tui-start-confirm-skip = Ajan sormadan çalışsın mı? "{ $name }" seçiliyken çalıştığı sürece komut çalıştırır ve dosyaları size sormadan değiştirir. Sormadan başlatmak için y'ye basın; başka bir tuş sormaya devam ettirir.
 tui-badge-no-ask = sormuyor
+
+## The app shell (ADR-0063 stage 2)
+tui-app-keys-tree = ↑↓ seç · Enter aç · Tab sonraki bölüm · Ctrl K komutlar · N seni bekleyen sonraki · Alt+1…9 sekmeler · w sekmeyi kapat · i ayrıntılar · q çık
+tui-app-keys-terminal = Tuşların ajana gider · Ctrl-] ya da F12 listeye dön · Alt+1…9 sekmeler
+tui-app-keys-inspector = Tab sonraki bölüm · Esc listeye dön · Ctrl K komutlar
+tui-app-keys-palette = Süzmek için yaz · ↑↓ seç · Enter çalıştır · Esc kapat
+tui-app-mouse-on = fare açık (metin seçmek için m ile bırak)
+tui-app-mouse-off = fare kapalı (m ile geri al)
+tui-app-no-agent = Soldan bir ajan seçip Enter'a basın; terminali burada görünür.
+tui-app-no-screen = Bu ajanın terminali açılıyor.
+tui-app-tree-empty = Henüz ajan yok.
+tui-app-palette-title = Komutlar
+tui-app-palette-none = Eşleşen yok.
+tui-app-cmd-open = { $name } aç
+tui-app-cmd-next = Seni bekleyen sonraki ajana git
+tui-app-cmd-mouse = Fareyi aç ya da kapat
+tui-app-cmd-inspector = Ayrıntıları göster ya da gizle
+tui-app-cmd-close = Bu sekmeyi kapat
+tui-app-cmd-quit = Çık
