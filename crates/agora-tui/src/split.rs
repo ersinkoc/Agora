@@ -419,6 +419,14 @@ fn project_from_id(id: &str) -> String {
     format!("project {}", hash.chars().take(7).collect::<String>())
 }
 
+/// The tree row that heads the old machines (ADR-0073); the palette offers to clean them up when it is there.
+pub const OLD_MACHINES: &str = "#old-machines";
+
+/// ADR-0073: a machine not seen for a day (offline, its last word a day ago or never), as the web decides it.
+pub fn is_old(n: &agora_protocol::v1::NodeSnapshot, now_ms: u64) -> bool {
+    !n.online && now_ms.saturating_sub(n.last_event_ms) >= 86_400_000
+}
+
 /// Whether the machine `node` is known to the hub and offline (ADR-0070: the hub owns presence).
 fn machine_offline(s: &Snapshot, node: &str) -> bool {
     s.nodes.iter().any(|n| n.node_id == node && !n.online)
@@ -463,7 +471,28 @@ pub fn app_rows(s: &Snapshot, now_ms: u64, t: Text<'_>) -> Vec<crate::app::Row> 
     };
     let mut nodes: Vec<_> = s.nodes.iter().collect();
     nodes.sort_by(|a, b| b.online.cmp(&a.online).then_with(|| name(a).cmp(name(b))));
-    for n in nodes {
+    // ADR-0073: machines not seen for a day are listed apart, last, under their own heading (as the web's Old machines).
+    let (old, recent): (Vec<_>, Vec<_>) = nodes.into_iter().partition(|n| is_old(n, now_ms));
+    let first_old = recent.len();
+    for (i, n) in recent.into_iter().chain(old.iter().copied()).enumerate() {
+        if i == first_old {
+            rows.push(crate::app::Row {
+                id: OLD_MACHINES.into(),
+                label: t(
+                    key!("tui-app-old-machines"),
+                    &[(
+                        "count",
+                        Arg::Num(i64::try_from(old.len()).unwrap_or(i64::MAX)),
+                    )],
+                ),
+                state: String::new(),
+                needs_you: false,
+                terminal: false,
+                header: true,
+                group: true,
+                request: false,
+            });
+        }
         rows.push(crate::app::Row {
             id: n.node_id.clone(),
             label: format!("{} {}", if n.online { "●" } else { "○" }, name(n)),
@@ -1466,6 +1495,41 @@ mod tests {
             .iter()
             .filter(|r| r.group)
             .all(|r| r.header && !r.needs_you));
+    }
+
+    #[test]
+    fn machines_not_seen_for_a_day_are_listed_last_under_their_own_heading() {
+        let mut s = snapshot();
+        let now = 10 * 86_400_000;
+        // "win" was offline 2 days, mac2 is online; a third machine went quiet an hour ago (not old yet).
+        for n in &mut s.nodes {
+            if n.node_id == "win" {
+                n.last_event_ms = now - 2 * 86_400_000;
+            }
+        }
+        s.nodes.push(NodeSnapshot {
+            node_id: "pi".into(),
+            hostname: "pi".into(),
+            online: false,
+            last_event_ms: now - 3_600_000,
+            ..Default::default()
+        });
+        let rows = app_rows(&s, now, &text);
+        let heads: Vec<&str> = rows
+            .iter()
+            .filter(|r| r.header && !r.group || r.id == OLD_MACHINES)
+            .map(|r| r.id.as_str())
+            .collect();
+        assert_eq!(heads, ["mac2", "pi", OLD_MACHINES, "win"]);
+        let old = rows.iter().find(|r| r.id == OLD_MACHINES).unwrap();
+        assert_eq!(old.label, "tui-app-old-machines count=1");
+        // Its agents go with it, under it.
+        let at = rows.iter().position(|r| r.id == OLD_MACHINES).unwrap();
+        assert!(rows[at..].iter().any(|r| r.id == "win/agent-1"));
+        // Nobody old: no heading.
+        assert!(!app_rows(&snapshot(), 0, &text)
+            .iter()
+            .any(|r| r.id == OLD_MACHINES));
     }
 
     #[test]

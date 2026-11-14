@@ -224,4 +224,21 @@ tui-app-cmd-inspector = Show or hide the details
 tui-app-cmd-close = Close this tab
 tui-tab-closed = Closed the tab. { $agent } keeps running; x stops it.
 tui-app-cmd-quit = Quit
+tui-app-old-machines = { $count ->
+        [one] One old machine
+       *[other] { $count } old machines
+    } (not seen for a day)
+tui-app-cmd-cleanup = Clean up old machines
+tui-cleanup-none = No old machines: every machine was seen within a day.
+tui-cleanup-title = { $count ->
+        [one] Clean up one old machine?
+       *[other] Clean up { $count } old machines?
+    }
+tui-cleanup-explain = Forgotten machines and their finished agents leave every window. What they did stays in the history and the costs. A machine that connects again comes back.
+tui-cleanup-keys = y forgets them · r forgets them and refuses them if they connect again · any other key keeps them
+tui-cleanup-done = { $count ->
+        [one] Forgot one machine.
+       *[other] Forgot { $count } machines.
+    }
+tui-cleanup-failed = Could not forget a machine ({ $code }); { $count } forgotten before it.
 tui-app-start-read = You read the whole request. Press y to allow it or n to deny it.

@@ -123,6 +123,8 @@ pub enum Action {
     /// Text was selected with the mouse in the active agent's pane: copy it. In the pane's rows and columns, both ends included (the
     /// caller maps them to the screen's rows as drawn, see [`TerminalPane::first_row`]).
     Copy(Selection),
+    /// ADR-0073: forget the old machines (not seen for a day); the caller asks first.
+    CleanUpOld,
     Quit,
 }
 
@@ -193,6 +195,7 @@ enum Command {
     ToggleMouse,
     ToggleInspector,
     CloseTab,
+    CleanUpOld,
     Quit,
 }
 
@@ -652,6 +655,10 @@ impl App {
         if !self.tabs.is_empty() {
             all.push((Command::CloseTab, t(key!("tui-app-cmd-close"), &[])));
         }
+        // ADR-0073: offered when the tree lists old machines.
+        if cx.rows.iter().any(|r| r.id == crate::split::OLD_MACHINES) {
+            all.push((Command::CleanUpOld, t(key!("tui-app-cmd-cleanup"), &[])));
+        }
         all.push((Command::Quit, t(key!("tui-app-cmd-quit"), &[])));
         let query = self
             .palette
@@ -703,6 +710,7 @@ impl App {
                     Some(Command::ToggleMouse) => self.common(Key::Char('m'), cx.area, out),
                     Some(Command::ToggleInspector) => self.toggle_inspector(cx.area),
                     Some(Command::CloseTab) => self.close_tab(out),
+                    Some(Command::CleanUpOld) => out.push(Action::CleanUpOld),
                     Some(Command::Quit) => out.push(Action::Quit),
                     None => {}
                 }
@@ -2938,6 +2946,29 @@ mod tests {
             key(&mut app, &rows, Key::Alt('Y')),
             vec![Action::Command('y')]
         );
+    }
+
+    #[test]
+    fn the_palette_offers_to_clean_up_old_machines_only_when_there_are_some() {
+        let mut rows = rows();
+        let mut app = App::default();
+        key(&mut app, &rows, Key::Ctrl('k'));
+        for c in "cmd-cleanup".chars() {
+            key(&mut app, &rows, Key::Char(c));
+        }
+        assert!(app.commands(&cx(&rows)).is_empty());
+        rows.push(Row {
+            id: crate::split::OLD_MACHINES.into(),
+            label: "1 old machine".into(),
+            state: String::new(),
+            needs_you: false,
+            terminal: false,
+            header: true,
+            group: true,
+            request: false,
+        });
+        assert_eq!(app.commands(&cx(&rows)).len(), 1);
+        assert_eq!(key(&mut app, &rows, Key::Enter), vec![Action::CleanUpOld]);
     }
 
     #[test]
