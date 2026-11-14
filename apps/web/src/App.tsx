@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { CommandPalette, type PaletteItem } from './components/CommandPalette';
 import { demoAgents, demoApprovals, demoList, demoMachines, demoProjects } from './fixtures';
+import { demoDiff, demoFiles } from './demoWorkspace';
 import { chooseLanguage, getLanguage, subscribeLanguage, t } from './i18n';
 import { nextNeedingMe, type AgentTileModel, type ResumeAction } from './model';
 import { connectLive, type CommandBody, type Live, type LinkState } from './net/live';
@@ -340,9 +341,9 @@ export function App() {
     return s;
   }, [api, agents]);
 
-  const loadDiff = useCallback(async (a: AgentTileModel): Promise<string> => {
+  const loadDiff = useCallback(async (a: AgentTileModel, path = ''): Promise<string> => {
     if (!api || !a.workspaceRef) return '';
-    const ok = await api.command(a.workspaceRef.node, a.workspaceRef.directory ? { workspaceQuery: { workspaceId: a.workspaceRef.id, operation: 'diff' } } : { gitDiff: { worktreeId: a.workspaceRef.id, path: '' } });
+    const ok = await api.command(a.workspaceRef.node, a.workspaceRef.directory ? { workspaceQuery: { workspaceId: a.workspaceRef.id, operation: 'diff', path } } : { gitDiff: { worktreeId: a.workspaceRef.id, path } });
     return ok.gitDiff?.diff ?? '';
   }, [api]);
 
@@ -470,7 +471,7 @@ export function App() {
           link={hub ? link : 'live'} onRetry={api ? api.retry : undefined} onOpen={open} onCommand={() => setPalette(true)} onLock={hub ? lockNow : undefined} start={startWindow}
           onStart={hub && api && live ? () => setStarting({}) : (!hub && import.meta.env.DEV ? () => setStarting({}) : undefined)} />
         : <Console agents={agents} machines={live ? machines(live) : []} usage={usage} projects={live && usage ? costByProject(live, usage.perAgent) : []}
-          approvals={live ? approvalList(live) : hub ? [] : demoApprovals} messages={live ? recentMessages(live) : []} boards={live ? boards(live) : []} terminalFor={terminalFor} chatOf={hub && api ? chatOf : undefined} sendPrompt={hub && api ? sendPrompt : undefined} chooseOption={hub && api ? chooseOption : undefined} loadDiff={hub && api ? loadDiff : undefined} loadHistory={hub && api ? loadHistory : undefined} filesOf={hub && api ? filesOf : undefined} onOpen={open}
+          approvals={live ? approvalList(live) : hub ? [] : demoApprovals} messages={live ? recentMessages(live) : []} boards={live ? boards(live) : []} terminalFor={terminalFor} chatOf={hub && api ? chatOf : undefined} sendPrompt={hub && api ? sendPrompt : undefined} chooseOption={hub && api ? chooseOption : undefined} loadDiff={hub && api ? loadDiff : !hub ? demoLoadDiff : undefined} loadHistory={hub && api ? loadHistory : undefined} filesOf={hub && api ? filesOf : !hub ? demoFilesOf : undefined} onOpen={open}
           onResolve={resolve} helperGrants={hub && api ? helperGrants : undefined} revokeGrant={hub && api ? revokeGrant : undefined} notice={notice ? t(notice) : undefined} link={hub ? link : 'live'} onRetry={api ? api.retry : undefined}
           onStart={hub && api && live ? (node) => setStarting({ node }) : (!hub && import.meta.env.DEV ? (node) => setStarting({ node }) : undefined)} onCommand={() => setPalette(true)} onForget={hub && api ? forgetAgent : undefined} onResume={hub && api ? resumeAgent : (!hub && import.meta.env.DEV ? async () => undefined : undefined)} onLock={hub ? lockNow : undefined}
           start={startWindow} />}
@@ -484,3 +485,8 @@ export function App() {
     </>
   );
 }
+
+// The demo window (no hub): the closed demo agent's workspace, so the review screen and the file browser can be seen and tested.
+const DEMO_CHANGED = 'a6';
+const demoLoadDiff = async (a: AgentTileModel, path?: string) => (a.id === DEMO_CHANGED ? demoDiff(path) : '');
+const demoFilesOf = (a: AgentTileModel) => (a.id === DEMO_CHANGED ? demoFiles : undefined);
