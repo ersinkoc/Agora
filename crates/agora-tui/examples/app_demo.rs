@@ -32,6 +32,7 @@ fn main() -> std::io::Result<()> {
             needs_you: false,
             terminal: true,
             header: false,
+            group: false,
         },
         Row {
             id: "mac/agent-2".into(),
@@ -40,6 +41,7 @@ fn main() -> std::io::Result<()> {
             needs_you: false,
             terminal: true,
             header: false,
+            group: false,
         },
         Row {
             id: "win/agent-7".into(),
@@ -48,6 +50,7 @@ fn main() -> std::io::Result<()> {
             needs_you: true,
             terminal: true,
             header: false,
+            group: false,
         },
     ];
     let mut screens: HashMap<String, AlacrittyTerminal> = HashMap::new();
