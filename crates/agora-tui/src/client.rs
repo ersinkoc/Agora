@@ -193,8 +193,9 @@ impl Session {
 
     /// Waits up to `wait` for the hub to say something.
     pub fn next(&mut self, wait: Duration) -> Update {
+        // A kept snapshot first. `changed` is left as it is: `set_aside` cleared it when the snapshot came, so if it is set now an
+        // event arrived after the snapshot, and the next call reports it.
         if let Some(s) = self.snapshot.take() {
-            self.changed = false;
             return Update::Snapshot(s);
         }
         if std::mem::take(&mut self.changed) {
@@ -1068,6 +1069,15 @@ mod set_aside_tests {
         );
         assert_eq!(kept.as_deref(), Some(&s));
         assert!(!changed, "a snapshot supersedes the events before it");
+        // An event after the snapshot is newer than it: it stays marked, so the caller asks again after taking the snapshot.
+        set_aside(
+            frame(STREAM_EVENTS, kinds::POSITIONED_EVENT, vec![]),
+            &mut changed,
+            &mut kept,
+            &mut queue,
+        );
+        assert!(changed && kept.is_some());
+        changed = false;
         set_aside(
             frame(
                 agora_protocol::frame::FIRST_DYNAMIC_STREAM,
