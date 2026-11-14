@@ -1139,6 +1139,15 @@ fn a_machine_that_has_not_come_back_after_the_hub_is_killed_is_shown_offline() {
     let (again, other) = start_hub(&home, &hub_dir, "127.0.0.1:0");
     let mut again = Proc(again);
     assert_ne!(other, addr);
+    // #508: the restarted hub rewrites its `listen` file; only `agora tui --hub-dir` reads it, never the node (it dials the
+    // address it enrolled with), so the node stays unable to reach this hub.
+    let listen = || {
+        std::fs::read_to_string(hub_dir.join("listen"))
+            .unwrap()
+            .trim()
+            .to_string()
+    };
+    assert_eq!(listen(), other);
     let (up, seen) = online(&first_snapshot(&home, &hub_dir, &other)).unwrap();
     assert!(!up, "a machine that has not come back is shown offline");
     assert!(
@@ -1151,10 +1160,57 @@ fn a_machine_that_has_not_come_back_after_the_hub_is_killed_is_shown_offline() {
     again.0.wait().unwrap();
     let (back, addr) = start_hub(&home, &hub_dir, &format!("127.0.0.1:{port}"));
     let _back = Proc(back);
+    assert_eq!(listen(), addr);
     let end = Instant::now() + Duration::from_secs(30);
     while online(&first_snapshot(&home, &hub_dir, &addr)).map(|o| o.0) != Some(true) {
         assert!(Instant::now() < end, "the node never came back online");
         std::thread::sleep(Duration::from_millis(200));
     }
     let _ = std::fs::remove_dir_all(root);
+}
+
+/// `agora tui --hub-dir DIR` on the hub's machine, without `--hub` and without `machine.toml`: it dials the port the hub in that
+/// folder really listens on, not the default 7443 (found on the maintainer's hub, which runs on a port of its own).
+#[test]
+fn the_console_with_only_the_hub_folder_dials_the_hubs_real_port() {
+    let root = tmp("tui-port");
+    let (hub_dir, home) = (root.join("hub"), root.join("home"));
+    std::fs::create_dir_all(&home).unwrap();
+    let mut hub = agora(
+        &home,
+        &["hub", "run", "--listen", "127.0.0.1:0", "--hub-dir"],
+    )
+    .arg(&hub_dir)
+    .stdout(Stdio::piped())
+    .stderr(Stdio::null())
+    .spawn()
+    .unwrap();
+    let mut line = String::new();
+    let mut out = BufReader::new(hub.stdout.take().unwrap());
+    out.read_line(&mut line).unwrap();
+    let _hub = Proc(hub);
+    let addr = line
+        .split("running on ")
+        .nth(1)
+        .and_then(|r| r.split(". Its").next())
+        .expect(&line)
+        .trim()
+        .to_string();
+    assert_ne!(
+        addr, "127.0.0.1:7443",
+        "the test needs a port other than the default"
+    );
+
+    let mut tui = agora(&home, &["tui", "--hub-dir"])
+        .arg(&hub_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut err = BufReader::new(tui.stderr.take().unwrap());
+    let _tui = Proc(tui);
+    let mut first = String::new();
+    err.read_line(&mut first).unwrap();
+    assert!(first.contains(&format!("Connecting to {addr}")), "{first}");
 }

@@ -4,13 +4,17 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
-### Getting started
-- `agora --version` prints the version.
-
 ### Machines
+- `agora doctor` says who may make this machine act: which commands sent through the hub need a signature from one of your devices
+  (and a note when none do, since whoever controls the hub could then send them), how many devices the machine trusts and how many
+  of them may act in every project, whether agents may skip their permission questions, and any policy line the node did not
+  understand.
 - After the hub restarts a machine that has not come back is shown offline, with "last seen" from when the hub last heard
   from it. Before, a machine that was connected when the hub stopped abruptly (killed, power loss) stayed online until it
   redialled, or forever if it never did.
+
+### Getting started
+- `agora --version` prints the version.
 
 ## 0.3.10
 

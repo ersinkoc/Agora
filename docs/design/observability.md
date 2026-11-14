@@ -63,4 +63,8 @@
   and recent errors into one bundle for bug reports.
   It also notes that the node reads its policy file (`<data>/policy`) only when it starts, and warns when that file changed after
   the running node started (compared with its local socket's time), since such a change waits for a restart.
+  It states who may make the machine act, as the node applies its files when it starts: which commands routed through the hub
+  need a device-signed grant (the `signed_commands` line, the team default a limited device turns on, or none: a note, since a
+  compromised hub could then send them, threat model T1), how many devices are trusted and how many of them may act in every
+  project, the `skip_permissions` setting, and how many policy lines the node did not understand.
 - **Tracing across hops:** commands carry a trace id from client through hub to node and adapter.
