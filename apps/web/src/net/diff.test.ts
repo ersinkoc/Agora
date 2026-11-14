@@ -192,6 +192,19 @@ describe('a folder whose name holds " b/"', () => {
     ]);
   });
 
+  it('takes a binary file\'s name from the header when the name holds " and " (Binary files … and … cannot be split)', () => {
+    const files = parseDiff([
+      'diff --git a/q and b/m.bin b/q and b/m.bin', 'index 1111111..2222222 100644', 'Binary files a/q and b/m.bin and b/q and b/m.bin differ',
+      'diff --git a/n and b/new.bin b/n and b/new.bin', 'new file mode 100644', 'index 0000000..3333333',
+      'Binary files /dev/null and b/n and b/new.bin differ',
+      'diff --git a/Terms and Conditions.pdf b/Terms and Conditions.pdf', 'new file mode 100644', 'index 0000000..4444444',
+      'Binary files /dev/null and b/Terms and Conditions.pdf differ', '',
+    ].join('\n'));
+    expect(files.map((f) => [f.path, f.status, f.binary])).toEqual([
+      ['q and b/m.bin', 'modified', true], ['n and b/new.bin', 'added', true], ['Terms and Conditions.pdf', 'added', true],
+    ]);
+  });
+
   it('still reads the --no-index form and a deleted binary file', () => {
     const files = parseDiff([
       'diff --git a/dev/null b/fresh.bin', 'new file mode 100644', 'Binary files /dev/null and b/fresh.bin differ',

@@ -22,6 +22,8 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 - For an agent working in a folder inside a repository, every changed file in the review is named from that folder, so opening a
   changed file, its own diff or its unchanged lines works. Before, files git already tracked were named from the repository's
   top, and showing one of them alone found nothing.
+- For an agent working in a folder inside a repository, the "files changed" count covers only that folder, like its list of
+  changes. Before, it also counted files changed elsewhere in the repository.
 - A very long change shown whole ("Show all") and switched to side by side no longer holds the page for seconds: only the rows in
   view are drawn.
 - Files in a folder whose name contains " b/" keep their real path; lines that changed only between LF and CRLF are noted as such;

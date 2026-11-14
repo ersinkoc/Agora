@@ -583,6 +583,9 @@ pub fn status(worktree: &Path) -> Result<GitStatus, GitError> {
     // A git process costs about a second on a busy Windows machine. The filter question is asked once for both commands that read
     // files, right before the first; the commit comes from the same `status` as the changed paths (`# branch.oid`) instead of a
     // `rev-parse` of its own.
+    // Both commands take the pathspec `.`, like [`diff`]: without one git reports the whole checkout even when run in a folder
+    // inside it (a workspace selected inside a repository, ADR-0053), and the count would include files the diff never lists. At a
+    // checkout's root `.` is everything, so a worktree the node made is counted as before.
     let filters = Filters::of(worktree);
     let git = |args: &[&str]| run(hardened_with(worktree, &filters), args);
     let (files_changed, head_commit) = parse_status_v2(&git(&[
@@ -590,6 +593,8 @@ pub fn status(worktree: &Path) -> Result<GitStatus, GitError> {
         "--porcelain=v2",
         "--branch",
         SUBMODULE_COMMITS_ONLY,
+        "--",
+        ".",
     ])?);
     let (insertions, deletions) = parse_shortstat(&git(&[
         "diff",
@@ -598,6 +603,8 @@ pub fn status(worktree: &Path) -> Result<GitStatus, GitError> {
         SUBMODULE_COMMITS_ONLY,
         "--shortstat",
         "HEAD",
+        "--",
+        ".",
     ])?);
     Ok(GitStatus {
         files_changed,
@@ -1250,6 +1257,51 @@ mod tests {
             d.contains("diff --git a/web/w.txt b/web/w.txt") && d.contains("+OUTSIDE"),
             "{d}"
         );
+    }
+
+    #[test]
+    fn a_workspace_inside_a_checkout_counts_only_its_own_folder() {
+        let r = Repo::new(None);
+        fs::create_dir_all(r.dir.join("web")).expect("dir");
+        fs::write(r.dir.join("web/w.txt"), "web\n").expect("write");
+        fs::write(r.dir.join("web/m.txt"), "move me\n").expect("write");
+        fs::write(r.dir.join("gone.txt"), "bye\n").expect("write");
+        fs::write(r.dir.join("in.txt"), "in\n").expect("write");
+        r.commit("layout");
+        // Outside the folder: a tracked change, an untracked file, a deleted file.
+        fs::write(r.dir.join("a.txt"), "one\nOUTSIDE\n").expect("write");
+        fs::write(r.dir.join("root.txt"), "r\n").expect("write");
+        fs::remove_file(r.dir.join("gone.txt")).expect("rm");
+        // Renames across the boundary, both ways: inside the folder one is a new file, the other a deleted one.
+        fs::create_dir_all(r.dir.join("web/in b")).expect("dir");
+        r.git(&["mv", "in.txt", "web/in b/in.txt"]);
+        r.git(&["mv", "web/m.txt", "moved.txt"]);
+        // Inside: a tracked change and an untracked file whose name has a space.
+        fs::write(r.dir.join("web/w.txt"), "web\nINSIDE\n").expect("write");
+        fs::write(r.dir.join("web/new file.txt"), "n\n").expect("write");
+
+        let web = status(&r.dir.join("web")).expect("status");
+        // web/w.txt, web/new file.txt, web/in b/in.txt (added), web/m.txt (deleted).
+        assert_eq!(
+            (web.files_changed, web.insertions, web.deletions),
+            (4, 2, 1)
+        );
+        assert_eq!(web.head_commit, r.git(&["rev-parse", "HEAD"]).trim());
+        // The diff of the folder lists the same files the count describes (an untracked file is named from the folder).
+        let d = diff(&r.dir.join("web"), None).expect("diff");
+        for inside in ["web/w.txt", "new file.txt", "web/in b/in.txt", "web/m.txt"] {
+            assert!(d.contains(inside), "{inside} missing from {d}");
+        }
+        for outside in ["root.txt", "gone.txt", "OUTSIDE", "moved.txt"] {
+            assert!(!d.contains(outside), "{outside} in {d}");
+        }
+
+        // At the checkout's root (a worktree the node made) everything still counts: the four above plus a.txt, root.txt and
+        // gone.txt; each rename is one entry.
+        let root = status(&r.dir).expect("status");
+        let porcelain = r.git(&["status", "--porcelain"]);
+        assert_eq!(root.files_changed as usize, porcelain.lines().count());
+        assert_eq!(root.files_changed, 7);
     }
 
     #[test]
