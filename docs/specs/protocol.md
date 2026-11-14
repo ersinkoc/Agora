@@ -144,7 +144,9 @@ Hub core (`agora-hub::hub`): store, view and subscriber fan-out are one step und
 snapshot (or backlog) and registers for live events together sees every event once, in order, even while several nodes
 ingest. A subscriber that falls more than 1024 events behind is dropped, never waited for; it reconnects with the last
 position it saw and gets the backlog, or a snapshot when that position is ahead of the log (a hub restored from an older
-backup). When a node's connection ends without a goodbye the hub records `NodeOffline` itself as producer `hub` (a name no
+backup) or more than 10 000 events or 8 MiB of them behind (`MAX_REPLAY_EVENTS`, `MAX_REPLAY_BYTES`): replay runs under the hub's
+lock, so its cost is bounded instead of growing with how long the client was away (a client 100 000 events behind held the lock for
+about 155 ms before; its snapshot now takes well under a millisecond). When a node's connection ends without a goodbye the hub records `NodeOffline` itself as producer `hub` (a name no
 node certificate can carry), in the same log, so live and rebuilt views agree.
 
 Presence (ADR-0070): the hub also records `NodeLink { node_id, up, reason, generation, last_heard_ms }` as producer `hub`, from
@@ -254,7 +256,10 @@ Implemented by the node today: `project.list`, `agent.*`, `terminal.*`, `approva
 `chat.subscribe` (ADR-0038: a conversation stream, below), `git.status`, `git.log` (ADR-0037: newest first, default 30, at most 200), `git.diff`, `files.list` and `files.read`. The git and files commands answer only for the workspace of one of the node's own agents (`worktree_id` is the id
 the node reported in `WorktreeCreated`); a path that is absolute, climbs with `..` or starts with `:` or `-` is refused as
 `protocol.invalid_message`. `git.diff` is the unified diff against HEAD plus the new files git does not track yet (shown as
-all-added, at most 50 files of at most 64 KiB), and an answer is cut at 512 KiB. `files.list` hides `.git`; `files.read` refuses
+all-added, at most 50 files of at most 64 KiB), and an answer is cut at 512 KiB. It covers the workspace folder only and names
+every file from that folder, so each name is a path `git.diff` and `files.read` take: for a workspace that is the folder `web/`
+of a repository, `web/a.txt` is `a.txt`; a rename across the folder's edge shows as the file added or deleted inside it. At a
+repository's root the names are the repository's own. `files.list` hides `.git`; `files.read` refuses
 files above 512 KiB (`files.too_large`) and paths that leave the workspace, symlinks included (`files.outside_root`), checked again on the opened file so a link swapped in after the check is still refused.
 
 ### Selected directories (ADR-0052)
@@ -267,7 +272,7 @@ create a worktree. New clients refuse an unavailable directory launch rather tha
 | `directory.inspect` / `DirectoryInspect` (81) | `path`, `create_project_id`, `authorization` → `DirectoryInfo` (Ok tag 18): canonical `path`, `project_id`, `git_root`, `branch`, `portable`, `previous_project_id` |
 | `directory.list` / `DirectoryList` (84) | `path` (empty: the user's home folder), `authorization` → `DirectoryEntries` (Ok tag 21): canonical `path`, `parent` (empty at a root), `entries[]` of `{name, is_git}`, `truncated`. Folders only, sorted by name, at most 500 per answer; folders ADR-0052 refuses to launch in are not listed; capability `directory.list` (ADR-0053) |
 | `agent.forget` / `AgentForget` (85) | `agent_id`; answered by the hub, which appends `AgentForgotten` (event 36, `agent_id` is the hub-wide key `<node>/<id>`) and stops listing the agent; `agent.running` while it runs; the earlier events stay in the store (ADR-0053) |
-| `node.forget` / `NodeForget` (93) | `node_id`, `refuse_return`; answered by the hub, owner only (`auth.forbidden` otherwise), with no `target_node` (`protocol.invalid_message` otherwise). `node.online` while the machine is connected, `node.unknown` for one the hub never saw. With `refuse_return` every certificate enrolled under `node_id` is revoked first. The hub appends `NodeForgotten` (event 15, producer `hub`): its snapshot leaves out that machine and everything keyed under it (folders, worktrees, terminals, approvals, agents); a later `NodeLink { up }` of the same node lists it again with the agents it still runs, and the ones closed before stay forgotten. History and usage stay (ADR-0073). The web window is served by its hub, so it always matches it; there is no separate client capability |
+| `node.forget` / `NodeForget` (93) | `node_id`, `refuse_return`; answered by the hub, owner only (`auth.forbidden` otherwise), with no `target_node` (`protocol.invalid_message` otherwise). `node.online` while the machine is connected, `node.unknown` for one the hub never saw. With `refuse_return` every certificate enrolled under `node_id` is revoked first. The hub appends `NodeForgotten` (event 15, producer `hub`): its snapshot leaves out that machine and everything keyed under it (folders, worktrees, terminals, approvals, agents); a later `NodeLink { up }` (or `NodeOnline`) of the same node lists it again with the agents it still runs, and the ones closed before stay forgotten. A client that joined while the machine was hidden holds none of its records and no event repeats them, so when it comes back the hub lets every live client go, and a client resuming from a position before that return gets a snapshot instead of a replay (`View::remembered_at`, rebuilt at start). History and usage stay (ADR-0073). The web window is served by its hub, so it always matches it; there is no separate client capability |
 | `agent.launch` / `AgentLaunch` (82) | canonical `path`, expected `project_id`, `kind`, `separate_worktree`, `authorization`, `accept_identity_change` → `AgentLaunchResult` (Ok tag 19): `agent_id`, `terminal_id`, `workspace_id`, actual cwd `path` |
 | `workspace.query` / `WorkspaceQuery` (83) | `workspace_id`, `operation` (`list`, `read`, `status`, `diff`, `history`), relative `path`, `limit` → existing file/Git results |
 

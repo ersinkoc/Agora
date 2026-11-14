@@ -26,6 +26,11 @@ use crate::store::{Append, EventStore, SqliteStore, StoreError};
 /// Events a subscriber may have queued before it is considered too slow and dropped.
 pub const SUBSCRIBER_BUFFER: usize = 1024;
 const PAGE: usize = 1000;
+/// A subscriber that resumes from a position replays at most this many events, or this many bytes of them; further behind, it gets
+/// a fresh snapshot instead (architecture review R3). Replay runs under the hub lock, so its cost must not grow with how long a
+/// client was away: every node's ingest and every other client waits while it runs.
+pub const MAX_REPLAY_EVENTS: u64 = 10_000;
+pub const MAX_REPLAY_BYTES: usize = 8 << 20;
 
 /// One event with its place in the global log.
 #[derive(Debug, Clone, PartialEq)]
@@ -560,8 +565,17 @@ impl Hub {
     }
 
     fn publish(g: &mut Inner, d: Delivered) {
+        let back = g.view.brings_back(&d.event);
         g.view.apply(&d.event);
         g.pos = d.pos;
+        // ADR-0073: a forgotten machine came back. A client that joined while it was hidden holds none of its folders or agents, and
+        // no event will say them again; every client is let go, reconnects from its position and, being before this one, gets a
+        // snapshot (see `subscribe_within`).
+        if back {
+            g.view.remembered_at = d.pos;
+            g.subs.clear();
+            return;
+        }
         // `try_send`: a full queue means the subscriber is too slow; drop it rather than stall every other node.
         g.subs.retain(|s| match s.try_send(d.clone()) {
             Ok(()) => true,
@@ -569,28 +583,57 @@ impl Hub {
         });
     }
 
+    /// The stored events after `after`, or `None` when they come to more than `max_bytes`: then a snapshot is cheaper and bounded.
+    /// The size is asked of the store first, so a replay over budget copies no payload at all (#519 review: a page of 1 000 large
+    /// events was read into memory before the check).
+    fn replay(&self, after: u64, max_bytes: usize) -> Result<Option<Vec<Delivered>>, StoreError> {
+        if self.store.payload_bytes_after(after)? > u64::try_from(max_bytes).unwrap_or(u64::MAX) {
+            return Ok(None);
+        }
+        let mut backlog = Vec::new();
+        let (mut at, mut bytes) = (after, 0usize);
+        loop {
+            let page = self.store.events_after(at, PAGE)?;
+            let Some(last) = page.last() else { break };
+            at = last.pos;
+            bytes += page.iter().map(|e| e.payload.len()).sum::<usize>();
+            if bytes > max_bytes {
+                return Ok(None);
+            }
+            backlog.extend(page.iter().filter_map(decode));
+        }
+        Ok(Some(backlog))
+    }
+
     /// Subscribes from `after` (the last position the subscriber saw), or from the start with `None`. If `after`
-    /// is ahead of the log (the hub was restored from an older backup) the subscriber gets a snapshot instead.
+    /// is ahead of the log (the hub was restored from an older backup), or further behind than [`MAX_REPLAY_EVENTS`] or
+    /// [`MAX_REPLAY_BYTES`] of replay, the subscriber gets a snapshot instead.
     pub fn subscribe(&self, after: Option<u64>) -> Result<Subscription, StoreError> {
+        self.subscribe_within(after, MAX_REPLAY_EVENTS, MAX_REPLAY_BYTES)
+    }
+
+    fn subscribe_within(
+        &self,
+        after: Option<u64>,
+        max_events: u64,
+        max_bytes: usize,
+    ) -> Result<Subscription, StoreError> {
         let mut g = self.lock();
         let (tx, rx) = sync_channel(SUBSCRIBER_BUFFER);
-        let sub = match after {
-            Some(n) if n <= g.pos => {
-                let mut backlog = Vec::new();
-                let mut at = n;
-                loop {
-                    let page = self.store.events_after(at, PAGE)?;
-                    let Some(last) = page.last() else { break };
-                    at = last.pos;
-                    backlog.extend(page.iter().filter_map(decode));
-                }
-                Subscription {
-                    snapshot: None,
-                    backlog,
-                    live: rx,
-                }
+        // Positions only grow (one per stored event), so `pos - n` bounds the number of events to replay before any is read.
+        let backlog = match after {
+            Some(n) if n <= g.pos && g.pos - n <= max_events && n >= g.view.remembered_at => {
+                self.replay(n, max_bytes)?
             }
-            _ => Subscription {
+            _ => None,
+        };
+        let sub = match backlog {
+            Some(backlog) => Subscription {
+                snapshot: None,
+                backlog,
+                live: rx,
+            },
+            None => Subscription {
                 snapshot: Some((g.view.clone(), g.pos)),
                 backlog: Vec::new(),
                 live: rx,
@@ -916,6 +959,65 @@ mod tests {
     }
 
     #[test]
+    fn a_client_that_joined_while_a_machine_was_forgotten_gets_its_records_when_it_comes_back() {
+        // #535 review (Codex): a client that subscribed while the machine was hidden holds none of its folders or agents, and the
+        // machine's return is only a `NodeLink`; it must be given a snapshot, not a replay.
+        use agora_protocol::v1::CheckoutDiscovered;
+        let (hub, sup) = (hub(), support());
+        let mut s = open_session(&hub, &sup, "n1");
+        let (reg, _cmds, generation) = hub.node_link_opened("n1", Vec::new(), 1);
+        hub.ingest(&mut s, &online("n1", 1)).unwrap();
+        let checkout = Event {
+            producer_id: "n1".into(),
+            seq: 2,
+            at_ms: 2,
+            body: Some(Body::CheckoutDiscovered(CheckoutDiscovered {
+                checkout_id: "c".into(),
+                node_id: "n1".into(),
+                project_id: "p".into(),
+                path: "/repo".into(),
+            })),
+        };
+        hub.ingest(&mut s, &checkout.encode_to_vec()).unwrap();
+        hub.ingest(&mut s, &agent("n1", 3, "running")).unwrap();
+        hub.node_link_closed(reg, generation, false, 4, 4);
+        hub.forget_node("n1", false, 5).unwrap();
+
+        // This client joins while the machine is hidden: its snapshot has none of it.
+        let joined = hub.subscribe(None).unwrap();
+        let (view, at) = joined.snapshot.clone().unwrap();
+        let shown = crate::server::snapshot_of(&view, at);
+        assert!(shown.nodes.is_empty() && shown.checkouts.is_empty() && shown.agents.is_empty());
+
+        // The machine comes back: every live client is let go...
+        let _back = hub.node_link_opened("n1", Vec::new(), 6);
+        assert!(
+            joined.live.try_recv().is_err(),
+            "a live client was kept: it would only hear NodeLink"
+        );
+        // ...and resuming from where it was gives a snapshot with the machine's folders and running agent, not a replay.
+        let again = hub.subscribe(Some(at)).unwrap();
+        assert!(again.backlog.is_empty());
+        let (view, pos) = again.snapshot.expect("a snapshot");
+        let shown = crate::server::snapshot_of(&view, pos);
+        assert_eq!(shown.nodes.len(), 1);
+        assert_eq!(shown.checkouts.len(), 1);
+        assert_eq!(
+            shown
+                .agents
+                .iter()
+                .map(|a| a.agent_id.as_str())
+                .collect::<Vec<_>>(),
+            ["n1/running"]
+        );
+        // A client that resumes from after the return replays as usual.
+        let after = hub.subscribe(Some(pos)).unwrap();
+        assert!(after.snapshot.is_none());
+        // The hub restarting keeps the rule: the rebuilt view knows where the machine came back.
+        assert_eq!(View::rebuild(hub.store()).unwrap().0.remembered_at, pos);
+    }
+
+    #[test]
     fn forgetting_with_refuse_return_revokes_the_machines_certificates() {
         let (hub, sup) = (hub(), support());
         let ca = crate::ca::Ca::generate("ca").unwrap();
@@ -946,6 +1048,53 @@ mod tests {
         hub.ingest(&mut s, &agent("n1", 2, "a")).unwrap();
         let live = sub.live.try_recv().unwrap();
         assert_eq!(live.pos, 2);
+    }
+
+    #[test]
+    fn a_subscriber_too_far_behind_gets_a_snapshot_not_an_unbounded_replay() {
+        let (hub, sup) = (hub(), support());
+        let mut s = open_session(&hub, &sup, "n1");
+        for i in 1..=6 {
+            hub.ingest(&mut s, &agent("n1", i, &format!("a{i}")))
+                .unwrap();
+        }
+        let head = hub.view().1;
+        // Within the budget: the backlog, as before.
+        let near = hub.subscribe_within(Some(head - 2), 2, usize::MAX).unwrap();
+        assert!(near.snapshot.is_none());
+        assert_eq!(near.backlog.len(), 2);
+        // More events behind than the budget: a snapshot at the head, nothing replayed.
+        let far = hub.subscribe_within(Some(head - 3), 2, usize::MAX).unwrap();
+        assert!(far.backlog.is_empty());
+        let (view, pos) = far.snapshot.expect("a snapshot");
+        assert_eq!(pos, head);
+        assert_eq!(view.agents.len(), 6);
+        // More bytes than the budget, though few events: a snapshot too.
+        let heavy = hub.subscribe_within(Some(head - 2), 10, 1).unwrap();
+        assert!(heavy.backlog.is_empty() && heavy.snapshot.is_some());
+        // The snapshot/live boundary: the next event reaches the far subscriber live, once, right after the snapshot's position.
+        hub.ingest(&mut s, &agent("n1", 7, "a7")).unwrap();
+        let next = far.live.try_recv().unwrap();
+        assert_eq!(next.pos, head + 1);
+        assert!(far.live.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_client_away_for_more_than_the_replay_budget_resumes_from_a_snapshot() {
+        let (hub, sup) = (hub(), support());
+        let mut s = open_session(&hub, &sup, "n1");
+        let first = hub.view().1;
+        let total = MAX_REPLAY_EVENTS + 1;
+        for i in 1..=total {
+            hub.ingest(&mut s, &agent("n1", i, "a")).unwrap();
+        }
+        let sub = hub.subscribe(Some(first)).unwrap();
+        assert!(
+            sub.backlog.is_empty(),
+            "replayed {} events",
+            sub.backlog.len()
+        );
+        assert_eq!(sub.snapshot.map(|(_, pos)| pos), Some(hub.view().1));
     }
 
     #[test]

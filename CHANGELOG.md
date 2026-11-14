@@ -11,6 +11,13 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
   they connect again, for a lost or retired machine. `agora hub machines` lists machines as online, offline or old, and
   `agora hub machines forget NAME` or `forget --old` does the same from the hub's machine. Only the hub's owner can forget machines.
 
+### Hub
+- A window or terminal client that comes back after a long time away (more than 10 000 events or 8 MiB behind) gets a fresh snapshot
+  instead of replaying everything it missed. Its return no longer holds up the hub for every machine and every other window while
+  the backlog is read (100 000 events behind took about 155 ms of the hub's time; now well under a millisecond).
+
+## 0.3.11
+
 ### Terminal client (ADR-0063)
 - `agora tui` is drawn with ratatui: machines and their agents on the left, the agents you open as tabs with their live terminal in the middle (what you type goes to the agent; Ctrl-] or F12 comes back to the list; Alt+1…9 picks a tab), and the selected agent's details and the request it waits on on the right. The mouse works: click a row to select it and again to open it, click a tab, drag the dividers; `m` releases the mouse so the terminal can select text. A chat agent opens as a tab too: its conversation, and a line to type a request into (Enter sends it; `/mode` and `/model` switch, as before). Ctrl K opens the commands, N goes to the next agent that needs you, and the letters of the earlier console stay (y / n answer, s start, f folder, x stop, u / U resume, d remove). A request to start an agent can be allowed only once all of it was on screen, in the details or in the reader that y opens. Their questions (which agent to start, allow this machine, stop its helpers too, approve a device) open in a box over the console instead of clearing the screen. In a window of 80–140 columns the agent's terminal now gets the room: the details panel shows itself only when the terminal keeps at least 60 columns (i shows or hides it at any width), the footer shows whole keys with Ctrl K first, and Ctrl K also lists every letter's action (start, stop, allow…). Dragging over an agent's terminal selects text and copies it to the clipboard (OSC 52, over SSH too). Colours follow the terminal: 16 colours where `TERM` has no 256, the 256-colour palette without `COLORTERM=truecolor` (macOS Terminal), and "needs you" in an orange that reads on light and dark backgrounds. Inside a tab, Alt+K opens the commands, Alt+M takes or releases the mouse, and Alt+Y / Alt+N answer the request of the agent in front. r shows what the selected agent changed: its diff, coloured, scrolled with the arrows and Space. o browses its files: a folder's entries, Enter into a folder or a file, ⌫ up. Typing in a chat never answers a request (Alt+Y / Alt+N do, and the draft is kept); the diff, the files and the readers follow a resized window and say when a new request arrives; and `agora tui` ends when its terminal closes.
 - A chat agent's tool calls read as words, as in the web window: "Command cargo test", "Read src/auth.rs", "Search TODO", instead of the raw `{"tool": …}` text.
@@ -26,9 +33,18 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 ### Getting started
 - `agora --version` prints the version.
 
+### Agents working together
+- An agent asking who is in its project (`agents_list`) now sees the project's agents on your other connected machines too, not
+  only the ones on its own machine, named the way it messages them (`<machine>/<agent>`). Agents of projects only another machine
+  has are never shown. When the hub cannot be reached the list still answers with this machine's agents and says that others may
+  be missing (`partial`).
+
 ### Reviewing changes and files
 - Changes larger than 512 KiB say how many files were read and at least how many are not listed, in the review screen and in the
   file browser, so the "files changed" count never silently disagrees with the list.
+- For an agent working in a folder inside a repository, every changed file in the review is named from that folder, so opening a
+  changed file, its own diff or its unchanged lines works. Before, files git already tracked were named from the repository's
+  top, and showing one of them alone found nothing.
 - For an agent working in a folder inside a repository, the "files changed" count covers only that folder, like its list of
   changes. Before, it also counted files changed elsewhere in the repository.
 - A very long change shown whole ("Show all") and switched to side by side no longer holds the page for seconds: only the rows in

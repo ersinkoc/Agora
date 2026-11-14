@@ -834,11 +834,21 @@ struct ViewWait {
 }
 
 impl ViewWait {
-    fn new() -> Self {
+    /// A request that already waits when the view opens is said from the start, not only one that arrives meanwhile.
+    fn new(say: &Say, ask: &Over<'_>) -> Self {
+        let waiting = ask
+            .c
+            .snapshot
+            .as_ref()
+            .is_some_and(|s| !s.approvals.is_empty());
         Self {
             area: window_area(),
             idle_until: Instant::now() + Duration::from_secs(600),
-            banner: String::new(),
+            banner: if waiting {
+                say.text(key!("tui-view-asked"), &[])
+            } else {
+                String::new()
+            },
         }
     }
 
@@ -1152,6 +1162,7 @@ fn follow(
     snapshot: &Snapshot,
     selected: &str,
     preview: &mut Option<Preview>,
+    tried: &mut Option<(String, Instant)>,
 ) {
     let wanted = snapshot.terminals.iter().any(|t| t.agent_id == selected);
     if wanted && preview.as_ref().is_some_and(|p| p.agent == selected) {
@@ -1160,10 +1171,38 @@ fn follow(
     if let Some(p) = preview.take() {
         p.close(session);
     }
-    if wanted {
+    // A terminal that could not be opened (its machine not back yet after a reconnect) is tried again every 2 s, not on every
+    // turn of the loop.
+    if wanted
+        && !tried
+            .as_ref()
+            .is_some_and(|(a, at)| a == selected && at.elapsed() < RETRY_OPEN)
+    {
         *preview = Preview::open(session, selected).ok();
+        *tried = preview
+            .is_none()
+            .then(|| (selected.to_string(), Instant::now()));
     }
 }
+
+/// Says `text` in the console's footer (a box when it is long) and draws the console at once: the link to the hub is lost or
+/// being made, and the console is not running its loop to draw it. Before, these lines went to stderr, over the screen.
+fn show_notice(say: &Say, c: &mut Console, text: String) {
+    c.notice = text;
+    let t = |id: &str, args: &[(&str, Arg)]| say.text(id, args);
+    let rows = c
+        .snapshot
+        .as_ref()
+        .map(|s| app_rows(s, now_ms(), &t))
+        .unwrap_or_default();
+    draw_console(say, c, &rows, None, None, window_area(), None);
+}
+
+/// How long a notice stays in the footer before the summary comes back.
+const NOTICE_FOR: Duration = Duration::from_secs(10);
+
+/// How long a terminal or a conversation that could not be opened waits before it is tried again.
+const RETRY_OPEN: Duration = Duration::from_secs(2);
 
 pub fn tui(say: &Say, o: &Opts) -> ExitCode {
     let dir = hub_dir(o);
@@ -1225,13 +1264,20 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                 read_whole: std::collections::HashSet::new(),
                 shown_request: None,
                 stale: false,
+                not_sized: std::collections::HashSet::new(),
                 drafts: std::collections::HashMap::new(),
+                open_failed_notice: None,
+                notice_at: Instant::now(),
                 note: Note::default(),
                 colors: if color {
                     ColorMode::from_env(
                         None,
                         std::env::var("COLORTERM").ok().as_deref(),
                         std::env::var("TERM").ok().as_deref(),
+                        std::env::var("WT_SESSION")
+                            .or_else(|_| std::env::var("TERM_PROGRAM"))
+                            .ok()
+                            .as_deref(),
                     )
                 } else {
                     ColorMode::Mono
@@ -1275,7 +1321,11 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
             return ExitCode::SUCCESS;
         }
         if first {
-            say.err(key!("tui-connecting"), &hub_arg);
+            match console_state.as_mut() {
+                // The console's own screen says it (stderr would write over it).
+                Some(c) => show_notice(say, c, say.text(key!("tui-connecting"), &hub_arg)),
+                None => say.err(key!("tui-connecting"), &hub_arg),
+            }
         }
         let session = (|| {
             let t = match &token {
@@ -1315,7 +1365,10 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                 continue;
             }
             Err(ClientError::Unreachable) => {
-                say.err(key!("tui-lost"), &hub_arg);
+                match console_state.as_mut() {
+                    Some(c) => show_notice(say, c, say.text(key!("tui-lost"), &hub_arg)),
+                    None => say.err(key!("tui-lost"), &hub_arg),
+                }
                 first = false;
                 std::thread::sleep(Duration::from_secs(2));
                 continue;
@@ -1323,6 +1376,12 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
         };
         first = false;
         if let Some(c) = console_state.as_mut() {
+            // Connected: "Connecting…" or "lost, trying again" no longer holds.
+            if c.notice == say.text(key!("tui-connecting"), &hub_arg)
+                || c.notice == say.text(key!("tui-lost"), &hub_arg)
+            {
+                c.notice.clear();
+            }
             match console(say, &mut session, &rx, &hub_arg, color, c) {
                 Next::Quit => return ExitCode::SUCCESS,
                 Next::Reconnect => continue,
@@ -1402,7 +1461,7 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                             .unwrap_or_default();
                         redraw = true;
                     }
-                    follow(&mut session, s, &selected, &mut preview);
+                    follow(&mut session, s, &selected, &mut preview, &mut None);
                 }
                 window = agora_platform::terminal_size();
                 if let Some(p) = preview.as_mut() {
@@ -1454,7 +1513,7 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
                                 (_, None) => 0,
                             };
                             selected = order.get(next).cloned().unwrap_or_default();
-                            follow(&mut session, s, &selected, &mut preview);
+                            follow(&mut session, s, &selected, &mut preview, &mut None);
                             draw(&snapshot, &selected, &notice, cost, preview.as_ref());
                             last_draw = Instant::now();
                         }
@@ -1718,9 +1777,16 @@ struct Console {
     read_whole: std::collections::HashSet<String>,
     /// The hub said something changed while a full-screen view held the screen: the console asks for a fresh snapshot after it.
     stale: bool,
+    /// Agents whose terminal is never sized to the pane: the one this client itself runs in (see the console's size loop).
+    not_sized: std::collections::HashSet<String>,
     /// What was typed into each chat agent's line and not sent yet: kept when the conversation is opened again (a fresh snapshot
     /// reconnects the console, another tab comes to the front), so a draft is never lost.
     drafts: std::collections::HashMap<String, Vec<u8>>,
+    /// The "could not open" notice put up for a terminal or conversation, cleared when the open later works (also after a
+    /// reconnect, when the machine is back).
+    open_failed_notice: Option<String>,
+    /// When the footer's notice was put up: it gives way to the summary after NOTICE_FOR.
+    notice_at: Instant,
     /// A request shown whole outside the inspector (the chat tab's pane shows its agent's): y / n may answer it without asking again.
     shown_request: Option<String>,
     note: Note,
@@ -1781,7 +1847,13 @@ fn console(
     // The open chat agent's conversation (one at a time, the active tab's), and an agent whose conversation could not be opened (not
     // tried again until another tab comes to the front).
     let mut chat: Option<ChatPane> = None;
-    let mut chat_failed: Option<String> = None;
+    // A conversation that could not be opened, and when: tried again after RETRY_OPEN (its machine may be back after a reconnect).
+    let mut chat_failed: Option<(String, Instant)> = None;
+    // The same for a terminal.
+    let mut open_tried: Option<(String, Instant)> = None;
+    // How many things needed the user at the last turn: a new one clears an old notice so the footer's summary shows it.
+    let mut last_waiting = 0usize;
+
     let mut redraw = true;
     let mut last_draw = Instant::now() - Duration::from_secs(1);
     let mut area = window_area();
@@ -1817,7 +1889,7 @@ fn console(
             }
             Update::Quiet => {}
             Update::Closed => {
-                say.err(key!("tui-lost"), hub_arg);
+                show_notice(say, c, say.text(key!("tui-lost"), hub_arg));
                 std::thread::sleep(Duration::from_secs(2));
                 return Next::Reconnect;
             }
@@ -1838,6 +1910,16 @@ fn console(
         let mut events = Vec::new();
         let now = window_area();
         if now != area {
+            // The window took exactly the size last given to the open tab's terminal: this client runs in that terminal
+            // (`agora tui` started in an agent's shell, then that agent opened). Sizing it again would shrink this window again,
+            // down to nothing (seen on Windows: 1x17 for good), so that agent's terminal is left at its size from now on. A pane is
+            // always smaller than the window, so this never matches an ordinary resize.
+            if let Some((agent, w, h)) = sized.as_ref() {
+                if (*w, *h) == (now.width, now.height) && !c.not_sized.contains(agent) {
+                    c.not_sized.insert(agent.clone());
+                    c.notice = say.text(key!("tui-app-self-terminal"), &[]);
+                }
+            }
             area = now;
             let _ = c.window.resized();
             // `resized` clears the screen: draw it again now, not at the next key (seen on Windows: blank after a resize).
@@ -1983,7 +2065,16 @@ fn console(
                 }
             }
         }
+        if !c.notice.is_empty()
+            && c.notice == c.note.seen
+            && !c.note.open
+            && c.notice_at.elapsed() >= NOTICE_FOR
+        {
+            // An old notice ("Allowed.") gives the footer back to the summary of machines, agents and what needs the user.
+            c.notice.clear();
+        }
         if c.notice != c.note.seen {
+            c.notice_at = Instant::now();
             c.note.seen = c.notice.clone();
             c.note.open = !c.notice.is_empty();
             c.note.drawn = false;
@@ -1991,8 +2082,14 @@ fn console(
             redraw = true;
         }
         if let Some(s) = &c.snapshot {
-            follow(session, s, c.app.active_agent().unwrap_or(""), &mut preview);
-            if let Err(code) = follow_chat(
+            follow(
+                session,
+                s,
+                c.app.active_agent().unwrap_or(""),
+                &mut preview,
+                &mut open_tried,
+            );
+            match follow_chat(
                 session,
                 s,
                 c.app.active_agent(),
@@ -2000,9 +2097,25 @@ fn console(
                 &mut chat_failed,
                 &c.drafts,
             ) {
-                c.notice = say.text(key!("tui-opening-failed"), &[("code", Arg::Str(code))]);
+                Err(code) => {
+                    c.notice = say.text(key!("tui-opening-failed"), &[("code", Arg::Str(code))]);
+                    c.open_failed_notice = Some(c.notice.clone());
+                    redraw = true;
+                }
+                // Opened after all (its machine is back): the old "could not open" no longer holds.
+                Ok(true) if c.open_failed_notice.take().is_some_and(|n| n == c.notice) => {
+                    c.notice.clear();
+                    redraw = true;
+                }
+                Ok(_) => {}
+            }
+            // A new request clears an old notice ("Allowed.") so the footer's summary says it.
+            let waiting = needs_you_count(s);
+            if waiting > last_waiting && !c.note.open {
+                c.notice.clear();
                 redraw = true;
             }
+            last_waiting = waiting;
         }
         if let Some(pane) = chat.as_mut() {
             match session.chat_next(pane.stream, Duration::from_millis(1)) {
@@ -2023,7 +2136,7 @@ fn console(
                     redraw = true;
                 }
                 ChatEvent::Lost => {
-                    say.err(key!("tui-lost"), hub_arg);
+                    show_notice(say, c, say.text(key!("tui-lost"), hub_arg));
                     std::thread::sleep(Duration::from_secs(2));
                     return Next::Reconnect;
                 }
@@ -2034,7 +2147,11 @@ fn console(
         let pane = c.app.areas(area).terminal;
         if let Some(active) = c.app.active_agent() {
             let want = (active.to_string(), pane.width, pane.height);
-            if sized.as_ref() != Some(&want) && pane.width > 0 && pane.height > 0 {
+            if sized.as_ref() != Some(&want)
+                && pane.width > 0
+                && pane.height > 0
+                && !c.not_sized.contains(active)
+            {
                 if let Some((node, local)) = active.split_once('/') {
                     session.terminal_resize(node, &format!("t-{local}"), pane.width, pane.height);
                 }
@@ -2050,7 +2167,7 @@ fn console(
                     redraw = true;
                 }
                 Pumped::Lost => {
-                    say.err(key!("tui-lost"), hub_arg);
+                    show_notice(say, c, say.text(key!("tui-lost"), hub_arg));
                     std::thread::sleep(Duration::from_secs(2));
                     return Next::Reconnect;
                 }
@@ -2094,7 +2211,21 @@ fn draw_console(
     let details = c
         .snapshot
         .as_ref()
-        .map(|s| app_details(s, &c.selected, inspector.width, inspector.height, &text).lines)
+        .map(|s| {
+            // Beside the agent's own tab with the keyboard in it: only its request, answered with Alt+Y / Alt+N.
+            if c.app.focus == agora_tui::app::Focus::Terminal {
+                agora_tui::split::app_details_in_tab(
+                    s,
+                    &c.selected,
+                    inspector.width,
+                    inspector.height,
+                    &text,
+                )
+                .lines
+            } else {
+                app_details(s, &c.selected, inspector.width, inspector.height, &text).lines
+            }
+        })
         .unwrap_or_default();
     // The footer's notice: the last thing done, or the hub's counts (machines, agents, what needs the user).
     let notice = if c.notice.is_empty() {
@@ -2287,25 +2418,28 @@ fn follow_chat(
     s: &Snapshot,
     active: Option<&str>,
     chat: &mut Option<ChatPane>,
-    failed: &mut Option<String>,
+    failed: &mut Option<(String, Instant)>,
     drafts: &std::collections::HashMap<String, Vec<u8>>,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let wanted = active.filter(|id| {
         s.agents.iter().any(|a| a.agent_id == *id && a.running)
             && !s.terminals.iter().any(|t| t.agent_id == *id)
     });
     if chat.as_ref().map(|p| p.agent.as_str()) == wanted {
-        return Ok(());
+        return Ok(false);
     }
     if let Some(p) = chat.take() {
         session.terminal_close(p.stream);
     }
     let Some(id) = wanted else {
         *failed = None;
-        return Ok(());
+        return Ok(false);
     };
-    if failed.as_deref() == Some(id) {
-        return Ok(());
+    if failed
+        .as_ref()
+        .is_some_and(|(f, at)| f == id && at.elapsed() < RETRY_OPEN)
+    {
+        return Ok(false);
     }
     let (node, local) = id.split_once('/').unwrap_or(("", id));
     match session.chat_open(node, local) {
@@ -2320,10 +2454,10 @@ fn follow_chat(
                 snapshot: s.agents.iter().find(|a| a.agent_id == id).cloned(),
             });
             *failed = None;
-            Ok(())
+            Ok(true)
         }
         Err(code) => {
-            *failed = Some(id.to_string());
+            *failed = Some((id.to_string(), Instant::now()));
             Err(code)
         }
     }
@@ -2779,7 +2913,7 @@ fn command(
                 let lines = agora_tui::review::lines(&diff);
                 let colors = ask.c.colors;
                 let mut top = 0usize;
-                let mut view = ViewWait::new();
+                let mut view = ViewWait::new(say, ask);
                 loop {
                     let room = usize::from(window_area().height.saturating_sub(2)).max(1);
                     top = agora_tui::review::clamp_top(top, lines.len(), room);
@@ -2814,7 +2948,7 @@ fn command(
                 use agora_tui::files;
                 let mut path = String::new();
                 let mut notice = String::new();
-                let mut view = ViewWait::new();
+                let mut view = ViewWait::new(say, ask);
                 'folder: loop {
                     let entries = match session.files_list(&node, &place, &path) {
                         Ok(e) => files::sorted(e),

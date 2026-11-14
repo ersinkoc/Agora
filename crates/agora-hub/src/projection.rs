@@ -163,6 +163,9 @@ pub struct View {
     pub approvals: BTreeMap<String, ApprovalView>,
     /// ADR-0061: node id → the devices it said it trusts (its last `NodeTrustedDevices`).
     pub trusted_devices: BTreeMap<String, Vec<String>>,
+    /// ADR-0073: the position of the latest event that brought a forgotten machine back. A client that last saw an earlier position
+    /// may not hold that machine's records (it joined while they were hidden), so it is given a snapshot, not a replay.
+    pub remembered_at: u64,
 }
 
 /// The hub-wide key of an entity a producer named with a local id.
@@ -176,6 +179,23 @@ pub fn split_key(key: &str) -> Option<(&str, &str)> {
 }
 
 impl View {
+    /// ADR-0073: whether `ev` brings a forgotten machine back: its link opening (from the hub, not about a replaced connection) or its
+    /// process starting.
+    pub fn brings_back(&self, ev: &Event) -> bool {
+        let node = match &ev.body {
+            Some(Body::NodeLink(e)) if ev.producer_id == RESERVED_HUB_ID && e.up => {
+                let replaced = e.reason == agora_protocol::v1::NodeLinkReason::Replaced as i32;
+                match self.nodes.get(&e.node_id) {
+                    Some(n) if !replaced && e.generation >= n.link_generation => e.node_id.as_str(),
+                    _ => return false,
+                }
+            }
+            Some(Body::NodeOnline(e)) => e.node_id.as_str(),
+            _ => return false,
+        };
+        self.nodes.get(node).is_some_and(|n| n.forgotten)
+    }
+
     /// ADR-0073: a forgotten machine that connects again is listed again, with the agents it still runs. Agents that had closed
     /// before it was forgotten stay forgotten.
     fn remember_node(&mut self, node: &str) {
@@ -575,6 +595,9 @@ impl View {
                 pos = e.pos;
                 // A payload that does not decode was stored by a newer build; skip it rather than fail.
                 if let Ok(ev) = Event::decode(e.payload.as_slice()) {
+                    if view.brings_back(&ev) {
+                        view.remembered_at = pos;
+                    }
                     view.apply(&ev);
                 }
             }

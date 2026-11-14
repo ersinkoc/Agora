@@ -20,6 +20,13 @@ and This device sets the password and the idle lock (`screen-password/`):
 ![](screen-password/signin-password-dark.png) ![](screen-password/signin-password-light.png)
 ![](screen-password/window-lock-button-dark.png) ![](screen-password/device-password-dark.png)
 
+## A chat agent's conversation
+An agent without a terminal (ACP or an adapter): what it did reads as steps (folded details, the last three of a run shown), its
+changes as coloured diffs, its plan as a list (earlier copies folded) and its answers with code blocks (`chat/`, gallery data).
+
+![](chat/chat-top-dark.png) ![](chat/chat-dark.png)
+![](chat/chat-top-light.png) ![](chat/chat-light.png)
+
 ## The console (Home)
 One window: machines and agents on the left, the terminals of the agents being watched in the middle (several at once), and
 what needs you, uncommitted changes, agent messages and spend on the right.

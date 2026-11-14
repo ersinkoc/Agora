@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   byFolder, changedSpan, countByStatus, fileLines, gapLines, gapsOf, isTruncated, MAX_DIFF_BYTES, matchesFile, pairedLines, parseDiff,
-  lineEndingOnly, sameChange, splitRows, unquote,
+  lineEndingOnly, parseHunks, sameChange, splitRows, unquote,
 } from './diff';
 
 const SAMPLE = `diff --git a/a.txt b/a.txt
@@ -78,6 +78,69 @@ describe('parseDiff', () => {
     ]);
     expect(f[1]?.oldPath).toBe('old name.md');
     expect(f[3]?.lines.map((l) => l.text)).toEqual(['@@ -1 +1 @@', 'a', 'b']);
+  });
+
+  // What a node answers for a workspace that is the folder `web/` of a repository (captured from agora-node's
+  // `a_folder_workspace_names_every_file_from_the_folder`): every name is from the folder, as `git.diff` and `files.read` take them.
+  it('reads the names of a folder workspace as paths inside the folder', () => {
+    const files = parseDiff(`diff --git a/img.bin b/img.bin
+index 8352675..797c34e 100644
+Binary files a/img.bin and b/img.bin differ
+diff --git a/in b/in.txt b/in b/in.txt
+new file mode 100644
+index 0000000..4935e88
+--- /dev/null
++++ b/in b/in.txt\t
+@@ -0,0 +1 @@
++in
+diff --git a/m.txt b/m.txt
+deleted file mode 100644
+index d3f59cb..0000000
+--- a/m.txt
++++ /dev/null
+@@ -1 +0,0 @@
+-move me
+diff --git a/old.txt b/renamed.txt
+similarity index 100%
+rename from old.txt
+rename to renamed.txt
+diff --git a/w.txt b/w.txt
+index c077218..309e238 100644
+--- a/w.txt
++++ b/w.txt
+@@ -1 +1,2 @@
+ web
++INSIDE
+diff --git a/x b/f.txt b/x b/f.txt
+index 6a69f92..ab71375 100644
+--- a/x b/f.txt\t
++++ b/x b/f.txt\t
+@@ -1 +1,2 @@
+ f
++g
+diff --git a/new.bin b/new.bin
+new file mode 100644
+index 0000000..00ffac9
+Binary files /dev/null and b/new.bin differ
+diff --git a/new.txt b/new.txt
+new file mode 100644
+index 0000000..3e75765
+--- /dev/null
++++ b/new.txt
+@@ -0,0 +1 @@
++new
+`);
+    expect(files.map((f) => [f.path, f.status, f.binary])).toEqual([
+      ['img.bin', 'modified', true],
+      ['in b/in.txt', 'added', false],
+      ['m.txt', 'deleted', false],
+      ['renamed.txt', 'renamed', false],
+      ['w.txt', 'modified', false],
+      ['x b/f.txt', 'modified', false],
+      ['new.bin', 'added', true],
+      ['new.txt', 'added', false],
+    ]);
+    expect(files[3]?.oldPath).toBe('old.txt');
   });
 
   it('marks a missing newline at the end', () => {
@@ -224,5 +287,18 @@ describe('the file list', () => {
       ['', ['a.txt', 'fresh.txt']], ['src', ['src/app.ts']], ['src/z', ['src/z/b.ts']],
     ]);
     expect(countByStatus(files)).toEqual({ all: 4, added: 1, modified: 3, deleted: 0, renamed: 0 });
+  });
+});
+
+describe('parseHunks', () => {
+  it('reads a chat agent\'s diff, which has no `diff --git` line', () => {
+    // As the ACP bridge writes it (crates/agora-adapters/src/acp.rs `replace_diff`).
+    const h = parseHunks('--- a/a.rs\n+++ b/a.rs\n@@ -1,1 +1,2 @@\n-old\n+new\n+more\n');
+    expect([h.added, h.removed]).toEqual([2, 1]);
+    expect(h.lines.map((l) => l.kind)).toEqual(['hunk', 'del', 'add', 'add']);
+  });
+  it('reads git\'s output too, and nothing without a hunk', () => {
+    expect(parseHunks(SAMPLE).added).toBe(2);
+    expect(parseHunks('just text')).toEqual({ added: 0, removed: 0, lines: [] });
   });
 });
