@@ -120,6 +120,7 @@ impl Hubside {
             commands: None,
             grants: None,
             mesh: None,
+            devices: None,
         }
     }
 
@@ -249,7 +250,7 @@ fn the_terminal_console_gets_the_snapshot_of_a_node_and_draws_it() {
     let text = |id: &str, args: &[(&str, agora_i18n::Arg)]| {
         catalog.render(id, args).unwrap_or_else(|| id.to_string())
     };
-    let screen = agora_tui::render::render(&snapshot, false, false, "", "", 0, &text).join("\n");
+    let screen = agora_tui::render::render(&snapshot, false, false, "", "", 0, 0, &text).join("\n");
     assert!(
         screen.contains("agent-1") && screen.contains("1 of 1 machines online"),
         "{screen}"

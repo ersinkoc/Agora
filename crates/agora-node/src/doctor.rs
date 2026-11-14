@@ -104,18 +104,32 @@ pub fn run(inputs: &Inputs) -> Vec<Check> {
 
     out.push(data_dir(&inputs.data_dir));
 
-    out.push(
-        if agora_platform::LOCAL_SOCKETS_SUPPORTED
-            && agora_platform::local_connect(&inputs.socket).is_ok()
-        {
-            check("node", Status::Ok, inputs.socket.display().to_string())
-        } else {
-            check("node", Status::Warn, inputs.socket.display().to_string())
-        },
-    );
+    let running = agora_platform::LOCAL_SOCKETS_SUPPORTED
+        && agora_platform::local_connect(&inputs.socket).is_ok();
+    out.push(if running {
+        check("node", Status::Ok, inputs.socket.display().to_string())
+    } else {
+        check("node", Status::Warn, inputs.socket.display().to_string())
+    });
 
+    out.extend(policy_read_at_start(&policy_file, &inputs.socket, running));
     out.extend(manifests(&inputs.manifests_dir));
     out
+}
+
+/// The node reads its policy file (`<data>/policy`: limited devices, signed commands, the sandbox) only when it starts, unlike the
+/// trusted-devices file, which it follows. With a policy file: a note that a change needs a restart, and a warning when the file
+/// changed after the running node started (its socket was made then; where that cannot be told, only the note). Detail: the path.
+fn policy_read_at_start(policy: &Path, socket: &Path, running: bool) -> Option<Check> {
+    let changed = std::fs::metadata(policy).ok()?.modified().ok()?;
+    let detail = policy.display().to_string();
+    let started = running
+        .then(|| std::fs::metadata(socket).ok()?.modified().ok())
+        .flatten();
+    Some(match started {
+        Some(at) if changed > at => check("policy-changed", Status::Warn, detail),
+        _ => check("policy-restart", Status::Ok, detail),
+    })
 }
 
 /// One note per `sandbox.read` / `sandbox.write` entry the node cannot use: dropped (`policy-path-dropped`: relative, `..`, `~` with
@@ -232,6 +246,55 @@ mod tests {
         // Where terminals are unsupported (Windows for now) that is a reported problem, not a healthy machine.
         let git_ok = find(&checks, "git")[0].status == Status::Ok;
         assert_eq!(healthy(&checks), git_ok && agora_platform::PTY_SUPPORTED);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_policy_file_is_said_to_need_a_restart_and_a_change_after_the_start_is_a_warning() {
+        let d = tmp("policy-restart");
+        let policy = d.join("policy");
+        let socket = d.join("node.sock");
+        let at = |p: &Path, t: std::time::SystemTime| {
+            std::fs::File::options()
+                .write(true)
+                .open(p)
+                .unwrap()
+                .set_modified(t)
+                .unwrap();
+        };
+        let now = std::time::SystemTime::now();
+        let minute = std::time::Duration::from_secs(60);
+        // No policy file: nothing to say.
+        assert!(policy_read_at_start(&policy, &socket, true).is_none());
+        std::fs::write(&policy, "device.web-1.projects = shop\n").unwrap();
+        std::fs::write(&socket, "").unwrap();
+        // No node running, or one started after the last change: the note.
+        for running in [false, true] {
+            at(&socket, now);
+            at(&policy, now - minute);
+            let c = policy_read_at_start(&policy, &socket, running).unwrap();
+            assert_eq!((c.id, c.status), ("policy-restart", Status::Ok));
+            assert_eq!(c.detail, policy.display().to_string());
+        }
+        // Changed after the running node started: the warning, which is a note and not a problem.
+        at(&socket, now - minute);
+        at(&policy, now);
+        let c = policy_read_at_start(&policy, &socket, true).unwrap();
+        assert_eq!((c.id, c.status), ("policy-changed", Status::Warn));
+        assert!(healthy(&[c]));
+        // Where the start cannot be told (no socket file, e.g. a named pipe), only the note.
+        std::fs::remove_file(&socket).unwrap();
+        assert_eq!(
+            policy_read_at_start(&policy, &socket, true).unwrap().id,
+            "policy-restart"
+        );
+        // `run` says it too.
+        let checks = run(&Inputs {
+            data_dir: d.clone(),
+            socket: d.join("nope.sock"),
+            manifests_dir: d.join("manifests"),
+        });
+        assert_eq!(find(&checks, "policy-restart").len(), 1);
         let _ = std::fs::remove_dir_all(&d);
     }
 

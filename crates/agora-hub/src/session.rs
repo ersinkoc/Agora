@@ -141,6 +141,11 @@ impl<'a, S: EventStore> NodeSession<'a, S> {
         if ev.seq == 0 {
             return Err(invalid("seq"));
         }
+        // ADR-0070: presence is the hub's own fact, written from the certificate-authenticated connection. A node cannot say
+        // that it, or any other node, is online.
+        if matches!(ev.body, Some(agora_protocol::v1::event::Body::NodeLink(_))) {
+            return Err(invalid("node_link"));
+        }
         let appended = match self.resync_at_ms {
             Some(at) => self
                 .store
@@ -254,6 +259,31 @@ mod tests {
             code(s.hello(&h, 0).unwrap_err()),
             ErrorCode::ProtocolInvalidMessage
         );
+    }
+
+    /// ADR-0070: presence is the hub's fact; a node that sends a `NodeLink` (for itself or another node) is refused.
+    #[test]
+    fn a_node_cannot_send_presence() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let sup = support();
+        let mut s = NodeSession::new(&store, "n1", &sup);
+        s.hello(&node_hello(), 0).unwrap();
+        s.resume(&Resume::default()).unwrap();
+        let ev = Event {
+            producer_id: "n1".into(),
+            seq: 1,
+            at_ms: 1,
+            body: Some(agora_protocol::v1::event::Body::NodeLink(
+                agora_protocol::v1::NodeLink {
+                    node_id: "n2".into(),
+                    up: true,
+                    ..Default::default()
+                },
+            )),
+        }
+        .encode_to_vec();
+        assert!(s.event(&ev).is_err());
+        assert_eq!(store.acked("n1").unwrap(), 0);
     }
 
     #[test]

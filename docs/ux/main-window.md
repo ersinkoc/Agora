@@ -22,7 +22,7 @@ An agent whose process is gone moves from its folder to **Closed**, below the ma
 
 ![Hub and machines](screens/network-dark.png)
 
-`#/machines` draws the hub with a live link to every machine it knows (animated when connected, dotted when not), a card per machine (state, system, node version, agents, terminals, memory, cost, last heard) and the agents running there as chips.
+`#/machines` draws the hub with a live link to every machine it knows (animated when connected, dotted when not), a card per machine (state, system, node version, agents, terminals, memory, cost, when it was last heard, or for an offline one "last seen", ADR-0070) and the agents running there as chips. An offline machine also shows "last seen" on its row in the agent list and in its tooltip.
 
 ## Layout (editor-style, 2026-11-12)
 

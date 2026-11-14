@@ -38,6 +38,10 @@ const HUB_CAPABILITIES: &[&str] = &[
     "agent.resume",
     // ADR-0059
     "agent.launch_options",
+    // ADR-0061: the hub carries endorsements and revocations to nodes that verify them (`device.trust`), and answers a node's
+    // `DeviceList` on a connection of its own (`device.list`).
+    "device.trust",
+    "device.list",
 ];
 
 pub(crate) fn hub_dir(o: &Opts) -> PathBuf {
@@ -547,6 +551,112 @@ pub fn hub_user(say: &Say, o: &Opts) -> ExitCode {
             Err(e) => fail(e.to_string()),
         },
         _ => bad(),
+    }
+}
+
+/// A moment as people read it in a terminal: `2026-11-13 14:02 UTC` (the hub's and the node's clocks are both UTC-agnostic).
+pub(crate) fn utc(ms: u64) -> String {
+    let secs = ms / 1000;
+    let days = i64::try_from(secs / 86_400).unwrap_or(0);
+    let (h, m) = ((secs % 86_400) / 3600, (secs % 3600) / 60);
+    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let mo = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(mo <= 2);
+    format!("{y:04}-{mo:02}-{d:02} {h:02}:{m:02} UTC")
+}
+
+/// `agora hub devices`: every registered device (ADR-0061) with its fingerprint, the person it belongs to, and when it was registered
+/// and last used. These are candidates: a machine trusts one only when its owner says so there, or a trusted device endorses it.
+pub fn hub_devices(say: &Say, o: &Opts) -> ExitCode {
+    let dir = hub_dir(o);
+    // `agora hub devices forget ID`: a revoked device leaves the list (its revocations stay, so machines keep refusing it).
+    if let [verb, id] = o.positional.as_slice() {
+        if verb != "forget" {
+            say.err(key!("cli-bad-arguments"), &[]);
+            return ExitCode::from(2);
+        }
+        let done = SqliteStore::open(&dir.join("hub.db"))
+            .map_err(|e| e.to_string())
+            .and_then(|store| {
+                agora_hub::devices::Devices::new(&store)
+                    .forget(id)
+                    .map_err(|e| e.code.as_str().to_string())
+            });
+        return match done {
+            Ok(true) => {
+                say.out(
+                    key!("cli-hub-device-forgotten"),
+                    &[("id", id.clone().into())],
+                );
+                ExitCode::SUCCESS
+            }
+            Ok(false) => {
+                say.err(
+                    key!("cli-hub-device-not-forgotten"),
+                    &[("id", id.clone().into())],
+                );
+                ExitCode::from(1)
+            }
+            Err(e) => {
+                say.err(key!("cli-hub-failed"), &[("reason", e.into())]);
+                ExitCode::from(1)
+            }
+        };
+    }
+    if !o.positional.is_empty() {
+        say.err(key!("cli-bad-arguments"), &[]);
+        return ExitCode::from(2);
+    }
+    let list = SqliteStore::open(&dir.join("hub.db"))
+        .map_err(|e| e.to_string())
+        .and_then(|store| {
+            agora_hub::devices::Devices::new(&store)
+                .list_all()
+                .map_err(|e| e.code.as_str().to_string())
+        });
+    match list {
+        Ok(list) if list.is_empty() => {
+            say.out(key!("cli-hub-devices-none"), &[]);
+            ExitCode::SUCCESS
+        }
+        Ok(list) => {
+            for d in list {
+                let state = if d.revoked_ms > 0 {
+                    say.text(key!("cli-device-state-revoked"), &[])
+                } else if d.approval_asked_ms > 0 {
+                    say.text(key!("cli-device-state-waiting"), &[])
+                } else {
+                    String::new()
+                };
+                say.out(
+                    key!("cli-hub-device-line"),
+                    &[
+                        ("name", d.name.clone().into()),
+                        (
+                            "fingerprint",
+                            agora_hub::devices::fingerprint(&d.public_key).into(),
+                        ),
+                        ("id", d.device_id.clone().into()),
+                        ("user", d.user_id.clone().into()),
+                        ("created", utc(d.created_ms).into()),
+                        ("used", utc(d.last_used_ms).into()),
+                        ("state", state.into()),
+                    ],
+                );
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            say.err(key!("cli-hub-failed"), &[("reason", e.into())]);
+            ExitCode::from(1)
+        }
     }
 }
 
@@ -1101,6 +1211,12 @@ pub fn node_enroll(say: &Say, o: &Opts) -> ExitCode {
         say.err(key!("cli-usage"), &[]);
         return ExitCode::from(2);
     };
+    // ADR-0061: `--yes` covers exactly the devices whose fingerprints are given; checked before anything is enrolled.
+    if o.yes != !o.fingerprints.is_empty() || (o.include_others && !o.yes) {
+        say.err(key!("cli-bad-arguments"), &[]);
+        say.err(key!("cli-usage"), &[]);
+        return ExitCode::from(2);
+    }
     // `--ca -` reads the certificate from standard input (how `hub ssh install` hands it over, ADR-0034).
     let ca_text = if ca_file.as_os_str() == "-" {
         let mut t = String::new();
@@ -1115,8 +1231,8 @@ pub fn node_enroll(say: &Say, o: &Opts) -> ExitCode {
         );
         return ExitCode::from(1);
     };
-    match enroll_and_save(url, &ca_pem, code, id) {
-        Ok(dir) => {
+    match enroll_and_save_with_devices(url, &ca_pem, code, id) {
+        Ok((dir, devices)) => {
             say.out(
                 key!("cli-enrolled"),
                 &[
@@ -1124,7 +1240,13 @@ pub fn node_enroll(say: &Say, o: &Opts) -> ExitCode {
                     ("dir", dir.display().to_string().into()),
                 ],
             );
-            ExitCode::SUCCESS
+            // ADR-0061: the owner is at this machine now; the devices they registered can be trusted here in one step. An old hub
+            // sends none, and nothing is asked.
+            if devices.is_empty() {
+                ExitCode::SUCCESS
+            } else {
+                crate::trustcli::offer(say, o, &devices)
+            }
         }
         Err(EnrollFailure::Refused(code)) => {
             say.err(key!("cli-enroll-refused"), &[("code", code.into())]);
@@ -1152,6 +1274,16 @@ pub(crate) fn enroll_and_save(
     code: &str,
     id: &str,
 ) -> Result<PathBuf, EnrollFailure> {
+    enroll_and_save_with_devices(url, ca_pem, code, id).map(|(dir, _)| dir)
+}
+
+/// [`enroll_and_save`], also returning the devices the hub registered (ADR-0061: candidates the owner may trust here).
+pub(crate) fn enroll_and_save_with_devices(
+    url: &str,
+    ca_pem: &str,
+    code: &str,
+    id: &str,
+) -> Result<(PathBuf, Vec<agora_protocol::v1::DeviceInfo>), EnrollFailure> {
     let (key_pem, csr) =
         new_device_request().map_err(|_| EnrollFailure::Other("key generation".into()))?;
     match enroll(url, ca_pem, code, id, &csr) {
@@ -1166,7 +1298,7 @@ pub(crate) fn enroll_and_save(
                 agora_platform::write_private(&dir.join("key.pem"), key_pem.as_bytes())
             };
             write().map_err(|e| EnrollFailure::Other(e.to_string()))?;
-            Ok(dir)
+            Ok((dir, r.devices))
         }
         Err(LinkError::Refused(code)) => Err(EnrollFailure::Refused(code)),
         Err(e) => Err(EnrollFailure::Other(format!("{e:?}"))),
@@ -1221,6 +1353,7 @@ pub fn load_link(socket: PathBuf) -> Option<(String, HubLink)> {
             mesh_out: None,
             grants: None,
             mesh: None,
+            devices: None,
         },
     ))
 }
@@ -1237,6 +1370,13 @@ mod tests {
         for c in agora_node::uplink_client::CAPABILITIES {
             assert!(HUB_CAPABILITIES.contains(c), "the hub does not support {c}");
         }
+    }
+
+    #[test]
+    fn moments_are_written_as_utc_dates() {
+        assert_eq!(utc(0), "1970-01-01 00:00 UTC");
+        assert_eq!(utc(1_700_000_000_000), "2023-11-14 22:13 UTC");
+        assert_eq!(utc(951_782_400_000), "2000-02-29 00:00 UTC");
     }
 
     #[test]

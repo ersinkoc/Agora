@@ -2,12 +2,32 @@ import * as Dialog from '@radix-ui/react-dialog';
 import { useEffect, useRef, useState } from 'react';
 import { t } from '../i18n';
 import type { MachineModel, ProjectChoice } from '../net/view';
-import { childPath, type DirectoryInfo, type DirectoryListing } from '../net/directory';
+import { childPath, directoryReasonKey, type DirectoryInfo, type DirectoryListing } from '../net/directory';
 import { Icon } from './Icon';
 import { machineFor } from './startChoice';
 import { ASK, chosenIds, confirmedIds, confirmSkip, harmless, initialLaunch, keepAsking, labelOf, pickPermission, skipping, toggleHarmless, usableOptions, type LaunchOptionChoice } from './launchChoice';
 // ADR-0059: `options` are the kind's launch options as the machine lists them (none from an older machine).
 export interface KindChoice { kind: string; name: string; installed: boolean; options?: LaunchOptionChoice[] }
+
+// The command a machine's owner runs once so the machine trusts this device (ADR-0020), with a Copy button: no hunting for it on another page.
+function TrustCommand({ command }: { command: string }) {
+  const [copied, setCopied] = useState(false);
+  return <div className="flex items-start gap-2 rounded-xs border border-line bg-surface-0 px-3 py-2">
+    <code className="min-w-0 flex-1 break-all font-mono text-xs">{command}</code>
+    <button type="button" className="button px-2 py-1 text-xs" onClick={() => { void navigator.clipboard?.writeText(command).then(() => setCopied(true), () => undefined); }}>{copied ? t('trust-copied') : t('trust-copy')}</button>
+  </div>;
+}
+
+// ADR-0061: another device of this person that the machine trusts can approve this one; asking puts a card on that device.
+function AskApproval({ ask }: { ask: () => Promise<boolean> }) {
+  const [state, setState] = useState<'idle' | 'busy' | 'asked' | 'failed'>('idle');
+  return <div className="flex flex-wrap items-center gap-2">
+    <button type="button" className="button button--primary" disabled={state === 'busy' || state === 'asked'}
+      onClick={() => { setState('busy'); void ask().then((ok) => setState(ok ? 'asked' : 'failed')); }}>{t('trust-ask')}</button>
+    {state === 'asked' && <span role="status" className="text-[13px] text-muted">{t('trust-asked')}</span>}
+    {state === 'failed' && <span role="alert" className="text-[13px] text-needs-you">{t('device-ask-failed')}</span>}
+  </div>;
+}
 
 const chip = 'inline-flex items-center gap-2 rounded-xs border px-2.5 py-1.5 text-[13px] transition-colors duration-150 disabled:opacity-50';
 const chipOn = 'border-accent bg-surface-2 text-ink ring-1 ring-accent';
@@ -15,10 +35,14 @@ const chipOff = 'border-line bg-surface-0 text-muted hover:bg-surface-2 hover:te
 
 // "Start an agent" in one window: the machine, the folder (a known one in a click, or any path), then the agent. Choosing the
 // folder shows the folder the node resolved before anything starts (ADR-0052); the rest is a click.
-export function StartAgent({ projects, machines, initialNode, loadKinds, inspect, list, onStart, onClose }: {
+export function StartAgent({ projects, machines, initialNode, trust, askApproval, loadKinds, inspect, list, onStart, onClose }: {
   projects: readonly ProjectChoice[];
   machines: readonly MachineModel[];
   initialNode?: string;
+  // This device's id and public key: when a machine does not trust the device yet, the command that fixes it is shown right here.
+  trust?: { id: string; key: string };
+  // ADR-0061: whether another device of this person that `node` trusts could approve this one, and asking it to.
+  askApproval?: { can: (node: string) => boolean; ask: () => Promise<boolean> };
   loadKinds: (node: string) => Promise<KindChoice[]>;
   inspect: (node: string, path: string, createIdentity: boolean) => Promise<DirectoryInfo>;
   // ADR-0053: the sub-folders of a folder on the machine (empty path: its home folder). Missing, or refused by an older machine: the path is typed.
@@ -44,7 +68,7 @@ export function StartAgent({ projects, machines, initialNode, loadKinds, inspect
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   // The folder picker: what the machine answered for the folder being looked at.
-  const [browse, setBrowse] = useState<{ listing?: DirectoryListing; busy: boolean; failed?: boolean } | undefined>();
+  const [browse, setBrowse] = useState<{ listing?: DirectoryListing; busy: boolean; failed?: boolean; forbidden?: boolean } | undefined>();
   const [canBrowse, setCanBrowse] = useState(!!list);
   const look = async (at: string) => {
     if (!list) return;
@@ -53,7 +77,7 @@ export function StartAgent({ projects, machines, initialNode, loadKinds, inspect
     catch (e) {
       // A machine without the command: keep the typed path, and do not offer the picker again.
       if ((e as { code?: string }).code === 'protocol.capability_missing') { setCanBrowse(false); setBrowse(undefined); }
-      else setBrowse((b) => ({ listing: b?.listing, busy: false, failed: true }));
+      else setBrowse((b) => ({ listing: b?.listing, busy: false, failed: true, forbidden: (e as { code?: string }).code === 'auth.forbidden' }));
     }
   };
   useEffect(() => { setBrowse(undefined); setCanBrowse(!!list); }, [node, list]);
@@ -85,7 +109,7 @@ export function StartAgent({ projects, machines, initialNode, loadKinds, inspect
   const choose = async (at = path) => {
     setBusy(true); setError(undefined);
     try { setInfo(await inspect(node, at, createIdentity)); }
-    catch (e) { setError((e as { code?: string }).code === 'approval.signature_invalid' ? 'approval-not-trusted' : (e as { code?: string }).code === 'protocol.capability_missing' ? 'start-directory-unsupported' : 'start-directory-failed'); }
+    catch (e) { setError(directoryReasonKey((e as { code?: string }).code)); }
     finally { setBusy(false); }
   };
   const go = async () => {
@@ -96,7 +120,10 @@ export function StartAgent({ projects, machines, initialNode, loadKinds, inspect
   const offered: LaunchOptionChoice[] = usableOptions((kinds !== 'loading' && kinds !== 'failed' ? kinds.find((k) => k.kind === kind)?.options : undefined) ?? []);
   const skips = skipping(offered), plain = harmless(offered);
   const pendingOption = offered.find((o) => o.id === launch.pending);
-  const known = projects.flatMap(p => (p.node === node && p.path ? [{ ...p, path: p.path }] : []));
+  // The same folder can be spelled several ways on Windows (`D:\x`, `D:/x`, `\\?\D:\x`): listed once.
+  const sameFolder = (path: string) => path.replace(/^\\\\\?\\/, '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+  const seen = new Set<string>();
+  const known = projects.flatMap(p => (p.node === node && p.path && !seen.has(sameFolder(p.path)) && seen.add(sameFolder(p.path)) ? [{ ...p, path: p.path }] : []));
   const machineName = (m: MachineModel) => (m.name === m.id ? m.name : t('machine-name-id', { name: m.name, id: m.id }));
 
   return <Dialog.Root open onOpenChange={open => { if (!open && !busy) onClose(); }}>
@@ -142,7 +169,7 @@ export function StartAgent({ projects, machines, initialNode, loadKinds, inspect
                   <button type="button" className="button button--primary px-2 py-1 text-xs" disabled={!browse.listing || busy} onClick={() => { const p = browse.listing?.path ?? ''; setBrowse(undefined); changePath(p); void choose(p); }}>{t('start-select-directory')}</button>
                   <button type="button" className="ide-iconbtn" onClick={() => setBrowse(undefined)} aria-label={t('start-browse-close')} title={t('start-browse-close')}><Icon name="close" className="size-4" /></button>
                 </div>
-                {browse.failed && <p role="alert" className="m-0 text-xs text-needs-you">{t('start-browse-failed')}</p>}
+                {browse.failed && <p role="alert" className="m-0 text-xs text-needs-you">{t(browse.forbidden ? 'start-directory-forbidden' : 'start-browse-failed')}</p>}
                 <ul className="m-0 grid max-h-52 list-none gap-0.5 overflow-y-auto p-0">
                   {browse.listing?.entries.length === 0 && <li className="muted px-2 py-1 text-xs">{t('start-browse-empty')}</li>}
                   {browse.listing?.entries.map((e) => <li key={e.name}><button type="button" className="ide-row py-1" disabled={browse.busy} onClick={() => void look(childPath(browse.listing?.path ?? '', e.name))}>
@@ -195,7 +222,9 @@ export function StartAgent({ projects, machines, initialNode, loadKinds, inspect
               {plain.map((o) => <label key={o.id} className="flex items-center gap-2 text-[13px]"><input type="checkbox" checked={launch.harmless.includes(o.id)} disabled={busy} onChange={e => { const on = e.target.checked; setLaunch((s) => toggleHarmless(s, o.id, on)); }} />{labelOf(o, t)}</label>)}
             </div>}
           </>}
-          {error && <p role="alert" className="m-0 text-needs-you">{t(error)}</p>}
+          {error && <p role="alert" className="m-0 text-needs-you">{error === 'approval-not-trusted' && trust ? t('trust-hint', { machine: online.find(m => m.id === node)?.name ?? node }) : t(error)}</p>}
+          {error === 'approval-not-trusted' && askApproval?.can(node) && <AskApproval ask={askApproval.ask} />}
+          {error === 'approval-not-trusted' && trust && <TrustCommand command={`agora node trust ${trust.id} ${trust.key}`} />}
         </div>}
         <div className="flex justify-end gap-2 border-t border-line px-4 py-3">
           <button type="button" className="button" disabled={busy} onClick={onClose}>{t('start-cancel')}</button>
