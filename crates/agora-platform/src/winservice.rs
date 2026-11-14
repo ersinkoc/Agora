@@ -60,22 +60,35 @@ fn xml_escape(s: &str) -> String {
     out
 }
 
+/// A path or argument as it goes into the task: valid Unicode, and without `%`, which Task Scheduler would expand as a variable.
 fn text(s: &std::ffi::OsStr) -> io::Result<&str> {
-    s.to_str().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "a path or argument is not valid Unicode",
-        )
-    })
+    let invalid = || io::Error::from(io::ErrorKind::InvalidInput);
+    let t = s.to_str().ok_or_else(invalid)?;
+    if t.contains('%') {
+        return Err(invalid());
+    }
+    Ok(t)
 }
 
-/// `DOMAIN\user` of this process's user, as the task names it.
+/// This process's user as the task names it: the security identifier (`whoami /user`), which also works for Microsoft and Entra
+/// accounts whose `USERNAME` is not their account name.
 fn current_user() -> io::Result<String> {
-    let user = std::env::var("USERNAME").map_err(|_| io::Error::other("USERNAME is not set"))?;
-    Ok(match std::env::var("USERDOMAIN") {
-        Ok(domain) if !domain.is_empty() => format!("{domain}\\{user}"),
-        _ => user,
-    })
+    let out = checked(
+        Command::new(system32("whoami.exe"))
+            .args(["/user", "/fo", "csv", "/nh"])
+            .stdin(Stdio::null())
+            .output()?,
+    )?;
+    sid_of(&String::from_utf8_lossy(&out.stdout))
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))
+}
+
+/// The SID in `whoami /user /fo csv /nh` output: `"domain\user","S-1-5-21-…"`.
+fn sid_of(csv: &str) -> Option<String> {
+    csv.split(',')
+        .map(|f| f.trim().trim_matches('"'))
+        .find(|f| f.starts_with("S-1-"))
+        .map(str::to_string)
 }
 
 /// The task file for `spec`, run at `user`'s logon.
@@ -131,7 +144,7 @@ pub(crate) fn task_xml(spec: &ServiceSpec, user: &str) -> io::Result<String> {
     ))
 }
 
-/// See [`crate::service_install`].
+/// See [`crate::service_install`]: registers only.
 pub(crate) fn install(spec: &ServiceSpec) -> io::Result<()> {
     let xml = task_xml(spec, &current_user()?)?;
     // `schtasks` reads a task file in UTF-16 with its byte order mark.
@@ -151,12 +164,29 @@ pub(crate) fn install(spec: &ServiceSpec) -> io::Result<()> {
     ]);
     let _ = std::fs::remove_file(&file);
     checked(created?)?;
-    checked(schtasks(&[
-        "/run".as_ref(),
-        "/tn".as_ref(),
-        spec.name.as_ref(),
-    ])?)?;
     Ok(())
+}
+
+/// See [`crate::service_start`].
+pub(crate) fn start(name: &str) -> io::Result<()> {
+    checked(schtasks(&["/run".as_ref(), "/tn".as_ref(), name.as_ref()])?)?;
+    Ok(())
+}
+
+/// Whether a task `name` (in the root folder) is listed, from the task list's first column (task paths are not translated).
+fn listed(name: &str) -> io::Result<bool> {
+    let out = checked(schtasks(&[
+        "/query".as_ref(),
+        "/fo".as_ref(),
+        "csv".as_ref(),
+        "/nh".as_ref(),
+    ])?)?;
+    let want = format!("\\{name}");
+    Ok(String::from_utf8_lossy(&out.stdout).lines().any(|line| {
+        line.split(',')
+            .next()
+            .is_some_and(|f| f.trim().trim_matches('"').eq_ignore_ascii_case(&want))
+    }))
 }
 
 /// See [`crate::service_status`]: the task's own file, whose tags are not translated (its listing is).
@@ -168,7 +198,12 @@ pub(crate) fn status(name: &str) -> io::Result<ServiceState> {
         "/xml".as_ref(),
     ])?;
     if !out.status.success() {
-        return Ok(ServiceState::NotInstalled);
+        // Not found, or the scheduler could not answer: only the task list tells them apart.
+        return if listed(name)? {
+            checked(out).map(|_| ServiceState::NotInstalled)
+        } else {
+            Ok(ServiceState::NotInstalled)
+        };
     }
     // The listing may come as UTF-16; the tags are ASCII either way.
     let xml: String = String::from_utf8_lossy(&out.stdout)
@@ -241,6 +276,40 @@ mod tests {
         assert!(xml.contains("<RunLevel>LeastPrivilege</RunLevel>"));
         // No restart on failure: the supervisor restarts the role and its give-up stays a give-up.
         assert!(!xml.contains("RestartOnFailure"));
+    }
+
+    #[test]
+    fn a_percent_sign_or_a_non_unicode_path_is_refused() {
+        let mut s = spec();
+        s.work_dir = PathBuf::from(r"C:\tmp\a%USERNAME%b");
+        assert_eq!(
+            task_xml(&s, "S-1-5-21-1").unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        let mut s = spec();
+        s.args.push("%PATH%".into());
+        assert!(task_xml(&s, "S-1-5-21-1").is_err());
+    }
+
+    #[test]
+    fn a_trailing_backslash_and_spaces_survive_the_command_line() {
+        let mut s = spec();
+        s.args[3] = r"C:\my home\".into();
+        let xml = task_xml(&s, "S-1-5-21-1").unwrap();
+        // CommandLineToArgvW reads `"C:\my home\\"` back as `C:\my home\`.
+        assert!(
+            xml.contains(r#"--home &quot;C:\my home\\&quot; --log"#),
+            "{xml}"
+        );
+    }
+
+    #[test]
+    fn the_user_is_named_by_its_sid() {
+        assert_eq!(
+            sid_of("\"white\\ersin\",\"S-1-5-21-111-222-333-1001\"\r\n").as_deref(),
+            Some("S-1-5-21-111-222-333-1001")
+        );
+        assert_eq!(sid_of("nothing"), None);
     }
 
     #[test]

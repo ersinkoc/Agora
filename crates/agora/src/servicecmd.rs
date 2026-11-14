@@ -6,9 +6,10 @@
 //! never with administrator rights; the per-system code is in `agora_platform` (`service_install`, `service_remove`,
 //! `service_status`). Before registering, the command says what it registers.
 //!
-//! `install` is idempotent: a role whose service is registered already is left as it is, and the command says so. `remove` stops the
-//! role through its lock whoever started it (the service, `agora`, or a supervisor started by hand), exactly as `agora down` does, and
-//! then unregisters the service: after it, nothing of that role runs or starts at login.
+//! `install` is idempotent: a role whose service is registered already is left as it is, and the command says so. It starts the role
+//! now only when nothing holds it already. `remove` acts only on a registered service: it stops the role through its lock whoever
+//! started it (the service, `agora`, or a supervisor started by hand), exactly as `agora down` does, and then unregisters the service.
+//! Without a registered service it changes nothing (a role started by hand is stopped with `agora down`).
 
 use std::ffi::OsString;
 use std::path::Path;
@@ -36,6 +37,8 @@ fn roles(m: &Machine) -> Vec<Role> {
 }
 
 fn spec(say: &Say, h: &Path, role: Role) -> std::io::Result<ServiceSpec> {
+    // The service runs from no particular folder: a relative Agora folder would name another one there.
+    let h = &std::path::absolute(h)?;
     let program = std::env::current_exe()?;
     let args: Vec<OsString> = vec![
         "supervise".into(),
@@ -121,11 +124,37 @@ fn install(say: &Say, h: &Path, m: &Machine) -> ExitCode {
             }
         };
         // A second `install` changes nothing and says so (to register it anew, `remove` first).
-        if let Ok(ServiceState::Installed { .. }) = agora_platform::service_status(&spec.name) {
-            say.out(
-                key!("service-already"),
-                &[("role", label), ("name", spec.name.clone().into())],
+        match agora_platform::service_status(&spec.name) {
+            Ok(ServiceState::Installed { .. }) => {
+                say.out(
+                    key!("service-already"),
+                    &[("role", label), ("name", spec.name.clone().into())],
+                );
+                continue;
+            }
+            Ok(ServiceState::NotInstalled) => {}
+            Err(e) => {
+                say.err(
+                    key!("service-status-failed"),
+                    &[
+                        ("name", spec.name.clone().into()),
+                        ("reason", e.to_string().into()),
+                    ],
+                );
+                code = ExitCode::from(1);
+                continue;
+            }
+        }
+        // What the system would change on the way (`%` expands in a Windows task) or cannot carry: refused with the path named.
+        if let Some(bad) = std::iter::once(spec.program.as_os_str())
+            .chain(spec.args.iter().map(OsString::as_os_str))
+            .find(|a| a.to_str().is_none_or(|t| t.contains('%')))
+        {
+            say.err(
+                key!("service-bad-path"),
+                &[("path", bad.to_string_lossy().into_owned().into())],
             );
+            code = ExitCode::from(1);
             continue;
         }
         say.out(
@@ -136,15 +165,39 @@ fn install(say: &Say, h: &Path, m: &Machine) -> ExitCode {
                 ("command", shown(&spec).into()),
             ],
         );
-        match agora_platform::service_install(&spec) {
+        if let Err(e) = agora_platform::service_install(&spec) {
+            say.err(
+                key!("service-install-failed"),
+                &[
+                    ("name", spec.name.clone().into()),
+                    ("reason", e.to_string().into()),
+                ],
+            );
+            code = ExitCode::from(1);
+            continue;
+        }
+        // Registered. Started now only when nothing holds the role already (a supervisor started now would only refuse the lock).
+        if let Some(l) = frontdoor::holder(h, role) {
+            say.out(
+                key!("service-installed-running"),
+                &[
+                    ("role", label),
+                    ("name", spec.name.clone().into()),
+                    ("pid", i64::from(l.pid).into()),
+                ],
+            );
+            continue;
+        }
+        match agora_platform::service_start(&spec.name) {
             Ok(()) => say.out(
                 key!("service-installed"),
                 &[("role", label), ("name", spec.name.clone().into())],
             ),
             Err(e) => {
                 say.err(
-                    key!("service-install-failed"),
+                    key!("service-installed-not-started"),
                     &[
+                        ("role", label),
                         ("name", spec.name.clone().into()),
                         ("reason", e.to_string().into()),
                     ],
@@ -163,6 +216,23 @@ fn remove(say: &Say, h: &Path, m: &Machine) -> ExitCode {
     for role in roles(m).into_iter().rev() {
         let name = service_name(role);
         let label: Arg = role.label(say).into();
+        // Only a registered service is removed, and only then is its role stopped: `remove` on a machine without one leaves a role
+        // started by hand alone (`agora down` stops that).
+        match agora_platform::service_status(&name) {
+            Ok(ServiceState::NotInstalled) => {
+                say.out(key!("service-none"), &[("role", label)]);
+                continue;
+            }
+            Ok(ServiceState::Installed { .. }) => {}
+            Err(e) => {
+                say.err(
+                    key!("service-status-failed"),
+                    &[("name", name.into()), ("reason", e.to_string().into())],
+                );
+                code = ExitCode::from(1);
+                continue;
+            }
+        }
         frontdoor::stop_role(say, h, Some(m), role, &mut code);
         match agora_platform::service_remove(&name) {
             Ok(true) => say.out(
@@ -249,6 +319,11 @@ mod tests {
         let say = Say(agora_i18n::Catalog::for_locale("en"));
         let h = std::env::temp_dir().join("agora home");
         let s = spec(&say, &h, Role::Node).unwrap();
+        assert!(s.work_dir.is_absolute());
+        // A relative Agora folder is made absolute: the service runs from no particular folder.
+        let rel = spec(&say, Path::new("rel-home"), Role::Node).unwrap();
+        assert!(rel.work_dir.is_absolute() && rel.work_dir.ends_with("rel-home"));
+        assert!(Path::new(&rel.args[3]).is_absolute());
         let args: Vec<String> = s
             .args
             .iter()

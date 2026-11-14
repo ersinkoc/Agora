@@ -209,16 +209,6 @@ fn unix_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// The role's log, opened to append and readable by its owner only (as the front door creates it).
-fn open_log(log: &Path) -> std::io::Result<std::fs::File> {
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log)?;
-    agora_platform::restrict_to_owner(log)?;
-    Ok(file)
-}
-
 /// `run/<role>.restarts`.
 pub(crate) fn record_path(home: &Path, role: Role) -> PathBuf {
     home.join("run").join(format!("{}.restarts", role.name()))
@@ -386,6 +376,11 @@ pub fn supervise(say: &Say, word: &str, start: &Start) -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    // A service passes the folder; a relative one would depend on where the service manager runs it from.
+    if start.home.as_ref().is_some_and(|h| !h.is_absolute()) {
+        say.err(key!("cli-bad-arguments"), &[]);
+        return ExitCode::from(2);
+    }
     let h = start.home.clone().unwrap_or_else(home);
     let Some(m) = frontdoor::load(&h) else {
         say.err(key!("frontdoor-not-set-up"), &[]);
@@ -445,8 +440,15 @@ pub fn supervise(say: &Say, word: &str, start: &Start) -> ExitCode {
     let mut out: Box<dyn Write> = if start.log {
         let log = role.log(&h);
         frontdoor::rotate(&log);
-        let file = match open_log(&log) {
+        let file = match agora_platform::open_append_private(&log) {
             Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => {
+                say.err(
+                    key!("supervise-log-link"),
+                    &[("log", log.display().to_string().into())],
+                );
+                return ExitCode::from(1);
+            }
             Err(e) => return fail(&e),
         };
         match (file.try_clone(), file.try_clone()) {

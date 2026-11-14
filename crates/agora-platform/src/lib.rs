@@ -1352,6 +1352,38 @@ pub fn stop_requested() -> bool {
     }
 }
 
+/// Opens `path` to append, creating it readable and writable by the user only (never executable), and refuses a symbolic link there:
+/// a link planted in the Agora folder must neither redirect what is written nor have its target's permissions changed. A log a
+/// process writes for itself (`agora supervise --log`).
+pub fn open_append_private(path: &std::path::Path) -> io::Result<std::fs::File> {
+    let link = || io::Error::new(io::ErrorKind::InvalidInput, "a symbolic link");
+    if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(link());
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        // O_NOFOLLOW closes the moment between the check above and the open.
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        let file = options.open(path)?;
+        // A file that existed keeps its mode on open: make it the user's only.
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        Ok(file)
+    }
+    #[cfg(windows)]
+    {
+        let file = options.open(path)?;
+        windows::set_owner_only(path, false)?;
+        Ok(file)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        options.open(path)
+    }
+}
+
 /// True where [`service_install`] can register a program to start at the user's login (ADR-0062 item 6): Windows (a logon task).
 /// The systemd user unit (Linux) and the LaunchAgent (macOS) halves come next, behind the same functions.
 pub const SERVICES_SUPPORTED: bool = cfg!(windows);
@@ -1387,7 +1419,9 @@ pub enum ServiceState {
     },
 }
 
-/// Registers `spec` to start at this user's login and starts it now. `Unsupported` where [`SERVICES_SUPPORTED`] is false.
+/// Registers `spec` to start at this user's login (it does not start it: [`service_start`]). `Unsupported` where
+/// [`SERVICES_SUPPORTED`] is false; `InvalidInput` for a path or argument the system would change on the way (Windows expands
+/// `%VAR%` in a task's command line) or that is not valid Unicode.
 pub fn service_install(spec: &ServiceSpec) -> io::Result<()> {
     #[cfg(windows)]
     {
@@ -1396,6 +1430,19 @@ pub fn service_install(spec: &ServiceSpec) -> io::Result<()> {
     #[cfg(not(windows))]
     {
         let _ = spec;
+        Err(io::Error::from(io::ErrorKind::Unsupported))
+    }
+}
+
+/// Starts the registered service `name` now, as the system would at login.
+pub fn service_start(name: &str) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        winservice::start(name)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = name;
         Err(io::Error::from(io::ErrorKind::Unsupported))
     }
 }
@@ -1414,7 +1461,8 @@ pub fn service_remove(name: &str) -> io::Result<bool> {
     }
 }
 
-/// Whether the service `name` is registered, and enabled.
+/// Whether the service `name` is registered, and enabled. An error when the system could not say (access denied, a broken scheduler):
+/// never reported as "not registered".
 pub fn service_status(name: &str) -> io::Result<ServiceState> {
     #[cfg(windows)]
     {
