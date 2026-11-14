@@ -289,7 +289,7 @@ fn service_install_status_remove_drive_a_user_unit_through_systemctl() {
     assert!(out.contains("turned off"), "{out}");
     let (code, out) = s.run(&["service", "install"]);
     assert_eq!(code, 0, "{out}");
-    assert!(out.contains("it is turned on again"), "{out}");
+    assert!(out.contains("turning it on again"), "{out}");
     assert!(!out.contains("already starts"), "{out}");
     assert!(s.base.join("bin/enabled-agora-node.service").exists());
     assert_eq!(stat("%i", &s.unit()), inode);
