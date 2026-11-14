@@ -501,7 +501,8 @@ pub fn front_door(say: &Say, o: &Opts) -> ExitCode {
     }
     // ADR-0062 item 6: the end of the first run asks once whether to start Agora at login. Always a question, never automatic; a no
     // (or no answer) leaves it to `agora service install`.
-    if first_run && agora_platform::SERVICES_SUPPORTED {
+    // Only where this machine can register one (Linux: systemd's `systemctl`, found at run time).
+    if first_run && agora_platform::services_available() {
         prompt(
             &mut std::io::stdout(),
             &say.text(key!("frontdoor-autostart-question"), &[]),

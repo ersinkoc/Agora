@@ -1481,9 +1481,110 @@ pub fn ensure_private_dir(dir: &std::path::Path) -> io::Result<()> {
     }
 }
 
-/// True where [`service_install`] can register a program to start at the user's login (ADR-0062 item 6): Windows (a logon task).
-/// The systemd user unit (Linux) and the LaunchAgent (macOS) halves come next, behind the same functions.
-pub const SERVICES_SUPPORTED: bool = cfg!(windows);
+/// True where this build has a way to register a program to start at the user's login (ADR-0062 item 6): Windows (a logon task) and
+/// Linux (a systemd user unit). Whether this machine can use it is [`services_available`], asked at run time. The LaunchAgent
+/// (macOS) half comes next, behind the same functions.
+pub const SERVICES_SUPPORTED: bool = cfg!(any(windows, target_os = "linux"));
+
+/// True where a login service starts only while the user is logged in unless the system is told otherwise, which Agora never does
+/// itself (Linux: a systemd user manager runs from boot only with `loginctl enable-linger`). The caller says so after installing.
+pub const SERVICES_NEED_LINGER_FOR_BOOT: bool = cfg!(target_os = "linux");
+
+/// Whether this machine can register a login service now: [`SERVICES_SUPPORTED`], and on Linux a `systemctl` (systemd's per-user
+/// services) found on `PATH`. Asked at run time, not when Agora was built: one Linux binary runs with and without systemd.
+pub fn services_available() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        linux::services_available()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        SERVICES_SUPPORTED
+    }
+}
+
+/// Why a path or argument of a [`ServiceSpec`] cannot go into this system's service entry as it is (see [`service_refusal`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ServiceRefusal {
+    /// The system would read part of it as a variable (Windows expands `%VAR%` in a task's command line).
+    Expands,
+    /// Not valid Unicode, or a form the entry cannot carry (systemd drops spaces at the start or end of a folder).
+    CannotCarry,
+    /// A line break, a NUL or another control character (a systemd unit is read line by line).
+    ControlCharacter,
+    /// Not a full path: the program and the working directory must start at the root.
+    NotAbsolute,
+}
+
+/// The first path or argument of `spec` this system's service entry cannot carry as it is, and why; `None` when all can. The caller
+/// asks before saying what it registers; [`service_install`] refuses the same ones with `InvalidInput`.
+pub fn service_refusal(spec: &ServiceSpec) -> Option<(std::ffi::OsString, ServiceRefusal)> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::service_refusal(spec)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // A Windows task: `%` expands, and every value must be Unicode.
+        std::iter::once(spec.program.as_os_str())
+            .chain(spec.args.iter().map(std::ffi::OsString::as_os_str))
+            .find_map(|a| match a.to_str() {
+                None => Some((a.to_owned(), ServiceRefusal::CannotCarry)),
+                Some(t) if t.contains('%') => Some((a.to_owned(), ServiceRefusal::Expands)),
+                Some(_) => None,
+            })
+    }
+}
+
+/// A service failure the caller words itself (carried inside the `io::Error` the `service_*` functions return; see
+/// [`service_problem`]). Its English `Display` is for logs only.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ServiceProblem {
+    /// The user's service manager cannot be reached from this session (systemd: no user bus, as in an SSH session without a user
+    /// manager, or no systemd at all).
+    NoUserManager,
+    /// Something Agora did not write is at the service file's place (a link, a folder), and Agora does not replace it.
+    InTheWay(PathBuf),
+    /// A service of the same name is registered, but Agora did not write it (a unit made by hand): it is neither replaced, stopped
+    /// nor removed. The path is its file, or its name when it is registered from elsewhere.
+    NotOurs(PathBuf),
+}
+
+impl std::fmt::Display for ServiceProblem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ServiceProblem::NoUserManager => {
+                f.write_str("the user's service manager cannot be reached")
+            }
+            ServiceProblem::InTheWay(p) => write!(f, "{} is not a plain file", p.display()),
+            ServiceProblem::NotOurs(p) => {
+                write!(f, "{} was not written by this program", p.display())
+            }
+        }
+    }
+}
+
+impl std::error::Error for ServiceProblem {}
+
+/// `Some(file)` when the service `name` is registered but was not written by Agora (Linux: a user unit of the same name made by hand
+/// or by another tool): the caller leaves it alone, neither stopping, replacing nor removing it. `None` when it is Agora's own or not
+/// registered (Windows: always `None`).
+pub fn service_foreign(name: &str) -> io::Result<Option<PathBuf>> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::service_foreign(name)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = name;
+        Ok(None)
+    }
+}
+
+/// The [`ServiceProblem`] inside an error a `service_*` function returned, if it is one.
+pub fn service_problem(e: &io::Error) -> Option<&ServiceProblem> {
+    e.get_ref()?.downcast_ref::<ServiceProblem>()
+}
 
 /// A program registered to start when the user logs in, for this user only and without administrator rights (ADR-0062 item 6). The
 /// caller (the `agora service` command) builds it; each system writes it in its own form.
@@ -1518,14 +1619,19 @@ pub enum ServiceState {
 }
 
 /// Registers `spec` to start at this user's login (it does not start it: [`service_start`]). `Unsupported` where
-/// [`SERVICES_SUPPORTED`] is false; `InvalidInput` for a path or argument the system would change on the way (Windows expands
-/// `%VAR%` in a task's command line) or that is not valid Unicode.
+/// [`SERVICES_SUPPORTED`] is false; `InvalidInput` for a path or argument the system would change on the way or cannot carry (see
+/// [`service_refusal`]). Linux: an owner-only systemd user unit, then `systemctl --user daemon-reload` and `enable`; a unit that is
+/// already there with the same text is not written again.
 pub fn service_install(spec: &ServiceSpec) -> io::Result<()> {
     #[cfg(windows)]
     {
         winservice::install(spec)
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::service_install(spec)
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = spec;
         Err(io::Error::from(io::ErrorKind::Unsupported))
@@ -1538,7 +1644,11 @@ pub fn service_start(name: &str) -> io::Result<()> {
     {
         winservice::start(name)
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::service_start(name)
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = name;
         Err(io::Error::from(io::ErrorKind::Unsupported))
@@ -1552,21 +1662,29 @@ pub fn service_remove(name: &str) -> io::Result<bool> {
     {
         winservice::remove(name)
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::service_remove(name)
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = name;
         Err(io::Error::from(io::ErrorKind::Unsupported))
     }
 }
 
-/// Whether the service `name` is registered, and enabled. An error when the system could not say (access denied, a broken scheduler):
-/// never reported as "not registered".
+/// Whether the service `name` is registered, and enabled. An error when the system could not say (access denied, a broken scheduler,
+/// no user service manager in this session: [`ServiceProblem::NoUserManager`]): never reported as "not registered".
 pub fn service_status(name: &str) -> io::Result<ServiceState> {
     #[cfg(windows)]
     {
         winservice::status(name)
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::service_status(name)
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = name;
         Err(io::Error::from(io::ErrorKind::Unsupported))
