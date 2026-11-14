@@ -418,7 +418,7 @@ pub fn supervise(say: &Say, word: &str, start: &Start) -> ExitCode {
             }
             return ExitCode::from(1);
         }
-        Err(e) => return fail(&e),
+        Err(e) => return frontdoor::lock_failed(say, &lock, &e),
     }
     if let Err(e) = agora_platform::catch_stop_requests() {
         return fail(&e);

@@ -92,10 +92,10 @@ fn owner_only_descriptor(inherit: bool) -> io::Result<Descriptor> {
 /// Creates the file at `path`, which must not exist yet (`CREATE_NEW`, so a planted file or link is not followed), already owner-only:
 /// the descriptor is given at creation, so there is no moment in which the file carries what its folder passes on and another user
 /// could open it (#320). The handle is not inheritable and the file is not shared while open.
-/// See [`crate::open_append_private`]. The folder is opened as itself (never through a link) and held without letting anyone rename or
+/// See [`crate::open_append_private`] (`append`) and [`crate::open_lock_private`] (read and write). The folder is opened as itself (never through a link) and held without letting anyone rename or
 /// delete it until the log is open, so it cannot be swapped for a link meanwhile; the log is then checked through its own handle: one
 /// name, not a link, and really inside the held folder (both final paths). An existing log is made owner-only through its handle.
-pub(crate) fn open_append_private(dir: &Path, path: &Path) -> io::Result<std::fs::File> {
+pub(crate) fn open_private(dir: &Path, path: &Path, append: bool) -> io::Result<std::fs::File> {
     use std::os::windows::fs::OpenOptionsExt;
     use windows_sys::Win32::Storage::FileSystem::{
         FILE_APPEND_DATA, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, READ_CONTROL,
@@ -108,11 +108,14 @@ pub(crate) fn open_append_private(dir: &Path, path: &Path) -> io::Result<std::fs
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
         Err(e) => return Err(e),
     }
-    // FILE_APPEND_DATA without FILE_WRITE_DATA: every write goes to the end, as with `append(true)`.
+    // FILE_APPEND_DATA without FILE_WRITE_DATA: every write goes to the end, as with `append(true)`. A lock file is read and written.
+    let data = if append {
+        FILE_APPEND_DATA
+    } else {
+        windows_sys::Win32::Foundation::GENERIC_READ | GENERIC_WRITE
+    };
     let file = std::fs::OpenOptions::new()
-        .access_mode(
-            FILE_APPEND_DATA | WRITE_DAC | READ_CONTROL | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
-        )
+        .access_mode(data | WRITE_DAC | READ_CONTROL | FILE_READ_ATTRIBUTES | SYNCHRONIZE)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
         .open(path)?;
     let (links, reparse) = link_facts(&file)?;
@@ -126,7 +129,11 @@ pub(crate) fn open_append_private(dir: &Path, path: &Path) -> io::Result<std::fs
     )) {
         return Err(refuse());
     }
-    set_owner_only_handle(&file)?;
+    // A file another user owns keeps its owner's rights over it whatever its ACL says: refused.
+    if !owned_by_this_user(&file)? {
+        return Err(refuse());
+    }
+    set_owner_only_handle(&file, false)?;
     drop(held);
     Ok(file)
 }
@@ -176,15 +183,86 @@ fn final_path(file: &std::fs::File) -> io::Result<String> {
     }
 }
 
+/// See [`crate::ensure_private_dir`]: the folder (created by the caller when missing) is opened as itself, never through a link or
+/// junction, without sharing delete; it must be owned by this user, and is given the owner-only ACL (inherited by what it holds)
+/// through that same handle.
+pub(crate) fn ensure_private_dir(dir: &Path) -> io::Result<()> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, READ_CONTROL, SYNCHRONIZE, WRITE_DAC,
+    };
+    let refuse = || io::Error::new(io::ErrorKind::InvalidInput, "a link");
+    let held = std::fs::OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES | READ_CONTROL | WRITE_DAC | SYNCHRONIZE)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(dir)?;
+    let (_, reparse) = link_facts(&held)?;
+    if reparse || !held.metadata()?.is_dir() || !owned_by_this_user(&held)? {
+        return Err(refuse());
+    }
+    set_owner_only_handle(&held, true)
+}
+
+/// Whether an open file or folder (opened with `READ_CONTROL`) is owned by this process's user, or by the default owner of its token
+/// (the Administrators group when it runs elevated, which owns what such a process creates).
+fn owned_by_this_user(file: &std::fs::File) -> io::Result<bool> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertSidToStringSidW, GetSecurityInfo, SE_FILE_OBJECT,
+    };
+    use windows_sys::Win32::Security::{OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID};
+    let mut owner: PSID = null_mut();
+    let mut sd: PSECURITY_DESCRIPTOR = null_mut();
+    // SAFETY: a live handle and valid out pointers; `sd` is LocalAlloc'd and freed below, `owner` points into it.
+    let err = unsafe {
+        GetSecurityInfo(
+            file.as_raw_handle() as HANDLE,
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            &mut owner,
+            null_mut(),
+            null_mut(),
+            null_mut(),
+            &mut sd,
+        )
+    };
+    if err != 0 {
+        return Err(os_error(err));
+    }
+    let mut text: *mut u16 = null_mut();
+    // SAFETY: `owner` is a valid SID inside `sd`; `text` receives a LocalAlloc'd string.
+    let converted = unsafe { ConvertSidToStringSidW(owner, &mut text) } != 0;
+    let sid = if converted {
+        // SAFETY: a NUL-terminated wide string from the system.
+        let len = (0..).take_while(|&i| unsafe { *text.add(i) } != 0).count();
+        // SAFETY: `len` units are valid.
+        let s = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(text, len) });
+        // SAFETY: allocated by ConvertSidToStringSidW, freed once.
+        unsafe { LocalFree(text.cast()) };
+        Some(s)
+    } else {
+        None
+    };
+    // SAFETY: allocated by GetSecurityInfo, freed once (after the last use of `owner`).
+    unsafe { LocalFree(sd) };
+    let Some(sid) = sid else {
+        return Err(io::Error::last_os_error());
+    };
+    Ok(sid == crate::winconfine::current_user_sid_text()?
+        || crate::winconfine::current_owner_sid_text().is_ok_and(|o| o == sid))
+}
+
 /// [`set_owner_only`] through an open handle (opened with `WRITE_DAC`), so it applies to exactly the file that was checked.
-fn set_owner_only_handle(file: &std::fs::File) -> io::Result<()> {
+fn set_owner_only_handle(file: &std::fs::File, inherit: bool) -> io::Result<()> {
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Security::Authorization::{SetSecurityInfo, SE_FILE_OBJECT};
     use windows_sys::Win32::Security::{
         GetSecurityDescriptorDacl, ACL, DACL_SECURITY_INFORMATION,
         PROTECTED_DACL_SECURITY_INFORMATION,
     };
-    let sd = owner_only_descriptor(false)?;
+    let sd = owner_only_descriptor(inherit)?;
     let (mut present, mut defaulted, mut dacl) = (0i32, 0i32, null_mut::<ACL>());
     // SAFETY: `sd` is a valid descriptor that outlives every use of `dacl`.
     if unsafe { GetSecurityDescriptorDacl(sd.0, &mut present, &mut dacl, &mut defaulted) } == 0 {

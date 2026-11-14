@@ -237,6 +237,7 @@ frontdoor-bad-machine-file = { $path } could not be read. Fix it, or delete it a
 frontdoor-not-set-up = Agora is not set up on this machine yet. Run `agora` first.
 frontdoor-no-port = No free port was found from { $port } on.
 frontdoor-failed = Agora could not start: { $reason }
+frontdoor-lock-busy = Another process has held { $path } for more than 10 seconds (it may be stopped or hung), so Agora did not change what runs. Find it with `agora status`, or end it, and try again.
 frontdoor-role-hub = hub
 frontdoor-role-node = node
 frontdoor-starting = Starting the { $role }…
