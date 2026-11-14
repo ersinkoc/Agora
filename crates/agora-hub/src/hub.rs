@@ -290,6 +290,7 @@ impl Hub {
                 approvals_waiting: g.view.approvals.len(),
                 approval_wait: g.approval_wait.snapshot(),
                 relays_dropped: self.router.relays_dropped(),
+                terminal_bytes: self.router.terminal_bytes(),
                 events_stored: g.pos,
                 resyncs: 0,
             }

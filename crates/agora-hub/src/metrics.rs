@@ -108,6 +108,7 @@ pub struct Gauges {
     /// How long agents waited for a person's answer, as the hub saw the answers.
     pub approval_wait: Histogram,
     pub relays_dropped: u64,
+    pub terminal_bytes: u64,
     pub events_stored: u64,
     pub resyncs: usize,
 }
@@ -146,6 +147,7 @@ impl Metrics {
         g.approval_wait
             .render("agora_hub_approval_wait_seconds", &mut out);
         counter(&mut out, "agora_hub_relays_dropped_total", g.relays_dropped);
+        counter(&mut out, "agora_hub_terminal_bytes_total", g.terminal_bytes);
         gauge(&mut out, "agora_hub_events_stored", g.events_stored);
         counter(&mut out, "agora_hub_resyncs_total", n(g.resyncs));
         out
