@@ -252,5 +252,21 @@ status-log = günlük: { $log }
 down-stopped = { $role } durduruldu (süreç { $pid }).
 down-failed = { $role } durdurulamadı: { $reason }
 down-nothing = Durdurulacak bir şey yok: `agora` şu anda çalışan hiçbir şey başlatmamış.
+status-restarting = çöktükten sonra yeniden başlatılıyor (çıkış kodu { $code }): { $max } yeniden başlatmadan { $count }.
+status-restarts = son 10 dakikada { $count } kez yeniden başlatıldı; son çökme: çıkış kodu { $code }, { $minutes ->
+    [0] bir dakikadan kısa süre önce
+   *[other] { $minutes } dk önce
+  }
+status-gave-up = { $role } { $max } yeniden başlatmadan sonra yine çöktü ve bir daha başlatılmadı (çıkış kodu { $code }, { $minutes } dk önce). Nedeni günlüğünde yazıyor; `agora` onu yeniden başlatır.
+status-refused = { $role } başlar başlamaz kapandı (çıkış kodu { $code }, { $minutes } dk önce), bu yüzden yeniden başlatılmadı. Nedeni günlüğünde yazıyor; `agora` yeniden dener.
+supervise-not-bound = Gözetici: bu sistem { $role } sürecinin gözeticisine bağlanmasına izin vermedi; gözetici durdurulursa { $role } çalışmaya devam edebilir.
+supervise-stop-request = Gözetici: durdurulması istendi; { $role } de onunla birlikte durduruldu.
+supervise-stopped = Gözetici: { $role } durdu (çıkış kodu 0); yeniden başlatılmıyor.
+supervise-refused = Gözetici: { $role } başladıktan { $seconds } sn sonra kapandı (çıkış kodu { $code }); bu bir çökme sayılamayacak kadar erken, bu yüzden yeniden başlatılmıyor. Nedeni yukarıda.
+supervise-restarting = Gözetici: { $role } { $seconds } sn çalıştıktan sonra kapandı (çıkış kodu { $code }); { $wait } sn sonra yeniden başlatılıyor ({ $minutes } dakikada { $max } yeniden başlatmadan { $count }.).
+supervise-gave-up = Gözetici: { $role } { $minutes } dakikada { $max } yeniden başlatmadan sonra yine kapandı (çıkış kodu { $code }); vazgeçiliyor. `agora` onu yeniden başlatır.
+supervise-already-running = Gözetici: { $role } burada zaten çalışıyor (bu gözetici başlatmadı), bu yüzden ikincisi başlatılmıyor.
+supervise-lost-lock = Gözetici: { $role } kilidi artık bu gözeticiyi göstermiyor (`agora down` çalıştı ya da başka biri devraldı), bu yüzden { $role } yeniden başlatılmıyor.
+supervise-lock-held = Bu Agora klasöründe { $role } ile zaten başka bir süreç (süreç { $pid }) ilgileniyor; bu gözetici kapanıyor.
 cli-node-policy-not-understood = node.policy_not_understood: ilke dosyasında bu makinenin anlamadığı bir satır var ({ $line }); düzeltilene kadar hiçbir ajan sormadan başlatılamaz.
 cli-version = Agora { $version }

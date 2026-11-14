@@ -9,6 +9,8 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+# The supervisor's restart rule (ADR-0062 item 8) is plain domain data; already in the tree through agora-node.
+agora-core = { path = "../agora-core" }
 agora-hub = { path = "../agora-hub" }
 agora-adapters = { path = "../agora-adapters" }
 agora-node = { path = "../agora-node" }

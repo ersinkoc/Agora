@@ -227,3 +227,15 @@ pub(crate) fn start_time(pid: u32) -> Option<u64> {
     // Fields after the name start at field 3 (state), so field 22 is index 19.
     f.get(19)?.parse().ok()
 }
+
+/// See [`crate::end_with_supervisor`]: `SIGTERM` when the supervisor ends (`PR_SET_PDEATHSIG`), and at once when it ended before the
+/// watch was set (this process was handed to another parent already).
+pub(crate) fn end_with(supervisor: u32) {
+    // SAFETY: plain system calls with no pointers.
+    unsafe {
+        libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+        if u32::try_from(libc::getppid()).ok() != Some(supervisor) {
+            libc::raise(libc::SIGTERM);
+        }
+    }
+}
