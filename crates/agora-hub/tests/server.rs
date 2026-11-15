@@ -1985,15 +1985,18 @@ async fn a_node_that_goes_silent_on_an_open_connection_is_closed_and_unreachable
 
 #[tokio::test]
 async fn an_idle_node_that_pings_is_never_dropped() {
-    idle_node_pinging_every(Duration::from_millis(400), 4, 20).await;
+    // A quarter of the deadline between pings. The deadline is wide enough that a loaded CI runner pausing this test cannot reach
+    // it; the ratio is what the test is about.
+    idle_node_pinging_every(Duration::from_millis(1600), 4, 6).await;
 }
 
 /// ADR-0070 compatibility: a node from before it pings every 15 s against the hub's 25 s deadline (3/5 of it). It is never dropped.
 #[tokio::test]
 async fn an_old_node_that_pings_every_15_s_is_never_dropped() {
-    let silence = Duration::from_millis(500);
-    // 15/25 of the deadline between pings.
-    idle_node_pinging_every(silence, 0, 8).await;
+    // 15/25 of the deadline between pings. A 500 ms deadline left 200 ms of slack, which loaded macOS runners used up (the hub
+    // closed the link for silence); 2 s leaves 800 ms at the same ratio.
+    let silence = Duration::from_millis(2000);
+    idle_node_pinging_every(silence, 0, 4).await;
 }
 
 /// An idle node that only pings, every `silence / quarters` (or every 3/5 of it when `quarters` is 0), `pings` times.

@@ -113,6 +113,7 @@ fn an_acp_agent_runs_through_the_bridge_like_any_chat_agent() {
         .expect("an agent id")
         .trim_matches(|c: char| !c.is_alphanumeric() && c != '-')
         .to_string();
+    wait_ready(&home, &id);
 
     let mut c = Client::connect(&sock).unwrap();
     c.call_on(
@@ -215,12 +216,28 @@ fn node_with_acp(tag: &str) -> Option<(std::path::PathBuf, Node)> {
 fn started_agent(home: &Path) -> String {
     let (code, started) = agora(home, &["agent", "start", "acp-fake"]);
     assert_eq!(code, 0, "{started}");
-    started
+    let id = started
         .split_whitespace()
         .find(|w| w.starts_with("agent-"))
         .expect("an agent id")
         .trim_matches(|c: char| !c.is_alphanumeric() && c != '-')
-        .to_string()
+        .to_string();
+    wait_ready(home, &id);
+    id
+}
+
+/// Waits until the bridge has its session (the agent is `idle`): `agent start` answers once the process runs, and a prompt sent
+/// before the session exists is refused ("no session"), so a slow runner (seen on Windows CI) lost the prompt and its answer.
+fn wait_ready(home: &Path, id: &str) {
+    let end = Instant::now() + Duration::from_secs(60);
+    loop {
+        let (_, out) = agora(home, &["agent", "list"]);
+        if out.lines().any(|l| l.contains(id) && l.contains("idle")) {
+            return;
+        }
+        assert!(Instant::now() < end, "{id} never became idle: {out}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 
 /// ADR-0058: a turn that ends in silence is a notice in the conversation, with a code and no text.
