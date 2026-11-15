@@ -90,6 +90,9 @@ the acknowledgement to send back. Clients page the log by global position. Paylo
 Hub node session (`agora-hub::session`): a state machine over decoded messages, independent of transport and framing.
 The producer id is the node's authenticated identity; an event naming another producer is `protocol.producer_mismatch`
 (`node_id`, `producer_id`).
+An event whose body names a node (its `node_id`) must name that producer, or it is `protocol.invalid_message` (field `node_id`);
+`NodeLink`, `NodeForgotten` and `AgentForgotten` are written by the hub only, and one from a node is `protocol.invalid_message`
+(field `node_link`, `node_forgotten`, `agent_forgotten`). Threat model T19.
 When the hub ends a node's connection because the node broke the protocol (such as
 `protocol.producer_mismatch`), it first sends a WebSocket close (code 1008) whose reason is the stable error code, logs
 `node refused: <node> <code> <params>`, and reads until the node's side of the close (at most 5 s) so the reason is not lost

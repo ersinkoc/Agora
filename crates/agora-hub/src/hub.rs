@@ -1260,6 +1260,121 @@ mod tests {
         assert_eq!(hub.view().1, n);
     }
 
+    /// What the view shows that a fact from n2 naming n1 would change: n1's card and agent, or the machine n2's entry is listed on.
+    fn shown(body: &Body, v: &View) -> String {
+        match body {
+            Body::NodeOnline(_) => format!("n1/a running={}", v.agents["n1/a"].running),
+            Body::NodeOffline(_) => format!("n1 online={}", v.nodes["n1"].online),
+            Body::NodeResources(_) => format!("n1 agents_running={}", v.nodes["n1"].agents_running),
+            Body::CheckoutDiscovered(_) => format!("n2/c on machine {}", v.checkouts["n2/c"].0),
+            Body::AgentStarted(_) => format!("n2/a on machine {}", v.agents["n2/a"].node_id),
+            Body::TerminalOpened(_) => format!("n2/t on machine {}", v.terminals["n2/t"].node_id),
+            Body::WorkspaceRegistered(_) => {
+                format!("n2/w on machine {}", v.workspaces["n2/w"].node_id)
+            }
+            _ => String::new(),
+        }
+    }
+
+    /// Threat model T19: a node speaks for itself only. n2 sends each fact that carries a node id naming n1: every one is refused
+    /// and changes nothing (n1's agent keeps running, its card and presence stay, nothing of n2's is listed on n1). The same facts
+    /// naming n2 itself are accepted.
+    #[test]
+    fn a_node_cannot_speak_for_another_node() {
+        let sup = support();
+        let at = |seq: u64, body: Body| {
+            Event {
+                producer_id: "n2".into(),
+                seq,
+                at_ms: seq,
+                body: Some(body),
+            }
+            .encode_to_vec()
+        };
+        let fresh = || {
+            let hub = hub();
+            let mut n1 = open_session(&hub, &sup, "n1");
+            hub.ingest(&mut n1, &online("n1", 1)).unwrap();
+            hub.ingest(&mut n1, &agent("n1", 2, "a")).unwrap();
+            let mut n2 = open_session(&hub, &sup, "n2");
+            hub.ingest(&mut n2, &online("n2", 1)).unwrap();
+            drop((n1, n2));
+            hub
+        };
+        let mut accepted = Vec::new();
+        for body in crate::session::tests::naming("n1") {
+            let hub = fresh();
+            let mut n2 = open_session(&hub, &sup, "n2");
+            let before = hub.view();
+            match hub.ingest(&mut n2, &at(2, body.clone())) {
+                Err(SessionError::Protocol(e)) => {
+                    assert_eq!(e.code.as_str(), "protocol.invalid_message");
+                    assert_eq!(hub.view(), before);
+                    assert_eq!(hub.store().acked("n2").unwrap(), 1);
+                }
+                got => accepted.push(format!("{got:?}: {}", shown(&body, &hub.view().0))),
+            }
+        }
+        assert!(accepted.is_empty(), "accepted naming n1: {accepted:#?}");
+        // Control: the same facts naming the sender are its own word.
+        for body in crate::session::tests::naming("n2") {
+            let hub = fresh();
+            let mut n2 = open_session(&hub, &sup, "n2");
+            assert!(matches!(
+                hub.ingest(&mut n2, &at(2, body)),
+                Ok(Ingest::Applied { .. })
+            ));
+        }
+    }
+
+    /// ADR-0073, ADR-0053: forgetting a machine or an agent is the hub's own fact. A node that sends one about another machine or its
+    /// agent is refused, and that agent stays listed and running.
+    #[test]
+    fn a_node_cannot_forget_another_machine_or_its_agent() {
+        let sup = support();
+        let mut accepted = Vec::new();
+        for body in [
+            Body::NodeForgotten(agora_protocol::v1::NodeForgotten {
+                node_id: "n1".into(),
+                refused_return: true,
+            }),
+            Body::AgentForgotten(agora_protocol::v1::AgentForgotten {
+                agent_id: "n1/a".into(),
+            }),
+        ] {
+            let hub = hub();
+            let mut n1 = open_session(&hub, &sup, "n1");
+            hub.ingest(&mut n1, &online("n1", 1)).unwrap();
+            hub.ingest(&mut n1, &agent("n1", 2, "a")).unwrap();
+            let mut n2 = open_session(&hub, &sup, "n2");
+            hub.ingest(&mut n2, &online("n2", 1)).unwrap();
+            let before = hub.view();
+            let forget = Event {
+                producer_id: "n2".into(),
+                seq: 2,
+                at_ms: 2,
+                body: Some(body.clone()),
+            }
+            .encode_to_vec();
+            match hub.ingest(&mut n2, &forget) {
+                Err(SessionError::Protocol(e)) => {
+                    assert_eq!(e.code.as_str(), "protocol.invalid_message");
+                    assert_eq!(hub.view(), before);
+                    assert_eq!(hub.store().acked("n2").unwrap(), 1);
+                }
+                got => {
+                    let (v, _) = hub.view();
+                    let (n, a) = (&v.nodes["n1"], &v.agents["n1/a"]);
+                    accepted.push(format!(
+                        "{body:?} {got:?}: n1 forgotten={}, n1/a forgotten={} running={}",
+                        n.forgotten, a.forgotten, a.running
+                    ));
+                }
+            }
+        }
+        assert!(accepted.is_empty(), "accepted: {accepted:#?}");
+    }
+
     #[test]
     fn a_dropped_connection_is_recorded_as_a_hub_event_and_survives_restart() {
         let (hub, sup) = (hub(), support());

@@ -76,11 +76,11 @@ fn online(node: &str) -> Body {
     })
 }
 
-fn agent(id: &str) -> Body {
+fn agent(node: &str, id: &str) -> Body {
     Body::AgentStarted(v1::AgentStarted {
         agent_id: id.into(),
         project_id: "p".into(),
-        node_id: "n".into(),
+        node_id: node.into(),
         worktree_id: "w".into(),
         kind: "shell".into(),
         level: 2,
@@ -179,7 +179,10 @@ async fn a_node_streams_events_gets_acks_and_goes_offline_when_it_leaves() {
     let st = state(None);
     let (mut c, task) = node_conn(&st, "laptop").await;
     assert_eq!(handshake(&mut c).await.from_seq, 1);
-    for (i, b) in [online("laptop"), agent("agent-1")].into_iter().enumerate() {
+    for (i, b) in [online("laptop"), agent("laptop", "agent-1")]
+        .into_iter()
+        .enumerate()
+    {
         c.send(&f(
             STREAM_EVENTS,
             kinds::EVENT,
@@ -282,7 +285,10 @@ async fn a_node_that_dials_again_is_online_again_by_itself_and_its_agents_are_un
     let st = state(None);
     let (mut old, old_task) = node_conn(&st, "laptop").await;
     let from = handshake(&mut old).await.from_seq;
-    for (i, b) in [online("laptop"), agent("agent-1")].into_iter().enumerate() {
+    for (i, b) in [online("laptop"), agent("laptop", "agent-1")]
+        .into_iter()
+        .enumerate()
+    {
         old.send(&f(
             STREAM_EVENTS,
             kinds::EVENT,
@@ -321,9 +327,13 @@ async fn a_gap_is_answered_with_where_to_resume_and_a_reconnect_starts_after_wha
     c.send(&f(STREAM_EVENTS, kinds::EVENT, event("n", 1, online("n"))))
         .await
         .unwrap();
-    c.send(&f(STREAM_EVENTS, kinds::EVENT, event("n", 3, agent("a"))))
-        .await
-        .unwrap(); // 2 is missing
+    c.send(&f(
+        STREAM_EVENTS,
+        kinds::EVENT,
+        event("n", 3, agent("n", "a")),
+    ))
+    .await
+    .unwrap(); // 2 is missing
     let mut from = None;
     while from.is_none() {
         let fr = recv(&mut c).await;
@@ -408,7 +418,7 @@ async fn a_client_needs_a_token_then_gets_a_snapshot_and_live_events_and_can_res
     node.send(&f(
         STREAM_EVENTS,
         kinds::EVENT,
-        event("n1", 2, agent("agent-1")),
+        event("n1", 2, agent("n1", "agent-1")),
     ))
     .await
     .unwrap();
@@ -1077,8 +1087,8 @@ async fn a_client_asks_the_hub_for_usage_and_gets_tokens_with_a_price_only_where
     };
     let bodies = vec![
         online("n1"),
-        agent("a1"),
-        agent("a2"),
+        agent("n1", "a1"),
+        agent("n1", "a2"),
         usage("a1", "anthropic/claude-haiku-4-5"),
         usage("a2", "no-such-model"),
     ];
@@ -1642,7 +1652,7 @@ async fn a_closed_agent_is_forgotten_for_every_client_but_its_usage_still_counts
     handshake(&mut node).await;
     let bodies = vec![
         online("n1"),
-        agent("a1"),
+        agent("n1", "a1"),
         Body::AgentUsageReported(v1::AgentUsageReported {
             agent_id: "a1".into(),
             model: "anthropic/claude-haiku-4-5".into(),
@@ -2102,7 +2112,10 @@ async fn a_node_frozen_past_the_deadline_is_disconnected_then_dials_again_and_is
     let silence = Duration::from_millis(300);
     let (mut c, task) = node_conn_within(&st, "laptop", silence).await;
     let from = handshake(&mut c).await.from_seq;
-    for (i, b) in [online("laptop"), agent("agent-1")].into_iter().enumerate() {
+    for (i, b) in [online("laptop"), agent("laptop", "agent-1")]
+        .into_iter()
+        .enumerate()
+    {
         c.send(&f(
             STREAM_EVENTS,
             kinds::EVENT,
@@ -2448,7 +2461,7 @@ async fn only_the_owner_reads_the_hubs_metrics_and_only_when_they_are_on() {
     // A machine sends three events; the owner reads them counted.
     let (mut node, _t) = node_conn(&st, "n1").await;
     handshake(&mut node).await;
-    for (i, b) in [online("n1"), agent("a1"), agent("a2")]
+    for (i, b) in [online("n1"), agent("n1", "a1"), agent("n1", "a2")]
         .into_iter()
         .enumerate()
     {
