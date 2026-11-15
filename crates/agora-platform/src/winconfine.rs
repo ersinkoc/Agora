@@ -635,11 +635,13 @@ fn broad_writer_below(
         let meta = std::fs::symlink_metadata(&p)?;
         if meta.is_dir() && !meta.file_type().is_symlink() {
             for e in std::fs::read_dir(&p)?.flatten() {
-                let checked = links
-                    && !LINKS_NOT_CHECKED
+                // Only a real folder of such a name is exempt: a file named `node_modules` (or a link, a junction) is checked as any
+                // other (#591 review).
+                let exempt_folder = e.file_type().is_ok_and(|t| t.is_dir() && !t.is_symlink())
+                    && LINKS_NOT_CHECKED
                         .iter()
                         .any(|n| e.file_name().eq_ignore_ascii_case(n));
-                stack.push((e.path(), checked));
+                stack.push((e.path(), links && !exempt_folder));
             }
         } else if links && meta.is_file() && has_other_names(&p)? {
             return Ok(Some((p, SandboxRefusal::WritableHasLinks)));
@@ -1768,6 +1770,26 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         assert_eq!(hit, Some((link, SandboxRefusal::WritableHasLinks)));
         assert_eq!(elsewhere, None);
+    }
+
+    /// #591 review: the exemption is for folders only. A hard-linked regular file named `node_modules`, `target` or `.git` is
+    /// refused like any other.
+    #[test]
+    fn a_linked_file_named_like_an_exempt_folder_is_still_refused() {
+        for name in ["node_modules", "target", ".git", "NODE_MODULES"] {
+            let root = scratch(&format!("links571n-{}", name.trim_start_matches('.')));
+            let work = root.join("work");
+            std::fs::create_dir_all(&work).unwrap();
+            std::fs::write(root.join("outside"), "rc").unwrap();
+            std::fs::hard_link(root.join("outside"), work.join(name)).unwrap();
+            let hit = broad_writer_below(&work, true).unwrap();
+            let _ = std::fs::remove_dir_all(&root);
+            assert_eq!(
+                hit,
+                Some((work.join(name), SandboxRefusal::WritableHasLinks)),
+                "{name}"
+            );
+        }
     }
 
     /// #571 (review): a write entry that is itself a file (a manifest's `~/.claude.json`) is granted like a folder, so one with
