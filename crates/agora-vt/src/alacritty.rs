@@ -1,6 +1,7 @@
 //! Backend on `alacritty_terminal` (ADR-0012).
 
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::Dimensions;
@@ -124,6 +125,13 @@ impl AlacrittyTerminal {
 
 impl Terminal for AlacrittyTerminal {
     fn feed(&mut self, bytes: &[u8]) {
+        // A synchronized update (`CSI ? 2026 h`) the program never ended is applied once its timeout has passed, as a
+        // terminal window does; the parser only buffers it and leaves the expiry to its owner (F702).
+        if let Some(deadline) = self.parser.sync_timeout().sync_timeout() {
+            if Instant::now() >= deadline {
+                self.parser.stop_sync(&mut self.term);
+            }
+        }
         self.parser.advance(&mut self.term, bytes);
     }
 
@@ -198,5 +206,21 @@ impl Terminal for AlacrittyTerminal {
 
     fn title(&self) -> Option<String> {
         self.listener.title.lock().ok().and_then(|t| t.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A synchronized update the program never ends is applied once its timeout has passed (F702).
+    #[test]
+    fn unfinished_synchronized_update_expires() {
+        let mut t = AlacrittyTerminal::new(Size { cols: 20, rows: 3 });
+        t.feed(b"\x1b[?2026hframe");
+        assert_eq!(t.line(0), "", "held while the update may still end");
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        t.feed(b"\r\n$ ");
+        assert_eq!(t.bottom_non_empty_lines(2), vec!["frame", "$"]);
     }
 }
