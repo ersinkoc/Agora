@@ -7,6 +7,7 @@ pub mod deliver;
 pub mod devices;
 pub mod enroll;
 pub mod hub;
+pub mod metrics;
 pub mod notifier;
 pub mod notify;
 pub mod passkey;

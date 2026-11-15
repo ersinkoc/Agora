@@ -17,7 +17,7 @@ cli-usage =
       agora terminal attach AJAN_KİMLİĞİ [--socket YOL]
       agora node stdio [--socket YOL]
       agora mesh stdio --socket YOL
-      agora hub run [--listen ADDR] [--hub-dir DIR] [--name HOST]... [--web DIR]
+      agora hub run [--listen ADDR] [--hub-dir DIR] [--name HOST]... [--web DIR] [--metrics]
       agora hub code [--hub-dir DIR]
       agora hub ssh install AD [--yes] [--unsigned] [--release-url URL] [--hub-dir DIR]
       agora hub login [--hub-dir DİZİN]

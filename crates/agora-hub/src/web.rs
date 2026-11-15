@@ -63,6 +63,17 @@ pub trait SessionApi: Send + Sync {
     fn audit(&self, _bearer: Option<&str>, _query: &str) -> (u16, String) {
         (404, String::new())
     }
+
+    /// `GET /api/metrics` (architecture review R8): the hub's own numbers in the Prometheus text format, for the owner only, and only
+    /// when the hub was started with `--metrics`; 404 otherwise.
+    fn metrics(&self, _bearer: Option<&str>) -> (u16, String) {
+        (404, String::new())
+    }
+
+    /// Whether `GET /api/metrics` is on (`agora hub run --metrics`). Off, the path is answered as any unknown path.
+    fn metrics_on(&self) -> bool {
+        false
+    }
 }
 
 pub enum SignInReply {
@@ -429,6 +440,24 @@ where
             "application/json",
             out.as_bytes(),
             false,
+        )
+        .await?;
+        return Ok(First::Answered);
+    }
+    // Only while the hub was started with `--metrics`; otherwise the path is answered as any unknown one (#562 review: an answer of
+    // its own would say that it exists).
+    if (method == "GET" || head_only)
+        && path == "/api/metrics"
+        && sessions.is_some_and(|api| api.metrics_on())
+    {
+        let (status, out) =
+            sessions.map_or((404, String::new()), |api| api.metrics(bearer().as_deref()));
+        respond(
+            &mut stream,
+            status,
+            "text/plain; version=0.0.4",
+            out.as_bytes(),
+            head_only,
         )
         .await?;
         return Ok(First::Answered);
