@@ -695,7 +695,7 @@ where
     // A member or viewer gets a snapshot cut to their projects, whatever position they ask from (a replay from the log would be
     // everyone's), and from then on only the events that are theirs (ADR-0049).
     let restricted = current.projects.is_some();
-    // ADR-0069: only the owner sees the full path of a machine's own executable; everyone else its folder and file name.
+    // ADR-0069: only the owner sees the full path of a machine's own executable; everyone else its file name.
     let owner = current.role == crate::users::Role::Owner;
     let subscription = hub.subscribe(if restricted { None } else { sub.after_pos })?;
     let mut scope = None;
