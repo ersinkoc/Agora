@@ -24,6 +24,16 @@ use crate::{home, Say};
 /// The service names start with the binary's own name (`agora-node`): the one place the product name comes from here.
 const NAME_PREFIX: &str = env!("CARGO_BIN_NAME");
 
+/// Whether a login service of either role is registered on this machine (any answer the system could not give counts as no).
+pub(crate) fn any_registered() -> bool {
+    [Role::Hub, Role::Node].into_iter().any(|r| {
+        matches!(
+            agora_platform::service_status(&service_name(r)),
+            Ok(ServiceState::Installed { .. })
+        )
+    })
+}
+
 fn service_name(role: Role) -> String {
     format!("{NAME_PREFIX}-{}", role.name())
 }
