@@ -60,6 +60,8 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
   after 150 ms, at the next output (audit finding F702).
 - Windows: a machine could stop updating its agents (memory, state) for good when a process's leftover parent id pointed back
   into the agent's own processes. Walking an agent's processes now visits each one once.
+- `agora hub machines` (and `hub devices`, `hub audit`, `hub fingerprint`) on a machine that does not run the hub
+  now says so and where to run it, instead of "unable to open database file".
 
 ## 0.3.13
 

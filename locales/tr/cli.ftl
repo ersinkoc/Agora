@@ -158,6 +158,7 @@ cli-device-state-waiting = {" "}· onay bekliyor
 cli-hub-backup = Yedek { $path } dosyasına yazıldı.
 cli-hub-restored = Veritabanı yedekten { $path } konumuna geri yüklendi. Önceki veritabanı aynı klasörde before-restore adıyla saklanıyor.
 cli-hub-failed = Hub komutu başarısız oldu: { $reason }
+cli-hub-not-here = Bu makine hub çalıştırmıyor ({ $dir } yok), bu yüzden burada gösterecek bir şey yok. Bu komutu hub'ı çalıştıran makinede çalıştırın ya da pencereyi açın.
 cli-hub-fingerprint = Hub sertifika yetkilisinin (CA) parmak izi (SHA-256): { $fingerprint }
 cli-hub-user-added = { $id } kullanıcısı { $role } rolüyle eklendi. Giriş kodu: { $code } (10 dakika geçerli). Hub adresini açıp kodu girsin; yenisi için `agora hub user login { $id }` çalıştırın.
 cli-hub-user-none = Henüz ekip üyesi yok. `agora hub user add AD --role member` ile ekleyin.
