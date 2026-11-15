@@ -173,7 +173,8 @@ on the file object itself, which both names share.
   changes. `node_modules`, `target` and `.git` are not checked: package
   stores and git link there on purpose. In three real pnpm checkouts, 36–87 % of the files were links into the pnpm store, all below
   `node_modules`, and none elsewhere. **Accepted risk:** while a confined agent runs, the store copies of those `node_modules` files
-  carry its grant (they are the same file objects), so it could change packages that other projects share. Also not seen: a link planted
+  carry its grant (they are the same file objects), so it could change those files in every pnpm project on the drive that
+  links them (a store file had 10–23 names in the measured checkouts, #594). Also not seen: a link planted
   earlier by an unconfined actor (the user, another program, or an agent that ran with `sandbox = off`) below `node_modules`,
   `target` or `.git`, through which a later confined agent could write the file's other place. Closing that would mean
   not granting a store-linked `node_modules` at all. Windows confinement stays off by default (ADR-0050).
