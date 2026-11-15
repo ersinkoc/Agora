@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ProjectChoice } from '../net/view';
-import { machineFor } from './startChoice';
+import { machineFor, missingPrograms, shortBinary, trustCommand } from './startChoice';
 
 const project = (node: string): ProjectChoice => ({ node, projectId: `p-${node}`, path: `/work/${node}`, label: node });
 
@@ -20,5 +20,32 @@ describe('machineFor', () => {
   });
   it('leaves a machine that went offline for one that is online', () => {
     expect(machineFor('a', ['b'], 'a', [project('a')])).toBe('b');
+  });
+});
+
+// ADR-0069: what the start window says about a missing program, and the trust command when the machine's program is off its PATH.
+describe('missingPrograms', () => {
+  it('names each missing program once, and asks for the general sentence only for a kind that names none', () => {
+    expect(missingPrograms([
+      { installed: true, program: 'claude' },
+      { installed: false, program: 'codex' },
+      { installed: false, program: 'codex' },
+      { installed: false, program: 'gemini' },
+    ])).toEqual({ programs: ['codex', 'gemini'], general: false });
+    expect(missingPrograms([{ installed: false }, { installed: false, program: 'codex' }])).toEqual({ programs: ['codex'], general: true });
+    expect(missingPrograms([{ installed: true }])).toEqual({ programs: [], general: false });
+  });
+});
+
+describe('shortBinary and trustCommand', () => {
+  it('shows only the last two parts of the program path, never the user folder', () => {
+    expect(shortBinary(String.raw`C:\Users\someone\Downloads\agora.exe`)).toBe(String.raw`…\Downloads\agora.exe`);
+    expect(shortBinary('/home/someone/bin/agora')).toBe('…/bin/agora');
+    expect(shortBinary(String.raw`Downloads\agora.exe`)).toBe(String.raw`Downloads\agora.exe`);
+  });
+  it('runs the program from its own folder when it is off the PATH, and by name otherwise', () => {
+    expect(trustCommand(undefined, 'd1', 'k1')).toBe('agora node trust d1 k1');
+    expect(trustCommand(String.raw`C:\Users\someone\Downloads\agora.exe`, 'd1', 'k1')).toBe(String.raw`.\agora.exe node trust d1 k1`);
+    expect(trustCommand('/home/someone/bin/agora', 'd1', 'k1')).toBe('./agora node trust d1 k1');
   });
 });

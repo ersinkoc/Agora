@@ -4,10 +4,10 @@ import { t } from '../i18n';
 import type { MachineModel, ProjectChoice } from '../net/view';
 import { childPath, directoryReasonKey, type DirectoryInfo, type DirectoryListing } from '../net/directory';
 import { Icon } from './Icon';
-import { machineFor } from './startChoice';
+import { machineFor, missingPrograms, shortBinary, trustCommand } from './startChoice';
 import { ASK, chosenIds, confirmedIds, confirmSkip, harmless, initialLaunch, keepAsking, labelOf, pickPermission, skipping, toggleHarmless, usableOptions, type LaunchOptionChoice } from './launchChoice';
 // ADR-0059: `options` are the kind's launch options as the machine lists them (none from an older machine).
-export interface KindChoice { kind: string; name: string; installed: boolean; options?: LaunchOptionChoice[] }
+export interface KindChoice { kind: string; name: string; installed: boolean; options?: LaunchOptionChoice[]; program?: string }
 
 // The command a machine's owner runs once so the machine trusts this device (ADR-0020), with a Copy button: no hunting for it on another page.
 function TrustCommand({ command }: { command: string }) {
@@ -55,6 +55,8 @@ export function StartAgent({ projects, machines, initialNode, trust, askApproval
   const preset = initialNode && online.some(m => m.id === initialNode) ? initialNode : undefined;
   const initialProject = projects.find(p => p.node === (preset ?? online[0]?.id)) ?? projects.find(p => online.some(m => m.id === p.node));
   const [node, setNode] = useState(preset ?? initialProject?.node ?? online[0]?.id ?? '');
+  // ADR-0069: where the chosen machine's program runs from, when that folder is not on its PATH.
+  const binary = online.find(m => m.id === node)?.binary || undefined;
   const [path, setPath] = useState(initialProject && initialProject.node === (preset ?? initialProject.node) ? initialProject.path ?? '' : '');
   const [kinds, setKinds] = useState<KindChoice[] | 'loading' | 'failed'>('loading');
   const [kind, setKind] = useState('');
@@ -199,7 +201,14 @@ export function StartAgent({ projects, machines, initialNode, trust, askApproval
                     {k.name}{!k.installed && <span className="text-[0.6875rem]">— {t('start-not-installed')}</span>}
                   </button>)}
                 </div>}
-              {Array.isArray(kinds) && kinds.some(k => !k.installed) && <p className="m-0 text-xs text-muted">{t('start-not-installed-why')}</p>}
+              {Array.isArray(kinds) && kinds.some(k => !k.installed) && (() => {
+                // ADR-0069: each missing program by name; the general sentence for a kind from an older machine that does not name it.
+                const missing = missingPrograms(kinds);
+                return <>
+                  {missing.programs.map(program => <p key={program} className="m-0 text-xs text-muted">{t('start-not-installed-program', { program })}</p>)}
+                  {missing.general && <p className="m-0 text-xs text-muted">{t('start-not-installed-why')}</p>}
+                </>;
+              })()}
             </div>
             {(info.gitRoot || info.previousProjectId) && <div className="grid gap-1.5">
               <h2 className="m-0">{t('ide-options')}</h2>
@@ -222,9 +231,11 @@ export function StartAgent({ projects, machines, initialNode, trust, askApproval
               {plain.map((o) => <label key={o.id} className="flex items-center gap-2 text-[0.8125rem]"><input type="checkbox" checked={launch.harmless.includes(o.id)} disabled={busy} onChange={e => { const on = e.target.checked; setLaunch((s) => toggleHarmless(s, o.id, on)); }} />{labelOf(o, t)}</label>)}
             </div>}
           </>}
-          {error && <p role="alert" className="m-0 text-needs-you">{error === 'approval-not-trusted' && trust ? t('trust-hint', { machine: online.find(m => m.id === node)?.name ?? node }) : t(error)}</p>}
+          {error && <p role="alert" className="m-0 text-needs-you">{error === 'approval-not-trusted' && trust ? (binary
+            ? t('trust-hint-binary', { machine: online.find(m => m.id === node)?.name ?? node, where: shortBinary(binary) })
+            : t('trust-hint', { machine: online.find(m => m.id === node)?.name ?? node })) : t(error)}</p>}
           {error === 'approval-not-trusted' && askApproval?.can(node) && <AskApproval ask={askApproval.ask} />}
-          {error === 'approval-not-trusted' && trust && <TrustCommand command={`agora node trust ${trust.id} ${trust.key}`} />}
+          {error === 'approval-not-trusted' && trust && <TrustCommand command={trustCommand(binary, trust.id, trust.key)} />}
         </div>}
         <div className="flex justify-end gap-2 border-t border-line px-4 py-3">
           <button type="button" className="button" disabled={busy} onClick={onClose}>{t('start-cancel')}</button>
