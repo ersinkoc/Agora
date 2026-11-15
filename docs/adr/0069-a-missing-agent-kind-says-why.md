@@ -15,3 +15,7 @@ Origin: the Windows agent's first-time-user findings (2026-11-14): "WrongStack: 
 
 ## Consequences
 Two proto fields and fixtures, `protocol.md`, the node filling them from data it already has, the web and TUI sentences. No behaviour change for starting agents.
+
+## Amendment (2026-11-15, #598; the merger asked for it, for the maintainer to see)
+- `NodeSnapshot.binary = 11`: the snapshot's copy of `NodeOnline.binary` from the node's latest start, so a window that connects later learns it too. Additive, like the two fields above.
+- Only the hub's owner receives the full path. The hub sends everyone else (members, viewers) its last two components (the folder and the file), in the snapshot and in live `NodeOnline` events, since the folders above may hold the machine's user name.

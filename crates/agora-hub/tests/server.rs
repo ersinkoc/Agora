@@ -1455,8 +1455,18 @@ async fn a_member_never_receives_another_projects_snapshot_events_or_commands() 
     let addr = start(Arc::clone(&st)).await;
     let (mut node, _t) = node_conn(&st, "n1").await;
     handshake(&mut node).await;
+    // ADR-0069: the machine's executable is off its PATH, in a folder named after its user.
+    let online_at = |path: &str| {
+        Body::NodeOnline(v1::NodeOnline {
+            node_id: "n1".into(),
+            hostname: "h".into(),
+            os: "linux".into(),
+            build: "b".into(),
+            binary: path.into(),
+        })
+    };
     for (seq, body) in [
-        (1, online("n1")),
+        (1, online_at("/home/eda/Downloads/agora")),
         (2, started("a1", "mine")),
         (3, started("a2", "theirs")),
     ] {
@@ -1481,6 +1491,8 @@ async fn a_member_never_receives_another_projects_snapshot_events_or_commands() 
     let snap = v1::Snapshot::decode(fr.payload.as_slice()).unwrap();
     let agents: Vec<&str> = snap.agents.iter().map(|a| a.agent_id.as_str()).collect();
     assert_eq!(agents, ["n1/a1"], "{snap:?}");
+    // Only the owner sees where the machine's user keeps it: a member gets the folder and file name.
+    assert_eq!(snap.nodes[0].binary, "Downloads/agora");
 
     // Live: the other project's change is not sent, this one's is (and it is the next frame the client gets).
     for (seq, body) in [(4, working("a2")), (5, working("a1"))] {
@@ -1515,6 +1527,27 @@ async fn a_member_never_receives_another_projects_snapshot_events_or_commands() 
     assert!(
         matches!(&forwarded.command, Some(command_request::Command::AgentStop(s)) if s.agent_id == "a1")
     );
+
+    // A later start of the machine, live: shortened the same way.
+    node.send(&f(
+        STREAM_EVENTS,
+        kinds::EVENT,
+        event("n1", 6, online_at(r"C:\Users\eda\Downloads\agora.exe")),
+    ))
+    .await
+    .unwrap();
+    next_ack(&mut node).await;
+    let binary = loop {
+        let fr = recv(&mut client).await;
+        if fr.kind != kinds::POSITIONED_EVENT {
+            continue;
+        }
+        let ev = v1::PositionedEvent::decode(fr.payload.as_slice()).unwrap();
+        if let Some(Body::NodeOnline(n)) = ev.event.and_then(|e| e.body) {
+            break n.binary;
+        }
+    };
+    assert_eq!(binary, r"Downloads\agora.exe");
 }
 
 async fn get_audit(addr: std::net::SocketAddr, token: Option<&str>, query: &str) -> (u16, String) {

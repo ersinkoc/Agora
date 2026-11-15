@@ -695,6 +695,8 @@ where
     // A member or viewer gets a snapshot cut to their projects, whatever position they ask from (a replay from the log would be
     // everyone's), and from then on only the events that are theirs (ADR-0049).
     let restricted = current.projects.is_some();
+    // ADR-0069: only the owner sees the full path of a machine's own executable; everyone else its folder and file name.
+    let owner = current.role == crate::users::Role::Owner;
     let subscription = hub.subscribe(if restricted { None } else { sub.after_pos })?;
     let mut scope = None;
     if let Some((view, pos)) = &subscription.snapshot {
@@ -705,13 +707,21 @@ where
                 scope = Some(s);
                 snapshot_of(&cut, *pos)
             }
-            None => snapshot_of(view, *pos),
+            None => {
+                let mut snap = snapshot_of(view, *pos);
+                if !owner {
+                    for n in &mut snap.nodes {
+                        n.binary = crate::scope::short_binary(&n.binary);
+                    }
+                }
+                snap
+            }
         };
         conn.send(&frame(STREAM_EVENTS, kinds::SNAPSHOT, body.encode_to_vec()))
             .await?;
     }
     for d in &subscription.backlog {
-        send_positioned(&mut conn, d).await?;
+        send_shown(&mut conn, d, owner).await?;
     }
     let mut checked = tokio::time::Instant::now();
     let (relays, mut relay_frames) = hub.router().client();
@@ -736,7 +746,7 @@ where
             match subscription.live.try_recv() {
                 Ok(d) => {
                     if scope.as_mut().is_none_or(|s| s.admit(&d.event)) {
-                        send_positioned(&mut conn, &d).await?;
+                        send_shown(&mut conn, &d, owner).await?;
                     }
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
@@ -1082,6 +1092,23 @@ where
         }
     }
     Ok(())
+}
+
+/// [`send_positioned`], with what only the owner may see taken out for anyone else (ADR-0069: a machine's full executable path).
+async fn send_shown<S>(
+    conn: &mut Conn<S>,
+    d: &crate::hub::Delivered,
+    owner: bool,
+) -> Result<(), ServeError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    match (owner, crate::scope::without_full_binary(&d.event)) {
+        (false, Some(event)) => {
+            send_positioned(conn, &crate::hub::Delivered { pos: d.pos, event }).await
+        }
+        _ => send_positioned(conn, d).await,
+    }
 }
 
 async fn send_positioned<S>(conn: &mut Conn<S>, d: &crate::hub::Delivered) -> Result<(), ServeError>

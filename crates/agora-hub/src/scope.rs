@@ -13,6 +13,28 @@ use agora_protocol::v1::Event;
 
 use crate::projection::{qualified, View};
 
+/// ADR-0069: what anyone but the owner is shown of a machine's own executable (`NodeOnline.binary`): its folder and file name only,
+/// never the folders above them, which may hold the machine's user name.
+pub fn short_binary(path: &str) -> String {
+    let sep = if path.contains('\\') { '\\' } else { '/' };
+    let parts: Vec<&str> = path.split(['/', '\\']).filter(|p| !p.is_empty()).collect();
+    parts[parts.len().saturating_sub(2)..].join(&sep.to_string())
+}
+
+/// [`short_binary`] applied to one event, when it carries a machine's executable; `None` when there is nothing to shorten.
+pub fn without_full_binary(ev: &Event) -> Option<Event> {
+    match &ev.body {
+        Some(Body::NodeOnline(n)) if !n.binary.is_empty() => {
+            let mut ev = ev.clone();
+            if let Some(Body::NodeOnline(n)) = &mut ev.body {
+                n.binary = short_binary(&n.binary);
+            }
+            Some(ev)
+        }
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Scope {
     /// Granted projects, `node/project`.
@@ -77,7 +99,9 @@ impl Scope {
         let mut out = View::default();
         for (k, n) in &view.nodes {
             if self.node_visible(k) {
-                out.nodes.insert(k.clone(), n.clone());
+                let mut n = n.clone();
+                n.binary = short_binary(&n.binary);
+                out.nodes.insert(k.clone(), n);
             }
         }
         for (k, d) in &view.trusted_devices {
@@ -282,6 +306,35 @@ impl Scope {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+
+    #[test]
+    fn only_the_folder_and_file_of_a_machines_binary_are_shown_to_anyone_but_the_owner() {
+        // ADR-0069: the folders above may hold the machine's user name.
+        assert_eq!(
+            super::short_binary("/home/eda/Downloads/agora"),
+            "Downloads/agora"
+        );
+        assert_eq!(
+            super::short_binary(r"C:\Users\eda\Downloads\agora.exe"),
+            r"Downloads\agora.exe"
+        );
+        assert_eq!(super::short_binary("agora"), "agora");
+        assert_eq!(super::short_binary(""), "");
+        assert_eq!(super::short_binary("/opt//agora/"), "opt/agora");
+        let ev = |binary: &str| v1::Event {
+            producer_id: "n1".into(),
+            body: Some(Body::NodeOnline(v1::NodeOnline {
+                node_id: "n1".into(),
+                binary: binary.into(),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let shown = super::without_full_binary(&ev("/home/eda/bin/agora")).unwrap();
+        assert!(matches!(shown.body, Some(Body::NodeOnline(n)) if n.binary == "bin/agora"));
+        assert!(super::without_full_binary(&ev("")).is_none());
+    }
+
     use super::*;
     use agora_protocol::v1::{self, command_request::Command};
 
