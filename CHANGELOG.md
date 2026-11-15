@@ -9,6 +9,10 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
   confinement), since writing it would change that other file too; the message says to remove the link or put a copy in its place
   (#571). Such links inside a folder it may write are not looked for at each start.
 
+### Machines
+- Windows: a machine could stop updating its agents (memory, state) for good when a process's leftover parent id pointed back
+  into the agent's own processes. Walking an agent's processes now visits each one once.
+
 ## 0.3.13
 
 ### Starting at login

@@ -1921,21 +1921,81 @@ mod detached_tests {
 /// The process and all its descendants, parents before children. Processes that exit while the tree is
 /// being walked are skipped.
 pub fn process_tree(root: u32) -> io::Result<Vec<ProcessInfo>> {
+    walk_tree(root, process_name, process_children)
+}
+
+/// [`process_tree`] over any process table. Each process is visited once: on Windows a process keeps the id of a parent that ended,
+/// and ids are reused, so a stale parent id can name one of the root's own descendants. The table then has a cycle, and a walk
+/// without this check never ended (a Windows CI run hung in `a_child_is_found_under_its_parent_and_in_the_tree`; the node walks
+/// the same tree on every tick).
+fn walk_tree(
+    root: u32,
+    mut name_of: impl FnMut(u32) -> io::Result<String>,
+    mut children_of: impl FnMut(u32) -> io::Result<Vec<u32>>,
+) -> io::Result<Vec<ProcessInfo>> {
     let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::from([root]);
     let mut queue = std::collections::VecDeque::from([(root, 0u32)]);
     while let Some((pid, ppid)) = queue.pop_front() {
-        let Ok(name) = process_name(pid) else {
+        let Ok(name) = name_of(pid) else {
             if pid == root {
                 return Err(io::Error::new(io::ErrorKind::NotFound, "process not found"));
             }
             continue;
         };
         out.push(ProcessInfo { pid, ppid, name });
-        if let Ok(kids) = process_children(pid) {
-            queue.extend(kids.into_iter().map(|k| (k, pid)));
+        if let Ok(kids) = children_of(pid) {
+            queue.extend(
+                kids.into_iter()
+                    .filter(|k| seen.insert(*k))
+                    .map(|k| (k, pid)),
+            );
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod walk_tree_tests {
+    use super::*;
+
+    #[test]
+    fn a_cycle_in_the_process_table_is_walked_once() {
+        // 10 → 11 → 12, and 12 is listed as the parent of 10 (a stale parent id reused by a descendant), and 12 of itself again
+        // through 13 → 11.
+        let table: &[(u32, &[u32])] = &[(10, &[11]), (11, &[12]), (12, &[10, 13]), (13, &[11])];
+        let children = |pid: u32| {
+            Ok(table
+                .iter()
+                .find(|(p, _)| *p == pid)
+                .map_or(Vec::new(), |(_, k)| k.to_vec()))
+        };
+        let tree = walk_tree(10, |pid| Ok(format!("p{pid}")), children).unwrap();
+        let pids: Vec<u32> = tree.iter().map(|p| p.pid).collect();
+        assert_eq!(pids, [10, 11, 12, 13]);
+        assert_eq!(tree[0].ppid, 0);
+        assert_eq!(tree[3].ppid, 12);
+    }
+
+    #[test]
+    fn a_child_that_ended_during_the_walk_is_skipped_and_a_missing_root_is_an_error() {
+        let children = |pid: u32| Ok(if pid == 1 { vec![2, 3] } else { vec![] });
+        let name = |pid: u32| {
+            if pid == 2 {
+                Err(io::Error::from(io::ErrorKind::NotFound))
+            } else {
+                Ok(String::from("x"))
+            }
+        };
+        let pids: Vec<u32> = walk_tree(1, name, children)
+            .unwrap()
+            .iter()
+            .map(|p| p.pid)
+            .collect();
+        assert_eq!(pids, [1, 3]);
+        assert!(walk_tree(2, name, children).is_err());
+    }
 }
 
 /// Start a process in a new PTY.

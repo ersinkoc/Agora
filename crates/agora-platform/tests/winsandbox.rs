@@ -660,3 +660,63 @@ fn a_confined_agent_commits_in_its_worktree_under_the_profile() {
     assert_ne!(std::fs::read_to_string(&branch).unwrap(), before);
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// #571: a hard link in the worktree to a file outside it, made before the agent starts, would carry the agent's grant to that file
+/// (Windows labels the file object, which both names share). The start is refused before anything changes, and the outside file is
+/// neither written nor given an entry. The same link below `node_modules` (a package store links there on purpose) does not stop a
+/// start.
+#[test]
+fn a_worktree_holding_a_hard_link_to_an_outside_file_is_refused_before_start() {
+    enable();
+    let root = scratch("links571");
+    let (work, outside) = (root.join("work"), root.join("outside"));
+    std::fs::create_dir_all(work.join("node_modules").join("pkg")).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("zshrc"), "rc\r\n").unwrap();
+    std::fs::hard_link(
+        outside.join("zshrc"),
+        work.join("node_modules").join("pkg").join("linked"),
+    )
+    .unwrap();
+    let profile = || Sandbox {
+        read: vec![],
+        write: vec![work.clone()],
+        reopen: vec![work.clone()],
+        ..Default::default()
+    };
+    // A package store's link alone: the agent starts and works.
+    let script = work.join("run.cmd");
+    std::fs::write(
+        &script,
+        format!(
+            "@echo off\r\necho in> \"{}\" && echo WROTE-ALLOWED\r\n",
+            work.join("ok.txt").display()
+        ),
+    )
+    .unwrap();
+    let out = run(profile(), &work, &script);
+    assert!(out.contains("WROTE-ALLOWED"), "{out}");
+    // A link to the same outside file in the worktree proper: refused before start.
+    std::fs::hard_link(outside.join("zshrc"), work.join("y")).unwrap();
+    let mut cfg = PtyConfig::new(vec![
+        "cmd.exe".into(),
+        "/c".into(),
+        format!("echo pwned>> \"{}\"", work.join("y").display()),
+    ]);
+    cfg.cwd = Some(work.clone());
+    cfg.sandbox = Some(profile());
+    let err = spawn(&cfg).err().expect("must be refused");
+    assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied, "{err}");
+    assert_eq!(
+        agora_platform::sandbox_refusal(&err),
+        Some(agora_platform::SandboxRefusal::WritableHasLinks)
+    );
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(
+        std::fs::read_to_string(outside.join("zshrc")).unwrap(),
+        "rc\r\n"
+    );
+    let acl = acl_text(&outside.join("zshrc"));
+    assert!(!acl.contains("Mandatory Label"), "{acl}");
+    let _ = std::fs::remove_dir_all(&root);
+}
