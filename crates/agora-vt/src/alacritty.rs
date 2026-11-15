@@ -15,6 +15,22 @@ use crate::{Cell, Color, Cursor, Modes, Size, Style, Terminal};
 /// Scrolled-back lines kept per terminal. Memory is bounded by this (design/resource-limits.md).
 const SCROLLBACK: usize = 2000;
 
+/// Longest OSC payload, in bytes, the parser is given: the bound `vte` itself keeps when built without `std` (`MAX_OSC_RAW`).
+/// Built with `std`, as `alacritty_terminal` does, it keeps a payload whole until its terminator, so an OSC that never ends
+/// would grow the terminal's memory with every byte, and a long title would be copied up to 4096 times onto the title stack
+/// (`CSI 22 t`). Bytes past the bound are left out; the sequence still ends at its terminator.
+const MAX_OSC: usize = 1024;
+
+/// What the OSC bound needs to know of the byte stream; it follows `vte`'s states for `ESC`, `ESC ]` and the OSC string.
+#[derive(Clone, Copy, Default)]
+enum Scan {
+    #[default]
+    Text,
+    Escape,
+    /// Inside an OSC, with this many payload bytes given to the parser.
+    Osc(usize),
+}
+
 #[derive(Clone, Default)]
 struct Listener {
     title: Arc<Mutex<Option<String>>>,
@@ -94,6 +110,7 @@ pub struct AlacrittyTerminal {
     parser: Processor,
     listener: Listener,
     size: Size,
+    scan: Scan,
 }
 
 impl AlacrittyTerminal {
@@ -119,6 +136,44 @@ impl AlacrittyTerminal {
             parser: Processor::new(),
             listener,
             size,
+            scan: Scan::Text,
+        }
+    }
+
+    /// Gives `bytes` to the parser, leaving out OSC payload bytes past [`MAX_OSC`].
+    fn advance_bounded(&mut self, bytes: &[u8]) {
+        let mut start = 0;
+        let mut i = 0;
+        while i < bytes.len() {
+            if let Scan::Text = self.scan {
+                // Only `ESC` can begin an OSC (a C1 0x9D is not one to `vte`).
+                match bytes[i..].iter().position(|&b| b == 0x1b) {
+                    Some(n) => i += n,
+                    None => break,
+                }
+            }
+            self.scan = match (self.scan, bytes[i]) {
+                (_, 0x1b) => Scan::Escape,
+                (Scan::Escape, b']') => Scan::Osc(0),
+                // `vte` stays in its escape state for these.
+                (Scan::Escape, 0x00..=0x17 | 0x19 | 0x1c..=0x1f | 0x7f..=0xff) => Scan::Escape,
+                (Scan::Osc(_), 0x07 | 0x18 | 0x1a) => Scan::Text,
+                // Ignored inside an OSC: not kept.
+                (Scan::Osc(n), 0x00..=0x06 | 0x08..=0x17 | 0x19 | 0x1c..=0x1f) => Scan::Osc(n),
+                (Scan::Osc(n), _) if n < MAX_OSC => Scan::Osc(n + 1),
+                (Scan::Osc(n), _) => {
+                    if start < i {
+                        self.parser.advance(&mut self.term, &bytes[start..i]);
+                    }
+                    start = i + 1;
+                    Scan::Osc(n)
+                }
+                _ => Scan::Text,
+            };
+            i += 1;
+        }
+        if start < bytes.len() {
+            self.parser.advance(&mut self.term, &bytes[start..]);
         }
     }
 }
@@ -132,7 +187,7 @@ impl Terminal for AlacrittyTerminal {
                 self.parser.stop_sync(&mut self.term);
             }
         }
-        self.parser.advance(&mut self.term, bytes);
+        self.advance_bounded(bytes);
     }
 
     fn resize(&mut self, size: Size) {
@@ -228,6 +283,40 @@ impl Terminal for AlacrittyTerminal {
 
     fn title(&self) -> Option<String> {
         self.listener.title.lock().ok().and_then(|t| t.clone())
+    }
+}
+
+#[cfg(test)]
+mod osc_tests {
+    use super::*;
+
+    /// An OSC payload is kept up to `MAX_OSC` bytes, however long the program makes it and however it is split (F704).
+    #[test]
+    fn a_long_osc_is_cut_at_its_bound() {
+        let long = "t".repeat(3 * MAX_OSC);
+        for split in [1, 7, 4096] {
+            let mut t = AlacrittyTerminal::new(Size { cols: 20, rows: 2 });
+            let bytes = format!("\x1b]0;{long}\x07$ ok");
+            for c in bytes.as_bytes().chunks(split) {
+                t.feed(c);
+            }
+            let title = t.title().unwrap_or_default();
+            assert_eq!(title.len(), MAX_OSC - 2, "split {split}");
+            assert_eq!(t.line(0), "$ ok", "split {split}");
+        }
+        let mut t = AlacrittyTerminal::new(Size { cols: 20, rows: 2 });
+        t.feed(format!("\x1b]0;{}\x07", "u".repeat(MAX_OSC - 2)).as_bytes());
+        assert_eq!(
+            t.title().map(|s| s.len()),
+            Some(MAX_OSC - 2),
+            "a title at the bound is whole"
+        );
+        t.feed(&[&b"\x1b\x80]0;"[..], long.as_bytes(), b"\x1b\\"].concat());
+        assert_eq!(
+            t.title(),
+            Some("t".repeat(MAX_OSC - 2)),
+            "ESC <ignored byte> ] is an OSC too"
+        );
     }
 }
 

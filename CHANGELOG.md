@@ -23,6 +23,9 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
   nor finish it, stuck until its lease ran out. It is refused (`mesh.recipient_unknown`) and stays with its owner (audit finding F601).
 
 ### Machines
+- A program can no longer make a terminal use unbounded memory with an endless title or other "operating system command". One that never
+  ended was kept whole (16 MiB sent held 32 MiB), and a long title was copied thousands of times by a title-stack request. The
+  parts past 1024 bytes are now left out; the sequence still ends where it ends (audit finding F704).
 - On macOS a busy node could lose its control socket: a second start while the first one's queue was full took it for a dead
   leftover, deleted its socket file and bound its own. Each socket now has a lock file beside it (`<socket>.lock`, left in place,
   harmless) held for as long as it is served; a second start finds it taken and stops (audit finding F202).
