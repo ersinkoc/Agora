@@ -1,6 +1,7 @@
 # 0076. A token that can only read the hub's numbers
-Status: Proposed
+Status: Accepted
 Date: 2026-11-15
+Accepted: 2026-11-15 (maintainer's explicit approval in chat: "accepted all", answering the list of ADRs waiting for a decision). The open questions' proposed answers stand: command line only in the first slice, and no expiry by default (`--expires DAYS` when wanted).
 
 ## Context
 `GET /api/metrics` (architecture review R8, #562) gives the hub's own numbers in the Prometheus text format. It is off unless the
