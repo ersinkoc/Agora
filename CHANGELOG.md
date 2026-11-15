@@ -20,6 +20,9 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
   nor finish it, stuck until its lease ran out. It is refused (`mesh.recipient_unknown`) and stays with its owner (audit finding F601).
 
 ### Machines
+- `agora doctor` now warns when the manifests folder holds an older description of an agent than the one built into the program.
+  Such a copy (made for an older release) replaces the built-in one for good: on a real machine it kept every Claude Code agent from
+  coming back after a restart. The warning names the file to remove; the shipped descriptions are built in, nothing needs copying.
 - An agent that died in the middle of a screen update no longer leaves the machine's view of its terminal frozen. After a
   "synchronized update" started and never ended, everything the terminal printed afterwards was held back; it is now let go
   after 150 ms, at the next output (audit finding F702).
