@@ -1282,3 +1282,33 @@ fn an_old_machine_is_listed_as_old_and_forgotten_through_the_running_hub() {
     let (_, after) = run(&["hub", "machines"]);
     assert!(after.contains("The hub shows no machine"), "{after}");
 }
+
+/// On a machine that only runs a node there is no hub folder: `agora hub machines` and the other commands that read a running hub's
+/// files say so, instead of "unable to open database file". The ones that create the hub folder themselves are untouched.
+#[test]
+fn a_hub_command_on_a_machine_without_a_hub_says_so() {
+    let home = tmp("not-here");
+    for cmd in ["fingerprint", "login", "audit", "devices", "machines"] {
+        let out = agora(&home, &["hub", cmd]).output().unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{cmd}: {err}");
+        assert!(
+            err.contains("This machine does not run the hub"),
+            "{cmd}: {err}"
+        );
+        assert!(!err.contains("database"), "{cmd}: {err}");
+        assert!(!home.join("hub").exists(), "{cmd} made a hub folder");
+    }
+    // `hub code` still makes the folder and a code before the hub's first start, as before.
+    let out = agora(&home, &["hub", "code"]).output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(home.join("hub").is_dir());
+    // With a hub folder, the commands run as before (an empty hub has no machines to list).
+    let out = agora(&home, &["hub", "machines"]).output().unwrap();
+    assert!(!String::from_utf8_lossy(&out.stderr).contains("does not run the hub"));
+    let _ = std::fs::remove_dir_all(&home);
+}

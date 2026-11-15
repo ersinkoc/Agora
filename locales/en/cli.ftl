@@ -160,6 +160,7 @@ cli-device-state-waiting = {" "}· waiting for approval
 cli-hub-backup = Backup written to { $path }.
 cli-hub-restored = Database restored from the backup into { $path }. The previous one is kept next to it as before-restore.
 cli-hub-failed = The hub command failed: { $reason }
+cli-hub-not-here = This machine does not run the hub (there is no { $dir }), so there is nothing to show here. Run this command on the machine that runs the hub, or open the window.
 cli-hub-fingerprint = The hub CA fingerprint (SHA-256): { $fingerprint }
 cli-hub-user-added = Added { $id } as { $role }. Their sign-in code: { $code } (valid for 10 minutes). Have them open the hub's address and enter it; `agora hub user login { $id }` makes another.
 cli-hub-user-none = No team members yet. Add one with `agora hub user add NAME --role member`.
