@@ -845,6 +845,10 @@ pub enum SandboxRefusal {
     /// A file or folder the agent may write or read is reached through a symbolic link inside a folder it may write, which it could
     /// have made itself to be given where the link points at its next start (#545, macOS).
     WritableIsLink,
+    /// A file the agent may write also has another name elsewhere (a hard link made outside confinement), so writing it would change
+    /// that other place too (#571). Windows: a regular file in the agent's worktree, outside `node_modules`, `target` and `.git`, whose
+    /// links are made on purpose by package stores and git.
+    WritableHasLinks,
 }
 
 impl SandboxRefusal {
@@ -855,6 +859,7 @@ impl SandboxRefusal {
             Self::ProtectedPathUnresolved => "protected_path_unresolved",
             Self::WorktreeNotFolder => "worktree_not_folder",
             Self::WritableIsLink => "writable_is_link",
+            Self::WritableHasLinks => "writable_has_links",
         }
     }
 }

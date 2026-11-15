@@ -588,16 +588,42 @@ fn has_explicit_label(path: &Path) -> bool {
     explicit
 }
 
+/// Folders below a worktree whose hard links are made on purpose and are not checked for them (#571): package stores link every
+/// package file into `node_modules` (pnpm: about 85 % of a checkout's files), and git hard-links objects in a `--local` clone.
+const LINKS_NOT_CHECKED: &[&str] = &["node_modules", "target", ".git"];
+
+/// Whether `path` is a regular file with more than one name (a hard link): asked of a handle opened for its attributes only, without
+/// following a link, so nothing is read.
+fn has_other_names(path: &Path) -> io::Result<bool> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+    };
+    let file = std::fs::OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    let (links, reparse) = crate::windows::link_facts(&file)?;
+    Ok(!reparse && links > 1)
+}
+
 /// The first file or folder at or below `root` whose own DACL lets `Users` or `Everyone` write (Amendment B, 4). Walks the whole tree:
 /// a single child with such a grant would let any confined agent write there through the Low label.
-fn broad_writer_below(root: &Path) -> io::Result<Option<(PathBuf, SandboxRefusal)>> {
+///
+/// With `check_links` (the agent's worktree), also the first regular file with another name elsewhere (#571): the agent's ACE and the
+/// Low label are propagated to the file object itself, so a hard link made outside confinement would let the agent write the file's
+/// other place too. [`LINKS_NOT_CHECKED`] folders are walked for grants but not for links.
+fn broad_writer_below(
+    root: &Path,
+    check_links: bool,
+) -> io::Result<Option<(PathBuf, SandboxRefusal)>> {
     let refused: Vec<Sid> = REFUSED_WRITERS
         .iter()
         .map(|s| Sid::from_string(s))
         .collect::<io::Result<_>>()?;
     let need_owner = !self_grant_enabled();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(p) = stack.pop() {
+    let mut stack = vec![(root.to_path_buf(), check_links)];
+    while let Some((p, links)) = stack.pop() {
         // Without the self-grant, a file or folder whose label the user cannot set is refused here, before anything changes.
         if grants_write_to(&p, &refused) {
             return Ok(Some((p, SandboxRefusal::BroadWriteGrant)));
@@ -609,8 +635,14 @@ fn broad_writer_below(root: &Path) -> io::Result<Option<(PathBuf, SandboxRefusal
         let meta = std::fs::symlink_metadata(&p)?;
         if meta.is_dir() && !meta.file_type().is_symlink() {
             for e in std::fs::read_dir(&p)?.flatten() {
-                stack.push(e.path());
+                let checked = links
+                    && !LINKS_NOT_CHECKED
+                        .iter()
+                        .any(|n| e.file_name().eq_ignore_ascii_case(n));
+                stack.push((e.path(), checked));
             }
+        } else if links && meta.is_file() && has_other_names(&p)? {
+            return Ok(Some((p, SandboxRefusal::WritableHasLinks)));
         }
     }
     Ok(None)
@@ -745,11 +777,11 @@ fn grants_write_to(path: &Path, sids: &[Sid]) -> bool {
     found
 }
 
-/// Amendment B, 4: refuses a profile whose writable folders (or anything below them) let `Users` or `Everyone` write. Returns the
-/// first such path.
+/// Amendment B, 4: refuses a profile whose writable folders (or anything below them) let `Users` or `Everyone` write, and (#571) a
+/// worktree (`Sandbox::reopen`) holding a file with another name elsewhere. Returns the first such path.
 pub(crate) fn preflight(sandbox: &Sandbox) -> Result<(), (PathBuf, SandboxRefusal)> {
     for p in sandbox.write.iter().filter(|p| p.exists()) {
-        match broad_writer_below(p) {
+        match broad_writer_below(p, sandbox.reopen.contains(p)) {
             Ok(None) => {}
             Ok(Some(hit)) => return Err(hit),
             // A folder whose permissions cannot be read cannot be promised either.
@@ -1700,9 +1732,41 @@ mod tests {
         // SAFETY: allocated by the conversion above.
         unsafe { LocalFree(sd) };
         assert_ne!(set, 0);
-        let hit = broad_writer_below(&root.join("work")).unwrap();
+        let hit = broad_writer_below(&root.join("work"), false).unwrap();
         let _ = std::fs::remove_dir_all(&root);
         assert_eq!(hit, Some((open, SandboxRefusal::BroadWriteGrant)));
+    }
+
+    /// #571: a hard link in the worktree to a file outside it, made before the agent starts, would carry the agent's grant to that
+    /// file. Such a worktree is refused, naming the link; the same link in `node_modules`, `target` or `.git` (package stores and git
+    /// link on purpose) or in a write place that is not the worktree is not.
+    #[test]
+    fn a_worktree_holding_a_hard_link_to_a_file_outside_is_refused() {
+        let root = scratch("links571");
+        let work = root.join("work");
+        for d in ["node_modules/pkg", "target", ".git/objects", "src"] {
+            std::fs::create_dir_all(work.join(d)).unwrap();
+        }
+        std::fs::create_dir_all(root.join("outside")).unwrap();
+        std::fs::write(root.join("outside").join("zshrc"), "rc").unwrap();
+        std::fs::write(work.join("src").join("plain.txt"), "x").unwrap();
+        for d in ["node_modules/pkg", "target", ".git/objects"] {
+            std::fs::hard_link(
+                root.join("outside").join("zshrc"),
+                work.join(d).join("linked"),
+            )
+            .unwrap();
+        }
+        // Package stores and git: walked for grants, never refused for their links.
+        assert_eq!(broad_writer_below(&work, true).unwrap(), None);
+        let link = work.join("src").join("y");
+        std::fs::hard_link(root.join("outside").join("zshrc"), &link).unwrap();
+        let hit = broad_writer_below(&work, true).unwrap();
+        // Another write place (not the worktree) is not checked for links.
+        let elsewhere = broad_writer_below(&work, false).unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(hit, Some((link, SandboxRefusal::WritableHasLinks)));
+        assert_eq!(elsewhere, None);
     }
 
     /// Review of #273, 5: a relaunch keeps the agent's identity (its mesh endpoint admits exactly that SID), so two confinements of one
