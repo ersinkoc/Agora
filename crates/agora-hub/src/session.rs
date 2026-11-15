@@ -146,6 +146,16 @@ impl<'a, S: EventStore> NodeSession<'a, S> {
         if matches!(ev.body, Some(agora_protocol::v1::event::Body::NodeLink(_))) {
             return Err(invalid("node_link"));
         }
+        // A node speaks for itself only (threat model T19): a start or a goodbye that names another node would end that node's agents
+        // and give back its tasks and leases, or say it is online or gone.
+        let named = match &ev.body {
+            Some(agora_protocol::v1::event::Body::NodeOnline(n)) => Some(&n.node_id),
+            Some(agora_protocol::v1::event::Body::NodeOffline(n)) => Some(&n.node_id),
+            _ => None,
+        };
+        if named.is_some_and(|n| *n != self.producer) {
+            return Err(invalid("node_id"));
+        }
         let appended = match self.resync_at_ms {
             Some(at) => self
                 .store
@@ -214,9 +224,10 @@ mod tests {
             producer_id: producer.into(),
             seq,
             at_ms: 1,
-            body: Some(agora_protocol::v1::event::Body::NodeOnline(
-                NodeOnline::default(),
-            )),
+            body: Some(agora_protocol::v1::event::Body::NodeOnline(NodeOnline {
+                node_id: producer.into(),
+                ..NodeOnline::default()
+            })),
         }
         .encode_to_vec()
     }

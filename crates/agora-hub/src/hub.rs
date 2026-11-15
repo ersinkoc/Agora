@@ -1260,6 +1260,47 @@ mod tests {
         assert_eq!(hub.view().1, n);
     }
 
+    /// Threat model T19: a node speaks for itself only. A `NodeOnline` or `NodeOffline` naming another node is refused and changes
+    /// nothing: that node's agents keep running, its tasks and leases stay, and its presence stays the hub's fact.
+    #[test]
+    fn a_node_cannot_announce_or_retire_another_node() {
+        let (hub, sup) = (hub(), support());
+        let mut victim = open_session(&hub, &sup, "n1");
+        hub.ingest(&mut victim, &online("n1", 1)).unwrap();
+        hub.ingest(&mut victim, &agent("n1", 2, "a")).unwrap();
+        let mut other = open_session(&hub, &sup, "n2");
+        hub.ingest(&mut other, &online("n2", 1)).unwrap();
+        let before = hub.view();
+        let forged = |body| {
+            Event {
+                producer_id: "n2".into(),
+                seq: 2,
+                at_ms: 2,
+                body: Some(body),
+            }
+            .encode_to_vec()
+        };
+        for body in [
+            Body::NodeOnline(NodeOnline {
+                node_id: "n1".into(),
+                ..NodeOnline::default()
+            }),
+            Body::NodeOffline(NodeOffline {
+                node_id: "n1".into(),
+            }),
+        ] {
+            match hub.ingest(&mut other, &forged(body)) {
+                Err(SessionError::Protocol(e)) => {
+                    assert_eq!(e.code.as_str(), "protocol.invalid_message")
+                }
+                other => panic!("accepted: {other:?}"),
+            }
+        }
+        assert_eq!(hub.view(), before);
+        assert!(hub.view().0.agents["n1/a"].running);
+        assert_eq!(hub.store().acked("n2").unwrap(), 1);
+    }
+
     #[test]
     fn a_dropped_connection_is_recorded_as_a_hub_event_and_survives_restart() {
         let (hub, sup) = (hub(), support());

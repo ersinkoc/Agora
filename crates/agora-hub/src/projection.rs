@@ -349,16 +349,18 @@ impl View {
             }
             Body::NodeForgotten(_) => {}
             Body::NodeResources(e) => {
-                if let Some(n) = self.nodes.get_mut(&e.node_id) {
+                // A node's numbers are its own: the connection's identity decides, never the id in the body (T19).
+                if let Some(n) = self.nodes.get_mut(producer) {
                     n.agents_running = e.agents_running;
                     n.terminals_open = e.terminals_open;
                     n.memory_used_bytes = e.memory_used_bytes;
                 }
             }
             Body::CheckoutDiscovered(e) => {
+                // The checkout is on the node that said so, whatever the body names (T19).
                 self.checkouts.insert(
                     q(&e.checkout_id),
-                    (e.node_id.clone(), e.project_id.clone(), e.path.clone()),
+                    (producer.to_string(), e.project_id.clone(), e.path.clone()),
                 );
             }
             Body::WorktreeCreated(e) => {
@@ -393,7 +395,8 @@ impl View {
                 self.agents.insert(
                     q(&e.agent_id),
                     AgentView {
-                        node_id: e.node_id.clone(),
+                        // The agent runs on the node that started it: the connection decides, not the body (T19).
+                        node_id: producer.to_string(),
                         project_id: e.project_id.clone(),
                         worktree_id: q(&e.worktree_id),
                         kind: e.kind.clone(),
@@ -511,7 +514,7 @@ impl View {
                 self.terminals.insert(
                     q(&e.terminal_id),
                     TerminalView {
-                        node_id: e.node_id.clone(),
+                        node_id: producer.to_string(),
                         agent_id: q(&e.agent_id),
                         title: String::new(),
                     },
@@ -664,6 +667,74 @@ mod tests {
             state: s as i32,
             reported,
         })
+    }
+
+    /// Threat model T19: a node speaks for itself only. What a node's events say about another node's id changes nothing about that
+    /// node: an agent, a terminal and a checkout are on the node that sent them, and resource numbers are the sender's own.
+    #[test]
+    fn a_node_cannot_place_things_on_or_change_the_numbers_of_another_node() {
+        let online = |id: &str| {
+            Body::NodeOnline(NodeOnline {
+                node_id: id.into(),
+                hostname: id.into(),
+                os: "linux".into(),
+                build: "b".into(),
+                binary: String::new(),
+            })
+        };
+        let mut v = View::default();
+        v.apply(&ev("n1", 1, online("n1")));
+        v.apply(&ev("n2", 1, online("n2")));
+        // n2 says things about n1.
+        v.apply(&ev(
+            "n2",
+            2,
+            Body::NodeResources(NodeResources {
+                node_id: "n1".into(),
+                agents_running: 9,
+                terminals_open: 9,
+                memory_used_bytes: 9,
+            }),
+        ));
+        assert_eq!(v.nodes["n1"].agents_running, 0, "n1's numbers are n1's own");
+        v.apply(&ev("n2", 3, started("a"))); // body names n1
+        assert_eq!(
+            v.agents["n2/a"].node_id, "n2",
+            "the agent runs on the node that started it"
+        );
+        v.apply(&ev(
+            "n2",
+            4,
+            Body::TerminalOpened(TerminalOpened {
+                terminal_id: "t".into(),
+                agent_id: "a".into(),
+                node_id: "n1".into(),
+                ..TerminalOpened::default()
+            }),
+        ));
+        assert_eq!(v.terminals["n2/t"].node_id, "n2");
+        v.apply(&ev(
+            "n2",
+            5,
+            Body::CheckoutDiscovered(CheckoutDiscovered {
+                checkout_id: "c".into(),
+                node_id: "n1".into(),
+                project_id: "p".into(),
+                path: "/x".into(),
+            }),
+        ));
+        assert_eq!(v.checkouts["n2/c"].0, "n2");
+        // The same events from n1 about itself still count.
+        v.apply(&ev(
+            "n1",
+            2,
+            Body::NodeResources(NodeResources {
+                node_id: "n1".into(),
+                agents_running: 2,
+                ..NodeResources::default()
+            }),
+        ));
+        assert_eq!(v.nodes["n1"].agents_running, 2);
     }
 
     #[test]

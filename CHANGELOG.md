@@ -9,6 +9,9 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
   minimized or not in front (the count only, in your language). Not on macOS yet: there it stays silent for now.
 
 ### Security
+- Hub: a machine can no longer speak for another machine. A start or goodbye that named another machine used to end its agents,
+  give back its tasks and file locks, or show it online with no connection; it is now refused. An agent, a terminal and a
+  checkout are shown on the machine whose connection sent them, and a machine's resource numbers are its own (audit finding F501).
 - macOS: a confined agent is not started when a file it may write also has another name elsewhere (a hard link made outside
   confinement), or when a save copy next to it (`state.json.tmp`) is such a link, since writing it would change that other file too; the message says to remove the link or put a copy in its place
   (#571). Such links inside a folder it may write are not looked for at each start.
