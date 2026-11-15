@@ -34,7 +34,9 @@ whether the window can still sign with its stored device key (approvals, grants,
 (stable identity) removes the prompt. WebView2 on Windows keeps that key with the user's account and does not ask.
 
 Notifications (ADR-0048 decision 5): when the number of approvals waiting (the page's title, `(N) Agora`) grows while the window
-is hidden, minimized or not focused, the shell shows one system notification with the count only, in the system's language. It
+is hidden, minimized or not focused, the shell shows one system notification with the count only, in the system's language.
+Clicking it does not bring the window forward yet (neither notifier reports the click back; ADR-0048 decision 5 stays open for
+that part). It
 uses the system's own notifier with no library (`agora_platform::desktop_notify`): Windows a toast (shown as Windows PowerShell;
 nothing when notifications are turned off for the user), Linux `notify-send` (nothing without it). **macOS: not yet.** The script
 notifier posts as Script Editor (shown only if Script Editor may notify, and a click opens Script Editor), so the shell posts

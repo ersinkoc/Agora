@@ -38,7 +38,8 @@ fn waiting(title: &str) -> u32 {
 }
 
 /// Shows one system notification that `count` approvals are waiting, through the system's own notifier on a thread of its own (the
-/// window's events never wait for it). Clicking it brings the app forward (the system's default), where the home screen lists them;
+/// window's events never wait for it). A click does not bring this window forward yet (no notifier here reports it back; ADR-0048
+/// decision 5 is complete only when it does), so the notice only says that approvals wait, and the window's home screen lists them;
 /// it carries no approval content.
 fn notify_waiting(app: &tauri::AppHandle, count: u32) {
     let tag = app
