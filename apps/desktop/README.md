@@ -33,6 +33,16 @@ Allow" applies to that build only. Allow it: seen with the 0.3.4 image on macOS 
 whether the window can still sign with its stored device key (approvals, grants, folder listing) is not tested. A Developer ID signature
 (stable identity) removes the prompt. WebView2 on Windows keeps that key with the user's account and does not ask.
 
-Not done yet: native notifications for a waiting approval while the window is hidden, signed installers and per-platform signing (needs
+Notifications (ADR-0048 decision 5): when the number of approvals waiting (the page's title, `(N) Agora`) grows while the window
+is hidden, minimized or not focused, the shell shows one system notification with the count only, in the system's language.
+Clicking it does not bring the window forward yet (neither notifier reports the click back; ADR-0048 decision 5 stays open for
+that part). It
+uses the system's own notifier with no library (`agora_platform::desktop_notify`): Windows a toast (shown as Windows PowerShell;
+nothing when notifications are turned off for the user), Linux `notify-send` (nothing without it). **macOS: not yet.** The script
+notifier posts as Script Editor (shown only if Script Editor may notify, and a click opens Script Editor), so the shell posts
+nothing there; the app's own notification is a follow-up. A silent Mac is expected for now; the hub's phone notifications
+(ntfy, ADR-0051) cover a person away from the window.
+
+Not done yet: signed installers and per-platform signing (needs
 the maintainer's Apple and Windows accounts; unsigned builds are published as such), a real icon (the name and logo are open question Q1).
 The product name appears in `src-tauri/tauri.conf.json` (`productName`, window title) and `ui/index.html`; renaming is a change to those.

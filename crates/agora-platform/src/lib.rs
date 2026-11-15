@@ -1839,6 +1839,32 @@ pub fn service_status(name: &str) -> io::Result<ServiceState> {
     }
 }
 
+/// Shows one notification of the system's own, with `title` and `body` (ADR-0048 decision 5: the desktop shell tells the user that
+/// approvals wait while its window is out of sight). No library: the system's own notifier is run by its full path with a fixed
+/// argument list, and the words travel as separate arguments (Linux `notify-send`) or as
+/// environment variables (Windows PowerShell), never inside a script, so no text can change what runs. The words come from
+/// `locales/` (the caller's). Waits for the notifier; `NotFound` where there is none (Linux without `notify-send`),
+/// `PermissionDenied` where the user turned notifications off (Windows), `Unsupported` on macOS for now (see `macos.rs`).
+pub fn desktop_notify(title: &str, body: &str) -> io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::desktop_notify(title, body)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        linux::desktop_notify(title, body)
+    }
+    #[cfg(windows)]
+    {
+        winservice::desktop_notify(title, body)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+    {
+        let _ = (title, body);
+        Err(io::Error::from(io::ErrorKind::Unsupported))
+    }
+}
+
 /// This machine's name (`gethostname` on Unix, `COMPUTERNAME` on Windows), if it has one.
 pub fn hostname() -> Option<String> {
     #[cfg(unix)]
