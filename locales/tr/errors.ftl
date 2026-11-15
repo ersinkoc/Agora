@@ -24,6 +24,7 @@ agent-sandbox_unavailable = Bu makine ajanları kısıtlayacak şekilde ayarlı 
         [label_failed] Kullanacağı bir klasör kısıtlı ajanlar için işaretlenemiyor.
         [protected_path_unresolved] Bu makinenin kendi Agora klasörü bulunamıyor; ajana kapalı tutulamazdı.
         [writable_is_link] Kullanabileceği bir dosya ya da klasöre, yazabileceği bir yerdeki bağlantı üzerinden ulaşılıyor; o bağlantıyı kendisi yapmış olabilir. Bağlantıyı kontrol edin: siz yapmadıysanız silin. Agora böyle bağlantıları, sizin yaptıklarınızı da (bir dotfiles bağlantısı) izlemez.
+        [writable_has_links] Yazabileceği bir dosyanın başka bir yerde de bir adı var (sabit bağlantı); ona yazmak orayı da değiştirirdi. O bağlantıyı silin (ya da yerine bir kopya koyun) ve yeniden başlatın. node_modules, target ve .git içindeki bağlantılar denetlenmez.
         [worktree_not_folder] Klasörü artık düz bir klasör değil (yerine bağlantı gibi bir şey konmuş).
        *[other] {""}
     }

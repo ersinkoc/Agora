@@ -160,3 +160,24 @@ checkout writes fail, in both directory and explicit-worktree modes. Explicit po
 A confined agent (`sandbox = worktree`) can connect to any unix socket it can name. A tmux server socket or `SSH_AUTH_SOCK` lets it run a command or use
 credentials outside the confinement. Landlock covers this only from ABI 9; Seatbelt needs an explicit rule. Tracked as L21 in
 `docs/backlog/lan-test-findings.md`; `worktree-offline` on macOS already allows only the agent's own mesh socket.
+
+## Hard links under confinement (#571)
+
+A hard link made outside confinement (by another program, the user, or an agent that ran with `sandbox = off`) gives a file in a
+place the agent may write a second name somewhere it may not. A confined agent cannot make such a link itself, but it can write
+through one that exists: Seatbelt checks the path that was opened, and Windows confinement puts the agent's grant and the Low label
+on the file object itself, which both names share.
+
+- **Windows:** a start is refused (`writable_has_links`) when a regular file in the agent's worktree, or a write entry that is itself a
+  file (a manifest's `~/.claude.json`), has more than one name, found by the walk that already checks every object before anything
+  changes. `node_modules`, `target` and `.git` are not checked: package
+  stores and git link there on purpose (real folders only: a file of such a name is checked). In three real pnpm checkouts, 36–87 % of the files were links into the pnpm store, all below
+  `node_modules`, and none elsewhere. **Accepted risk:** while a confined agent runs, the store copies of those `node_modules` files
+  carry its grant (they are the same file objects), so it could change those files in every pnpm project on the drive that
+  links them (a store file had 10–23 names in the measured checkouts, #594). Also not seen: a link planted
+  earlier by an unconfined actor (the user, another program, or an agent that ran with `sandbox = off`) below `node_modules`,
+  `target` or `.git`, through which a later confined agent could write the file's other place. Closing that would mean
+  not granting a store-linked `node_modules` at all. Windows confinement stays off by default (ADR-0050).
+- **macOS (#592):** a write entry that is itself a file with more than one name is refused. Folders are not scanned at every start
+  (documented, accepted risk).
+- **Linux:** not measured yet.
