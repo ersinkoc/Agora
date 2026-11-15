@@ -4,6 +4,10 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+### Terminal client
+- An agent a machine cannot start is named with the program the machine looked for ("WrongStack (`wstack`)"), and when this
+  device is not trusted yet the hint names the folder of that machine's `agora` program when it is not in its PATH (ADR-0069).
+
 ### Machines
 - Windows: a machine could stop updating its agents (memory, state) for good when a process's leftover parent id pointed back
   into the agent's own processes. Walking an agent's processes now visits each one once.
