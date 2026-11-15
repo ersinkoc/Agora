@@ -14,6 +14,8 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
   (#571). Such links inside a folder it may write are not looked for at each start.
 
 ### Machines
+- A terminal resized to one column stopped its machine's screen for that terminal: a wide character (Chinese, Japanese,
+  an emoji) crashed it, and narrowing a screen holding one never finished. A terminal's screen is now at least two columns.
 - Windows: a machine could stop updating its agents (memory, state) for good when a process's leftover parent id pointed back
   into the agent's own processes. Walking an agent's processes now visits each one once.
 

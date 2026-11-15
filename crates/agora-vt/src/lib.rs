@@ -117,6 +117,7 @@ impl Style {
 pub trait Terminal: Send {
     /// Process bytes written by the program. Never panics on malformed input.
     fn feed(&mut self, bytes: &[u8]);
+    /// Change the screen size. A backend may keep a minimum size; [`size`](Terminal::size) reports the size it has.
     fn resize(&mut self, size: Size);
     fn size(&self) -> Size;
     /// The cell at `row`, `col` of the live screen (0-based, top-left origin); `None` if out of range.
