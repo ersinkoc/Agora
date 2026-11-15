@@ -14,6 +14,9 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
   (#571). Such links inside a folder it may write are not looked for at each start.
 
 ### Machines
+- `agora doctor` now warns when the manifests folder holds an older description of an agent than the one built into the program.
+  Such a copy (made for an older release) replaces the built-in one for good: on a real machine it kept every Claude Code agent from
+  coming back after a restart. The warning names the file to remove; the shipped descriptions are built in, nothing needs copying.
 - Windows: a machine could stop updating its agents (memory, state) for good when a process's leftover parent id pointed back
   into the agent's own processes. Walking an agent's processes now visits each one once.
 
