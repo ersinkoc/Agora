@@ -4,6 +4,12 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+### Starting agents
+- `agora agent start codex --setting model=gpt-6.1-sol --setting effort=high` starts an agent with the model and reasoning effort you
+  choose (ADR-0066). Claude Code and Codex offer `model` and `effort` (low, medium, high, xhigh, max). The machine checks every value
+  before starting anything, and a value can never become another flag; it also tells the windows what each kind takes, for the start
+  window to offer in a later change. For now settings work on the machine itself: a start with settings through the hub is refused until the approval card
+  signs them.
 ### Console (`agora tui`)
 - An arrow key, a click or the start of a paste could be split while the console was busy, so its tail was typed into the agent
   or the chat (`[A`, `<0;10;5M`), or a paste arrived as keys with its line breaks as Enter. A key now waits 10 ms for its last byte.

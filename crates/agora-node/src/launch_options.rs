@@ -51,11 +51,13 @@ pub struct LaunchChoice {
 pub struct Requested {
     pub ids: Vec<String>,
     pub confirmed: Vec<String>,
+    /// ADR-0066: `(setting id, value)` pairs, at most one per id.
+    pub settings: Vec<(String, String)>,
 }
 
 impl Requested {
     pub fn is_empty(&self) -> bool {
-        self.ids.is_empty() && self.confirmed.is_empty()
+        self.ids.is_empty() && self.confirmed.is_empty() && self.settings.is_empty()
     }
 }
 
@@ -73,6 +75,10 @@ pub enum Refusal {
     /// `agent.option_unconfirmed`: this node's manifest says the option skips permissions, and the start did not name it among the
     /// confirmed ids (the window did not show the confirmation for it, for example because a hub relabelled it as harmless).
     Unconfirmed { option: String },
+    /// ADR-0066 `agent.setting_unknown`: a setting the kind does not declare, or one named twice, or too many.
+    SettingUnknown { setting: String },
+    /// ADR-0066 `agent.setting_invalid`: a value the setting does not take.
+    SettingInvalid { setting: String },
 }
 
 /// Resolves a start's ids against `manifest` and checks them against the node's policy. Which options skip permissions is this node's
@@ -130,6 +136,28 @@ pub fn choose(
         choice.ids.push(o.id.clone());
         choice.args.extend(o.args.iter().cloned());
     }
+    // ADR-0066: each chosen setting's arguments, in the manifest's order, after the options. The value is checked here, on the node,
+    // against this node's manifest, and only ever becomes part of one argument.
+    if req.settings.len() > agora_adapters::manifest::MAX_LAUNCH_SETTINGS {
+        return Err(Refusal::SettingUnknown {
+            setting: String::new(),
+        });
+    }
+    for (i, (id, _)) in req.settings.iter().enumerate() {
+        if manifest.launch_setting(id).is_none() || req.settings[..i].iter().any(|(o, _)| o == id) {
+            return Err(Refusal::SettingUnknown {
+                setting: id.clone(),
+            });
+        }
+    }
+    for st in &manifest.launch.setting {
+        if let Some((_, value)) = req.settings.iter().find(|(id, _)| *id == st.id) {
+            let args = st.args_for(value).ok_or_else(|| Refusal::SettingInvalid {
+                setting: st.id.clone(),
+            })?;
+            choice.args.extend(args);
+        }
+    }
     Ok(choice)
 }
 
@@ -156,10 +184,77 @@ mod tests {
         Requested {
             ids: ids(chosen),
             confirmed: ids(confirmed),
+            settings: Vec::new(),
         }
     }
 
     const SKIP: &[&str] = &["skip-permissions"];
+
+    fn with_settings() -> Manifest {
+        Manifest::parse(concat!(
+            "kind = \"k\"\ndisplay_name = \"K\"\nversion = \"1\"\nmin_engine = 3\n[process]\nlaunch = [\"k\"]\n",
+            "[[launch.option]]\nid = \"resume-last\"\nlabel = \"option-resume-last\"\nargs = [\"--continue\"]\n",
+            "[[launch.setting]]\nid = \"model\"\nlabel = \"setting-model\"\nargs = [\"--model\", \"{value}\"]\n",
+            "[[launch.setting]]\nid = \"effort\"\nlabel = \"setting-effort\"\nargs = [\"--effort\", \"{value}\"]\n",
+            "values = [\"low\", \"high\"]\n",
+        ))
+        .unwrap()
+    }
+
+    fn settings(v: &[(&str, &str)]) -> Requested {
+        Requested {
+            ids: ids(&["resume-last"]),
+            confirmed: Vec::new(),
+            settings: v
+                .iter()
+                .map(|(i, x)| ((*i).to_string(), (*x).to_string()))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn settings_add_their_arguments_after_the_options_in_the_manifests_order() {
+        // ADR-0066: whatever order the start names them in.
+        let c = choose(
+            &with_settings(),
+            &settings(&[("effort", "high"), ("model", "gpt-6.1-sol")]),
+            SkipPermissions::Allow,
+            false,
+        )
+        .unwrap();
+        assert_eq!(c.ids, ["resume-last"]);
+        assert_eq!(
+            c.args,
+            ["--continue", "--model", "gpt-6.1-sol", "--effort", "high"]
+        );
+    }
+
+    #[test]
+    fn an_unknown_repeated_or_bad_setting_starts_nothing() {
+        let refused = |v: &[(&str, &str)]| {
+            choose(
+                &with_settings(),
+                &settings(v),
+                SkipPermissions::Allow,
+                false,
+            )
+            .unwrap_err()
+        };
+        let unknown = |s: &str| Refusal::SettingUnknown { setting: s.into() };
+        let invalid = |s: &str| Refusal::SettingInvalid { setting: s.into() };
+        assert_eq!(refused(&[("mode", "plan")]), unknown("mode"));
+        assert_eq!(refused(&[("model", "a"), ("model", "b")]), unknown("model"));
+        assert_eq!(refused(&[("effort", "max")]), invalid("effort"));
+        // A value that would be a flag, or two arguments, is never put on the command line.
+        assert_eq!(
+            refused(&[("model", "--dangerously-skip-permissions")]),
+            invalid("model")
+        );
+        assert_eq!(refused(&[("model", "x --yolo")]), invalid("model"));
+        let many: Vec<(&str, &str)> =
+            vec![("model", "a"); agora_adapters::manifest::MAX_LAUNCH_SETTINGS + 1];
+        assert_eq!(refused(&many), unknown(""));
+    }
 
     #[test]
     fn the_policy_reads_three_values_and_anything_else_forbids() {
@@ -286,6 +381,7 @@ mod tests {
             let r = Requested {
                 ids: bad.clone(),
                 confirmed: Vec::new(),
+                settings: Vec::new(),
             };
             assert!(
                 matches!(

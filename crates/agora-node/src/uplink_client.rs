@@ -941,15 +941,27 @@ fn run_local_on(
     };
     // ADR-0059: launch options come through the hub only on a signed `AgentLaunch` (its signature covers them); a routed
     // `AgentStart` carries no signature, so one with options is refused whatever grant is live (a grant never covers one).
-    if let Some(command_request::Command::AgentStart(a)) = &req.command {
-        if let Some(option) = a.launch_options.first() {
-            return fail(
-                Error::new(ErrorCode::AgentOptionForbidden)
-                    .with("kind", a.kind.as_str())
-                    .with("option", option.as_str())
-                    .with("policy", "signature"),
-            );
+    // ADR-0066: so are settings (model, effort): the hub must not choose what an agent runs with, nor make it costlier, without a
+    // signature the node can check. Refused as an option is, naming the setting.
+    let unsigned = match &req.command {
+        Some(command_request::Command::AgentStart(a)) => a
+            .launch_options
+            .first()
+            .or_else(|| a.settings.first().map(|st| &st.id))
+            .map(|o| (&a.kind, o)),
+        // A signed launch's signature covers its options, not yet its settings.
+        Some(command_request::Command::AgentLaunch(a)) => {
+            a.settings.first().map(|st| (&a.kind, &st.id))
         }
+        _ => None,
+    };
+    if let Some((kind, option)) = unsigned {
+        return fail(
+            Error::new(ErrorCode::AgentOptionForbidden)
+                .with("kind", kind.as_str())
+                .with("option", option.as_str())
+                .with("policy", "signature"),
+        );
     }
     // ADR-0041: grants are made and judged here, where the hub's commands enter the node. A command the policy lists
     // runs only under a live grant; the local socket never passes through this function.
@@ -1543,6 +1555,32 @@ mod tests {
             };
             assert_eq!(e.code, "agent.option_forbidden");
             assert!(e.params.contains_key("policy"));
+        }
+        // ADR-0066: a model or effort chosen over the hub is refused the same way, naming the setting.
+        let with_setting = CommandRequest {
+            request_id: "r".into(),
+            command: Some(command_request::Command::AgentStart(
+                agora_protocol::v1::AgentStart {
+                    kind: "codex".into(),
+                    settings: vec![agora_protocol::v1::LaunchSetting {
+                        id: "model".into(),
+                        value: "gpt-6.1-sol".into(),
+                    }],
+                    ..Default::default()
+                },
+            )),
+            ..Default::default()
+        };
+        for g in [None, Some(&grants)] {
+            let resp = run_local(None, with_setting.clone(), g);
+            let Some(command_response::Result::Err(e)) = resp.result else {
+                panic!("not refused: {resp:?}");
+            };
+            assert_eq!(e.code, "agent.option_forbidden");
+            assert!(
+                matches!(e.params.get("option").and_then(|p| p.value.as_ref()), Some(agora_protocol::v1::param_value::Value::Str(s)) if s == "model"),
+                "{e:?}"
+            );
         }
         // Without options the grant lets it through to the node (here: no control socket, so `commands.routed`).
         let resp = run_local(None, start(Vec::new()), Some(&grants));

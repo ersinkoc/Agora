@@ -1,7 +1,7 @@
 kind = "codex"
 display_name = "Codex"
-version = "2026.11.14.1"
-min_engine = 2
+version = "2026.11.15.1"
+min_engine = 3
 # ADR-0057: before Enter, the last `› ` row (the input box) must hold the typed prompt (and only it), above the shortcuts footer and
 # with no dialog. A prompt long enough to wrap does not match, so it is left for the user rather than sent half-checked.
 input_box = '^›[^\S\n]+([^\n]*?)[^\S\n]*$'
@@ -19,6 +19,22 @@ id = "skip-permissions"
 label = "option-skip-permissions"
 args = ["--dangerously-bypass-approvals-and-sandbox"]
 skips_permissions = true
+
+# ADR-0066: chosen when an agent starts; the node checks the value and puts it into one argument. Checked on codex-cli 0.169.0:
+# `codex --help` lists `-m, --model <MODEL>` and `-c, --config <key=value>`; `model_reasoning_effort` is the config key Codex reads
+# (also in ~/.codex/config.toml), and its own help text gives the levels "`low`, `medium` (default), `high`, `xhigh`, or `max`" (and
+# says `none` and `minimal` are not supported).
+[[launch.setting]]
+id = "model"
+label = "setting-model"
+args = ["-m", "{value}"]
+
+[[launch.setting]]
+id = "effort"
+label = "setting-effort"
+args = ["-c", "model_reasoning_effort=\"{value}\""]
+values = ["low", "medium", "high", "xhigh", "max"]
+default = "medium"
 
 [accounts]
 login = ["codex", "login"]

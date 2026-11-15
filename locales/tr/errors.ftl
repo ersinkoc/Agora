@@ -37,6 +37,8 @@ agent-option_forbidden = { $kind }, { $option } seçeneğiyle başlatılmadı: {
        *[other] bu makine ajanların sormadan çalışmasına izin vermiyor.
     }
 agent-option_invalid = { $kind } başlatılmadı: "{ $option }" başlatma seçeneği onun sunduğu bir seçenek değil (ya da çok fazla seçenek var).
+agent-setting_unknown = { $kind } başlatılmadı: bu makinede "{ $setting }" adlı bir ayarı yok.
+agent-setting_invalid = { $kind } başlatılmadı: "{ $setting }" için seçilen değer kabul ettiği değerlerden biri değil.
 agent-option_unconfirmed = { $kind }, { $option } seçeneğiyle başlatılmadı: bu seçenek ajanın sormadan çalışmasını sağlar ve başlatma isteğinde bunun için onayınız yoktu.
 agent-running = { $agent_id } hâlâ çalışıyor. Önce durdurun.
 node-online = { $node_id } bağlı. Yalnızca çevrimdışı bir makine unutulabilir.

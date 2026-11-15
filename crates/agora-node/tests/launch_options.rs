@@ -81,9 +81,12 @@ impl Env {
             "[[launch.option]]\nid = \"skip-permissions\"\nlabel = \"option-skip-permissions\"\nargs = [\"{FLAG}\"]\nskips_permissions = true\n\
              [[launch.option]]\nid = \"resume-last\"\nlabel = \"option-resume-last\"\nargs = [\"--fake-continue\"]\n"
         );
+        // ADR-0066: and two settings, one with listed values.
+        let settings = "[[launch.setting]]\nid = \"model\"\nlabel = \"setting-model\"\nargs = [\"--fake-model\", \"{value}\"]\n\
+             [[launch.setting]]\nid = \"effort\"\nlabel = \"setting-effort\"\nargs = [\"--fake-effort={value}\"]\nvalues = [\"low\", \"high\"]\ndefault = \"low\"\n";
         std::fs::write(
             root.join("manifests/probe.toml"),
-            format!("kind = \"probe\"\ndisplay_name = \"Probe\"\nversion = \"1\"\nmin_engine = 2\n[process]\nlaunch = {launch}\n{options}"),
+            format!("kind = \"probe\"\ndisplay_name = \"Probe\"\nversion = \"1\"\nmin_engine = 3\n[process]\nlaunch = {launch}\n{options}{settings}"),
         )
         .unwrap();
         std::fs::write(
@@ -136,6 +139,17 @@ impl Env {
         ids: Vec<String>,
         confirmed: Vec<String>,
     ) -> Result<String, v1::ErrorInfo> {
+        self.launch_with(kind, ids, confirmed, &[])
+    }
+
+    /// ADR-0066: also with settings, `(id, value)`.
+    fn launch_with(
+        &self,
+        kind: &str,
+        ids: Vec<String>,
+        confirmed: Vec<String>,
+        settings: &[(&str, &str)],
+    ) -> Result<String, v1::ErrorInfo> {
         let mut c = Client::connect(self.node().socket().unwrap()).unwrap();
         let info = match c
             .call(Cmd::DirectoryInspect(v1::DirectoryInspect {
@@ -156,6 +170,13 @@ impl Env {
                 kind: kind.into(),
                 launch_options: ids,
                 confirmed_launch_options: confirmed,
+                settings: settings
+                    .iter()
+                    .map(|(id, value)| v1::LaunchSetting {
+                        id: (*id).into(),
+                        value: (*value).into(),
+                    })
+                    .collect(),
                 ..Default::default()
             }))
             .unwrap()?;
@@ -412,4 +433,80 @@ fn an_advertised_id_with_a_bang_or_a_comma_is_refused() {
         vec!["skip-permissions".into()],
     )
     .unwrap();
+}
+
+#[test]
+fn settings_are_listed_checked_on_the_node_and_put_on_the_command_line() {
+    if !supported() {
+        return;
+    }
+    // ADR-0066.
+    let e = Env::new("settings", None);
+    let mut c = Client::connect(e.node().socket().unwrap()).unwrap();
+    let kinds = match c
+        .call(Cmd::AgentKinds(v1::AgentKinds {}))
+        .unwrap()
+        .unwrap()
+        .result
+    {
+        Some(Ok_::AgentKinds(k)) => k.kinds,
+        other => panic!("{other:?}"),
+    };
+    let probe = kinds.iter().find(|k| k.kind == "probe").unwrap();
+    assert_eq!(
+        probe.settings,
+        [
+            v1::LaunchSettingSpec {
+                id: "model".into(),
+                label: "setting-model".into(),
+                values: vec![],
+                default_value: String::new(),
+            },
+            v1::LaunchSettingSpec {
+                id: "effort".into(),
+                label: "setting-effort".into(),
+                values: vec!["low".into(), "high".into()],
+                default_value: "low".into(),
+            },
+        ]
+    );
+
+    // Refused before anything starts: an unknown setting, a value not listed, a value that would be a flag.
+    let code = |r: Result<String, v1::ErrorInfo>| r.unwrap_err().code;
+    assert_eq!(
+        code(e.launch_with("probe", vec![], vec![], &[("mode", "plan")])),
+        "agent.setting_unknown"
+    );
+    assert_eq!(
+        code(e.launch_with("probe", vec![], vec![], &[("effort", "max")])),
+        "agent.setting_invalid"
+    );
+    assert_eq!(
+        code(e.launch_with(
+            "probe",
+            vec![],
+            vec![],
+            &[("model", "--dangerously-skip-permissions")]
+        )),
+        "agent.setting_invalid"
+    );
+    assert_eq!(e.agents(), 0);
+
+    e.launch_with(
+        "probe",
+        vec!["resume-last".into()],
+        vec![],
+        &[("effort", "high"), ("model", "gpt-6.1-sol")],
+    )
+    .unwrap();
+    let args = e.wait_reports(1).remove(0);
+    let at = |s: &str| {
+        args.iter()
+            .position(|a| a == s)
+            .unwrap_or_else(|| panic!("{s} in {args:?}"))
+    };
+    // After the options, in the manifest's order, each value inside its own argument.
+    assert!(at("--fake-continue") < at("--fake-model"));
+    assert_eq!(args[at("--fake-model") + 1], "gpt-6.1-sol");
+    assert!(at("--fake-model") < at("--fake-effort=high"));
 }
