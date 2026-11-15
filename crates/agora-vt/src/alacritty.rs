@@ -181,6 +181,28 @@ impl Terminal for AlacrittyTerminal {
         })
     }
 
+    /// Like the default, but keeps the zero-width characters (combining accents, variation selectors, joiners) the
+    /// backend stores on each cell, which [`Cell`] cannot carry (F703).
+    fn line(&self, row: u16) -> String {
+        let mut s = String::new();
+        if row >= self.size.rows {
+            return s;
+        }
+        let line = &self.term.grid()[Line(i32::from(row))];
+        for col in 0..usize::from(self.size.cols) {
+            let c = &line[Column(col)];
+            if c.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                continue;
+            }
+            s.push(if c.c == '\0' { ' ' } else { c.c });
+            if let Some(zw) = c.zerowidth() {
+                s.extend(zw);
+            }
+        }
+        s.truncate(s.trim_end().len());
+        s
+    }
+
     fn pen(&self) -> Style {
         let t = &self.term.grid().cursor.template;
         style(t.fg, t.bg, t.flags)

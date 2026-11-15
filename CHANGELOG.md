@@ -20,6 +20,9 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
   nor finish it, stuck until its lease ran out. It is refused (`mesh.recipient_unknown`) and stays with its owner (audit finding F601).
 
 ### Machines
+- Accents and joined characters are no longer dropped from what a machine reads off a terminal: a name typed as `cafe` plus a
+  combining accent, a variation selector or an emoji joiner lost its extra part in the detected text and in snapshot lines (audit
+  finding F703). The terminal's own repaint still drops them.
 - `agora doctor` now warns when the manifests folder holds an older description of an agent than the one built into the program.
   Such a copy (made for an older release) replaces the built-in one for good: on a real machine it kept every Claude Code agent from
   coming back after a restart. The warning names the file to remove; the shipped descriptions are built in, nothing needs copying.
