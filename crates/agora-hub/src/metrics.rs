@@ -52,7 +52,10 @@ impl Histogram {
             .position(|b| us <= *b)
             .unwrap_or(self.bounds.len());
         self.buckets[i].fetch_add(1, Relaxed);
-        self.sum_us.fetch_add(us, Relaxed);
+        // Saturating: a time from a machine's clock (an approval's answer far in the future) must not wrap the sum (#574 review).
+        let _ = self
+            .sum_us
+            .try_update(Relaxed, Relaxed, |s| Some(s.saturating_add(us)));
     }
 
     /// A copy of the counts as they are now (rendered after the hub's lock is let go).
@@ -172,6 +175,17 @@ mod tests {
         assert!(out.contains("x_seconds_bucket{le=\"+Inf\"} 3\n"), "{out}");
         assert!(out.contains("x_seconds_count 3\n"), "{out}");
         assert!(out.contains("x_seconds_sum 1.00075\n"), "{out}");
+        assert_eq!(h.count(), 3);
+    }
+
+    #[test]
+    fn a_far_future_time_does_not_wrap_the_sum() {
+        // #574 review: an approval answered with an extreme `at_ms` (a machine's clock) saturates the sum instead of wrapping it.
+        let h = Histogram::with_bounds(&ANSWER_US);
+        h.observe(Duration::from_millis(u64::MAX));
+        h.observe(Duration::from_millis(u64::MAX));
+        h.observe(Duration::from_secs(1));
+        assert_eq!(h.sum_us.load(Relaxed), u64::MAX);
         assert_eq!(h.count(), 3);
     }
 }
