@@ -99,6 +99,25 @@ device-request-some = Only the ones checked.
 device-request-failed = The approval could not be sent. Try again.
 device-request-later = Not now
 device-request-approve = Approve
+# ADR-0065: a machine that wants to join, or a browser on another machine that wants to sign in, waits for the owner's answer.
+pair-machine-title = New machine "{ $name }" ({ $os }, { $address }) wants to join
+pair-machine-title-plain = New machine "{ $name }" ({ $address }) wants to join
+pair-browser-title = Browser "{ $name }" ({ $address }) wants to sign in
+pair-number = Number
+pair-machine-compare = Approve only if the new machine shows the same number.
+pair-browser-compare = Approve only if that browser shows the same number.
+pair-failed = Your answer could not be sent. Try again.
+pair-deny = Deny
+pair-approve = Approve
+os-windows = Windows
+os-macos = macOS
+os-linux = Linux
+signin-waiting = Waiting for the owner to approve this browser…
+signin-waiting-hint = The owner sees this number on a card in a window they are already signed in to, and approves only if it matches.
+signin-denied = The owner did not approve this browser.
+signin-expired = Nobody approved this browser in time.
+signin-ask-again = Ask again
+signin-use-code = Use a code instead
 trust-ask = Ask another device to approve
 trust-asked = Asked. Approve this browser on a device that machine trusts, then start again.
 

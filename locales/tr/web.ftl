@@ -99,6 +99,25 @@ device-request-some = Yalnızca işaretlilerde.
 device-request-failed = Onay gönderilemedi. Yeniden deneyin.
 device-request-later = Şimdi değil
 device-request-approve = Onayla
+# ADR-0065: katılmak isteyen bir makine ya da başka bir makinede oturum açmak isteyen bir tarayıcı, sahibinin yanıtını bekler.
+pair-machine-title = Yeni makine "{ $name }" ({ $os }, { $address }) katılmak istiyor
+pair-machine-title-plain = Yeni makine "{ $name }" ({ $address }) katılmak istiyor
+pair-browser-title = Tarayıcı "{ $name }" ({ $address }) oturum açmak istiyor
+pair-number = Numara
+pair-machine-compare = Yalnızca yeni makine aynı numarayı gösteriyorsa onaylayın.
+pair-browser-compare = Yalnızca o tarayıcı aynı numarayı gösteriyorsa onaylayın.
+pair-failed = Yanıtınız gönderilemedi. Yeniden deneyin.
+pair-deny = Reddet
+pair-approve = Onayla
+os-windows = Windows
+os-macos = macOS
+os-linux = Linux
+signin-waiting = Sahibinin bu tarayıcıyı onaylaması bekleniyor…
+signin-waiting-hint = Sahibi bu numarayı, zaten oturum açtığı bir penceredeki kartta görür ve yalnızca eşleşiyorsa onaylar.
+signin-denied = Sahibi bu tarayıcıyı onaylamadı.
+signin-expired = Bu tarayıcıyı zamanında onaylayan olmadı.
+signin-ask-again = Yeniden iste
+signin-use-code = Bunun yerine kod kullan
 trust-ask = Başka bir cihazdan onay iste
 trust-asked = İstendi. Bu tarayıcıyı o makinenin güvendiği bir cihazda onaylayın, sonra yeniden başlatın.
 
