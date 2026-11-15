@@ -94,3 +94,4 @@ Date: YYYY-MM-DD
 | 0074 | A reply keeps its link to the message it answers, across machines | Accepted |
 | 0075 | The node updates in place without stopping its agents | Accepted |
 | 0076 | A token that can only read the hub's numbers | Accepted |
+| 0077 | The Windows binary is code-signed | Accepted |
