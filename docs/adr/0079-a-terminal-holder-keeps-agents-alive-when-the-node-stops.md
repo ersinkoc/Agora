@@ -68,6 +68,14 @@ and typed through them.
      the pipe ends and the buffer. The node feeds the buffer to the terminal's VT and gives each terminal a resize nudge (ADR-0075
      decision 3), so full-screen agents redraw. A buffer that starts in the middle of an escape sequence is only a few bad cells
      before the redraw.
+   - **The screen of a quiet terminal** (added in review, after acceptance; see the note at the end):
+     - **On a clean stop** (`agora down`, an update), the node hands the holder each terminal's screen (its VT snapshot, the cells
+       as the window shows them) before it exits. The next node starts from that snapshot and then feeds it the buffer, so every
+       screen comes back whole.
+     - **After a node crash** there is no snapshot. The new node has only what was written after the crash. A full-screen agent
+       redraws on the nudge, but a quiet shell, or a tool waiting for input, shows a blank screen until it writes again (a key
+       press, Enter at a prompt). Its process and its state are untouched.
+     - This is a v1 limit (Consequences). Keeping a periodic snapshot in the holder is open question 5.
    - **Windows clients** take a fresh snapshot, as after any reconnect (ADR-0075 decision 7).
 5. **The node-holder link.**
    - An owner-only local endpoint in the home's `run` folder: a named pipe with the owner-only security descriptor on Windows, a
@@ -90,8 +98,22 @@ and typed through them.
 7. **Updating.** Updating the node no longer touches agents on any system: the node stops, the new node starts and attaches. The
    holder itself is small and changes rarely. A new holder version is taken only when no agent runs, or at the next reboot. An
    `agora update` that brings a new holder version says so.
-8. **When the holder dies** (a crash, or killed by hand), its agents die with it, as they die with the node today. Resume (ADR-0060,
-   #613) covers that case, as it covers a reboot.
+8. **When the holder dies** (a crash, or killed by hand), its agents end. This decision was made explicit in review, after
+   acceptance (see the note at the end).
+   - **Windows:** the holder's kill-on-close job closes, and its agents end, as with the node's job today.
+   - **Unix, with a node attached:** nothing tells a child its parent died, and the node holds copies of the PTY masters, so the
+     terminals do not hang up by themselves. So the node watches its holder: the link closes, and the same pidfd or `kqueue` watch
+     as decision 4. When the holder is gone, the node:
+     - closes its copies of the masters, so each session gets the kernel's hangup (`SIGHUP`) once no copy is left;
+     - sends `SIGTERM`, then `SIGKILL` 5 s later, to each agent's process group.
+
+     A group is identified as ADR-0060's ledger does it, by pid, start time and boot. A group whose leader is not the recorded
+     process is never signalled.
+   - **Linux, also with no node attached:** the holder starts each agent's first process with `PR_SET_PDEATHSIG(SIGHUP)`, so it is
+     told when the holder dies.
+   - **macOS with no node attached:** the kernel's hangup on the last master is the only signal. An agent that ignores `SIGHUP`
+     keeps running, and the next node reports it `still_running` (ADR-0060), where it can be stopped.
+   - **Resume** (ADR-0060 and its Amendment A) then brings the conversation back, as after a reboot.
 9. **The ledger** records which agents are held, and by which holder (pid and start time). A node that starts and finds its holder
    alive attaches instead of reporting the agents as interrupted. Only agents whose holder is gone are interrupted.
 
@@ -128,7 +150,16 @@ and typed through them.
   - `agora down` keeps agents and `agora down --agents` stops them;
   - a second node is refused while one is attached;
   - a confined agent cannot open the holder's endpoint;
-  - a holder version mismatch changes nothing.
+  - a holder version mismatch changes nothing;
+  - `agora down` and then a start: a quiet shell's screen comes back from the snapshot;
+  - kill the holder:
+    - on Windows the agents end;
+    - on Linux and macOS with a node attached, the node ends them (hangup, then group signals, only for groups the ledger
+      identifies);
+    - on Linux with no node attached, `PR_SET_PDEATHSIG` ends them;
+    - on macOS with no node attached, an agent that ignores `SIGHUP` is reported `still_running`.
+- **A v1 limit:** after a node *crash*, a quiet terminal's screen is blank until the agent writes again. Its process is untouched
+  (decision 4).
 - **Threat model:** a row for the holder (decision 6).
 
 ## Open questions for the maintainer
@@ -138,3 +169,10 @@ and typed through them.
 3. **Buffer:** 1 MB per terminal while no node is attached (proposed), or more?
 4. **Order:** this touches `agora-platform`, `agora-node` and `crates/agora` on three systems. Proposed: Windows first (where agents
    die today), after the easy-setup work that holds those crates now.
+5. **A screen that survives a crash** (added in review, after acceptance): should the node also hand the holder a screen snapshot
+   every few seconds while attached, so that a quiet terminal's screen survives a node crash too? Proposed: later, after a
+   benchmark (ADR-0022), since it costs a snapshot per terminal every few seconds.
+
+**Note on the review changes (CodeRabbit on #616, after acceptance):** decision 4's quiet-screen rule, decision 8's per-system
+outcome, the matching tests, the v1 limit and question 5 fill gaps the review found. None of them changes a decision the
+maintainer accepted. The merger confirms them with the maintainer before merging.
