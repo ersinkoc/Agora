@@ -69,14 +69,33 @@ fn answer(verdict: Verdict) -> Answer {
     }
 }
 
-/// The online nodes that have a checkout of `project`.
-pub fn nodes_with(view: &View, project: &str) -> Vec<String> {
-    let mut nodes: Vec<String> = view
-        .checkouts
+/// Known `(node, project)` memberships from checkouts, selected workspaces and still-running agents.
+/// Facts can repeat and include offline nodes: transition discovery must still see a project after all its nodes disconnect.
+pub fn project_memberships(view: &View) -> impl Iterator<Item = (&str, &str)> {
+    view.checkouts
         .values()
-        .filter(|(_, p, _)| p == project)
-        .map(|(n, _, _)| n.clone())
-        .filter(|n| view.nodes.get(n).is_some_and(|v| v.online))
+        .map(|(node, project, _)| (node.as_str(), project.as_str()))
+        .chain(
+            view.workspaces
+                .values()
+                .map(|workspace| (workspace.node_id.as_str(), workspace.project_id.as_str())),
+        )
+        .chain(view.agents.iter().filter_map(|(id, agent)| {
+            if !agent.running {
+                return None;
+            }
+            // Running sessions keep their original project when folder metadata changes. The qualified key names the
+            // authenticated producer; the payload's node_id must not manufacture another node's membership.
+            id.split_once('/')
+                .map(|(node, _)| (node, agent.project_id.as_str()))
+        }))
+}
+
+/// The distinct online nodes with a checkout, selected workspace or running session of `project`.
+pub fn nodes_with(view: &View, project: &str) -> Vec<String> {
+    let mut nodes: Vec<String> = project_memberships(view)
+        .filter(|(node, p)| *p == project && view.nodes.get(*node).is_some_and(|v| v.online))
+        .map(|(node, _)| node.to_string())
         .collect();
     nodes.sort();
     nodes.dedup();
@@ -110,6 +129,14 @@ struct Joins {
     members: BTreeMap<String, BTreeSet<String>>,
     /// Projects whose nodes are handing over local work: until when calls wait, and the nodes not yet answered.
     pending: BTreeMap<String, (u64, BTreeSet<String>)>,
+}
+
+/// A project's board at one moment (see [`Boards::checkpoint`]).
+pub struct Checkpoint(Option<Mesh>);
+
+/// Whether a board tool can change the board (everything but reading the task list).
+pub fn changes_board(tool: &str) -> bool {
+    BOARD_TOOLS.contains(&tool) && tool != "task_list"
 }
 
 #[derive(Default)]
@@ -228,6 +255,95 @@ impl Boards {
             refs,
         });
         a
+    }
+
+    /// `workspace_status` on a shared project: the hub's facts about every running agent of the project on an online node (kind,
+    /// machine, state, the board task it claimed, the paths it holds, who started it), the board's open tasks and live leases, and how
+    /// many machines are online. Read only; the calling node merges it with what it knows of its own agents.
+    fn status(&self, view: &View, project: &str, now_ms: u64) -> Answer {
+        use agora_protocol::v1::AgentState;
+        let mut guard = self.by_project.lock().unwrap_or_else(|e| e.into_inner());
+        let mesh = guard
+            .entry(project.to_string())
+            .or_insert_with(|| Mesh::new(Limits::default()));
+        Self::sync(mesh, view, project, now_ms);
+        mesh.release_orphans();
+        mesh.expire_leases(now_ms);
+        let word = |s: AgentState| match s {
+            AgentState::Working => "working",
+            AgentState::Blocked => "blocked",
+            AgentState::Idle => "idle",
+            AgentState::Done => "done",
+            AgentState::Unspecified => "unknown",
+        };
+        let agents: Vec<Value> = view
+            .agents
+            .iter()
+            .filter(|(_, a)| {
+                a.project_id == project
+                    && a.running
+                    && view.nodes.get(&a.node_id).is_some_and(|n| n.online)
+            })
+            .take(agora_mesh::awareness::MAX_AGENTS)
+            .map(|(key, a)| {
+                let id = AgentId::new(key.as_str());
+                json!({
+                    "id": key, "kind": a.kind, "machine": a.node_id, "state": word(a.state),
+                    "holds": mesh.holds(&id, now_ms), "task": mesh.claimed_task(&id),
+                    "parent": (!a.parent_agent_id.is_empty()).then_some(a.parent_agent_id.as_str()),
+                    "workspace": view.worktrees.get(&a.worktree_id).map_or("", |w| w.path.as_str()),
+                })
+            })
+            .collect();
+        let open_tasks: Vec<Value> = mesh
+            .export_tasks()
+            .1
+            .iter()
+            .filter(|t| t.project == project && t.status != agora_mesh::broker::TaskStatus::Done)
+            .take(agora_mesh::awareness::MAX_TASKS)
+            .map(|t| {
+                json!({"id": t.id.as_str(), "title": cut(&t.title, 512),
+                       "owner": t.owner.as_ref().map(AgentId::as_str)})
+            })
+            .collect();
+        let leases: Vec<Value> = mesh
+            .live_leases(project, now_ms)
+            .iter()
+            .take(agora_mesh::awareness::MAX_LEASES)
+            .map(|(path, holder, expires)| {
+                json!({"path": cut(path, 512), "owner": holder.as_str(),
+                       "ttl": expires.saturating_sub(now_ms).div_ceil(1000)})
+            })
+            .collect();
+        let text = json!({
+            "project": project, "machines_online": nodes_with(view, project).len(),
+            "agents": agents, "open_tasks": open_tasks, "leases": leases,
+        });
+        let mut a = answer(Verdict::Done {
+            result: json!({"content": [{"type": "text", "text": text.to_string()}], "isError": false}),
+            is_error: false,
+        });
+        a.events = mesh.take_events();
+        a
+    }
+
+    /// A copy of a project's board as it is now, to put back with [`restore`](Self::restore) when a change cannot be stored.
+    pub fn checkpoint(&self, project: &str) -> Checkpoint {
+        let g = self.by_project.lock().unwrap_or_else(|e| e.into_inner());
+        Checkpoint(g.get(project).cloned())
+    }
+
+    /// Puts a project's board back as [`checkpoint`](Self::checkpoint) saw it (no board then: none now).
+    pub fn restore(&self, project: &str, saved: Checkpoint) {
+        let mut g = self.by_project.lock().unwrap_or_else(|e| e.into_inner());
+        match saved.0 {
+            Some(mesh) => {
+                g.insert(project.to_string(), mesh);
+            }
+            None => {
+                g.remove(project);
+            }
+        }
     }
 
     /// Undoes a handoff whose message could not be delivered: the task goes back to the giver. Returns the audit events.
@@ -402,7 +518,8 @@ impl Boards {
             ))
         };
         let channel = tool == "send_message";
-        if !channel && !BOARD_TOOLS.contains(&tool) {
+        let status = tool == "workspace_status";
+        if !channel && !status && !BOARD_TOOLS.contains(&tool) {
             return bad("tool");
         }
         let Ok(mut args) = serde_json::from_str::<Value>(arguments_json) else {
@@ -412,7 +529,7 @@ impl Boards {
             return bad("arguments_json");
         }
         let nodes = nodes_with(view, project);
-        // A node can only speak for a project it has a checkout of. A board is in use while two nodes share the project, and (ADR-0039
+        // A node can only speak for a project represented by its checkout, workspace or running session. A board is in use while two nodes share the project, and (ADR-0039
         // amendment A) while it still holds a task that is not done or a lease that has not ended: a node that drops must not make
         // the other one fall back to a local broker that knows nothing of the hub's tasks.
         if !nodes.iter().any(|n| n == node)
@@ -422,6 +539,9 @@ impl Boards {
         }
         if channel {
             return Self::channel(view, node, agent, project, &args);
+        }
+        if status {
+            return self.status(view, project, now_ms);
         }
         // ADR-0039 amendment B: while the project's nodes are handing over their local work, nothing is granted against work the
         // board has not seen yet.
@@ -529,9 +649,12 @@ impl Boards {
     /// `(node, project)` pairs that must now hand over their local work: every such node when a project becomes shared (reaches
     /// two nodes), and a node that joins an already shared project. Calls that grant something then wait (see [`JOIN_WAIT_MS`]).
     pub fn membership(&self, view: &View, now_ms: u64) -> Vec<(String, String)> {
-        let projects: BTreeSet<String> =
-            view.checkouts.values().map(|(_, p, _)| p.clone()).collect();
+        let mut projects: BTreeSet<String> = project_memberships(view)
+            .map(|(_, project)| project.to_string())
+            .collect();
         let mut j = self.joins.lock().unwrap_or_else(|e| e.into_inner());
+        // A reassigned folder and its last exiting agent can remove every current fact for a project.
+        projects.extend(j.members.keys().cloned());
         let mut out = Vec::new();
         for project in projects {
             let now: BTreeSet<String> = nodes_with(view, &project).into_iter().collect();
@@ -705,6 +828,8 @@ mod tests {
                     terminals_open: 0,
                     memory_used_bytes: 0,
                     last_event_ms: 0,
+                    link_generation: 0,
+                    forgotten: false,
                 },
             );
             v.checkouts
@@ -724,6 +849,12 @@ mod tests {
                     input_tokens: 0,
                     output_tokens: 0,
                     model: String::new(),
+                    forgotten: false,
+                    session: crate::projection::SessionView::default(),
+                    parent_agent_id: String::new(),
+                    interrupted: None,
+                    launch_options: Vec::new(),
+                    skips_permissions: false,
                 },
             );
         }
@@ -1005,6 +1136,52 @@ mod tests {
     }
 
     #[test]
+    fn workspace_status_lists_the_projects_agents_on_online_nodes_with_their_board_work() {
+        let b = Boards::new();
+        let mut v = view(&["alpha", "beta"]);
+        v.agents.get_mut("beta/a").unwrap().state = AgentState::Working;
+        v.agents.get_mut("beta/a").unwrap().parent_agent_id = "beta/boss".into();
+        // Not shared: the node answers from its own broker.
+        let single = view(&["alpha"]);
+        assert_eq!(
+            run(&b, &single, "alpha", "workspace_status", json!({}), 1).verdict,
+            Verdict::NotShared
+        );
+        let t = run(
+            &b,
+            &v,
+            "beta",
+            "task_create",
+            json!({"title": "ship it"}),
+            1,
+        );
+        let tid = serde_json::from_str::<Value>(&text(&t)).unwrap()["task_id"].clone();
+        run(&b, &v, "beta", "task_claim", json!({"task_id": tid}), 2);
+        run(
+            &b,
+            &v,
+            "beta",
+            "lease_acquire",
+            json!({"paths": ["src/a.rs"], "ttl_s": 60}),
+            3,
+        );
+        let a = run(&b, &v, "alpha", "workspace_status", json!({}), 1_000);
+        let st: Value = serde_json::from_str(&text(&a)).unwrap();
+        assert_eq!(st["machines_online"], 2);
+        let agents = st["agents"].as_array().unwrap();
+        // gamma is offline: its agent is not listed.
+        assert_eq!(agents.len(), 2, "{st}");
+        let beta = agents.iter().find(|r| r["id"] == "beta/a").unwrap();
+        assert_eq!(beta["state"], "working");
+        assert_eq!(beta["task"], "ship it");
+        assert_eq!(beta["holds"], 1);
+        assert_eq!(beta["parent"], "beta/boss");
+        assert_eq!(st["open_tasks"][0]["owner"], "beta/a");
+        assert_eq!(st["leases"][0]["path"], "src/a.rs");
+        assert_eq!(st["leases"][0]["ttl"], 60);
+    }
+
+    #[test]
     fn one_online_node_is_not_a_shared_project_and_a_node_cannot_use_a_project_it_has_no_checkout_of(
     ) {
         let b = Boards::new();
@@ -1018,6 +1195,26 @@ mod tests {
         assert!(matches!(a.verdict, Verdict::Invalid(_)));
         let a = b.call(&v, "alpha", "a", "p", "task_list", "[1]", 1);
         assert!(matches!(a.verdict, Verdict::Invalid(_)));
+    }
+
+    #[test]
+    fn a_handoff_to_an_agent_on_the_callers_own_node_is_delivered() {
+        let b = Boards::new();
+        let mut v = view(&["alpha", "beta"]);
+        // A second agent on alpha, as sync registers it: the hub-wide id names the agent.
+        let twin = v.agents.get("alpha/a").unwrap().clone();
+        v.agents.insert("alpha/b".to_string(), twin);
+        let a = run(
+            &b,
+            &v,
+            "alpha",
+            "handoff",
+            json!({"to": "alpha/b", "summary": "s", "refs": []}),
+            1,
+        );
+        assert_eq!(code(&a), "", "{}", text(&a));
+        let h = a.handoff.expect("the handoff must be accepted");
+        assert_eq!((h.to_node.as_str(), h.to_agent.as_str()), ("alpha", "b"));
     }
 
     #[test]

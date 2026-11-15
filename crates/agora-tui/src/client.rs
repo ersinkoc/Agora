@@ -10,7 +10,7 @@ use crate::device::{approval_message, grant_message, new_grant_id, Device};
 use agora_protocol::frame::{kinds, STREAM_CLOSE, STREAM_COMMANDS, STREAM_EVENTS};
 use agora_protocol::v1::{
     command_ok, command_request, command_response, CommandOk, CommandRequest, CommandResponse,
-    Snapshot,
+    ErrorInfo, Snapshot,
 };
 use agora_protocol::ws::{connect_with_token, Conn};
 use agora_protocol::Frame;
@@ -80,8 +80,11 @@ async fn tls(hub: &Hub) -> Result<TlsStream<TcpStream>, ClientError> {
     .with_no_client_auth();
     let connector = TlsConnector::from(Arc::new(cfg));
     for name in server_names(&hub.addr) {
-        let Ok(Ok(tcp)) =
-            tokio::time::timeout(Duration::from_secs(10), TcpStream::connect(&hub.addr)).await
+        let Ok(Ok(tcp)) = tokio::time::timeout(
+            Duration::from_secs(10),
+            agora_protocol::dial::connect(&hub.addr),
+        )
+        .await
         else {
             return Err(ClientError::Unreachable);
         };
@@ -135,6 +138,11 @@ pub struct Session {
     next_stream: u32,
     /// An event arrived while a command was waiting for its answer.
     changed: bool,
+    /// A request for the user's answer arrived since [`Session::take_asked`] was last called (a full-screen view says so).
+    asked: bool,
+    /// A snapshot that arrived while something else was waiting (the hub's first one comes right after subscribing, often while
+    /// the device registration waits for its answer): `next` hands it out first, so it is never lost.
+    snapshot: Option<Box<Snapshot>>,
     /// A machine refused something that was sent without waiting for the answer (typing) because it wants a grant first.
     grant_wanted: bool,
 }
@@ -180,19 +188,33 @@ impl Session {
             term_frames: std::collections::VecDeque::new(),
             next_stream: agora_protocol::frame::FIRST_DYNAMIC_STREAM,
             changed: false,
+            asked: false,
+            snapshot: None,
             grant_wanted: false,
         })
     }
 
     /// Waits up to `wait` for the hub to say something.
     pub fn next(&mut self, wait: Duration) -> Update {
+        // A kept snapshot first. `changed` is left as it is: `set_aside` cleared it when the snapshot came, so if it is set now an
+        // event arrived after the snapshot, and the next call reports it.
+        if let Some(s) = self.snapshot.take() {
+            return Update::Snapshot(s);
+        }
         if std::mem::take(&mut self.changed) {
             return Update::Changed;
         }
         let conn = &mut self.conn;
+        let queue = &mut self.term_frames;
+        let asked = &mut self.asked;
         self.rt.block_on(async {
             match tokio::time::timeout(wait, conn.recv()).await {
                 Err(_) => Update::Quiet,
+                // A terminal being watched alongside: kept for `terminal_next`, never dropped here.
+                Ok(Ok(Some(f))) if f.stream_id >= agora_protocol::frame::FIRST_DYNAMIC_STREAM => {
+                    queue.push_back(f);
+                    Update::Quiet
+                }
                 Ok(Ok(Some(f))) if f.stream_id == STREAM_EVENTS && f.kind == kinds::SNAPSHOT => {
                     match Snapshot::decode(f.payload.as_slice()) {
                         Ok(s) => Update::Snapshot(Box::new(s)),
@@ -202,12 +224,29 @@ impl Session {
                 Ok(Ok(Some(f)))
                     if f.stream_id == STREAM_EVENTS && f.kind == kinds::POSITIONED_EVENT =>
                 {
+                    if agora_protocol::v1::PositionedEvent::decode(f.payload.as_slice())
+                        .ok()
+                        .and_then(|p| p.event)
+                        .is_some_and(|e| {
+                            matches!(
+                                e.body,
+                                Some(agora_protocol::v1::event::Body::ApprovalRequested(_))
+                            )
+                        })
+                    {
+                        *asked = true;
+                    }
                     Update::Changed
                 }
                 Ok(Ok(Some(_))) => Update::Quiet,
                 Ok(_) => Update::Closed,
             }
         })
+    }
+
+    /// Whether a request for the user's answer arrived since the last call (then cleared).
+    pub fn take_asked(&mut self) -> bool {
+        std::mem::take(&mut self.asked)
     }
 
     /// Runs a command on a machine through the hub (ADR-0029) and waits for its answer. `Err` carries the error code the machine or
@@ -228,6 +267,16 @@ impl Session {
         command: command_request::Command,
         wait: Duration,
     ) -> Result<CommandOk, String> {
+        self.command_info(node, command, wait).map_err(|e| e.code)
+    }
+
+    /// Keeps the peer's error parameters for actions that render the localized reason.
+    fn command_info(
+        &mut self,
+        node: &str,
+        command: command_request::Command,
+        wait: Duration,
+    ) -> Result<CommandOk, ErrorInfo> {
         self.requests += 1;
         let id = format!("t{}", self.requests);
         let req = CommandRequest {
@@ -238,6 +287,7 @@ impl Session {
         };
         let conn = &mut self.conn;
         let changed = &mut self.changed;
+        let kept = &mut self.snapshot;
         let term_frames = &mut self.term_frames;
         let grant_wanted = &mut self.grant_wanted;
         self.rt.block_on(async {
@@ -248,14 +298,14 @@ impl Session {
                 payload: req.encode_to_vec(),
             })
             .await
-            .map_err(|_| "client.unreachable".to_string())?;
+            .map_err(|_| command_error("client.unreachable"))?;
             let end = tokio::time::Instant::now() + wait;
             loop {
                 let left = end.saturating_duration_since(tokio::time::Instant::now());
                 let f = match tokio::time::timeout(left, conn.recv()).await {
                     Ok(Ok(Some(f))) => f,
-                    Err(_) => return Err("node.timeout".to_string()),
-                    Ok(_) => return Err("client.unreachable".to_string()),
+                    Err(_) => return Err(command_error("node.timeout")),
+                    Ok(_) => return Err(command_error("client.unreachable")),
                 };
                 if (f.stream_id, f.kind) == (STREAM_COMMANDS, 1) {
                     let Ok(r) = CommandResponse::decode(f.payload.as_slice()) else {
@@ -268,16 +318,12 @@ impl Session {
                         continue;
                     }
                     return match r.result {
-                        Some(command_response::Result::Err(e)) => Err(e.code),
+                        Some(command_response::Result::Err(e)) => Err(e),
                         Some(command_response::Result::Ok(ok)) => Ok(ok),
                         None => Ok(CommandOk::default()),
                     };
                 }
-                if f.stream_id == STREAM_EVENTS && f.kind == kinds::POSITIONED_EVENT {
-                    *changed = true;
-                } else if f.stream_id >= agora_protocol::frame::FIRST_DYNAMIC_STREAM {
-                    term_frames.push_back(f);
-                }
+                set_aside(f, changed, kept, term_frames);
             }
         })
     }
@@ -291,7 +337,19 @@ impl Session {
         device: &Device,
         approved: bool,
     ) -> Result<bool, String> {
-        let Some(a) = snapshot.approvals.first() else {
+        self.resolve_approval(snapshot, device, approved, None)
+    }
+
+    /// Like [`Session::resolve_first_approval`], answering `agent`'s request when it has one (the agent the console points at), else
+    /// the first.
+    pub fn resolve_approval(
+        &mut self,
+        snapshot: &Snapshot,
+        device: &Device,
+        approved: bool,
+        agent: Option<&str>,
+    ) -> Result<bool, String> {
+        let Some(a) = answered_approval(snapshot, agent) else {
             return Ok(false);
         };
         // Hub-wide ids are `<node>/<local id>`; the machine knows the local one.
@@ -299,14 +357,22 @@ impl Session {
             .approval_id
             .split_once('/')
             .unwrap_or(("", a.approval_id.as_str()));
+        // ADR-0057: a start is decided over the request as shown (one start; grants are given in the web window).
+        let message = if a.action == "agent.start" {
+            crate::device::start_message(node, local, approved, 0, false, &a.detail)
+        } else {
+            approval_message(node, local, approved)
+        };
         let signature = device
-            .sign(&approval_message(node, local, approved))
+            .sign(&message)
             .ok_or_else(|| "client.sign".to_string())?;
         let cmd = command_request::Command::ApprovalResolve(agora_protocol::v1::ApprovalResolve {
             approval_id: local.to_string(),
             approved,
             signer_device_id: device.id.clone(),
             signature,
+            helper_grant: 0,
+            helpers_may_start: false,
         });
         self.command(node, cmd, Duration::from_secs(15))
             .map(|()| true)
@@ -352,6 +418,7 @@ impl Session {
         };
         let conn = &mut self.conn;
         let changed = &mut self.changed;
+        let kept = &mut self.snapshot;
         let term_frames = &mut self.term_frames;
         self.rt.block_on(async {
             conn.send(&Frame {
@@ -380,10 +447,8 @@ impl Session {
                             _ => Ok(stream),
                         };
                     }
-                } else if f.stream_id == STREAM_EVENTS && f.kind == kinds::POSITIONED_EVENT {
-                    *changed = true;
-                } else if f.stream_id >= agora_protocol::frame::FIRST_DYNAMIC_STREAM {
-                    term_frames.push_back(f);
+                } else {
+                    set_aside(f, changed, kept, term_frames);
                 }
             }
         })
@@ -416,6 +481,7 @@ impl Session {
         }
         let conn = &mut self.conn;
         let changed = &mut self.changed;
+        let kept = &mut self.snapshot;
         let queue = &mut self.term_frames;
         let grant_wanted = &mut self.grant_wanted;
         self.rt.block_on(async {
@@ -423,17 +489,15 @@ impl Session {
                 Err(_) => TermEvent::Quiet,
                 Ok(Ok(Some(f))) if f.stream_id == stream => event(&f).unwrap_or(TermEvent::Quiet),
                 Ok(Ok(Some(f))) => {
-                    if f.stream_id == STREAM_EVENTS && f.kind == kinds::POSITIONED_EVENT {
-                        *changed = true;
-                    } else if (f.stream_id, f.kind) == (STREAM_COMMANDS, 1) {
+                    if (f.stream_id, f.kind) == (STREAM_COMMANDS, 1) {
                         // The answer to something typed without waiting: only a missing grant matters.
                         if CommandResponse::decode(f.payload.as_slice())
                             .is_ok_and(|r| refused_for_grant(&r))
                         {
                             *grant_wanted = true;
                         }
-                    } else if f.stream_id >= agora_protocol::frame::FIRST_DYNAMIC_STREAM {
-                        queue.push_back(f);
+                    } else {
+                        set_aside(f, changed, kept, queue);
                     }
                     TermEvent::Quiet
                 }
@@ -466,17 +530,14 @@ impl Session {
         }
         let conn = &mut self.conn;
         let changed = &mut self.changed;
+        let kept = &mut self.snapshot;
         let queue = &mut self.term_frames;
         self.rt.block_on(async {
             match tokio::time::timeout(wait, conn.recv()).await {
                 Err(_) => ChatEvent::Quiet,
                 Ok(Ok(Some(f))) if f.stream_id == stream => take(&f).unwrap_or(ChatEvent::Quiet),
                 Ok(Ok(Some(f))) => {
-                    if f.stream_id == STREAM_EVENTS && f.kind == kinds::POSITIONED_EVENT {
-                        *changed = true;
-                    } else if f.stream_id >= agora_protocol::frame::FIRST_DYNAMIC_STREAM {
-                        queue.push_back(f);
-                    }
+                    set_aside(f, changed, kept, queue);
                     ChatEvent::Quiet
                 }
                 Ok(_) => ChatEvent::Lost,
@@ -496,6 +557,28 @@ impl Session {
         )
     }
 
+    /// ADR-0058: switches a chat agent's mode (`model == false`) or model to one of the ids it offered.
+    pub fn set_option(
+        &mut self,
+        node: &str,
+        agent_id: &str,
+        model: bool,
+        id: &str,
+    ) -> Result<(), String> {
+        let command = if model {
+            command_request::Command::AgentSetModel(agora_protocol::v1::AgentSetModel {
+                agent_id: agent_id.to_string(),
+                model: id.to_string(),
+            })
+        } else {
+            command_request::Command::AgentSetMode(agora_protocol::v1::AgentSetMode {
+                agent_id: agent_id.to_string(),
+                mode: id.to_string(),
+            })
+        };
+        self.command(node, command, Duration::from_secs(15))
+    }
+
     /// What the agents used so far, as the hub estimates it: total in micro-USD (the hub answers this itself, ADR-0033).
     pub fn usage_total(&mut self) -> Result<u64, String> {
         let ok = self.command_ok(
@@ -510,7 +593,177 @@ impl Session {
     }
 
     /// The agents a machine can start: `(kind, display name)` of the installed ones.
+    /// The folders inside `path` on `node` (ADR-0053 `directory.list`; empty `path` is the home folder there), with this device's
+    /// signature for exactly that folder.
+    pub fn list_folder(
+        &mut self,
+        node: &str,
+        path: &str,
+        authorization: agora_protocol::v1::DirectoryAuthorization,
+    ) -> Result<agora_protocol::v1::DirectoryEntries, String> {
+        let ok = self.command_ok(
+            node,
+            command_request::Command::DirectoryList(agora_protocol::v1::DirectoryList {
+                path: path.to_string(),
+                authorization: Some(authorization),
+            }),
+            Duration::from_secs(30),
+        )?;
+        match ok.result {
+            Some(command_ok::Result::DirectoryEntries(e)) => Ok(e),
+            _ => Err("protocol.invalid_message".into()),
+        }
+    }
+
+    /// What an agent changed, as a unified diff (what the web's review screen reads): its folder's (`workspace.query` "diff",
+    /// ADR-0053) or its worktree's (`git.diff`). Ids are the node's own (without the `node/` prefix).
+    pub fn diff(&mut self, node: &str, target: &Place) -> Result<String, String> {
+        let command = match target {
+            Place::Folder(id) => {
+                command_request::Command::WorkspaceQuery(agora_protocol::v1::WorkspaceQuery {
+                    workspace_id: id.clone(),
+                    operation: "diff".into(),
+                    ..Default::default()
+                })
+            }
+            Place::Worktree(id) => command_request::Command::GitDiff(agora_protocol::v1::GitDiff {
+                worktree_id: id.clone(),
+                path: String::new(),
+            }),
+        };
+        let ok = self.command_ok(node, command, Duration::from_secs(30))?;
+        match ok.result {
+            Some(command_ok::Result::GitDiff(d)) => Ok(d.diff),
+            _ => Err("protocol.invalid_message".into()),
+        }
+    }
+
+    /// The entries of `path` (relative, empty for the top) in an agent's folder or worktree, as the web's file browser lists them.
+    pub fn files_list(
+        &mut self,
+        node: &str,
+        place: &Place,
+        path: &str,
+    ) -> Result<Vec<agora_protocol::v1::FileEntry>, String> {
+        let command = match place {
+            Place::Folder(id) => {
+                command_request::Command::WorkspaceQuery(agora_protocol::v1::WorkspaceQuery {
+                    workspace_id: id.clone(),
+                    operation: "list".into(),
+                    path: path.to_string(),
+                    ..Default::default()
+                })
+            }
+            Place::Worktree(id) => {
+                command_request::Command::FilesList(agora_protocol::v1::FilesList {
+                    worktree_id: id.clone(),
+                    path: path.to_string(),
+                })
+            }
+        };
+        let ok = self.command_ok(node, command, Duration::from_secs(30))?;
+        match ok.result {
+            Some(command_ok::Result::FilesList(l)) => Ok(l.entries),
+            _ => Err("protocol.invalid_message".into()),
+        }
+    }
+
+    /// The bytes of the file at `path` in an agent's folder or worktree.
+    pub fn files_read(&mut self, node: &str, place: &Place, path: &str) -> Result<Vec<u8>, String> {
+        let command = match place {
+            Place::Folder(id) => {
+                command_request::Command::WorkspaceQuery(agora_protocol::v1::WorkspaceQuery {
+                    workspace_id: id.clone(),
+                    operation: "read".into(),
+                    path: path.to_string(),
+                    ..Default::default()
+                })
+            }
+            Place::Worktree(id) => {
+                command_request::Command::FilesRead(agora_protocol::v1::FilesRead {
+                    worktree_id: id.clone(),
+                    path: path.to_string(),
+                })
+            }
+        };
+        let ok = self.command_ok(node, command, Duration::from_secs(30))?;
+        match ok.result {
+            Some(command_ok::Result::FilesRead(r)) => Ok(r.data),
+            _ => Err("protocol.invalid_message".into()),
+        }
+    }
+
+    /// What `node` makes of a folder before an agent starts there (ADR-0052 `directory.inspect`): its canonical path and project.
+    pub fn inspect_folder(
+        &mut self,
+        node: &str,
+        path: &str,
+        authorization: agora_protocol::v1::DirectoryAuthorization,
+    ) -> Result<agora_protocol::v1::DirectoryInfo, String> {
+        let ok = self.command_ok(
+            node,
+            command_request::Command::DirectoryInspect(agora_protocol::v1::DirectoryInspect {
+                path: path.to_string(),
+                create_project_id: false,
+                authorization: Some(authorization),
+            }),
+            Duration::from_secs(30),
+        )?;
+        match ok.result {
+            Some(command_ok::Result::DirectoryInfo(i)) => Ok(i),
+            _ => Err("protocol.invalid_message".into()),
+        }
+    }
+
+    /// Starts an agent of `launch.kind` in an inspected folder (ADR-0052 `agent.launch`); answers its hub-wide id.
+    pub fn launch_in(
+        &mut self,
+        node: &str,
+        launch: agora_protocol::v1::AgentLaunch,
+    ) -> Result<String, String> {
+        let ok = self.command_ok(
+            node,
+            command_request::Command::AgentLaunch(launch),
+            Duration::from_secs(45),
+        )?;
+        match ok.result {
+            Some(command_ok::Result::AgentLaunch(r)) => Ok(format!("{node}/{}", r.agent_id)),
+            _ => Err("protocol.invalid_message".into()),
+        }
+    }
+
+    /// ADR-0060: brings back an interrupted agent (`agent.resume`, signed by this terminal's key for that agent and choice); answers
+    /// its hub-wide id. Errors keep the node's code and parameters for a localized reason.
+    pub fn resume_in(
+        &mut self,
+        node: &str,
+        resume: agora_protocol::v1::AgentResume,
+    ) -> Result<String, ErrorInfo> {
+        let ok = self.command_info(
+            node,
+            command_request::Command::AgentResume(resume),
+            Duration::from_secs(45),
+        )?;
+        match ok.result {
+            Some(command_ok::Result::AgentLaunch(r)) => Ok(format!("{node}/{}", r.agent_id)),
+            _ => Err(ErrorInfo {
+                code: "protocol.invalid_message".into(),
+                ..Default::default()
+            }),
+        }
+    }
+
     pub fn agent_kinds(&mut self, node: &str) -> Result<Vec<(String, String)>, String> {
+        Ok(self
+            .agent_kinds_all(node)?
+            .into_iter()
+            .filter(|(_, _, installed)| *installed)
+            .map(|(kind, name, _)| (kind, name))
+            .collect())
+    }
+
+    /// Every agent a machine offers: `(kind, display name, installed)`, the ones whose program the machine cannot find included.
+    pub fn agent_kinds_all(&mut self, node: &str) -> Result<Vec<(String, String, bool)>, String> {
         let ok = self.command_ok(
             node,
             command_request::Command::AgentKinds(agora_protocol::v1::AgentKinds {}),
@@ -521,16 +774,38 @@ impl Session {
         };
         Ok(k.kinds
             .into_iter()
-            .filter(|k| k.installed)
             .map(|k| {
                 let name = if k.display_name.is_empty() {
                     k.kind.clone()
                 } else {
                     k.display_name
                 };
-                (k.kind, name)
+                (k.kind, name, k.installed)
             })
             .collect())
+    }
+
+    /// ADR-0059: the launch options `kind` offers on `node` (none from an older machine or an unknown kind).
+    pub fn kind_options(
+        &mut self,
+        node: &str,
+        kind: &str,
+    ) -> Result<Vec<agora_protocol::v1::LaunchOption>, String> {
+        let ok = self.command_ok(
+            node,
+            command_request::Command::AgentKinds(agora_protocol::v1::AgentKinds {}),
+            Duration::from_secs(15),
+        )?;
+        let Some(command_ok::Result::AgentKinds(k)) = ok.result else {
+            return Ok(Vec::new());
+        };
+        Ok(usable_options(
+            k.kinds
+                .into_iter()
+                .find(|k| k.kind == kind)
+                .map(|k| k.launch_options)
+                .unwrap_or_default(),
+        ))
     }
 
     /// Starts an agent of `kind` in a project (its hub-wide id) on a machine; returns the agent's own id.
@@ -595,15 +870,110 @@ impl Session {
         )
     }
 
+    /// ADR-0061: registers this terminal's key and name with the hub under the signed-in person (a candidate for their machines, never
+    /// trust by itself). Sent after every sign-in; the hub keeps when it was last used.
+    pub fn register_device(&mut self, device: &Device, name: &str) -> Result<(), String> {
+        let registration = device
+            .registration(name, now_ms())
+            .ok_or_else(|| "client.sign".to_string())?;
+        self.command(
+            "",
+            command_request::Command::DeviceRegister(registration),
+            Duration::from_secs(15),
+        )
+    }
+
+    /// ADR-0061: the signed-in person's registered devices, as the hub lists them.
+    pub fn list_devices(&mut self) -> Result<Vec<agora_protocol::v1::DeviceInfo>, String> {
+        let ok = self.command_ok(
+            "",
+            command_request::Command::DeviceList(agora_protocol::v1::DeviceList {}),
+            Duration::from_secs(15),
+        )?;
+        match ok.result {
+            Some(command_ok::Result::DeviceList(l)) => Ok(l.devices),
+            _ => Ok(Vec::new()),
+        }
+    }
+
+    /// ADR-0061: asks the person's other devices to approve this one.
+    pub fn ask_approval(&mut self, device: &Device) -> Result<(), String> {
+        let ask = device
+            .ask(now_ms())
+            .ok_or_else(|| "client.sign".to_string())?;
+        self.command(
+            "",
+            command_request::Command::DeviceAskApproval(ask),
+            Duration::from_secs(15),
+        )
+    }
+
+    /// ADR-0061: this terminal vouches for `target` on every machine of the person; the hub carries it and each machine verifies it.
+    pub fn endorse_device(
+        &mut self,
+        device: &Device,
+        target: &agora_protocol::v1::DeviceInfo,
+    ) -> Result<(), String> {
+        let now = now_ms();
+        let endorsement = device
+            .endorse(target, &[], now)
+            .ok_or_else(|| "client.sign".to_string())?;
+        self.command(
+            "",
+            command_request::Command::DeviceEndorse(agora_protocol::v1::DeviceEndorse {
+                endorsement: Some(endorsement),
+            }),
+            Duration::from_secs(15),
+        )
+    }
+
     /// Stops an agent on a machine.
     pub fn stop_agent(&mut self, node: &str, agent_id: &str) -> Result<(), String> {
+        self.stop_agent_with(node, agent_id, false)
+    }
+
+    /// Stops an agent and, with `helpers`, the helpers it started and theirs (ADR-0057).
+    pub fn stop_agent_with(
+        &mut self,
+        node: &str,
+        agent_id: &str,
+        helpers: bool,
+    ) -> Result<(), String> {
         self.command(
             node,
             command_request::Command::AgentStop(agora_protocol::v1::AgentStop {
                 agent_id: agent_id.to_string(),
+                stop_helpers: helpers,
             }),
             Duration::from_secs(15),
         )
+    }
+
+    /// Removes a closed agent from every client's list (ADR-0053 `agent.forget`). The hub answers it itself, so it names no machine;
+    /// `agent_id` is the hub-wide `<node>/<id>`. `agent.running` while it runs. Errors keep the hub's code and parameters for
+    /// localized messages; other command helpers retain their code-only result.
+    pub fn forget_agent(&mut self, agent_id: &str) -> Result<(), ErrorInfo> {
+        self.command_info(
+            "",
+            command_request::Command::AgentForget(agora_protocol::v1::AgentForget {
+                agent_id: agent_id.to_string(),
+            }),
+            Duration::from_secs(15),
+        )
+        .map(|_| ())
+    }
+
+    /// ADR-0073: the hub stops listing an offline machine (owner only); `refuse_return` also refuses it if it connects again.
+    pub fn forget_node(&mut self, node_id: &str, refuse_return: bool) -> Result<(), ErrorInfo> {
+        self.command_info(
+            "",
+            command_request::Command::NodeForget(agora_protocol::v1::NodeForget {
+                node_id: node_id.to_string(),
+                refuse_return,
+            }),
+            Duration::from_secs(15),
+        )
+        .map(|_| ())
     }
 
     /// Keys typed into the terminal (an ordinary routed command; the machine runs them in the order sent). Fire and forget.
@@ -663,8 +1033,55 @@ impl Session {
     }
 }
 
+fn command_error(code: &str) -> ErrorInfo {
+    ErrorInfo {
+        code: code.to_string(),
+        ..Default::default()
+    }
+}
+
+/// The request `y` / `n` answer: `agent`'s when it has one, else the first waiting.
+pub fn answered_approval<'a>(
+    snapshot: &'a Snapshot,
+    agent: Option<&str>,
+) -> Option<&'a agora_protocol::v1::ApprovalSnapshot> {
+    agent
+        .and_then(|id| snapshot.approvals.iter().find(|a| a.agent_id == id))
+        .or_else(|| snapshot.approvals.first())
+}
+
 fn refused_for_grant(r: &CommandResponse) -> bool {
     matches!(&r.result, Some(command_response::Result::Err(e)) if e.code == "approval.grant_required")
+}
+
+/// Where an agent works, for asking its node about it ([`Session::diff`], [`Session::files_list`], [`Session::files_read`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Place {
+    /// A folder the agent was started in (a registered workspace), by the node's id for it.
+    Folder(String),
+    /// The agent's worktree, by the node's id for it.
+    Worktree(String),
+}
+
+/// Where to ask about `agent`'s work (its changes, its files), as the web does: the folder it is bound to when there is one, else its worktree; the
+/// machine and the node's own id. `None` when it has neither.
+pub fn place_of(snapshot: &Snapshot, agent: &str) -> Option<(String, Place)> {
+    let a = snapshot.agents.iter().find(|a| a.agent_id == agent)?;
+    let local = |id: &str| id.split_once('/').map_or(id, |(_, l)| l).to_string();
+    if let Some(w) = snapshot
+        .agent_workspaces
+        .iter()
+        .find(|b| b.agent_id == agent)
+        .filter(|b| {
+            snapshot
+                .workspaces
+                .iter()
+                .any(|w| w.workspace_id == b.workspace_id)
+        })
+    {
+        return Some((a.node_id.clone(), Place::Folder(local(&w.workspace_id))));
+    }
+    (!a.worktree_id.is_empty()).then(|| (a.node_id.clone(), Place::Worktree(local(&a.worktree_id))))
 }
 
 /// What a watched terminal said.
@@ -707,5 +1124,168 @@ mod name_tests {
         assert_eq!(n("192.168.1.2:7444").len(), 2);
         assert_eq!(n("[::1]:7444").len(), 2);
         assert_eq!(n("hub.example:7444").len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod answer_tests {
+    use super::answered_approval;
+    use agora_protocol::v1::{ApprovalSnapshot, Snapshot};
+
+    #[test]
+    fn y_and_n_answer_the_selected_agents_request_or_else_the_first() {
+        let req = |id: &str, agent: &str| ApprovalSnapshot {
+            approval_id: id.into(),
+            agent_id: agent.into(),
+            ..Default::default()
+        };
+        let s = Snapshot {
+            approvals: vec![req("m/1", "m/agent-1"), req("m/2", "m/agent-2")],
+            ..Default::default()
+        };
+        let id = |a: Option<&str>| answered_approval(&s, a).map(|x| x.approval_id.clone());
+        assert_eq!(id(Some("m/agent-2")).as_deref(), Some("m/2"));
+        assert_eq!(id(Some("m/agent-9")).as_deref(), Some("m/1"));
+        assert_eq!(id(None).as_deref(), Some("m/1"));
+        assert_eq!(
+            answered_approval(&Snapshot::default(), Some("m/agent-1")),
+            None
+        );
+    }
+}
+
+/// A frame that arrived while something else was waiting for its own: an event marks the hub's state changed, a snapshot is kept
+/// for [`Session::next`] (dropping it lost the hub's first one, which is not sent again: the console stayed at "Connecting…"), and
+/// a frame of a terminal or chat stream is queued for its reader. Anything else is not for a waiting caller.
+fn set_aside(
+    f: Frame,
+    changed: &mut bool,
+    kept: &mut Option<Box<Snapshot>>,
+    queue: &mut std::collections::VecDeque<Frame>,
+) {
+    if f.stream_id == STREAM_EVENTS && f.kind == kinds::POSITIONED_EVENT {
+        *changed = true;
+    } else if f.stream_id == STREAM_EVENTS && f.kind == kinds::SNAPSHOT {
+        if let Ok(s) = Snapshot::decode(f.payload.as_slice()) {
+            *kept = Some(Box::new(s));
+            // The snapshot is newer than any event before it.
+            *changed = false;
+        }
+    } else if f.stream_id >= agora_protocol::frame::FIRST_DYNAMIC_STREAM {
+        queue.push_back(f);
+    }
+}
+
+#[cfg(test)]
+mod set_aside_tests {
+    use super::*;
+
+    #[test]
+    fn a_snapshot_that_arrives_while_something_waits_is_kept_and_events_and_streams_are_not_lost() {
+        let (mut changed, mut kept, mut queue) = (false, None, std::collections::VecDeque::new());
+        let frame = |stream_id, kind, payload: Vec<u8>| Frame {
+            stream_id,
+            kind,
+            seq: None,
+            payload,
+        };
+        set_aside(
+            frame(STREAM_EVENTS, kinds::POSITIONED_EVENT, vec![]),
+            &mut changed,
+            &mut kept,
+            &mut queue,
+        );
+        assert!(changed && kept.is_none());
+        let s = Snapshot {
+            nodes: vec![agora_protocol::v1::NodeSnapshot {
+                node_id: "mac".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        set_aside(
+            frame(STREAM_EVENTS, kinds::SNAPSHOT, s.encode_to_vec()),
+            &mut changed,
+            &mut kept,
+            &mut queue,
+        );
+        assert_eq!(kept.as_deref(), Some(&s));
+        assert!(!changed, "a snapshot supersedes the events before it");
+        // An event after the snapshot is newer than it: it stays marked, so the caller asks again after taking the snapshot.
+        set_aside(
+            frame(STREAM_EVENTS, kinds::POSITIONED_EVENT, vec![]),
+            &mut changed,
+            &mut kept,
+            &mut queue,
+        );
+        assert!(changed && kept.is_some());
+        changed = false;
+        set_aside(
+            frame(
+                agora_protocol::frame::FIRST_DYNAMIC_STREAM,
+                0,
+                b"x".to_vec(),
+            ),
+            &mut changed,
+            &mut kept,
+            &mut queue,
+        );
+        assert_eq!(queue.len(), 1);
+        // A frame that is not for a waiting caller changes nothing.
+        set_aside(
+            frame(STREAM_COMMANDS, 1, vec![]),
+            &mut changed,
+            &mut kept,
+            &mut queue,
+        );
+        assert!(!changed && queue.len() == 1 && kept.is_some());
+    }
+}
+
+/// Milliseconds since the Unix epoch (0 before it).
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(0))
+}
+
+/// ADR-0059: the options a hub relayed that this window may offer: ids outside `[a-z0-9-]{1,32}` (a `!` or `,` in one, which a hub
+/// could use to make a signed id look like a confirmation or like two ids) are dropped before anything is shown or signed. The list
+/// is a display hint; the node decides which options skip permissions.
+pub fn usable_options(
+    options: Vec<agora_protocol::v1::LaunchOption>,
+) -> Vec<agora_protocol::v1::LaunchOption> {
+    options
+        .into_iter()
+        .filter(|o| {
+            !o.id.is_empty()
+                && o.id.len() <= 32
+                && o.id
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod launch_option_tests {
+    use super::usable_options;
+    use agora_protocol::v1::LaunchOption;
+
+    #[test]
+    fn ids_a_hub_could_abuse_are_never_offered() {
+        let o = |id: &str, skips| LaunchOption {
+            id: id.into(),
+            label: "option-skip-permissions".into(),
+            skips_permissions: skips,
+        };
+        let kept = usable_options(vec![
+            o("skip-permissions!", false),
+            o("a,b", false),
+            o("Skip", true),
+            o("", true),
+            o("skip-permissions", true),
+        ]);
+        assert_eq!(kept, vec![o("skip-permissions", true)]);
     }
 }

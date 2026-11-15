@@ -10,7 +10,7 @@
 //! Unknown or out-of-order facts are tolerated (a worktree event for an unseen checkout still records the
 //! worktree); the log is the truth, this is a cache.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use agora_protocol::v1::event::Body;
 use agora_protocol::v1::{AgentState, Event};
@@ -28,7 +28,32 @@ pub struct NodeView {
     pub agents_running: u32,
     pub terminals_open: u32,
     pub memory_used_bytes: u64,
+    /// When the node was last heard from: its latest event (node clock), or the hub's record of its link (ADR-0070, hub clock).
+    /// What the window shows as "last seen" for a machine that is offline.
     pub last_event_ms: u64,
+    /// The generation of the node's latest `NodeLink { up }` (ADR-0070); 0 when none was seen. A `NodeLink` with a lower one is
+    /// about a connection that was already replaced and changes nothing.
+    pub link_generation: u64,
+    /// ADR-0073: the owner had the hub forget this machine while it was offline. Clients are not shown it, or anything it ran, until
+    /// it connects again. Its records are kept (a machine that comes back has its folders again; usage still counts).
+    pub forgotten: bool,
+}
+
+impl NodeView {
+    fn unknown(online: bool) -> Self {
+        Self {
+            hostname: String::new(),
+            os: String::new(),
+            build: String::new(),
+            online,
+            agents_running: 0,
+            terminals_open: 0,
+            memory_used_bytes: 0,
+            last_event_ms: 0,
+            link_generation: 0,
+            forgotten: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,7 +67,21 @@ pub struct WorktreeView {
     pub head_commit: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// ADR-0058: what an agent's adapter reported about its session beyond tokens.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SessionView {
+    /// The last `AgentSessionOptions` (its `agent_id` is the node's local id).
+    pub options: Option<agora_protocol::v1::AgentSessionOptions>,
+    /// The context's level and size as last reported; 0 when never reported.
+    pub context_tokens: u64,
+    pub context_window: u64,
+    /// The sum of the cost the agent reported itself, in micro-units of `currency`; `None` when it reported none. A report in
+    /// another currency starts the sum again.
+    pub cost_micros: Option<u64>,
+    pub currency: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct AgentView {
     pub node_id: String,
     pub project_id: String,
@@ -58,6 +97,28 @@ pub struct AgentView {
     pub output_tokens: u64,
     /// The model the agent last reported; empty until it reports one.
     pub model: String,
+    /// ADR-0053: the owner had the hub forget this closed agent. It is no longer listed to clients; its tokens and cost still count.
+    pub forgotten: bool,
+    /// ADR-0058.
+    pub session: SessionView,
+    /// ADR-0057: the hub-wide key (`<node>/<agent>`) of the agent that started this one; empty when the user did.
+    pub parent_agent_id: String,
+    /// ADR-0059: the launch options it was started with, and whether it acts without asking (the badge).
+    pub launch_options: Vec<String>,
+    pub skips_permissions: bool,
+    /// ADR-0060: the node found this agent interrupted (running when the node stopped). Cleared by its next `AgentStarted`.
+    pub interrupted: Option<InterruptedView>,
+}
+
+/// ADR-0060: what `AgentInterrupted` said about an agent.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct InterruptedView {
+    /// Resume continues its own session; false: only Start again (a new session in the same folder).
+    pub resumable: bool,
+    pub at_ms: u64,
+    pub folder: String,
+    /// Its process from before the node's restart still runs: Stop it before Resume.
+    pub still_running: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,6 +134,8 @@ pub struct ApprovalView {
     pub action: String,
     pub detail: String,
     pub expires_at_ms: u64,
+    /// When the machine asked (its clock): with the answer's time, also the machine's, how long the agent waited.
+    pub requested_at_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,6 +163,11 @@ pub struct View {
     pub terminals: BTreeMap<String, TerminalView>,
     /// Approvals still waiting for an answer.
     pub approvals: BTreeMap<String, ApprovalView>,
+    /// ADR-0061: node id → the devices it said it trusts (its last `NodeTrustedDevices`).
+    pub trusted_devices: BTreeMap<String, Vec<String>>,
+    /// ADR-0073: the position of the latest event that brought a forgotten machine back. A client that last saw an earlier position
+    /// may not hold that machine's records (it joined while they were hidden), so it is given a snapshot, not a replay.
+    pub remembered_at: u64,
 }
 
 /// The hub-wide key of an entity a producer named with a local id.
@@ -113,6 +181,70 @@ pub fn split_key(key: &str) -> Option<(&str, &str)> {
 }
 
 impl View {
+    /// ADR-0073: whether `ev` brings a forgotten machine back: its link opening (from the hub, not about a replaced connection) or its
+    /// process starting.
+    pub fn brings_back(&self, ev: &Event) -> bool {
+        let node = match &ev.body {
+            Some(Body::NodeLink(e)) if ev.producer_id == RESERVED_HUB_ID && e.up => {
+                let replaced = e.reason == agora_protocol::v1::NodeLinkReason::Replaced as i32;
+                match self.nodes.get(&e.node_id) {
+                    Some(n) if !replaced && e.generation >= n.link_generation => e.node_id.as_str(),
+                    _ => return false,
+                }
+            }
+            Some(Body::NodeOnline(e)) => e.node_id.as_str(),
+            _ => return false,
+        };
+        self.nodes.get(node).is_some_and(|n| n.forgotten)
+    }
+
+    /// ADR-0073: a forgotten machine that connects again is listed again, with the agents it still runs. Agents that had closed
+    /// before it was forgotten stay forgotten.
+    fn remember_node(&mut self, node: &str) {
+        let Some(n) = self.nodes.get_mut(node) else {
+            return;
+        };
+        if !std::mem::take(&mut n.forgotten) {
+            return;
+        }
+        for a in self
+            .agents
+            .values_mut()
+            .filter(|a| a.node_id == node && a.running)
+        {
+            a.forgotten = false;
+        }
+    }
+
+    /// ADR-0073: the view clients are shown. A forgotten machine, and everything keyed under it (`<node>/...`: its folders, worktrees,
+    /// terminals, approvals and agents), is left out. Borrowed as it is when no machine is forgotten.
+    pub fn shown(&self) -> std::borrow::Cow<'_, View> {
+        let hidden: BTreeSet<&str> = self
+            .nodes
+            .iter()
+            .filter(|(_, n)| n.forgotten)
+            .map(|(id, _)| id.as_str())
+            .collect();
+        if hidden.is_empty() {
+            return std::borrow::Cow::Borrowed(self);
+        }
+        let mut v = self.clone();
+        let keep = |key: &String| !split_key(key).is_some_and(|(node, _)| hidden.contains(node));
+        v.nodes.retain(|id, _| !hidden.contains(id.as_str()));
+        v.checkouts
+            .retain(|k, c| keep(k) && !hidden.contains(c.0.as_str()));
+        v.worktrees.retain(|k, _| keep(k));
+        v.workspaces
+            .retain(|k, w| keep(k) && !hidden.contains(w.node_id.as_str()));
+        v.agent_workspaces.retain(|k, _| keep(k));
+        v.terminals.retain(|k, _| keep(k));
+        v.approvals.retain(|k, _| keep(k));
+        v.agents.retain(|k, _| keep(k));
+        v.trusted_devices
+            .retain(|id, _| !hidden.contains(id.as_str()));
+        std::borrow::Cow::Owned(v)
+    }
+
     pub fn apply(&mut self, ev: &Event) {
         let producer = ev.producer_id.as_str();
         let q = |id: &str| qualified(&ev.producer_id, id);
@@ -122,6 +254,10 @@ impl View {
             n.last_event_ms = n.last_event_ms.max(ev.at_ms);
         }
         match body {
+            Body::NodeTrustedDevices(e) => {
+                self.trusted_devices
+                    .insert(producer.to_string(), e.device_ids.clone());
+            }
             Body::WorkspaceStatusChanged(e) => {
                 if let Some(w) = self.workspaces.get_mut(&q(&e.workspace_id)) {
                     w.files_changed = e.files_changed;
@@ -139,8 +275,9 @@ impl View {
             }
 
             Body::NodeOnline(e) => {
-                // A node announces itself when its process starts, never when only the link to the hub comes back. So
-                // whatever it had running before is gone (agents die with the node) and its waiting approvals are lost.
+                // A node announces itself when its process starts, never when only the link to the hub comes back. A resync
+                // announcement (ADR-0054) leads with it only when the hub missed that start (ADR-0055). So whatever it had running
+                // before is gone (agents and their terminals die with the node) and its waiting approvals are lost.
                 for a in self
                     .agents
                     .values_mut()
@@ -151,16 +288,12 @@ impl View {
                 }
                 let prefix = format!("{}/", e.node_id);
                 self.approvals.retain(|k, _| !k.starts_with(&prefix));
-                let n = self.nodes.entry(e.node_id.clone()).or_insert(NodeView {
-                    hostname: String::new(),
-                    os: String::new(),
-                    build: String::new(),
-                    online: true,
-                    agents_running: 0,
-                    terminals_open: 0,
-                    memory_used_bytes: 0,
-                    last_event_ms: 0,
-                });
+                self.terminals.retain(|k, _| !k.starts_with(&prefix));
+                self.remember_node(&e.node_id);
+                let n = self
+                    .nodes
+                    .entry(e.node_id.clone())
+                    .or_insert_with(|| NodeView::unknown(true));
                 n.hostname = e.hostname.clone();
                 n.os = e.os.clone();
                 n.build = e.build.clone();
@@ -172,6 +305,45 @@ impl View {
                     n.online = false;
                 }
             }
+            // ADR-0070: the hub's record of a node's connection. Only the hub writes it; one that claims to come from a node is
+            // ignored (the session refuses it too). It never touches the node's agents: a link that goes down and up is not a
+            // process start.
+            Body::NodeLink(e) if producer == RESERVED_HUB_ID => {
+                let n = match self.nodes.get_mut(&e.node_id) {
+                    Some(n) => n,
+                    // A link that opens before the node's first `NodeOnline` arrives: the node is known from here on.
+                    None if e.up => self
+                        .nodes
+                        .entry(e.node_id.clone())
+                        .or_insert_with(|| NodeView::unknown(true)),
+                    None => return,
+                };
+                n.last_event_ms = n.last_event_ms.max(e.last_heard_ms);
+                // About a connection older than the latest one that opened: stale. A replaced connection's end never makes the
+                // node offline either, since the newer connection is up.
+                let stale = e.generation < n.link_generation
+                    || e.reason == agora_protocol::v1::NodeLinkReason::Replaced as i32;
+                if !stale {
+                    n.online = e.up;
+                    if e.up {
+                        n.link_generation = e.generation;
+                    }
+                }
+                if e.up && !stale {
+                    self.remember_node(&e.node_id);
+                }
+            }
+            Body::NodeLink(_) => {}
+            // ADR-0073: written by the hub only, for a machine that is offline.
+            Body::NodeForgotten(e) if producer == RESERVED_HUB_ID => {
+                if let Some(n) = self.nodes.get_mut(&e.node_id) {
+                    n.forgotten = true;
+                }
+                for a in self.agents.values_mut().filter(|a| a.node_id == e.node_id) {
+                    a.forgotten = true;
+                }
+            }
+            Body::NodeForgotten(_) => {}
             Body::NodeResources(e) => {
                 if let Some(n) = self.nodes.get_mut(&e.node_id) {
                     n.agents_running = e.agents_running;
@@ -229,8 +401,62 @@ impl View {
                         input_tokens: 0,
                         output_tokens: 0,
                         model: String::new(),
+                        forgotten: false,
+                        session: SessionView::default(),
+                        parent_agent_id: if e.parent_agent_id.is_empty() {
+                            String::new()
+                        } else {
+                            q(&e.parent_agent_id)
+                        },
+                        interrupted: None,
+                        launch_options: e.launch_options.clone(),
+                        skips_permissions: e.skips_permissions,
                     },
                 );
+            }
+            // ADR-0060: kept with the closed agents ("finished"), with what Resume or Start again needs. An agent the hub never saw
+            // (its store was reset) is listed from the event alone.
+            Body::AgentInterrupted(e) => {
+                let a = self
+                    .agents
+                    .entry(q(&e.agent_id))
+                    .or_insert_with(|| AgentView {
+                        node_id: producer.to_string(),
+                        project_id: e.project_id.clone(),
+                        worktree_id: q(""),
+                        kind: e.kind.clone(),
+                        state: AgentState::Done,
+                        reported: false,
+                        session_id: None,
+                        running: false,
+                        exit_code: None,
+                        input_tokens: 0,
+                        output_tokens: 0,
+                        model: String::new(),
+                        forgotten: false,
+                        session: SessionView::default(),
+                        parent_agent_id: if e.parent_agent_id.is_empty() {
+                            String::new()
+                        } else {
+                            q(&e.parent_agent_id)
+                        },
+                        interrupted: None,
+                        launch_options: Vec::new(),
+                        skips_permissions: false,
+                    });
+                a.running = false;
+                a.state = AgentState::Done;
+                a.interrupted = Some(InterruptedView {
+                    resumable: e.resumable,
+                    at_ms: e.interrupted_at_ms,
+                    folder: e.folder.clone(),
+                    still_running: e.still_running,
+                });
+            }
+            Body::AgentSessionOptions(e) => {
+                if let Some(a) = self.agents.get_mut(&q(&e.agent_id)) {
+                    a.session.options = Some(e.clone());
+                }
             }
             Body::AgentStateChanged(e) => {
                 if let Some(a) = self.agents.get_mut(&q(&e.agent_id)) {
@@ -250,6 +476,24 @@ impl View {
                     if !e.model.is_empty() {
                         a.model.clone_from(&e.model);
                     }
+                    let s = &mut a.session;
+                    if e.context_tokens > 0 || e.context_window > 0 {
+                        s.context_tokens = e.context_tokens;
+                        s.context_window = e.context_window;
+                    }
+                    if let Some(c) = e.cost_micros.filter(|_| !e.currency.is_empty()) {
+                        if s.currency != e.currency {
+                            s.currency.clone_from(&e.currency);
+                            s.cost_micros = None;
+                        }
+                        s.cost_micros = Some(s.cost_micros.unwrap_or(0).saturating_add(c));
+                    }
+                }
+            }
+            // ADR-0053: the id is the hub-wide key (the hub made this event); history and usage stay.
+            Body::AgentForgotten(e) => {
+                if let Some(a) = self.agents.get_mut(&e.agent_id) {
+                    a.forgotten = true;
                 }
             }
             Body::AgentExited(e) => {
@@ -285,6 +529,7 @@ impl View {
                         action: e.action.clone(),
                         detail: e.detail.clone(),
                         expires_at_ms: e.expires_at_ms,
+                        requested_at_ms: ev.at_ms,
                     },
                 );
             }
@@ -331,7 +576,11 @@ impl View {
                 };
                 self.leases.remove(&format!("{agent}\0{}", l.path));
             }
-            Body::MessagePosted(_) | Body::HandoffCreated(_) | Body::FilesChanged(_) => {}
+            // ADR-0057: a refused start changes no view; it is in the store and the audit trail.
+            Body::MessagePosted(_)
+            | Body::HandoffCreated(_)
+            | Body::FilesChanged(_)
+            | Body::AgentStartRefused(_) => {}
         }
     }
 
@@ -349,6 +598,9 @@ impl View {
                 pos = e.pos;
                 // A payload that does not decode was stored by a newer build; skip it rather than fail.
                 if let Ok(ev) = Event::decode(e.payload.as_slice()) {
+                    if view.brings_back(&ev) {
+                        view.remembered_at = pos;
+                    }
                     view.apply(&ev);
                 }
             }
@@ -396,6 +648,9 @@ mod tests {
             worktree_id: "w".into(),
             kind: "claude-code".into(),
             level: 2,
+            parent_agent_id: String::new(),
+            launch_options: Vec::new(),
+            skips_permissions: false,
         })
     }
 
@@ -405,6 +660,223 @@ mod tests {
             state: s as i32,
             reported,
         })
+    }
+
+    #[test]
+    fn an_interrupted_agent_stays_closed_until_it_starts_again_and_one_never_seen_is_listed() {
+        let online = Body::NodeOnline(NodeOnline {
+            node_id: "n1".into(),
+            hostname: "laptop".into(),
+            os: "linux".into(),
+            build: "b".into(),
+        });
+        let interrupted = |id: &str, resumable: bool| {
+            Body::AgentInterrupted(AgentInterrupted {
+                agent_id: id.into(),
+                kind: "claude-code".into(),
+                project_id: "p".into(),
+                folder: "/work/a".into(),
+                parent_agent_id: String::new(),
+                resumable,
+                started_at_ms: 1,
+                interrupted_at_ms: 99,
+                last_state: AgentState::Working as i32,
+                still_running: false,
+            })
+        };
+        let mut v = View::default();
+        v.apply(&ev("n1", 1, online.clone()));
+        v.apply(&ev("n1", 2, started("a")));
+        v.apply(&ev(
+            "n1",
+            3,
+            Body::AgentUsageReported(AgentUsageReported {
+                agent_id: "a".into(),
+                input_tokens: 5,
+                ..Default::default()
+            }),
+        ));
+        // The node stops with the agent running and starts again.
+        v.apply(&ev("n1", 4, online));
+        v.apply(&ev("n1", 5, interrupted("a", true)));
+        let a = &v.agents["n1/a"];
+        assert!(!a.running);
+        assert_eq!(a.state, AgentState::Done);
+        assert_eq!(a.input_tokens, 5);
+        assert_eq!(
+            a.interrupted,
+            Some(InterruptedView {
+                resumable: true,
+                at_ms: 99,
+                folder: "/work/a".into(),
+                still_running: false,
+            })
+        );
+        // Said again by a resync: still one agent, still interrupted.
+        v.apply(&ev("n1", 6, interrupted("a", true)));
+        assert_eq!(v.agents.len(), 1);
+        // Resumed: its start clears it.
+        v.apply(&ev("n1", 7, started("a")));
+        assert!(v.agents["n1/a"].running && v.agents["n1/a"].interrupted.is_none());
+        // One the hub never saw start (its store was reset) is listed from the event alone.
+        v.apply(&ev("n1", 8, interrupted("b", false)));
+        let b = &v.agents["n1/b"];
+        assert!(!b.running && b.interrupted.as_ref().is_some_and(|i| !i.resumable));
+        assert_eq!(
+            (b.kind.as_str(), b.project_id.as_str()),
+            ("claude-code", "p")
+        );
+    }
+
+    fn link(node: &str, up: bool, reason: NodeLinkReason, generation: u64, heard: u64) -> Body {
+        Body::NodeLink(NodeLink {
+            node_id: node.into(),
+            up,
+            reason: reason as i32,
+            generation,
+            last_heard_ms: heard,
+        })
+    }
+
+    fn node_online(node: &str) -> Body {
+        Body::NodeOnline(NodeOnline {
+            node_id: node.into(),
+            hostname: "h".into(),
+            os: "linux".into(),
+            build: "b".into(),
+        })
+    }
+
+    /// ADR-0070: the hub's `NodeLink` decides `online`, a reconnect touches nothing the node runs, and "last seen" is when the hub
+    /// last heard from it.
+    #[test]
+    fn a_link_that_goes_down_and_up_changes_presence_only() {
+        let mut v = View::default();
+        v.apply(&ev(
+            "hub",
+            1,
+            link("n1", true, NodeLinkReason::Opened, 1, 5),
+        ));
+        v.apply(&ev("n1", 1, node_online("n1")));
+        v.apply(&ev("n1", 2, started("a1")));
+        assert!(v.nodes["n1"].online);
+        v.apply(&ev(
+            "hub",
+            2,
+            link("n1", false, NodeLinkReason::Silent, 1, 900),
+        ));
+        assert!(!v.nodes["n1"].online);
+        assert_eq!(v.nodes["n1"].last_event_ms, 900);
+        assert!(v.agents["n1/a1"].running, "offline is not finished");
+        v.apply(&ev(
+            "hub",
+            3,
+            link("n1", true, NodeLinkReason::Opened, 2, 2000),
+        ));
+        assert!(v.nodes["n1"].online);
+        assert!(v.agents["n1/a1"].running, "a reconnect resets nothing");
+        assert_eq!(v.nodes["n1"].link_generation, 2);
+    }
+
+    /// A late `up: false` about a connection that a newer one replaced never overrides the newer `up`.
+    #[test]
+    fn a_late_down_from_a_replaced_connection_is_ignored() {
+        let mut v = View::default();
+        v.apply(&ev(
+            "hub",
+            1,
+            link("n1", true, NodeLinkReason::Opened, 1, 1),
+        ));
+        v.apply(&ev(
+            "hub",
+            2,
+            link("n1", true, NodeLinkReason::Opened, 2, 2),
+        ));
+        v.apply(&ev(
+            "hub",
+            3,
+            link("n1", false, NodeLinkReason::Closed, 1, 3),
+        ));
+        assert!(v.nodes["n1"].online, "stale generation");
+        v.apply(&ev(
+            "hub",
+            4,
+            link("n1", false, NodeLinkReason::Replaced, 2, 4),
+        ));
+        assert!(v.nodes["n1"].online, "replaced never means offline");
+        v.apply(&ev(
+            "hub",
+            5,
+            link("n1", false, NodeLinkReason::Closed, 2, 5),
+        ));
+        assert!(!v.nodes["n1"].online);
+        // The time it was last heard still counts from any of them.
+        assert_eq!(v.nodes["n1"].last_event_ms, 5);
+    }
+
+    /// Old data (an older hub wrote only `NodeOnline` / `NodeOffline`) and new facts mix: the latest presence fact by position wins.
+    #[test]
+    fn old_and_new_presence_facts_mix_and_the_latest_wins() {
+        let mut v = View::default();
+        // Old hub: online from the node's start, offline from the hub.
+        v.apply(&ev("n1", 1, node_online("n1")));
+        v.apply(&ev(
+            "hub",
+            1,
+            Body::NodeOffline(NodeOffline {
+                node_id: "n1".into(),
+            }),
+        ));
+        assert!(!v.nodes["n1"].online);
+        // The hub was upgraded: the next connection says up.
+        v.apply(&ev(
+            "hub",
+            2,
+            link("n1", true, NodeLinkReason::Opened, 1, 50),
+        ));
+        assert!(v.nodes["n1"].online);
+        // A new hub also writes `NodeOffline` for older clients; it agrees with the `NodeLink` after it.
+        v.apply(&ev(
+            "hub",
+            3,
+            Body::NodeOffline(NodeOffline {
+                node_id: "n1".into(),
+            }),
+        ));
+        v.apply(&ev(
+            "hub",
+            4,
+            link("n1", false, NodeLinkReason::Closed, 1, 60),
+        ));
+        assert!(!v.nodes["n1"].online);
+        // A process start (the node's own `NodeOnline`) still says online, and resets what it ran (ADR-0055).
+        v.apply(&ev("n1", 2, started("a1")));
+        v.apply(&ev("n1", 3, node_online("n1")));
+        assert!(v.nodes["n1"].online);
+        assert!(!v.agents["n1/a1"].running);
+    }
+
+    /// Only the hub writes presence: a `NodeLink` that a node produced (the session refuses it too) changes nothing.
+    #[test]
+    fn a_node_cannot_claim_presence() {
+        let mut v = View::default();
+        v.apply(&ev(
+            "evil",
+            1,
+            link("victim", true, NodeLinkReason::Opened, 9, 1),
+        ));
+        assert!(!v.nodes.contains_key("victim"));
+        v.apply(&ev(
+            "hub",
+            1,
+            link("victim", true, NodeLinkReason::Opened, 1, 1),
+        ));
+        v.apply(&ev(
+            "evil",
+            2,
+            link("victim", false, NodeLinkReason::Closed, 1, 2),
+        ));
+        assert!(v.nodes["victim"].online);
     }
 
     #[test]
@@ -474,6 +946,147 @@ mod tests {
         assert_eq!(v.agents["n1/a"].state, AgentState::Done);
     }
 
+    /// ADR-0054: a node's resync announcement led by `NodeOnline` (a start the hub missed, ADR-0055) ends agents and terminals that
+    /// went away inside the lost events, and keeps the ones still running with their current state, session, terminal and approval.
+    #[test]
+    fn a_resync_announcement_ends_what_went_away_and_keeps_what_still_runs() {
+        let online = || {
+            Body::NodeOnline(NodeOnline {
+                node_id: "n1".into(),
+                hostname: "laptop".into(),
+                os: "linux".into(),
+                build: "b".into(),
+            })
+        };
+        let terminal = |agent: &str| {
+            Body::TerminalOpened(TerminalOpened {
+                terminal_id: format!("t-{agent}"),
+                node_id: "n1".into(),
+                purpose: TerminalPurpose::Agent as i32,
+                agent_id: agent.into(),
+            })
+        };
+        let approval = |id: &str, agent: &str| {
+            Body::ApprovalRequested(ApprovalRequested {
+                approval_id: id.into(),
+                agent_id: agent.into(),
+                action: "run_command".into(),
+                detail: String::new(),
+                expires_at_ms: 0,
+            })
+        };
+        let mut v = View::default();
+        // What the hub last heard: two agents with terminals, one waiting on an approval; another machine with its own.
+        let before = [
+            online(),
+            started("gone"),
+            terminal("gone"),
+            approval("x", "gone"),
+            started("kept"),
+            terminal("kept"),
+            state("kept", AgentState::Working, false),
+        ];
+        for (i, b) in before.into_iter().enumerate() {
+            v.apply(&ev("n1", i as u64 + 1, b));
+        }
+        v.apply(&ev(
+            "n2",
+            1,
+            Body::AgentStarted(AgentStarted {
+                agent_id: "other".into(),
+                node_id: "n2".into(),
+                ..Default::default()
+            }),
+        ));
+        v.apply(&ev("n2", 2, terminal("other")));
+        // Lost: `gone` exited, `kept` went blocked and asked for an approval. The announcement says what is true now.
+        let announcement = [
+            online(),
+            started("kept"),
+            state("kept", AgentState::Blocked, false),
+            Body::AgentSessionReported(AgentSessionReported {
+                agent_id: "kept".into(),
+                session_id: "s-1".into(),
+            }),
+            terminal("kept"),
+            approval("y", "kept"),
+        ];
+        for (i, b) in announcement.into_iter().enumerate() {
+            v.apply(&ev("n1", 50 + i as u64, b));
+        }
+        let gone = &v.agents["n1/gone"];
+        assert!(!gone.running);
+        assert_eq!(gone.state, AgentState::Done);
+        let kept = &v.agents["n1/kept"];
+        assert!(kept.running);
+        assert_eq!(kept.state, AgentState::Blocked);
+        assert_eq!(kept.session_id.as_deref(), Some("s-1"));
+        assert_eq!(
+            v.terminals.keys().collect::<Vec<_>>(),
+            ["n1/t-kept", "n2/t-other"],
+            "the ended agent's terminal is gone, the other machine's stays"
+        );
+        assert_eq!(v.approvals.keys().collect::<Vec<_>>(), ["n1/y"]);
+        assert!(v.agents["n2/other"].running);
+        assert_eq!(v.needs_attention(), ["n1/kept"]);
+    }
+
+    #[test]
+    fn an_agents_options_context_and_own_cost_are_kept() {
+        let mut v = View::default();
+        v.apply(&ev("n1", 1, started("a")));
+        let options = AgentSessionOptions {
+            agent_id: "a".into(),
+            modes: vec![SessionOption {
+                id: "plan".into(),
+                ..SessionOption::default()
+            }],
+            current_mode: "plan".into(),
+            ..AgentSessionOptions::default()
+        };
+        v.apply(&ev("n1", 2, Body::AgentSessionOptions(options.clone())));
+        let usage = |cost: Option<u64>, currency: &str, ctx: u64| {
+            Body::AgentUsageReported(AgentUsageReported {
+                agent_id: "a".into(),
+                cost_micros: cost,
+                currency: currency.into(),
+                context_tokens: ctx,
+                context_window: if ctx > 0 { 1000 } else { 0 },
+                ..AgentUsageReported::default()
+            })
+        };
+        v.apply(&ev("n1", 3, usage(Some(10), "USD", 100)));
+        v.apply(&ev("n1", 4, usage(Some(5), "USD", 0)));
+        let s = &v.agents["n1/a"].session;
+        assert_eq!(s.options.as_ref(), Some(&options));
+        assert_eq!(
+            (s.context_tokens, s.context_window),
+            (100, 1000),
+            "a report without a level keeps the last one"
+        );
+        assert_eq!((s.cost_micros, s.currency.as_str()), (Some(15), "USD"));
+        v.apply(&ev("n1", 5, usage(Some(7), "EUR", 0)));
+        let s = &v.agents["n1/a"].session;
+        assert_eq!(
+            (s.cost_micros, s.currency.as_str()),
+            (Some(7), "EUR"),
+            "another currency starts again"
+        );
+    }
+
+    #[test]
+    fn a_helper_names_its_parent_by_hub_wide_key() {
+        let mut v = View::default();
+        v.apply(&ev("n1", 1, started("a")));
+        let mut helper = started("b");
+        if let Body::AgentStarted(s) = &mut helper {
+            s.parent_agent_id = "a".into();
+        }
+        v.apply(&ev("n1", 2, helper));
+        assert_eq!(v.agents["n1/b"].parent_agent_id, "n1/a");
+        assert_eq!(v.agents["n1/a"].parent_agent_id, "");
+    }
+
     #[test]
     fn agent_lifecycle_tracks_state_usage_and_exit() {
         let mut v = View::default();
@@ -490,6 +1103,7 @@ mod tests {
                     model: "m".into(),
                     input_tokens: 5,
                     output_tokens: 7,
+                    ..Default::default()
                 }),
             ));
         }
@@ -555,6 +1169,8 @@ mod tests {
                 approval_id: "x".into(),
                 approved: true,
                 signer_device_id: "d".into(),
+                helper_grant: 0,
+                helpers_may_start: false,
             }),
         ));
         assert_eq!(v.needs_attention(), ["n1/a"]);

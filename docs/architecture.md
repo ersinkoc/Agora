@@ -104,10 +104,17 @@ Owner/Team ─┬─ Node ── Checkout ── Worktree
   projects (`agora project init` gives them one explicit id). A standalone folder has a
   node-local identity, without a fabricated Git commit. Metadata never grants access. Changed confirmed bindings
   require explicit owner confirmation. (ADR-0003, ADR-0052)
+  The hub resolves board membership from both discovered checkouts and registered selected workspaces, by project identity
+  and online node ID; selecting a directory after the daemon starts participates in the same shared board.
+  Running agents retain membership in their reported project until they exit, even if the owner confirms a new identity for
+  their folder. A metadata change does not strand their existing tasks or leases on a different broker.
 - **Workspace:** an owner-selected canonical directory, possibly a subdirectory or non-Git folder. Several agents
   may share one workspace. New `directory.inspect` / `agent.launch` commands use this directory by default;
   explicit worktree mode creates an isolated branch and preserves the selected subdirectory. Legacy `agent.start`
   keeps creating a worktree. Session resume preserves its cwd. The node never cleans or removes user-owned folders.
+  After creating a worktree for a pending start, the node retains its branch and initial commit as a rollback receipt.
+  Failed injection or process/adapter launch removes that worktree and only its unchanged, unused direct branch;
+  failed removal preserves the branch. Ordinary worktree removal and successful sessions preserve their branches.
 - **Integration configuration:** directory-mode L1 agents receive separate per-session MCP configuration below the
   node's worktree storage, via existing manifest CLI/environment injection. User files are preserved. Manifests
   whose MCP support requires a fixed in-project config file need explicit worktree mode. L2/L3 hosted sessions

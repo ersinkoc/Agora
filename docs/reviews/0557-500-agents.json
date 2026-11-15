@@ -1,0 +1,28 @@
+{
+ "fleet": "10x5x10",
+ "agents": 500,
+ "fixture": "static-fleet-no-live-nodes-or-terminal-streams",
+ "domRowsReadyMs": 139,
+ "rows": 500,
+ "treeNodes": 3810,
+ "pageNodes": 4901,
+ "heapMB": 11,
+ "scrollFrameMs": {
+  "p50": 16.9,
+  "p95": 24.4,
+  "max": 32.9
+ },
+ "longTasksWhileScrolling": 0,
+ "longTasksWhilePicking": 0,
+ "longTasksWhileFiltering": 0,
+ "longTasksOutsidePhases": 0,
+ "longTasksTotal": 0,
+ "pickToFrameMs": {
+  "p50": 29,
+  "p95": 37.4
+ },
+ "filterToFrameMs": {
+  "p50": 21.3,
+  "p95": 31.3
+ }
+}

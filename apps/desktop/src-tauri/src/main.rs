@@ -37,10 +37,10 @@ fn waiting(title: &str) -> u32 {
         .unwrap_or(0)
 }
 
-/// Shows one OS notification that `count` approvals are waiting. Clicking it brings the app forward (the system's default), where
-/// the home screen lists them; it carries no approval content.
+/// Shows one system notification that `count` approvals are waiting, through the system's own notifier on a thread of its own (the
+/// window's events never wait for it). Clicking it brings the app forward (the system's default), where the home screen lists them;
+/// it carries no approval content.
 fn notify_waiting(app: &tauri::AppHandle, count: u32) {
-    use tauri_plugin_notification::NotificationExt;
     let tag = app
         .state::<Locale>()
         .0
@@ -48,17 +48,18 @@ fn notify_waiting(app: &tauri::AppHandle, count: u32) {
         .map(|l| l.clone())
         .unwrap_or_default();
     let words = agora_i18n::catalog::Catalog::for_locale(&tag);
-    let n = i64::from(count);
     let (Some(title), Some(body)) = (
         words.render("notify-title", &[]),
         words.render(
             "notify-desktop-approvals",
-            &[("count", agora_i18n::catalog::Arg::Num(n))],
+            &[("count", agora_i18n::catalog::Arg::Num(i64::from(count)))],
         ),
     ) else {
         return;
     };
-    let _ = app.notification().builder().title(title).body(body).show();
+    std::thread::spawn(move || {
+        let _ = agora_platform::desktop_notify(&title, &body);
+    });
 }
 
 /// The shell's own screen reports the system language once (`navigator.language`).
@@ -140,9 +141,37 @@ fn forget(app: tauri::AppHandle, tunnels: State<'_, Tunnels>) -> Result<(), Stri
 
 fn main() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_notification::init())
         .manage(Tunnels::default())
         .manage(Locale(Mutex::new(agora_i18n::catalog::locale_from_env())))
+        // The window is made here rather than from the config alone so its title follows the page's: the hub's page puts the number
+        // of approvals waiting in its title, and the taskbar shows the window's. When that number grows while the window is out of
+        // sight (hidden, minimized or not focused), one system notification says so (ADR-0048 decision 5).
+        .setup(|app| {
+            let config = app
+                .config()
+                .app
+                .windows
+                .first()
+                .cloned()
+                .ok_or("tauri.conf.json has no window")?;
+            tauri::WebviewWindowBuilder::from_config(app.handle(), &config)?
+                .on_document_title_changed({
+                    let last = Arc::new(AtomicU32::new(0));
+                    move |window, title| {
+                        let _ = window.set_title(&title);
+                        let now = waiting(&title);
+                        let before = last.swap(now, Ordering::Relaxed);
+                        let away = !window.is_visible().unwrap_or(true)
+                            || window.is_minimized().unwrap_or(false)
+                            || !window.is_focused().unwrap_or(true);
+                        if now > before && away {
+                            notify_waiting(window.app_handle(), now);
+                        }
+                    }
+                })
+                .build()?;
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             ca_fingerprint,
             saved,
@@ -150,32 +179,6 @@ fn main() {
             forget,
             use_locale
         ])
-        .setup(|app| {
-            // The window from the configuration, plus a watch on its title: when the page's count of waiting approvals grows while
-            // the window is out of sight, one notification (ADR-0048 decision 5).
-            let config = app
-                .config()
-                .app
-                .windows
-                .iter()
-                .find(|w| w.label == "main")
-                .cloned()
-                .ok_or("no main window in tauri.conf.json")?;
-            let last = Arc::new(AtomicU32::new(0));
-            tauri::WebviewWindowBuilder::from_config(app.handle(), &config)?
-                .on_document_title_changed(move |window, title| {
-                    let now = waiting(&title);
-                    let before = last.swap(now, Ordering::Relaxed);
-                    let away = !window.is_visible().unwrap_or(true)
-                        || window.is_minimized().unwrap_or(false)
-                        || !window.is_focused().unwrap_or(true);
-                    if now > before && away {
-                        notify_waiting(window.app_handle(), now);
-                    }
-                })
-                .build()?;
-            Ok(())
-        })
         .run(tauri::generate_context!())
         .expect("the desktop shell could not start");
 }

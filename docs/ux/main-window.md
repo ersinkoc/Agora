@@ -1,5 +1,54 @@
 # Main window
 
+![Window, dark](screens/window-ide-dark.png)
+![Window, light](screens/window-ide-light.png)
+![Terminals side by side](screens/window-ide-grid.png)
+![Full size](screens/window-full-dark.png)
+![Start an agent](screens/window-start-chosen-dark.png)
+
+## Browsing folders
+
+![Folder picker](screens/window-folder-picker-dark.png)
+
+**Browse folders** under the working-folder field opens a list of the machine's sub-folders (`directory.list`, ADR-0053; it starts in the home folder, or the typed path when there is one). Click a folder to step into it, the arrow goes up one, a Git project is marked, and **Use this folder** continues as if the path had been typed (the machine still resolves and shows it before anything starts). A machine without the command keeps the typed path.
+
+## Closed agents
+
+![A closed agent's summary](screens/window-closed-dark.png)
+
+An agent whose process is gone moves from its folder to **Closed**, below the machines, with how long ago it ended; a failed one is marked. Opening it shows a summary (how it ended, when, for how long, folder and branch, files left behind with Review/History/Files, tokens and cost), **Start an agent** on this machine and **Remove from the list**. **Clear closed** removes them all. **Remove from this list** is remembered in this browser only; **Remove for everyone** asks the hub to forget the agent (`agent.forget`, ADR-0053): every client stops listing it, while its earlier events and its cost stay in the hub's record. A hub without the command answers with an error and the agent is only hidden here.
+
+## Hub and machines
+
+![Hub and machines](screens/network-dark.png)
+
+`#/machines` draws the hub with a live link to every machine it knows (animated when connected, dotted when not), a card per machine (state, system, node version, agents, terminals, memory, cost, when it was last heard, or for an offline one "last seen", ADR-0070) and the agents running there as chips. An offline machine also shows "last seen" on its row in the agent list and in its tooltip.
+
+**Old machines** (ADR-0073): a machine not seen for more than a day is listed apart, folded, under **n old machines**, and is not
+offered for new agents. An offline machine has **Forget…**, and the old ones have **Clean up…**: one dialog lists them, ticked,
+with when each was last seen and how many agents were running then, and one box also refuses them if they connect again (a new join
+code is needed then). The hub forgets them for every window (`node.forget`, owner only); what they did stays in the history and the
+costs, and a machine that connects again comes back with the agents it still runs. `agora hub machines` does the same from the hub's
+machine.
+
+![Old machines](screens/old-machines-dark.png)
+![Cleaning up old machines](screens/old-machines-cleanup-light.png)
+
+## Layout (editor-style, 2026-11-12)
+
+The window is laid out like an editor, with the terminal as the content. At most two side panels are visible (visual-language.md); each hides with its button.
+
+- **Title bar:** product mark, the search and command field (Ctrl+K), connection state, language, device.
+- **Left, Agents:** a tree of machine, folder, agent. A machine row has a start button (visible on hover and focus). Agents show their state shape, shared-folder label and changed-file count. The project filter and search narrow the tree. Clicking an agent opens it as a tab; clicking the one in front closes it.
+- **Middle, panes (ADR-0068, [layout.md](layout.md)):** a layout of panes and tab groups: one pane with a tab per watched agent by default, or 1x2, 2x1, 2x2, 3x2 and one large with three small from the **Layout** menu in the title bar, saved by name, exported and imported. Panes are split, resized by their dividers, dragged onto each other, maximized and restored; a pane can follow what needs you or the selected agent. Above each terminal: machine, folder and branch, changed files, cost, state, History, Files, Full size, and the copyable agent address.
+- **Right, Details:** tabs for Needs you (opens first whenever something needs you), Changes, Board, Messages, Spent.
+- **Status bar:** machines online, agents, how many need you, cost so far.
+- **Empty state:** a start button, the agents that are running, and the two keyboard shortcuts.
+- **One terminal in several windows:** a terminal open in more than one window (two machines, or a phone and a laptop) has the size of the smallest of them, so it fits every one; a bigger window shows it at its top left with a thin line where it ends, and gets its own size back as soon as the smaller window closes it. A terminal client on the machine itself still sets the size it wants (ADR-0072; docs/specs/protocol.md, "Shared terminal size").
+- **Phones:** a single column instead of this window: what needs you, machines and agents, then one agent (ADR-0067 rung 2, [phone.md](phone.md)). A tablet keeps this window; on a touch screen its terminals get the key bar.
+
+The older three-column description below stays valid for what each area holds.
+
 Agreed layout (2026-11-06). Three columns plus a top bar, shown in the **Focus** layer.
 
 Default state follows `visual-language.md`: the window opens on **Home** (Glance: attention strip + fleet of
@@ -27,6 +76,21 @@ permanent section. Labels below use internal terms; the UI uses the vocabulary i
 ## Right column: project context
 - **Files**: lazy tree of the project checkout on the selected agent's node. Badges for added/modified;
   lock icon for files under a lease.
+  Built today (web, read-only; `apps/web/src/components/FilesView.tsx`), in the Files window and in a pane ("Show… → This
+  agent's files", beside its terminal):
+  - The tree marks each changed file with its status letter, and each folder that holds one with a dot. "N changed" lists only
+    the changed files, and a name filter searches every file listed so far.
+  - Open files are tabs. The path bar's folders open the tree down to the file.
+  - The file shows with line numbers and marks in the gutter (added, changed, removed above), read again whenever the node's
+    count of changed files moves. The text is drawn a screenful at a time.
+  - Ctrl F finds in the file (a query with a capital letter matches case exactly; otherwise every case form matches, Turkish `i`/`İ`
+    and `ı`/`I` included). `/` filters the tree. The whole file can be copied.
+  - The tree is one Tab stop: arrows move between the items shown, Right opens a folder and goes into it, Left goes back up and
+    closes it, Home and End go to the ends.
+  - When the changes are larger than 512 KiB, the files after the cut carry no mark, and the tree says so with the machine's count.
+  - In a narrow pane the tree sits above the file.
+  - Syntax colours (highlight.js, loaded on demand) for files up to 128 KiB in about 25 languages, chosen by file name.
+  - Not built yet: lease locks, editing.
 - **Changes**: workspace diff summary (+/−); shared folders appear once and have a shared-folder label. No per-agent attribution is implied. Opens the review screen (`review.md`).
 - **Mesh**: project channels with unread counts; task board progress (`task-board.md`).
 - **Usage**: tokens and estimated cost for the selected agent and project (`../design/usage-and-cost.md`).
@@ -38,6 +102,8 @@ permanent section. Labels below use internal terms; the UI uses the vocabulary i
 See `experience.md`. Command palette, attention flow, and fleet view are part of this window.
 
 ## Start an agent (ADR-0052)
+
+One window: **Machine** chips, then **Working folder** (a known folder in one click, or a typed path), then **Agent** chips and options. Choosing the folder shows the resolved folder, branch and the rule that nothing is changed before anything starts.
 
 Choose an online **Machine**, a known **Project** or another **Working folder** on that machine, then **Use this folder**.
 The canonical folder is shown before choosing an agent and starting it. Default launch uses exactly this folder; it does not

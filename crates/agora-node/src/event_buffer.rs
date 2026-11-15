@@ -248,8 +248,73 @@ impl DiskEventLog {
         self.ack(next - 1)
     }
 
+    /// The first retained event, acknowledged or not, for which `pick` says yes, read from disk one record at a time (a start-up
+    /// check must not hold the whole backlog in memory). Acknowledged events count too: a resync replays from the oldest retained.
+    pub fn find_retained(
+        &self,
+        mut pick: impl FnMut(&[u8]) -> bool,
+    ) -> io::Result<Option<Vec<u8>>> {
+        let Some(start) = self.offsets.first() else {
+            return Ok(None);
+        };
+        let mut f = File::open(self.dir.join("events.log"))?;
+        f.seek(SeekFrom::Start(*start))?;
+        let mut reader = io::BufReader::new(f.take(self.end - start));
+        while let Some(p) = read_record(&mut reader) {
+            if pick(&p) {
+                return Ok(Some(p));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Whether this log holds or numbered anything (a fresh log holds nothing and starts at 1).
+    pub fn is_pristine(&self) -> bool {
+        self.offsets.is_empty() && self.first_seq == 1 && self.acked == 0
+    }
+
+    /// Moves this log out of the way, never deleting it: `events.log` becomes `events.<label>.<unix_secs>.log` in the same folder
+    /// (and the ack file `events.<label>.<unix_secs>.ack`), with `-2`, `-3`, ... added when that name is taken. `label` is reduced
+    /// to `[A-Za-z0-9._-]` (others become `_`, at most 64 characters). Returns the new path of the log; opening the folder
+    /// afterwards starts a fresh, empty log numbered from 1.
+    pub fn set_aside(self, label: &str, unix_secs: u64) -> io::Result<PathBuf> {
+        let Self { dir, file, .. } = self;
+        drop(file);
+        let label: String = label
+            .chars()
+            .take(64)
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let label = if label.is_empty() { "_".into() } else { label };
+        let mut stem = format!("events.{label}.{unix_secs}");
+        let mut n = 1;
+        while dir.join(format!("{stem}.log")).exists() || dir.join(format!("{stem}.ack")).exists() {
+            n += 1;
+            stem = format!("events.{label}.{unix_secs}-{n}");
+        }
+        let log = dir.join(format!("{stem}.log"));
+        fs::rename(dir.join("events.log"), &log)?;
+        let ack = dir.join("ack");
+        if ack.exists() {
+            fs::rename(ack, dir.join(format!("{stem}.ack")))?;
+        }
+        Ok(log)
+    }
+
     /// Events after `after`, in order, for replay following a reconnect (`after` is the consumer's ack).
     pub fn replay_after(&self, after: u64) -> Result<Vec<Vec<u8>>, ReplayError> {
+        self.replay_after_max(after, usize::MAX)
+    }
+
+    /// Like [`replay_after`](Self::replay_after), at most `max` events, reading only those from disk (one uplink batch
+    /// must not cost a read of the whole backlog).
+    pub fn replay_after_max(&self, after: u64, max: usize) -> Result<Vec<Vec<u8>>, ReplayError> {
         if after.saturating_add(1) < self.first_seq {
             return Err(ReplayError::Stale {
                 oldest_retained: self.first_seq,
@@ -259,10 +324,15 @@ impl DiskEventLog {
         let Some(start) = self.offsets.get(idx) else {
             return Ok(Vec::new());
         };
+        let stop = self
+            .offsets
+            .get(idx.saturating_add(max))
+            .copied()
+            .unwrap_or(self.end);
         let mut f = File::open(self.dir.join("events.log"))?;
         f.seek(SeekFrom::Start(*start))?;
-        let mut reader = io::BufReader::new(f.take(self.end - start));
-        let mut out = Vec::with_capacity(self.offsets.len() - idx);
+        let mut reader = io::BufReader::new(f.take(stop - start));
+        let mut out = Vec::with_capacity((self.offsets.len() - idx).min(max));
         while let Some(p) = read_record(&mut reader) {
             out.push(p);
         }
@@ -271,7 +341,8 @@ impl DiskEventLog {
 
     /// Reclaim acknowledged events once enough of the file is dead weight.
     fn compact(&mut self) -> io::Result<()> {
-        let dead = usize::try_from(self.acked + 1 - self.first_seq)
+        // The size cap may already have dropped events past the ack: then nothing retained is acknowledged.
+        let dead = usize::try_from((self.acked + 1).saturating_sub(self.first_seq))
             .unwrap_or(0)
             .min(self.offsets.len());
         if dead == 0 {
@@ -296,7 +367,8 @@ impl DiskEventLog {
         if keep_from == 0 {
             return Ok(0);
         }
-        let first_dropped_unacked = self.acked + 1;
+        // Events before `first_seq` were dropped (and counted) by an earlier eviction.
+        let first_dropped_unacked = (self.acked + 1).max(self.first_seq);
         let last_dropped = self.first_seq + keep_from as u64 - 1;
         let evicted = if last_dropped >= first_dropped_unacked {
             last_dropped - first_dropped_unacked + 1
@@ -399,6 +471,19 @@ mod tests {
     }
 
     #[test]
+    fn a_bounded_replay_reads_at_most_max_events_with_the_same_rules() {
+        let mut log = DiskEventLog::open(&dir(), 1 << 20).unwrap();
+        for i in 1..=5 {
+            log.append(&ev(i)).unwrap();
+        }
+        assert_eq!(log.replay_after_max(0, 2).unwrap(), evs(1..=2));
+        assert_eq!(log.replay_after_max(3, 2).unwrap(), evs(4..=5));
+        assert_eq!(log.replay_after_max(3, 99).unwrap(), evs(4..=5));
+        assert!(log.replay_after_max(0, 0).unwrap().is_empty());
+        assert!(log.replay_after_max(5, 2).unwrap().is_empty());
+    }
+
+    #[test]
     fn restart_replays_exactly_the_events_after_the_last_ack() {
         let d = dir();
         {
@@ -433,6 +518,43 @@ mod tests {
         assert_eq!(log.acked(), 2);
         log.ack(1000).unwrap();
         assert_eq!(log.acked(), 3);
+    }
+
+    #[test]
+    fn find_retained_sees_acknowledged_events_too() {
+        let mut log = DiskEventLog::open(&dir(), 1 << 20).unwrap();
+        assert!(log.is_pristine());
+        assert_eq!(log.find_retained(|_| true).unwrap(), None);
+        for i in 1..=4 {
+            log.append(&ev(i)).unwrap();
+        }
+        log.ack(4).unwrap();
+        assert!(!log.is_pristine());
+        assert_eq!(log.find_retained(|p| p == ev(1)).unwrap(), Some(ev(1)));
+        assert_eq!(log.find_retained(|p| p == ev(9)).unwrap(), None);
+    }
+
+    #[test]
+    fn a_log_set_aside_is_renamed_never_deleted_and_a_fresh_one_starts_at_1() {
+        let d = dir();
+        let mut log = DiskEventLog::open(&d, 1 << 20).unwrap();
+        for i in 1..=3 {
+            log.append(&ev(i)).unwrap();
+        }
+        log.ack(1).unwrap();
+        let kept = log.set_aside("lo/cal", 1700).unwrap();
+        assert_eq!(kept, d.join("events.lo_cal.1700.log"));
+        assert!(d.join("events.lo_cal.1700.ack").exists());
+        assert!(!d.join("ack").exists());
+        let old = DiskEventLog::open(&d, 1 << 20).unwrap();
+        assert_eq!((old.next_seq(), old.acked()), (1, 0));
+        // The same name in the same second does not overwrite the first.
+        assert_eq!(
+            old.set_aside("lo/cal", 1700).unwrap(),
+            d.join("events.lo_cal.1700-2.log")
+        );
+        let bytes = fs::read(&kept).unwrap();
+        assert_eq!(&bytes[..8], MAGIC);
     }
 
     #[test]
@@ -510,6 +632,44 @@ mod tests {
         drop(log);
         let log = DiskEventLog::open(&d, rec * 10 + HEADER_LEN).unwrap();
         assert_eq!((log.oldest_retained(), log.next_seq()), (first, n));
+    }
+
+    #[test]
+    fn an_ack_older_than_what_the_size_cap_kept_drops_nothing_retained() {
+        let d = dir();
+        let cap = 200 * 1024;
+        let mut log = DiskEventLog::open(&d, cap).unwrap();
+        // Events 1..=10 are on their way to the hub when a burst overflows the cap and evicts past them.
+        for _ in 0..410 {
+            log.append(&[7u8; 1000]).unwrap();
+        }
+        let (len, oldest) = (log.len(), log.oldest_retained());
+        assert!(oldest > 11 && len * 1008 >= MIN_COMPACT as usize);
+        // Then the hub's ack for that earlier batch arrives.
+        log.ack(10).unwrap();
+        assert_eq!(
+            (log.acked(), log.len(), log.oldest_retained()),
+            (10, len, oldest)
+        );
+        assert_eq!(log.replay_after(oldest - 1).unwrap().len(), len);
+        drop(log);
+        let log = DiskEventLog::open(&d, cap).unwrap();
+        assert_eq!(
+            (log.acked(), log.len(), log.oldest_retained()),
+            (10, len, oldest)
+        );
+    }
+
+    #[test]
+    fn each_unacknowledged_event_the_size_cap_drops_is_counted_once() {
+        let mut log = DiskEventLog::open(&dir(), HEADER_LEN + 108 * 10).unwrap();
+        let mut reported = 0;
+        for _ in 0..40 {
+            reported += log.append(&[1u8; 100]).unwrap().evicted_unacked;
+        }
+        // Nothing was acknowledged, so every event before the oldest retained one was dropped unacknowledged, once.
+        assert!(log.oldest_retained() > 11);
+        assert_eq!(reported, log.oldest_retained() - 1);
     }
 
     #[test]

@@ -6,7 +6,6 @@
 //! Targets come from the owner's file `<hub dir>/notify`: one `ntfy <url>` or `webhook <url>` per line.
 
 use std::io::{self, Read, Write};
-use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -182,11 +181,7 @@ trait Stream: Read + Write {}
 impl<T: Read + Write> Stream for T {}
 
 fn open(url: &Url) -> io::Result<Box<dyn Stream>> {
-    let addr = (url.host.as_str(), url.port)
-        .to_socket_addrs()?
-        .next()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no address"))?;
-    let tcp = TcpStream::connect_timeout(&addr, TIMEOUT)?;
+    let tcp = agora_protocol::dial::connect_timeout((url.host.as_str(), url.port), TIMEOUT)?;
     tcp.set_read_timeout(Some(TIMEOUT))?;
     tcp.set_write_timeout(Some(TIMEOUT))?;
     if !url.https {

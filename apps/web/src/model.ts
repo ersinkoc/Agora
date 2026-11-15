@@ -1,5 +1,20 @@
 // Client-side view model. Components render this; rendering never mutates state (AGENTS.md: render is pure).
 
+// ADR-0058: one mode or model an agent offers. Name and description are the agent's own words.
+export interface SessionOptionModel { id: string; name: string; description: string; skipsPermissions: boolean }
+// What an agent reported about its session: the modes and models it offers and the ones in use, how full its context is, and its own
+// cost (in micro-units of `currency`). Absent parts were never reported.
+export interface SessionModel {
+  modes: SessionOptionModel[];
+  models: SessionOptionModel[];
+  currentMode: string;
+  currentModel: string;
+  contextTokens: number;
+  contextWindow: number;
+  costMicros?: number;
+  currency?: string;
+}
+
 export type UiState = 'working' | 'needs-you' | 'finished' | 'idle' | 'unknown';
 
 export interface AgentTileModel {
@@ -22,6 +37,38 @@ export interface AgentTileModel {
   project?: string; // the project's folder name, to group agents by project
   workspaceRef?: { node: string; id: string; directory?: boolean }; // where to ask the node about this workspace (`git.diff`)
   filesChanged?: number; // files with uncommitted changes in the agent's workspace
+  closed?: boolean; // its process is gone; the list keeps it until the user clears it
+  exitCode?: number;
+  startedMs?: number;
+  endedMs?: number;
+  session?: SessionModel; // ADR-0058, for agents whose adapter reported it
+  parentId?: string; // ADR-0057: the agent that started this one (hub-wide key)
+  skipsPermissions?: boolean; // ADR-0059: started with an option that lets it act without asking (the "does not ask" badge)
+  parentName?: string;
+  // ADR-0060: it was running when its machine stopped. `resumable`: it can continue its own conversation (Resume); otherwise only Start
+  // again (a new session in the same folder).
+  // `stillRunning`: its process from before the restart still runs; it must be stopped before it can be resumed.
+  interrupted?: { resumable: boolean; stillRunning?: boolean };
+}
+
+// ADR-0060: what to do with an interrupted agent: continue its conversation, start a new one in its folder, or stop its process that
+// outlived the restart.
+export type ResumeAction = 'resume' | 'again' | 'stop';
+
+// ADR-0057: each helper right after the agent that started it, with how deep it sits. A helper whose parent is not in `list` stays in
+// its place at depth 0.
+export function helperTree<T extends { id: string; parentId?: string }>(list: readonly T[]): { agent: T; depth: number }[] {
+  const out: { agent: T; depth: number }[] = [];
+  const seen = new Set<string>();
+  const add = (a: T, depth: number) => {
+    if (seen.has(a.id) || depth > 8) return;
+    seen.add(a.id);
+    out.push({ agent: a, depth });
+    for (const c of list) if (c.parentId === a.id) add(c, depth + 1);
+  };
+  for (const a of list) if (!a.parentId || !list.some((p) => p.id === a.parentId)) add(a, 0);
+  for (const a of list) if (!seen.has(a.id)) out.push({ agent: a, depth: 0 });
+  return out;
 }
 
 // Protocol AgentState (schema/agora/v1/common.proto) → what the user sees.

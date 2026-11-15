@@ -108,6 +108,50 @@ fn handshake_session_prompt_and_usage() {
 }
 
 #[test]
+fn session_start_carries_the_mcp_servers() {
+    let a = spawn();
+    a.initialize(&[], "en", T).unwrap();
+    let mesh = agora_adapters::host::McpServer {
+        name: "agora-mesh".into(),
+        command: "/usr/bin/agora".into(),
+        args: vec![
+            "mesh".into(),
+            "stdio".into(),
+            "--socket".into(),
+            "/s/a.sock".into(),
+        ],
+    };
+    let sid = a
+        .start_session_with("/p", "/p", Some("s-2"), &[mesh], T)
+        .unwrap();
+    a.prompt(&sid, "mcp-servers", false, T).unwrap();
+    let ev = until(&a, |e| matches!(e, AdapterEvent::Chat { .. }));
+    let Some(AdapterEvent::Chat {
+        item: ChatItem::Text(t),
+        ..
+    }) = ev.last()
+    else {
+        panic!("{ev:?}");
+    };
+    let got: serde_json::Value = serde_json::from_str(t).unwrap();
+    assert_eq!(
+        got,
+        serde_json::json!([{"name": "agora-mesh", "command": "/usr/bin/agora",
+                            "args": ["mesh", "stdio", "--socket", "/s/a.sock"]}])
+    );
+    // Without servers the field is left out, as before.
+    let b = spawn();
+    b.initialize(&[], "en", T).unwrap();
+    let sid = b.start_session("/p", "/p", None, T).unwrap();
+    b.prompt(&sid, "mcp-servers", false, T).unwrap();
+    let ev = until(&b, |e| matches!(e, AdapterEvent::Chat { .. }));
+    assert!(
+        matches!(ev.last(), Some(AdapterEvent::Chat { item: ChatItem::Text(t), .. }) if t == "[]"),
+        "{ev:?}"
+    );
+}
+
+#[test]
 fn resume_passes_the_session_id_through() {
     let a = spawn();
     a.initialize(&[], "en", T).unwrap();
@@ -214,6 +258,58 @@ fn an_adapter_that_never_answers_times_out() {
         a.initialize(&[], "en", Duration::from_millis(300)),
         Err(HostError::Timeout)
     ));
+}
+
+/// The adapter of the next test when `AGORA_TEST_STUCK_ADAPTER` is set: alive, its output open, never reading its input.
+#[test]
+fn stuck_adapter_child() {
+    if std::env::var_os("AGORA_TEST_STUCK_ADAPTER").is_none() {
+        return;
+    }
+    // Bounded, so a failing run leaves nothing behind for long.
+    std::thread::sleep(Duration::from_secs(60));
+}
+
+/// A request larger than the pipe to an adapter that stopped reading used to block the caller in the write for as long as the
+/// adapter lived (the node holds its supervisor lock there), whatever the call's timeout (audit F043).
+#[test]
+fn a_call_to_an_adapter_that_stopped_reading_still_times_out() {
+    let a = Adapter::spawn(&AdapterConfig {
+        program: std::env::current_exe().unwrap(),
+        args: [
+            "--exact",
+            "stuck_adapter_child",
+            "--nocapture",
+            "--test-threads=1",
+        ]
+        .map(String::from)
+        .to_vec(),
+        env: vec![("AGORA_TEST_STUCK_ADAPTER".into(), "1".into())],
+        cwd: None,
+        sandbox: None,
+    })
+    .unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (dropped_tx, dropped) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let big = "x".repeat(1 << 20);
+        let first = a.prompt("s", &big, false, Duration::from_millis(300));
+        // More than the write queue holds: each one still comes back.
+        let rest: Vec<_> = (0..70)
+            .map(|_| a.prompt("s", "y", false, Duration::from_millis(10)))
+            .collect();
+        let _ = tx.send((first, rest));
+        drop(a); // with lines still queued: must not hang either
+        let _ = dropped_tx.send(());
+    });
+    let (first, rest) = rx
+        .recv_timeout(T)
+        .expect("the calls returned within their timeouts");
+    assert!(matches!(first, Err(HostError::Timeout)), "{first:?}");
+    assert!(rest.iter().all(|r| matches!(r, Err(HostError::Timeout))));
+    dropped
+        .recv_timeout(T)
+        .expect("dropping the adapter killed and reaped it");
 }
 
 #[test]

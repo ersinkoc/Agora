@@ -20,6 +20,13 @@ pub enum Append {
     Duplicate,
     /// Not the next event from this producer; `expected` is the one the hub is waiting for.
     Gap { expected: u64 },
+    /// Stored as the producer's new base after it said it cannot replay (ADR-0054): `from_seq..=to_seq` were skipped and are
+    /// recorded as lost. Only [`EventStore::append_resync`] gives this.
+    Resynced {
+        pos: u64,
+        from_seq: u64,
+        to_seq: u64,
+    },
 }
 
 /// One event as stored: opaque payload (an encoded protocol `Event`) plus its coordinates.
@@ -58,6 +65,17 @@ pub trait EventStore {
         at_ms: u64,
         payload: &[u8],
     ) -> Result<Append, StoreError>;
+    /// Like [`append`](Self::append), for the producer's first event after it said it cannot replay (`SnapshotRequired`, ADR-0054):
+    /// an event above the next number is stored too, and in the same transaction the producer's numbering moves to it and the
+    /// skipped numbers are recorded as lost, at `resync_at_ms`. Never backwards: at or below what is held is a `Duplicate`.
+    fn append_resync(
+        &self,
+        producer: &str,
+        seq: u64,
+        at_ms: u64,
+        payload: &[u8],
+        resync_at_ms: u64,
+    ) -> Result<Append, StoreError>;
     /// Highest contiguous `seq` applied for the producer (0 when none): the acknowledgement to send back.
     fn acked(&self, producer: &str) -> Result<u64, StoreError>;
     /// Events with a global position greater than `after`, oldest first, at most `limit`.
@@ -66,7 +84,7 @@ pub trait EventStore {
     fn set_setting(&self, key: &str, value: &[u8]) -> Result<(), StoreError>;
 }
 
-const SCHEMA_VERSION: i64 = 8;
+const SCHEMA_VERSION: i64 = 11;
 
 pub struct SqliteStore {
     conn: Mutex<Connection>,
@@ -83,6 +101,17 @@ impl SqliteStore {
 
     pub fn open_in_memory() -> Result<Self, StoreError> {
         Self::init(Connection::open_in_memory()?)
+    }
+
+    /// The total size of the stored payloads after `after`, without reading them: SQLite answers `length()` of a blob from the
+    /// record header (a replay decides from this whether to read the events at all, before any is copied into memory).
+    pub fn payload_bytes_after(&self, after: u64) -> Result<u64, StoreError> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare_cached(
+            "SELECT COALESCE(SUM(length(payload)), 0) FROM events WHERE pos > ?1",
+        )?;
+        let total: i64 = stmt.query_row(params![to_i64(after)?], |r| r.get(0))?;
+        Ok(to_u64(total))
     }
 
     fn init(conn: Connection) -> Result<Self, StoreError> {
@@ -227,9 +256,213 @@ impl SqliteStore {
                  COMMIT;",
             )?;
         }
+        if version < 9 {
+            // Numbers a node could no longer replay and the hub skipped (ADR-0054): the loss is recorded, never silent.
+            conn.execute_batch(
+                "BEGIN;
+                 CREATE TABLE resyncs (
+                     id       INTEGER PRIMARY KEY AUTOINCREMENT,
+                     producer TEXT    NOT NULL,
+                     from_seq INTEGER NOT NULL,
+                     to_seq   INTEGER NOT NULL,
+                     at_ms    INTEGER NOT NULL
+                 );
+                 PRAGMA user_version = 9;
+                 COMMIT;",
+            )?;
+        }
+        if version < 10 {
+            // Which session did it (L16): a short id of the session, so two windows of the same person can be told apart. Rows
+            // written before have none. The trigger is made again so the new column is as fixed as the others.
+            conn.execute_batch(
+                "BEGIN;
+                 ALTER TABLE audit ADD COLUMN session TEXT NOT NULL DEFAULT '';
+                 DROP TRIGGER audit_only_the_outcome;
+                 CREATE TRIGGER audit_only_the_outcome BEFORE UPDATE ON audit
+                 WHEN OLD.outcome != 'sent' OR NEW.id != OLD.id OR NEW.at_ms != OLD.at_ms OR NEW.who != OLD.who
+                      OR NEW.action != OLD.action OR NEW.node != OLD.node OR NEW.session != OLD.session
+                 BEGIN SELECT RAISE(ABORT, 'the audit trail is append-only'); END;
+                 PRAGMA user_version = 10;
+                 COMMIT;",
+            )?;
+        }
+        if version < 11 {
+            // ADR-0061: each person's registered devices (candidates a machine may come to trust; never trust by themselves), and the
+            // endorsements and revocations the hub carries to machines, kept so a machine that connects later still gets them. The
+            // hub cannot make either: they are signed by a device and verified on the machine.
+            conn.execute_batch(
+                "BEGIN;
+                 CREATE TABLE IF NOT EXISTS user_devices (
+                     device_id         TEXT PRIMARY KEY,
+                     user_id           TEXT NOT NULL,
+                     name              TEXT NOT NULL,
+                     public_key        BLOB NOT NULL,
+                     created_ms        INTEGER NOT NULL,
+                     last_used_ms      INTEGER NOT NULL,
+                     approval_asked_ms INTEGER NOT NULL DEFAULT 0,
+                     revoked_ms        INTEGER NOT NULL DEFAULT 0,
+                     signed_at_ms      INTEGER NOT NULL DEFAULT 0,
+                     signature         BLOB NOT NULL DEFAULT x''
+                 );
+                 CREATE TABLE IF NOT EXISTS device_endorsements (
+                     id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                     device_id  TEXT NOT NULL,
+                     endorser   TEXT NOT NULL,
+                     issued_ms  INTEGER NOT NULL,
+                     expires_ms INTEGER NOT NULL,
+                     signature  BLOB NOT NULL UNIQUE,
+                     payload    BLOB NOT NULL
+                 );
+                 CREATE TABLE IF NOT EXISTS device_revocations (
+                     id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                     device_id TEXT NOT NULL,
+                     revoker   TEXT NOT NULL,
+                     issued_ms INTEGER NOT NULL,
+                     signature BLOB NOT NULL UNIQUE,
+                     payload   BLOB NOT NULL
+                 );
+                 PRAGMA user_version = 11;
+                 COMMIT;",
+            )?;
+        }
         Ok(Self {
             conn: Mutex::new(conn),
         })
+    }
+
+    /// How many lost ranges resyncs recorded (counted by the database, no rows read).
+    pub fn resync_count(&self) -> Result<usize, StoreError> {
+        let conn = self.lock()?;
+        let n: i64 = conn.query_row("SELECT COUNT(*) FROM resyncs", [], |r| r.get(0))?;
+        Ok(usize::try_from(n).unwrap_or(0))
+    }
+
+    /// The recorded resyncs (ADR-0054), oldest first: `(producer, from_seq, to_seq, at_ms)`.
+    pub fn resyncs(&self) -> Result<Vec<(String, u64, u64, u64)>, StoreError> {
+        let conn = self.lock()?;
+        let mut stmt =
+            conn.prepare("SELECT producer, from_seq, to_seq, at_ms FROM resyncs ORDER BY id")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get(0)?,
+                to_u64(r.get(1)?),
+                to_u64(r.get(2)?),
+                to_u64(r.get(3)?),
+            ))
+        })?;
+        rows.collect::<Result<_, _>>().map_err(Into::into)
+    }
+
+    /// Appends `seq` for `producer`. With `resync_at_ms`, an event above the next number becomes the new base (ADR-0054).
+    fn append_inner(
+        &self,
+        producer: &str,
+        seq: u64,
+        at_ms: u64,
+        payload: &[u8],
+        resync_at_ms: Option<u64>,
+    ) -> Result<Append, StoreError> {
+        let (seq_i, at_i) = (to_i64(seq)?, to_i64(at_ms)?);
+        let mut conn = self.lock()?;
+        let tx = conn.transaction()?;
+        let last: i64 = tx
+            .query_row(
+                "SELECT last_seq FROM producers WHERE producer = ?1",
+                [producer],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(0);
+        let expected = last + 1;
+        if seq_i <= last {
+            return Ok(Append::Duplicate);
+        }
+        if seq_i != expected && resync_at_ms.is_none() {
+            return Ok(Append::Gap {
+                expected: to_u64(expected),
+            });
+        }
+        // Only a real jump is a resync; the next number is an ordinary append even right after `SnapshotRequired`.
+        let skipped = resync_at_ms.filter(|_| seq_i != expected);
+        tx.execute(
+            "INSERT INTO events (producer, seq, at_ms, payload) VALUES (?1, ?2, ?3, ?4)",
+            params![producer, seq_i, at_i, payload],
+        )?;
+        let pos = to_u64(tx.last_insert_rowid());
+        tx.execute(
+            "INSERT INTO producers (producer, last_seq) VALUES (?1, ?2)
+             ON CONFLICT(producer) DO UPDATE SET last_seq = excluded.last_seq",
+            params![producer, seq_i],
+        )?;
+        if let Some(when) = skipped {
+            tx.execute(
+                "INSERT INTO resyncs (producer, from_seq, to_seq, at_ms) VALUES (?1, ?2, ?3, ?4)",
+                params![producer, expected, seq_i - 1, to_i64(when)?],
+            )?;
+        }
+        tx.commit()?;
+        Ok(match skipped {
+            Some(_) => Append::Resynced {
+                pos,
+                from_seq: to_u64(expected),
+                to_seq: seq - 1,
+            },
+            None => Append::Applied { pos },
+        })
+    }
+
+    /// The hub's own events, numbered from `first_seq`, and one setting, in one transaction: all of them are stored or none is (a
+    /// board change and its audit events, #517 review). Refused when the producer's numbering is not at `first_seq - 1`. Returns
+    /// each event's position, in order.
+    pub fn append_batch_with_setting(
+        &self,
+        producer: &str,
+        first_seq: u64,
+        events: &[(u64, Vec<u8>)],
+        setting: Option<(&str, &[u8])>,
+    ) -> Result<Vec<u64>, StoreError> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction()?;
+        let last: i64 = tx
+            .query_row(
+                "SELECT last_seq FROM producers WHERE producer = ?1",
+                [producer],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(0);
+        if to_u64(last).checked_add(1) != Some(first_seq) {
+            return Err(StoreError(format!(
+                "{producer} is numbered at {last}, not {}",
+                first_seq.saturating_sub(1)
+            )));
+        }
+        let mut positions = Vec::with_capacity(events.len());
+        let mut seq = first_seq;
+        for (at_ms, payload) in events {
+            tx.execute(
+                "INSERT INTO events (producer, seq, at_ms, payload) VALUES (?1, ?2, ?3, ?4)",
+                params![producer, to_i64(seq)?, to_i64(*at_ms)?, payload],
+            )?;
+            positions.push(to_u64(tx.last_insert_rowid()));
+            seq += 1;
+        }
+        if !events.is_empty() {
+            tx.execute(
+                "INSERT INTO producers (producer, last_seq) VALUES (?1, ?2)
+                 ON CONFLICT(producer) DO UPDATE SET last_seq = excluded.last_seq",
+                params![producer, to_i64(seq - 1)?],
+            )?;
+        }
+        if let Some((key, value)) = setting {
+            tx.execute(
+                "INSERT INTO settings (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![key, value],
+            )?;
+        }
+        tx.commit()?;
+        Ok(positions)
     }
 
     /// Online, consistent backup into a new file (`VACUUM INTO` takes a snapshot while writers keep working).
@@ -306,38 +539,18 @@ impl EventStore for SqliteStore {
         at_ms: u64,
         payload: &[u8],
     ) -> Result<Append, StoreError> {
-        let (seq_i, at_i) = (to_i64(seq)?, to_i64(at_ms)?);
-        let mut conn = self.lock()?;
-        let tx = conn.transaction()?;
-        let last: i64 = tx
-            .query_row(
-                "SELECT last_seq FROM producers WHERE producer = ?1",
-                [producer],
-                |r| r.get(0),
-            )
-            .optional()?
-            .unwrap_or(0);
-        let expected = last + 1;
-        if seq_i <= last {
-            return Ok(Append::Duplicate);
-        }
-        if seq_i != expected {
-            return Ok(Append::Gap {
-                expected: to_u64(expected),
-            });
-        }
-        tx.execute(
-            "INSERT INTO events (producer, seq, at_ms, payload) VALUES (?1, ?2, ?3, ?4)",
-            params![producer, seq_i, at_i, payload],
-        )?;
-        let pos = tx.last_insert_rowid();
-        tx.execute(
-            "INSERT INTO producers (producer, last_seq) VALUES (?1, ?2)
-             ON CONFLICT(producer) DO UPDATE SET last_seq = excluded.last_seq",
-            params![producer, seq_i],
-        )?;
-        tx.commit()?;
-        Ok(Append::Applied { pos: to_u64(pos) })
+        self.append_inner(producer, seq, at_ms, payload, None)
+    }
+
+    fn append_resync(
+        &self,
+        producer: &str,
+        seq: u64,
+        at_ms: u64,
+        payload: &[u8],
+        resync_at_ms: u64,
+    ) -> Result<Append, StoreError> {
+        self.append_inner(producer, seq, at_ms, payload, Some(resync_at_ms))
     }
 
     fn acked(&self, producer: &str) -> Result<u64, StoreError> {
@@ -626,7 +839,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(pk, 0);
-        for table in ["users", "audit", "grants"] {
+        for table in ["users", "audit", "grants", "resyncs"] {
             let n: i64 = conn
                 .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
                 .unwrap();
@@ -637,6 +850,141 @@ mod tests {
         // And reopening an upgraded database changes nothing.
         drop(s);
         assert!(SqliteStore::open(&path).is_ok());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// ADR-0054: after `SnapshotRequired` the producer's next event above what the hub holds becomes its new base, in one
+    /// transaction with the record of the skipped numbers. Never backwards, and the next number is an ordinary append.
+    #[test]
+    fn a_resync_stores_the_event_moves_the_numbering_and_records_the_skipped_range() {
+        let s = store();
+        for i in 1..=3 {
+            s.append("n1", i, 0, &[i as u8]).unwrap();
+        }
+        // At or below what is held stays a duplicate, even as a resync.
+        assert_eq!(
+            s.append_resync("n1", 2, 0, b"x", 99).unwrap(),
+            Append::Duplicate
+        );
+        // The next number is an ordinary append: nothing was lost.
+        assert_eq!(
+            s.append_resync("n1", 4, 0, b"d", 99).unwrap(),
+            Append::Applied { pos: 4 }
+        );
+        assert!(s.resyncs().unwrap().is_empty());
+        assert_eq!(
+            s.append_resync("n1", 10, 7, b"j", 99).unwrap(),
+            Append::Resynced {
+                pos: 5,
+                from_seq: 5,
+                to_seq: 9
+            }
+        );
+        assert_eq!(s.acked("n1").unwrap(), 10);
+        assert_eq!(s.resyncs().unwrap(), [("n1".to_string(), 5, 9, 99)]);
+        let last = s.events_after(4, 10).unwrap();
+        assert_eq!((last.len(), last[0].seq, last[0].at_ms), (1, 10, 7));
+        // Ordinary appends follow the normal rules from the new base.
+        assert_eq!(s.append("n1", 10, 0, b"j").unwrap(), Append::Duplicate);
+        assert_eq!(
+            s.append("n1", 12, 0, b"l").unwrap(),
+            Append::Gap { expected: 11 }
+        );
+        // Another producer is untouched.
+        assert_eq!(s.acked("n2").unwrap(), 0);
+    }
+
+    /// The resync record and the event are one transaction: an event that cannot be stored leaves no record and no jump.
+    #[test]
+    fn a_resync_that_fails_to_store_its_event_records_nothing() {
+        let s = store();
+        s.append("n1", 1, 0, b"a").unwrap();
+        // An event time SQLite cannot hold is refused before anything is written.
+        assert!(s.append_resync("n1", 5, u64::MAX, b"e", 9).is_err());
+        assert_eq!(s.acked("n1").unwrap(), 1);
+        assert!(s.resyncs().unwrap().is_empty());
+        // A failure after the event row was written (the record's own time) rolls the event and the jump back too.
+        assert!(s.append_resync("n1", 5, 0, b"e", u64::MAX).is_err());
+        assert_eq!(s.acked("n1").unwrap(), 1);
+        assert_eq!(s.events_after(0, 10).unwrap().len(), 1);
+        assert!(s.resyncs().unwrap().is_empty());
+    }
+
+    /// Takes a current database back to schema 9: the audit trail as it was before it named sessions (L16).
+    fn undo_audit_sessions(conn: &Connection) {
+        conn.execute_batch(
+            "DROP TRIGGER audit_only_the_outcome;
+             ALTER TABLE audit DROP COLUMN session;
+             CREATE TRIGGER audit_only_the_outcome BEFORE UPDATE ON audit
+             WHEN OLD.outcome != 'sent' OR NEW.id != OLD.id OR NEW.at_ms != OLD.at_ms OR NEW.who != OLD.who
+                  OR NEW.action != OLD.action OR NEW.node != OLD.node
+             BEGIN SELECT RAISE(ABORT, 'the audit trail is append-only'); END;
+             PRAGMA user_version = 9;",
+        )
+        .unwrap();
+    }
+
+    /// L16: a schema 9 database opens with its audit rows kept, each with no session, and the session is as fixed as the rest.
+    #[test]
+    fn an_audit_trail_from_before_sessions_upgrades_in_place() {
+        let d = tmpdir("upgrade9");
+        let path = d.join("hub.db");
+        {
+            let s = SqliteStore::open(&path).unwrap();
+            let conn = s.lock().unwrap();
+            undo_audit_sessions(&conn);
+            conn.execute_batch(
+                "INSERT INTO audit (at_ms, who, action, node, outcome) VALUES (1, 'owner', 'AgentStop', 'n1', 'sent');",
+            )
+            .unwrap();
+        }
+        let s = SqliteStore::open(&path).unwrap();
+        let rows = crate::audit::Audit::new(&s).list(0, None, 10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].session, "");
+        assert_eq!(rows[0].outcome, "sent");
+        let conn = s.lock().unwrap();
+        assert!(conn.execute("UPDATE audit SET session = 'x'", []).is_err());
+        assert!(conn.execute("UPDATE audit SET who = 'x'", []).is_err());
+        assert!(conn.execute("DELETE FROM audit", []).is_err());
+        drop(conn);
+        crate::audit::Audit::new(&s)
+            .finish(rows[0].id, "ok")
+            .unwrap();
+        assert_eq!(
+            crate::audit::Audit::new(&s).outcome(rows[0].id).as_deref(),
+            Some("ok")
+        );
+        drop(s);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A hub database from before ADR-0054 (schema 8) opens, gains an empty `resyncs` table and keeps its events.
+    #[test]
+    fn a_database_from_before_resyncs_upgrades_in_place() {
+        let d = tmpdir("upgrade8");
+        let path = d.join("hub.db");
+        {
+            let s = SqliteStore::open(&path).unwrap();
+            s.append("n1", 1, 5, b"a").unwrap();
+            let conn = s.lock().unwrap();
+            undo_audit_sessions(&conn);
+            conn.execute_batch("DROP TABLE resyncs; PRAGMA user_version = 8;")
+                .unwrap();
+        }
+        assert!(verify(&path).is_ok(), "an older database is a valid backup");
+        let s = SqliteStore::open(&path).unwrap();
+        assert_eq!(s.acked("n1").unwrap(), 1);
+        assert!(s.resyncs().unwrap().is_empty());
+        assert_eq!(
+            s.append_resync("n1", 4, 0, b"d", 1).unwrap(),
+            Append::Resynced {
+                pos: 2,
+                from_seq: 2,
+                to_seq: 3
+            }
+        );
+        drop(s);
         let _ = std::fs::remove_dir_all(&d);
     }
 }

@@ -36,6 +36,12 @@ const ACK_IDLE: Duration = Duration::from_millis(50);
 const ACK_BATCH: u32 = 64;
 /// How often live events are pushed to a client.
 const PUSH: Duration = Duration::from_millis(20);
+/// A node connection on which nothing at all arrived for this long is closed and the node recorded offline (`NodeLink { up: false,
+/// reason: silent }`, ADR-0070), although the operating system may still call the connection open (a frozen node, a laptop that
+/// slept, a NAT that forgot the connection). When the node dials again, the new connection records it online by itself.
+/// A node pings every 10 s (`agora_node::uplink_client::PING_EVERY`), so an idle but healthy node is never dropped; the node
+/// uses the same deadline for the hub (`SILENCE_DEADLINE`). Two and a half pings: one late ping is not enough.
+pub const NODE_SILENCE: Duration = Duration::from_millis(25_000);
 
 #[derive(Debug)]
 pub enum ServeError {
@@ -44,6 +50,8 @@ pub enum ServeError {
     Store(StoreError),
     /// The peer did something this role may not do.
     Refused,
+    /// Nothing arrived from the peer for its deadline, or a frame could not be sent for as long (see [`NODE_SILENCE`]).
+    Silent,
 }
 
 impl From<TransportError> for ServeError {
@@ -98,9 +106,10 @@ where
 }
 
 /// The conversation with one authenticated node, until it ends. `node_id` comes from the certificate. When the
-/// node had come online, the hub records it offline at the end.
+/// connection opened, the hub records the node online, and at the end offline (ADR-0070). When the node broke the protocol, the connection ends with the
+/// error's stable code as the close reason, so the node can say why instead of seeing a bare reset; the hub's log says it too.
 pub async fn serve_node<S>(
-    mut conn: Conn<S>,
+    conn: Conn<S>,
     node_id: &str,
     hub: &Arc<Hub>,
     support: &Support,
@@ -108,46 +117,170 @@ pub async fn serve_node<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let mut session = NodeSession::new(hub.store(), node_id, support);
+    serve_node_within(conn, node_id, hub, support, NODE_SILENCE).await
+}
 
-    let hello = v1::Hello::decode(
-        expect(&mut conn, STREAM_CONTROL, kinds::HELLO)
-            .await?
-            .payload
-            .as_slice(),
-    )
-    .map_err(|_| invalid("hello"))?;
-    let welcome = session.hello(&hello, now_ms())?;
-    conn.send(&frame(
-        STREAM_CONTROL,
-        kinds::WELCOME,
-        welcome.encode_to_vec(),
-    ))
-    .await?;
+/// [`serve_node`] with another silence deadline than [`NODE_SILENCE`] (tests use a short one).
+pub async fn serve_node_within<S>(
+    conn: Conn<S>,
+    node_id: &str,
+    hub: &Arc<Hub>,
+    support: &Support,
+    silence: Duration,
+) -> Result<(), ServeError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    serve_node_from(conn, None, node_id, hub, support, silence, &|| true).await
+}
 
-    let resume = v1::Resume::decode(
-        expect(&mut conn, STREAM_CONTROL, kinds::RESUME)
-            .await?
-            .payload
-            .as_slice(),
-    )
-    .map_err(|_| invalid("resume"))?;
-    let ok = session.resume(&resume)?;
-    conn.send(&frame(STREAM_CONTROL, kinds::RESUME_OK, ok.encode_to_vec()))
-        .await?;
+/// [`serve_node_within`] for as long as `valid` holds: when it stops holding (a revoked certificate), the conversation ends with
+/// `auth.device_revoked` and the node is recorded offline, the handshake included. The certificate path uses it with the enrollment
+/// record; tests with a switch.
+pub async fn serve_node_while<S>(
+    conn: Conn<S>,
+    node_id: &str,
+    hub: &Arc<Hub>,
+    support: &Support,
+    silence: Duration,
+    valid: &(dyn Fn() -> bool + Sync),
+) -> Result<(), ServeError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    serve_node_from(conn, None, node_id, hub, support, silence, valid).await
+}
 
-    let (_registration, commands) = hub
-        .router()
-        .register_with_capabilities(node_id, welcome.capabilities);
-    let result = stream_events(&mut conn, &mut session, hub, node_id, commands).await;
-    // However it ended, the hub now knows this node is not connected.
-    let _ = hub.node_disconnected(node_id, now_ms());
-    // Forget it as a member of its projects, so it is asked to hand over its local work when it is back (ADR-0039 amendment B);
-    // anyone the change makes due is asked now.
-    for (node, project) in hub.board_membership(now_ms()) {
-        ask_board_join(hub, node, project);
+/// [`serve_node_within`] when the connection's first frame was already read (it must be the node's `Hello`; ADR-0061 reads it to
+/// tell a one-shot question from a node's conversation).
+async fn serve_node_from<S>(
+    mut conn: Conn<S>,
+    first: Option<Frame>,
+    node_id: &str,
+    hub: &Arc<Hub>,
+    support: &Support,
+    silence: Duration,
+    valid: &(dyn Fn() -> bool + Sync),
+) -> Result<(), ServeError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let result = converse_node(&mut conn, first, node_id, hub, support, silence, valid).await;
+    match &result {
+        Err(ServeError::Protocol(e)) => {
+            // Codes and parameters only: this is the hub's log, not a user's screen.
+            eprintln!("node refused: {node_id} {} {:?}", e.code.as_str(), e.params);
+            conn.close_with(e.code.as_str()).await;
+        }
+        // Closed, so a node that was only frozen or asleep reads the end of the stream as soon as it runs again and dials at once.
+        // Bounded: a peer that reads nothing must not hold this task. It is recorded offline as `silent` (see `converse_node`).
+        Err(ServeError::Silent) => {
+            eprintln!("node silent: {node_id}");
+            let _ = tokio::time::timeout(Duration::from_secs(1), conn.close()).await;
+        }
+        _ => {}
     }
     result
+}
+
+async fn converse_node<S>(
+    conn: &mut Conn<S>,
+    first: Option<Frame>,
+    node_id: &str,
+    hub: &Arc<Hub>,
+    support: &Support,
+    silence: Duration,
+    valid: &(dyn Fn() -> bool + Sync),
+) -> Result<(), ServeError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut session = NodeSession::new(hub.store(), node_id, support);
+    let revoked = || {
+        ServeError::Protocol(Error::new(ErrorCode::AuthDeviceRevoked).with("device_id", node_id))
+    };
+
+    // The handshake is watched as the conversation is (#558 review): a certificate revoked between Hello and Resume ends it, and a
+    // node that stops in the middle is dropped after `silence` instead of holding the connection forever.
+    let welcome = {
+        let handshake = async {
+            let hello_frame = match first {
+                Some(f) if (f.stream_id, f.kind) == (STREAM_CONTROL, kinds::HELLO) => f,
+                Some(_) => return Err(invalid("frame")),
+                None => expect(conn, STREAM_CONTROL, kinds::HELLO).await?,
+            };
+            let hello =
+                v1::Hello::decode(hello_frame.payload.as_slice()).map_err(|_| invalid("hello"))?;
+            let welcome = session.hello(&hello, now_ms())?;
+            conn.send(&frame(
+                STREAM_CONTROL,
+                kinds::WELCOME,
+                welcome.encode_to_vec(),
+            ))
+            .await?;
+            let resume = v1::Resume::decode(
+                expect(conn, STREAM_CONTROL, kinds::RESUME)
+                    .await?
+                    .payload
+                    .as_slice(),
+            )
+            .map_err(|_| invalid("resume"))?;
+            let ok = session.resume(&resume)?;
+            conn.send(&frame(STREAM_CONTROL, kinds::RESUME_OK, ok.encode_to_vec()))
+                .await?;
+            Ok::<_, ServeError>(welcome)
+        };
+        tokio::select! {
+            r = tokio::time::timeout(silence, handshake) => r.map_err(|_| ServeError::Silent)??,
+            () = still(valid) => return Err(revoked()),
+        }
+    };
+    // Checked once more right before the node is recorded online.
+    if !valid() {
+        return Err(revoked());
+    }
+
+    // ADR-0070: the connection is open, so the hub records the node online (a first connect or a reconnect alike: nothing the node
+    // runs is reset) and, when it ends, offline with why. Both come from this certificate-authenticated connection only.
+    let verifies_devices = welcome.capabilities.iter().any(|c| c == "device.trust");
+    let (registration, commands, generation) =
+        hub.node_link_opened(node_id, welcome.capabilities, now_ms());
+    // ADR-0061: a node that verifies endorsements gets every one it may have missed while it was away, and every revocation.
+    if verifies_devices {
+        give_device_changes(hub, node_id);
+    }
+    let mut last_heard = tokio::time::Instant::now();
+    // A certificate revoked while the connection is open ends it here, inside the conversation, so the end below still records the
+    // node offline (it used to be cancelled from outside, and a revoked machine stayed online in every view).
+    let result = tokio::select! {
+        r = stream_events(conn, &mut session, hub, node_id, commands, silence, &mut last_heard) => r,
+        () = still(valid) => Err(revoked()),
+    };
+    // However it ended, the router now knows this node is not connected (commands to it fail with `node.offline` at once), unless
+    // a newer connection of the node replaced this one: that one is live, and the node is not offline.
+    let now = now_ms();
+    let heard_ms = now.saturating_sub(last_heard.elapsed().as_millis() as u64);
+    let silent = matches!(result, Err(ServeError::Silent));
+    if hub.node_link_closed(registration, generation, silent, heard_ms, now) {
+        // Forget it as a member of its projects, so it is asked to hand over its local work when it is back (ADR-0039 amendment
+        // B); anyone the change makes due is asked now.
+        for (node, project) in hub.board_membership(now) {
+            ask_board_join(hub, node, project);
+        }
+    }
+    result
+}
+
+/// Sends one frame to a node, but never waits longer than `limit` for it: a node that stopped reading fills the socket's buffer,
+/// and a send that waits forever would keep its connection from ever being found dead.
+async fn put<S>(conn: &mut Conn<S>, f: &Frame, limit: Duration) -> Result<(), ServeError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    match tokio::time::timeout(limit, conn.send(f)).await {
+        Ok(r) => Ok(r?),
+        Err(_) => Err(ServeError::Silent),
+    }
 }
 
 async fn stream_events<S>(
@@ -156,10 +289,13 @@ async fn stream_events<S>(
     hub: &Arc<Hub>,
     node_id: &str,
     mut commands: tokio::sync::mpsc::UnboundedReceiver<crate::router::ToNode>,
+    silence: Duration,
+    last_heard: &mut tokio::time::Instant,
 ) -> Result<(), ServeError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    // Every frame from the node counts as a sign of life; an idle node sends its pings (every 10 s; 15 s before ADR-0070).
     let mut acked: Option<u64> = None; // highest contiguous seq not yet acknowledged
     let mut since_ack = 0u32;
     // Commands sent to this node and not yet answered, by the request id the hub chose.
@@ -173,11 +309,14 @@ where
     // Handoffs the board accepted but the receiving node did not take: undone here, where the hub is at hand.
     let (revert_tx, mut reverts) = tokio::sync::mpsc::unbounded_channel::<crate::board::Handoff>();
     loop {
+        if last_heard.elapsed() >= silence {
+            return Err(ServeError::Silent);
+        }
         let idle;
         let received = tokio::select! {
             r = tokio::time::timeout(ACK_IDLE, conn.recv()) => r,
             Some(answer) = posted.recv() => {
-                conn.send(&frame(STREAM_COMMANDS, 1, answer.encode_to_vec())).await?;
+                put(conn, &frame(STREAM_COMMANDS, 1, answer.encode_to_vec()), silence).await?;
                 continue;
             }
             Some(handoff) = reverts.recv() => {
@@ -190,10 +329,10 @@ where
                         waiting.retain(|_, s| !s.is_closed());
                         let payload = request.encode_to_vec();
                         waiting.insert(request.request_id.clone(), reply);
-                        conn.send(&frame(stream, 0, payload)).await?;
+                        put(conn, &frame(stream, 0, payload), silence).await?;
                     }
                     crate::router::ToNode::Close { stream } => {
-                        conn.send(&frame(stream, STREAM_CLOSE, Vec::new())).await?;
+                        put(conn, &frame(stream, STREAM_CLOSE, Vec::new()), silence).await?;
                     }
                 }
                 continue;
@@ -202,11 +341,34 @@ where
         match received {
             Ok(Ok(Some(f))) => {
                 idle = false;
+                *last_heard = tokio::time::Instant::now();
                 match (f.stream_id, f.kind) {
                     (STREAM_EVENTS, kinds::EVENT) => match hub.ingest(session, &f.payload)? {
                         Ingest::Applied { acked: a, .. } => {
                             acked = Some(a);
                             since_ack += 1;
+                            for (node, project) in hub.board_membership(now_ms()) {
+                                ask_board_join(hub, node, project);
+                            }
+                        }
+                        // The node could not replay (ADR-0054): this event is its new base and the numbers before it are lost.
+                        // Recorded in the store with the event; said in the log and the audit trail too, so it is never silent.
+                        Ingest::Resynced {
+                            acked: a,
+                            from_seq,
+                            to_seq,
+                            ..
+                        } => {
+                            acked = Some(a);
+                            since_ack += 1;
+                            eprintln!("node resync: {node_id} skipped {from_seq}..={to_seq}");
+                            let _ = crate::audit::Audit::new(hub.store()).record(
+                                now_ms(),
+                                crate::ca::RESERVED_HUB_ID,
+                                "node.resynced",
+                                node_id,
+                                &format!("{from_seq}..={to_seq}"),
+                            );
                             for (node, project) in hub.board_membership(now_ms()) {
                                 ask_board_join(hub, node, project);
                             }
@@ -218,13 +380,25 @@ where
                         // Not the next event: tell the node where to start again (nothing was stored).
                         Ingest::Gap { expected } => {
                             let ok = v1::ResumeOk { from_seq: expected };
-                            conn.send(&frame(STREAM_CONTROL, kinds::RESUME_OK, ok.encode_to_vec()))
-                                .await?;
+                            put(
+                                conn,
+                                &frame(STREAM_CONTROL, kinds::RESUME_OK, ok.encode_to_vec()),
+                                silence,
+                            )
+                            .await?;
                         }
                     },
+                    // The node cannot replay from where the hub asked (ADR-0054): its next new event is the new base.
+                    (STREAM_CONTROL, kinds::SNAPSHOT_REQUIRED) => {
+                        session.snapshot_required(now_ms())?
+                    }
                     (STREAM_CONTROL, kinds::PING) => {
-                        conn.send(&frame(STREAM_CONTROL, kinds::PONG, f.payload))
-                            .await?;
+                        put(
+                            conn,
+                            &frame(STREAM_CONTROL, kinds::PONG, f.payload),
+                            silence,
+                        )
+                        .await?;
                     }
                     // A node asks the hub to carry one mesh message to an agent on another node (ADR-0031). Nothing else
                     // is accepted from a node on this stream.
@@ -265,8 +439,12 @@ where
         if let Some(a) = acked {
             if idle || since_ack >= ACK_BATCH {
                 let ack = v1::EventAck { up_to_seq: a };
-                conn.send(&frame(STREAM_EVENTS, kinds::EVENT_ACK, ack.encode_to_vec()))
-                    .await?;
+                put(
+                    conn,
+                    &frame(STREAM_EVENTS, kinds::EVENT_ACK, ack.encode_to_vec()),
+                    silence,
+                )
+                .await?;
                 acked = None;
                 since_ack = 0;
             }
@@ -284,12 +462,16 @@ pub trait ClientAuth {
             role: crate::users::Role::Owner,
             user: "owner".into(),
             projects: None,
+            session: String::new(),
         })
     }
 }
 
 /// The wire form of the hub's view (ADR-0027). Ids are the hub-wide keys.
 pub fn snapshot_of(view: &View, pos: u64) -> v1::Snapshot {
+    // ADR-0073: forgotten machines and what they ran are not shown.
+    let shown = view.shown();
+    let view: &View = &shown;
     v1::Snapshot {
         workspaces: view.workspaces.values().cloned().collect(),
         agent_workspaces: view
@@ -314,6 +496,7 @@ pub fn snapshot_of(view: &View, pos: u64) -> v1::Snapshot {
                 terminals_open: n.terminals_open,
                 memory_used_bytes: n.memory_used_bytes,
                 last_event_ms: n.last_event_ms,
+                trusted_device_ids: view.trusted_devices.get(id).cloned().unwrap_or_default(),
             })
             .collect(),
         checkouts: view
@@ -343,6 +526,7 @@ pub fn snapshot_of(view: &View, pos: u64) -> v1::Snapshot {
         agents: view
             .agents
             .iter()
+            .filter(|(_, a)| !a.forgotten)
             .map(|(id, a)| v1::AgentSnapshot {
                 agent_id: id.clone(),
                 node_id: a.node_id.clone(),
@@ -356,6 +540,19 @@ pub fn snapshot_of(view: &View, pos: u64) -> v1::Snapshot {
                 exit_code: a.exit_code,
                 input_tokens: a.input_tokens,
                 output_tokens: a.output_tokens,
+                parent_agent_id: a.parent_agent_id.clone(),
+                interrupted: a.interrupted.is_some(),
+                resumable: a.interrupted.as_ref().is_some_and(|i| i.resumable),
+                interrupted_at_ms: a.interrupted.as_ref().map_or(0, |i| i.at_ms),
+                folder: a
+                    .interrupted
+                    .as_ref()
+                    .map(|i| i.folder.clone())
+                    .unwrap_or_default(),
+                still_running: a.interrupted.as_ref().is_some_and(|i| i.still_running),
+                launch_options: a.launch_options.clone(),
+                skips_permissions: a.skips_permissions,
+                ..session_snapshot(&a.session)
             })
             .collect(),
         terminals: view
@@ -416,6 +613,7 @@ where
             role: crate::users::Role::Owner,
             user: "owner".into(),
             projects: None,
+            session: String::new(),
         })
     })
     .await
@@ -424,10 +622,66 @@ where
 /// [`serve_client`] for a person with a role (ADR-0049). `role` is asked for every command, so a demotion or a removed person takes
 /// effect at once; `None` ends the connection.
 pub async fn serve_client_as<S>(
+    conn: Conn<S>,
+    hub: &Hub,
+    first: Frame,
+    access: &(dyn Fn() -> Option<crate::users::Access> + Sync),
+) -> Result<(), ServeError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    serve_client_while(conn, hub, first, access, &|| true).await
+}
+
+/// [`serve_client_as`] that also ends the connection as soon as `valid` turns false (a session that expired, was signed out or
+/// revoked). Only the client's part is raced against it, so commands already on its way still get their outcome recorded.
+async fn serve_client_while<S>(
+    conn: Conn<S>,
+    hub: &Hub,
+    first: Frame,
+    access: &(dyn Fn() -> Option<crate::users::Access> + Sync),
+    valid: &(dyn Fn() -> bool + Sync),
+) -> Result<(), ServeError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut inflight: Vec<Inflight> = Vec::new();
+    // The connection is moved in, so it is closed when the client's part ends, whichever way it ends.
+    let result = tokio::select! {
+        r = serve_client_loop(conn, hub, first, access, &mut inflight) => r,
+        () = still(valid) => Err(ServeError::Refused),
+    };
+    finish_unanswered(hub, inflight).await;
+    result
+}
+
+/// Commands still on their way when the client left (a reload, a closed tab) or was refused: nobody will read their answers, but
+/// the audit trail (ADR-0049) says how each one really ended, the node's answer, `node.offline` or `node.timeout`, instead of
+/// staying `sent` for good (L17).
+async fn finish_unanswered(hub: &Hub, mut inflight: Vec<Inflight>) {
+    // answer_ready's swap_remove can put a newer request before an older one. Waiting on the later deadline first would let
+    // an older request's late reply queue up and beat its expired timeout when we finally poll it. Visit the earliest deadline first.
+    inflight.sort_unstable_by_key(|item| item.deadline);
+    for item in inflight {
+        let Some(id) = item.audit else { continue };
+        let outcome = match tokio::time::timeout_at(item.deadline, item.reply).await {
+            Ok(Ok(r)) => match r.result {
+                Some(command_response::Result::Err(info)) => info.code,
+                _ => "ok".to_string(),
+            },
+            Ok(Err(_)) => ErrorCode::NodeOffline.as_str().to_string(),
+            Err(_) => ErrorCode::NodeTimeout.as_str().to_string(),
+        };
+        let _ = crate::audit::Audit::new(hub.store()).finish(id, &outcome);
+    }
+}
+
+async fn serve_client_loop<S>(
     mut conn: Conn<S>,
     hub: &Hub,
     first: Frame,
     access: &(dyn Fn() -> Option<crate::users::Access> + Sync),
+    inflight: &mut Vec<Inflight>,
 ) -> Result<(), ServeError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -459,10 +713,9 @@ where
         send_positioned(&mut conn, d).await?;
     }
     let mut checked = tokio::time::Instant::now();
-    let mut inflight: Vec<Inflight> = Vec::new();
     let (relays, mut relay_frames) = hub.router().client();
     loop {
-        answer_ready(&mut conn, &mut inflight, hub).await?;
+        answer_ready(&mut conn, inflight, hub).await?;
         // Terminal frames from nodes, and streams the hub ended.
         while let Ok(rf) = relay_frames.try_recv() {
             conn.send(&frame(rf.stream, rf.kind, rf.payload)).await?;
@@ -512,7 +765,7 @@ where
                         &mut conn,
                         hub,
                         &relays,
-                        &mut inflight,
+                        inflight,
                         stream,
                         &f.payload,
                         Caller {
@@ -523,6 +776,11 @@ where
                     .await?;
                 }
                 (stream, STREAM_CLOSE) if stream >= FIRST_DYNAMIC_STREAM => relays.close(stream),
+                // A window checks that the hub is still there (protocol section 1): answered at once, whatever else is queued.
+                (STREAM_CONTROL, kinds::PING) => {
+                    conn.send(&frame(STREAM_CONTROL, kinds::PONG, f.payload))
+                        .await?;
+                }
                 _ => {}
             },
             Err(_) => {}
@@ -569,11 +827,17 @@ async fn forward_command<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let req = v1::CommandRequest::decode(payload).map_err(|_| invalid("request"))?;
+    let mut req = v1::CommandRequest::decode(payload).map_err(|_| invalid("request"))?;
     let client_request_id = req.request_id.clone();
     let refuse = |e: Error| error_response(&client_request_id, &e);
-    // ADR-0049: a viewer's commands stop here, before any node hears of them. (The node still decides what its devices may do.)
     let Caller { who, scope } = caller;
+    // ADR-0061: a person's own devices, answered (or carried) by the hub; a node decides for itself what it trusts.
+    if let Some(resp) = device_command(hub, who, &req) {
+        conn.send(&frame(STREAM_COMMANDS, 1, resp.encode_to_vec()))
+            .await?;
+        return Ok(());
+    }
+    // ADR-0049: a viewer's commands stop here, before any node hears of them. (The node still decides what its devices may do.)
     let may = req.command.as_ref().is_some_and(|c| {
         (who.role != crate::users::Role::Viewer || crate::users::viewer_may(c))
             && scope.is_none_or(|s| s.command_allowed(&req.target_node, c))
@@ -588,6 +852,66 @@ where
                 .encode_to_vec(),
         ))
         .await?;
+        return Ok(());
+    }
+    // ADR-0053: the hub forgets a closed agent. It names the agent by its hub-wide key, so it names no node.
+    if let Some(command_request::Command::AgentForget(f)) = &req.command {
+        let node = f.agent_id.split('/').next().unwrap_or_default().to_string();
+        let resp = if req.target_node.is_empty() {
+            match hub.forget_agent(&f.agent_id, now_ms()) {
+                Ok(()) => {
+                    audit(hub, who, "agent.forget", &node, "ok");
+                    v1::CommandResponse {
+                        request_id: client_request_id,
+                        result: Some(command_response::Result::Ok(v1::CommandOk {
+                            result: Some(command_ok::Result::Empty(v1::Empty {})),
+                        })),
+                    }
+                }
+                Err(e) => {
+                    audit(hub, who, "agent.forget", &node, e.code.as_str());
+                    refuse(e)
+                }
+            }
+        } else {
+            refuse(Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "target_node"))
+        };
+        conn.send(&frame(STREAM_COMMANDS, 1, resp.encode_to_vec()))
+            .await?;
+        return Ok(());
+    }
+    // ADR-0073: the hub forgets an offline machine. Owner only (machines belong to the owner, not to a project); it names the machine
+    // in the command, not as the target.
+    if let Some(command_request::Command::NodeForget(f)) = &req.command {
+        let resp = if !req.target_node.is_empty() {
+            refuse(Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "target_node"))
+        } else if who.role != crate::users::Role::Owner {
+            audit(hub, who, "node.forget", &f.node_id, "auth.forbidden");
+            refuse(Error::new(ErrorCode::AuthForbidden).with("action", "node.forget"))
+        } else {
+            match hub.forget_node(&f.node_id, f.refuse_return, now_ms()) {
+                Ok(()) => {
+                    let outcome = if f.refuse_return {
+                        "ok refused_return"
+                    } else {
+                        "ok"
+                    };
+                    audit(hub, who, "node.forget", &f.node_id, outcome);
+                    v1::CommandResponse {
+                        request_id: client_request_id,
+                        result: Some(command_response::Result::Ok(v1::CommandOk {
+                            result: Some(command_ok::Result::Empty(v1::Empty {})),
+                        })),
+                    }
+                }
+                Err(e) => {
+                    audit(hub, who, "node.forget", &f.node_id, e.code.as_str());
+                    refuse(e)
+                }
+            }
+        };
+        conn.send(&frame(STREAM_COMMANDS, 1, resp.encode_to_vec()))
+            .await?;
         return Ok(());
     }
     // Answered by the hub itself from its own view and prices (ADR-0033); it names no node.
@@ -605,6 +929,34 @@ where
         conn.send(&frame(STREAM_COMMANDS, 1, resp.encode_to_vec()))
             .await?;
         return Ok(());
+    }
+    // Shared terminal size: the node gets the smallest size of the windows watching the terminal, and only when it changes.
+    if let Some(command_request::Command::TerminalResize(t)) = req.command.as_mut() {
+        if !req.target_node.is_empty() {
+            use crate::router::Resize;
+            match hub
+                .router()
+                .resize(relays, &req.target_node, &t.terminal_id, t.cols, t.rows)
+            {
+                Resize::Forward((cols, rows)) => {
+                    t.cols = cols.into();
+                    t.rows = rows.into();
+                }
+                Resize::Unchanged => {
+                    audit(hub, who, &audit_action(&req), &req.target_node, "ok");
+                    let resp = v1::CommandResponse {
+                        request_id: client_request_id,
+                        result: Some(command_response::Result::Ok(v1::CommandOk {
+                            result: Some(command_ok::Result::Empty(v1::Empty {})),
+                        })),
+                    };
+                    conn.send(&frame(STREAM_COMMANDS, 1, resp.encode_to_vec()))
+                        .await?;
+                    return Ok(());
+                }
+                Resize::PassThrough => {}
+            }
+        }
     }
     let outcome = (|| {
         let node = crate::router::forwardable(&req)?.to_string();
@@ -628,7 +980,13 @@ where
             return Err(Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "stream_id"));
         }
         let (reply, relay) = if subscribing {
-            let node_stream = hub.router().open_relay(&node, relays, stream_id);
+            let terminal = match &req.command {
+                Some(command_request::Command::TerminalSubscribe(t)) => {
+                    Some(t.terminal_id.as_str())
+                }
+                _ => None,
+            };
+            let node_stream = hub.router().open_relay(&node, relays, stream_id, terminal);
             match hub.router().send_on(&node, req.clone(), node_stream) {
                 Ok(r) => (r, Some(node_stream)),
                 Err(e) => {
@@ -650,14 +1008,14 @@ where
     })();
     match outcome {
         Ok(mut i) => {
-            i.audit = audit(hub, who, &command_name(&req), &i.node, "sent");
+            i.audit = audit(hub, who, &audit_action(&req), &i.node, "sent");
             inflight.push(i);
         }
         Err(e) => {
             audit(
                 hub,
                 who,
-                &command_name(&req),
+                &audit_action(&req),
                 &req.target_node,
                 e.code.as_str(),
             );
@@ -1004,6 +1362,210 @@ fn board_for_node(
     });
 }
 
+/// ADR-0058: the snapshot fields that come from an agent's reported session (options, context, its own cost).
+fn session_snapshot(s: &crate::projection::SessionView) -> v1::AgentSnapshot {
+    let o = s.options.clone().unwrap_or_default();
+    v1::AgentSnapshot {
+        modes: o.modes,
+        models: o.models,
+        current_mode: o.current_mode,
+        current_model: o.current_model,
+        context_tokens: s.context_tokens,
+        context_window: s.context_window,
+        cost_micros: s.cost_micros,
+        currency: s.currency.clone(),
+        ..v1::AgentSnapshot::default()
+    }
+}
+
+/// ADR-0061: the device commands a client sends, answered here; `None` for any other command. Registering and listing are open to
+/// every signed-in person for their own devices; a viewer, who cannot act on a machine, cannot endorse or revoke.
+fn device_command(
+    hub: &Hub,
+    who: &crate::users::Access,
+    req: &v1::CommandRequest,
+) -> Option<v1::CommandResponse> {
+    use command_request::Command as C;
+    let devices = crate::devices::Devices::new(hub.store());
+    let now = now_ms();
+    let empty = || command_ok::Result::Empty(v1::Empty {});
+    let viewer = who.role == crate::users::Role::Viewer;
+    let aimed = !req.target_node.is_empty();
+    let (action, result): (&str, Result<command_ok::Result, Error>) = match &req.command {
+        // Nothing is registered, kept or carried for a request that names a node: device commands are the hub's.
+        Some(
+            C::DeviceRegister(_)
+            | C::DeviceList(_)
+            | C::DeviceAskApproval(_)
+            | C::DeviceEndorse(_)
+            | C::DeviceRevoke(_),
+        ) if aimed => (
+            "",
+            Err(Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "target_node")),
+        ),
+        Some(C::DeviceRegister(r)) => ("", devices.register(&who.user, r, now).map(|()| empty())),
+        Some(C::DeviceList(_)) => (
+            "",
+            devices
+                .list_for(&who.user)
+                .map(|devices| command_ok::Result::DeviceList(v1::DeviceListResult { devices })),
+        ),
+        Some(C::DeviceAskApproval(a)) => (
+            "device.ask_approval",
+            devices.ask_approval(&who.user, a, now).map(|()| empty()),
+        ),
+        Some(C::DeviceEndorse(_) | C::DeviceRevoke(_)) if viewer => (
+            "device.endorse",
+            Err(Error::new(ErrorCode::AuthForbidden).with("action", command_name(req).as_str())),
+        ),
+        Some(C::DeviceEndorse(d)) => (
+            "device.endorse",
+            match &d.endorsement {
+                None => {
+                    Err(Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "endorsement"))
+                }
+                Some(e) => devices.record_endorsement(&who.user, e, now).map(|()| {
+                    carry_device_change(hub, C::DeviceEndorse(d.clone()), &e.nodes);
+                    empty()
+                }),
+            },
+        ),
+        Some(C::DeviceRevoke(d)) => (
+            "device.revoke",
+            match &d.revocation {
+                None => {
+                    Err(Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "revocation"))
+                }
+                Some(r) => devices.record_revocation(&who.user, r, now).map(|()| {
+                    carry_device_change(hub, C::DeviceRevoke(d.clone()), &[]);
+                    empty()
+                }),
+            },
+        ),
+        _ => return None,
+    };
+    if !action.is_empty() {
+        let outcome = match &result {
+            Ok(_) => "ok",
+            Err(e) => e.code.as_str(),
+        };
+        audit(hub, who, action, "", outcome);
+    }
+    Some(match result {
+        Ok(ok) => v1::CommandResponse {
+            request_id: req.request_id.clone(),
+            result: Some(command_response::Result::Ok(v1::CommandOk {
+                result: Some(ok),
+            })),
+        },
+        Err(e) => error_response(&req.request_id, &e),
+    })
+}
+
+/// ADR-0061: hands an endorsement or revocation to every connected node that verifies them (for an endorsement that names machines,
+/// only those). A node that is not connected gets it when it connects ([`give_device_changes`]). The answers are not waited for: what
+/// a node did shows in its next `NodeTrustedDevices`, and the node keeps its own record of every one it refused.
+fn carry_device_change(hub: &Hub, command: command_request::Command, nodes: &[String]) {
+    let devices = crate::devices::Devices::new(hub.store());
+    for node in hub.router().nodes_with("device.trust") {
+        // An endorsement goes only to machines its device's person may act on (as the device list does); a revocation, which can
+        // only narrow, goes everywhere.
+        let relevant = match &command {
+            command_request::Command::DeviceEndorse(d) => d.endorsement.as_ref().is_some_and(|e| {
+                devices
+                    .list_for_node(&node)
+                    .is_ok_and(|l| l.iter().any(|x| x.device_id == e.device_id))
+            }),
+            _ => true,
+        };
+        if relevant && (nodes.is_empty() || nodes.contains(&node)) {
+            let req = v1::CommandRequest {
+                request_id: String::new(),
+                idempotency_key: String::new(),
+                target_node: String::new(),
+                command: Some(command.clone()),
+            };
+            let _ = hub.router().send(&node, req);
+        }
+    }
+}
+
+/// ADR-0061: everything a node that just connected may have missed: endorsements that have not expired (for it), then revocations.
+/// Applying one twice changes nothing on the node.
+fn give_device_changes(hub: &Hub, node_id: &str) {
+    let Ok((endorsements, revocations)) =
+        crate::devices::Devices::new(hub.store()).for_machines(now_ms())
+    else {
+        return;
+    };
+    let relevant: Vec<String> = crate::devices::Devices::new(hub.store())
+        .list_for_node(node_id)
+        .map(|l| l.into_iter().map(|d| d.device_id).collect())
+        .unwrap_or_default();
+    let commands = endorsements
+        .into_iter()
+        .filter(|e| e.nodes.is_empty() || e.nodes.iter().any(|n| n == node_id))
+        .filter(|e| relevant.contains(&e.device_id))
+        .map(|e| {
+            command_request::Command::DeviceEndorse(v1::DeviceEndorse {
+                endorsement: Some(e),
+            })
+        })
+        .chain(revocations.into_iter().map(|r| {
+            command_request::Command::DeviceRevoke(v1::DeviceRevoke {
+                revocation: Some(r),
+            })
+        }));
+    for command in commands {
+        let req = v1::CommandRequest {
+            request_id: String::new(),
+            idempotency_key: String::new(),
+            target_node: String::new(),
+            command: Some(command),
+        };
+        let _ = hub.router().send(node_id, req);
+    }
+}
+
+/// ADR-0061: a node's one question on a connection of its own (made with its certificate, before any `Hello`): `DeviceList`, so the
+/// owner at the machine can choose which registered devices it trusts (`agora node trust --from-hub`) while the node's own connection
+/// stays as it is. One answer, then the connection ends; nothing else is accepted this way.
+async fn serve_node_query<S>(
+    mut conn: Conn<S>,
+    hub: &Hub,
+    node_id: &str,
+    first: Frame,
+) -> Result<(), ServeError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let req =
+        v1::CommandRequest::decode(first.payload.as_slice()).map_err(|_| invalid("request"))?;
+    let resp = match req.command {
+        Some(command_request::Command::DeviceList(_)) => {
+            match crate::devices::Devices::new(hub.store()).list_for_node(node_id) {
+                Ok(devices) => v1::CommandResponse {
+                    request_id: req.request_id.clone(),
+                    result: Some(command_response::Result::Ok(v1::CommandOk {
+                        result: Some(command_ok::Result::DeviceList(v1::DeviceListResult {
+                            devices,
+                        })),
+                    })),
+                },
+                Err(e) => error_response(&req.request_id, &e),
+            }
+        }
+        _ => error_response(
+            &req.request_id,
+            &Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "command"),
+        ),
+    };
+    conn.send(&frame(STREAM_COMMANDS, 1, resp.encode_to_vec()))
+        .await?;
+    conn.close().await;
+    Ok(())
+}
+
 /// Appends a row to the audit trail. A failure to write is not allowed to take the hub down with it.
 fn audit(
     hub: &Hub,
@@ -1013,8 +1575,23 @@ fn audit(
     outcome: &str,
 ) -> Option<i64> {
     crate::audit::Audit::new(hub.store())
-        .record(now_ms(), &who.user, action, node, outcome)
+        .record_in(&who.session, now_ms(), &who.user, action, node, outcome)
         .ok()
+}
+
+/// The audit row's action: the command's schema name, with the launch options a start chose (ADR-0059: `AgentLaunch[skip-permissions]`).
+fn audit_action(req: &v1::CommandRequest) -> String {
+    let options = match &req.command {
+        Some(command_request::Command::AgentLaunch(a)) => a.launch_options.as_slice(),
+        Some(command_request::Command::AgentStart(a)) => a.launch_options.as_slice(),
+        _ => &[],
+    };
+    let name = command_name(req);
+    if options.is_empty() {
+        name
+    } else {
+        format!("{name}[{}]", options.join(","))
+    }
 }
 
 /// The command's schema name (`AgentStop`), for an error that names what was refused.
@@ -1065,6 +1642,10 @@ where
                     cert_pem: issued.cert_pem,
                     ca_pem: ca.cert_pem().to_string(),
                     not_after_ms: now_ms() + crate::ca::DEVICE_CERT_DAYS as u64 * 86_400_000,
+                    // ADR-0061: candidates only; the owner at the machine says which ones it trusts.
+                    devices: crate::devices::Devices::new(hub.store())
+                        .list_for_node(&e.node_id)
+                        .unwrap_or_default(),
                 })),
             })),
         },
@@ -1117,10 +1698,7 @@ where
             // The token was good when the connection opened; an expired or revoked session must not keep a live one.
             let token = token.unwrap_or_default();
             let role = || state.auth.access(token);
-            tokio::select! {
-                r = serve_client_as(conn, &state.hub, first, &role) => r,
-                () = still(|| state.auth.check(token)) => Err(ServeError::Refused),
-            }
+            serve_client_while(conn, &state.hub, first, &role, &|| state.auth.check(token)).await
         }
         _ => Err(ServeError::Refused),
     }
@@ -1141,9 +1719,11 @@ async fn handle(
     tcp: tokio::net::TcpStream,
     tls: Option<tokio_rustls::TlsAcceptor>,
 ) -> Result<(), ServeError> {
+    // Who is on the other end: a sign-in from another machine needs the screen password (ADR-0067), the hub's own does not.
+    let peer = tcp.peer_addr().ok().map(|a| a.ip());
     let Some(acceptor) = tls else {
         // Without TLS nothing can prove it is a node: only the token path exists (development and tests).
-        let Some(tcp) = websocket_only(tcp, state).await? else {
+        let Some(tcp) = websocket_only(tcp, peer, state).await? else {
             return Ok(());
         };
         let (conn, token) = agora_protocol::ws::accept_with_token(tcp).await?;
@@ -1154,7 +1734,7 @@ async fn handle(
         .await
         .map_err(|e| ServeError::Transport(TransportError::Ws(e.to_string())))?;
     let identity = crate::tls::identity(stream.get_ref().1.peer_certificates());
-    let Some(stream) = websocket_only(stream, state).await? else {
+    let Some(stream) = websocket_only(stream, peer, state).await? else {
         return Ok(());
     };
     let (conn, token) = agora_protocol::ws::accept_with_token(stream).await?;
@@ -1168,15 +1748,42 @@ async fn handle(
                     Error::new(ErrorCode::AuthDeviceRevoked).with("device_id", id.node_id.as_str()),
                 ));
             }
-            // Revoking a node ends its connection, not only its next one.
-            tokio::select! {
-                r = serve_node(conn, &id.node_id, &state.hub, &state.support) => r,
-                () = still(|| Enrollment::new(state.hub.store()).is_active(&id.serial_hex).unwrap_or(false)) => {
-                    Err(ServeError::Protocol(
-                        Error::new(ErrorCode::AuthDeviceRevoked).with("device_id", id.node_id.as_str()),
-                    ))
-                }
+            let mut conn = conn;
+            // The first frame decides; a peer that says nothing is dropped like a silent node (ADR-0070).
+            let first = match tokio::time::timeout(NODE_SILENCE, conn.recv()).await {
+                Ok(r) => r?,
+                Err(_) => return Err(ServeError::Silent),
+            };
+            let Some(first) = first else {
+                return Ok(());
+            };
+            // ADR-0061: a one-shot question on a connection of its own.
+            if (first.stream_id, first.kind) == (STREAM_COMMANDS, 0) {
+                return serve_node_query(conn, &state.hub, &id.node_id, first).await;
             }
+            // Revoking a node ends its connection, not only its next one (checked inside the conversation, so it ends as any other).
+            // While the connection is open, only a record that says "revoked" ends it: a store that cannot be read right now is
+            // logged and the connection kept (#558 review), where the check at connect time above refuses on any doubt.
+            let active = || match Enrollment::new(state.hub.store()).is_active(&id.serial_hex) {
+                Ok(active) => active,
+                Err(_) => {
+                    eprintln!(
+                        "node {}: enrollment record unreadable; connection kept",
+                        id.node_id
+                    );
+                    true
+                }
+            };
+            serve_node_from(
+                conn,
+                Some(first),
+                &id.node_id,
+                &state.hub,
+                &state.support,
+                NODE_SILENCE,
+                &active,
+            )
+            .await
         }
         None => serve_unauthenticated(conn, token.as_deref(), state).await,
     }
@@ -1203,14 +1810,20 @@ async fn still(valid: impl Fn() -> bool) {
 /// Answers plain HTTP requests from the assets; returns the stream (replaying what was read) when it is a WebSocket.
 async fn websocket_only<S>(
     stream: S,
+    peer: Option<std::net::IpAddr>,
     state: &ServerState,
 ) -> Result<Option<crate::web::Rewind<S>>, ServeError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    match crate::web::route(stream, state.assets.as_deref(), state.sessions.as_deref())
-        .await
-        .map_err(|e| ServeError::Transport(TransportError::Ws(e.to_string())))?
+    match crate::web::route(
+        stream,
+        peer,
+        state.assets.as_deref(),
+        state.sessions.as_deref(),
+    )
+    .await
+    .map_err(|e| ServeError::Transport(TransportError::Ws(e.to_string())))?
     {
         crate::web::First::WebSocket(s) => Ok(Some(s)),
         crate::web::First::Answered => Ok(None),
@@ -1228,5 +1841,51 @@ pub async fn run(
         // ACK holds one back for up to 40 ms.
         let _ = tcp.set_nodelay(true);
         tokio::spawn(handle_connection(Arc::clone(&state), tcp, tls.clone()));
+    }
+}
+
+#[cfg(test)]
+mod audit_cleanup_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn an_older_command_must_time_out_while_cleanup_waits_for_a_newer_one(
+    ) -> Result<(), crate::store::StoreError> {
+        let hub = Hub::open(crate::store::SqliteStore::open_in_memory()?)?;
+        let audit = crate::audit::Audit::new(hub.store());
+        let older_id = audit.record(0, "owner", "AgentList", "n", "sent")?;
+        let newer_id = audit.record(1, "owner", "AgentList", "n", "sent")?;
+        let now = tokio::time::Instant::now();
+        let older_deadline = now + Duration::from_millis(10);
+        let (older_send, older_reply) = tokio::sync::oneshot::channel();
+        let (newer_send, newer_reply) = tokio::sync::oneshot::channel();
+        let pending = |audit, reply, deadline| Inflight {
+            client_request_id: String::new(),
+            node: "n".into(),
+            relay: None,
+            audit: Some(audit),
+            reply,
+            deadline,
+        };
+        // answer_ready uses swap_remove: a completed first request moves the newest one in front of an older pending request.
+        let inflight = vec![
+            pending(newer_id, newer_reply, now + Duration::from_secs(1)),
+            pending(older_id, older_reply, older_deadline),
+        ];
+        let send_late = async {
+            tokio::time::sleep_until(older_deadline + Duration::from_millis(50)).await;
+            assert!(tokio::time::Instant::now() > older_deadline);
+            let ok = || v1::CommandResponse {
+                request_id: String::new(),
+                result: Some(command_response::Result::Ok(v1::CommandOk::default())),
+            };
+            let _ = older_send.send(ok());
+            let _ = newer_send.send(ok());
+        };
+        // Poll cleanup first even if a busy test runner wakes after both timers: the timely timeout must precede the late reply.
+        tokio::join!(biased; finish_unanswered(&hub, inflight), send_late);
+        assert_eq!(audit.outcome(newer_id).as_deref(), Some("ok"));
+        assert_eq!(audit.outcome(older_id).as_deref(), Some("node.timeout"));
+        Ok(())
     }
 }

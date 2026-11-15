@@ -47,6 +47,26 @@ budgets above; CI runs it as an informational step and stores `footprint.json`. 
 | Node cold start ≤ 200 ms | 10 ms | start until the control socket answers a command, in-process |
 | Keystroke → echo, same machine ≤ 16 ms | 0.06–0.2 ms p95 | node portion only (no client, no network) |
 
+### Hub cold start against history size (architecture review R4, 2026-11-14)
+
+The hub rebuilds its view by replaying its whole event log at start (`View::rebuild`), so its cold start grows with history. Measured
+with `crates/agora-hub/tests/startup_measure.rs` (ignored; `AGORA_MEASURE_DB=<copy of a hub.db>`, release build, Linux), on a copy
+of a real hub's log of 20 982 events from 26 hours (5 machines, 17 agents), repeated to make longer histories with the same view:
+
+| Events | Database | Rebuild | `Hub::open` |
+| --- | --- | --- | --- |
+| 20 982 | 2.4 MiB | 18 ms | 43 ms |
+| 209 820 | 22 MiB | 125 ms | 119 ms |
+| 1 049 100 | 110 MiB | 591 ms | 649 ms |
+| 2 098 200 | 220 MiB | 1 160 ms | 1 127 ms |
+
+About 0.55 ms per 1 000 events: the 500 ms budget is passed near 900 000 events. **96% of that log was `AgentUsageReported`**
+(20 104 events; one agent alone wrote 11 751, about 7 a minute). The node now gathers usage reports of one agent, model and currency
+for 5 s and logs one (`agora-node::usage_merge`; sums are exact, so totals do not change). On the same log that leaves 5.5% of the
+usage events, which moves the budget from about three months of such use to years. A projection checkpoint (replaying only the log's
+tail) stays the next step if a hub's history still grows past it; it needs its own design for versioning, corruption fallback and
+backups.
+
 Not measured yet: binary size with web assets, process start (exec) in
 the cold-start figure, macOS and Windows numbers (CI will show macOS-agnostic regressions only through tests).
 
@@ -60,7 +80,7 @@ the supervisor reads the exit status without copying anything.
 ### Data path
 - **Terminal bytes are not events.** They flow on their own streams, are relayed by the hub without decoding
   or storing, and use shared buffers (no copies per client).
-- **Direct path** (ADR-0023, proposed): when a client can reach a node directly (same machine or LAN), terminal
+- **Direct path** (ADR-0023, accepted, not built yet: terminal streams still go through the hub relay): when a client can reach a node directly (same machine or LAN), terminal
   streams and file transfers go client ↔ node; the hub keeps control, auth, and state. This removes the
   hairpin when the hub runs far away.
 - **Input beats output.** Keystrokes and approvals ride the highest-priority stream; output is chunked small
@@ -92,6 +112,9 @@ the supervisor reads the exit status without copying anything.
 - Scrollback stored compressed in memory with a configurable cap.
 - Hub projections are in memory with write-behind to storage; reads never hit disk on the hot path.
 - Event fanout uses subscription indexes (by project, node, agent) instead of filtering every event per client.
+- The file watcher stops checked-handle enumeration after recording 50,000 non-directory entries. It does not first
+  collect a whole directory into memory. This is a recorded-entry budget; traversed directories are not counted.
+  Full directory requests still collect their requested level. [Watcher measurements](../reviews/0343-bounded-directory-visits.md).
 
 ## 3. Measurement and enforcement
 - **Bench harness** (`just bench`): synthetic nodes and `agora-fake-agent` terminals producing scripted output,
@@ -105,7 +128,7 @@ the supervisor reads the exit status without copying anything.
   the base at the exact threshold for every scenario.
 - **CI gate:** a reduced benchmark suite runs on every PR touching hot-path crates; a regression above 10% on
   any budget scenario's throughput, or a p95 latency above its ceiling, fails the build. Base and head are built on the same runner and measured alternately (three
-  rounds each, best of each metric per side), so drift on a shared runner hits both sides alike. The full suite runs nightly.
+  rounds each, best of each metric per side), so drift on a shared runner hits both sides alike. It runs on every push to `main` and every pull request; there is no nightly run yet.
 - **Latency tracing:** every input and command carries timestamps per hop (client, hub, node, adapter) so the
   breakdown is visible, not guessed.
 - **Performance HUD:** a developer overlay in the client (also usable by users as "connection details") shows
@@ -134,6 +157,57 @@ whenever keystrokes came less than a round trip apart. The loop now wakes on a t
 sockets and the node's uplink set `TCP_NODELAY`.
 
 Not measured: twenty terminals all open and busy at once (the wall shows four; the other agents' output is not relayed to the browser), and any machine over a real network.
+
+### Measured through the hub in the terminal client (ADR-0063)
+
+`agora tui` (release build, macOS on Apple silicon) against a hub and a node on the same machine, driven in a 160×40 pseudo-terminal:
+a key is written to the console, which sends it to the shell agent through the hub, and the time runs until the echoed character is
+in the console's output. The flood row times the console's own answer (Ctrl K drawing the palette) while the agent's tab streams
+`yes … | head -c 50000000`.
+
+| Budget | Result | Note |
+|---|---|---|
+| Keystroke → echo, same machine, ≤ 16 ms p95 | p50 3.6 ms, p95 4.6 ms, max 13 ms | 100 keys, 20 ms apart |
+| Input outranks output | palette drawn p50 4.1 ms, p95 6.2 ms, max 6.8 ms during the flood | 100 times |
+| Idle CPU | 0.2% with a terminal tab open and nothing typed | 10 s |
+
+The first wiring measured the echo at p50 33 ms: frames were capped at 25 a second, a key that only went to the agent still drew a
+frame (holding the echo back by up to one more frame), and the loop slept 15 ms on the hub while a key waited on stdin. Now frames are
+capped at 60 a second, a key that changes nothing on screen draws nothing, and while the user types (a key in the last second) the loop
+reads keys every 2 ms; idle, it sleeps as before.
+
+### Large lists: the static agent tree and a large diff (architecture review R6, 2026-11-14)
+
+`node scripts/perf-tree.mjs` starts a hub on a throw-away home, seeds it with `scripts/perf-seed-agents.py` (machines x projects x
+agents; `AGORA_PERF_FLEET`) and measures the tree in headless Chromium (software rendering, 1440x900). No node connects and no
+terminal streams: the seeded machines are offline after the hub opens. Every tree row is in the DOM. Existing artifacts can be
+supplied with `AGORA_PERF_BIN` and `AGORA_PERF_WEB_DIR` instead of building another target.
+`PYTHON` selects the Python executable (default `python3`); Windows can set it to `python`, with `AGORA_PERF_BIN` pointing to
+`agora.exe` and `CHROME` to the Chromium executable. `PW_DIR` names the directory containing `node_modules/playwright-core`.
+Repository and executable paths may contain spaces. Cleanup waits for the temporary hub to exit before removing its files.
+
+The load endpoint is a warm reload until all rows exist in the DOM (`domRowsReadyMs`), not a paint measurement. Picking is a
+programmatic row click to the next frame. Filtering changes only Explorer's local state (`filterToFrameMs`); it does not measure
+App's view-to-model work or a complete live-view update.
+
+Re-measured after #557 separated the Long Tasks observer by phase. Each entry belongs to the phase in which its task started;
+scroll includes returning to the top and one settling frame. Pending observer records are drained after the final phase. The
+script reports scroll, pick, filter and outside-phase counts separately, with their total. Evidence and the post-scroll control:
+[measurement record](../reviews/0557-perf-phases.md).
+
+| Static fleet | Reload → DOM rows ready | Scroll frame gap, p50 / p95 | Pick → frame, p50 / p95 | Filter → frame, p50 / p95 | Long tasks: scroll / pick / filter | Tree DOM / heap |
+| --- | --- | --- | --- | --- | --- | --- |
+| **500 agents**, 50 projects, 10 machines | 139 ms | 16.9 / 24.4 ms | 29.0 / 37.4 ms | 21.3 / 31.3 ms | 0 / 0 / 0 | 3 810 nodes / 11 MB |
+| 2 000 agents, 100 projects, 20 machines | 395 ms | 62.0 / 93.8 ms | 82.4 / 93.2 ms | 75.6 / 111.5 ms | 89 / 10 / 26 | 14 820 nodes / 38 MB |
+
+The 500-agent static case stays below the 50 ms selection budget and has no long tasks, but its slowest frame tail misses a
+60 Hz interval. The 2 000-agent case clearly misses both scroll and selection budgets. These runs do not certify the budget for
+busy live fleets or change any budget; larger-tree work still needs measurements of those workloads and windowing where required.
+The old scroll long-task count included later picks and filters and is superseded by these phase-specific results.
+
+**A diff of 10 000 changed lines** is drawn as a window since #511, in the review screen and in `DiffDialog` (it uses the same
+`ChangesView`): `scripts/e2e-changes-large.mjs` opens a file rewritten whole (20 000 rows), Show all and side by side with **no
+main-thread task over 50 ms** and 72 rows in the DOM.
 
 ### xterm.js against a WebAssembly emulator (decides ADR-0017's open choice)
 

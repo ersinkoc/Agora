@@ -38,7 +38,9 @@ fn fake_agent() -> String {
     p.pop(); // deps
     p.pop(); // debug
     p.push(format!("agora-fake-agent{}", std::env::consts::EXE_SUFFIX));
-    if !p.exists() {
+    // Built once per test binary, even when present: a binary left from an older checkout may lack newer flags.
+    static FRESH: std::sync::Once = std::sync::Once::new();
+    FRESH.call_once(|| {
         // `cargo test` only builds binaries of the package under test; build the fake agent on demand.
         let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
         let ok = std::process::Command::new(cargo)
@@ -47,7 +49,7 @@ fn fake_agent() -> String {
             .expect("run cargo")
             .success();
         assert!(ok, "building agora-fake-agent failed");
-    }
+    });
     p.to_string_lossy().into_owned()
 }
 
@@ -221,6 +223,31 @@ fn resize_and_exit_are_delivered_to_subscribers() {
 }
 
 #[test]
+fn a_resize_to_the_same_size_reaches_no_one() {
+    let h = handle(&["sh"]);
+    let (snap, sub) = h.subscribe();
+    let same = snap.size;
+    let seq = h.snapshot().seq;
+    h.resize(same).unwrap();
+    h.resize(Size { cols: 91, rows: 21 }).unwrap();
+    h.resize(Size { cols: 91, rows: 21 }).unwrap();
+    let mut resizes = Vec::new();
+    let end = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < end {
+        if let Ok(Output::Resize(s)) = sub.recv_timeout(Duration::from_millis(100)) {
+            resizes.push(s);
+        }
+    }
+    assert_eq!(
+        resizes,
+        [Size { cols: 91, rows: 21 }],
+        "only the change is delivered"
+    );
+    assert!(h.snapshot().seq > seq);
+    h.kill().unwrap();
+}
+
+#[test]
 fn a_slow_subscriber_lags_without_slowing_the_terminal_and_can_resync() {
     let flood = handle(&["sh", "-c", "yes 'flood flood flood flood flood flood'"]);
     let (_s, slow) = flood.subscribe();
@@ -261,5 +288,66 @@ fn dropped_subscribers_are_forgotten() {
     wait_for(&h, "echo", |s| {
         s.lines.iter().any(|l| l.ends_with("still-fine"))
     });
+    h.kill().unwrap();
+}
+
+#[test]
+fn a_subscriber_gets_the_screen_with_its_colours_and_the_same_cells() {
+    let h = handle(&["sh"]);
+    h.send_input(b"printf '\\033[1;31mRED\\033[0m \\033[38;5;208mORANGE\\033[0m \\033[48;2;1;2;3mRGB\\033[0m\\n'\n".to_vec())
+        .unwrap();
+    wait_for(&h, "coloured line", |s| {
+        s.lines.iter().any(|l| l.contains("RED ORANGE RGB"))
+    });
+    let (snap, _sub) = h.subscribe();
+    let ansi = snap.to_ansi();
+    let text = String::from_utf8_lossy(&ansi);
+    assert!(text.contains("\x1b[0;1;31mRED"), "{text:?}");
+    assert!(text.contains("\x1b[0;38;5;208mORANGE"), "{text:?}");
+    assert!(text.contains("\x1b[0;48;2;1;2;3mRGB"), "{text:?}");
+    // Painted on a fresh terminal of the same size, the repaint gives back the node's own screen and cursor.
+    let mut mirror = AlacrittyTerminal::new(snap.size);
+    mirror.feed(&ansi);
+    assert_eq!(lines(&mirror), snap.lines);
+    assert_eq!(
+        (mirror.cursor().row, mirror.cursor().col),
+        (snap.cursor.row, snap.cursor.col)
+    );
+    // A plain snapshot (what detection reads) does not pay for the repaint.
+    assert!(h.snapshot().repaint.is_none());
+    h.kill().unwrap();
+}
+
+/// A client that joins after the program set its colour and input modes draws what follows like the program's own screen, and its
+/// keys and pastes are encoded the way the program asked for (audit F040: the repaint used to leave both at their defaults).
+#[test]
+fn a_subscriber_joining_mid_stream_gets_the_programs_style_and_input_modes() {
+    let h = handle(&[
+        "sh",
+        "-c",
+        "printf '\\033[?2004h\\033[?1h\\033[1;31mred-'; read x; printf 'more'; read y",
+    ]);
+    wait_for(&h, "first output", |s| {
+        s.lines.iter().any(|l| l.contains("red-"))
+    });
+    let (snap, sub) = h.subscribe();
+    // The client had other modes and colours from earlier output; the repaint replaces them.
+    let mut mirror = AlacrittyTerminal::new(snap.size);
+    mirror.feed(b"\x1b[?2004l\x1b[?1l\x1b[32m");
+    mirror.feed(&snap.to_ansi());
+    // The program goes on only once the client has its repaint.
+    h.send_input(b"go\n".to_vec()).unwrap();
+    drain(&sub, &mut mirror, |t| {
+        lines(t).iter().any(|l| l.contains("more"))
+    });
+    wait_for(&h, "more", |s| s.lines.iter().any(|l| l.contains("more")));
+    let (row, col) = (0..mirror.size().rows)
+        .find_map(|r| mirror.line(r).find("more").map(|c| (r, c as u16)))
+        .unwrap();
+    let theirs = h.inspect(|t| t.cell(row, col).map(|c| c.style)).unwrap();
+    assert!(theirs.bold && theirs.fg == agora_vt::Color::Indexed(1));
+    assert_eq!(mirror.cell(row, col).map(|c| c.style), Some(theirs));
+    assert_eq!(mirror.modes(), h.snapshot().modes);
+    assert!(mirror.modes().bracketed_paste && mirror.modes().application_cursor);
     h.kill().unwrap();
 }

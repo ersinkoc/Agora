@@ -20,6 +20,11 @@ describe('grants', () => {
       scope: 'agent:a-1', commands: ['agent.prompt', 'terminal.input'], kind: 'typing',
     });
     expect(grantFor({ terminalInput: { terminalId: 't-a-2', data: new Uint8Array() } })?.scope).toBe('agent:a-2');
+    // ADR-0058: a model switch is about one agent, like a mode switch (it was asked machine-wide: `node`).
+    expect(grantFor({ agentSetModel: { agentId: 'agent-1', model: 'm' } })).toEqual({
+      scope: 'agent:agent-1', commands: ['agent.set_model', 'agent.prompt', 'terminal.input'], kind: 'typing',
+    });
+    expect(grantFor({ agentSetMode: { agentId: 'agent-1', mode: 'plan' } })?.scope).toBe('agent:agent-1');
     expect(grantFor({ agentStart: { projectId: 'p-1', kind: 'claude' } })).toEqual({ scope: 'project:p-1', commands: ['agent.start'], kind: 'start' });
     expect(grantFor({ filesWrite: { worktreeId: 'w', path: 'a' } })).toEqual({ scope: 'node', commands: ['files.write'], kind: 'other' });
     expect(grantFor({})).toBeUndefined();

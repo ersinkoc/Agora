@@ -1,0 +1,40 @@
+{
+  "issue": 557,
+  "base_head": "3343cdb",
+  "at": "2026-11-14T20:26:47.061254+00:00",
+  "source_sha256": "08e80f96fa7f12e74125449b3edb6dee9bce1a07bbda460afe821b5fc5f1ed1e",
+  "checks": {
+    "native_browser_500": "PASS",
+    "native_browser_2000": "PASS",
+    "dynamic_post_scroll_control": "PASS",
+    "old_global_counter_mutation": {
+      "exit_code": 1,
+      "error": "Scroll counter includes another phase",
+      "source_restored": true
+    }
+  },
+  "control": {
+    "controlled_ms": 80,
+    "scroll_long_tasks": 0,
+    "pick_long_tasks": 0,
+    "filter_long_tasks": 0,
+    "outside_phase_long_tasks": 1,
+    "total": 1
+  },
+  "measurement_scope": "static synthetic fleet, no live node connections or terminal streams; warm DOM row readiness, programmatic row selection, local Explorer filter",
+  "artifact_provenance": "Existing clean author r6-lists binary/web build referenced read-only via explicit environment overrides; no extra Rust target",
+  "dependencies_added": 0,
+  "product_ui_changed": false,
+  "limitations": [
+    "One Linux machine, headless Chromium with software rendering",
+    "Results are descriptive runs, not new budgets or certification of busy live fleets",
+    "The controlled 80 ms task is deliberately injected between phases"
+  ],
+  "checks_passed": [
+    "node --check scripts/perf-tree.mjs",
+    "node --check docs/reviews/0557-phase-control.mjs",
+    "sh scripts/check-docs.sh",
+    "cargo fmt --all -- --check",
+    "git diff --check"
+  ]
+}

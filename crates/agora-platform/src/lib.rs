@@ -18,12 +18,16 @@ mod windows;
 #[cfg(windows)]
 mod winproc;
 #[cfg(windows)]
+mod winservice;
+#[cfg(windows)]
 use winproc as procinfo;
 
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_os = "macos")]
+mod macservice;
 #[cfg(target_os = "linux")]
 use linux as procinfo;
 #[cfg(target_os = "macos")]
@@ -35,6 +39,25 @@ pub const LOCAL_SOCKETS_SUPPORTED: bool = cfg!(any(unix, windows));
 
 /// True where [`spawn`] can start a PTY.
 pub const PTY_SUPPORTED: bool = cfg!(any(unix, windows));
+
+/// The user's shell, for the node's built-in `shell` kind: on Unix `$SHELL` when it names an existing file, else `sh`; on Windows
+/// `%ComSpec%` when set, else `cmd.exe`.
+pub fn default_shell() -> String {
+    #[cfg(windows)]
+    {
+        std::env::var("ComSpec")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "cmd.exe".to_string())
+    }
+    #[cfg(not(windows))]
+    {
+        std::env::var("SHELL")
+            .ok()
+            .filter(|s| std::path::Path::new(s).is_file())
+            .unwrap_or_else(|| "sh".to_string())
+    }
+}
 
 /// A connected local (same-machine) stream, used for the node's control socket.
 pub struct LocalStream {
@@ -124,7 +147,8 @@ pub fn local_endpoint_name(path: &std::path::Path) -> Option<String> {
 }
 
 /// Puts a freshly downloaded program in place of the one at `target` (which may be running): the new file is made executable and
-/// renamed over it. Windows cannot replace a running program, so the old one is moved aside to `<target>.old` first.
+/// renamed over it. Windows cannot replace a running program, so the old one is moved aside to `<target>.old` first; when that name is
+/// still taken by a program an earlier update moved aside and that still runs (a node not restarted since), to `<target>.old-<pid>`.
 pub fn replace_executable(new: &std::path::Path, target: &std::path::Path) -> io::Result<()> {
     #[cfg(unix)]
     {
@@ -134,13 +158,38 @@ pub fn replace_executable(new: &std::path::Path, target: &std::path::Path) -> io
     }
     #[cfg(not(unix))]
     {
-        let mut old = target.as_os_str().to_owned();
-        old.push(".old");
-        let old = std::path::PathBuf::from(old);
-        let _ = std::fs::remove_file(&old);
-        std::fs::rename(target, &old)?;
-        std::fs::rename(new, target).inspect_err(|_| {
-            let _ = std::fs::rename(&old, target);
+        let aside = |suffix: &str| {
+            let mut old = target.as_os_str().to_owned();
+            old.push(suffix);
+            std::path::PathBuf::from(old)
+        };
+        let mut old = aside(".old");
+        if std::fs::remove_file(&old).is_err() && old.exists() {
+            // The program an earlier update moved aside still runs (or a virus scanner still holds a file it just saw): take the first
+            // free name instead, never one that is still held (renaming over a held file fails with a sharing violation).
+            let pid = std::process::id();
+            old = (0..100)
+                .map(|n| aside(&format!(".old-{pid}-{n}")))
+                .find(|p| std::fs::remove_file(p).is_ok() || !p.exists())
+                .ok_or_else(|| io::Error::from(io::ErrorKind::AlreadyExists))?;
+        }
+        // A file just written or renamed is often held for a moment by a virus scanner or the search indexer (a sharing violation,
+        // error 32): wait for it briefly instead of failing the update.
+        let rename = |from: &std::path::Path, to: &std::path::Path| {
+            let mut tries = 0;
+            loop {
+                match std::fs::rename(from, to) {
+                    Err(e) if e.raw_os_error() == Some(32) && tries < 40 => {
+                        tries += 1;
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                    r => return r,
+                }
+            }
+        };
+        rename(target, &old)?;
+        rename(new, target).inspect_err(|_| {
+            let _ = rename(&old, target);
         })
     }
 }
@@ -160,14 +209,51 @@ pub fn set_executable(path: &std::path::Path, executable: bool) -> io::Result<()
     }
 }
 
-/// Makes a folder usable by the current user only (the folder of installed adapters). A no-op elsewhere than Unix.
+/// Opens `path` for reading without waiting on it: on Unix with `O_NONBLOCK` (a FIFO or a device swapped in for a file would
+/// otherwise block the open until a writer appears; regular files read as usual) and `O_NOCTTY`. Check what was opened on the handle
+/// (`metadata().is_file()`, [`opened_path`]).
+pub fn open_read(path: &std::path::Path) -> io::Result<std::fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY)
+            .open(path)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::File::open(path)
+    }
+}
+
+/// Whether a file's owner may run it, as git records it (`100755`): the owner's execute bit on Unix; elsewhere never.
+pub fn is_executable(meta: &std::fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        meta.permissions().mode() & 0o100 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        false
+    }
+}
+
+/// Makes a folder usable by the current user only (the folder of installed adapters): `0700` on Unix; on Windows a protected ACL for
+/// the user and SYSTEM, passed on to everything below. A no-op elsewhere.
 pub fn restrict_to_owner(path: &std::path::Path) -> io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        windows::set_owner_only(path, true)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = path;
         Ok(())
@@ -175,13 +261,12 @@ pub fn restrict_to_owner(path: &std::path::Path) -> io::Result<()> {
 }
 
 /// Writes `contents` to `path` readable and writable only by the current user (private keys and tokens), replacing any
-/// existing file. Elsewhere than Unix the file is written with the default permissions (Windows ACLs come with the
-/// Windows node).
+/// existing file: `0600` on Unix; on Windows a protected ACL for the user and SYSTEM, so a folder that lets other users in
+/// (a data volume's default ACL) does not reach the file.
 pub fn write_private(path: &std::path::Path, contents: &[u8]) -> io::Result<()> {
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     {
         use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
         // Written beside the target and renamed over it: a full disk or an interruption leaves the old file whole, never
         // a half-written key or token. The temporary name is exclusive (`create_new`), so a planted link is never followed.
         let mut tmp = path.as_os_str().to_owned();
@@ -189,13 +274,20 @@ pub fn write_private(path: &std::path::Path, contents: &[u8]) -> io::Result<()> 
         let tmp = std::path::PathBuf::from(tmp);
         let _ = std::fs::remove_file(&tmp);
         let result = (|| {
-            let mut f = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(&tmp)?;
+            #[cfg(unix)]
+            let mut f = {
+                let mut options = std::fs::OpenOptions::new();
+                options.write(true).create_new(true);
+                std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+                options.open(&tmp)?
+            };
+            // Private from its creation on, not made private just after it (#320).
+            #[cfg(windows)]
+            let mut f = windows::create_private_new(&tmp)?;
             f.write_all(contents)?;
             f.sync_all()?;
+            // Windows cannot rename a file that is still open.
+            drop(f);
             std::fs::rename(&tmp, path)
         })();
         if result.is_err() {
@@ -203,7 +295,7 @@ pub fn write_private(path: &std::path::Path, contents: &[u8]) -> io::Result<()> 
         }
         result
     }
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     {
         std::fs::write(path, contents)
     }
@@ -238,6 +330,120 @@ pub fn symlink(target: &std::path::Path, link: &std::path::Path) -> io::Result<(
     }
 }
 
+/// Whether `m` (from `symlink_metadata`) is a reparse point: a Windows junction or symbolic link. Always false on other systems, where
+/// [`std::fs::FileType::is_symlink`] says it.
+pub fn is_reparse_point(m: &std::fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        std::os::windows::fs::MetadataExt::file_attributes(m) & 0x400 != 0
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = m;
+        false
+    }
+}
+
+/// Creates a link at `link` to the folder `target` that any user may make: a symbolic link on Unix, a junction on Windows (where a
+/// symbolic link needs a privilege). Tests that swap a folder for a link use it, so they run on every system instead of skipping.
+pub fn link_dir(target: &std::path::Path, link: &std::path::Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, link)
+    }
+    #[cfg(windows)]
+    {
+        windows::junction(target, link)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (target, link);
+        Err(unsupported_io("folder links"))
+    }
+}
+
+/// The path of the file `file` has open, as the kernel knows it now, with every link resolved (spelled as `std::fs::canonicalize`
+/// spells it). Checking a path and then opening it are two steps another process can change in between (a folder or the file
+/// itself swapped for a link); checking where the open handle really is happens after the open, so nothing can change it.
+pub fn opened_path(file: &std::fs::File) -> io::Result<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::opened_path(file)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        linux::opened_path(file)
+    }
+    #[cfg(windows)]
+    {
+        windows::opened_path(file)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+    {
+        let _ = file;
+        Err(io::Error::from(io::ErrorKind::Unsupported))
+    }
+}
+
+/// One entry of a folder listed with [`list_dir`], described without following links (as `DirEntry::file_type` and
+/// `DirEntry::metadata` describe it): a link is neither a folder nor its target's size.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirItem {
+    pub name: std::ffi::OsString,
+    pub is_dir: bool,
+    pub len: u64,
+    pub modified: std::time::SystemTime,
+}
+
+/// Opens the folder at `path` for [`list_dir`] (following links, as any open does: check where it is with [`opened_path`]).
+pub fn open_dir(path: &std::path::Path) -> io::Result<std::fs::File> {
+    #[cfg(unix)]
+    {
+        unix::open_dir(path)
+    }
+    #[cfg(windows)]
+    {
+        windows::open_dir(path)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = path;
+        Err(io::Error::from(io::ErrorKind::Unsupported))
+    }
+}
+
+/// The entries of the folder `dir` holds open (from [`open_dir`]), read through that handle: `std::fs::read_dir` takes a path and
+/// opens it again, so a folder swapped for a link after its handle was checked would be listed instead. `.` and `..` are left out.
+pub fn list_dir(dir: &std::fs::File) -> io::Result<Vec<DirItem>> {
+    let mut items = Vec::new();
+    visit_dir(dir, |item| {
+        items.push(item);
+        std::ops::ControlFlow::Continue(())
+    })?;
+    Ok(items)
+}
+
+/// Visits entries through the open directory handle. Returning [`std::ops::ControlFlow::Break`] stops enumeration before
+/// reading metadata for any later entry. Unlike [`list_dir`], this never collects the entire directory first.
+pub fn visit_dir(
+    dir: &std::fs::File,
+    mut visitor: impl FnMut(DirItem) -> std::ops::ControlFlow<()>,
+) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        unix::visit_dir(dir, &mut visitor)
+    }
+    #[cfg(windows)]
+    {
+        windows::visit_dir(dir, &mut visitor)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (dir, visitor);
+        Err(io::Error::from(io::ErrorKind::Unsupported))
+    }
+}
+
 /// Connect to a local socket.
 pub fn local_connect(path: &std::path::Path) -> io::Result<LocalStream> {
     #[cfg(unix)]
@@ -253,11 +459,17 @@ pub fn local_connect(path: &std::path::Path) -> io::Result<LocalStream> {
 }
 
 impl LocalListener {
-    /// Wait for the next client.
+    /// Wait for the next client. The stream it returns blocks (its reads wait, up to their timeout), whether or not this listener
+    /// does.
     pub fn accept(&self) -> io::Result<LocalStream> {
         #[cfg(unix)]
         {
-            self.inner.accept().map(|(inner, _)| LocalStream { inner })
+            // macOS and the BSDs hand an accepted socket the listener's O_NONBLOCK (Linux does not). A listener made non-blocking
+            // for its accept loop must not make every connection non-blocking: a read with a timeout would return WouldBlock at
+            // once, and a loop that waits on it spins a core (seen on macOS: each idle control connection at 100% CPU).
+            let (inner, _) = self.inner.accept()?;
+            inner.set_nonblocking(false)?;
+            Ok(LocalStream { inner })
         }
         #[cfg(windows)]
         {
@@ -397,6 +609,71 @@ impl Drop for RawMode {
     }
 }
 
+/// Reads one line from the terminal on stdin without showing what is typed (a password), without its line ending. Fails with
+/// `Unsupported` when stdin is not a terminal (a secret is never read from a pipe or a file by accident) and with `Interrupted` on
+/// Ctrl-C; the terminal's settings are restored on every path, Ctrl-C included. A caller that shows a prompt should use
+/// [`read_secret_line_with_prompt`]: a prompt printed before this call can be answered before echo is off, and that answer is shown.
+pub fn read_secret_line() -> io::Result<String> {
+    read_secret(None)
+}
+
+/// [`read_secret_line`] that writes `prompt` (and a line break) to stderr only once echo is off, so nothing typed or pasted in answer
+/// to it is ever shown. On Unix, input that arrived before the prompt (typed ahead, and already shown by the terminal as it came) is
+/// discarded when echo is switched off, so it never becomes part of the secret; the person types it again after the prompt.
+pub fn read_secret_line_with_prompt(prompt: &str) -> io::Result<String> {
+    read_secret(Some(prompt))
+}
+
+fn read_secret(prompt: Option<&str>) -> io::Result<String> {
+    #[cfg(unix)]
+    let mode = unix::secret_mode(prompt.is_some())?;
+    #[cfg(windows)]
+    let mode = windows::secret_mode()?;
+    #[cfg(not(any(unix, windows)))]
+    let mode: () = return Err(unsupported_io("reading a password"));
+    if let Some(prompt) = prompt {
+        use std::io::Write;
+        let mut err = io::stderr().lock();
+        // A prompt that cannot be shown does not stop the read: the terminal is still the one typed into.
+        let _ = writeln!(err, "{prompt}");
+        let _ = err.flush();
+    }
+    let line = secret_from(&mut io::stdin().lock());
+    drop(mode);
+    // The Enter (or Ctrl-C) that ended it was not echoed.
+    eprintln!();
+    line
+}
+
+/// The line editing [`read_secret_line`] does itself, with the terminal's own switched off: Enter ends the line, Backspace removes the
+/// last character, Ctrl-U the whole line, Ctrl-C is `Interrupted`, Ctrl-D on an empty line is `UnexpectedEof`; other control bytes
+/// are dropped.
+pub fn secret_from(input: &mut impl io::Read) -> io::Result<String> {
+    let mut line: Vec<u8> = Vec::new();
+    let mut byte = [0u8; 1];
+    loop {
+        if input.read(&mut byte)? == 0 {
+            if line.is_empty() {
+                return Err(io::ErrorKind::UnexpectedEof.into());
+            }
+            break;
+        }
+        match byte[0] {
+            b'\r' | b'\n' => break,
+            0x03 => return Err(io::ErrorKind::Interrupted.into()),
+            0x04 if line.is_empty() => return Err(io::ErrorKind::UnexpectedEof.into()),
+            0x15 => line.clear(),
+            0x08 | 0x7f => {
+                // One character, however many bytes it took.
+                while line.pop().is_some_and(|b| (0x80..0xc0).contains(&b)) {}
+            }
+            b if b < 0x20 => {}
+            b => line.push(b),
+        }
+    }
+    String::from_utf8(line).map_err(|_| io::ErrorKind::InvalidData.into())
+}
+
 /// Size of the terminal on stdout as `(cols, rows)`, or `None` when stdout is not a terminal.
 pub fn terminal_size() -> Option<(u16, u16)> {
     #[cfg(unix)]
@@ -435,6 +712,31 @@ pub struct PtyConfig {
     /// The agent's own identity under confinement, from [`new_agent_identity`]: the confined process runs with it, and its mesh endpoint
     /// ([`local_listen_agent`]) admits exactly it. `None` makes a fresh one (or means nothing where agents are not confined this way).
     pub identity: Option<String>,
+    /// Inherited environment variables the process must not get: exact names, or a prefix ending in `*` (`CLAUDE_CODE_*`). Variables
+    /// in `env` are set whatever this says.
+    pub env_remove: Vec<String>,
+}
+
+/// Whether an inherited variable `name` is one [`PtyConfig::env_remove`] leaves out (on Windows names compare without case).
+pub fn env_removed(name: &std::ffi::OsStr, patterns: &[String]) -> bool {
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    let eq = |a: &str, b: &str| {
+        if cfg!(windows) {
+            a.eq_ignore_ascii_case(b)
+        } else {
+            a == b
+        }
+    };
+    patterns.iter().any(|p| match p.strip_suffix('*') {
+        Some(prefix) => {
+            name.len() >= prefix.len()
+                && name.is_char_boundary(prefix.len())
+                && eq(&name[..prefix.len()], prefix)
+        }
+        None => eq(name, p),
+    })
 }
 
 /// File-system confinement for a process and everything it starts: it may read (and run programs from) `read` and `write`, and
@@ -446,8 +748,20 @@ pub struct Sandbox {
     /// No network but the loopback interface and the unix sockets below `sockets` and `write` (ADR-0047 `worktree-offline`).
     /// Refused where [`offline_supported`] is false.
     pub offline: bool,
-    /// Folders whose unix sockets stay reachable when `offline` (the node's mesh sockets).
+    /// The agent's own unix sockets (its mesh socket; offline, also its private temp folder): reachable even below `deny`, and the
+    /// only ones reachable when `offline`.
     pub sockets: Vec<PathBuf>,
+    /// The node's own folders and files (its data, identity, logs, control socket, other agents' mesh sockets): never read or written,
+    /// and no unix socket below them connected to, even when they sit below an allowed folder (a node home under `/tmp`), except
+    /// `sockets`, including paths that do not exist yet when the agent starts. Enforced on macOS only (Seatbelt can say "except");
+    /// Linux and Windows ignore it today, so there a node home below an allowed folder stays reachable and T16 stays open (see
+    /// `docs/security/threat-model.md`).
+    pub deny: Vec<PathBuf>,
+    /// The folders below `deny` the agent may use after all (the worktree the node made for it). Each is reopened only while it is a
+    /// real folder whose own name is not a symbolic link: an agent that swapped its worktree for a link to the node's home would
+    /// otherwise have the home opened at its next start. A `read` or `write` entry that resolves below `deny` is never opened.
+    /// macOS only, as `deny`.
+    pub reopen: Vec<PathBuf>,
 }
 
 impl Sandbox {
@@ -465,6 +779,12 @@ impl Sandbox {
 /// reads. There the node hands an agent only its worktree, its own Git admin folder, the shared `objects/` and `refs/`, and a private
 /// temp folder, and leaves the rest of the shared Git folder (config, hooks) read-only. Callers use this instead of a `cfg`.
 pub const NARROW_GIT_WRITES: bool = cfg!(windows);
+
+/// True where a confined agent may write only the parts of its checkout's shared Git folder a commit needs (`objects`, `refs`,
+/// `logs/refs`, its own worktree admin folder; on macOS also `packed-refs`) and not `config` or `hooks`: a planted config or hook would
+/// run in the user's own git and the node's. Windows (narrow profile) and macOS; Linux still gives the whole shared folder. Callers use
+/// this instead of a `cfg`.
+pub const GIT_CONFIG_READ_ONLY: bool = cfg!(any(windows, target_os = "macos"));
 
 /// True where a confined agent gets a temp folder of its own (`TMPDIR`, `TEMP`, `TMP` point at it): on macOS the per-user temp folder
 /// is private to the sandbox and on Windows the profile's is out of reach, so without one compilers and `mktemp` fail. On Linux the
@@ -518,6 +838,17 @@ pub enum SandboxRefusal {
     BroadWriteGrant,
     /// A folder the agent would write could not be labelled for confined agents.
     LabelFailed,
+    /// One of the node's own paths it must keep closed (`Sandbox::deny`) is relative or cannot be resolved (macOS).
+    ProtectedPathUnresolved,
+    /// The agent's worktree (`Sandbox::reopen`) is no longer a plain folder: a link, or something else, is in its place (macOS).
+    WorktreeNotFolder,
+    /// A file or folder the agent may write or read is reached through a symbolic link inside a folder it may write, which it could
+    /// have made itself to be given where the link points at its next start (#545, macOS).
+    WritableIsLink,
+    /// A file the agent may write also has another name elsewhere (a hard link made outside confinement), so writing it would change
+    /// that other place too (#571). Windows: a regular file in the agent's worktree, outside `node_modules`, `target` and `.git`, whose
+    /// links are made on purpose by package stores and git.
+    WritableHasLinks,
 }
 
 impl SandboxRefusal {
@@ -525,6 +856,10 @@ impl SandboxRefusal {
         match self {
             Self::BroadWriteGrant => "broad_write_grant",
             Self::LabelFailed => "label_failed",
+            Self::ProtectedPathUnresolved => "protected_path_unresolved",
+            Self::WorktreeNotFolder => "worktree_not_folder",
+            Self::WritableIsLink => "writable_is_link",
+            Self::WritableHasLinks => "writable_has_links",
         }
     }
 }
@@ -590,7 +925,7 @@ pub fn confine_command(cmd: &mut std::process::Command, sandbox: &Sandbox) -> io
         // not (std cannot read them back), so callers confine first and set the streams after.
         let (program, args) = {
             let a: Vec<_> = cmd.get_args().map(ToOwned::to_owned).collect();
-            macos::wrap(sandbox, cmd.get_program(), &a)
+            macos::wrap(sandbox, cmd.get_program(), &a)?
         };
         let mut wrapped = std::process::Command::new(program);
         wrapped.args(args);
@@ -627,6 +962,7 @@ impl PtyConfig {
             limits: ProcessLimits::default(),
             sandbox: None,
             identity: None,
+            env_remove: Vec::new(),
         }
     }
 }
@@ -739,6 +1075,73 @@ pub fn process_name(pid: u32) -> io::Result<String> {
     }
 }
 
+/// What tells a running process apart from a later one that got the same pid (ADR-0060): its process group, its start time in a
+/// unit of the system's own (compared, never shown), the boot it started in (Linux `boot_id`; empty where the start time already
+/// tells boots apart) and its program's name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessIdentity {
+    pub pid: u32,
+    pub group: u32,
+    pub started: u64,
+    pub boot: String,
+    pub name: String,
+}
+
+/// The [`ProcessIdentity`] of a running process. `Unsupported` on Windows, where a node's agents are in a job object that ends them
+/// with the node, so none can outlive it to be found again.
+pub fn process_identity(pid: u32) -> io::Result<ProcessIdentity> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        procinfo::identity(pid)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = pid;
+        Err(unsupported())
+    }
+}
+
+/// Whether the process `id` names still runs: the same pid with the same start time, in the same boot, running the same program (a
+/// reused pid is not it, and neither is a record that names nothing: an empty name never matches).
+pub fn process_still_running(id: &ProcessIdentity) -> bool {
+    id.pid > 1
+        && !id.name.is_empty()
+        && process_identity(id.pid).is_ok_and(|now| {
+            now.started == id.started && now.boot == id.boot && now.name == id.name
+        })
+}
+
+/// Ends the process `id` names (ADR-0060), and with it its process group when it leads one (an agent's terminal does), only if it
+/// still runs with the same start time: a pid that was given to another process is never touched. `Ok(false)` when it was not
+/// running. Never this process's own group.
+pub fn kill_process_if_same(id: &ProcessIdentity) -> io::Result<bool> {
+    if !process_still_running(id) {
+        return Ok(false);
+    }
+    #[cfg(unix)]
+    {
+        let pid =
+            i32::try_from(id.pid).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+        // SAFETY: getpgrp has no preconditions.
+        let own = unsafe { libc::getpgrp() };
+        let group = i32::try_from(id.group).unwrap_or(0);
+        // SAFETY: plain signals to a process group, or a process, checked to be the recorded one just above.
+        let r = if group == pid && group > 1 && group != own {
+            unsafe { libc::killpg(group, libc::SIGKILL) }
+        } else {
+            unsafe { libc::kill(pid, libc::SIGKILL) }
+        };
+        if r != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(true)
+    }
+    #[cfg(not(unix))]
+    {
+        Err(unsupported())
+    }
+}
+
 /// Current working directory of a process.
 pub fn process_cwd(pid: u32) -> io::Result<PathBuf> {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -787,24 +1190,842 @@ pub fn process_children(pid: u32) -> io::Result<Vec<u32>> {
     }
 }
 
+/// Starts `cmd` detached from this process, its terminal and its session (ADR-0062): it survives the terminal closing, the SSH session
+/// ending and this process being killed. Standard input is empty; standard output and error are appended to `log` (created readable by
+/// the user only). Unix: a new session (`setsid`), so no terminal hangup or Ctrl-C reaches it; Windows: `DETACHED_PROCESS` and
+/// `CREATE_NEW_PROCESS_GROUP`. Returns its process id. A thread of this process reaps it if it ends while this process still runs,
+/// so it never lingers as a zombie. Nothing else of this process is inherited: no other descriptor or handle (a caller reading this
+/// process's output to its end is never kept waiting by the daemon).
+///
+/// On Windows the process also leaves this process's job (`CREATE_BREAKAWAY_FROM_JOB`), so closing the terminal that started it does
+/// not end it; when the job forbids that, it is started inside the job and [`Detached::in_job`] says so.
+pub fn spawn_detached(
+    cmd: &mut std::process::Command,
+    log: &std::path::Path,
+) -> io::Result<Detached> {
+    // The log is opened as the supervisor's own is: against its folder, never through a link or a second name, private from its
+    // creation (#556). `InvalidInput` / `PermissionDenied` when it refuses.
+    let out = open_append_private(log)?;
+    #[cfg(windows)]
+    {
+        winproc::spawn_detached(cmd, &out)
+    }
+    #[cfg(not(windows))]
+    {
+        cmd.stdin(std::process::Stdio::null())
+            .stdout(out.try_clone()?)
+            .stderr(out);
+        #[cfg(unix)]
+        unix::detach(cmd);
+        let mut child = cmd.spawn()?;
+        let pid = child.id();
+        let _ = std::thread::Builder::new()
+            .name("agora-reap".into())
+            .spawn(move || {
+                let _ = child.wait();
+            });
+        Ok(Detached { pid, in_job: false })
+    }
+}
+
+/// A process started by [`spawn_detached`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Detached {
+    pub pid: u32,
+    /// Windows only: the caller's job forbade leaving it, so the process still ends when that job is closed.
+    pub in_job: bool,
+}
+
+/// When process `pid` started, in a unit of the system's own (only compared for equality), or `None` when no such process runs (an
+/// ended one that was not reaped yet counts as ended). A pid with the same start time is the same process, not a recycled pid: what
+/// lock files compare. Where the start time cannot be read, a live process reports 0.
+pub fn process_start_time(pid: u32) -> Option<u64> {
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    {
+        procinfo::start_time(pid)
+    }
+    #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+    {
+        unix::alive(pid).then_some(0)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
+/// Asks process `pid` to end: `SIGTERM` on Unix, `TerminateProcess` on Windows.
+pub fn terminate_process(pid: u32) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        unix::terminate(pid)
+    }
+    #[cfg(windows)]
+    {
+        winproc::terminate(pid)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+        Err(io::Error::from(io::ErrorKind::Unsupported))
+    }
+}
+
+/// The variable through which [`spawn_bound`] tells a child (on Unix) which process it must end with; [`end_with_supervisor`] reads
+/// and removes it.
+const SUPERVISOR_VAR: &str = "AGORA_SUPERVISOR_PID";
+
+/// Starts `cmd` bound to this process: the child ends when this process ends, however it ends (stopped, killed, crashed), so a
+/// supervisor never leaves its child behind (ADR-0062 item 8).
+///
+/// Windows: the first call puts this process into a job of its own that ends every process in it when it is closed
+/// (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`); only this process holds the job, so it closes when this process ends. The child starts
+/// inside it, so there is no moment when it runs unbound. Processes in the job may still leave it on purpose
+/// (`JOB_OBJECT_LIMIT_BREAKAWAY_OK`), as [`spawn_detached`] does. When this process may not join a job, the child starts unbound
+/// and [`Bound::bound`] says so.
+///
+/// Unix: the child learns this process's id from its environment and must call [`end_with_supervisor`] first thing (Linux:
+/// `PR_SET_PDEATHSIG`; macOS: a `kqueue` exit watch), which ends it with `SIGTERM` when this process ends. Spawn and wait from
+/// the same thread, one that lives as long as the child: Linux ties the signal to the thread that started the child.
+pub fn spawn_bound(cmd: &mut std::process::Command) -> io::Result<Bound> {
+    #[cfg(windows)]
+    {
+        let bound = winproc::join_kill_on_close_job();
+        // As `spawn_detached` started it before: no console of its own (a console-less parent's child would get a new one, a
+        // window whose closing would end it) and out of any Ctrl-C group.
+        std::os::windows::process::CommandExt::creation_flags(cmd, winproc::DETACHED_FLAGS);
+        Ok(Bound {
+            child: cmd.spawn()?,
+            bound,
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        cmd.env(SUPERVISOR_VAR, std::process::id().to_string());
+        Ok(Bound {
+            child: cmd.spawn()?,
+            bound: cfg!(any(target_os = "linux", target_os = "macos")),
+        })
+    }
+}
+
+/// Whether [`spawn_bound`] can bind a child here: a supervisor asks before starting anything, and refuses to start a child that could
+/// outlive it. Windows: joins the job (once) and says whether that worked; Linux and macOS: yes; other systems: no.
+pub fn children_can_be_bound() -> bool {
+    #[cfg(windows)]
+    {
+        winproc::join_kill_on_close_job()
+    }
+    #[cfg(not(windows))]
+    {
+        cfg!(any(target_os = "linux", target_os = "macos"))
+    }
+}
+
+/// A child started by [`spawn_bound`].
+#[derive(Debug)]
+pub struct Bound {
+    pub child: std::process::Child,
+    /// False when the child does not end with this process (Windows: this process could not join a job; a Unix system without a
+    /// parent-exit watch).
+    pub bound: bool,
+}
+
+/// In a child started by [`spawn_bound`]: arranges for this process to end when its supervisor ends, and removes the variable that
+/// named it so nothing this process starts inherits it. Does nothing in a process started any other way. Call it at the very start
+/// of `main`, before any other thread exists (it changes the environment).
+pub fn end_with_supervisor() {
+    let Some(value) = std::env::var_os(SUPERVISOR_VAR) else {
+        return;
+    };
+    std::env::remove_var(SUPERVISOR_VAR);
+    let parent = value.to_str().and_then(|v| v.parse::<u32>().ok());
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if let Some(parent) = parent {
+        procinfo::end_with(parent);
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let _ = parent;
+}
+
+/// Waits until `child` has ended without reaping it (Unix `waitid` with `WNOWAIT`): its pid stays its own, so a stop request passed
+/// on by pid between this and the reaping [`std::process::Child::wait`] cannot reach a process that got the pid again. Windows
+/// passes nothing on by pid and returns at once; the caller's `wait` does the waiting.
+pub fn wait_unreaped(child: &std::process::Child) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        unix::wait_unreaped(child.id())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = child;
+        Ok(())
+    }
+}
+
+/// The signal that ended a process, where there are signals (Unix); `None` for an exit with a code.
+pub fn exit_signal(status: &std::process::ExitStatus) -> Option<i32> {
+    #[cfg(unix)]
+    {
+        std::os::unix::process::ExitStatusExt::signal(status)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = status;
+        None
+    }
+}
+
+/// For a supervisor: from now on `SIGTERM`, `SIGINT` and `SIGHUP` do not end this process; they set [`stop_requested`] and are
+/// passed on as `SIGTERM` to the process named by [`forward_stop_to`]. Windows has no such request for a detached process (`agora
+/// down` ends it with `TerminateProcess`, and the job of [`spawn_bound`] takes the child with it): there this does nothing.
+pub fn catch_stop_requests() -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        unix::catch_stop_requests()
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(())
+    }
+}
+
+/// The process a stop request caught by [`catch_stop_requests`] is passed on to (`None`: no one, between children).
+pub fn forward_stop_to(pid: Option<u32>) {
+    #[cfg(unix)]
+    unix::forward_stop_to(pid);
+    #[cfg(not(unix))]
+    let _ = pid;
+}
+
+/// Whether a stop request was caught since [`catch_stop_requests`].
+pub fn stop_requested() -> bool {
+    #[cfg(unix)]
+    {
+        unix::stop_requested()
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
+/// Opens `path` to append for a log a process writes for itself (`agora supervise --log`), so that nothing planted in the Agora folder
+/// can redirect what is written or change another file's permissions (`InvalidInput` when it refuses):
+/// - the folder it is in is opened as itself, never through a link or junction, and the log is opened against that folder (Unix
+///   `openat`; Windows: the folder is held so it can be neither renamed nor removed, and the log is checked to be inside it);
+/// - a new log is created exclusively, readable and writable by the user only (never executable) from its creation on;
+/// - an existing log is opened without following a link and refused when it is a link, not a regular file, has another name (a hard
+///   link) or (Unix) belongs to another user; it is then made the user's only through its own handle.
+///
+/// The folders above the log's own (the Agora folder and its parents) are the user's choice and are not checked.
+pub fn open_append_private(path: &std::path::Path) -> io::Result<std::fs::File> {
+    let dir = path
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .unwrap_or(std::path::Path::new("."));
+    #[cfg(unix)]
+    {
+        let name = path
+            .file_name()
+            .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+        unix::open_private(dir, name, true)
+    }
+    #[cfg(windows)]
+    {
+        windows::open_private(dir, path, true)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = dir;
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+    }
+}
+
+/// Refusals: `InvalidInput` for a link, a second name or not a plain file or folder; `PermissionDenied` for one another user owns.
+///
+/// Opens (creating it) a lock file a process takes with `File::lock`, with every check of [`open_append_private`]: its folder opened as
+/// itself, never through a link; a new file private from its creation (mode 0600, an owner-only ACL); an existing one a regular file
+/// with one name and (Unix) this user's, made private through its handle. Read and write, never truncated. Another local user can then
+/// neither open it to hold the lock nor plant a link that makes the lock land on another file.
+pub fn open_lock_private(path: &std::path::Path) -> io::Result<std::fs::File> {
+    let dir = path
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .unwrap_or(std::path::Path::new("."));
+    #[cfg(unix)]
+    {
+        let name = path
+            .file_name()
+            .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+        unix::open_private(dir, name, false)
+    }
+    #[cfg(windows)]
+    {
+        windows::open_private(dir, path, false)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = dir;
+        std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(path)
+    }
+}
+
+/// Makes `dir` exist as a folder only its user can enter (Unix 0700; Windows an owner-only ACL inherited by what it holds), creating it
+/// when missing. `InvalidInput` when it is a link or not a folder, or belongs to another user: a private folder is never reached
+/// through a link, and is checked and changed through one handle of the folder itself.
+pub fn ensure_private_dir(dir: &std::path::Path) -> io::Result<()> {
+    if std::fs::symlink_metadata(dir).is_err_and(|e| e.kind() == io::ErrorKind::NotFound) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(dir)?;
+        }
+        #[cfg(not(unix))]
+        std::fs::create_dir_all(dir)?;
+    }
+    // Checked and made private through one handle of the folder itself: never through a link, and only when it is this user's.
+    #[cfg(unix)]
+    {
+        unix::ensure_private_dir(dir)
+    }
+    #[cfg(windows)]
+    {
+        windows::ensure_private_dir(dir)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        restrict_to_owner(dir)
+    }
+}
+
+/// True where this build has a way to register a program to start at the user's login (ADR-0062 item 6): Windows (a logon task),
+/// Linux (a systemd user unit) and macOS (a LaunchAgent). Whether this machine can use it is [`services_available`], asked at run time.
+pub const SERVICES_SUPPORTED: bool = cfg!(any(windows, target_os = "linux", target_os = "macos"));
+
+/// True where a login service starts only while the user is logged in unless the system is told otherwise, which Agora never does
+/// itself (Linux: a systemd user manager runs from boot only with `loginctl enable-linger`). The caller says so after installing.
+pub const SERVICES_NEED_LINGER_FOR_BOOT: bool = cfg!(target_os = "linux");
+
+/// True where a program replaced by an update must be allowed onto the local network again before a login service can reach a hub
+/// on another machine (macOS: Privacy & Security > Local Network keeps the permission per binary; measured with 0.3.12 → 0.3.13,
+/// unsigned builds). The caller says so after an update when a service is registered.
+pub const SERVICES_NEED_NETWORK_PERMISSION_AFTER_UPDATE: bool = cfg!(target_os = "macos");
+
+/// Whether this machine can register a login service now: [`SERVICES_SUPPORTED`], and on Linux a `systemctl` (systemd's per-user
+/// services) found on `PATH`, on macOS a login session (`launchctl print gui/<uid>`; none over SSH while nobody is logged in at the
+/// screen). Asked at run time, not when Agora was built: one Linux binary runs with and without systemd.
+pub fn services_available() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        linux::services_available()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macservice::available()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        SERVICES_SUPPORTED
+    }
+}
+
+/// Why a path or argument of a [`ServiceSpec`] cannot go into this system's service entry as it is (see [`service_refusal`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ServiceRefusal {
+    /// The system would read part of it as a variable (Windows expands `%VAR%` in a task's command line).
+    Expands,
+    /// Not valid Unicode, or a form the entry cannot carry (systemd drops spaces at the start or end of a folder).
+    CannotCarry,
+    /// A line break, a NUL or another control character (a systemd unit is read line by line).
+    ControlCharacter,
+    /// Not a full path: the program and the working directory must start at the root.
+    NotAbsolute,
+    /// A backslash in the working directory (systemd writes it unquoted, and a `\` at a line's end joins the next line).
+    Backslash,
+    /// A quote (`"`, `'`) or a backslash in the program's path: systemd refuses to run such an executable.
+    ProgramCharacter,
+}
+
+/// The first path or argument of `spec` this system's service entry cannot carry as it is, and why; `None` when all can. The caller
+/// asks before saying what it registers; [`service_install`] refuses the same ones with `InvalidInput`.
+pub fn service_refusal(spec: &ServiceSpec) -> Option<(std::ffi::OsString, ServiceRefusal)> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::service_refusal(spec)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macservice::refusal(spec)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        // A Windows task: `%` expands, and every value must be Unicode.
+        std::iter::once(spec.program.as_os_str())
+            .chain(spec.args.iter().map(std::ffi::OsString::as_os_str))
+            .find_map(|a| match a.to_str() {
+                None => Some((a.to_owned(), ServiceRefusal::CannotCarry)),
+                Some(t) if t.contains('%') => Some((a.to_owned(), ServiceRefusal::Expands)),
+                Some(_) => None,
+            })
+    }
+}
+
+/// A service failure the caller words itself (carried inside the `io::Error` the `service_*` functions return; see
+/// [`service_problem`]). Its English `Display` is for logs only.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ServiceProblem {
+    /// The user's service manager cannot be reached from this session (systemd: no user bus, as in an SSH session without a user
+    /// manager, or no systemd at all).
+    NoUserManager,
+    /// Something Agora did not write is at the service file's place (a link, a folder), and Agora does not replace it.
+    InTheWay(PathBuf),
+    /// A service of the same name is registered, but Agora did not write it (a unit made by hand): it is neither replaced, stopped
+    /// nor removed. The path is its file, or its name when it is registered from elsewhere.
+    NotOurs(PathBuf),
+    /// Run as root (`sudo`): a login service is the user's own, and root would leave its files in the user's folder. Nothing is done.
+    Root,
+    /// Neither `XDG_CONFIG_HOME` nor `HOME` names a full path, so there is no folder for the user's service files.
+    NoConfigFolder,
+    /// After reloading, the service manager did not find the service file that was just written (it reads another folder).
+    NotLoaded(PathBuf),
+    /// The service manager would also read these files (drop-ins, or another file of the same name), which can change what the service
+    /// runs; nothing was registered.
+    Overridden(Vec<PathBuf>),
+    /// Turned off by the user in the system's own settings (macOS: System Settings > General > Login Items & Extensions, "Allow in
+    /// the Background"), which Agora cannot turn on: only the user can, there. Nothing was registered.
+    TurnedOffInSettings,
+}
+
+impl std::fmt::Display for ServiceProblem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ServiceProblem::NoUserManager => {
+                f.write_str("the user's service manager cannot be reached")
+            }
+            ServiceProblem::InTheWay(p) => write!(f, "{} is not a plain file", p.display()),
+            ServiceProblem::NotOurs(p) => {
+                write!(f, "{} was not written by this program", p.display())
+            }
+            ServiceProblem::Root => f.write_str("refused as root"),
+            ServiceProblem::NoConfigFolder => {
+                f.write_str("neither XDG_CONFIG_HOME nor HOME is set")
+            }
+            ServiceProblem::NotLoaded(p) => write!(f, "{} was not loaded", p.display()),
+            ServiceProblem::Overridden(ps) => write!(f, "also read: {ps:?}"),
+            ServiceProblem::TurnedOffInSettings => f.write_str("turned off in the system settings"),
+        }
+    }
+}
+
+impl std::error::Error for ServiceProblem {}
+
+/// Whether `agora service` may act in this process at all; an error with a [`ServiceProblem`] when not (Linux: run as root, or no
+/// folder for the user's units; macOS: run as root). The caller asks before writing anything.
+pub fn service_precheck() -> io::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::service_precheck()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macservice::precheck()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        Ok(())
+    }
+}
+
+/// The files the service manager reads for the service `name` besides Agora's own (Linux: its drop-ins, and the unit file it loaded
+/// when that is not Agora's), which can change what it runs. `status` and a repeated `install` name them; [`service_remove`] does not
+/// delete them, and the caller names those still there afterwards. Empty elsewhere (launchd reads one file per job: a job of the
+/// same label loaded from another file is [`service_foreign`]).
+pub fn service_drop_ins(name: &str) -> io::Result<Vec<PathBuf>> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::service_drop_ins(name)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = name;
+        Ok(Vec::new())
+    }
+}
+
+/// `Some(file)` when the service `name` is registered but was not written by Agora (Linux: a user unit of the same name made by hand
+/// or by another tool): the caller leaves it alone, neither stopping, replacing nor removing it. `None` when it is Agora's own or not
+/// registered (Windows: a task of the name without Agora's marker, named by its place in Task Scheduler, `\<name>`; macOS: a file at
+/// the LaunchAgent's place without Agora's marker, or the job loaded from another file).
+pub fn service_foreign(name: &str) -> io::Result<Option<PathBuf>> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::service_foreign(name)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macservice::foreign(name)
+    }
+    #[cfg(windows)]
+    {
+        winservice::foreign(name)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    {
+        let _ = name;
+        Ok(None)
+    }
+}
+
+/// The `PATH` a login service gets: the spec's, keeping the order but only full paths an entry can carry (an empty or relative entry
+/// would mean "the folder the service manager runs it from", which is not the installing shell's; a control character or a Unicode
+/// noncharacter cannot go into a unit or a property list). No other variable of the installing shell goes into the entry.
+/// Shared by the systemd unit and the LaunchAgent (Windows applies no variables).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn service_path_variable(env: &[(String, std::ffi::OsString)]) -> Option<String> {
+    let (_, value) = env.iter().find(|(k, _)| k == "PATH")?;
+    let kept: Vec<String> = std::env::split_paths(value)
+        .filter(|p| p.is_absolute())
+        .filter_map(|p| p.to_str().map(str::to_owned))
+        .filter(|p| !p.chars().any(|c| c.is_control() || is_noncharacter(c)))
+        .collect();
+    (!kept.is_empty()).then(|| kept.join(":"))
+}
+
+/// A Unicode noncharacter (U+FDD0..U+FDEF, and the last two code points of every plane, U+FFFE and U+FFFF among them): XML 1.0
+/// cannot carry U+FFFE and U+FFFF, and none of them is ever meant in a path.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn is_noncharacter(c: char) -> bool {
+    let n = u32::from(c);
+    (0xFDD0..=0xFDEF).contains(&n) || n & 0xFFFE == 0xFFFE
+}
+
+/// The [`ServiceProblem`] inside an error a `service_*` function returned, if it is one.
+pub fn service_problem(e: &io::Error) -> Option<&ServiceProblem> {
+    e.get_ref()?.downcast_ref::<ServiceProblem>()
+}
+
+/// A program registered to start when the user logs in, for this user only and without administrator rights (ADR-0062 item 6). The
+/// caller (the `agora service` command) builds it; each system writes it in its own form.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ServiceSpec {
+    /// The service's name in the system (a task, a unit, a launchd label): one name per role, from one constant of the caller.
+    pub name: String,
+    /// A sentence the system's own lists show.
+    pub description: String,
+    /// The program, by its full path.
+    pub program: PathBuf,
+    pub args: Vec<std::ffi::OsString>,
+    /// Variables to set for it (the installing shell's `PATH` until ADR-0062 item 5 captures the login environment). Windows ignores
+    /// them: a logon task gets the user's own environment.
+    pub env: Vec<(String, std::ffi::OsString)>,
+    /// Its working directory (the Agora folder); system files the registration needs for a moment are written there, owner-only.
+    pub work_dir: PathBuf,
+    /// Start the program again when it failed: killed by a signal or an exit with a non-zero code (systemd `Restart=on-failure`, launchd
+    /// `KeepAlive = { SuccessfulExit = false }`). The supervisor exits 0 for every end it decided itself under a service (a give-up, a
+    /// refusal, a clean stop), so only a crash of the supervisor itself is restarted. Windows has no such setting: ignored.
+    pub restart_supervisor_on_failure: bool,
+}
+
+/// Whether a service is registered (see [`ServiceSpec`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ServiceState {
+    NotInstalled,
+    /// Registered; `enabled` is false when it was turned off outside Agora (a disabled task, Login Items, a policy).
+    Installed {
+        enabled: bool,
+    },
+}
+
+/// Registers `spec` to start at this user's login (it does not start it: [`service_start`]). `Unsupported` where
+/// [`SERVICES_SUPPORTED`] is false; `InvalidInput` for a path or argument the system would change on the way or cannot carry (see
+/// [`service_refusal`]). Linux: an owner-only systemd user unit, then `systemctl --user daemon-reload` and `enable`; a unit that is
+/// already there with the same text is not written again. macOS: an owner-only LaunchAgent in `~/Library/LaunchAgents`, turned on
+/// again (`launchctl enable`) when it was turned off.
+pub fn service_install(spec: &ServiceSpec) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        winservice::install(spec)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        linux::service_install(spec)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macservice::install(spec)
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+    {
+        let _ = spec;
+        Err(io::Error::from(io::ErrorKind::Unsupported))
+    }
+}
+
+/// Starts the registered service `name` now, as the system would at login.
+pub fn service_start(name: &str) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        winservice::start(name)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        linux::service_start(name)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macservice::start(name)
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+    {
+        let _ = name;
+        Err(io::Error::from(io::ErrorKind::Unsupported))
+    }
+}
+
+/// Unregisters the service `name`; `Ok(false)` when it was not registered. It does not stop what the service started: the caller
+/// stops the role through its lock first (ending a Windows task ends only its `conhost`).
+pub fn service_remove(name: &str) -> io::Result<bool> {
+    #[cfg(windows)]
+    {
+        winservice::remove(name)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        linux::service_remove(name)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macservice::remove(name)
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+    {
+        let _ = name;
+        Err(io::Error::from(io::ErrorKind::Unsupported))
+    }
+}
+
+/// Whether the service `name` is registered, and enabled. An error when the system could not say (access denied, a broken scheduler,
+/// no user service manager in this session: [`ServiceProblem::NoUserManager`]): never reported as "not registered".
+pub fn service_status(name: &str) -> io::Result<ServiceState> {
+    #[cfg(windows)]
+    {
+        winservice::status(name)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        linux::service_status(name)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macservice::status(name)
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+    {
+        let _ = name;
+        Err(io::Error::from(io::ErrorKind::Unsupported))
+    }
+}
+
+/// Shows one notification of the system's own, with `title` and `body` (ADR-0048 decision 5: the desktop shell tells the user that
+/// approvals wait while its window is out of sight). No library: the system's own notifier is run by its full path with a fixed
+/// argument list, and the words travel as separate arguments (macOS `osascript` reads them from `argv`; Linux `notify-send`) or as
+/// environment variables (Windows PowerShell), never inside a script, so no text can change what runs. The words come from
+/// `locales/` (the caller's). Waits for the notifier; `NotFound` where there is none (Linux without `notify-send`).
+pub fn desktop_notify(title: &str, body: &str) -> io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::desktop_notify(title, body)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        linux::desktop_notify(title, body)
+    }
+    #[cfg(windows)]
+    {
+        winservice::desktop_notify(title, body)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+    {
+        let _ = (title, body);
+        Err(io::Error::from(io::ErrorKind::Unsupported))
+    }
+}
+
+/// This machine's name (`gethostname` on Unix, `COMPUTERNAME` on Windows), if it has one.
+pub fn hostname() -> Option<String> {
+    #[cfg(unix)]
+    {
+        unix::hostname()
+    }
+    #[cfg(windows)]
+    {
+        std::env::var("COMPUTERNAME")
+            .ok()
+            .filter(|n| !n.trim().is_empty())
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        None
+    }
+}
+
+/// Opens `url` in the user's browser: `open` on macOS, `cmd /c start` on Windows, `xdg-open` elsewhere. An error means no browser
+/// could be asked (the caller then shows the address); a helper still running after a few seconds counts as success.
+pub fn open_url(url: &str) -> io::Result<()> {
+    use std::process::{Command, Stdio};
+    #[cfg(target_os = "macos")]
+    let mut cmd = Command::new("open");
+    #[cfg(windows)]
+    let mut cmd = {
+        let mut c = Command::new("cmd");
+        // The empty argument is the window title `start` takes first; without it a quoted URL would become the title.
+        c.args(["/c", "start", ""]);
+        c
+    };
+    #[cfg(not(any(target_os = "macos", windows)))]
+    let mut cmd = Command::new("xdg-open");
+    let mut child = cmd
+        .arg(url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return if status.success() {
+                Ok(())
+            } else {
+                Err(io::Error::other("no browser opened the address"))
+            };
+        }
+        if std::time::Instant::now() > end {
+            // Still working (some helpers wait for the browser): leave it be, and reap it from a thread.
+            let _ = std::thread::Builder::new().spawn(move || {
+                let _ = child.wait();
+            });
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod detached_tests {
+    #[test]
+    fn a_live_process_keeps_its_start_time_and_an_ended_one_has_none() {
+        let me = std::process::id();
+        let first = super::process_start_time(me);
+        assert!(first.is_some());
+        assert_eq!(super::process_start_time(me), first);
+        if !cfg!(any(unix, windows)) {
+            return;
+        }
+        let exe = std::env::current_exe().unwrap();
+        let mut child = std::process::Command::new(exe)
+            .arg("--list")
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        assert_eq!(super::process_start_time(pid), None);
+        assert!(super::hostname().is_some_and(|h| !h.is_empty()));
+    }
+}
+
 /// The process and all its descendants, parents before children. Processes that exit while the tree is
 /// being walked are skipped.
 pub fn process_tree(root: u32) -> io::Result<Vec<ProcessInfo>> {
+    walk_tree(root, process_name, process_children)
+}
+
+/// [`process_tree`] over any process table. Each process is visited once: on Windows a process keeps the id of a parent that ended,
+/// and ids are reused, so a stale parent id can name one of the root's own descendants. The table then has a cycle, and a walk
+/// without this check never ended (a Windows CI run hung in `a_child_is_found_under_its_parent_and_in_the_tree`; the node walks
+/// the same tree on every tick).
+fn walk_tree(
+    root: u32,
+    mut name_of: impl FnMut(u32) -> io::Result<String>,
+    mut children_of: impl FnMut(u32) -> io::Result<Vec<u32>>,
+) -> io::Result<Vec<ProcessInfo>> {
     let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::from([root]);
     let mut queue = std::collections::VecDeque::from([(root, 0u32)]);
     while let Some((pid, ppid)) = queue.pop_front() {
-        let Ok(name) = process_name(pid) else {
+        let Ok(name) = name_of(pid) else {
             if pid == root {
                 return Err(io::Error::new(io::ErrorKind::NotFound, "process not found"));
             }
             continue;
         };
         out.push(ProcessInfo { pid, ppid, name });
-        if let Ok(kids) = process_children(pid) {
-            queue.extend(kids.into_iter().map(|k| (k, pid)));
+        if let Ok(kids) = children_of(pid) {
+            queue.extend(
+                kids.into_iter()
+                    .filter(|k| seen.insert(*k))
+                    .map(|k| (k, pid)),
+            );
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod walk_tree_tests {
+    use super::*;
+
+    #[test]
+    fn a_cycle_in_the_process_table_is_walked_once() {
+        // 10 → 11 → 12, and 12 is listed as the parent of 10 (a stale parent id reused by a descendant), and 12 of itself again
+        // through 13 → 11.
+        let table: &[(u32, &[u32])] = &[(10, &[11]), (11, &[12]), (12, &[10, 13]), (13, &[11])];
+        let children = |pid: u32| {
+            Ok(table
+                .iter()
+                .find(|(p, _)| *p == pid)
+                .map_or(Vec::new(), |(_, k)| k.to_vec()))
+        };
+        let tree = walk_tree(10, |pid| Ok(format!("p{pid}")), children).unwrap();
+        let pids: Vec<u32> = tree.iter().map(|p| p.pid).collect();
+        assert_eq!(pids, [10, 11, 12, 13]);
+        assert_eq!(tree[0].ppid, 0);
+        assert_eq!(tree[3].ppid, 12);
+    }
+
+    #[test]
+    fn a_child_that_ended_during_the_walk_is_skipped_and_a_missing_root_is_an_error() {
+        let children = |pid: u32| Ok(if pid == 1 { vec![2, 3] } else { vec![] });
+        let name = |pid: u32| {
+            if pid == 2 {
+                Err(io::Error::from(io::ErrorKind::NotFound))
+            } else {
+                Ok(String::from("x"))
+            }
+        };
+        let pids: Vec<u32> = walk_tree(1, name, children)
+            .unwrap()
+            .iter()
+            .map(|p| p.pid)
+            .collect();
+        assert_eq!(pids, [1, 3]);
+        assert!(walk_tree(2, name, children).is_err());
+    }
 }
 
 /// Start a process in a new PTY.
@@ -825,6 +2046,169 @@ pub fn spawn(config: &PtyConfig) -> io::Result<Box<dyn Pty>> {
     #[cfg(windows)]
     {
         conpty::spawn(config)
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)] // expect is allowed in tests
+mod list_dir_tests {
+    struct Folder(std::path::PathBuf);
+
+    impl Folder {
+        fn new() -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            loop {
+                let path = std::env::temp_dir().join(format!(
+                    "agora-visitdir-{}-{}",
+                    std::process::id(),
+                    NEXT.fetch_add(1, Ordering::Relaxed)
+                ));
+                match std::fs::create_dir(&path) {
+                    Ok(()) => return Self(path),
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                    Err(e) => panic!("create fixture: {e}"),
+                }
+            }
+        }
+    }
+
+    impl Drop for Folder {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn listing_keeps_the_open_folder_after_its_path_is_replaced() {
+        let folder = Folder::new();
+        let original = folder.0.join("original");
+        let moved = folder.0.join("moved");
+        let outside = folder.0.join("outside");
+        std::fs::create_dir(&original).expect("original");
+        std::fs::create_dir(&outside).expect("outside");
+        std::fs::write(original.join("own.txt"), "own").expect("own file");
+        std::fs::write(outside.join("outside.txt"), "outside").expect("outside file");
+        let handle = super::open_dir(&original).expect("open original");
+        std::fs::rename(&original, &moved).expect("move original");
+        #[cfg(windows)]
+        {
+            // Junctions need no symbolic-link privilege: this coverage must run on an ordinary Windows CI account.
+            let result = std::process::Command::new("cmd.exe")
+                .args(["/d", "/c", "mklink", "/J"])
+                .arg(&original)
+                .arg(&outside)
+                .output()
+                .expect("junction command");
+            assert!(result.status.success(), "{result:?}");
+        }
+        #[cfg(not(windows))]
+        super::symlink(&outside, &original).expect("replace path");
+        let items = super::list_dir(&handle).expect("held directory");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].name, "own.txt");
+        let replaced = super::open_dir(&original).expect("replacement directory");
+        let items = super::list_dir(&replaced).expect("replacement listing");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].name, "outside.txt");
+    }
+
+    #[test]
+    fn visiting_a_folder_reads_metadata_lazily_and_stops_early() {
+        use std::ops::ControlFlow;
+        let folder = Folder::new();
+        let names = ["a", "b", "c"];
+        for name in names {
+            std::fs::write(folder.0.join(name), "x").expect("file");
+        }
+        let handle = super::open_dir(&folder.0).expect("open");
+        let mut visited = 0;
+        super::visit_dir(&handle, |item| {
+            if visited == 0 {
+                assert_eq!(item.len, 1);
+                // Directory order is irrelevant: change every other file after the first callback.
+                // An eager Vec would already contain stale metadata for those entries.
+                for name in names {
+                    if item.name != name {
+                        std::fs::write(folder.0.join(name), "changed").expect("update");
+                    }
+                }
+            } else {
+                assert_eq!(
+                    item.len, 7,
+                    "later metadata was read before the first callback"
+                );
+            }
+            visited += 1;
+            ControlFlow::Continue(())
+        })
+        .expect("visit");
+        assert_eq!(visited, names.len());
+
+        let mut stopped = 0;
+        super::visit_dir(&handle, |_| {
+            stopped += 1;
+            ControlFlow::Break(())
+        })
+        .expect("stop");
+        assert_eq!(stopped, 1);
+        // Early return closes only the enumeration's duplicate; the caller can list the handle again.
+        assert_eq!(
+            super::list_dir(&handle).expect("list after stop").len(),
+            names.len()
+        );
+    }
+
+    #[test]
+    fn a_folder_lists_through_its_handle_without_following_links() {
+        let d = std::env::temp_dir().join(format!("agora-listdir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("sub")).expect("dir");
+        std::fs::write(d.join("f.txt"), "abc").expect("file");
+        let linked = super::symlink(&d.join("sub"), &d.join("link")).is_ok();
+        let handle = super::open_dir(&d).expect("open");
+        let mut items = super::list_dir(&handle).expect("list");
+        items.sort_by(|a, b| a.name.cmp(&b.name));
+        let names: Vec<_> = items
+            .iter()
+            .map(|i| i.name.to_string_lossy().into_owned())
+            .collect();
+        let mut want = vec!["f.txt", "sub"];
+        if linked {
+            want.insert(1, "link");
+        }
+        assert_eq!(names, want);
+        let get = |n: &str| items.iter().find(|i| i.name == n).expect("item");
+        assert!(get("sub").is_dir && !get("f.txt").is_dir);
+        assert_eq!(get("f.txt").len, 3);
+        if linked {
+            assert!(!get("link").is_dir, "a link to a folder is not a folder");
+        }
+        // Listing twice through the same handle gives the same entries.
+        assert_eq!(super::list_dir(&handle).expect("again").len(), items.len());
+        // A file is not a folder.
+        assert!(super::open_dir(&d.join("f.txt")).is_err());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)] // expect is allowed in tests
+mod opened_path_tests {
+    #[test]
+    fn an_open_file_reports_where_it_really_is_even_through_a_link() {
+        let d = std::env::temp_dir().join(format!("agora-opened-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("real")).expect("dir");
+        std::fs::write(d.join("real/f.txt"), "x").expect("file");
+        let real = std::fs::canonicalize(d.join("real/f.txt")).expect("canonical");
+        let direct = std::fs::File::open(d.join("real/f.txt")).expect("open");
+        assert_eq!(super::opened_path(&direct).expect("path"), real);
+        if super::symlink(&d.join("real"), &d.join("link")).is_ok() {
+            let through = std::fs::File::open(d.join("link/f.txt")).expect("open");
+            assert_eq!(super::opened_path(&through).expect("path"), real);
+        }
+        let _ = std::fs::remove_dir_all(&d);
     }
 }
 
@@ -891,5 +2275,32 @@ mod procinfo_tests {
     fn missing_process_is_an_error() {
         assert!(process_name(u32::MAX - 1).is_err());
         assert!(process_tree(u32::MAX - 1).is_err());
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod secret_tests {
+    use super::secret_from;
+    use std::io::ErrorKind;
+
+    fn read(bytes: &[u8]) -> std::io::Result<String> {
+        secret_from(&mut &bytes[..])
+    }
+
+    #[test]
+    fn a_secret_line_is_edited_here_and_ctrl_c_stops_it() {
+        assert_eq!(read(b"open sesame\r").unwrap(), "open sesame");
+        assert_eq!(read(b"abx\x7fc\n").unwrap(), "abc");
+        assert_eq!(read("güz\u{e7}\x7f\x7fel\r".as_bytes()).unwrap(), "güel");
+        assert_eq!(read(b"junk\x15ok\r").unwrap(), "ok");
+        assert_eq!(read(b"a\x1bb\r").unwrap(), "ab");
+        assert_eq!(
+            read(b"secr\x03et\r").unwrap_err().kind(),
+            ErrorKind::Interrupted
+        );
+        assert_eq!(read(b"\x04").unwrap_err().kind(), ErrorKind::UnexpectedEof);
+        assert_eq!(read(b"").unwrap_err().kind(), ErrorKind::UnexpectedEof);
+        assert_eq!(read(b"\xff\r").unwrap_err().kind(), ErrorKind::InvalidData);
     }
 }

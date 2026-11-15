@@ -21,6 +21,49 @@ use crate::{home, Opts, Say};
 
 pub(crate) const DEFAULT_LISTEN: &str = "127.0.0.1:7443";
 
+/// What this hub agrees on with a node that offers it. Every capability a node offers
+/// (`agora_node::uplink_client::CAPABILITIES`) must be here, or the hub refuses each command that needs it (ADR-0053's
+/// `directory.list` was missing once, #378); `the_hub_agrees_on_every_capability_a_node_offers` checks it. A capability added here
+/// that no node offers (only the hub or clients use it) is not covered by that check: give it a test of its own.
+const HUB_CAPABILITIES: &[&str] = &[
+    "terminal.raw",
+    "workspace.directory",
+    "directory.list",
+    "board.join",
+    "mesh.spawn",
+    // ADR-0058
+    "agent.set_mode",
+    "agent.set_model",
+    // ADR-0060
+    "agent.resume",
+    // ADR-0059
+    "agent.launch_options",
+    // ADR-0061: the hub carries endorsements and revocations to nodes that verify them (`device.trust`), and answers a node's
+    // `DeviceList` on a connection of its own (`device.list`).
+    "device.trust",
+    "device.list",
+];
+
+/// `<hub dir>/listen`: the address the running hub bound, written at every start.
+pub(crate) const LISTEN_FILE: &str = "listen";
+
+/// The address a client on the hub's own machine dials, from `<hub dir>/listen`. A hub listening on every address
+/// (`0.0.0.0` or `::`) is reached on loopback. `None` when the file is missing or unreadable.
+pub(crate) fn own_hub_addr(dir: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(dir.join(LISTEN_FILE)).ok()?;
+    local_dial_addr(text.trim())
+}
+
+fn local_dial_addr(listen: &str) -> Option<String> {
+    let addr: std::net::SocketAddr = listen.parse().ok()?;
+    let ip = match addr.ip() {
+        std::net::IpAddr::V4(ip) if ip.is_unspecified() => std::net::Ipv4Addr::LOCALHOST.into(),
+        std::net::IpAddr::V6(ip) if ip.is_unspecified() => std::net::Ipv6Addr::LOCALHOST.into(),
+        ip => ip,
+    };
+    Some(std::net::SocketAddr::new(ip, addr.port()).to_string())
+}
+
 pub(crate) fn hub_dir(o: &Opts) -> PathBuf {
     o.hub_dir.clone().unwrap_or_else(|| home().join("hub"))
 }
@@ -79,6 +122,7 @@ impl ClientAuth for ClientTokens {
                 role: agora_hub::users::Role::Owner,
                 user: "owner".into(),
                 projects: None,
+                session: String::new(),
             });
         }
         agora_hub::server::ClientAuth::access(&*self.sessions, token)
@@ -134,6 +178,10 @@ pub fn hub_run(say: &Say, o: &Opts) -> ExitCode {
         let has_web = web_assets(o).is_some();
         let store = SqliteStore::open(&dir.join("hub.db")).map_err(|e| e.to_string())?;
         let hub = Arc::new(Hub::open(store).map_err(|e| e.to_string())?);
+        // R8: `GET /api/metrics` answers (owner only) when asked for at start.
+        if o.metrics {
+            hub.enable_metrics();
+        }
         // Where notifications go, if the owner listed any (docs/design/notifications.md).
         let notify_file = dir.join("notify");
         if let Ok(text) = std::fs::read_to_string(&notify_file) {
@@ -184,11 +232,7 @@ pub fn hub_run(say: &Say, o: &Opts) -> ExitCode {
             hub,
             support: Support {
                 generations: vec![1],
-                capabilities: vec![
-                    "terminal.raw".into(),
-                    "workspace.directory".into(),
-                    "board.join".into(),
-                ],
+                capabilities: HUB_CAPABILITIES.iter().map(|c| (*c).to_string()).collect(),
                 required: vec![],
             },
             ca: Some(ca),
@@ -210,6 +254,10 @@ pub fn hub_run(say: &Say, o: &Opts) -> ExitCode {
                     .await
                     .map_err(|e| e.to_string())?;
             let addr = listener.local_addr().map_err(|e| e.to_string())?;
+            // Where this hub really listens (a port of its own, or `:0`), for a client on this machine that only has the folder
+            // (`agora tui --hub-dir`). Best effort: a client without it falls back to the default address, as before.
+            let _ =
+                agora_platform::write_private(&dir.join(LISTEN_FILE), addr.to_string().as_bytes());
             say.out(
                 key!("cli-hub-listening"),
                 &[
@@ -277,6 +325,126 @@ pub fn hub_login(say: &Say, o: &Opts) -> ExitCode {
         Err(e) => {
             say.err(key!("cli-hub-failed"), &[("reason", e.into())]);
             ExitCode::from(1)
+        }
+    }
+}
+
+/// `agora password set|clear|status` (ADR-0067): the screen password a sign-in from another machine must give. Run on the hub's
+/// machine, so no old password is asked. Setting reads the password twice from the terminal with echo off and refuses to read one
+/// from a pipe; setting or clearing it signs out every session, and both are in the audit trail.
+pub fn password(say: &Say, o: &Opts, op: &str) -> ExitCode {
+    use agora_hub::password::{check_new, PasswordError, ScreenPassword};
+    let fail = |e: String| {
+        say.err(key!("cli-hub-failed"), &[("reason", e.into())]);
+        ExitCode::from(1)
+    };
+    let dir = hub_dir(o);
+    if op == "set" && !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        say.err(key!("cli-password-needs-terminal"), &[]);
+        return ExitCode::from(2);
+    }
+    if std::fs::create_dir_all(&dir).is_err() {
+        return fail(dir.display().to_string());
+    }
+    let store = match SqliteStore::open(&dir.join("hub.db")) {
+        Ok(s) => s,
+        Err(e) => return fail(e.to_string()),
+    };
+    let screen = ScreenPassword::new(&store);
+    let now = server::now_ms();
+    // Every session ends, and so does every passkey added from another machine without the password (ADR-0067).
+    let sign_out_all = || {
+        let _ = agora_hub::password::drop_unvouched_passkeys(&store);
+        SignIn::new(&store, Arc::new(Lockout::new()))
+            .revoke_all()
+            .unwrap_or(0)
+    };
+    let audit = |action: &str| {
+        let _ = agora_hub::audit::Audit::new(&store).record(now, "owner", action, "cli", "ok");
+    };
+    match op {
+        "status" => {
+            say.out(
+                if screen.is_set() {
+                    key!("cli-password-on")
+                } else {
+                    key!("cli-password-off")
+                },
+                &[],
+            );
+            ExitCode::SUCCESS
+        }
+        "clear" => match screen.clear() {
+            Ok(true) => {
+                let revoked = sign_out_all();
+                audit("password_clear");
+                say.out(
+                    key!("cli-password-cleared"),
+                    &[("count", (revoked as i64).into())],
+                );
+                ExitCode::SUCCESS
+            }
+            Ok(false) => {
+                say.out(key!("cli-password-off"), &[]);
+                ExitCode::SUCCESS
+            }
+            Err(e) => fail(format!("{e:?}")),
+        },
+        "set" => {
+            // The prompt appears only once echo is off: an answer typed or pasted right after it is never shown.
+            let read =
+                |prompt: &str| agora_platform::read_secret_line_with_prompt(&say.text(prompt, &[]));
+            // Ctrl-C: the terminal is already back to normal; stop as an interrupted program does.
+            let stopped = |e: std::io::Error| {
+                if e.kind() == std::io::ErrorKind::Interrupted {
+                    ExitCode::from(130)
+                } else {
+                    say.err(key!("cli-password-needs-terminal"), &[]);
+                    ExitCode::from(2)
+                }
+            };
+            let first = match read(key!("cli-password-prompt")) {
+                Ok(p) => p,
+                Err(e) => return stopped(e),
+            };
+            match check_new(&first) {
+                Ok(()) => {}
+                Err(PasswordError::TooLong) => {
+                    say.err(key!("cli-password-too-long"), &[]);
+                    return ExitCode::from(2);
+                }
+                Err(_) => {
+                    say.err(
+                        key!("cli-password-too-short"),
+                        &[("min", (agora_hub::password::MIN_CHARS as i64).into())],
+                    );
+                    return ExitCode::from(2);
+                }
+            }
+            let again = match read(key!("cli-password-repeat")) {
+                Ok(p) => p,
+                Err(e) => return stopped(e),
+            };
+            if again != first {
+                say.err(key!("cli-password-mismatch"), &[]);
+                return ExitCode::from(1);
+            }
+            match screen.set(&first) {
+                Ok(()) => {
+                    let revoked = sign_out_all();
+                    audit("password_set");
+                    say.out(
+                        key!("cli-password-set"),
+                        &[("count", (revoked as i64).into())],
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(e) => fail(format!("{e:?}")),
+            }
+        }
+        _ => {
+            say.err(key!("cli-usage"), &[]);
+            ExitCode::from(2)
         }
     }
 }
@@ -411,6 +579,112 @@ pub fn hub_user(say: &Say, o: &Opts) -> ExitCode {
             Err(e) => fail(e.to_string()),
         },
         _ => bad(),
+    }
+}
+
+/// A moment as people read it in a terminal: `2026-11-13 14:02 UTC` (the hub's and the node's clocks are both UTC-agnostic).
+pub(crate) fn utc(ms: u64) -> String {
+    let secs = ms / 1000;
+    let days = i64::try_from(secs / 86_400).unwrap_or(0);
+    let (h, m) = ((secs % 86_400) / 3600, (secs % 3600) / 60);
+    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let mo = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(mo <= 2);
+    format!("{y:04}-{mo:02}-{d:02} {h:02}:{m:02} UTC")
+}
+
+/// `agora hub devices`: every registered device (ADR-0061) with its fingerprint, the person it belongs to, and when it was registered
+/// and last used. These are candidates: a machine trusts one only when its owner says so there, or a trusted device endorses it.
+pub fn hub_devices(say: &Say, o: &Opts) -> ExitCode {
+    let dir = hub_dir(o);
+    // `agora hub devices forget ID`: a revoked device leaves the list (its revocations stay, so machines keep refusing it).
+    if let [verb, id] = o.positional.as_slice() {
+        if verb != "forget" {
+            say.err(key!("cli-bad-arguments"), &[]);
+            return ExitCode::from(2);
+        }
+        let done = SqliteStore::open(&dir.join("hub.db"))
+            .map_err(|e| e.to_string())
+            .and_then(|store| {
+                agora_hub::devices::Devices::new(&store)
+                    .forget(id)
+                    .map_err(|e| e.code.as_str().to_string())
+            });
+        return match done {
+            Ok(true) => {
+                say.out(
+                    key!("cli-hub-device-forgotten"),
+                    &[("id", id.clone().into())],
+                );
+                ExitCode::SUCCESS
+            }
+            Ok(false) => {
+                say.err(
+                    key!("cli-hub-device-not-forgotten"),
+                    &[("id", id.clone().into())],
+                );
+                ExitCode::from(1)
+            }
+            Err(e) => {
+                say.err(key!("cli-hub-failed"), &[("reason", e.into())]);
+                ExitCode::from(1)
+            }
+        };
+    }
+    if !o.positional.is_empty() {
+        say.err(key!("cli-bad-arguments"), &[]);
+        return ExitCode::from(2);
+    }
+    let list = SqliteStore::open(&dir.join("hub.db"))
+        .map_err(|e| e.to_string())
+        .and_then(|store| {
+            agora_hub::devices::Devices::new(&store)
+                .list_all()
+                .map_err(|e| e.code.as_str().to_string())
+        });
+    match list {
+        Ok(list) if list.is_empty() => {
+            say.out(key!("cli-hub-devices-none"), &[]);
+            ExitCode::SUCCESS
+        }
+        Ok(list) => {
+            for d in list {
+                let state = if d.revoked_ms > 0 {
+                    say.text(key!("cli-device-state-revoked"), &[])
+                } else if d.approval_asked_ms > 0 {
+                    say.text(key!("cli-device-state-waiting"), &[])
+                } else {
+                    String::new()
+                };
+                say.out(
+                    key!("cli-hub-device-line"),
+                    &[
+                        ("name", d.name.clone().into()),
+                        (
+                            "fingerprint",
+                            agora_hub::devices::fingerprint(&d.public_key).into(),
+                        ),
+                        ("id", d.device_id.clone().into()),
+                        ("user", d.user_id.clone().into()),
+                        ("created", utc(d.created_ms).into()),
+                        ("used", utc(d.last_used_ms).into()),
+                        ("state", state.into()),
+                    ],
+                );
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            say.err(key!("cli-hub-failed"), &[("reason", e.into())]);
+            ExitCode::from(1)
+        }
     }
 }
 
@@ -852,15 +1126,7 @@ pub fn hub_notify(say: &Say, o: &Opts) -> ExitCode {
 /// `agora hub code`: a one-time code for enrolling a node, and where the CA to pin is.
 pub fn hub_code(say: &Say, o: &Opts) -> ExitCode {
     let dir = hub_dir(o);
-    let result = (|| -> Result<String, String> {
-        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        let _ = load_or_create_ca(&dir)?;
-        let store = SqliteStore::open(&dir.join("hub.db")).map_err(|e| e.to_string())?;
-        Enrollment::new(&store)
-            .create_code(server::now_ms())
-            .map_err(|_| "could not create a code".to_string())
-    })();
-    match result {
+    match new_enrollment_code(&dir) {
         Ok(code) => {
             say.out(
                 key!("cli-hub-code"),
@@ -876,6 +1142,16 @@ pub fn hub_code(say: &Say, o: &Opts) -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+/// A one-time enrollment code from the hub's own store (valid 10 minutes), creating the hub's CA the first time.
+pub(crate) fn new_enrollment_code(dir: &Path) -> Result<String, String> {
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let _ = load_or_create_ca(dir)?;
+    let store = SqliteStore::open(&dir.join("hub.db")).map_err(|e| e.to_string())?;
+    Enrollment::new(&store)
+        .create_code(server::now_ms())
+        .map_err(|_| "could not create a code".to_string())
 }
 
 const BACKUP_PREFIX: &str = "hub-";
@@ -963,6 +1239,12 @@ pub fn node_enroll(say: &Say, o: &Opts) -> ExitCode {
         say.err(key!("cli-usage"), &[]);
         return ExitCode::from(2);
     };
+    // ADR-0061: `--yes` covers exactly the devices whose fingerprints are given; checked before anything is enrolled.
+    if o.yes != !o.fingerprints.is_empty() || (o.include_others && !o.yes) {
+        say.err(key!("cli-bad-arguments"), &[]);
+        say.err(key!("cli-usage"), &[]);
+        return ExitCode::from(2);
+    }
     // `--ca -` reads the certificate from standard input (how `hub ssh install` hands it over, ADR-0034).
     let ca_text = if ca_file.as_os_str() == "-" {
         let mut t = String::new();
@@ -977,14 +1259,62 @@ pub fn node_enroll(say: &Say, o: &Opts) -> ExitCode {
         );
         return ExitCode::from(1);
     };
-    let Ok((key_pem, csr)) = new_device_request() else {
-        say.err(
-            key!("cli-hub-failed"),
-            &[("reason", "key generation".into())],
-        );
-        return ExitCode::from(1);
-    };
-    match enroll(url, &ca_pem, code, id, &csr) {
+    match enroll_and_save_with_devices(url, &ca_pem, code, id) {
+        Ok((dir, devices)) => {
+            say.out(
+                key!("cli-enrolled"),
+                &[
+                    ("id", id.as_str().into()),
+                    ("dir", dir.display().to_string().into()),
+                ],
+            );
+            // ADR-0061: the owner is at this machine now; the devices they registered can be trusted here in one step. An old hub
+            // sends none, and nothing is asked.
+            if devices.is_empty() {
+                ExitCode::SUCCESS
+            } else {
+                crate::trustcli::offer(say, o, &devices)
+            }
+        }
+        Err(EnrollFailure::Refused(code)) => {
+            say.err(key!("cli-enroll-refused"), &[("code", code.into())]);
+            ExitCode::from(1)
+        }
+        Err(EnrollFailure::Other(reason)) => {
+            say.err(key!("cli-hub-failed"), &[("reason", reason.into())]);
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Why [`enroll_and_save`] did not enroll this machine.
+pub(crate) enum EnrollFailure {
+    /// The hub refused, with this error code.
+    Refused(String),
+    Other(String),
+}
+
+/// Enrolls this machine with the hub at `url` (pinning `ca_pem`) under `id` with a one-time `code`, and keeps what the hub gave it in
+/// the link folder, which it returns.
+pub(crate) fn enroll_and_save(
+    url: &str,
+    ca_pem: &str,
+    code: &str,
+    id: &str,
+) -> Result<PathBuf, EnrollFailure> {
+    enroll_and_save_with_devices(url, ca_pem, code, id).map(|(dir, _)| dir)
+}
+
+/// [`enroll_and_save`], also returning the devices the hub registered (ADR-0061: candidates the owner may trust here).
+pub(crate) fn enroll_and_save_with_devices(
+    url: &str,
+    ca_pem: &str,
+    code: &str,
+    id: &str,
+) -> Result<(PathBuf, Vec<agora_protocol::v1::DeviceInfo>), EnrollFailure> {
+    let (key_pem, csr) =
+        new_device_request().map_err(|_| EnrollFailure::Other("key generation".into()))?;
+    match enroll(url, ca_pem, code, id, &csr) {
         Ok(r) => {
             let dir = link_dir();
             let write = || -> std::io::Result<()> {
@@ -995,28 +1325,41 @@ pub fn node_enroll(say: &Say, o: &Opts) -> ExitCode {
                 std::fs::write(dir.join("cert.pem"), &r.cert_pem)?;
                 agora_platform::write_private(&dir.join("key.pem"), key_pem.as_bytes())
             };
-            if let Err(e) = write() {
-                say.err(key!("cli-hub-failed"), &[("reason", e.to_string().into())]);
-                return ExitCode::from(1);
-            }
+            write().map_err(|e| EnrollFailure::Other(e.to_string()))?;
+            Ok((dir, r.devices))
+        }
+        Err(LinkError::Refused(code)) => Err(EnrollFailure::Refused(code)),
+        Err(e) => Err(EnrollFailure::Other(format!("{e:?}"))),
+    }
+}
+
+/// The address of the hub's web app, from the hub address a node was enrolled with (`wss://host:port` -> `https://host:port/`).
+fn panel_address(hub: &str) -> Option<String> {
+    let rest = hub.trim().strip_prefix("wss://")?;
+    let host = rest.split('/').next().filter(|h| !h.is_empty())?;
+    Some(format!("https://{host}/"))
+}
+
+/// `agora panel`: where to open the hub's panel from a machine that runs a node (ADR-0056). The person still signs in with a code
+/// from `agora hub login` on the hub; nothing here holds a session or opens a port.
+pub fn panel(say: &Say) -> ExitCode {
+    let dir = link_dir();
+    let address = std::fs::read_to_string(dir.join("url"))
+        .ok()
+        .and_then(|u| panel_address(&u));
+    match address {
+        Some(url) => {
             say.out(
-                key!("cli-enrolled"),
+                key!("cli-panel"),
                 &[
-                    ("id", id.as_str().into()),
-                    ("dir", dir.display().to_string().into()),
+                    ("url", url.into()),
+                    ("ca", dir.join("ca.pem").display().to_string().into()),
                 ],
             );
             ExitCode::SUCCESS
         }
-        Err(LinkError::Refused(code)) => {
-            say.err(key!("cli-enroll-refused"), &[("code", code.into())]);
-            ExitCode::from(1)
-        }
-        Err(e) => {
-            say.err(
-                key!("cli-hub-failed"),
-                &[("reason", format!("{e:?}").into())],
-            );
+        None => {
+            say.err(key!("cli-panel-none"), &[]);
             ExitCode::from(1)
         }
     }
@@ -1038,6 +1381,7 @@ pub fn load_link(socket: PathBuf) -> Option<(String, HubLink)> {
             mesh_out: None,
             grants: None,
             mesh: None,
+            devices: None,
         },
     ))
 }
@@ -1046,6 +1390,36 @@ pub fn load_link(socket: PathBuf) -> Option<(String, HubLink)> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_hub_agrees_on_every_capability_a_node_offers() {
+        // Including the ones no client can send (`board.join` goes only from the hub to nodes), which the real hub-and-node test
+        // in `tests/hub_cli.rs` cannot reach.
+        for c in agora_node::uplink_client::CAPABILITIES {
+            assert!(HUB_CAPABILITIES.contains(c), "the hub does not support {c}");
+        }
+    }
+
+    #[test]
+    fn moments_are_written_as_utc_dates() {
+        assert_eq!(utc(0), "1970-01-01 00:00 UTC");
+        assert_eq!(utc(1_700_000_000_000), "2023-11-14 22:13 UTC");
+        assert_eq!(utc(951_782_400_000), "2000-02-29 00:00 UTC");
+    }
+
+    #[test]
+    fn the_panel_address_comes_from_the_hub_address() {
+        assert_eq!(
+            panel_address("wss://hub.lan:7444\n").as_deref(),
+            Some("https://hub.lan:7444/")
+        );
+        assert_eq!(
+            panel_address("wss://localhost:7443/x").as_deref(),
+            Some("https://localhost:7443/")
+        );
+        assert_eq!(panel_address("ws://hub:1"), None);
+        assert_eq!(panel_address("wss://"), None);
+    }
 
     #[test]
     fn only_the_newest_automatic_backups_are_kept() {
@@ -1067,4 +1441,178 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(dir);
     }
+}
+
+#[cfg(test)]
+mod listen_file_tests {
+    use super::local_dial_addr;
+
+    #[test]
+    fn a_client_on_the_hubs_machine_dials_the_port_the_hub_bound() {
+        assert_eq!(
+            local_dial_addr("127.0.0.1:7445").as_deref(),
+            Some("127.0.0.1:7445")
+        );
+        assert_eq!(
+            local_dial_addr("0.0.0.0:7446").as_deref(),
+            Some("127.0.0.1:7446")
+        );
+        assert_eq!(local_dial_addr("[::]:7447").as_deref(), Some("[::1]:7447"));
+        assert_eq!(
+            local_dial_addr("192.168.1.5:7448").as_deref(),
+            Some("192.168.1.5:7448")
+        );
+        assert_eq!(local_dial_addr("not an address"), None);
+        assert_eq!(local_dial_addr(""), None);
+    }
+}
+
+/// ADR-0073: a machine not seen for this long is shown as old (the window and the TUI use the same threshold).
+pub(crate) const OLD_AFTER_MS: u64 = 24 * 60 * 60 * 1000;
+
+/// A machine's state as people see it: `online`, `offline`, or `old` (offline and not seen for [`OLD_AFTER_MS`]).
+pub(crate) fn machine_state(online: bool, last_seen_ms: u64, now_ms: u64) -> &'static str {
+    if online {
+        "online"
+    } else if now_ms.saturating_sub(last_seen_ms) >= OLD_AFTER_MS {
+        "old"
+    } else {
+        "offline"
+    }
+}
+
+/// `agora hub machines`: every machine the hub shows, with its state and when it was last seen. `forget NAME` and `forget --old`
+/// (every old machine) ask the running hub to forget them (ADR-0073), after the owner's yes on this terminal (`--yes` for a
+/// script); `--refuse-return` also revokes their certificates. The list is read from the hub's file; forgetting goes through the
+/// running hub, signed in from its folder, so its view and every window hear of it.
+pub fn hub_machines(say: &Say, o: &Opts) -> ExitCode {
+    let dir = hub_dir(o);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+    let view = match SqliteStore::open(&dir.join("hub.db"))
+        .and_then(|s| agora_hub::projection::View::rebuild(&s))
+    {
+        Ok((view, _)) => view,
+        Err(e) => {
+            say.err(key!("cli-hub-failed"), &[("reason", e.to_string().into())]);
+            return ExitCode::from(1);
+        }
+    };
+    let shown = view.shown();
+    let machines: Vec<(&String, &agora_hub::projection::NodeView, &str)> = shown
+        .nodes
+        .iter()
+        .map(|(id, n)| (id, n, machine_state(n.online, n.last_event_ms, now)))
+        .collect();
+    let picked: Vec<&String> = match o.positional.as_slice() {
+        [] if !o.old => {
+            if machines.is_empty() {
+                say.out(key!("cli-machines-none"), &[]);
+            }
+            for (id, n, state) in &machines {
+                say.out(
+                    key!("cli-machine-line"),
+                    &[
+                        ("id", (*id).clone().into()),
+                        ("state", (*state).into()),
+                        ("seen", utc(n.last_event_ms).into()),
+                    ],
+                );
+            }
+            return ExitCode::SUCCESS;
+        }
+        [verb] if verb == "forget" && o.old => machines
+            .iter()
+            .filter(|(_, _, s)| *s == "old")
+            .map(|(id, _, _)| *id)
+            .collect(),
+        [verb, name] if verb == "forget" && !o.old => {
+            match machines.iter().find(|(id, _, _)| *id == name) {
+                Some((id, _, _)) => vec![*id],
+                None => {
+                    say.err(key!("cli-machine-unknown"), &[("id", name.clone().into())]);
+                    return ExitCode::from(1);
+                }
+            }
+        }
+        _ => {
+            say.err(key!("cli-bad-arguments"), &[]);
+            return ExitCode::from(2);
+        }
+    };
+    if picked.is_empty() {
+        say.out(key!("cli-machines-none-old"), &[]);
+        return ExitCode::SUCCESS;
+    }
+    for (id, n, state) in machines.iter().filter(|(id, _, _)| picked.contains(id)) {
+        say.out(
+            key!("cli-machine-line"),
+            &[
+                ("id", (*id).clone().into()),
+                ("state", (*state).into()),
+                ("seen", utc(n.last_event_ms).into()),
+            ],
+        );
+    }
+    if !o.yes {
+        use std::io::{BufRead, IsTerminal, Write};
+        if !std::io::stdin().is_terminal() {
+            say.out(key!("cli-machines-not-asked"), &[]);
+            return ExitCode::SUCCESS;
+        }
+        let question = if o.refuse_return {
+            key!("cli-machines-question-refuse")
+        } else {
+            key!("cli-machines-question")
+        };
+        let mut out = std::io::stdout();
+        let _ = write!(out, "{} ", say.text(question, &[]));
+        let _ = out.flush();
+        let mut answer = String::new();
+        let _ = std::io::stdin().lock().read_line(&mut answer);
+        if !crate::trustcli::is_yes(&answer, &say.text(key!("cli-devices-yes"), &[])) {
+            say.out(key!("cli-machines-declined"), &[]);
+            return ExitCode::SUCCESS;
+        }
+    }
+    let session = (|| {
+        let hub = agora_tui::client::Hub {
+            addr: own_hub_addr(&dir).unwrap_or_else(|| DEFAULT_LISTEN.to_string()),
+            ca_pem: std::fs::read_to_string(dir.join("ca.pem")).map_err(|e| e.to_string())?,
+        };
+        let code = new_login_code(&dir)?;
+        let token = agora_tui::client::sign_in(&hub, &code).map_err(|e| format!("{e:?}"))?;
+        agora_tui::client::Session::connect(&hub, &token).map_err(|e| format!("{e:?}"))
+    })();
+    let mut session = match session {
+        Ok(s) => s,
+        Err(reason) => {
+            say.err(
+                key!("cli-machines-hub-unreachable"),
+                &[("reason", reason.into())],
+            );
+            return ExitCode::from(1);
+        }
+    };
+    let mut code = ExitCode::SUCCESS;
+    for id in picked {
+        let forget = agora_protocol::v1::command_request::Command::NodeForget(
+            agora_protocol::v1::NodeForget {
+                node_id: id.clone(),
+                refuse_return: o.refuse_return,
+            },
+        );
+        match session.command("", forget, std::time::Duration::from_secs(15)) {
+            Ok(()) => say.out(key!("cli-machine-forgotten"), &[("id", id.clone().into())]),
+            Err(e) => {
+                say.err(
+                    key!("cli-machine-not-forgotten"),
+                    &[("id", id.clone().into()), ("code", e.into())],
+                );
+                code = ExitCode::from(1);
+            }
+        }
+    }
+    code
 }

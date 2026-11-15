@@ -670,3 +670,615 @@ fn the_hub_prints_its_ca_fingerprint_for_the_desktop_apps_first_use() {
     assert!(out.contains(&want), "{out}");
     let _ = std::fs::remove_dir_all(root);
 }
+
+/// The first `XXXX-XXXX` code in a command's output (Fluent may wrap it in isolation marks).
+fn code_in(text: &str) -> String {
+    text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+        .find(|w| w.len() == 9 && w.as_bytes()[4] == b'-')
+        .expect(text)
+        .to_string()
+}
+
+#[test]
+fn the_hubs_first_snapshot_reaches_a_client_that_sends_a_command_at_once() {
+    // Seen on main after #446: `agora tui` registers its device right after connecting, and the hub's first snapshot arrived while
+    // that command waited for its answer; the wait dropped it, the hub never sends it again, and the console stayed at
+    // "Connecting…". A client that asks something at once must still get the snapshot.
+    use agora_tui::client::{sign_in, Hub, Session, Update};
+    let root = tmp("first-snapshot");
+    let (hub_dir, home) = (root.join("hub"), root.join("home"));
+    std::fs::create_dir_all(&home).unwrap();
+    let mut hub = agora(
+        &home,
+        &["hub", "run", "--listen", "127.0.0.1:0", "--hub-dir"],
+    )
+    .arg(&hub_dir)
+    .stdout(Stdio::piped())
+    .stderr(Stdio::null())
+    .spawn()
+    .unwrap();
+    let mut line = String::new();
+    BufReader::new(hub.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    let _hub = Proc(hub);
+    let addr = line
+        .split("running on ")
+        .nth(1)
+        .and_then(|r| r.split(". Its").next())
+        .expect(&line)
+        .trim()
+        .to_string();
+    let login = agora(&home, &["hub", "login", "--hub-dir"])
+        .arg(&hub_dir)
+        .output()
+        .unwrap();
+    let target = Hub {
+        addr,
+        ca_pem: std::fs::read_to_string(hub_dir.join("ca.pem")).unwrap(),
+    };
+    let token = sign_in(&target, &code_in(&String::from_utf8_lossy(&login.stdout))).unwrap();
+    let mut session = Session::connect(&target, &token).unwrap();
+    // A command right away, as the console's device registration is: its answer comes after the snapshot.
+    let _ = session.list_devices();
+    let end = std::time::Instant::now() + Duration::from_secs(10);
+    let mut got = false;
+    while !got && std::time::Instant::now() < end {
+        got = matches!(
+            session.next(Duration::from_millis(200)),
+            Update::Snapshot(_)
+        );
+    }
+    assert!(got, "the first snapshot was lost while the command waited");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn every_capability_a_node_advertises_is_one_the_real_hub_agrees_on() {
+    // The real binaries on both ends: the hub's supported list (`hubcli.rs`) and the node's advertised list (`uplink_client.rs`)
+    // must both name a capability, or the hub refuses every command that needs it (#378: `directory.list` was missing on the hub
+    // side, and no test crossed the two lists). One command per capability goes through the hub; the node may refuse it for its
+    // own reasons (no signature, no project), but the hub must not answer `protocol.capability_missing`.
+    use agora_protocol::v1::{self, command_request::Command as Cmd};
+    use agora_tui::client::{sign_in, Hub, Session};
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return;
+    }
+    let root = tmp("capabilities");
+    let (hub_dir, node_home) = (root.join("hub"), root.join("node"));
+    std::fs::create_dir_all(&node_home).unwrap();
+    let mut hub = agora(
+        &node_home,
+        &["hub", "run", "--listen", "127.0.0.1:0", "--hub-dir"],
+    )
+    .arg(&hub_dir)
+    .stdout(Stdio::piped())
+    .stderr(Stdio::null())
+    .spawn()
+    .unwrap();
+    let mut line = String::new();
+    let mut out = BufReader::new(hub.stdout.take().unwrap());
+    out.read_line(&mut line).unwrap();
+    let _hub = Proc(hub);
+    let addr = line
+        .split("running on ")
+        .nth(1)
+        .and_then(|r| r.split(". Its").next())
+        .expect(&line)
+        .trim()
+        .to_string();
+    let port = addr.rsplit(':').next().unwrap().to_string();
+    let text = agora(&node_home, &["hub", "code", "--hub-dir"])
+        .arg(&hub_dir)
+        .output()
+        .unwrap();
+    let code = code_in(&String::from_utf8_lossy(&text.stdout));
+    let enrolled = agora(
+        &node_home,
+        &[
+            "node",
+            "enroll",
+            "--hub",
+            &format!("wss://localhost:{port}"),
+            "--ca",
+        ],
+    )
+    .arg(hub_dir.join("ca.pem"))
+    .args(["--code", &code, "--id", "laptop"])
+    .output()
+    .unwrap();
+    assert!(
+        enrolled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&enrolled.stderr)
+    );
+    let node = agora(&node_home, &["node", "run"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let _node = Proc(node);
+
+    let login = agora(&node_home, &["hub", "login", "--hub-dir"])
+        .arg(&hub_dir)
+        .output()
+        .unwrap();
+    let target = Hub {
+        addr: format!("127.0.0.1:{port}"),
+        ca_pem: std::fs::read_to_string(hub_dir.join("ca.pem")).unwrap(),
+    };
+    let token = sign_in(&target, &code_in(&String::from_utf8_lossy(&login.stdout))).unwrap();
+    let mut session = Session::connect(&target, &token).unwrap();
+    let wait = Duration::from_secs(30);
+    for (capability, command) in [
+        (
+            "workspace.directory",
+            Cmd::DirectoryInspect(v1::DirectoryInspect::default()),
+        ),
+        (
+            "workspace.directory",
+            Cmd::AgentLaunch(v1::AgentLaunch::default()),
+        ),
+        (
+            "workspace.directory",
+            Cmd::WorkspaceQuery(v1::WorkspaceQuery::default()),
+        ),
+        (
+            "directory.list",
+            Cmd::DirectoryList(v1::DirectoryList::default()),
+        ),
+        // `board.join` is not here: only the hub sends it, never a client. `hubcli`'s
+        // `the_hub_agrees_on_every_capability_a_node_offers` covers it and every other capability a node offers.
+    ] {
+        // Until the node has dialed in, the hub does not know it (`node.unknown`) or has it offline.
+        let end = Instant::now() + Duration::from_secs(60);
+        let answer = loop {
+            let answer = session.command("laptop", command.clone(), wait).err();
+            let waiting = matches!(answer.as_deref(), Some("node.unknown" | "node.offline"));
+            if !waiting || Instant::now() > end {
+                break answer;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        };
+        assert!(
+            !matches!(answer.as_deref(), Some("node.unknown" | "node.offline")),
+            "{capability}: the node never came online: {answer:?}"
+        );
+        // Anything else is the node's own answer (no signature, nothing to join), so the hub routed it.
+        assert_ne!(
+            answer.as_deref(),
+            Some("protocol.capability_missing"),
+            "{capability}: the hub and the node do not agree on it"
+        );
+    }
+}
+
+#[test]
+fn the_screen_password_is_never_read_from_a_pipe_and_clearing_it_signs_out() {
+    use agora_hub::password::ScreenPassword;
+    let root = tmp("password");
+    let run = |args: &[&str]| {
+        let o = agora(&root, args)
+            .arg("--hub-dir")
+            .arg(&root)
+            .stdin(Stdio::piped())
+            .output()
+            .unwrap();
+        (
+            o.status.code(),
+            String::from_utf8_lossy(&o.stdout).into_owned(),
+        )
+    };
+    let (code, out) = run(&["password", "status"]);
+    assert_eq!(code, Some(0));
+    assert!(out.contains("No screen password"), "{out}");
+    // Not a terminal: refused, nothing set.
+    assert_eq!(run(&["password", "set"]).0, Some(2));
+    assert!(!ScreenPassword::new(&SqliteStore::open(&root.join("hub.db")).unwrap()).is_set());
+
+    // Runs on every system (Windows included, where the echo-less reader is only compiled): a pipe is refused, and clearing a
+    // password ends every session.
+    ScreenPassword::with_iterations(&SqliteStore::open(&root.join("hub.db")).unwrap(), 1_000)
+        .set("open sesame 42")
+        .unwrap();
+    // A live session, to see it end when the password is cleared.
+    let store = SqliteStore::open(&root.join("hub.db")).unwrap();
+    let signin = agora_hub::signin::SignIn::new(
+        &store,
+        std::sync::Arc::new(agora_hub::enroll::Lockout::new()),
+    );
+    let now = agora_hub::server::now_ms();
+    let token = signin
+        .redeem(&signin.create_code(now).unwrap(), now)
+        .unwrap();
+
+    let (code, out) = run(&["password", "clear"]);
+    assert_eq!(code, Some(0), "{out}");
+    assert!(!ScreenPassword::new(&store).is_set());
+    assert!(
+        !signin.check(&token, agora_hub::server::now_ms()),
+        "every session ends"
+    );
+    let rows = agora_hub::audit::Audit::new(&store)
+        .list(0, None, 50)
+        .unwrap();
+    assert!(rows.iter().any(|r| r.action == "password_clear"));
+}
+
+/// Typing the password in a real terminal: nothing is echoed, Ctrl-C stops with 130. It drives a Unix pty; on Windows the reader is
+/// compiled and the pipe refusal above is what runs.
+#[cfg(unix)]
+#[test]
+fn the_screen_password_is_typed_twice_unseen_and_ctrl_c_stops_it() {
+    use agora_hub::password::ScreenPassword;
+    let root = tmp("password-pty");
+    let run = |args: &[&str]| {
+        let o = agora(&root, args)
+            .arg("--hub-dir")
+            .arg(&root)
+            .stdin(Stdio::piped())
+            .output()
+            .unwrap();
+        (
+            o.status.code(),
+            String::from_utf8_lossy(&o.stdout).into_owned(),
+        )
+    };
+    let store = SqliteStore::open(&root.join("hub.db")).unwrap();
+    let signin = agora_hub::signin::SignIn::new(
+        &store,
+        std::sync::Arc::new(agora_hub::enroll::Lockout::new()),
+    );
+    let now = agora_hub::server::now_ms();
+    let token = signin
+        .redeem(&signin.create_code(now).unwrap(), now)
+        .unwrap();
+    let mut pty = agora_platform::spawn(&agora_platform::PtyConfig {
+        argv: vec![
+            AGORA.into(),
+            "password".into(),
+            "set".into(),
+            "--hub-dir".into(),
+            root.display().to_string(),
+        ],
+        cwd: None,
+        env: vec![
+            ("AGORA_HOME".into(), root.display().to_string()),
+            ("AGORA_LANG".into(), "en".into()),
+        ],
+        cols: 120,
+        rows: 30,
+        limits: agora_platform::ProcessLimits::default(),
+        sandbox: None,
+        identity: None,
+        env_remove: Vec::new(),
+    })
+    .unwrap();
+    let mut seen = String::new();
+    let mut wait_for = |pty: &mut Box<dyn agora_platform::Pty>, text: &str| {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while !seen.contains(text) {
+            assert!(Instant::now() < deadline, "waited for {text:?}: {seen}");
+            if let Ok(b) = pty.output().recv_timeout(Duration::from_millis(100)) {
+                seen.push_str(&String::from_utf8_lossy(&b));
+            }
+        }
+    };
+    wait_for(&mut pty, "New screen password");
+    pty.write_input(b"open sesame 42\r").unwrap();
+    wait_for(&mut pty, "Type it again");
+    pty.write_input(b"open sesame 42\r").unwrap();
+    wait_for(&mut pty, "open sessions were signed out");
+    assert!(pty.wait().unwrap().success(), "{seen}");
+    // Ctrl-C while typing stops with 130 and changes nothing (the terminal is restored before it exits).
+    let mut stop = agora_platform::spawn(&agora_platform::PtyConfig {
+        argv: vec![
+            AGORA.into(),
+            "password".into(),
+            "set".into(),
+            "--hub-dir".into(),
+            root.display().to_string(),
+        ],
+        cwd: None,
+        env: vec![("AGORA_LANG".into(), "en".into())],
+        cols: 120,
+        rows: 30,
+        limits: agora_platform::ProcessLimits::default(),
+        sandbox: None,
+        identity: None,
+        env_remove: Vec::new(),
+    })
+    .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut text = String::new();
+    while !text.contains("New screen password") {
+        assert!(Instant::now() < deadline, "{text}");
+        if let Ok(b) = stop.output().recv_timeout(Duration::from_millis(100)) {
+            text.push_str(&String::from_utf8_lossy(&b));
+        }
+    }
+    stop.write_input(b"half\x03").unwrap();
+    assert_eq!(stop.wait().unwrap().code, Some(130), "{text}");
+    assert!(
+        !seen.contains("open sesame"),
+        "the password is never shown: {seen}"
+    );
+    let password = ScreenPassword::new(&store);
+    assert!(password.verify("open sesame 42"));
+    assert!(
+        !signin.check(&token, agora_hub::server::now_ms()),
+        "every session ends"
+    );
+    assert!(run(&["password", "status"])
+        .1
+        .contains("A screen password is set"));
+}
+
+/// Starts `agora hub run` on `listen` over `hub_dir`; returns the process and the address it says it runs on.
+fn start_hub(home: &Path, hub_dir: &Path, listen: &str) -> (Child, String) {
+    let mut hub = agora(home, &["hub", "run", "--listen", listen, "--hub-dir"])
+        .arg(hub_dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    let mut out = BufReader::new(hub.stdout.take().unwrap());
+    out.read_line(&mut line).unwrap();
+    // Keep reading what the hub prints so it never blocks on a full pipe.
+    std::thread::spawn(move || std::io::copy(&mut out, &mut std::io::sink()));
+    let addr = line
+        .split("running on ")
+        .nth(1)
+        .and_then(|r| r.split(". Its").next())
+        .expect(&line)
+        .trim()
+        .to_string();
+    (hub, addr)
+}
+
+/// What a signed-in window is shown first: the hub's snapshot.
+fn first_snapshot(home: &Path, hub_dir: &Path, addr: &str) -> agora_protocol::v1::Snapshot {
+    use agora_tui::client::{sign_in, Hub, Session, Update};
+    let login = agora(home, &["hub", "login", "--hub-dir"])
+        .arg(hub_dir)
+        .output()
+        .unwrap();
+    let target = Hub {
+        addr: addr.to_string(),
+        ca_pem: std::fs::read_to_string(hub_dir.join("ca.pem")).unwrap(),
+    };
+    let token = sign_in(&target, &code_in(&String::from_utf8_lossy(&login.stdout))).unwrap();
+    let mut session = Session::connect(&target, &token).unwrap();
+    let end = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < end {
+        if let Update::Snapshot(s) = session.next(Duration::from_millis(200)) {
+            return *s;
+        }
+    }
+    panic!("no snapshot from the hub at {addr}");
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+}
+
+#[test]
+fn a_machine_that_has_not_come_back_after_the_hub_is_killed_is_shown_offline() {
+    // Seen on the maintainer's hub (ADR-0070, #467): the view is rebuilt from the log, so a machine whose connection was open
+    // when the hub was killed (no end of it was ever recorded) stayed online after the hub started again, until it redialled,
+    // or forever when it never did. Presence is about live connections, and a hub that has just started has none.
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return;
+    }
+    let root = tmp("presence-at-open");
+    let (hub_dir, home, node_home) = (root.join("hub"), root.join("home"), root.join("node"));
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&node_home).unwrap();
+
+    let (hub, addr) = start_hub(&home, &hub_dir, "127.0.0.1:0");
+    let mut hub = Proc(hub);
+    let port = addr.rsplit(':').next().unwrap().to_string();
+    let out = agora(&home, &["hub", "code", "--hub-dir"])
+        .arg(&hub_dir)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let code = text
+        .split("Enrollment code: ")
+        .nth(1)
+        .and_then(|r| r.split(' ').next())
+        .expect(&text)
+        .to_string();
+    let out = agora(
+        &node_home,
+        &[
+            "node",
+            "enroll",
+            "--hub",
+            &format!("wss://localhost:{port}"),
+            "--ca",
+        ],
+    )
+    .arg(hub_dir.join("ca.pem"))
+    .args(["--code", &code, "--id", "laptop"])
+    .output()
+    .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let node = agora(&node_home, &["node", "run"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let _node = Proc(node);
+    let online = |s: &agora_protocol::v1::Snapshot| {
+        s.nodes
+            .iter()
+            .find(|n| n.node_id == "laptop")
+            .map(|n| (n.online, n.last_event_ms))
+    };
+    let end = Instant::now() + Duration::from_secs(30);
+    while online(&first_snapshot(&home, &hub_dir, &addr)).map(|o| o.0) != Some(true) {
+        assert!(Instant::now() < end, "the node never came online");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    // The hub is killed (SIGKILL on Unix, this exact process): it records nothing about the node's connection.
+    hub.0.kill().unwrap();
+    hub.0.wait().unwrap();
+    let killed_at = now_ms();
+    // It starts again on the same directory, on another port, so the node cannot redial it: the machine is shown offline, with
+    // "last seen" from before the kill, not the restart.
+    let (again, other) = start_hub(&home, &hub_dir, "127.0.0.1:0");
+    let mut again = Proc(again);
+    assert_ne!(other, addr);
+    // #508: the restarted hub rewrites its `listen` file; only `agora tui --hub-dir` reads it, never the node (it dials the
+    // address it enrolled with), so the node stays unable to reach this hub.
+    let listen = || {
+        std::fs::read_to_string(hub_dir.join("listen"))
+            .unwrap()
+            .trim()
+            .to_string()
+    };
+    assert_eq!(listen(), other);
+    let (up, seen) = online(&first_snapshot(&home, &hub_dir, &other)).unwrap();
+    assert!(!up, "a machine that has not come back is shown offline");
+    assert!(
+        seen > 0 && seen <= killed_at,
+        "last seen {seen} vs killed at {killed_at}"
+    );
+
+    // Killed again and started where the node dials: it comes back online by itself.
+    again.0.kill().unwrap();
+    again.0.wait().unwrap();
+    let (back, addr) = start_hub(&home, &hub_dir, &format!("127.0.0.1:{port}"));
+    let _back = Proc(back);
+    assert_eq!(listen(), addr);
+    let end = Instant::now() + Duration::from_secs(30);
+    while online(&first_snapshot(&home, &hub_dir, &addr)).map(|o| o.0) != Some(true) {
+        assert!(Instant::now() < end, "the node never came back online");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// `agora tui --hub-dir DIR` on the hub's machine, without `--hub` and without `machine.toml`: it dials the port the hub in that
+/// folder really listens on, not the default 7443 (found on the maintainer's hub, which runs on a port of its own).
+#[test]
+fn the_console_with_only_the_hub_folder_dials_the_hubs_real_port() {
+    let root = tmp("tui-port");
+    let (hub_dir, home) = (root.join("hub"), root.join("home"));
+    std::fs::create_dir_all(&home).unwrap();
+    let mut hub = agora(
+        &home,
+        &["hub", "run", "--listen", "127.0.0.1:0", "--hub-dir"],
+    )
+    .arg(&hub_dir)
+    .stdout(Stdio::piped())
+    .stderr(Stdio::null())
+    .spawn()
+    .unwrap();
+    let mut line = String::new();
+    let mut out = BufReader::new(hub.stdout.take().unwrap());
+    out.read_line(&mut line).unwrap();
+    let _hub = Proc(hub);
+    let addr = line
+        .split("running on ")
+        .nth(1)
+        .and_then(|r| r.split(". Its").next())
+        .expect(&line)
+        .trim()
+        .to_string();
+    assert_ne!(
+        addr, "127.0.0.1:7443",
+        "the test needs a port other than the default"
+    );
+
+    let mut tui = agora(&home, &["tui", "--hub-dir"])
+        .arg(&hub_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut err = BufReader::new(tui.stderr.take().unwrap());
+    let _tui = Proc(tui);
+    let mut first = String::new();
+    err.read_line(&mut first).unwrap();
+    assert!(first.contains(&format!("Connecting to {addr}")), "{first}");
+}
+
+/// ADR-0073 from the command line: a machine the hub has not seen for days is listed as old; `forget --old --yes` has the running
+/// hub forget it, and it is listed no more.
+#[test]
+fn an_old_machine_is_listed_as_old_and_forgotten_through_the_running_hub() {
+    use agora_hub::store::EventStore;
+    use agora_protocol::v1::{event::Body, Event, NodeOnline};
+    use prost::Message;
+    let root = tmp("machines");
+    let (hub_dir, home) = (root.join("hub"), root.join("home"));
+    std::fs::create_dir_all(&hub_dir).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    {
+        // A machine last heard from in 2020.
+        let store = SqliteStore::open(&hub_dir.join("hub.db")).unwrap();
+        let ev = Event {
+            producer_id: "old-box".into(),
+            seq: 1,
+            at_ms: 1_600_000_000_000,
+            body: Some(Body::NodeOnline(NodeOnline {
+                node_id: "old-box".into(),
+                ..Default::default()
+            })),
+        };
+        store
+            .append("old-box", 1, ev.at_ms, &ev.encode_to_vec())
+            .unwrap();
+    }
+    let mut hub = agora(
+        &home,
+        &["hub", "run", "--listen", "127.0.0.1:0", "--hub-dir"],
+    )
+    .arg(&hub_dir)
+    .stdout(Stdio::piped())
+    .stderr(Stdio::null())
+    .spawn()
+    .unwrap();
+    let mut line = String::new();
+    let mut out = BufReader::new(hub.stdout.take().unwrap());
+    out.read_line(&mut line).unwrap();
+    let _hub = Proc(hub);
+    let run = |args: &[&str]| {
+        let o = agora(&home, args)
+            .arg("--hub-dir")
+            .arg(&hub_dir)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        (
+            o.status.success(),
+            String::from_utf8_lossy(&o.stdout).into_owned() + &String::from_utf8_lossy(&o.stderr),
+        )
+    };
+    let (ok, listed) = run(&["hub", "machines"]);
+    assert!(ok, "{listed}");
+    assert!(
+        listed.contains("old-box · old, last seen 2020-"),
+        "{listed}"
+    );
+    // Without a terminal to answer and without --yes, nothing is forgotten.
+    let (_, asked) = run(&["hub", "machines", "forget", "--old"]);
+    assert!(asked.contains("Nothing was forgotten"), "{asked}");
+    let (ok, forgot) = run(&["hub", "machines", "forget", "--old", "--yes"]);
+    assert!(ok, "{forgot}");
+    assert!(forgot.contains("old-box is forgotten"), "{forgot}");
+    let (_, after) = run(&["hub", "machines"]);
+    assert!(after.contains("The hub shows no machine"), "{after}");
+}

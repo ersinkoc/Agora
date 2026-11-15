@@ -4,6 +4,10 @@ Errors are `{ code, params }`. `code` is a stable, dotted, lowercase string. `pa
 and numbers used by clients to render localized messages (`locales/<lang>/errors.ftl`, key = code with dots
 replaced by dashes). Codes are part of the public protocol: never rename or reuse one.
 
+The terminal client's remove action preserves the hub's error parameters and renders its refusal from `errors.ftl` in the
+selected language, including `agent.running` and `auth.forbidden`. Unknown codes remain visible as a fallback; a lost connection
+or a local response timeout has a localized retry message.
+
 | Code | Params | Meaning |
 | --- | --- | --- |
 | `auth.unauthenticated` | — | No or invalid credentials |
@@ -12,8 +16,10 @@ replaced by dashes). Codes are part of the public protocol: never rename or reus
 | `protocol.unsupported_generation` | `offered`, `supported` | No common protocol generation |
 | `protocol.capability_missing` | `capability` | Peer lacks a required capability |
 | `protocol.invalid_message` | `field` | Message failed validation |
+| `protocol.producer_mismatch` | `node_id`, `producer_id` | A node sent an event that names another producer (`producer_id`) than its certificate (`node_id`); the hub ends the connection with this code as the WebSocket close reason (protocol.md section 3) |
 | `node.offline` | `node_id` | Target node not connected |
 | `node.unknown` | `node_id` | The hub has never seen this node, or the request named none (ADR-0029) |
+| `node.online` | `node_id` | ADR-0073: the machine is connected, so it cannot be forgotten; only an offline machine can |
 | `node.timeout` | `node_id` | The node did not answer a routed command in time (ADR-0029) |
 | `node.policy_denied` | `node_id`, `rule` | Node local policy rejected the action |
 | `node.resource_limit` | `resource`, `limit` | Limit reached (agents, memory, disk) |
@@ -24,13 +30,29 @@ replaced by dashes). Codes are part of the public protocol: never rename or reus
 | `agent.not_found` | `agent_id` | |
 | `agent.kind_unknown` | `kind` | No manifest or adapter for this kind |
 | `agent.publisher_revoked` | `kind`, `publisher` | The adapter of this kind was installed from a registry publisher that the registry has since revoked (ADR-0044) |
-| `agent.sandbox_unavailable` | `kind`, `level`, `reason` | The node's policy confines agents (`sandbox = level`, ADR-0047) and this machine, or this kind of agent, cannot be confined that way; nothing was started. `reason` (added with ADR-0050 Amendment B; older nodes omit it): `unsupported` (this machine or kind cannot be confined at that level), `broad_write_grant` (a folder the agent would be given, or something below it, lets `Users` or `Everyone` write), `label_failed` (a folder the agent would write cannot be labelled for confined agents) |
+| `agent.sandbox_unavailable` | `kind`, `level`, `reason` | The node's policy confines agents (`sandbox = level`, ADR-0047) and this machine, or this kind of agent, cannot be confined that way; nothing was started. `reason` (added with ADR-0050 Amendment B; older nodes omit it): `unsupported` (this machine or kind cannot be confined at that level), `broad_write_grant` (a folder the agent would be given, or something below it, lets `Users` or `Everyone` write), `label_failed` (a folder the agent would write cannot be labelled for confined agents), `protected_path_unresolved` (macOS: one of the node's own paths it keeps closed to agents is relative or cannot be resolved), `worktree_not_folder` (macOS: the agent's worktree is no longer a plain folder, e.g. a link was put in its place), `writable_is_link` (macOS: a file or folder the agent may write or read is reached through a symbolic link at or below a place it may write, compared where the kernel has the path, so the agent could have made it; for a link at the place itself, only when this user may write the folder holding it. The user checks the link and removes it if they did not make it; a link the owner made there, as a dotfiles `~/.claude -> ~/dotfiles/claude`, is refused too, since it cannot be told apart), `writable_has_links` (#571; Windows: a regular file in the agent's worktree, outside `node_modules`, `target` and `.git`, has another name elsewhere, a hard link made outside confinement, so its grant would reach that other place) |
 | `agent.not_authenticated` | `kind`, `node_id` | Agent account not logged in on that node |
 | `agent.blocked` | `agent_id` | Agent waits for input; prompt not sent |
 | `agent.mode_unsupported` | `kind`, `mode` | e.g. chat mode for an L1 agent |
+| `agent.option_forbidden` | `kind`, `option`, `policy` | ADR-0059: a start chose a launch option (`option`, the first refused id) that may not be used; nothing was started. `policy`: `forbid` (the node's `skip_permissions` policy does not allow an option that skips permissions), `confined_only` (it allows one only for a confined agent and this one would not be confined), `signature` (a routed `AgentStart` with options: only a signed `AgentLaunch` or the node's own socket may carry them) |
+| `agent.option_invalid` | `kind`, `option` | ADR-0059: a launch option id that is not `[a-z0-9-]{1,32}` (so `!` or `,` in it), that the node's manifest for `kind` does not declare, that is repeated, or a confirmation for an id that was not chosen; more than 8 (`option` empty). Nothing was started |
+| `agent.option_unconfirmed` | `kind`, `option` | ADR-0059: the node's own manifest says `option` makes the agent act without asking, and the start did not list it in `confirmed_launch_options` (signed with the start): the window did not show the confirmation for it, for example because a hub relabelled it as harmless. Nothing was started |
+| `agent.running` | `agent_id` | the agent still runs, so it cannot be forgotten (ADR-0053) |
+| `agent.not_interrupted` | `agent_id` | ADR-0060: `agent.resume` names an agent the node does not hold as interrupted (never seen, running, resumed already, or no longer kept after 14 days) |
+| `agent.session_missing` | `agent_id` | ADR-0060: Resume needs the agent's own session id and a kind that can resume one; the node has neither, so only Start again (`new_session`) is possible |
+| `agent.folder_changed` | `agent_id`, `path` | ADR-0060: the agent's folder is gone or now has another project identity (ADR-0052); nothing was started |
+| `agent.parent_not_running` | `agent_id`, `parent_agent_id` | ADR-0060: a helper (ADR-0057) is resumed only while the agent that started it runs |
+| `agent.still_running` | `agent_id` | ADR-0060: the agent's process from before the node's restart still runs (a node killed without stopping its agents); stop it first (`agent.stop` ends exactly that process), then resume |
 | `approval.expired` | `approval_id` | |
 | `approval.signature_invalid` | `approval_id` | |
 | `approval.grant_required` | `command` | ADR-0041: the node's `signed_commands` policy lists this command and no live grant covers it |
+| `device.unknown` | `device_id` | ADR-0061: the hub has no device with this id registered to the caller (another person's device looks the same) |
+| `device.key_mismatch` | `device_id` | ADR-0061: the id is registered (or trusted on the machine) with another key; a device id stays bound to its key |
+| `device.untrusted` | `device_id`, `node_id` | ADR-0061: the device that signed an endorsement or revocation (`device_id`) is not one this machine trusts, or its trust there expired |
+| `device.signature_invalid` | `device_id` | ADR-0061: the registration, ask, endorsement or revocation of `device_id` does not verify under the key that must have signed it, or its time is too far from the receiver's clock |
+| `device.endorsement_expired` | `device_id` | ADR-0061: the endorsement has expired, lasts longer than 90 days, or was signed in the future |
+| `device.not_in_scope` | `device_id`, `node_id` | ADR-0061: the endorsement names other machines than this one |
+| `device.revoked` | `device_id` | ADR-0061: a revocation of the device was signed at or after this endorsement |
 | `lease.held` | `path`, `holder_agent_id`, `expires_at` | `expires_at` is when the conflicting lease ends, in milliseconds since the epoch |
 | `board.unavailable` | `project_id` | A shared project's board cannot be reached (hub unreachable), or a lease or claim waits while the project's nodes hand over their local work (up to 5 s, ADR-0039 amendment B); the agent keeps working locally (ADR-0039) |
 | `mesh.recipient_unknown` | `to` | |
@@ -38,7 +60,10 @@ replaced by dashes). Codes are part of the public protocol: never rename or reus
 | `mesh.body_too_large` | `limit` | Message body over the size limit; pass a reference instead |
 | `mesh.too_many_refs` | `limit` | Too many references on one message |
 | `mesh.too_many_asks` | `limit` | Too many unanswered `ask`s from this agent |
-| `mesh.timeout` | — | An `ask` got no reply in time |
+| `mesh.timeout` | — | An `ask` got no reply in time, or an `agent_wait` ended before the helper reached the state |
+| `mesh.folder_not_allowed` | `folder` | ADR-0057: a helper's folder must be the asking agent's own folder or below it; an outside folder only with the user's single approval naming it (never a grant), and another machine is not offered |
+| `mesh.helper_limit` | `rule`, `limit` | ADR-0057: `rule` is `depth` (a helper cannot start helpers unless the decision that started it allowed it, and a helper of a helper never can), `helpers` (running helpers per agent), `pending` (one start waits for the user at a time) or `prompt` (first prompt over the size limit) |
+| `mesh.start_denied` | `approval_id` | ADR-0057: the user refused the start, or it was withdrawn |
 | `task.not_found` | `task_id` | No such task in the caller's project |
 | `task.not_open` | `task_id` | The task is already claimed or done |
 | `task.blocked` | `task_id`, `depends_on` | A dependency of the task is not done |
@@ -50,4 +75,7 @@ replaced by dashes). Codes are part of the public protocol: never rename or reus
 | `files.outside_root` | `path` | Path escapes the worktree (`..`, absolute, or a symlink leading out) |
 | `adapter.signature_invalid` | `package` | |
 | `adapter.crashed` | `kind`, `exit_code` | |
+| `adapter.agent_exited` | `stage`, `exit_code`, `stderr_tail` | ADR-0058: the agent behind an adapter (an ACP agent behind the bridge) exited before it was ready. `stage` is `initialize` or `session`; `exit_code` is its exit code, `?` when it had none; `stderr_tail` the last lines of its error output with secrets removed (docs/specs/adapter-protocol.md), possibly empty |
+| `adapter.agent_refused` | `stage` | ADR-0058: the agent behind an adapter answered `initialize` or the new session (`stage`) with an error |
+| `adapter.option_refused` | `id` | ADR-0058: the agent did not switch to that mode or model |
 | `internal` | `incident_id` | Unexpected failure; details only in logs |

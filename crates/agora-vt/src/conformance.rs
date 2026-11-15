@@ -13,11 +13,14 @@ pub fn run_all<T: Terminal>(make: impl Fn(Size) -> T) {
     clear_screen(&make);
     resize_updates_size_and_keeps_in_range_cells(&make);
     bottom_lines_never_include_scrollback(&make);
+    history_is_what_scrolled_off_in_order(&make);
     bottom_non_empty_lines_skip_blank_rows(&make);
     alt_screen_is_separate_and_restores(&make);
     title_from_osc(&make);
     wide_characters_use_two_cells(&make);
     modes_toggle(&make);
+    styles_are_kept_per_cell(&make);
+    pen_is_the_style_of_the_next_character(&make);
     styling_sequences_print_nothing(&make);
     malformed_input_does_not_panic(&make);
 }
@@ -86,6 +89,28 @@ fn bottom_lines_never_include_scrollback<T: Terminal>(make: &impl Fn(Size) -> T)
     assert_eq!(t.bottom_lines(2), bottom[3..].to_vec());
 }
 
+/// What scrolled off the live screen, newest first from `back = 1`; a backend that keeps no history says 0 and nothing.
+fn history_is_what_scrolled_off_in_order<T: Terminal>(make: &impl Fn(Size) -> T) {
+    let mut t = make(size(20, 5));
+    for i in 1..=30 {
+        t.feed(format!("line {i}\r\n").as_bytes());
+    }
+    let n = t.history_len();
+    if n == 0 {
+        assert_eq!(t.history_cell(1, 0), None);
+        return;
+    }
+    // The live screen holds lines 27..30 and the empty row after them; line 26 scrolled off last, line 1 first.
+    assert_eq!(n, 26);
+    assert_eq!(t.history_line(1), "line 26");
+    assert_eq!(t.history_line(n), "line 1");
+    assert_eq!(t.history_cell(0, 0), None);
+    assert_eq!(t.history_cell(n + 1, 0), None);
+    assert_eq!(t.history_cell(1, 20), None);
+    // The live screen is untouched by reading history.
+    assert_eq!(t.line(0), "line 27");
+}
+
 fn bottom_non_empty_lines_skip_blank_rows<T: Terminal>(make: &impl Fn(Size) -> T) {
     let mut t = make(size(20, 8));
     t.feed(b"first\r\n\r\nsecond\r\n\r\n");
@@ -139,6 +164,64 @@ fn modes_toggle<T: Terminal>(make: &impl Fn(Size) -> T) {
     t.feed(b"\x1b[?2004l\x1b[?1l");
     let m = t.modes();
     assert!(!m.bracketed_paste && !m.application_cursor);
+}
+
+fn styles_are_kept_per_cell<T: Terminal>(make: &impl Fn(Size) -> T) {
+    use crate::{Color, Style};
+    let mut t = make(size(20, 2));
+    t.feed(
+        b"\x1b[1;3;4;31mA\x1b[0m\x1b[38;5;208;48;2;10;20;30mB\x1b[0m\x1b[2;7;9mC\x1b[0mD\x1b[91mE",
+    );
+    let st = |c: u16| t.cell(0, c).map(|x| x.style).unwrap_or_default();
+    assert_eq!(
+        st(0),
+        Style {
+            fg: Color::Indexed(1),
+            bold: true,
+            italic: true,
+            underline: true,
+            ..Style::default()
+        }
+    );
+    assert_eq!(
+        st(1),
+        Style {
+            fg: Color::Indexed(208),
+            bg: Color::Rgb(10, 20, 30),
+            ..Style::default()
+        }
+    );
+    assert_eq!(
+        st(2),
+        Style {
+            dim: true,
+            inverse: true,
+            strike: true,
+            ..Style::default()
+        }
+    );
+    assert_eq!(st(3), Style::default());
+    assert_eq!(st(4).fg, Color::Indexed(9), "bright red is palette 9");
+}
+
+/// The pen is the style the next character gets: a repaint for a client that joins mid-stream hands it on (F040).
+fn pen_is_the_style_of_the_next_character<T: Terminal>(make: &impl Fn(Size) -> T) {
+    use crate::{Color, Style};
+    let mut t = make(size(20, 2));
+    assert_eq!(t.pen(), Style::default());
+    t.feed(b"\x1b[1;4;31;48;2;1;2;3mA");
+    let expected = Style {
+        fg: Color::Indexed(1),
+        bg: Color::Rgb(1, 2, 3),
+        bold: true,
+        underline: true,
+        ..Style::default()
+    };
+    assert_eq!(t.pen(), expected, "unchanged by printing");
+    t.feed(b"B");
+    assert_eq!(t.cell(0, 1).map(|c| c.style), Some(expected));
+    t.feed(b"\x1b[0m");
+    assert_eq!(t.pen(), Style::default());
 }
 
 fn styling_sequences_print_nothing<T: Terminal>(make: &impl Fn(Size) -> T) {

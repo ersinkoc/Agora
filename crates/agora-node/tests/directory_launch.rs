@@ -41,20 +41,19 @@ fn fake() -> String {
         .join(format!("agora-fake-agent{}", std::env::consts::EXE_SUFFIX));
     static BUILD: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     BUILD.get_or_init(|| {
-        if !p.exists() {
-            let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
-            let mut command = Command::new(cargo);
-            command
-                .args(["build", "-q", "-p", "agora-fake-agent", "--target-dir"])
-                .arg(p.parent().unwrap().parent().unwrap());
-            if p.parent().unwrap().ends_with("release") {
-                command.arg("--release");
-            }
-            assert!(
-                command.status().unwrap().success(),
-                "building fake fixture failed"
-            );
+        // Even when present: a binary left from an older checkout may lack newer flags.
+        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+        let mut command = Command::new(cargo);
+        command
+            .args(["build", "-q", "-p", "agora-fake-agent", "--target-dir"])
+            .arg(p.parent().unwrap().parent().unwrap());
+        if p.parent().unwrap().ends_with("release") {
+            command.arg("--release");
         }
+        assert!(
+            command.status().unwrap().success(),
+            "building fake fixture failed"
+        );
     });
     assert!(p.exists(), "fake fixture is absent after build");
     p.to_string_lossy().into_owned()
@@ -77,6 +76,7 @@ impl Env {
         std::fs::write(root.join("manifests/probe.toml"), format!("kind = \"probe\"\ndisplay_name = \"Probe\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = {launch}\n[mcp]\nmethod = \"cli_flag\"\npath = \".mcp.json\"\nflag = [\"--mcp-config\", \"{{config_file}}\"]\n")).unwrap();
         std::fs::write(root.join("manifests/adapter.toml"), format!("kind = \"adapter\"\ndisplay_name = \"Adapter\"\nversion = \"1\"\nmin_engine = 1\n[adapter]\ncommand = [{}, \"--adapter\"]\n", serde_json::to_string(&fake()).unwrap())).unwrap();
         let node = Node::start(&NodeConfig {
+            resume_all: false,
             node_id: "node-directory".into(),
             socket: root.join("n.sock"),
             data_dir: root.join("data"),
@@ -198,6 +198,7 @@ fn two_sessions_use_the_selected_dirty_subfolder_and_preserve_user_configuration
     for id in [&a.agent_id, &b.agent_id] {
         c.call(Cmd::AgentStop(v1::AgentStop {
             agent_id: id.to_string(),
+            stop_helpers: false,
         }))
         .unwrap()
         .unwrap();
@@ -360,6 +361,7 @@ fn adapter_sessions_and_resume_keep_the_selected_non_git_directory() {
         }
         c.call(Cmd::AgentStop(v1::AgentStop {
             agent_id: a.agent_id.clone(),
+            stop_helpers: false,
         }))
         .unwrap()
         .unwrap();
@@ -544,7 +546,10 @@ fn confined_selected_subfolders_cannot_write_to_the_parent_checkout() {
         let a = launch(&mut c, &info, "boundary", separate);
         let cwd = Path::new(&a.path);
         let until = Instant::now() + Duration::from_secs(10);
-        while !cwd.join("result").exists() && Instant::now() < until {
+        // `printf … > result` creates the file before it writes it: wait for the content, not for the file.
+        while std::fs::read_to_string(cwd.join("result")).map_or(true, |s| s.is_empty())
+            && Instant::now() < until
+        {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert_eq!(
@@ -558,6 +563,7 @@ fn confined_selected_subfolders_cannot_write_to_the_parent_checkout() {
         assert!(!forbidden.exists());
         c.call(Cmd::AgentStop(v1::AgentStop {
             agent_id: a.agent_id,
+            stop_helpers: false,
         }))
         .unwrap()
         .unwrap();
@@ -569,4 +575,223 @@ fn confined_selected_subfolders_cannot_write_to_the_parent_checkout() {
     drop(c);
     drop(e);
     let _ = std::fs::remove_dir_all(repo);
+}
+
+#[test]
+fn a_launched_folders_changes_are_reported_for_its_workspace() {
+    use v1::event::Body;
+    if !supported() {
+        return;
+    }
+    // The start answers without counting the folder's changes; the node's Git watcher, woken by the start, reports them.
+    let e = Env::new("changes");
+    let repo = e.root.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("a.txt"), "committed\n").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-qm", "initial"]);
+    std::fs::write(repo.join("a.txt"), "edited\n").unwrap();
+    std::fs::write(repo.join("b.txt"), "new\n").unwrap();
+    let mut c = e.client();
+    let info = inspect(&mut c, &repo, false);
+    let a = launch(&mut c, &info, "probe", false);
+    // Generous: one status is a few git processes, which take seconds each on a busy Windows machine.
+    let end = Instant::now() + Duration::from_secs(60);
+    loop {
+        let latest = e
+            .node
+            .as_ref()
+            .unwrap()
+            .events
+            .events_after(0)
+            .into_iter()
+            .filter_map(|ev| match ev.body {
+                Some(Body::WorkspaceStatusChanged(s)) if s.workspace_id == a.workspace_id => {
+                    Some(s)
+                }
+                _ => None,
+            })
+            .next_back();
+        if latest.as_ref().is_some_and(|s| s.files_changed == 2) {
+            break;
+        }
+        assert!(
+            Instant::now() < end,
+            "no report of the two changed files: {latest:?}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    c.call(Cmd::AgentStop(v1::AgentStop {
+        agent_id: a.agent_id,
+        stop_helpers: false,
+    }))
+    .unwrap()
+    .unwrap();
+}
+
+/// Waits until the node's event log holds an event that `pred` accepts.
+fn wait_for_event(node: &Node, what: &str, pred: impl Fn(&v1::event::Body) -> bool) {
+    let until = Instant::now() + Duration::from_secs(10);
+    while !node
+        .events
+        .events_after(0)
+        .iter()
+        .any(|e| e.body.as_ref().is_some_and(&pred))
+    {
+        assert!(Instant::now() < until, "no {what} in the event log");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// ADR-0054 section 3: when the hub's record of this node cannot be continued and this process's start is lost to the hub, the
+/// node says at the tail of its buffer who it is, its folders, every agent that runs now (with state, session and terminal) and
+/// every approval still waiting, and nothing about agents that ended. ADR-0055: otherwise it says the same without `NodeOnline`,
+/// and its ended agents as ended.
+#[test]
+fn a_resync_announces_the_nodes_present() {
+    use v1::event::Body;
+    if !supported() {
+        return;
+    }
+    let e = Env::new("resync");
+    let (shared, chat) = (e.root.join("shared"), e.root.join("chat"));
+    std::fs::create_dir_all(&shared).unwrap();
+    std::fs::create_dir_all(&chat).unwrap();
+    let mut c = e.client();
+    let info = inspect(&mut c, &shared, false);
+    let kept = launch(&mut c, &info, "probe", false);
+    let ended = launch(&mut c, &info, "probe", false);
+    let chat_info = inspect(&mut c, &chat, false);
+    let talker = launch(&mut c, &chat_info, "adapter", false);
+    let node = e.node.as_ref().unwrap();
+    e.reports(2);
+    wait_for_event(
+        node,
+        "session",
+        |b| matches!(b, Body::AgentSessionReported(s) if s.agent_id == talker.agent_id),
+    );
+    c.call(Cmd::AgentPrompt(v1::AgentPrompt {
+        agent_id: talker.agent_id.clone(),
+        text: "ask".into(),
+    }))
+    .unwrap()
+    .unwrap();
+    wait_for_event(
+        node,
+        "approval",
+        |b| matches!(b, Body::ApprovalRequested(a) if a.agent_id == talker.agent_id),
+    );
+    c.call(Cmd::AgentStop(v1::AgentStop {
+        agent_id: ended.agent_id.clone(),
+        stop_helpers: false,
+    }))
+    .unwrap()
+    .unwrap();
+    // The stop is asynchronous: an agent that has not exited yet still runs, and is rightly announced. Wait for its end.
+    wait_for_event(
+        node,
+        "exit",
+        |b| matches!(b, Body::AgentExited(x) if x.agent_id == ended.agent_id),
+    );
+
+    let mark = node.events.next_seq() - 1;
+    node.events.announce();
+    let said: Vec<Body> = node
+        .events
+        .events_after(mark)
+        .into_iter()
+        .filter_map(|e| e.body)
+        .collect();
+    // The node's own loop keeps writing (resources, usage, state) and may get in between `mark` and the announcement (seen on a
+    // loaded Windows runner): the announcement starts at its `NodeOnline`, and nothing of it comes before.
+    let online = said
+        .iter()
+        .position(|b| matches!(b, Body::NodeOnline(n) if n.node_id == "node-directory"))
+        .expect("the announcement starts with NodeOnline");
+    assert!(
+        !said[..online].iter().any(|b| matches!(
+            b,
+            Body::WorkspaceRegistered(_)
+                | Body::AgentWorkspaceBound(_)
+                | Body::AgentStarted(_)
+                | Body::TerminalOpened(_)
+                | Body::ApprovalRequested(_)
+        )),
+        "{:?}",
+        &said[..online]
+    );
+    let said = said[online..].to_vec();
+    let at = |pred: &dyn Fn(&Body) -> bool| said.iter().position(pred);
+    let started = |id: &str| at(&|b| matches!(b, Body::AgentStarted(s) if s.agent_id == id));
+    // Only what runs now, each after the folder it works in and bound to it.
+    assert_eq!(
+        started(&ended.agent_id),
+        None,
+        "an ended agent is not announced"
+    );
+    for (agent, workspace) in [(&kept, &kept.workspace_id), (&talker, &talker.workspace_id)] {
+        let s = started(&agent.agent_id).expect("a running agent is announced");
+        let registered =
+            at(&|b| matches!(b, Body::WorkspaceRegistered(w) if &w.workspace_id == workspace))
+                .unwrap();
+        let bound = at(&|b| matches!(b, Body::AgentWorkspaceBound(w) if w.agent_id == agent.agent_id && &w.workspace_id == workspace)).unwrap();
+        assert!(registered < bound && bound < s);
+        assert!(said[s..]
+            .iter()
+            .any(|b| matches!(b, Body::AgentStateChanged(x) if x.agent_id == agent.agent_id)));
+    }
+    let talker_started = started(&talker.agent_id).unwrap();
+    assert!(said[talker_started..].iter().any(|b| matches!(b, Body::AgentSessionReported(x) if x.agent_id == talker.agent_id && !x.session_id.is_empty())));
+    // Only the terminal agent that runs has a terminal; the chat agent has none.
+    let terminals: Vec<&str> = said
+        .iter()
+        .filter_map(|b| match b {
+            Body::TerminalOpened(t) => Some(t.agent_id.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(terminals, [kept.agent_id.as_str()]);
+    // The approval still waiting, after the agent it belongs to.
+    let approval =
+        at(&|b| matches!(b, Body::ApprovalRequested(a) if a.agent_id == talker.agent_id)).unwrap();
+    assert!(approval > talker_started);
+    assert!(!said.iter().any(|b| matches!(b, Body::AgentExited(_))));
+
+    // ADR-0055: a resync after a start the hub already has (the start is older than what it lost) states facts instead: no
+    // `NodeOnline`, the running agents as above, and the ended one as ended, with its terminal closed.
+    let start = node.events.last_online();
+    let mark = node.events.next_seq() - 1;
+    node.events.resync(start + 1, node.events.next_seq());
+    let said: Vec<Body> = node
+        .events
+        .events_after(mark)
+        .into_iter()
+        .filter_map(|e| e.body)
+        .collect();
+    let at = |pred: &dyn Fn(&Body) -> bool| said.iter().position(pred);
+    assert!(!said.iter().any(|b| matches!(b, Body::NodeOnline(_))));
+    assert_eq!(node.events.last_online(), start);
+    for agent in [&kept, &talker] {
+        assert!(
+            at(&|b| matches!(b, Body::AgentStarted(s) if s.agent_id == agent.agent_id)).is_some()
+        );
+    }
+    let exits: Vec<(&str, i32)> = said
+        .iter()
+        .filter_map(|b| match b {
+            Body::AgentExited(x) => Some((x.agent_id.as_str(), x.exit_code)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        exits,
+        [(ended.agent_id.as_str(), i32::MIN)],
+        "stopped on request"
+    );
+    let terminal = format!("t-{}", ended.agent_id);
+    assert!(at(&|b| matches!(b, Body::TerminalClosed(t) if t.terminal_id == terminal)).is_some());
+    assert!(
+        at(&|b| matches!(b, Body::ApprovalRequested(a) if a.agent_id == talker.agent_id)).is_some()
+    );
 }

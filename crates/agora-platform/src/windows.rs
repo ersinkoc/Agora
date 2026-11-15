@@ -33,7 +33,7 @@ use windows_sys::Win32::System::Console::{
     STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
 };
 use windows_sys::Win32::System::Pipes::{
-    ConnectNamedPipe, CreateNamedPipeW, WaitNamedPipeW, PIPE_READMODE_BYTE,
+    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, WaitNamedPipeW, PIPE_READMODE_BYTE,
     PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
 };
 use windows_sys::Win32::System::Threading::{CreateEventW, WaitForSingleObject, INFINITE};
@@ -41,6 +41,307 @@ use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED
 
 /// Only the owner of the pipe and the system may open it; nobody else on the machine, and nobody over the network.
 const OWNER_ONLY: &str = "D:P(A;;GA;;;OW)(A;;GA;;;SY)";
+
+/// Gives `path` a protected DACL that admits the current user and SYSTEM only, what `0600`/`0700` do on Unix (private keys and tokens,
+/// the folder of installed adapters). Nothing is inherited from above it any more, so a folder that lets other users in (a data
+/// volume's default ACL) does not reach it. `inherit` also covers what is, or will be, below a folder.
+pub(crate) fn set_owner_only(path: &Path, inherit: bool) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Security::Authorization::{SetNamedSecurityInfoW, SE_FILE_OBJECT};
+    use windows_sys::Win32::Security::{
+        GetSecurityDescriptorDacl, ACL, DACL_SECURITY_INFORMATION,
+        PROTECTED_DACL_SECURITY_INFORMATION,
+    };
+    let sd = owner_only_descriptor(inherit)?;
+    let (mut present, mut defaulted, mut dacl) = (0i32, 0i32, null_mut::<ACL>());
+    // SAFETY: `sd` is a valid descriptor that outlives every use of `dacl`.
+    if unsafe { GetSecurityDescriptorDacl(sd.0, &mut present, &mut dacl, &mut defaulted) } == 0 {
+        return Err(os_error(unsafe { GetLastError() }));
+    }
+    let name: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    // SAFETY: a NUL-terminated path and a valid DACL.
+    let err = unsafe {
+        SetNamedSecurityInfoW(
+            name.as_ptr().cast_mut(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            null_mut(),
+            null_mut(),
+            dacl,
+            null(),
+        )
+    };
+    if err == 0 {
+        Ok(())
+    } else {
+        Err(os_error(err))
+    }
+}
+
+/// The protected descriptor of [`set_owner_only`]: the current user and SYSTEM, nothing inherited from above.
+fn owner_only_descriptor(inherit: bool) -> io::Result<Descriptor> {
+    let user = crate::winconfine::current_user_sid_text()?;
+    let flags = if inherit { "OICI" } else { "" };
+    Descriptor::from_sddl(&format!("D:P(A;{flags};FA;;;{user})(A;{flags};FA;;;SY)"))
+}
+
+/// Creates the file at `path`, which must not exist yet (`CREATE_NEW`, so a planted file or link is not followed), already owner-only:
+/// the descriptor is given at creation, so there is no moment in which the file carries what its folder passes on and another user
+/// could open it (#320). The handle is not inheritable and the file is not shared while open.
+/// See [`crate::open_append_private`] (`append`) and [`crate::open_lock_private`] (read and write). The folder is opened as itself (never through a link) and held without letting anyone rename or
+/// delete it until the log is open, so it cannot be swapped for a link meanwhile; the log is then checked through its own handle: one
+/// name, not a link, and really inside the held folder (both final paths). An existing log is made owner-only through its handle.
+pub(crate) fn open_private(dir: &Path, path: &Path, append: bool) -> io::Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_APPEND_DATA, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, READ_CONTROL,
+        SYNCHRONIZE, WRITE_DAC,
+    };
+    let refuse = || io::Error::new(io::ErrorKind::InvalidInput, "a link");
+    let held = hold_dir(dir)?;
+    match create_private_new(path) {
+        Ok(f) => drop(f),
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e),
+    }
+    // FILE_APPEND_DATA without FILE_WRITE_DATA: every write goes to the end, as with `append(true)`. A lock file is read and written.
+    let data = if append {
+        FILE_APPEND_DATA
+    } else {
+        windows_sys::Win32::Foundation::GENERIC_READ | GENERIC_WRITE
+    };
+    let file = std::fs::OpenOptions::new()
+        .access_mode(data | WRITE_DAC | READ_CONTROL | FILE_READ_ATTRIBUTES | SYNCHRONIZE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    let (links, reparse) = link_facts(&file)?;
+    if reparse || links > 1 || !file.metadata()?.is_file() {
+        return Err(refuse());
+    }
+    let (inside, folder) = (final_path(&file)?, final_path(&held)?);
+    if !inside.to_lowercase().starts_with(&format!(
+        "{}\\",
+        folder.trim_end_matches('\\').to_lowercase()
+    )) {
+        return Err(refuse());
+    }
+    // A file another user owns keeps its owner's rights over it whatever its ACL says: refused.
+    if !owned_by_this_user(&file)? {
+        return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+    }
+    set_owner_only_handle(&file, false)?;
+    drop(held);
+    Ok(file)
+}
+
+/// Opens folder `dir` as itself (`FILE_FLAG_OPEN_REPARSE_POINT`) without sharing delete, so it can be neither renamed nor removed while
+/// the handle lives; `InvalidInput` when it is a link or junction, or not a folder.
+fn hold_dir(dir: &Path) -> io::Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, SYNCHRONIZE,
+    };
+    let held = std::fs::OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES | SYNCHRONIZE)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(dir)?;
+    let (_, reparse) = link_facts(&held)?;
+    if reparse || !held.metadata()?.is_dir() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "a link"));
+    }
+    Ok(held)
+}
+
+/// The final path of an open file or folder (`GetFinalPathNameByHandleW`), links resolved.
+fn final_path(file: &std::fs::File) -> io::Result<String> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::GetFinalPathNameByHandleW;
+    let mut buf = vec![0u16; 1024];
+    loop {
+        // SAFETY: a live handle and a buffer of `buf.len()` units.
+        let n = unsafe {
+            GetFinalPathNameByHandleW(
+                file.as_raw_handle() as HANDLE,
+                buf.as_mut_ptr(),
+                buf.len() as u32,
+                0,
+            )
+        } as usize;
+        if n == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if n < buf.len() {
+            return Ok(String::from_utf16_lossy(&buf[..n]));
+        }
+        buf.resize(n + 1, 0);
+    }
+}
+
+/// See [`crate::ensure_private_dir`]: the folder (created by the caller when missing) is opened as itself, never through a link or
+/// junction, without sharing delete; it must be owned by this user, and is given the owner-only ACL (inherited by what it holds)
+/// through that same handle.
+pub(crate) fn ensure_private_dir(dir: &Path) -> io::Result<()> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, READ_CONTROL, SYNCHRONIZE, WRITE_DAC,
+    };
+    let refuse = || io::Error::new(io::ErrorKind::InvalidInput, "a link");
+    let held = std::fs::OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES | READ_CONTROL | WRITE_DAC | SYNCHRONIZE)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(dir)?;
+    let (_, reparse) = link_facts(&held)?;
+    if reparse || !held.metadata()?.is_dir() {
+        return Err(refuse());
+    }
+    if !owned_by_this_user(&held)? {
+        return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+    }
+    set_owner_only_handle(&held, true)
+}
+
+/// Whether an open file or folder (opened with `READ_CONTROL`) is owned by this process's user, or by the default owner of its token
+/// (the Administrators group when it runs elevated, which owns what such a process creates).
+fn owned_by_this_user(file: &std::fs::File) -> io::Result<bool> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertSidToStringSidW, GetSecurityInfo, SE_FILE_OBJECT,
+    };
+    use windows_sys::Win32::Security::{OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID};
+    let mut owner: PSID = null_mut();
+    let mut sd: PSECURITY_DESCRIPTOR = null_mut();
+    // SAFETY: a live handle and valid out pointers; `sd` is LocalAlloc'd and freed below, `owner` points into it.
+    let err = unsafe {
+        GetSecurityInfo(
+            file.as_raw_handle() as HANDLE,
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            &mut owner,
+            null_mut(),
+            null_mut(),
+            null_mut(),
+            &mut sd,
+        )
+    };
+    if err != 0 {
+        return Err(os_error(err));
+    }
+    let mut text: *mut u16 = null_mut();
+    // SAFETY: `owner` is a valid SID inside `sd`; `text` receives a LocalAlloc'd string.
+    let converted = unsafe { ConvertSidToStringSidW(owner, &mut text) } != 0;
+    let sid = if converted {
+        // SAFETY: a NUL-terminated wide string from the system.
+        let len = (0..).take_while(|&i| unsafe { *text.add(i) } != 0).count();
+        // SAFETY: `len` units are valid.
+        let s = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(text, len) });
+        // SAFETY: allocated by ConvertSidToStringSidW, freed once.
+        unsafe { LocalFree(text.cast()) };
+        Some(s)
+    } else {
+        None
+    };
+    // SAFETY: allocated by GetSecurityInfo, freed once (after the last use of `owner`).
+    unsafe { LocalFree(sd) };
+    let Some(sid) = sid else {
+        return Err(io::Error::last_os_error());
+    };
+    Ok(sid == crate::winconfine::current_user_sid_text()?
+        || crate::winconfine::current_owner_sid_text().is_ok_and(|o| o == sid))
+}
+
+/// [`set_owner_only`] through an open handle (opened with `WRITE_DAC`), so it applies to exactly the file that was checked.
+fn set_owner_only_handle(file: &std::fs::File, inherit: bool) -> io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Security::Authorization::{SetSecurityInfo, SE_FILE_OBJECT};
+    use windows_sys::Win32::Security::{
+        GetSecurityDescriptorDacl, ACL, DACL_SECURITY_INFORMATION,
+        PROTECTED_DACL_SECURITY_INFORMATION,
+    };
+    let sd = owner_only_descriptor(inherit)?;
+    let (mut present, mut defaulted, mut dacl) = (0i32, 0i32, null_mut::<ACL>());
+    // SAFETY: `sd` is a valid descriptor that outlives every use of `dacl`.
+    if unsafe { GetSecurityDescriptorDacl(sd.0, &mut present, &mut dacl, &mut defaulted) } == 0 {
+        return Err(os_error(unsafe { GetLastError() }));
+    }
+    // SAFETY: a live handle opened with WRITE_DAC and a valid DACL.
+    let err = unsafe {
+        SetSecurityInfo(
+            file.as_raw_handle() as HANDLE,
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            null_mut(),
+            null_mut(),
+            dacl,
+            null(),
+        )
+    };
+    if err == 0 {
+        Ok(())
+    } else {
+        Err(os_error(err))
+    }
+}
+
+/// How many names (hard links) an open file has, and whether the handle is a reparse point (a link opened with
+/// `FILE_FLAG_OPEN_REPARSE_POINT`): asked of the handle, so a name swapped after the open cannot change the answer.
+pub(crate) fn link_facts(file: &std::fs::File) -> io::Result<(u32, bool)> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_REPARSE_POINT,
+    };
+    // SAFETY: an all-zero structure is a valid out-buffer.
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    // SAFETY: a live handle owned by `file` and a valid out-pointer.
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle() as HANDLE, &mut info) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok((
+        info.nNumberOfLinks,
+        info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0,
+    ))
+}
+
+pub(crate) fn create_private_new(path: &Path) -> io::Result<std::fs::File> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::FromRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{CREATE_NEW, FILE_ATTRIBUTE_NORMAL};
+    let sd = owner_only_descriptor(false)?;
+    let attrs = SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: sd.0,
+        bInheritHandle: 0,
+    };
+    let name: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    // SAFETY: a NUL-terminated path; `attrs` and the descriptor it points to live for the call.
+    let h = unsafe {
+        CreateFileW(
+            name.as_ptr(),
+            GENERIC_WRITE,
+            0,
+            &attrs,
+            CREATE_NEW,
+            FILE_ATTRIBUTE_NORMAL,
+            null_mut(),
+        )
+    };
+    if h == INVALID_HANDLE_VALUE {
+        return Err(os_error(unsafe { GetLastError() }));
+    }
+    // SAFETY: a fresh handle that this `File` now owns and closes.
+    Ok(unsafe { std::fs::File::from_raw_handle(h) })
+}
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -86,9 +387,11 @@ fn overlapped(event: &Event) -> OVERLAPPED {
 }
 
 /// The pipe name for a socket path: the file name for people, a hash of the whole path so two sockets of the same name in different
-/// folders do not meet.
+/// folders do not meet. The path is hashed in one spelling (absolute, `\`, no `..`, not verbatim), so every spelling of one socket file
+/// names one pipe, as every spelling reaches one socket on Unix. A path already in that spelling hashes as before.
 fn pipe_name(path: &Path) -> Vec<u16> {
-    let full = path.to_string_lossy().to_lowercase();
+    let normal = std::path::absolute(path).map_or_else(|_| path.to_path_buf(), plain_path);
+    let full = normal.to_string_lossy().to_lowercase();
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in full.as_bytes() {
         h ^= u64::from(*b);
@@ -262,6 +565,16 @@ impl Listener {
     }
 
     pub fn accept(&self) -> io::Result<Stream> {
+        // Clients that left before they were accepted are skipped, however many there were.
+        loop {
+            if let Some(s) = self.accept_once()? {
+                return Ok(s);
+            }
+        }
+    }
+
+    /// One accept; `None` when the instance's client had already left (the instance is reset for the next one).
+    fn accept_once(&self) -> io::Result<Option<Stream>> {
         let mut st = self
             .state
             .lock()
@@ -282,6 +595,13 @@ impl Listener {
                 match unsafe { GetLastError() } {
                     ERROR_PIPE_CONNECTED => connected = true,
                     ERROR_IO_PENDING => st.pending = Some(Pending { event, ov }),
+                    // A client connected and left before this accept: the instance stays "being closed" until it is disconnected,
+                    // and every later accept would fail on it. Reset it (the name stays served) and wait for the next client.
+                    ERROR_NO_DATA => {
+                        // SAFETY: a live pipe instance with no operation pending.
+                        unsafe { DisconnectNamedPipe(inst) };
+                        return Ok(None);
+                    }
                     e => return Err(os_error(e)),
                 }
             }
@@ -317,7 +637,7 @@ impl Listener {
         // A fresh instance is ready before the connected one is handed out, so the next client finds one.
         let next = create_instance(&self.name, &self.sd, false)?;
         let conn = st.instance.replace(next);
-        conn.map(Stream::from_handle)
+        conn.map(|h| Some(Stream::from_handle(h)))
             .ok_or_else(|| io::Error::other("no instance"))
     }
 }
@@ -548,6 +868,36 @@ pub(crate) fn restore_mode(saved: &crate::RawMode) {
     }
 }
 
+/// Console settings for typing a secret: no echo, no line editing and no Ctrl-C handling by the console (Ctrl-C arrives as a byte, so
+/// the reader can restore the mode before it stops). Restored when dropped, on every path.
+pub(crate) struct SecretMode(u32);
+
+impl Drop for SecretMode {
+    fn drop(&mut self) {
+        // SAFETY: restoring the mode read earlier from the same handle.
+        unsafe { SetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), self.0) };
+    }
+}
+
+pub(crate) fn secret_mode() -> io::Result<SecretMode> {
+    let mut saved = 0u32;
+    // SAFETY: plain calls on the process's standard input handle; the mode is read before it is changed.
+    unsafe {
+        let stdin = GetStdHandle(STD_INPUT_HANDLE);
+        if GetConsoleMode(stdin, &mut saved) == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "stdin is not a console",
+            ));
+        }
+        let quiet = saved & !(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT | ENABLE_PROCESSED_INPUT);
+        if SetConsoleMode(stdin, quiet) == 0 {
+            return Err(os_error(GetLastError()));
+        }
+    }
+    Ok(SecretMode(saved))
+}
+
 /// Size of the console window on stdout.
 pub(crate) fn terminal_size() -> Option<(u16, u16)> {
     // SAFETY: an all-zero info structure is a valid out-buffer.
@@ -603,6 +953,212 @@ pub(crate) fn plain_path(path: PathBuf) -> PathBuf {
     PathBuf::from(plain)
 }
 
+/// See [`crate::opened_path`]: `GetFinalPathNameByHandleW` (the `\\?\` spelling, as `std::fs::canonicalize` gives).
+pub(crate) fn opened_path(file: &std::fs::File) -> io::Result<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::GetFinalPathNameByHandleW;
+    let mut buf = vec![0u16; 512];
+    loop {
+        let cap = u32::try_from(buf.len()).unwrap_or(u32::MAX);
+        // SAFETY: a live handle owned by `file`; `buf` holds `cap` UTF-16 units. 0 = normalized name, DOS volume name.
+        let n =
+            unsafe { GetFinalPathNameByHandleW(file.as_raw_handle(), buf.as_mut_ptr(), cap, 0) };
+        if n == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // A buffer too small gets the size it needs (with the terminating NUL); a fitting one the length without it.
+        if n < cap {
+            buf.truncate(n as usize);
+            return Ok(PathBuf::from(std::ffi::OsString::from_wide(&buf)));
+        }
+        buf.resize(n as usize, 0);
+    }
+}
+
+/// See [`crate::link_dir`]: a junction, made by `cmd`'s own `mklink /J` (no privilege needed, unlike a symbolic link).
+pub(crate) fn junction(target: &Path, link: &Path) -> io::Result<()> {
+    let out = std::process::Command::new("cmd")
+        .args(["/d", "/c", "mklink", "/J"])
+        .arg(link)
+        .arg(target)
+        .output()?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other(
+            String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        ))
+    }
+}
+
+/// See [`crate::open_dir`]: follow the path once, then callers verify the resulting handle before enumerating it.
+pub(crate) fn open_dir(path: &Path) -> io::Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+    let dir = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+        .map_err(|e| io::Error::new(e.kind(), format!("open directory: {e}")))?;
+    if !dir.metadata()?.is_dir() {
+        return Err(io::ErrorKind::NotADirectory.into());
+    }
+    Ok(dir)
+}
+
+/// See [`crate::visit_dir`]: a fresh synchronous handle to the same object, then one directory entry per query.
+/// No path is reopened, no reparse target is traversed for entry metadata, and no later entry is requested after Break.
+pub(crate) fn visit_dir(
+    dir: &std::fs::File,
+    visitor: &mut dyn FnMut(crate::DirItem) -> std::ops::ControlFlow<()>,
+) -> io::Result<()> {
+    use std::ffi::OsString;
+    use std::mem::{offset_of, size_of, size_of_val};
+    use std::os::windows::ffi::OsStringExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
+    use windows_sys::Wdk::Storage::FileSystem::{
+        FileDirectoryInformation, NtOpenFile, NtQueryDirectoryFile, FILE_DIRECTORY_FILE,
+        FILE_DIRECTORY_INFORMATION, FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT,
+    };
+    use windows_sys::Win32::Foundation::{
+        RtlNtStatusToDosError, STATUS_NO_MORE_FILES, STATUS_SUCCESS, UNICODE_STRING,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_LIST_DIRECTORY,
+        FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, SYNCHRONIZE,
+    };
+    use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
+
+    let mut empty = [0u16];
+    let name = UNICODE_STRING {
+        Length: 0,
+        MaximumLength: 2,
+        Buffer: empty.as_mut_ptr(),
+    };
+    let attributes = OBJECT_ATTRIBUTES {
+        Length: size_of::<OBJECT_ATTRIBUTES>() as u32,
+        RootDirectory: dir.as_raw_handle(),
+        ObjectName: &name,
+        ..Default::default()
+    };
+    let mut handle = null_mut();
+    let mut opened = IO_STATUS_BLOCK::default();
+    // SAFETY: live input/output structures; an empty name relative to the held directory reopens that object, without a
+    // path lookup. Explicit directory and synchronous options give this enumeration its own cursor and completed queries.
+    let status = unsafe {
+        NtOpenFile(
+            &mut handle,
+            FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+            &attributes,
+            &mut opened,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            FILE_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+        )
+    };
+    if status != STATUS_SUCCESS {
+        // SAFETY: converting the open operation's returned NTSTATUS.
+        let error = os_error(unsafe { RtlNtStatusToDosError(status) });
+        return Err(io::Error::new(
+            error.kind(),
+            format!("reopen directory: {error}"),
+        ));
+    }
+    let handle = Handle(handle);
+    // Eight-byte aligned and large enough for a complete record plus a maximum-length UTF-16 name, with bounded memory.
+    let mut buffer = vec![0u64; 16 * 1024];
+    let mut first = true;
+    loop {
+        let mut result = IO_STATUS_BLOCK::default();
+        // SAFETY: a synchronous owned handle, a live aligned output buffer and status block. No APC or event. Single-entry
+        // mode preserves the callback's early-stop contract; the first call restarts only this enumeration's own cursor.
+        let status = unsafe {
+            NtQueryDirectoryFile(
+                handle.0,
+                null_mut(),
+                None,
+                null(),
+                &mut result,
+                buffer.as_mut_ptr().cast(),
+                size_of_val(buffer.as_slice()) as u32,
+                FileDirectoryInformation,
+                true,
+                null(),
+                first,
+            )
+        };
+        first = false;
+        if status == STATUS_NO_MORE_FILES {
+            return Ok(());
+        }
+        if status != STATUS_SUCCESS {
+            // SAFETY: converting the returned NTSTATUS to a normal Win32 error code.
+            let error = os_error(unsafe { RtlNtStatusToDosError(status) });
+            return Err(io::Error::new(
+                error.kind(),
+                format!("query directory: {error}"),
+            ));
+        }
+        let name_offset = offset_of!(FILE_DIRECTORY_INFORMATION, FileName);
+        if result.Information < name_offset || result.Information > size_of_val(buffer.as_slice()) {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        // SAFETY: the buffer is aligned, initialized, and contains the fixed portion of the returned record.
+        let entry = unsafe { &*buffer.as_ptr().cast::<FILE_DIRECTORY_INFORMATION>() };
+        let bytes = entry.FileNameLength as usize;
+        if bytes == 0 || !bytes.is_multiple_of(2) || bytes > result.Information - name_offset {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        // SAFETY: the name is UTF-16 aligned; its whole byte range was checked against the completed query's output.
+        let name = unsafe {
+            std::slice::from_raw_parts(
+                buffer.as_ptr().cast::<u8>().add(name_offset).cast::<u16>(),
+                bytes / 2,
+            )
+        };
+        let name = OsString::from_wide(name);
+        if name == "." || name == ".." {
+            continue;
+        }
+        let link = entry.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+        let item = crate::DirItem {
+            name,
+            is_dir: !link && entry.FileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0,
+            len: if link {
+                0
+            } else {
+                u64::try_from(entry.EndOfFile).unwrap_or(0)
+            },
+            modified: directory_time(entry.LastWriteTime),
+        };
+        if visitor(item).is_break() {
+            return Ok(());
+        }
+    }
+}
+
+/// NT directory timestamps are signed 100 ns ticks since 1601; preserve dates on either side of the Unix epoch.
+fn directory_time(ticks: i64) -> std::time::SystemTime {
+    const UNIX_EPOCH_TICKS: i128 = 116_444_736_000_000_000;
+    let delta = i128::from(ticks) - UNIX_EPOCH_TICKS;
+    let magnitude = delta.unsigned_abs();
+    let duration = Duration::new(
+        (magnitude / 10_000_000) as u64,
+        ((magnitude % 10_000_000) * 100) as u32,
+    );
+    let epoch = std::time::UNIX_EPOCH;
+    if delta < 0 {
+        epoch.checked_sub(duration)
+    } else {
+        epoch.checked_add(duration)
+    }
+    .unwrap_or(epoch)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -628,6 +1184,117 @@ mod tests {
     }
 
     #[test]
+    fn a_private_file_is_owner_only_from_its_creation_on() {
+        let dir = std::env::temp_dir().join(format!("agora-private-create-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // A parent that lets everyone change what is below it.
+        let out = std::process::Command::new("icacls")
+            .arg(&dir)
+            .args(["/grant", "*S-1-1-0:(OI)(CI)(M)"])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        let acl = |p: &Path| {
+            let out = std::process::Command::new("icacls")
+                .arg(p)
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+        // Control: a plain exclusive create here carries the parent's grant from the start, which is the window #320 is about.
+        let plain = dir.join("plain.tmp");
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&plain)
+            .unwrap();
+        assert!(
+            acl(&plain).contains("Everyone"),
+            "the parent is not permissive"
+        );
+        drop(f);
+        // Looked at while the file is still open and empty, before anything else touches it.
+        let private = dir.join("private.tmp");
+        let f = create_private_new(&private).unwrap();
+        let a = acl(&private);
+        assert!(!a.contains("Everyone"), "{a}");
+        assert!(!a.contains("(I)"), "inherited entries: {a}");
+        assert!(a.contains("SYSTEM"), "{a}");
+        drop(f);
+        // Exclusive: an existing name is never opened.
+        assert!(create_private_new(&private).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn private_files_and_folders_shut_out_a_permissive_parent() {
+        let dir = std::env::temp_dir().join(format!("agora-private-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // A parent that lets everyone change what is below it, like a data volume's default ACL lets every user.
+        let icacls = |args: &[&str]| {
+            let out = std::process::Command::new("icacls")
+                .arg(&dir)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{out:?}");
+        };
+        icacls(&["/grant", "*S-1-1-0:(OI)(CI)(M)"]);
+        let acl = |p: &Path| {
+            let out = std::process::Command::new("icacls")
+                .arg(p)
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+        let key = dir.join("key.pem");
+        crate::write_private(&key, b"one").unwrap();
+        crate::write_private(&key, b"two-longer").unwrap();
+        assert_eq!(std::fs::read(&key).unwrap(), b"two-longer");
+        let adapters = dir.join("adapters");
+        std::fs::create_dir_all(&adapters).unwrap();
+        crate::restrict_to_owner(&adapters).unwrap();
+        std::fs::write(adapters.join("tool.exe"), b"x").unwrap();
+        for p in [key.clone(), adapters.clone(), adapters.join("tool.exe")] {
+            let a = acl(&p);
+            assert!(!a.contains("Everyone"), "{}: {a}", p.display());
+            assert!(a.contains("SYSTEM"), "{}: {a}", p.display());
+        }
+        assert!(std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .all(|e| !e.file_name().to_string_lossy().contains(".tmp-")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_second_update_works_while_the_program_moved_aside_by_the_first_still_runs() {
+        let dir = std::env::temp_dir().join(format!("agora-update-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Any long-running program stands in for a node started before the first update.
+        let ping = Path::new(r"C:\Windows\System32\PING.EXE");
+        let target = dir.join("agora.exe");
+        std::fs::copy(ping, &target).unwrap();
+        let mut node = std::process::Command::new(&target)
+            .args(["-n", "30", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        for n in 1..=3 {
+            let new = dir.join(format!("new-{n}.exe"));
+            std::fs::copy(ping, &new).unwrap();
+            crate::replace_executable(&new, &target).unwrap_or_else(|e| panic!("update {n}: {e}"));
+            assert!(target.exists() && !new.exists());
+        }
+        let _ = node.kill();
+        let _ = node.wait();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_canonical_folder_is_one_cmd_can_start_in() {
         let dir = std::env::temp_dir();
         let canon = crate::canonicalize_plain(&dir).unwrap();
@@ -647,6 +1314,39 @@ mod tests {
 
     fn path(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("agora-pipe-{}-{name}.sock", std::process::id()))
+    }
+
+    #[test]
+    fn every_spelling_of_one_socket_path_reaches_one_listener() {
+        let p = path("spelling");
+        let l = listen(&p).unwrap();
+        let text = p.to_string_lossy().into_owned();
+        let parent = p.parent().unwrap();
+        let spellings = [
+            PathBuf::from(text.replace('\\', "/")),
+            parent.join("x").join("..").join(p.file_name().unwrap()),
+            PathBuf::from(format!(r"\\?\{text}")),
+            PathBuf::from(text.to_uppercase()),
+        ];
+        // Pipe names compare without case, like the paths.
+        let name = |p: &Path| String::from_utf16_lossy(&pipe_name(p)).to_lowercase();
+        for s in &spellings {
+            assert_eq!(name(s), name(&p), "{}", s.display());
+            let client = connect(s);
+            assert!(client.is_ok(), "{}", s.display());
+            // Frees the instance for the next client.
+            l.accept().unwrap();
+            drop(client);
+        }
+        // Relative to the current folder: the same pipe as the absolute spelling there.
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(
+            pipe_name(Path::new("n.sock")),
+            pipe_name(&cwd.join("n.sock"))
+        );
+        // Two different socket files still get two pipes.
+        assert_ne!(pipe_name(&p), pipe_name(&path("other")));
+        drop(l);
     }
 
     #[test]
@@ -754,5 +1454,29 @@ mod tests {
         drop(c);
         let mut b = [0u8; 4];
         assert_eq!(Read::read(&mut s, &mut b).unwrap(), 0);
+    }
+
+    #[test]
+    fn a_client_that_leaves_before_accept_does_not_stop_the_next_one() {
+        let p = path("early");
+        let l = listen(&p).unwrap();
+        // Connects and leaves before the server accepts (it holds the only free instance until then).
+        drop(connect(&p).unwrap());
+        let client = {
+            let p = p.clone();
+            std::thread::spawn(move || {
+                let mut c = connect(&p).unwrap();
+                c.write_all(b"hi").unwrap();
+                let mut b = [0u8; 2];
+                c.read_exact_pipe(&mut b);
+                b
+            })
+        };
+        let mut s = l.accept().unwrap();
+        let mut b = [0u8; 2];
+        s.read_exact_pipe(&mut b);
+        assert_eq!(&b, b"hi");
+        s.write_all(b"ok").unwrap();
+        assert_eq!(&client.join().unwrap(), b"ok");
     }
 }

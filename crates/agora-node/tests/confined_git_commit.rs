@@ -131,8 +131,10 @@ fn a_confined_agent_commits_in_its_own_worktree() {
                 )),
                 "git finds {top}"
             );
-            // The refused start removed its worktree but kept the branch it created (as every abandoned start does).
-            git(&repo, &["branch", "-D", "agent/a"]);
+            // A refused start rolls back its unused branch, so tightening the folder permits a direct retry.
+            assert!(git(&repo, &["branch", "--list", "agent/a"])
+                .trim()
+                .is_empty());
             sup.start(&req, Instant::now()).unwrap();
         }
         Err(e) => panic!("start: {e:?}"),

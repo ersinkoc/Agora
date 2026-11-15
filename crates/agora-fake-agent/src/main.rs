@@ -34,6 +34,11 @@ fn main() -> ExitCode {
         };
     }
     if std::env::args().nth(1).as_deref() == Some("--acp") {
+        // An ACP agent that dies before `initialize`, as one with a broken plugin does.
+        if std::env::args().nth(2).as_deref() == Some("--fail-at-start") {
+            let code = agora_fake_agent::acp::fail_at_start(&mut io::stderr().lock());
+            return ExitCode::from(u8::try_from(code).unwrap_or(1));
+        }
         // L2 mode: the Agent Client Protocol over stdio.
         return match agora_fake_agent::acp::run(std::io::stdin().lock(), &mut io::stdout().lock()) {
             Ok(()) => ExitCode::SUCCESS,

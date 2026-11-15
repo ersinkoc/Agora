@@ -15,7 +15,7 @@ use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
 use std::sync::{Mutex, MutexGuard};
 
 use agora_protocol::v1::event::Body;
-use agora_protocol::v1::{Event, NodeOffline};
+use agora_protocol::v1::{Event, NodeLink, NodeLinkReason, NodeOffline};
 use prost::Message;
 
 use crate::ca::RESERVED_HUB_ID;
@@ -26,6 +26,11 @@ use crate::store::{Append, EventStore, SqliteStore, StoreError};
 /// Events a subscriber may have queued before it is considered too slow and dropped.
 pub const SUBSCRIBER_BUFFER: usize = 1024;
 const PAGE: usize = 1000;
+/// A subscriber that resumes from a position replays at most this many events, or this many bytes of them; further behind, it gets
+/// a fresh snapshot instead (architecture review R3). Replay runs under the hub lock, so its cost must not grow with how long a
+/// client was away: every node's ingest and every other client waits while it runs.
+pub const MAX_REPLAY_EVENTS: u64 = 10_000;
+pub const MAX_REPLAY_BYTES: usize = 8 << 20;
 
 /// One event with its place in the global log.
 #[derive(Debug, Clone, PartialEq)]
@@ -49,9 +54,16 @@ struct Inner {
     pos: u64,
     hub_seq: u64,
     subs: Vec<SyncSender<Delivered>>,
+    /// Subscribers let go because their queue was full (a slow window) or closed (`GET /api/metrics`).
+    subs_dropped: u64,
+    /// How long an agent waited for a person's answer (`GET /api/metrics`).
+    approval_wait: crate::metrics::Histogram,
 }
 
 pub struct Hub {
+    /// The hub's own numbers (`GET /api/metrics`, when `--metrics` turned it on).
+    metrics: crate::metrics::Metrics,
+    metrics_on: std::sync::atomic::AtomicBool,
     boards: crate::board::Boards,
     prices: std::sync::RwLock<(std::sync::Arc<crate::usage::Catalog>, u64)>,
     store: SqliteStore,
@@ -65,12 +77,82 @@ fn decode(e: &crate::store::StoredEvent) -> Option<Delivered> {
         .map(|event| Delivered { pos: e.pos, event })
 }
 
+/// ADR-0057: the audit row an event about agents starting agents makes, as `(who, action, node, outcome, at_ms)`. `who` is the asking
+/// agent as `<node>/<agent>`. A start is recorded once (an `AgentStarted` said again for an agent the hub knows is not a new start).
+fn spawn_audit(
+    view: &crate::projection::View,
+    event: &Event,
+) -> Option<(String, String, String, String, u64)> {
+    let node = event.producer_id.clone();
+    let q = |id: &str| format!("{node}/{id}");
+    let row = |who: String, action: &str, outcome: String| {
+        Some((who, action.to_string(), node.clone(), outcome, event.at_ms))
+    };
+    match event.body.as_ref()? {
+        Body::ApprovalRequested(a) if a.action == "agent.start" => {
+            row(q(&a.agent_id), "agent.start.asked", a.approval_id.clone())
+        }
+        Body::ApprovalResolved(r) => {
+            let asked = view.approvals.get(&q(&r.approval_id))?;
+            if asked.action != "agent.start" {
+                return None;
+            }
+            let outcome = match (r.approved, r.signer_device_id.is_empty()) {
+                (true, _) => format!(
+                    "approved:{}:grant={}:nested={}",
+                    r.signer_device_id, r.helper_grant, r.helpers_may_start
+                ),
+                (false, false) => format!("denied:{}", r.signer_device_id),
+                (false, true) => "withdrawn".to_string(),
+            };
+            // The view keeps the asking agent by its hub-wide key already.
+            row(asked.agent_id.clone(), "agent.start.decided", outcome)
+        }
+        Body::AgentStartRefused(r) => row(q(&r.agent_id), "agent.start", r.code.clone()),
+        Body::AgentStarted(s)
+            if !s.parent_agent_id.is_empty() && !view.agents.contains_key(&q(&s.agent_id)) =>
+        {
+            row(
+                q(&s.parent_agent_id),
+                "agent.start",
+                format!("ok:{}", q(&s.agent_id)),
+            )
+        }
+        // ADR-0059: every start with an option that skips permissions is audited with its options, however it was started (through
+        // the hub or at the machine). The node never gives a helper one.
+        Body::AgentStarted(s)
+            if s.skips_permissions && !view.agents.contains_key(&q(&s.agent_id)) =>
+        {
+            row(
+                q(&s.agent_id),
+                "agent.launch_options",
+                format!("skips_permissions:{}", s.launch_options.join(",")),
+            )
+        }
+        _ => None,
+    }
+}
+
 impl Hub {
-    /// Opens the hub on a store, rebuilding the view from the log.
+    /// Opens the hub on a store, rebuilding the view from the log. See [`Hub::open_at`].
     pub fn open(store: SqliteStore) -> Result<Self, StoreError> {
+        Self::open_at(store, crate::server::now_ms())
+    }
+
+    /// Opens the hub on a store, rebuilding the view from the log, at `now_ms` (hub clock).
+    ///
+    /// ADR-0070: presence is the hub's fact about live connections, and a hub that has just opened has none. A node the rebuilt
+    /// view shows online (its last presence fact says so: the hub stopped without recording the end of its connection, or the
+    /// fact is an old `NodeOnline` from before ADR-0070) is recorded offline here, before any connection is accepted: `NodeOffline`
+    /// for clients from before ADR-0070, then `NodeLink { up: false, reason: closed }` for the node's latest connection, with
+    /// `last_heard_ms` the last time the log heard of the node (not now), so "last seen" stays true. Nothing is recorded for a node
+    /// already offline, so opening again adds nothing.
+    pub fn open_at(store: SqliteStore, now_ms: u64) -> Result<Self, StoreError> {
         let (view, pos) = View::rebuild(&store)?;
         let hub_seq = store.acked(RESERVED_HUB_ID)?;
-        Ok(Self {
+        let hub = Self {
+            metrics: crate::metrics::Metrics::default(),
+            metrics_on: std::sync::atomic::AtomicBool::new(false),
             boards: crate::board::Boards::new(),
             prices: std::sync::RwLock::new((crate::usage::Catalog::bundled(), 0)),
             store,
@@ -80,8 +162,41 @@ impl Hub {
                 pos,
                 hub_seq,
                 subs: Vec::new(),
+                subs_dropped: 0,
+                approval_wait: crate::metrics::Histogram::with_bounds(&crate::metrics::ANSWER_US),
             }),
-        })
+        };
+        {
+            let mut g = hub.lock();
+            let stale: Vec<(String, u64, u64)> = g
+                .view
+                .nodes
+                .iter()
+                .filter(|(_, n)| n.online)
+                .map(|(id, n)| (id.clone(), n.link_generation, n.last_event_ms))
+                .collect();
+            for (node, generation, last_heard_ms) in stale {
+                hub.emit(
+                    &mut g,
+                    Body::NodeOffline(NodeOffline {
+                        node_id: node.clone(),
+                    }),
+                    now_ms,
+                )?;
+                hub.emit(
+                    &mut g,
+                    Body::NodeLink(NodeLink {
+                        node_id: node,
+                        up: false,
+                        reason: NodeLinkReason::Closed as i32,
+                        generation,
+                        last_heard_ms,
+                    }),
+                    now_ms,
+                )?;
+            }
+        }
+        Ok(hub)
     }
 
     /// Replaces the price table (overrides already applied) and says when it was refreshed (ms since the epoch; 0 for the
@@ -92,7 +207,8 @@ impl Hub {
         }
     }
 
-    /// Tokens and estimated cost per agent (ADR-0033). An agent whose model has no price has no estimate.
+    /// Tokens and estimated cost per agent (ADR-0033). An agent whose model has no price has no estimate; an agent that reported its
+    /// own cost in US dollars (ADR-0058) has that instead.
     pub fn usage_report(&self) -> agora_protocol::v1::UsageReportResult {
         use crate::usage::{Cost, Usage};
         let (catalog, prices_at_ms) = match self.prices.read() {
@@ -110,7 +226,13 @@ impl Hub {
                     output_tokens: a.output_tokens,
                     ..Usage::default()
                 };
-                let micro_usd = catalog.cost(&a.model, &usage, None).map(Cost::micro_usd);
+                // ADR-0058: a cost the agent reported itself in US dollars is what it cost; only without one is it estimated.
+                let reported = a
+                    .session
+                    .cost_micros
+                    .filter(|_| a.session.currency == "USD");
+                let micro_usd =
+                    reported.or_else(|| catalog.cost(&a.model, &usage, None).map(Cost::micro_usd));
                 total = total.saturating_add(micro_usd.unwrap_or(0));
                 agora_protocol::v1::AgentUsage {
                     agent_id: id.clone(),
@@ -142,6 +264,45 @@ impl Hub {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Turns on `GET /api/metrics` (`agora hub run --metrics`). The numbers are counted either way; this only lets them be read.
+    pub fn enable_metrics(&self) {
+        self.metrics_on
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Whether `GET /api/metrics` was turned on.
+    pub fn metrics_on(&self) -> bool {
+        self.metrics_on.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// The hub's numbers in the Prometheus text format, or `None` when they were not turned on.
+    pub fn metrics_text(&self) -> Option<String> {
+        if !self.metrics_on.load(std::sync::atomic::Ordering::Relaxed) {
+            return None;
+        }
+        let gauges = {
+            let g = self.lock();
+            crate::metrics::Gauges {
+                nodes_known: g.view.nodes.len(),
+                nodes_online: g.view.nodes.values().filter(|n| n.online).count(),
+                subscribers: g.subs.len(),
+                subscribers_dropped: g.subs_dropped,
+                approvals_waiting: g.view.approvals.len(),
+                approval_wait: g.approval_wait.snapshot(),
+                relays_dropped: self.router.relays_dropped(),
+                terminal_bytes: self.router.terminal_bytes(),
+                events_stored: g.pos,
+                resyncs: 0,
+            }
+        };
+        // Read outside the hub's lock: it is a query on the store.
+        let resyncs = self.store.resync_count().unwrap_or(0);
+        Some(
+            self.metrics
+                .render(&crate::metrics::Gauges { resyncs, ..gauges }),
+        )
+    }
+
     /// Whether any node by this id has ever been seen (online or not).
     pub fn node_known(&self, node: &str) -> bool {
         self.lock().view.nodes.contains_key(node)
@@ -159,30 +320,111 @@ impl Hub {
         session: &mut NodeSession<'_, SqliteStore>,
         payload: &[u8],
     ) -> Result<Ingest, SessionError> {
+        let asked = std::time::Instant::now();
         let mut g = self.lock();
+        let held = std::time::Instant::now();
+        self.metrics.lock_wait.observe(held - asked);
+        let outcome = self.ingest_locked(&mut g, session, payload);
+        self.metrics.ingest.observe(held.elapsed());
+        outcome
+    }
+
+    fn ingest_locked(
+        &self,
+        g: &mut MutexGuard<'_, Inner>,
+        session: &mut NodeSession<'_, SqliteStore>,
+        payload: &[u8],
+    ) -> Result<Ingest, SessionError> {
         let outcome = session.event(payload)?;
-        if let Ingest::Applied { pos, .. } = outcome {
+        if let Ingest::Applied { pos, .. } | Ingest::Resynced { pos, .. } = outcome {
+            self.metrics
+                .events_ingested
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             // The session already decoded it successfully, so this cannot fail; stay defensive anyway.
             if let Ok(event) = Event::decode(payload) {
                 let restarted = match &event.body {
                     Some(Body::NodeOnline(n)) => Some((n.node_id.clone(), event.at_ms)),
                     _ => None,
                 };
-                Self::publish(&mut g, Delivered { pos, event });
-                // A node announces itself only when its process starts: the agents it had are gone, so their tasks and leases go back.
+                // Read before the event is folded in: whether an agent is new, and what a decision was about.
+                let audit = spawn_audit(&g.view, &event);
+                Self::publish(g, Delivered { pos, event });
+                if let Some((who, action, node, outcome, at_ms)) = audit {
+                    let _ = crate::audit::Audit::new(&self.store)
+                        .record(at_ms, &who, &action, &node, &outcome);
+                }
+                // A node announces itself only when its process starts (a resync re-states it only for a start the hub missed,
+                // ADR-0055): the agents it had are gone, so their tasks and leases go back.
                 if let Some((node, at_ms)) = restarted {
                     for (project, events) in self.boards.node_restarted(&node, at_ms) {
                         if let Some(bytes) = self.boards.snapshot(&project, at_ms) {
                             let _ = self.store.set_setting(&format!("board.{project}"), &bytes);
                         }
                         for body in events {
-                            let _ = self.emit(&mut g, body, at_ms);
+                            let _ = self.emit(g, body, at_ms);
                         }
                     }
                 }
             }
         }
         Ok(outcome)
+    }
+
+    /// ADR-0053: the hub stops listing a closed agent. `agent` is the hub-wide key. Refused while it runs; its earlier events stay in
+    /// the store, and its tokens and cost still count.
+    pub fn forget_agent(&self, agent: &str, now_ms: u64) -> Result<(), agora_protocol::Error> {
+        use agora_protocol::{Error, ErrorCode};
+        let mut g = self.lock();
+        match g.view.agents.get(agent) {
+            None => return Err(Error::new(ErrorCode::AgentNotFound).with("agent_id", agent)),
+            Some(a) if a.running => {
+                return Err(Error::new(ErrorCode::AgentRunning).with("agent_id", agent))
+            }
+            Some(a) if a.forgotten => return Ok(()),
+            Some(_) => {}
+        }
+        self.emit(
+            &mut g,
+            Body::AgentForgotten(agora_protocol::v1::AgentForgotten {
+                agent_id: agent.to_string(),
+            }),
+            now_ms,
+        )
+        .map_err(|_| Error::new(ErrorCode::Internal))
+    }
+
+    /// ADR-0073: the hub stops listing an offline machine and what it ran. With `refuse_return`, every certificate enrolled under it
+    /// is revoked first, so its next connection is refused until it enrolls again. History stays, and usage still counts.
+    pub fn forget_node(
+        &self,
+        node: &str,
+        refuse_return: bool,
+        now_ms: u64,
+    ) -> Result<(), agora_protocol::Error> {
+        use agora_protocol::{Error, ErrorCode};
+        let mut g = self.lock();
+        match g.view.nodes.get(node) {
+            None => return Err(Error::new(ErrorCode::NodeUnknown).with("node_id", node)),
+            Some(n) if n.online => {
+                return Err(Error::new(ErrorCode::NodeOnline).with("node_id", node))
+            }
+            Some(n) if n.forgotten && !refuse_return => return Ok(()),
+            Some(_) => {}
+        }
+        if refuse_return {
+            crate::enroll::Enrollment::new(&self.store)
+                .revoke(node, now_ms)
+                .map_err(|_| Error::new(ErrorCode::Internal).with("incident_id", "node.forget"))?;
+        }
+        self.emit(
+            &mut g,
+            Body::NodeForgotten(agora_protocol::v1::NodeForgotten {
+                node_id: node.to_string(),
+                refused_return: refuse_return,
+            }),
+            now_ms,
+        )
+        .map_err(|_| Error::new(ErrorCode::Internal).with("incident_id", "node.forget"))
     }
 
     /// A node's connection ended without it saying goodbye: record that it is offline.
@@ -195,6 +437,87 @@ impl Hub {
             }),
             now_ms,
         )
+    }
+
+    /// ADR-0070: a node's connection is open after the handshake. Registers it with the router (commands reach it from now on) and
+    /// records `NodeLink { up }` under one lock, so the log's order of presence facts is the order the connections really took
+    /// turns in. Returns the registration, the node's commands and this connection's generation. Nothing the node runs is touched:
+    /// a reconnect is not a process start.
+    pub fn node_link_opened(
+        &self,
+        node: &str,
+        capabilities: Vec<String>,
+        now_ms: u64,
+    ) -> (
+        crate::router::Registration,
+        tokio::sync::mpsc::UnboundedReceiver<crate::router::ToNode>,
+        u64,
+    ) {
+        let mut g = self.lock();
+        let generation = g
+            .view
+            .nodes
+            .get(node)
+            .map_or(0, |n| n.link_generation)
+            .saturating_add(1);
+        let (registration, commands) = self.router.register_with_capabilities(node, capabilities);
+        // The router has it either way; a store that cannot write leaves the view as it was until the next fact.
+        let _ = self.emit(
+            &mut g,
+            Body::NodeLink(NodeLink {
+                node_id: node.to_string(),
+                up: true,
+                reason: NodeLinkReason::Opened as i32,
+                generation,
+                last_heard_ms: now_ms,
+            }),
+            now_ms,
+        );
+        (registration, commands, generation)
+    }
+
+    /// ADR-0070: a node's connection ended (`silent`: the hub closed it after its deadline). Unregisters it and records
+    /// `NodeLink { up: false }` under one lock. When a newer connection of the node had already replaced this one, the fact says
+    /// `replaced` and the node stays online; otherwise the hub also records `NodeOffline`, which clients from before ADR-0070
+    /// understand. `last_heard_ms` is when the hub last received anything on this connection. Returns whether the node is now
+    /// offline.
+    pub fn node_link_closed(
+        &self,
+        registration: crate::router::Registration,
+        generation: u64,
+        silent: bool,
+        last_heard_ms: u64,
+        now_ms: u64,
+    ) -> bool {
+        let mut g = self.lock();
+        let node = registration.node().to_string();
+        let current = registration.end();
+        let reason = match (current, silent) {
+            (false, _) => NodeLinkReason::Replaced,
+            (true, true) => NodeLinkReason::Silent,
+            (true, false) => NodeLinkReason::Closed,
+        };
+        if current {
+            let _ = self.emit(
+                &mut g,
+                Body::NodeOffline(NodeOffline {
+                    node_id: node.clone(),
+                }),
+                now_ms,
+            );
+        }
+        let _ = self.emit(
+            &mut g,
+            Body::NodeLink(NodeLink {
+                node_id: node,
+                up: false,
+                reason: reason as i32,
+                generation,
+                last_heard_ms,
+            }),
+            now_ms,
+        );
+        current
     }
 
     /// Records an event the hub itself produced (as the reserved hub producer).
@@ -236,10 +559,11 @@ impl Hub {
         now_ms: u64,
     ) -> Vec<crate::board::Notice> {
         let mut g = self.lock();
+        let key = self.restore_board(project, now_ms);
         let (events, notices) = self.boards.joined(&g.view, node, project, work, now_ms);
         if !events.is_empty() {
             if let Some(bytes) = self.boards.snapshot(project, now_ms) {
-                let _ = self.store.set_setting(&format!("board.{project}"), &bytes);
+                let _ = self.store.set_setting(&key, &bytes);
             }
         }
         for body in events {
@@ -273,65 +597,164 @@ impl Hub {
         now_ms: u64,
     ) -> crate::board::Answer {
         let mut g = self.lock();
-        let key = format!("board.{}", call.project_id);
-        if !self.boards.has(&call.project_id) {
-            if let Ok(Some(bytes)) = self.store.setting(&key) {
-                self.boards.load(&call.project_id, &bytes, now_ms);
-            }
-        }
+        let key = self.restore_board(&call.project_id, now_ms);
+        let project = call.project_id.as_str();
+        // A change is answered as done only once it is stored, and the board with its audit events is stored in one transaction:
+        // all of it or none (#517 review: a partly written change published one grant of a refused lease batch, and a failed undo
+        // brought a refused claim back after a restart). Until then the board as it was is kept aside, to be put back.
+        let before =
+            crate::board::changes_board(&call.tool).then(|| self.boards.checkpoint(project));
         let mut a = self.boards.call(
             &g.view,
             node,
             &call.from_agent,
-            &call.project_id,
+            project,
             &call.tool,
             &call.arguments_json,
             now_ms,
         );
-        if !a.events.is_empty() {
-            // Tasks changed: keep the board in the store (best effort; the call already succeeded).
-            if let Some(bytes) = self.boards.snapshot(&call.project_id, now_ms) {
-                let _ = self.store.set_setting(&key, &bytes);
+        if a.events.is_empty() {
+            return a;
+        }
+        let first = g.hub_seq + 1;
+        let events: Vec<Event> = std::mem::take(&mut a.events)
+            .into_iter()
+            .zip(first..)
+            .map(|(body, seq)| Event {
+                producer_id: RESERVED_HUB_ID.to_string(),
+                seq,
+                at_ms: now_ms,
+                body: Some(body),
+            })
+            .collect();
+        let payloads: Vec<(u64, Vec<u8>)> =
+            events.iter().map(|e| (now_ms, e.encode_to_vec())).collect();
+        let snapshot = self.boards.snapshot(project, now_ms);
+        let stored = self.store.append_batch_with_setting(
+            RESERVED_HUB_ID,
+            first,
+            &payloads,
+            snapshot.as_deref().map(|bytes| (key.as_str(), bytes)),
+        );
+        match stored {
+            Ok(positions) => {
+                g.hub_seq = first + events.len() as u64 - 1;
+                // Only now does anyone hear of it: the view, the windows and the nodes.
+                for (pos, event) in positions.into_iter().zip(events) {
+                    Self::publish(&mut g, Delivered { pos, event });
+                }
+                a
+            }
+            Err(_) => {
+                if let Some(board) = before {
+                    self.boards.restore(project, board);
+                }
+                crate::board::Answer {
+                    verdict: crate::board::Verdict::Invalid(
+                        agora_protocol::Error::new(agora_protocol::ErrorCode::Internal)
+                            .with("incident_id", "board.store"),
+                    ),
+                    events: Vec::new(),
+                    handoff: None,
+                    fanout: None,
+                }
             }
         }
-        for body in std::mem::take(&mut a.events) {
-            let _ = self.emit(&mut g, body, now_ms);
+    }
+
+    /// Restores an uninitialized board and returns its storage key. Callers hold the hub lock so calls and joins cannot
+    /// reload over one another's newer in-memory work.
+    fn restore_board(&self, project: &str, now_ms: u64) -> String {
+        let key = format!("board.{project}");
+        if !self.boards.has(project) {
+            if let Ok(Some(bytes)) = self.store.setting(&key) {
+                self.boards.load(project, &bytes, now_ms);
+            }
         }
-        a
+        key
     }
 
     fn publish(g: &mut Inner, d: Delivered) {
+        // An answer to a waiting approval: how long the agent waited, both times on the asking machine's clock.
+        if let Some(Body::ApprovalResolved(r)) = &d.event.body {
+            let key = crate::projection::qualified(&d.event.producer_id, &r.approval_id);
+            if let Some(a) = g.view.approvals.get(&key) {
+                let waited = d.event.at_ms.saturating_sub(a.requested_at_ms);
+                g.approval_wait
+                    .observe(std::time::Duration::from_millis(waited));
+            }
+        }
+        let back = g.view.brings_back(&d.event);
         g.view.apply(&d.event);
         g.pos = d.pos;
+        // ADR-0073: a forgotten machine came back. A client that joined while it was hidden holds none of its folders or agents, and
+        // no event will say them again; every client is let go, reconnects from its position and, being before this one, gets a
+        // snapshot (see `subscribe_within`).
+        if back {
+            g.view.remembered_at = d.pos;
+            g.subs.clear();
+            return;
+        }
         // `try_send`: a full queue means the subscriber is too slow; drop it rather than stall every other node.
+        let before = g.subs.len();
         g.subs.retain(|s| match s.try_send(d.clone()) {
             Ok(()) => true,
             Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => false,
         });
+        g.subs_dropped += (before - g.subs.len()) as u64;
+    }
+
+    /// The stored events after `after`, or `None` when they come to more than `max_bytes`: then a snapshot is cheaper and bounded.
+    /// The size is asked of the store first, so a replay over budget copies no payload at all (#519 review: a page of 1 000 large
+    /// events was read into memory before the check).
+    fn replay(&self, after: u64, max_bytes: usize) -> Result<Option<Vec<Delivered>>, StoreError> {
+        if self.store.payload_bytes_after(after)? > u64::try_from(max_bytes).unwrap_or(u64::MAX) {
+            return Ok(None);
+        }
+        let mut backlog = Vec::new();
+        let (mut at, mut bytes) = (after, 0usize);
+        loop {
+            let page = self.store.events_after(at, PAGE)?;
+            let Some(last) = page.last() else { break };
+            at = last.pos;
+            bytes += page.iter().map(|e| e.payload.len()).sum::<usize>();
+            if bytes > max_bytes {
+                return Ok(None);
+            }
+            backlog.extend(page.iter().filter_map(decode));
+        }
+        Ok(Some(backlog))
     }
 
     /// Subscribes from `after` (the last position the subscriber saw), or from the start with `None`. If `after`
-    /// is ahead of the log (the hub was restored from an older backup) the subscriber gets a snapshot instead.
+    /// is ahead of the log (the hub was restored from an older backup), or further behind than [`MAX_REPLAY_EVENTS`] or
+    /// [`MAX_REPLAY_BYTES`] of replay, the subscriber gets a snapshot instead.
     pub fn subscribe(&self, after: Option<u64>) -> Result<Subscription, StoreError> {
+        self.subscribe_within(after, MAX_REPLAY_EVENTS, MAX_REPLAY_BYTES)
+    }
+
+    fn subscribe_within(
+        &self,
+        after: Option<u64>,
+        max_events: u64,
+        max_bytes: usize,
+    ) -> Result<Subscription, StoreError> {
         let mut g = self.lock();
         let (tx, rx) = sync_channel(SUBSCRIBER_BUFFER);
-        let sub = match after {
-            Some(n) if n <= g.pos => {
-                let mut backlog = Vec::new();
-                let mut at = n;
-                loop {
-                    let page = self.store.events_after(at, PAGE)?;
-                    let Some(last) = page.last() else { break };
-                    at = last.pos;
-                    backlog.extend(page.iter().filter_map(decode));
-                }
-                Subscription {
-                    snapshot: None,
-                    backlog,
-                    live: rx,
-                }
+        // Positions only grow (one per stored event), so `pos - n` bounds the number of events to replay before any is read.
+        let backlog = match after {
+            Some(n) if n <= g.pos && g.pos - n <= max_events && n >= g.view.remembered_at => {
+                self.replay(n, max_bytes)?
             }
-            _ => Subscription {
+            _ => None,
+        };
+        let sub = match backlog {
+            Some(backlog) => Subscription {
+                snapshot: None,
+                backlog,
+                live: rx,
+            },
+            None => Subscription {
                 snapshot: Some((g.view.clone(), g.pos)),
                 backlog: Vec::new(),
                 live: rx,
@@ -352,6 +775,104 @@ mod tests {
     use super::*;
     use agora_protocol::handshake::Support;
     use agora_protocol::v1::{AgentStarted, Hello, NodeOnline, Resume, Role};
+
+    #[test]
+    fn agent_starts_are_audited_once_with_the_asking_agent() {
+        use agora_protocol::v1::{AgentStartRefused, ApprovalRequested, ApprovalResolved};
+        let mut view = View::default();
+        let at = |body: Body| Event {
+            producer_id: "n1".into(),
+            seq: 1,
+            at_ms: 5,
+            body: Some(body),
+        };
+        let asked = at(Body::ApprovalRequested(ApprovalRequested {
+            approval_id: "ap-1".into(),
+            agent_id: "a".into(),
+            action: "agent.start".into(),
+            detail: "{}".into(),
+            expires_at_ms: 9,
+        }));
+        let row = spawn_audit(&view, &asked).unwrap();
+        assert_eq!(
+            (row.0.as_str(), row.1.as_str(), row.3.as_str()),
+            ("n1/a", "agent.start.asked", "ap-1")
+        );
+        view.apply(&asked);
+        let decided = at(Body::ApprovalResolved(ApprovalResolved {
+            approval_id: "ap-1".into(),
+            approved: true,
+            signer_device_id: "phone".into(),
+            helper_grant: 3,
+            helpers_may_start: false,
+        }));
+        let row = spawn_audit(&view, &decided).unwrap();
+        assert_eq!(
+            (row.0.as_str(), row.3.as_str()),
+            ("n1/a", "approved:phone:grant=3:nested=false")
+        );
+        let refused = at(Body::AgentStartRefused(AgentStartRefused {
+            agent_id: "a".into(),
+            kind: "codex".into(),
+            folder: "/w".into(),
+            code: "mesh.helper_limit".into(),
+        }));
+        assert_eq!(spawn_audit(&view, &refused).unwrap().3, "mesh.helper_limit");
+        let started = at(Body::AgentStarted(AgentStarted {
+            agent_id: "b".into(),
+            project_id: "p".into(),
+            node_id: "n1".into(),
+            worktree_id: String::new(),
+            kind: "codex".into(),
+            level: 1,
+            parent_agent_id: "a".into(),
+            launch_options: Vec::new(),
+            skips_permissions: false,
+        }));
+        let row = spawn_audit(&view, &started).unwrap();
+        assert_eq!((row.0.as_str(), row.3.as_str()), ("n1/a", "ok:n1/b"));
+        view.apply(&started);
+        // Said again (a restart or a resync): not a new start.
+        assert!(spawn_audit(&view, &started).is_none());
+    }
+
+    #[test]
+    fn a_start_that_does_not_ask_is_audited_once_with_its_options() {
+        let mut view = crate::projection::View::default();
+        let at = |body| Event {
+            producer_id: "n1".into(),
+            seq: 1,
+            at_ms: 7,
+            body: Some(body),
+        };
+        let started = |skips, options: &[&str]| {
+            at(Body::AgentStarted(AgentStarted {
+                agent_id: "c".into(),
+                project_id: "p".into(),
+                node_id: "n1".into(),
+                worktree_id: String::new(),
+                kind: "codex".into(),
+                level: 1,
+                parent_agent_id: String::new(),
+                launch_options: options.iter().map(|o| (*o).to_string()).collect(),
+                skips_permissions: skips,
+            }))
+        };
+        assert!(spawn_audit(&view, &started(false, &[])).is_none());
+        assert!(spawn_audit(&view, &started(false, &["resume-last"])).is_none());
+        let skip = started(true, &["skip-permissions"]);
+        let row = spawn_audit(&view, &skip).unwrap();
+        assert_eq!(
+            (row.0.as_str(), row.1.as_str(), row.3.as_str()),
+            (
+                "n1/c",
+                "agent.launch_options",
+                "skips_permissions:skip-permissions"
+            )
+        );
+        view.apply(&skip);
+        assert!(spawn_audit(&view, &skip).is_none());
+    }
 
     fn support() -> Support {
         Support {
@@ -409,6 +930,9 @@ mod tests {
                 worktree_id: "w".into(),
                 kind: "shell".into(),
                 level: 2,
+                parent_agent_id: String::new(),
+                launch_options: Vec::new(),
+                skips_permissions: false,
             })),
         }
         .encode_to_vec()
@@ -437,6 +961,202 @@ mod tests {
         assert!(sub.live.try_recv().is_err());
     }
 
+    /// ADR-0054: the event a node's resync lands on goes into the view and to subscribers like any applied one.
+    #[test]
+    fn a_resynced_event_is_published_and_folded_into_the_view() {
+        let (hub, sup) = (hub(), support());
+        let mut s = open_session(&hub, &sup, "n1");
+        hub.ingest(&mut s, &online("n1", 1)).unwrap();
+        let sub = hub.subscribe(Some(1)).unwrap();
+        s.snapshot_required(9).unwrap();
+        assert_eq!(
+            hub.ingest(&mut s, &agent("n1", 7, "a")).unwrap(),
+            Ingest::Resynced {
+                acked: 7,
+                pos: 2,
+                from_seq: 2,
+                to_seq: 6
+            }
+        );
+        assert!(hub.view().0.agents.contains_key("n1/a"));
+        assert_eq!(sub.live.try_recv().map(|d| d.pos).ok(), Some(2));
+    }
+
+    #[test]
+    fn a_closed_agent_can_be_forgotten_but_a_running_one_cannot() {
+        use agora_protocol::{v1::AgentExited, ErrorCode};
+        let (hub, sup) = (hub(), support());
+        let mut s = open_session(&hub, &sup, "n1");
+        hub.ingest(&mut s, &online("n1", 1)).unwrap();
+        hub.ingest(&mut s, &agent("n1", 2, "a")).unwrap();
+        // Running: refused, and nothing was recorded.
+        let e = hub.forget_agent("n1/a", 5).unwrap_err();
+        assert_eq!(e.code, ErrorCode::AgentRunning);
+        assert_eq!(hub.view().1, 2);
+        assert_eq!(
+            hub.forget_agent("n1/nobody", 5).unwrap_err().code,
+            ErrorCode::AgentNotFound
+        );
+        let exited = Event {
+            producer_id: "n1".into(),
+            seq: 3,
+            at_ms: 3,
+            body: Some(Body::AgentExited(AgentExited {
+                agent_id: "a".into(),
+                exit_code: 0,
+            })),
+        }
+        .encode_to_vec();
+        hub.ingest(&mut s, &exited).unwrap();
+        let sub = hub.subscribe(Some(3)).unwrap();
+        hub.forget_agent("n1/a", 6).unwrap();
+        // Clients hear of it as an event; the event is in the log, the agent's history is not rewritten, and asking again is harmless.
+        let heard = sub.live.try_recv().unwrap();
+        assert!(matches!(heard.event.body, Some(Body::AgentForgotten(_))));
+        assert_eq!(hub.view().1, 4);
+        hub.forget_agent("n1/a", 7).unwrap();
+        assert_eq!(hub.view().1, 4);
+        let (view, _) = hub.view();
+        assert!(view.agents["n1/a"].forgotten);
+        assert!(!view.agents["n1/a"].running);
+    }
+
+    #[test]
+    fn an_offline_machine_can_be_forgotten_and_comes_back_when_it_connects() {
+        use agora_protocol::{v1::AgentExited, ErrorCode};
+        let (hub, sup) = (hub(), support());
+        let mut s = open_session(&hub, &sup, "n1");
+        let (reg, _cmds, generation) = hub.node_link_opened("n1", Vec::new(), 1);
+        hub.ingest(&mut s, &online("n1", 1)).unwrap();
+        hub.ingest(&mut s, &agent("n1", 2, "closed")).unwrap();
+        hub.ingest(&mut s, &agent("n1", 3, "running")).unwrap();
+        let exited = Event {
+            producer_id: "n1".into(),
+            seq: 4,
+            at_ms: 4,
+            body: Some(Body::AgentExited(AgentExited {
+                agent_id: "closed".into(),
+                exit_code: 0,
+            })),
+        };
+        hub.ingest(&mut s, &exited.encode_to_vec()).unwrap();
+        // Connected: refused, nothing recorded. Unknown: refused.
+        let before = hub.view().1;
+        assert_eq!(
+            hub.forget_node("n1", false, 5).unwrap_err().code,
+            ErrorCode::NodeOnline
+        );
+        assert_eq!(
+            hub.forget_node("nobody", false, 5).unwrap_err().code,
+            ErrorCode::NodeUnknown
+        );
+        assert_eq!(hub.view().1, before);
+
+        hub.node_link_closed(reg, generation, false, 5, 5);
+        let sub = hub.subscribe(Some(hub.view().1)).unwrap();
+        hub.forget_node("n1", false, 6).unwrap();
+        let heard = sub.live.try_recv().unwrap();
+        assert!(matches!(heard.event.body, Some(Body::NodeForgotten(_))));
+        // Kept in the hub's records, left out of what clients are shown.
+        let (view, _) = hub.view();
+        assert!(view.nodes["n1"].forgotten);
+        assert!(view.agents["n1/closed"].forgotten && view.agents["n1/running"].forgotten);
+        let shown = crate::server::snapshot_of(&view, 0);
+        assert!(shown.nodes.is_empty(), "{:?}", shown.nodes);
+        assert!(shown.agents.is_empty(), "{:?}", shown.agents);
+        // Asking again is harmless.
+        let at = hub.view().1;
+        hub.forget_node("n1", false, 7).unwrap();
+        assert_eq!(hub.view().1, at);
+
+        // It connects again: listed again, with the agent it still runs; the one closed before stays forgotten.
+        let _back = hub.node_link_opened("n1", Vec::new(), 8);
+        let (view, _) = hub.view();
+        assert!(!view.nodes["n1"].forgotten);
+        let shown = crate::server::snapshot_of(&view, 0);
+        assert_eq!(shown.nodes.len(), 1);
+        let agents: Vec<&str> = shown.agents.iter().map(|a| a.agent_id.as_str()).collect();
+        assert_eq!(agents, ["n1/running"]);
+    }
+
+    #[test]
+    fn a_client_that_joined_while_a_machine_was_forgotten_gets_its_records_when_it_comes_back() {
+        // #535 review (Codex): a client that subscribed while the machine was hidden holds none of its folders or agents, and the
+        // machine's return is only a `NodeLink`; it must be given a snapshot, not a replay.
+        use agora_protocol::v1::CheckoutDiscovered;
+        let (hub, sup) = (hub(), support());
+        let mut s = open_session(&hub, &sup, "n1");
+        let (reg, _cmds, generation) = hub.node_link_opened("n1", Vec::new(), 1);
+        hub.ingest(&mut s, &online("n1", 1)).unwrap();
+        let checkout = Event {
+            producer_id: "n1".into(),
+            seq: 2,
+            at_ms: 2,
+            body: Some(Body::CheckoutDiscovered(CheckoutDiscovered {
+                checkout_id: "c".into(),
+                node_id: "n1".into(),
+                project_id: "p".into(),
+                path: "/repo".into(),
+            })),
+        };
+        hub.ingest(&mut s, &checkout.encode_to_vec()).unwrap();
+        hub.ingest(&mut s, &agent("n1", 3, "running")).unwrap();
+        hub.node_link_closed(reg, generation, false, 4, 4);
+        hub.forget_node("n1", false, 5).unwrap();
+
+        // This client joins while the machine is hidden: its snapshot has none of it.
+        let joined = hub.subscribe(None).unwrap();
+        let (view, at) = joined.snapshot.clone().unwrap();
+        let shown = crate::server::snapshot_of(&view, at);
+        assert!(shown.nodes.is_empty() && shown.checkouts.is_empty() && shown.agents.is_empty());
+
+        // The machine comes back: every live client is let go...
+        let _back = hub.node_link_opened("n1", Vec::new(), 6);
+        assert!(
+            joined.live.try_recv().is_err(),
+            "a live client was kept: it would only hear NodeLink"
+        );
+        // ...and resuming from where it was gives a snapshot with the machine's folders and running agent, not a replay.
+        let again = hub.subscribe(Some(at)).unwrap();
+        assert!(again.backlog.is_empty());
+        let (view, pos) = again.snapshot.expect("a snapshot");
+        let shown = crate::server::snapshot_of(&view, pos);
+        assert_eq!(shown.nodes.len(), 1);
+        assert_eq!(shown.checkouts.len(), 1);
+        assert_eq!(
+            shown
+                .agents
+                .iter()
+                .map(|a| a.agent_id.as_str())
+                .collect::<Vec<_>>(),
+            ["n1/running"]
+        );
+        // A client that resumes from after the return replays as usual.
+        let after = hub.subscribe(Some(pos)).unwrap();
+        assert!(after.snapshot.is_none());
+        // The hub restarting keeps the rule: the rebuilt view knows where the machine came back.
+        assert_eq!(View::rebuild(hub.store()).unwrap().0.remembered_at, pos);
+    }
+
+    #[test]
+    fn forgetting_with_refuse_return_revokes_the_machines_certificates() {
+        let (hub, sup) = (hub(), support());
+        let ca = crate::ca::Ca::generate("ca").unwrap();
+        let (_, csr) = crate::ca::new_device_request().unwrap();
+        let mut e = crate::enroll::Enrollment::new(hub.store());
+        let code = e.create_code(1).unwrap();
+        let issued = e.redeem(&ca, &code, "n1", &csr, 2).unwrap();
+        let mut s = open_session(&hub, &sup, "n1");
+        hub.ingest(&mut s, &online("n1", 1)).unwrap();
+        hub.node_disconnected("n1", 3).unwrap();
+        hub.forget_node("n1", true, 4).unwrap();
+        assert!(!crate::enroll::Enrollment::new(hub.store())
+            .is_active(&issued.serial_hex)
+            .unwrap());
+        let (view, _) = hub.view();
+        assert!(view.nodes["n1"].forgotten);
+    }
+
     #[test]
     fn a_new_subscriber_gets_a_snapshot_then_live_events() {
         let (hub, sup) = (hub(), support());
@@ -449,6 +1169,53 @@ mod tests {
         hub.ingest(&mut s, &agent("n1", 2, "a")).unwrap();
         let live = sub.live.try_recv().unwrap();
         assert_eq!(live.pos, 2);
+    }
+
+    #[test]
+    fn a_subscriber_too_far_behind_gets_a_snapshot_not_an_unbounded_replay() {
+        let (hub, sup) = (hub(), support());
+        let mut s = open_session(&hub, &sup, "n1");
+        for i in 1..=6 {
+            hub.ingest(&mut s, &agent("n1", i, &format!("a{i}")))
+                .unwrap();
+        }
+        let head = hub.view().1;
+        // Within the budget: the backlog, as before.
+        let near = hub.subscribe_within(Some(head - 2), 2, usize::MAX).unwrap();
+        assert!(near.snapshot.is_none());
+        assert_eq!(near.backlog.len(), 2);
+        // More events behind than the budget: a snapshot at the head, nothing replayed.
+        let far = hub.subscribe_within(Some(head - 3), 2, usize::MAX).unwrap();
+        assert!(far.backlog.is_empty());
+        let (view, pos) = far.snapshot.expect("a snapshot");
+        assert_eq!(pos, head);
+        assert_eq!(view.agents.len(), 6);
+        // More bytes than the budget, though few events: a snapshot too.
+        let heavy = hub.subscribe_within(Some(head - 2), 10, 1).unwrap();
+        assert!(heavy.backlog.is_empty() && heavy.snapshot.is_some());
+        // The snapshot/live boundary: the next event reaches the far subscriber live, once, right after the snapshot's position.
+        hub.ingest(&mut s, &agent("n1", 7, "a7")).unwrap();
+        let next = far.live.try_recv().unwrap();
+        assert_eq!(next.pos, head + 1);
+        assert!(far.live.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_client_away_for_more_than_the_replay_budget_resumes_from_a_snapshot() {
+        let (hub, sup) = (hub(), support());
+        let mut s = open_session(&hub, &sup, "n1");
+        let first = hub.view().1;
+        let total = MAX_REPLAY_EVENTS + 1;
+        for i in 1..=total {
+            hub.ingest(&mut s, &agent("n1", i, "a")).unwrap();
+        }
+        let sub = hub.subscribe(Some(first)).unwrap();
+        assert!(
+            sub.backlog.is_empty(),
+            "replayed {} events",
+            sub.backlog.len()
+        );
+        assert_eq!(sub.snapshot.map(|(_, pos)| pos), Some(hub.view().1));
     }
 
     #[test]
@@ -517,6 +1284,149 @@ mod tests {
         assert_eq!(again.view(), live_view);
         again.node_disconnected("n1", 70).unwrap();
         assert_eq!(again.store().acked(RESERVED_HUB_ID).unwrap(), 3);
+    }
+
+    /// ADR-0070: right after the hub opens no connection exists, so a node the log leaves online (the hub was killed with its
+    /// connection open, or only an old `NodeOnline` says so) is recorded offline, once, with "last seen" from the log.
+    #[test]
+    fn opening_the_hub_records_nodes_the_log_leaves_online_as_offline_once() {
+        use agora_protocol::v1::NodeResources;
+        let store = SqliteStore::open_in_memory().unwrap();
+        let put = |producer: &str, seq: u64, at_ms: u64, body: Body| {
+            let e = Event {
+                producer_id: producer.into(),
+                seq,
+                at_ms,
+                body: Some(body),
+            };
+            store
+                .append(producer, seq, at_ms, &e.encode_to_vec())
+                .unwrap();
+        };
+        let link = |node: &str, up: bool, reason: NodeLinkReason, generation, heard| {
+            Body::NodeLink(NodeLink {
+                node_id: node.into(),
+                up,
+                reason: reason as i32,
+                generation,
+                last_heard_ms: heard,
+            })
+        };
+        let started = |node: &str| {
+            Body::NodeOnline(NodeOnline {
+                node_id: node.into(),
+                hostname: "h".into(),
+                os: "linux".into(),
+                build: "b".into(),
+            })
+        };
+        // "up": its connection (generation 2) was open when the hub was killed; it was last heard at 500.
+        put("up", 1, 10, started("up"));
+        put(
+            "hub",
+            1,
+            11,
+            link("up", true, NodeLinkReason::Opened, 1, 11),
+        );
+        put(
+            "hub",
+            2,
+            20,
+            link("up", false, NodeLinkReason::Closed, 1, 19),
+        );
+        put(
+            "hub",
+            3,
+            30,
+            link("up", true, NodeLinkReason::Opened, 2, 30),
+        );
+        put(
+            "up",
+            2,
+            500,
+            Body::NodeResources(NodeResources {
+                node_id: "up".into(),
+                ..NodeResources::default()
+            }),
+        );
+        // "down": its last fact is offline already.
+        put("down", 1, 40, started("down"));
+        put(
+            "hub",
+            4,
+            41,
+            link("down", true, NodeLinkReason::Opened, 1, 41),
+        );
+        put(
+            "hub",
+            5,
+            60,
+            link("down", false, NodeLinkReason::Silent, 1, 45),
+        );
+        // "old": seen only through a `NodeOnline` from before ADR-0070.
+        put("old", 1, 70, started("old"));
+        let before = store.events_after(0, 100).unwrap().len();
+
+        let hub = Hub::open_at(store, 9_000).unwrap();
+        let (view, _) = hub.view();
+        for (node, seen) in [("up", 500), ("down", 45), ("old", 70)] {
+            assert!(!view.nodes[node].online, "{node} is offline");
+            assert_eq!(view.nodes[node].last_event_ms, seen, "{node} last seen");
+        }
+        let added: Vec<Event> = hub
+            .store()
+            .events_after(0, 100)
+            .unwrap()
+            .iter()
+            .skip(before)
+            .filter_map(decode)
+            .map(|d| d.event)
+            .collect();
+        assert!(added
+            .iter()
+            .all(|e| e.producer_id == RESERVED_HUB_ID && e.at_ms == 9_000));
+        // The hub's numbering continues where the log left it.
+        assert_eq!(
+            added.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            [6, 7, 8, 9]
+        );
+        let mut facts: Vec<(String, Option<(u64, u64)>)> = added
+            .into_iter()
+            .map(|e| match e.body {
+                Some(Body::NodeOffline(o)) => (o.node_id, None),
+                Some(Body::NodeLink(l)) => {
+                    assert!(!l.up);
+                    assert_eq!(l.reason, NodeLinkReason::Closed as i32);
+                    (l.node_id, Some((l.generation, l.last_heard_ms)))
+                }
+                other => panic!("unexpected {other:?}"),
+            })
+            .collect();
+        facts.sort();
+        assert_eq!(
+            facts,
+            [
+                ("old".to_string(), None),
+                ("old".to_string(), Some((0, 70))),
+                ("up".to_string(), None),
+                ("up".to_string(), Some((2, 500))),
+            ]
+        );
+        // A rebuilt view agrees with the live one, and opening again records nothing.
+        let live = hub.view();
+        let store = SqliteStore::open_in_memory().unwrap();
+        for e in hub.store().events_after(0, 100).unwrap() {
+            store
+                .append(&e.producer, e.seq, e.at_ms, &e.payload)
+                .unwrap();
+        }
+        let again = Hub::open_at(store, 10_000).unwrap();
+        assert_eq!(again.view(), live);
+        assert_eq!(again.store().acked(RESERVED_HUB_ID).unwrap(), 9);
+        // The next connection of "up" is a newer generation and brings it back online.
+        let (_reg, _cmds, generation) = again.node_link_opened("up", Vec::new(), 10_001);
+        assert_eq!(generation, 3);
+        assert!(again.view().0.nodes["up"].online);
     }
 
     #[test]

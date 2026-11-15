@@ -5,5 +5,6 @@
 //! agents (already bound to an identity by the node's MCP connection) and the current time, and gets back results and
 //! audit events. The MCP server that exposes these as tools is a thin layer on top.
 
+pub mod awareness;
 pub mod broker;
 pub mod mcp;

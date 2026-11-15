@@ -75,9 +75,25 @@ pub struct Message {
     pub refs: Vec<String>,
     pub at_ms: u64,
     pub reply_to: Option<String>,
-    /// `message`, `ask`, `reply` or `handoff`.
+    /// `message`, `ask`, `reply`, `handoff`, `delivery_failed` or `presence`.
     pub kind: &'static str,
 }
+
+/// What the node knows about an agent besides [`AgentInfo`], for `agents_list` and `workspace_status`: facts, never what the agent
+/// typed or what its screen shows.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Activity {
+    /// When it joined the mesh (ms); `None` for an agent registered without a time.
+    pub since_ms: Option<u64>,
+    /// The kind of a chat agent's latest item, in fixed words (`running a command`, `editing files`, `planning`,
+    /// `asking the user`); cleared when it stops working.
+    pub latest: Option<&'static str>,
+    /// The agent that started it (ADR-0057).
+    pub parent: Option<AgentId>,
+}
+
+/// Presence notices one inbox gets per [`Limits::window_ms`] at most; the last one of a window says that more changed.
+pub const PRESENCE_PER_WINDOW: usize = 10;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MeshError {
@@ -175,6 +191,7 @@ pub enum AskStatus {
     TimedOut,
 }
 
+#[derive(Clone)]
 struct Ask {
     from: AgentId,
     to: AgentId,
@@ -201,6 +218,7 @@ pub enum TaskStatus {
     Done,
 }
 
+#[derive(Clone)]
 struct TaskRec {
     task: Task,
     project: String,
@@ -214,6 +232,7 @@ struct TaskRec {
 pub const MAX_HANDOVER_TASKS: usize = 500;
 pub const MAX_HANDOVER_LEASES: usize = 500;
 
+#[derive(Clone)]
 struct LeaseBatch {
     holder: AgentId,
     project: String,
@@ -240,6 +259,7 @@ fn split_address(to: &str) -> Option<(&str, &str)> {
     (!node.is_empty() && !agent.is_empty() && !agent.contains('/')).then_some((node, agent))
 }
 
+#[derive(Clone)]
 pub struct Mesh {
     outbox: Vec<Outbound>,
     limits: Limits,
@@ -252,6 +272,11 @@ pub struct Mesh {
     batches: BTreeMap<String, LeaseBatch>,
     next: u64,
     events: Vec<Body>,
+    activity: BTreeMap<AgentId, Activity>,
+    /// Files changed in each worktree, from the node's own git status.
+    files: BTreeMap<String, u32>,
+    /// When each inbox got its recent presence notices.
+    presence_sent: BTreeMap<AgentId, VecDeque<u64>>,
 }
 
 impl Mesh {
@@ -268,6 +293,9 @@ impl Mesh {
             batches: BTreeMap::new(),
             next: 1,
             events: Vec::new(),
+            activity: BTreeMap::new(),
+            files: BTreeMap::new(),
+            presence_sent: BTreeMap::new(),
         }
     }
 
@@ -330,9 +358,17 @@ impl Mesh {
         Ok(id)
     }
 
-    /// Tells `from` that a message it sent to another node did not arrive. It lands in the inbox as a notice (kind
-    /// `delivery_failed`, body the error code); delivery is at most once, so nothing is retried.
-    pub fn delivery_failed(&mut self, from: &AgentId, to: &str, code: &str, now_ms: u64) {
+    /// Tells `from` that its message `message_id` (the id `send_message` answered with) to another node did not arrive. It lands
+    /// in the inbox as a notice (kind `delivery_failed`, body the error code, `reply_to` the failed message's id, so an agent with
+    /// several messages in flight knows which one); delivery is at most once, so nothing is retried.
+    pub fn delivery_failed(
+        &mut self,
+        from: &AgentId,
+        message_id: &str,
+        to: &str,
+        code: &str,
+        now_ms: u64,
+    ) {
         let Some(info) = self.agents.get(from).cloned() else {
             return;
         };
@@ -350,7 +386,7 @@ impl Mesh {
             body: code.to_string(),
             refs: Vec::new(),
             at_ms: now_ms,
-            reply_to: None,
+            reply_to: (!message_id.is_empty()).then(|| message_id.to_string()),
             kind: "delivery_failed",
         };
         let inbox = self.inboxes.entry(info.id).or_default();
@@ -372,11 +408,173 @@ impl Mesh {
         self.agents.insert(info.id.clone(), info);
     }
 
+    /// [`register`](Self::register) for an agent that starts now: it remembers when, and the other running agents of its project
+    /// get a `presence` notice. Registering an agent that is already registered (a restart keeps its endpoint) changes nothing.
+    pub fn join(&mut self, info: AgentInfo, now_ms: u64) {
+        if self.agents.contains_key(&info.id) {
+            return;
+        }
+        self.activity.insert(
+            info.id.clone(),
+            Activity {
+                since_ms: Some(now_ms),
+                ..Activity::default()
+            },
+        );
+        self.register(info.clone());
+        self.presence(&info, "joined", None, now_ms);
+    }
+
+    /// [`unregister`](Self::unregister) with a `presence` notice to the other running agents of its project. `reason` is a fixed
+    /// word the node chose (`finished`, `stopped`, `crashed`, `left`), never text from the agent.
+    pub fn leave(&mut self, agent: &AgentId, reason: &str, now_ms: u64) {
+        let info = self.agents.get(agent).cloned();
+        self.unregister(agent, now_ms);
+        if let Some(info) = info {
+            self.presence(&info, "left", Some(reason), now_ms);
+        }
+    }
+
+    /// One notice per change to every other running agent of the subject's project: it lands in the inbox (data, never typed
+    /// into a terminal). Each inbox gets at most [`PRESENCE_PER_WINDOW`] per window; the last of them says more changed.
+    fn presence(&mut self, subject: &AgentInfo, change: &str, reason: Option<&str>, now_ms: u64) {
+        let recipients: Vec<AgentInfo> = self
+            .agents
+            .values()
+            .filter(|a| a.project == subject.project && a.id != subject.id)
+            .cloned()
+            .collect();
+        let window = self.limits.window_ms;
+        for r in recipients {
+            let q = self.presence_sent.entry(r.id.clone()).or_default();
+            while q
+                .front()
+                .is_some_and(|t| now_ms.saturating_sub(*t) >= window)
+            {
+                q.pop_front();
+            }
+            if q.len() >= PRESENCE_PER_WINDOW {
+                continue;
+            }
+            q.push_back(now_ms);
+            let place = if r.node == subject.node && r.worktree == subject.worktree {
+                "this workspace"
+            } else {
+                "this project"
+            };
+            let body = if q.len() == PRESENCE_PER_WINDOW {
+                "more agents joined or left this project; call workspace_status for the current picture"
+                    .to_string()
+            } else {
+                match reason {
+                    Some(why) => format!(
+                        "{} {} {change} {place} ({why})",
+                        crate::awareness::clean(&subject.kind, 64),
+                        crate::awareness::clean(subject.id.as_str(), 128)
+                    ),
+                    None => format!(
+                        "{} {} {change} {place} (machine {})",
+                        crate::awareness::clean(&subject.kind, 64),
+                        crate::awareness::clean(subject.id.as_str(), 128),
+                        crate::awareness::clean(&subject.node, 128)
+                    ),
+                }
+            };
+            let m = Message {
+                id: self.id("m"),
+                provenance: Provenance {
+                    from: subject.id.clone(),
+                    kind: subject.kind.clone(),
+                    node: subject.node.clone(),
+                    project: subject.project.clone(),
+                },
+                to: r.id.as_str().to_string(),
+                body,
+                refs: Vec::new(),
+                at_ms: now_ms,
+                reply_to: None,
+                kind: "presence",
+            };
+            let inbox = self.inboxes.entry(r.id).or_default();
+            inbox.push_back(m);
+            while inbox.len() > self.limits.inbox_capacity {
+                inbox.pop_front();
+            }
+        }
+    }
+
+    /// The kind of a chat agent's latest item, in fixed words (see [`Activity::latest`]).
+    pub fn set_activity(&mut self, agent: &AgentId, latest: Option<&'static str>) {
+        if self.agents.contains_key(agent) {
+            self.activity.entry(agent.clone()).or_default().latest = latest;
+        }
+    }
+
+    /// The agent that started this one (ADR-0057).
+    pub fn set_parent(&mut self, agent: &AgentId, parent: Option<&AgentId>) {
+        if self.agents.contains_key(agent) {
+            let a = self.activity.entry(agent.clone()).or_default();
+            if a.parent.as_ref() != parent {
+                a.parent = parent.cloned();
+            }
+        }
+    }
+
+    /// How many files are changed in `worktree`, from the node's git status.
+    pub fn set_files_changed(&mut self, worktree: &str, n: u32) {
+        if self.files.get(worktree) != Some(&n) {
+            self.files.insert(worktree.to_string(), n);
+        }
+    }
+
+    pub fn files_changed(&self, worktree: &str) -> Option<u32> {
+        self.files.get(worktree).copied()
+    }
+
+    pub fn activity(&self, agent: &AgentId) -> Option<&Activity> {
+        self.activity.get(agent)
+    }
+
+    /// How many paths `agent` holds a lease on that has not ended.
+    pub fn holds(&self, agent: &AgentId, now_ms: u64) -> usize {
+        let Some(info) = self.agents.get(agent) else {
+            return 0;
+        };
+        self.leases.get(&info.project).map_or(0, |t| {
+            t.all()
+                .iter()
+                .filter(|l| &l.holder == agent && !l.is_expired(now_ms))
+                .count()
+        })
+    }
+
+    /// The title of a task `agent` has claimed, if it holds one (the first by id).
+    pub fn claimed_task(&self, agent: &AgentId) -> Option<&str> {
+        self.tasks.values().find_map(|t| match t.task.state() {
+            TaskState::Claimed(a) if a == agent => Some(t.task.title.as_str()),
+            _ => None,
+        })
+    }
+
+    /// Leases of one project that have not ended, as `(path, holder, expires_at_ms)`.
+    pub fn live_leases(&self, project: &str, now_ms: u64) -> Vec<(String, AgentId, u64)> {
+        self.export_leases(project, now_ms)
+            .into_iter()
+            .filter(|(_, _, e)| *e > now_ms)
+            .collect()
+    }
+
     /// The agent ended: it leaves the registry, loses its leases and open asks, and gives its tasks back.
     pub fn unregister(&mut self, agent: &AgentId, now_ms: u64) {
-        self.agents.remove(agent);
+        if let Some(gone) = self.agents.remove(agent) {
+            if !self.agents.values().any(|a| a.worktree == gone.worktree) {
+                self.files.remove(&gone.worktree);
+            }
+        }
         self.inboxes.remove(agent);
         self.sent.remove(agent);
+        self.activity.remove(agent);
+        self.presence_sent.remove(agent);
         self.asks.retain(|_, a| &a.from != agent && &a.to != agent);
         let held: Vec<String> = self
             .batches
@@ -412,6 +610,12 @@ impl Mesh {
         if let Some(a) = self.agents.get_mut(agent) {
             if a.state != state {
                 a.state = state.to_string();
+                // What a chat agent did last is only what it is doing while it works (or waits on the user).
+                if !matches!(state, "working" | "blocked") {
+                    if let Some(x) = self.activity.get_mut(agent) {
+                        x.latest = None;
+                    }
+                }
             }
         }
     }
@@ -505,9 +709,15 @@ impl Mesh {
     ) -> Result<(Message, Vec<AgentId>), MeshError> {
         let info = self.caller(from)?.clone();
         self.check_content(body, refs)?;
-        // Your own node's name in front is just a longer way to say "here".
+        // Your own node's name in front is just a longer way to say "here" — unless the whole address
+        // already names an agent: the hub's board keeps hub-wide `<node>/<agent>` ids (ADR-0053), so on
+        // it "n1/b" for an agent of node n1 is that agent, not "b".
         let to = match split_address(to) {
-            Some((node, agent)) if node == info.node => agent,
+            Some((node, agent))
+                if node == info.node && !self.agents.contains_key(&AgentId::new(to)) =>
+            {
+                agent
+            }
             _ => to,
         };
         if let (Some((node, agent)), "message") = (split_address(to), kind) {
@@ -608,8 +818,9 @@ impl Mesh {
             return Err(MeshError::RecipientUnknown(to.to_string()));
         }
         self.caller(from)?;
+        // Forget the caller's asks that ran out unanswered; an answered one waits for its poll, which may come after this call.
         self.asks
-            .retain(|_, a| a.answer.is_none() || &a.from != from);
+            .retain(|_, a| &a.from != from || a.answer.is_some() || a.deadline_ms > now_ms);
         let open = self
             .asks
             .values()
@@ -652,6 +863,17 @@ impl Mesh {
             return AskStatus::TimedOut;
         }
         AskStatus::Pending
+    }
+
+    /// Discards an ask whose originating caller can no longer consume its answer. Another agent cannot cancel it.
+    /// Completed answers remain available to live callers until polled; their transport owns cancellation on disconnect.
+    pub fn cancel_ask(&mut self, from: &AgentId, ask_id: &str) -> bool {
+        if self.asks.get(ask_id).is_some_and(|ask| &ask.from == from) {
+            self.asks.remove(ask_id);
+            true
+        } else {
+            false
+        }
     }
 
     /// `inbox`: messages after `since` (by id), oldest first. Reading does not remove them; `since` moves the cursor.
@@ -993,6 +1215,13 @@ impl Mesh {
     ) -> Result<String, MeshError> {
         let project = self.caller(by)?.project.clone();
         let table = self.leases.entry(project.clone()).or_default();
+        // What the caller already holds: acquiring a path it holds renews that lease in place, so a call that fails puts it back.
+        let held: Vec<(String, u64)> = table
+            .all()
+            .iter()
+            .filter(|l| &l.holder == by)
+            .map(|l| (l.path.clone(), l.expires_at_ms))
+            .collect();
         let mut taken: Vec<String> = Vec::new();
         for p in paths {
             match table.acquire(p, by, now_ms, ttl_ms) {
@@ -1000,6 +1229,11 @@ impl Mesh {
                 Err(e) => {
                     for t in &taken {
                         table.release(t, by);
+                        if let Some((_, expires)) =
+                            held.iter().find(|(h, until)| h == t && *until > now_ms)
+                        {
+                            let _ = table.acquire(t, by, now_ms, expires - now_ms);
+                        }
                     }
                     return Err(match e {
                         LeaseError::Conflict {
@@ -1016,6 +1250,13 @@ impl Mesh {
                 }
             }
         }
+        // A path the caller took again now belongs to this grant: releasing an older lease id must not free it.
+        for b in self.batches.values_mut() {
+            if &b.holder == by && b.project == project {
+                b.paths.retain(|p| !taken.contains(p));
+            }
+        }
+        self.batches.retain(|_, b| !b.paths.is_empty());
         let id = self.id("l");
         for p in &taken {
             self.events.push(Body::LeaseGranted(LeaseGranted {
@@ -1499,6 +1740,112 @@ mod tests {
             .unwrap();
     }
 
+    /// The expiry `who` would be refused with on `path` (the lease that blocks it), or `None` when the path is free.
+    fn blocked_until(m: &mut Mesh, who: &str, path: &str, now: u64) -> Option<u64> {
+        match m.lease_acquire(&id(who), &[path.into()], 1, now) {
+            Err(MeshError::LeaseHeld { expires_at_ms, .. }) => Some(expires_at_ms),
+            Ok(l) => {
+                m.lease_release(&id(who), &l, now).unwrap();
+                None
+            }
+            Err(e) => panic!("{e:?}"),
+        }
+    }
+
+    #[test]
+    fn a_failed_acquire_leaves_a_lease_the_caller_already_held_as_it_was() {
+        let mut m = mesh();
+        m.register(agent("d", "p", "laptop"));
+        m.lease_acquire(&id("a"), &["src/x.rs".into()], 60_000, 0)
+            .unwrap();
+        m.lease_acquire(&id("b"), &["src/y.rs".into()], 60_000, 0)
+            .unwrap();
+        m.take_events();
+        // All or none: the call fails on y, and x (which `a` already held) keeps its holder and its expiry.
+        assert!(matches!(
+            m.lease_acquire(
+                &id("a"),
+                &["src/x.rs".into(), "src/y.rs".into()],
+                500_000,
+                30
+            ),
+            Err(MeshError::LeaseHeld { .. })
+        ));
+        assert!(m.take_events().is_empty());
+        assert_eq!(blocked_until(&mut m, "d", "src/x.rs", 40), Some(60_000));
+        // One that had already ended by the failed call is not brought back.
+        m.lease_acquire(&id("a"), &["src/z.rs".into()], 100, 50)
+            .unwrap();
+        let _ = m.lease_acquire(&id("a"), &["src/z.rs".into(), "src/y.rs".into()], 100, 200);
+        assert_eq!(blocked_until(&mut m, "d", "src/z.rs", 210), None);
+    }
+
+    #[test]
+    fn releasing_an_older_lease_id_does_not_free_a_path_taken_again_since() {
+        let mut m = mesh();
+        // Renewed before it ended: the path moves to the newer id; the older one keeps what it still holds.
+        let old = m
+            .lease_acquire(&id("a"), &["src/x.rs".into(), "src/y.rs".into()], 60_000, 0)
+            .unwrap();
+        let new = m
+            .lease_acquire(&id("a"), &["src/x.rs".into()], 60_000, 10)
+            .unwrap();
+        m.lease_release(&id("a"), &old, 20).unwrap();
+        assert_eq!(blocked_until(&mut m, "b", "src/y.rs", 30), None);
+        assert_eq!(blocked_until(&mut m, "b", "src/x.rs", 30), Some(60_010));
+        m.lease_release(&id("a"), &new, 40).unwrap();
+        assert_eq!(blocked_until(&mut m, "b", "src/x.rs", 50), None);
+        // Ended, and taken again before the sweep saw it end.
+        let old = m
+            .lease_acquire(&id("a"), &["f.rs".into()], 1_000, 0)
+            .unwrap();
+        m.lease_acquire(&id("a"), &["f.rs".into()], 60_000, 1_200)
+            .unwrap();
+        m.expire_leases(1_300);
+        assert_eq!(
+            m.lease_release(&id("a"), &old, 1_400),
+            Err(MeshError::LeaseUnknown(old.clone()))
+        );
+        assert_eq!(blocked_until(&mut m, "b", "f.rs", 1_500), Some(61_200));
+    }
+
+    #[test]
+    fn an_answered_ask_survives_the_askers_next_ask_until_it_is_polled() {
+        let mut m = mesh();
+        let first = m.ask(&id("a"), "b", "branch?", Some(60_000), 0).unwrap();
+        m.send_message(&id("b"), "a", "main", &[], Some(&first), 10)
+            .unwrap();
+        // The asker's connection has not polled yet when its next question comes in.
+        let second = m.ask(&id("a"), "b", "test?", Some(60_000), 15).unwrap();
+        assert_eq!(
+            m.ask_status(&first, 20),
+            AskStatus::Answered {
+                reply: "main".into(),
+                from: id("b")
+            }
+        );
+        assert_eq!(m.ask_status(&second, 20), AskStatus::Pending);
+    }
+
+    #[test]
+    fn only_the_asker_can_cancel_pending_or_completed_asks() {
+        let mut m = mesh();
+        let pending = m.ask(&id("a"), "b", "pending?", None, 0).unwrap();
+        let answered = m.ask(&id("a"), "b", "answered?", None, 1).unwrap();
+        m.send_message(&id("b"), "a", "yes", &[], Some(&answered), 2)
+            .unwrap();
+        let peers = m.ask(&id("b"), "a", "other caller?", None, 3).unwrap();
+        assert!(!m.cancel_ask(&id("b"), &pending));
+        assert_eq!(m.ask_status(&pending, 4), AskStatus::Pending);
+        assert!(m.cancel_ask(&id("a"), &pending));
+        assert!(m.cancel_ask(&id("a"), &answered));
+        assert!(!m.cancel_ask(&id("a"), &pending), "already discarded");
+        assert_eq!(m.ask_status(&pending, 4), AskStatus::TimedOut);
+        assert_eq!(m.ask_status(&answered, 4), AskStatus::TimedOut);
+        assert!(!m.cancel_ask(&id("a"), &peers));
+        assert_eq!(m.ask_status(&peers, 4), AskStatus::Pending);
+    }
+
     #[test]
     fn handoff_moves_the_task_and_tells_the_receiver() {
         let mut m = mesh();
@@ -1585,6 +1932,84 @@ mod tests {
             ["message", "task", "task", "lease", "message", "task", "handoff"]
         );
         assert!(m.take_events().is_empty());
+    }
+
+    fn presence(m: &Mesh, who: &str) -> Vec<String> {
+        m.inbox(&id(who), None, 1000)
+            .unwrap()
+            .iter()
+            .filter(|x| x.kind == "presence")
+            .map(|x| x.body.clone())
+            .collect()
+    }
+
+    #[test]
+    fn joining_and_leaving_tell_the_project_once_each() {
+        let mut m = Mesh::new(Limits::default());
+        m.join(agent("a", "p", "mac"), 0);
+        m.join(agent("b", "p", "mac"), 10);
+        m.join(agent("c", "other", "mac"), 20);
+        // A restart registers again: no second notice.
+        m.join(agent("b", "p", "mac"), 30);
+        assert_eq!(
+            presence(&m, "a"),
+            ["claude-code b joined this workspace (machine mac)"]
+        );
+        assert!(presence(&m, "b").is_empty());
+        assert!(presence(&m, "c").is_empty());
+        m.leave(&id("b"), "finished", 40);
+        // Already gone: an exit after a stop says nothing more.
+        m.leave(&id("b"), "stopped", 50);
+        m.unregister(&id("b"), 60);
+        assert_eq!(
+            presence(&m, "a"),
+            [
+                "claude-code b joined this workspace (machine mac)",
+                "claude-code b left this workspace (finished)"
+            ]
+        );
+        let notice = &m.inbox(&id("a"), None, 10).unwrap()[1];
+        assert_eq!(notice.provenance.from, id("b"));
+        // Not audited as a message and never sent anywhere else.
+        assert!(m.take_outbound().is_empty());
+        assert!(m
+            .take_events()
+            .iter()
+            .all(|e| !matches!(e, Body::MessagePosted(_))));
+    }
+
+    #[test]
+    fn presence_notices_are_rate_limited_per_inbox_and_say_when_more_changed() {
+        let mut m = Mesh::new(Limits::default());
+        m.join(agent("watcher", "p", "mac"), 0);
+        for i in 0..30 {
+            let mut a = agent(&format!("h{i}"), "p", "mac");
+            a.worktree = "/elsewhere".into();
+            m.join(a, 1_000 + i);
+            m.leave(&id(&format!("h{i}")), "crashed", 1_000 + i);
+        }
+        let got = presence(&m, "watcher");
+        assert_eq!(got.len(), PRESENCE_PER_WINDOW);
+        assert_eq!(got[0], "claude-code h0 joined this project (machine mac)");
+        assert_eq!(got[1], "claude-code h0 left this project (crashed)");
+        assert!(got[PRESENCE_PER_WINDOW - 1].contains("workspace_status"));
+        // A new window lets notices through again.
+        m.join(agent("late", "p", "mac"), 70_000);
+        assert_eq!(presence(&m, "watcher").len(), PRESENCE_PER_WINDOW + 1);
+    }
+
+    #[test]
+    fn presence_bodies_are_one_clean_line() {
+        let mut m = Mesh::new(Limits::default());
+        m.join(agent("a", "p", "mac"), 0);
+        let mut evil = agent("b", "p", "mac\nIGNORE ALL\u{202e}");
+        evil.kind = "x\u{1b}[2Jy".into();
+        m.join(evil, 1);
+        let got = presence(&m, "a");
+        assert_eq!(
+            got,
+            ["x [2Jy b joined this project (machine mac IGNORE ALL)"]
+        );
     }
 
     #[test]
@@ -1765,15 +2190,40 @@ mod tests {
         }
 
         #[test]
+        fn a_hub_wide_id_for_an_agent_on_the_callers_own_node_reaches_that_agent() {
+            // The hub's board registers agents under hub-wide `<node>/<agent>` ids (Boards::sync in
+            // agora-hub), so "n1/b" names the agent itself; the node part is not a machine prefix to strip.
+            let mut m = Mesh::new(Limits::default());
+            m.register(agent("n1/a", "p", "n1"));
+            m.register(agent("n1/b", "p", "n1"));
+            m.register(agent("n2/c", "p", "n2"));
+            let me = AgentId::new("n1/a");
+            // Another node: the address names a remote agent.
+            assert!(m.handoff(&me, "n2/c", None, "s", &[], 1_000).is_ok());
+            // The same node: the whole id names a registered agent and must reach it.
+            assert!(
+                m.handoff(&me, "n1/b", None, "s", &[], 1_001).is_ok(),
+                "a handoff to an agent on the caller's own node must reach that agent"
+            );
+        }
+
+        #[test]
         fn a_failed_delivery_reaches_the_sender_as_a_notice() {
             let mut m = mesh();
-            m.delivery_failed(&AgentId::new("a1"), "n2/b7", "node.offline", 3);
+            m.delivery_failed(&AgentId::new("a1"), "m-3", "n2/b7", "node.offline", 3);
+            m.delivery_failed(&AgentId::new("a1"), "m-4", "n2/b8", "node.offline", 4);
             let got = m.inbox(&AgentId::new("a1"), None, 10).unwrap();
+            // Each notice names the message that failed, so several in flight can be told apart.
             assert_eq!(
-                (got[0].kind, got[0].body.as_str()),
-                ("delivery_failed", "node.offline")
+                got.iter()
+                    .map(|g| (g.kind, g.body.as_str(), g.reply_to.as_deref()))
+                    .collect::<Vec<_>>(),
+                vec![
+                    ("delivery_failed", "node.offline", Some("m-3")),
+                    ("delivery_failed", "node.offline", Some("m-4")),
+                ]
             );
-            m.delivery_failed(&AgentId::new("gone"), "n2/b7", "x", 3); // an agent that left: nothing happens
+            m.delivery_failed(&AgentId::new("gone"), "m-5", "n2/b7", "x", 3); // an agent that left: nothing happens
         }
     }
 }

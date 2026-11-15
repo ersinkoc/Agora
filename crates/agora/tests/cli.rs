@@ -63,22 +63,27 @@ fn start_node(s: &Setup) -> NodeProc {
     start_node_at(s, &s.home)
 }
 fn start_node_at(s: &Setup, cwd: &Path) -> NodeProc {
-    let child = Command::new(AGORA)
-        .current_dir(cwd)
-        .args(["node", "run", "--project"])
-        .arg(&s.repo)
-        .env("AGORA_HOME", &s.home)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("start node");
+    // Owned before the wait: a node that is slow to start is still killed when the test gives up on it (left running, it held the
+    // binary open and broke the next build).
+    let node = NodeProc(
+        Command::new(AGORA)
+            .current_dir(cwd)
+            .args(["node", "run", "--project"])
+            .arg(&s.repo)
+            .env("AGORA_HOME", &s.home)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("start node"),
+    );
     let sock = s.home.join("node.sock");
-    let end = Instant::now() + Duration::from_secs(15);
+    // A node on a busy Windows machine took up to 24 s to open its socket (measured), mostly in git.
+    let end = Instant::now() + Duration::from_secs(60);
     while !sock.exists() {
         assert!(Instant::now() < end, "node did not create its socket");
         std::thread::sleep(Duration::from_millis(50));
     }
-    NodeProc(child)
+    node
 }
 
 /// Run `agora <args>` and return (exit code, stdout, stderr).
@@ -281,15 +286,28 @@ fn doctor_reports_agents_and_exits_zero_on_a_healthy_machine() {
     let expected = if agora_platform::PTY_SUPPORTED { 0 } else { 1 };
     assert_eq!(code, expected, "{out}{err}");
     assert!(out.contains("Git is available"), "{out}");
-    assert!(out.contains("1 agent description loaded."), "{out}");
-    // The manifest launches `sh`: doctor says whether it is installed, and a missing one is a note, not a failure.
+    // The built-in kinds and the folder's `shell`.
+    let loaded = agora_node::manifests::BUILT_IN.len() + 1;
+    assert!(
+        out.contains(&format!("{loaded} agent descriptions loaded.")),
+        "{out}"
+    );
+    // The manifest launches `sh`: doctor says where the kind came from and whether its program is found; a missing one is a note,
+    // not a failure.
     if agora_platform::PTY_SUPPORTED {
         if sh_on_path() {
-            assert!(out.contains("shell is installed."), "{out}");
+            assert!(
+                out.contains("shell (from the manifests folder): `sh` is found."),
+                "{out}"
+            );
         } else {
-            assert!(out.contains("[note] shell is not installed"), "{out}");
+            assert!(
+                out.contains("[note] shell (from the manifests folder): this machine cannot find `sh` in its PATH"),
+                "{out}"
+            );
         }
     }
+    assert!(out.contains("codex (built in): "), "{out}");
     // No node is running in this setup: a note, not a failure.
     assert!(out.contains("[note] No node is running"), "{out}");
 }
@@ -320,6 +338,7 @@ fn node_stdio_carries_the_framed_protocol_over_pipes() {
         target_node: String::new(),
         command: Some(Cmd::AgentStop(agora_protocol::v1::AgentStop {
             agent_id: "agent-404".into(),
+            stop_helpers: false,
         })),
     };
     let bytes = Frame {
@@ -488,16 +507,16 @@ fn a_node_owner_can_trust_a_device_and_bad_input_trusts_nothing() {
     };
     assert!(run(&["node", "trust", "phone", &key]).status.success());
     let file = home.join("data/trusted-devices");
-    assert_eq!(
-        std::fs::read_to_string(&file).unwrap(),
-        format!("phone {key}\n")
+    // One line, the id and the key as before; ADR-0061 adds when its trust began (`since=`).
+    let written = std::fs::read_to_string(&file).unwrap();
+    assert!(
+        written.starts_with(&format!("phone {key} since=")),
+        "{written}"
     );
+    assert_eq!(written.lines().count(), 1);
     assert!(!run(&["node", "trust", "phone", "zz"]).status.success());
     assert!(!run(&["node", "trust", "phone"]).status.success());
-    assert_eq!(
-        std::fs::read_to_string(&file).unwrap(),
-        format!("phone {key}\n")
-    );
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), written);
     let _ = std::fs::remove_dir_all(&home);
 }
 

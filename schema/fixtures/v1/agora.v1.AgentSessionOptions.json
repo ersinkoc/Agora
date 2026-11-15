@@ -1,0 +1,21 @@
+{
+  "agentId": "x",
+  "modes": [
+    {
+      "id": "x",
+      "name": "x",
+      "description": "x",
+      "skipsPermissions": true
+    }
+  ],
+  "models": [
+    {
+      "id": "x",
+      "name": "x",
+      "description": "x",
+      "skipsPermissions": true
+    }
+  ],
+  "currentMode": "x",
+  "currentModel": "x"
+}

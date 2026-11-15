@@ -31,6 +31,18 @@ sandbox.write = /var/folders/xx/yyyy/T, /var/folders/xx/yyyy/C, ~/.cargo/registr
 - Listing the per-user temp folder lets the agent read other programs' temp files of the same user. Without it, tools that honour
   `TMPDIR` (Python, Node, Rust) still work: the node gives each agent a temp folder of its own (PR #244).
 
+A confined agent on macOS writes only the parts of its checkout's shared `.git` a commit needs (`objects`, `refs`, `logs/refs`,
+`packed-refs`, its own worktree admin folder); the shared `config` and `hooks` are read-only, so it cannot plant a hook or setting that
+your git runs in the main checkout. Git run *inside the agent's worktree* is another matter: the agent can still rewrite that worktree's
+`.git` file and its admin folder (`commondir`, `config.worktree`), so treat git there as running the agent's settings (the node's own
+git switches off what it can, see T8b in the threat model). The node opens the shared folder only when its
+`worktrees/<name>/gitdir` points back at the worktree and `.git` is a plain file, so a `.git` file the agent redirected or replaced with a link opens nothing new on the next start.
+
+Measured with git 2.56 in a node-made worktree: status, add, commit, log, new branches and tags, checkout, stash, fetch, `pack-refs` and
+deleting a branch work (a delete warns that it could not drop the branch's config section). Refused, because they write the shared
+`config` or create folders in the shared `.git`: `git branch --set-upstream-to`, `git config`, `git remote add`, the agent's own
+`git worktree add`, and `git gc` (so git's automatic gc cannot run either). Run those from your own checkout.
+
 ### macOS: `worktree-offline`
 
 `sandbox = worktree-offline` takes the same `sandbox.read` / `sandbox.write` lines and also cuts the network: the agent can connect only to
@@ -92,5 +104,12 @@ What differs from macOS and Linux:
 - **A half-listed tool can fail harder than an unlisted one.** With `~\.config\git` listed but its `ignore` file a symbolic link to
   `~\dotfiles\git\ignore`, git stops with `fatal: cannot use ...\.config\git\ignore as an exclude file`; unlisted, it only warns. List symbolic link
   targets too (`Get-Item <file> | Select-Object Target`).
+- **git's packed refs are read-only**, so the shared `.git` folder's root stays closed (an ADR-0050 decision; widening it needs an amendment).
+  Measured with git 2.56 and a `--worktree` agent:
+  - A commit is made, but git prints `error: Unable to create '<checkout>/.git/packed-refs.lock': Permission denied`. Agents may read
+    that line as a failed commit; check with `git log`.
+  - `git branch -d` fails with the same error. Delete branches outside the agent.
+  - Without `~\.config\git` in `sandbox.read`, git also warns `unable to access '...\.config/git/ignore': Permission denied`; it is
+    harmless.
 - **rustup needs `~\.rustup` itself** (`could not create home directory ... (os error 183)` when only one toolchain folder is listed).
 - Not working yet: `cargo build` (`Access is denied` starting `rustc.exe`); npm's cache (`%LOCALAPPDATA%\npm-cache`) is too large to list per agent.

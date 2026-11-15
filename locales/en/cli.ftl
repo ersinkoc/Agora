@@ -2,7 +2,12 @@
 
 cli-usage =
     Usage:
-      agora node run [--socket PATH] [--manifests DIR] [--project PATH]... [--data DIR] [--worktrees DIR]
+      agora [--ui tui|web|none [--save]] [--resume ask|auto [--save]]
+      agora web
+      agora status
+      agora down
+      agora service install|remove|status
+      agora node run [--socket PATH] [--manifests DIR] [--project PATH]... [--data DIR] [--worktrees DIR] [--resume auto]
       agora agent start KIND [--cwd PATH] [--worktree] [--project NAME] [--name NAME] [--accept-project-id-change] [--socket PATH]
       agora project init [--cwd PATH] [--socket PATH]
       agora agent stop AGENT_ID [--socket PATH]
@@ -12,22 +17,29 @@ cli-usage =
       agora terminal attach AGENT_ID [--socket PATH]
       agora node stdio [--socket PATH]
       agora mesh stdio --socket PATH
-      agora hub run [--listen ADDR] [--hub-dir DIR] [--name HOST]... [--web DIR]
+      agora hub run [--listen ADDR] [--hub-dir DIR] [--name HOST]... [--web DIR] [--metrics]
       agora hub code [--hub-dir DIR]
       agora hub ssh install NAME [--yes] [--unsigned] [--release-url URL] [--hub-dir DIR]
       agora hub login [--hub-dir DIR]
+      agora password set|clear|status [--hub-dir DIR]
       agora hub notify [--ntfy URL | --webhook URL | --test] [--hub-dir DIR]
       agora hub prices update [--url URL] [--hub-dir DIR]
       agora hub ssh [add NAME DESTINATION [--port N]] [--hub-dir DIR]
       agora hub backup [FILE] [--keep N] [--hub-dir DIR]
       agora hub restore FILE [--hub-dir DIR]
-      agora node enroll --hub URL --ca FILE --code CODE --id NAME
+      agora hub machines [forget NAME | forget --old] [--refuse-return] [--yes] [--hub-dir DIR]
+      agora hub devices [forget DEVICE_ID] [--hub-dir DIR]
+      agora node enroll --hub URL --ca FILE --code CODE --id NAME [--yes --fingerprint FP]... [--include-others] [--replace]
+      agora panel
       agora node trust DEVICE_ID PUBLIC_KEY_HEX [--data DIR]
+      agora node trust --from-hub [--yes --fingerprint FP]... [--include-others] [--replace] [--data DIR]
+      agora node untrust DEVICE_ID [--data DIR]
       agora tui [--hub HOST:PORT --ca FILE --code CODE] [--hub-dir DIR]
       agora update [--check] [--version X] [--release-url URL] [--release-key FILE] [--unsigned]
       agora adapter install NAME [--registry URL] [--root-key FILE] [--yes] | update [NAME] | list | remove NAME
       agora doctor [--data DIR] [--manifests DIR] [--socket PATH]
 cli-node-listening = Node is running. Control socket: { $socket }
+cli-node-events-set-aside = Events recorded before this machine was linked as { $node_id } (under { $old_id }) were set aside and will not be sent to the hub: { $path }
 cli-agent-started = Started agent { $agent_id } in { $worktree }
 cli-agent-stopped = Stopped agent { $agent_id }
 cli-agent-prompted = Sent the prompt to agent { $agent_id }
@@ -36,11 +48,13 @@ cli-agent-kinds-empty = This node has no agent descriptions.
 cli-terminal-detached = Detached from { $agent_id }.
 cli-attach-needs-terminal = Attaching needs an interactive terminal.
 cli-node-not-running = No node is listening at { $socket }. Start one with "agora node run".
+cli-node-refused = The node at { $socket } refused this process. The node accepts only its own user, and never a confined agent; run the command as the user who started the node.
 cli-unknown-project = No project named { $project } is registered on this node.
 cli-ambiguous-project = More than one project is registered; choose one with --project.
 cli-no-projects = This node has no projects. Start it with --project PATH.
 cli-bad-arguments = The arguments were not understood.
 cli-error = Error { $code }: { $message }
+cli-invalid-directory-identity_changed = This folder's project identity changed since an agent last started here. Add --accept-project-id-change to start one anyway.
 
 doctor-status-ok = ok
 doctor-status-warn = note
@@ -63,11 +77,35 @@ doctor-manifests = { $detail ->
         [one] 1 agent description loaded.
        *[other] { $detail } agent descriptions loaded.
     }
-doctor-manifests-missing = No agent descriptions folder at { $detail }.
-doctor-agent-installed = { $detail } is installed.
-doctor-agent-missing = { $detail } is not installed on this machine.
+doctor-agent-installed = { $detail } ({ $from ->
+        [built-in] built in
+       *[folder] from the manifests folder
+    }): `{ $program }` is found.
+doctor-agent-missing = { $detail } ({ $from ->
+        [built-in] built in
+       *[folder] from the manifests folder
+    }): this machine cannot find `{ $program }` in its PATH. Install it there, or start the node from a terminal where `{ $program }` runs.
 doctor-policy-path-dropped = The node's policy line "{ $detail }" names a path the node cannot use (relative, "..", or "~" without a home folder); agents start without it. Write a full path or one starting with "~/".
 doctor-policy-path-missing = The node's policy line "{ $detail }" names a path that does not exist yet; agents start without it until it does.
+doctor-policy-restart = The node reads its policy file { $detail } only when it starts: after you change it, restart the node ("agora node run"). Trusting or removing a device needs no restart.
+doctor-policy-changed = The policy file { $detail } changed after this node started, so the change does not apply yet. Restart the node ("agora node run") to apply it.
+doctor-signed-commands = Commands sent to this machine through the hub need a signature from one of your trusted devices: { $detail }.
+doctor-signed-commands-team = Some devices are limited to certain projects, so every command sent through the hub that changes something needs a signature from a trusted device: { $detail }.
+doctor-signed-commands-none = Commands sent to this machine through the hub (stop an agent, type into its terminal, write a file) run without a signature from your device, so whoever controls the hub could send them. Starting an agent in a folder from the window is always signed. To require a signature, add this line to { $detail } and restart the node: signed_commands = agent.start, agent.stop, agent.prompt, terminal.input, files.write
+doctor-devices = { $detail ->
+    [one] One device is trusted on this machine
+   *[other] { $detail } devices are trusted on this machine
+}; { $unlimited } of them may act in every project.
+doctor-devices-none = No device is trusted on this machine yet, so it accepts no signed request: approvals and starts from the window are refused here. Trust your browser or terminal with "agora node trust --from-hub".
+doctor-skip-permissions = { $detail ->
+    [allow] Agents may be started in a mode that skips their permission questions, after your confirmation and signature (policy: skip_permissions = allow).
+    [confined_only] Agents may skip their permission questions only while they are confined (policy: skip_permissions = confined_only).
+   *[other] No agent may be started in a mode that skips its permission questions (policy: skip_permissions = forbid).
+}
+doctor-policy-problems = { $detail ->
+    [one] One line
+   *[other] { $detail } lines
+} of the node's policy file could not be understood; until they are fixed, no agent may skip its permission questions.
 doctor-manifest-invalid = The agent description { $detail } could not be read.
 doctor-summary-ok = Everything Agora needs is in place.
 doctor-summary-problems = Something Agora needs is missing. Fix the items marked PROBLEM.
@@ -77,8 +115,48 @@ cli-hub-notify = Notifications go to { $count } target(s) from { $file }.
 cli-hub-notify-skipped = { $count } line(s) of { $file } were not understood and are ignored. Each line is `ntfy URL` or `webhook URL`.
 cli-hub-web = Web app: https://{ $addr }/ . Sign in with the code { $code } (valid for 10 minutes; `agora hub login` makes another). The hub's certificate is signed by its own CA, so the browser warns until you trust it.
 cli-hub-login = Sign-in code for the web app: { $code } (valid for 10 minutes). Open the hub's address in a browser and enter it.
-cli-trusted = Device { $id } can now answer approvals on this node. Restart the node to apply it.
+cli-password-prompt = New screen password (not shown as you type):
+cli-password-repeat = Type it again:
+cli-password-needs-terminal = Setting the screen password needs an interactive terminal: it is never read from a pipe or a file.
+cli-password-too-short = That is too short: use at least { $min } characters.
+cli-password-too-long = That is too long.
+cli-password-mismatch = The two did not match; nothing was changed.
+cli-password-set = Screen password set. A sign-in from another machine now needs it; this machine's own browser is never asked. { $count } open sessions were signed out.
+cli-password-cleared = Screen password removed. A sign-in code alone is enough again. { $count } open sessions were signed out.
+cli-password-on = A screen password is set: sign-ins from other machines need it.
+cli-password-off = No screen password is set: a sign-in code alone is enough.
+cli-trusted = Device { $id } can now answer approvals on this node.
 cli-trust-failed = Could not trust that device: { $reason }
+cli-devices-offer = The hub lists { $count ->
+        [one] a device
+       *[other] { $count } devices
+    } this machine does not trust yet. Compare each fingerprint with the one the window shows under "This device":
+cli-devices-line =   { $name } ({ $id }) · registered { $when }
+cli-devices-line-user =   { $name } ({ $id }) · of { $user } · registered { $when }
+cli-devices-fingerprint =     fingerprint { $fingerprint }
+cli-devices-replaces =     This machine already trusts { $id } with another key: trusting this one replaces it (only with --replace).
+cli-devices-unproven = The hub lists { $id } without its own signature (proof that its key is held); it is not offered.
+cli-devices-others = Devices of other people on this hub ({ $count }), trusted only with --include-others and their fingerprints:
+cli-devices-others-need-flag = Nothing was trusted: these devices are not the hub owner's. To trust one, pass --yes --include-others --fingerprint FP.
+cli-devices-replace-refused = Not trusted: { $id } is already trusted here with another key. Pass --replace to replace it.
+cli-devices-question = Trust these devices on this machine? [y/N]
+cli-devices-yes = y, yes
+cli-devices-trusted = Trusted { $name } ({ $id }, { $fingerprint }) on this machine.
+cli-devices-none = No device is registered on the hub yet. Sign in from the window, then run "agora node trust --from-hub" here.
+cli-devices-none-new = Every device registered on the hub is already trusted on this machine.
+cli-devices-declined = Nothing was trusted.
+cli-devices-not-asked = Nothing was trusted: this is not an interactive terminal. Run "agora node trust --from-hub" on this machine, or pass --yes with --fingerprint for each device.
+cli-devices-unmatched = No device the hub lists has the fingerprint { $fingerprint }; it was not trusted.
+cli-devices-not-enrolled = This machine is not enrolled with a hub. Run "agora node enroll" first.
+cli-devices-failed = Could not get the devices from the hub ({ $reason }).
+cli-untrusted = Device { $id } is no longer trusted on this machine.
+cli-untrust-unknown = Device { $id } was not trusted on this machine. It stays refused if the hub carries an earlier approval of it.
+cli-hub-device-forgotten = Device { $id } is no longer listed. Machines keep refusing it.
+cli-hub-device-not-forgotten = Device { $id } is not a removed device on this hub; only removed devices can be forgotten.
+cli-hub-devices-none = No device is registered yet. A browser or the terminal client registers itself when it signs in.
+cli-hub-device-line = { $name } · { $fingerprint } · { $id } · { $user } · registered { $created } · last used { $used }{ $state }
+cli-device-state-revoked = {" "}· removed
+cli-device-state-waiting = {" "}· waiting for approval
 cli-hub-backup = Backup written to { $path }.
 cli-hub-restored = Database restored from the backup into { $path }. The previous one is kept next to it as before-restore.
 cli-hub-failed = The hub command failed: { $reason }
@@ -117,6 +195,7 @@ cli-hub-ssh-install-manual = { $name } is enrolled, but it has neither systemd n
 cli-hub-ssh-install-failed = Stopped at step "{ $step }" on { $name }: { $detail } Already done: { $done }. Nothing was rolled back.
 cli-update-current = Agora { $version } is the newest release.
 cli-update-available = Agora { $version } is available (this is { $current }). Run "agora update" to install it.
+cli-update-local-network = macOS may ask again whether Agora may use the local network: allow it (or turn `agora` on in System Settings > Privacy & Security > Local Network), or the node started at login cannot reach a hub on another machine.
 cli-update-done = Updated to Agora { $version }. Running agents keep going; restart the node to use the new version.
 cli-update-failed = The update did not happen: { $reason }
 cli-update-checksum = The download does not match its published checksum. Nothing was changed.
@@ -138,3 +217,138 @@ cli-adapter-listed = { $name } { $version } (publisher { $publisher })
 cli-adapter-listed-revoked = { $name } { $version } (publisher { $publisher }, revoked in the newest registry index: remove it or find a new publisher)
 
 cli-project-identity = Project identity: { $id } (folder: { $path }). Share .agent-project.json with the other copies of this project.
+
+cli-panel = Open the hub's panel at { $url } in a browser. This machine's browser must trust the hub's certificate: import { $ca } as a certificate authority (on Windows: certutil -user -addstore Root { $ca }). Sign in with a code from "agora hub login" on the hub machine.
+cli-panel-none = This machine is not enrolled with a hub, so there is no panel to open. Enroll it first with "agora node enroll".
+
+# ADR-0062: plain `agora` (the front door), `agora web`, `agora status`, `agora down`.
+frontdoor-welcome = Welcome to Agora. What should this machine do?
+frontdoor-choice-here = 1) Start Agora here: your agents run on this machine and you open them from here
+frontdoor-choice-alone = 2) Just this machine, alone
+frontdoor-choice-join = 3) Join an Agora that runs on another machine
+frontdoor-choose = Type 1, 2 or 3 and press Enter:
+frontdoor-lan-question = Let other machines of yours connect? [y/N]
+frontdoor-autostart-question = Start Agora when you log in? [Y/n]
+frontdoor-autostart-later = Agora will not start by itself when you log in. `agora service install` sets that up whenever you want.
+frontdoor-resume-question = Bring agents back by themselves after a restart? [Y/n]
+frontdoor-resume-off = Agents will not come back by themselves after a restart; the window offers to bring each one back. `agora --resume auto --save` turns it on again.
+frontdoor-resume-saved = Saved. It applies from the next time Agora starts on this machine: a node running now keeps what it started with until `agora down`.
+frontdoor-join-later = Joining from here is not available yet. On the machine that runs Agora, run `agora hub code`; then here run `agora node enroll` and `agora node run` (see `agora --help`).
+frontdoor-get-started = Agora is not set up on this machine yet. Run `agora` in a terminal and answer one question. (Settings are kept in { $path }.)
+frontdoor-set-up-by-hand = This machine already has an Agora started by hand ({ $path }). `agora` does not take it over yet: keep using `agora hub run` and `agora node run`, or set AGORA_HOME to a new folder to let `agora` set one up there.
+frontdoor-saved = Saved in { $path }.
+frontdoor-bad-machine-file = { $path } could not be read. Fix it, or delete it and run `agora` again to answer the first question anew.
+frontdoor-not-set-up = Agora is not set up on this machine yet. Run `agora` first.
+frontdoor-no-port = No free port was found from { $port } on.
+frontdoor-failed = Agora could not start: { $reason }
+frontdoor-lock-busy = Another process has held { $path } for more than 10 seconds (it may be stopped or hung), so Agora did not change what runs. Find it with `agora status`, or end it, and try again.
+frontdoor-lock-unsafe = { $path } (or its folder) is a link, a second name of another file, or not a plain file or folder, so Agora did not use it. Remove it, and Agora makes a new one.
+frontdoor-lock-not-yours = { $path } (or its folder) belongs to another user, so Agora did not use it. Remove it, or give it back to your user.
+frontdoor-role-hub = hub
+frontdoor-role-node = node
+frontdoor-starting = Starting the { $role }…
+frontdoor-in-job = The { $role } could not leave the job of the terminal that started it, so it ends when that terminal closes. Start `agora` from a terminal outside that job (or a service) to keep it running.
+frontdoor-not-ready = The { $role } did not start within { $seconds } s. What it wrote is in { $log }
+frontdoor-not-linked = This machine did not connect to its hub within { $seconds } s. What it wrote is in { $log }
+frontdoor-running = Agora is running on this machine. It keeps running when you close this window; `agora status` shows it, `agora down` stops it.
+frontdoor-web-failed = Could not sign the browser in: { $reason }. Run `agora web` again; `agora status` shows whether Agora is running.
+frontdoor-web-opened = Opened Agora in your browser, signed in.
+frontdoor-web-url = Open this address in your browser to sign in (it works once, for 10 minutes; if it expired, run `agora web` again): { $url }
+status-machine = This machine's Agora ({ $path }); interface: { $ui }
+status-running = The { $role } is running (process { $pid }, version { $version })
+status-running-supervised = The { $role } is running (process { $pid }, version { $version }; its supervisor is process { $supervisor })
+status-running-other = The { $role } is running (it was not started by `agora`)
+status-stopped = The { $role } is not running
+status-hub = listens on { $addr }; data folder { $dir }
+status-node-linked = connected to { $hub } as { $id }
+status-node-not-linked = not connected to a hub
+status-agents = agents running: { $count }
+status-log = log: { $log }
+down-stopped = Stopped the { $role } (process { $pid }).
+down-stopped-supervised = Stopped the { $role } and its supervisor (process { $pid }).
+down-failed = Could not stop the { $role }: { $reason }
+down-still-running = it was still running 10 seconds after being asked to stop
+down-lock-busy = The process ended, but another process has held { $path } for more than 10 seconds (it may be stopped or hung), so its old lock file stays: harmless, the next start replaces it. Find that process, or end it.
+down-nothing = Nothing to stop: `agora` did not start anything that is still running.
+service-description = Starts the Agora { $role } when you log in (it keeps it running).
+service-unsupported = Starting Agora when you log in is not available on this system yet. Start it with `agora` after logging in.
+service-registering = Registering "{ $name }" to start the { $role } when you log in. It runs: { $command }
+service-installed = The { $role } now starts when you log in ("{ $name }"), and it was started now.
+service-already = The { $role } already starts when you log in ("{ $name }"); nothing changed. To register it anew, run `agora service remove` first.
+service-installed-running = The { $role } now starts when you log in ("{ $name }"). It runs already (process { $pid }), so it was not started again.
+service-installed-not-started = The { $role } now starts when you log in ("{ $name }"), but it could not be started now: { $reason }. `agora` starts it.
+service-bad-path = "{ $path }" cannot go into the login entry: it contains `%` (the system would read it as a variable) or characters it cannot carry. Move Agora or its folder to a plain path.
+supervise-log-link = The log { $log } (or its folder) is a link, a second name of another file, or not a plain file of yours, so the supervisor does not write to it. Remove it, and `agora` makes a new one.
+service-install-failed = Could not register "{ $name }": { $reason }
+service-removed = "{ $name }" is removed: the { $role } no longer starts when you log in.
+service-none = The { $role } was not set to start when you log in.
+service-remove-failed = Could not remove "{ $name }": { $reason }
+service-status-installed = The { $role } starts when you log in ("{ $name }").
+service-status-disabled = The { $role } is set to start when you log in ("{ $name }"), but that is turned off in this system's settings.
+service-status-not-installed = The { $role } does not start by itself when you log in (`agora service install` sets that up).
+service-status-failed = Could not read "{ $name }": { $reason }
+service-status-running = running now (process { $pid })
+service-status-stopped = not running now
+service-unavailable = Starting Agora when you log in is not available on this machine: on Linux it needs systemd's per-user services (`systemctl`), which were not found; on macOS it needs your login session (log in at the screen; SSH alone is not enough). Start it with `agora` after logging in.
+service-no-user-manager = Could not reach your user's service manager for "{ $name }": this session has no systemd user bus (for example `su`, or an SSH session while your user manager is not running), or on macOS no login session (an SSH session while you are not logged in at the screen). Log in on this machine and try again; nothing was changed.
+service-in-the-way = { $path } is a link or not a plain file, so Agora does not replace it. If it is not yours to keep, remove it and try again.
+service-bad-path-control = "{ $path }" cannot go into the login entry: it contains a line break or another control character. Move Agora or its folder to a plain path.
+service-bad-path-relative = "{ $path }" cannot go into the login entry: it is not a full path. Run Agora by its full path, or name its folder with a full path.
+service-not-ours = "{ $name }" is already set up on this machine, but not by Agora ({ $path }), so Agora leaves it exactly as it is: it neither replaces, stops nor removes it. To let Agora set it up, remove or rename that one yourself first.
+service-root = `agora service` sets up a login service for your own user, so it does not run as root (with `sudo`). Run it as yourself, without `sudo`; nothing was changed.
+service-no-config-folder = There is no folder for your login services: neither XDG_CONFIG_HOME nor HOME names a full path. Set HOME and try again; nothing was changed.
+service-not-loaded = After reloading, systemd did not find "{ $name }" at { $path }; it reads its user units from another folder (its own XDG_CONFIG_HOME). Nothing was registered.
+service-overridden = "{ $name }" would not run only what Agora wrote: systemd also reads { $paths }, which can change what it runs. Nothing was registered. Remove or move those files yourself if you do not need them, and try again.
+service-drop-ins-left = These files that change "{ $name }" were not written by Agora and are left as they are: { $paths }
+service-bad-path-backslash = "{ $path }" cannot go into the login entry: a folder with a backslash (\) cannot be written safely into a systemd unit. Move Agora's folder to a path without one.
+service-bad-program = "{ $path }" cannot be started by systemd: the program's path contains a quote or a backslash. Move Agora to a path without one.
+service-turned-off-in-settings = "{ $name }" is turned off in System Settings > General > Login Items & Extensions ("Allow in the Background"), and only you can turn it on there. Turn it on, then run `agora service install` again; nothing was changed.
+service-was-off = The { $role } was set up to start when you log in ("{ $name }") but that was turned off; turning it on again.
+service-already-overridden = The { $role } is set up to start when you log in ("{ $name }"), but systemd also reads { $paths }, which can change what it runs. Nothing was changed; remove or move those files yourself if you do not need them.
+service-status-overridden = systemd also reads { $paths } for it, which can change what it runs
+service-linger-hint = This starts Agora when you log in. To start it at boot without logging in, run `loginctl enable-linger` yourself; Agora did not do that.
+supervise-not-bound = The { $role } is not started: this system did not let it be tied to its supervisor, so `agora down` could not stop it. Start it by hand (`agora { $role } run`) or report this.
+supervise-stop-request = Supervisor: asked to stop; the { $role } was stopped with it.
+supervise-stopped = Supervisor: the { $role } stopped (exit code 0); it is not started again.
+supervise-already-running = Supervisor: the { $role } already runs here (it was not started by this supervisor), so another one is not started.
+supervise-lost-lock = Supervisor: the { $role }'s lock no longer names this supervisor (`agora down` ran, or another took over), so the { $role } is not started again.
+supervise-lock-held = Another process (process { $pid }) already looks after the { $role } on this Agora folder; this supervisor ends.
+status-restarting = The { $role } is not running: it crashed ({ $end }) and its supervisor (process { $pid }) starts it again shortly (restart { $count } of { $max }).
+status-restarts = { $count ->
+    [one] restarted once in the last { $window } minutes
+   *[other] restarted { $count } times in the last { $window } minutes
+  }; the last crash: { $end }, { $minutes ->
+    [0] less than a minute ago
+   *[other] { $minutes } min ago
+  }
+status-gave-up = The { $role } crashed again after { $max } restarts and was not started again ({ $end }, { $minutes ->
+    [0] less than a minute ago
+   *[other] { $minutes } min ago
+  }). Its log says why; `agora` starts it again.
+status-refused = The { $role } ended right after starting ({ $end }, { $minutes ->
+    [0] less than a minute ago
+   *[other] { $minutes } min ago
+  }), so it was not started again. Its log says why; `agora` tries again.
+supervise-end-code = exit code { $code }
+supervise-end-signal = signal { $signal }
+supervise-refused = Supervisor: the { $role } ended { $seconds } s after starting ({ $end }), too soon to be a crash, so it is not started again. The reason is above.
+supervise-restarting = Supervisor: the { $role } ended after { $seconds } s ({ $end }); starting it again in { $wait } s (restart { $count } of { $max } in { $minutes } minutes).
+supervise-gave-up = Supervisor: the { $role } ended again ({ $end }) after { $max } restarts in { $minutes } minutes; giving up. `agora` starts it again.
+supervise-handoff-lost = The { $role } was stopped while its supervisor was starting (`agora down` ran), so it is not started.
+cli-node-policy-not-understood = node.policy_not_understood: the policy file has a line this node does not understand ({ $line }), so no agent may start without asking until it is fixed.
+cli-version = Agora { $version }
+cli-machines-none = The hub shows no machine.
+cli-machines-none-old = No machine is old: every machine was seen in the last 24 hours.
+cli-machine-line = { $id } · { $state ->
+    [online] online
+    [old] old, last seen { $seen }
+   *[other] offline, last seen { $seen }
+}
+cli-machine-unknown = The hub shows no machine named { $id }.
+cli-machines-question = Forget these machines? They leave every window; one that connects again comes back. [y/N]
+cli-machines-question-refuse = Forget these machines and refuse them if they connect again? Each would need a new join code. [y/N]
+cli-machines-declined = Nothing was forgotten.
+cli-machines-not-asked = Nothing was forgotten: this terminal cannot answer. Run it in a terminal, or add --yes.
+cli-machines-hub-unreachable = The running hub could not be reached from its folder ({ $reason }). Machines are forgotten by the running hub; start it with "agora" or "agora hub run".
+cli-machine-forgotten = { $id } is forgotten.
+cli-machine-not-forgotten = { $id } was not forgotten ({ $code }).

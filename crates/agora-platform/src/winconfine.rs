@@ -92,6 +92,44 @@ const LABEL_LINE: &str = "#label";
 const WO_LINE: &str = "#wo";
 /// The owner line of a ledger whose spawn has ended with entries it could not take back: no live process, so it is stale.
 const ENDED_OWNER: &str = "#owner\t0\t0";
+/// A ledger folder whose name is not valid Unicode is written as this mark followed by its UTF-16 units in hex. A lossy spelling would
+/// name a folder that does not exist, and recovery takes a missing folder as gone, so its label and entries would stay for good. No
+/// real path starts with `?`, so ledgers written before this read the same.
+const WIDE_MARK: &str = "?wide:";
+
+/// A folder as ledger lines spell it.
+fn ledger_path(p: &Path) -> std::borrow::Cow<'_, str> {
+    use std::os::windows::ffi::OsStrExt;
+    match p.to_str() {
+        Some(s) => s.into(),
+        None => {
+            let hex: String = p
+                .as_os_str()
+                .encode_wide()
+                .map(|u| format!("{u:04x}"))
+                .collect();
+            format!("{WIDE_MARK}{hex}").into()
+        }
+    }
+}
+
+/// The folder a ledger line names (the reverse of [`ledger_path`]).
+fn path_from_ledger(s: &str) -> PathBuf {
+    use std::os::windows::ffi::OsStringExt;
+    if let Some(hex) = s.strip_prefix(WIDE_MARK) {
+        let units: Option<Vec<u16>> = (0..hex.len())
+            .step_by(4)
+            .map(|i| {
+                hex.get(i..i + 4)
+                    .and_then(|h| u16::from_str_radix(h, 16).ok())
+            })
+            .collect();
+        if let Some(units) = units {
+            return PathBuf::from(std::ffi::OsString::from_wide(&units));
+        }
+    }
+    PathBuf::from(s)
+}
 
 fn last_error() -> io::Error {
     // SAFETY: plain call.
@@ -550,16 +588,42 @@ fn has_explicit_label(path: &Path) -> bool {
     explicit
 }
 
+/// Folders below a worktree whose hard links are made on purpose and are not checked for them (#571): package stores link every
+/// package file into `node_modules` (pnpm: about 85 % of a checkout's files), and git hard-links objects in a `--local` clone.
+const LINKS_NOT_CHECKED: &[&str] = &["node_modules", "target", ".git"];
+
+/// Whether `path` is a regular file with more than one name (a hard link): asked of a handle opened for its attributes only, without
+/// following a link, so nothing is read.
+fn has_other_names(path: &Path) -> io::Result<bool> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+    };
+    let file = std::fs::OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    let (links, reparse) = crate::windows::link_facts(&file)?;
+    Ok(!reparse && links > 1)
+}
+
 /// The first file or folder at or below `root` whose own DACL lets `Users` or `Everyone` write (Amendment B, 4). Walks the whole tree:
 /// a single child with such a grant would let any confined agent write there through the Low label.
-fn broad_writer_below(root: &Path) -> io::Result<Option<(PathBuf, SandboxRefusal)>> {
+///
+/// With `check_links` (the agent's worktree), also the first regular file with another name elsewhere (#571): the agent's ACE and the
+/// Low label are propagated to the file object itself, so a hard link made outside confinement would let the agent write the file's
+/// other place too. [`LINKS_NOT_CHECKED`] folders are walked for grants but not for links.
+fn broad_writer_below(
+    root: &Path,
+    check_links: bool,
+) -> io::Result<Option<(PathBuf, SandboxRefusal)>> {
     let refused: Vec<Sid> = REFUSED_WRITERS
         .iter()
         .map(|s| Sid::from_string(s))
         .collect::<io::Result<_>>()?;
     let need_owner = !self_grant_enabled();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(p) = stack.pop() {
+    let mut stack = vec![(root.to_path_buf(), check_links)];
+    while let Some((p, links)) = stack.pop() {
         // Without the self-grant, a file or folder whose label the user cannot set is refused here, before anything changes.
         if grants_write_to(&p, &refused) {
             return Ok(Some((p, SandboxRefusal::BroadWriteGrant)));
@@ -571,8 +635,16 @@ fn broad_writer_below(root: &Path) -> io::Result<Option<(PathBuf, SandboxRefusal
         let meta = std::fs::symlink_metadata(&p)?;
         if meta.is_dir() && !meta.file_type().is_symlink() {
             for e in std::fs::read_dir(&p)?.flatten() {
-                stack.push(e.path());
+                // Only a real folder of such a name is exempt: a file named `node_modules` (or a link, a junction) is checked as any
+                // other (#591 review).
+                let exempt_folder = e.file_type().is_ok_and(|t| t.is_dir() && !t.is_symlink())
+                    && LINKS_NOT_CHECKED
+                        .iter()
+                        .any(|n| e.file_name().eq_ignore_ascii_case(n));
+                stack.push((e.path(), links && !exempt_folder));
             }
+        } else if links && meta.is_file() && has_other_names(&p)? {
+            return Ok(Some((p, SandboxRefusal::WritableHasLinks)));
         }
     }
     Ok(None)
@@ -707,11 +779,12 @@ fn grants_write_to(path: &Path, sids: &[Sid]) -> bool {
     found
 }
 
-/// Amendment B, 4: refuses a profile whose writable folders (or anything below them) let `Users` or `Everyone` write. Returns the
-/// first such path.
+/// Amendment B, 4: refuses a profile whose writable folders (or anything below them) let `Users` or `Everyone` write, and (#571) a
+/// worktree (`Sandbox::reopen`) holding a file with another name elsewhere, or a write entry that is itself such a file (a manifest's
+/// or the policy's `sandbox.write` file, granted like a folder). Returns the first such path.
 pub(crate) fn preflight(sandbox: &Sandbox) -> Result<(), (PathBuf, SandboxRefusal)> {
     for p in sandbox.write.iter().filter(|p| p.exists()) {
-        match broad_writer_below(p) {
+        match broad_writer_below(p, sandbox.reopen.contains(p) || p.is_file()) {
             Ok(None) => {}
             Ok(Some(hit)) => return Err(hit),
             // A folder whose permissions cannot be read cannot be promised either.
@@ -850,26 +923,22 @@ struct Plan<'a> {
 }
 
 fn wo_line(path: &Path, logon: &str) -> String {
-    format!("{WO_LINE}\t{}\t{logon}", path.to_string_lossy())
+    format!("{WO_LINE}\t{}\t{logon}", ledger_path(path))
 }
 
 fn write_ledger(file: &Path, plan: &Plan) -> io::Result<()> {
     let mut text = owner_line();
     for p in plan.grants {
-        text.push_str(&format!("{}\t{}\n", plan.sid, p.to_string_lossy()));
+        text.push_str(&format!("{}\t{}\n", plan.sid, ledger_path(p)));
     }
     for p in plan.above {
-        text.push_str(&format!(
-            "{}\t{}\t{HERE_MARK}\n",
-            plan.sid,
-            p.to_string_lossy()
-        ));
+        text.push_str(&format!("{}\t{}\t{HERE_MARK}\n", plan.sid, ledger_path(p)));
     }
     // A label (and the self-grant that may be needed to set it) is per folder, shared by the agents that use it.
     for p in plan.labels {
         text.push_str(&wo_line(p, plan.logon));
         text.push('\n');
-        text.push_str(&format!("{LABEL_LINE}\t{}\n", p.to_string_lossy()));
+        text.push_str(&format!("{LABEL_LINE}\t{}\n", ledger_path(p)));
     }
     if let Some(dir) = file.parent() {
         std::fs::create_dir_all(dir)?;
@@ -941,7 +1010,7 @@ impl Confinement {
         let above = ancestors_of(&all);
         // A folder the user labelled on purpose is left as it is (and not undone later). One that a live agent labelled (a shared
         // `objects`, `refs`) is recorded here too, so the label stays until the last agent using it has ended.
-        let label_line = |p: &Path| format!("{LABEL_LINE}\t{}", p.to_string_lossy());
+        let label_line = |p: &Path| format!("{LABEL_LINE}\t{}", ledger_path(p));
         let mut shared: Vec<PathBuf> = Vec::new();
         let labels: Vec<PathBuf> = wanted
             .iter()
@@ -1039,7 +1108,7 @@ impl Drop for Confinement {
         let _lock = LedgerLock::acquire();
         // Labels first (setting them may need the self-grant), each only when no other live agent still uses that folder.
         for path in &self.labelled {
-            let line = format!("{LABEL_LINE}\t{}", path.to_string_lossy());
+            let line = format!("{LABEL_LINE}\t{}", ledger_path(path));
             if !line_in_use_elsewhere(&line, &self.ledger) && !take_label_back(path) {
                 all_removed = false;
             }
@@ -1059,7 +1128,7 @@ impl Drop for Confinement {
         // A relaunch of the same agent keeps its SID; while that spawn's ledger lists the same entry, it is still in use. The line names
         // no access level: if two spawns of one agent got the same folder at different levels (a policy change between them), the
         // merged, stronger entry stays until the last of them ends. It belongs to the same agent, never to another one.
-        let sid_line = |p: &Path| format!("{}\t{}", self.sid_text, p.to_string_lossy());
+        let sid_line = |p: &Path| format!("{}\t{}", self.sid_text, ledger_path(p));
         for path in &self.granted {
             // A path recorded but never changed (the start failed on it) has no entry to take back.
             if !line_in_use_elsewhere(&sid_line(path), &self.ledger)
@@ -1101,14 +1170,16 @@ pub(crate) fn current_user_sid_text() -> io::Result<String> {
     let mut needed = 0u32;
     // SAFETY: the documented size query.
     unsafe { GetTokenInformation(own.0, TokenUser, null_mut(), 0, &mut needed) };
-    let mut buf = vec![0u8; (needed as usize).max(std::mem::size_of::<TOKEN_USER>())];
+    // u64 units: the structure read from it needs pointer alignment, which a byte vector does not promise.
+    let bytes = (needed as usize).max(std::mem::size_of::<TOKEN_USER>());
+    let mut buf = vec![0u64; bytes.div_ceil(8)];
     // SAFETY: `buf` is `needed` bytes.
     if unsafe {
         GetTokenInformation(
             own.0,
             TokenUser,
             buf.as_mut_ptr().cast(),
-            buf.len() as u32,
+            (buf.len() * 8) as u32,
             &mut needed,
         )
     } == 0
@@ -1118,6 +1189,40 @@ pub(crate) fn current_user_sid_text() -> io::Result<String> {
     // SAFETY: GetTokenInformation(TokenUser) wrote a TOKEN_USER at the start of `buf`.
     let user = unsafe { &*(buf.as_ptr().cast::<TOKEN_USER>()) };
     sid_text(user.User.Sid)
+}
+
+/// The SID that owns what this process creates (its token's default owner: the user, or the Administrators group when the process runs
+/// elevated), as text.
+pub(crate) fn current_owner_sid_text() -> io::Result<String> {
+    use windows_sys::Win32::Security::{TokenOwner, TOKEN_OWNER};
+    let mut own: HANDLE = null_mut();
+    // SAFETY: the pseudo handle of this process and an out pointer.
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut own) } == 0 {
+        return Err(last_error());
+    }
+    let own = Token(own);
+    let mut needed = 0u32;
+    // SAFETY: the documented size query.
+    unsafe { GetTokenInformation(own.0, TokenOwner, null_mut(), 0, &mut needed) };
+    // u64 units: the structure read from it needs pointer alignment, which a byte vector does not promise.
+    let bytes = (needed as usize).max(std::mem::size_of::<TOKEN_OWNER>());
+    let mut buf = vec![0u64; bytes.div_ceil(8)];
+    // SAFETY: `buf` is `needed` bytes.
+    if unsafe {
+        GetTokenInformation(
+            own.0,
+            TokenOwner,
+            buf.as_mut_ptr().cast(),
+            (buf.len() * 8) as u32,
+            &mut needed,
+        )
+    } == 0
+    {
+        return Err(last_error());
+    }
+    // SAFETY: GetTokenInformation(TokenOwner) wrote a TOKEN_OWNER at the start of `buf`.
+    let owner = unsafe { &*(buf.as_ptr().cast::<TOKEN_OWNER>()) };
+    sid_text(owner.Owner)
 }
 
 /// `S-1-...` for a SID.
@@ -1293,7 +1398,11 @@ fn restricted_token(agent: &Sid) -> io::Result<Token> {
 
 /// Removes the entries a crashed node left behind. Call it once when the node starts, before any agent is running.
 pub(crate) fn recover_stale() {
-    let Ok(dir) = std::fs::read_dir(ledger_dir()) else {
+    recover_in(&ledger_dir());
+}
+
+fn recover_in(ledgers: &Path) {
+    let Ok(dir) = std::fs::read_dir(ledgers) else {
         return;
     };
     for entry in dir.flatten() {
@@ -1313,7 +1422,7 @@ pub(crate) fn recover_stale() {
             let Some((mark, folder)) = line.split_once('\t') else {
                 continue;
             };
-            let folder_path = Path::new(folder);
+            let folder_path = &path_from_ledger(folder);
             if !folder_path.exists() || line_in_use_elsewhere(line, &path) {
                 continue;
             }
@@ -1330,7 +1439,7 @@ pub(crate) fn recover_stale() {
                 let Some((folder, granter)) = folder.rsplit_once('\t') else {
                     continue;
                 };
-                let folder_path = Path::new(folder);
+                let folder_path = &path_from_ledger(folder);
                 if let Ok(granter) = Sid::from_string(granter) {
                     if folder_path.exists()
                         && !line_in_use_elsewhere(line, &path)
@@ -1356,7 +1465,7 @@ pub(crate) fn recover_stale() {
                 Some((f, HERE_MARK)) => (f, true),
                 _ => (folder, false),
             };
-            let folder = Path::new(folder);
+            let folder = &path_from_ledger(folder);
             // A folder that is gone has nothing to undo; one the user may not change was skipped when granting.
             if !folder.exists() {
                 continue;
@@ -1562,6 +1671,42 @@ mod tests {
         assert!(ledger_files.is_empty(), "ledgers left: {ledger_files:?}");
     }
 
+    /// A crashed node's ledger for a folder whose name is not valid Unicode: recovery finds that folder again and undoes it (a lossy
+    /// spelling named no folder, so recovery took it as gone, dropped the ledger, and the label and entry stayed for good).
+    #[test]
+    fn recovery_undoes_a_folder_whose_name_is_not_valid_unicode() {
+        use std::os::windows::ffi::OsStringExt;
+        let root = std::env::temp_dir().join(format!("agora-wide-ledger-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let ledgers = root.join("ledgers");
+        let mut name: Vec<u16> = "odd-".encode_utf16().collect();
+        name.push(0xD800);
+        let odd = root.join("work").join(std::ffi::OsString::from_wide(&name));
+        std::fs::create_dir_all(&odd).unwrap();
+        assert_eq!(path_from_ledger(&ledger_path(&odd)), odd);
+        assert_eq!(path_from_ledger(&ledger_path(&root)), root);
+
+        let sandbox = Sandbox::new(vec![], vec![odd.clone()]);
+        let c = Confinement::in_ledger_dir(&sandbox, &ledgers, None).unwrap();
+        let sid = Sid::from_string(&c.sid_text).unwrap();
+        let ledger = c.ledger.clone();
+        // A crash: nothing is taken back, and the owner is gone.
+        std::mem::forget(c);
+        assert!(has_explicit_label(&odd) && has_explicit_ace_for(&odd, sid.0));
+        let text = std::fs::read_to_string(&ledger).unwrap();
+        let rest = text.split_once('\n').unwrap().1;
+        std::fs::write(&ledger, format!("{ENDED_OWNER}\n{rest}")).unwrap();
+
+        recover_in(&ledgers);
+        assert!(!has_explicit_label(&odd), "the Low label stayed");
+        assert!(
+            !has_explicit_ace_for(&odd, sid.0),
+            "the agent's entry stayed"
+        );
+        assert!(!ledger.exists(), "the ledger stayed although all is undone");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// Review of #273, 4: a NULL DACL lets everyone do everything, so it is refused like a `Users`/`Everyone` write grant.
     #[test]
     fn a_null_dacl_is_a_broad_write_grant() {
@@ -1590,9 +1735,84 @@ mod tests {
         // SAFETY: allocated by the conversion above.
         unsafe { LocalFree(sd) };
         assert_ne!(set, 0);
-        let hit = broad_writer_below(&root.join("work")).unwrap();
+        let hit = broad_writer_below(&root.join("work"), false).unwrap();
         let _ = std::fs::remove_dir_all(&root);
         assert_eq!(hit, Some((open, SandboxRefusal::BroadWriteGrant)));
+    }
+
+    /// #571: a hard link in the worktree to a file outside it, made before the agent starts, would carry the agent's grant to that
+    /// file. Such a worktree is refused, naming the link; the same link in `node_modules`, `target` or `.git` (package stores and git
+    /// link on purpose) or in a write place that is not the worktree is not.
+    #[test]
+    fn a_worktree_holding_a_hard_link_to_a_file_outside_is_refused() {
+        let root = scratch("links571");
+        let work = root.join("work");
+        for d in ["node_modules/pkg", "target", ".git/objects", "src"] {
+            std::fs::create_dir_all(work.join(d)).unwrap();
+        }
+        std::fs::create_dir_all(root.join("outside")).unwrap();
+        std::fs::write(root.join("outside").join("zshrc"), "rc").unwrap();
+        std::fs::write(work.join("src").join("plain.txt"), "x").unwrap();
+        for d in ["node_modules/pkg", "target", ".git/objects"] {
+            std::fs::hard_link(
+                root.join("outside").join("zshrc"),
+                work.join(d).join("linked"),
+            )
+            .unwrap();
+        }
+        // Package stores and git: walked for grants, never refused for their links.
+        assert_eq!(broad_writer_below(&work, true).unwrap(), None);
+        let link = work.join("src").join("y");
+        std::fs::hard_link(root.join("outside").join("zshrc"), &link).unwrap();
+        let hit = broad_writer_below(&work, true).unwrap();
+        // Another write place (not the worktree) is not checked for links.
+        let elsewhere = broad_writer_below(&work, false).unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(hit, Some((link, SandboxRefusal::WritableHasLinks)));
+        assert_eq!(elsewhere, None);
+    }
+
+    /// #591 review: the exemption is for folders only. A hard-linked regular file named `node_modules`, `target` or `.git` is
+    /// refused like any other.
+    #[test]
+    fn a_linked_file_named_like_an_exempt_folder_is_still_refused() {
+        for name in ["node_modules", "target", ".git", "NODE_MODULES"] {
+            let root = scratch(&format!("links571n-{}", name.trim_start_matches('.')));
+            let work = root.join("work");
+            std::fs::create_dir_all(&work).unwrap();
+            std::fs::write(root.join("outside"), "rc").unwrap();
+            std::fs::hard_link(root.join("outside"), work.join(name)).unwrap();
+            let hit = broad_writer_below(&work, true).unwrap();
+            let _ = std::fs::remove_dir_all(&root);
+            assert_eq!(
+                hit,
+                Some((work.join(name), SandboxRefusal::WritableHasLinks)),
+                "{name}"
+            );
+        }
+    }
+
+    /// #571 (review): a write entry that is itself a file (a manifest's `~/.claude.json`) is granted like a folder, so one with
+    /// another name elsewhere is refused too; a plain file entry is not.
+    #[test]
+    fn a_write_entry_that_is_a_linked_file_is_refused() {
+        let root = scratch("links571f");
+        std::fs::write(root.join("plain.json"), "{}").unwrap();
+        std::fs::write(root.join("real.json"), "{}").unwrap();
+        std::fs::hard_link(root.join("real.json"), root.join("entry.json")).unwrap();
+        let profile = |entry: &str| Sandbox {
+            read: vec![],
+            write: vec![root.join(entry)],
+            ..Default::default()
+        };
+        let plain = preflight(&profile("plain.json"));
+        let linked = preflight(&profile("entry.json"));
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(plain, Ok(()));
+        assert_eq!(
+            linked,
+            Err((root.join("entry.json"), SandboxRefusal::WritableHasLinks))
+        );
     }
 
     /// Review of #273, 5: a relaunch keeps the agent's identity (its mesh endpoint admits exactly that SID), so two confinements of one

@@ -3,6 +3,7 @@ syntax = "proto3";
 package agora.v1;
 
 import "agora/v1/common.proto";
+import "agora/v1/devices.proto";
 import "agora/v1/enroll.proto";
 
 // Commands flow client -> hub -> node (docs/specs/protocol.md section 4). Every request has a request_id
@@ -59,6 +60,22 @@ message CommandRequest {
     DirectoryInspect directory_inspect = 81;
     AgentLaunch agent_launch = 82;
     WorkspaceQuery workspace_query = 83;
+    // ADR-0053: a folder picker's one question (node), and forgetting a closed agent (hub only).
+    DirectoryList directory_list = 84;
+    AgentForget agent_forget = 85;
+    // ADR-0058: sent only to a node with the capability `agent.set_model`.
+    AgentSetModel agent_set_model = 86;
+    // ADR-0060: sent only to a node with the capability `agent.resume`.
+    AgentResume agent_resume = 87;
+    // ADR-0061 (87 is ADR-0060's): devices. `DeviceRegister`, `DeviceList` and `DeviceAskApproval` are answered by the hub;
+    // `DeviceEndorse` and `DeviceRevoke` a client sends to the hub, which carries them to the nodes with the capability `device.trust`.
+    DeviceRegister device_register = 88;
+    DeviceList device_list = 89;
+    DeviceEndorse device_endorse = 90;
+    DeviceRevoke device_revoke = 91;
+    DeviceAskApproval device_ask_approval = 92;
+    // ADR-0073: answered by the hub (owner only, capability `node.forget`); refused with `node.online` while the machine is connected.
+    NodeForget node_forget = 93;
   }
 }
 
@@ -93,6 +110,9 @@ message CommandOk {
     DirectoryInfo directory_info = 18;
     AgentLaunchResult agent_launch = 19;
     BoardJoinResult board_join = 20;
+    DirectoryEntries directory_entries = 21;
+    // ADR-0061
+    DeviceListResult device_list = 22;
   }
 }
 
@@ -110,10 +130,18 @@ message AgentStart {
   string worktree_id = 4;
   IntegrationLevel level = 5;
   string prompt = 6;
+  // ADR-0059: ids of the kind's `[[launch.option]]`s to start with (capability `agent.launch_options`). Accepted only on the
+  // node's own control socket; routed through the hub such a start is refused (it carries no signature), use `AgentLaunch`.
+  repeated string launch_options = 7;
+  // ADR-0059: the chosen ids whose "act without asking" confirmation the window showed and the user accepted. The node, from its own
+  // manifest, refuses an option that skips permissions unless it is listed here (`agent.option_unconfirmed`).
+  repeated string confirmed_launch_options = 8;
 }
 
 message AgentStop {
   string agent_id = 1;
+  // ADR-0057: also stop the helpers this agent started (and theirs). Old nodes ignore it and stop only this agent.
+  bool stop_helpers = 2;
 }
 
 message AgentPrompt {
@@ -121,9 +149,17 @@ message AgentPrompt {
   string text = 2;
 }
 
+// ADR-0058: `mode` is the id of one of the modes the agent reported (`AgentSessionOptions`). Sent only to a node with the
+// capability `agent.set_mode`.
 message AgentSetMode {
   string agent_id = 1;
   string mode = 2;
+}
+
+// ADR-0058: `model` is the id of one of the models the agent reported (`AgentSessionOptions`).
+message AgentSetModel {
+  string agent_id = 1;
+  string model = 2;
 }
 
 message TerminalOpen {
@@ -204,6 +240,16 @@ message ApprovalResolve {
   bool approved = 2;
   string signer_device_id = 3;
   bytes signature = 4;
+  // ADR-0057, only for an approved `agent.start`: allow the asking agent up to this many helpers of the same kind in the same
+  // folder while it runs, this start included (0: this start only). Revoked with `GrantRevoke { grant_id: approval_id }`.
+  uint32 helper_grant = 5;
+  // ADR-0057, only for an approved `agent.start`: the helpers started under this decision may themselves ask to start helpers
+  // (each such start still needs its own approval; never deeper than that).
+  bool helpers_may_start = 6;
+  // For an `agent.start` approval the signature is not over the ADR-0028 message but over
+  // `agora-approval-start-v1 NUL node_id NUL approval_id NUL verdict NUL helper_grant NUL helpers_may_start NUL
+  // sha256(detail)` (verdict and helpers_may_start as ASCII `0`/`1`, helper_grant in decimal, the hash of the request's `detail` in lowercase hex): the decision binds what the user saw (kind, node, folder, asking agent,
+  // the first prompt), so a hub can neither swap the prompt nor add or remove a grant.
 }
 
 // ADR-0041. Signed by a trusted device (the same ES256 scheme as ApprovalResolve) over
@@ -231,6 +277,11 @@ message GrantInfo {
   repeated string commands = 3;
   uint64 expires_at_ms = 4;
   string signer_device_id = 5;
+  // ADR-0057: a helper grant (`commands` is `mesh.agent_start`, `scope` is `agent:<asking agent>`, `grant_id` the approval id,
+  // `expires_at_ms` 0: it ends when the asking agent exits or is stopped). The kind and folder it covers and the starts it has left.
+  string kind = 6;
+  string folder = 7;
+  uint32 remaining = 8;
 }
 
 message GrantListResult {
@@ -370,6 +421,8 @@ enum ChatKind {
   CHAT_KIND_TOOL_CALL = 2;
   CHAT_KIND_PLAN = 3;
   CHAT_KIND_DIFF = 4;
+  // ADR-0058: `code` and `params` say what happened; `text` is empty.
+  CHAT_KIND_NOTICE = 5;
 }
 
 // One line of an agent's conversation (ADR-0038). Untrusted text: a model or a person wrote it.
@@ -383,6 +436,9 @@ message ChatEntry {
   string text = 5;
   // For a diff: the file.
   string path = 6;
+  // ADR-0058, for a notice: a stable code (`adapter.turn_failed`, ...) and its parameters, rendered from the client's locale files.
+  string code = 7;
+  map<string, string> params = 8;
 }
 
 message ChatSnapshot {
@@ -448,6 +504,17 @@ message AgentKind {
   IntegrationLevel level = 3;
   // Whether the launch program is found on this node.
   bool installed = 4;
+  // ADR-0059: the options a start may choose (the manifest's `[[launch.option]]`s, in its order). Old nodes send none.
+  repeated LaunchOption launch_options = 5;
+}
+
+// ADR-0059: one `[[launch.option]]` of a kind. The arguments it adds stay on the node.
+message LaunchOption {
+  string id = 1;
+  // A Fluent message id; a client without it shows `id`.
+  string label = 2;
+  // The agent acts without asking (a permission-skipping flag): never preselected, confirmed, signed, audited, badged.
+  bool skips_permissions = 3;
 }
 
 message AgentKindsResult {
@@ -498,6 +565,46 @@ message DirectoryInfo {
   bool portable = 5;
   string previous_project_id = 6;
 }
+// ADR-0053. Lists the sub-folders of one folder on a node: names only, never files. `path` empty means the user's home folder.
+message DirectoryList {
+  string path = 1;
+  DirectoryAuthorization authorization = 2;
+}
+message DirectoryEntry {
+  string name = 1;
+  bool is_git = 2;
+}
+message DirectoryEntries {
+  // The canonical folder the node resolved, and its parent (empty at a root).
+  string path = 1;
+  string parent = 2;
+  repeated DirectoryEntry entries = 3;
+  // More folders exist than the node answers with (at most 500 per answer).
+  bool truncated = 4;
+}
+// ADR-0073. The hub stops listing an offline machine. `refuse_return` also revokes every certificate enrolled under `node_id`, so a
+// later connection is refused (`auth.device_revoked`) until the machine enrolls again.
+message NodeForget {
+  string node_id = 1;
+  bool refuse_return = 2;
+}
+
+// ADR-0053. The hub stops listing a closed agent. Answered by the hub; refused with `agent.running` while the agent runs.
+message AgentForget {
+  string agent_id = 1;
+}
+
+// ADR-0060. Brings back an agent the node reported interrupted (`AgentInterrupted`): same agent id, same folder, same project. The
+// node runs the manifest's `[resume]` argv or the adapter's session load with the agent's own session id; with `new_session` it starts
+// a new session of the same kind in the same folder instead ("Start again"). Signed like `agent.launch` on the routed path (operation
+// `resume`, see docs/specs/protocol.md); the node answers with `AgentLaunchResult`.
+message AgentResume {
+  // The node's own id of the agent (`agent-7`), not the hub-wide key.
+  string agent_id = 1;
+  bool new_session = 2;
+  DirectoryAuthorization authorization = 3;
+}
+
 message AgentLaunch {
   string path = 1;
   string project_id = 2;
@@ -505,6 +612,11 @@ message AgentLaunch {
   bool separate_worktree = 4;
   DirectoryAuthorization authorization = 5;
   bool accept_identity_change = 6;
+  // ADR-0059: ids of the kind's `[[launch.option]]`s to start with (capability `agent.launch_options`). When not empty the
+  // authorization signs them too (`directory-action-v3`, docs/specs/protocol.md), so a hub can neither add nor remove one.
+  repeated string launch_options = 7;
+  // ADR-0059: as `AgentStart.confirmed_launch_options`; signed with `launch_options` as a separate list.
+  repeated string confirmed_launch_options = 8;
 }
 message AgentLaunchResult {
   string agent_id = 1;

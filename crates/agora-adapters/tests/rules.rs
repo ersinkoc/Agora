@@ -167,6 +167,29 @@ not = [{ contains = "x" }]
 }
 
 #[test]
+fn a_rule_that_names_both_a_phrase_and_a_regex_is_rejected() {
+    // Exactly one of `contains`/`regex`, like every condition in `all`/`any`/`not`: the detector would
+    // silently drop a rule that names both, and a lost Blocked rule reads as free.
+    let src = r#"
+kind = "k"
+display_name = "K"
+version = "1"
+min_engine = 1
+[[rules]]
+id = "r"
+state = "idle"
+priority = 1
+region = "title"
+contains = "x"
+regex = "x"
+"#;
+    assert_eq!(
+        field(&Manifest::parse(src).unwrap_err()),
+        "rules[0].conditions"
+    );
+}
+
+#[test]
 fn unknown_sections_are_ignored_so_newer_manifests_load() {
     let src =
         format!("{MANIFEST}\n[usage]\nsource = \"otel\"\n[accounts]\nconfig_dir_env = \"X\"\n");

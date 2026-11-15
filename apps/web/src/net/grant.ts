@@ -30,7 +30,7 @@ export interface GrantAsk {
   kind: GrantKind;
 }
 
-const AGENT_COMMANDS = ['agentPrompt', 'agentSetMode', 'agentStop', 'terminalInput', 'terminalResize'];
+const AGENT_COMMANDS = ['agentPrompt', 'agentSetMode', 'agentSetModel', 'agentStop', 'terminalInput', 'terminalResize'];
 
 // What to ask the owner for, given the command the node refused. One agent for typing, one project for starting, and the
 // whole machine only for what names neither.

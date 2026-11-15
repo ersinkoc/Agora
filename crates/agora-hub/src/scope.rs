@@ -80,6 +80,11 @@ impl Scope {
                 out.nodes.insert(k.clone(), n.clone());
             }
         }
+        for (k, d) in &view.trusted_devices {
+            if self.node_visible(k) {
+                out.trusted_devices.insert(k.clone(), d.clone());
+            }
+        }
         for (k, c) in &view.checkouts {
             if self.granted(self.checkouts.get(k)) {
                 out.checkouts.insert(k.clone(), c.clone());
@@ -143,7 +148,10 @@ impl Scope {
 
             Body::NodeOnline(e) => self.node_visible(&e.node_id),
             Body::NodeOffline(e) => self.node_visible(&e.node_id),
+            Body::NodeLink(e) => self.node_visible(&e.node_id),
+            Body::NodeForgotten(e) => self.node_visible(&e.node_id),
             Body::NodeResources(e) => self.node_visible(&e.node_id),
+            Body::NodeTrustedDevices(_) => self.node_visible(node),
             Body::CheckoutDiscovered(e) => {
                 let p = qualified(&e.node_id, &e.project_id);
                 self.checkouts.insert(q(&e.checkout_id), p.clone());
@@ -167,10 +175,23 @@ impl Scope {
                 self.agents.insert(q(&e.agent_id), p.clone());
                 self.projects.contains(&p)
             }
+            // ADR-0060: the agent may be one the hub never saw start (its store was reset), so it teaches the project too.
+            Body::AgentInterrupted(e) => {
+                let p = self
+                    .agents
+                    .entry(q(&e.agent_id))
+                    .or_insert_with(|| qualified(node, &e.project_id))
+                    .clone();
+                self.projects.contains(&p)
+            }
             Body::AgentStateChanged(e) => self.granted(self.agents.get(&q(&e.agent_id))),
             Body::AgentSessionReported(e) => self.granted(self.agents.get(&q(&e.agent_id))),
             Body::AgentUsageReported(e) => self.granted(self.agents.get(&q(&e.agent_id))),
+            Body::AgentSessionOptions(e) => self.granted(self.agents.get(&q(&e.agent_id))),
             Body::AgentExited(e) => self.granted(self.agents.get(&q(&e.agent_id))),
+            Body::AgentStartRefused(e) => self.granted(self.agents.get(&q(&e.agent_id))),
+            // Made by the hub, which names the agent by its hub-wide key already (ADR-0053).
+            Body::AgentForgotten(e) => self.granted(self.agents.get(&e.agent_id)),
             Body::TerminalOpened(e) => {
                 let p = self.agents.get(&q(&e.agent_id)).cloned();
                 if let Some(p) = &p {
@@ -230,8 +251,12 @@ impl Scope {
                         || self.granted(self.worktrees.get(&q(&c.worktree_id))))
             }
             C::AgentStop(c) => self.granted(self.agents.get(&q(&c.agent_id))),
+            C::AgentResume(c) => self.granted(self.agents.get(&q(&c.agent_id))),
+            // ADR-0053: named by the hub-wide key, so it is not qualified again.
+            C::AgentForget(c) => self.granted(self.agents.get(&c.agent_id)),
             C::AgentPrompt(c) => self.granted(self.agents.get(&q(&c.agent_id))),
             C::AgentSetMode(c) => self.granted(self.agents.get(&q(&c.agent_id))),
+            C::AgentSetModel(c) => self.granted(self.agents.get(&q(&c.agent_id))),
             C::ChatSubscribe(c) => self.granted(self.agents.get(&q(&c.agent_id))),
             C::TerminalInput(c) => self.granted(self.terminals.get(&q(&c.terminal_id))),
             C::TerminalResize(c) => self.granted(self.terminals.get(&q(&c.terminal_id))),
@@ -291,6 +316,9 @@ mod tests {
                 worktree_id: String::new(),
                 kind: "k".into(),
                 level: 0,
+                parent_agent_id: String::new(),
+                launch_options: Vec::new(),
+                skips_permissions: false,
             }),
         )
     }
@@ -530,6 +558,7 @@ mod tests {
         let stop = |id: &str| {
             Command::AgentStop(v1::AgentStop {
                 agent_id: id.into(),
+                stop_helpers: false,
             })
         };
         assert!(s.command_allowed("n1", &stop("a1")));
@@ -538,6 +567,15 @@ mod tests {
             !s.command_allowed("n2", &stop("a1")),
             "the same local id on another machine is another agent"
         );
+        // Forgetting names the agent by its hub-wide key (ADR-0053): the person's own agent, not another's, on any `target_node`.
+        let forget = |id: &str| {
+            Command::AgentForget(v1::AgentForget {
+                agent_id: id.into(),
+            })
+        };
+        assert!(s.command_allowed("", &forget("n1/a1")));
+        assert!(!s.command_allowed("", &forget("n1/a2")));
+        assert!(!s.command_allowed("", &forget("a1")));
         let start = |p: &str| {
             Command::AgentStart(v1::AgentStart {
                 project_id: p.into(),

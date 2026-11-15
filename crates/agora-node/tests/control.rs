@@ -64,6 +64,7 @@ launch = ["sh"]
 
 fn node(e: &Env, limits: NodeLimits) -> Node {
     Node::start(&NodeConfig {
+        resume_all: false,
         node_id: "node-test".into(),
         // Short path: Unix socket paths are limited to about 100 bytes.
         socket: e.dir.join("c.sock"),
@@ -131,6 +132,7 @@ fn project_list_and_agent_start_stop_over_the_socket() {
 
     ok(c.call(Cmd::AgentStop(v1::AgentStop {
         agent_id: s.agent_id.clone(),
+        stop_helpers: false,
     })));
     assert!(!n.supervisor.lock().unwrap().list()[0].running);
 
@@ -162,7 +164,8 @@ fn errors_travel_as_codes_with_params() {
     );
     assert_eq!(
         err_code(c.call(Cmd::AgentStop(v1::AgentStop {
-            agent_id: "agent-404".into()
+            agent_id: "agent-404".into(),
+            stop_helpers: false,
         }))),
         "agent.not_found"
     );
@@ -264,6 +267,9 @@ fn terminal_subscription_streams_snapshot_data_resize_and_exit() {
     ));
     let snap = wait_frame(&mut c, 3, |f| f.kind == KIND_TERM_SNAPSHOT);
     assert!(snap.payload.starts_with(b"\x1b[0m\x1b[2J"));
+    // Right after it, the size it was painted at (the node's default terminal, 80x24).
+    let size = wait_frame(&mut c, 3, |f| f.kind == KIND_TERM_RESIZE);
+    assert_eq!(size.payload, [80u8, 0, 24, 0]);
 
     ok(c.call(Cmd::TerminalInput(v1::TerminalInput {
         terminal_id: s.terminal_id.clone(),
@@ -294,9 +300,11 @@ fn terminal_subscription_streams_snapshot_data_resize_and_exit() {
     let r = wait_frame(&mut c, 3, |f| f.kind == KIND_TERM_RESIZE);
     assert_eq!(r.payload, [100, 0, 30, 0]);
 
+    // A leading empty line: on Windows the msys `sh` sometimes loses the first byte typed after a ConPTY resize (about 1 run in 10,
+    // `xit 5`; never without the resize, and waiting a second does not help). Losing the newline instead is harmless.
     ok(c.call(Cmd::TerminalInput(v1::TerminalInput {
         terminal_id: s.terminal_id.clone(),
-        data: b"exit 5\n".to_vec(),
+        data: b"\nexit 5\n".to_vec(),
     })));
     let x = wait_frame(&mut c, 3, |f| f.kind == KIND_TERM_EXIT);
     assert_eq!(i32::from_le_bytes(x.payload.clone().try_into().unwrap()), 5);
@@ -346,6 +354,7 @@ fn the_node_reports_what_the_hub_needs_to_show_it() {
     let s = started(ok(c.call(start_cmd("shell"))));
     ok(c.call(Cmd::AgentStop(v1::AgentStop {
         agent_id: s.agent_id.clone(),
+        stop_helpers: false,
     })));
 
     // Exit is noticed by the supervision tick; wait for the terminal to be reported closed.
@@ -563,6 +572,7 @@ fn agents_on_one_node_coordinate_through_their_own_mesh_endpoints() {
     assert_eq!(r["error"]["code"], "lease.held");
     ok(c.call(Cmd::AgentStop(v1::AgentStop {
         agent_id: a1.clone(),
+        stop_helpers: false,
     })));
     assert!(!n.mesh.is_registered(&AgentId::new(&a1)));
     assert!(!sock(&a1).exists(), "its endpoint is gone");
@@ -744,6 +754,7 @@ fn input_to_a_program_that_never_reads_does_not_wedge_the_node() {
     ok(c.call(Cmd::AgentList(v1::AgentList::default())));
     ok(c.call(Cmd::AgentStop(v1::AgentStop {
         agent_id: s.agent_id.clone(),
+        stop_helpers: false,
     })));
     assert!(
         t0.elapsed() < Duration::from_secs(5),
@@ -857,14 +868,16 @@ fn fake_adapter_path() -> String {
     p.pop();
     p.pop();
     p.push(format!("agora-fake-agent{}", std::env::consts::EXE_SUFFIX));
-    if !p.exists() {
+    // Built once per test binary, even when present: a binary left from an older checkout may lack newer flags.
+    static FRESH: std::sync::Once = std::sync::Once::new();
+    FRESH.call_once(|| {
         let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
         assert!(Command::new(cargo)
             .args(["build", "-q", "-p", "agora-fake-agent"])
             .status()
             .unwrap()
             .success());
-    }
+    });
     p.to_string_lossy().into_owned()
 }
 
@@ -912,6 +925,8 @@ fn an_adapter_approval_waits_for_a_signed_decision_and_is_relayed() {
             approved,
             signer_device_id: device.into(),
             signature: signed_message(node, id, approved),
+            helper_grant: 0,
+            helpers_may_start: false,
         }))
     };
     let state_of = |n: &Node, id: &str| {
@@ -1042,6 +1057,8 @@ fn with_no_trusted_device_every_decision_is_refused() {
         approved: true,
         signer_device_id: "phone".into(),
         signature: signed_message("node-test", &id, true),
+        helper_grant: 0,
+        helpers_may_start: false,
     }));
     assert_eq!(err_code(r), "approval.signature_invalid");
 }
@@ -1111,6 +1128,87 @@ fn agent_kinds_lists_what_this_node_can_start() {
 }
 
 #[test]
+fn a_node_with_an_empty_manifests_folder_offers_and_starts_every_built_in_kind_and_a_folder_file_overrides_one(
+) {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
+        return;
+    }
+    let e = env("builtin");
+    let empty = e.dir.join("empty-manifests");
+    std::fs::create_dir_all(&empty).unwrap();
+    let n = Node::start(&NodeConfig {
+        resume_all: false,
+        node_id: "node-test".into(),
+        socket: e.dir.join("c.sock"),
+        data_dir: e.dir.join("data"),
+        worktree_root: e.dir.join("worktrees"),
+        manifests_dir: empty.clone(),
+        projects: vec![e.repo.clone()],
+        limits: NodeLimits::default(),
+    })
+    .expect("start node");
+    assert!(n.manifest_problems.is_empty());
+    let mut c = Client::connect(&e.dir.join("c.sock")).unwrap();
+    let kinds = |c: &mut Client| -> std::collections::BTreeMap<String, String> {
+        let r = ok(c.call(Cmd::AgentKinds(v1::AgentKinds {})));
+        let Some(Ok_::AgentKinds(list)) = r.result else {
+            panic!("not an AgentKinds result");
+        };
+        list.kinds
+            .into_iter()
+            .map(|k| (k.kind, k.display_name))
+            .collect()
+    };
+    let shipped: Vec<String> = agora_node::manifests::BUILT_IN
+        .iter()
+        .map(|(_, text)| {
+            agora_adapters::Manifest::parse(text)
+                .expect("shipped manifest")
+                .kind
+        })
+        .collect();
+    let listed = kinds(&mut c);
+    assert_eq!(
+        listed.keys().cloned().collect::<Vec<_>>(),
+        {
+            let mut s = shipped.clone();
+            s.push(agora_node::manifests::SHELL_KIND.to_string());
+            s.sort();
+            s
+        },
+        "every shipped kind and the built-in shell, nothing else"
+    );
+    assert_eq!(listed["shell"], "Shell");
+    // With no file at all, the user's shell starts.
+    let started = c.call(start_cmd("shell"));
+    assert!(started.is_ok(), "{started:?}");
+    // What the node looks for is the program's name, for the "not installed" line.
+    let programs: std::collections::BTreeMap<_, _> = n
+        .supervisor
+        .lock()
+        .unwrap()
+        .kinds()
+        .into_iter()
+        .map(|k| (k.kind, k.program))
+        .collect();
+    assert_eq!(programs["wrongstack"], "wstack");
+    // A folder file of the same kind wins, a broken one leaves the built-in kind in place; both without a restart.
+    std::fs::write(
+        empty.join("codex.toml"),
+        "kind = \"codex\"\ndisplay_name = \"Codex here\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"sh\"]\n",
+    )
+    .unwrap();
+    std::fs::write(empty.join("wrongstack.toml"), "kind = \"wrongstack\"\n[").unwrap();
+    let listed = kinds(&mut c);
+    assert_eq!(listed["codex"], "Codex here");
+    assert_eq!(listed["wrongstack"], "WrongStack");
+    let started = c.call(start_cmd("codex"));
+    assert!(started.is_ok(), "{started:?}");
+    drop(n);
+    let _ = std::fs::remove_dir_all(&e.dir);
+}
+
+#[test]
 fn uncommitted_changes_in_an_agents_workspace_are_reported() {
     use v1::event::Body;
     if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
@@ -1123,8 +1221,10 @@ fn uncommitted_changes_in_an_agents_workspace_are_reported() {
     std::fs::write(Path::new(&s.worktree_id).join("new.txt"), "x").unwrap();
     std::fs::write(Path::new(&s.worktree_id).join("other.txt"), "y").unwrap();
 
-    // The watcher checks every few seconds; the latest report for this workspace must show both new files.
-    let end = Instant::now() + Duration::from_secs(20);
+    // The watcher checks every few seconds; the latest report for this workspace must show both new files. One check is six git
+    // processes (each command with its filter question): 2-6 s on an idle Windows machine and up to about 50 s while this whole
+    // file runs in parallel there (measured), so the wait is generous.
+    let end = Instant::now() + Duration::from_secs(120);
     loop {
         let latest = n
             .events
@@ -1146,6 +1246,7 @@ fn uncommitted_changes_in_an_agents_workspace_are_reported() {
     }
     ok(c.call(Cmd::AgentStop(v1::AgentStop {
         agent_id: s.agent_id,
+        stop_helpers: false,
     })));
 }
 
@@ -1206,6 +1307,7 @@ fn git_status_and_diff_cover_new_and_changed_files_and_only_agent_workspaces() {
     }
     ok(c.call(Cmd::AgentStop(v1::AgentStop {
         agent_id: s.agent_id,
+        stop_helpers: false,
     })));
 }
 
@@ -1288,6 +1390,7 @@ fn files_list_and_read_stay_inside_an_agents_workspace() {
     );
     ok(c.call(Cmd::AgentStop(v1::AgentStop {
         agent_id: s.agent_id,
+        stop_helpers: false,
     })));
 }
 
@@ -1336,6 +1439,7 @@ fn git_log_lists_the_workspaces_commits_newest_first() {
     );
     ok(c.call(Cmd::AgentStop(v1::AgentStop {
         agent_id: s.agent_id,
+        stop_helpers: false,
     })));
 }
 
@@ -1344,7 +1448,9 @@ fn fake_agent_path() -> String {
     p.pop();
     p.pop();
     p.push(format!("agora-fake-agent{}", std::env::consts::EXE_SUFFIX));
-    if !p.exists() {
+    // Built once per test binary, even when present: a binary left from an older checkout may lack newer flags.
+    static FRESH: std::sync::Once = std::sync::Once::new();
+    FRESH.call_once(|| {
         let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
         assert!(
             Command::new(cargo)
@@ -1354,7 +1460,7 @@ fn fake_agent_path() -> String {
                 .success(),
             "building agora-fake-agent failed"
         );
-    }
+    });
     p.to_string_lossy().into_owned()
 }
 
@@ -1429,5 +1535,51 @@ fn a_chat_agents_conversation_streams_to_whoever_subscribes() {
     );
     ok(c.call(Cmd::AgentStop(v1::AgentStop {
         agent_id: s.agent_id,
+        stop_helpers: false,
     })));
+}
+
+#[test]
+fn the_node_lists_a_folders_subfolders_for_the_folder_picker() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return;
+    }
+    let e = env("dirlist");
+    // Outside the node's own folder (the one its worktrees are in), which is never listed.
+    let pick = std::env::temp_dir().join(format!("agora-pick-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&pick);
+    std::fs::create_dir_all(pick.join("zeta")).unwrap();
+    std::fs::create_dir_all(pick.join("alpha/.git")).unwrap();
+    std::fs::write(pick.join("file.txt"), "x").unwrap();
+    let n = node(&e, NodeLimits::default());
+    let mut c = Client::connect(n.socket().unwrap()).unwrap();
+    let r = ok(c.call(Cmd::DirectoryList(v1::DirectoryList {
+        path: pick.to_string_lossy().into_owned(),
+        authorization: None,
+    })));
+    let Some(Ok_::DirectoryEntries(list)) = r.result else {
+        panic!("not a folder listing: {r:?}");
+    };
+    let names: Vec<(&str, bool)> = list
+        .entries
+        .iter()
+        .map(|x| (x.name.as_str(), x.is_git))
+        .collect();
+    assert_eq!(names, [("alpha", true), ("zeta", false)]);
+    assert!(!list.truncated);
+    assert!(
+        list.path
+            .ends_with(&*pick.file_name().unwrap().to_string_lossy()),
+        "{}",
+        list.path
+    );
+    // The node's own folder holds its keys: never listed, and refused when asked for.
+    assert_eq!(
+        err_code(c.call(Cmd::DirectoryList(v1::DirectoryList {
+            path: e.dir.join("data").to_string_lossy().into_owned(),
+            authorization: None,
+        }))),
+        "protocol.invalid_message"
+    );
+    let _ = std::fs::remove_dir_all(&pick);
 }

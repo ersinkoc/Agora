@@ -1,0 +1,11 @@
+{
+  "path": "x",
+  "parent": "x",
+  "entries": [
+    {
+      "name": "x",
+      "isGit": true
+    }
+  ],
+  "truncated": true
+}

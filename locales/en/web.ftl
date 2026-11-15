@@ -23,6 +23,7 @@ machines-online =
     }
 link-connecting = Connecting to your hub…
 link-offline = Hub unreachable. Retrying…
+link-retry = Retry now
 action-open = Open
 action-start-agent = Start an agent
 theme-dark = Dark
@@ -50,29 +51,103 @@ approval-allow = Allow
 approval-deny = Deny
 approval-not-trusted = This device is not trusted by that machine yet. Open "This device" and run the command it shows on the machine.
 approval-failed = The answer did not go through. Try again.
+approval-forbidden = You cannot answer for this project from this device: it is limited to other projects there. Ask someone who works on it.
+start-approval-title = { $name } ({ $agentKind }) on { $node } asks to start { $kind }
+start-approval-depth = Depth
+start-approval-folder = Folder
+start-approval-worktree = in its own worktree
+start-approval-outside = This folder is outside the asking agent's own folder.
+start-approval-prompt = Its first prompt
+start-approval-no-prompt = No prompt: it starts and waits.
+start-approval-scope = What to allow
+start-approval-once = Only this one
+start-approval-no-grant = Only this one can be allowed: this kind runs any program it is given, so it is never started without asking.
+start-approval-more = Up to { $count } { $kind } agents in this folder while { $name } runs, without asking again
+start-approval-nested = Its helpers may ask to start helpers too (you answer each)
+helper-started-by = started by { $name }
+helper-grants = Helper permissions
+helper-grant-line = Can still start { $count } { $kind } without asking in
+helper-grant-revoke = Revoke
+helper-grants-failed = Could not read or change the helper permissions.
 device-title = This device
-device-intro = Machines only accept an answer from a device their owner trusted. To trust this one, run this on the machine:
+device-intro = Machines only accept an answer from a device they trust. This is what they know this browser by:
 device-name = Device name
 device-key = Device key
 device-link = This device
+device-fingerprint = Fingerprint
+device-trusted-here = trusts this browser
+device-not-trusted-here = does not trust this browser yet
+device-add-title = Add this browser: approve it on another device of yours
+device-add-intro = If one of your machines already trusts another device of yours (a browser or the terminal client), that device can approve this one. It sees a card with this browser's fingerprint, { $fingerprint }: check it is the same.
+device-ask = Ask another device to approve
+device-asked = Asked. Open the window on a device your machines trust: it shows a card for this browser. Its fingerprint must read { $fingerprint }.
+device-ask-failed = Could not ask. Check the connection and try again.
+device-command-intro = Or run this on the machine (if `agora` is not found there, run it in the folder of the agora program: ./agora, or .\agora.exe on Windows):
+device-others = Your other devices
+device-removed = removed
+device-waiting = waiting for your approval
+device-trusted-on = trusted on { $machines }
+device-trusted-nowhere = not trusted on any machine
+device-last-used = last used { $when }
+device-remove = Remove
+device-remove-failed = Could not remove it.
+device-request-title = { $name } asks to be trusted
+device-request-compare = Compare it with the fingerprint that device shows under "This device". Approve only if they are the same.
+device-request-machines = On these machines
+device-request-all = All of them, and any machine that trusts this device later.
+device-request-some = Only the ones checked.
+device-request-failed = The approval could not be sent. Try again.
+device-request-later = Not now
+device-request-approve = Approve
+trust-ask = Ask another device to approve
+trust-asked = Asked. Approve this browser on a device that machine trusts, then start again.
 
 signin-title = Sign in
 signin-intro = Ask your hub for a code: run "agora hub login" on the machine that runs it, then type the code here.
 signin-code = Code
 signin-action = Sign in
 signin-refused = That code did not work. It may be wrong, expired or already used.
-signin-too-many = Too many wrong codes. Wait a minute and try again.
+signin-too-many = Too many wrong tries from here. Wait a while and try again.
 signin-failed = Could not reach your hub. Try again.
+signin-password = Screen password
+signin-password-hint = You are signing in from another machine, so this hub also asks for its screen password.
+signin-refused-password = That did not work. The code may be wrong, expired or already used, or the password may be wrong.
+lock-now = Lock
+lock-now-hint = Sign this window out. Agents keep running.
+password-title = Screen password
+password-intro = Set a password that a sign-in from another machine must give along with its code. This machine's own browser is never asked.
+password-intro-set = A screen password is set: a sign-in from another machine needs it. Changing it signs out every other window.
+password-current = Current password
+password-new = New password
+password-again = Type it again
+password-set = Set password
+password-change = Change password
+password-saved = Saved. Every other window was signed out.
+password-refused = That password is not right.
+password-too-many = Too many wrong tries. Wait a while and try again.
+password-too-short = Use at least { $min } characters.
+password-mismatch = The two passwords do not match.
+password-failed = Could not reach your hub. Try again.
+idle-lock = Lock this window when idle
+idle-lock-off = Never
+idle-lock-minutes = After { $minutes } minutes
+idle-lock-hint = Kept in this browser only. An idle window signs out like Lock; agents keep running. Signing in again takes a code (and from another machine the screen password) or a passkey.
+idle-lock-hint-no-password = Kept in this browser only. An idle window signs out like Lock; agents keep running.
+audit-action-sign-out = Signed out
+audit-action-password-set = Set the screen password
+audit-action-password-clear = Removed the screen password
 machines-title = Your machines
 machines-empty = No machines connected yet.
 machine-online = Online
 machine-offline = Offline
+machine-last-seen = last seen { $when }
 machine-agents =
     { $count ->
         [one] { $count } agent running
        *[other] { $count } agents running
     }
 palette-go-machines = Show my machines
+palette-language = Language: { $name }
 agent-tokens = { $count } tokens used
 
 start-title = Start an agent
@@ -83,6 +158,7 @@ start-kinds-failed = The machine did not answer. Try again.
 start-no-kinds = This machine has no agents set up yet.
 start-no-projects = No project is set up on a connected machine. Run "agora node run --project PATH" on one.
 start-not-installed = not installed
+start-not-installed-why = This machine cannot find the programs of the agents marked "not installed" in its PATH. Install them there, or start the node from a terminal where they run.
 start-go = Start
 start-cancel = Cancel
 start-kind-unknown = That machine does not know this agent.
@@ -123,6 +199,78 @@ changes-files = { $count ->
 diff-title = What { $name } changed
 diff-close = Close
 diff-failed = Could not read the changes from that machine.
+changes-summary = { $count ->
+    [one] 1 file
+   *[other] { $count } files
+}
+changes-filter = Show
+changes-filter-all = All
+changes-filter-modified = Changed
+changes-filter-added = Added
+changes-filter-deleted = Deleted
+changes-filter-renamed = Renamed
+changes-status-modified = Changed
+changes-status-added = Added
+changes-status-deleted = Deleted
+changes-status-renamed = Renamed
+changes-badge-modified = M
+changes-badge-added = A
+changes-badge-deleted = D
+changes-badge-renamed = R
+changes-search = Filter by name
+changes-layout = Layout
+changes-layout-unified = Unified
+changes-layout-split = Side by side
+changes-wrap = Wrap lines
+changes-wrap-long = A long change shown whole is drawn one line per row, so it does not wrap; scroll sideways instead.
+changes-refresh = Read the changes again
+changes-list = Changed files
+changes-top-folder = Top folder
+changes-no-match = No changed file matches.
+changes-pick = Pick a file on the left to see what changed in it.
+changes-renamed-from = was { $name }
+changes-whole-file = Whole file
+changes-prev = Previous file
+changes-next = Next file
+changes-keys = next and previous file
+changes-binary = This file is not text, so its changes are not shown.
+changes-no-lines = Only the name or the permissions of this file changed.
+changes-no-eol = No line break at the end of the file
+changes-gap = { $count ->
+    [one] Show 1 unchanged line
+   *[other] Show { $count } unchanged lines
+}
+changes-gap-rest = Show the rest of the file
+changes-gap-failed = Could not read this file to show the unchanged lines.
+changes-retry = Try again
+changes-stale = The file has changed since these changes were read, so the unchanged lines are not shown. Read the changes again.
+changes-truncated = These changes are larger than 512 KiB, so only the first part was read. The last file in the list is cut off.
+changes-truncated-count = These changes are larger than 512 KiB, so only the first { $count ->
+        [one] file was
+       *[other] { $count } files were
+    } read. The machine counts { $total } changed files: at least { $min ->
+        [one] one is
+       *[other] { $min } are
+    } not listed here. The last file in the list is cut off.
+files-truncated = The changes are larger than 512 KiB, so files after the cut may have no change mark.
+files-truncated-count = The changes are larger than 512 KiB, so files after the cut have no change mark. The machine counts { $total ->
+        [one] one changed file
+       *[other] { $total } changed files
+    }; { $count ->
+        [one] one is
+       *[other] { $count } are
+    } marked.
+changes-partial = This file is cut off: the changes were too large to read at once.
+changes-eol = { $count ->
+    [one] One changed line differs only in its line ending (LF or CRLF); its text is the same.
+   *[other] { $count } changed lines differ only in their line endings (LF or CRLF); their text is the same.
+}
+changes-load-file = Read only this file
+changes-load-file-failed = This file alone is still too large to read.
+changes-show-all = { $count ->
+    [one] Show all 1 line
+   *[other] Show all { $count } lines
+}
 console-files = Files
 files-title = Files of { $name }
 files-tree = Folders and files
@@ -130,6 +278,42 @@ files-pick = Pick a file on the left to read it.
 files-binary = This file is not text, so it is not shown.
 files-too-large = This file could not be read (it may be too large).
 files-failed = Could not list this folder.
+files-filter = Filter files by name
+files-only-changed = Show only the changed files
+files-changed-count = { $count ->
+    [one] 1 changed
+   *[other] { $count } changed
+}
+files-refresh = Read the folders and changes again
+files-no-match = No file matches. Folders not opened yet are not searched.
+files-deleted = This file was deleted; its changes are in the review screen.
+files-empty = This folder is empty.
+files-folder-changed = Holds changed files
+files-key-filter = filter files
+files-key-find = find in the file
+files-open-files = Open files
+files-close-tab = Close { $name }
+files-path = Path
+files-lines = { $count ->
+    [one] 1 line
+   *[other] { $count } lines
+}
+files-changed-lines = { $count ->
+    [one] 1 line changed
+   *[other] { $count } lines changed
+}
+files-find = Find in the file
+files-find-none = No match
+files-find-at = { $used } of { $total }
+files-find-prev = Previous match
+files-find-next = Next match
+files-find-close = Close the search
+files-copy = Copy the whole file
+files-copied = Copied
+files-reload = Read this file again
+files-mark-add = Added since the last commit
+files-mark-mod = Changed since the last commit
+files-mark-del = Lines removed here since the last commit
 filter-placeholder = Filter by agent, machine or project
 filter-none = Nothing matches.
 console-drag = Drag this bar onto another terminal to swap their places
@@ -145,8 +329,55 @@ history-failed = Could not read the history from that machine.
 history-no-subject = (no message)
 chat-empty = Nothing said yet. Tell it what to do below.
 chat-log = Conversation
-chat-tool = Tool
 chat-plan = Plan
+chat-plan-steps =
+    { $count ->
+        [one] Plan · { $count } step
+       *[other] Plan · { $count } steps
+    }
+chat-plan-earlier =
+    { $count ->
+        [one] Earlier plan · { $count } step
+       *[other] Earlier plan · { $count } steps
+    }
+chat-steps-earlier =
+    { $count ->
+        [one] { $count } earlier step
+       *[other] { $count } earlier steps
+    }
+chat-working = Working…
+chat-copy = Copy
+chat-copied = Copied
+# What an agent asked to do, when it gave no title of its own. Neutral: the call may still be running or be refused.
+tool-read = Read
+tool-edit = Edit
+tool-run = Command
+tool-search = Search
+tool-fetch = Web page
+tool-delete = Delete
+tool-move = Move
+tool-think = Thinking
+tool-other = Step
+approval-full-request = Full request
+notice-adapter-turn_failed = The agent's turn failed (error { $rpc_code }). Its provider may have refused the request; try again or choose another model. { $stderr_tail }
+notice-adapter-turn_stopped = The agent stopped its turn ({ $stop_reason }).
+notice-adapter-turn_empty = The agent ended its turn without saying anything. Its provider may have refused the request. { $stderr_tail }
+notice-adapter-agent_exited = The agent stopped (step { $stage }, exit code { $exit_code }). Its last output: { $stderr_tail }
+notice-adapter-agent_refused = The agent refused to start (step { $stage }, error { $rpc_code }): { $detail }
+notice-other = The agent reported something this window cannot show ({ $code }).
+session-mode = Mode
+session-model = Model
+session-not-reported = Not reported
+session-mode-unasked = { $name } (does not ask)
+session-context = Context { $percent }%
+session-context-under-one = Context <1%
+session-context-detail = { $used } of { $size } tokens in the agent's context
+session-cost = { $amount } reported by the agent
+session-change-failed = The agent did not switch.
+session-confirm-title = Let the agent act without asking?
+session-confirm-body = In { $name } the agent runs commands and changes files without asking you first.
+session-confirm-yes = Switch anyway
+session-confirm-no = Keep asking
 grant-title-typing = Allow typing into this agent for 1 hour?
 grant-title-start = Allow starting agents in this project for 1 hour?
 grant-title-other = Allow this window to act on { $machine } for 1 hour?
@@ -157,6 +388,8 @@ grant-failed = The permission did not go through. Try again.
 audit-title = Activity
 audit-intro = Who did what on this hub, newest first. Only the owner sees this.
 audit-person = Person
+audit-session = session { $id }
+audit-session-hint = Each sign-in is its own session: two windows of the same person show different ones.
 audit-empty = Nothing has happened yet.
 audit-owner-only = Only the owner can see the activity.
 audit-signed-out = You are signed out. Sign in again to see the activity.
@@ -214,6 +447,7 @@ start-separate-worktree = Create an isolated working copy
 start-identity-change = Associate this folder with its changed project identity
 start-directory-unsupported = This machine needs an update to start agents in selected folders.
 start-directory-failed = The folder could not be selected. Check its path and permissions.
+start-directory-forbidden = This device is limited to other projects on this machine. Choose a folder of a project you work in, or ask the machine's owner.
 workspace-shared = Shared folder · changes belong to the workspace
 filter-project = Project
 filter-all-projects = All projects
@@ -224,6 +458,7 @@ start-directory-agent-unsupported = This agent needs an isolated working copy to
 audit-action-directoryinspect = Selected a folder
 audit-action-agentlaunch = Started an agent in a folder
 audit-action-workspacequery = Read workspace files or changes
+audit-action-node-resynced = Reconnected a machine; part of its history is missing
 
 agent-address = Agent address
 agent-address-copy = Copy agent address
@@ -238,3 +473,320 @@ language-system = Browser default
 language-en = English
 language-tr = Türkçe
 language-not-saved = Language changed for this visit. Your browser could not save the preference.
+
+# The IDE-style window: title bar, agent tree, tabs, details panel, status bar.
+ide-command = Search or run a command
+ide-new-tab = Start an agent
+ide-close-tab = Close { $name }
+ide-hide-panel = Hide this panel
+ide-show-agents = Show the agent list
+ide-show-details = Show details
+ide-layout-single = One terminal at a time
+ide-layout-grid = Terminals side by side
+ide-details = Details
+ide-welcome-title = Pick up where you left off
+ide-welcome-running = Running now
+ide-welcome-none = No agent is running yet.
+ide-welcome-search = Search and commands
+ide-welcome-next = Jump to the next agent that needs you
+ide-add-here = Start an agent on { $machine }
+ide-toggle-machine = Show or hide the agents on { $name }
+ide-status-agents =
+    { $count ->
+        [one] { $count } agent
+       *[other] { $count } agents
+    }
+ide-status-needs =
+    { $count ->
+        [one] { $count } needs you
+       *[other] { $count } need you
+    }
+ide-folder-known = Known folders
+ide-folder-change = Change folder
+ide-folder-chosen = Working folder
+ide-agent-pick = Agent
+ide-options = Options
+ide-copy-address = Copy address
+ide-tab-changes = Changes
+ide-tab-messages = Messages
+ide-tab-cost = Spent
+theme-label = Colour scheme
+theme-system = Follow the system
+ide-shared = Shared
+ide-memory = Memory used by the agents on this machine
+network-hub = Your hub
+network-build = Version running on this machine
+network-never = never
+network-heard = heard { $when }
+network-last-seen = last seen { $when }
+network-online =
+    { $total ->
+        [one] { $online } of { $total } machine online
+       *[other] { $online } of { $total } machines online
+    }
+network-terminals =
+    { $count ->
+        [one] { $count } terminal open
+       *[other] { $count } terminals open
+    }
+terminal-size = Terminal text size
+terminal-smaller = Smaller text
+terminal-larger = Larger text
+closed-section = Closed
+closed-clear = Clear closed
+closed-dismiss = Remove from this list
+closed-forget = Remove for everyone
+closed-ok = Finished
+closed-failed = Ended with exit code { $code }
+closed-note = Its terminal is gone. This is what it left behind.
+closed-machine = Machine
+closed-folder = Folder
+closed-branch = Branch
+closed-ended-label = Ended
+closed-earlier = before this window opened
+closed-ran-label = Ran for
+closed-changes-label = Left behind
+closed-changes-none = No uncommitted changes
+closed-tokens-label = Used
+closed-review = Review the changes
+ide-resize = Resize the panel
+start-browse = Browse folders
+start-browse-up = Up one folder
+start-browse-close = Close the folder list
+start-browse-empty = No folders here.
+start-browse-more = There are more folders than are shown. Type the path to go further.
+start-browse-failed = The folder could not be listed.
+start-browse-git = A Git project
+closed-clear-everyone = Remove every closed agent for everyone
+closed-forget-failed = The hub did not remove it: { $reason }
+closed-reason-forbidden = you are not allowed to remove it
+closed-reason-running = it is running again
+closed-reason-gone = the hub no longer knows it
+closed-reason-other = the hub could not be reached or refused
+
+trust-hint = This machine ({ $machine }) does not trust this device yet. Run this command once on that machine, then press Start again:
+trust-copy = Copy
+trust-copied = Copied
+interrupted-section = Stopped with the machine
+interrupted-hint = These were running when the machine stopped.
+interrupted-note = It was running when its machine stopped. Resume continues its conversation in the same folder.
+interrupted-note-new = It was running when its machine stopped. Its conversation cannot be continued; Start again opens a new one in the same folder.
+interrupted-note-running = Its process from before the machine's restart is still running. Stop it first; then it can be resumed. Or leave it running.
+action-stop-old = Stop it
+action-resume = Resume
+action-start-again = Start again
+resume-failed = It did not start. Try again.
+resume-failed-folder = Its folder is gone or now belongs to another project, so it was not started.
+resume-failed-parent = The agent that started it is not running. Resume that one first.
+resume-failed-session = Its conversation cannot be continued. Use Start again.
+resume-failed-gone = That machine no longer offers it.
+resume-failed-unsupported = That machine cannot resume agents yet. Update it.
+resume-failed-still-running = Its process from before the restart is still running. Stop it first.
+resume-failed-offline = That machine is offline.
+resume-failed-forbidden = This device is limited to other projects on this machine, so it cannot start this agent.
+
+# ADR-0059: launch options (manifest `[[launch.option]]` labels)
+option-skip-permissions = Don't ask
+option-ask = Ask before acting
+start-how-it-acts = How it acts
+start-confirm-skip-body = With "{ $name }" chosen, the agent runs commands and changes files without asking you first, for as long as it runs.
+start-confirm-skip-yes = Start without asking
+start-does-not-ask-note = This agent will act without asking you.
+start-option-forbidden = This machine does not let agents act without asking. Choose "Ask before acting".
+start-option-confined-only = This machine lets an agent act without asking only while it is confined to its folder, and it would not be here.
+start-options-unsupported = This machine is too old for start options. Update it, or choose "Ask before acting".
+agent-does-not-ask = Does not ask
+agent-does-not-ask-explain = Started so that it acts without asking you first
+start-option-unconfirmed = This machine says that option lets the agent act without asking, and this window did not ask you first. Nothing was started; open the start window again.
+start-option-invalid = This machine does not offer that start option. Nothing was started; open the start window again.
+# Layouts (ADR-0068): panes side by side, tabs, saved layouts.
+layout-menu = Layout
+layout-menu-back = Back
+layout-preset-1x1 = One pane with tabs
+layout-preset-2x1 = Two side by side
+layout-preset-1x2 = Two, one above the other
+layout-preset-2x2 = Four (2 × 2)
+layout-preset-3x2 = Six (3 × 2)
+layout-preset-focus = One large, three small
+layout-maximize = Maximize
+layout-restore = Restore
+layout-save-as = Save layout as…
+layout-saved = Saved layouts…
+layout-export = Export
+layout-import = Import…
+layout-reset = Reset layout
+layout-split-right = Split right
+layout-split-down = Split down
+layout-close-pane = Close pane
+layout-pane-menu = Pane options: { $name }
+layout-move-to = Move to…
+layout-swap-with = Swap with…
+layout-move-out = Take out of the tabs
+layout-place-before = Beside it, before
+layout-place-after = Beside it, after
+layout-place-above = Above it
+layout-place-below = Below it
+layout-place-tab = As a tab
+layout-show = Show…
+layout-follow-attention = What needs you next
+layout-follow-selection = The agent selected in the list
+layout-follows-attention = Follows what needs you
+layout-follows-selection = Follows the selection
+layout-show-agent = { $name }
+layout-panel-agent = Agent
+layout-show-agent-itself = This agent
+layout-show-agent-files = This agent's files
+layout-panel-empty = Empty pane
+layout-panel-unknown = Unknown panel “{ $id }”: this window cannot show it.
+layout-drag = Drag onto another pane: an edge puts it beside, the middle makes it a tab
+layout-empty-title = Choose what this pane shows
+layout-nothing-selected = Select an agent in the list to see it here.
+layout-gone = This agent is no longer here.
+layout-files-open = Browse the files of { $name }
+layout-files-none = Files are shown once this window is connected to your machines.
+layout-no-terminal = This agent is a chat; it has no terminal.
+layout-no-conversation = This agent has a terminal, not a chat.
+layout-pane = Pane: { $name }
+layout-divider = Resize the panes
+layout-save-title = Save the layout
+layout-save-name = Name
+layout-save-replaces = A saved layout with this name will be replaced.
+layout-cancel = Cancel
+layout-save = Save
+layout-list-title = Saved layouts
+layout-list-empty = No saved layouts yet. Use “Save layout as…” in the layout menu.
+layout-apply = Use
+layout-rename = Rename
+layout-delete = Delete
+layout-delete-named = Delete { $name }
+layout-close = Close
+layout-import-title = Import a layout
+layout-import-paste = Paste a layout (JSON)
+layout-import-file = Or choose a file
+layout-import-do = Import
+layout-error-json = This is not valid JSON.
+layout-error-invalid = This is not a layout this window can read.
+layout-error-newer = This layout was made by a newer version. Update to use it.
+layout-error-too-deep = This layout is nested too deeply (at most { $max } levels).
+layout-error-too-many = This layout has too many panes (at most { $max }).
+layout-board-empty = No shared tasks or files yet.
+layout-cost-empty = Nothing spent yet.
+
+## Themes (ADR-0068 rung 2, docs/ux/themes.md)
+theme-editor-title = Theme
+theme-edit = Edit theme
+theme-follows-system = Following the system: showing the { $scheme } theme. Choose one theme for each.
+theme-forced = Always { $scheme }. Follow the system to switch between your two themes by itself.
+theme-for-light = Light theme
+theme-for-dark = Dark theme
+theme-name = Name
+theme-built-in = built in
+theme-built-in-hint = Built-in themes can't be changed. Customize makes a copy you can change.
+theme-customize = Customize
+theme-copy-name = { $name } (mine)
+theme-colours = Colours
+theme-shape = Text and shape
+theme-readability = Readability
+theme-incomplete = Some values are not valid yet; the window keeps the last good ones.
+theme-contrast-ok = All text is readable (WCAG AA).
+theme-contrast-not-applied = Not applied: some text would be hard to read.
+theme-px = { $size } px
+theme-import = Import…
+theme-export = Export
+theme-delete = Delete theme
+theme-reset = Reset to defaults
+theme-import-hint = Themes are kept in this browser. Export one to use it in another browser; Reset brings back Light and Dark and keeps your themes.
+theme-name-dark = Dark
+theme-name-light = Light
+theme-name-high-contrast = High contrast
+theme-name-large-text = Large text
+theme-name-slate = Slate
+theme-name-sand = Sand
+theme-token-surface-0 = Background
+theme-token-surface-1 = Panels
+theme-token-surface-2 = Raised surfaces
+theme-token-border = Lines
+theme-token-text = Text
+theme-token-text-muted = Secondary text
+theme-token-accent = Accent
+theme-token-on-accent = Text on accent
+theme-token-state-working = Working
+theme-token-state-needs-you = Needs you
+theme-token-state-finished = Finished
+theme-token-state-idle = Idle
+theme-token-state-unknown = Unknown
+theme-token-font-ui = Interface font
+theme-token-font-mono = Terminal and code font
+theme-token-text-16 = Text size
+theme-token-space-1 = Spacing
+theme-token-radius-xs = Corners: tiny
+theme-token-radius-s = Corners: small
+theme-token-radius-m = Corners: medium
+theme-token-radius-l = Corners: large
+theme-error-json = This file is not JSON.
+theme-error-invalid = This is not an Agora theme file.
+theme-error-newer = This theme was made by a newer version of Agora.
+theme-error-name = A theme needs a name of 1 to { $max } characters.
+theme-error-scheme = The theme must say whether it is "dark" or "light".
+theme-error-unknown-field = "{ $field }" is not part of a theme file.
+theme-error-unknown-token = "{ $token }" is not a theme token.
+theme-error-derived-token = "{ $token }" follows from "{ $base }": set "{ $base }" instead.
+theme-error-bad-color = { $label } ("{ $token }") must be a colour like #1a2b3c.
+theme-error-bad-size = { $label } ("{ $token }") must be between { $min } and { $max } px.
+theme-error-bad-font = { $label } ("{ $token }") must be a list of font names separated by commas.
+theme-error-contrast = { $fg } on { $bg } is { $ratio }:1; it needs at least { $min }:1 to be readable.
+theme-error-full = You have { $max } themes; delete one first.
+palette-theme-editor = Edit theme
+palette-theme = Theme: { $name }
+device-appearance = Appearance
+device-appearance-intro = This browser shows the { $name } theme. Themes are kept in this browser only.
+
+## ADR-0067 rung 2: the phone-sized window and the terminal key bar.
+phone-nav = Go to
+phone-search = Search
+phone-start = Start
+phone-machines = Machines
+phone-back = Back to the list
+phone-offline = offline
+phone-no-agents = No agents on this machine.
+phone-needs = Needs you · { $count }
+phone-next = Next · { $count }
+phone-untrusted = { $machine } does not trust this device yet, so it will refuse an answer from here.
+key-bar = Terminal keys
+key-esc = Esc
+key-tab = Tab
+key-ctrl = Ctrl
+key-up = Up
+key-down = Down
+key-left = Left
+key-right = Right
+key-paste = Paste
+
+# ADR-0073: old machines, forgetting machines
+old-machines-title = { $count ->
+    [one] One old machine
+   *[other] { $count } old machines
+}
+old-machines-explain = Not seen for more than a day. They are not offered for new agents. One that connects again is shown as usual.
+old-machines-cleanup = Clean up…
+forget-machine-action = Forget…
+forget-machine-title = Forget { $name }?
+forget-machines-title = { $count ->
+    [one] Clean up one old machine?
+   *[other] Clean up { $count } old machines?
+}
+forget-machines-explain = Forgotten machines and their finished agents leave every window. What they did stays in the history and the costs. A machine that connects again comes back.
+forget-machine-agents = { $count ->
+    [one] one agent was running then; it may still run there
+   *[other] { $count } agents were running then; they may still run there
+}
+forget-machines-refuse = Also refuse them if they connect again (each would need a new join code)
+forget-machines-cancel = Keep
+forget-machines-confirm = { $count ->
+    [one] Forget
+   *[other] Forget { $count }
+}
+forget-machine-reason-forbidden = Only the hub's owner can forget machines.
+forget-machine-reason-online = It is connected again, so it was not forgotten.
+forget-machine-reason-gone = The hub no longer knows this machine.
+forget-machine-reason-other = The hub could not forget it. Try again.

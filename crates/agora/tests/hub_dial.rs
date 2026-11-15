@@ -15,7 +15,7 @@ use agora_hub::hub::Hub;
 use agora_hub::server::{self, ClientAuth, ServerState};
 use agora_hub::store::SqliteStore;
 use agora_hub::tls;
-use agora_node::daemon::EventSink;
+use agora_node::daemon::{Announce, EventSink};
 use agora_node::uplink_client::{spawn, HubLink};
 use agora_protocol::handshake::Support;
 
@@ -60,7 +60,11 @@ fn hubside(node_id: &str) -> Hubside {
         hub: Arc::new(Hub::open(store).unwrap()),
         support: Support {
             generations: vec![1],
-            capabilities: vec!["terminal.raw".into()],
+            capabilities: vec![
+                "terminal.raw".into(),
+                "workspace.directory".into(),
+                "directory.list".into(),
+            ],
             required: vec![],
         },
         ca: Some(ca),
@@ -116,6 +120,7 @@ impl Hubside {
             commands: None,
             grants: None,
             mesh: None,
+            devices: None,
         }
     }
 
@@ -198,7 +203,7 @@ fn a_node_dials_the_hub_and_its_agents_appear_in_the_view_then_new_events_follow
     });
 
     // Something new on the node shows up live.
-    sink.node_resources("laptop", 3, 3);
+    sink.node_resources("laptop", 3, 3, 0);
     wait("the resource event", || {
         hub.state.hub.view().0.nodes["laptop"].agents_running == 3
     });
@@ -245,7 +250,7 @@ fn the_terminal_console_gets_the_snapshot_of_a_node_and_draws_it() {
     let text = |id: &str, args: &[(&str, agora_i18n::Arg)]| {
         catalog.render(id, args).unwrap_or_else(|| id.to_string())
     };
-    let screen = agora_tui::render::render(&snapshot, false, false, "", "", 0, &text).join("\n");
+    let screen = agora_tui::render::render(&snapshot, false, false, "", "", 0, 0, &text).join("\n");
     assert!(
         screen.contains("agent-1") && screen.contains("1 of 1 machines online"),
         "{screen}"
@@ -274,7 +279,9 @@ fn the_terminal_console_answers_an_approval_with_its_own_key_through_the_hub() {
     let mut fake = std::path::PathBuf::from(env!("CARGO_BIN_EXE_agora"));
     fake.pop();
     fake.push(format!("agora-fake-agent{}", std::env::consts::EXE_SUFFIX));
-    if !fake.exists() {
+    // Built once per test binary, even when present: a binary left from an older checkout may lack newer flags.
+    static FRESH: std::sync::Once = std::sync::Once::new();
+    FRESH.call_once(|| {
         assert!(std::process::Command::new(
             std::env::var("CARGO").unwrap_or_else(|_| "cargo".into())
         )
@@ -282,7 +289,7 @@ fn the_terminal_console_answers_an_approval_with_its_own_key_through_the_hub() {
         .status()
         .unwrap()
         .success());
-    }
+    });
     std::fs::write(
         manifests.join("ad.toml"),
         format!("kind = \"adapted\"\ndisplay_name = \"A\"\nversion = \"1\"\nmin_engine = 1\n[adapter]\ncommand = [{:?}, \"--adapter\"]\n", fake.to_string_lossy()),
@@ -300,6 +307,7 @@ fn the_terminal_console_answers_an_approval_with_its_own_key_through_the_hub() {
     )
     .unwrap();
     let cfg = agora_node::daemon::NodeConfig {
+        resume_all: false,
         node_id: "node-test".into(),
         socket: dir.join("c.sock"),
         data_dir: data,
@@ -405,6 +413,7 @@ fn the_terminal_console_opens_an_agents_terminal_through_the_hub_types_into_it_a
     )
     .unwrap();
     let cfg = agora_node::daemon::NodeConfig {
+        resume_all: false,
         node_id: "laptop".into(),
         socket: dir.join("c.sock"),
         data_dir: dir.join("data"),
@@ -499,7 +508,9 @@ fn the_terminal_console_follows_a_chat_agents_conversation_sends_a_request_and_s
     let mut fake = std::path::PathBuf::from(env!("CARGO_BIN_EXE_agora"));
     fake.pop();
     fake.push(format!("agora-fake-agent{}", std::env::consts::EXE_SUFFIX));
-    if !fake.exists() {
+    // Built once per test binary, even when present: a binary left from an older checkout may lack newer flags.
+    static FRESH: std::sync::Once = std::sync::Once::new();
+    FRESH.call_once(|| {
         assert!(std::process::Command::new(
             std::env::var("CARGO").unwrap_or_else(|_| "cargo".into())
         )
@@ -507,13 +518,14 @@ fn the_terminal_console_follows_a_chat_agents_conversation_sends_a_request_and_s
         .status()
         .unwrap()
         .success());
-    }
+    });
     std::fs::write(
         manifests.join("ad.toml"),
         format!("kind = \"adapted\"\ndisplay_name = \"A\"\nversion = \"1\"\nmin_engine = 1\n[adapter]\ncommand = [{:?}, \"--adapter\"]\n", fake.to_string_lossy()),
     )
     .unwrap();
     let cfg = agora_node::daemon::NodeConfig {
+        resume_all: false,
         node_id: "laptop".into(),
         socket: dir.join("c.sock"),
         data_dir: dir.join("data"),
@@ -630,6 +642,7 @@ fn the_terminal_console_gives_a_machine_a_signed_grant_when_its_policy_asks_for_
     // The owner's policy: stopping an agent through the hub needs a grant.
     std::fs::write(data.join("policy"), "signed_commands = agent.stop\n").unwrap();
     let cfg = agora_node::daemon::NodeConfig {
+        resume_all: false,
         node_id: "laptop".into(),
         socket: dir.join("c.sock"),
         data_dir: data,
@@ -736,6 +749,7 @@ fn the_terminal_console_learns_that_typing_was_refused_for_want_of_a_grant() {
     // The owner's policy: typing into a terminal through the hub needs a grant.
     std::fs::write(data.join("policy"), "signed_commands = terminal.input\n").unwrap();
     let cfg = agora_node::daemon::NodeConfig {
+        resume_all: false,
         node_id: "laptop".into(),
         socket: dir.join("c.sock"),
         data_dir: data,
@@ -824,7 +838,7 @@ fn a_node_keeps_working_without_the_hub_and_catches_up_when_it_appears() {
     let sink = sink_with_agent(&tmp("late"), "server");
     let _link = spawn(Arc::clone(&sink), hub.link(addr)).unwrap();
     // Events keep being recorded locally while nobody listens.
-    sink.node_resources("server", 1, 1);
+    sink.node_resources("server", 1, 1, 0);
     std::thread::sleep(Duration::from_millis(800));
     assert!(hub.state.hub.view().0.nodes.is_empty());
     assert_eq!(sink.acked(), 0);
@@ -846,8 +860,8 @@ fn a_node_that_returns_under_a_known_name_with_an_empty_data_dir_is_still_heard(
     let addr = hub.listen("127.0.0.1:0");
     // First life: five or more events reach the hub and are acknowledged.
     let first = sink_with_agent(&tmp("returns-1"), "vps");
-    first.node_resources("vps", 1, 1);
-    first.node_resources("vps", 2, 2);
+    first.node_resources("vps", 1, 1, 0);
+    first.node_resources("vps", 2, 2, 0);
     let link = spawn(Arc::clone(&first), hub.link(addr)).unwrap();
     wait("the first life to be acknowledged", || {
         first.acked() >= 6 && first.acked() == first.next_seq() - 1
@@ -863,8 +877,10 @@ fn a_node_that_returns_under_a_known_name_with_an_empty_data_dir_is_still_heard(
         second.next_seq() <= acked_by_hub,
         "the test needs the hub to be ahead"
     );
-    second.set_announcer(Box::new(|ev| {
-        ev.node_online("vps");
+    second.set_announcer(Box::new(|ev, how| {
+        if how == Announce::Restart {
+            ev.node_online("vps");
+        }
         ev.checkout_discovered("vps", "reborn", Path::new("/work/reborn"));
     }));
     let _link = spawn(Arc::clone(&second), hub.link(addr)).unwrap();
@@ -879,6 +895,70 @@ fn a_node_that_returns_under_a_known_name_with_an_empty_data_dir_is_still_heard(
     });
     wait("everything to be acknowledged", || {
         second.acked() == second.next_seq() - 1
+    });
+}
+
+/// ADR-0054 over the real transport: a node whose size cap dropped events the hub never saw used to end every connection in
+/// `Stale` and retry forever. Now it says `SnapshotRequired`, the hub takes its oldest held event as the new base, records the
+/// lost numbers (store and audit trail) and shows what the node announced as its present.
+#[test]
+fn a_node_that_lost_unacknowledged_events_resyncs_over_the_link() {
+    let hub = hubside("burst");
+    let addr = hub.listen("127.0.0.1:0");
+    let sink = Arc::new(EventSink::open_with_cap(&tmp("burst"), "burst", 1200).unwrap());
+    // Its start (`NodeOnline`, the first event) is among what the cap dropped, so the announcement is led by `NodeOnline` (ADR-0055).
+    sink.set_announcer(Box::new(|ev, how| {
+        if how == Announce::Restart {
+            ev.node_online("burst");
+        }
+        ev.agent_launched(
+            &AgentId::new("agent-now"),
+            "proj",
+            "burst",
+            Path::new("/work/proj"),
+            Path::new("/work/now"),
+            "agent/now",
+            "shell",
+            true,
+        );
+    }));
+    // Offline long enough that the cap dropped events the hub never saw.
+    sink.node_online("burst");
+    for i in 0..60 {
+        sink.node_resources("burst", i, 0, 0);
+    }
+    let oldest = sink.oldest_retained();
+    assert!(oldest > 1);
+    let _link = spawn(Arc::clone(&sink), hub.link(addr)).unwrap();
+    wait("the announced agent to show up", || {
+        hub.state
+            .hub
+            .view()
+            .0
+            .agents
+            .contains_key("burst/agent-now")
+    });
+    wait("everything to be acknowledged", || {
+        sink.acked() == sink.next_seq() - 1
+    });
+    let store = hub.state.hub.store();
+    let resyncs = store.resyncs().unwrap();
+    assert_eq!(resyncs.len(), 1);
+    let (producer, from, to, _) = &resyncs[0];
+    assert_eq!((producer.as_str(), *from), ("burst", 1));
+    // At least what was dropped offline; more if the announcement itself pushed older events out under the cap.
+    assert!(*to >= oldest - 1, "{to} vs {oldest}");
+    let audit = agora_hub::audit::Audit::new(store)
+        .list(0, None, 50)
+        .unwrap();
+    assert!(audit.iter().any(|e| e.action == "node.resynced"
+        && e.who == "hub"
+        && e.node == "burst"
+        && e.outcome == format!("1..={to}")));
+    // From then on the link is ordinary.
+    sink.node_resources("burst", 7, 7, 0);
+    wait("a newer event", || {
+        hub.state.hub.view().0.nodes["burst"].agents_running == 7
     });
 }
 
@@ -917,6 +997,7 @@ fn a_signed_in_client_runs_a_command_on_a_node_through_the_hub() {
     let dir = tmp("routed");
     std::fs::create_dir_all(&dir).unwrap();
     let cfg = agora_node::daemon::NodeConfig {
+        resume_all: false,
         node_id: "laptop".into(),
         socket: dir.join("c.sock"),
         data_dir: dir.join("data"),
@@ -1037,6 +1118,7 @@ fn a_clients_terminal_is_relayed_through_the_hub_with_input_and_close() {
     )
     .unwrap();
     let cfg = agora_node::daemon::NodeConfig {
+        resume_all: false,
         node_id: "laptop".into(),
         socket: dir.join("c.sock"),
         data_dir: dir.join("data"),
@@ -1228,6 +1310,7 @@ fn an_agent_messages_an_agent_on_another_node_through_the_hub_and_a_failure_come
         let dir = tmp(name);
         std::fs::create_dir_all(&dir).unwrap();
         let cfg = agora_node::daemon::NodeConfig {
+            resume_all: false,
             node_id: name.into(),
             socket: dir.join("c.sock"),
             data_dir: dir.join("data"),
@@ -1352,6 +1435,7 @@ fn agents_on_two_nodes_share_a_board_claims_leases_and_handoffs_and_it_fails_clo
         let dir = tmp(&format!("board-{name}"));
         std::fs::create_dir_all(&dir).unwrap();
         let cfg = agora_node::daemon::NodeConfig {
+            resume_all: false,
             node_id: name.into(),
             socket: dir.join("c.sock"),
             data_dir: dir.join("data"),
@@ -1604,6 +1688,7 @@ fn a_command_the_policy_lists_needs_a_grant_signed_by_a_trusted_device_and_the_l
     )
     .unwrap();
     let cfg = agora_node::daemon::NodeConfig {
+        resume_all: false,
         node_id: "laptop".into(),
         socket: dir.join("c.sock"),
         data_dir: dir.join("data"),
@@ -1762,4 +1847,428 @@ fn a_command_the_policy_lists_needs_a_grant_signed_by_a_trusted_device_and_the_l
     let e = r.unwrap_err();
     assert_ne!(e.code, ErrorCode::ApprovalGrantRequired.as_str(), "{e:?}");
     drop(node);
+}
+
+#[test]
+fn the_terminal_console_removes_a_closed_agent_from_every_list_but_not_a_running_one() {
+    use agora_tui::client::{Hub as ConsoleHub, Session};
+    let hub = hubside("laptop");
+    let addr = hub.listen("127.0.0.1:0");
+    let sink = sink_with_agent(&tmp("forget"), "laptop");
+    let _link = spawn(Arc::clone(&sink), hub.link(addr)).unwrap();
+    wait("the node to appear", || {
+        hub.state.hub.view().0.agents.contains_key("laptop/agent-1")
+    });
+    let console = ConsoleHub {
+        addr: addr.to_string(),
+        ca_pem: hub.ca_pem.clone(),
+    };
+    let mut session = Session::connect(&console, "client-token").unwrap();
+    // Running: the hub refuses, and the agent stays.
+    let error = session.forget_agent("laptop/agent-1").unwrap_err();
+    assert_eq!(error.code, "agent.running");
+    assert_eq!(
+        error.params["agent_id"].value,
+        Some(agora_protocol::v1::param_value::Value::Str(
+            "laptop/agent-1".into()
+        ))
+    );
+    assert!(hub.state.hub.view().0.agents.contains_key("laptop/agent-1"));
+    // Once it has exited, `d` removes it for everyone.
+    sink.record_bodies(vec![agora_protocol::v1::event::Body::AgentExited(
+        agora_protocol::v1::AgentExited {
+            agent_id: "agent-1".into(),
+            exit_code: 0,
+        },
+    )]);
+    wait("the agent to stop running", || {
+        hub.state
+            .hub
+            .view()
+            .0
+            .agents
+            .get("laptop/agent-1")
+            .is_some_and(|a| !a.running)
+    });
+    assert_eq!(session.forget_agent("laptop/agent-1"), Ok(()));
+    wait("the hub to forget the agent", || {
+        hub.state
+            .hub
+            .view()
+            .0
+            .agents
+            .get("laptop/agent-1")
+            .is_some_and(|a| a.forgotten)
+    });
+    // A window that opens now does not list it.
+    let mut fresh = Session::connect(&console, "client-token").unwrap();
+    let end = Instant::now() + Duration::from_secs(20);
+    let snapshot = loop {
+        match fresh.next(Duration::from_millis(200)) {
+            agora_tui::client::Update::Snapshot(s) => break *s,
+            agora_tui::client::Update::Closed => panic!("the hub closed the connection"),
+            _ => assert!(Instant::now() < end, "no snapshot"),
+        }
+    };
+    assert!(!snapshot
+        .agents
+        .iter()
+        .any(|a| a.agent_id == "laptop/agent-1"));
+}
+
+#[test]
+fn the_terminal_console_picks_a_folder_on_a_machine_and_starts_an_agent_there() {
+    use agora_tui::client::{Hub as ConsoleHub, Session};
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
+        return;
+    }
+    let hub = hubside("laptop");
+    let addr = hub.listen("127.0.0.1:0");
+    let dir = tmp("console-folder");
+    let manifests = dir.join("manifests");
+    std::fs::create_dir_all(&manifests).unwrap();
+    std::fs::write(
+        manifests.join("shell.toml"),
+        "kind = \"shell\"\ndisplay_name = \"Shell\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"sh\"]\n",
+    )
+    .unwrap();
+    // The folder to pick: outside the node's own folder, with a project inside it.
+    let pick = tmp("console-folder-pick");
+    std::fs::create_dir_all(pick.join("app")).unwrap();
+    std::fs::create_dir_all(pick.join("notes")).unwrap();
+    git(&pick.join("app"), &["init", "-q", "-b", "main"]);
+    let (device, _) = agora_tui::device::Device::generate().unwrap();
+    let (stranger, _) = agora_tui::device::Device::generate().unwrap();
+    let data = dir.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    agora_node::approvals::trust_device(
+        &data.join(agora_node::approvals::TRUSTED_DEVICES_FILE),
+        &device.id,
+        &device.public_key_hex(),
+    )
+    .unwrap();
+    let cfg = agora_node::daemon::NodeConfig {
+        resume_all: false,
+        node_id: "laptop".into(),
+        socket: dir.join("c.sock"),
+        data_dir: data,
+        worktree_root: dir.join("wt"),
+        manifests_dir: manifests,
+        projects: vec![],
+        limits: Default::default(),
+    };
+    let node = agora_node::daemon::Node::start(&cfg).unwrap();
+    let mut link = hub.link(addr);
+    link.commands = Some(cfg.socket.clone());
+    link.grants = Some(Arc::clone(&node.grants));
+    let _uplink = spawn(Arc::clone(&node.events), link).unwrap();
+    wait("the node to be online in the hub", || {
+        hub.state
+            .hub
+            .view()
+            .0
+            .nodes
+            .get("laptop")
+            .is_some_and(|n| n.online)
+    });
+    let console = ConsoleHub {
+        addr: addr.to_string(),
+        ca_pem: hub.ca_pem.clone(),
+    };
+    let mut session = Session::connect(&console, "client-token").unwrap();
+    let now = || {
+        u64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap()
+    };
+    let folder = pick.to_string_lossy().into_owned();
+    let sign = |d: &agora_tui::device::Device, op: &str, path: &str, kind: &str, project: &str| {
+        d.authorize("laptop", op, path, kind, project, false, false, now())
+            .unwrap()
+    };
+    // A device the machine does not trust cannot look.
+    assert_eq!(
+        session.list_folder("laptop", &folder, sign(&stranger, "list", &folder, "", "")),
+        Err("approval.signature_invalid".to_string())
+    );
+    // The trusted one sees the subfolders, the project marked; one level down works the same way.
+    let listed = session
+        .list_folder("laptop", &folder, sign(&device, "list", &folder, "", ""))
+        .unwrap();
+    let names: Vec<(&str, bool)> = listed
+        .entries
+        .iter()
+        .map(|e| (e.name.as_str(), e.is_git))
+        .collect();
+    assert_eq!(names, [("app", true), ("notes", false)]);
+    let app = agora_tui::picker::child(&listed.path, "app");
+    let inside = session
+        .list_folder("laptop", &app, sign(&device, "list", &app, "", ""))
+        .unwrap();
+    assert!(inside.entries.is_empty(), "{inside:?}");
+    // A signature for one folder does not list another.
+    assert_eq!(
+        session.list_folder("laptop", &folder, sign(&device, "list", &app, "", "")),
+        Err("approval.signature_invalid".to_string())
+    );
+    // Chosen: inspected, then an agent starts there.
+    let info = session
+        .inspect_folder("laptop", &app, sign(&device, "inspect", &app, "", ""))
+        .unwrap();
+    let agent = session
+        .launch_in(
+            "laptop",
+            agora_protocol::v1::AgentLaunch {
+                path: info.path.clone(),
+                project_id: info.project_id.clone(),
+                kind: "shell".into(),
+                separate_worktree: false,
+                authorization: Some(sign(
+                    &device,
+                    "launch",
+                    &info.path,
+                    "shell",
+                    &info.project_id,
+                )),
+                accept_identity_change: false,
+                launch_options: Vec::new(),
+                confirmed_launch_options: Vec::new(),
+            },
+        )
+        .unwrap();
+    wait("the agent to appear in the hub", || {
+        hub.state.hub.view().0.agents.contains_key(&agent)
+    });
+    let _ = std::fs::remove_dir_all(&pick);
+}
+
+#[test]
+fn the_terminal_console_keeps_a_forget_refusals_permission_details() {
+    use agora_hub::users::{Access, Role};
+    use agora_tui::client::{Hub as ConsoleHub, Session};
+    struct Viewer;
+    impl ClientAuth for Viewer {
+        fn check(&self, token: &str) -> bool {
+            token == "client-token"
+        }
+        fn access(&self, token: &str) -> Option<Access> {
+            self.check(token).then(|| Access {
+                role: Role::Viewer,
+                user: "viewer".into(),
+                projects: None,
+                session: String::new(),
+            })
+        }
+    }
+    let mut hub = hubside("laptop");
+    Arc::get_mut(&mut hub.state).unwrap().auth = Box::new(Viewer);
+    let addr = hub.listen("127.0.0.1:0");
+    let sink = sink_with_agent(&tmp("forget-viewer"), "laptop");
+    sink.record_bodies(vec![agora_protocol::v1::event::Body::AgentExited(
+        agora_protocol::v1::AgentExited {
+            agent_id: "agent-1".into(),
+            exit_code: 0,
+        },
+    )]);
+    let _link = spawn(Arc::clone(&sink), hub.link(addr)).unwrap();
+    wait("the closed agent", || {
+        hub.state
+            .hub
+            .view()
+            .0
+            .agents
+            .get("laptop/agent-1")
+            .is_some_and(|a| !a.running)
+    });
+    let console = ConsoleHub {
+        addr: addr.to_string(),
+        ca_pem: hub.ca_pem.clone(),
+    };
+    let mut session = Session::connect(&console, "client-token").unwrap();
+    let error = session.forget_agent("laptop/agent-1").unwrap_err();
+    assert_eq!(error.code, "auth.forbidden");
+    assert_eq!(
+        error.params["action"].value,
+        Some(agora_protocol::v1::param_value::Value::Str(
+            "AgentForget".into()
+        ))
+    );
+    assert!(!hub.state.hub.view().0.agents["laptop/agent-1"].forgotten);
+}
+
+/// Found on macOS: a machine whose node ran once before it was enrolled has events recorded as `local` in its buffer. After
+/// `agora node enroll` the node used to replay them, the hub ended the connection because they name another node than the
+/// certificate, and the node saw only "connection reset", forever. Now the node sets the unlinked log aside at start (renamed, never
+/// deleted), links at once under its enrolled name, and its new events reach the hub.
+#[test]
+fn a_node_that_ran_before_it_was_enrolled_links_and_its_new_events_arrive() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return;
+    }
+    let hub = hubside("mac-tm3");
+    let addr = hub.listen("127.0.0.1:0");
+    let dir = tmp("before-enroll");
+    std::fs::create_dir_all(&dir).unwrap();
+    let cfg = |id: &str| agora_node::daemon::NodeConfig {
+        resume_all: false,
+        node_id: id.into(),
+        socket: dir.join("c.sock"),
+        data_dir: dir.join("data"),
+        worktree_root: dir.join("wt"),
+        manifests_dir: dir.join("manifests"),
+        projects: vec![],
+        limits: Default::default(),
+    };
+    // Not enrolled yet: the node runs as `local` and records events nobody acknowledges.
+    {
+        let node = agora_node::daemon::Node::start(&cfg("local")).unwrap();
+        node.events
+            .checkout_discovered("local", "proj", Path::new("/work/proj"));
+        node.events.node_resources("local", 1, 1, 0);
+        assert!(node.events.next_seq() > 2);
+    }
+    // Enrolled, started again under the certificate's name.
+    let node = agora_node::daemon::Node::start(&cfg("mac-tm3")).unwrap();
+    assert_eq!(
+        node.events_set_aside.as_ref().map(|s| s.old_id.as_str()),
+        Some("local"),
+        "the node says it set the unlinked events aside"
+    );
+    let _link = spawn(Arc::clone(&node.events), hub.link(addr)).unwrap();
+    wait("the enrolled node to be online in the hub", || {
+        hub.state
+            .hub
+            .view()
+            .0
+            .nodes
+            .get("mac-tm3")
+            .is_some_and(|n| n.online)
+    });
+    node.events.node_resources("mac-tm3", 4, 4, 0);
+    wait("a new event to arrive", || {
+        hub.state.hub.view().0.nodes["mac-tm3"].agents_running == 4
+    });
+    wait("everything to be acknowledged", || {
+        node.events.acked() == node.events.next_seq() - 1
+    });
+    assert!(!hub.state.hub.view().0.nodes.contains_key("local"));
+    // The old events are kept beside the new log, never deleted.
+    let kept: Vec<String> = std::fs::read_dir(dir.join("data").join("events"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with("events.local.") && n.ends_with(".log"))
+        .collect();
+    assert_eq!(kept.len(), 1, "{kept:?}");
+}
+
+/// When the hub ends a node's connection because an event names another node, it says why with a stable code before it closes,
+/// and the node's link reports that code instead of a bare reset.
+#[test]
+fn the_hub_says_why_it_refuses_events_that_name_another_node() {
+    let hub = hubside("laptop");
+    let addr = hub.listen("127.0.0.1:0");
+    // A buffer written under another name, sent over the certificate of `laptop`.
+    let sink = sink_with_agent(&tmp("mismatch"), "someone-else");
+    let link = hub.link(addr);
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let r = hub
+        .rt
+        .block_on(agora_node::uplink_client::run_once(&link, &sink, &stop));
+    match r {
+        Err(agora_node::uplink_client::LinkError::Refused(code)) => {
+            assert_eq!(code, "protocol.producer_mismatch");
+        }
+        other => panic!("expected a refusal with a code, got {other:?}"),
+    }
+    assert_eq!(sink.acked(), 0);
+    assert!(!hub.state.hub.view().0.nodes.contains_key("someone-else"));
+}
+
+/// Found on macOS in review: a node enrolled as one name, linked and fully acknowledged, then enrolled again under another name,
+/// still replayed the old name's events (a resync from 1 reached them) and was refused forever. Any log of another producer is set
+/// aside, not only `local`'s.
+#[test]
+fn a_node_enrolled_again_under_another_name_links_and_keeps_the_old_log() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return;
+    }
+    let hub = hubside("mac-tm4");
+    let addr = hub.listen("127.0.0.1:0");
+    let dir = tmp("re-enroll");
+    std::fs::create_dir_all(&dir).unwrap();
+    let cfg = |id: &str| agora_node::daemon::NodeConfig {
+        resume_all: false,
+        node_id: id.into(),
+        socket: dir.join("c.sock"),
+        data_dir: dir.join("data"),
+        worktree_root: dir.join("wt"),
+        manifests_dir: dir.join("manifests"),
+        projects: vec![],
+        limits: Default::default(),
+    };
+    // First enrollment: linked, everything acknowledged.
+    {
+        let node = agora_node::daemon::Node::start(&cfg("mac-tm4")).unwrap();
+        assert!(node.events_set_aside.is_none());
+        node.events
+            .checkout_discovered("mac-tm4", "proj", Path::new("/work/proj"));
+        let events = Arc::clone(&node.events);
+        let _link = spawn(Arc::clone(&events), hub.link(addr)).unwrap();
+        // The node stops while linked, so even its last event (`NodeOffline`) is acknowledged: nothing of the old name waits.
+        drop(node);
+        wait("the first name to be acknowledged", || {
+            events.acked() == events.next_seq() - 1 && events.acked() >= 3
+        });
+    }
+    // Enrolled again under a new name.
+    let (cert, key) = hub.enroll("mac-tm4b");
+    let node = agora_node::daemon::Node::start(&cfg("mac-tm4b")).unwrap();
+    assert_eq!(
+        node.events_set_aside.as_ref().map(|s| s.old_id.as_str()),
+        Some("mac-tm4")
+    );
+    let mut link = hub.link(addr);
+    (link.cert_pem, link.key_pem) = (cert, key);
+    let _link = spawn(Arc::clone(&node.events), link).unwrap();
+    wait("the new name to be online", || {
+        hub.state
+            .hub
+            .view()
+            .0
+            .nodes
+            .get("mac-tm4b")
+            .is_some_and(|n| n.online)
+    });
+    node.events.node_resources("mac-tm4b", 5, 5, 0);
+    wait("a new event under the new name", || {
+        hub.state.hub.view().0.nodes["mac-tm4b"].agents_running == 5
+    });
+    wait("everything to be acknowledged", || {
+        node.events.acked() == node.events.next_seq() - 1
+    });
+    let names: Vec<String> = std::fs::read_dir(dir.join("data").join("events"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    let logs = names
+        .iter()
+        .filter(|n| n.starts_with("events.mac-tm4.") && n.ends_with(".log"))
+        .count();
+    let acks = names
+        .iter()
+        .filter(|n| n.starts_with("events.mac-tm4.") && n.ends_with(".ack"))
+        .count();
+    assert_eq!((logs, acks), (1, 1), "{names:?}");
+    drop(_link);
+    drop(node);
+    // Back to not enrolled: the enrolled name's log is set aside again, never mixed with `local` events.
+    let node = agora_node::daemon::Node::start(&cfg("local")).unwrap();
+    assert_eq!(
+        node.events_set_aside.as_ref().map(|s| s.old_id.as_str()),
+        Some("mac-tm4b")
+    );
 }

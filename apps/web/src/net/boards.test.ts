@@ -91,4 +91,62 @@ describe('board identity', () => {
     }).sort((a, b) => a - b);
     console.info(`Board projection: 500 agents, 50 projects, 50 samples, p95 ${samples[47]?.toFixed(2)} ms (projection only).`);
   });
+
+  it('does not list an isolated working copy as a folder of its board', () => {
+    const view = fromSnapshot({
+      nodes: [{ nodeId: 'n', hostname: 'Machine' }],
+      checkouts: [{ checkoutId: 'n/c', nodeId: 'n', projectId: 'p', path: '/repo' }],
+      tasks: [{ taskId: 't', projectId: 'p', title: 'T' }],
+      workspaces: [{ workspaceId: 'n/wt', nodeId: 'n', projectId: 'p', path: '/wt/copy', gitRoot: '/wt/copy', managedWorktree: true }],
+    });
+    expect(boards(view)[0]?.folders.map(f => f.path)).toEqual(['/repo']);
+  });
+});
+
+import { bytesLabel } from './view';
+describe('bytesLabel', () => {
+  it('writes memory the way people read it', () => {
+    expect(bytesLabel(0)).toBe('');
+    expect(bytesLabel(512)).toBe('512 B');
+    expect(bytesLabel(1536 * 1024 * 1024)).toBe('1.5 GB');
+    expect(bytesLabel(20 * 1024 * 1024)).toBe('20 MB');
+  });
+});
+
+import { tiles, applyEvent } from './view';
+describe('closed agents', () => {
+  it('are told apart from running ones, with how they ended', () => {
+    const view = fromSnapshot({ nodes: [{ nodeId: 'n', hostname: 'M' }], agents: [{ agentId: 'n/a', nodeId: 'n', kind: 'claude-code', running: true }] });
+    applyEvent(view, 5, { producerId: 'n', body: 'agentExited', agentExited: { agentId: 'a', exitCode: 2 } } as never);
+    const t = tiles(view)[0];
+    expect(t?.closed).toBe(true);
+    expect(t?.exitCode).toBe(2);
+    expect(t?.state).toBe('finished');
+  });
+});
+
+describe('forgotten agents', () => {
+  it('leave the view when the hub says it forgot them', () => {
+    const view = fromSnapshot({ nodes: [{ nodeId: 'n', hostname: 'M' }], agents: [{ agentId: 'n/a', nodeId: 'n', kind: 'shell', running: false }] });
+    expect(tiles(view)).toHaveLength(1);
+    applyEvent(view, 6, { producerId: 'hub', body: 'agentForgotten', agentForgotten: { agentId: 'n/a' } } as never);
+    expect(tiles(view)).toHaveLength(0);
+  });
+});
+
+import { childPath } from './directory';
+describe('childPath', () => {
+  it('joins with the separator the machine uses', () => {
+    expect(childPath('/home/dev', 'code')).toBe('/home/dev/code');
+    expect(childPath('/', 'etc')).toBe('/etc');
+    expect(childPath('C:\\Users\\dev', 'code')).toBe('C:\\Users\\dev\\code');
+    expect(childPath('C:\\', 'Users')).toBe('C:\\Users');
+  });
+});
+
+describe('a closed agent is finished', () => {
+  it('whatever state its machine lost it in', () => {
+    const view = fromSnapshot({ nodes: [{ nodeId: 'n', hostname: 'M' }], agents: [{ agentId: 'n/a', nodeId: 'n', kind: 'shell', state: 2, running: false }] });
+    expect(tiles(view)[0]?.state).toBe('finished');
+  });
 });

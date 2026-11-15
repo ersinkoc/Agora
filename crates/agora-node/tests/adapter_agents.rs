@@ -20,7 +20,9 @@ fn fake_agent() -> String {
     p.pop();
     p.pop();
     p.push(format!("agora-fake-agent{}", std::env::consts::EXE_SUFFIX));
-    if !p.exists() {
+    // Built once per test binary, even when present: a binary left from an older checkout may lack newer flags.
+    static FRESH: std::sync::Once = std::sync::Once::new();
+    FRESH.call_once(|| {
         let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
         let ok = Command::new(cargo)
             .args(["build", "-q", "-p", "agora-fake-agent"])
@@ -28,7 +30,7 @@ fn fake_agent() -> String {
             .expect("run cargo")
             .success();
         assert!(ok, "building agora-fake-agent failed");
-    }
+    });
     p.to_string_lossy().into_owned()
 }
 
@@ -170,6 +172,18 @@ fn an_adapter_agent_gets_its_own_worktree_and_reports_its_state() {
     // Chat and usage are passed on as adapter events, and the native session id is recorded.
     let all = ev;
     assert!(all.iter().any(|e| matches!(e, SupervisorEvent::Adapter { event: AdapterEvent::Chat { item: ChatItem::Text(t), .. }, .. } if t == "hello")), "{all:#?}");
+    // ADR-0058: this adapter declared no mode or model switch, so neither is sent to it.
+    for (kind, cap) in [
+        (agora_adapters::host::OptionKind::Mode, "agent.set_mode"),
+        (agora_adapters::host::OptionKind::Model, "agent.set_model"),
+    ] {
+        assert_eq!(
+            s.adapter_set_option(&id, kind, "x"),
+            Err(agora_node::supervisor::SupervisorError::OptionUnsupported(
+                cap
+            ))
+        );
+    }
 }
 
 #[test]
@@ -238,6 +252,32 @@ fn stopping_an_adapter_agent_ends_its_session() {
     let ev = s.stop(&id).unwrap();
     assert!(ev.contains(&SupervisorEvent::Stopped { agent: id.clone() }));
     assert!(!s.list().into_iter().find(|v| v.id == id).unwrap().running);
+}
+
+#[test]
+fn stopping_an_adapter_agent_ends_its_process() {
+    let e = env("stop-process");
+    let mut s = supervisor();
+    let id = start(&mut s, &e, "adp-stop");
+    let pid = s.running_pids()[0];
+    assert!(
+        agora_platform::process_name(pid).is_ok(),
+        "the adapter runs"
+    );
+    s.stop(&id).unwrap();
+    // Like a terminal agent's process, the adapter process ends with the stop instead of running on unobserved.
+    assert!(
+        agora_platform::process_name(pid).is_err(),
+        "the adapter process outlived its stop"
+    );
+    assert!(s.running_pids().is_empty());
+    // A resume starts a fresh adapter, and stopping again ends that one too.
+    s.resume(&id, Instant::now()).unwrap();
+    let again = s.running_pids()[0];
+    assert_ne!(again, pid);
+    assert!(s.adapter_prompt(&id, "hello", false).is_ok());
+    s.stop(&id).unwrap();
+    assert!(agora_platform::process_name(again).is_err());
 }
 
 #[test]

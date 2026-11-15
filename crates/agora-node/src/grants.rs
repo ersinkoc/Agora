@@ -73,6 +73,7 @@ impl SignedCommands {
                 "agent.stop",
                 "agent.prompt",
                 "agent.set_mode",
+                "agent.set_model",
                 "terminal.open",
                 "terminal.input",
                 "files.write",
@@ -97,6 +98,19 @@ struct State {
 
 type Resolver = Box<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
+/// What a directory action lands in, for a device limited to some projects (ADR-0049, ADR-0052, ADR-0053).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Place<'a> {
+    /// A folder path as the request names it, or for `directory.inspect` also a registered project's id or name.
+    Folder(&'a str),
+    /// The node's own id of an agent (`agent.resume`).
+    Agent(&'a str),
+}
+
+/// The project a [`Place`] belongs to by the node's own records (never by what the request or the folder claims), or `None` when
+/// the node does not know it as part of any project.
+pub type PlaceResolver = Box<dyn Fn(Place<'_>) -> Option<String> + Send + Sync>;
+
 pub struct Grants {
     node_id: String,
     approvals: Arc<NodeApprovals>,
@@ -108,6 +122,8 @@ pub struct Grants {
     project_of: Mutex<Option<Resolver>>,
     /// What each trusted device may sign (ADR-0049).
     limits: Arc<crate::limits::DeviceLimits>,
+    /// Which project a directory action lands in, for limited devices. Unset: a limited device can take no directory action.
+    places: Mutex<Option<PlaceResolver>>,
 }
 
 /// What a command is about, as far as a grant's scope can tell.
@@ -124,6 +140,7 @@ fn subject(c: &Cmd) -> Subject {
         Cmd::AgentStop(a) => s.agent = Some(a.agent_id.clone()),
         Cmd::AgentPrompt(a) => s.agent = Some(a.agent_id.clone()),
         Cmd::AgentSetMode(a) => s.agent = Some(a.agent_id.clone()),
+        Cmd::AgentSetModel(a) => s.agent = Some(a.agent_id.clone()),
         Cmd::TerminalInput(t) => {
             s.agent = agent_of_terminal(&t.terminal_id).map(|a| a.as_str().to_string());
         }
@@ -159,7 +176,39 @@ impl Grants {
             directory_nonce_file: None,
             project_of: Mutex::new(None),
             limits: Arc::new(crate::limits::DeviceLimits::default()),
+            places: Mutex::new(None),
         }
+    }
+
+    /// Tells grants which project a folder or an agent belongs to, so a device limited to some projects can take directory actions
+    /// inside them.
+    pub fn set_place_resolver(&self, f: PlaceResolver) {
+        *self.places.lock().unwrap_or_else(|e| e.into_inner()) = Some(f);
+    }
+
+    /// May a device limited to some projects take this directory action? Only inside a project it may act in, judged by the node's
+    /// own records of where that project is: a folder the node already knows for that project (a registered checkout, or a folder an
+    /// agent of that project was launched in) or a folder inside one; for a launch also the project the request was signed for, which
+    /// the launch itself then checks against the folder's identity. Never a new identity (`create_project_id`), never a changed one
+    /// (`accept_identity_change`), never the home folder or a folder the node knows for no project or for another project.
+    fn limited_directory_allowed(&self, device: &str, c: &Cmd) -> bool {
+        let guard = self.places.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(place_of) = guard.as_ref() else {
+            return false;
+        };
+        let (place, signed_project) = match c {
+            Cmd::DirectoryInspect(d) if !d.create_project_id => (Place::Folder(&d.path), None),
+            Cmd::DirectoryList(d) if !d.path.is_empty() => (Place::Folder(&d.path), None),
+            Cmd::AgentLaunch(a) if !a.accept_identity_change => {
+                (Place::Folder(&a.path), Some(a.project_id.as_str()))
+            }
+            Cmd::AgentResume(a) => (Place::Agent(&a.agent_id), None),
+            _ => return false,
+        };
+        let Some(project) = place_of(place) else {
+            return false;
+        };
+        signed_project.is_none_or(|p| p == project) && self.limits.allows_project(device, &project)
     }
 
     pub fn with_directory_nonce_file(mut self, path: std::path::PathBuf) -> Self {
@@ -169,6 +218,10 @@ impl Grants {
 
     /// Directory actions are always exact-path, short-lived, owner-signed and single-use on the routed path.
     pub fn directory_action(&self, c: &Cmd, now: u64) -> Result<(), Error> {
+        let (launch_options, confirmed): (&[String], &[String]) = match c {
+            Cmd::AgentLaunch(a) => (&a.launch_options, &a.confirmed_launch_options),
+            _ => (&[], &[]),
+        };
         let (auth, op, path, kind, project, option, identity_change) = match c {
             Cmd::DirectoryInspect(d) => (
                 d.authorization.as_ref(),
@@ -177,6 +230,15 @@ impl Grants {
                 "",
                 "",
                 d.create_project_id,
+                false,
+            ),
+            Cmd::DirectoryList(d) => (
+                d.authorization.as_ref(),
+                "list",
+                d.path.as_str(),
+                "",
+                "",
+                false,
                 false,
             ),
             Cmd::AgentLaunch(a) => (
@@ -188,6 +250,16 @@ impl Grants {
                 a.separate_worktree,
                 a.accept_identity_change,
             ),
+            // ADR-0060: the agent id stands in the path field; the node takes its folder, kind and project from its own ledger.
+            Cmd::AgentResume(a) => (
+                a.authorization.as_ref(),
+                "resume",
+                a.agent_id.as_str(),
+                "",
+                "",
+                a.new_session,
+                false,
+            ),
             _ => return Ok(()),
         };
         let bad =
@@ -196,6 +268,11 @@ impl Grants {
         if [path, kind, project, a.nonce.as_str(), a.device_id.as_str()]
             .iter()
             .any(|s| s.contains('\0') || s.len() > 4096)
+            // The lists are signed length-prefixed, so their contents cannot be confused; the node checks each id afterwards
+            // (`agent.option_invalid`). Only their size is bounded here.
+            || launch_options.len() > 16
+            || confirmed.len() > 16
+            || launch_options.iter().chain(confirmed).any(|o| o.len() > 64)
             || a.nonce.len() != 32
             || !a.nonce.bytes().all(|b| b.is_ascii_hexdigit())
             || a.expires_at_ms <= now
@@ -203,25 +280,43 @@ impl Grants {
         {
             return Err(bad());
         }
-        if !self.limits.allows_scope(&a.device_id, "node") {
-            return Err(Error::new(ErrorCode::AuthForbidden).with("action", "directory"));
-        }
-        let msg = crate::directory::signed_message(
-            &self.node_id,
-            op,
-            path,
-            kind,
-            project,
-            option,
-            identity_change,
-            &a.nonce,
-            a.expires_at_ms,
-        );
+        // ADR-0059: chosen launch options are signed too, under their own domain (a hub can neither add nor remove one).
+        let msg = if launch_options.is_empty() && confirmed.is_empty() {
+            crate::directory::signed_message(
+                &self.node_id,
+                op,
+                path,
+                kind,
+                project,
+                option,
+                identity_change,
+                &a.nonce,
+                a.expires_at_ms,
+            )
+        } else {
+            crate::directory::launch_signed_message(
+                &self.node_id,
+                path,
+                kind,
+                project,
+                option,
+                identity_change,
+                launch_options,
+                confirmed,
+                &a.nonce,
+                a.expires_at_ms,
+            )
+        };
         if !self
             .approvals
             .verify_device(&a.device_id, &msg, &a.signature)
         {
             return Err(bad());
+        }
+        // Checked after the signature, so only a device this node trusts learns whether a folder lies in its projects.
+        if self.limits.is_limited(&a.device_id) && !self.limited_directory_allowed(&a.device_id, c)
+        {
+            return Err(Error::new(ErrorCode::AuthForbidden).with("action", "directory"));
         }
         let key = format!("{}:{}", a.device_id, a.nonce);
         let mut used = self
@@ -334,19 +429,43 @@ impl Grants {
             commands: g.commands.clone(),
             expires_at_ms: g.expires_at_ms,
             signer_device_id: g.signer_device_id.clone(),
+            kind: String::new(),
+            folder: String::new(),
+            remaining: 0,
         });
         Ok(())
     }
 
+    /// Live grants, then live helper grants (ADR-0057: `mesh.agent_start` for one agent, ending with it).
     pub fn list(&self, now_ms: u64) -> Vec<v1::GrantInfo> {
-        let mut st = self.st();
-        st.live.retain(|x| x.expires_at_ms > now_ms);
-        st.live.clone()
+        let mut out = {
+            let mut st = self.st();
+            st.live.retain(|x| x.expires_at_ms > now_ms);
+            st.live.clone()
+        };
+        out.extend(
+            self.approvals
+                .helper_grants()
+                .into_iter()
+                .map(|g| v1::GrantInfo {
+                    grant_id: g.id,
+                    scope: format!("agent:{}", g.agent.as_str()),
+                    commands: vec!["mesh.agent_start".into()],
+                    expires_at_ms: 0,
+                    signer_device_id: g.signer_device_id,
+                    kind: g.kind,
+                    folder: g.folder,
+                    remaining: g.remaining,
+                }),
+        );
+        out
     }
 
-    /// Ends a grant. An id that is not live is not an error (ending access is always allowed and idempotent).
+    /// Ends a grant, or a helper grant by its approval id. An id that is not live is not an error (ending access is always allowed
+    /// and idempotent).
     pub fn revoke(&self, grant_id: &str) {
         self.st().live.retain(|x| x.grant_id != grant_id);
+        self.approvals.revoke_helper_grant(grant_id);
     }
 
     /// Lets a routed command through, or refuses it with `approval.grant_required`. Commands the policy does not list pass.

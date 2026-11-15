@@ -31,3 +31,13 @@ export function StateBadge({ state }: { state: UiState }) {
     </span>
   );
 }
+
+// The shape alone, for dense rows and tabs; the state's name stays available to screen readers.
+export function StateMark({ state }: { state: UiState }) {
+  return (
+    <span className={`state state--${state}`}>
+      <Mark state={state} />
+      <span className="sr-only">{t(`state-${state}`)}</span>
+    </span>
+  );
+}

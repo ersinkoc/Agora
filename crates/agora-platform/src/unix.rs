@@ -161,6 +161,41 @@ pub(crate) fn restore_mode(saved: &libc::termios) {
     unsafe { libc::tcsetattr(0, libc::TCSANOW, saved) };
 }
 
+/// Terminal settings for typing a secret: no echo, no line editing by the terminal and no signals (Ctrl-C arrives as a byte, so the
+/// reader can restore the settings before it stops). Restored when dropped, on every path. With `discard_pending`, input that is
+/// waiting unread is dropped as the settings change (`TCSAFLUSH`), so what was typed before the prompt never joins the secret.
+pub(crate) struct SecretMode(libc::termios);
+
+impl Drop for SecretMode {
+    fn drop(&mut self) {
+        restore_mode(&self.0);
+    }
+}
+
+pub(crate) fn secret_mode(discard_pending: bool) -> io::Result<SecretMode> {
+    // SAFETY: an all-zero termios is a valid buffer for tcgetattr to fill.
+    let mut saved: libc::termios = unsafe { std::mem::zeroed() };
+    // SAFETY: fd 0 is stdin; `saved` is a valid out-pointer. Fails (ENOTTY) when stdin is not a terminal.
+    if unsafe { libc::tcgetattr(0, &mut saved) } != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "stdin is not a terminal",
+        ));
+    }
+    let mut quiet = saved;
+    quiet.c_lflag &= !(libc::ECHO | libc::ICANON | libc::ISIG);
+    quiet.c_cc[libc::VMIN] = 1;
+    quiet.c_cc[libc::VTIME] = 0;
+    let when = if discard_pending {
+        libc::TCSAFLUSH
+    } else {
+        libc::TCSANOW
+    };
+    // SAFETY: fd 0 is stdin; `quiet` is a valid termios.
+    cvt(unsafe { libc::tcsetattr(0, when, &quiet) })?;
+    Ok(SecretMode(saved))
+}
+
 pub(crate) fn terminal_size() -> Option<(u16, u16)> {
     // SAFETY: an all-zero winsize is a valid out-buffer.
     let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
@@ -215,7 +250,7 @@ pub(crate) fn spawn(config: &PtyConfig) -> io::Result<Box<dyn Pty>> {
     let (program, args) = match &config.sandbox {
         Some(sb) => {
             let a: Vec<std::ffi::OsString> = args.iter().map(Into::into).collect();
-            let (p, a) = crate::macos::wrap(sb, program.as_ref(), &a);
+            let (p, a) = crate::macos::wrap(sb, program.as_ref(), &a)?;
             (p, a)
         }
         None => (
@@ -229,6 +264,11 @@ pub(crate) fn spawn(config: &PtyConfig) -> io::Result<Box<dyn Pty>> {
     cmd.args(args);
     if let Some(cwd) = &config.cwd {
         cmd.current_dir(cwd);
+    }
+    for (name, _) in std::env::vars_os() {
+        if crate::env_removed(&name, &config.env_remove) {
+            cmd.env_remove(name);
+        }
     }
     if !config.env.iter().any(|(k, _)| k == "TERM") {
         cmd.env("TERM", "xterm-256color");
@@ -374,6 +414,329 @@ impl Drop for UnixPty {
         // Do not join the reader: a descendant that outlived the group could keep the PTY open.
         drop(self.reader.take());
     }
+}
+
+/// See [`crate::open_dir`]: `open(O_DIRECTORY)`, close-on-exec as every std open.
+pub(crate) fn open_dir(path: &std::path::Path) -> io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY)
+        .open(path)
+}
+
+/// See [`crate::visit_dir`]: `fdopendir` on a duplicate of the handle, `readdir`, and `fstatat(AT_SYMLINK_NOFOLLOW)` for each name, so
+/// every entry is described from the folder the handle holds and no link is followed.
+pub(crate) fn visit_dir(
+    dir: &File,
+    visitor: &mut dyn FnMut(crate::DirItem) -> std::ops::ControlFlow<()>,
+) -> io::Result<()> {
+    use std::ffi::{CStr, OsStr};
+    use std::os::unix::ffi::OsStrExt;
+    // SAFETY: duplicating a live descriptor we own; the copy is owned by the `DIR` below and closed with it.
+    let fd = unsafe { libc::fcntl(dir.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `fd` is a fresh descriptor of a directory; on success `fdopendir` takes it over.
+    let stream = unsafe { libc::fdopendir(fd) };
+    if stream.is_null() {
+        let e = io::Error::last_os_error();
+        // SAFETY: `fdopendir` failed, so `fd` is still ours to close.
+        unsafe { libc::close(fd) };
+        return Err(e);
+    }
+    struct Stream(*mut libc::DIR);
+    impl Drop for Stream {
+        fn drop(&mut self) {
+            // SAFETY: a stream from `fdopendir`, closed once (with its descriptor).
+            unsafe { libc::closedir(self.0) };
+        }
+    }
+    let stream = Stream(stream);
+    // A duplicate shares its position with the original: start from the first entry whatever was read before.
+    // SAFETY: a live stream.
+    unsafe { libc::rewinddir(stream.0) };
+    loop {
+        // SAFETY: a live stream; the entry stays valid until the next `readdir` on it, and is copied before that.
+        let entry = unsafe { libc::readdir(stream.0) };
+        if entry.is_null() {
+            break;
+        }
+        // SAFETY: `d_name` is a NUL-terminated name inside the entry just returned.
+        let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
+        if name.to_bytes() == b"." || name.to_bytes() == b".." {
+            continue;
+        }
+        // SAFETY: zeroed `stat` is a valid out-buffer.
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: the stream's descriptor, a name from it, a live out-buffer; links are described, not followed.
+        let r = unsafe {
+            libc::fstatat(
+                libc::dirfd(stream.0),
+                name.as_ptr(),
+                &mut st,
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        if r != 0 {
+            // Gone since `readdir` returned it: like `DirEntry::metadata` failing, it is left out.
+            continue;
+        }
+        let modified = u64::try_from(st.st_mtime)
+            .ok()
+            .map_or(std::time::UNIX_EPOCH, |s| {
+                std::time::UNIX_EPOCH
+                    + std::time::Duration::new(s, u32::try_from(st.st_mtime_nsec).unwrap_or(0))
+            });
+        let item = crate::DirItem {
+            name: OsStr::from_bytes(name.to_bytes()).to_os_string(),
+            is_dir: st.st_mode & libc::S_IFMT == libc::S_IFDIR,
+            len: u64::try_from(st.st_size).unwrap_or(0),
+            modified,
+        };
+        if visitor(item).is_break() {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// Makes `cmd` start in a session of its own (`setsid` in the child before `exec`), detached from this process's terminal: see
+/// [`crate::spawn_detached`].
+pub(crate) fn detach(cmd: &mut Command) {
+    // SAFETY: `setsid` is async-signal-safe and touches no memory of the parent; the child is a fresh fork here.
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            // Only standard input, output and error (already redirected) reach the daemon: any other descriptor this process got from
+            // its own caller without close-on-exec (a pipe a script reads to its end) is closed at exec, so the caller is never kept
+            // waiting. Marked rather than closed, so the runtime's own exec-error pipe still works.
+            let max = libc::sysconf(libc::_SC_OPEN_MAX);
+            let max = if max <= 0 { 1024 } else { max.min(65_536) } as libc::c_int;
+            for fd in 3..max {
+                let flags = libc::fcntl(fd, libc::F_GETFD);
+                if flags >= 0 && flags & libc::FD_CLOEXEC == 0 {
+                    libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
+                }
+            }
+            Ok(())
+        });
+    }
+}
+
+/// The child a caught stop request is passed on to (0: none), and whether one was caught: see [`crate::catch_stop_requests`].
+static STOP_TARGET: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+static STOP_CAUGHT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+extern "C" fn on_stop_request(_: libc::c_int) {
+    use std::sync::atomic::Ordering::SeqCst;
+    // Only lock-free atomics and `kill`, all async-signal-safe.
+    STOP_CAUGHT.store(true, SeqCst);
+    let pid = STOP_TARGET.load(SeqCst);
+    if pid > 0 {
+        // SAFETY: plain system call on a pid number.
+        unsafe { libc::kill(pid, libc::SIGTERM) };
+    }
+}
+
+/// See [`crate::catch_stop_requests`]. A child started after this gets the default actions back at `exec` (caught signals are reset).
+pub(crate) fn catch_stop_requests() -> io::Result<()> {
+    for sig in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
+        // SAFETY: an all-zero sigaction is valid; the handler only touches atomics and calls `kill`.
+        let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+        action.sa_sigaction = on_stop_request as extern "C" fn(libc::c_int) as libc::sighandler_t;
+        action.sa_flags = libc::SA_RESTART;
+        // SAFETY: valid pointers to a filled action; the old action is not wanted.
+        unsafe { libc::sigemptyset(&mut action.sa_mask) };
+        // SAFETY: as above.
+        cvt(unsafe { libc::sigaction(sig, &action, std::ptr::null_mut()) })?;
+    }
+    Ok(())
+}
+
+/// See [`crate::open_append_private`] (`append`) and [`crate::open_lock_private`] (read and write): the folder is opened as itself (`O_DIRECTORY|O_NOFOLLOW`) and the log is created or opened
+/// relative to that descriptor (`openat` with `O_NOFOLLOW`), so neither can be swapped for a link between a check and the open. A new
+/// log is created exclusively with mode 0600; an existing one must be a regular file with one name, owned by this user, and is made
+/// 0600 through its descriptor when others could read it.
+pub(crate) fn open_private(
+    dir: &std::path::Path,
+    name: &std::ffi::OsStr,
+    append: bool,
+) -> io::Result<std::fs::File> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let refuse = || io::Error::new(io::ErrorKind::InvalidInput, "a link");
+    let link_error = |e: io::Error| match e.raw_os_error() {
+        Some(libc::ELOOP) | Some(libc::ENOTDIR) => refuse(),
+        _ => e,
+    };
+    let cdir = std::ffi::CString::new(dir.as_os_str().as_bytes())
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    let cname = std::ffi::CString::new(name.as_bytes())
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    if name.as_bytes().contains(&b'/') {
+        return Err(io::Error::from(io::ErrorKind::InvalidInput));
+    }
+    // SAFETY: a NUL-terminated path; the descriptor is owned below.
+    let dfd = cvt(unsafe {
+        libc::open(
+            cdir.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    })
+    .map_err(link_error)?;
+    // SAFETY: a descriptor this call just opened and nothing else owns.
+    let dir_fd = unsafe { OwnedFd::from_raw_fd(dfd) };
+    let access = if append {
+        libc::O_WRONLY | libc::O_APPEND
+    } else {
+        libc::O_RDWR
+    };
+    let flags = access | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    // SAFETY: a live directory descriptor and a NUL-terminated name.
+    let created = unsafe {
+        libc::openat(
+            dir_fd.as_raw_fd(),
+            cname.as_ptr(),
+            flags | libc::O_CREAT | libc::O_EXCL,
+            0o600 as libc::c_uint,
+        )
+    };
+    if created >= 0 {
+        // SAFETY: a descriptor this call just opened.
+        return Ok(unsafe { std::fs::File::from_raw_fd(created) });
+    }
+    let e = io::Error::last_os_error();
+    if e.raw_os_error() != Some(libc::EEXIST) {
+        return Err(link_error(e));
+    }
+    // SAFETY: as above.
+    // O_NONBLOCK: a FIFO (or a device) planted under the log's name must not hold the open until someone reads it; it is refused below,
+    // and a FIFO without a reader is refused at once (ENXIO).
+    let fd =
+        cvt(unsafe { libc::openat(dir_fd.as_raw_fd(), cname.as_ptr(), flags | libc::O_NONBLOCK) })
+            .map_err(|e| match e.raw_os_error() {
+                Some(libc::ENXIO) => refuse(),
+                _ => link_error(e),
+            })?;
+    // SAFETY: a descriptor this call just opened.
+    let file = unsafe { std::fs::File::from_raw_fd(fd) };
+    let m = file.metadata()?;
+    // SAFETY: plain call.
+    let me = unsafe { libc::geteuid() };
+    if !m.is_file() || m.nlink() > 1 {
+        return Err(refuse());
+    }
+    if m.uid() != me {
+        return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+    }
+    // A regular file of this user's: writes block as usual again.
+    // SAFETY: plain calls on a descriptor `file` owns.
+    unsafe {
+        let fl = libc::fcntl(file.as_raw_fd(), libc::F_GETFL);
+        if fl < 0 || libc::fcntl(file.as_raw_fd(), libc::F_SETFL, fl & !libc::O_NONBLOCK) < 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    if m.mode() & 0o077 != 0 {
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(file)
+}
+
+/// See [`crate::ensure_private_dir`]: the folder (created by the caller when missing) is opened as itself (`O_DIRECTORY|O_NOFOLLOW`),
+/// must be owned by this user, and is made 0700 through that descriptor when others could enter it.
+pub(crate) fn ensure_private_dir(dir: &std::path::Path) -> io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let refuse = || io::Error::new(io::ErrorKind::InvalidInput, "a link");
+    let cdir = std::ffi::CString::new(dir.as_os_str().as_bytes())
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    // SAFETY: a NUL-terminated path; the descriptor is owned below.
+    let fd = cvt(unsafe {
+        libc::open(
+            cdir.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    })
+    .map_err(|e| match e.raw_os_error() {
+        Some(libc::ELOOP) | Some(libc::ENOTDIR) => refuse(),
+        _ => e,
+    })?;
+    // SAFETY: a descriptor this call just opened and nothing else owns.
+    let held = unsafe { OwnedFd::from_raw_fd(fd) };
+    // SAFETY: an all-zero stat is a valid out-buffer; a live descriptor.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    cvt(unsafe { libc::fstat(held.as_raw_fd(), &mut st) })?;
+    // SAFETY: plain call.
+    if st.st_uid != unsafe { libc::geteuid() } {
+        return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+    }
+    if st.st_mode & 0o077 != 0 {
+        // SAFETY: a live descriptor of this user's folder.
+        cvt(unsafe { libc::fchmod(held.as_raw_fd(), 0o700) })?;
+    }
+    Ok(())
+}
+
+/// See [`crate::wait_unreaped`].
+pub(crate) fn wait_unreaped(pid: u32) -> io::Result<()> {
+    let id = libc::id_t::from(pid);
+    loop {
+        // SAFETY: an all-zero siginfo_t is a valid out-buffer.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        // SAFETY: a valid out-pointer; WNOWAIT leaves the child to be reaped by its owner.
+        let r = unsafe { libc::waitid(libc::P_PID, id, &mut info, libc::WEXITED | libc::WNOWAIT) };
+        if r == 0 {
+            return Ok(());
+        }
+        let e = io::Error::last_os_error();
+        if e.kind() != io::ErrorKind::Interrupted {
+            return Err(e);
+        }
+    }
+}
+
+pub(crate) fn forward_stop_to(pid: Option<u32>) {
+    let pid = pid.and_then(|p| i32::try_from(p).ok()).unwrap_or(0);
+    STOP_TARGET.store(pid, std::sync::atomic::Ordering::SeqCst);
+}
+
+pub(crate) fn stop_requested() -> bool {
+    STOP_CAUGHT.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// `SIGTERM` to one process (not its group): see [`crate::terminate_process`].
+pub(crate) fn terminate(pid: u32) -> io::Result<()> {
+    let pid =
+        libc::pid_t::try_from(pid).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    // SAFETY: plain system call on a pid number.
+    cvt(unsafe { libc::kill(pid, libc::SIGTERM) }).map(|_| ())
+}
+
+/// Whether a process with this pid exists (one owned by another user counts).
+#[allow(dead_code)] // used only on the Unix systems without a start-time reader
+pub(crate) fn alive(pid: u32) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return false;
+    };
+    // SAFETY: signal 0 checks existence and permission only.
+    let r = unsafe { libc::kill(pid, 0) };
+    r == 0 || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+/// See [`crate::hostname`].
+pub(crate) fn hostname() -> Option<String> {
+    let mut buf = [0u8; 256];
+    // SAFETY: the buffer is valid for `buf.len()` bytes; the result may be unterminated when truncated, handled below.
+    if unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) } != 0 {
+        return None;
+    }
+    let len = buf.iter().position(|b| *b == 0).unwrap_or(buf.len());
+    let name = String::from_utf8_lossy(&buf[..len]).trim().to_string();
+    (!name.is_empty()).then_some(name)
 }
 
 #[cfg(test)]
@@ -538,20 +901,24 @@ mod tests {
     fn concurrent_spawns_do_not_keep_each_others_terminals_open() {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
-        // A thread keeps spawning long-lived processes while we spawn short-lived ones. Before the fix, a
-        // long-lived process inherited a short-lived terminal's slave and its output never ended.
+        // A thread spawns long-lived processes while we spawn short-lived ones. Before the fix, a long-lived
+        // process inherited a short-lived terminal's slave and its output never ended. They are kept until the end,
+        // so a leaked descriptor outlives the wait below. A fixed number: each holds a terminal, and churning through
+        // them used to exhaust the machine's terminals on a busy macOS runner (`openpty` then fails with ENXIO).
+        // On Linux this catches the leak; on macOS the kernel revokes a terminal when its session leader exits, so a
+        // leaked descriptor cannot hold it open and the test only shows that concurrent spawns work.
+        const LONG_LIVED: usize = 24;
         let stop = Arc::new(AtomicBool::new(false));
         let stop2 = Arc::clone(&stop);
         let spawner = std::thread::spawn(move || {
             let mut keep = Vec::new();
-            while !stop2.load(Ordering::Relaxed) {
+            while !stop2.load(Ordering::Relaxed) && keep.len() < LONG_LIVED {
                 if let Ok(p) = spawn(&PtyConfig::new(vec!["sleep".into(), "30".into()])) {
                     keep.push(p);
                 }
-                if keep.len() > 60 {
-                    keep.clear();
-                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
             }
+            keep
         });
         for i in 0..40 {
             let p = spawn(&PtyConfig::new(vec![
@@ -577,7 +944,7 @@ mod tests {
             }
         }
         stop.store(true, Ordering::Relaxed);
-        spawner.join().expect("spawner");
+        drop(spawner.join().expect("spawner"));
     }
 
     #[test]
@@ -668,6 +1035,24 @@ mod tests {
     }
 
     #[test]
+    fn inherited_variables_named_in_env_remove_are_left_out_and_set_ones_kept() {
+        // A name no other test uses: set for this process, so every child inherits it unless it is removed.
+        std::env::set_var("AGORA_TEST_DROP_ME_1", "inherited");
+        std::env::set_var("AGORA_TEST_KEEP_ME", "kept");
+        let mut cfg = PtyConfig::new(vec![
+            "sh".into(),
+            "-c".into(),
+            "echo \"[${AGORA_TEST_DROP_ME_1:-gone}|$AGORA_TEST_KEEP_ME|$AGORA_TEST_DROP_SET]\"; sleep 0.2".into(),
+        ]);
+        cfg.env_remove = vec!["AGORA_TEST_DROP_*".into()];
+        cfg.env.push(("AGORA_TEST_DROP_SET".into(), "set".into()));
+        let mut p = spawn(&cfg).expect("spawn");
+        let seen = read_until(&*p, "]");
+        assert!(seen.contains("[gone|kept|set]"), "{seen:?}");
+        let _ = p.wait();
+    }
+
+    #[test]
     fn spawning_a_missing_program_is_an_error() {
         let err = spawn(&PtyConfig::new(vec!["/definitely/not/a/program".into()]));
         assert!(err.is_err());
@@ -700,5 +1085,50 @@ mod tests {
         );
         assert_eq!(std::fs::read_dir(&dir).expect("io").count(), 1);
         let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod identity_tests {
+    use crate::{kill_process_if_same, process_identity, process_still_running};
+
+    #[test]
+    fn a_process_is_known_by_its_start_and_a_reused_pid_is_never_killed() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let id = process_identity(child.id()).unwrap();
+        assert!(process_still_running(&id));
+        // The same pid with another start time is another process: left alone.
+        // Another start time, another boot, another program, or no program named: another process, left alone.
+        let others = [
+            crate::ProcessIdentity {
+                started: id.started + 1,
+                ..id.clone()
+            },
+            crate::ProcessIdentity {
+                boot: format!("{}x", id.boot),
+                ..id.clone()
+            },
+            crate::ProcessIdentity {
+                name: "victim".into(),
+                ..id.clone()
+            },
+            crate::ProcessIdentity {
+                name: String::new(),
+                ..id.clone()
+            },
+        ];
+        for other in &others {
+            assert!(!process_still_running(other), "{other:?}");
+            assert!(!kill_process_if_same(other).unwrap(), "{other:?}");
+        }
+        assert!(child.try_wait().unwrap().is_none());
+        // Its own group is the test's: only the process itself is ended.
+        assert!(kill_process_if_same(&id).unwrap());
+        assert!(!child.wait().unwrap().success());
+        assert!(!process_still_running(&id));
     }
 }

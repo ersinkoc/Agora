@@ -56,6 +56,16 @@ pub fn render(catalog: &Catalog, n: &Notice, name: &str) -> String {
 /// Where the owner opens a waiting approval (ADR-0046): the hub's public address and the approval's place in the page. A
 /// notification only points at it; allowing still takes the device key.
 pub fn approval_link(public_url: &str, subject: &str) -> String {
+    page_link(public_url, "approvals", subject)
+}
+
+/// Where the owner opens an agent that waits or finished (ADR-0067 rung 2): its own view in the page, on a phone too.
+pub fn agent_link(public_url: &str, subject: &str) -> String {
+    page_link(public_url, "agent", subject)
+}
+
+/// `<public_url>/#/<route>/<subject>`, the subject percent-encoded as one path part.
+fn page_link(public_url: &str, route: &str, subject: &str) -> String {
     let encoded: String = subject
         .chars()
         .map(|c| match c {
@@ -67,7 +77,7 @@ pub fn approval_link(public_url: &str, subject: &str) -> String {
                 .collect(),
         })
         .collect();
-    format!("{}/#/approvals/{encoded}", public_url.trim_end_matches('/'))
+    format!("{}/#/{route}/{encoded}", public_url.trim_end_matches('/'))
 }
 
 /// Watches `hub` and delivers to `targets` until the hub is gone. Returns at once when there is nothing to deliver to.
@@ -95,10 +105,14 @@ pub fn spawn(hub: Arc<Hub>, targets: Vec<Target>, catalog: Catalog, public_url: 
                 continue;
             }
             let mut text = render(&catalog, &notice, &name);
-            if let (Trigger::ApprovalRequested, Some(base)) =
-                (notice.trigger, public_url.as_deref())
-            {
-                text = format!("{text}\n{}", approval_link(base, &notice.subject));
+            match (notice.trigger, public_url.as_deref()) {
+                (Trigger::ApprovalRequested, Some(base)) => {
+                    text = format!("{text}\n{}", approval_link(base, &notice.subject));
+                }
+                (Trigger::AgentBlocked | Trigger::AgentDone, Some(base)) => {
+                    text = format!("{text}\n{}", agent_link(base, &notice.subject));
+                }
+                _ => {}
             }
             for t in targets.iter().cloned() {
                 let (title, text, priority) =
@@ -132,6 +146,10 @@ mod tests {
         assert_eq!(
             approval_link("https://hub.example/", "laptop/p 1"),
             "https://hub.example/#/approvals/laptop%2Fp%201"
+        );
+        assert_eq!(
+            agent_link("https://hub.example", "laptop/agent-1"),
+            "https://hub.example/#/agent/laptop%2Fagent-1"
         );
     }
 

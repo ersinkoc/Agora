@@ -4,7 +4,7 @@
 
 [package]
 name = "agora-desktop"
-version = "0.2.1"
+version = "0.3.13"
 edition = "2021"
 publish = false
 license = "Apache-2.0"
@@ -18,9 +18,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # The pinned-CA loopback tunnel (ADR-0048 decision 3).
 agora-desktop-tunnel = { path = "../../../crates/agora-desktop-tunnel" }
-# ADR-0048 decision 5: an OS notification for a waiting approval while the window is hidden (decision 7: Tauri crates stay here).
-tauri-plugin-notification = "2"
-# The notification's words, from `locales/` like every other text (no dependencies of its own).
+# ADR-0048 decision 5: an OS notification for a waiting approval while the window is hidden, shown by the system's own notifier
+# (`agora_platform::desktop_notify`: no notification library), with its words from `locales/` (`agora-i18n`, no dependencies).
+agora-platform = { path = "../../../crates/agora-platform" }
 agora-i18n = { path = "../../../crates/agora-i18n" }
 
 [profile.release]

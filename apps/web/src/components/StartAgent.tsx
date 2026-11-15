@@ -1,30 +1,86 @@
-import { useEffect, useState } from 'react';
+import * as Dialog from '@radix-ui/react-dialog';
+import { useEffect, useRef, useState } from 'react';
 import { t } from '../i18n';
 import type { MachineModel, ProjectChoice } from '../net/view';
-import type { DirectoryInfo } from '../net/directory';
-export interface KindChoice { kind: string; name: string; installed: boolean }
+import { childPath, directoryReasonKey, type DirectoryInfo, type DirectoryListing } from '../net/directory';
+import { Icon } from './Icon';
+import { machineFor } from './startChoice';
+import { ASK, chosenIds, confirmedIds, confirmSkip, harmless, initialLaunch, keepAsking, labelOf, pickPermission, skipping, toggleHarmless, usableOptions, type LaunchOptionChoice } from './launchChoice';
+// ADR-0059: `options` are the kind's launch options as the machine lists them (none from an older machine).
+export interface KindChoice { kind: string; name: string; installed: boolean; options?: LaunchOptionChoice[] }
 
-export function StartAgent({ projects, machines, loadKinds, inspect, onStart, onClose }: {
+// The command a machine's owner runs once so the machine trusts this device (ADR-0020), with a Copy button: no hunting for it on another page.
+function TrustCommand({ command }: { command: string }) {
+  const [copied, setCopied] = useState(false);
+  return <div className="flex items-start gap-2 rounded-xs border border-line bg-surface-0 px-3 py-2">
+    <code className="min-w-0 flex-1 break-all font-mono text-xs">{command}</code>
+    <button type="button" className="button px-2 py-1 text-xs" onClick={() => { void navigator.clipboard?.writeText(command).then(() => setCopied(true), () => undefined); }}>{copied ? t('trust-copied') : t('trust-copy')}</button>
+  </div>;
+}
+
+// ADR-0061: another device of this person that the machine trusts can approve this one; asking puts a card on that device.
+function AskApproval({ ask }: { ask: () => Promise<boolean> }) {
+  const [state, setState] = useState<'idle' | 'busy' | 'asked' | 'failed'>('idle');
+  return <div className="flex flex-wrap items-center gap-2">
+    <button type="button" className="button button--primary" disabled={state === 'busy' || state === 'asked'}
+      onClick={() => { setState('busy'); void ask().then((ok) => setState(ok ? 'asked' : 'failed')); }}>{t('trust-ask')}</button>
+    {state === 'asked' && <span role="status" className="text-[0.8125rem] text-muted">{t('trust-asked')}</span>}
+    {state === 'failed' && <span role="alert" className="text-[0.8125rem] text-needs-you">{t('device-ask-failed')}</span>}
+  </div>;
+}
+
+const chip = 'inline-flex items-center gap-2 rounded-xs border px-2.5 py-1.5 text-[0.8125rem] transition-colors duration-150 disabled:opacity-50';
+const chipOn = 'border-accent bg-surface-2 text-ink ring-1 ring-accent';
+const chipOff = 'border-line bg-surface-0 text-muted hover:bg-surface-2 hover:text-ink';
+
+// "Start an agent" in one window: the machine, the folder (a known one in a click, or any path), then the agent. Choosing the
+// folder shows the folder the node resolved before anything starts (ADR-0052); the rest is a click.
+export function StartAgent({ projects, machines, initialNode, trust, askApproval, loadKinds, inspect, list, onStart, onClose }: {
   projects: readonly ProjectChoice[];
   machines: readonly MachineModel[];
+  initialNode?: string;
+  // This device's id and public key: when a machine does not trust the device yet, the command that fixes it is shown right here.
+  trust?: { id: string; key: string };
+  // ADR-0061: whether another device of this person that `node` trusts could approve this one, and asking it to.
+  askApproval?: { can: (node: string) => boolean; ask: () => Promise<boolean> };
   loadKinds: (node: string) => Promise<KindChoice[]>;
   inspect: (node: string, path: string, createIdentity: boolean) => Promise<DirectoryInfo>;
+  // ADR-0053: the sub-folders of a folder on the machine (empty path: its home folder). Missing, or refused by an older machine: the path is typed.
+  list?: (node: string, path: string) => Promise<DirectoryListing>;
   // A failure is a Fluent message id, translated when rendered so an open form follows a language change.
-  onStart: (node: string, info: DirectoryInfo, kind: string, separate: boolean, acceptIdentityChange: boolean) => Promise<string | undefined>;
+  onStart: (node: string, info: DirectoryInfo, kind: string, separate: boolean, acceptIdentityChange: boolean, launch: { ids: string[]; confirmed: string[] }) => Promise<string | undefined>;
   onClose: () => void;
 }) {
   const online = machines.filter(m => m.online);
-  const initialProject = projects.find(p => online.some(m => m.id === p.node));
-  const [node, setNode] = useState(initialProject?.node ?? online[0]?.id ?? '');
-  const [path, setPath] = useState(initialProject?.path ?? '');
+  const preset = initialNode && online.some(m => m.id === initialNode) ? initialNode : undefined;
+  const initialProject = projects.find(p => p.node === (preset ?? online[0]?.id)) ?? projects.find(p => online.some(m => m.id === p.node));
+  const [node, setNode] = useState(preset ?? initialProject?.node ?? online[0]?.id ?? '');
+  const [path, setPath] = useState(initialProject && initialProject.node === (preset ?? initialProject.node) ? initialProject.path ?? '' : '');
   const [kinds, setKinds] = useState<KindChoice[] | 'loading' | 'failed'>('loading');
   const [kind, setKind] = useState('');
   const [info, setInfo] = useState<DirectoryInfo>();
   const [createIdentity, setCreateIdentity] = useState(false);
   const [separate, setSeparate] = useState(false);
   const [acceptIdentityChange, setAcceptIdentityChange] = useState(false);
+  // ADR-0059: "Ask before acting" until the user picks an option that skips permissions and confirms it; a new agent kind starts over.
+  const [launch, setLaunch] = useState(initialLaunch);
+  useEffect(() => { setLaunch(initialLaunch()); }, [kind, node]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
+  // The folder picker: what the machine answered for the folder being looked at.
+  const [browse, setBrowse] = useState<{ listing?: DirectoryListing; busy: boolean; failed?: boolean; forbidden?: boolean } | undefined>();
+  const [canBrowse, setCanBrowse] = useState(!!list);
+  const look = async (at: string) => {
+    if (!list) return;
+    setBrowse((b) => ({ listing: b?.listing, busy: true }));
+    try { setBrowse({ listing: await list(node, at), busy: false }); }
+    catch (e) {
+      // A machine without the command: keep the typed path, and do not offer the picker again.
+      if ((e as { code?: string }).code === 'protocol.capability_missing') { setCanBrowse(false); setBrowse(undefined); }
+      else setBrowse((b) => ({ listing: b?.listing, busy: false, failed: true, forbidden: (e as { code?: string }).code === 'auth.forbidden' }));
+    }
+  };
+  useEffect(() => { setBrowse(undefined); setCanBrowse(!!list); }, [node, list]);
   useEffect(() => {
     if (!node) return;
     let current = true;
@@ -33,37 +89,148 @@ export function StartAgent({ projects, machines, loadKinds, inspect, onStart, on
     return () => { current = false; };
   }, [node, loadKinds]);
   const changePath = (value: string) => { setPath(value); setInfo(undefined); setError(undefined); setSeparate(false); setAcceptIdentityChange(false); };
-  const choose = async () => {
+  const changeNode = (id: string) => { setNode(id); changePath(projects.find(p => p.node === id)?.path ?? ''); };
+  // The machine and its project can reach the view after the window opened (a node that has just dialed in). Then the window
+  // selects that machine, and fills in its project folder unless the user has typed a path of their own.
+  const typed = useRef(false);
+  const onlineKey = online.map(m => m.id).join('\n');
+  useEffect(() => {
+    const next = machineFor(node, online.map(m => m.id), initialNode, projects);
+    if (next === node) return;
+    setNode(next);
+    if (!typed.current) changePath(projects.find(p => p.node === next)?.path ?? '');
+    // Keyed on which machines are online, not on every new array.
+  }, [onlineKey]);
+  const projectPath = projects.find(p => p.node === node)?.path ?? '';
+  useEffect(() => {
+    if (!typed.current && !path && !info && projectPath) setPath(projectPath);
+    // Only when the machine's project path appears or changes.
+  }, [projectPath]);
+  const choose = async (at = path) => {
     setBusy(true); setError(undefined);
-    try { setInfo(await inspect(node, path, createIdentity)); }
-    catch (e) { setError((e as { code?: string }).code === 'approval.signature_invalid' ? 'approval-not-trusted' : (e as { code?: string }).code === 'protocol.capability_missing' ? 'start-directory-unsupported' : 'start-directory-failed'); }
+    try { setInfo(await inspect(node, at, createIdentity)); }
+    catch (e) { setError(directoryReasonKey((e as { code?: string }).code)); }
     finally { setBusy(false); }
   };
   const go = async () => {
     if (!info) return;
-    setBusy(true); setError(await onStart(node, info, kind, separate, acceptIdentityChange)); setBusy(false);
+    setBusy(true); setError(await onStart(node, info, kind, separate, acceptIdentityChange, { ids: chosenIds(launch, offered), confirmed: confirmedIds(launch, offered) })); setBusy(false);
   };
-  if (!online.length) return <section className="start"><p>{t('start-no-machines')}</p><button className="button" onClick={onClose}>{t('start-cancel')}</button></section>;
-  return <section className="start" aria-label={t('start-title')}>
-    <h2>{t('start-title')}</h2>
-    <label><span>{t('start-machine')}</span><select value={node} disabled={busy} onChange={e => { setNode(e.target.value); changePath(projects.find(p => p.node === e.target.value)?.path ?? ''); }}>{online.map(m => <option key={m.id} value={m.id}>{m.name === m.id ? m.name : t('machine-name-id', { name: m.name, id: m.id })}</option>)}</select></label>
-    {projects.some(p => p.node === node) && <label><span>{t('start-project')}</span><select value={projects.some(p => p.node === node && p.path === path) ? path : ''} disabled={busy} onChange={e => changePath(e.target.value)}><option value="">{t('start-other-folder')}</option>{projects.filter(p => p.node === node).map(p => <option key={p.path} value={p.path}>{p.label}</option>)}</select></label>}
-    <label><span>{t('start-directory')}</span><input value={path} disabled={busy} onChange={e => changePath(e.target.value)} placeholder={t('start-directory-placeholder')} /></label>
-    {!info && <>
-      <label className="text-sm"><span><input type="checkbox" checked={createIdentity} disabled={busy} onChange={e => setCreateIdentity(e.target.checked)} /> {t('start-portable')}</span></label>
-      {createIdentity && <p className="muted text-sm">{t('start-portable-explain')}</p>}
-      <button className="button button--primary" disabled={!path.trim() || busy} onClick={() => void choose()}>{t('start-select-directory')}</button>
-    </>}
-    {info && <>
-      <p className="break-all text-sm">{info.path}</p>
-      <p className="muted text-sm">{t('start-in-directory')}</p>
-      {info.portable && <p className="break-all text-xs text-muted">{t('start-project-id', { id: info.projectId })}</p>}
-      <label><span>{t('start-which')}</span>{kinds === 'loading' ? <span>{t('start-loading')}</span> : kinds === 'failed' ? <span role="alert">{t('start-kinds-failed')}</span> : <select value={kind} disabled={busy} onChange={e => setKind(e.target.value)}>{kinds.map(k => <option key={k.kind} value={k.kind} disabled={!k.installed}>{k.installed ? k.name : `${k.name} — ${t('start-not-installed')}`}</option>)}</select>}</label>
-      {info.gitRoot && <label><span><input type="checkbox" checked={separate} disabled={busy} onChange={e => setSeparate(e.target.checked)} /> {t('start-separate-worktree')}</span></label>}
-      {info.previousProjectId && <label><span><input type="checkbox" checked={acceptIdentityChange} disabled={busy} onChange={e => setAcceptIdentityChange(e.target.checked)} /> {t('start-identity-change')}</span></label>}
-      <button className="button button--primary" disabled={busy || !kind || (!!info.previousProjectId && !acceptIdentityChange)} onClick={() => void go()}>{t('start-go')}</button>
-    </>}
-    {error && <p role="alert">{t(error)}</p>}
-    <button className="button" disabled={busy} onClick={onClose}>{t('start-cancel')}</button>
-  </section>;
+  // Ids outside `[a-z0-9-]` are never offered (the hub relays the list; the machine decides).
+  const offered: LaunchOptionChoice[] = usableOptions((kinds !== 'loading' && kinds !== 'failed' ? kinds.find((k) => k.kind === kind)?.options : undefined) ?? []);
+  const skips = skipping(offered), plain = harmless(offered);
+  const pendingOption = offered.find((o) => o.id === launch.pending);
+  // The same folder can be spelled several ways on Windows (`D:\x`, `D:/x`, `\\?\D:\x`): listed once.
+  const sameFolder = (path: string) => path.replace(/^\\\\\?\\/, '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+  const seen = new Set<string>();
+  const known = projects.flatMap(p => (p.node === node && p.path && !seen.has(sameFolder(p.path)) && seen.add(sameFolder(p.path)) ? [{ ...p, path: p.path }] : []));
+  const machineName = (m: MachineModel) => (m.name === m.id ? m.name : t('machine-name-id', { name: m.name, id: m.id }));
+
+  return <Dialog.Root open onOpenChange={open => { if (!open && !busy) onClose(); }}>
+    <Dialog.Portal>
+      <Dialog.Overlay className="fixed inset-0 z-40 bg-surface-0/70 backdrop-blur-sm" />
+      <Dialog.Content aria-describedby={undefined} aria-label={t('start-title')}
+        className="fixed left-1/2 top-[8vh] z-50 flex max-h-[84vh] w-[min(36rem,calc(100vw-1.5rem))] -translate-x-1/2 flex-col overflow-hidden rounded-m border border-line bg-surface-1 shadow-card">
+        <div className="flex items-center gap-2 border-b border-line px-4 py-3">
+          <Icon name="terminal" className="size-4 text-accent" />
+          <Dialog.Title className="m-0 flex-1 text-sm font-semibold tracking-normal text-ink normal-case">{t('start-title')}</Dialog.Title>
+          <Dialog.Close className="ide-iconbtn" aria-label={t('start-cancel')} disabled={busy}><Icon name="close" /></Dialog.Close>
+        </div>
+        {!online.length ? <div className="p-4"><p className="m-0">{t('start-no-machines')}</p></div> : <div className="grid min-h-0 gap-4 overflow-y-auto p-4">
+          <div className="grid gap-1.5">
+            <h2 className="m-0">{t('start-machine')}</h2>
+            <div className="flex flex-wrap gap-1.5" role="radiogroup" aria-label={t('start-machine')}>
+              {online.map(m => <button key={m.id} type="button" role="radio" aria-checked={node === m.id} disabled={busy} className={`${chip} ${node === m.id ? chipOn : chipOff}`} onClick={() => node !== m.id && changeNode(m.id)}>
+                <Icon name="machine" className="size-3.5" />{machineName(m)}
+              </button>)}
+            </div>
+          </div>
+
+          <div className="grid gap-1.5">
+            <h2 className="m-0">{t('ide-folder-chosen')}</h2>
+            {info ? <div className="flex items-start gap-2 rounded-xs border border-line bg-surface-0 px-3 py-2">
+              <Icon name="folder" className="mt-0.5 size-4 text-accent" />
+              <div className="min-w-0 flex-1">
+                <p className="m-0 break-all font-mono text-[0.8125rem]">{info.path}</p>
+                <p className="m-0 mt-0.5 text-xs text-muted">{info.branch ? <><Icon name="branch" className="me-1 inline size-3" />{info.branch} · </> : null}{t('start-in-directory')}</p>
+                {info.portable && <p className="m-0 mt-0.5 break-all text-xs text-muted">{t('start-project-id', { id: info.projectId })}</p>}
+              </div>
+              <button type="button" className="button px-2 py-1 text-xs" disabled={busy} onClick={() => setInfo(undefined)}>{t('ide-folder-change')}</button>
+            </div> : <>
+              <div className="flex gap-2">
+                <input value={path} disabled={busy} autoFocus className="min-w-0 flex-1 font-mono text-[0.8125rem]" aria-label={t('start-directory')} onChange={e => { typed.current = true; changePath(e.target.value); }} onKeyDown={e => { if (e.key === 'Enter' && path.trim() && !busy) void choose(); }} placeholder={t('start-directory-placeholder')} />
+                <button type="button" className="button button--primary" disabled={!path.trim() || busy} onClick={() => void choose()}>{t('start-select-directory')}</button>
+              </div>
+              {canBrowse && !browse && <button type="button" className="button justify-self-start px-3 py-1 text-xs" disabled={busy} onClick={() => void look(path.trim().startsWith('/') || /^[A-Za-z]:[\\/]/.test(path.trim()) ? path.trim() : '')}><Icon name="folder" className="size-4" />{t('start-browse')}</button>}
+              {browse && <div className="grid gap-1 rounded-xs border border-line bg-surface-0 p-2" aria-busy={browse.busy}>
+                <div className="flex items-center gap-1.5">
+                  <button type="button" className="ide-iconbtn" disabled={!browse.listing?.parent || browse.busy} onClick={() => void look(browse.listing?.parent ?? '')} aria-label={t('start-browse-up')} title={t('start-browse-up')}><Icon name="chevron" className="size-4 rotate-180 rtl:rotate-0" /></button>
+                  <code dir="ltr" className="min-w-0 flex-1 truncate text-xs" title={browse.listing?.path}>{browse.listing?.path ?? '…'}</code>
+                  <button type="button" className="button button--primary px-2 py-1 text-xs" disabled={!browse.listing || busy} onClick={() => { const p = browse.listing?.path ?? ''; setBrowse(undefined); changePath(p); void choose(p); }}>{t('start-select-directory')}</button>
+                  <button type="button" className="ide-iconbtn" onClick={() => setBrowse(undefined)} aria-label={t('start-browse-close')} title={t('start-browse-close')}><Icon name="close" className="size-4" /></button>
+                </div>
+                {browse.failed && <p role="alert" className="m-0 text-xs text-needs-you">{t(browse.forbidden ? 'start-directory-forbidden' : 'start-browse-failed')}</p>}
+                <ul className="m-0 grid max-h-52 list-none gap-0.5 overflow-y-auto p-0">
+                  {browse.listing?.entries.length === 0 && <li className="muted px-2 py-1 text-xs">{t('start-browse-empty')}</li>}
+                  {browse.listing?.entries.map((e) => <li key={e.name}><button type="button" className="ide-row py-1" disabled={browse.busy} onClick={() => void look(childPath(browse.listing?.path ?? '', e.name))}>
+                    <Icon name="folder" className="size-4 text-muted" /><span className="min-w-0 flex-1 truncate">{e.name}</span>{e.isGit && <span className="ide-chip" title={t('start-browse-git')}><Icon name="branch" className="size-3" />git</span>}
+                  </button></li>)}
+                </ul>
+                {browse.listing?.truncated && <p className="muted m-0 text-xs">{t('start-browse-more')}</p>}
+              </div>}
+              {known.length > 0 && !browse && <div className="grid gap-0.5">
+                <span className="text-[0.6875rem] text-muted">{t('ide-folder-known')}</span>
+                <ul className="m-0 grid max-h-44 list-none gap-0.5 overflow-y-auto p-0">
+                  {known.map(p => <li key={p.path}><button type="button" className="ide-row py-1.5" disabled={busy} aria-current={p.path === path ? 'true' : undefined} onClick={() => { changePath(p.path); void choose(p.path); }}>
+                    <Icon name="folder" className="size-4 text-muted" /><span className="min-w-0 flex-1"><span className="block truncate">{p.label}</span><span className="block truncate font-mono text-[0.6875rem] text-muted">{p.path}</span></span>
+                  </button></li>)}
+                </ul>
+              </div>}
+              <label className="flex items-start gap-2 text-[0.8125rem]"><input type="checkbox" className="mt-0.5" checked={createIdentity} disabled={busy} onChange={e => setCreateIdentity(e.target.checked)} /><span>{t('start-portable')}{createIdentity && <span className="mt-0.5 block text-xs text-muted">{t('start-portable-explain')}</span>}</span></label>
+            </>}
+          </div>
+
+          {info && <>
+            <div className="grid gap-1.5">
+              <h2 className="m-0">{t('ide-agent-pick')}</h2>
+              {kinds === 'loading' ? <p className="muted m-0">{t('start-loading')}</p> : kinds === 'failed' ? <p role="alert" className="m-0">{t('start-kinds-failed')}</p> : kinds.length === 0 ? <p className="muted m-0">{t('start-no-kinds')}</p> :
+                <div className="flex flex-wrap gap-1.5" role="radiogroup" aria-label={t('start-which')}>
+                  {kinds.map(k => <button key={k.kind} type="button" role="radio" aria-checked={kind === k.kind} disabled={busy || !k.installed} className={`${chip} ${kind === k.kind ? chipOn : chipOff}`} onClick={() => setKind(k.kind)}>
+                    {k.name}{!k.installed && <span className="text-[0.6875rem]">— {t('start-not-installed')}</span>}
+                  </button>)}
+                </div>}
+              {Array.isArray(kinds) && kinds.some(k => !k.installed) && <p className="m-0 text-xs text-muted">{t('start-not-installed-why')}</p>}
+            </div>
+            {(info.gitRoot || info.previousProjectId) && <div className="grid gap-1.5">
+              <h2 className="m-0">{t('ide-options')}</h2>
+              {info.gitRoot && <label className="flex items-center gap-2 text-[0.8125rem]"><input type="checkbox" checked={separate} disabled={busy} onChange={e => setSeparate(e.target.checked)} />{t('start-separate-worktree')}</label>}
+              {info.previousProjectId && <label className="flex items-center gap-2 text-[0.8125rem]"><input type="checkbox" checked={acceptIdentityChange} disabled={busy} onChange={e => setAcceptIdentityChange(e.target.checked)} />{t('start-identity-change')}</label>}
+            </div>}
+            {offered.length > 0 && <div className="grid gap-1.5">
+              <h2 className="m-0">{t('start-how-it-acts')}</h2>
+              {skips.length > 0 && <div className="flex flex-wrap gap-1.5" role="radiogroup" aria-label={t('start-how-it-acts')}>
+                <button type="button" role="radio" aria-checked={launch.permission === ASK} disabled={busy} className={`${chip} ${launch.permission === ASK ? chipOn : chipOff}`} onClick={() => setLaunch((s) => pickPermission(s, ASK))}>{t('option-ask')}</button>
+                {skips.map((o) => <button key={o.id} type="button" role="radio" aria-checked={launch.permission === o.id} disabled={busy} className={`${chip} ${launch.permission === o.id ? 'border-needs-you bg-surface-2 text-ink ring-1 ring-needs-you' : chipOff}`} onClick={() => setLaunch((s) => pickPermission(s, o.id))}>{labelOf(o, t)}</button>)}
+              </div>}
+              {pendingOption && <div role="alertdialog" aria-label={t('session-confirm-title')} className="flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-s border border-needs-you/60 bg-surface-2 px-3 py-2">
+                <div className="min-w-0 flex-1 basis-64 text-xs"><strong className="block">{t('session-confirm-title')}</strong>
+                  <span className="text-muted">{t('start-confirm-skip-body', { name: labelOf(pendingOption, t) })}</span></div>
+                <button type="button" className="button px-3 py-1 text-xs" onClick={() => setLaunch(confirmSkip)}>{t('start-confirm-skip-yes')}</button>
+                <button type="button" className="button button--primary px-3 py-1 text-xs" autoFocus onClick={() => setLaunch(keepAsking)}>{t('session-confirm-no')}</button>
+              </div>}
+              {launch.permission !== ASK && !pendingOption && <p className="m-0 text-xs text-needs-you">{t('start-does-not-ask-note')}</p>}
+              {plain.map((o) => <label key={o.id} className="flex items-center gap-2 text-[0.8125rem]"><input type="checkbox" checked={launch.harmless.includes(o.id)} disabled={busy} onChange={e => { const on = e.target.checked; setLaunch((s) => toggleHarmless(s, o.id, on)); }} />{labelOf(o, t)}</label>)}
+            </div>}
+          </>}
+          {error && <p role="alert" className="m-0 text-needs-you">{error === 'approval-not-trusted' && trust ? t('trust-hint', { machine: online.find(m => m.id === node)?.name ?? node }) : t(error)}</p>}
+          {error === 'approval-not-trusted' && askApproval?.can(node) && <AskApproval ask={askApproval.ask} />}
+          {error === 'approval-not-trusted' && trust && <TrustCommand command={`agora node trust ${trust.id} ${trust.key}`} />}
+        </div>}
+        <div className="flex justify-end gap-2 border-t border-line px-4 py-3">
+          <button type="button" className="button" disabled={busy} onClick={onClose}>{t('start-cancel')}</button>
+          {info && <button type="button" className="button button--primary" disabled={busy || !kind || !!launch.pending || (!!info.previousProjectId && !acceptIdentityChange)} onClick={() => void go()}>{t('start-go')}</button>}
+        </div>
+      </Dialog.Content>
+    </Dialog.Portal>
+  </Dialog.Root>;
 }

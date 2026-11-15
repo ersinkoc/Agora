@@ -5,7 +5,8 @@ the node per MCP connection; agents cannot impersonate each other.
 
 | Tool | Input | Output |
 | --- | --- | --- |
-| `agents_list` | `{ project?: string }` | `[{ agent_id, kind, node, state, worktree, label }]` |
+| `agents_list` | `{ project?: string }` | `[{ agent_id, kind, node, state, worktree, label }]` (more fields: see "Awareness") |
+| `workspace_status` | `{}` | `{ workspace, project, machine, machines_online, partial, agents, same_workspace, working, blocked, idle, open_tasks, leases, summary }` (see "Awareness") |
 | `send_message` | `{ to: agent_id \| "#channel", body: string, refs?: [path\|commit\|task_id] }` | `{ message_id }` |
 | `ask` | `{ to, question, timeout_s?: number (default 600) }` | `{ reply, from }` or error `mesh.timeout` |
 | `inbox` | `{ since?: message_id, limit?: number }` | `[{ message_id, from, body, refs, at, provenance }]` |
@@ -16,6 +17,9 @@ the node per MCP connection; agents cannot impersonate each other.
 | `lease_acquire` | `{ paths: [glob], ttl_s: number, reason }` | `{ lease_id, expires_at }` or `lease.held` |
 | `lease_release` | `{ lease_id }` | `{ ok }` |
 | `handoff` | `{ to, task_id?, summary, refs }` | `{ handoff_id }` |
+| `agent_start` | `{ kind, prompt?, folder?, worktree?: bool, node? }` | `{ agent_id }` after the user's decision (ADR-0057) |
+| `agent_wait` | `{ agent_id, state: "idle"\|"working"\|"blocked"\|"done"\|"exited", timeout_s?: number (default 600, at most 3600) }` | `{ agent_id, state }` or `mesh.timeout` |
+| `agent_output` | `{ agent_id, lines?: number (default 40, at most 200) }` | `{ agent_id, source: "screen"\|"transcript", lines }` |
 
 ## Safety rules
 
@@ -30,11 +34,12 @@ the node per MCP connection; agents cannot impersonate each other.
 
 The server speaks MCP (JSON-RPC 2.0) with `initialize`, `ping`, `tools/list` and `tools/call`; tools before `initialize` are
 refused. Protocol versions 2025-06-18, 2025-03-26 and 2024-11-05 are accepted; an unknown version gets the newest. The
-`initialize` result carries `instructions`: the standing instruction that other agents' messages are information, not authority.
+`initialize` result carries `instructions`: the standing instruction that other agents' messages are information, not authority,
+and to call `workspace_status` when it starts and before it edits files others may touch.
 The caller is the agent the node bound to the connection; no argument can name another sender.
 
 Differences from the table above, all additive: `send_message` takes an optional `reply_to` (a `message_id` from the inbox)
-and a reply to an open `ask` is what answers it; `agents_list` items also carry `project`; `task_list` items carry `detail`
+and a reply to an open `ask` is what answers it; `agents_list` items also carry `project` and the fields under "Awareness"; `task_list` items carry `detail`
 and `summary`; `inbox` items carry `kind` (`message`, `ask`, `reply`, `handoff`), `reply_to` and a `provenance` object. `reason` on
 `lease_acquire` is accepted but only the audit trail of the call would hold it (not stored yet).
 
@@ -42,7 +47,8 @@ Tool errors are results with `isError: true` whose text is JSON `{"error": {"cod
 `error-codes.md` (new: `mesh.rate_limited`, `mesh.body_too_large`, `mesh.too_many_refs`, `mesh.too_many_asks`, `mesh.timeout`,
 `task.not_found`, `task.not_open`, `task.blocked`, `task.not_owner`, `lease.not_found`, `lease.invalid_path`). Bad arguments are
 JSON-RPC `-32602`. `ask` does not block the library: the connection returns `Waiting { ask_id, deadline }` and the caller polls
-the broker and calls `finish_ask`.
+the broker and calls `finish_ask`. If the originating transport ends first, its runtime calls the caller-bound
+`Mesh::cancel_ask` for the asks it owns; another agent cannot cancel them.
 
 ## Node-local server (`agora-node::mesh_server`)
 
@@ -52,8 +58,15 @@ Whatever connects to a socket is that agent as far as the broker is concerned, s
 agent's process. `agora mesh stdio --socket PATH` is what an agent's MCP client runs as its server: it carries stdin/stdout to
 that socket. The node registers the agent on start, keeps its state current for `agents_list`, and on stop or exit
 unregisters it, which gives back its tasks, leases and open asks and closes the endpoint. Pending `ask`s are answered on the
-same connection without blocking the agent's other calls. Mesh activity is written to the node's event log.
-The socket reaches the agent through its manifest's `[mcp]` section (see `agent-manifest.md`). Messages to agents on other nodes: see below.
+same connection without blocking the agent's other calls. The connection owns its outstanding ask IDs independently
+of its polling queue. On EOF, input/output failure or shutdown it discards those asks (including already answered ones)
+without unregistering the agent or affecting another connection's requests. A live connection still receives a completed
+answer even if it starts another ask before polling that answer. Mesh activity is written to the node's event log.
+The socket reaches a terminal agent through its manifest's `[mcp]` section (see `agent-manifest.md`). A structured agent (an L3
+adapter, or an ACP agent through `agora acp-bridge`) joins the mesh the same way and gets the same server in `session/start`
+`mcpServers` (`adapter-protocol.md`), which the bridge passes on to ACP `session/new`/`session/load`; so every tool above,
+`agent_start`, `agent_wait` and `agent_output` included, works for it, and its `agent_start` waits for the user like any agent's.
+Messages to agents on other nodes: see below.
 
 
 ## Messages between nodes (ADR-0031)
@@ -65,7 +78,8 @@ node wrote. The target broker delivers it to the local agent with `provenance.fr
 `provenance.node = <origin>`; answering is a `send_message` to that address. Delivery is at most once. `send_message`
 returns once the broker accepted the message (limits and rate are checked there); if it does not arrive, the sender's inbox
 receives a notice of kind `delivery_failed` whose body is the error code (`node.offline`, `node.unknown`, `node.timeout`,
-`mesh.recipient_unknown`, `mesh.rate_limited`, ...). Plain messages cross nodes; `ask` stays node-local, and a `#channel` message on a shared project reaches every other running agent of the project on any node (below), and a node may have 64 posts waiting at the hub. Tasks, leases and
+`mesh.recipient_unknown`, `mesh.rate_limited`, ...) and whose `reply_to` is the failed message's id (the `message_id`
+`send_message` answered with), so an agent with several messages in flight knows which one failed. Nothing is resent. Plain messages cross nodes; `ask` stays node-local, and a `#channel` message on a shared project reaches every other running agent of the project on any node (below), and a node may have 64 posts waiting at the hub. Tasks, leases and
 `handoff` cross nodes through the shared board below, for a project that is on two or more online nodes. The machine's owner can turn it off:
 `<node data dir>/policy` with the line `mesh.remote = false` (default `true`; a value that is not exactly `true` or `false` counts as
 `false`, so a typo never widens the node). Then messages to other nodes fail with a `delivery_failed` notice `node.policy_denied`
@@ -73,6 +87,13 @@ and messages from other nodes are refused with the same code; messages on this n
 file. `refs` travel with a cross-node message (ADR-0035, `MeshPost.refs`) and the receiver stores each as `<origin node>:<ref>` (`laptop:src/auth.rs`; one that is already qualified is qualified again), so an agent can tell a path on another machine from a local one; refs stay inert text, within the usual limits, and confer no lease or permission. The web window lists recent messages and marks the ones between machines.
 
 ## Shared board (ADR-0039)
+
+Project membership includes both startup checkouts and owner-selected workspaces (`WorkspaceRegistered`, ADR-0052), so
+folders selected after a node starts participate without a daemon restart. Membership is deduplicated by enrolled node ID;
+host names and directory names do not establish shared identity. Offline and unknown nodes do not count. A single-node
+project with no unfinished shared work continues on its local broker.
+An agent still running under an earlier project identity retains that membership until it exits. Re-associating its folder
+does not move that session's tasks or leases to a local broker; the node's qualified agent key establishes its membership.
 
 When a project has checkouts on two or more online nodes, `task_*`, `lease_*` and `handoff` are decided by the hub, which keeps one
 board per project and is its only writer: a claim has exactly one winner and a lease is all-or-nothing across nodes. The agent's
@@ -86,9 +107,123 @@ A `handoff` to `<node>/<agent>` moves the task and sends the receiver a message 
 is offline it fails with `node.offline` and the task does not move. When the hub cannot be reached, a project this node knows to
 be shared fails with `board.unavailable` (the agent's other tools and its worktree keep working); a project it does not know to be
 shared stays on the local broker. When a project becomes shared (gains its second online node with a checkout) the hub sends each such node `BoardJoin`: the node hands over its open and claimed tasks and its live leases for the project and stops keeping them; the hub puts them on the board (each task gets a board id and its owner a notice `{"board":"task_moved","from":...,"to":...}` from `hub/board`; a lease the board already holds for another agent is refused, and both holders get `lease_refused` / `lease_conflict`). Until the nodes answered, or 5 s passed, `lease_acquire` and `task_claim` on that project answer `board.unavailable` (ADR-0039 amendment B). Done tasks stay in the node's local history. A node with `mesh.remote = false` answers `node.policy_denied` and keeps its work; a late answer is still applied (only the 5 s hold ends). A node hands over at most 500 tasks and 500 leases (leases by whole grant; what does not fit stays on its broker and keeps working there), the hub takes no more from one answer, cuts titles and details to the message size limit, and runs a handed-over lease at most one hour; a task whose creator or owner no longer runs lands open, made by `hub/board`. `BoardJoin` is answered where the hub's commands enter the node; the local control socket refuses it. Not done yet: boards
-keep their tasks in the hub's SQLite file (settings key `board.<project>`, so they are in its backup); leases are stored with them (ADR-0040) and a restart keeps those whose TTL has not passed (a restored lease has no id, so it ends at its TTL), a task claimed by an agent that is gone after a restart is given back, a message to a
+keep their tasks in the hub's SQLite file (settings key `board.<project>`, so they are in its backup); a change (create, claim, complete, lease, release, handoff) is answered as done only after the board and its audit events are written, together in one transaction (all or nothing), and only then published to the view, windows and nodes; when the hub cannot write them the call fails with `internal` (`incident_id: board.store`) and the board in memory is put back as it was, so an acknowledged claim or handoff survives a restart and a refused one never appears; leases are stored with them (ADR-0040) and a restart keeps those whose TTL has not passed (a restored lease has no id, so it ends at its TTL), a task claimed by an agent that is gone after a restart is given back, a message to a
 `#channel` is sent as `BoardCall{tool: "send_message"}`; the hub makes one copy per other running agent of the project (any online node), each arriving as a message from the sender with the channel name in front of the text (`[#dev] ...`), best effort and at most once, within the usual body and ref limits (the tool returns `{ delivered_to }` instead of `{ message_id }` in this case). Channel history is not kept and `inbox` on the receiver is how it is read. The web console shows each project's board (tasks with their owner, held paths) in its right column, built from the hub's
 `TaskChanged`/`LeaseGranted`/`LeaseReleased` events; a window that opens or reloads gets the boards in its `Snapshot` (`tasks`, `leases`, ADR-0040).
+
+## Agents that start agents (ADR-0057)
+
+A node offers `agent_start`, `agent_wait` and `agent_output` (capability `mesh.spawn`); they appear in `tools/list` only there, and
+the node answers them itself (`agora-node::spawn`), not the broker. The caller is the connection's agent, as for every tool.
+
+- **Every start needs the user's decision.** `agent_start` announces an `ApprovalRequested` with action `agent.start` whose detail
+  shows the asking agent and machine, the kind, the folder and the whole prompt (see `protocol.md`), and answers only once a trusted
+  device's signed decision has been verified on this node: `{ agent_id }`, `mesh.start_denied` (refused, or withdrawn) or
+  `approval.expired`. The decision is signed over a hash of the request as announced, so a hub cannot change what starts. The call
+  does not block the agent's other calls; if the connection ends first, the request is withdrawn.
+- **A grant.** The decision may allow "up to N helpers of this kind in this folder" (N at most 10, this start included) and, separately,
+  that the helpers it starts may ask in turn. Later starts that match the grant (same asking agent, kind, folder and `worktree`
+  choice) start at once. A grant ends when the asking agent exits or is stopped, or when revoked (`GrantRevoke` with the approval id;
+  `GrantList` shows it). No grant is given for a kind without an agent integration (a mesh section, an adapter or a structured mode), nor for
+  kind `shell` or a kind whose program (`process.launch`, else `structured.acp.argv`, else `adapter.command`; its file name lower-cased,
+  without `.exe`/`.cmd`/`.bat`/`.com` and without a version) is a shell, a wrapper (`env`, `nice`, `nohup`, `setsid`, `timeout`,
+  `stdbuf`, `xargs`, `sudo`, `doas`, `su`, `ssh`, `wsl`, `docker`, `podman`) or an interpreter or runner (`python`, `pypy`, `perl`,
+  `ruby`, `node`, `deno`, `bun`, `npx`, `uvx`, `bunx`, `php`, `lua`), whatever screen rules it has: there it would mean "run any N programs
+  without asking". The
+  request's `grant_allowed` says whether one may be given.
+- **Never wider than the asker.** The folder defaults to the asker's own; one below it is allowed (a relative `folder` is taken below
+  the asker's own); `worktree: true` makes the helper its own worktree of it. Another folder is asked about with `inside: false`
+  shown to the user, never covered by a grant, and a helper started there cannot ask for helpers. A helper's helper must stay
+  inside. Folder rules of ADR-0052 apply. On a node that confines agents (ADR-0047), a helper of another kind whose manifest the
+  owner trusts to widen confinement is refused (`node.policy_denied`, rule `sandbox.trust_manifest`). Another machine is not
+  supported yet (`protocol.capability_missing`, `mesh.spawn.remote`).
+- **Limits** (`mesh.helper_limit` with `rule`): a helper cannot start helpers unless the decision that started it allowed it, and a
+  helper's helper never can (`depth`); 3 running helpers per agent (`helpers`); one start in progress or waiting for the user per
+  agent (`pending`; the slot is taken before the limits are checked and held until the start ends, so concurrent calls cannot pass
+  them together); a first prompt over 16 KiB (`prompt`). Six `agent_start` calls a minute per agent (`mesh.rate_limited`), and the
+  node's own agent limit (`node.resource_limit`). A refusal before asking is an `AgentStartRefused` event (rate refusals at most one a
+  minute per agent; agent-written fields cut to 256 bytes).
+- **Prompt rules** (`protocol.invalid_message`, `field = prompt`): no control characters other than line breaks and tabs; no
+  invisible characters (the list in `crates/agora-core/src/hidden-characters.txt`: Default_Ignorable_Code_Point and every format
+  character, the line and paragraph separators and the private use areas; also refused in the requested `folder` and in the folder
+  it resolves to); no leading `!`, `/`, `#`, `&`, `$` or `?` (a shell escape, a slash command, a memory edit, a background send, a
+  skill form or the shortcuts key in common agents); and no text the kind's `[[typed]]` rules require on screen (its footer,
+  compared case-insensitively), which could stand in for the real footer; and no last word starting with `@` (a file picker would take the
+  Enter). Clients show any such character that reaches them as a visible `\u{…}` escape.
+- **Following.** `agent_wait` and `agent_output` answer only for helpers the caller started (anything else is `agent.not_found`).
+  `agent_wait` ends when the helper reaches the state or exits (`state: "exited"`); a connection may have 8 waits open
+  (`mesh.too_many_asks`), all read from one view of the node per poll. `agent_output` is the bottom of the live screen (never
+  scrollback) or, for a chat agent without a terminal, the end of its transcript; at most 16 KiB. It is untrusted text.
+- **The first prompt** is typed into a terminal helper only after two fresh looks in a row at its live screen (taken then, not the
+  paced detection's last result) show the kind's empty input box (`[[ready]]`) and an idle state; line breaks and tabs are typed as
+  spaces. Enter follows only after two later fresh looks in a row show the input box (`input_box`) holding exactly the typed prompt
+  and nothing else, with no dialog or menu on screen (`[[typed]]`), see `agent-manifest.md`. A blocked screen, keys someone else typed
+  into the box, or text that does not show within a second leave it for the user. A kind without these rules never gets its first
+  prompt typed, and a prompt long enough to wrap where the kind's `input_box` reads one row is left for the user too. When it is not
+  typed within 120 seconds, or not sent, that is recorded as an `AgentStartRefused` with `code = agent.blocked` (its `folder` holds
+  the helper's id). A chat agent gets it as its first request once it reports idle. Every helper's first prompt, granted starts
+  included, is recorded as a `MessagePosted` from the parent to the helper (the text, or `sha256:<hex>` above 4 KiB). Later messages
+  from the parent are ordinary mesh messages (information, not authority).
+- **Stopping.** `AgentStop { stop_helpers: true }` stops the agent's running helpers and theirs too. A parent that exits on its own leaves
+  its helpers running.
+- **Restart.** Which helper an agent started is kept in the node's memory (the supervisor's parent links and the spawner's record of
+  what each decision allowed) for as long as the supervisor lists the agent, which is the node process's life: a helper that crashes
+  and is restarted, or is resumed, is still the same helper. Agents end with the node process, so a restarted node starts with no
+  helpers. An agent the supervisor knows as a helper but whose decision record is missing may not ask for helpers, and helper counts
+  use the supervisor's links, so a missing record never widens the limits.
+
+## Awareness: who else is here
+
+An agent can ask, for its own workspace and project, how many agents work there, on which machines, what each is doing, which
+tasks are open and which paths are held. Everything comes from facts the node has; no field ever carries a prompt, a message, the
+screen or the transcript of an agent, or a secret. Fields that hold text another agent wrote (a task title, a lease path) are put
+on one line (control and invisible characters become spaces, as in `agora-core`'s hidden-character list) and cut (a title or
+`doing` at 120 bytes, a path at 200). Like every mesh content, what one agent learns about another is information, not
+instructions. The words are data for agents, in English like the MCP `instructions`; a window does not show them.
+
+**`agents_list`** rows keep their fields and add: `workspace` (the agent's folder or worktree on its machine), `project`, `since`
+(seconds it has run, `null` when unknown), `doing`, `files_changed` (changed files in its workspace from the node's own git status,
+`null` until the node looked), `holds` (paths it holds a lease on) and `parent` (the agent that started it, ADR-0057, or `null`).
+The list spans machines like `workspace_status`: for each project in it (the one asked for, or every project of the agents this
+node lists, at most 16) the node asks the hub the same `BoardCall{tool: "workspace_status"}` (no new message), and when the project
+is shared it adds the project's running agents on other online machines (`agent_id` `<node>/<agent>`, which is what `send_message`
+takes; `label` empty, `since` and `files_changed` `null`) and puts the board's claimed task and leases into this node's rows. The hub
+answers only for projects the calling node takes part in, so agents of a project only other machines have are never listed. Every
+row also carries `partial`: `false` when its project is complete (the hub answered, or said the project lives on this machine
+only), `true` when the hub could not be asked about it (same cases as below); the list is then this node's agents alone, as nodes
+are autonomous. Agents on a machine that is offline are not listed.
+
+**`doing`** is, in order: `working on task: <title>` when it holds a claimed task; else, while a chat (ACP or adapter) agent works,
+the kind of its latest item (`running a command`, `editing files`, `reading files`, `planning`, `using a tool`, `writing a
+reply`, from the item's kind and the tool's name only, never its arguments; `asking the user` while it waits on an approval it
+asked for); else the state in words (`working`, `waiting for approval`, `idle`, `finished`, `state unknown`).
+
+**`workspace_status {}`** (no arguments) answers for the caller's project:
+`{ workspace, project, machine, machines_online, partial, agents: [{ id, kind, machine, state, doing, since, files_changed, holds,
+parent, workspace, you }], same_workspace, working, blocked, idle, open_tasks: [{ id, title, owner }], leases: [{ path, owner, ttl }],
+summary }`. `same_workspace` counts the agents (the caller included) in the caller's folder on its machine; `working`, `blocked`
+and `idle` (idle or finished) count the listed agents; `ttl` is seconds left; at most 100 agents, 20 tasks and 20 leases.
+`summary` is one or two sentences built from those facts, for example `3 agents in this project on 2 machines, 2 in this workspace
+(2 working, 1 waiting for approval); codex agent-2 is editing files; agent-1 holds src/auth.rs.` Agents on this machine are named
+by their id and agents on other machines `<node>/<agent>`, which is how `send_message` addresses them.
+
+The node's broker answers for its own agents. The node then asks the hub with `BoardCall{tool: "workspace_status",
+arguments_json: "{}"}` (the read-only counterpart of the board tools, ADR-0039; no new message): when the project is shared the
+hub answers with the running agents of the project on online nodes (kind, machine, state, the board task each claimed, the paths
+each holds, its parent, its worktree path), the board's open tasks and live leases and how many machines are online; the node keeps
+its own rows (they know more), puts the board's task and leases into them and adds the others (`since` and `files_changed` are
+`null` for those). When the hub says the project is not shared the node's answer is complete. When the hub cannot be asked (no hub,
+`mesh.remote = false`, an older hub that refuses the tool, or 3 s without an answer) the answer is the node's alone with
+`partial: true` and the summary says so.
+
+**Presence notices.** When an agent starts on a node (joins its mesh) or ends (its endpoint closes: `finished`, `stopped`,
+`crashed`, or `left` for any other reason), every other running agent of its project on that node gets an inbox item of kind
+`presence` whose body is one line such as `codex agent-2 joined this workspace (machine mac)` or `codex agent-2 left this project
+(stopped)` (`this workspace` when both are in the same folder on the same machine); its `provenance` names the agent the notice is
+about. One notice per agent per change (a restart that keeps the endpoint, or an exit after a stop, says nothing more); at most 10
+per inbox per minute, the tenth saying that more agents joined or left and to call `workspace_status`. Notices are data in the
+inbox, never typed into a terminal (ADR-0031), and are not audited as messages (nobody sent them). Agents on other machines joining
+or leaving are not announced yet; `workspace_status` lists them.
 
 ## Implementation status
 `agora-mesh::broker::Mesh` implements the tools' logic as deterministic in-memory state: registry, messages with

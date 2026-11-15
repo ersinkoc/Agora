@@ -77,6 +77,7 @@ mode = "delta"
     // The node reads the user's home from the environment when it starts; this binary has this one test.
     std::env::set_var("HOME", &home);
     let n = Node::start(&NodeConfig {
+        resume_all: false,
         node_id: "node-test".into(),
         socket: dir.join("c.sock"),
         data_dir: dir.join("data"),
@@ -147,7 +148,10 @@ mode = "delta"
         })
         .sum();
     assert_eq!(sum, 15);
-    let _ = c.call(Cmd::AgentStop(v1::AgentStop { agent_id: agent }));
+    let _ = c.call(Cmd::AgentStop(v1::AgentStop {
+        agent_id: agent,
+        stop_helpers: false,
+    }));
     drop(n);
     let _ = std::fs::remove_dir_all(dir);
 }

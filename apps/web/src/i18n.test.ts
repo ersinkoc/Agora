@@ -18,7 +18,7 @@ describe('i18n', () => {
       for (const m of readFileSync(f, 'utf8').matchAll(/\bt\('([a-z0-9-]+)'/g)) keys.add(m[1] as string);
     }
     expect(keys.size).toBeGreaterThan(5);
-    for (const k of keys) expect(t(k, { machine: 'm', id: 'i', name: 'n', count: 1, amount: '$1', date: 'd' }), k).not.toBe(k);
+    for (const k of keys) expect(t(k, { machine: 'm', id: 'i', name: 'n', count: 1, online: 1, total: 1, when: 'w', code: 1, reason: 'r', amount: '$1', date: 'd', kind: 'k', agentKind: 'a', node: 'n', percent: 1, used: 'u', size: 's', stderr_tail: 't', detail: 'd', rpc_code: 'r', stage: 's', minutes: 5, min: 8, fingerprint: 'f', machines: 'm', max: 1, field: 'f', token: 't', base: 'b', label: 'l', fg: 'f', bg: 'b', ratio: 1, scheme: 's' }), k).not.toBe(k);
   });
   it('has the dynamic state and theme keys', () => {
     for (const s of ['working', 'needs-you', 'finished', 'idle', 'unknown']) expect(t(`state-${s}`)).not.toBe(`state-${s}`);
@@ -27,7 +27,7 @@ describe('i18n', () => {
   it('has the audit trail\'s reasons and outcomes', () => {
     for (const k of ['owner-only', 'signed-out', 'failed']) expect(t(`audit-${k}`)).not.toBe(`audit-${k}`);
     for (const k of ['done', 'sent']) expect(t(`audit-outcome-${k}`)).not.toBe(`audit-outcome-${k}`);
-    for (const a of ['sign_in', 'user.add', 'AgentStop', 'ApprovalResolve']) expect(t(actionKey(a)), a).not.toBe(actionKey(a));
+    for (const a of ['sign_in', 'user.add', 'AgentStop', 'ApprovalResolve', 'node.resynced']) expect(t(actionKey(a)), a).not.toBe(actionKey(a));
   });
   it('lays the page out right to left for the languages written that way', () => {
     for (const l of ['ar', 'he', 'fa-IR', 'ur']) expect(directionOf(l), l).toBe('rtl');

@@ -9,7 +9,10 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use agora_adapters::host::{Adapter, AdapterConfig, AdapterEvent};
+use agora_adapters::host::{
+    Adapter, AdapterConfig, AdapterEvent, HostError, McpServer, OptionKind, SessionOption,
+    SessionOptions,
+};
 use agora_adapters::{Detector, Manifest, Pacer};
 use agora_core::{Agent, AgentId, AgentState, IntegrationLevel, NodeId, StateSource, WorktreeId};
 use agora_platform::{spawn, ExitStatus, ProcessLimits, PtyConfig};
@@ -17,6 +20,7 @@ use agora_protocol::{Error, ErrorCode};
 use agora_vt::Size;
 
 use crate::git::{self, GitError};
+use crate::launch_options::{LaunchChoice, Refusal, Requested, SkipPermissions};
 use crate::terminal::{TerminalHandle, TerminalOptions};
 
 /// Restart policy for agents that die on their own (crash, non-zero exit, signal). A user stop is never
@@ -97,6 +101,9 @@ struct Extras {
     identity: Option<String>,
     /// The agent's own mesh socket: the only unix socket outside its private temp folder it may reach when offline.
     socket: Option<PathBuf>,
+    /// ADR-0059: the arguments of the launch options chosen at start, put right after the launch (or resume) command at every
+    /// (re)launch, before the injected ones.
+    options: Vec<String>,
 }
 
 /// What to start.
@@ -111,6 +118,22 @@ pub struct StartRequest {
     /// Short name used for the worktree directory and the `agent/<name>` branch.
     pub name: String,
     pub base: Option<String>,
+}
+
+/// ADR-0060: an interrupted agent as the node's session ledger holds it, for [`Supervisor::restore`].
+#[derive(Debug, Clone)]
+pub struct Restore {
+    pub id: AgentId,
+    pub kind: String,
+    pub project: agora_core::ProjectId,
+    pub folder: PathBuf,
+    /// A selected folder (ADR-0052) rather than a worktree the node made for it.
+    pub directory: bool,
+    pub branch: String,
+    /// The agent's own session to continue; `None` starts a new one.
+    pub session: Option<String>,
+    /// Where its injected configuration goes when it may not be written into the folder (a directory agent in the user's own folder).
+    pub private_config: Option<PathBuf>,
 }
 
 /// Something that happened to an agent. Plain data, ready to become protocol events.
@@ -181,6 +204,22 @@ pub enum SupervisorError {
     Git(GitError),
     /// Starting the process failed; the text is for logs only.
     Spawn(String),
+    /// ADR-0058: the adapter answered with one of the stable reasons the node passes on (`adapter.agent_exited`,
+    /// `adapter.agent_refused`, `adapter.option_refused`), with its parameters already checked and bounded.
+    Adapter {
+        code: &'static str,
+        params: Vec<(&'static str, String)>,
+    },
+    /// ADR-0058: the agent has no such switch (a terminal agent, or an adapter that did not declare it). The capability's name.
+    OptionUnsupported(&'static str),
+    /// ADR-0058: the agent did not offer this id; the field (`mode`, `model`).
+    OptionUnknown(&'static str),
+    /// ADR-0059: a launch option the node's policy refuses: `(kind, option, policy)`. Nothing was started.
+    OptionForbidden(String, String, &'static str),
+    /// ADR-0059: a launch option id that is malformed, unknown, repeated or too many: `(kind, option)`.
+    OptionInvalid(String, String),
+    /// ADR-0059: an option that skips permissions without the user's signed confirmation: `(kind, option)`.
+    OptionUnconfirmed(String, String),
     /// The node is at one of its limits; `resource` is `agents` or `terminals`.
     ResourceLimit {
         resource: &'static str,
@@ -219,6 +258,27 @@ impl SupervisorError {
             }
             Self::Git(e) => e.to_protocol(),
             Self::Spawn(_) => Error::new(ErrorCode::Internal).with("incident_id", "unassigned"),
+            Self::Adapter { code, params } => params
+                .iter()
+                .fold(Error::new(ErrorCode::parse(code)), |e, (k, v)| {
+                    e.with(k, v.as_str())
+                }),
+            Self::OptionUnsupported(c) => {
+                Error::new(ErrorCode::ProtocolCapabilityMissing).with("capability", *c)
+            }
+            Self::OptionUnknown(f) => {
+                Error::new(ErrorCode::ProtocolInvalidMessage).with("field", *f)
+            }
+            Self::OptionInvalid(k, o) => Error::new(ErrorCode::AgentOptionInvalid)
+                .with("kind", k.as_str())
+                .with("option", o.as_str()),
+            Self::OptionUnconfirmed(k, o) => Error::new(ErrorCode::AgentOptionUnconfirmed)
+                .with("kind", k.as_str())
+                .with("option", o.as_str()),
+            Self::OptionForbidden(k, o, p) => Error::new(ErrorCode::AgentOptionForbidden)
+                .with("kind", k.as_str())
+                .with("option", o.as_str())
+                .with("policy", *p),
             Self::ResourceLimit { resource, limit } => Error::new(ErrorCode::NodeResourceLimit)
                 .with("resource", *resource)
                 .with("limit", i64::try_from(*limit).unwrap_or(i64::MAX)),
@@ -254,6 +314,69 @@ pub struct AgentView {
     pub project: String,
     pub running: bool,
     pub restarts: u32,
+    /// ADR-0057: the agent on this node that started this one through the mesh.
+    pub parent: Option<AgentId>,
+    /// ADR-0059: the launch options it was started with, and whether one of them skips permissions.
+    pub launch_options: Vec<String>,
+    pub skips_permissions: bool,
+}
+
+/// ADR-0057: whether `program` is a shell, a wrapper or an interpreter, which runs whatever it is given. Compared by its file name,
+/// lower-cased, without `.exe`, `.cmd`, `.bat` or `.com` and without a version (`python3.12` is `python`, `pypy3` is `pypy`).
+fn runs_anything(program: &str) -> bool {
+    const ANY: &[&str] = &[
+        "sh",
+        "bash",
+        "zsh",
+        "fish",
+        "dash",
+        "ksh",
+        "csh",
+        "tcsh",
+        "nu",
+        "pwsh",
+        "powershell",
+        "cmd",
+        "busybox",
+        "wsl",
+        "env",
+        "nice",
+        "nohup",
+        "setsid",
+        "timeout",
+        "stdbuf",
+        "xargs",
+        "sudo",
+        "doas",
+        "su",
+        "ssh",
+        "docker",
+        "podman",
+        "python",
+        "pypy",
+        "perl",
+        "ruby",
+        "node",
+        "deno",
+        "bun",
+        "npx",
+        "uvx",
+        "bunx",
+        "php",
+        "lua",
+    ];
+    let base = program
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(program)
+        .to_ascii_lowercase();
+    let base = [".exe", ".cmd", ".bat", ".com"]
+        .iter()
+        .find_map(|x| base.strip_suffix(x))
+        .unwrap_or(&base);
+    let name =
+        base.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.' || c == '-' || c == '_');
+    ANY.contains(&name) || ANY.contains(&base)
 }
 
 /// One startable agent kind, as reported by [`Supervisor::kinds`].
@@ -263,17 +386,39 @@ pub struct KindInfo {
     pub display_name: String,
     pub level: IntegrationLevel,
     pub installed: bool,
+    /// The program looked for in the node's `PATH` (or the path the manifest names); empty when the manifest names none. Only the
+    /// name: never the node's `PATH` itself.
+    pub program: String,
+    /// ADR-0059: the kind's `[[launch.option]]`s, in the manifest's order.
+    pub launch_options: Vec<agora_adapters::manifest::LaunchOption>,
 }
 
 struct KindEntry {
     manifest: Manifest,
     detector: Detector,
+    /// ADR-0057: the manifest's `[[ready]]` rules (an empty input box).
+    ready: Detector,
+    /// ADR-0057: the manifest's `[[typed]]` rules and `input_box` pattern (typed text in the box, nothing else on screen).
+    typed: Detector,
+}
+
+/// What a terminal agent's live screen shows right now (ADR-0057), read when asked rather than from the paced detection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScreenCheck {
+    /// What the kind's rules detect on the live bottom of the screen now (`None`: no rule matches).
+    pub state: Option<AgentState>,
+    /// The `[[ready]]` rules match: the input box is empty and waiting.
+    pub ready: bool,
+    /// The `[[typed]]` rules match and the input box (`input_box`) holds exactly the text asked about and nothing else (whitespace
+    /// ignored, so a wrapped line still counts). Keys someone else typed into the box make it false.
+    pub shows: bool,
 }
 
 /// An agent driven through an L3 adapter process instead of a terminal.
 struct AdapterEntry {
     agent: Agent,
-    adapter: Adapter,
+    /// `None` once a user stop has ended the adapter process.
+    adapter: Option<Adapter>,
     session_id: String,
     worktree: PathBuf,
     branch: String,
@@ -283,6 +428,15 @@ struct AdapterEntry {
     checkout_root: PathBuf,
     restarts: u32,
     restart_at: Option<Instant>,
+    /// What the adapter declared in `initialize` (ADR-0058: `set_mode`, `set_model`).
+    capabilities: Vec<String>,
+    /// The modes and models the adapter last reported (ADR-0058), checked and bounded.
+    options: SessionOptions,
+    /// The agent's own mesh endpoint, passed in `session/start` (`mcp_servers`). Kept across restarts after a crash, as a terminal
+    /// agent's is; a stopped agent left the mesh and gets a fresh one when resumed.
+    mesh: Option<agora_adapters::inject::Endpoint>,
+    /// ADR-0059: the options it was started with (their arguments are already in `spec.command`).
+    launch: LaunchChoice,
 }
 
 struct Entry {
@@ -298,6 +452,8 @@ struct Entry {
     gave_up: bool,
     extras: Extras,
     private_config: Option<PathBuf>,
+    /// ADR-0059: the options it was started with (their arguments are in `extras.options`).
+    launch: LaunchChoice,
 }
 
 pub struct Supervisor {
@@ -311,6 +467,10 @@ pub struct Supervisor {
     abort_hook: Option<AbortHook>,
     sandbox: crate::sandbox::SandboxPolicy,
     adapters: BTreeMap<AgentId, AdapterEntry>,
+    /// ADR-0057: helper -> the agent that started it.
+    parents: BTreeMap<AgentId, AgentId>,
+    /// ADR-0059: the owner's `skip_permissions` policy.
+    skip_permissions: SkipPermissions,
 }
 
 impl Supervisor {
@@ -325,7 +485,126 @@ impl Supervisor {
             abort_hook: None,
             sandbox: Default::default(),
             adapters: BTreeMap::new(),
+            parents: BTreeMap::new(),
+            skip_permissions: SkipPermissions::default(),
         }
+    }
+
+    /// ADR-0060: agent ids start at `next` (the session ledger's), so an id is never given twice across the node's restarts.
+    pub fn reserve_ids(&mut self, next: u64) {
+        self.next_id = self.next_id.max(next);
+    }
+
+    /// ADR-0059: the owner's `skip_permissions` policy (from the node's policy file; the default allows).
+    pub fn set_skip_permissions(&mut self, policy: SkipPermissions) {
+        self.skip_permissions = policy;
+    }
+
+    /// ADR-0059: resolves a start's launch options and checks them against the owner's policy, before anything is created.
+    /// `confined_only` needs this agent's confinement to be active (the node confines agents and can here: a start that cannot be
+    /// confined is refused on its own before this).
+    fn launch_choice(&self, kind: &str, req: &Requested) -> Result<LaunchChoice, SupervisorError> {
+        if req.is_empty() {
+            return Ok(LaunchChoice::default());
+        }
+        let k = self
+            .kinds
+            .get(kind)
+            .ok_or_else(|| SupervisorError::UnknownKind(kind.to_string()))?;
+        let confined =
+            self.sandbox.level != crate::sandbox::Level::Off && self.sandbox.enforceable();
+        crate::launch_options::choose(&k.manifest, req, self.skip_permissions, confined).map_err(
+            |r| match r {
+                Refusal::Invalid { option } => {
+                    SupervisorError::OptionInvalid(kind.to_string(), option)
+                }
+                Refusal::Unconfirmed { option } => {
+                    SupervisorError::OptionUnconfirmed(kind.to_string(), option)
+                }
+                Refusal::Forbidden { option, policy } => {
+                    SupervisorError::OptionForbidden(kind.to_string(), option, policy)
+                }
+            },
+        )
+    }
+
+    /// ADR-0057: `child` was started by `parent` (an agent's `agent_start`). Carried in every view of `child`.
+    pub fn set_parent(&mut self, child: &AgentId, parent: &AgentId) {
+        self.parents.insert(child.clone(), parent.clone());
+    }
+
+    /// ADR-0057: a fresh look at a terminal agent's live screen, run on its bottom lines now (never the paced detection's last result):
+    /// what its rules detect, whether its `[[ready]]` rules match, and whether its input box holds exactly `text` (`[[typed]]` and
+    /// `input_box`). `None` for an agent without a terminal.
+    pub fn screen_check(&self, id: &AgentId, text: &str) -> Option<ScreenCheck> {
+        let e = self.agents.get(id)?;
+        let term = e.terminal.as_ref()?;
+        let kind = self.kinds.get(&e.agent.kind)?;
+        let squash = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+        let needle = squash(text);
+        Some(term.inspect(|t| {
+            ScreenCheck {
+                state: kind.detector.detect(t).map(|d| d.state),
+                ready: kind.ready.detect(t).is_some(),
+                shows: !needle.is_empty()
+                    && kind.typed.detect(t).is_some()
+                    && kind
+                        .manifest
+                        .input_box
+                        .as_deref()
+                        .and_then(|p| Detector::input_box(p, t))
+                        .is_some_and(|in_box| squash(&in_box) == needle),
+            }
+        }))
+    }
+
+    /// ADR-0057: whether a scoped grant ("up to N more without asking") may cover `kind`: only a kind with an agent integration (a
+    /// mesh section, an adapter or a structured mode) whose program (`process.launch`, else `structured.acp.argv`, else
+    /// `adapter.command`) is not a shell, a wrapper or an interpreter, however many screen rules it has: a grant there would mean "run
+    /// any N programs without asking". Unknown kinds are not grantable.
+    pub fn grantable(&self, kind: &str) -> bool {
+        let Some(k) = self.kinds.get(kind) else {
+            return false;
+        };
+        let m = &k.manifest;
+        let integrated = m.mcp.is_some() || m.adapter.is_some() || m.structured.is_some();
+        let program = m
+            .process
+            .launch
+            .first()
+            .or_else(|| {
+                m.structured
+                    .as_ref()
+                    .and_then(|s| s.acp.as_ref())
+                    .and_then(|a| a.argv.first())
+            })
+            .or_else(|| m.adapter.as_ref().and_then(|a| a.command.first()));
+        kind != "shell" && integrated && program.is_some_and(|p| !runs_anything(p))
+    }
+
+    /// ADR-0057: the footer and marker texts the kind's `[[typed]]` rules require on screen. A prompt that contains one could stand in
+    /// for the real footer, so such a prompt is never typed.
+    pub fn typed_markers(&self, kind: &str) -> Vec<String> {
+        let Some(k) = self.kinds.get(kind) else {
+            return Vec::new();
+        };
+        k.manifest
+            .typed
+            .iter()
+            .flat_map(|r| {
+                r.contains.iter().cloned().chain(
+                    r.all
+                        .iter()
+                        .chain(&r.any)
+                        .filter_map(|c| c.contains.clone()),
+                )
+            })
+            .collect()
+    }
+
+    /// The node's confinement settings (ADR-0047), for checks that compare two agents' confinement.
+    pub fn sandbox_policy(&self) -> &crate::sandbox::SandboxPolicy {
+        &self.sandbox
     }
 
     /// Installs the hook that gives each launching agent a mesh endpoint.
@@ -348,7 +627,7 @@ impl Supervisor {
     }
 
     /// With confinement on, a launch in a folder that would make the confinement meaningless is refused before anything starts.
-    fn refuse_protected(
+    pub(crate) fn refuse_protected(
         &self,
         selected: &Path,
         worktree_root: &Path,
@@ -384,18 +663,27 @@ impl Supervisor {
     }
 
     /// A start that failed after the worktree and the mesh endpoint were made: give both back, so repeated failures cannot pile up.
-    fn abandon(&self, id: &AgentId, checkout: &std::path::Path, worktree: &std::path::Path) {
+    fn abandon(&self, id: &AgentId, worktree: git::StartWorktree) {
         if let Some(h) = &self.abort_hook {
             h(id);
         }
-        let _ = git::remove_worktree(checkout, worktree, true);
+        let _ = worktree.rollback();
     }
 
     /// Make an agent kind available. Replaces a previous manifest of the same kind.
     pub fn register(&mut self, manifest: Manifest) {
         let detector = Detector::new(&manifest);
-        self.kinds
-            .insert(manifest.kind.clone(), KindEntry { manifest, detector });
+        let ready = Detector::ready(&manifest);
+        let typed = Detector::typed(&manifest);
+        self.kinds.insert(
+            manifest.kind.clone(),
+            KindEntry {
+                manifest,
+                detector,
+                ready,
+                typed,
+            },
+        );
     }
 
     /// Agents that are running or waiting for a restart.
@@ -440,8 +728,20 @@ impl Supervisor {
 
     /// Create the agent's own worktree and start it there.
     pub fn start(&mut self, req: &StartRequest, now: Instant) -> Result<AgentId, SupervisorError> {
+        self.start_with_options(req, &Requested::default(), now)
+    }
+
+    /// [`Self::start`] with the launch options a person chose (ADR-0059). Only the person's own start passes options: a helper an agent
+    /// starts (ADR-0057) goes through [`Self::start`] and never gets one.
+    pub fn start_with_options(
+        &mut self,
+        req: &StartRequest,
+        options: &Requested,
+        now: Instant,
+    ) -> Result<AgentId, SupervisorError> {
         // Checked first: a refused start must not leave a worktree behind.
         self.check_limits()?;
+        let choice = self.launch_choice(&req.kind, options)?;
         let kind = self
             .kinds
             .get(&req.kind)
@@ -463,7 +763,9 @@ impl Supervisor {
             }) {
                 return Err(SupervisorError::PublisherRevoked(req.kind.clone(), p));
             }
-            return self.start_adapter(req, &spec);
+            let mut spec = spec;
+            spec.command.extend(choice.args.iter().cloned());
+            return self.start_adapter(req, &spec, choice);
         }
         let argv = kind.manifest.process.launch.clone();
         if argv.is_empty() {
@@ -472,7 +774,8 @@ impl Supervisor {
         let checkout = git::discover_checkout(&req.checkout)?;
         let worktree = req.worktree_root.join(&req.name);
         let branch = format!("agent/{}", req.name);
-        git::create_worktree(&checkout.root, &worktree, &branch, req.base.as_deref())?;
+        let created =
+            git::create_start_worktree(&checkout.root, &worktree, &branch, req.base.as_deref())?;
 
         let id = AgentId::new(format!("agent-{}", self.next_id));
         self.next_id += 1;
@@ -483,13 +786,16 @@ impl Supervisor {
             &worktree,
             None,
         ) {
-            Ok(x) => x,
+            Ok(x) => Extras {
+                options: choice.args.clone(),
+                ..x
+            },
             Err(e) => {
-                self.abandon(&id, &checkout.root, &worktree);
+                self.abandon(&id, created);
                 return Err(e);
             }
         };
-        let agent = Agent::new(
+        let mut agent = Agent::new(
             id.clone(),
             checkout.project,
             self.cfg.node.clone(),
@@ -497,10 +803,13 @@ impl Supervisor {
             req.kind.clone(),
             IntegrationLevel::L1Manifest,
         );
-        let terminal = match self.launch(&req.kind, &argv, &worktree, &extras) {
-            Ok(t) => t,
+        let terminal = match self.first_launch(&req.kind, &argv, &worktree, &extras) {
+            Ok((t, session)) => {
+                agent.session = session;
+                t
+            }
             Err(e) => {
-                self.abandon(&id, &checkout.root, &worktree);
+                self.abandon(&id, created);
                 return Err(e);
             }
         };
@@ -519,6 +828,7 @@ impl Supervisor {
                 gave_up: false,
                 extras,
                 private_config: None,
+                launch: choice,
             },
         );
         Ok(id)
@@ -533,9 +843,31 @@ impl Supervisor {
         separate: bool,
         now: Instant,
     ) -> Result<AgentId, SupervisorError> {
+        self.start_selected_with_options(
+            req,
+            project,
+            git_root,
+            separate,
+            &Requested::default(),
+            now,
+        )
+    }
+
+    /// [`Self::start_selected`] with the launch options a person chose (ADR-0059); see [`Self::start_with_options`].
+    pub fn start_selected_with_options(
+        &mut self,
+        req: &StartRequest,
+        project: agora_core::ProjectId,
+        git_root: &Path,
+        separate: bool,
+        options: &Requested,
+        now: Instant,
+    ) -> Result<AgentId, SupervisorError> {
+        // Refused before anything is created.
+        self.launch_choice(&req.kind, options)?;
         if !separate {
             self.refuse_protected(&req.checkout, &req.worktree_root)?;
-            return self.start_in_directory(req, project, now);
+            return self.start_directory_impl(req, project, now, true, options);
         }
         self.check_limits()?;
         if !self.sandbox.enforceable() {
@@ -550,18 +882,18 @@ impl Supervisor {
             .strip_prefix(git_root)
             .map_err(|e| SupervisorError::Spawn(e.to_string()))?;
         let branch = format!("agent/{}", req.name);
-        git::create_worktree(git_root, &target, &branch, None)?;
+        let created = git::create_start_worktree(git_root, &target, &branch, None)?;
         let mut direct = req.clone();
         let result = selected_worktree_directory(&target, relative)
             .map_err(|e| SupervisorError::Spawn(e.to_string()))
             .and_then(|cwd| {
                 direct.checkout = cwd;
-                self.start_directory_impl(&direct, project, now, false)
+                self.start_directory_impl(&direct, project, now, false, options)
             });
         match result {
             Ok(id) => Ok(id),
             Err(e) => {
-                let _ = git::remove_worktree(git_root, &target, true);
+                let _ = created.rollback();
                 Err(e)
             }
         }
@@ -574,7 +906,7 @@ impl Supervisor {
         project: agora_core::ProjectId,
         now: Instant,
     ) -> Result<AgentId, SupervisorError> {
-        self.start_directory_impl(req, project, now, true)
+        self.start_directory_impl(req, project, now, true, &Requested::default())
     }
 
     fn start_directory_impl(
@@ -583,8 +915,10 @@ impl Supervisor {
         project: agora_core::ProjectId,
         now: Instant,
         private: bool,
+        options: &Requested,
     ) -> Result<AgentId, SupervisorError> {
         self.check_limits()?;
+        let choice = self.launch_choice(&req.kind, options)?;
         if !self.sandbox.enforceable() {
             return Err(SupervisorError::SandboxUnavailable(
                 req.kind.clone(),
@@ -595,7 +929,10 @@ impl Supervisor {
             .kinds
             .get(&req.kind)
             .ok_or_else(|| SupervisorError::UnknownKind(req.kind.clone()))?;
-        let driver = kind.manifest.driver(&bridge_program());
+        let driver = kind.manifest.driver(&bridge_program()).map(|mut spec| {
+            spec.command.extend(choice.args.iter().cloned());
+            spec
+        });
         let argv = kind.manifest.process.launch.clone();
         let id = AgentId::new(format!("agent-{}", self.next_id));
         self.next_id += 1;
@@ -612,14 +949,24 @@ impl Supervisor {
             }
             let root =
                 git::discover_checkout(&worktree).map_or_else(|_| worktree.clone(), |c| c.root);
-            let (adapter, session_id) = launch_adapter(
+            let mesh = self.adapter_mesh(&id, &req.kind, &project.to_string(), &worktree);
+            let launched = launch_adapter(
                 &spec,
                 &root,
                 &worktree,
                 None,
                 self.sandbox_for(&req.kind, &worktree, &spec.command[0]),
-            )
-            .map_err(SupervisorError::Spawn)?;
+                mesh.as_ref(),
+            );
+            let (adapter, session_id, capabilities) = match launched {
+                Ok(l) => l,
+                Err(e) => {
+                    if let Some(hook) = &self.abort_hook {
+                        hook(&id);
+                    }
+                    return Err(e);
+                }
+            };
             let mut agent = Agent::new(
                 id.clone(),
                 project,
@@ -633,7 +980,7 @@ impl Supervisor {
                 id.clone(),
                 AdapterEntry {
                     agent,
-                    adapter,
+                    adapter: Some(adapter),
                     session_id,
                     worktree,
                     branch: String::new(),
@@ -642,6 +989,10 @@ impl Supervisor {
                     checkout_root: root,
                     restarts: 0,
                     restart_at: None,
+                    capabilities,
+                    options: SessionOptions::default(),
+                    mesh,
+                    launch: choice,
                 },
             );
         } else {
@@ -657,7 +1008,10 @@ impl Supervisor {
                 &worktree,
                 private_config.as_deref(),
             ) {
-                Ok(e) => e,
+                Ok(e) => Extras {
+                    options: choice.args.clone(),
+                    ..e
+                },
                 Err(e) => {
                     if let Some(hook) = &self.abort_hook {
                         hook(&id);
@@ -665,7 +1019,8 @@ impl Supervisor {
                     return Err(e);
                 }
             };
-            let terminal = match self.launch(&req.kind, &argv, &worktree, &extras) {
+            let (terminal, session) = match self.first_launch(&req.kind, &argv, &worktree, &extras)
+            {
                 Ok(t) => t,
                 Err(e) => {
                     if let Some(hook) = &self.abort_hook {
@@ -674,7 +1029,7 @@ impl Supervisor {
                     return Err(e);
                 }
             };
-            let agent = Agent::new(
+            let mut agent = Agent::new(
                 id.clone(),
                 project,
                 self.cfg.node.clone(),
@@ -682,6 +1037,7 @@ impl Supervisor {
                 req.kind.clone(),
                 IntegrationLevel::L1Manifest,
             );
+            agent.session = session;
             self.agents.insert(
                 id.clone(),
                 Entry {
@@ -697,10 +1053,44 @@ impl Supervisor {
                     gave_up: false,
                     extras,
                     private_config,
+                    launch: choice,
                 },
             );
         }
         Ok(id)
+    }
+
+    /// Registers the agent with the mesh through the launch hook and returns the endpoint it is to be given; `None` without a hook or
+    /// when the mesh could not serve it (the mesh is an addition: an agent never fails to start because of it).
+    fn join_mesh(
+        &self,
+        id: &AgentId,
+        kind: &str,
+        project: &str,
+        worktree: &Path,
+        identity: Option<String>,
+    ) -> Option<agora_adapters::inject::Endpoint> {
+        let hook = self.hook.as_ref()?;
+        hook(&Launching {
+            id: id.clone(),
+            kind: kind.to_string(),
+            project: project.to_string(),
+            node: self.cfg.node.as_str().to_string(),
+            worktree: worktree.to_path_buf(),
+            identity,
+        })
+    }
+
+    /// The mesh endpoint of an adapter agent, passed to it in `session/start`. No confined identity: the adapter process is not
+    /// started with one (on Windows, the only system that has them, a confined adapter cannot be started at all yet).
+    fn adapter_mesh(
+        &self,
+        id: &AgentId,
+        kind: &str,
+        project: &str,
+        worktree: &Path,
+    ) -> Option<agora_adapters::inject::Endpoint> {
+        self.join_mesh(id, kind, project, worktree, None)
     }
 
     /// Gives the agent its mesh MCP server as its manifest says (`[mcp]`): asks the hook for an endpoint, writes
@@ -723,19 +1113,12 @@ impl Supervisor {
             identity: identity.clone(),
             ..Extras::default()
         };
-        let Some(hook) = &self.hook else {
+        if self.hook.is_none() {
             return Ok(none());
-        };
+        }
         // The hook registers the agent with the mesh even when its manifest has no `[mcp]` (it may reach the mesh
         // some other way); only a manifest with `[mcp]` gets anything injected.
-        let endpoint = hook(&Launching {
-            id: id.clone(),
-            kind: kind.to_string(),
-            project: project.to_string(),
-            node: self.cfg.node.as_str().to_string(),
-            worktree: worktree.to_path_buf(),
-            identity: identity.clone(),
-        });
+        let endpoint = self.join_mesh(id, kind, project, worktree, identity.clone());
         let socket = endpoint.as_ref().map(|e| e.socket.clone());
         let (Some(endpoint), Some(spec)) = (
             endpoint,
@@ -780,6 +1163,7 @@ impl Supervisor {
             env: plan.env,
             identity,
             socket,
+            options: Vec::new(),
         })
     }
 
@@ -788,24 +1172,34 @@ impl Supervisor {
         &mut self,
         req: &StartRequest,
         spec: &agora_adapters::manifest::AdapterSpec,
+        launch: LaunchChoice,
     ) -> Result<AgentId, SupervisorError> {
         let checkout = git::discover_checkout(&req.checkout)?;
         let worktree = req.worktree_root.join(&req.name);
         let branch = format!("agent/{}", req.name);
-        git::create_worktree(&checkout.root, &worktree, &branch, req.base.as_deref())?;
         if spec.command.is_empty() {
             return Err(SupervisorError::UnknownKind(req.kind.clone()));
         }
-        let (adapter, session_id) = launch_adapter(
+        let created =
+            git::create_start_worktree(&checkout.root, &worktree, &branch, req.base.as_deref())?;
+        let id = AgentId::new(format!("agent-{}", self.next_id));
+        self.next_id += 1;
+        let mesh = self.adapter_mesh(&id, &req.kind, &checkout.project.to_string(), &worktree);
+        let result = launch_adapter(
             spec,
             &checkout.root,
             &worktree,
             None,
             self.sandbox_for(&req.kind, &worktree, &spec.command[0]),
-        )
-        .map_err(SupervisorError::Spawn)?;
-        let id = AgentId::new(format!("agent-{}", self.next_id));
-        self.next_id += 1;
+            mesh.as_ref(),
+        );
+        let (adapter, session_id, capabilities) = match result {
+            Ok(started) => started,
+            Err(error) => {
+                self.abandon(&id, created);
+                return Err(error);
+            }
+        };
         let mut agent = Agent::new(
             id.clone(),
             checkout.project,
@@ -819,7 +1213,7 @@ impl Supervisor {
             id.clone(),
             AdapterEntry {
                 agent,
-                adapter,
+                adapter: Some(adapter),
                 session_id,
                 worktree,
                 branch,
@@ -828,6 +1222,10 @@ impl Supervisor {
                 checkout_root: checkout.root,
                 restarts: 0,
                 restart_at: None,
+                capabilities,
+                options: SessionOptions::default(),
+                mesh,
+                launch,
             },
         );
         Ok(id)
@@ -847,16 +1245,30 @@ impl Supervisor {
             self.restart_adapter(&id, now, events);
         }
         for (id, e) in &mut self.adapters {
-            if !e.running {
-                continue;
-            }
-            for ev in e.adapter.poll() {
+            let polled = match &e.adapter {
+                Some(adapter) if e.running => adapter.poll(),
+                _ => continue,
+            };
+            for ev in polled {
                 match ev {
                     AdapterEvent::State { state, .. } => {
                         if e.agent.observe(state, StateSource::Reported) {
                             events.push(SupervisorEvent::StateChanged {
                                 agent: id.clone(),
                                 state,
+                            });
+                        }
+                    }
+                    AdapterEvent::Options { options, .. } => {
+                        let options = bounded_options(options);
+                        if options != e.options {
+                            e.options = options.clone();
+                            events.push(SupervisorEvent::Adapter {
+                                agent: id.clone(),
+                                event: AdapterEvent::Options {
+                                    session_id: e.session_id.clone(),
+                                    options,
+                                },
                             });
                         }
                     }
@@ -906,16 +1318,19 @@ impl Supervisor {
         };
         e.restart_at = None;
         e.restarts += 1;
+        // A crash keeps the agent in the mesh: the restarted session gets the same endpoint.
         match launch_adapter(
             &e.spec,
             &e.checkout_root,
             &e.worktree,
             e.agent.session.as_deref(),
             profile,
+            e.mesh.as_ref(),
         ) {
-            Ok((adapter, session_id)) => {
-                e.adapter = adapter;
+            Ok((adapter, session_id, capabilities)) => {
+                e.adapter = Some(adapter);
                 e.session_id = session_id;
+                e.capabilities = capabilities;
                 e.running = true;
                 e.agent.process_restarted();
                 events.push(SupervisorEvent::Started { agent: id.clone() });
@@ -925,10 +1340,11 @@ impl Supervisor {
         }
     }
 
-    fn adapter_of(&self, id: &AgentId) -> Result<&AdapterEntry, SupervisorError> {
+    fn adapter_of(&self, id: &AgentId) -> Result<(&Adapter, &str), SupervisorError> {
         self.adapters
             .get(id)
             .filter(|e| e.running)
+            .and_then(|e| Some((e.adapter.as_ref()?, e.session_id.as_str())))
             .ok_or_else(|| SupervisorError::NotFound(id.clone()))
     }
 
@@ -939,10 +1355,46 @@ impl Supervisor {
         text: &str,
         from_mesh: bool,
     ) -> Result<(), SupervisorError> {
-        let e = self.adapter_of(id)?;
-        e.adapter
-            .prompt(&e.session_id, text, from_mesh, Duration::from_secs(10))
+        let (adapter, session) = self.adapter_of(id)?;
+        adapter
+            .prompt(session, text, from_mesh, Duration::from_secs(10))
             .map_err(|e| SupervisorError::Spawn(e.to_string()))
+    }
+
+    /// ADR-0058: switches an adapter agent to one of the modes or models it reported. Only the user's own command reaches this (an
+    /// agent has no mesh tool for it); a terminal agent, an adapter that did not declare the switch, and an id the agent did not offer
+    /// are refused before the adapter hears of it.
+    pub fn adapter_set_option(
+        &self,
+        id: &AgentId,
+        kind: OptionKind,
+        value: &str,
+    ) -> Result<(), SupervisorError> {
+        let (capability, field) = match kind {
+            OptionKind::Mode => ("agent.set_mode", "mode"),
+            OptionKind::Model => ("agent.set_model", "model"),
+        };
+        let Some(e) = self.adapters.get(id) else {
+            return Err(if self.agents.contains_key(id) {
+                SupervisorError::OptionUnsupported(capability)
+            } else {
+                SupervisorError::NotFound(id.clone())
+            });
+        };
+        if !e.capabilities.iter().any(|c| c == kind.capability()) {
+            return Err(SupervisorError::OptionUnsupported(capability));
+        }
+        let offered = match kind {
+            OptionKind::Mode => &e.options.modes,
+            OptionKind::Model => &e.options.models,
+        };
+        if value.is_empty() || !offered.iter().any(|o| o.id == value) {
+            return Err(SupervisorError::OptionUnknown(field));
+        }
+        let (adapter, session) = self.adapter_of(id)?;
+        adapter
+            .set_option(session, kind, value, Duration::from_secs(10))
+            .map_err(adapter_error)
     }
 
     /// Delivers a decision the node has already verified (ADR-0020) to the adapter that asked.
@@ -952,15 +1404,74 @@ impl Supervisor {
         approval_id: &str,
         approved: bool,
     ) -> Result<(), SupervisorError> {
-        let e = self.adapter_of(id)?;
-        e.adapter
-            .resolve_approval(
-                &e.session_id,
-                approval_id,
-                approved,
-                Duration::from_secs(10),
-            )
+        let (adapter, session) = self.adapter_of(id)?;
+        adapter
+            .resolve_approval(session, approval_id, approved, Duration::from_secs(10))
             .map_err(|e| SupervisorError::Spawn(e.to_string()))
+    }
+
+    /// ADR-0060: an agent's first launch. A kind whose manifest has `[session] id_args` gets a session id the node chooses (a random
+    /// v4 UUID), returned so the caller reports it before anything else of the agent; restarts and resumes use `[resume]` with it.
+    fn first_launch(
+        &self,
+        kind: &str,
+        argv: &[String],
+        worktree: &Path,
+        extras: &Extras,
+    ) -> Result<(TerminalHandle, Option<String>), SupervisorError> {
+        let id_args = self
+            .kinds
+            .get(kind)
+            .and_then(|k| k.manifest.session.as_ref())
+            .map(|s| s.id_args.clone())
+            .unwrap_or_default();
+        if id_args.is_empty() {
+            return Ok((self.launch(kind, argv, worktree, extras)?, None));
+        }
+        let session = new_session_id().map_err(|e| SupervisorError::Spawn(e.to_string()))?;
+        let mut argv = argv.to_vec();
+        argv.extend(id_args.iter().map(|a| a.replace("{session_id}", &session)));
+        Ok((self.launch(kind, &argv, worktree, extras)?, Some(session)))
+    }
+
+    /// A terminal agent's own session id, as chosen at its launch or reported (ADR-0060). `None` for an adapter agent: what it holds
+    /// right after its start is the adapter's session, not the agent's own, which its adapter reports itself (`session/reported`).
+    pub fn session_of(&self, id: &AgentId) -> Option<String> {
+        self.agents.get(id).and_then(|e| e.agent.session.clone())
+    }
+
+    /// Every session id the node's agents have (ADR-0060): a session file naming one of these is never another agent's.
+    pub fn known_sessions(&self) -> std::collections::HashSet<String> {
+        self.agents
+            .values()
+            .map(|e| &e.agent)
+            .chain(self.adapters.values().map(|e| &e.agent))
+            .filter_map(|a| a.session.clone())
+            .collect()
+    }
+
+    /// Terminal agents that run without a known session id and whose kind says which file names it (`[session.file]`, ADR-0060).
+    pub fn session_file_targets(&self) -> Vec<crate::session_files::Target> {
+        self.agents
+            .iter()
+            .filter(|(_, e)| e.terminal.is_some() && e.agent.session.is_none())
+            .filter_map(|(id, e)| {
+                let spec = self
+                    .kinds
+                    .get(&e.agent.kind)?
+                    .manifest
+                    .session
+                    .as_ref()?
+                    .file
+                    .clone()?;
+                Some(crate::session_files::Target {
+                    agent: id.clone(),
+                    kind: e.agent.kind.clone(),
+                    folder: e.worktree.clone(),
+                    spec,
+                })
+            })
+            .collect()
     }
 
     fn launch(
@@ -971,6 +1482,7 @@ impl Supervisor {
         extras: &Extras,
     ) -> Result<TerminalHandle, SupervisorError> {
         let mut argv = argv.to_vec();
+        argv.extend(extras.options.iter().cloned());
         argv.extend(extras.argv.iter().cloned());
         let program = argv.first().cloned();
         let mut cfg = PtyConfig::new(argv);
@@ -980,16 +1492,10 @@ impl Supervisor {
         cfg.limits = self.cfg.limits.process;
         cfg.sandbox = program.and_then(|p| self.sandbox_for(kind, worktree, &p));
         cfg.identity = extras.identity.clone();
+        cfg.env_remove = inherited_session_markers(std::env::vars_os().map(|(k, _)| k));
         if let Some(profile) = &mut cfg.sandbox {
             profile.read.extend(extras.read.iter().cloned());
-            // Offline (ADR-0047 `worktree-offline`): only its own mesh socket and the unix sockets it makes in its private temp
-            // folder; not `/tmp` (a tmux server or an SSH agent there would hand it a way out) and not other agents' sockets.
-            if profile.offline {
-                profile.sockets = extras.socket.iter().cloned().collect();
-                if agora_platform::PRIVATE_TEMP {
-                    profile.sockets.push(crate::sandbox::agent_temp(worktree));
-                }
-            }
+            offline_sockets(profile, extras.socket.as_deref(), worktree);
         }
         if let Some(k) = self.kinds.get(kind) {
             cfg.env = k
@@ -1111,7 +1617,7 @@ impl Supervisor {
             entry.agent.session.clone(),
             entry.extras.clone(),
         );
-        let (argv, _native) = self.argv_for_resume(&kind, session.as_deref());
+        let (argv, native, fresh) = self.argv_for_resume(&kind, session.as_deref());
         let result = self.launch(&kind, &argv, &worktree, &extras);
         let Some(entry) = self.agents.get_mut(id) else {
             return;
@@ -1124,6 +1630,10 @@ impl Supervisor {
                 entry.pacer = Pacer::default();
                 entry.next_check = now;
                 entry.agent.process_restarted();
+                // A new session when its own could not be continued (ADR-0060): that one is its session now.
+                if !native {
+                    entry.agent.session = fresh;
+                }
                 events.push(SupervisorEvent::Started { agent: id.clone() });
                 events.extend(session_report(&entry.agent));
             }
@@ -1147,19 +1657,43 @@ impl Supervisor {
 
     /// Native resume when the manifest has a resume command and the agent reported a session id; otherwise
     /// the plain launch command (layout-only fallback). The bool is true for the native case.
-    fn argv_for_resume(&self, kind: &str, session: Option<&str>) -> (Vec<String>, bool) {
+    ///
+    /// ADR-0060: only an id [`argv_safe`](crate::session_files::argv_safe) allows goes on the command line (whatever reported it, an id
+    /// that could be read as an option never does). Without one, a kind with `[session] id_args` gets a new id the node chooses, as at a
+    /// first launch, so it can be resumed later; that new id is the third value (the agent's session from then on).
+    fn argv_for_resume(
+        &self,
+        kind: &str,
+        session: Option<&str>,
+    ) -> (Vec<String>, bool, Option<String>) {
         let Some(k) = self.kinds.get(kind) else {
-            return (Vec::new(), false);
+            return (Vec::new(), false, None);
         };
-        match (&k.manifest.resume, session) {
-            (Some(r), Some(sid)) => (
-                r.argv
-                    .iter()
-                    .map(|a| a.replace("{session_id}", sid))
-                    .collect(),
-                true,
-            ),
-            _ => (k.manifest.process.launch.clone(), false),
+        let safe = session.filter(|s| crate::session_files::argv_safe(s));
+        if let (Some(r), Some(sid)) = (&k.manifest.resume, safe) {
+            let argv = r
+                .argv
+                .iter()
+                .map(|a| a.replace("{session_id}", sid))
+                .collect();
+            return (argv, true, None);
+        }
+        let mut argv = k.manifest.process.launch.clone();
+        let id_args = k
+            .manifest
+            .session
+            .as_ref()
+            .map(|s| s.id_args.clone())
+            .unwrap_or_default();
+        if id_args.is_empty() {
+            return (argv, false, None);
+        }
+        match new_session_id() {
+            Ok(new) => {
+                argv.extend(id_args.iter().map(|a| a.replace("{session_id}", &new)));
+                (argv, false, Some(new))
+            }
+            Err(_) => (argv, false, None),
         }
     }
 
@@ -1170,9 +1704,11 @@ impl Supervisor {
             let mut events = Vec::new();
             e.restart_at = None;
             if e.running {
-                let _ = e
-                    .adapter
-                    .stop_session(&e.session_id, "stop", Duration::from_secs(5));
+                // A stop ends the adapter process too (`shutdown`, then kill), as it ends a terminal agent's process.
+                if let Some(adapter) = e.adapter.take() {
+                    let _ = adapter.stop_session(&e.session_id, "stop", Duration::from_secs(5));
+                    adapter.shutdown(Duration::from_secs(1));
+                }
                 e.running = false;
             }
             if e.agent.observe(AgentState::Done, StateSource::Reported) {
@@ -1196,6 +1732,105 @@ impl Supervisor {
         set_state(entry, AgentState::Done, StateSource::Reported, &mut events);
         events.push(SupervisorEvent::Stopped { agent: id.clone() });
         Ok(events)
+    }
+
+    /// ADR-0060: whether an agent of `kind` can continue its own session: its manifest has a `[resume]` argv, or it runs through an
+    /// adapter (an ACP bridge loads the session when the agent offers `loadSession`, and opens a new one otherwise).
+    pub fn resumable(&self, kind: &str) -> bool {
+        self.kinds.get(kind).is_some_and(|k| {
+            k.manifest.resume.is_some() || k.manifest.driver(&bridge_program()).is_some()
+        })
+    }
+
+    /// ADR-0060: puts an agent the node's session ledger holds as interrupted back as a stopped agent, so [`resume`](Self::resume)
+    /// starts it under the same id, in the same folder and project. Nothing runs yet. `session` is the agent's own session id to
+    /// continue, `None` for a new session.
+    pub fn restore(&mut self, r: Restore) -> Result<(), SupervisorError> {
+        if self.agents.contains_key(&r.id) || self.adapters.contains_key(&r.id) {
+            return Err(SupervisorError::StillRunning(r.id));
+        }
+        let kind = self
+            .kinds
+            .get(&r.kind)
+            .ok_or_else(|| SupervisorError::UnknownKind(r.kind.clone()))?;
+        let worktree = (!r.directory).then(|| WorktreeId::new(r.folder.to_string_lossy()));
+        if let Some(spec) = kind.manifest.driver(&bridge_program()) {
+            let mut agent = Agent::new(
+                r.id.clone(),
+                r.project,
+                self.cfg.node.clone(),
+                worktree,
+                r.kind.clone(),
+                IntegrationLevel::L3Adapter,
+            );
+            agent.session = r.session;
+            let checkout_root =
+                git::discover_checkout(&r.folder).map_or_else(|_| r.folder.clone(), |c| c.root);
+            self.adapters.insert(
+                r.id,
+                AdapterEntry {
+                    agent,
+                    adapter: None,
+                    session_id: String::new(),
+                    worktree: r.folder,
+                    branch: r.branch,
+                    running: false,
+                    spec,
+                    checkout_root,
+                    restarts: 0,
+                    restart_at: None,
+                    capabilities: Vec::new(),
+                    options: SessionOptions::default(),
+                    mesh: None,
+                    // ADR-0060: a resumed agent gets none of its launch options back (a resumed agent asks before acting again).
+                    launch: LaunchChoice::default(),
+                },
+            );
+            return Ok(());
+        }
+        if kind.manifest.process.launch.is_empty() {
+            return Err(SupervisorError::UnknownKind(r.kind));
+        }
+        let mut agent = Agent::new(
+            r.id.clone(),
+            r.project,
+            self.cfg.node.clone(),
+            worktree,
+            r.kind,
+            IntegrationLevel::L1Manifest,
+        );
+        agent.session = r.session;
+        self.agents.insert(
+            r.id,
+            Entry {
+                agent,
+                worktree: r.folder,
+                branch: r.branch,
+                terminal: None,
+                pacer: Pacer::default(),
+                next_check: Instant::now(),
+                visible: true,
+                restarts: 0,
+                restart_at: None,
+                gave_up: false,
+                extras: Extras::default(),
+                private_config: r.private_config,
+                // ADR-0060: no launch option comes back with a resume.
+                launch: LaunchChoice::default(),
+            },
+        );
+        Ok(())
+    }
+
+    /// ADR-0060: takes back a [`restore`](Self::restore) whose resume failed, so the agent stays only in the ledger.
+    pub fn unrestore(&mut self, id: &AgentId) {
+        if self.agents.get(id).is_some_and(|e| e.terminal.is_none()) {
+            self.agents.remove(id);
+        }
+        if self.adapters.get(id).is_some_and(|e| !e.running) {
+            self.adapters.remove(id);
+        }
+        self.parents.remove(id);
     }
 
     /// Start a stopped (or given-up) agent again in its worktree.
@@ -1232,20 +1867,38 @@ impl Supervisor {
                 .first()
                 .and_then(|p| self.sandbox_for(&entry.agent.kind, &entry.worktree, p));
             let native = entry.agent.session.is_some();
-            let (adapter, session_id) = launch_adapter(
+            // A stopped (or given-up) agent left the mesh; resuming joins again with a fresh endpoint, given back if the start fails.
+            let mesh = self.adapter_mesh(
+                id,
+                &entry.agent.kind,
+                &entry.agent.project.to_string(),
+                &entry.worktree,
+            );
+            let launched = launch_adapter(
                 &entry.spec,
                 &entry.checkout_root,
                 &entry.worktree,
                 entry.agent.session.as_deref(),
                 profile,
-            )
-            .map_err(SupervisorError::Spawn)?;
+                mesh.as_ref(),
+            );
+            let (adapter, session_id, capabilities) = match launched {
+                Ok(l) => l,
+                Err(e) => {
+                    if let Some(hook) = &self.abort_hook {
+                        hook(id);
+                    }
+                    return Err(e);
+                }
+            };
             let entry = self
                 .adapters
                 .get_mut(id)
                 .ok_or_else(|| SupervisorError::NotFound(id.clone()))?;
-            entry.adapter = adapter;
+            entry.adapter = Some(adapter);
             entry.session_id = session_id;
+            entry.capabilities = capabilities;
+            entry.mesh = mesh;
             entry.running = true;
             entry.restart_at = None;
             entry.restarts = 0;
@@ -1271,11 +1924,29 @@ impl Supervisor {
             entry.agent.session.clone(),
             entry.agent.project.to_string(),
         );
-        let (argv, native) = self.argv_for_resume(&kind, session.as_deref());
+        let (argv, native, fresh) = self.argv_for_resume(&kind, session.as_deref());
         // A stopped agent left the mesh and its endpoint closed; resuming joins again with a fresh one.
         let config = self.agents.get(id).and_then(|e| e.private_config.clone());
-        let extras = self.inject(id, &kind, &project, &worktree, config.as_deref())?;
-        let terminal = self.launch(&kind, &argv, &worktree, &extras)?;
+        // ADR-0059: a resumed agent keeps the options it was started with.
+        let options = self
+            .agents
+            .get(id)
+            .map(|e| e.extras.options.clone())
+            .unwrap_or_default();
+        // A resume that fails after the hook ran gives the endpoint back, as a failed start does.
+        let launched = self
+            .inject(id, &kind, &project, &worktree, config.as_deref())
+            .map(|extras| Extras { options, ..extras })
+            .and_then(|extras| Ok((self.launch(&kind, &argv, &worktree, &extras)?, extras)));
+        let (terminal, extras) = match launched {
+            Ok(t) => t,
+            Err(e) => {
+                if let Some(hook) = &self.abort_hook {
+                    hook(id);
+                }
+                return Err(e);
+            }
+        };
         let Some(entry) = self.agents.get_mut(id) else {
             return Err(SupervisorError::NotFound(id.clone()));
         };
@@ -1285,6 +1956,9 @@ impl Supervisor {
         entry.next_check = now;
         entry.restarts = 0;
         entry.gave_up = false;
+        if !native {
+            entry.agent.session = fresh;
+        }
         let mut events = vec![SupervisorEvent::Resumed {
             agent: id.clone(),
             native,
@@ -1316,7 +1990,13 @@ impl Supervisor {
     }
 
     /// The agent's own session id, used by [`resume`](Self::resume).
+    ///
+    /// ADR-0060: a terminal agent's id goes on its command line at a restart (`[resume]`), so only an id
+    /// [`argv_safe`](crate::session_files::argv_safe) allows is taken (`protocol.invalid_message`, `session_id`, otherwise).
     pub fn report_session(&mut self, id: &AgentId, session: &str) -> Result<(), SupervisorError> {
+        if !crate::session_files::argv_safe(session) {
+            return Err(SupervisorError::OptionUnknown("session_id"));
+        }
         let entry = self
             .agents
             .get_mut(id)
@@ -1336,6 +2016,51 @@ impl Supervisor {
         self.agents.get(id)?.terminal.as_ref()
     }
 
+    /// The node is stopping: every agent's process ends now (terminal process groups killed, adapters shut down), without an end
+    /// recorded anywhere, so the session ledger finds them interrupted at the next start (ADR-0060). Nothing is restarted.
+    pub fn shutdown(&mut self) {
+        for e in self.agents.values_mut() {
+            e.restart_at = None;
+            // Dropping the handle kills the process group and joins the actor.
+            e.terminal = None;
+        }
+        for e in self.adapters.values_mut() {
+            e.restart_at = None;
+            e.running = false;
+            if let Some(adapter) = e.adapter.take() {
+                adapter.shutdown(Duration::from_secs(1));
+            }
+        }
+    }
+
+    /// ADR-0060: each running agent's top process (its terminal's program, or its adapter), for the session ledger.
+    pub fn agent_pids(&self) -> Vec<(AgentId, u32)> {
+        self.agents
+            .iter()
+            .filter_map(|(id, e)| Some((id.clone(), e.terminal.as_ref()?.pid())))
+            .chain(
+                self.adapters
+                    .iter()
+                    .filter(|(_, e)| e.running)
+                    .filter_map(|(id, e)| Some((id.clone(), e.adapter.as_ref()?.pid()))),
+            )
+            .collect()
+    }
+
+    /// The process ids at the top of each running agent: its terminal's process, or its adapter process.
+    pub fn running_pids(&self) -> Vec<u32> {
+        self.agents
+            .values()
+            .filter_map(|e| e.terminal.as_ref().map(TerminalHandle::pid))
+            .chain(
+                self.adapters
+                    .values()
+                    .filter(|e| e.running)
+                    .filter_map(|e| e.adapter.as_ref().map(Adapter::pid)),
+            )
+            .collect()
+    }
+
     pub fn list(&self) -> Vec<AgentView> {
         let mut out: Vec<AgentView> = self
             .agents
@@ -1352,6 +2077,9 @@ impl Supervisor {
                 project: e.agent.project.to_string(),
                 running: e.terminal.is_some(),
                 restarts: e.restarts,
+                parent: self.parents.get(id).cloned(),
+                launch_options: e.launch.ids.clone(),
+                skips_permissions: e.launch.skips_permissions,
             })
             .collect();
         out.extend(self.adapters.iter().map(|(id, e)| AgentView {
@@ -1366,6 +2094,9 @@ impl Supervisor {
             project: e.agent.project.to_string(),
             running: e.running,
             restarts: e.restarts,
+            parent: self.parents.get(id).cloned(),
+            launch_options: e.launch.ids.clone(),
+            skips_permissions: e.launch.skips_permissions,
         }));
         out.sort_by(|a, b| a.id.cmp(&b.id));
         out
@@ -1412,16 +2143,19 @@ impl Supervisor {
             .map(|k| {
                 let m = &k.manifest;
                 let acp = m.structured.as_ref().and_then(|s| s.acp.as_ref());
-                let (level, program) = match (&m.adapter, acp) {
-                    (Some(a), _) => (IntegrationLevel::L3Adapter, a.command.first()),
-                    (None, Some(a)) => (IntegrationLevel::L2Acp, a.argv.first()),
-                    (None, None) => (IntegrationLevel::L1Manifest, m.process.launch.first()),
+                let level = match (&m.adapter, acp) {
+                    (Some(_), _) => IntegrationLevel::L3Adapter,
+                    (None, Some(_)) => IntegrationLevel::L2Acp,
+                    (None, None) => IntegrationLevel::L1Manifest,
                 };
+                let program = crate::manifests::program(m);
                 KindInfo {
                     kind: m.kind.clone(),
                     display_name: m.display_name.clone(),
                     level,
-                    installed: program.is_some_and(|p| crate::doctor::on_path(p)),
+                    installed: program.is_some_and(crate::doctor::on_path),
+                    program: program.unwrap_or_default().to_string(),
+                    launch_options: m.launch.option.clone(),
                 }
             })
             .collect()
@@ -1433,6 +2167,39 @@ impl Supervisor {
     }
 }
 
+/// ADR-0060: when the node itself runs inside a Claude Code session (started from one, or from a terminal one opened), it inherits that
+/// session's markers (`CLAUDECODE`, `CLAUDE_CODE_CHILD_SESSION`, other `CLAUDE_CODE_*`). An agent started with them takes itself for a
+/// child session and Claude Code then saves no transcript, so its session can never be resumed (seen on Claude Code 2.1.319: "Transcript
+/// saving is off — inherited CLAUDE_CODE_CHILD_SESSION marker"). Only then are they left out of every terminal agent's environment; a
+/// node started normally passes `CLAUDE_CODE_*` settings the user made (`CLAUDE_CODE_USE_BEDROCK`, ...) on as before.
+fn inherited_session_markers(names: impl Iterator<Item = std::ffi::OsString>) -> Vec<String> {
+    let inside = names
+        .filter_map(|n| n.into_string().ok())
+        .any(|n| n == "CLAUDECODE" || n == "CLAUDE_CODE_CHILD_SESSION");
+    if inside {
+        vec!["CLAUDECODE".into(), "CLAUDE_CODE_*".into()]
+    } else {
+        Vec::new()
+    }
+}
+
+/// A random version 4 UUID, lower-case.
+fn new_session_id() -> Result<String, getrandom::Error> {
+    let mut b = [0u8; 16];
+    getrandom::getrandom(&mut b)?;
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    let h: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    Ok(format!(
+        "{}-{}-{}-{}-{}",
+        &h[..8],
+        &h[8..12],
+        &h[12..16],
+        &h[16..20],
+        &h[20..]
+    ))
+}
+
 /// The program that runs `acp-bridge` for ACP agents: this node's own binary (`agora`), unless `AGORA_ACP_BRIDGE` names another
 /// (tests, packaging).
 fn bridge_program() -> PathBuf {
@@ -1442,39 +2209,169 @@ fn bridge_program() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("agora"))
 }
 
-/// Spawns an adapter process, initializes it and starts (or resumes) a session. Returns it with the session id.
+/// The most modes or models kept per agent, and the longest id, name and description (ADR-0058). Adapters are untrusted: an option
+/// with a longer id is dropped (a cut id would name another option), longer text is cut.
+const OPTIONS_MAX: usize = 200;
+const OPTION_ID_MAX: usize = 200;
+const OPTION_NAME_MAX: usize = 200;
+const OPTION_DESCRIPTION_MAX: usize = 500;
+/// The longest parameter value of an adapter's reason passed on in an error (the bridge's stderr tail is at most about 400 bytes).
+const REASON_PARAM_MAX: usize = 600;
+
+fn clip(s: &str, max: usize) -> String {
+    let mut end = s.len().min(max);
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].to_string()
+}
+
+/// ADR-0058: an adapter's report, checked and bounded. A current id that is not in its list is dropped too.
+fn bounded_options(o: SessionOptions) -> SessionOptions {
+    let list = |l: Vec<SessionOption>, modes: bool| -> Vec<SessionOption> {
+        let mut seen = std::collections::BTreeSet::new();
+        l.into_iter()
+            .filter(|o| !o.id.is_empty() && o.id.len() <= OPTION_ID_MAX)
+            .filter(|o| seen.insert(o.id.clone()))
+            .take(OPTIONS_MAX)
+            .map(|o| SessionOption {
+                name: clip(&o.name, OPTION_NAME_MAX),
+                description: clip(&o.description, OPTION_DESCRIPTION_MAX),
+                skips_permissions: modes && o.skips_permissions,
+                id: o.id,
+            })
+            .collect()
+    };
+    let (modes, models) = (list(o.modes, true), list(o.models, false));
+    let keep = |id: String, l: &[SessionOption]| {
+        if l.iter().any(|o| o.id == id) {
+            id
+        } else {
+            String::new()
+        }
+    };
+    SessionOptions {
+        current_mode: keep(o.current_mode, &modes),
+        current_model: keep(o.current_model, &models),
+        modes,
+        models,
+    }
+}
+
+/// An adapter's error answer as a supervisor error: one of the stable reasons the node passes on (ADR-0058), with only the
+/// parameters that code has, as strings, bounded; anything else is internal (the text goes to logs only).
+fn adapter_error(e: HostError) -> SupervisorError {
+    if let Some((code, params)) = e.reason() {
+        let known = [
+            agora_protocol::ErrorCode::AdapterAgentExited,
+            agora_protocol::ErrorCode::AdapterAgentRefused,
+            agora_protocol::ErrorCode::AdapterOptionRefused,
+        ];
+        if let Some(c) = known.iter().find(|c| c.as_str() == code) {
+            let code = match c {
+                agora_protocol::ErrorCode::AdapterAgentExited => "adapter.agent_exited",
+                agora_protocol::ErrorCode::AdapterAgentRefused => "adapter.agent_refused",
+                _ => "adapter.option_refused",
+            };
+            let params = c
+                .params()
+                .iter()
+                .map(|k| {
+                    let v = params.get(*k).and_then(serde_json::Value::as_str);
+                    // The one parameter an adapter may leave out: an agent killed by a signal has no exit code.
+                    let v = match (v, *k) {
+                        (Some(v), _) => clip(v, REASON_PARAM_MAX),
+                        (None, "exit_code") => "?".to_string(),
+                        (None, _) => String::new(),
+                    };
+                    (*k, v)
+                })
+                .collect();
+            return SupervisorError::Adapter { code, params };
+        }
+    }
+    SupervisorError::Spawn(e.to_string())
+}
+
+/// Spawns an adapter process, initializes it and starts (or resumes) a session. Returns it with the session id and the capabilities
+/// it declared. An adapter's stable reason for failing (ADR-0058) becomes [`SupervisorError::Adapter`].
 fn launch_adapter(
     spec: &agora_adapters::manifest::AdapterSpec,
     checkout_root: &Path,
     worktree: &Path,
     resume: Option<&str>,
-    sandbox: Option<agora_platform::Sandbox>,
-) -> Result<(Adapter, String), String> {
-    const STEP: Duration = Duration::from_secs(10);
-    let (program, args) = spec.command.split_first().ok_or("empty adapter command")?;
+    mut sandbox: Option<agora_platform::Sandbox>,
+    mesh: Option<&agora_adapters::inject::Endpoint>,
+) -> Result<(Adapter, String, Vec<String>), SupervisorError> {
+    // A real agent can be slow to answer: opencode 2.x took 2 to 5 s to initialize and 9.5 to 12 s to open a session (seen on Windows), so
+    // the old 10 s ended such a start as a bare `internal` error.
+    const INIT: Duration = Duration::from_secs(30);
+    const SESSION: Duration = Duration::from_secs(60);
+    let (program, args) = spec
+        .command
+        .split_first()
+        .ok_or_else(|| SupervisorError::Spawn("empty adapter command".into()))?;
+    let mut env: Vec<(String, String)> = spec
+        .env
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    // The agent's mesh server runs below the adapter, inside its confinement: offline, it may reach its own mesh socket and no other.
+    if let Some(profile) = &mut sandbox {
+        offline_sockets(profile, mesh.map(|m| m.socket.as_path()), worktree);
+    }
+    // A confined adapter works in its own private temporary folder, as a confined terminal agent does.
+    if sandbox.is_some() && agora_platform::PRIVATE_TEMP {
+        let temp = crate::sandbox::agent_temp(worktree).display().to_string();
+        env.push(("TMPDIR".into(), temp.clone()));
+        env.push(("TEMP".into(), temp.clone()));
+        env.push(("TMP".into(), temp));
+    }
     let adapter = Adapter::spawn(&AdapterConfig {
         program: program.into(),
         args: args.to_vec(),
-        env: spec
-            .env
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect(),
+        env,
         cwd: Some(worktree.to_path_buf()),
         sandbox,
     })
-    .map_err(|e| e.to_string())?;
-    let fail = |e: agora_adapters::host::HostError| e.to_string();
-    adapter.initialize(&["chat"], "en", STEP).map_err(fail)?;
+    .map_err(|e| SupervisorError::Spawn(e.to_string()))?;
+    let init = adapter
+        .initialize(&["chat"], "en", INIT)
+        .map_err(adapter_error)?;
+    // The agent's own mesh server, described as for a terminal agent (`inject`): `agora mesh stdio --socket <its socket>`.
+    let servers: Vec<McpServer> = mesh
+        .map(|m| McpServer {
+            name: "agora-mesh".into(),
+            command: m.command.to_string_lossy().into_owned(),
+            args: vec![
+                "mesh".into(),
+                "stdio".into(),
+                "--socket".into(),
+                m.socket.to_string_lossy().into_owned(),
+            ],
+        })
+        .into_iter()
+        .collect();
     let session_id = adapter
-        .start_session(
+        .start_session_with(
             &checkout_root.to_string_lossy(),
             &worktree.to_string_lossy(),
             resume,
-            STEP,
+            &servers,
+            SESSION,
         )
-        .map_err(fail)?;
-    Ok((adapter, session_id))
+        .map_err(adapter_error)?;
+    Ok((adapter, session_id, init.capabilities))
+}
+
+/// The unix sockets a confined agent may reach although the node's own folders are closed (its own mesh socket, #475); offline
+/// (ADR-0047 `worktree-offline`) also the ones it makes in its private temp folder, and no others: not `/tmp` (a tmux server or an SSH
+/// agent there would hand it a way out) and not other agents' sockets.
+fn offline_sockets(profile: &mut agora_platform::Sandbox, socket: Option<&Path>, worktree: &Path) {
+    profile.sockets = socket.map(Path::to_path_buf).into_iter().collect();
+    if profile.offline && agora_platform::PRIVATE_TEMP {
+        profile.sockets.push(crate::sandbox::agent_temp(worktree));
+    }
 }
 
 /// After an adapter died on its own: wait out the backoff and try again, or give up for good.
@@ -1621,4 +2518,210 @@ fn session_report(agent: &Agent) -> Option<SupervisorEvent> {
             agent: agent.id.clone(),
             session: session.clone(),
         })
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod adapter_option_tests {
+    use super::*;
+
+    #[test]
+    fn claude_code_session_markers_are_left_out_only_when_the_node_runs_inside_a_session() {
+        let names = |l: &[&str]| {
+            l.iter()
+                .map(std::ffi::OsString::from)
+                .collect::<Vec<_>>()
+                .into_iter()
+        };
+        assert!(inherited_session_markers(names(&["PATH", "CLAUDE_CODE_USE_BEDROCK"])).is_empty());
+        for marker in ["CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION"] {
+            let removed = inherited_session_markers(names(&["PATH", marker]));
+            assert!(agora_platform::env_removed("CLAUDECODE".as_ref(), &removed));
+            assert!(agora_platform::env_removed(
+                "CLAUDE_CODE_CHILD_SESSION".as_ref(),
+                &removed
+            ));
+            assert!(agora_platform::env_removed(
+                "CLAUDE_CODE_ENTRYPOINT".as_ref(),
+                &removed
+            ));
+            assert!(!agora_platform::env_removed("PATH".as_ref(), &removed));
+            assert!(!agora_platform::env_removed(
+                "CLAUDE_CONFIG_DIR".as_ref(),
+                &removed
+            ));
+        }
+    }
+
+    #[test]
+    fn a_grant_needs_an_agent_program_from_launch_acp_or_adapter() {
+        let mut sup = Supervisor::new(SupervisorConfig {
+            node: NodeId::new("n"),
+            restart: RestartPolicy::default(),
+            terminal: TerminalOptions::default(),
+            limits: NodeLimits::default(),
+        });
+        let head = |k: &str| {
+            format!("kind = \"{k}\"\ndisplay_name = \"K\"\nversion = \"1\"\nmin_engine = 1\n")
+        };
+        let mcp = "[mcp]\nmethod = \"cli_flag\"\nflag = [\"--mcp\", \"{config_file}\"]\n";
+        let cases = [
+            (
+                "agent",
+                format!("{}[process]\nlaunch = [\"claude\"]\n{mcp}", head("agent")),
+                true,
+            ),
+            (
+                "bare",
+                format!("{}[process]\nlaunch = [\"claude\"]\n", head("bare")),
+                false,
+            ),
+            (
+                "pyl",
+                format!(
+                    "{}[process]\nlaunch = [\"/usr/bin/python3.12\", \"x.py\"]\n{mcp}",
+                    head("pyl")
+                ),
+                false,
+            ),
+            (
+                "acp-ok",
+                format!(
+                    "{}[structured]\nacp = {{ argv = [\"opencode\", \"acp\"] }}\n",
+                    head("acp-ok")
+                ),
+                true,
+            ),
+            (
+                "acp-py",
+                format!(
+                    "{}[structured]\nacp = {{ argv = [\"python3\", \"a.py\"] }}\n",
+                    head("acp-py")
+                ),
+                false,
+            ),
+            (
+                "acp-env",
+                format!(
+                    "{}[structured]\nacp = {{ argv = [\"env\", \"-S\", \"x\"] }}\n",
+                    head("acp-env")
+                ),
+                false,
+            ),
+            (
+                "ad-ok",
+                format!(
+                    "{}[adapter]\ncommand = [\"agora-adapter-x\"]\n",
+                    head("ad-ok")
+                ),
+                true,
+            ),
+            (
+                "ad-bash",
+                format!(
+                    "{}[adapter]\ncommand = [\"C:\\\\Tools\\\\BASH.EXE\", \"-c\"]\n",
+                    head("ad-bash")
+                ),
+                false,
+            ),
+            (
+                "ad-npx",
+                format!(
+                    "{}[adapter]\ncommand = [\"npx\", \"pkg\"]\n",
+                    head("ad-npx")
+                ),
+                false,
+            ),
+        ];
+        for (kind, src, _) in &cases {
+            sup.register(Manifest::parse(src).unwrap_or_else(|e| panic!("{kind}: {e:?}")));
+        }
+        for (kind, _, want) in &cases {
+            assert_eq!(sup.grantable(kind), *want, "{kind}");
+        }
+        for p in [
+            "pypy3", "PWSH.exe", "wsl.exe", "uvx", "bunx", "nohup", "setsid", "xargs", "stdbuf",
+            "cmd.cmd", "node22",
+        ] {
+            assert!(runs_anything(p), "{p}");
+        }
+        for p in ["claude", "codex", "wstack", "opencode"] {
+            assert!(!runs_anything(p), "{p}");
+        }
+    }
+
+    fn opt(id: &str, skips: bool) -> SessionOption {
+        SessionOption {
+            id: id.into(),
+            name: "n".repeat(300),
+            skips_permissions: skips,
+            ..SessionOption::default()
+        }
+    }
+
+    #[test]
+    fn reported_options_are_bounded_and_a_model_never_skips_permissions() {
+        let mut models: Vec<SessionOption> =
+            (0..250).map(|i| opt(&format!("m{i}"), true)).collect();
+        models.insert(0, opt(&"x".repeat(OPTION_ID_MAX + 1), false));
+        models.push(opt("m1", false));
+        let o = bounded_options(SessionOptions {
+            modes: vec![
+                opt("plan", false),
+                opt("yolo", true),
+                opt("", false),
+                opt("plan", true),
+            ],
+            models,
+            current_mode: "yolo".into(),
+            current_model: "gone".into(),
+        });
+        assert_eq!(
+            o.modes
+                .iter()
+                .map(|m| (m.id.as_str(), m.skips_permissions))
+                .collect::<Vec<_>>(),
+            [("plan", false), ("yolo", true)],
+            "empty and repeated ids are dropped"
+        );
+        assert_eq!(o.models.len(), OPTIONS_MAX);
+        assert!(o
+            .models
+            .iter()
+            .all(|m| !m.skips_permissions && m.name.len() <= OPTION_NAME_MAX));
+        assert_eq!(
+            (o.current_mode.as_str(), o.current_model.as_str()),
+            ("yolo", "")
+        );
+    }
+
+    #[test]
+    fn an_adapters_reason_is_passed_on_only_for_known_codes_with_their_own_params() {
+        let exited = HostError::Rpc {
+            code: -32000,
+            data: Some(serde_json::json!({"code": "adapter.agent_exited",
+                "params": {"stage": "initialize", "stderr_tail": "x".repeat(2000), "extra": "no"}})),
+        };
+        let e = adapter_error(exited).to_protocol();
+        assert_eq!(e.code, ErrorCode::AdapterAgentExited);
+        let s = |k: &str| match e.params.get(k) {
+            Some(agora_protocol::ParamValue::Str(s)) => s.clone(),
+            other => panic!("{k}: {other:?}"),
+        };
+        assert_eq!(
+            (s("stage").as_str(), s("exit_code").as_str()),
+            ("initialize", "?")
+        );
+        assert_eq!(s("stderr_tail").len(), REASON_PARAM_MAX);
+        assert!(!e.params.contains_key("extra"));
+        let other = HostError::Rpc {
+            code: -32000,
+            data: Some(serde_json::json!({"code": "auth.forbidden", "params": {}})),
+        };
+        assert_eq!(adapter_error(other).to_protocol().code, ErrorCode::Internal);
+        assert_eq!(
+            adapter_error(HostError::Timeout).to_protocol().code,
+            ErrorCode::Internal
+        );
+    }
 }

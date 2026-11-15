@@ -24,7 +24,8 @@ export function demoSource(banner: string): TerminalSource {
           const out = text.replace(/\r/g, '\r\n$ ').replace(/\x7f/g, '\b \b');
           onEvent({ type: 'data', bytes: enc.encode(out) });
         },
-        resize() {},
+        // No node: the terminal takes the size that fits, as a node with this one window would give it.
+        resize(cols, rows) { onEvent({ type: 'resize', cols, rows }); },
         close() {},
       };
     },

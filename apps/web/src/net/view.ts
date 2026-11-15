@@ -2,7 +2,7 @@
 // positioned events. Keys are hub-wide `<producer>/<local id>`. Pure: no sockets, no React.
 
 import { agora } from '../gen/agora.js';
-import { type AgentTileModel, uiState } from '../model';
+import { type AgentTileModel, type SessionModel, type SessionOptionModel, uiState } from '../model';
 
 type Ev = agora.v1.Event.$Properties;
 type Num = number | bigint | { toString(): string } | null | undefined;
@@ -13,13 +13,42 @@ export function num(x: Num): number {
   return typeof x === 'number' ? x : Number(x.toString());
 }
 
-export interface NodeV { hostname: string; os: string; online: boolean; lastEventMs: number; agentsRunning: number }
+// `linkGen`: the generation of the latest `NodeLink { up }` this window saw (ADR-0070); unknown (0) for a node it only knows from the
+// snapshot.
+// `forgotten`: the owner had the hub forget it (ADR-0073); it and what it runs are not shown until it connects again.
+export interface NodeV { hostname: string; os: string; online: boolean; lastEventMs: number; agentsRunning: number; memoryBytes?: number; build?: string; terminalsOpen?: number; linkGen?: number; forgotten?: boolean }
 export interface WorkspaceV { nodeId: string; projectId: string; path: string; gitRoot: string; branch: string; managed: boolean; filesChanged: number }
 export interface WorktreeV { checkoutId: string; path: string; branch: string; filesChanged: number }
 export interface AgentV {
   nodeId: string; worktreeId: string; kind: string; state: number; reported: boolean; running: boolean;
   sinceMs: number;
   tokens: number; // input + output so far
+  startedMs?: number; // when this window saw it start (not known for agents that were already running)
+  exitCode?: number; // how it ended, once it has
+  session?: SessionModel; // ADR-0058: options, context and its own cost, once reported
+  parentId?: string; // ADR-0057: the hub-wide key of the agent that started it
+  interrupted?: InterruptedV; // ADR-0060: it was running when its machine stopped; cleared by its next start
+  skipsPermissions?: boolean; // ADR-0059: started with an option that skips permissions, for its whole life
+}
+export interface InterruptedV { resumable: boolean; atMs: number; folder: string; stillRunning?: boolean }
+
+type OptionWire = { id?: string | null; name?: string | null; description?: string | null; skipsPermissions?: boolean | null };
+const optionsOf = (l: readonly OptionWire[] | null | undefined, modes: boolean): SessionOptionModel[] =>
+  (l ?? []).map((o) => ({ id: o.id ?? '', name: o.name ?? '', description: o.description ?? '', skipsPermissions: modes && !!o.skipsPermissions })).filter((o) => o.id);
+const emptySession = (): SessionModel => ({ modes: [], models: [], currentMode: '', currentModel: '', contextTokens: 0, contextWindow: 0 });
+
+// ADR-0058: a usage report's context level and the agent's own cost, folded like the hub does (a new currency starts the sum again).
+function addUsage(a: AgentV, u: Record<string, any>): void {
+  const ctx = num(u.contextTokens), size = num(u.contextWindow);
+  const hasCost = u.costMicros !== undefined && u.costMicros !== null && !!u.currency;
+  if (!ctx && !size && !hasCost) return;
+  const s = a.session ?? emptySession();
+  if (ctx || size) { s.contextTokens = ctx; s.contextWindow = size; }
+  if (hasCost) {
+    if (s.currency !== u.currency) { s.currency = u.currency; s.costMicros = 0; }
+    s.costMicros = (s.costMicros ?? 0) + num(u.costMicros);
+  }
+  a.session = s;
 }
 export interface CheckoutV { nodeId: string; projectId: string; path: string }
 export interface ApprovalV { agentId: string; action: string; detail: string; expiresAtMs: number }
@@ -41,6 +70,8 @@ export interface View {
   tasks: Map<string, TaskV>; // the shared board's tasks seen since this window opened (ADR-0039)
   leases: Map<string, LeaseV>;
   withTerminal: Set<string>; // agents that have a terminal; the others (chat agents) are talked to with prompts
+  // ADR-0061: node id -> the devices it says it trusts (its last `NodeTrustedDevices`).
+  trusted?: Map<string, string[]>;
 }
 
 const MAX_MESSAGES = 50;
@@ -58,8 +89,10 @@ export function fromSnapshot(s: agora.v1.Snapshot.$Properties): View {
     v.nodes.set(n.nodeId ?? '', {
       hostname: n.hostname ?? '', os: n.os ?? '', online: !!n.online, lastEventMs: num(n.lastEventMs),
       agentsRunning: n.agentsRunning ?? 0,
+      memoryBytes: Number(n.memoryUsedBytes ?? 0), build: n.build ?? '', terminalsOpen: n.terminalsOpen ?? 0,
     });
   }
+  for (const n of s.nodes ?? []) if (n.trustedDeviceIds?.length) (v.trusted ??= new Map()).set(n.nodeId ?? '', [...n.trustedDeviceIds]);
   for (const c of s.checkouts ?? []) {
     v.checkouts.set(c.checkoutId ?? '', { nodeId: c.nodeId ?? '', projectId: c.projectId ?? '', path: c.path ?? '' });
   }
@@ -73,7 +106,20 @@ export function fromSnapshot(s: agora.v1.Snapshot.$Properties): View {
       nodeId: a.nodeId ?? '', worktreeId: a.worktreeId ?? '', kind: a.kind ?? '', state: a.state ?? 0,
       reported: !!a.reported, running: !!a.running, sinceMs: 0,
       tokens: num(a.inputTokens) + num(a.outputTokens),
+      parentId: a.parentAgentId || undefined,
+      ...(a.interrupted ? { interrupted: { resumable: !!a.resumable, atMs: num(a.interruptedAtMs), folder: a.folder ?? '', stillRunning: !!a.stillRunning }, sinceMs: num(a.interruptedAtMs) } : {}),
+      skipsPermissions: !!a.skipsPermissions,
     });
+    const modes = optionsOf(a.modes, true), models = optionsOf(a.models, false);
+    const reported = a.costMicros !== undefined && a.costMicros !== null && !!a.currency;
+    if (modes.length || models.length || num(a.contextTokens) || num(a.contextWindow) || reported) {
+      const agent = v.agents.get(a.agentId ?? '');
+      if (agent) agent.session = {
+        modes, models, currentMode: a.currentMode ?? '', currentModel: a.currentModel ?? '',
+        contextTokens: num(a.contextTokens), contextWindow: num(a.contextWindow),
+        ...(reported ? { costMicros: num(a.costMicros), currency: a.currency ?? '' } : {}),
+      };
+    }
   }
   for (const tm of s.terminals ?? []) if (tm.agentId) v.withTerminal.add(tm.agentId);
   for (const t of s.tasks ?? []) {
@@ -113,9 +159,47 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
       for (const a of v.agents.values()) if (a.nodeId === b.nodeId && a.running) { a.running = false; a.state = 4 /* done */; }
       for (const k of [...v.approvals.keys()]) if (k.startsWith(`${b.nodeId}/`)) v.approvals.delete(k);
       for (const k of [...v.withTerminal]) if (k.startsWith(`${b.nodeId}/`)) v.withTerminal.delete(k);
-      v.nodes.set(b.nodeId, { hostname: b.hostname ?? '', os: b.os ?? '', online: true, lastEventMs: at, agentsRunning: v.nodes.get(b.nodeId)?.agentsRunning ?? 0 });
+      const was = v.nodes.get(b.nodeId);
+      v.nodes.set(b.nodeId, { hostname: b.hostname ?? '', os: b.os ?? '', online: true, lastEventMs: Math.max(at, was?.lastEventMs ?? 0), agentsRunning: was?.agentsRunning ?? 0, linkGen: was?.linkGen });
       break;
     }
+    // ADR-0070: the hub's record of a node's connection decides whether the machine is online; it never touches what the machine runs
+    // (a link that goes down and up is not a process start). Only the hub writes it. A fact about a connection older than the latest
+    // one that opened, or about a replaced one, changes nothing but "last seen".
+    case 'nodeLink': {
+      if (producer !== 'hub') break;
+      const b = e.nodeLink;
+      const id = b.nodeId ?? '';
+      let n = v.nodes.get(id);
+      if (!n) {
+        if (!b.up) break;
+        n = { hostname: '', os: '', online: true, lastEventMs: 0, agentsRunning: 0 };
+        v.nodes.set(id, n);
+      }
+      n.lastEventMs = Math.max(n.lastEventMs, num(b.lastHeardMs));
+      const gen = num(b.generation);
+      const stale = gen < (n.linkGen ?? 0) || b.reason === agora.v1.NodeLinkReason.NODE_LINK_REASON_REPLACED;
+      if (!stale) {
+        n.online = !!b.up;
+        if (b.up) n.linkGen = gen;
+        // ADR-0073: a forgotten machine that connects again is shown again, with what it still runs.
+        if (b.up) n.forgotten = false;
+      }
+      break;
+    }
+    // ADR-0073: only the hub writes it, for an offline machine. Its closed agents stay forgotten for good; what still runs there is
+    // kept, hidden with the machine, and shown again if it comes back.
+    case 'nodeForgotten': {
+      if (producer !== 'hub') break;
+      const id = e.nodeForgotten.nodeId ?? '';
+      const n = v.nodes.get(id);
+      if (n) n.forgotten = true;
+      for (const [key, a] of [...v.agents]) {
+        if (a.nodeId === id && !a.running) { v.agents.delete(key); v.agentWorkspaces.delete(key); v.withTerminal.delete(key); }
+      }
+      break;
+    }
+    case 'nodeTrustedDevices': (v.trusted ??= new Map()).set(producer, [...(e.nodeTrustedDevices.deviceIds ?? [])]); break;
     case 'nodeOffline': {
       const n = v.nodes.get(e.nodeOffline.nodeId);
       if (n) n.online = false;
@@ -128,7 +212,7 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
     }
     case 'nodeResources': {
       const n = v.nodes.get(e.nodeResources.nodeId);
-      if (n) n.agentsRunning = e.nodeResources.agentsRunning ?? 0;
+      if (n) { n.agentsRunning = e.nodeResources.agentsRunning ?? 0; n.memoryBytes = Number(e.nodeResources.memoryUsedBytes ?? 0); n.terminalsOpen = e.nodeResources.terminalsOpen ?? n.terminalsOpen; }
       break;
     }
     case 'worktreeCreated': {
@@ -151,7 +235,9 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
       v.withTerminal.delete(q(b.agentId));
       v.agents.set(q(b.agentId), {
         nodeId: b.nodeId ?? '', worktreeId: q(b.worktreeId), kind: b.kind ?? '', state: 3 /* idle */,
-        reported: false, running: true, sinceMs: at, tokens: 0,
+        reported: false, running: true, sinceMs: at, tokens: 0, startedMs: at,
+        parentId: b.parentAgentId ? q(b.parentAgentId) : undefined,
+        skipsPermissions: !!b.skipsPermissions,
       });
       break;
     }
@@ -166,12 +252,44 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
     }
     case 'agentUsageReported': {
       const a = v.agents.get(q(e.agentUsageReported.agentId));
-      if (a) a.tokens += num(e.agentUsageReported.inputTokens) + num(e.agentUsageReported.outputTokens);
+      if (a) { a.tokens += num(e.agentUsageReported.inputTokens) + num(e.agentUsageReported.outputTokens); addUsage(a, e.agentUsageReported); }
+      break;
+    }
+    case 'agentSessionOptions': {
+      const b = e.agentSessionOptions;
+      const a = v.agents.get(q(b.agentId));
+      if (a) {
+        const s = a.session ?? emptySession();
+        a.session = { ...s, modes: optionsOf(b.modes, true), models: optionsOf(b.models, false), currentMode: b.currentMode ?? '', currentModel: b.currentModel ?? '' };
+      }
+      break;
+    }
+    // ADR-0053: the hub stopped listing a closed agent (its id is already the hub-wide key).
+    case 'agentForgotten': {
+      const id = e.agentForgotten.agentId ?? '';
+      v.agents.delete(id);
+      v.agentWorkspaces.delete(id);
+      v.withTerminal.delete(id);
+      break;
+    }
+    // ADR-0060: kept with the closed agents, offering Resume (its own session) or Start again; one never seen is listed from the event.
+    case 'agentInterrupted': {
+      const b = e.agentInterrupted;
+      const key = q(b.agentId);
+      const a: AgentV = v.agents.get(key) ?? {
+        nodeId: producer, worktreeId: q(''), kind: b.kind ?? '', state: 4, reported: false, running: false, sinceMs: 0, tokens: 0,
+        parentId: b.parentAgentId ? q(b.parentAgentId) : undefined,
+      };
+      a.running = false;
+      a.state = 4 /* done */;
+      a.sinceMs = num(b.interruptedAtMs) || at;
+      a.interrupted = { resumable: !!b.resumable, atMs: num(b.interruptedAtMs), folder: b.folder ?? '', stillRunning: !!b.stillRunning };
+      v.agents.set(key, a);
       break;
     }
     case 'agentExited': {
       const a = v.agents.get(q(e.agentExited.agentId));
-      if (a) { a.running = false; a.state = 4 /* done */; a.sinceMs = at; }
+      if (a) { a.running = false; a.state = 4 /* done */; a.sinceMs = at; a.exitCode = e.agentExited.exitCode ?? 0; }
       break;
     }
     case 'terminalOpened':
@@ -238,21 +356,22 @@ export function tiles(v: View): AgentTileModel[] {
   const waiting = new Set([...v.approvals.values()].map((a) => a.agentId));
   const sharingCounts = new Map<string, number>();
   for (const [id, agent] of v.agents) { const workspace = v.agentWorkspaces.get(id); if (agent.running && workspace) sharingCounts.set(workspace, (sharingCounts.get(workspace) ?? 0) + 1); }
-  return [...v.agents.entries()].map(([id, a]) => {
+  const list = [...v.agents.entries()].map(([id, a]) => {
     const i = hash(id) % ACCENTS.length;
     const node = v.nodes.get(a.nodeId);
     const wt = v.worktrees.get(a.worktreeId);
     const workspaceId = v.agentWorkspaces.get(id);
     const selected = workspaceId ? v.workspaces.get(workspaceId) : undefined;
     const sharing = !!workspaceId && (sharingCounts.get(workspaceId) ?? 0) > 1;
-    const state = waiting.has(id) ? 'needs-you' : uiState(a.state);
+    // A closed agent is finished, whatever state it had when its machine lost it (a blocked one that ended is not waiting for anyone).
+    const state = !a.running ? 'finished' : waiting.has(id) ? 'needs-you' : uiState(a.state);
     return {
       id,
       name: `${a.kind} · ${ACCENT_NAMES[i]}`,
       accent: ACCENTS[i] as string,
       machine: node?.hostname || a.nodeId,
       machineId: a.nodeId,
-      workspace: selected ? selected.path : wt ? workspaceName(v, wt) : '',
+      workspace: selected ? selected.path : wt ? workspaceName(v, wt) : a.interrupted?.folder ?? '',
       shared: sharing, git: selected ? !!selected.gitRoot : true, projectId: selected?.projectId ?? (wt ? v.checkouts.get(wt.checkoutId)?.projectId : undefined),
       state,
       preview: '',
@@ -264,8 +383,19 @@ export function tiles(v: View): AgentTileModel[] {
       terminal: v.withTerminal.has(id),
       branch: selected?.branch || wt?.branch || undefined,
       filesChanged: selected?.filesChanged ?? wt?.filesChanged ?? 0,
-    };
+      closed: !a.running,
+      exitCode: a.exitCode,
+      startedMs: a.startedMs,
+      endedMs: a.running ? undefined : a.sinceMs || undefined,
+      session: a.session,
+      parentId: a.parentId,
+      interrupted: a.interrupted ? { resumable: a.interrupted.resumable, stillRunning: !!a.interrupted.stillRunning } : undefined,
+      skipsPermissions: !!a.skipsPermissions,
+    } as AgentTileModel;
   });
+  const names = new Map(list.map((t) => [t.id, t.name]));
+  for (const t of list) if (t.parentId) t.parentName = names.get(t.parentId) ?? t.parentId.slice(t.parentId.indexOf('/') + 1);
+  return list;
 }
 
 export function machinesOnline(v: View): number {
@@ -276,10 +406,45 @@ export interface ApprovalModel {
   id: string; // hub-wide key `<node>/<local id>`
   node: string;
   localId: string;
+  agentId: string;
   agentName: string;
   action: string;
   detail: string;
   expiresAtMs: number;
+  start?: StartRequest; // ADR-0057: what an `agent.start` request asks for
+}
+
+// An agent's request to start another (ADR-0057), read from the approval's detail. Every field is the asking agent's text: shown, never
+// interpreted. The detail itself is what the decision is signed over, so it is kept as it came.
+export interface StartRequest { agent: string; agentKind: string; node: string; kind: string; folder: string; prompt: string; inside: boolean; worktree: boolean; depth: number; grantAllowed: boolean }
+
+// Characters that are invisible or change how text around them looks: the one list in crates/agora-core/src/hidden-characters.txt
+// (Default_Ignorable_Code_Point and every format character, the line and paragraph separators, the private use areas). The node refuses them in a start request; anything that reaches a card
+// is shown as a visible escape, with control characters other than line breaks and tabs, so what is shown is what is signed.
+export const HIDDEN_RANGES: readonly (readonly [number, number])[] = [
+  [0x00ad, 0x00ad], [0x034f, 0x034f], [0x0600, 0x0605], [0x061c, 0x061c], [0x06dd, 0x06dd], [0x070f, 0x070f], [0x0890, 0x0891],
+  [0x08e2, 0x08e2], [0x115f, 0x1160], [0x17b4, 0x17b5], [0x180b, 0x180f], [0x200b, 0x200f], [0x2028, 0x202e], [0x2060, 0x206f],
+  [0x3164, 0x3164], [0xfe00, 0xfe0f], [0xfeff, 0xfeff], [0xffa0, 0xffa0], [0xfff0, 0xfffb], [0x110bd, 0x110bd], [0x110cd, 0x110cd],
+  [0x13430, 0x1343f], [0x1bca0, 0x1bca3], [0x1d173, 0x1d17a], [0xe0000, 0xe0fff], [0xe000, 0xf8ff], [0xf0000, 0xffffd],
+  [0x100000, 0x10fffd],
+];
+const hex = (n: number) => `\\u{${n.toString(16)}}`;
+const HIDDEN = new RegExp(`[${HIDDEN_RANGES.map(([lo, hi]) => (lo === hi ? hex(lo) : `${hex(lo)}-${hex(hi)}`)).join('')}]|[\\u0000-\\u0008\\u000b-\\u001f\\u007f-\\u009f]`, 'gu');
+
+export function visible(text: string): string {
+  return text.replace(HIDDEN, (c) => `\\u{${(c.codePointAt(0) ?? 0).toString(16)}}`);
+}
+
+export function startRequest(action: string, detail: string): StartRequest | undefined {
+  if (action !== 'agent.start') return undefined;
+  try {
+    const d = JSON.parse(detail) as Record<string, unknown>;
+    const s = (k: string) => (typeof d[k] === 'string' ? (d[k] as string) : '');
+    // `grant_allowed` (a scoped grant may be given: not for a shell or plain terminal program); a node that does not say so offers none.
+    return { agent: s('agent'), agentKind: s('agent_kind'), node: s('node'), kind: s('kind'), folder: s('folder'), prompt: s('prompt'), inside: d.inside === true, worktree: d.worktree === true, depth: typeof d.depth === 'number' ? d.depth : 1, grantAllowed: d.grant_allowed === true };
+  } catch {
+    return undefined;
+  }
 }
 
 // What the approvals section shows: soonest to expire first.
@@ -292,21 +457,51 @@ export function approvalList(v: View): ApprovalModel[] {
         id,
         node: at < 0 ? '' : id.slice(0, at),
         localId: at < 0 ? id : id.slice(at + 1),
+        agentId: a.agentId,
         agentName: names.get(a.agentId) ?? a.agentId,
         action: a.action,
         detail: a.detail,
         expiresAtMs: a.expiresAtMs,
+        start: startRequest(a.action, a.detail),
       };
     })
     .sort((a, b) => a.expiresAtMs - b.expiresAtMs);
 }
 
-export interface MachineModel { id: string; name: string; os: string; online: boolean; agentsRunning: number; lastSeenMs: number }
+// ADR-0073: a machine not seen for a day is shown as old (the hub's `agora hub machines` uses the same threshold).
+export const OLD_AFTER_MS = 24 * 60 * 60 * 1000;
+
+export function isOld(m: { online: boolean; lastSeenMs: number }, now: number): boolean {
+  return !m.online && now - m.lastSeenMs >= OLD_AFTER_MS;
+}
+
+// ADR-0073: the view as people see it: a forgotten machine and everything that belongs to it (its folders, worktrees, terminals,
+// approvals and agents) are left out. A new object either way, so React sees the change.
+export function shown(v: View): View {
+  const hidden = new Set([...v.nodes].filter(([, n]) => n.forgotten).map(([id]) => id));
+  if (hidden.size === 0) return { ...v };
+  const under = (key: string) => hidden.has(key.split('/')[0] ?? '');
+  const keep = <T,>(m: Map<string, T>, ok: (k: string, x: T) => boolean) => new Map([...m].filter(([k, x]) => ok(k, x)));
+  return {
+    ...v,
+    nodes: keep(v.nodes, (id) => !hidden.has(id)),
+    checkouts: keep(v.checkouts, (k, c) => !under(k) && !hidden.has(c.nodeId)),
+    workspaces: keep(v.workspaces, (k, w) => !under(k) && !hidden.has(w.nodeId)),
+    worktrees: keep(v.worktrees, (k) => !under(k)),
+    agents: keep(v.agents, (k, a) => !under(k) && !hidden.has(a.nodeId)),
+    agentWorkspaces: keep(v.agentWorkspaces, (k) => !under(k)),
+    approvals: keep(v.approvals, (k) => !under(k)),
+    withTerminal: new Set([...v.withTerminal].filter((k) => !under(k))),
+    trusted: v.trusted && keep(v.trusted, (id) => !hidden.has(id)),
+  };
+}
+
+export interface MachineModel { id: string; name: string; os: string; online: boolean; agentsRunning: number; lastSeenMs: number; memoryBytes?: number; build?: string; terminalsOpen?: number }
 
 // Online machines first, then by name.
 export function machines(v: View): MachineModel[] {
   return [...v.nodes.entries()]
-    .map(([id, n]) => ({ id, name: n.hostname || id, os: n.os, online: n.online, agentsRunning: n.agentsRunning, lastSeenMs: n.lastEventMs }))
+    .map(([id, n]) => ({ id, name: n.hostname || id, os: n.os, online: n.online, agentsRunning: n.agentsRunning, lastSeenMs: n.lastEventMs, memoryBytes: n.memoryBytes, build: n.build, terminalsOpen: n.terminalsOpen }))
     .sort((a, b) => Number(b.online) - Number(a.online) || a.name.localeCompare(b.name));
 }
 
@@ -353,7 +548,7 @@ export function boards(v: View): BoardModel[] {
     context.folders.set(`${nodeId}\u0000${path}`, { nodeId, machine: v.nodes.get(nodeId)?.hostname || nodeId, path });
   };
   for (const c of v.checkouts.values()) addFolder(c.projectId, c.nodeId, c.path);
-  for (const w of v.workspaces.values()) addFolder(w.projectId, w.nodeId, w.gitRoot || w.path);
+  for (const w of v.workspaces.values()) if (!w.managed) addFolder(w.projectId, w.nodeId, w.gitRoot || w.path);
   const by = new Map<string, BoardModel>();
   const board = (id: string) => {
     let b = by.get(id);
@@ -392,4 +587,13 @@ export function costByProject(v: View, perAgent: ReadonlyMap<string, number>): P
     byProject.set(checkout.projectId, row);
   }
   return [...byProject.values()].sort((a, b) => b.microUsd - a.microUsd || a.label.localeCompare(b.label));
+}
+
+// "1.2 GB": what the agents on a machine hold in memory. Units are the same in every language.
+export function bytesLabel(n: number): string {
+  if (!(n > 0)) return '';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let i = 0, v = n;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return `${v >= 10 || i === 0 ? Math.round(v) : v.toFixed(1)} ${units[i]}`;
 }

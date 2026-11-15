@@ -42,6 +42,8 @@ pub struct Access {
     pub user: String,
     /// The projects (`node/project`) this person may see and work in; `None` means all of them (the owner).
     pub projects: Option<std::collections::BTreeSet<String>>,
+    /// The session's short id for the audit trail ([`crate::audit::session_id`]); `""` when there is no session (L16).
+    pub session: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -214,6 +216,7 @@ impl<'a> Users<'a> {
                 role: Role::Owner,
                 user: "owner".into(),
                 projects: None,
+                session: crate::audit::session_id(token_hash),
             }),
             Some(id) => {
                 let role: String = conn
@@ -242,6 +245,7 @@ impl<'a> Users<'a> {
                     role,
                     user: id,
                     projects,
+                    session: crate::audit::session_id(token_hash),
                 })
             }
         }

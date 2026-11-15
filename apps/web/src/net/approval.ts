@@ -14,6 +14,34 @@ export function signedMessage(nodeId: string, approvalId: string, approved: bool
   return Uint8Array.from(out);
 }
 
+// ADR-0057: a decision on an agent's request to start another is signed over the request exactly as it was shown (a SHA-256 of its
+// detail) and the grant that comes with it, so a hub can neither swap the prompt nor add or strip a grant
+// (crates/agora-node/src/approvals.rs `start_signed_message`).
+export async function startSignedMessage(
+  nodeId: string, approvalId: string, approved: boolean, helperGrant: number, helpersMayStart: boolean, detail: string,
+  subtle: SubtleCrypto = crypto.subtle,
+): Promise<Uint8Array> {
+  const enc = new TextEncoder();
+  const hash = toHex(new Uint8Array(await subtle.digest('SHA-256', enc.encode(detail) as BufferSource)));
+  const parts = ['agora-approval-start-v1', nodeId, approvalId, approved ? '1' : '0', String(helperGrant), helpersMayStart ? '1' : '0', hash];
+  const out: number[] = [];
+  parts.forEach((p, i) => {
+    if (i > 0) out.push(0);
+    out.push(...enc.encode(p));
+  });
+  return Uint8Array.from(out);
+}
+
+/** Why an answer to an approval did not go through, as one of the web's own texts. `auth.forbidden` is lasting (this device or this
+ * person may not answer for that project), so it never says to try again. */
+export function approvalFailureKey(code: string | undefined): string {
+  switch (code) {
+    case 'approval.signature_invalid': return 'approval-not-trusted';
+    case 'auth.forbidden': return 'approval-forbidden';
+    default: return 'approval-failed';
+  }
+}
+
 export function toHex(bytes: Uint8Array): string {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
 }
@@ -36,7 +64,8 @@ export async function thisDevice(store: KeyStore, subtle: SubtleCrypto = crypto.
   let saved = await store.load();
   if (!saved) {
     const keys = await subtle.generateKey(ALGORITHM, false, ['sign', 'verify']);
-    const suffix = toHex(crypto.getRandomValues(new Uint8Array(3)));
+    // 64 random bits (ids made before ADR-0061's review have 24 and stay valid: they are read back as stored).
+    const suffix = toHex(crypto.getRandomValues(new Uint8Array(8)));
     saved = { id: `web-${suffix}`, keys };
     await store.save(saved);
   }
@@ -58,6 +87,15 @@ export async function signApproval(
     signedMessage(nodeId, approvalId, approved) as BufferSource,
   );
   return new Uint8Array(sig);
+}
+
+// The signature of a decision on a start request (ADR-0057).
+export async function signStart(
+  device: Device, nodeId: string, approvalId: string, approved: boolean, helperGrant: number, helpersMayStart: boolean, detail: string,
+  subtle: SubtleCrypto = crypto.subtle,
+): Promise<Uint8Array> {
+  const message = await startSignedMessage(nodeId, approvalId, approved, helperGrant, helpersMayStart, detail, subtle);
+  return new Uint8Array(await subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, device.keys.privateKey, message as BufferSource));
 }
 
 export function indexedDbStore(): KeyStore | undefined {

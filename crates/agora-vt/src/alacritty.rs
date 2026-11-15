@@ -7,9 +7,9 @@ use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config, Term, TermMode};
-use alacritty_terminal::vte::ansi::Processor;
+use alacritty_terminal::vte::ansi::{Color as AColor, NamedColor, Processor};
 
-use crate::{Cell, Cursor, Modes, Size, Terminal};
+use crate::{Cell, Color, Cursor, Modes, Size, Style, Terminal};
 
 /// Scrolled-back lines kept per terminal. Memory is bounded by this (design/resource-limits.md).
 const SCROLLBACK: usize = 2000;
@@ -43,6 +43,48 @@ impl Dimensions for Dims {
     }
     fn columns(&self) -> usize {
         usize::from(self.0.cols)
+    }
+}
+
+/// The backend's colour as the program set it: the 16 named colours are palette entries 0-15, its dim variants the plain ones (dim is
+/// carried by [`Style::dim`]), and the terminal's own foreground, background and cursor colours are [`Color::Default`].
+fn color(c: AColor) -> Color {
+    match c {
+        AColor::Spec(rgb) => Color::Rgb(rgb.r, rgb.g, rgb.b),
+        AColor::Indexed(i) => Color::Indexed(i),
+        AColor::Named(n) => {
+            let i = n as usize;
+            if i < 16 {
+                Color::Indexed(i as u8)
+            } else {
+                match n {
+                    NamedColor::DimBlack => Color::Indexed(0),
+                    NamedColor::DimRed => Color::Indexed(1),
+                    NamedColor::DimGreen => Color::Indexed(2),
+                    NamedColor::DimYellow => Color::Indexed(3),
+                    NamedColor::DimBlue => Color::Indexed(4),
+                    NamedColor::DimMagenta => Color::Indexed(5),
+                    NamedColor::DimCyan => Color::Indexed(6),
+                    NamedColor::DimWhite => Color::Indexed(7),
+                    _ => Color::Default,
+                }
+            }
+        }
+    }
+}
+
+/// A backend cell's (or the cursor template's) colours and flags as a [`Style`].
+fn style(fg: AColor, bg: AColor, f: Flags) -> Style {
+    Style {
+        fg: color(fg),
+        bg: color(bg),
+        bold: f.contains(Flags::BOLD),
+        dim: f.contains(Flags::DIM),
+        italic: f.contains(Flags::ITALIC),
+        underline: f.intersects(Flags::ALL_UNDERLINES),
+        inverse: f.contains(Flags::INVERSE),
+        strike: f.contains(Flags::STRIKEOUT),
+        hidden: f.contains(Flags::HIDDEN),
     }
 }
 
@@ -108,7 +150,32 @@ impl Terminal for AlacrittyTerminal {
         Some(Cell {
             ch: if spacer || c.c == '\0' { ' ' } else { c.c },
             spacer,
+            style: style(c.fg, c.bg, c.flags),
         })
+    }
+
+    fn history_len(&self) -> usize {
+        self.term.grid().history_size()
+    }
+
+    fn history_cell(&self, back: usize, col: u16) -> Option<Cell> {
+        if back == 0 || back > self.history_len() || col >= self.size.cols {
+            return None;
+        }
+        // Negative lines are the scrollback above the live screen's top (`Line(-1)` scrolled off last).
+        let line = Line(-i32::try_from(back).ok()?);
+        let c = &self.term.grid()[line][Column(usize::from(col))];
+        let spacer = c.flags.contains(Flags::WIDE_CHAR_SPACER);
+        Some(Cell {
+            ch: if spacer || c.c == '\0' { ' ' } else { c.c },
+            spacer,
+            style: style(c.fg, c.bg, c.flags),
+        })
+    }
+
+    fn pen(&self) -> Style {
+        let t = &self.term.grid().cursor.template;
+        style(t.fg, t.bg, t.flags)
     }
 
     fn cursor(&self) -> Cursor {

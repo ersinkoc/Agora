@@ -44,6 +44,47 @@ fn state_text(state: AgentState, t: Text<'_>) -> String {
     )
 }
 
+/// ADR-0060: what an interrupted agent's row says: it stopped with its machine, and `u` resumes it (or `U` starts it again).
+pub fn interrupted_text(a: &AgentSnapshot, t: Text<'_>) -> String {
+    t(
+        if a.still_running {
+            key!("tui-interrupted-running")
+        } else if a.resumable {
+            key!("tui-interrupted-resume")
+        } else {
+            key!("tui-interrupted-again")
+        },
+        &[],
+    )
+}
+
+/// ADR-0070: what a machine row says about its presence: "online", or "offline · last seen 3 min ago" from when the hub last heard
+/// from it (`last_event_ms`), relative to `now_ms`.
+pub fn presence_text(n: &agora_protocol::v1::NodeSnapshot, now_ms: u64, t: Text<'_>) -> String {
+    if n.online {
+        return t(key!("tui-online"), &[]);
+    }
+    let offline = t(key!("tui-offline"), &[]);
+    if n.last_event_ms == 0 {
+        return offline;
+    }
+    let s = now_ms.saturating_sub(n.last_event_ms) / 1000;
+    let (unit, count) = match s {
+        0..=59 => ("s", s),
+        60..=3599 => ("min", s / 60),
+        3600..=86_399 => ("h", s / 3600),
+        _ => ("d", s / 86_400),
+    };
+    let seen = t(
+        key!("tui-last-seen"),
+        &[
+            ("unit", Arg::Str(unit.into())),
+            ("n", Arg::Num(i64::try_from(count).unwrap_or(i64::MAX))),
+        ],
+    );
+    format!("{offline} · {seen}")
+}
+
 /// The part of a hub-wide id after `<node>/`.
 fn local(id: &str) -> &str {
     id.split_once('/').map_or(id, |(_, rest)| rest)
@@ -51,7 +92,9 @@ fn local(id: &str) -> &str {
 
 /// One screen of lines for a snapshot. `color` off spells states out with a marker and no escape sequences (NO_COLOR).
 /// `selected` is the agent the keyboard points at (Enter opens its terminal); `keys` says the console takes answers from the keyboard (a hint line appears while something waits); `notice` is the last
-/// thing the user did, shown at the bottom; `cost_micro_usd` is the hub's estimate of what the agents cost (0 when unknown).
+/// thing the user did, shown at the bottom; `cost_micro_usd` is the hub's estimate of what the agents cost (0 when unknown);
+/// `now_ms` is the time "last seen" counts from.
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     s: &Snapshot,
     color: bool,
@@ -59,6 +102,7 @@ pub fn render(
     selected: &str,
     notice: &str,
     cost_micro_usd: u64,
+    now_ms: u64,
     t: Text<'_>,
 ) -> Vec<String> {
     let (bold, dim, reset) = if color {
@@ -116,6 +160,15 @@ pub fn render(
     let mut waiting = 0;
     for a in &s.approvals {
         waiting += 1;
+        let (on, off) = paint(AgentState::Blocked, color);
+        // ADR-0057: a request to start an agent shows what would start, where, and its whole first prompt.
+        if let Some((line, prompt)) = start_card(&a.action, &a.detail, t) {
+            out.push(format!("  {on}!{off} {line}"));
+            for l in prompt {
+                out.push(format!("      {dim}{l}{reset}"));
+            }
+            continue;
+        }
         let line = t(
             key!("tui-asks"),
             &[
@@ -126,7 +179,6 @@ pub fn render(
                 ),
             ],
         );
-        let (on, off) = paint(AgentState::Blocked, color);
         out.push(format!("  {on}!{off} {line}"));
     }
     for a in s
@@ -181,7 +233,7 @@ pub fn render(
             folder(project).unwrap_or_else(|| project.to_string())
         };
         out.push(format!("{bold}{name}{reset}"));
-        for a in agents {
+        for (a, depth) in helper_order(&agents) {
             let st = state_of(a);
             let (on, off) = paint(st, color);
             let marker = if color { "●" } else { "*" };
@@ -191,8 +243,33 @@ pub fn render(
                 " "
             };
             let word = state_text(st, t);
+            // A helper sits under the agent that started it (ADR-0057) and says so.
+            let indent = "  ".repeat(depth);
+            let by = if a.parent_agent_id.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "  {}",
+                    t(
+                        key!("tui-started-by"),
+                        &[("agent", Arg::Str(local(&a.parent_agent_id).to_string()))],
+                    )
+                )
+            };
+            // ADR-0060: stopped with its machine; the keys that bring it back.
+            let by = if a.interrupted && !a.running {
+                format!("{by}  · {}", interrupted_text(a, t))
+            } else {
+                by
+            };
+            // ADR-0059: an agent started so that it acts without asking says so on its row, for its whole life.
+            let no_ask = if a.skips_permissions {
+                format!("  [{}]", t(key!("tui-badge-no-ask"), &[]))
+            } else {
+                String::new()
+            };
             out.push(format!(
-                "{pointer} {on}{marker} {word:<10}{off} {}  {dim}{}  {}{reset}",
+                "{pointer} {indent}{on}{marker} {word:<10}{off} {}  {dim}{}  {}{by}{reset}{no_ask}",
                 local(&a.agent_id),
                 a.kind,
                 a.node_id,
@@ -208,14 +285,7 @@ pub fn render(
         } else {
             &n.hostname
         };
-        let status = t(
-            if n.online {
-                key!("tui-online")
-            } else {
-                key!("tui-offline")
-            },
-            &[],
-        );
+        let status = presence_text(n, now_ms, t);
         out.push(format!("  {id}  {dim}{status}{reset}"));
     }
     out.push(String::new());
@@ -229,6 +299,119 @@ pub fn render(
     out
 }
 
+/// What an `agent.start` request asks for (ADR-0057), from its detail; `None` for any other request or a detail that does not parse.
+struct StartRequest {
+    agent: String,
+    agent_kind: String,
+    node: String,
+    kind: String,
+    folder: String,
+    prompt: String,
+    inside: bool,
+    worktree: bool,
+    depth: i64,
+}
+
+/// ADR-0057: what an `agent.start` request shows before it is answered: one line saying who asks to start what and where, then its whole
+/// first prompt, line by line. Everything comes from the signed request and every hidden or control character is made visible, since
+/// the answer is signed over exactly that request. `None` for any other request.
+pub(crate) fn start_card(action: &str, detail: &str, t: Text<'_>) -> Option<(String, Vec<String>)> {
+    let start = start_request(action, detail)?;
+    let line = t(
+        if start.inside {
+            key!("tui-asks-start")
+        } else {
+            key!("tui-asks-start-outside")
+        },
+        &[
+            ("agent", Arg::Str(visible(&start.agent))),
+            ("agent_kind", Arg::Str(visible(&start.agent_kind))),
+            ("node", Arg::Str(visible(&start.node))),
+            ("kind", Arg::Str(visible(&start.kind))),
+            ("folder", Arg::Str(visible(&start.folder))),
+            ("worktree", Arg::Str(start.worktree.to_string())),
+            ("depth", Arg::Num(start.depth)),
+        ],
+    );
+    let prompt = visible(&start.prompt).lines().map(str::to_string).collect();
+    Some((line, prompt))
+}
+
+/// The kind an `agent.start` request asks for, made visible; `None` for any other request.
+pub(crate) fn start_kind(action: &str, detail: &str) -> Option<String> {
+    start_request(action, detail).map(|s| visible(&s.kind))
+}
+
+fn start_request(action: &str, detail: &str) -> Option<StartRequest> {
+    if action != "agent.start" {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_str(detail).ok()?;
+    let s = |k: &str| {
+        v.get(k)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string()
+    };
+    let flag = |k: &str| {
+        v.get(k)
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+    };
+    Some(StartRequest {
+        agent: s("agent"),
+        agent_kind: s("agent_kind"),
+        node: s("node"),
+        kind: s("kind"),
+        folder: s("folder"),
+        prompt: s("prompt"),
+        inside: flag("inside"),
+        worktree: flag("worktree"),
+        depth: v
+            .get("depth")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(1),
+    })
+}
+
+/// `agents` with each helper right after the agent that started it, and how deep it is. A helper whose parent is not in the list (another
+/// project, or gone) stays where it is, at depth 0.
+pub(crate) fn helper_order<'a>(agents: &[&'a AgentSnapshot]) -> Vec<(&'a AgentSnapshot, usize)> {
+    let present = |id: &str| agents.iter().any(|a| a.agent_id == id);
+    let mut out = Vec::new();
+    fn add<'a>(
+        a: &'a AgentSnapshot,
+        depth: usize,
+        agents: &[&'a AgentSnapshot],
+        out: &mut Vec<(&'a AgentSnapshot, usize)>,
+    ) {
+        if depth > 8 || out.iter().any(|(x, _)| x.agent_id == a.agent_id) {
+            return;
+        }
+        out.push((a, depth));
+        for c in agents.iter().filter(|c| c.parent_agent_id == a.agent_id) {
+            add(c, depth + 1, agents, out);
+        }
+    }
+    for a in agents {
+        if a.parent_agent_id.is_empty() || !present(&a.parent_agent_id) {
+            add(a, 0, agents, &mut out);
+        }
+    }
+    // A loop of parents (never made by a node) would leave agents out: they are listed anyway.
+    for a in agents {
+        if !out.iter().any(|(x, _)| x.agent_id == a.agent_id) {
+            out.push((a, 0));
+        }
+    }
+    out
+}
+
+/// `agora_core::text::visible`, with each line break kept (a prompt's lines are shown as lines).
+fn visible(text: &str) -> String {
+    agora_core::text::visible(text)
+}
+
 /// Text an agent or a person wrote is shown as plain text: control characters (escape sequences that could move the cursor, change the
 /// title or paste into the prompt) and bidirectional overrides are dropped, a tab becomes spaces.
 pub fn plain(text: &str) -> String {
@@ -240,7 +423,215 @@ pub fn plain(text: &str) -> String {
             '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' => None,
             c => Some(c),
         })
+        // Other invisible characters (zero-width, tags, fillers) are shown as escapes rather than passed through unseen.
+        .map(|c| {
+            if agora_core::text::is_hidden(c) {
+                format!("\\u{{{:x}}}", u32::from(c))
+            } else {
+                c.to_string()
+            }
+        })
         .collect()
+}
+
+/// ADR-0058: a notice in the conversation, in words. The code picks the message; parameters are the agent's text, shown plain.
+pub fn notice_text(e: &ChatEntry, t: Text<'_>) -> String {
+    let p = |k: &str| Arg::Str(plain(e.params.get(k).map_or("", String::as_str)));
+    match e.code.as_str() {
+        "adapter.turn_failed" => t(
+            key!("tui-notice-turn_failed"),
+            &[
+                ("rpc_code", p("rpc_code")),
+                ("stderr_tail", p("stderr_tail")),
+            ],
+        ),
+        "adapter.turn_stopped" => t(
+            key!("tui-notice-turn_stopped"),
+            &[("stop_reason", p("stop_reason"))],
+        ),
+        "adapter.turn_empty" => t(
+            key!("tui-notice-turn_empty"),
+            &[("stderr_tail", p("stderr_tail"))],
+        ),
+        "adapter.agent_exited" => t(
+            key!("tui-notice-agent_exited"),
+            &[
+                ("stage", p("stage")),
+                (
+                    "exit_code",
+                    Arg::Str(plain(e.params.get("exit_code").map_or("?", String::as_str))),
+                ),
+                ("stderr_tail", p("stderr_tail")),
+            ],
+        ),
+        "adapter.agent_refused" => t(
+            key!("tui-notice-agent_refused"),
+            &[
+                ("stage", p("stage")),
+                ("rpc_code", p("rpc_code")),
+                ("detail", p("detail")),
+            ],
+        ),
+        other => t(
+            key!("tui-notice-other"),
+            &[("code", Arg::Str(plain(other)))],
+        ),
+    }
+}
+
+/// ADR-0058: the line above a chat agent's conversation: its mode, model and how full its context is, when it reported them.
+/// Records in `a` a switch the agent accepted (ADR-0058), so the line [`session_line`] makes shows it at once instead of what it ran
+/// with when the conversation was opened.
+pub fn switched(a: &mut AgentSnapshot, model: bool, id: &str) {
+    if model {
+        a.current_model = id.to_string();
+    } else {
+        a.current_mode = id.to_string();
+    }
+}
+
+pub fn session_line(a: &AgentSnapshot, t: Text<'_>) -> Option<String> {
+    let name = |list: &[agora_protocol::v1::SessionOption], id: &str| {
+        list.iter()
+            .find(|o| o.id == id)
+            .map_or(id, |o| {
+                if o.name.is_empty() {
+                    id
+                } else {
+                    o.name.as_str()
+                }
+            })
+            .to_string()
+    };
+    let mut parts = Vec::new();
+    if !a.current_mode.is_empty() {
+        parts.push(t(
+            key!("tui-chat-mode"),
+            &[("mode", Arg::Str(plain(&name(&a.modes, &a.current_mode))))],
+        ));
+    }
+    if !a.current_model.is_empty() {
+        parts.push(t(
+            key!("tui-chat-model"),
+            &[("model", Arg::Str(plain(&name(&a.models, &a.current_model))))],
+        ));
+    }
+    if let Some(pct) = a
+        .context_tokens
+        .saturating_mul(100)
+        .checked_div(a.context_window)
+    {
+        parts.push(t(
+            key!("tui-chat-context"),
+            &[(
+                "percent",
+                Arg::Num(i64::try_from(pct.min(100)).unwrap_or(100)),
+            )],
+        ));
+    }
+    (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
+/// ADR-0058: what a typed chat line asks for when it starts with `/mode ` or `/model `.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChatCommand {
+    /// Not a switch: send the line as a request.
+    Prompt,
+    /// Switch to this id (`model` false for a mode).
+    Switch { model: bool, id: String },
+    /// The agent did not offer this id; the ids it offers.
+    Unknown { id: String, offered: Vec<String> },
+    /// A mode in which the agent acts without asking: the same line again confirms it.
+    Confirm { id: String },
+}
+
+/// Reads a typed line. `confirming` is the line that asked for confirmation last time, if any: typing it again switches.
+pub fn chat_command(
+    line: &str,
+    agent: Option<&AgentSnapshot>,
+    confirming: Option<&str>,
+) -> ChatCommand {
+    let (model, id) = match (line.strip_prefix("/mode "), line.strip_prefix("/model ")) {
+        (Some(id), _) => (false, id.trim()),
+        (_, Some(id)) => (true, id.trim()),
+        _ => return ChatCommand::Prompt,
+    };
+    let list = agent.map_or(
+        &[][..],
+        |a| if model { &a.models[..] } else { &a.modes[..] },
+    );
+    let Some(option) = list
+        .iter()
+        .find(|o| o.id == id || (!o.name.is_empty() && o.name == id))
+    else {
+        return ChatCommand::Unknown {
+            id: id.to_string(),
+            offered: list.iter().map(|o| o.id.clone()).collect(),
+        };
+    };
+    if !model && option.skips_permissions && confirming != Some(line) {
+        return ChatCommand::Confirm {
+            id: option.id.clone(),
+        };
+    }
+    ChatCommand::Switch {
+        model,
+        id: option.id.clone(),
+    }
+}
+
+/// `row` cut into pieces of at most `first` characters for the first and `rest` for the others, at the last space that fits when
+/// there is one (the space itself is dropped), else in the middle of the word. Counted in characters: a wide character may overshoot
+/// a little, which is harmless.
+pub fn wrap_row(row: &str, first: usize, rest: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut left: Vec<char> = row.chars().collect();
+    while !left.is_empty() {
+        let width = if out.is_empty() { first } else { rest };
+        if left.len() <= width {
+            out.push(left.iter().collect());
+            break;
+        }
+        let cut = left[..=width]
+            .iter()
+            .rposition(|c| *c == ' ')
+            .filter(|&at| at > 0);
+        let (take, skip) = cut.map_or((width, width), |at| (at, at + 1));
+        out.push(left[..take].iter().collect());
+        left.drain(..skip);
+    }
+    out
+}
+
+/// A tool call as one line: what kind of step it was, then its command, search, address or file (the agent's own title when it named
+/// nothing else). Every part is the agent's text and is made plain.
+pub fn tool_line(c: &crate::tool::Call, t: Text<'_>) -> String {
+    use crate::tool::Action;
+    let word = t(
+        match c.action {
+            Action::Read => key!("tui-tool-read"),
+            Action::Edit => key!("tui-tool-edit"),
+            Action::Run => key!("tui-tool-run"),
+            Action::Search => key!("tui-tool-search"),
+            Action::Fetch => key!("tui-tool-fetch"),
+            Action::Delete => key!("tui-tool-delete"),
+            Action::Move => key!("tui-tool-move"),
+            Action::Think => key!("tui-tool-think"),
+            Action::Other => key!("tui-tool-other"),
+        },
+        &[],
+    );
+    let what = if c.subject.is_empty() {
+        &c.title
+    } else {
+        &c.subject
+    };
+    let what = plain(what).replace('\n', " ");
+    if what.is_empty() {
+        word
+    } else {
+        format!("{word} {what}")
+    }
 }
 
 /// The conversation of an agent that has no terminal, as the last lines that fit `rows` x `cols`, then the line being typed.
@@ -268,37 +659,45 @@ pub fn render_chat(
             )
         };
         let body = match ChatKind::try_from(e.kind).unwrap_or(ChatKind::Unspecified) {
-            ChatKind::ToolCall => t(key!("tui-chat-tool"), &[("text", Arg::Str(plain(&e.text)))]),
+            // A tool call in words, as the web window says it ("Command cargo test"); text that is not a call is shown as it came.
+            ChatKind::ToolCall => match crate::tool::call(&e.text) {
+                Some(c) => tool_line(&c, t),
+                None => t(key!("tui-chat-tool"), &[("text", Arg::Str(plain(&e.text)))]),
+            },
             ChatKind::Plan => format!("{}\n{}", t(key!("tui-chat-plan"), &[]), plain(&e.text)),
             ChatKind::Diff => t(key!("tui-chat-diff"), &[("path", Arg::Str(plain(&e.path)))]),
+            ChatKind::Notice => notice_text(e, t),
             _ => plain(&e.text),
         };
         for (i, row) in body.split('\n').enumerate() {
-            let prefix = if i == 0 {
-                format!("{bold}{who}:{reset} ")
+            // The first line starts with the speaker, the others are indented; each line is cut to what is left of the width
+            // after its own start (one column spare, so a full line never makes the terminal wrap it on its own).
+            let (prefix, prefix_width) = if i == 0 {
+                (format!("{bold}{who}:{reset} "), who.chars().count() + 2)
             } else {
-                "  ".to_string()
+                ("  ".to_string(), 2)
             };
-            // Hard wrap by characters; a wide character may overshoot a little, which is harmless.
-            let width = cols.saturating_sub(4).max(10);
-            let chars: Vec<char> = row.chars().collect();
-            if chars.is_empty() {
+            let first = cols.saturating_sub(prefix_width + 1).max(10);
+            let rest = cols.saturating_sub(3).max(10);
+            let pieces = wrap_row(row, first, rest);
+            if pieces.is_empty() {
                 lines.push(prefix.trim_end().to_string());
             }
-            for (j, chunk) in chars.chunks(width).enumerate() {
-                let head = if j == 0 {
-                    prefix.clone()
-                } else {
-                    "  ".to_string()
-                };
-                lines.push(format!("{head}{}", chunk.iter().collect::<String>()));
+            for (j, piece) in pieces.into_iter().enumerate() {
+                let head = if j == 0 { prefix.as_str() } else { "  " };
+                lines.push(format!("{head}{piece}"));
             }
         }
     }
-    let room = rows.saturating_sub(3).max(1);
+    // The hint wraps to the width (a narrow pane showed only its start); the conversation gets what is left.
+    let hint_width = cols.saturating_sub(1).max(10);
+    let hint = wrap_row(&t(key!("tui-chat-hint"), &[]), hint_width, hint_width);
+    let room = rows.saturating_sub(2 + hint.len()).max(1);
     let skip = lines.len().saturating_sub(room);
     let mut out: Vec<String> = lines.into_iter().skip(skip).collect();
-    out.push(format!("{dim}{}{reset}", t(key!("tui-chat-hint"), &[])));
+    for h in hint {
+        out.push(format!("{dim}{h}{reset}"));
+    }
     out.push(format!(
         "{} {}",
         t(key!("tui-chat-input"), &[]),
@@ -322,6 +721,39 @@ mod tests {
             })
             .collect();
         format!("{id}[{}]", a.join(","))
+    }
+
+    /// ADR-0070: an offline machine's row says when it was last heard from, in the largest whole unit.
+    #[test]
+    fn an_offline_machine_says_when_it_was_last_seen() {
+        let node = |online: bool, last: u64| NodeSnapshot {
+            node_id: "vps".into(),
+            online,
+            last_event_ms: last,
+            ..Default::default()
+        };
+        let now = 10_000_000;
+        assert_eq!(presence_text(&node(true, 1), now, &t), "tui-online[]");
+        assert_eq!(presence_text(&node(false, 0), now, &t), "tui-offline[]");
+        assert_eq!(
+            presence_text(&node(false, now - 42_000), now, &t),
+            "tui-offline[] · tui-last-seen[unit=s,n=42]"
+        );
+        assert_eq!(
+            presence_text(&node(false, now - 3 * 60_000 - 5_000), now, &t),
+            "tui-offline[] · tui-last-seen[unit=min,n=3]"
+        );
+        assert_eq!(
+            presence_text(&node(false, now - 2 * 3_600_000), now, &t),
+            "tui-offline[] · tui-last-seen[unit=h,n=2]"
+        );
+        let mut s = snapshot();
+        s.nodes[1].last_event_ms = 1_000;
+        let text = render(&s, false, false, "", "", 0, 61_000, &t).join("\n");
+        assert!(
+            text.contains("vps  tui-offline[] · tui-last-seen[unit=min,n=1]"),
+            "{text}"
+        );
     }
 
     fn snapshot() -> Snapshot {
@@ -378,7 +810,7 @@ mod tests {
 
     #[test]
     fn the_screen_says_what_waits_for_the_user_and_groups_agents_by_project() {
-        let lines = render(&snapshot(), false, true, "", "", 0, &t);
+        let lines = render(&snapshot(), false, true, "", "", 0, 0, &t);
         let text = lines.join("\n");
         assert!(
             text.contains("tui-header[online=1,total=2,agents=2]"),
@@ -403,11 +835,36 @@ mod tests {
         );
         assert!(text.contains("vps") && text.contains("tui-offline[]"));
         assert!(text.contains("tui-hint-answer[]"), "{text}");
-        let quiet = render(&snapshot(), false, false, "", "done!", 0, &t).join("\n");
+        let quiet = render(&snapshot(), false, false, "", "done!", 0, 0, &t).join("\n");
         assert!(
             !quiet.contains("tui-hint-answer") && quiet.contains("done!"),
             "{quiet}"
         );
+    }
+
+    #[test]
+    fn an_agent_that_stopped_with_its_machine_says_how_to_bring_it_back() {
+        let mut snap = snapshot();
+        for (id, resumable) in [("laptop/agent-3", true), ("laptop/agent-4", false)] {
+            snap.agents.push(AgentSnapshot {
+                agent_id: id.into(),
+                node_id: "laptop".into(),
+                project_id: "web".into(),
+                kind: "claude-code".into(),
+                state: AgentState::Done as i32,
+                interrupted: true,
+                resumable,
+                ..Default::default()
+            });
+        }
+        let text = render(&snap, false, true, "", "", 0, 0, &t).join("\n");
+        let row = |id: &str| text.lines().find(|l| l.contains(id)).unwrap().to_string();
+        assert!(
+            row("agent-3").contains("tui-interrupted-resume[]"),
+            "{text}"
+        );
+        assert!(row("agent-4").contains("tui-interrupted-again[]"), "{text}");
+        assert!(!row("agent-1").contains("tui-interrupted"), "{text}");
     }
 
     #[test]
@@ -419,15 +876,85 @@ mod tests {
             agent_id: "laptop/agent-1".into(),
             title: String::new(),
         });
-        let lines = render(&snap, false, true, "laptop/agent-1", "", 0, &t);
+        let lines = render(&snap, false, true, "laptop/agent-1", "", 0, 0, &t);
         let row = lines
             .iter()
             .find(|l| l.contains("agent-1") && l.contains("codex"))
             .expect("row");
         assert!(row.starts_with('>'), "{row}");
         assert!(lines.join("\n").contains("tui-hint-open[]"));
-        let other = render(&snap, false, true, "nobody/agent-9", "", 0, &t).join("\n");
+        let other = render(&snap, false, true, "nobody/agent-9", "", 0, 0, &t).join("\n");
         assert!(!other.contains("tui-hint-open"), "{other}");
+    }
+
+    #[test]
+    fn a_switch_shows_on_the_session_line_at_once() {
+        let opt = |id: &str, name: &str| agora_protocol::v1::SessionOption {
+            id: id.into(),
+            name: name.into(),
+            ..Default::default()
+        };
+        let mut a = AgentSnapshot {
+            modes: vec![opt("build", "Build"), opt("plan", "Plan")],
+            models: vec![opt("m1", "One"), opt("m2", "Two")],
+            current_mode: "build".into(),
+            current_model: "m1".into(),
+            ..Default::default()
+        };
+        switched(&mut a, false, "plan");
+        switched(&mut a, true, "m2");
+        let line = session_line(&a, &t).unwrap();
+        assert!(
+            line.contains("mode=Plan") && line.contains("model=Two"),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn long_chat_lines_fit_the_width_and_break_between_words() {
+        // Seen on macOS: a long notice overflowed its first line (the speaker was not counted), the terminal wrapped it on its own
+        // and "invalid" came out as "inva" / "lid".
+        let body = "ERROR service=llm provider rejected: invalid x-api-key (auth) at ~/.local/share/fake/auth.json";
+        let entries = vec![ChatEntry {
+            role: ChatRole::Agent as i32,
+            kind: ChatKind::Text as i32,
+            text: body.into(),
+            ..Default::default()
+        }];
+        let cols = 40;
+        let lines = render_chat(&entries, "agent-1", "", (cols, 24), false, &t);
+        let said: Vec<&String> = lines
+            .iter()
+            .take_while(|l| !l.starts_with("tui-chat-hint"))
+            .collect();
+        assert!(said.iter().all(|l| l.chars().count() < cols), "{said:#?}");
+        assert!(
+            said[0].starts_with("tui-chat-agent[agent=agent-1]: "),
+            "{said:#?}"
+        );
+        assert!(said[1..].iter().all(|l| l.starts_with("  ")), "{said:#?}");
+        let words: Vec<&str> = said
+            .iter()
+            .enumerate()
+            .flat_map(|(i, l)| {
+                let l = if i == 0 {
+                    l.split_once(": ").map_or("", |(_, r)| r)
+                } else {
+                    l.trim_start()
+                };
+                l.split(' ')
+            })
+            .collect();
+        assert_eq!(
+            words.join(" "),
+            body,
+            "nothing lost, no word cut: {said:#?}"
+        );
+        // A word longer than the line is still cut, and nothing is lost.
+        assert_eq!(wrap_row(&"x".repeat(25), 10, 10).concat(), "x".repeat(25));
+        assert_eq!(wrap_row("aa bb", 10, 10), ["aa bb"]);
+        assert_eq!(wrap_row("aaaa bbbb", 5, 5), ["aaaa", "bbbb"]);
+        assert!(wrap_row("", 5, 5).is_empty());
     }
 
     #[test]
@@ -455,8 +982,42 @@ mod tests {
         );
         assert!(text.contains("tui-chat-you[]: hello"), "{text}");
         assert!(text.contains("hi]0;owned there"), "{text}");
-        assert!(text.contains("tui-chat-tool[text="), "{text}");
+        assert!(text.contains("tui-tool-other[] ls"), "{text}");
         assert!(lines.last().is_some_and(|l| l.contains("typed")));
+        // ADR-0058: a notice is said from its code; its parameters are plain text; an unknown code is named.
+        let mut notice = entry(ChatRole::Agent, ChatKind::Notice, "");
+        notice.code = "adapter.agent_exited".into();
+        notice
+            .params
+            .insert("stderr_tail".into(), "boom\x1b[2J".into());
+        let mut other = entry(ChatRole::Agent, ChatKind::Notice, "");
+        other.code = "future.thing".into();
+        // Wide enough that the notice is on one line (wrapping is checked on its own).
+        let said = render_chat(&[notice, other], "a", "", (160, 24), false, &t).join("\n");
+        assert!(
+            said.contains("tui-notice-agent_exited[stage=,exit_code=?,stderr_tail=boom[2J]"),
+            "{said}"
+        );
+        assert!(
+            said.contains("tui-notice-other[code=future.thing]"),
+            "{said}"
+        );
+        let a = AgentSnapshot {
+            modes: vec![agora_protocol::v1::SessionOption {
+                id: "plan".into(),
+                name: "Plan".into(),
+                ..Default::default()
+            }],
+            current_mode: "plan".into(),
+            context_tokens: 50,
+            context_window: 200,
+            ..Default::default()
+        };
+        assert_eq!(
+            session_line(&a, &t).as_deref(),
+            Some("tui-chat-mode[mode=Plan] · tui-chat-context[percent=25]")
+        );
+        assert!(session_line(&AgentSnapshot::default(), &t).is_none());
         // Only what fits is kept.
         let many: Vec<ChatEntry> = (0..50)
             .map(|i| entry(ChatRole::Agent, ChatKind::Text, &format!("line {i}")))
@@ -470,31 +1031,201 @@ mod tests {
     }
 
     #[test]
+    fn a_typed_switch_needs_an_offered_id_and_a_mode_that_does_not_ask_needs_it_twice() {
+        let opt = |id: &str, skips: bool| agora_protocol::v1::SessionOption {
+            id: id.into(),
+            name: id.to_uppercase(),
+            skips_permissions: skips,
+            ..Default::default()
+        };
+        let a = AgentSnapshot {
+            modes: vec![opt("plan", false), opt("yolo", true)],
+            models: vec![opt("m1", false)],
+            ..Default::default()
+        };
+        assert_eq!(chat_command("fix it", Some(&a), None), ChatCommand::Prompt);
+        assert_eq!(
+            chat_command("/mode PLAN", Some(&a), None),
+            ChatCommand::Switch {
+                model: false,
+                id: "plan".into()
+            }
+        );
+        assert_eq!(
+            chat_command("/model m1", Some(&a), None),
+            ChatCommand::Switch {
+                model: true,
+                id: "m1".into()
+            }
+        );
+        assert_eq!(
+            chat_command("/model m9", Some(&a), None),
+            ChatCommand::Unknown {
+                id: "m9".into(),
+                offered: vec!["m1".into()]
+            }
+        );
+        assert_eq!(
+            chat_command("/mode yolo", Some(&a), None),
+            ChatCommand::Confirm { id: "yolo".into() }
+        );
+        assert_eq!(
+            chat_command("/mode yolo", Some(&a), Some("/mode yolo")),
+            ChatCommand::Switch {
+                model: false,
+                id: "yolo".into()
+            }
+        );
+        assert!(matches!(
+            chat_command("/mode plan", None, None),
+            ChatCommand::Unknown { .. }
+        ));
+    }
+
+    #[test]
+    fn an_agent_that_does_not_ask_says_so_on_its_row() {
+        let mut snap = snapshot();
+        snap.agents.insert(
+            0,
+            AgentSnapshot {
+                agent_id: "laptop/agent-9".into(),
+                node_id: "laptop".into(),
+                kind: "codex".into(),
+                running: true,
+                launch_options: vec!["skip-permissions".into()],
+                skips_permissions: true,
+                ..Default::default()
+            },
+        );
+        let lines = render(&snap, false, false, "", "", 0, 0, &t);
+        let row = lines.iter().find(|l| l.contains("agent-9")).expect("row");
+        assert!(row.contains("[tui-badge-no-ask[]]"), "{row}");
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|l| l.contains("tui-badge-no-ask"))
+                .count(),
+            1,
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn helpers_sit_under_their_parent_and_a_start_request_shows_its_prompt() {
+        let mut snap = snapshot();
+        snap.agents.insert(
+            0,
+            AgentSnapshot {
+                agent_id: "laptop/agent-3".into(),
+                node_id: "laptop".into(),
+                project_id: "web".into(),
+                kind: "codex".into(),
+                running: true,
+                parent_agent_id: "laptop/agent-1".into(),
+                ..Default::default()
+            },
+        );
+        snap.approvals[0].action = "agent.start".into();
+        snap.approvals[0].detail =
+            r#"{"agent":"agent-1","agent_kind":"codex","node":"laptop","kind":"claude-code","folder":"/w","inside":true,"worktree":true,"depth":1,"prompt":"line one\nline \u001b[2Jtwo\u200b"}"#
+                .into();
+        let lines = render(&snap, false, false, "", "", 0, 0, &t);
+        let text = lines.join("\n");
+        assert!(
+            text.contains("tui-asks-start[agent=agent-1,agent_kind=codex,node=laptop,kind=claude-code,folder=/w,worktree=true,depth=1]"),
+            "{text}"
+        );
+        assert!(
+            text.contains("line one")
+                && text.contains("line \\u{1b}[2Jtwo\\u{200b}")
+                && !text.contains('\u{1b}'),
+            "{text}"
+        );
+        let parent = lines
+            .iter()
+            .position(|l| l.contains("agent-1  codex"))
+            .expect("parent row");
+        assert!(
+            lines[parent + 1].contains("agent-3")
+                && lines[parent + 1].contains("tui-started-by[agent=agent-1]"),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn the_tui_hides_nothing_on_the_shared_list() {
+        // The one list (crates/agora-core/src/hidden-characters.txt, pinned there and in the web client): every range's ends show as
+        // escapes, in a start request and in plain text.
+        for (lo, hi) in agora_core::text::HIDDEN {
+            for c in [*lo, *hi].into_iter().filter_map(char::from_u32) {
+                let s = c.to_string();
+                let want = format!("\\u{{{:x}}}", u32::from(c));
+                assert_eq!(visible(&s), want);
+                // plain() drops the bidirectional controls outright and escapes the rest.
+                assert!(plain(&s) == want || plain(&s).is_empty(), "{want}");
+            }
+        }
+    }
+
+    #[test]
     fn the_header_adds_up_the_tokens_the_agents_used() {
         let mut snap = snapshot();
         snap.agents[0].input_tokens = 1000;
         snap.agents[1].output_tokens = 250;
-        let text = render(&snap, false, false, "", "", 0, &t).join("\n");
+        let text = render(&snap, false, false, "", "", 0, 0, &t).join("\n");
         assert!(text.contains("tui-usage[input=1000,output=250]"), "{text}");
         assert!(!text.contains("tui-cost"), "{text}");
-        let priced = render(&snap, false, false, "", "", 1_234_567, &t).join("\n");
+        let priced = render(&snap, false, false, "", "", 1_234_567, 0, &t).join("\n");
         assert!(priced.contains("tui-cost[usd=1.23]"), "{priced}");
     }
 
     #[test]
     fn without_color_there_are_no_escape_sequences() {
-        let text = render(&snapshot(), false, true, "", "", 0, &t).join("\n");
+        let text = render(&snapshot(), false, true, "", "", 0, 0, &t).join("\n");
         assert!(!text.contains('\x1b'));
-        let colored = render(&snapshot(), true, true, "", "", 0, &t).join("\n");
+        let colored = render(&snapshot(), true, true, "", "", 0, 0, &t).join("\n");
         assert!(colored.contains('\x1b'));
     }
 
     #[test]
     fn an_empty_hub_says_nothing_waits_and_there_are_no_agents() {
-        let text = render(&Snapshot::default(), false, true, "", "", 0, &t).join("\n");
+        let text = render(&Snapshot::default(), false, true, "", "", 0, 0, &t).join("\n");
         assert!(
             text.contains("tui-nothing-waiting[]") && text.contains("tui-no-agents[]"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn a_tool_call_reads_as_words_and_its_text_cannot_drive_the_terminal() {
+        let t = |id: &str, _: &[(&str, Arg)]| id.to_string();
+        let line = |text: &str| {
+            let e = ChatEntry {
+                role: ChatRole::Agent as i32,
+                kind: ChatKind::ToolCall as i32,
+                text: text.into(),
+                ..Default::default()
+            };
+            render_chat(&[e], "agent-1", "", (100, 10), false, &t).join("\n")
+        };
+        assert!(
+            line(r#"{"tool":"execute","arguments":{"command":"cargo test"}}"#)
+                .contains("tui-tool-run cargo test")
+        );
+        assert!(
+            line(r#"{"tool":"Read src/a.rs","arguments":{"file_path":"/w/src/a.rs"}}"#)
+                .contains("tui-tool-read /w/src/a.rs")
+        );
+        // An agent's command with escapes in it is drawn as plain text.
+        let hostile = line(
+            "{\"tool\":\"execute\",\"arguments\":{\"command\":\"echo \\u001b]0;owned\\u0007 x\"}}",
+        );
+        assert!(
+            !hostile.contains('\x1b') && !hostile.contains('\x07'),
+            "{hostile:?}"
+        );
+        assert!(hostile.contains("tui-tool-run echo"), "{hostile}");
+        // Text that is not a call is said as it came.
+        assert!(line("not json").contains("tui-chat-tool"));
     }
 }
