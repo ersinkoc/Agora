@@ -107,6 +107,8 @@ export function App() {
     const ok = await api!.command(node, { agentKinds: {} });
     return (ok.agentKinds?.kinds ?? []).map((k) => ({
       kind: k.kind ?? '', name: k.displayName || (k.kind ?? ''), installed: !!k.installed,
+      // ADR-0069: the program the machine looks for in its PATH (empty from an older machine).
+      program: k.program ?? '',
       // ADR-0059: the kind's launch options (the machine keeps their arguments).
       options: (k.launchOptions ?? []).filter((o) => usableId(o.id ?? '')).map((o) => ({ id: o.id ?? '', label: o.label ?? '', skipsPermissions: !!o.skipsPermissions })),
     }));

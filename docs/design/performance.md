@@ -158,6 +158,23 @@ sockets and the node's uplink set `TCP_NODELAY`.
 
 Not measured: twenty terminals all open and busy at once (the wall shows four; the other agents' output is not relayed to the browser), and any machine over a real network.
 
+### Commands through the hub while another machine floods output (architecture review R5)
+
+`crates/agora-hub/tests/flood_latency.rs` (release, `--ignored`; a real hub on loopback, Linux, 4 runtime threads): a window sends an
+`agent.list` to one machine every 5 ms, 400 times, and times the answer, while another machine writes 4 KiB terminal frames as fast as
+the hub takes them to a window (about 1.5–1.8 GB/s). This times the hub's share of the remote keystroke budget (≤ 5 ms).
+
+| Flood | Before | After |
+|---|---|---|
+| none | p50 21.4 ms, p99 21.7 ms | p50 0.21 ms, p99 0.45 ms, max 0.7 ms |
+| to another window | p50 21.1 ms, p99 21.3 ms | p50 0.21 ms, p99 0.41 ms, max 1.3 ms |
+| to the same window | p50 21.1 ms, p99 21.4 ms | p50 0.21 ms, p99 0.62 ms, max 3.8 ms |
+
+The flood never slowed a command: the 21 ms was the window's loop, which sent a node's answer only at its next 20 ms tick (`PUSH`).
+The loop now wakes when an answer arrives (`server.rs::an_answer`); a non-ignored test keeps the median of 20 round trips under 10 ms.
+Live events to a window still go out at that tick (the subscriber queue is a blocking channel): up to 20 ms on top of the state and
+approval budgets, which they meet.
+
 ### Measured through the hub in the terminal client (ADR-0063)
 
 `agora tui` (release build, macOS on Apple silicon) against a hub and a node on the same machine, driven in a 160×40 pseudo-terminal:

@@ -73,6 +73,9 @@ pub struct LocalListener {
     inner: std::os::unix::net::UnixListener,
     #[cfg(unix)]
     path: PathBuf,
+    /// `<path>.lock`, held while this listener serves the socket (see `unix::local_listen`).
+    #[cfg(unix)]
+    _lock: std::fs::File,
     #[cfg(windows)]
     inner: windows::Listener,
 }
@@ -1190,6 +1193,16 @@ pub fn process_children(pid: u32) -> io::Result<Vec<u32>> {
     }
 }
 
+/// Makes a helper program the node runs for itself (git, and the like) start with no window of its own. The node has no console
+/// (it runs detached, ADR-0062), and on Windows every console program started by a process without one gets a new console window:
+/// each `git` behind a diff flashed a window and took the focus. Windows: `CREATE_NO_WINDOW`, so the helper gets a console with no
+/// window, which the programs it starts share. Elsewhere nothing changes. Not for agents: they run on a terminal of their own.
+pub fn no_console_window(cmd: &mut std::process::Command) -> &mut std::process::Command {
+    #[cfg(windows)]
+    std::os::windows::process::CommandExt::creation_flags(cmd, winproc::NO_WINDOW_FLAGS);
+    cmd
+}
+
 /// Starts `cmd` detached from this process, its terminal and its session (ADR-0062): it survives the terminal closing, the SSH session
 /// ending and this process being killed. Standard input is empty; standard output and error are appended to `log` (created readable by
 /// the user only). Unix: a new session (`setsid`), so no terminal hangup or Ctrl-C reaches it; Windows: `DETACHED_PROCESS` and
@@ -1835,6 +1848,32 @@ pub fn service_status(name: &str) -> io::Result<ServiceState> {
     #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {
         let _ = name;
+        Err(io::Error::from(io::ErrorKind::Unsupported))
+    }
+}
+
+/// Shows one notification of the system's own, with `title` and `body` (ADR-0048 decision 5: the desktop shell tells the user that
+/// approvals wait while its window is out of sight). No library: the system's own notifier is run by its full path with a fixed
+/// argument list, and the words travel as separate arguments (Linux `notify-send`) or as
+/// environment variables (Windows PowerShell), never inside a script, so no text can change what runs. The words come from
+/// `locales/` (the caller's). Waits for the notifier; `NotFound` where there is none (Linux without `notify-send`),
+/// `PermissionDenied` where the user turned notifications off (Windows), `Unsupported` on macOS for now (see `macos.rs`).
+pub fn desktop_notify(title: &str, body: &str) -> io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::desktop_notify(title, body)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        linux::desktop_notify(title, body)
+    }
+    #[cfg(windows)]
+    {
+        winservice::desktop_notify(title, body)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+    {
+        let _ = (title, body);
         Err(io::Error::from(io::ErrorKind::Unsupported))
     }
 }
