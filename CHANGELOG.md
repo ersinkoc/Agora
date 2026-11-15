@@ -11,7 +11,8 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ### Machines
 - Windows: looking at changes (a diff, the changed files) no longer opens and closes a window for every `git` the machine runs,
-  and no longer takes the focus.
+  and no longer takes the focus. A structured agent (opencode, WrongStack, Antigravity) no longer keeps a window open for its
+  whole life.
 - Windows: a machine could stop updating its agents (memory, state) for good when a process's leftover parent id pointed back
   into the agent's own processes. Walking an agent's processes now visits each one once.
 
