@@ -4,6 +4,12 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+### Console (`agora tui`)
+- An arrow key, a click or the start of a paste could be split while the console was busy, so its tail was typed into the agent
+  or the chat (`[A`, `<0;10;5M`), or a paste arrived as keys with its line breaks as Enter. A key now waits 10 ms for its last byte.
+- In the review and the file browser, the mouse wheel, a click, Page Up/Down or Ctrl+arrow closed the view and typed the rest of
+  the key into the console. They are now ignored there.
+
 ### Security
 - macOS: a confined agent is not started when a file it may write also has another name elsewhere (a hard link made outside
   confinement), or when a save copy next to it (`state.json.tmp`) is such a link, since writing it would change that other file too; the message says to remove the link or put a copy in its place

@@ -766,37 +766,42 @@ fn read_key(rx: &mpsc::Receiver<u8>, wait: Duration) -> Option<u8> {
     if k != 0x1b {
         return Some(k);
     }
-    match (
-        rx.recv_timeout(Duration::from_millis(15)),
-        rx.recv_timeout(Duration::from_millis(15)),
-    ) {
-        (Ok(b'['), Ok(b'A')) => Some(b'k'),
-        (Ok(b'['), Ok(b'B')) => Some(b'j'),
-        (Ok(b'['), Ok(b'D')) => Some(0x7f),
-        (Ok(b'['), Ok(b'C')) => Some(b'\r'),
-        _ => Some(0x1b),
-    }
+    escape_key(rx)
 }
 
 /// Like [`read_key`], but says when the keys are gone for good (the terminal closed): `Err`.
 fn read_key_or_gone(rx: &mpsc::Receiver<u8>, wait: Duration) -> Result<Option<u8>, ()> {
     match rx.recv_timeout(wait) {
         Ok(k) if k != 0x1b => Ok(Some(k)),
-        Ok(_) => Ok(Some(
-            match (
-                rx.recv_timeout(Duration::from_millis(15)),
-                rx.recv_timeout(Duration::from_millis(15)),
-            ) {
-                (Ok(b'['), Ok(b'A')) => b'k',
-                (Ok(b'['), Ok(b'B')) => b'j',
-                (Ok(b'['), Ok(b'D')) => 0x7f,
-                (Ok(b'['), Ok(b'C')) => b'\r',
-                _ => 0x1b,
-            },
-        )),
+        Ok(_) => Ok(escape_key(rx)),
         Err(mpsc::RecvTimeoutError::Timeout) => Ok(None),
         Err(mpsc::RecvTimeoutError::Disconnected) => Err(()),
     }
+}
+
+/// The rest of a key that began with ESC, read whole: `ESC [ … A/B/D/C` (with xterm modifiers too) as k / j / ⌫ / Enter, any other
+/// `ESC [` sequence (Page Down, a click or the wheel, which the review and the files still receive) as no key, so it never reads as
+/// Esc nor leaves its tail to be read as typed keys; ESC with anything else, or alone for 15 ms, as Esc.
+fn escape_key(rx: &mpsc::Receiver<u8>) -> Option<u8> {
+    let next = || rx.recv_timeout(Duration::from_millis(15)).ok();
+    if next() != Some(b'[') {
+        // ESC and one more byte (Alt and a key) are Esc, as before.
+        let _ = next();
+        return Some(0x1b);
+    }
+    // Parameters up to the final byte; one longer than `input`'s longest is not a key and is dropped.
+    for _ in 0..32 {
+        match next() {
+            Some(b'A') => return Some(b'k'),
+            Some(b'B') => return Some(b'j'),
+            Some(b'D') => return Some(0x7f),
+            Some(b'C') => return Some(b'\r'),
+            Some(0x40..=0x7e) => return None,
+            Some(_) => {}
+            None => return Some(0x1b),
+        }
+    }
+    None
 }
 
 /// A key within `wait` (`Some(Some(k))`), or the window resized meanwhile (`Some(None)`: draw again for the new size), or nothing:
@@ -1929,22 +1934,18 @@ fn console(
                 rows: area.height,
             });
         }
-        let mut bytes = Vec::new();
-        while let Ok(b) = rx.try_recv() {
-            bytes.push(b);
-        }
-        if bytes.is_empty() && terminal_gone() {
+        let typed = read_keys(
+            rx,
+            &mut c.parser,
+            &mut typed_at,
+            Instant::now(),
+            &mut events,
+        );
+        if !typed && terminal_gone() {
             if let Some(p) = preview.take() {
                 p.close(session);
             }
             return Next::Quit;
-        }
-        if !bytes.is_empty() {
-            typed_at = Some(Instant::now());
-        }
-        events.extend(c.parser.push(&bytes));
-        if bytes.is_empty() {
-            events.extend(c.parser.flush());
         }
         // Any key or click closes the box of a long notice (and still does what it does).
         if c.note.open && c.note.drawn && !events.is_empty() {
@@ -2218,6 +2219,35 @@ fn console(
             last_refresh = Instant::now();
         }
     }
+}
+
+/// How long after its last byte an unfinished escape sequence is read as the keys typed (a lone ESC as Esc). The reader thread hands
+/// bytes over one at a time, so a turn of the loop can come between two bytes of one key; only a pause this long ends a sequence.
+const KEY_GAP: Duration = Duration::from_millis(10);
+
+/// The bytes the keyboard's reader thread handed over since the last turn, read as the console's events (added to `events`), with
+/// `typed_at` moved to `now` when any came. Returns whether any came.
+fn read_keys(
+    rx: &mpsc::Receiver<u8>,
+    parser: &mut Parser,
+    typed_at: &mut Option<Instant>,
+    now: Instant,
+    events: &mut Vec<AppEvent>,
+) -> bool {
+    let mut bytes = Vec::new();
+    while let Ok(b) = rx.try_recv() {
+        bytes.push(b);
+    }
+    if bytes.is_empty() {
+        // A turn that found nothing is not yet a pause (an arrow was read as Esc and `[A`): flush once KEY_GAP passed.
+        if typed_at.is_none_or(|t| now.saturating_duration_since(t) >= KEY_GAP) {
+            events.extend(parser.flush());
+        }
+        return false;
+    }
+    *typed_at = Some(now);
+    events.extend(parser.push(&bytes));
+    true
 }
 
 fn draw_console(
@@ -3433,5 +3463,298 @@ mod forget_tests {
         // Only its own request is the chat tab's to answer.
         assert!(waiting_for(&snap, "n/agent-1").is_none());
         assert!(waiting_for(&snap, "n/agent-2").is_some());
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod read_keys_tests {
+    use super::*;
+    use agora_tui::app::{Key, Mouse, MouseKind};
+
+    /// The console loop's keyboard side, driven turn by turn: what the reader thread handed over before a turn, and when it ran.
+    struct Keys {
+        tx: mpsc::Sender<u8>,
+        rx: mpsc::Receiver<u8>,
+        parser: Parser,
+        typed_at: Option<Instant>,
+        t0: Instant,
+    }
+
+    impl Keys {
+        fn new() -> Self {
+            let (tx, rx) = mpsc::channel();
+            Keys {
+                tx,
+                rx,
+                parser: Parser::default(),
+                typed_at: None,
+                t0: Instant::now(),
+            }
+        }
+
+        /// One turn of the loop `ms` after the start, with `bytes` sent by the reader thread since the turn before.
+        fn turn(&mut self, ms: u64, bytes: &[u8]) -> Vec<AppEvent> {
+            for &b in bytes {
+                self.tx.send(b).unwrap();
+            }
+            let mut events = Vec::new();
+            read_keys(
+                &self.rx,
+                &mut self.parser,
+                &mut self.typed_at,
+                self.t0 + Duration::from_millis(ms),
+                &mut events,
+            );
+            events
+        }
+
+        fn turns(&mut self, turns: &[(u64, &[u8])]) -> Vec<AppEvent> {
+            turns.iter().flat_map(|&(ms, b)| self.turn(ms, b)).collect()
+        }
+    }
+
+    fn k(k: Key) -> AppEvent {
+        AppEvent::Key(k)
+    }
+
+    /// Checks every case, printing each, and fails at the end if any differed.
+    fn check(cases: Vec<(&str, Vec<AppEvent>, Vec<AppEvent>)>) {
+        let mut failed = Vec::new();
+        for (name, expected, actual) in cases {
+            println!("{name}\n  EXPECTED: {expected:?}\n  ACTUAL:   {actual:?}");
+            if expected != actual {
+                failed.push(name);
+            }
+        }
+        assert!(failed.is_empty(), "differed: {failed:?}");
+    }
+
+    #[test]
+    fn an_escape_sequence_whose_bytes_reach_separate_turns_is_still_one_key() {
+        // The reader thread hands bytes over one at a time, so a turn of the loop (2 ms while typing, at once while the hub's frames
+        // stream in) can find the channel empty between the bytes of one key. A turn that found nothing flushed the parser then:
+        // an arrow came out as Esc and the text `[A` typed into the agent, a click as Alt-[ and `<0;10;5M`.
+        let down = AppEvent::Mouse(Mouse {
+            kind: MouseKind::Down,
+            col: 9,
+            row: 4,
+        });
+        check(vec![
+            (
+                "arrow split after ESC",
+                vec![k(Key::Up)],
+                Keys::new().turns(&[(0, b"\x1b"), (1, b""), (2, b"[A")]),
+            ),
+            (
+                "mouse report split after ESC [",
+                vec![down.clone()],
+                Keys::new().turns(&[(0, b"\x1b["), (1, b""), (2, b"<0;10;5M")]),
+            ),
+            (
+                "paste start split after ESC [ 2",
+                vec![AppEvent::Paste("ls\r".into())],
+                Keys::new().turns(&[(0, b"\x1b[2"), (1, b""), (2, b"00~ls\r\x1b[201~")]),
+            ),
+            // Controls: unaffected before the fix as after it.
+            (
+                "control: arrow in one turn",
+                vec![k(Key::Up)],
+                Keys::new().turns(&[(0, b"\x1b[A")]),
+            ),
+            (
+                "control: mouse report in one turn",
+                vec![down],
+                Keys::new().turns(&[(0, b"\x1b[<0;10;5M")]),
+            ),
+            (
+                "control: lone Esc, nothing more for 100 ms",
+                vec![k(Key::Esc)],
+                Keys::new().turns(&[(0, b"\x1b"), (100, b"")]),
+            ),
+            (
+                "control: UTF-8 character split by an empty turn",
+                vec![k(Key::Char('ş'))],
+                Keys::new().turns(&[(0, b"\xc5"), (1, b""), (2, b"\x9f")]),
+            ),
+        ]);
+    }
+
+    #[test]
+    fn a_pause_of_key_gap_after_the_last_byte_still_ends_a_sequence() {
+        let gap = u64::try_from(KEY_GAP.as_millis()).unwrap();
+        let mut lone = Keys::new();
+        let before = lone.turns(&[(0, b"\x1b"), (2, b""), (gap - 1, b"")]);
+        check(vec![
+            // A lone Esc keypress: nothing until KEY_GAP after the byte, Esc at exactly KEY_GAP.
+            ("lone Esc before KEY_GAP", vec![], before),
+            (
+                "lone Esc at KEY_GAP",
+                vec![k(Key::Esc)],
+                lone.turn(gap, b""),
+            ),
+            // The pause counts from the last byte, not the last turn: empty turns in between change nothing.
+            (
+                "arrow after many empty turns within KEY_GAP",
+                vec![k(Key::Down)],
+                Keys::new().turns(&[
+                    (0, b"\x1b"),
+                    (2, b""),
+                    (4, b""),
+                    (6, b"["),
+                    (8, b""),
+                    (gap + 5, b"B"),
+                ]),
+            ),
+            // Alt+x as a terminal sends it, split by an empty turn, stays Alt+x.
+            (
+                "Alt+x split by an empty turn",
+                vec![k(Key::Alt('x'))],
+                Keys::new().turns(&[(0, b"\x1b"), (1, b""), (2, b"x")]),
+            ),
+            // An Esc that really was alone, then text: Esc, then the text, nothing lost or reordered.
+            (
+                "Esc after a pause, then text",
+                vec![
+                    k(Key::Char('a')),
+                    k(Key::Esc),
+                    k(Key::Char('[')),
+                    k(Key::Char('A')),
+                ],
+                Keys::new().turns(&[(0, b"a\x1b"), (gap, b""), (gap + 1, b"[A")]),
+            ),
+            // A mouse release split twice (the `m` must not reach the shell as a key).
+            (
+                "mouse release split twice",
+                vec![AppEvent::Mouse(Mouse {
+                    kind: MouseKind::Up,
+                    col: 9,
+                    row: 4,
+                })],
+                Keys::new().turns(&[
+                    (0, b"\x1b"),
+                    (1, b""),
+                    (2, b"[<0;1"),
+                    (3, b""),
+                    (4, b"0;5m"),
+                ]),
+            ),
+            // Nothing typed yet: an empty turn is nothing.
+            (
+                "no keys at all",
+                vec![],
+                Keys::new().turns(&[(0, b""), (100, b"")]),
+            ),
+        ]);
+    }
+}
+
+#[cfg(test)]
+mod escape_key_tests {
+    use super::*;
+
+    /// What `read_key_or_gone` returns.
+    type Got = Result<Option<u8>, ()>;
+
+    /// What `read_key_or_gone` makes of `bytes` (all sent before it reads; the keyboard then closes, so nothing waits on the clock),
+    /// and the bytes it left for whoever reads next (the console's parser once a view or picker returns).
+    fn read(bytes: &[u8]) -> (Got, Vec<u8>) {
+        let (tx, rx) = mpsc::channel();
+        for &b in bytes {
+            let _ = tx.send(b);
+        }
+        drop(tx);
+        let got = read_key_or_gone(&rx, Duration::from_millis(50));
+        (got, rx.try_iter().collect())
+    }
+
+    #[test]
+    fn a_longer_escape_sequence_is_read_whole_and_never_closes_a_view_as_esc() {
+        // The review, the files and the reader close on Esc (0x1b). They keep the console's mouse reporting, so the wheel sends
+        // `ESC [ < 65 ; x ; y M`; Page Down sends `ESC [ 6 ~`. Only two bytes after ESC were read: the view closed as if Esc was
+        // pressed and the rest of the sequence was left for the console, which read it as typed keys.
+        let cases: [(&str, &[u8], Got); 7] = [
+            ("wheel down in a view", b"\x1b[<65;10;3M", Ok(None)),
+            ("click in a view", b"\x1b[<0;10;3M", Ok(None)),
+            ("Page Down", b"\x1b[6~", Ok(None)),
+            ("Ctrl+Down (xterm modifier)", b"\x1b[1;5B", Ok(Some(b'j'))),
+            // Controls: unaffected before the fix as after it.
+            ("control: Down", b"\x1b[B", Ok(Some(b'j'))),
+            ("control: lone Esc", b"\x1b", Ok(Some(0x1b))),
+            ("control: q", b"q", Ok(Some(b'q'))),
+        ];
+        let mut failed = Vec::new();
+        for (name, bytes, key) in cases {
+            let (got, left) = read(bytes);
+            println!(
+                "{name}\n  EXPECTED: key {key:?}, left for the console {:?}\n  ACTUAL:   key {got:?}, left for the console {:?}",
+                "",
+                String::from_utf8_lossy(&left)
+            );
+            if got != key || !left.is_empty() {
+                failed.push(name);
+            }
+        }
+        assert!(failed.is_empty(), "differed: {failed:?}");
+    }
+
+    #[test]
+    fn what_follows_an_escape_sequence_is_the_next_key_and_unfinished_ones_are_esc() {
+        let (tx, rx) = mpsc::channel();
+        for &b in b"\x1b[6~q\x1b[<64;1;1Mk" {
+            let _ = tx.send(b);
+        }
+        drop(tx);
+        let wait = Duration::from_millis(50);
+        let mut got = Vec::new();
+        for _ in 0..5 {
+            got.push(read_key_or_gone(&rx, wait));
+        }
+        let cases = [
+            // Page Down, q, the wheel, k, then the keyboard is gone: in order, nothing lost or eaten.
+            (
+                "keys after sequences",
+                format!(
+                    "{:?}",
+                    [Ok(None), Ok(Some(b'q')), Ok(None), Ok(Some(b'k')), Err(())]
+                ),
+                format!("{got:?}"),
+            ),
+            // `ESC [` with nothing after it is Esc, as before.
+            (
+                "unfinished ESC [",
+                format!("{:?}", (Ok::<_, ()>(Some(0x1bu8)), "")),
+                {
+                    let (k, left) = read(b"\x1b[");
+                    format!("{:?}", (k, String::from_utf8_lossy(&left)))
+                },
+            ),
+            // Alt and a key: Esc, both bytes taken, as before.
+            ("Alt+x", format!("{:?}", (Ok::<_, ()>(Some(0x1bu8)), "")), {
+                let (k, left) = read(b"\x1bx");
+                format!("{:?}", (k, String::from_utf8_lossy(&left)))
+            }),
+            // The earlier split view's questions read the same way.
+            (
+                "read_key: Page Down then y",
+                format!("{:?}", (None::<u8>, Some(b'y'))),
+                {
+                    let (tx, rx) = mpsc::channel();
+                    for &b in b"\x1b[5~y" {
+                        let _ = tx.send(b);
+                    }
+                    drop(tx);
+                    format!("{:?}", (read_key(&rx, wait), read_key(&rx, wait)))
+                },
+            ),
+        ];
+        let mut failed = Vec::new();
+        for (name, expected, actual) in cases {
+            println!("{name}\n  EXPECTED: {expected}\n  ACTUAL:   {actual}");
+            if expected != actual {
+                failed.push(name);
+            }
+        }
+        assert!(failed.is_empty(), "differed: {failed:?}");
     }
 }
