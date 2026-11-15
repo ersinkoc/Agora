@@ -1,6 +1,7 @@
 # 0080. The file browser does not show secret files
-Status: Proposed
+Status: Accepted
 Date: 2026-11-15
+Accepted: 2026-11-15 (the maintainer's explicit message in the merger chat, accepting the ADRs listed by number (#613 ADR-0060 Amendment A, #614 ADR-0078, #615 ADR-0080, #616 ADR-0079): they accepted all of them). The open questions' proposed answers stand.
 Origin: a question the maintainer was asked while the file and review screens (#483, #487, #488, #500) were built: `.env` files and private keys show in
 full in the file browser, which is the node's old behaviour. Asked "should they be hidden?", they approved, without
 seeing details; this text is the detailed proposal and is not accepted until they read it and say so.
