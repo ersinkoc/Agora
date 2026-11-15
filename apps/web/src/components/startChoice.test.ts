@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ProjectChoice } from '../net/view';
-import { machineFor, missingPrograms, shortBinary, trustCommand } from './startChoice';
+import { isBareName, machineFor, missingPrograms, shortBinary, trustCommand } from './startChoice';
 
 const project = (node: string): ProjectChoice => ({ node, projectId: `p-${node}`, path: `/work/${node}`, label: node });
 
@@ -54,6 +54,15 @@ describe('shortBinary and trustCommand', () => {
     expect(trustCommand(String.raw`C:\x\it's agora.exe`, 'windows', 'd1', 'k1')).toBe(String.raw`& '.\it''s agora.exe' node trust d1 k1`);
     expect(trustCommand('/home/x/agora (1)', 'macos', 'd1', 'k1')).toBe(`'./agora (1)' node trust d1 k1`);
     expect(trustCommand("/home/x/it's", 'linux', 'd1', 'k1')).toBe(String.raw`'./it'\''s' node trust d1 k1`);
+  });
+  it('treats a file name with no folder as bare, as a member receives it from the hub (#598)', () => {
+    expect(isBareName('agora.exe')).toBe(true);
+    expect(isBareName('agora (1).exe')).toBe(true);
+    expect(isBareName(String.raw`Downloads\agora.exe`)).toBe(false);
+    expect(isBareName('bin/agora')).toBe(false);
+    // A bare name is shown as it is (nothing to shorten, nothing more to reveal) and run from its folder.
+    expect(shortBinary('agora.exe', 'windows')).toBe('agora.exe');
+    expect(trustCommand('agora (1).exe', 'windows', 'd1', 'k1')).toBe(String.raw`& '.\agora (1).exe' node trust d1 k1`);
   });
   it('tells Windows from the machine, not from a backslash, so a bare file name still gets the Windows form (#599 review)', () => {
     expect(trustCommand('agora.exe', 'windows', 'd1', 'k1')).toBe(String.raw`.\agora.exe node trust d1 k1`);

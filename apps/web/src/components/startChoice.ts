@@ -30,6 +30,11 @@ export function shortBinary(binary: string, os?: string): string {
   return parts.length > 2 ? `…${sep}${parts.slice(-2).join(sep)}` : parts.join(sep);
 }
 
+/** Whether `binary` is a file name only, with no folder (what a member gets from the hub, #598). */
+export function isBareName(binary: string): boolean {
+  return !/[\\/]/.test(binary);
+}
+
 /** Whether the machine runs Windows: from its `os`, which holds whatever form of the path arrives (a bare file name has no `\`); from
  * the path only when the machine did not say. */
 function isWindows(binary: string, os?: string): boolean {

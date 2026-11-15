@@ -552,6 +552,7 @@ closed-reason-other = hub'a ulaşılamadı ya da reddetti
 
 trust-hint = Bu makine ({ $machine }) bu cihaza henüz güvenmiyor. Bu komutu o makinede bir kez çalıştırın, sonra yeniden Başlat'a basın:
 trust-hint-binary = Bu makine ({ $machine }) bu cihaza henüz güvenmiyor. Agora orada PATH üzerinde olmayan { $where } konumundan çalışıyor: o klasörde bu komutu bir kez çalıştırın (Windows'ta PowerShell'de), sonra yeniden Başlat'a basın:
+trust-hint-file = Bu makine ({ $machine }) bu cihaza henüz güvenmiyor. Oradaki Agora programı ({ $file }) PATH üzerinde değil: o dosyanın bulunduğu klasörde bu komutu bir kez çalıştırın (Windows'ta PowerShell'de), sonra yeniden Başlat'a basın:
 trust-show-path = Yolun tamamını göster
 trust-copy = Kopyala
 trust-copied = Kopyalandı

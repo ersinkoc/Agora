@@ -4,7 +4,7 @@ import { t } from '../i18n';
 import type { MachineModel, ProjectChoice } from '../net/view';
 import { childPath, directoryReasonKey, type DirectoryInfo, type DirectoryListing } from '../net/directory';
 import { Icon } from './Icon';
-import { machineFor, missingPrograms, shortBinary, trustCommand } from './startChoice';
+import { isBareName, machineFor, missingPrograms, shortBinary, trustCommand } from './startChoice';
 import { ASK, chosenIds, confirmedIds, confirmSkip, harmless, initialLaunch, keepAsking, labelOf, pickPermission, skipping, toggleHarmless, usableOptions, type LaunchOptionChoice } from './launchChoice';
 // ADR-0059: `options` are the kind's launch options as the machine lists them (none from an older machine).
 export interface KindChoice { kind: string; name: string; installed: boolean; options?: LaunchOptionChoice[]; program?: string }
@@ -235,7 +235,10 @@ export function StartAgent({ projects, machines, initialNode, trust, askApproval
             </div>}
           </>}
           {error && <p role="alert" className="m-0 text-needs-you">{error === 'approval-not-trusted' && trust ? (binary
-            ? t('trust-hint-binary', { machine: online.find(m => m.id === node)?.name ?? node, where: shortBinary(binary, machineOs) })
+            // A member gets the file name only (#598): no folder to name, so the sentence asks for the folder where that file is.
+            ? isBareName(binary)
+              ? t('trust-hint-file', { machine: online.find(m => m.id === node)?.name ?? node, file: binary })
+              : t('trust-hint-binary', { machine: online.find(m => m.id === node)?.name ?? node, where: shortBinary(binary, machineOs) })
             : t('trust-hint', { machine: online.find(m => m.id === node)?.name ?? node })) : t(error)}</p>}
           {error === 'approval-not-trusted' && trust && binary && shortBinary(binary, machineOs) !== binary && (wholePath
             ? <code className="break-all font-mono text-xs text-muted">{binary}</code>
