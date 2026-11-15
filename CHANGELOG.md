@@ -11,6 +11,12 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## 0.3.12
 
+### Known issue (Windows)
+- Microsoft Defender may flag `agora.exe` shortly after `agora service install`. It was seen on one machine with the 0.3.12 release
+  file, whose checksum and signature `agora update` had checked (`Behavior:Win32/Execution.A!ml`, a guess from what the program does,
+  not a known-malware match). Defender then quarantined the file, ended the supervisor and the node, and removed the `agora-node`
+  login task, so the machine went offline and `agora` no longer ran. What you can do is in getting-started ("Windows Defender").
+
 ### Hub
 - A machine whose certificate is revoked while it is connected (for example, another machine enrolled under its name) is shown
   offline at once. Its connection already ended, but every window kept showing it online until the hub restarted.
