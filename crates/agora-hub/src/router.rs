@@ -8,7 +8,7 @@
 //! docs/specs/protocol.md, "Shared terminal size").
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use agora_protocol::v1::{self, command_request};
@@ -43,6 +43,18 @@ struct Link {
     conn: u64,
     capabilities: Vec<String>,
     tx: mpsc::UnboundedSender<ToNode>,
+    load: Arc<LinkLoad>,
+}
+
+/// How much one node connection has to do (`GET /api/metrics`, architecture review R8). Kept with the connection, so a connection
+/// that ended or was replaced stops counting at once, whatever it still held.
+#[derive(Debug, Default)]
+pub struct LinkLoad {
+    /// Commands queued for the node and not yet written to it (the queue is unbounded: a node that does not read its connection
+    /// grows it).
+    pub queued: AtomicUsize,
+    /// Commands written to the node and not answered yet.
+    pub unanswered: AtomicUsize,
 }
 
 struct Relay {
@@ -153,9 +165,15 @@ pub struct Registration {
     router: Arc<Router>,
     node: String,
     conn: u64,
+    load: Arc<LinkLoad>,
 }
 
 impl Registration {
+    /// This connection's load, for the connection's own loop to keep up to date.
+    pub fn load(&self) -> Arc<LinkLoad> {
+        Arc::clone(&self.load)
+    }
+
     /// Ends the registration now. Returns whether this was still the node's current connection: `false` when a newer
     /// connection of the same node replaced it, which then stays registered.
     pub fn end(self) -> bool {
@@ -212,6 +230,7 @@ impl Router {
     ) -> (Registration, mpsc::UnboundedReceiver<ToNode>) {
         let (tx, rx) = mpsc::unbounded_channel();
         let conn = self.next.fetch_add(1, Ordering::Relaxed);
+        let load = Arc::new(LinkLoad::default());
         let replaced = self
             .nodes
             .lock()
@@ -222,6 +241,7 @@ impl Router {
                     conn,
                     tx,
                     capabilities,
+                    load: Arc::clone(&load),
                 },
             )
             .is_some();
@@ -235,6 +255,7 @@ impl Router {
                 router: Arc::clone(self),
                 node: node.to_string(),
                 conn,
+                load,
             },
             rx,
         )
@@ -371,6 +392,17 @@ impl Router {
     /// How many terminal relays ended because the window could not keep up (or was gone).
     pub fn relays_dropped(&self) -> u64 {
         self.relays_dropped.load(Ordering::Relaxed)
+    }
+
+    /// Commands queued for nodes and not yet written, and commands written and not answered yet, over every node connected now.
+    pub fn node_load(&self) -> (usize, usize) {
+        let nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
+        nodes.values().fold((0, 0), |(q, u), l| {
+            (
+                q.saturating_add(l.load.queued.load(Ordering::Relaxed)),
+                u.saturating_add(l.load.unanswered.load(Ordering::Relaxed)),
+            )
+        })
     }
 
     /// Bytes of terminal frames passed on to windows so far.
@@ -652,13 +684,20 @@ impl Router {
                 Error::new(ErrorCode::ProtocolCapabilityMissing).with("capability", "board.join")
             );
         }
-        link.tx
+        // Counted before it is queued, so the connection's loop never takes one off before it was counted.
+        link.load.queued.fetch_add(1, Ordering::Relaxed);
+        if link
+            .tx
             .send(ToNode::Command {
                 request: Box::new(request),
                 reply,
                 stream,
             })
-            .map_err(|_| offline())?;
+            .is_err()
+        {
+            link.load.queued.fetch_sub(1, Ordering::Relaxed);
+            return Err(offline());
+        }
         Ok(rx)
     }
 }
@@ -870,6 +909,31 @@ mod tests {
         drop(reg);
         assert!(!r.is_connected("a"));
         assert!(r.send("a", req("a")).is_err());
+    }
+
+    #[test]
+    fn a_nodes_queued_commands_are_counted_until_its_connection_takes_them_or_ends() {
+        // `GET /api/metrics` (R8): commands waiting for a node that does not read its connection are counted, per connection.
+        let r = Router::new();
+        let (a, mut rx_a) = r.register("a");
+        let (_b, _rx_b) = r.register("b");
+        let _keep: Vec<_> = (0..3)
+            .map(|i| r.send("a", req(&format!("a{i}"))).unwrap())
+            .collect();
+        let _keep_b = r.send("b", req("b")).unwrap();
+        assert_eq!(r.node_load(), (4, 0));
+        // The connection's loop takes one and counts it as written and waiting for its answer (server.rs does this).
+        let load = a.load();
+        assert!(matches!(rx_a.try_recv(), Ok(ToNode::Command { .. })));
+        load.queued.fetch_sub(1, Ordering::Relaxed);
+        load.unanswered.store(1, Ordering::Relaxed);
+        assert_eq!(r.node_load(), (3, 1));
+        // A connection that ends stops counting at once, whatever it still held; a refused send is not counted.
+        drop(a);
+        assert_eq!(r.node_load(), (1, 0));
+        drop(rx_a);
+        assert!(r.send("a", req("late")).is_err());
+        assert_eq!(r.node_load(), (1, 0));
     }
 
     #[test]
