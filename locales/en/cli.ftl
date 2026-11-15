@@ -2,12 +2,12 @@
 
 cli-usage =
     Usage:
-      agora [--ui tui|web|none [--save]]
+      agora [--ui tui|web|none [--save]] [--resume ask|auto [--save]]
       agora web
       agora status
       agora down
       agora service install|remove|status
-      agora node run [--socket PATH] [--manifests DIR] [--project PATH]... [--data DIR] [--worktrees DIR]
+      agora node run [--socket PATH] [--manifests DIR] [--project PATH]... [--data DIR] [--worktrees DIR] [--resume auto]
       agora agent start KIND [--cwd PATH] [--worktree] [--project NAME] [--name NAME] [--accept-project-id-change] [--socket PATH]
       agora project init [--cwd PATH] [--socket PATH]
       agora agent stop AGENT_ID [--socket PATH]
@@ -229,6 +229,9 @@ frontdoor-choose = Type 1, 2 or 3 and press Enter:
 frontdoor-lan-question = Let other machines of yours connect? [y/N]
 frontdoor-autostart-question = Start Agora when you log in? [Y/n]
 frontdoor-autostart-later = Agora will not start by itself when you log in. `agora service install` sets that up whenever you want.
+frontdoor-resume-question = Bring agents back by themselves after a restart? [Y/n]
+frontdoor-resume-off = Agents will not come back by themselves after a restart; the window offers to bring each one back. `agora --resume auto --save` turns it on again.
+frontdoor-resume-saved = Saved. It applies from the next time Agora starts on this machine: a node running now keeps what it started with until `agora down`.
 frontdoor-join-later = Joining from here is not available yet. On the machine that runs Agora, run `agora hub code`; then here run `agora node enroll` and `agora node run` (see `agora --help`).
 frontdoor-get-started = Agora is not set up on this machine yet. Run `agora` in a terminal and answer one question. (Settings are kept in { $path }.)
 frontdoor-set-up-by-hand = This machine already has an Agora started by hand ({ $path }). `agora` does not take it over yet: keep using `agora hub run` and `agora node run`, or set AGORA_HOME to a new folder to let `agora` set one up there.

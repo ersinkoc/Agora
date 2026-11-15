@@ -64,6 +64,7 @@ launch = ["sh"]
 
 fn node(e: &Env, limits: NodeLimits) -> Node {
     Node::start(&NodeConfig {
+        resume_all: false,
         node_id: "node-test".into(),
         // Short path: Unix socket paths are limited to about 100 bytes.
         socket: e.dir.join("c.sock"),
@@ -1136,6 +1137,7 @@ fn a_node_with_an_empty_manifests_folder_offers_and_starts_every_built_in_kind_a
     let empty = e.dir.join("empty-manifests");
     std::fs::create_dir_all(&empty).unwrap();
     let n = Node::start(&NodeConfig {
+        resume_all: false,
         node_id: "node-test".into(),
         socket: e.dir.join("c.sock"),
         data_dir: e.dir.join("data"),
