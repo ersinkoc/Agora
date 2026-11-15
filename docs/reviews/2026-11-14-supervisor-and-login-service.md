@@ -68,6 +68,13 @@ Not seen on a real machine: a task disabled by Group Policy (no domain here), an
   - BTM marked each scratch job `notified` (the "Background Items Added" notice); its records went away with the job files;
   - `kill -9` → started again after 10.1 s; an exit 0 → not restarted (the ignored hand check, again).
   - Not measured: an SSH session with no login at the screen (`launchctl print gui/<uid>` failing → "no login session").
+- **macOS, the LAN node `mac` moved to `agora service` on 0.3.12**, by macos with the maintainer's OK given in the session
+  (`AGORA_HOME=~/.agora-lan`, a node-only `machine.toml`, hub `192.168.1.246:7444`):
+  - `install` → "starts when you log in … started now"; `status` → running, the plist 0600 with the marker;
+  - **Local Network privacy:** the node started by launchd got `No route to host (os error 65)` to the hub, while Terminal reached it.
+    After the maintainer allowed `agora` (Privacy & Security > Local Network) the link came up within seconds. A node started
+    from Terminal uses Terminal's permission, so this shows only under the service;
+  - Not measured yet: whether a new binary from `agora update` is asked again.
 - **Linux, scratch homes, #543 at 1d59d55 and #548 / #551**, by linux and linux Codex:
   - crash → restart after 30 s;
   - `kill -9` of the supervisor → the node ended within 1.5 s;
