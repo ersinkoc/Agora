@@ -14,6 +14,9 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
   (#571). Such links inside a folder it may write are not looked for at each start.
 
 ### Machines
+- An agent that died in the middle of a screen update no longer leaves the machine's view of its terminal frozen. After a
+  "synchronized update" started and never ended, everything the terminal printed afterwards was held back; it is now let go
+  after 150 ms, at the next output (audit finding F702).
 - Windows: a machine could stop updating its agents (memory, state) for good when a process's leftover parent id pointed back
   into the agent's own processes. Walking an agent's processes now visits each one once.
 
