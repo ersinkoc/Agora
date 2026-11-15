@@ -1303,7 +1303,7 @@ mod tests {
     /// Runs a node's conversation against a fake hub on loopback until it ends or `stop_after` passes; returns how it ended
     /// and how long it took.
     fn talk(name: &str, hub: Hub, stop_after: Duration) -> (Result<(), LinkError>, Duration) {
-        talk_frozen(name, hub, stop_after, None)
+        talk_frozen(name, hub, stop_after, None, FAST)
     }
 
     /// [`talk`], with the whole runtime (the node's conversation and the fake hub alike) blocked for `freeze.1` after `freeze.0`:
@@ -1313,6 +1313,7 @@ mod tests {
         hub: Hub,
         stop_after: Duration,
         freeze: Option<(Duration, Duration)>,
+        live: Liveness,
     ) -> (Result<(), LinkError>, Duration) {
         let dir = std::env::temp_dir().join(format!("agora-link-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1384,7 +1385,7 @@ mod tests {
                 None,
                 None,
                 None,
-                FAST,
+                live,
                 None,
                 &AtomicBool::new(false),
             )
@@ -1411,6 +1412,7 @@ mod tests {
             Hub::Answers,
             Duration::from_secs(10),
             Some(freeze),
+            FAST,
         );
         assert!(matches!(r, Err(LinkError::Suspended)), "{r:?}");
         // Right after it ran again, not at the silence deadline counted from then.
@@ -1472,10 +1474,17 @@ mod tests {
 
     #[test]
     fn an_idle_hub_that_answers_pings_is_never_dropped() {
-        // Five deadlines with nothing but pings and pongs on the link.
-        let (r, took) = talk("answers", Hub::Answers, FAST.deadline * 5);
+        // Three deadlines with nothing but pings and pongs on the link. Pings as often as FAST, but a deadline and a suspension
+        // threshold a loaded CI runner cannot reach by pausing this test's thread (FAST's 250 ms "suspended" was reached on macOS
+        // runners: the link was given up although the hub answered every ping).
+        const IDLE: Liveness = Liveness {
+            ping_every: Duration::from_millis(50),
+            deadline: Duration::from_millis(1500),
+            suspended_after: Duration::from_millis(1000),
+        };
+        let (r, took) = talk_frozen("answers", Hub::Answers, IDLE.deadline * 3, None, IDLE);
         assert!(r.is_ok(), "{r:?}");
-        assert!(took >= FAST.deadline * 5, "{took:?}");
+        assert!(took >= IDLE.deadline * 3, "{took:?}");
     }
 
     /// ADR-0059: a routed `AgentStart` that chose launch options carries no signature over them, so it is refused where the hub's
