@@ -20,14 +20,38 @@ describe('pairing (ADR-0065)', () => {
     expect(formatPairNumber('482-193')).toBe('482-193');
   });
 
-  it('names a machine with its system and address, and leaves out a system it does not know', () => {
-    expect(pairTitle(machine)).toBe('New machine "laptop" (Windows, 192.168.1.50) wants to join');
-    expect(pairTitle({ ...machine, os: 'macos' })).toContain('(macOS, 192.168.1.50)');
-    expect(pairTitle({ ...machine, os: '' })).toBe('New machine "laptop" (192.168.1.50) wants to join');
-    expect(pairTitle({ ...machine, os: undefined })).toBe('New machine "laptop" (192.168.1.50) wants to join');
+  it('has one fixed title and gives the name, the system and the address a row each, leaving out a system it does not know', () => {
+    expect(pairTitle(machine)).toBe('A new machine wants to join');
+    expect(pairTitle(browser)).toBe('A browser wants to sign in');
+    const m = renderToStaticMarkup(<PairRequest request={machine} onAnswer={async () => true} />);
+    expect(m).toContain('<dt class="text-muted">Name</dt><dd class="m-0 min-w-0 break-words text-ink"><bdi>laptop</bdi></dd>');
+    expect(m).toContain('<bdi>Windows</bdi>');
+    expect(m).toContain('>192.168.1.50</dd>');
+    expect(renderToStaticMarkup(<PairRequest request={{ ...machine, os: 'macos' }} onAnswer={async () => true} />)).toContain('<bdi>macOS</bdi>');
+    // No system known: no System row.
+    for (const os of ['', undefined]) {
+      expect(renderToStaticMarkup(<PairRequest request={{ ...machine, os }} onAnswer={async () => true} />)).not.toContain('>System<');
+    }
     // A system this build has no words for is shown as the machine reported it.
     expect(systemName('freebsd')).toBe('freebsd');
-    expect(pairTitle(browser)).toBe('Browser "Chrome · macOS" (192.168.1.57) wants to sign in');
+    // A browser has no system row.
+    expect(renderToStaticMarkup(<PairRequest request={browser} onAnswer={async () => true} />)).not.toContain('>System<');
+  });
+
+  it('keeps a name that imitates an address in the name row: the address is its own row, what the hub saw', () => {
+    const hostile = { ...machine, name: 'x" (linux, 10.0.0.1) wants to join. New machine "y' };
+    const html = renderToStaticMarkup(<PairRequest request={hostile} onAnswer={async () => true} />);
+    // Text, never markup, and only inside the name row.
+    expect(html).toContain('<bdi>x&quot; (linux, 10.0.0.1) wants to join. New machine &quot;y</bdi>');
+    expect(html.split('10.0.0.1').length - 1).toBe(1);
+    // The title does not carry the name, and the real address is in the address row.
+    expect(html).toContain('>A new machine wants to join</h2>');
+    expect(html).toContain('>192.168.1.50</dd>');
+    expect(pairTitle(hostile)).not.toContain('10.0.0.1');
+    // Markup in a name is escaped.
+    const tag = renderToStaticMarkup(<PairRequest request={{ ...machine, name: '<img src=x onerror=alert(1)>' }} onAnswer={async () => true} />);
+    expect(tag).not.toContain('<img');
+    expect(tag).toContain('&lt;img');
   });
 
   it('puts the number and what to compare it with on the card, with Deny and Approve', () => {
@@ -96,7 +120,8 @@ describe('signing in by approval (ADR-0065 decision 6)', () => {
 
   it('speaks Turkish', () => {
     setLanguage('tr');
-    expect(pairTitle(machine)).toBe('Yeni makine "laptop" (Windows, 192.168.1.50) katılmak istiyor');
+    expect(pairTitle(machine)).toBe('Yeni bir makine katılmak istiyor');
+    expect(renderToStaticMarkup(<PairRequest request={machine} onAnswer={async () => true} />)).toContain('<dt class="text-muted">Adres</dt>');
     expect(renderToStaticMarkup(<SignInWaiting approval={{ number: '731004', state: 'waiting' }} onAskAgain={() => {}} onUseCode={() => {}} />)).toContain('Bunun yerine kod kullan');
     setLanguage('en');
   });

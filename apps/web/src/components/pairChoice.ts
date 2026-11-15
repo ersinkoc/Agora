@@ -33,11 +33,11 @@ export function systemName(os: string | undefined): string {
   return text === key ? os : text;
 }
 
-/** The card's title: the machine with its system and address (the system left out when unknown), or the browser with its address. */
+/**
+ * The card's title: one fixed sentence. The name and the system come from the machine or browser that asks, so they are NOT built into a
+ * sentence with the address (a name such as `x" (linux, 10.0.0.1) wants to join. New machine "y` would pass for the address): each
+ * has its own labelled row on the card, and only the address is the hub's own observation.
+ */
 export function pairTitle(r: PairRequestModel): string {
-  if (r.kind === 'browser') return t('pair-browser-title', { name: r.name, address: r.address });
-  const os = systemName(r.os);
-  return os
-    ? t('pair-machine-title', { name: r.name, os, address: r.address })
-    : t('pair-machine-title-plain', { name: r.name, address: r.address });
+  return t(r.kind === 'browser' ? 'pair-browser-title' : 'pair-machine-title');
 }

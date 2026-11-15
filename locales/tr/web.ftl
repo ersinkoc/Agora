@@ -100,9 +100,11 @@ device-request-failed = Onay gönderilemedi. Yeniden deneyin.
 device-request-later = Şimdi değil
 device-request-approve = Onayla
 # ADR-0065: katılmak isteyen bir makine ya da başka bir makinede oturum açmak isteyen bir tarayıcı, sahibinin yanıtını bekler.
-pair-machine-title = Yeni makine "{ $name }" ({ $os }, { $address }) katılmak istiyor
-pair-machine-title-plain = Yeni makine "{ $name }" ({ $address }) katılmak istiyor
-pair-browser-title = Tarayıcı "{ $name }" ({ $address }) oturum açmak istiyor
+pair-machine-title = Yeni bir makine katılmak istiyor
+pair-browser-title = Bir tarayıcı oturum açmak istiyor
+pair-name = Ad
+pair-system = Sistem
+pair-address = Adres
 pair-number = Numara
 pair-machine-compare = Yalnızca yeni makine aynı numarayı gösteriyorsa onaylayın.
 pair-browser-compare = Yalnızca o tarayıcı aynı numarayı gösteriyorsa onaylayın.

@@ -100,9 +100,11 @@ device-request-failed = The approval could not be sent. Try again.
 device-request-later = Not now
 device-request-approve = Approve
 # ADR-0065: a machine that wants to join, or a browser on another machine that wants to sign in, waits for the owner's answer.
-pair-machine-title = New machine "{ $name }" ({ $os }, { $address }) wants to join
-pair-machine-title-plain = New machine "{ $name }" ({ $address }) wants to join
-pair-browser-title = Browser "{ $name }" ({ $address }) wants to sign in
+pair-machine-title = A new machine wants to join
+pair-browser-title = A browser wants to sign in
+pair-name = Name
+pair-system = System
+pair-address = Address
 pair-number = Number
 pair-machine-compare = Approve only if the new machine shows the same number.
 pair-browser-compare = Approve only if that browser shows the same number.

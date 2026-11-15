@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { t } from '../i18n';
 import { Icon } from './Icon';
-import { formatPairNumber, pairTitle, type PairRequestModel } from './pairChoice';
+import { formatPairNumber, pairTitle, systemName, type PairRequestModel } from './pairChoice';
 
 // ADR-0065 decision 3a: a machine that wants to join, or a browser on another machine that wants to sign in, waits for the owner's
 // answer in a window they are already signed in to. The card names who asks and from where, and shows the number the other screen
@@ -17,7 +17,8 @@ export function PairRequest({ request, onAnswer, inline }: {
   const [state, setState] = useState<'idle' | 'busy' | 'failed'>('idle');
   const answer = async (approve: boolean) => {
     setState('busy');
-    setState((await onAnswer(approve)) ? 'idle' : 'failed');
+    // An answer that could not be sent, or a call that threw, leaves the card ready to try again, never stuck busy.
+    setState((await onAnswer(approve).catch(() => false)) ? 'idle' : 'failed');
   };
   const id = `pair-request-${request.id}`;
   return (
@@ -27,6 +28,18 @@ export function PairRequest({ request, onAnswer, inline }: {
         <Icon name={request.kind === 'machine' ? 'machine' : 'globe'} className="mt-0.5 size-4 text-accent" />
         <h2 id={id} className="m-0 flex-1 text-sm font-semibold tracking-normal text-ink normal-case">{pairTitle(request)}</h2>
       </div>
+      {/* Who asks, one fact for each row. The name and the system are what the other side says about itself; the address is what the
+          hub saw. They never share a sentence, so one cannot pass for another. */}
+      <dl className="m-0 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
+        <dt className="text-muted">{t('pair-name')}</dt>
+        <dd className="m-0 min-w-0 break-words text-ink"><bdi>{request.name}</bdi></dd>
+        {request.kind === 'machine' && systemName(request.os) && (<>
+          <dt className="text-muted">{t('pair-system')}</dt>
+          <dd className="m-0 min-w-0 break-words text-ink"><bdi>{systemName(request.os)}</bdi></dd>
+        </>)}
+        <dt className="text-muted">{t('pair-address')}</dt>
+        <dd className="m-0 min-w-0 break-words font-mono text-ink">{request.address}</dd>
+      </dl>
       <div className="grid gap-1">
         <span className="text-xs text-muted">{t('pair-number')}</span>
         <span className="font-mono text-[length:var(--text-20)] tracking-wide text-ink">{formatPairNumber(request.number)}</span>
