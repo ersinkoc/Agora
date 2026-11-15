@@ -58,6 +58,8 @@ export function StartAgent({ projects, machines, initialNode, trust, askApproval
   // ADR-0069: where the chosen machine's program runs from, when that folder is not on its PATH.
   const binary = online.find(m => m.id === node)?.binary || undefined;
   const machineOs = online.find(m => m.id === node)?.os;
+  // The whole path only when the person asks for it (it can hold the machine's user name); a member never gets more than two parts.
+  const [wholePath, setWholePath] = useState(false);
   const [path, setPath] = useState(initialProject && initialProject.node === (preset ?? initialProject.node) ? initialProject.path ?? '' : '');
   const [kinds, setKinds] = useState<KindChoice[] | 'loading' | 'failed'>('loading');
   const [kind, setKind] = useState('');
@@ -235,6 +237,9 @@ export function StartAgent({ projects, machines, initialNode, trust, askApproval
           {error && <p role="alert" className="m-0 text-needs-you">{error === 'approval-not-trusted' && trust ? (binary
             ? t('trust-hint-binary', { machine: online.find(m => m.id === node)?.name ?? node, where: shortBinary(binary, machineOs) })
             : t('trust-hint', { machine: online.find(m => m.id === node)?.name ?? node })) : t(error)}</p>}
+          {error === 'approval-not-trusted' && trust && binary && shortBinary(binary, machineOs) !== binary && (wholePath
+            ? <code className="break-all font-mono text-xs text-muted">{binary}</code>
+            : <button type="button" className="justify-self-start text-xs text-muted underline" onClick={() => setWholePath(true)}>{t('trust-show-path')}</button>)}
           {error === 'approval-not-trusted' && askApproval?.can(node) && <AskApproval ask={askApproval.ask} />}
           {error === 'approval-not-trusted' && trust && <TrustCommand command={trustCommand(binary, machineOs, trust.id, trust.key)} />}
         </div>}
