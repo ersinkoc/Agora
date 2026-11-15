@@ -100,7 +100,9 @@
   | A long disconnect whose buffer overflows | `crates/agora/tests/hub_link.rs` (a node with a 16 KiB cap; `a_node_whose_cap_dropped_unacked_events_resyncs_and_delivers_its_newer_events`) | the node resynchronizes, the hub records the lost range (`resyncs`), and agents still running keep their board work (ADR-0054, ADR-0055) |
   | A client that leaves while its command is on its way | `crates/agora-hub/tests/server.rs` `a_command_whose_client_left_still_gets_its_outcome_in_the_audit_trail` | the command still happens once and its outcome reaches the audit trail |
 
-  Not yet: the metrics the review lists first (ingest and storage latency, lock hold time, queue depth, oldest unacknowledged event,
-  resync and relay-reset counts, approval latency), and a recovery target written down apart from the acceptable history-loss
-  window (a resync restores the present, not the missing history).
+  Of the metrics the review lists first, ingest and storage latency, lock hold time, resync and relay-reset counts and approval
+  latency are the `/api/metrics` lines above. The recovery target is written down apart from the history-loss window
+  (`docs/design/backup-restore.md`: the present whole within 5 s of the hub starting; a resync restores the present, not the
+  missing history), and the restore drill fails above it. Not yet: queue depth (see above) and the oldest event a machine holds
+  unacknowledged, which only the node knows.
 - **Tracing across hops:** commands carry a trace id from client through hub to node and adapter.
