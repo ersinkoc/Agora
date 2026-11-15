@@ -1,6 +1,7 @@
 # 0077. The Windows binary is code-signed
-Status: Proposed
+Status: Accepted
 Date: 2026-11-15
+Accepted: 2026-11-15 (the maintainer's explicit message in the merger's chat, answering the merger's message that named ADR-0056 Amendment A (#608) and ADR-0077 (#597) as the answers still owed: they said that the answer to everything they owed was the same, approval, and asked for the waiting work to be done). The open questions' proposed answers stand. Option 1 (SignPath Foundation) first, option 2 only if SignPath does not accept the project; the team-MFA question is answered yes. Applying to SignPath, and its account, are the maintainer's own steps.
 Origin: the move of `win` to `agora service` on 0.3.12 (LAN finding L13, #588). Microsoft Defender flagged the verified release
 `agora.exe` (`Behavior:Win32/Execution.A!ml`) within a few minutes of `agora service install`, twice. It quarantined the file, ended
 the node and removed the logon task. Binaries built locally from the same code were never flagged.
