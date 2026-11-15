@@ -778,10 +778,11 @@ fn grants_write_to(path: &Path, sids: &[Sid]) -> bool {
 }
 
 /// Amendment B, 4: refuses a profile whose writable folders (or anything below them) let `Users` or `Everyone` write, and (#571) a
-/// worktree (`Sandbox::reopen`) holding a file with another name elsewhere. Returns the first such path.
+/// worktree (`Sandbox::reopen`) holding a file with another name elsewhere, or a write entry that is itself such a file (a manifest's
+/// or the policy's `sandbox.write` file, granted like a folder). Returns the first such path.
 pub(crate) fn preflight(sandbox: &Sandbox) -> Result<(), (PathBuf, SandboxRefusal)> {
     for p in sandbox.write.iter().filter(|p| p.exists()) {
-        match broad_writer_below(p, sandbox.reopen.contains(p)) {
+        match broad_writer_below(p, sandbox.reopen.contains(p) || p.is_file()) {
             Ok(None) => {}
             Ok(Some(hit)) => return Err(hit),
             // A folder whose permissions cannot be read cannot be promised either.
@@ -1767,6 +1768,29 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         assert_eq!(hit, Some((link, SandboxRefusal::WritableHasLinks)));
         assert_eq!(elsewhere, None);
+    }
+
+    /// #571 (review): a write entry that is itself a file (a manifest's `~/.claude.json`) is granted like a folder, so one with
+    /// another name elsewhere is refused too; a plain file entry is not.
+    #[test]
+    fn a_write_entry_that_is_a_linked_file_is_refused() {
+        let root = scratch("links571f");
+        std::fs::write(root.join("plain.json"), "{}").unwrap();
+        std::fs::write(root.join("real.json"), "{}").unwrap();
+        std::fs::hard_link(root.join("real.json"), root.join("entry.json")).unwrap();
+        let profile = |entry: &str| Sandbox {
+            read: vec![],
+            write: vec![root.join(entry)],
+            ..Default::default()
+        };
+        let plain = preflight(&profile("plain.json"));
+        let linked = preflight(&profile("entry.json"));
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(plain, Ok(()));
+        assert_eq!(
+            linked,
+            Err((root.join("entry.json"), SandboxRefusal::WritableHasLinks))
+        );
     }
 
     /// Review of #273, 5: a relaunch keeps the agent's identity (its mesh endpoint admits exactly that SID), so two confinements of one

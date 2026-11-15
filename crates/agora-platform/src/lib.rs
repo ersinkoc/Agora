@@ -847,7 +847,7 @@ pub enum SandboxRefusal {
     WritableIsLink,
     /// A file the agent may write also has another name elsewhere (a hard link made outside confinement), so writing it would change
     /// that other place too (#571). Windows: a regular file in the agent's worktree, outside `node_modules`, `target` and `.git`, whose
-    /// links are made on purpose by package stores and git.
+    /// links are made on purpose by package stores and git, or a write entry that is itself such a file.
     WritableHasLinks,
 }
 
