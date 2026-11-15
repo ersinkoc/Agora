@@ -215,3 +215,20 @@ tui-cleanup-keys = y unutur · r unutur ve yeniden bağlanırlarsa reddeder · b
 tui-cleanup-done = { $count } makine unutuldu.
 tui-cleanup-failed = Bir makine unutulamadı ({ $code }); öncesinde { $count } unutuldu.
 tui-app-start-read = İsteğin tamamını okudunuz. İzin vermek için y, reddetmek için n.
+
+# ADR-0065: the pairing card and the join screen (the same words as the web's pair-*).
+tui-pair-machine-title = Yeni makine "{ $name }" ({ $os }, { $address }) katılmak istiyor
+tui-pair-machine-title-plain = Yeni makine "{ $name }" ({ $address }) katılmak istiyor
+tui-pair-browser-title = Tarayıcı "{ $name }" ({ $address }) oturum açmak istiyor
+tui-pair-number = Numara
+tui-pair-machine-compare = Yalnızca yeni makine aynı numarayı gösteriyorsa onaylayın.
+tui-pair-browser-compare = Yalnızca o tarayıcı aynı numarayı gösteriyorsa onaylayın.
+tui-pair-keys = y onaylar, n reddeder
+tui-join-looking = Bu ağda bir Agora hub'ı aranıyor…
+tui-join-found = Bu ağdaki Agora hub'ları:
+tui-join-pick = Katılma isteği göndermek için numarasına, durmak için q'ya basın.
+tui-join-waiting = "{ $hub }" hub'ından bu makinenin katılmasına izin vermesi istendi. Sahibi orada onaylar.
+tui-join-compare = Sahibi de bir numara görür: bununla aynı olmalı.
+tui-join-approved = "{ $hub }" bu makinenin katılmasına izin verdi. Şimdi bağlanıyor.
+tui-join-denied = "{ $hub }" bu makinenin katılmasına izin vermedi. Burada hiçbir şey değişmedi.
+tui-join-expired = "{ $hub }" zamanında yanıt vermedi. Yeniden sormak için `agora join` komutunu tekrar çalıştırın.

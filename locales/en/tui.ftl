@@ -242,3 +242,20 @@ tui-cleanup-done = { $count ->
     }
 tui-cleanup-failed = Could not forget a machine ({ $code }); { $count } forgotten before it.
 tui-app-start-read = You read the whole request. Press y to allow it or n to deny it.
+
+# ADR-0065: the pairing card and the join screen (the same words as the web's pair-*).
+tui-pair-machine-title = New machine "{ $name }" ({ $os }, { $address }) wants to join
+tui-pair-machine-title-plain = New machine "{ $name }" ({ $address }) wants to join
+tui-pair-browser-title = Browser "{ $name }" ({ $address }) wants to sign in
+tui-pair-number = Number
+tui-pair-machine-compare = Approve only if the new machine shows the same number.
+tui-pair-browser-compare = Approve only if that browser shows the same number.
+tui-pair-keys = y approves, n denies
+tui-join-looking = Looking for an Agora hub on this network…
+tui-join-found = Agora hubs on this network:
+tui-join-pick = Press its number to ask to join, or q to stop.
+tui-join-waiting = Asked "{ $hub }" to let this machine join. Its owner approves it there.
+tui-join-compare = The owner sees a number too: it must be the same as this one.
+tui-join-approved = "{ $hub }" let this machine join. It is connecting now.
+tui-join-denied = "{ $hub }" did not let this machine join. Nothing was changed here.
+tui-join-expired = "{ $hub }" did not answer in time. Run `agora join` again to ask once more.
