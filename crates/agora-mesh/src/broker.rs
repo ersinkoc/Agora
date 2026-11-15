@@ -1214,6 +1214,8 @@ impl Mesh {
         now_ms: u64,
     ) -> Result<String, MeshError> {
         let project = self.caller(by)?.project.clone();
+        // `LeaseTable::acquire` drops ended leases silently: end them here first, so each is recorded and leaves its grant.
+        self.expire_leases(now_ms);
         let table = self.leases.entry(project.clone()).or_default();
         // What the caller already holds: acquiring a path it holds renews that lease in place, so a call that fails puts it back.
         let held: Vec<(String, u64)> = table
@@ -1738,6 +1740,31 @@ mod tests {
         ));
         m.lease_acquire(&id("b"), &["f.rs".into()], 100, 100)
             .unwrap();
+    }
+
+    #[test]
+    fn a_lease_that_ends_before_another_acquire_is_still_recorded() {
+        let mut m = mesh();
+        let l = m.lease_acquire(&id("a"), &["f.rs".into()], 100, 0).unwrap();
+        m.take_events();
+        // The sweep has not run yet when another agent takes a path at the moment `f.rs` ends.
+        m.lease_acquire(&id("b"), &["g.rs".into()], 100, 100)
+            .unwrap();
+        m.expire_leases(150);
+        let released: Vec<(String, String)> = m
+            .take_events()
+            .into_iter()
+            .filter_map(|e| match e {
+                Body::LeaseReleased(r) => Some((r.agent_id, r.path)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(released, [("a".to_string(), "f.rs".to_string())]);
+        // Its grant is gone with it.
+        assert_eq!(
+            m.lease_release(&id("a"), &l, 150),
+            Err(MeshError::LeaseUnknown(l.clone()))
+        );
     }
 
     /// The expiry `who` would be refused with on `path` (the lease that blocks it), or `None` when the path is free.
