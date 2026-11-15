@@ -497,6 +497,7 @@ pub fn snapshot_of(view: &View, pos: u64) -> v1::Snapshot {
                 memory_used_bytes: n.memory_used_bytes,
                 last_event_ms: n.last_event_ms,
                 trusted_device_ids: view.trusted_devices.get(id).cloned().unwrap_or_default(),
+                binary: n.binary.clone(),
             })
             .collect(),
         checkouts: view

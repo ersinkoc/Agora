@@ -488,6 +488,7 @@ mod tests {
                     hostname: "h".into(),
                     os: "o".into(),
                     build: "b".into(),
+                    binary: String::new(),
                 }),
             ),
             ev(
@@ -497,6 +498,7 @@ mod tests {
                     hostname: "h".into(),
                     os: "o".into(),
                     build: "b".into(),
+                    binary: String::new(),
                 }),
             ),
         ]
@@ -541,6 +543,7 @@ mod tests {
                     hostname: "h".into(),
                     os: "o".into(),
                     build: "b".into(),
+                    binary: String::new(),
                 }),
             ),
         ] {

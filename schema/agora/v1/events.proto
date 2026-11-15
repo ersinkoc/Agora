@@ -68,6 +68,9 @@ message NodeOnline {
   string hostname = 2;
   string os = 3;
   string build = 4;
+  // ADR-0069: the node's own executable (its full path) only when the folder it is in is not on the node's PATH, so a client can
+  // say to run `agora` from that folder; empty otherwise, and from an old node. Clients show its last two components unless asked.
+  string binary = 5;
 }
 
 message NodeOffline {

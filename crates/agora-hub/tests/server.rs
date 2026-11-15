@@ -72,6 +72,7 @@ fn online(node: &str) -> Body {
         hostname: "h".into(),
         os: "linux".into(),
         build: "b".into(),
+        binary: String::new(),
     })
 }
 
