@@ -25,6 +25,8 @@ use winproc as procinfo;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
+mod macnotify;
+#[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
 mod macservice;
@@ -1844,11 +1846,12 @@ pub fn service_status(name: &str) -> io::Result<ServiceState> {
 /// argument list, and the words travel as separate arguments (Linux `notify-send`) or as
 /// environment variables (Windows PowerShell), never inside a script, so no text can change what runs. The words come from
 /// `locales/` (the caller's). Waits for the notifier; `NotFound` where there is none (Linux without `notify-send`),
-/// `PermissionDenied` where the user turned notifications off (Windows), `Unsupported` on macOS for now (see `macos.rs`).
+/// `PermissionDenied` where the user turned notifications off or did not allow them, `Unsupported` where it cannot post (macOS:
+/// outside an app bundle, see `macnotify.rs`).
 pub fn desktop_notify(title: &str, body: &str) -> io::Result<()> {
     #[cfg(target_os = "macos")]
     {
-        macos::desktop_notify(title, body)
+        macnotify::desktop_notify(title, body)
     }
     #[cfg(target_os = "linux")]
     {

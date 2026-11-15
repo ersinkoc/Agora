@@ -5,8 +5,8 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 ## Next
 
 ### Desktop app
-- On Windows and Linux, the desktop app shows one system notification when approvals are waiting while its window is hidden,
-  minimized or not in front (the count only, in your language). Not on macOS yet: there it stays silent for now.
+- The desktop app shows one system notification when approvals are waiting while its window is hidden, minimized or not in
+  front (the count only, in your language). On macOS it asks for permission the first time.
 
 ### Security
 - macOS: a confined agent is not started when a file it may write also has another name elsewhere (a hard link made outside
