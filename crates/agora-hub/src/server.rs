@@ -245,6 +245,7 @@ where
     let verifies_devices = welcome.capabilities.iter().any(|c| c == "device.trust");
     let (registration, commands, generation) =
         hub.node_link_opened(node_id, welcome.capabilities, now_ms());
+    let load = registration.load();
     // ADR-0061: a node that verifies endorsements gets every one it may have missed while it was away, and every revocation.
     if verifies_devices {
         give_device_changes(hub, node_id);
@@ -253,7 +254,7 @@ where
     // A certificate revoked while the connection is open ends it here, inside the conversation, so the end below still records the
     // node offline (it used to be cancelled from outside, and a revoked machine stayed online in every view).
     let result = tokio::select! {
-        r = stream_events(conn, &mut session, hub, node_id, commands, silence, &mut last_heard) => r,
+        r = stream_events(conn, &mut session, hub, node_id, (commands, &load), silence, &mut last_heard) => r,
         () = still(valid) => Err(revoked()),
     };
     // However it ended, the router now knows this node is not connected (commands to it fail with `node.offline` at once), unless
@@ -288,7 +289,11 @@ async fn stream_events<S>(
     session: &mut NodeSession<'_, crate::store::SqliteStore>,
     hub: &Arc<Hub>,
     node_id: &str,
-    mut commands: tokio::sync::mpsc::UnboundedReceiver<crate::router::ToNode>,
+    // The commands queued for this node, and the connection's count of them (`GET /api/metrics`).
+    (mut commands, load): (
+        tokio::sync::mpsc::UnboundedReceiver<crate::router::ToNode>,
+        &crate::router::LinkLoad,
+    ),
     silence: Duration,
     last_heard: &mut tokio::time::Instant,
 ) -> Result<(), ServeError>
@@ -326,9 +331,11 @@ where
             Some(to_node) = commands.recv() => {
                 match to_node {
                     crate::router::ToNode::Command { request, reply, stream } => {
+                        load.queued.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                         waiting.retain(|_, s| !s.is_closed());
                         let payload = request.encode_to_vec();
                         waiting.insert(request.request_id.clone(), reply);
+                        load.unanswered.store(waiting.len(), std::sync::atomic::Ordering::Relaxed);
                         put(conn, &frame(stream, 0, payload), silence).await?;
                     }
                     crate::router::ToNode::Close { stream } => {
@@ -422,6 +429,8 @@ where
                             if let Some(reply) = waiting.remove(&resp.request_id) {
                                 let _ = reply.send(resp);
                             }
+                            load.unanswered
+                                .store(waiting.len(), std::sync::atomic::Ordering::Relaxed);
                         }
                     }
                     // Terminal frames of a relayed subscription: passed to the client, never stored or decoded.
