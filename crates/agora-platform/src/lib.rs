@@ -1519,6 +1519,11 @@ pub const SERVICES_SUPPORTED: bool = cfg!(any(windows, target_os = "linux", targ
 /// itself (Linux: a systemd user manager runs from boot only with `loginctl enable-linger`). The caller says so after installing.
 pub const SERVICES_NEED_LINGER_FOR_BOOT: bool = cfg!(target_os = "linux");
 
+/// True where a program replaced by an update must be allowed onto the local network again before a login service can reach a hub
+/// on another machine (macOS: Privacy & Security > Local Network keeps the permission per binary; measured with 0.3.12 → 0.3.13,
+/// unsigned builds). The caller says so after an update when a service is registered.
+pub const SERVICES_NEED_NETWORK_PERMISSION_AFTER_UPDATE: bool = cfg!(target_os = "macos");
+
 /// Whether this machine can register a login service now: [`SERVICES_SUPPORTED`], and on Linux a `systemctl` (systemd's per-user
 /// services) found on `PATH`, on macOS a login session (`launchctl print gui/<uid>`; none over SSH while nobody is logged in at the
 /// screen). Asked at run time, not when Agora was built: one Linux binary runs with and without systemd.
