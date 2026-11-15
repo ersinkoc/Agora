@@ -38,7 +38,9 @@ $t = $x.GetElementsByTagName('text');\
 $t.Item(0).AppendChild($x.CreateTextNode($env:AGORA_NOTIFY_TITLE)) | Out-Null;\
 $t.Item(1).AppendChild($x.CreateTextNode($env:AGORA_NOTIFY_BODY)) | Out-Null;\
 $id = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe';\
-[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($id).Show([Windows.UI.Notifications.ToastNotification]::new($x))";
+$n = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($id);\
+if ($n.Setting -ne 'Enabled') { exit 3 };\
+$n.Show([Windows.UI.Notifications.ToastNotification]::new($x))";
 
 /// See [`crate::desktop_notify`]: Windows PowerShell by its full path, with [`TOAST_SCRIPT`]; the words are environment variables.
 pub(crate) fn desktop_notify(title: &str, body: &str) -> io::Result<()> {
@@ -53,10 +55,11 @@ pub(crate) fn desktop_notify(title: &str, body: &str) -> io::Result<()> {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(io::Error::other(format!("powershell: {status}")))
+    match status.code() {
+        Some(0) => Ok(()),
+        // Notifications are turned off for this user or this notifier (`ToastNotifier.Setting` is not `Enabled`): nothing was shown.
+        Some(3) => Err(io::Error::from(io::ErrorKind::PermissionDenied)),
+        _ => Err(io::Error::other(format!("powershell: {status}"))),
     }
 }
 

@@ -620,28 +620,12 @@ pub(crate) fn wrap(
     Ok((SANDBOX_EXEC.into(), v))
 }
 
-/// See [`crate::desktop_notify`]: `osascript` with a fixed script that reads the title and the body from its arguments.
+/// See [`crate::desktop_notify`]: not yet on macOS. The system's own notifier for a script (`osascript`) posts as *Script Editor*:
+/// it shows only when Script Editor may notify, and a click opens Script Editor instead of Agora (measured on macOS 27.2), so nothing
+/// is posted. The app's own notification (`UNUserNotificationCenter`) is the planned way (#296 follow-up).
 pub(crate) fn desktop_notify(title: &str, body: &str) -> io::Result<()> {
-    let status = std::process::Command::new("/usr/bin/osascript")
-        .args([
-            "-e",
-            "on run argv",
-            "-e",
-            "display notification (item 2 of argv) with title (item 1 of argv)",
-            "-e",
-            "end run",
-            title,
-            body,
-        ])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(io::Error::other(format!("osascript: {status}")))
-    }
+    let _ = (title, body);
+    Err(io::Error::from(io::ErrorKind::Unsupported))
 }
 
 /// See [`crate::opened_path`]: `F_GETPATH`, the path the kernel has for the open vnode (firmlinks shown as `/Users/...`, as
