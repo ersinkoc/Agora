@@ -2037,6 +2037,7 @@ fn the_terminal_console_picks_a_folder_on_a_machine_and_starts_an_agent_there() 
                 accept_identity_change: false,
                 launch_options: Vec::new(),
                 confirmed_launch_options: Vec::new(),
+                settings: Vec::new(),
             },
         )
         .unwrap();

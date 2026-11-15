@@ -38,6 +38,10 @@ pub enum ErrorCode {
     AgentOptionInvalid,
     /// ADR-0059: an option that skips permissions was sent without the user's signed confirmation marker.
     AgentOptionUnconfirmed,
+    /// ADR-0066: the start names a setting the kind's manifest does not declare.
+    AgentSettingUnknown,
+    /// ADR-0066: a setting's value is not one it takes (not listed, or not a plain value).
+    AgentSettingInvalid,
     AgentRunning,
     AgentNotInterrupted,
     AgentSessionMissing,
@@ -115,6 +119,8 @@ impl ErrorCode {
         ErrorCode::AgentOptionForbidden,
         ErrorCode::AgentOptionInvalid,
         ErrorCode::AgentOptionUnconfirmed,
+        ErrorCode::AgentSettingUnknown,
+        ErrorCode::AgentSettingInvalid,
         ErrorCode::AgentRunning,
         ErrorCode::AgentNotInterrupted,
         ErrorCode::AgentSessionMissing,
@@ -187,6 +193,8 @@ impl ErrorCode {
             ErrorCode::AgentOptionForbidden => "agent.option_forbidden",
             ErrorCode::AgentOptionInvalid => "agent.option_invalid",
             ErrorCode::AgentOptionUnconfirmed => "agent.option_unconfirmed",
+            ErrorCode::AgentSettingUnknown => "agent.setting_unknown",
+            ErrorCode::AgentSettingInvalid => "agent.setting_invalid",
             ErrorCode::AgentRunning => "agent.running",
             ErrorCode::NodeOnline => "node.online",
             ErrorCode::AgentNotInterrupted => "agent.not_interrupted",
@@ -272,6 +280,8 @@ impl ErrorCode {
             ErrorCode::AgentOptionForbidden => &["kind", "option", "policy"],
             ErrorCode::AgentOptionInvalid => &["kind", "option"],
             ErrorCode::AgentOptionUnconfirmed => &["kind", "option"],
+            ErrorCode::AgentSettingUnknown => &["kind", "setting"],
+            ErrorCode::AgentSettingInvalid => &["kind", "setting"],
             ErrorCode::AgentRunning => &["agent_id"],
             ErrorCode::NodeOnline => &["node_id"],
             ErrorCode::AgentNotInterrupted => &["agent_id"],

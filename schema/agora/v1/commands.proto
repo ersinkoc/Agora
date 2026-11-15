@@ -136,6 +136,16 @@ message AgentStart {
   // ADR-0059: the chosen ids whose "act without asking" confirmation the window showed and the user accepted. The node, from its own
   // manifest, refuses an option that skips permissions unless it is listed here (`agent.option_unconfirmed`).
   repeated string confirmed_launch_options = 8;
+  // ADR-0066: values for the kind's `[[launch.setting]]`s (model, effort, ...), at most one per id. Accepted only on the node's own
+  // control socket; routed through the hub such a start is refused (it carries no signature) until the signed path covers them.
+  repeated LaunchSetting settings = 9;
+}
+
+// ADR-0066: one value chosen for a kind's `[[launch.setting]]`. The node checks it against its manifest (`agent.setting_unknown`,
+// `agent.setting_invalid`) and puts it into its argument template as one argument, never through a shell.
+message LaunchSetting {
+  string id = 1;
+  string value = 2;
 }
 
 message AgentStop {
@@ -506,6 +516,19 @@ message AgentKind {
   bool installed = 4;
   // ADR-0059: the options a start may choose (the manifest's `[[launch.option]]`s, in its order). Old nodes send none.
   repeated LaunchOption launch_options = 5;
+  // ADR-0066: the settings a start may give (the manifest's `[[launch.setting]]`s, in its order). Old nodes send none.
+  repeated LaunchSettingSpec settings = 7;
+}
+
+// ADR-0066: one `[[launch.setting]]` of a kind, as clients show it. The arguments it adds stay on the node.
+message LaunchSettingSpec {
+  string id = 1;
+  // A Fluent message id; a client without it shows `id`.
+  string label = 2;
+  // The values a start may choose, in order; empty means any plain value (a model name the tool itself checks).
+  repeated string values = 3;
+  // What the tool uses when nothing is chosen, for display only; empty when the manifest does not say.
+  string default_value = 4;
 }
 
 // ADR-0059: one `[[launch.option]]` of a kind. The arguments it adds stay on the node.
@@ -617,6 +640,10 @@ message AgentLaunch {
   repeated string launch_options = 7;
   // ADR-0059: as `AgentStart.confirmed_launch_options`; signed with `launch_options` as a separate list.
   repeated string confirmed_launch_options = 8;
+  // ADR-0066: values for the kind's `[[launch.setting]]`s. Accepted only on the node's own control socket for now: `authorization`
+  // does not cover them yet, so a launch with settings that came through the hub is refused (`agent.option_forbidden`,
+  // `policy: signature`) until a signing domain version that includes them.
+  repeated LaunchSetting settings = 9;
 }
 message AgentLaunchResult {
   string agent_id = 1;

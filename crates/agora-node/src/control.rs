@@ -314,6 +314,16 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                         agora_core::IntegrationLevel::L3Adapter => v1::IntegrationLevel::L3Adapter,
                     } as i32,
                     installed: k.installed,
+                    settings: k
+                        .settings
+                        .iter()
+                        .map(|st| v1::LaunchSettingSpec {
+                            id: st.id.clone(),
+                            label: st.label.clone(),
+                            values: st.values.clone(),
+                            default_value: st.default.clone().unwrap_or_default(),
+                        })
+                        .collect(),
                     launch_options: k
                         .launch_options
                         .iter()
@@ -482,6 +492,13 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                     &crate::launch_options::Requested {
                         ids: a.launch_options.clone(),
                         confirmed: a.confirmed_launch_options.clone(),
+                        // ADR-0066: a launch through the hub with settings was refused where the hub's commands enter (its
+                        // signature does not cover them yet); here they come from this machine's own socket.
+                        settings: a
+                            .settings
+                            .iter()
+                            .map(|st| (st.id.clone(), st.value.clone()))
+                            .collect(),
                     },
                     Instant::now(),
                 )
@@ -576,6 +593,12 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                     &crate::launch_options::Requested {
                         ids: a.launch_options.clone(),
                         confirmed: a.confirmed_launch_options.clone(),
+                        // ADR-0066: from this machine's own socket only (the hub's path refuses a start with settings).
+                        settings: a
+                            .settings
+                            .iter()
+                            .map(|st| (st.id.clone(), st.value.clone()))
+                            .collect(),
                     },
                     Instant::now(),
                 )

@@ -587,6 +587,8 @@ resume-failed-forbidden = This device is limited to other projects on this machi
 
 # ADR-0059: launch options (manifest `[[launch.option]]` labels)
 option-skip-permissions = Don't ask
+setting-model = Model
+setting-effort = Effort
 option-ask = Ask before acting
 start-how-it-acts = How it acts
 start-confirm-skip-body = With "{ $name }" chosen, the agent runs commands and changes files without asking you first, for as long as it runs.

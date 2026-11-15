@@ -572,6 +572,8 @@ resume-failed-forbidden = Bu cihaz bu makinede başka projelerle sınırlı, bu 
 
 # ADR-0059: launch options (manifest `[[launch.option]]` labels)
 option-skip-permissions = Sormadan
+setting-model = Model
+setting-effort = Efor
 option-ask = Önce sorsun
 start-how-it-acts = Nasıl çalışsın
 start-confirm-skip-body = "{ $name }" seçiliyken ajan, çalıştığı sürece komut çalıştırır ve dosyaları size sormadan değiştirir.

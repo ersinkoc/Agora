@@ -1148,6 +1148,8 @@ fn start_in_folder(
             accept_identity_change: accept,
             launch_options,
             confirmed_launch_options,
+            // ADR-0066: a signed launch carries no settings until its signature covers them (PR 2).
+            settings: Vec::new(),
         },
     ) {
         Ok(agent) => say.text(key!("tui-started"), &[("agent", Arg::Str(agent))]),

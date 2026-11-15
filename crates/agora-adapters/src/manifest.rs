@@ -4,8 +4,12 @@ use std::collections::{BTreeMap, HashSet};
 
 use serde::Deserialize;
 
-/// Highest manifest `min_engine` this engine can run. 2: `[[launch.option]]` (ADR-0059).
-pub const ENGINE_VERSION: u32 = 2;
+/// Highest manifest `min_engine` this engine can run. 2: `[[launch.option]]` (ADR-0059). 3: `[[launch.setting]]` (ADR-0066).
+pub const ENGINE_VERSION: u32 = 3;
+
+/// ADR-0066: most `[[launch.setting]]`s one manifest may declare, most allowed values one may list, and most arguments one may add.
+pub const MAX_LAUNCH_SETTINGS: usize = 8;
+const MAX_SETTING_VALUES: usize = 32;
 
 /// Most `[[launch.option]]`s one manifest may declare, and most arguments one option may add.
 pub const MAX_LAUNCH_OPTIONS: usize = 8;
@@ -151,12 +155,58 @@ pub struct LaunchOption {
     pub skips_permissions: bool,
 }
 
-/// `[launch]`: what may be chosen when an agent starts (ADR-0059).
+/// ADR-0066: one `[[launch.setting]]`, a value chosen when an agent starts (`model`, `effort`, `mode`, ...). Each `{value}` in `args`
+/// is replaced by the chosen value (a [`valid_setting_value`], so it is one argument and never another flag); the arguments are
+/// added to the launch command (a terminal kind) or to the ACP server command (`[structured] acp`). `label` is a Fluent message id.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaunchSetting {
+    pub id: String,
+    pub label: String,
+    pub args: Vec<String>,
+    /// The values a start may choose, in the order a client lists them. Empty: any [`valid_setting_value`] (a model name, which the
+    /// tool itself checks).
+    #[serde(default)]
+    pub values: Vec<String>,
+    /// What the tool uses when nothing is chosen, for a client to show; never added to the command by the node.
+    #[serde(default)]
+    pub default: Option<String>,
+}
+
+impl LaunchSetting {
+    /// The arguments for `value`, or `None` when the value is not one this setting takes.
+    pub fn args_for(&self, value: &str) -> Option<Vec<String>> {
+        let allowed = valid_setting_value(value)
+            && (self.values.is_empty() || self.values.iter().any(|v| v == value));
+        allowed.then(|| {
+            self.args
+                .iter()
+                .map(|a| a.replace("{value}", value))
+                .collect()
+        })
+    }
+}
+
+/// ADR-0066: a value a start may give a setting. It ends up inside one argument of the agent's command line, so it is a plain token
+/// (letters, digits, `.`, `_`, `:`, `/`, `@`, `+`, `-`; at most 128), and it never starts with `-` (it cannot become a flag) or with a
+/// character a quoted template could break out of (no quote, no space, no `=`).
+pub fn valid_setting_value(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 128
+        && s.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
+        && s.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '/' | '@' | '+' | '-')
+        })
+}
+
+/// `[launch]`: what may be chosen when an agent starts (ADR-0059 options, ADR-0066 settings).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Launch {
     #[serde(default)]
     pub option: Vec<LaunchOption>,
+    #[serde(default)]
+    pub setting: Vec<LaunchSetting>,
 }
 
 /// `[structured]`: the ways an agent can be driven without a terminal. Keys this engine does not know yet (`adapter` as a registry
@@ -326,6 +376,11 @@ impl Manifest {
         self.launch.option.iter().find(|o| o.id == id)
     }
 
+    /// ADR-0066: the declared setting with this id.
+    pub fn launch_setting(&self, id: &str) -> Option<&LaunchSetting> {
+        self.launch.setting.iter().find(|s| s.id == id)
+    }
+
     /// What drives this kind without a terminal, as an adapter command: its own `[adapter]`, or the ACP bridge (`bridge` is the
     /// program that runs `acp-bridge`, the `agora` binary) around `[structured] acp`. `None` for a kind that runs in a terminal.
     pub fn driver(&self, bridge: &std::path::Path) -> Option<AdapterSpec> {
@@ -476,6 +531,50 @@ impl Manifest {
                 return Err(at("skips_permissions"));
             }
         }
+        // ADR-0066: settings. Same id rules as options (the two share no id: a start names both by id); `args` must use `{value}`;
+        // listed values and the default are values a start could give; a setting can never add a flag that skips permissions.
+        let settings = &self.launch.setting;
+        if settings.len() > MAX_LAUNCH_SETTINGS {
+            return Err(invalid("launch.setting"));
+        }
+        let mut setting_ids = HashSet::new();
+        for (i, st) in settings.iter().enumerate() {
+            let at = |f: &str| invalid(format!("launch.setting[{i}].{f}"));
+            if !valid_option_id(&st.id)
+                || ids.contains(st.id.as_str())
+                || !setting_ids.insert(st.id.as_str())
+            {
+                return Err(at("id"));
+            }
+            if !fluent_id(&st.label) {
+                return Err(at("label"));
+            }
+            let args_ok = !st.args.is_empty()
+                && st.args.len() <= MAX_OPTION_ARGS
+                && st.args.iter().any(|a| a.contains("{value}"))
+                && st
+                    .args
+                    .iter()
+                    .all(|a| !a.trim().is_empty() && a.len() <= 256 && !a.contains('\0'))
+                && !st.args.iter().any(|a| skips_permissions_flag(a));
+            if !args_ok {
+                return Err(at("args"));
+            }
+            let mut seen = HashSet::new();
+            if st.values.len() > MAX_SETTING_VALUES
+                || !st
+                    .values
+                    .iter()
+                    .all(|v| valid_setting_value(v) && seen.insert(v.as_str()))
+            {
+                return Err(at("values"));
+            }
+            if let Some(d) = &st.default {
+                if st.args_for(d).is_none() {
+                    return Err(at("default"));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -586,15 +685,82 @@ mod launch_tests {
     }
 
     #[test]
-    fn launch_options_need_engine_2() {
-        let src = with(SKIP).replace("min_engine = 2", "min_engine = 3");
+    fn a_manifest_newer_than_this_engine_is_refused() {
+        let src = with(SKIP).replace("min_engine = 2", "min_engine = 4");
         assert!(matches!(
             Manifest::parse(&src),
             Err(ManifestError::EngineTooOld {
-                required: 3,
-                supported: 2
+                required: 4,
+                supported: 3
             })
         ));
+    }
+
+    const EFFORT: &str = "[[launch.setting]]\nid = \"effort\"\nlabel = \"setting-effort\"\nargs = [\"-c\", \"model_reasoning_effort=\\\"{value}\\\"\"]\nvalues = [\"low\", \"high\"]\ndefault = \"low\"\n";
+    const MODEL: &str = "[[launch.setting]]\nid = \"model\"\nlabel = \"setting-model\"\nargs = [\"--model\", \"{value}\"]\n";
+
+    #[test]
+    fn launch_settings_put_a_checked_value_into_one_argument() {
+        // ADR-0066.
+        let m = Manifest::parse(&with(&format!("{EFFORT}{MODEL}"))).unwrap();
+        let effort = m.launch_setting("effort").unwrap();
+        assert_eq!(
+            effort.args_for("high").unwrap(),
+            ["-c", "model_reasoning_effort=\"high\""]
+        );
+        assert_eq!(effort.args_for("medium"), None, "not listed");
+        let model = m.launch_setting("model").unwrap();
+        assert_eq!(
+            model.args_for("gpt-6.1-sol").unwrap(),
+            ["--model", "gpt-6.1-sol"]
+        );
+        // A value can never become a flag, another argument, or break out of a quoted template.
+        for bad in [
+            "",
+            "-x",
+            "--dangerously-skip-permissions",
+            "a b",
+            "a\"b",
+            "a=b",
+            "a;b",
+            "a\nb",
+            &"x".repeat(129),
+        ] {
+            assert_eq!(model.args_for(bad), None, "{bad:?}");
+        }
+        assert!(m.launch_setting("mode").is_none());
+    }
+
+    #[test]
+    fn a_launch_setting_that_could_be_misused_is_refused() {
+        let field = |src: &str| match Manifest::parse(&with(src)) {
+            Err(ManifestError::Invalid { field }) => field,
+            other => panic!("{other:?}"),
+        };
+        // No `{value}` in its arguments, a flag that skips permissions, a listed value that is not a plain token, a default that is
+        // not listed, a duplicate id, and an id an option already has.
+        assert_eq!(
+            field(&MODEL.replace("{value}", "x")),
+            "launch.setting[0].args"
+        );
+        assert_eq!(
+            field(&MODEL.replace("\"--model\", ", "\"--dangerously-skip-permissions\", ")),
+            "launch.setting[0].args"
+        );
+        assert_eq!(
+            field(&EFFORT.replace("\"high\"]", "\"-high\"]")),
+            "launch.setting[0].values"
+        );
+        assert_eq!(
+            field(&EFFORT.replace("default = \"low\"", "default = \"max\"")),
+            "launch.setting[0].default"
+        );
+        assert_eq!(field(&format!("{MODEL}{MODEL}")), "launch.setting[1].id");
+        let clash = format!(
+            "{SKIP}{}",
+            MODEL.replace("\"model\"", "\"skip-permissions\"")
+        );
+        assert_eq!(field(&clash), "launch.setting[0].id");
     }
 }
 
