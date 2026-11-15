@@ -122,6 +122,7 @@ pub(crate) fn children(pid: u32) -> io::Result<Vec<u32>> {
     // SAFETY: a live snapshot and an entry with its size set.
     let mut more = unsafe { Process32FirstW(snap.0, &mut entry) } != 0;
     while more {
+        // A child whose id is reused between the snapshot and the time read is kept (its new holder is younger): rare and harmless.
         if entry.th32ParentProcessID == pid
             && entry.th32ProcessID != pid
             && started_after(born, start_time(entry.th32ProcessID))
@@ -348,6 +349,9 @@ pub(crate) fn spawn_detached(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    use std::time::{Duration, Instant};
+
+    use super::*;
 
     #[test]
     fn a_process_older_than_its_listed_parent_is_not_its_child() {
@@ -360,9 +364,6 @@ mod tests {
         assert!(started_after(Some(1), None));
         assert!(started_after(None, None));
     }
-    use std::time::{Duration, Instant};
-
-    use super::*;
 
     #[test]
     fn this_process_has_a_name_memory_and_cpu_time() {
