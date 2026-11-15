@@ -10,3 +10,5 @@ TECHNICAL APPROVE, review 5911783451 posted. Direct-home P2 thread PRRT_kwDOVlwv
 Signed evidence pushed b79716f3973b483be190957a8a12b98164f8de35, docs/reviews/0598-fixed-verified.md + original unchanged proof/runner/output/validation. Main merge d1473e1c changes none of the previously reviewed protocol/node/hub scope. Production source/tests restored; removing own review worktree/target after clean/remote/process checks.
 
 Nonblocking PR body cleanup requested: old folder-and-file test name and Downloads/agora expectations, plus stale NodeSnapshot.binary-not-in-ADR statement. ADR amendment maintainer acceptance/integration hold remains independent (bf33b5db); this review does not grant/relay acceptance or merge. Technical code finding is closed.
+
+Update after reading concurrently arrived merger note 8a214878: it records the maintainer's own acceptance of the ADR-0069 amendment in the merger chat, so the earlier bf33b5db acceptance hold is superseded by the merger's record. My technical approval above is complete; no remaining Codex code blocker at 8bd1ffe. Integration stays with the maintainer/merger.
