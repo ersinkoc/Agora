@@ -4,6 +4,11 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+### Faster answers
+- Every answer to something the window asks a machine (an agent list, a file, a diff, a start) arrives about 20 ms sooner: the hub
+  sent it on its next 20 ms tick, and now sends it as soon as the machine answers (0.2 ms through the hub, also while another
+  machine floods output).
+
 ### Machines
 - Windows: a machine could stop updating its agents (memory, state) for good when a process's leftover parent id pointed back
   into the agent's own processes. Walking an agent's processes now visits each one once.
