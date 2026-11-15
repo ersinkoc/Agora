@@ -1,6 +1,7 @@
 # 0075. The node updates in place without stopping its agents
-Status: Proposed
+Status: Accepted
 Date: 2026-11-15
+Accepted: 2026-11-15 (maintainer's explicit approval in chat: "accepted all", answering the list of ADRs waiting for a decision). The open questions' proposed answers stand: exec in place on Unix (supersedes only ADR-0019's `SCM_RIGHTS` step), scrollback not carried in v1, a 10 s drain that refuses rather than silently restarting, and Windows stays on restart and resume.
 
 Refines the live handoff of ADR-0019 (Accepted), which is not built yet. It changes only the mechanism on Unix; the rest of 0019 stands.
 

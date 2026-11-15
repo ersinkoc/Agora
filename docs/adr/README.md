@@ -92,4 +92,4 @@ Date: YYYY-MM-DD
 | 0072 | A shared terminal takes the size of the smallest window looking at it | Accepted |
 | 0073 | Old machines are shown as old, and can be cleaned up | Accepted |
 | 0074 | A reply keeps its link to the message it answers, across machines | Accepted |
-| 0075 | The node updates in place without stopping its agents | Proposed |
+| 0075 | The node updates in place without stopping its agents | Accepted |
