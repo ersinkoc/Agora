@@ -114,6 +114,10 @@ pub struct Gauges {
     pub terminal_bytes: u64,
     pub events_stored: u64,
     pub resyncs: usize,
+    /// Commands queued for connected nodes and not yet written to them.
+    pub node_commands_queued: usize,
+    /// Commands written to connected nodes and not answered yet.
+    pub node_commands_unanswered: usize,
 }
 
 impl Metrics {
@@ -153,6 +157,16 @@ impl Metrics {
         counter(&mut out, "agora_hub_terminal_bytes_total", g.terminal_bytes);
         gauge(&mut out, "agora_hub_events_stored", g.events_stored);
         counter(&mut out, "agora_hub_resyncs_total", n(g.resyncs));
+        gauge(
+            &mut out,
+            "agora_hub_node_commands_queued",
+            n(g.node_commands_queued),
+        );
+        gauge(
+            &mut out,
+            "agora_hub_node_commands_unanswered",
+            n(g.node_commands_unanswered),
+        );
         out
     }
 }
