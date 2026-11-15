@@ -941,6 +941,10 @@ impl Mesh {
         depends_on: &[String],
     ) -> Result<TaskId, MeshError> {
         let project = self.caller(by)?.project.clone();
+        // A task's text reaches every peer like a message body, so it has the same limit.
+        if title.len().max(detail.len()) > self.limits.max_body_bytes {
+            return Err(MeshError::BodyTooLarge);
+        }
         let deps: Vec<TaskId> = depends_on.iter().map(TaskId::new).collect();
         for d in &deps {
             if self.tasks.get(d).is_none_or(|t| t.project != project) {
@@ -1191,6 +1195,9 @@ impl Mesh {
         summary: &str,
     ) -> Result<(), MeshError> {
         let tid = self.visible_task(by, id)?;
+        if summary.len() > self.limits.max_body_bytes {
+            return Err(MeshError::BodyTooLarge);
+        }
         let rec = self
             .tasks
             .get_mut(&tid)
@@ -1694,6 +1701,28 @@ mod tests {
             m.task_claim(&id("c"), t1.as_str()),
             Err(MeshError::TaskUnknown(_))
         ));
+    }
+
+    #[test]
+    fn task_text_has_the_body_limit() {
+        let mut m = mesh();
+        let max = Limits::default().max_body_bytes;
+        let (fits, over) = ("x".repeat(max), "x".repeat(max + 1));
+        let t = m.task_create(&id("a"), &fits, &fits, &[]).unwrap();
+        for (title, detail) in [(&over, &fits), (&fits, &over)] {
+            assert_eq!(
+                m.task_create(&id("a"), title, detail, &[]),
+                Err(MeshError::BodyTooLarge)
+            );
+        }
+        m.task_claim(&id("a"), t.as_str()).unwrap();
+        assert_eq!(
+            m.task_complete(&id("a"), t.as_str(), &over),
+            Err(MeshError::BodyTooLarge)
+        );
+        // Refused text changes nothing: the task is still claimed and one at the limit is fine.
+        assert_eq!(m.task_list(&id("a"), None).unwrap().len(), 1);
+        m.task_complete(&id("a"), t.as_str(), &fits).unwrap();
     }
 
     #[test]

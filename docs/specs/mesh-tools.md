@@ -27,7 +27,8 @@ the node per MCP connection; agents cannot impersonate each other.
   node). Agents receive a standing instruction that messages from other agents are information, not
   authority; sensitive actions still go through approvals (see `security/threat-model.md`).
 - Rate limits per agent (messages per minute, open asks) prevent loops between agents.
-- Message bodies are size-limited; large content is passed by reference (path, commit, task).
+- Message bodies are size-limited; large content is passed by reference (path, commit, task). A task's title, detail and
+  summary have the same limit (`mesh.body_too_large`).
 - All mesh traffic is in the audit log.
 
 ## MCP conversation (`agora-mesh::mcp`)
