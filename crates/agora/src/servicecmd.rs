@@ -24,6 +24,16 @@ use crate::{home, Say};
 /// The service names start with the binary's own name (`agora-node`): the one place the product name comes from here.
 const NAME_PREFIX: &str = env!("CARGO_BIN_NAME");
 
+/// Whether a login service of either role is registered on this machine (any answer the system could not give counts as no).
+pub(crate) fn any_registered() -> bool {
+    [Role::Hub, Role::Node].into_iter().any(|r| {
+        matches!(
+            agora_platform::service_status(&service_name(r)),
+            Ok(ServiceState::Installed { .. })
+        )
+    })
+}
+
 fn service_name(role: Role) -> String {
     format!("{NAME_PREFIX}-{}", role.name())
 }
@@ -108,6 +118,10 @@ fn failed(say: &Say, key: &'static str, name: &str, e: &std::io::Error) {
                 ("name", name.into()),
                 ("path", p.display().to_string().into()),
             ],
+        ),
+        Some(ServiceProblem::TurnedOffInSettings) => say.err(
+            key!("service-turned-off-in-settings"),
+            &[("name", name.into())],
         ),
         Some(ServiceProblem::Overridden(ps)) => say.err(
             key!("service-overridden"),
@@ -215,6 +229,7 @@ pub(crate) fn install(say: &Say, h: &Path, m: &Machine) -> ExitCode {
                 return ExitCode::from(1);
             }
         };
+        let mut was_off = false;
         // A second `install` changes nothing and says so (to register it anew, `remove` first).
         match agora_platform::service_status(&spec.name) {
             // A unit of the same name made by hand: left as it is, and this install did not do what was asked.
@@ -250,13 +265,9 @@ pub(crate) fn install(say: &Say, h: &Path, m: &Machine) -> ExitCode {
                 }
                 continue;
             }
-            // Agora's own but turned off: registered again below, which turns it on (and says so), never "already starts".
-            Ok(ServiceState::Installed { enabled: false }) => {
-                say.out(
-                    key!("service-was-off"),
-                    &[("role", label.clone()), ("name", spec.name.clone().into())],
-                );
-            }
+            // Agora's own but turned off: registered again below, which turns it on (and says so once it did), never "already
+            // starts". One the system refuses to turn on (switched off in macOS's Login Items) gets only that error.
+            Ok(ServiceState::Installed { enabled: false }) => was_off = true,
             Ok(ServiceState::NotInstalled) => {}
             Err(e) => {
                 failed(say, key!("service-status-failed"), &spec.name, &e);
@@ -291,6 +302,12 @@ pub(crate) fn install(say: &Say, h: &Path, m: &Machine) -> ExitCode {
             failed(say, key!("service-install-failed"), &spec.name, &e);
             code = ExitCode::from(1);
             continue;
+        }
+        if was_off {
+            say.out(
+                key!("service-was-off"),
+                &[("role", label.clone()), ("name", spec.name.clone().into())],
+            );
         }
         registered = true;
         // Registered. Started now only when nothing holds the role already (a supervisor started now would only refuse the lock).
@@ -392,6 +409,9 @@ fn status(say: &Say, h: &Path, m: &Machine) -> ExitCode {
         let name = service_name(role);
         let label: Arg = role.label(say).into();
         match agora_platform::service_status(&name) {
+            // One of the same name that Agora did not write (a LaunchAgent or a unit made by hand): named as not Agora's, never as
+            // Agora's login service.
+            Ok(ServiceState::Installed { .. }) if !mine(say, &name) => {}
             Ok(ServiceState::Installed { enabled }) => {
                 say.out(
                     if enabled {

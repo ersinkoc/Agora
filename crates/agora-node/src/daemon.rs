@@ -994,6 +994,10 @@ pub struct NodeConfig {
     /// Git checkouts to register as projects.
     pub projects: Vec<PathBuf>,
     pub limits: NodeLimits,
+    /// ADR-0062 item 4: at start, bring back every interrupted agent that can continue its own session, whatever its kind and folder
+    /// (`agora node run --resume auto`, which `agora` passes unless the owner said no). The policy file's `resume = auto` with its
+    /// kinds and folders works as before.
+    pub resume_all: bool,
 }
 
 /// What no confined agent may read, write or connect to, whatever its profile opens (#475, and the security reviews of #477).
@@ -1043,6 +1047,16 @@ pub fn node_private_paths(cfg: &NodeConfig) -> Vec<PathBuf> {
     out
 }
 
+/// ADR-0062 item 4: the most agents a node brings back by itself at a time; the others wait for the next round.
+pub const AUTO_RESUME_MAX: usize = 8;
+/// ADR-0062 item 4: the most agents a node brings back by itself at one start; any more stay offered (Resume in the window).
+pub const AUTO_RESUME_TOTAL: usize = 16;
+/// ADR-0062 item 4: an agent the node brought back by itself less than this long ago is not brought back by itself again (a crash
+/// loop restarts the node at most 5 times in 10 minutes).
+pub const AUTO_RESUME_COOLDOWN_MS: u64 = 10 * 60 * 1000;
+/// ADR-0062 item 4: the time between two rounds of agents brought back by themselves.
+pub const AUTO_RESUME_GAP: Duration = Duration::from_secs(5);
+
 /// Name of the node's policy file in its data directory (written by the machine's owner; the hub cannot change it).
 pub const POLICY_FILE: &str = "policy";
 
@@ -1070,8 +1084,12 @@ pub struct Policy {
 /// ADR-0060: `resume = ask | auto`. `ask` (the default, and any other value) offers Resume in the window and does nothing by itself;
 /// `auto` resumes, as the node starts, the interrupted agents that can continue their own session, of a kind in `resume.kinds`, in a
 /// folder at or below one in `resume.folders`. Both lists must name something: `auto` with an empty list resumes nothing.
+/// ADR-0062 item 4: a `resume` line always wins over `agora node run --resume auto`: `ask` (or any word but `auto`) stops it, and
+/// `auto` keeps it to the kinds and folders listed. Only a policy without a `resume` line leaves the choice to the flag.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ResumePolicy {
+    /// The policy file has a `resume` line.
+    pub set: bool,
     pub auto: bool,
     pub kinds: Vec<String>,
     pub folders: Vec<PathBuf>,
@@ -1197,7 +1215,10 @@ pub fn read_policy(path: &std::path::Path) -> Policy {
                         );
                     }
                 }
-                "resume" => p.resume.auto = v.trim() == "auto",
+                "resume" => {
+                    p.resume.set = true;
+                    p.resume.auto = v.trim() == "auto";
+                }
                 "resume.kinds" => {
                     p.resume.kinds = v
                         .split(',')
@@ -1276,6 +1297,8 @@ pub struct Node {
     server: Option<ControlServer>,
     stop: Arc<AtomicBool>,
     ticker: Option<JoinHandle<()>>,
+    /// ADR-0062 item 4: brings back, a round at a time, the agents still waiting after the first round.
+    resume_wait: Option<JoinHandle<()>>,
     git_watch: Option<JoinHandle<()>>,
     pub supervisor: Arc<Mutex<Supervisor>>,
     pub events: Arc<EventSink>,
@@ -1536,17 +1559,34 @@ impl Node {
         // ADR-0060: `resume = auto` brings back, without anyone asking, the interrupted agents of the kinds and folders the owner listed
         // that can continue their own session. In id order, so a helper comes after its parent (a helper whose parent did not come
         // back stays offered). A refusal leaves the agent offered as before.
+        // ADR-0062 item 4: `agora node run --resume auto` brings back every such agent, whatever its kind and folder, unless the
+        // policy file has a `resume` line, which always wins (the stricter one). At most AUTO_RESUME_TOTAL at a start, none brought
+        // back by itself in the last AUTO_RESUME_COOLDOWN_MS, and AUTO_RESUME_MAX at a time so a machine coming back does not start
+        // everything at once: the first round here, before the socket answers, the others every AUTO_RESUME_GAP after (each still
+        // offered until then; one resumed or started again by hand meanwhile is refused and skipped).
         let resume = read_policy(&cfg.data_dir.join(POLICY_FILE)).resume;
-        if resume.auto {
-            for e in ledger.interrupted() {
-                if !e.session_id.is_empty() && resume.covers(&e.kind, Path::new(&e.folder)) {
-                    let _ = crate::control::resume_agent(&ctx, &e.agent_id, false);
-                }
-            }
-        }
+        let started_ms = now_ms();
+        let mut waiting: std::collections::VecDeque<String> = ledger
+            .interrupted()
+            .into_iter()
+            .filter(|e| {
+                let wanted = if resume.set {
+                    resume.covers(&e.kind, Path::new(&e.folder))
+                } else {
+                    cfg.resume_all
+                };
+                wanted
+                    && !e.session_id.is_empty()
+                    && started_ms.saturating_sub(e.auto_resumed_at_ms) >= AUTO_RESUME_COOLDOWN_MS
+            })
+            .map(|e| e.agent_id)
+            .take(AUTO_RESUME_TOTAL)
+            .collect();
+        resume_round(&ctx, &ledger, &mut waiting);
+        let resume_ctx = Arc::clone(&ctx);
         let server = ControlServer::start(&cfg.socket, ctx)?;
-
         let stop = Arc::new(AtomicBool::new(false));
+
         let ticker = {
             let (sup, ev, stop, node_id, mesh, approvals, chat, spawner) = (
                 Arc::clone(&supervisor),
@@ -1780,11 +1820,34 @@ impl Node {
                     }
                 })?
         };
+        // Started last, after every step that can fail: a node that did not start leaves nothing resuming behind it.
+        let resume_wait = if waiting.is_empty() {
+            None
+        } else {
+            let (ledger, stop) = (Arc::clone(&ledger), Arc::clone(&stop));
+            Some(
+                std::thread::Builder::new()
+                    .name("agora-resume".into())
+                    .spawn(move || {
+                        while !waiting.is_empty() {
+                            let until = Instant::now() + AUTO_RESUME_GAP;
+                            while Instant::now() < until {
+                                if stop.load(Ordering::Acquire) {
+                                    return;
+                                }
+                                std::thread::sleep(TICK);
+                            }
+                            resume_round(&resume_ctx, &ledger, &mut waiting);
+                        }
+                    })?,
+            )
+        };
         let events_set_aside = events.set_aside().cloned();
         Ok(Self {
             server: Some(server),
             stop,
             ticker: Some(ticker),
+            resume_wait,
             git_watch: Some(git_watch),
             supervisor,
             events,
@@ -1915,11 +1978,33 @@ fn watch_git(
     }
 }
 
+/// ADR-0062 item 4: resumes waiting agents, in order, until AUTO_RESUME_MAX came back or none wait. A refusal (the agent was resumed or
+/// started again by hand meanwhile, or its folder is gone) skips it and leaves it offered.
+fn resume_round(
+    ctx: &ControlContext,
+    ledger: &crate::ledger::Ledger,
+    waiting: &mut std::collections::VecDeque<String>,
+) {
+    let mut brought = 0;
+    while brought < AUTO_RESUME_MAX {
+        let Some(id) = waiting.pop_front() else {
+            return;
+        };
+        if crate::control::resume_agent(ctx, &id, false).is_ok() {
+            ledger.mark_auto_resumed(&id, now_ms());
+            brought += 1;
+        }
+    }
+}
+
 impl Drop for Node {
     fn drop(&mut self) {
         drop(self.server.take());
         self.stop.store(true, Ordering::Release);
         if let Some(t) = self.ticker.take() {
+            let _ = t.join();
+        }
+        if let Some(t) = self.resume_wait.take() {
             let _ = t.join();
         }
         if let Some(t) = self.git_watch.take() {
@@ -2195,6 +2280,7 @@ mod announce_tests {
     #[test]
     fn the_nodes_private_paths_are_its_whole_home_or_what_is_known_to_be_its() {
         let cfg = |data: &str, worktrees: &str| NodeConfig {
+            resume_all: false,
             node_id: "n".into(),
             socket: PathBuf::from("/h/node.sock"),
             data_dir: PathBuf::from(data),

@@ -84,6 +84,10 @@ pub(crate) struct Machine {
     pub hub_dir: PathBuf,
     /// The folders the node offers as projects.
     pub node_projects: Vec<PathBuf>,
+    /// ADR-0062 item 4: whether the node brings back by itself the agents that were running when it stopped (`resume = "auto"`) or
+    /// only offers them (`"ask"`, also any other value). `None`: never answered (a file written before this setting existed), which
+    /// is ask until the owner answers the question at the next `agora` in a terminal: an upgrade never turns it on silently.
+    pub resume: Option<bool>,
 }
 
 impl Machine {
@@ -123,13 +127,17 @@ impl Machine {
              hub_listen = {}\n\
              hub_names = {}\n\
              hub_dir = {}\n\
-             node_projects = {}\n",
+             node_projects = {}\n{}",
             list(&self.roles),
             quote(self.ui.as_str()),
             quote(&self.hub_listen),
             list(&self.hub_names),
             quote(&self.hub_dir.to_string_lossy()),
             list(&paths),
+            self.resume.map_or_else(String::new, |r| format!(
+                "resume = {}\n",
+                quote(if r { "auto" } else { "ask" })
+            )),
         )
     }
 
@@ -141,6 +149,8 @@ impl Machine {
         let mut hub_names = Vec::new();
         let mut hub_dir = None;
         let mut node_projects = Vec::new();
+        // ADR-0062 item 4: not answered unless the file says (a file from before the setting was never asked).
+        let mut resume = None;
         for line in text.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
@@ -157,6 +167,8 @@ impl Machine {
                 "node_projects" => {
                     node_projects = parse_list(v)?.into_iter().map(PathBuf::from).collect()
                 }
+                // Only "auto" is yes: an unknown word is the stricter answer.
+                "resume" => resume = Some(parse_string(v)?.0 == "auto"),
                 // Keys of a later version are kept by that version; this one ignores them.
                 _ => {}
             }
@@ -169,6 +181,7 @@ impl Machine {
             ui,
             hub_names,
             node_projects,
+            resume,
         };
         if m.has("hub") && (m.port().is_none() || m.hub_dir.as_os_str().is_empty()) {
             return None;
@@ -348,6 +361,7 @@ fn ask(
     home: &Path,
     cwd: &Path,
     ui: Ui,
+    resume: Option<bool>,
 ) -> Result<Option<Machine>, ExitCode> {
     let _ = writeln!(out, "{}", say.text(key!("frontdoor-welcome"), &[]));
     let _ = writeln!(out, "{}", say.text(key!("frontdoor-choice-here"), &[]));
@@ -377,6 +391,8 @@ fn ask(
             )
         }
     };
+    // ADR-0062 item 4: asked once, unless `--resume` already answered.
+    let resume = resume.or_else(|| ask_resume(say, input, out));
     let ip = if lan {
         IpAddr::V4(Ipv4Addr::UNSPECIFIED)
     } else {
@@ -420,6 +436,7 @@ fn ask(
         hub_names: names,
         hub_dir: home.join("hub"),
         node_projects: projects,
+        resume,
     }))
 }
 
@@ -433,15 +450,50 @@ pub fn front_door(say: &Say, o: &Opts) -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    // ADR-0062 item 4: `--resume ask|auto` for this run (the node's supervisor gets it), kept with `--save`.
+    let resume = match o.resume.as_deref() {
+        None => None,
+        Some("auto") => Some(true),
+        Some("ask") => Some(false),
+        Some(_) => {
+            say.err(key!("cli-bad-arguments"), &[]);
+            return ExitCode::from(2);
+        }
+    };
     let h = home();
     let mut first_run = false;
     let m = match load(&h) {
         Some(mut m) => {
+            let mut changed = false;
             if let Some(u) = ui.filter(|u| o.save && *u != m.ui) {
                 m.ui = u;
+                changed = true;
+            }
+            let mut resume_saved = false;
+            if let Some(r) = resume.filter(|r| o.save && m.resume != Some(*r)) {
+                m.resume = Some(r);
+                changed = true;
+                resume_saved = true;
+            }
+            // ADR-0062 item 4: a machine set up before the question existed is asked once, at the first `agora` in a terminal; until
+            // then (and when the input ends without an answer) nothing comes back by itself.
+            if m.resume.is_none() && resume.is_none() && std::io::stdin().is_terminal() {
+                if let Some(r) =
+                    ask_resume(say, &mut std::io::stdin().lock(), &mut std::io::stdout())
+                {
+                    m.resume = Some(r);
+                    changed = true;
+                    resume_saved = true;
+                }
+            }
+            if changed {
                 if let Err(e) = save(&h, &m) {
                     return failed(say, &e.to_string());
                 }
+            }
+            if resume_saved {
+                // A node running now (and its supervisor, for a restart after a crash) keeps what it started with.
+                say.out(key!("frontdoor-resume-saved"), &[]);
             }
             m
         }
@@ -478,6 +530,7 @@ pub fn front_door(say: &Say, o: &Opts) -> ExitCode {
                 &h,
                 &cwd,
                 ui.filter(|_| o.save).unwrap_or_else(Ui::system_default),
+                resume,
             );
             match asked {
                 Ok(Some(m)) => {
@@ -496,7 +549,7 @@ pub fn front_door(say: &Say, o: &Opts) -> ExitCode {
             }
         }
     };
-    if let Err(code) = up(say, &h, &m) {
+    if let Err(code) = up(say, &h, &m, resume) {
         return code;
     }
     // ADR-0062 item 6: the end of the first run asks once whether to start Agora at login. Always a question, never automatic; a no
@@ -517,6 +570,23 @@ pub fn front_door(say: &Say, o: &Opts) -> ExitCode {
     open(say, &m, ui.unwrap_or(m.ui))
 }
 
+/// ADR-0062 item 4: "Bring agents back by themselves after a restart? [Y/n]". Enter or yes is yes (the default the maintainer chose),
+/// a no is no and says how to turn it on again; input that ended is no answer (`None`: asked again next time, nothing comes back by
+/// itself meanwhile).
+fn ask_resume(say: &Say, input: &mut dyn BufRead, out: &mut dyn Write) -> Option<bool> {
+    prompt(out, &say.text(key!("frontdoor-resume-question"), &[]));
+    let yes = wants_resume(read_answer(input).as_deref()?);
+    if !yes {
+        let _ = writeln!(out, "{}", say.text(key!("frontdoor-resume-off"), &[]));
+    }
+    Some(yes)
+}
+
+/// Only a no is a no: Enter, yes, or anything else is yes.
+fn wants_resume(answer: &str) -> bool {
+    !matches!(answer, "n" | "no" | "h" | "hayır" | "hayir")
+}
+
 /// The answer to "Start Agora when you log in? [Y/n]": Enter or yes is yes, no is no, and no answer at all (the input ended) is no.
 fn wants_autostart(answer: Option<&str>) -> bool {
     matches!(answer, Some("" | "y" | "yes" | "e" | "evet"))
@@ -529,7 +599,7 @@ pub fn web(say: &Say) -> ExitCode {
         say.err(key!("frontdoor-not-set-up"), &[]);
         return ExitCode::from(1);
     };
-    if let Err(code) = up(say, &h, &m) {
+    if let Err(code) = up(say, &h, &m, None) {
         return code;
     }
     open(say, &m, Ui::Web)
@@ -830,6 +900,11 @@ pub(crate) fn command(
             for p in &m.node_projects {
                 cmd.arg("--project").arg(p);
             }
+            // ADR-0062 item 4: the agents that were running come back when the node starts again (also under a supervisor or a
+            // service, which run this same command).
+            if m.resume == Some(true) {
+                cmd.args(["--resume", "auto"]);
+            }
         }
     }
     Ok(cmd)
@@ -838,7 +913,12 @@ pub(crate) fn command(
 /// The command line of `role`'s supervisor (`agora supervise <role>`), which runs [`command`] and starts it again after a crash.
 /// The supervisor waits only for this process (`--handoff PID:START`, the holder of the lock now) to hand the lock over; any other
 /// holder makes it refuse at once, so a supervisor never takes a lock that `agora down` just freed.
-fn supervisor_command(home: &Path, role: Role) -> std::io::Result<std::process::Command> {
+/// `resume` (ADR-0062 item 4): `--resume auto|ask` for this run instead of the machine file's setting.
+fn supervisor_command(
+    home: &Path,
+    role: Role,
+    resume: Option<bool>,
+) -> std::io::Result<std::process::Command> {
     let me = LockInfo::of(std::process::id())
         .ok_or_else(|| std::io::Error::other("own start time unknown"))?;
     let mut cmd = std::process::Command::new(std::env::current_exe()?);
@@ -846,12 +926,21 @@ fn supervisor_command(home: &Path, role: Role) -> std::io::Result<std::process::
         .current_dir(home)
         .args(["supervise", role.name(), "--handoff"])
         .arg(format!("{}:{}", me.pid, me.start));
+    if let Some(r) = resume {
+        cmd.args(["--resume", if r { "auto" } else { "ask" }]);
+    }
     Ok(cmd)
 }
 
 /// Starts `role` detached under its supervisor unless it runs already, then waits for it to answer. The lock is this process's
 /// until the supervisor's id replaces it; the supervisor waits for that before it starts the role.
-fn ensure(say: &Say, home: &Path, m: &Machine, role: Role) -> Result<(), ExitCode> {
+fn ensure(
+    say: &Say,
+    home: &Path,
+    m: &Machine,
+    role: Role,
+    resume: Option<bool>,
+) -> Result<(), ExitCode> {
     let lock = role.lock(home);
     let log = role.log(home);
     if holder(home, role).is_none() && !role_answers(home, m, role) {
@@ -862,7 +951,7 @@ fn ensure(say: &Say, home: &Path, m: &Machine, role: Role) -> Result<(), ExitCod
                 &[("role", role.label(say).into())],
             );
             rotate(&log);
-            let started = supervisor_command(home, role)
+            let started = supervisor_command(home, role, resume)
                 .and_then(|mut c| agora_platform::spawn_detached(&mut c, &log))
                 .map(|d| {
                     if d.in_job {
@@ -935,18 +1024,19 @@ fn ensure(say: &Say, home: &Path, m: &Machine, role: Role) -> Result<(), ExitCod
 
 /// Brings up what the machine remembers: the hub, the node's enrollment with it (the first time), the node, and waits until the node
 /// shows up at the hub.
-fn up(say: &Say, home: &Path, m: &Machine) -> Result<(), ExitCode> {
+/// `resume`: `agora --resume ask|auto` for this run, passed to the node's supervisor (only a node started now uses it).
+fn up(say: &Say, home: &Path, m: &Machine, resume: Option<bool>) -> Result<(), ExitCode> {
     for d in ["logs", "run"] {
         std::fs::create_dir_all(home.join(d)).map_err(|e| failed(say, &e.to_string()))?;
     }
     if m.has("hub") {
-        ensure(say, home, m, Role::Hub)?;
+        ensure(say, home, m, Role::Hub, None)?;
     }
     if m.has("node") {
         if m.has("hub") && !crate::hubcli::link_dir().join("node-id").exists() {
             enroll_self(say, m)?;
         }
-        ensure(say, home, m, Role::Node)?;
+        ensure(say, home, m, Role::Node, resume)?;
         if m.has("hub") {
             wait_linked(say, home, m)?;
         }
@@ -1296,7 +1386,18 @@ mod tests {
         let held = guard(&lock).unwrap();
         let remover = {
             let (lock, stopped) = (lock.clone(), stopped.clone());
-            std::thread::spawn(move || remove_lock_of(&lock, &stopped).unwrap())
+            // The guard waits 10 s. A runner that stalls the whole process longer than that (seen on Ubuntu CI: a 14 s gap) lets
+            // the waiting thread run first when it resumes, past its deadline while the guard is still held: TimedOut, although
+            // nothing is wrong. Tried again a bounded number of times; one that never gets the guard still fails.
+            std::thread::spawn(move || {
+                for _ in 0..3 {
+                    match remove_lock_of(&lock, &stopped) {
+                        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => continue,
+                        r => return r.unwrap(),
+                    }
+                }
+                panic!("the guard was never let go");
+            })
         };
         std::thread::sleep(Duration::from_millis(300));
         assert!(lock.exists(), "the removal did not wait for the guard");
@@ -1396,6 +1497,7 @@ mod tests {
             hub_names: vec!["localhost".into(), "box".into(), "192.168.1.5".into()],
             hub_dir: PathBuf::from(r#"C:\Users\a "b"\.agora\hub"#),
             node_projects: vec![PathBuf::from("/home/a/proj"), PathBuf::from("/x\ty")],
+            resume: Some(false),
         };
         assert_eq!(Machine::parse(&m.to_toml()), Some(m.clone()));
         assert_eq!(m.local_addr().as_deref(), Some("127.0.0.1:7445"));
@@ -1410,6 +1512,70 @@ mod tests {
         assert_eq!(Machine::parse("roles = [\"hub\"\n"), None);
         assert_eq!(Machine::parse("ui = \"tui\"\n"), None);
         assert_eq!(Ui::parse("desktop"), None);
+    }
+
+    #[test]
+    fn agents_come_back_unless_the_owner_said_no() {
+        // ADR-0062 item 4: a file from before the setting was never asked (no resume by itself); only "auto" is yes; the node command
+        // carries it.
+        let yes = Machine {
+            roles: vec!["hub".into(), "node".into()],
+            ui: Ui::Tui,
+            hub_listen: "127.0.0.1:7445".into(),
+            hub_names: vec!["localhost".into()],
+            hub_dir: PathBuf::from("/h"),
+            node_projects: vec![],
+            resume: Some(true),
+        };
+        let old = Machine {
+            resume: None,
+            ..yes.clone()
+        };
+        assert!(!old.to_toml().contains("resume"), "{}", old.to_toml());
+        assert_eq!(Machine::parse(&old.to_toml()), Some(old.clone()));
+        assert_eq!(Machine::parse(&yes.to_toml()), Some(yes.clone()));
+        let no = Machine {
+            resume: Some(false),
+            ..yes.clone()
+        };
+        assert!(no.to_toml().contains("resume = \"ask\""));
+        assert_eq!(Machine::parse(&no.to_toml()), Some(no.clone()));
+        let odd = yes.to_toml().replace("\"auto\"", "\"always\"");
+        assert_eq!(Machine::parse(&odd), Some(no.clone()));
+
+        let args = |m: &Machine, role: Role| -> Vec<String> {
+            command(Path::new("/h"), m, role)
+                .unwrap()
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect()
+        };
+        assert!(args(&yes, Role::Node).ends_with(&["--resume".into(), "auto".into()]));
+        assert!(!args(&no, Role::Node).contains(&"--resume".into()));
+        assert!(!args(&old, Role::Node).contains(&"--resume".into()));
+        assert!(!args(&yes, Role::Hub).contains(&"--resume".into()));
+
+        // `agora --resume ask|auto` reaches the node's supervisor for this run only.
+        let sup = |r: Option<bool>| -> Vec<String> {
+            supervisor_command(Path::new("/h"), Role::Node, r)
+                .unwrap()
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect()
+        };
+        assert!(!sup(None).contains(&"--resume".into()));
+        assert!(sup(Some(false)).ends_with(&["--resume".into(), "ask".into()]));
+        assert!(sup(Some(true)).ends_with(&["--resume".into(), "auto".into()]));
+
+        for a in ["", "y", "evet", "maybe"] {
+            assert!(wants_resume(a), "{a}");
+        }
+        for a in ["n", "no", "h", "hayır"] {
+            assert!(!wants_resume(a), "{a}");
+        }
+        // Input that ended is no answer: asked again next time.
+        let mut input: &[u8] = b"";
+        assert_eq!(ask_resume(&say(), &mut input, &mut Vec::new()), None);
     }
 
     #[test]
@@ -1430,7 +1596,7 @@ mod tests {
 
         // A wrong answer is asked again; 1 then "y" listens on every address with the machine's names.
         let mut input: &[u8] = b"9\n1\ny\n";
-        let m = ask(&say(), &mut input, &mut out, &home, &repo, Ui::Tui)
+        let m = ask(&say(), &mut input, &mut out, &home, &repo, Ui::Tui, None)
             .unwrap()
             .unwrap();
         assert_eq!(m.roles, ["hub", "node"]);
@@ -1444,33 +1610,86 @@ mod tests {
 
         // "Just this machine": loopback only, no LAN question; a folder that is not a checkout is not offered.
         let mut input: &[u8] = b"2\n";
-        let m = ask(&say(), &mut input, &mut Vec::new(), &home, &home, Ui::None)
-            .unwrap()
-            .unwrap();
+        let m = ask(
+            &say(),
+            &mut input,
+            &mut Vec::new(),
+            &home,
+            &home,
+            Ui::None,
+            None,
+        )
+        .unwrap()
+        .unwrap();
         assert!(m.hub_listen.starts_with("127.0.0.1:"), "{}", m.hub_listen);
         assert_eq!(m.hub_names, ["localhost"]);
         assert!(m.node_projects.is_empty());
         assert_eq!(m.ui, Ui::None);
 
-        // "Start here" answered no: loopback.
-        let mut input: &[u8] = b"1\n\n";
-        let m = ask(&say(), &mut input, &mut Vec::new(), &home, &home, Ui::Tui)
+        // "Start here" answered no: loopback. Enter at the resume question keeps agents coming back.
+        let mut input: &[u8] = b"1\n\n\n";
+        let m = ask(
+            &say(),
+            &mut input,
+            &mut Vec::new(),
+            &home,
+            &home,
+            Ui::Tui,
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(m.hub_listen.starts_with("127.0.0.1:"));
+        assert_eq!(m.resume, Some(true));
+
+        // ADR-0062 item 4: asked once; a no is kept and says how to turn it on again.
+        let mut out = Vec::new();
+        let mut input: &[u8] = b"2\nn\n";
+        let m = ask(&say(), &mut input, &mut out, &home, &home, Ui::Tui, None)
             .unwrap()
             .unwrap();
-        assert!(m.hub_listen.starts_with("127.0.0.1:"));
+        assert_eq!(m.resume, Some(false));
+        let text = String::from_utf8_lossy(&out).into_owned();
+        assert!(text.contains("after a restart"), "{text}");
+        assert!(text.contains("agora --resume auto --save"), "{text}");
+        // `--resume` already answered: no question.
+        let mut out = Vec::new();
+        let mut input: &[u8] = b"2\n";
+        let m = ask(
+            &say(),
+            &mut input,
+            &mut out,
+            &home,
+            &home,
+            Ui::Tui,
+            Some(false),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(m.resume, Some(false));
+        assert!(!String::from_utf8_lossy(&out).contains("after a restart"));
 
         // Join: a pointer to the manual way, nothing saved.
         let mut out = Vec::new();
         let mut input: &[u8] = b"3\n";
         assert_eq!(
-            ask(&say(), &mut input, &mut out, &home, &home, Ui::Tui).unwrap(),
+            ask(&say(), &mut input, &mut out, &home, &home, Ui::Tui, None).unwrap(),
             None
         );
         assert!(String::from_utf8_lossy(&out).contains("agora node enroll"));
 
         // Input ended without an answer.
         let mut input: &[u8] = b"";
-        assert!(ask(&say(), &mut input, &mut Vec::new(), &home, &home, Ui::Tui).is_err());
+        assert!(ask(
+            &say(),
+            &mut input,
+            &mut Vec::new(),
+            &home,
+            &home,
+            Ui::Tui,
+            None
+        )
+        .is_err());
         let _ = std::fs::remove_dir_all(home);
     }
 

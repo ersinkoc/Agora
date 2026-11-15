@@ -4,9 +4,33 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+### Security
+- macOS: a confined agent is not started when a file it may write also has another name elsewhere (a hard link made outside
+  confinement), or when a save copy next to it (`state.json.tmp`) is such a link, since writing it would change that other file too; the message says to remove the link or put a copy in its place
+  (#571). Such links inside a folder it may write are not looked for at each start.
+
+### Machines
+- Windows: a machine could stop updating its agents (memory, state) for good when a process's leftover parent id pointed back
+  into the agent's own processes. Walking an agent's processes now visits each one once.
+
+## 0.3.13
+
+### Starting at login
+- After a restart of the machine or of Agora, the agents that were running come back on their own and carry on in their own conversations. At most 8 start at once, the rest 5 seconds apart. The first time, Agora asks once (the default is yes); `agora --resume ask|auto` changes it. The node's own policy file always outranks the flag.
+
+## 0.3.12
+
+### Known issue (Windows)
+- Microsoft Defender may flag `agora.exe` shortly after `agora service install`. It was seen on one machine with the 0.3.12 release
+  file, whose checksum and signature `agora update` had checked (`Behavior:Win32/Execution.A!ml`, a guess from what the program does,
+  not a known-malware match). Defender then quarantined the file, ended the supervisor and the node, and removed the `agora-node`
+  login task, so the machine went offline and `agora` no longer ran. What you can do is in getting-started ("Windows Defender").
+
 ### Hub
 - A machine whose certificate is revoked while it is connected (for example, another machine enrolled under its name) is shown
   offline at once. Its connection already ended, but every window kept showing it online until the hub restarted.
+- `agora hub run --metrics` lets the hub's owner read its own numbers at `/api/metrics` (Prometheus format): events stored, how long
+  each one held the hub, machines online, windows following, slow windows let go, approvals waiting and resyncs. Off unless asked for.
 
 ### Security
 - macOS: a confined agent (`sandbox = worktree`) can no longer reach the node's own files and sockets: the whole node home is closed to it (trusted devices, policy, ledger, identity, logs, hub folder, manifests, adapter trust files, the node's control socket and the other agents' mesh sockets), except its own worktree and mesh socket; the home cannot be renamed away, and no socket can be bound there before the node's own. Before, it could connect to the control socket (Seatbelt checks unix sockets as network, not as files), and with a node home under `/tmp` it could read and write the node's data (#475). Its own mesh socket stays open. Its worktree is given back only while it is still a real folder: an agent that leaves a link in its place is not started again, and says why. A node home that cannot be found stops confined agents from starting instead of leaving the home open, and your own home folder is never taken for the node's. A confined agent that replaces a file or folder it may write with a link (to `~/.zshrc`, to your home) is not started again: before, its next start could write where the link pointed, also when another agent swapped the link in while it started (#545). The message says to check that link and remove it if you did not make it; a file you keep there as a link yourself (a dotfiles link) is refused too. A folder named in the policy through `/System/Volumes/Data/...` is now closed or opened as named; before, such a rule matched nothing.
@@ -22,14 +46,23 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
   says what it registers first. `agora service status` says whether it is set up and whether it runs now; `agora service remove`
   stops it and removes it. On Windows (a logon task) and on Linux with systemd (a user unit in `~/.config/systemd/user`, no root;
   to start it at boot without logging in, run `loginctl enable-linger` yourself, which Agora never does), and on macOS (a
-  LaunchAgent in `~/Library/LaunchAgents`; macOS may say "Background Items Added" and lists it under Login Items). A login entry
-  of the same name that Agora did not write is left exactly as it is.
+  LaunchAgent in `~/Library/LaunchAgents`; macOS may say "Background Items Added" and lists it under Login Items, where switching it
+  off is shown by `status` and only you can switch it on again). A login entry of the same name that Agora did not write is left
+  exactly as it is, and `status` says it is not Agora's. The service gets only the full-path entries of your `PATH`.
 
 ### Getting started
 - A hub or node started by `agora` that crashes is started again 30 seconds later, at most 5 times in 10 minutes; one that
   stops right after starting (a port taken, a wrong setting) is not retried and its log says why. `agora status` shows a restart
   in progress, the restarts of the last 10 minutes and a give-up. `agora down` and a killed supervisor never leave a hub or node
   running behind them. A hub or node started by an earlier version stays as it is until `agora down` and `agora`.
+- Agents come back by themselves after a restart (ADR-0062): when this machine's Agora starts again, the agents that were running
+  continue their own conversations in their folders, 8 at once and the next 8 a few seconds later (at most 16; any more wait for
+  Resume in the window). The first run asks once ("Bring agents back by themselves after a restart? [Y/n]", Enter is yes); with a
+  no, the window still offers to bring each one back. A machine set up with an earlier version is asked once at the next `agora` in
+  a terminal and changes nothing until then. `agora --resume ask` or `--resume auto` changes it for one start, and with `--save`
+  from the next start on. A `resume` line in the node's own policy file always wins. An agent that cannot continue its own
+  conversation, or that was brought back by itself in the last 10 minutes, is never started again by itself. Run by hand,
+  `agora node run --resume auto` does the same.
 
 ### Shared board
 - A change to a shared project's board (create, claim, complete, lease, release, handoff) is answered as done only once the hub has

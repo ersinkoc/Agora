@@ -845,6 +845,10 @@ pub enum SandboxRefusal {
     /// A file or folder the agent may write or read is reached through a symbolic link inside a folder it may write, which it could
     /// have made itself to be given where the link points at its next start (#545, macOS).
     WritableIsLink,
+    /// A file the agent may write also has another name elsewhere (a hard link made outside confinement), so writing it would change
+    /// that other place too (#571). Windows: a regular file in the agent's worktree, outside `node_modules`, `target` and `.git`, whose
+    /// links are made on purpose by package stores and git.
+    WritableHasLinks,
 }
 
 impl SandboxRefusal {
@@ -855,6 +859,7 @@ impl SandboxRefusal {
             Self::ProtectedPathUnresolved => "protected_path_unresolved",
             Self::WorktreeNotFolder => "worktree_not_folder",
             Self::WritableIsLink => "writable_is_link",
+            Self::WritableHasLinks => "writable_has_links",
         }
     }
 }
@@ -1514,14 +1519,24 @@ pub const SERVICES_SUPPORTED: bool = cfg!(any(windows, target_os = "linux", targ
 /// itself (Linux: a systemd user manager runs from boot only with `loginctl enable-linger`). The caller says so after installing.
 pub const SERVICES_NEED_LINGER_FOR_BOOT: bool = cfg!(target_os = "linux");
 
+/// True where a program replaced by an update must be allowed onto the local network again before a login service can reach a hub
+/// on another machine (macOS: Privacy & Security > Local Network keeps the permission per binary; measured with 0.3.12 → 0.3.13,
+/// unsigned builds). The caller says so after an update when a service is registered.
+pub const SERVICES_NEED_NETWORK_PERMISSION_AFTER_UPDATE: bool = cfg!(target_os = "macos");
+
 /// Whether this machine can register a login service now: [`SERVICES_SUPPORTED`], and on Linux a `systemctl` (systemd's per-user
-/// services) found on `PATH`. Asked at run time, not when Agora was built: one Linux binary runs with and without systemd.
+/// services) found on `PATH`, on macOS a login session (`launchctl print gui/<uid>`; none over SSH while nobody is logged in at the
+/// screen). Asked at run time, not when Agora was built: one Linux binary runs with and without systemd.
 pub fn services_available() -> bool {
     #[cfg(target_os = "linux")]
     {
         linux::services_available()
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        macservice::available()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         SERVICES_SUPPORTED
     }
@@ -1589,6 +1604,9 @@ pub enum ServiceProblem {
     /// The service manager would also read these files (drop-ins, or another file of the same name), which can change what the service
     /// runs; nothing was registered.
     Overridden(Vec<PathBuf>),
+    /// Turned off by the user in the system's own settings (macOS: System Settings > General > Login Items & Extensions, "Allow in
+    /// the Background"), which Agora cannot turn on: only the user can, there. Nothing was registered.
+    TurnedOffInSettings,
 }
 
 impl std::fmt::Display for ServiceProblem {
@@ -1607,6 +1625,7 @@ impl std::fmt::Display for ServiceProblem {
             }
             ServiceProblem::NotLoaded(p) => write!(f, "{} was not loaded", p.display()),
             ServiceProblem::Overridden(ps) => write!(f, "also read: {ps:?}"),
+            ServiceProblem::TurnedOffInSettings => f.write_str("turned off in the system settings"),
         }
     }
 }
@@ -1668,6 +1687,29 @@ pub fn service_foreign(name: &str) -> io::Result<Option<PathBuf>> {
         let _ = name;
         Ok(None)
     }
+}
+
+/// The `PATH` a login service gets: the spec's, keeping the order but only full paths an entry can carry (an empty or relative entry
+/// would mean "the folder the service manager runs it from", which is not the installing shell's; a control character or a Unicode
+/// noncharacter cannot go into a unit or a property list). No other variable of the installing shell goes into the entry.
+/// Shared by the systemd unit and the LaunchAgent (Windows applies no variables).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn service_path_variable(env: &[(String, std::ffi::OsString)]) -> Option<String> {
+    let (_, value) = env.iter().find(|(k, _)| k == "PATH")?;
+    let kept: Vec<String> = std::env::split_paths(value)
+        .filter(|p| p.is_absolute())
+        .filter_map(|p| p.to_str().map(str::to_owned))
+        .filter(|p| !p.chars().any(|c| c.is_control() || is_noncharacter(c)))
+        .collect();
+    (!kept.is_empty()).then(|| kept.join(":"))
+}
+
+/// A Unicode noncharacter (U+FDD0..U+FDEF, and the last two code points of every plane, U+FFFE and U+FFFF among them): XML 1.0
+/// cannot carry U+FFFE and U+FFFF, and none of them is ever meant in a path.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn is_noncharacter(c: char) -> bool {
+    let n = u32::from(c);
+    (0xFDD0..=0xFDEF).contains(&n) || n & 0xFFFE == 0xFFFE
 }
 
 /// The [`ServiceProblem`] inside an error a `service_*` function returned, if it is one.
@@ -1884,21 +1926,81 @@ mod detached_tests {
 /// The process and all its descendants, parents before children. Processes that exit while the tree is
 /// being walked are skipped.
 pub fn process_tree(root: u32) -> io::Result<Vec<ProcessInfo>> {
+    walk_tree(root, process_name, process_children)
+}
+
+/// [`process_tree`] over any process table. Each process is visited once: on Windows a process keeps the id of a parent that ended,
+/// and ids are reused, so a stale parent id can name one of the root's own descendants. The table then has a cycle, and a walk
+/// without this check never ended (a Windows CI run hung in `a_child_is_found_under_its_parent_and_in_the_tree`; the node walks
+/// the same tree on every tick).
+fn walk_tree(
+    root: u32,
+    mut name_of: impl FnMut(u32) -> io::Result<String>,
+    mut children_of: impl FnMut(u32) -> io::Result<Vec<u32>>,
+) -> io::Result<Vec<ProcessInfo>> {
     let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::from([root]);
     let mut queue = std::collections::VecDeque::from([(root, 0u32)]);
     while let Some((pid, ppid)) = queue.pop_front() {
-        let Ok(name) = process_name(pid) else {
+        let Ok(name) = name_of(pid) else {
             if pid == root {
                 return Err(io::Error::new(io::ErrorKind::NotFound, "process not found"));
             }
             continue;
         };
         out.push(ProcessInfo { pid, ppid, name });
-        if let Ok(kids) = process_children(pid) {
-            queue.extend(kids.into_iter().map(|k| (k, pid)));
+        if let Ok(kids) = children_of(pid) {
+            queue.extend(
+                kids.into_iter()
+                    .filter(|k| seen.insert(*k))
+                    .map(|k| (k, pid)),
+            );
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod walk_tree_tests {
+    use super::*;
+
+    #[test]
+    fn a_cycle_in_the_process_table_is_walked_once() {
+        // 10 → 11 → 12, and 12 is listed as the parent of 10 (a stale parent id reused by a descendant), and 12 of itself again
+        // through 13 → 11.
+        let table: &[(u32, &[u32])] = &[(10, &[11]), (11, &[12]), (12, &[10, 13]), (13, &[11])];
+        let children = |pid: u32| {
+            Ok(table
+                .iter()
+                .find(|(p, _)| *p == pid)
+                .map_or(Vec::new(), |(_, k)| k.to_vec()))
+        };
+        let tree = walk_tree(10, |pid| Ok(format!("p{pid}")), children).unwrap();
+        let pids: Vec<u32> = tree.iter().map(|p| p.pid).collect();
+        assert_eq!(pids, [10, 11, 12, 13]);
+        assert_eq!(tree[0].ppid, 0);
+        assert_eq!(tree[3].ppid, 12);
+    }
+
+    #[test]
+    fn a_child_that_ended_during_the_walk_is_skipped_and_a_missing_root_is_an_error() {
+        let children = |pid: u32| Ok(if pid == 1 { vec![2, 3] } else { vec![] });
+        let name = |pid: u32| {
+            if pid == 2 {
+                Err(io::Error::from(io::ErrorKind::NotFound))
+            } else {
+                Ok(String::from("x"))
+            }
+        };
+        let pids: Vec<u32> = walk_tree(1, name, children)
+            .unwrap()
+            .iter()
+            .map(|p| p.pid)
+            .collect();
+        assert_eq!(pids, [1, 3]);
+        assert!(walk_tree(2, name, children).is_err());
+    }
 }
 
 /// Start a process in a new PTY.

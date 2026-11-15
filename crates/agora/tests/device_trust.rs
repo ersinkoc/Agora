@@ -392,6 +392,7 @@ fn the_hub_offers_devices_the_owner_decides_and_endorsements_and_revocations_are
 
     // ---- the node runs and links to the hub ----
     let cfg = agora_node::daemon::NodeConfig {
+        resume_all: false,
         node_id: "laptop".into(),
         socket: home.join("c.sock"),
         data_dir: data.clone(),

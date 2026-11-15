@@ -48,6 +48,8 @@ fn supported() -> bool {
 struct Env {
     root: PathBuf,
     node: Option<Node>,
+    /// `agora node run --resume auto` (ADR-0062 item 4).
+    resume_all: bool,
 }
 
 impl Env {
@@ -102,7 +104,11 @@ impl Env {
             ),
         )
         .unwrap();
-        let mut e = Self { root, node: None };
+        let mut e = Self {
+            root,
+            node: None,
+            resume_all: false,
+        };
         e.start();
         e
     }
@@ -111,6 +117,7 @@ impl Env {
         self.node = None;
         self.node = Some(
             Node::start(&NodeConfig {
+                resume_all: self.resume_all,
                 node_id: "node-resume".into(),
                 socket: self.root.join("n.sock"),
                 data_dir: self.root.join("data"),
@@ -677,4 +684,72 @@ fn a_resumed_agent_never_gets_its_dont_ask_option_back() {
         .filter(|r| args(r).iter().any(|a| a == "--yolo"))
         .count();
     assert_eq!(yolo, 1);
+}
+
+#[test]
+fn resume_auto_brings_agents_back_eight_at_a_time_at_most_sixteen_and_not_twice_in_ten_minutes() {
+    if !supported() {
+        return;
+    }
+    use agora_node::daemon::{AUTO_RESUME_MAX, AUTO_RESUME_TOTAL};
+    // ADR-0062 item 4: `agora node run --resume auto` needs no policy file and covers every kind and folder. At most AUTO_RESUME_MAX at
+    // once, the next round a few seconds later, AUTO_RESUME_TOTAL at one start; the rest stay offered. An agent with no session of
+    // its own stays offered too.
+    let mut e = Env::new("all");
+    let probes: Vec<String> = (0..=AUTO_RESUME_TOTAL).map(|_| e.launch("probe")).collect();
+    let plain = e.launch("plain");
+    for p in &probes {
+        e.wait("the probe's session", |e| !e.session(p).is_empty());
+    }
+    e.resume_all = true;
+    e.start();
+    let back = |e: &Env| probes.iter().filter(|p| e.running(p)).count();
+    assert_eq!(back(&e), AUTO_RESUME_MAX);
+    e.wait("the second round", |e| back(e) == AUTO_RESUME_TOTAL);
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(back(&e), AUTO_RESUME_TOTAL);
+    let last = probes.last().unwrap();
+    assert!(!e.running(last));
+    assert!(e.node().ledger.get(last).unwrap().interrupted());
+    assert!(!e.running(&plain));
+    assert!(e.node().ledger.get(&plain).unwrap().interrupted());
+
+    // A restart soon after (a crash loop): the ones just brought back stay offered; only the one never brought back comes back.
+    e.start();
+    assert!(e.running(last));
+    assert_eq!(back(&e), 1);
+
+    // Without it (and without a policy file) nothing comes back by itself.
+    e.resume_all = false;
+    e.start();
+    assert_eq!(back(&e), 0);
+}
+
+#[test]
+fn the_policy_file_always_wins_over_resume_auto() {
+    if !supported() {
+        return;
+    }
+    // ADR-0062 item 4: a `resume` line in the node's own policy file is the stricter rule: `ask` (or any other word) stops the flag,
+    // and `auto` keeps it to the kinds and folders it lists.
+    let mut e = Env::new("policy");
+    e.resume_all = true;
+    let p = e.launch("probe");
+    e.wait("the probe's session", |e| !e.session(&p).is_empty());
+    std::fs::create_dir_all(e.root.join("data")).unwrap();
+    for policy in [
+        "resume = ask\n".to_string(),
+        "resume = forbid\n".to_string(),
+        format!(
+            "resume = auto\nresume.kinds = adapter\nresume.folders = {}\n",
+            e.root.join("work").display()
+        ),
+    ] {
+        std::fs::write(e.root.join("data/policy"), &policy).unwrap();
+        for _ in 0..2 {
+            e.start();
+            assert!(!e.running(&p), "{policy}");
+            assert!(e.node().ledger.get(&p).unwrap().interrupted(), "{policy}");
+        }
+    }
 }

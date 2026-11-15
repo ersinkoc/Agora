@@ -2,12 +2,12 @@
 
 cli-usage =
     Usage:
-      agora [--ui tui|web|none [--save]]
+      agora [--ui tui|web|none [--save]] [--resume ask|auto [--save]]
       agora web
       agora status
       agora down
       agora service install|remove|status
-      agora node run [--socket PATH] [--manifests DIR] [--project PATH]... [--data DIR] [--worktrees DIR]
+      agora node run [--socket PATH] [--manifests DIR] [--project PATH]... [--data DIR] [--worktrees DIR] [--resume auto]
       agora agent start KIND [--cwd PATH] [--worktree] [--project NAME] [--name NAME] [--accept-project-id-change] [--socket PATH]
       agora project init [--cwd PATH] [--socket PATH]
       agora agent stop AGENT_ID [--socket PATH]
@@ -17,7 +17,7 @@ cli-usage =
       agora terminal attach AGENT_ID [--socket PATH]
       agora node stdio [--socket PATH]
       agora mesh stdio --socket PATH
-      agora hub run [--listen ADDR] [--hub-dir DIR] [--name HOST]... [--web DIR]
+      agora hub run [--listen ADDR] [--hub-dir DIR] [--name HOST]... [--web DIR] [--metrics]
       agora hub code [--hub-dir DIR]
       agora hub ssh install NAME [--yes] [--unsigned] [--release-url URL] [--hub-dir DIR]
       agora hub login [--hub-dir DIR]
@@ -195,6 +195,7 @@ cli-hub-ssh-install-manual = { $name } is enrolled, but it has neither systemd n
 cli-hub-ssh-install-failed = Stopped at step "{ $step }" on { $name }: { $detail } Already done: { $done }. Nothing was rolled back.
 cli-update-current = Agora { $version } is the newest release.
 cli-update-available = Agora { $version } is available (this is { $current }). Run "agora update" to install it.
+cli-update-local-network = macOS may ask again whether Agora may use the local network: allow it (or turn `agora` on in System Settings > Privacy & Security > Local Network), or the node started at login cannot reach a hub on another machine.
 cli-update-done = Updated to Agora { $version }. Running agents keep going; restart the node to use the new version.
 cli-update-failed = The update did not happen: { $reason }
 cli-update-checksum = The download does not match its published checksum. Nothing was changed.
@@ -229,6 +230,9 @@ frontdoor-choose = Type 1, 2 or 3 and press Enter:
 frontdoor-lan-question = Let other machines of yours connect? [y/N]
 frontdoor-autostart-question = Start Agora when you log in? [Y/n]
 frontdoor-autostart-later = Agora will not start by itself when you log in. `agora service install` sets that up whenever you want.
+frontdoor-resume-question = Bring agents back by themselves after a restart? [Y/n]
+frontdoor-resume-off = Agents will not come back by themselves after a restart; the window offers to bring each one back. `agora --resume auto --save` turns it on again.
+frontdoor-resume-saved = Saved. It applies from the next time Agora starts on this machine: a node running now keeps what it started with until `agora down`.
 frontdoor-join-later = Joining from here is not available yet. On the machine that runs Agora, run `agora hub code`; then here run `agora node enroll` and `agora node run` (see `agora --help`).
 frontdoor-get-started = Agora is not set up on this machine yet. Run `agora` in a terminal and answer one question. (Settings are kept in { $path }.)
 frontdoor-set-up-by-hand = This machine already has an Agora started by hand ({ $path }). `agora` does not take it over yet: keep using `agora hub run` and `agora node run`, or set AGORA_HOME to a new folder to let `agora` set one up there.
@@ -285,8 +289,8 @@ service-status-not-installed = The { $role } does not start by itself when you l
 service-status-failed = Could not read "{ $name }": { $reason }
 service-status-running = running now (process { $pid })
 service-status-stopped = not running now
-service-unavailable = Starting Agora when you log in is not available on this machine: it needs systemd's per-user services (`systemctl`), which were not found. Start it with `agora` after logging in.
-service-no-user-manager = Could not reach your user's service manager for "{ $name }": this session has no systemd user bus (for example `su`, or an SSH session while your user manager is not running). Log in on this machine and try again; nothing was changed.
+service-unavailable = Starting Agora when you log in is not available on this machine: on Linux it needs systemd's per-user services (`systemctl`), which were not found; on macOS it needs your login session (log in at the screen; SSH alone is not enough). Start it with `agora` after logging in.
+service-no-user-manager = Could not reach your user's service manager for "{ $name }": this session has no systemd user bus (for example `su`, or an SSH session while your user manager is not running), or on macOS no login session (an SSH session while you are not logged in at the screen). Log in on this machine and try again; nothing was changed.
 service-in-the-way = { $path } is a link or not a plain file, so Agora does not replace it. If it is not yours to keep, remove it and try again.
 service-bad-path-control = "{ $path }" cannot go into the login entry: it contains a line break or another control character. Move Agora or its folder to a plain path.
 service-bad-path-relative = "{ $path }" cannot go into the login entry: it is not a full path. Run Agora by its full path, or name its folder with a full path.
@@ -298,6 +302,7 @@ service-overridden = "{ $name }" would not run only what Agora wrote: systemd al
 service-drop-ins-left = These files that change "{ $name }" were not written by Agora and are left as they are: { $paths }
 service-bad-path-backslash = "{ $path }" cannot go into the login entry: a folder with a backslash (\) cannot be written safely into a systemd unit. Move Agora's folder to a path without one.
 service-bad-program = "{ $path }" cannot be started by systemd: the program's path contains a quote or a backslash. Move Agora to a path without one.
+service-turned-off-in-settings = "{ $name }" is turned off in System Settings > General > Login Items & Extensions ("Allow in the Background"), and only you can turn it on there. Turn it on, then run `agora service install` again; nothing was changed.
 service-was-off = The { $role } was set up to start when you log in ("{ $name }") but that was turned off; turning it on again.
 service-already-overridden = The { $role } is set up to start when you log in ("{ $name }"), but systemd also reads { $paths }, which can change what it runs. Nothing was changed; remove or move those files yourself if you do not need them.
 service-status-overridden = systemd also reads { $paths } for it, which can change what it runs

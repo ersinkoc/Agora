@@ -25,6 +25,7 @@ agent-sandbox_unavailable = This machine is set to confine agents ({ $level }), 
         [label_failed] A folder it would use cannot be marked for confined agents.
         [protected_path_unresolved] This machine's own Agora folder cannot be found, so it could not be kept closed to the agent.
         [writable_is_link] A file or folder it may use is reached through a link in a place it may write, so it could have made that link itself. Check that link: if you did not make it, remove it. Agora does not follow such links, also ones you made yourself (a dotfiles link).
+        [writable_has_links] A file it may write also has another name in a different place (a hard link), so writing it would change that place too. Remove that link (or replace it with a copy) and start it again. Links inside node_modules, target and .git are not checked.
         [worktree_not_folder] Its folder is no longer a plain folder (something, such as a link, was put in its place).
        *[other] {""}
     }

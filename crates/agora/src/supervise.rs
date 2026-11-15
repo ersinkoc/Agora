@@ -361,6 +361,8 @@ pub struct Start<'a> {
     pub home: Option<PathBuf>,
     /// `--log`: write its notes and the child's output to the role's log itself.
     pub log: bool,
+    /// `--resume auto|ask` (ADR-0062 item 4): the front door's choice for this run, instead of the machine file's.
+    pub resume: Option<&'a str>,
 }
 
 /// The exit code of an end the supervisor decided itself (a give-up, a refusal, a lock held or lost, a clean stop, a log it will not
@@ -396,10 +398,19 @@ pub fn supervise(say: &Say, word: &str, start: &Start) -> ExitCode {
         return ExitCode::from(2);
     }
     let h = start.home.clone().unwrap_or_else(home);
-    let Some(m) = frontdoor::load(&h) else {
+    let Some(mut m) = frontdoor::load(&h) else {
         say.err(key!("frontdoor-not-set-up"), &[]);
         return planned(1);
     };
+    match start.resume {
+        None => {}
+        Some("auto") => m.resume = Some(true),
+        Some("ask") => m.resume = Some(false),
+        Some(_) => {
+            say.err(key!("cli-bad-arguments"), &[]);
+            return planned(2);
+        }
+    }
     let fail = |e: &dyn std::fmt::Display| {
         say.err(
             key!("frontdoor-failed"),

@@ -141,6 +141,7 @@ pub fn run(terminals: usize, idle_for: Duration, commit: &str) -> std::io::Resul
     // Cold start: from nothing to a node that answers a command.
     let t0 = Instant::now();
     let node = agora_node::daemon::Node::start(&agora_node::daemon::NodeConfig {
+        resume_all: false,
         node_id: "bench".into(),
         socket: dir.join("n.sock"),
         data_dir: dir.join("data"),

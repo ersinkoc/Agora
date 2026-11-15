@@ -353,6 +353,25 @@ impl crate::web::SessionApi for HubSessions {
         }
     }
 
+    fn metrics_on(&self) -> bool {
+        self.hub.metrics_on()
+    }
+
+    fn metrics(&self, bearer: Option<&str>) -> (u16, String) {
+        // The token first: nobody but the owner makes the hub count anything (#562 review).
+        let Some(token) = bearer else {
+            return (401, String::new());
+        };
+        match self.signin().access(token, crate::server::now_ms()) {
+            None => (401, String::new()),
+            Some(a) if a.role != crate::users::Role::Owner => (403, String::new()),
+            Some(_) => self
+                .hub
+                .metrics_text()
+                .map_or((404, String::new()), |text| (200, text)),
+        }
+    }
+
     fn info(&self, client: &Client) -> serde_json::Value {
         let set = self.screen_password().is_set();
         serde_json::json!({ "passwordRequired": set && !client.is_local(), "passwordSet": set })

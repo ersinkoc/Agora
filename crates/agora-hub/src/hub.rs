@@ -54,9 +54,16 @@ struct Inner {
     pos: u64,
     hub_seq: u64,
     subs: Vec<SyncSender<Delivered>>,
+    /// Subscribers let go because their queue was full (a slow window) or closed (`GET /api/metrics`).
+    subs_dropped: u64,
+    /// How long an agent waited for a person's answer (`GET /api/metrics`).
+    approval_wait: crate::metrics::Histogram,
 }
 
 pub struct Hub {
+    /// The hub's own numbers (`GET /api/metrics`, when `--metrics` turned it on).
+    metrics: crate::metrics::Metrics,
+    metrics_on: std::sync::atomic::AtomicBool,
     boards: crate::board::Boards,
     prices: std::sync::RwLock<(std::sync::Arc<crate::usage::Catalog>, u64)>,
     store: SqliteStore,
@@ -144,6 +151,8 @@ impl Hub {
         let (view, pos) = View::rebuild(&store)?;
         let hub_seq = store.acked(RESERVED_HUB_ID)?;
         let hub = Self {
+            metrics: crate::metrics::Metrics::default(),
+            metrics_on: std::sync::atomic::AtomicBool::new(false),
             boards: crate::board::Boards::new(),
             prices: std::sync::RwLock::new((crate::usage::Catalog::bundled(), 0)),
             store,
@@ -153,6 +162,8 @@ impl Hub {
                 pos,
                 hub_seq,
                 subs: Vec::new(),
+                subs_dropped: 0,
+                approval_wait: crate::metrics::Histogram::with_bounds(&crate::metrics::ANSWER_US),
             }),
         };
         {
@@ -253,6 +264,45 @@ impl Hub {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Turns on `GET /api/metrics` (`agora hub run --metrics`). The numbers are counted either way; this only lets them be read.
+    pub fn enable_metrics(&self) {
+        self.metrics_on
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Whether `GET /api/metrics` was turned on.
+    pub fn metrics_on(&self) -> bool {
+        self.metrics_on.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// The hub's numbers in the Prometheus text format, or `None` when they were not turned on.
+    pub fn metrics_text(&self) -> Option<String> {
+        if !self.metrics_on.load(std::sync::atomic::Ordering::Relaxed) {
+            return None;
+        }
+        let gauges = {
+            let g = self.lock();
+            crate::metrics::Gauges {
+                nodes_known: g.view.nodes.len(),
+                nodes_online: g.view.nodes.values().filter(|n| n.online).count(),
+                subscribers: g.subs.len(),
+                subscribers_dropped: g.subs_dropped,
+                approvals_waiting: g.view.approvals.len(),
+                approval_wait: g.approval_wait.snapshot(),
+                relays_dropped: self.router.relays_dropped(),
+                terminal_bytes: self.router.terminal_bytes(),
+                events_stored: g.pos,
+                resyncs: 0,
+            }
+        };
+        // Read outside the hub's lock: it is a query on the store.
+        let resyncs = self.store.resync_count().unwrap_or(0);
+        Some(
+            self.metrics
+                .render(&crate::metrics::Gauges { resyncs, ..gauges }),
+        )
+    }
+
     /// Whether any node by this id has ever been seen (online or not).
     pub fn node_known(&self, node: &str) -> bool {
         self.lock().view.nodes.contains_key(node)
@@ -270,9 +320,26 @@ impl Hub {
         session: &mut NodeSession<'_, SqliteStore>,
         payload: &[u8],
     ) -> Result<Ingest, SessionError> {
+        let asked = std::time::Instant::now();
         let mut g = self.lock();
+        let held = std::time::Instant::now();
+        self.metrics.lock_wait.observe(held - asked);
+        let outcome = self.ingest_locked(&mut g, session, payload);
+        self.metrics.ingest.observe(held.elapsed());
+        outcome
+    }
+
+    fn ingest_locked(
+        &self,
+        g: &mut MutexGuard<'_, Inner>,
+        session: &mut NodeSession<'_, SqliteStore>,
+        payload: &[u8],
+    ) -> Result<Ingest, SessionError> {
         let outcome = session.event(payload)?;
         if let Ingest::Applied { pos, .. } | Ingest::Resynced { pos, .. } = outcome {
+            self.metrics
+                .events_ingested
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             // The session already decoded it successfully, so this cannot fail; stay defensive anyway.
             if let Ok(event) = Event::decode(payload) {
                 let restarted = match &event.body {
@@ -281,7 +348,7 @@ impl Hub {
                 };
                 // Read before the event is folded in: whether an agent is new, and what a decision was about.
                 let audit = spawn_audit(&g.view, &event);
-                Self::publish(&mut g, Delivered { pos, event });
+                Self::publish(g, Delivered { pos, event });
                 if let Some((who, action, node, outcome, at_ms)) = audit {
                     let _ = crate::audit::Audit::new(&self.store)
                         .record(at_ms, &who, &action, &node, &outcome);
@@ -294,7 +361,7 @@ impl Hub {
                             let _ = self.store.set_setting(&format!("board.{project}"), &bytes);
                         }
                         for body in events {
-                            let _ = self.emit(&mut g, body, at_ms);
+                            let _ = self.emit(g, body, at_ms);
                         }
                     }
                 }
@@ -608,6 +675,15 @@ impl Hub {
     }
 
     fn publish(g: &mut Inner, d: Delivered) {
+        // An answer to a waiting approval: how long the agent waited, both times on the asking machine's clock.
+        if let Some(Body::ApprovalResolved(r)) = &d.event.body {
+            let key = crate::projection::qualified(&d.event.producer_id, &r.approval_id);
+            if let Some(a) = g.view.approvals.get(&key) {
+                let waited = d.event.at_ms.saturating_sub(a.requested_at_ms);
+                g.approval_wait
+                    .observe(std::time::Duration::from_millis(waited));
+            }
+        }
         let back = g.view.brings_back(&d.event);
         g.view.apply(&d.event);
         g.pos = d.pos;
@@ -620,10 +696,12 @@ impl Hub {
             return;
         }
         // `try_send`: a full queue means the subscriber is too slow; drop it rather than stall every other node.
+        let before = g.subs.len();
         g.subs.retain(|s| match s.try_send(d.clone()) {
             Ok(()) => true,
             Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => false,
         });
+        g.subs_dropped += (before - g.subs.len()) as u64;
     }
 
     /// The stored events after `after`, or `None` when they come to more than `max_bytes`: then a snapshot is cheaper and bounded.

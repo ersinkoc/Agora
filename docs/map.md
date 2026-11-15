@@ -64,7 +64,7 @@ Each rung ships alone, is usable on its own, and has its own tests. Do not start
 | **1 front door** | type `agora` on a fresh machine: it starts a hub **and** a node here (loopback), detached, and opens the interface signed in | machine.toml, detached start, a lock |
 | **2 join** | on another machine paste ONE string (`agora join <string>`) printed by the hub: it joins, no CA file, no flags | join string, CA pin |
 | **3 honest environment** | tools like `wstack`, `claude`, `codex` are found; a missing one says why | login-shell PATH captured |
-| **4 coming back** | after a restart the agents that were running are resumed | ledger (ADR-0060) |
+| **4 coming back (built)** | after a restart the agents that were running are resumed (asked once, default yes; 8 at a time) | ledger (ADR-0060) |
 | **5 autostart** | it all starts when you log in (systemd user / LaunchAgent / logon task) | per-OS service |
 | **6 care** | `agora status` / `down`, logs, restart-on-failure, version mismatch hints | — |
 | parallel | trust without typed commands (ADR-0061), a proper terminal UI (ADR-0063) | — |

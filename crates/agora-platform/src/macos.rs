@@ -208,6 +208,17 @@ pub(crate) fn profile(sb: &crate::Sandbox) -> io::Result<String> {
         Ok(out)
     };
     let write_real = resolve(&sb.write)?;
+    // #571: a file the agent may write that has another name (a hard link made outside confinement: an agent cannot make one, `ln` is
+    // refused) would let it write that other place too, which Seatbelt checks only by the name used. Refused, from the same
+    // descriptor the walk resolved. Folders are not scanned at each start (too costly; the accepted risk in T16).
+    // The same for the siblings a file entry opens for saving (`<file>.*`, see [`sibling_rule`]): one that is already there with a
+    // second name (`state.json.tmp` linked to `~/.zshrc`) would be writable too (review of #592, measured).
+    if write_real
+        .iter()
+        .any(|r| r.file && (r.links > 1 || sibling_has_links(&r.path)))
+    {
+        return Err(refused(crate::SandboxRefusal::WritableHasLinks));
+    }
     let read_real = resolve(&sb.read)?;
     let holds_private = |p: &std::path::Path| {
         PRIVATE
@@ -365,6 +376,8 @@ struct Walked {
     path: std::path::PathBuf,
     dir: bool,
     file: bool,
+    /// How many names the file has (`st_nlink`), read from the descriptor the walk ended on.
+    links: u64,
 }
 
 /// Why [`walk`] stopped.
@@ -495,6 +508,7 @@ fn walk(
                     path: path_of(&at).map_err(failed)?.join(&name),
                     dir: false,
                     file: st.st_mode & libc::S_IFMT == libc::S_IFREG,
+                    links: u64::from(st.st_nlink),
                 });
             }
             Err(e) => return Err(failed(e)),
@@ -506,6 +520,7 @@ fn walk(
         path,
         dir: meta.is_dir(),
         file: meta.is_file(),
+        links: std::os::unix::fs::MetadataExt::nlink(&meta),
     })
 }
 
@@ -524,6 +539,26 @@ fn agents_link(
     places.iter().any(|w| place == w)
         // SAFETY: `dir` is an open folder for the call; "." is a NUL-terminated literal.
         && unsafe { libc::faccessat(dir, c".".as_ptr(), libc::W_OK, libc::AT_EACCESS) } == 0
+}
+
+/// Whether a file next to `file` whose name starts with its name and a dot (what [`sibling_rule`] lets the agent write) is a
+/// regular file with more than one name. A folder that cannot be read counts as holding one: the start is refused rather than
+/// opened unchecked.
+fn sibling_has_links(file: &std::path::Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::MetadataExt;
+    let (Some(dir), Some(name)) = (file.parent(), file.file_name()) else {
+        return true;
+    };
+    let mut prefix = name.as_bytes().to_vec();
+    prefix.push(b'.');
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return true;
+    };
+    entries.filter_map(Result::ok).any(|e| {
+        e.file_name().as_bytes().starts_with(&prefix)
+            && std::fs::symlink_metadata(e.path()).is_ok_and(|m| m.is_file() && m.nlink() > 1)
+    })
 }
 
 /// `(regex #"^<file>\.[^/]*$")`: the names next to `file` that start with its name and a dot. `None` for a path a raw string
@@ -1362,6 +1397,45 @@ mod sandbox_tests {
             );
             std::fs::remove_file(u.join("w/rc")).unwrap();
         }
+        let _ = std::fs::remove_dir_all(&u);
+    }
+
+    #[test]
+    fn a_file_it_may_write_that_has_another_name_refuses_the_start() {
+        // #571: a hard link made outside confinement (measured: writing through it changed the other file). A file entry with a
+        // second name is refused; the same file with one name starts, and so does a folder entry holding such a file (accepted risk).
+        let u = std::path::PathBuf::from(format!("/tmp/agora-571-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&u);
+        std::fs::create_dir_all(u.join("w")).unwrap();
+        std::fs::write(u.join(".zshrc"), "# rc\n").unwrap();
+        std::fs::write(u.join(".claude.json"), "{}").unwrap();
+        let sb = crate::Sandbox {
+            write: vec![u.join(".claude.json"), u.join("w"), "/dev".into()],
+            ..Default::default()
+        };
+        assert!(super::profile(&sb).is_ok());
+        std::fs::remove_file(u.join(".claude.json")).unwrap();
+        std::fs::hard_link(u.join(".zshrc"), u.join(".claude.json")).unwrap();
+        assert_eq!(
+            crate::sandbox_refusal(&super::profile(&sb).unwrap_err()),
+            Some(crate::SandboxRefusal::WritableHasLinks)
+        );
+        std::fs::remove_file(u.join(".claude.json")).unwrap();
+        std::fs::write(u.join(".claude.json"), "{}").unwrap();
+        // A save sibling it may write (`.claude.json.tmp`) that is already a second name of `.zshrc` (review of #592): refused,
+        // and Seatbelt would have let the write through (measured with this file before the fix).
+        std::fs::hard_link(u.join(".zshrc"), u.join(".claude.json.tmp")).unwrap();
+        assert_eq!(
+            crate::sandbox_refusal(&super::profile(&sb).unwrap_err()),
+            Some(crate::SandboxRefusal::WritableHasLinks)
+        );
+        std::fs::remove_file(u.join(".claude.json.tmp")).unwrap();
+        // A sibling with one name, and a link whose name only looks alike (`.claude.jsonx`), are fine.
+        std::fs::write(u.join(".claude.json.lock"), "").unwrap();
+        std::fs::hard_link(u.join(".zshrc"), u.join(".claude.jsonx")).unwrap();
+        assert!(super::profile(&sb).is_ok());
+        std::fs::hard_link(u.join(".zshrc"), u.join("w/rc")).unwrap();
+        assert!(super::profile(&sb).is_ok(), "folders are not scanned");
         let _ = std::fs::remove_dir_all(&u);
     }
 

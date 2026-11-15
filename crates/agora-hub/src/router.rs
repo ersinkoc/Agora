@@ -98,6 +98,11 @@ pub struct Router {
     sizes: Mutex<HashMap<(String, String), Shared>>,
     next: AtomicU64,
     next_stream: AtomicU32,
+    /// Terminal relays ended because the window's queue was full or gone (`GET /api/metrics`). Chat relays are not counted.
+    relays_dropped: AtomicU64,
+    /// Bytes of terminal frames passed on to windows (`GET /api/metrics`; a rate of it is the terminals' bytes per second). Chat
+    /// frames are not counted.
+    terminal_bytes: AtomicU64,
 }
 
 impl Default for Router {
@@ -108,6 +113,8 @@ impl Default for Router {
             sizes: Mutex::default(),
             next: AtomicU64::new(0),
             next_stream: AtomicU32::new(agora_protocol::frame::FIRST_DYNAMIC_STREAM),
+            relays_dropped: AtomicU64::new(0),
+            terminal_bytes: AtomicU64::new(0),
         }
     }
 }
@@ -361,6 +368,16 @@ impl Router {
         }
     }
 
+    /// How many terminal relays ended because the window could not keep up (or was gone).
+    pub fn relays_dropped(&self) -> u64 {
+        self.relays_dropped.load(Ordering::Relaxed)
+    }
+
+    /// Bytes of terminal frames passed on to windows so far.
+    pub fn terminal_bytes(&self) -> u64 {
+        self.terminal_bytes.load(Ordering::Relaxed)
+    }
+
     /// A frame from a node on a dynamic stream: queued for the client. A client whose queue is full is not waited for;
     /// its relay is closed on both sides and it resubscribes. A terminal exit ends the relay after the frame.
     pub fn relay_frame(&self, node: &str, stream: u32, kind: u8, payload: Vec<u8>) {
@@ -395,13 +412,22 @@ impl Router {
             }
             return;
         }
+        let bytes = payload.len() as u64;
+        // Only terminal relays count for the terminal metrics (#574 review: a chat snapshot is not terminal output).
+        let terminal = r.terminal.is_some();
         let sent = r.to_client.try_send(RelayFrame {
             stream: r.client_stream,
             kind,
             payload,
         });
+        if sent.is_ok() && terminal {
+            self.terminal_bytes.fetch_add(bytes, Ordering::Relaxed);
+        }
         let exited = kind == 3;
         if sent.is_err() || exited {
+            if sent.is_err() && terminal {
+                self.relays_dropped.fetch_add(1, Ordering::Relaxed);
+            }
             if let Some(r) = relays.remove(&key) {
                 if sent.is_err() {
                     r.closed
@@ -896,6 +922,40 @@ mod tests {
     }
 
     #[test]
+    fn only_terminal_relays_count_for_the_terminal_metrics() {
+        // #574 review: `GET /api/metrics` counts the bytes of terminal frames that reached a window and the terminal relays let go;
+        // a chat relay (snapshot, events) and a frame that was not delivered count for neither.
+        let r = Router::new();
+        let (_reg, _node_rx) = r.register("n");
+        let (client, mut frames) = r.client();
+        let chat = r.open_relay("n", &client, 5, None);
+        let term = r.open_relay("n", &client, 6, Some("t-1"));
+        r.relay_frame("n", chat, 10, vec![7; 4104]);
+        r.relay_frame("n", chat, 11, vec![7; 30]);
+        r.relay_frame("n", term, 1, b"snap".to_vec());
+        r.relay_frame("n", term, 0, vec![1, 2, 3, 4]);
+        while frames.try_recv().is_ok() {}
+        assert_eq!(r.terminal_bytes(), 8);
+        assert_eq!(r.relays_dropped(), 0);
+
+        // A chat relay whose window does not keep up is let go, but is not a terminal relay dropped.
+        for _ in 0..=RELAY_QUEUE {
+            r.relay_frame("n", chat, 11, vec![0; 3]);
+        }
+        assert_eq!(client.take_closed(), vec![5]);
+        assert_eq!((r.terminal_bytes(), r.relays_dropped()), (8, 0));
+        while frames.try_recv().is_ok() {}
+
+        // A terminal relay that does not keep up: RELAY_QUEUE frames of 2 bytes reach the queue, the next one ends the relay.
+        for _ in 0..=RELAY_QUEUE {
+            r.relay_frame("n", term, 0, vec![0; 2]);
+        }
+        assert_eq!(client.take_closed(), vec![6]);
+        assert_eq!(r.relays_dropped(), 1);
+        assert_eq!(r.terminal_bytes(), 8 + 2 * RELAY_QUEUE as u64);
+    }
+
+    #[test]
     fn a_client_going_away_or_a_node_leaving_ends_the_relays() {
         let r = Router::new();
         let (reg, mut node_rx) = r.register("n");
@@ -1139,5 +1199,40 @@ mod tests {
         assert!(forwardable(&e).is_err());
         e.command = Some(command_request::Command::BoardJoin(v1::BoardJoin::default()));
         assert!(forwardable(&e).is_err());
+    }
+
+    /// #574 review: the relay path before and after the terminal counters (`cargo test --release -p agora-hub --lib
+    /// relay_path_cost -- --ignored --nocapture`). Each window has a terminal relay; every round the node writes one frame to each.
+    #[test]
+    #[ignore = "measurement"]
+    fn relay_path_cost() {
+        for (clients, size) in [(1usize, 64usize), (1, 4096), (8, 64), (8, 4096), (32, 4096)] {
+            let r = Router::new();
+            let (_reg, _node_rx) = r.register("n");
+            let mut windows = Vec::new();
+            for c in 0..clients {
+                let (client, frames) = r.client();
+                let s = r.open_relay("n", &client, 7, Some(&format!("t-{c}")));
+                windows.push((client, frames, s));
+            }
+            let frames_total = 2_000_000 / clients.max(1);
+            let mut best = f64::MAX;
+            for _ in 0..5 {
+                let start = std::time::Instant::now();
+                for i in 0..frames_total {
+                    for (_, _, s) in &windows {
+                        r.relay_frame("n", *s, 0, vec![0u8; size]);
+                    }
+                    if i % 256 == 255 {
+                        for (_, rx, _) in &mut windows {
+                            while rx.try_recv().is_ok() {}
+                        }
+                    }
+                }
+                let ns = start.elapsed().as_nanos() as f64 / (frames_total * clients) as f64;
+                best = best.min(ns);
+            }
+            println!("relay_path clients={clients} payload={size}B best_of_5={best:.1} ns/frame");
+        }
     }
 }

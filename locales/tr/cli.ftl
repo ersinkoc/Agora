@@ -2,12 +2,12 @@
 
 cli-usage =
     Kullanım:
-      agora [--ui tui|web|none [--save]]
+      agora [--ui tui|web|none [--save]] [--resume ask|auto [--save]]
       agora web
       agora status
       agora down
       agora service install|remove|status
-      agora node run [--socket YOL] [--manifests DİZİN] [--project YOL]... [--data DİZİN] [--worktrees DİZİN]
+      agora node run [--socket YOL] [--manifests DİZİN] [--project YOL]... [--data DİZİN] [--worktrees DİZİN] [--resume auto]
       agora agent start TÜR [--cwd YOL] [--worktree] [--project AD] [--name AD] [--accept-project-id-change] [--socket YOL]
       agora project init [--cwd YOL] [--socket YOL]
       agora agent stop AJAN_KİMLİĞİ [--socket YOL]
@@ -17,7 +17,7 @@ cli-usage =
       agora terminal attach AJAN_KİMLİĞİ [--socket YOL]
       agora node stdio [--socket YOL]
       agora mesh stdio --socket YOL
-      agora hub run [--listen ADDR] [--hub-dir DIR] [--name HOST]... [--web DIR]
+      agora hub run [--listen ADDR] [--hub-dir DIR] [--name HOST]... [--web DIR] [--metrics]
       agora hub code [--hub-dir DIR]
       agora hub ssh install AD [--yes] [--unsigned] [--release-url URL] [--hub-dir DIR]
       agora hub login [--hub-dir DİZİN]
@@ -192,6 +192,7 @@ cli-hub-ssh-install-manual = { $name } kaydedildi ama kullanıcı hizmetleri iç
 cli-hub-ssh-install-failed = { $name } üzerinde "{ $step }" adımında durdu: { $detail } Önceden yapılanlar: { $done }. Hiçbir şey geri alınmadı.
 cli-update-current = Agora { $version } en yeni sürüm.
 cli-update-available = Agora { $version } hazır (şu an { $current } kullanılıyor). Kurmak için "agora update" çalıştırın.
+cli-update-local-network = macOS, Agora'nın yerel ağı kullanıp kullanamayacağını yeniden sorabilir: izin verin (ya da Sistem Ayarları > Gizlilik ve Güvenlik > Yerel Ağ'da `agora`yı açın); aksi halde oturum açınca başlayan düğüm başka bir makinedeki hub'a ulaşamaz.
 cli-update-done = Agora { $version } sürümüne güncellendi. Çalışan ajanlar çalışmaya devam eder; yeni sürümü kullanmak için düğümü yeniden başlatın.
 cli-update-failed = Güncelleme yapılamadı: { $reason }
 cli-update-checksum = İndirilen dosya yayımlanan sağlama toplamıyla uyuşmuyor. Hiçbir şey değişmedi.
@@ -226,6 +227,9 @@ frontdoor-choose = 1, 2 ya da 3 yazıp Enter'a basın:
 frontdoor-lan-question = Diğer makineleriniz bağlanabilsin mi? [e/H]
 frontdoor-autostart-question = Oturum açtığınızda Agora başlasın mı? [E/h]
 frontdoor-autostart-later = Agora oturum açtığınızda kendiliğinden başlamayacak. İstediğiniz zaman `agora service install` bunu ayarlar.
+frontdoor-resume-question = Yeniden başlatmadan sonra ajanlar kendiliğinden geri gelsin mi? [E/h]
+frontdoor-resume-off = Ajanlar yeniden başlatmadan sonra kendiliğinden geri gelmeyecek; pencere her birini geri getirmeyi önerir. `agora --resume auto --save` bunu yeniden açar.
+frontdoor-resume-saved = Kaydedildi. Bu makinede Agora bir sonraki başladığında geçerli olur: şu an çalışan node, `agora down` yapılana kadar başladığı ayarla devam eder.
 frontdoor-join-later = Buradan katılmak henüz yok. Agora'nın çalıştığı makinede `agora hub code` çalıştırın; sonra burada `agora node enroll` ve `agora node run` çalıştırın (bkz. `agora --help`).
 frontdoor-get-started = Agora bu makinede henüz kurulmadı. Bir terminalde `agora` çalıştırıp tek bir soruyu yanıtlayın. (Ayarlar { $path } dosyasında tutulur.)
 frontdoor-set-up-by-hand = Bu makinede elle başlatılmış bir Agora zaten var ({ $path }). `agora` onu henüz devralmıyor: `agora hub run` ve `agora node run` ile devam edin ya da `agora` yeni bir kurulum yapsın diye AGORA_HOME değişkenini yeni bir klasöre yöneltin.
@@ -282,8 +286,8 @@ service-status-not-installed = { $role } oturum açınca kendiliğinden başlam�
 service-status-failed = "{ $name }" okunamadı: { $reason }
 service-status-running = şu anda çalışıyor (süreç { $pid })
 service-status-stopped = şu anda çalışmıyor
-service-unavailable = Oturum açınca Agora'yı başlatma bu makinede kullanılamıyor: systemd'nin kullanıcı hizmetleri (`systemctl`) gerekiyor ve bulunamadı. Oturum açtıktan sonra `agora` ile başlatın.
-service-no-user-manager = "{ $name }" için kullanıcınızın hizmet yöneticisine ulaşılamadı: bu oturumda systemd kullanıcı veri yolu yok (örneğin `su` ya da kullanıcı yöneticiniz çalışmıyorken açılmış bir SSH oturumu). Bu makinede oturum açıp yeniden deneyin; hiçbir şey değiştirilmedi.
+service-unavailable = Oturum açınca Agora'yı başlatma bu makinede kullanılamıyor: Linux'ta systemd'nin kullanıcı hizmetleri (`systemctl`) gerekiyor ve bulunamadı; macOS'ta oturumunuz gerekiyor (ekranda oturum açın; yalnızca SSH yetmez). Oturum açtıktan sonra `agora` ile başlatın.
+service-no-user-manager = "{ $name }" için kullanıcınızın hizmet yöneticisine ulaşılamadı: bu oturumda systemd kullanıcı veri yolu yok (örneğin `su` ya da kullanıcı yöneticiniz çalışmıyorken açılmış bir SSH oturumu) ya da macOS'ta oturum yok (ekranda oturum açık değilken bağlanılmış bir SSH oturumu). Bu makinede oturum açıp yeniden deneyin; hiçbir şey değiştirilmedi.
 service-in-the-way = { $path } bir bağlantı ya da düz bir dosya değil, bu yüzden Agora onu değiştirmiyor. Saklamanız gereken bir şey değilse silin ve yeniden deneyin.
 service-bad-path-control = "{ $path }" oturum açılış kaydına konamıyor: satır sonu ya da başka bir denetim karakteri içeriyor. Agora'yı ya da klasörünü sade bir yola taşıyın.
 service-bad-path-relative = "{ $path }" oturum açılış kaydına konamıyor: tam yol değil. Agora'yı tam yoluyla çalıştırın ya da klasörünü tam yolla belirtin.
@@ -295,6 +299,7 @@ service-overridden = "{ $name }" yalnızca Agora'nın yazdığını çalıştır
 service-drop-ins-left = "{ $name }" birimini değiştiren şu dosyaları Agora yazmadı, oldukları gibi bırakıldı: { $paths }
 service-bad-path-backslash = "{ $path }" oturum açılış kaydına konamıyor: ters eğik çizgi (\) içeren bir klasör systemd birimine güvenle yazılamaz. Agora'nın klasörünü ters eğik çizgi içermeyen bir yola taşıyın.
 service-bad-program = "{ $path }" systemd tarafından başlatılamaz: programın yolu tırnak ya da ters eğik çizgi içeriyor. Agora'yı bunları içermeyen bir yola taşıyın.
+service-turned-off-in-settings = "{ $name }", Sistem Ayarları > Genel > Giriş Öğeleri ve Uzantılar ("Arka Planda İzin Ver") bölümünde kapalı ve onu yalnızca siz orada açabilirsiniz. Açın, sonra `agora service install` komutunu yeniden çalıştırın; hiçbir şey değiştirilmedi.
 service-was-off = { $role } oturum açınca başlayacak şekilde ayarlıydı ("{ $name }") ama bu kapatılmıştı; yeniden açılıyor.
 service-already-overridden = { $role } oturum açtığınızda başlayacak şekilde ayarlı ("{ $name }"), ama systemd ayrıca { $paths } dosyalarını da okuyor ve bunlar çalışanı değiştirebilir. Hiçbir şey değiştirilmedi; gerekmiyorsa bu dosyaları kendiniz kaldırın ya da taşıyın.
 service-status-overridden = systemd bunun için ayrıca { $paths } dosyalarını da okuyor; bunlar çalışanı değiştirebilir

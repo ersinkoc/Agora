@@ -76,6 +76,7 @@ impl Env {
         std::fs::write(root.join("manifests/probe.toml"), format!("kind = \"probe\"\ndisplay_name = \"Probe\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = {launch}\n[mcp]\nmethod = \"cli_flag\"\npath = \".mcp.json\"\nflag = [\"--mcp-config\", \"{{config_file}}\"]\n")).unwrap();
         std::fs::write(root.join("manifests/adapter.toml"), format!("kind = \"adapter\"\ndisplay_name = \"Adapter\"\nversion = \"1\"\nmin_engine = 1\n[adapter]\ncommand = [{}, \"--adapter\"]\n", serde_json::to_string(&fake()).unwrap())).unwrap();
         let node = Node::start(&NodeConfig {
+            resume_all: false,
             node_id: "node-directory".into(),
             socket: root.join("n.sock"),
             data_dir: root.join("data"),
@@ -702,9 +703,27 @@ fn a_resync_announces_the_nodes_present() {
         .into_iter()
         .filter_map(|e| e.body)
         .collect();
+    // The node's own loop keeps writing (resources, usage, state) and may get in between `mark` and the announcement (seen on a
+    // loaded Windows runner): the announcement starts at its `NodeOnline`, and nothing of it comes before.
+    let online = said
+        .iter()
+        .position(|b| matches!(b, Body::NodeOnline(n) if n.node_id == "node-directory"))
+        .expect("the announcement starts with NodeOnline");
+    assert!(
+        !said[..online].iter().any(|b| matches!(
+            b,
+            Body::WorkspaceRegistered(_)
+                | Body::AgentWorkspaceBound(_)
+                | Body::AgentStarted(_)
+                | Body::TerminalOpened(_)
+                | Body::ApprovalRequested(_)
+        )),
+        "{:?}",
+        &said[..online]
+    );
+    let said = said[online..].to_vec();
     let at = |pred: &dyn Fn(&Body) -> bool| said.iter().position(pred);
     let started = |id: &str| at(&|b| matches!(b, Body::AgentStarted(s) if s.agent_id == id));
-    assert!(matches!(said.first(), Some(Body::NodeOnline(n)) if n.node_id == "node-directory"));
     // Only what runs now, each after the folder it works in and bound to it.
     assert_eq!(
         started(&ended.agent_id),
