@@ -685,11 +685,13 @@ pub fn diff(worktree: &Path, path: Option<&str>) -> Result<String, GitError> {
         "HEAD",
     ];
     // Always a pathspec: without one git diffs the whole checkout even when run in a folder inside it (a selected workspace),
-    // while `ls-files` below lists only that folder.
-    args.extend(["--", path.unwrap_or(".")]);
+    // while `ls-files` below lists only that folder. A named path is a name, not a pattern: a file name may hold `*`, `?` or `[`,
+    // which git would otherwise match against other files too (`a[1].txt` would show `a1.txt`).
+    let literal = path.map(|p| format!(":(literal){p}"));
+    args.extend(["--", literal.as_deref().unwrap_or(".")]);
     let mut out = git_capped(worktree, &args, MAX_DIFF_READ)?;
     let mut ls = vec!["ls-files", "--others", "--exclude-standard", "-z"];
-    if let Some(p) = path {
+    if let Some(p) = &literal {
         ls.extend(["--", p]);
     }
     let listed = git(worktree, &ls)?;
@@ -1312,6 +1314,33 @@ mod tests {
         let porcelain = r.git(&["status", "--porcelain"]);
         assert_eq!(root.files_changed as usize, porcelain.lines().count());
         assert_eq!(root.files_changed, 7);
+    }
+
+    #[test]
+    fn a_path_is_a_name_not_a_pattern() {
+        let r = Repo::new(None);
+        for f in ["a1.txt", "a[1].txt"] {
+            fs::write(r.dir.join(f), "one\n").expect("write");
+        }
+        r.commit("names");
+        for f in ["a1.txt", "a[1].txt"] {
+            fs::write(r.dir.join(f), "one\ntwo\n").expect("write");
+        }
+        for f in ["b1.txt", "b[1].txt"] {
+            fs::write(r.dir.join(f), "new\n").expect("write");
+        }
+        let files = |p: &str| -> Vec<String> {
+            diff(&r.dir, Some(p))
+                .expect("diff")
+                .lines()
+                .filter(|l| l.starts_with("diff --git "))
+                .map(str::to_owned)
+                .collect()
+        };
+        assert_eq!(files("a[1].txt"), ["diff --git a/a[1].txt b/a[1].txt"]);
+        assert_eq!(files("b[1].txt"), ["diff --git a/b[1].txt b/b[1].txt"]);
+        // `.` still selects everything.
+        assert_eq!(files(".").len(), 4);
     }
 
     #[test]
