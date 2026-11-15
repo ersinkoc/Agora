@@ -3,7 +3,6 @@ Status: Accepted
 Date: 2026-11-14
 Accepted: 2026-11-14 (maintainer's explicit answer to a question listing each Proposed ADR with its summary and "approve as proposed": they ticked 0064, 0065, 0066, 0069, 0071, 0072 and 0074). The open questions' proposed answers stand. For pairing this accepts rung (a), approving on the hub; the `spake2` dependency for rung (b), typing the number, stays a separate decision as written.
 
-Not accepted. Nothing here may be built until the maintainer accepts it in a message of their own.
 Origin: the maintainer: "I do not want to ask for a key with `agora hub login` again and again; it is my machine. Every node must connect to a hub easily, without a million steps: if there is a hub
 somewhere on the network the node should find it, or I type its address; I say connect, it asks for the number shown on the hub's screen, I enter it, the handshake runs, done."
 Replaces rung 2 of ADR-0062 (the join string stays as the fallback) and supersedes the typed sign-in codes for the owner's own devices.

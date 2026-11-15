@@ -8,6 +8,12 @@ for f in docs/adr/[0-9][0-9][0-9][0-9]-*.md; do
   grep -q "| $n |" docs/adr/README.md || { echo "ADR $n missing from docs/adr/README.md"; fail=1; }
 done
 # The index says each ADR's status as its file does (architecture review R7: one status, not two that drift apart).
+# An Accepted ADR must not still say it is not accepted (a Proposed ADR's warning line left behind when it was accepted).
+for f in docs/adr/[0-9][0-9][0-9][0-9]-*.md; do
+  if grep -q '^Status: *Accepted' "$f" && grep -q '^Not accepted\. Nothing here may be built' "$f"; then
+    echo "$f: Accepted, but still says \"Not accepted. Nothing here may be built\""; fail=1
+  fi
+done
 for f in docs/adr/[0-9][0-9][0-9][0-9]-*.md; do
   n=$(basename "$f" | cut -c1-4)
   file_status=$(sed -n 's/^Status: *\([A-Za-z]*\).*/\1/p' "$f" | head -n 1)
