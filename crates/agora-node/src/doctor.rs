@@ -95,14 +95,19 @@ pub fn run(inputs: &Inputs) -> Vec<Check> {
     }
     out.extend(authority(&inputs.data_dir, &policy, now_ms()));
 
-    out.push(match Command::new("git").arg("--version").output() {
-        Ok(o) if o.status.success() => check(
-            "git",
-            Status::Ok,
-            String::from_utf8_lossy(&o.stdout).trim().to_string(),
-        ),
-        _ => check("git", Status::Fail, ""),
-    });
+    out.push(
+        match agora_platform::no_console_window(&mut Command::new("git"))
+            .arg("--version")
+            .output()
+        {
+            Ok(o) if o.status.success() => check(
+                "git",
+                Status::Ok,
+                String::from_utf8_lossy(&o.stdout).trim().to_string(),
+            ),
+            _ => check("git", Status::Fail, ""),
+        },
+    );
 
     out.push(data_dir(&inputs.data_dir));
 
