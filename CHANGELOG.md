@@ -14,6 +14,9 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
   (#571). Such links inside a folder it may write are not looked for at each start.
 
 ### Machines
+- A terminal narrower than two columns can no longer crash or freeze a machine. A wide character (Chinese, an emoji) on a one-column
+  screen made the terminal's thread panic, and shrinking a screen with wide text to one column never finished while holding a lock.
+  The screen now keeps at least two columns (audit finding F701).
 - Windows: a machine could stop updating its agents (memory, state) for good when a process's leftover parent id pointed back
   into the agent's own processes. Walking an agent's processes now visits each one once.
 

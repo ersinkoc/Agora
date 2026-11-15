@@ -14,6 +14,10 @@ use crate::{Cell, Color, Cursor, Modes, Size, Style, Terminal};
 /// Scrolled-back lines kept per terminal. Memory is bounded by this (design/resource-limits.md).
 const SCROLLBACK: usize = 2000;
 
+/// The fewest columns the screen has. A double-width character needs two cells: on a one-column grid `alacritty_terminal`
+/// indexes past the row when one is printed and never finishes reflowing one on resize (F701).
+const MIN_COLS: u16 = 2;
+
 #[derive(Clone, Default)]
 struct Listener {
     title: Arc<Mutex<Option<String>>>,
@@ -96,6 +100,7 @@ pub struct AlacrittyTerminal {
 }
 
 impl AlacrittyTerminal {
+    /// A terminal of `size`, at least 2 columns by 1 row ([`size`](Terminal::size) reports what it got).
     pub fn new(size: Size) -> Self {
         Self::with_scrollback(size, SCROLLBACK)
     }
@@ -104,7 +109,7 @@ impl AlacrittyTerminal {
     /// detection; the cap only bounds memory.
     pub fn with_scrollback(size: Size, scrollback: usize) -> Self {
         let size = Size {
-            cols: size.cols.max(1),
+            cols: size.cols.max(MIN_COLS),
             rows: size.rows.max(1),
         };
         let listener = Listener::default();
@@ -129,7 +134,7 @@ impl Terminal for AlacrittyTerminal {
 
     fn resize(&mut self, size: Size) {
         let size = Size {
-            cols: size.cols.max(1),
+            cols: size.cols.max(MIN_COLS),
             rows: size.rows.max(1),
         };
         self.term.resize(Dims(size));
