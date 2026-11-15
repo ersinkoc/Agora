@@ -318,6 +318,14 @@ fn main() -> ExitCode {
         ["adapter", "update"] => adaptercmd::update(&say, &opts),
         ["password", op @ ("set" | "clear" | "status")] => hubcli::password(&say, &opts, op),
         ["hub", "run"] => hubcli::hub_run(&say, &opts),
+        // A machine that does not run the hub (no hub folder) gets that said, not the database error these commands would hit.
+        // The commands that create the hub folder themselves (`code`, `login`, `user`, `prices`, `ssh`, `notify`, `backup`,
+        // `restore`) are not listed.
+        ["hub", "fingerprint" | "audit" | "devices" | "machines"]
+            if !hubcli::hub_dir(&opts).is_dir() =>
+        {
+            hubcli::not_here(&say, &opts)
+        }
         ["hub", "code"] => hubcli::hub_code(&say, &opts),
         ["hub", "fingerprint"] => hubcli::hub_fingerprint(&say, &opts),
         ["hub", "login"] => hubcli::hub_login(&say, &opts),
@@ -422,6 +430,7 @@ fn doctor(say: &Say, o: &Opts) -> ExitCode {
             ("manifests", _) => key!("doctor-manifests"),
             ("agent-installed", _) => key!("doctor-agent-installed"),
             ("agent-missing", _) => key!("doctor-agent-missing"),
+            ("manifest-older", _) => key!("doctor-manifest-older"),
             ("policy-path-dropped", _) => key!("doctor-policy-path-dropped"),
             ("policy-path-missing", _) => key!("doctor-policy-path-missing"),
             ("policy-restart", _) => key!("doctor-policy-restart"),
