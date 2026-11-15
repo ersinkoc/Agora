@@ -78,6 +78,7 @@ mode = "delta"
     .unwrap();
     std::env::set_var("HOME", &home);
     let n = Node::start(&NodeConfig {
+        resume_all: false,
         node_id: "node-test".into(),
         socket: dir.join("c.sock"),
         data_dir: dir.join("data"),

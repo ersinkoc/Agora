@@ -505,7 +505,10 @@ All additions; nothing published changed.
 - **Automatic resume.** The node's own `<data>/policy` may say `resume = auto` with `resume.kinds = a, b` and `resume.folders = /x,
   /y`: after a start, interrupted agents of a listed kind in a listed folder (or below it) that can resume their own session are
   resumed without anyone asking (a helper only after its parent was). The default is `resume = ask`; any other value is `ask`. The
-  hub cannot change it.
+  hub cannot change it. `agora node run --resume auto` (ADR-0062 item 4, what `agora` passes when the owner answered yes) resumes
+  every such agent whatever its kind and folder, but only when the policy has no `resume` line: a `resume` line always wins (`ask`
+  stops it, `auto` keeps it to the listed kinds and folders). Either way at most 16 at one start, 8 at a time (the next round 5 s
+  later), and never an agent the node brought back by itself in the last 10 minutes (`auto_resumed_at_ms` in the ledger).
 
 ### Launch options (ADR-0059)
 

@@ -73,6 +73,9 @@ pub struct Entry {
     /// The boot it started in (Linux) and its program's name: a process is the recorded one only when both match too.
     pub process_boot: String,
     pub process_name: String,
+    /// ADR-0062 item 4: when the node last brought it back by itself (0: never), so an agent interrupted again soon after (a crash
+    /// loop) is not brought back again by itself.
+    pub auto_resumed_at_ms: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -154,6 +157,7 @@ impl Entry {
             "process_started": self.process_started,
             "process_boot": self.process_boot,
             "process_name": self.process_name,
+            "auto_resumed_at_ms": self.auto_resumed_at_ms,
         })
     }
 
@@ -195,6 +199,7 @@ impl Entry {
             process_started: number(v, "process_started"),
             process_boot: field(v, "process_boot"),
             process_name: field(v, "process_name"),
+            auto_resumed_at_ms: number(v, "auto_resumed_at_ms"),
         };
         (!e.agent_id.is_empty() && !e.kind.is_empty()).then_some(e)
     }
@@ -408,6 +413,18 @@ impl Ledger {
         ) = now;
         e.updated_at_ms = now_ms;
         st.dirty = true;
+        drop(st);
+        let _ = self.flush();
+    }
+
+    /// ADR-0062 item 4: the node brought this agent back by itself now.
+    pub fn mark_auto_resumed(&self, agent_id: &str, now_ms: u64) {
+        let mut st = self.st();
+        if let Some(e) = st.entries.get_mut(agent_id) {
+            e.auto_resumed_at_ms = now_ms;
+            e.updated_at_ms = now_ms;
+            st.dirty = true;
+        }
         drop(st);
         let _ = self.flush();
     }

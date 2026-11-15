@@ -35,6 +35,14 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
   stops right after starting (a port taken, a wrong setting) is not retried and its log says why. `agora status` shows a restart
   in progress, the restarts of the last 10 minutes and a give-up. `agora down` and a killed supervisor never leave a hub or node
   running behind them. A hub or node started by an earlier version stays as it is until `agora down` and `agora`.
+- Agents come back by themselves after a restart (ADR-0062): when this machine's Agora starts again, the agents that were running
+  continue their own conversations in their folders, 8 at once and the next 8 a few seconds later (at most 16; any more wait for
+  Resume in the window). The first run asks once ("Bring agents back by themselves after a restart? [Y/n]", Enter is yes); with a
+  no, the window still offers to bring each one back. A machine set up with an earlier version is asked once at the next `agora` in
+  a terminal and changes nothing until then. `agora --resume ask` or `--resume auto` changes it for one start, and with `--save`
+  from the next start on. A `resume` line in the node's own policy file always wins. An agent that cannot continue its own
+  conversation, or that was brought back by itself in the last 10 minutes, is never started again by itself. Run by hand,
+  `agora node run --resume auto` does the same.
 
 ### Shared board
 - A change to a shared project's board (create, claim, complete, lease, release, handoff) is answered as done only once the hub has

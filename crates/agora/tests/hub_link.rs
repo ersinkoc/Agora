@@ -481,6 +481,7 @@ mod shared_board {
         )
         .unwrap();
         let cfg = NodeConfig {
+            resume_all: false,
             node_id: "alpha".into(),
             socket: dir.join("c.sock"),
             data_dir: dir.join("data"),
