@@ -192,6 +192,7 @@ cli-hub-ssh-install-manual = { $name } kaydedildi ama kullanıcı hizmetleri iç
 cli-hub-ssh-install-failed = { $name } üzerinde "{ $step }" adımında durdu: { $detail } Önceden yapılanlar: { $done }. Hiçbir şey geri alınmadı.
 cli-update-current = Agora { $version } en yeni sürüm.
 cli-update-available = Agora { $version } hazır (şu an { $current } kullanılıyor). Kurmak için "agora update" çalıştırın.
+cli-update-local-network = macOS, Agora'nın yerel ağı kullanıp kullanamayacağını yeniden sorabilir: izin verin (ya da Sistem Ayarları > Gizlilik ve Güvenlik > Yerel Ağ'da `agora`yı açın); aksi halde oturum açınca başlayan düğüm başka bir makinedeki hub'a ulaşamaz.
 cli-update-done = Agora { $version } sürümüne güncellendi. Çalışan ajanlar çalışmaya devam eder; yeni sürümü kullanmak için düğümü yeniden başlatın.
 cli-update-failed = Güncelleme yapılamadı: { $reason }
 cli-update-checksum = İndirilen dosya yayımlanan sağlama toplamıyla uyuşmuyor. Hiçbir şey değişmedi.

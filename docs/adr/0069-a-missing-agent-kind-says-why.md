@@ -3,7 +3,6 @@ Status: Accepted
 Date: 2026-11-14
 Accepted: 2026-11-14 (maintainer's explicit answer to a question listing each Proposed ADR with its summary and "approve as proposed": they ticked 0064, 0065, 0066, 0069, 0071, 0072 and 0074). The open questions' proposed answers stand.
 
-Not accepted. Nothing here may be built until the maintainer accepts it in a message of their own.
 Origin: the Windows agent's first-time-user findings (2026-11-14): "WrongStack: not installed" says nothing about what was looked for or where; a pasted `agora node trust …` fails on a machine where `agora` is not on PATH. The built-in manifests (PR #460) removed the main cause (a release node had no manifests); this closes the explanation gap with two additive fields.
 
 ## Context
@@ -16,3 +15,7 @@ Origin: the Windows agent's first-time-user findings (2026-11-14): "WrongStack: 
 
 ## Consequences
 Two proto fields and fixtures, `protocol.md`, the node filling them from data it already has, the web and TUI sentences. No behaviour change for starting agents.
+
+## Amendment (2026-11-15, #598; accepted by the maintainer the same day in chat: "accepted all")
+- `NodeSnapshot.binary = 11`: the snapshot's copy of `NodeOnline.binary` from the node's latest start, so a window that connects later learns it too. Additive, like the two fields above.
+- Only the hub's owner receives the full path. The hub sends everyone else (members, viewers) the file name alone (`agora`, `agora.exe`), in the snapshot and in live and replayed `NodeOnline` events: any folder may hold the machine's user name, the one the program is in too when it is kept straight in the user's home (`/home/alice/agora`), and the hub cannot tell which folder is a home on another machine (#598 cross-review). This replaces, for them, the "last two path components" of decision 2; the owner's client still shows the last two unless asked for the whole path.

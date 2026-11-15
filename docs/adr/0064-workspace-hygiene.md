@@ -3,7 +3,6 @@ Status: Accepted
 Date: 2026-11-14
 Accepted: 2026-11-14 (maintainer's explicit answer to a question listing each Proposed ADR with its summary and "approve as proposed": they ticked 0064, 0065, 0066, 0069, 0071, 0072 and 0074). The open questions' proposed answers stand.
 
-Not accepted. Nothing here may be built until the maintainer accepts it in a message of their own.
 Origin: the maintainer: "know that worktrees take disk space: weight the *shared* folder; and do not forget to delete workspaces when they are no longer needed, so the disk does not fill."
 Amends ADR-0052 (selected folders; worktrees optional) only by adding clean-up; everything else in it stands.
 

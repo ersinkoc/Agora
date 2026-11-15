@@ -165,6 +165,46 @@ fn currency_code(c: &str) -> Option<String> {
     (c.len() == 3 && c.bytes().all(|b| b.is_ascii_alphabetic())).then(|| c.to_ascii_uppercase())
 }
 
+/// ADR-0069: this node's executable, only when the folder it is in is not on its PATH (so a client can say to run `agora` from there);
+/// empty otherwise, or when it cannot be told.
+fn binary_off_path() -> String {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| {
+            off_path(
+                &exe,
+                std::env::var_os("PATH").as_deref(),
+                std::env::current_dir().ok().as_deref(),
+            )
+        })
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// `exe` when its folder is none of the folders in `path_var`, compared as the file system resolves them (links, `.`, case on
+/// Windows); `None` when it is on PATH or has no folder. An empty entry is the current folder `cwd`, as a shell reads it
+/// (`PATH=:/usr/bin`).
+fn off_path(exe: &Path, path_var: Option<&std::ffi::OsStr>, cwd: Option<&Path>) -> Option<PathBuf> {
+    let dir = exe.parent()?;
+    let resolve =
+        |p: &Path| agora_platform::canonicalize_plain(p).unwrap_or_else(|_| p.to_path_buf());
+    let dir = resolve(dir);
+    let on_path = path_var.is_some_and(|v| {
+        std::env::split_paths(v).any(|d| {
+            let d = if d.as_os_str().is_empty() {
+                match cwd {
+                    Some(c) => c.to_path_buf(),
+                    None => return false,
+                }
+            } else {
+                d
+            };
+            resolve(&d) == dir
+        })
+    });
+    (!on_path).then(|| exe.to_path_buf())
+}
+
 pub(crate) fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -740,6 +780,7 @@ impl EventSink {
             hostname: host,
             os: std::env::consts::OS.to_string(),
             build: env!("CARGO_PKG_VERSION").to_string(),
+            binary: binary_off_path(),
         }));
     }
 
@@ -2275,6 +2316,30 @@ mod announce_tests {
             && r.approved == r.approval_id[3..].parse::<u32>().unwrap().is_multiple_of(2)));
         assert_eq!(restated(Announce::Present), first, "the ring did not move");
         assert!(restated(Announce::Restart).is_empty());
+    }
+
+    #[test]
+    fn the_nodes_own_binary_is_named_only_when_its_folder_is_not_on_path() {
+        // ADR-0069.
+        let dir = std::env::temp_dir().join(format!("agora-binpath-{}", std::process::id()));
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let exe = bin.join("agora");
+        std::fs::write(&exe, b"").unwrap();
+        let other = dir.join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        let path = |dirs: &[&Path]| std::env::join_paths(dirs).unwrap();
+        let off = |p: Option<&std::ffi::OsStr>, cwd: Option<&Path>| super::off_path(&exe, p, cwd);
+        assert_eq!(off(Some(&path(&[&other])), None), Some(exe.clone()));
+        assert_eq!(off(None, None), Some(exe.clone()));
+        assert_eq!(off(Some(&path(&[&other, &bin])), None), None);
+        // The same folder spelled another way (`bin/.`) is still on PATH.
+        assert_eq!(off(Some(&path(&[&bin.join(".")])), None), None);
+        // An empty entry is the current folder (`PATH=:/usr/bin`, the node started from its own folder; review of #598).
+        let empty_first = std::env::join_paths([Path::new(""), other.as_path()]).unwrap();
+        assert_eq!(off(Some(&empty_first), Some(&bin)), None);
+        assert_eq!(off(Some(&empty_first), Some(&other)), Some(exe.clone()));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

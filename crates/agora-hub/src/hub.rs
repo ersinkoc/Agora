@@ -913,6 +913,7 @@ mod tests {
                 hostname: "h".into(),
                 os: "linux".into(),
                 build: "b".into(),
+                binary: String::new(),
             })),
         }
         .encode_to_vec()
@@ -1318,6 +1319,7 @@ mod tests {
                 hostname: "h".into(),
                 os: "linux".into(),
                 build: "b".into(),
+                binary: String::new(),
             })
         };
         // "up": its connection (generation 2) was open when the hub was killed; it was last heard at 500.
