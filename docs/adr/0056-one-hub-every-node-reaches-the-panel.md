@@ -35,3 +35,35 @@ a signed-in device. A person sitting at a node machine has a node but no panel t
 ## Consequences
 Adds a small command (and possibly a loopback forwarder) and a trust step; no protocol message change and no change to the
 hub's authority. A forwarder would be a new surface and needs the threat model (`docs/security/threat-model.md`) updated.
+
+## Amendment A (Accepted, 2026-11-15): the panel opens through the node, with no certificate to import
+Accepted: 2026-11-15 (the maintainer's explicit message in the merger's chat, answering the merger's message that named ADR-0056 Amendment A (#608) and ADR-0077 (#597) as the answers still owed: they said that the answer to everything they owed was the same, approval, and asked for the waiting work to be done). The open questions' proposed answers stand.
+Origin: the maintainer, after setting up three machines by hand: "we shouldn't suffer this much on every machine; hub and nodes
+should connect easily, and browsers on the network more easily". The chosen answer above (point the browser at the hub and print how
+to trust its CA) is the `certutil` / keychain step that every browser on every machine has to repeat.
+
+**Change:** `agora panel` (and the first run's "open the window" on a node machine, ADR-0062) opens the hub's web app at
+`http://127.0.0.1:<port>/`, served by a **loopback forwarder in the node** that carries the connection to the hub over the node's
+pinned-CA link. The browser talks to a loopback address, so it needs no certificate import; the forwarder is what checks the hub's
+certificate, against the CA the node already pinned at enrolment. This is the design the desktop app already uses
+(`agora-desktop-tunnel`, ADR-0048), and it is reused, not rewritten.
+
+**Requirements:**
+1. **One fixed port per hub, kept across runs** (stored next to the node's hub address). A device key and a sign-in belong to the
+   page's origin, which includes the port (ADR-0048 found the same), so a new port each time would be a new device and another trust
+   step: the pain this removes.
+2. **Loopback only, and the Host header checked.** The forwarder binds `127.0.0.1` only and accepts a request only when its `Host` is
+   `127.0.0.1:<port>` or `localhost:<port>`. Without that check, a website the person visits could use DNS rebinding to reach the hub
+   through the forwarder. The same check is added to the desktop app's tunnel, which does not make it today.
+3. **Not a login.** Reaching the panel this way is not a sign-in. Decision 3 stands: the person signs in as from any browser. With
+   ADR-0065 decision 6 that means approving from an interface they are already signed in to, with no code typed.
+4. **Only while asked for.** Decision 4 stands: the forwarder runs while `agora panel` (or the window it opened) runs, and no port is
+   open otherwise.
+5. **Threat model:** a row for the forwarder (loopback listener, Host check, what a local process can reach through it, which is no
+   more than it could reach by talking to the hub itself).
+
+**What it does not change:** the hub's authority, the protocol, and the node's policy. The hub still sees a TLS connection from the
+node's pinned link; a browser on a machine with **no** node still needs the hub's CA (or the desktop app).
+
+**Together with ADR-0065** (find a hub on the network, approve on the hub, the owner's devices trusted in the same step), this
+removes the per-machine steps: no enrolment code to copy, no CA file, no certificate import, and no trust command.

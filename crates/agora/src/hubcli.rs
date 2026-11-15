@@ -42,6 +42,8 @@ const HUB_CAPABILITIES: &[&str] = &[
     // `DeviceList` on a connection of its own (`device.list`).
     "device.trust",
     "device.list",
+    // ADR-0069: the hub keeps `NodeOnline.binary` in its snapshot (`NodeSnapshot.binary`) and passes `AgentKind.program` through.
+    "kinds.program",
 ];
 
 /// `<hub dir>/listen`: the address the running hub bound, written at every start.

@@ -43,6 +43,8 @@ pub const CAPABILITIES: &[&str] = &[
     "agent.launch_options",
     // ADR-0061: verifies the endorsements and revocations the hub carries, and reports `NodeTrustedDevices`.
     "device.trust",
+    // ADR-0069: `AgentKind.program` and `NodeOnline.binary` are filled.
+    "kinds.program",
 ];
 
 /// Events sent per step; the hub acknowledges after each batch.
