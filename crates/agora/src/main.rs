@@ -422,6 +422,7 @@ fn doctor(say: &Say, o: &Opts) -> ExitCode {
             ("manifests", _) => key!("doctor-manifests"),
             ("agent-installed", _) => key!("doctor-agent-installed"),
             ("agent-missing", _) => key!("doctor-agent-missing"),
+            ("manifest-older", _) => key!("doctor-manifest-older"),
             ("policy-path-dropped", _) => key!("doctor-policy-path-dropped"),
             ("policy-path-missing", _) => key!("doctor-policy-path-missing"),
             ("policy-restart", _) => key!("doctor-policy-restart"),

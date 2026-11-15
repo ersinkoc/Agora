@@ -1221,6 +1221,8 @@ impl Mesh {
         now_ms: u64,
     ) -> Result<String, MeshError> {
         let project = self.caller(by)?.project.clone();
+        // `LeaseTable::acquire` drops ended leases silently: end them here first, so each is recorded and leaves its grant.
+        self.expire_leases(now_ms);
         let table = self.leases.entry(project.clone()).or_default();
         // What the caller already holds: acquiring a path it holds renews that lease in place, so a call that fails puts it back.
         let held: Vec<(String, u64)> = table
@@ -1365,6 +1367,14 @@ impl Mesh {
                     .ok_or_else(|| MeshError::TaskUnknown(id.into()))?;
                 if !matches!(rec.task.state(), TaskState::Claimed(a) if a == from) {
                     return Err(MeshError::NotTaskOwner(id.to_string()));
+                }
+                // A task stays on its project's board: an agent of another project could neither see nor finish it.
+                if self
+                    .agents
+                    .get(&target)
+                    .is_none_or(|a| a.project != info.project)
+                {
+                    return Err(MeshError::RecipientUnknown(to.to_string()));
                 }
                 Some(tid)
             }
@@ -1769,6 +1779,31 @@ mod tests {
             .unwrap();
     }
 
+    #[test]
+    fn a_lease_that_ends_before_another_acquire_is_still_recorded() {
+        let mut m = mesh();
+        let l = m.lease_acquire(&id("a"), &["f.rs".into()], 100, 0).unwrap();
+        m.take_events();
+        // The sweep has not run yet when another agent takes a path at the moment `f.rs` ends.
+        m.lease_acquire(&id("b"), &["g.rs".into()], 100, 100)
+            .unwrap();
+        m.expire_leases(150);
+        let released: Vec<(String, String)> = m
+            .take_events()
+            .into_iter()
+            .filter_map(|e| match e {
+                Body::LeaseReleased(r) => Some((r.agent_id, r.path)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(released, [("a".to_string(), "f.rs".to_string())]);
+        // Its grant is gone with it.
+        assert_eq!(
+            m.lease_release(&id("a"), &l, 150),
+            Err(MeshError::LeaseUnknown(l.clone()))
+        );
+    }
+
     /// The expiry `who` would be refused with on `path` (the lease that blocks it), or `None` when the path is free.
     fn blocked_until(m: &mut Mesh, who: &str, path: &str, now: u64) -> Option<u64> {
         match m.lease_acquire(&id(who), &[path.into()], 1, now) {
@@ -1911,6 +1946,25 @@ mod tests {
         );
         let still = m.task_list(&id("a"), Some(TaskStatus::Claimed)).unwrap();
         assert!(still.iter().any(|x| x.id == t2 && x.owner == Some(id("a"))));
+    }
+
+    #[test]
+    fn a_task_is_never_handed_to_another_project() {
+        let mut m = mesh();
+        let t = m.task_create(&id("a"), "p only", "", &[]).unwrap();
+        m.task_claim(&id("a"), t.as_str()).unwrap();
+        // `c` works on another project: it could neither see nor finish the task, so nothing moves and nothing is sent.
+        assert_eq!(
+            m.handoff(&id("a"), "c", Some(t.as_str()), "take it", &[], 1),
+            Err(MeshError::RecipientUnknown("c".into()))
+        );
+        let e = m.task_list(&id("a"), None).unwrap().remove(0);
+        assert_eq!((e.status, e.owner), (TaskStatus::Claimed, Some(id("a"))));
+        assert!(m.inbox(&id("c"), None, 10).unwrap().is_empty());
+        assert_eq!(m.claimed_task(&id("c")), None);
+        // A handoff that names no task is a message, which may cross projects as before.
+        assert!(m.handoff(&id("a"), "c", None, "fyi", &[], 2).is_ok());
+        m.task_complete(&id("a"), t.as_str(), "done").unwrap();
     }
 
     #[test]
