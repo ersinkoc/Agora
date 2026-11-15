@@ -14,6 +14,9 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
   (#571). Such links inside a folder it may write are not looked for at each start.
 
 ### Machines
+- On macOS a busy node could lose its control socket: a second start while the first one's queue was full took it for a dead
+  leftover, deleted its socket file and bound its own. Each socket now has a lock file beside it (`<socket>.lock`, left in place,
+  harmless) held for as long as it is served; a second start finds it taken and stops (audit finding F202).
 - Windows: a machine could stop updating its agents (memory, state) for good when a process's leftover parent id pointed back
   into the agent's own processes. Walking an agent's processes now visits each one once.
 
