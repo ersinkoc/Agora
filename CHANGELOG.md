@@ -9,6 +9,11 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
   sent it on its next 20 ms tick, and now sends it as soon as the machine answers (0.2 ms through the hub, also while another
   machine floods output).
 
+### Security
+- macOS: a confined agent is not started when a file it may write also has another name elsewhere (a hard link made outside
+  confinement), or when a save copy next to it (`state.json.tmp`) is such a link, since writing it would change that other file too; the message says to remove the link or put a copy in its place
+  (#571). Such links inside a folder it may write are not looked for at each start.
+
 ### Machines
 - Windows: a machine could stop updating its agents (memory, state) for good when a process's leftover parent id pointed back
   into the agent's own processes. Walking an agent's processes now visits each one once.
