@@ -1288,7 +1288,7 @@ fn an_old_machine_is_listed_as_old_and_forgotten_through_the_running_hub() {
 #[test]
 fn a_hub_command_on_a_machine_without_a_hub_says_so() {
     let home = tmp("not-here");
-    for cmd in ["fingerprint", "login", "audit", "devices", "machines"] {
+    for cmd in ["fingerprint", "audit", "devices", "machines"] {
         let out = agora(&home, &["hub", cmd]).output().unwrap();
         let err = String::from_utf8_lossy(&out.stderr);
         assert_eq!(out.status.code(), Some(1), "{cmd}: {err}");
@@ -1299,6 +1299,16 @@ fn a_hub_command_on_a_machine_without_a_hub_says_so() {
         assert!(!err.contains("database"), "{cmd}: {err}");
         assert!(!home.join("hub").exists(), "{cmd} made a hub folder");
     }
+    // `hub login` is not read-only (it makes the folder and a sign-in code), so it is not guarded and works as before.
+    let fresh = tmp("not-here-login");
+    let out = agora(&fresh, &["hub", "login"]).output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(fresh.join("hub").is_dir());
+    let _ = std::fs::remove_dir_all(&fresh);
     // `hub code` still makes the folder and a code before the hub's first start, as before.
     let out = agora(&home, &["hub", "code"]).output().unwrap();
     assert!(
