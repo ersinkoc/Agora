@@ -56,3 +56,40 @@ a ledger written by someone else cannot point a stop at another program. A node 
 agents itself. `agora node` has no signal handler: under systemd's default `KillMode=control-group` its agents die with it anyway; a
 plain `kill` of the node process leaves terminal agents running, and they show as still running at the next start.
 
+## Amendment A (Accepted, 2026-11-15): an agent that was working carries on after an automatic resume
+Accepted: 2026-11-15 (the maintainer's explicit message in the merger chat, accepting the ADRs listed by number (#613 ADR-0060 Amendment A, #614 ADR-0078, #615 ADR-0080, #616 ADR-0079): they accepted all of them). The open questions' proposed answers stand.
+Origin: the maintainer, about restarts: "these agents should go on with what they were doing, without a break, as if they had never
+dropped". Measured on `win` (0.3.13 release, `resume = "auto"`): after the node was killed, a Claude Code agent came back by itself in
+its own session and remembered what it had been told, then **sat idle**. A task cut off in the middle does not go on until someone
+types "continue". The ledger already keeps each agent's `last_state` (decision 1), so the node knows which agents were in the middle
+of something.
+
+**Change:**
+1. When the node brings an interrupted agent back **by itself** (`resume = "auto"`, or `node run --resume auto`, ADR-0062 item 4) and
+   the ledger's `last_state` for it was **working**, the agent is given one message that the session was cut off by a restart and that
+   it should first check the state of what it was doing, then carry on where it stopped.
+2. **Never otherwise.** It is not sent when the last state was *needs you*: text typed into a terminal that shows a permission prompt
+   could answer it. It is not sent for idle, finished or unknown. It is not sent when a person pressed Resume, because they are there
+   and can say what they want. A helper (ADR-0057) follows decision 5 and gets it only on the same terms as any other agent.
+3. **The node's own policy decides; the hub cannot.** A policy line `resume.continue = on | off` in the node's policy file, default
+   **on** wherever automatic resume is on. No command or protocol message carries it or its text, so a hub can neither turn it on nor
+   change what is said (ADR-0020: the hub cannot widen node policy).
+4. **The words are data, not code.** A kind says how it is continued in its manifest, under `[resume]`:
+   - `continue_argv`, the resume command with a first message, for tools that take one (`claude --resume {session_id} "{continue}"`,
+     `codex resume {session_id} "{continue}"`);
+   - or, for an ACP kind, a `session/prompt` right after `session/load`.
+
+   `{continue}` is a sentence in the manifest's `[resume] continue`. A kind without either is resumed as today and gets no message.
+   No such text lives in node Rust.
+5. **Once per interruption.** The ledger records when the message was sent, and it is never sent twice for the same interruption.
+   The existing rule that an agent brought back by itself in the last 10 minutes is not brought back again also keeps a crash loop from
+   repeating it.
+6. **Nothing is skipped.** The message is ordinary input to the agent. Every approval, the node's policy and the agent's launch options
+   (ADR-0059) apply as they did before the restart. The message shows in the agent's own terminal and conversation like any prompt,
+   and the node's log says it was sent.
+
+**Consequences:** a manifest field (`[resume] continue` and `continue_argv`, `docs/specs/agent-manifest.md`), a ledger field (sent at),
+a policy line, the node's automatic-resume path, tests with `agora-fake-agent` (working → message; needs-you, idle, a person's Resume
+and `off` → none; at most once), and a threat-model row: *a message no person sent carries on a step that was half done* (a
+migration, a push). The row's mitigations are only working agents, the text asks to check the state first, approvals still apply,
+an off switch per node, and once per interruption. No schema change.

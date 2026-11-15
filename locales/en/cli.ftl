@@ -106,6 +106,7 @@ doctor-policy-problems = { $detail ->
     [one] One line
    *[other] { $detail } lines
 } of the node's policy file could not be understood; until they are fixed, no agent may skip its permission questions.
+doctor-manifest-older = The manifests folder holds an older description of { $detail } (version { $from }; this program has { $shipped } built in) and it replaces the built-in one, so agents of this kind may not resume after a restart. Remove the file { $file } from the manifests folder: the shipped descriptions are built in.
 doctor-manifest-invalid = The agent description { $detail } could not be read.
 doctor-summary-ok = Everything Agora needs is in place.
 doctor-summary-problems = Something Agora needs is missing. Fix the items marked PROBLEM.

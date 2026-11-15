@@ -15,3 +15,8 @@ notify-digest =
 
 notify-title = Agora
 notify-test = Agora bildirimleri çalışıyor.
+notify-desktop-approvals =
+    { $count ->
+        [one] Sizi bekleyen bir onay var.
+       *[other] Sizi bekleyen { $count } onay var.
+    }

@@ -13,6 +13,8 @@ name = "agora-desktop"
 version = "0.3.13"
 dependencies = [
  "agora-desktop-tunnel",
+ "agora-i18n",
+ "agora-platform",
  "serde",
  "serde_json",
  "tauri",
@@ -27,6 +29,18 @@ dependencies = [
  "rustls",
  "tokio",
  "tokio-rustls",
+]
+
+[[package]]
+name = "agora-i18n"
+version = "0.3.13"
+
+[[package]]
+name = "agora-platform"
+version = "0.3.13"
+dependencies = [
+ "libc",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
