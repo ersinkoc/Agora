@@ -13,6 +13,12 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
   confinement), or when a save copy next to it (`state.json.tmp`) is such a link, since writing it would change that other file too; the message says to remove the link or put a copy in its place
   (#571). Such links inside a folder it may write are not looked for at each start.
 
+### Starting at login
+- An agent that was in the middle of a task when its machine or Agora stopped now carries on by itself when it comes back: Agora tells it
+  that its session was cut off, to check the state of what it was doing first, and to go on where it stopped. Only for an agent that was
+  working, only when Agora brought it back by itself (not when you pressed Resume, and not for one that was waiting for you), once for each
+  interruption, for Claude Code and Codex. `resume.continue = off` in the node's policy file turns it off.
+
 ### Machines
 - Windows: a machine could stop updating its agents (memory, state) for good when a process's leftover parent id pointed back
   into the agent's own processes. Walking an agent's processes now visits each one once.

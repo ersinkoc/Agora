@@ -35,6 +35,9 @@ flag = [
 
 [resume]
 argv = ["codex", "resume", "{session_id}"]
+# ADR-0060 Amendment A: as for Claude Code (checked on codex-cli 0.169.0: `codex resume <id> "<prompt>"`).
+continue_argv = ["codex", "resume", "{session_id}", "{continue}"]
+continue = "This session was cut off by a restart of the machine or of Agora. Before anything else, check the state of what you were doing (the files, the running tasks, git status), then carry on where you stopped."
 
 [session.file]
 # ADR-0060: no flag sets Codex's session id. The first line of ~/.codex/sessions/YYYY/MM/DD/rollout-<time>-<id>.jsonl is

@@ -192,7 +192,19 @@ added at every launch, restarts and resumes included; a resumed agent gets a fre
 
 `[resume] argv` is how a terminal agent continues its own session: `{session_id}` is replaced by the session id the node holds for
 the agent. The node uses it after a crash (restart), and after its own restart when someone chooses Resume (`agent.resume`) or the
-node's policy resumes by itself. The node holds a session id only when it learned one:
+node's policy resumes by itself.
+
+`[resume] continue_argv` and `[resume] continue` (ADR-0060 Amendment A) say how the node continues an agent that was **working** when the node
+stopped, after it brought the agent back **by itself** (never when a person pressed Resume, and not for an agent that was waiting for a
+person, idle, finished or unknown): `continue_argv` is the resume command with one more argument, `{continue}`, which stands for the sentence
+in `continue` (that the session was cut off by a restart, to check the state of what it was doing first, then carry on); `{session_id}` is
+replaced as in `argv`. The sentence is data: one plain line of at most 512 bytes, which does not begin with `-` and holds no `{`, `}` or
+control character, and it is given as an argument of its own, never inside a shell string. The two fields go together: one without the
+other, a `continue_argv` without `{session_id}`, or one in which `{continue}` is not an argument of its own makes the manifest invalid. A kind
+without them is resumed as usual and gets no message. The node's policy line `resume.continue = on | off` (default on) decides, and no
+command or message from the hub carries it; the ledger records when the message was sent, so it goes once for each interruption.
+
+The node holds a session id only when it learned one:
 
 - **`id_args`** (Claude Code, `--session-id <uuid>`, checked on 2.1.319): the node chooses a random v4 UUID at the agent's first launch,
   adds `id_args` with `{session_id}` replaced, and records the id (`AgentSessionReported`) right after the start. Restarts and

@@ -41,6 +41,9 @@ fn fake() -> String {
     p.to_string_lossy().into_owned()
 }
 
+const SENTENCE: &str =
+    "The session was cut off by a restart. Check the state first, then carry on.";
+
 fn supported() -> bool {
     agora_platform::PTY_SUPPORTED && agora_platform::LOCAL_SOCKETS_SUPPORTED
 }
@@ -81,6 +84,27 @@ impl Env {
                 head("probe").replace("min_engine = 1", "min_engine = 2"),
                 q(probe("start-{pid}.json")),
                 q(resume)
+            ),
+        )
+        .unwrap();
+        // ADR-0060 Amendment A: a kind whose manifest says how to carry on: the probe of that command is another file, so the test can tell
+        // a resume that carried the sentence from one that did not.
+        let mut carry_resume = probe("resume-{pid}.json");
+        carry_resume.extend(["--resume".to_string(), "{session_id}".to_string()]);
+        let mut carry_argv = probe("carry-{pid}.json");
+        carry_argv.extend([
+            "--resume".to_string(),
+            "{session_id}".to_string(),
+            "{continue}".to_string(),
+        ]);
+        std::fs::write(
+            root.join("manifests/carry.toml"),
+            format!(
+                "{}[process]\nlaunch = {}\n[resume]\nargv = {}\ncontinue_argv = {}\ncontinue = \"{SENTENCE}\"\n[session]\nid_args = [\"--session-id\", \"{{session_id}}\"]\n",
+                head("carry").replace("min_engine = 1", "min_engine = 2"),
+                q(probe("start-{pid}.json")),
+                q(carry_resume),
+                q(carry_argv)
             ),
         )
         .unwrap();
@@ -194,6 +218,51 @@ impl Env {
             Ok(other) => panic!("{other:?}"),
             Err(e) => Err(e.code),
         }
+    }
+
+    /// The ledger is told the agent's state, as the node's event path does while it runs.
+    fn set_state(&self, id: &str, state: v1::AgentState) {
+        self.node().ledger.observe(
+            &v1::event::Body::AgentStateChanged(v1::AgentStateChanged {
+                agent_id: id.into(),
+                state: state as i32,
+                reported: false,
+            }),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64,
+        );
+        assert_eq!(
+            self.node().ledger.get(id).unwrap().last_state,
+            match state {
+                v1::AgentState::Working => "working",
+                v1::AgentState::Blocked => "blocked",
+                v1::AgentState::Idle => "idle",
+                _ => "unknown",
+            }
+        );
+    }
+
+    /// The `args` the fake agent wrote to the probe files whose names start with `prefix`.
+    fn probes(&self, prefix: &str) -> Vec<Vec<String>> {
+        let mut out = Vec::new();
+        for f in std::fs::read_dir(&self.root).unwrap().flatten() {
+            let name = f.file_name().to_string_lossy().into_owned();
+            if name.starts_with(prefix) && name.ends_with(".json") {
+                let v: serde_json::Value =
+                    serde_json::from_str(&std::fs::read_to_string(f.path()).unwrap()).unwrap();
+                out.push(
+                    v["args"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|a| a.as_str().unwrap().to_string())
+                        .collect(),
+                );
+            }
+        }
+        out
     }
 
     fn running(&self, id: &str) -> bool {
@@ -752,4 +821,101 @@ fn the_policy_file_always_wins_over_resume_auto() {
             assert!(e.node().ledger.get(&p).unwrap().interrupted(), "{policy}");
         }
     }
+}
+
+/// ADR-0060 Amendment A, a real restart: the node brings back by itself an agent that was working, and its resume carries the kind's
+/// sentence as one argument; the ledger says it was sent and a second start does not send it again.
+#[test]
+fn a_working_agent_brought_back_by_itself_is_given_the_kinds_carry_on_sentence_once() {
+    if !supported() {
+        return;
+    }
+    let mut e = Env::new("carry-working");
+    let id = e.launch("carry");
+    e.wait("the session", |e| !e.session(&id).is_empty());
+    e.set_state(&id, v1::AgentState::Working);
+    e.resume_all = true;
+    e.start();
+    e.wait("the agent back", |e| e.running(&id));
+    e.wait("the probe", |e| !e.probes("carry-").is_empty());
+    let carried = e.probes("carry-");
+    assert_eq!(carried.len(), 1, "{carried:?}");
+    // The sentence is an argument of its own, after the session id; the plain resume command did not run.
+    let sid = e.session(&id);
+    let args = &carried[0];
+    assert_eq!(
+        &args[args.len() - 3..],
+        ["--resume", sid.as_str(), SENTENCE]
+    );
+    assert!(e.probes("resume-").is_empty(), "the plain resume ran too");
+    let entry = e.node().ledger.get(&id).unwrap();
+    assert!(entry.continue_sent_ms > 0 && entry.auto_resumed_at_ms > 0);
+    // Another stop and start soon after: it is not brought back again by itself (a crash loop), so nothing more is sent.
+    e.start();
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(e.probes("carry-").len(), 1);
+}
+
+/// The message is never sent otherwise: not to an agent that waited for a person (it could answer a permission prompt), nor to an idle
+/// one, nor when the owner's policy says off, nor when a person pressed Resume.
+#[test]
+fn the_carry_on_sentence_is_never_sent_unless_the_agent_was_working_and_the_node_resumed_it() {
+    // Either command wrote its probe: the assertions then say which one it was.
+    let any_probe = |e: &Env| !e.probes("resume-").is_empty() || !e.probes("carry-").is_empty();
+    if !supported() {
+        return;
+    }
+    for (name, state) in [
+        ("blocked", v1::AgentState::Blocked),
+        ("idle", v1::AgentState::Idle),
+    ] {
+        let mut e = Env::new(&format!("carry-{name}"));
+        let id = e.launch("carry");
+        e.wait("the session", |e| !e.session(&id).is_empty());
+        e.set_state(&id, state);
+        e.resume_all = true;
+        e.start();
+        e.wait("the agent back", |e| e.running(&id));
+        e.wait("a probe", |e| any_probe(e));
+        assert!(
+            e.probes("carry-").is_empty(),
+            "{name}: the sentence was sent"
+        );
+        assert_eq!(e.node().ledger.get(&id).unwrap().continue_sent_ms, 0);
+    }
+    // The owner's policy says off: resumed by itself, but without the sentence.
+    let mut e = Env::new("carry-off");
+    let id = e.launch("carry");
+    e.wait("the session", |e| !e.session(&id).is_empty());
+    e.set_state(&id, v1::AgentState::Working);
+    std::fs::create_dir_all(e.root.join("data")).unwrap();
+    std::fs::write(e.root.join("data/policy"), "resume.continue = off\n").unwrap();
+    e.resume_all = true;
+    e.start();
+    e.wait("the agent back", |e| e.running(&id));
+    e.wait("a probe", |e| any_probe(e));
+    assert!(e.probes("carry-").is_empty(), "off: the sentence was sent");
+    // A person pressed Resume: they are there, so nothing is sent for them.
+    let mut e = Env::new("carry-person");
+    let id = e.launch("carry");
+    e.wait("the session", |e| !e.session(&id).is_empty());
+    e.set_state(&id, v1::AgentState::Working);
+    e.start();
+    assert!(!e.running(&id));
+    e.resume(&id, false).unwrap();
+    e.wait("a probe", |e| any_probe(e));
+    assert!(
+        e.probes("carry-").is_empty(),
+        "Resume: the sentence was sent"
+    );
+    assert_eq!(e.node().ledger.get(&id).unwrap().continue_sent_ms, 0);
+    // A kind with no carry-on command in its manifest is resumed as usual, whatever it was doing.
+    let mut e = Env::new("carry-none");
+    let id = e.launch("probe");
+    e.wait("the session", |e| !e.session(&id).is_empty());
+    e.set_state(&id, v1::AgentState::Working);
+    e.resume_all = true;
+    e.start();
+    e.wait("the agent back", |e| e.running(&id));
+    assert_eq!(e.node().ledger.get(&id).unwrap().continue_sent_ms, 0);
 }
