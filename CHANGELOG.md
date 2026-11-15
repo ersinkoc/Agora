@@ -4,6 +4,11 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+## 0.3.13
+
+### Starting at login
+- After a restart of the machine or of Agora, the agents that were running come back on their own and carry on in their own conversations. At most 8 start at once, the rest 5 seconds apart. The first time, Agora asks once (the default is yes); `agora --resume ask|auto` changes it. The node's own policy file always outranks the flag.
+
 ## 0.3.12
 
 ### Hub
