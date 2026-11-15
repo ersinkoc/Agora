@@ -4,6 +4,10 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+### Machines
+- Windows: a machine could stop updating its agents (memory, state) for good when a process's leftover parent id pointed back
+  into the agent's own processes. Walking an agent's processes now visits each one once.
+
 ## 0.3.13
 
 ### Starting at login
