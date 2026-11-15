@@ -105,13 +105,18 @@ impl AlacrittyTerminal {
         Self::with_scrollback(size, SCROLLBACK)
     }
 
+    /// The size the screen really has for a requested one: at least [`MIN_COLS`] columns and one row.
+    fn clamped(size: Size) -> Size {
+        Size {
+            cols: size.cols.max(MIN_COLS),
+            rows: size.rows.max(1),
+        }
+    }
+
     /// Like [`new`](Self::new) with an explicit scrollback cap in lines. Scrollback is never read by
     /// detection; the cap only bounds memory.
     pub fn with_scrollback(size: Size, scrollback: usize) -> Self {
-        let size = Size {
-            cols: size.cols.max(MIN_COLS),
-            rows: size.rows.max(1),
-        };
+        let size = Self::clamped(size);
         let listener = Listener::default();
         let config = Config {
             scrolling_history: scrollback,
@@ -132,11 +137,12 @@ impl Terminal for AlacrittyTerminal {
         self.parser.advance(&mut self.term, bytes);
     }
 
+    fn clamp_size(&self, size: Size) -> Size {
+        Self::clamped(size)
+    }
+
     fn resize(&mut self, size: Size) {
-        let size = Size {
-            cols: size.cols.max(MIN_COLS),
-            rows: size.rows.max(1),
-        };
+        let size = Self::clamped(size);
         self.term.resize(Dims(size));
         self.size = size;
     }

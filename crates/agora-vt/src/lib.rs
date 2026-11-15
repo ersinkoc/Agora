@@ -119,6 +119,11 @@ pub trait Terminal: Send {
     fn feed(&mut self, bytes: &[u8]);
     /// Change the screen size. A backend may keep a minimum size; [`size`](Terminal::size) reports the size it has.
     fn resize(&mut self, size: Size);
+    /// The size [`resize`](Terminal::resize) would really give the screen for `size` (a backend may keep a minimum). Whoever also
+    /// resizes something tied to the screen, such as the process's terminal, asks this first so both have the same size.
+    fn clamp_size(&self, size: Size) -> Size {
+        size
+    }
     fn size(&self) -> Size;
     /// The cell at `row`, `col` of the live screen (0-based, top-left origin); `None` if out of range.
     fn cell(&self, row: u16, col: u16) -> Option<Cell>;
