@@ -1221,6 +1221,9 @@ pub fn read_policy(path: &std::path::Path) -> Policy {
         Err(_) => {
             p.problems.push("unreadable".into());
             p.skip_permissions = crate::launch_options::SkipPermissions::Forbid;
+            // The stricter reading here too: a policy the owner wrote and the node cannot read may say `resume.continue = off`, so no
+            // "carry on" message is typed into an agent (ADR-0060 Amendment A).
+            p.resume.no_carry_on = true;
             return p;
         }
     };

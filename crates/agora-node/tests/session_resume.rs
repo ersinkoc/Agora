@@ -919,3 +919,37 @@ fn the_carry_on_sentence_is_never_sent_unless_the_agent_was_working_and_the_node
     e.wait("the agent back", |e| e.running(&id));
     assert_eq!(e.node().ledger.get(&id).unwrap().continue_sent_ms, 0);
 }
+
+/// ADR-0060 Amendment A, the policy line: on by default, on only by the word `on`, and the stricter reading when the file exists but
+/// cannot be read (a reviewer found it fell back to on).
+#[test]
+fn the_carry_on_policy_is_on_by_default_and_off_for_anything_but_on_or_an_unreadable_file() {
+    use agora_node::daemon::read_policy;
+    let dir = std::env::temp_dir().join(format!("carry-policy-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let off = |text: &str| {
+        let f = dir.join("policy");
+        std::fs::write(&f, text).unwrap();
+        read_policy(&f).resume.no_carry_on
+    };
+    // No file, no line, `on`: carrying on is allowed.
+    assert!(!read_policy(&dir.join("missing")).resume.no_carry_on);
+    assert!(!off("resume = auto\n"));
+    assert!(!off("resume.continue = on\n"));
+    assert!(!off("resume.continue =   on  \n"));
+    // `off`, any other word, or an empty value: not allowed.
+    for text in [
+        "resume.continue = off\n",
+        "resume.continue = maybe\n",
+        "resume.continue = ON\n",
+        "resume.continue =\n",
+    ] {
+        assert!(off(text), "{text:?}");
+    }
+    // A file that exists and cannot be read (a folder where the file should be): not allowed.
+    let unreadable = dir.join("folder");
+    std::fs::create_dir_all(&unreadable).unwrap();
+    assert!(read_policy(&unreadable).resume.no_carry_on);
+    let _ = std::fs::remove_dir_all(&dir);
+}
