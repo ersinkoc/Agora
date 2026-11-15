@@ -314,6 +314,11 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                         agora_core::IntegrationLevel::L3Adapter => v1::IntegrationLevel::L3Adapter,
                     } as i32,
                     installed: k.installed,
+                    // ADR-0069: a bare file name, never a path (a manifest may name its program by path).
+                    program: std::path::Path::new(&k.program)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
                     launch_options: k
                         .launch_options
                         .iter()

@@ -24,6 +24,8 @@ pub struct NodeView {
     pub hostname: String,
     pub os: String,
     pub build: String,
+    /// ADR-0069: the node's executable when its folder is not on the node's PATH (`NodeOnline.binary`); empty otherwise.
+    pub binary: String,
     pub online: bool,
     pub agents_running: u32,
     pub terminals_open: u32,
@@ -45,6 +47,7 @@ impl NodeView {
             hostname: String::new(),
             os: String::new(),
             build: String::new(),
+            binary: String::new(),
             online,
             agents_running: 0,
             terminals_open: 0,
@@ -297,6 +300,7 @@ impl View {
                 n.hostname = e.hostname.clone();
                 n.os = e.os.clone();
                 n.build = e.build.clone();
+                n.binary = e.binary.clone();
                 n.online = true;
                 n.last_event_ms = n.last_event_ms.max(ev.at_ms);
             }
@@ -663,12 +667,34 @@ mod tests {
     }
 
     #[test]
+    fn a_nodes_binary_off_path_is_kept_from_its_latest_start() {
+        // ADR-0069: `NodeOnline.binary` is what the snapshot gives windows that connect later; a later start replaces it.
+        let online = |binary: &str| {
+            Body::NodeOnline(NodeOnline {
+                node_id: "n1".into(),
+                hostname: "laptop".into(),
+                os: "windows".into(),
+                build: "b".into(),
+                binary: binary.into(),
+            })
+        };
+        let mut v = View::default();
+        v.apply(&ev("n1", 1, online(r"C:\Users\a\Downloads\agora.exe")));
+        assert_eq!(v.nodes["n1"].binary, r"C:\Users\a\Downloads\agora.exe");
+        let snap = crate::server::snapshot_of(&v, 1);
+        assert_eq!(snap.nodes[0].binary, r"C:\Users\a\Downloads\agora.exe");
+        v.apply(&ev("n1", 2, online("")));
+        assert_eq!(v.nodes["n1"].binary, "");
+    }
+
+    #[test]
     fn an_interrupted_agent_stays_closed_until_it_starts_again_and_one_never_seen_is_listed() {
         let online = Body::NodeOnline(NodeOnline {
             node_id: "n1".into(),
             hostname: "laptop".into(),
             os: "linux".into(),
             build: "b".into(),
+            binary: String::new(),
         });
         let interrupted = |id: &str, resumable: bool| {
             Body::AgentInterrupted(AgentInterrupted {
@@ -744,6 +770,7 @@ mod tests {
             hostname: "h".into(),
             os: "linux".into(),
             build: "b".into(),
+            binary: String::new(),
         })
     }
 
@@ -890,6 +917,7 @@ mod tests {
                 hostname: "laptop".into(),
                 os: "linux".into(),
                 build: "b".into(),
+                binary: String::new(),
             }),
         ));
         v.apply(&ev(
@@ -923,6 +951,7 @@ mod tests {
                 hostname: "laptop".into(),
                 os: "linux".into(),
                 build: "b".into(),
+                binary: String::new(),
             })
         };
         let mut v = View::default();
@@ -956,6 +985,7 @@ mod tests {
                 hostname: "laptop".into(),
                 os: "linux".into(),
                 build: "b".into(),
+                binary: String::new(),
             })
         };
         let terminal = |agent: &str| {

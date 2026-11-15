@@ -506,6 +506,9 @@ message AgentKind {
   bool installed = 4;
   // ADR-0059: the options a start may choose (the manifest's `[[launch.option]]`s, in its order). Old nodes send none.
   repeated LaunchOption launch_options = 5;
+  // ADR-0069: the program the node looks for on its PATH (a bare file name such as `wstack`, never a path), so a kind that is not
+  // installed can say what is missing. Empty from an old node (capability `kinds.program`).
+  string program = 6;
 }
 
 // ADR-0059: one `[[launch.option]]` of a kind. The arguments it adds stay on the node.

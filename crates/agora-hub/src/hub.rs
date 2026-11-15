@@ -293,14 +293,20 @@ impl Hub {
                 terminal_bytes: self.router.terminal_bytes(),
                 events_stored: g.pos,
                 resyncs: 0,
+                node_commands_queued: 0,
+                node_commands_unanswered: 0,
             }
         };
+        // The router's own lock, taken after the hub's is let go.
+        let (node_commands_queued, node_commands_unanswered) = self.router.node_load();
         // Read outside the hub's lock: it is a query on the store.
         let resyncs = self.store.resync_count().unwrap_or(0);
-        Some(
-            self.metrics
-                .render(&crate::metrics::Gauges { resyncs, ..gauges }),
-        )
+        Some(self.metrics.render(&crate::metrics::Gauges {
+            resyncs,
+            node_commands_queued,
+            node_commands_unanswered,
+            ..gauges
+        }))
     }
 
     /// Whether any node by this id has ever been seen (online or not).
@@ -913,6 +919,7 @@ mod tests {
                 hostname: "h".into(),
                 os: "linux".into(),
                 build: "b".into(),
+                binary: String::new(),
             })),
         }
         .encode_to_vec()
@@ -1318,6 +1325,7 @@ mod tests {
                 hostname: "h".into(),
                 os: "linux".into(),
                 build: "b".into(),
+                binary: String::new(),
             })
         };
         // "up": its connection (generation 2) was open when the hub was killed; it was last heard at 500.

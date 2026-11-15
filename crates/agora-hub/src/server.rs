@@ -245,6 +245,7 @@ where
     let verifies_devices = welcome.capabilities.iter().any(|c| c == "device.trust");
     let (registration, commands, generation) =
         hub.node_link_opened(node_id, welcome.capabilities, now_ms());
+    let load = registration.load();
     // ADR-0061: a node that verifies endorsements gets every one it may have missed while it was away, and every revocation.
     if verifies_devices {
         give_device_changes(hub, node_id);
@@ -253,7 +254,7 @@ where
     // A certificate revoked while the connection is open ends it here, inside the conversation, so the end below still records the
     // node offline (it used to be cancelled from outside, and a revoked machine stayed online in every view).
     let result = tokio::select! {
-        r = stream_events(conn, &mut session, hub, node_id, commands, silence, &mut last_heard) => r,
+        r = stream_events(conn, &mut session, hub, node_id, (commands, &load), silence, &mut last_heard) => r,
         () = still(valid) => Err(revoked()),
     };
     // However it ended, the router now knows this node is not connected (commands to it fail with `node.offline` at once), unless
@@ -288,7 +289,11 @@ async fn stream_events<S>(
     session: &mut NodeSession<'_, crate::store::SqliteStore>,
     hub: &Arc<Hub>,
     node_id: &str,
-    mut commands: tokio::sync::mpsc::UnboundedReceiver<crate::router::ToNode>,
+    // The commands queued for this node, and the connection's count of them (`GET /api/metrics`).
+    (mut commands, load): (
+        tokio::sync::mpsc::UnboundedReceiver<crate::router::ToNode>,
+        &crate::router::LinkLoad,
+    ),
     silence: Duration,
     last_heard: &mut tokio::time::Instant,
 ) -> Result<(), ServeError>
@@ -326,9 +331,11 @@ where
             Some(to_node) = commands.recv() => {
                 match to_node {
                     crate::router::ToNode::Command { request, reply, stream } => {
+                        load.queued.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                         waiting.retain(|_, s| !s.is_closed());
                         let payload = request.encode_to_vec();
                         waiting.insert(request.request_id.clone(), reply);
+                        load.unanswered.store(waiting.len(), std::sync::atomic::Ordering::Relaxed);
                         put(conn, &frame(stream, 0, payload), silence).await?;
                     }
                     crate::router::ToNode::Close { stream } => {
@@ -422,6 +429,8 @@ where
                             if let Some(reply) = waiting.remove(&resp.request_id) {
                                 let _ = reply.send(resp);
                             }
+                            load.unanswered
+                                .store(waiting.len(), std::sync::atomic::Ordering::Relaxed);
                         }
                     }
                     // Terminal frames of a relayed subscription: passed to the client, never stored or decoded.
@@ -497,6 +506,7 @@ pub fn snapshot_of(view: &View, pos: u64) -> v1::Snapshot {
                 memory_used_bytes: n.memory_used_bytes,
                 last_event_ms: n.last_event_ms,
                 trusted_device_ids: view.trusted_devices.get(id).cloned().unwrap_or_default(),
+                binary: n.binary.clone(),
             })
             .collect(),
         checkouts: view
@@ -694,6 +704,8 @@ where
     // A member or viewer gets a snapshot cut to their projects, whatever position they ask from (a replay from the log would be
     // everyone's), and from then on only the events that are theirs (ADR-0049).
     let restricted = current.projects.is_some();
+    // ADR-0069: only the owner sees the full path of a machine's own executable; everyone else its file name.
+    let owner = current.role == crate::users::Role::Owner;
     let subscription = hub.subscribe(if restricted { None } else { sub.after_pos })?;
     let mut scope = None;
     if let Some((view, pos)) = &subscription.snapshot {
@@ -704,13 +716,21 @@ where
                 scope = Some(s);
                 snapshot_of(&cut, *pos)
             }
-            None => snapshot_of(view, *pos),
+            None => {
+                let mut snap = snapshot_of(view, *pos);
+                if !owner {
+                    for n in &mut snap.nodes {
+                        n.binary = crate::scope::short_binary(&n.binary);
+                    }
+                }
+                snap
+            }
         };
         conn.send(&frame(STREAM_EVENTS, kinds::SNAPSHOT, body.encode_to_vec()))
             .await?;
     }
     for d in &subscription.backlog {
-        send_positioned(&mut conn, d).await?;
+        send_shown(&mut conn, d, owner).await?;
     }
     let mut checked = tokio::time::Instant::now();
     let (relays, mut relay_frames) = hub.router().client();
@@ -735,7 +755,7 @@ where
             match subscription.live.try_recv() {
                 Ok(d) => {
                     if scope.as_mut().is_none_or(|s| s.admit(&d.event)) {
-                        send_positioned(&mut conn, &d).await?;
+                        send_shown(&mut conn, &d, owner).await?;
                     }
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
@@ -750,6 +770,8 @@ where
                 conn.send(&frame(rf.stream, rf.kind, rf.payload)).await?;
                 continue;
             }
+            // A node answered: sent at the top of the loop, now (`answer_ready`).
+            () = an_answer(inflight) => continue,
         };
         match received {
             Ok(Ok(Some(f))) => match (f.stream_id, f.kind) {
@@ -804,9 +826,33 @@ struct Inflight {
     /// A terminal subscription: the stream on the node's connection that was reserved for it.
     relay: Option<u32>,
     reply: tokio::sync::oneshot::Receiver<v1::CommandResponse>,
+    /// The answer [`an_answer`] already took from `reply` (a oneshot gives it once), for [`answer_ready`] to send.
+    answered: Option<Result<v1::CommandResponse, tokio::sync::oneshot::error::RecvError>>,
     deadline: tokio::time::Instant,
     /// The audit row that says this command is on its way (ADR-0049); finished when the answer comes.
     audit: Option<i64>,
+}
+
+/// Resolves when a command on its way has its answer (or lost its node), keeping it in [`Inflight::answered`]: a client gets an
+/// answer as soon as the node gives it. Before, answers waited for the loop's next tick ([`PUSH`]): every command's round trip was
+/// at least 20 ms (architecture review R5 measurement, `tests/flood_latency.rs`).
+fn an_answer(inflight: &mut [Inflight]) -> impl std::future::Future<Output = ()> + '_ {
+    std::future::poll_fn(move |cx| {
+        let mut any = false;
+        for i in inflight.iter_mut().filter(|i| i.answered.is_none()) {
+            if let std::task::Poll::Ready(r) =
+                std::future::Future::poll(std::pin::Pin::new(&mut i.reply), cx)
+            {
+                i.answered = Some(r);
+                any = true;
+            }
+        }
+        if any {
+            std::task::Poll::Ready(())
+        } else {
+            std::task::Poll::Pending
+        }
+    })
 }
 
 /// Who is asking and what they may reach (ADR-0049).
@@ -978,6 +1024,7 @@ where
             node,
             relay,
             reply,
+            answered: None,
             deadline: tokio::time::Instant::now() + COMMAND_DEADLINE,
             audit: None,
         })
@@ -1015,7 +1062,12 @@ where
     let mut i = 0;
     while i < inflight.len() {
         let item = &mut inflight[i];
-        let resp = match item.reply.try_recv() {
+        let got = match item.answered.take() {
+            Some(Ok(r)) => Ok(r),
+            Some(Err(_)) => Err(TryRecvError::Closed),
+            None => item.reply.try_recv(),
+        };
+        let resp = match got {
             Ok(mut r) => {
                 r.request_id.clone_from(&item.client_request_id);
                 Some(r)
@@ -1057,6 +1109,23 @@ where
         }
     }
     Ok(())
+}
+
+/// [`send_positioned`], with what only the owner may see taken out for anyone else (ADR-0069: a machine's full executable path).
+async fn send_shown<S>(
+    conn: &mut Conn<S>,
+    d: &crate::hub::Delivered,
+    owner: bool,
+) -> Result<(), ServeError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    match (owner, crate::scope::without_full_binary(&d.event)) {
+        (false, Some(event)) => {
+            send_positioned(conn, &crate::hub::Delivered { pos: d.pos, event }).await
+        }
+        _ => send_positioned(conn, d).await,
+    }
 }
 
 async fn send_positioned<S>(conn: &mut Conn<S>, d: &crate::hub::Delivered) -> Result<(), ServeError>
@@ -1836,6 +1905,7 @@ mod audit_cleanup_tests {
             relay: None,
             audit: Some(audit),
             reply,
+            answered: None,
             deadline,
         };
         // answer_ready uses swap_remove: a completed first request moves the newest one in front of an older pending request.

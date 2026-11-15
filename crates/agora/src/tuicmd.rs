@@ -164,13 +164,9 @@ fn resume(
                 });
             say.text(key!("tui-resumed"), &[("agent", Arg::Str(name))])
         }
-        Err(e) if e.code == "approval.signature_invalid" => say.text(
-            key!("tui-not-trusted"),
-            &[
-                ("id", Arg::Str(device.id.clone())),
-                ("key", Arg::Str(device.public_key_hex())),
-            ],
-        ),
+        Err(e) if e.code == "approval.signature_invalid" => {
+            not_trusted(say, &device, node_binary(snapshot, node).as_deref())
+        }
         Err(e) => resume_notice(say, &e),
     }
 }
@@ -325,14 +321,16 @@ fn answer(
             },
             &[],
         ),
-        Err(code) if code == "approval.signature_invalid" => say.text(
-            key!("tui-not-trusted"),
-            &[
-                ("id", Arg::Str(device.id.clone())),
-                ("key", Arg::Str(device.public_key_hex())),
-                ("fingerprint", Arg::Str(device.fingerprint())),
-            ],
-        ),
+        Err(code) if code == "approval.signature_invalid" => {
+            // The machine of the agent that asked.
+            let node = snapshot
+                .approvals
+                .iter()
+                .find(|a| a.approval_id == selected)
+                .and_then(|a| a.agent_id.split_once('/'))
+                .map_or("", |(n, _)| n);
+            not_trusted(say, &device, node_binary(snapshot, node).as_deref())
+        }
         Err(code) => say.text(key!("tui-answer-failed"), &[("code", Arg::Str(code))]),
     }
 }
@@ -399,6 +397,39 @@ fn read_start(
 
 const GRANT_TTL: Duration = Duration::from_secs(60 * 60);
 
+/// Where the `agora` program of `node` is when it is not in that machine's `PATH`, as its folder and file (ADR-0069
+/// `NodeSnapshot.binary`): the hub's owner receives the full path and is shown its last two parts; everyone else receives the file
+/// name alone, which says nothing about where it is, so `None` then, as when it is in the `PATH` or the machine is older.
+fn node_binary(snapshot: &Snapshot, node: &str) -> Option<String> {
+    let full = snapshot
+        .nodes
+        .iter()
+        .find(|n| n.node_id == node)
+        .map(|n| n.binary.as_str())
+        .filter(|b| !b.is_empty())?;
+    let sep = if full.contains('\\') { '\\' } else { '/' };
+    let mut parts = full.rsplit(sep).filter(|p| !p.is_empty());
+    let file = parts.next()?;
+    let folder = parts.next()?;
+    Some(format!("{folder}{sep}{file}"))
+}
+
+/// This device is not trusted by `node`: how to trust it there, naming where its `agora` program is when the machine said so.
+fn not_trusted(say: &Say, device: &Device, binary: Option<&str>) -> String {
+    let mut args = vec![
+        ("id", Arg::Str(device.id.clone())),
+        ("key", Arg::Str(device.public_key_hex())),
+        ("fingerprint", Arg::Str(device.fingerprint())),
+    ];
+    match binary {
+        Some(b) => {
+            args.push(("binary", Arg::Str(plain(b))));
+            say.text(key!("tui-not-trusted-at"), &args)
+        }
+        None => say.text(key!("tui-not-trusted"), &args),
+    }
+}
+
 /// A machine refused until its owner allows it (ADR-0041). Asks, and on `y` signs a grant with this device's key. `Ok(true)` means it
 /// was given and the action can be repeated; `Ok(false)` that the user said no; `Err` is the line to show.
 fn ask_grant(
@@ -417,14 +448,8 @@ fn ask_grant(
     let device = device().ok_or_else(|| fail("device".into()))?;
     match session.grant(node, &device, scope, commands, GRANT_TTL) {
         Ok(()) => Ok(true),
-        Err(code) if code == "approval.signature_invalid" => Err(say.text(
-            key!("tui-not-trusted"),
-            &[
-                ("id", Arg::Str(device.id.clone())),
-                ("key", Arg::Str(device.public_key_hex())),
-                ("fingerprint", Arg::Str(device.fingerprint())),
-            ],
-        )),
+        // No snapshot here: the general sentence.
+        Err(code) if code == "approval.signature_invalid" => Err(not_trusted(say, &device, None)),
         Err(code) => Err(fail(code)),
     }
 }
@@ -909,15 +934,8 @@ fn start_in_folder(
             &[("code", Arg::Str("device".into()))],
         );
     };
-    let not_trusted = |device: &Device| {
-        say.text(
-            key!("tui-not-trusted"),
-            &[
-                ("id", Arg::Str(device.id.clone())),
-                ("key", Arg::Str(device.public_key_hex())),
-                ("fingerprint", Arg::Str(device.fingerprint())),
-            ],
-        )
+    let not_trusted = |device: &Device, node: &str| {
+        not_trusted(say, device, node_binary(snapshot, node).as_deref())
     };
     let online: Vec<&agora_protocol::v1::NodeSnapshot> =
         snapshot.nodes.iter().filter(|n| n.online).collect();
@@ -951,7 +969,9 @@ fn start_in_folder(
         };
         let folder = match session.list_folder(&node.node_id, &path, auth) {
             Ok(f) => f,
-            Err(code) if code == "approval.signature_invalid" => return not_trusted(&device),
+            Err(code) if code == "approval.signature_invalid" => {
+                return not_trusted(&device, &node.node_id)
+            }
             Err(code) if code == "protocol.capability_missing" => {
                 return say.text(key!("tui-folder-unsupported"), &[])
             }
@@ -1020,7 +1040,7 @@ fn start_in_folder(
     };
     let info = match session.inspect_folder(&node, &folder, auth) {
         Ok(i) => i,
-        Err(code) if code == "approval.signature_invalid" => return not_trusted(&device),
+        Err(code) if code == "approval.signature_invalid" => return not_trusted(&device, &node),
         Err(code) => return say.text(key!("tui-start-failed"), &[("code", Arg::Str(code))]),
     };
     // Which agent: the machine's installed kinds by number, as `s` asks.
@@ -1151,7 +1171,7 @@ fn start_in_folder(
         },
     ) {
         Ok(agent) => say.text(key!("tui-started"), &[("agent", Arg::Str(agent))]),
-        Err(code) if code == "approval.signature_invalid" => not_trusted(&device),
+        Err(code) if code == "approval.signature_invalid" => not_trusted(&device, &node),
         Err(code) => say.text(key!("tui-start-failed"), &[("code", Arg::Str(code))]),
     }
 }
@@ -3144,18 +3164,26 @@ fn clean_up_old(
 }
 
 /// A machine's agents split into the ones it can start (numbered in the menu) and one line naming the others: the machine cannot
-/// find their program in its `PATH`. The program names are not in the kinds answer yet, so the line names the agents.
+/// find their program in its `PATH`. Each is named with the program the machine looked for (ADR-0069), when the machine says it.
 fn split_kinds(
     say: &Say,
-    all: Vec<(String, String, bool)>,
+    all: Vec<agora_tui::client::Kind>,
 ) -> (Vec<(String, String)>, Option<String>) {
     let mut installed = Vec::new();
     let mut missing = Vec::new();
-    for (kind, name, ok) in all {
-        if ok {
-            installed.push((kind, name));
+    for k in all {
+        if k.installed {
+            installed.push((k.kind, k.name));
+        } else if k.program.is_empty() {
+            missing.push(plain(&k.name));
         } else {
-            missing.push(plain(&name));
+            missing.push(say.text(
+                key!("tui-start-missing-item"),
+                &[
+                    ("name", Arg::Str(plain(&k.name))),
+                    ("program", Arg::Str(plain(&k.program))),
+                ],
+            ));
         }
     }
     let line = (!missing.is_empty()).then(|| {
@@ -3165,6 +3193,101 @@ fn split_kinds(
         )
     });
     (installed, line)
+}
+
+#[cfg(test)]
+mod adr0069_tests {
+    use super::*;
+    use agora_i18n::Catalog;
+
+    fn kind(name: &str, installed: bool, program: &str) -> agora_tui::client::Kind {
+        agora_tui::client::Kind {
+            kind: name.to_lowercase(),
+            name: name.into(),
+            installed,
+            program: program.into(),
+        }
+    }
+
+    #[test]
+    fn a_missing_agent_names_the_program_its_machine_looked_for() {
+        let say = Say(Catalog::english());
+        let (ok, line) = split_kinds(
+            &say,
+            vec![
+                kind("Claude Code", true, "claude"),
+                kind("WrongStack", false, "wstack"),
+                // An older machine says no program: the agent's name alone.
+                kind("Codex", false, ""),
+            ],
+        );
+        assert_eq!(
+            ok,
+            vec![("claude code".to_string(), "Claude Code".to_string())]
+        );
+        let line = line.unwrap_or_default();
+        assert!(line.contains("WrongStack (`wstack`), Codex."), "{line}");
+        assert!(
+            line.contains("cannot find their programs in its PATH"),
+            "{line}"
+        );
+        assert_eq!(
+            split_kinds(&say, vec![kind("Claude Code", true, "claude")]).1,
+            None
+        );
+    }
+
+    #[test]
+    fn the_trust_hint_names_the_folder_of_agora_when_the_machine_said_it() {
+        let say = Say(Catalog::english());
+        let s = Snapshot {
+            nodes: vec![
+                // The hub's owner receives the full path.
+                agora_protocol::v1::NodeSnapshot {
+                    node_id: "win".into(),
+                    binary: r"C:\Users\alice\Downloads\agora.exe".into(),
+                    ..Default::default()
+                },
+                agora_protocol::v1::NodeSnapshot {
+                    node_id: "lin".into(),
+                    binary: "/home/alice/agora".into(),
+                    ..Default::default()
+                },
+                // Everyone else receives the file name alone.
+                agora_protocol::v1::NodeSnapshot {
+                    node_id: "other".into(),
+                    binary: "agora".into(),
+                    ..Default::default()
+                },
+                agora_protocol::v1::NodeSnapshot {
+                    node_id: "mac".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            node_binary(&s, "win").as_deref(),
+            Some(r"Downloads\agora.exe")
+        );
+        assert_eq!(node_binary(&s, "lin").as_deref(), Some("alice/agora"));
+        assert_eq!(node_binary(&s, "other"), None);
+        assert_eq!(node_binary(&s, "mac"), None);
+        assert_eq!(node_binary(&s, "gone"), None);
+        let (device, _) = Device::generate().unwrap_or_else(|| panic!("a device key"));
+        let at = not_trusted(&say, &device, node_binary(&s, "win").as_deref());
+        assert!(
+            at.contains(r"in the folder of Downloads\agora.exe, run: ./agora node trust"),
+            "{at}"
+        );
+        assert!(at.contains(&device.fingerprint()), "{at}");
+        let general = not_trusted(&say, &device, None);
+        assert!(
+            general.contains("run it in the folder of the agora program"),
+            "{general}"
+        );
+        assert!(general.contains(&device.public_key_hex()), "{general}");
+    }
 }
 
 #[cfg(test)]

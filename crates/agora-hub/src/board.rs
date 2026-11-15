@@ -823,6 +823,7 @@ mod tests {
                     hostname: (*n).into(),
                     os: String::new(),
                     build: String::new(),
+                    binary: String::new(),
                     online: online.contains(n),
                     agents_running: 1,
                     terminals_open: 0,

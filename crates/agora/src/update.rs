@@ -194,6 +194,13 @@ pub fn update(say: &Say, o: &Opts) -> ExitCode {
     match result {
         Ok(()) => {
             say.out(key!("cli-update-done"), &[("version", wanted.into())]);
+            // macOS asks again whether the new program may use the local network; until then a node started by the login service
+            // cannot reach a hub on another machine.
+            if agora_platform::SERVICES_NEED_NETWORK_PERMISSION_AFTER_UPDATE
+                && crate::servicecmd::any_registered()
+            {
+                say.out(key!("cli-update-local-network"), &[]);
+            }
             ExitCode::SUCCESS
         }
         Err((id, reason)) => {

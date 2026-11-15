@@ -25,6 +25,8 @@
   | `agora_hub_terminal_bytes_total` | counter | bytes of terminal frames (snapshots and output) that reached a window's queue (`rate()` of it is the terminals' bytes per second); chat frames are not counted |
   | `agora_hub_events_stored` | gauge | the position of the last event in the hub's log |
   | `agora_hub_resyncs_total` | counter | lost ranges recorded by resyncs (ADR-0054) |
+  | `agora_hub_node_commands_queued` | gauge | commands queued for connected machines and not yet written to them (that queue has no bound: while a write to a machine that stopped reading waits, it grows, until the write gives up after 25 s and the connection ends) |
+  | `agora_hub_node_commands_unanswered` | gauge | commands written to connected machines and not answered yet |
 
   Counting costs two clock reads and a few atomics per stored event: 50 000 ingests measured 15.4–15.6 µs each with it and
   15.3–16.0 µs without (noise). Not yet: per-subscriber queue depth (the subscribers' `sync_channel` does not say its length; it needs a counted wrapper on every send and receive, so `agora_hub_subscribers_dropped_total` stands in for it: a subscriber is let go when its queue is full).
@@ -103,6 +105,7 @@
   Of the metrics the review lists first, ingest and storage latency, lock hold time, resync and relay-reset counts and approval
   latency are the `/api/metrics` lines above. The recovery target is written down apart from the history-loss window
   (`docs/design/backup-restore.md`: the present whole within 5 s of the hub starting; a resync restores the present, not the
-  missing history), and the restore drill fails above it. Not yet: queue depth (see above) and the oldest event a machine holds
-  unacknowledged, which only the node knows.
+  missing history), and the restore drill fails above it. Queue depth: the queues towards machines are the two
+  `agora_hub_node_commands_*` lines, counted per connection (a connection that ends stops counting at once). Not yet: the
+  subscribers' queue depth (see above) and the oldest event a machine holds unacknowledged, which only the node knows.
 - **Tracing across hops:** commands carry a trace id from client through hub to node and adapter.

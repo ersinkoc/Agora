@@ -95,14 +95,19 @@ pub fn run(inputs: &Inputs) -> Vec<Check> {
     }
     out.extend(authority(&inputs.data_dir, &policy, now_ms()));
 
-    out.push(match Command::new("git").arg("--version").output() {
-        Ok(o) if o.status.success() => check(
-            "git",
-            Status::Ok,
-            String::from_utf8_lossy(&o.stdout).trim().to_string(),
-        ),
-        _ => check("git", Status::Fail, ""),
-    });
+    out.push(
+        match agora_platform::no_console_window(&mut Command::new("git"))
+            .arg("--version")
+            .output()
+        {
+            Ok(o) if o.status.success() => check(
+                "git",
+                Status::Ok,
+                String::from_utf8_lossy(&o.stdout).trim().to_string(),
+            ),
+            _ => check("git", Status::Fail, ""),
+        },
+    );
 
     out.push(data_dir(&inputs.data_dir));
 
@@ -271,7 +276,55 @@ fn manifests(dir: &Path) -> Vec<Check> {
             .unwrap_or_default();
         out.push(check("manifest-invalid", Status::Warn, name));
     }
+    out.extend(older_than_built_in(dir));
     out
+}
+
+/// A manifest in the folder replaces the built-in one of its kind, so a copy made for an older release keeps replacing it after the
+/// program is updated: it lacks what the newer built-in has (a session id to resume with, a skip-permissions option, the prompt
+/// patterns). Found on a real machine: such copies from 11 Nov made `claude-code` agents impossible to resume. One warning for each
+/// folder file whose version is older than the built-in one of the same kind, naming the file (never its path).
+fn older_than_built_in(dir: &Path) -> Vec<Check> {
+    let (loaded, _) = crate::manifests::load(dir);
+    let mut out = Vec::new();
+    for l in loaded {
+        let crate::manifests::Source::Folder(path) = &l.source else {
+            continue;
+        };
+        let Some(shipped) = crate::manifests::BUILT_IN
+            .iter()
+            .filter_map(|(_, text)| agora_adapters::manifest::Manifest::parse(text).ok())
+            .find(|m| m.kind == l.manifest.kind)
+        else {
+            continue;
+        };
+        if !version_older(&l.manifest.version, &shipped.version) {
+            continue;
+        }
+        let mut c = check("manifest-older", Status::Warn, l.manifest.kind.clone());
+        c.args = vec![
+            ("from", l.manifest.version.clone()),
+            ("shipped", shipped.version),
+            (
+                "file",
+                path.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+            ),
+        ];
+        out.push(c);
+    }
+    out
+}
+
+/// Whether manifest version `a` is older than `b`: both are dotted numbers (`2026.11.13.1`), compared part by part. Anything else is
+/// not compared (no warning for a version in another shape).
+fn version_older(a: &str, b: &str) -> bool {
+    let parts = |v: &str| -> Option<Vec<u64>> { v.split('.').map(|p| p.parse().ok()).collect() };
+    match (parts(a), parts(b)) {
+        (Some(a), Some(b)) => a < b,
+        _ => false,
+    }
 }
 
 /// True when nothing failed (warnings are fine): the exit status of `agora doctor`.
@@ -419,6 +472,67 @@ mod tests {
         .unwrap();
         assert!(!run(&inputs).iter().any(|c| c.id.starts_with("policy-path")));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_folder_manifest_older_than_the_built_in_one_is_warned_about() {
+        let dir = tmp("older-manifests");
+        let shipped = crate::manifests::BUILT_IN
+            .iter()
+            .find(|(n, _)| *n == "claude-code.toml")
+            .unwrap()
+            .1;
+        let version = shipped
+            .lines()
+            .find(|l| l.starts_with("version = "))
+            .unwrap()
+            .to_string();
+        let with = |v: &str| shipped.replace(&version, &format!("version = \"{v}\""));
+        // Older: warned, and the file (not its path) is named.
+        std::fs::write(dir.join("claude-code.toml"), with("2026.01.01.1")).unwrap();
+        // The same version, a newer one and a kind with no built-in one are fine.
+        std::fs::write(dir.join("codex.toml"), {
+            let c = crate::manifests::BUILT_IN
+                .iter()
+                .find(|(n, _)| *n == "codex.toml")
+                .unwrap()
+                .1;
+            c.to_string()
+        })
+        .unwrap();
+        std::fs::write(
+            dir.join("mine.toml"),
+            "kind = \"mine\"\ndisplay_name = \"M\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"mine\"]\n",
+        )
+        .unwrap();
+        let checks = manifests(&dir);
+        let older = find(&checks, "manifest-older");
+        assert_eq!(older.len(), 1, "{checks:?}");
+        assert_eq!(older[0].detail, "claude-code");
+        assert!(older[0]
+            .args
+            .iter()
+            .any(|(k, v)| *k == "file" && v == "claude-code.toml"));
+        assert!(older[0]
+            .args
+            .iter()
+            .any(|(k, v)| *k == "from" && v == "2026.01.01.1"));
+        // A newer folder copy is not warned about.
+        std::fs::write(dir.join("claude-code.toml"), with("2099.01.01.1")).unwrap();
+        assert!(find(&manifests(&dir), "manifest-older").is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn manifest_versions_compare_part_by_part_and_other_shapes_are_not_compared() {
+        assert!(version_older("2026.11.09.1", "2026.11.13.1"));
+        assert!(version_older("2026.11.13.1", "2026.11.13.2"));
+        assert!(version_older("2026.9.30.1", "2026.11.1.1")); // numbers, not text
+        assert!(!version_older("2026.11.13.1", "2026.11.13.1"));
+        assert!(!version_older("2027.1.1.1", "2026.11.13.1"));
+        assert!(version_older("1", "2026.11.13.1")); // a hand-made override with a plain number counts as older
+        assert!(!version_older("v2", "2026.11.13.1"));
+        assert!(!version_older("", "2026.11.13.1"));
     }
 
     #[test]

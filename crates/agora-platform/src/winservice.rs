@@ -29,6 +29,40 @@ fn system32(program: &str) -> PathBuf {
         .join(program)
 }
 
+/// The toast script for [`desktop_notify`]: fixed text that reads the words from `AGORA_NOTIFY_TITLE` and `AGORA_NOTIFY_BODY`, shown
+/// under Windows PowerShell's own application id (a toast needs a registered one).
+const TOAST_SCRIPT: &str = "$ErrorActionPreference='Stop';\
+[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null;\
+$x = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02);\
+$t = $x.GetElementsByTagName('text');\
+$t.Item(0).AppendChild($x.CreateTextNode($env:AGORA_NOTIFY_TITLE)) | Out-Null;\
+$t.Item(1).AppendChild($x.CreateTextNode($env:AGORA_NOTIFY_BODY)) | Out-Null;\
+$id = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe';\
+$n = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($id);\
+if ($n.Setting -ne 'Enabled') { exit 3 };\
+$n.Show([Windows.UI.Notifications.ToastNotification]::new($x))";
+
+/// See [`crate::desktop_notify`]: Windows PowerShell by its full path, with [`TOAST_SCRIPT`]; the words are environment variables.
+pub(crate) fn desktop_notify(title: &str, body: &str) -> io::Result<()> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let status = Command::new(system32(r"WindowsPowerShell\v1.0\powershell.exe"))
+        .args(["-NoProfile", "-NonInteractive", "-Command", TOAST_SCRIPT])
+        .env("AGORA_NOTIFY_TITLE", title)
+        .env("AGORA_NOTIFY_BODY", body)
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()?;
+    match status.code() {
+        Some(0) => Ok(()),
+        // Notifications are turned off for this user or this notifier (`ToastNotifier.Setting` is not `Enabled`): nothing was shown.
+        Some(3) => Err(io::Error::from(io::ErrorKind::PermissionDenied)),
+        _ => Err(io::Error::other(format!("powershell: {status}"))),
+    }
+}
+
 fn schtasks(args: &[&std::ffi::OsStr]) -> io::Result<Output> {
     Command::new(system32("schtasks.exe"))
         .args(args)

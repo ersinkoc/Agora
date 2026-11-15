@@ -103,6 +103,7 @@ doctor-skip-permissions = { $detail ->
    *[other] Hiçbir ajan izin sorularını atlayan bir kipte başlatılamaz (politika: skip_permissions = forbid).
 }
 doctor-policy-problems = Düğümün politika dosyasındaki { $detail } satır anlaşılamadı; bunlar düzelene kadar hiçbir ajan izin sorularını atlayamaz.
+doctor-manifest-older = Manifestler klasöründe { $detail } için daha eski bir tanım var (sürüm { $from }; bu programda { $shipped } yerleşik) ve yerleşik olanın yerine geçiyor; bu yüzden bu türden ajanlar yeniden başlatmadan sonra geri gelmeyebilir. { $file } dosyasını manifestler klasöründen kaldırın: gönderilen tanımlar zaten yerleşik.
 doctor-manifest-invalid = { $detail } ajan tanımı okunamadı.
 doctor-summary-ok = Agora'nın ihtiyaç duyduğu her şey yerinde.
 doctor-summary-problems = Agora'nın ihtiyaç duyduğu bir şey eksik. SORUN olarak işaretlenenleri düzeltin.
@@ -192,6 +193,7 @@ cli-hub-ssh-install-manual = { $name } kaydedildi ama kullanıcı hizmetleri iç
 cli-hub-ssh-install-failed = { $name } üzerinde "{ $step }" adımında durdu: { $detail } Önceden yapılanlar: { $done }. Hiçbir şey geri alınmadı.
 cli-update-current = Agora { $version } en yeni sürüm.
 cli-update-available = Agora { $version } hazır (şu an { $current } kullanılıyor). Kurmak için "agora update" çalıştırın.
+cli-update-local-network = macOS, Agora'nın yerel ağı kullanıp kullanamayacağını yeniden sorabilir: izin verin (ya da Sistem Ayarları > Gizlilik ve Güvenlik > Yerel Ağ'da `agora`yı açın); aksi halde oturum açınca başlayan düğüm başka bir makinedeki hub'a ulaşamaz.
 cli-update-done = Agora { $version } sürümüne güncellendi. Çalışan ajanlar çalışmaya devam eder; yeni sürümü kullanmak için düğümü yeniden başlatın.
 cli-update-failed = Güncelleme yapılamadı: { $reason }
 cli-update-checksum = İndirilen dosya yayımlanan sağlama toplamıyla uyuşmuyor. Hiçbir şey değişmedi.

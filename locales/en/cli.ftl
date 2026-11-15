@@ -106,6 +106,7 @@ doctor-policy-problems = { $detail ->
     [one] One line
    *[other] { $detail } lines
 } of the node's policy file could not be understood; until they are fixed, no agent may skip its permission questions.
+doctor-manifest-older = The manifests folder holds an older description of { $detail } (version { $from }; this program has { $shipped } built in) and it replaces the built-in one, so agents of this kind may not resume after a restart. Remove the file { $file } from the manifests folder: the shipped descriptions are built in.
 doctor-manifest-invalid = The agent description { $detail } could not be read.
 doctor-summary-ok = Everything Agora needs is in place.
 doctor-summary-problems = Something Agora needs is missing. Fix the items marked PROBLEM.
@@ -195,6 +196,7 @@ cli-hub-ssh-install-manual = { $name } is enrolled, but it has neither systemd n
 cli-hub-ssh-install-failed = Stopped at step "{ $step }" on { $name }: { $detail } Already done: { $done }. Nothing was rolled back.
 cli-update-current = Agora { $version } is the newest release.
 cli-update-available = Agora { $version } is available (this is { $current }). Run "agora update" to install it.
+cli-update-local-network = macOS may ask again whether Agora may use the local network: allow it (or turn `agora` on in System Settings > Privacy & Security > Local Network), or the node started at login cannot reach a hub on another machine.
 cli-update-done = Updated to Agora { $version }. Running agents keep going; restart the node to use the new version.
 cli-update-failed = The update did not happen: { $reason }
 cli-update-checksum = The download does not match its published checksum. Nothing was changed.
