@@ -389,6 +389,7 @@ async fn a_client_registers_lists_and_asks_and_the_hub_carries_endorsements_only
             hostname: "h".into(),
             os: "linux".into(),
             build: "b".into(),
+            binary: String::new(),
         }),
         Body::NodeTrustedDevices(v1::NodeTrustedDevices {
             device_ids: vec!["web-old".into()],

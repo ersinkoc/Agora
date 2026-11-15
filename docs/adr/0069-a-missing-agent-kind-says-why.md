@@ -15,3 +15,7 @@ Origin: the Windows agent's first-time-user findings (2026-11-14): "WrongStack: 
 
 ## Consequences
 Two proto fields and fixtures, `protocol.md`, the node filling them from data it already has, the web and TUI sentences. No behaviour change for starting agents.
+
+## Amendment (2026-11-15, #598; accepted by the maintainer the same day in chat: "accepted all")
+- `NodeSnapshot.binary = 11`: the snapshot's copy of `NodeOnline.binary` from the node's latest start, so a window that connects later learns it too. Additive, like the two fields above.
+- Only the hub's owner receives the full path. The hub sends everyone else (members, viewers) the file name alone (`agora`, `agora.exe`), in the snapshot and in live and replayed `NodeOnline` events: any folder may hold the machine's user name, the one the program is in too when it is kept straight in the user's home (`/home/alice/agora`), and the hub cannot tell which folder is a home on another machine (#598 cross-review). This replaces, for them, the "last two path components" of decision 2; the owner's client still shows the last two unless asked for the whole path.

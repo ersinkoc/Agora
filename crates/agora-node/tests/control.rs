@@ -1103,6 +1103,12 @@ fn agent_kinds_lists_what_this_node_can_start() {
         "kind = \"ghost\"\ndisplay_name = \"Ghost\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"definitely-not-installed-xyz\"]\n",
     )
     .unwrap();
+    // ADR-0069: a manifest that names its program by path still reports only the file name.
+    std::fs::write(
+        e.dir.join("manifests/pathed.toml"),
+        "kind = \"pathed\"\ndisplay_name = \"Pathed\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"/nowhere/at/all/wstack\"]\n",
+    )
+    .unwrap();
     let n = node(&e, NodeLimits::default());
     let mut c = Client::connect(&e.dir.join("c.sock")).unwrap();
     let r = ok(c.call(Cmd::AgentKinds(v1::AgentKinds {})));
@@ -1124,6 +1130,16 @@ fn agent_kinds_lists_what_this_node_can_start() {
     assert!(!by["ghost"].1);
     assert_eq!(by["shell"].2, v1::IntegrationLevel::L1Manifest as i32);
     assert!(!by.contains_key("broken"), "invalid manifests are omitted");
+    // ADR-0069: the program each kind looks for, a bare file name, so a missing one can say what to install.
+    let program: std::collections::BTreeMap<_, _> = list
+        .kinds
+        .iter()
+        .map(|k| (k.kind.as_str(), k.program.as_str()))
+        .collect();
+    assert_eq!(program["shell"], "sh");
+    assert_eq!(program["ghost"], "definitely-not-installed-xyz");
+    assert_eq!(program["pathed"], "wstack");
+    assert!(!by["pathed"].1);
     drop(n);
 }
 
