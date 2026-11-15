@@ -1359,6 +1359,14 @@ impl Mesh {
                 if !matches!(rec.task.state(), TaskState::Claimed(a) if a == from) {
                     return Err(MeshError::NotTaskOwner(id.to_string()));
                 }
+                // A task stays on its project's board: an agent of another project could neither see nor finish it.
+                if self
+                    .agents
+                    .get(&target)
+                    .is_none_or(|a| a.project != info.project)
+                {
+                    return Err(MeshError::RecipientUnknown(to.to_string()));
+                }
                 Some(tid)
             }
             None => None,
@@ -1882,6 +1890,25 @@ mod tests {
         );
         let still = m.task_list(&id("a"), Some(TaskStatus::Claimed)).unwrap();
         assert!(still.iter().any(|x| x.id == t2 && x.owner == Some(id("a"))));
+    }
+
+    #[test]
+    fn a_task_is_never_handed_to_another_project() {
+        let mut m = mesh();
+        let t = m.task_create(&id("a"), "p only", "", &[]).unwrap();
+        m.task_claim(&id("a"), t.as_str()).unwrap();
+        // `c` works on another project: it could neither see nor finish the task, so nothing moves and nothing is sent.
+        assert_eq!(
+            m.handoff(&id("a"), "c", Some(t.as_str()), "take it", &[], 1),
+            Err(MeshError::RecipientUnknown("c".into()))
+        );
+        let e = m.task_list(&id("a"), None).unwrap().remove(0);
+        assert_eq!((e.status, e.owner), (TaskStatus::Claimed, Some(id("a"))));
+        assert!(m.inbox(&id("c"), None, 10).unwrap().is_empty());
+        assert_eq!(m.claimed_task(&id("c")), None);
+        // A handoff that names no task is a message, which may cross projects as before.
+        assert!(m.handoff(&id("a"), "c", None, "fyi", &[], 2).is_ok());
+        m.task_complete(&id("a"), t.as_str(), "done").unwrap();
     }
 
     #[test]

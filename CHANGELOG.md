@@ -13,6 +13,10 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
   confinement), or when a save copy next to it (`state.json.tmp`) is such a link, since writing it would change that other file too; the message says to remove the link or put a copy in its place
   (#571). Such links inside a folder it may write are not looked for at each start.
 
+### Agents working together
+- A task can no longer be handed to an agent of another project: it used to end up claimed by someone who could neither see
+  nor finish it, stuck until its lease ran out. It is refused (`mesh.recipient_unknown`) and stays with its owner (audit finding F601).
+
 ### Machines
 - An agent that died in the middle of a screen update no longer leaves the machine's view of its terminal frozen. After a
   "synchronized update" started and never ended, everything the terminal printed afterwards was held back; it is now let go
