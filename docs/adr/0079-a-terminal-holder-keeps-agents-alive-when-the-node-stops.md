@@ -38,8 +38,18 @@ and typed through them.
   to end the holder's read first and hand its buffer over (decision 4).
 - **The supervisor's job allows breakaway.** `spawn_bound` sets `JOB_OBJECT_LIMIT_BREAKAWAY_OK`, so a process started with
   `CREATE_BREAKAWAY_FROM_JOB` (as `spawn_detached` already does) is not ended when the supervisor's job closes.
-- **Not measured yet:** whether Task Scheduler's stop of the `agora-node` task ends a process that broke away from the supervisor's
-  job. This is to be measured before the Windows part is built.
+- **Under Task Scheduler (measured 2026-11-16, a temporary task, as `agora service` runs `agora-node`):**
+  - A task's process is in a job of Task Scheduler's own, which forbids breakaway: `CREATE_BREAKAWAY_FROM_JOB` from the task's
+    process fails with error 5 (access denied).
+  - A process that joins a kill-on-close job allowing breakaway (as the supervisor does) and then starts a child with
+    `CREATE_BREAKAWAY_FROM_JOB` succeeds. The child leaves the inner job and stays in Task Scheduler's.
+  - **`Stop-ScheduledTask` ended only the task's own process.** 30 s later the child that broke away from the inner job was alive,
+    and so was a child started plainly in Task Scheduler's job.
+  - So a holder the supervisor starts with breakaway outlives both the supervisor's job and a stop of the task. Signing out still
+    ends it, since `agora-node` is a logon task.
+  - **One rule follows:** `spawn_detached` falls back to starting *inside* the job when breakaway is refused. The holder must never
+    take that fallback, because inside the supervisor's kill-on-close job it would die with the supervisor. It refuses to start
+    instead, and the node runs its agents itself as today.
 
 ## Decision
 1. **One holder per Agora home** (`agora hold`, the same binary). It owns, for every agent of that home:
