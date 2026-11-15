@@ -4,6 +4,11 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+### Console (`agora tui`)
+- An arrow key, a click or the start of a paste could be split while the console was busy, so its tail was typed into the agent
+  or the chat (`[A`, `<0;10;5M`), or a paste arrived as keys with its line breaks as Enter. A key now waits 10 ms for its last byte.
+- In the review and the file browser, the mouse wheel, a click, Page Up/Down or Ctrl+arrow closed the view and typed the rest of
+  the key into the console. They are now ignored there.
 ### Terminal client
 - An agent a machine cannot start is named with the program the machine looked for ("WrongStack (`wstack`)"), and when this
   device is not trusted yet the hub's owner sees the folder of that machine's `agora` program when it is not in its PATH (ADR-0069).
