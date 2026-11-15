@@ -15,8 +15,8 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 - A connected machine can no longer speak for another one. Before, it could show another machine's running agents as done and
   give back their tasks, show that machine online or offline, change its numbers, list its own agents, folders and terminals on
   it, or hide one of its agents from every window. The hub now refuses such a message and closes the sender's connection.
-  A history written before this check is read the same way: what a machine reports about an agent, a terminal, a folder or its numbers counts for
-  that machine only.
+  A history written before this check is read the same way: what a machine reports (that it started or left, an agent, a terminal, a folder, its
+  numbers) counts for that machine only, and only the hub can hide an agent.
 
 ### Machines
 - Windows: a machine could stop updating its agents (memory, state) for good when a process's leftover parent id pointed back

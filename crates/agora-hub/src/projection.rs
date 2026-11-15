@@ -195,7 +195,8 @@ impl View {
                     _ => return false,
                 }
             }
-            Some(Body::NodeOnline(e)) => e.node_id.as_str(),
+            // A node's start is about the node that sent it, whatever the body names.
+            Some(Body::NodeOnline(_)) => ev.producer_id.as_str(),
             _ => return false,
         };
         self.nodes.get(node).is_some_and(|n| n.forgotten)
@@ -277,6 +278,8 @@ impl View {
                     .insert(q(&e.agent_id), q(&e.workspace_id));
             }
 
+            // The node id is the connection's, never the body's: a node speaks for itself only (T19), and a history stored before
+            // the session refused such events is read the same way.
             Body::NodeOnline(e) => {
                 // A node announces itself when its process starts, never when only the link to the hub comes back. A resync
                 // announcement (ADR-0054) leads with it only when the hub missed that start (ADR-0055). So whatever it had running
@@ -284,18 +287,18 @@ impl View {
                 for a in self
                     .agents
                     .values_mut()
-                    .filter(|a| a.node_id == e.node_id && a.running)
+                    .filter(|a| a.node_id == producer && a.running)
                 {
                     a.running = false;
                     a.state = AgentState::Done;
                 }
-                let prefix = format!("{}/", e.node_id);
+                let prefix = format!("{producer}/");
                 self.approvals.retain(|k, _| !k.starts_with(&prefix));
                 self.terminals.retain(|k, _| !k.starts_with(&prefix));
-                self.remember_node(&e.node_id);
+                self.remember_node(producer);
                 let n = self
                     .nodes
-                    .entry(e.node_id.clone())
+                    .entry(producer.to_string())
                     .or_insert_with(|| NodeView::unknown(true));
                 n.hostname = e.hostname.clone();
                 n.os = e.os.clone();
@@ -305,7 +308,14 @@ impl View {
                 n.last_event_ms = n.last_event_ms.max(ev.at_ms);
             }
             Body::NodeOffline(e) => {
-                if let Some(n) = self.nodes.get_mut(&e.node_id) {
+                // The hub writes this for a node whose connection ended (for older clients, ADR-0070): then the body names that
+                // node. From a node it is about the node itself, whatever the body says.
+                let node = if producer == RESERVED_HUB_ID {
+                    e.node_id.as_str()
+                } else {
+                    producer
+                };
+                if let Some(n) = self.nodes.get_mut(node) {
                     n.online = false;
                 }
             }
@@ -497,12 +507,14 @@ impl View {
                     }
                 }
             }
-            // ADR-0053: the id is the hub-wide key (the hub made this event); history and usage stay.
-            Body::AgentForgotten(e) => {
+            // ADR-0053: the id is the hub-wide key (the hub made this event); history and usage stay. Written by the hub only: one that
+            // claims to come from a node is ignored (the session refuses it too), as `NodeForgotten` is.
+            Body::AgentForgotten(e) if producer == RESERVED_HUB_ID => {
                 if let Some(a) = self.agents.get_mut(&e.agent_id) {
                     a.forgotten = true;
                 }
             }
+            Body::AgentForgotten(_) => {}
             Body::AgentExited(e) => {
                 if let Some(a) = self.agents.get_mut(&q(&e.agent_id)) {
                     a.running = false;
@@ -735,6 +747,68 @@ mod tests {
             }),
         ));
         assert_eq!(v.nodes["n1"].agents_running, 2);
+    }
+
+    /// The same, for the events that end or hide things: a history stored before the session refused them must not act on another node
+    /// when it is read again (a hub restart replays the store).
+    #[test]
+    fn a_stored_forged_start_goodbye_or_forget_changes_nothing_on_another_node() {
+        let online = |id: &str| {
+            Body::NodeOnline(NodeOnline {
+                node_id: id.into(),
+                hostname: id.into(),
+                os: "linux".into(),
+                build: "b".into(),
+                binary: String::new(),
+            })
+        };
+        let mut v = View::default();
+        v.apply(&ev("n1", 1, online("n1")));
+        v.apply(&ev("n2", 1, online("n2")));
+        v.apply(&ev("n1", 2, started("a")));
+        assert!(v.agents["n1/a"].running);
+        // n2 claims n1 started again: n1's agent is still running, and n2's own start counted for n2.
+        v.apply(&ev("n2", 2, online("n1")));
+        assert!(v.agents["n1/a"].running, "a forged start ended n1's agent");
+        assert!(v.nodes["n1"].online);
+        // n2 says goodbye for n1: n1 is still online; and for itself it counts.
+        v.apply(&ev(
+            "n2",
+            3,
+            Body::NodeOffline(NodeOffline {
+                node_id: "n1".into(),
+            }),
+        ));
+        assert!(v.nodes["n1"].online, "a forged goodbye took n1 offline");
+        // n2 forgets n1's agent: only the hub may.
+        let forget = |producer: &str, seq| {
+            ev(
+                producer,
+                seq,
+                Body::AgentForgotten(AgentForgotten {
+                    agent_id: "n1/a".into(),
+                }),
+            )
+        };
+        v.apply(&forget("n2", 4));
+        assert!(
+            !v.agents["n1/a"].forgotten,
+            "a node hid another node's agent"
+        );
+        v.apply(&forget(RESERVED_HUB_ID, 1));
+        assert!(
+            v.agents["n1/a"].forgotten,
+            "the hub's own forget still works"
+        );
+        // A node's own goodbye still counts.
+        v.apply(&ev(
+            "n2",
+            5,
+            Body::NodeOffline(NodeOffline {
+                node_id: "n2".into(),
+            }),
+        ));
+        assert!(!v.nodes["n2"].online);
     }
 
     #[test]
