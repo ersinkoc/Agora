@@ -23,6 +23,9 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
   nor finish it, stuck until its lease ran out. It is refused (`mesh.recipient_unknown`) and stays with its owner (audit finding F601).
 
 ### Machines
+- The number of changed files a machine shows for a folder is now right when the folder holds new files: a new folder with three files
+  counted as one, and as none if the repository's own settings said not to show untracked files (the repository is written by the
+  agent). The count and the review screen's list now agree (audit finding F401).
 - Windows: looking at changes (a diff, the changed files) no longer opens and closes a window for every `git` the machine runs,
   and no longer takes the focus. A structured agent (opencode, WrongStack, Antigravity) no longer keeps a window open for its
   whole life.
