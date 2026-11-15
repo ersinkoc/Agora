@@ -23,6 +23,9 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
   nor finish it, stuck until its lease ran out. It is refused (`mesh.recipient_unknown`) and stays with its owner (audit finding F601).
 
 ### Machines
+- Windows: looking at changes (a diff, the changed files) no longer opens and closes a window for every `git` the machine runs,
+  and no longer takes the focus. A structured agent (opencode, WrongStack, Antigravity) no longer keeps a window open for its
+  whole life.
 - A program can no longer make a terminal use unbounded memory with an endless title or other "operating system command". One that never
   ended was kept whole (16 MiB sent held 32 MiB), and a long title was copied thousands of times by a title-stack request. The
   parts past 1024 bytes are now left out; the sequence still ends where it ends (audit finding F704).
