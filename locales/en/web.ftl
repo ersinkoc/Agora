@@ -565,9 +565,9 @@ closed-reason-running = it is running again
 closed-reason-gone = the hub no longer knows it
 closed-reason-other = the hub could not be reached or refused
 
-trust-hint = This machine ({ $machine }) does not trust this device yet. Run this command once on that machine, then press Start again:
-trust-hint-binary = This machine ({ $machine }) does not trust this device yet. Agora runs there from { $where }, which is not on its PATH: in that folder, run this command once (on Windows, in PowerShell), then press Start again:
-trust-hint-file = This machine ({ $machine }) does not trust this device yet. Its Agora program ({ $file }) is not on its PATH: in the folder where that file is, run this command once (on Windows, in PowerShell), then press Start again:
+trust-hint = { $machine } has to trust this browser once before it starts agents from it, so that the hub alone can never run programs there. In a terminal on { $machine }, run this command, check that the fingerprint it shows matches "This device", and answer y. Then press Start again:
+trust-hint-binary = { $machine } has to trust this browser once before it starts agents from it, so that the hub alone can never run programs there. Agora runs there from { $where }, which is not on its PATH: in that folder, in a terminal (on Windows, PowerShell), run this command, check that the fingerprint matches "This device", and answer y. Then press Start again:
+trust-hint-file = { $machine } has to trust this browser once before it starts agents from it, so that the hub alone can never run programs there. Its Agora program ({ $file }) is not on its PATH: in the folder where that file is, in a terminal (on Windows, PowerShell), run this command, check that the fingerprint matches "This device", and answer y. Then press Start again:
 trust-show-path = Show the whole path
 trust-copy = Copy
 trust-copied = Copied

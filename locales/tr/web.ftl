@@ -550,9 +550,9 @@ closed-reason-running = yeniden çalışıyor
 closed-reason-gone = hub artık bunu tanımıyor
 closed-reason-other = hub'a ulaşılamadı ya da reddetti
 
-trust-hint = Bu makine ({ $machine }) bu cihaza henüz güvenmiyor. Bu komutu o makinede bir kez çalıştırın, sonra yeniden Başlat'a basın:
-trust-hint-binary = Bu makine ({ $machine }) bu cihaza henüz güvenmiyor. Agora orada PATH üzerinde olmayan { $where } konumundan çalışıyor: o klasörde bu komutu bir kez çalıştırın (Windows'ta PowerShell'de), sonra yeniden Başlat'a basın:
-trust-hint-file = Bu makine ({ $machine }) bu cihaza henüz güvenmiyor. Oradaki Agora programı ({ $file }) PATH üzerinde değil: o dosyanın bulunduğu klasörde bu komutu bir kez çalıştırın (Windows'ta PowerShell'de), sonra yeniden Başlat'a basın:
+trust-hint = { $machine }, ajan başlatmadan önce bu tarayıcıya bir kez güvenmeli; böylece hub tek başına orada hiçbir program çalıştıramaz. { $machine } üzerinde bir terminalde bu komutu çalıştırın, gösterdiği parmak izinin "Bu cihaz" ile aynı olduğunu kontrol edin ve y yazın. Sonra yeniden Başlat'a basın:
+trust-hint-binary = { $machine }, ajan başlatmadan önce bu tarayıcıya bir kez güvenmeli; böylece hub tek başına orada hiçbir program çalıştıramaz. Agora orada PATH üzerinde olmayan { $where } konumundan çalışıyor: o klasörde bir terminalde (Windows'ta PowerShell) bu komutu çalıştırın, parmak izinin "Bu cihaz" ile aynı olduğunu kontrol edin ve y yazın. Sonra yeniden Başlat'a basın:
+trust-hint-file = { $machine }, ajan başlatmadan önce bu tarayıcıya bir kez güvenmeli; böylece hub tek başına orada hiçbir program çalıştıramaz. Oradaki Agora programı ({ $file }) PATH üzerinde değil: o dosyanın bulunduğu klasörde bir terminalde (Windows'ta PowerShell) bu komutu çalıştırın, parmak izinin "Bu cihaz" ile aynı olduğunu kontrol edin ve y yazın. Sonra yeniden Başlat'a basın:
 trust-show-path = Yolun tamamını göster
 trust-copy = Kopyala
 trust-copied = Kopyalandı

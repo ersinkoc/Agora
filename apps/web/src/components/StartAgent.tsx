@@ -244,7 +244,7 @@ export function StartAgent({ projects, machines, initialNode, trust, askApproval
             ? <code className="break-all font-mono text-xs text-muted">{binary}</code>
             : <button type="button" className="justify-self-start text-xs text-muted underline" onClick={() => setWholePath(true)}>{t('trust-show-path')}</button>)}
           {error === 'approval-not-trusted' && askApproval?.can(node) && <AskApproval ask={askApproval.ask} />}
-          {error === 'approval-not-trusted' && trust && <TrustCommand command={trustCommand(binary, machineOs, trust.id, trust.key)} />}
+          {error === 'approval-not-trusted' && trust && <TrustCommand command={trustCommand(binary, machineOs)} />}
         </div>}
         <div className="flex justify-end gap-2 border-t border-line px-4 py-3">
           <button type="button" className="button" disabled={busy} onClick={onClose}>{t('start-cancel')}</button>

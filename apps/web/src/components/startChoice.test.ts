@@ -44,16 +44,16 @@ describe('shortBinary and trustCommand', () => {
     expect(shortBinary(String.raw`Downloads\agora.exe`)).toBe(String.raw`Downloads\agora.exe`);
   });
   it('runs the program from its own folder when it is off the PATH, and by name otherwise', () => {
-    expect(trustCommand(undefined, 'windows', 'd1', 'k1')).toBe('agora node trust d1 k1');
-    expect(trustCommand(String.raw`C:\Users\someone\Downloads\agora.exe`, 'windows', 'd1', 'k1')).toBe(String.raw`.\agora.exe node trust d1 k1`);
-    expect(trustCommand('/home/someone/bin/agora', 'linux', 'd1', 'k1')).toBe('./agora node trust d1 k1');
+    expect(trustCommand(undefined, 'windows')).toBe('agora node trust --from-hub');
+    expect(trustCommand(String.raw`C:\Users\someone\Downloads\agora.exe`, 'windows')).toBe(String.raw`.\agora.exe node trust --from-hub`);
+    expect(trustCommand('/home/someone/bin/agora', 'linux')).toBe('./agora node trust --from-hub');
   });
   it('quotes a file name the shell would split, in the form each shell takes (#599 review)', () => {
     // A second download into Downloads: PowerShell needs the call operator around a quoted path.
-    expect(trustCommand(String.raw`C:\Users\x\Downloads\agora (1).exe`, 'windows', 'd1', 'k1')).toBe(String.raw`& '.\agora (1).exe' node trust d1 k1`);
-    expect(trustCommand(String.raw`C:\x\it's agora.exe`, 'windows', 'd1', 'k1')).toBe(String.raw`& '.\it''s agora.exe' node trust d1 k1`);
-    expect(trustCommand('/home/x/agora (1)', 'macos', 'd1', 'k1')).toBe(`'./agora (1)' node trust d1 k1`);
-    expect(trustCommand("/home/x/it's", 'linux', 'd1', 'k1')).toBe(String.raw`'./it'\''s' node trust d1 k1`);
+    expect(trustCommand(String.raw`C:\Users\x\Downloads\agora (1).exe`, 'windows')).toBe(String.raw`& '.\agora (1).exe' node trust --from-hub`);
+    expect(trustCommand(String.raw`C:\x\it's agora.exe`, 'windows')).toBe(String.raw`& '.\it''s agora.exe' node trust --from-hub`);
+    expect(trustCommand('/home/x/agora (1)', 'macos')).toBe(`'./agora (1)' node trust --from-hub`);
+    expect(trustCommand("/home/x/it's", 'linux')).toBe(String.raw`'./it'\''s' node trust --from-hub`);
   });
   it('treats a file name with no folder as bare, as a member receives it from the hub (#598)', () => {
     expect(isBareName('agora.exe')).toBe(true);
@@ -62,10 +62,10 @@ describe('shortBinary and trustCommand', () => {
     expect(isBareName('bin/agora')).toBe(false);
     // A bare name is shown as it is (nothing to shorten, nothing more to reveal) and run from its folder.
     expect(shortBinary('agora.exe', 'windows')).toBe('agora.exe');
-    expect(trustCommand('agora (1).exe', 'windows', 'd1', 'k1')).toBe(String.raw`& '.\agora (1).exe' node trust d1 k1`);
+    expect(trustCommand('agora (1).exe', 'windows')).toBe(String.raw`& '.\agora (1).exe' node trust --from-hub`);
   });
   it('tells Windows from the machine, not from a backslash, so a bare file name still gets the Windows form (#599 review)', () => {
-    expect(trustCommand('agora.exe', 'windows', 'd1', 'k1')).toBe(String.raw`.\agora.exe node trust d1 k1`);
+    expect(trustCommand('agora.exe', 'windows')).toBe(String.raw`.\agora.exe node trust --from-hub`);
     expect(shortBinary(String.raw`Users\x\Downloads\agora.exe`, 'windows')).toBe(String.raw`…\Downloads\agora.exe`);
     expect(shortBinary('home/x/bin/agora', 'linux')).toBe('…/bin/agora');
   });

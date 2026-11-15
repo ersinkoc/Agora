@@ -45,8 +45,10 @@ function isWindows(binary: string, os?: string): boolean {
  * its file name from its own folder (`.\agora.exe` on Windows, `./agora` elsewhere), so no full path is shown or needed. A name
  * with anything beyond letters, digits, `.`, `_` and `-` (a second download is `agora (1).exe`) is quoted so the shell takes it as
  * one word: PowerShell's call form `& '.\agora (1).exe'` on Windows, `'./agora (1)'` elsewhere. */
-export function trustCommand(binary: string | undefined, os: string | undefined, id: string, key: string): string {
-  const args = `node trust ${id} ${key}`;
+export function trustCommand(binary: string | undefined, os: string | undefined): string {
+  // ADR-0061: the machine fetches this person's registered devices from the hub and asks on its own terminal, after the person
+  // compares the fingerprint with "This device"; no device id or 130-character key to copy.
+  const args = 'node trust --from-hub';
   if (!binary) return `agora ${args}`;
   const windows = isWindows(binary, os);
   const file = binary.split(/[\\/]/).filter(Boolean).pop() ?? 'agora';
