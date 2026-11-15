@@ -19,6 +19,11 @@ the node and removed the logon task. Binaries built locally from the same code w
   reputation (removed in 2024); OV and EV are treated alike for new files. Reputation is earned per file hash, and over time per
   signing identity. So any certificate helps only after a few releases signed by the same identity. A signature also lets a
   false-positive report name a publisher.
+- **Smart App Control** (Windows 11, on or in evaluation mode, mostly on clean installs) blocks an unsigned program without
+  reputation outright. That is not a Defender detection: there is no "Allow on device" and no per-file exception, only switching
+  Smart App Control off for the whole machine, which on most builds cannot be switched back on without resetting Windows. A
+  signature from a certificate authority Windows trusts is what it accepts. (Microsoft's documentation; not measured here, since
+  this machine has it off: `VerifiedAndReputablePolicyState = 0`.)
 
 ## Options
 1. **SignPath Foundation (free for open-source projects).** The repository is Apache-2.0, which is OSI-approved. A GitHub Action
@@ -34,7 +39,8 @@ the node and removed the logon task. Binaries built locally from the same code w
 3. **A purchased OV certificate.** In the maintainer's name, yearly cost. Since 2023 the private key must live in a hardware token
    or a cloud HSM, so CI signing needs a cloud-HSM service (an extra account and cost). An EV certificate costs more and, since
    2024, no longer brings instant reputation.
-4. **Stay unsigned** (today). Document it (#588). Users choose "Allow on device" in Protection history. Optionally submit each
+4. **Stay unsigned** (today). Document it (#588). Users choose "Allow on device" in Protection history. On a machine with Smart App
+   Control on, this is a dead end: `agora.exe` does not run at all, and the only way out is turning Smart App Control off for good. Optionally submit each
    release to Microsoft as a false positive (from the maintainer's account; each release is a new hash).
 
 ## Decision (proposed)
