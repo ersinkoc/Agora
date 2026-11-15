@@ -164,7 +164,7 @@ const REFUSED: [&str; 2] = ["-c", "refused-filter-driver"];
 fn config_env_supported() -> bool {
     static SUPPORTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *SUPPORTED.get_or_init(|| {
-        Command::new("git")
+        agora_platform::no_console_window(&mut Command::new("git"))
             .args(["config", "--get", "probe.configenv"])
             .env("GIT_CONFIG_COUNT", "1")
             .env("GIT_CONFIG_KEY_0", "probe.configenv")
@@ -229,6 +229,8 @@ fn made_dirs(dir: &Path) -> Option<(PathBuf, PathBuf, PathBuf)> {
 /// `.git` file (a submodule's, a separate git dir) is followed as git does.
 fn plain_hardened(dir: &Path) -> Command {
     let mut c = Command::new("git");
+    // The node has no console: on Windows each git would otherwise open a window and take the focus (a diff runs several).
+    agora_platform::no_console_window(&mut c);
     c.args(HARDENED)
         .arg("-C")
         .arg(dir)
