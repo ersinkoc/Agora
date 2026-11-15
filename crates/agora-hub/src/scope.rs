@@ -13,12 +13,14 @@ use agora_protocol::v1::Event;
 
 use crate::projection::{qualified, View};
 
-/// ADR-0069: what anyone but the owner is shown of a machine's own executable (`NodeOnline.binary`): its folder and file name only,
-/// never the folders above them, which may hold the machine's user name.
+/// ADR-0069: what anyone but the owner is shown of a machine's own executable (`NodeOnline.binary`): its file name only. No folder is
+/// kept, not even the one it is in: a program kept straight in its user's home (`/home/alice/agora`, `C:\Users\alice\agora.exe`)
+/// would show the user name there (#598 cross-review), and the hub cannot tell which folder is a home on another machine.
 pub fn short_binary(path: &str) -> String {
-    let sep = if path.contains('\\') { '\\' } else { '/' };
-    let parts: Vec<&str> = path.split(['/', '\\']).filter(|p| !p.is_empty()).collect();
-    parts[parts.len().saturating_sub(2)..].join(&sep.to_string())
+    path.split(['/', '\\'])
+        .rfind(|p| !p.is_empty())
+        .unwrap_or_default()
+        .to_string()
 }
 
 /// [`short_binary`] applied to one event, when it carries a machine's executable; `None` when there is nothing to shorten.
@@ -308,19 +310,19 @@ impl Scope {
 mod tests {
 
     #[test]
-    fn only_the_folder_and_file_of_a_machines_binary_are_shown_to_anyone_but_the_owner() {
-        // ADR-0069: the folders above may hold the machine's user name.
-        assert_eq!(
-            super::short_binary("/home/eda/Downloads/agora"),
-            "Downloads/agora"
-        );
-        assert_eq!(
-            super::short_binary(r"C:\Users\eda\Downloads\agora.exe"),
-            r"Downloads\agora.exe"
-        );
-        assert_eq!(super::short_binary("agora"), "agora");
-        assert_eq!(super::short_binary(""), "");
-        assert_eq!(super::short_binary("/opt//agora/"), "opt/agora");
+    fn only_the_file_name_of_a_machines_binary_is_shown_to_anyone_but_the_owner() {
+        // ADR-0069: any folder may hold the machine's user name, the one it is in too.
+        for (path, shown) in [
+            ("/home/eda/Downloads/agora", "agora"),
+            ("/home/alice/agora", "agora"),
+            ("/Users/alice/agora", "agora"),
+            (r"C:\Users\alice\agora.exe", "agora.exe"),
+            ("agora", "agora"),
+            ("", ""),
+            ("/opt//agora/", "agora"),
+        ] {
+            assert_eq!(super::short_binary(path), shown, "{path}");
+        }
         let ev = |binary: &str| v1::Event {
             producer_id: "n1".into(),
             body: Some(Body::NodeOnline(v1::NodeOnline {
@@ -331,7 +333,7 @@ mod tests {
             ..Default::default()
         };
         let shown = super::without_full_binary(&ev("/home/eda/bin/agora")).unwrap();
-        assert!(matches!(shown.body, Some(Body::NodeOnline(n)) if n.binary == "bin/agora"));
+        assert!(matches!(shown.body, Some(Body::NodeOnline(n)) if n.binary == "agora"));
         assert!(super::without_full_binary(&ev("")).is_none());
     }
 

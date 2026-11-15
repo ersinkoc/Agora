@@ -6,7 +6,12 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ### Terminal client
 - An agent a machine cannot start is named with the program the machine looked for ("WrongStack (`wstack`)"), and when this
-  device is not trusted yet the hint names the folder of that machine's `agora` program when it is not in its PATH (ADR-0069).
+  device is not trusted yet the hub's owner sees the folder of that machine's `agora` program when it is not in its PATH (ADR-0069).
+
+### Security
+- macOS: a confined agent is not started when a file it may write also has another name elsewhere (a hard link made outside
+  confinement), or when a save copy next to it (`state.json.tmp`) is such a link, since writing it would change that other file too; the message says to remove the link or put a copy in its place
+  (#571). Such links inside a folder it may write are not looked for at each start.
 
 ### Machines
 - Windows: a machine could stop updating its agents (memory, state) for good when a process's leftover parent id pointed back

@@ -100,7 +100,15 @@ pub(crate) fn stats(pid: u32) -> io::Result<crate::ProcessStats> {
     })
 }
 
+/// Whether a process listed with `pid` as its parent really is its child. Windows keeps the id of a parent that ended, and ids are
+/// reused: a process created before `pid` was started by an earlier holder of that id, not by `pid`. When either creation time is
+/// unknown (the process ended, or may not be opened), it is kept, as before.
+fn started_after(parent_born: Option<u64>, child_born: Option<u64>) -> bool {
+    !matches!((parent_born, child_born), (Some(p), Some(c)) if c < p)
+}
+
 pub(crate) fn children(pid: u32) -> io::Result<Vec<u32>> {
+    let born = start_time(pid);
     // SAFETY: plain call.
     let snap = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
     if snap == INVALID_HANDLE_VALUE {
@@ -114,7 +122,11 @@ pub(crate) fn children(pid: u32) -> io::Result<Vec<u32>> {
     // SAFETY: a live snapshot and an entry with its size set.
     let mut more = unsafe { Process32FirstW(snap.0, &mut entry) } != 0;
     while more {
-        if entry.th32ParentProcessID == pid && entry.th32ProcessID != pid {
+        // A child whose id is reused between the snapshot and the time read is kept (its new holder is younger): rare and harmless.
+        if entry.th32ParentProcessID == pid
+            && entry.th32ProcessID != pid
+            && started_after(born, start_time(entry.th32ProcessID))
+        {
             out.push(entry.th32ProcessID);
         }
         // SAFETY: as above.
@@ -340,6 +352,18 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
+
+    #[test]
+    fn a_process_older_than_its_listed_parent_is_not_its_child() {
+        // A parent id reused: the "child" was created before this parent.
+        assert!(!started_after(Some(200), Some(100)));
+        assert!(started_after(Some(100), Some(200)));
+        assert!(started_after(Some(100), Some(100)));
+        // Unknown times keep the child, as before.
+        assert!(started_after(None, Some(1)));
+        assert!(started_after(Some(1), None));
+        assert!(started_after(None, None));
+    }
 
     #[test]
     fn this_process_has_a_name_memory_and_cpu_time() {

@@ -1491,8 +1491,8 @@ async fn a_member_never_receives_another_projects_snapshot_events_or_commands() 
     let snap = v1::Snapshot::decode(fr.payload.as_slice()).unwrap();
     let agents: Vec<&str> = snap.agents.iter().map(|a| a.agent_id.as_str()).collect();
     assert_eq!(agents, ["n1/a1"], "{snap:?}");
-    // Only the owner sees where the machine's user keeps it: a member gets the folder and file name.
-    assert_eq!(snap.nodes[0].binary, "Downloads/agora");
+    // Only the owner sees where the machine's user keeps it: a member gets the file name.
+    assert_eq!(snap.nodes[0].binary, "agora");
 
     // Live: the other project's change is not sent, this one's is (and it is the next frame the client gets).
     for (seq, body) in [(4, working("a2")), (5, working("a1"))] {
@@ -1547,7 +1547,7 @@ async fn a_member_never_receives_another_projects_snapshot_events_or_commands() 
             break n.binary;
         }
     };
-    assert_eq!(binary, r"Downloads\agora.exe");
+    assert_eq!(binary, "agora.exe");
 }
 
 async fn get_audit(addr: std::net::SocketAddr, token: Option<&str>, query: &str) -> (u16, String) {
@@ -2558,4 +2558,132 @@ async fn a_certificate_revoked_during_the_handshake_ends_the_connection() {
         "{ended:?}"
     );
     assert!(!st.hub.view().0.nodes.get("n1").is_some_and(|n| n.online));
+}
+
+// ADR-0069, #598 cross-review (linux Codex, docs/reviews/0598-privacy-review.md on its review branch): over the real hub, a machine's
+// executable kept straight in its user's home never reaches anyone but the owner with that user name in it, by any route.
+struct PrivacyProbeAuth {
+    role: agora_hub::users::Role,
+    scoped: bool,
+}
+
+impl ClientAuth for PrivacyProbeAuth {
+    fn check(&self, token: &str) -> bool {
+        token == "good-token"
+    }
+    fn access(&self, token: &str) -> Option<agora_hub::users::Access> {
+        self.check(token).then(|| agora_hub::users::Access {
+            role: self.role,
+            user: "reader".into(),
+            projects: self.scoped.then(|| ["n1/mine".to_string()].into()),
+            session: String::new(),
+        })
+    }
+}
+
+async fn probe_online_binary(client: &mut Conn<TcpStream>) -> String {
+    loop {
+        let fr = recv(client).await;
+        assert_eq!(fr.kind, kinds::POSITIONED_EVENT);
+        let ev = v1::PositionedEvent::decode(fr.payload.as_slice()).unwrap();
+        if let Some(Body::NodeOnline(n)) = ev.event.and_then(|e| e.body) {
+            return n.binary;
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_machines_user_name_in_its_binary_path_reaches_only_the_owner() {
+    use agora_hub::users::Role;
+    let mut leaks = Vec::new();
+    let mut observations = 0;
+    for path in [
+        "/home/alice/agora",
+        "/Users/alice/agora",
+        r"C:\Users\alice\agora.exe",
+    ] {
+        for (role, scoped) in [
+            (Role::Owner, false),
+            (Role::Member, false),
+            (Role::Member, true),
+            (Role::Viewer, false),
+            (Role::Viewer, true),
+        ] {
+            let st = Arc::new(ServerState {
+                hub: Arc::new(Hub::open(SqliteStore::open_in_memory().unwrap()).unwrap()),
+                support: support(),
+                ca: None,
+                lockout: Arc::new(Lockout::new()),
+                auth: Box::new(PrivacyProbeAuth { role, scoped }),
+                assets: None,
+                sessions: None,
+            });
+            let addr = start(Arc::clone(&st)).await;
+            let (mut node, task) = node_conn(&st, "n1").await;
+            handshake(&mut node).await;
+            let online = || {
+                Body::NodeOnline(v1::NodeOnline {
+                    node_id: "n1".into(),
+                    binary: path.into(),
+                    ..Default::default()
+                })
+            };
+            node.send(&f(STREAM_EVENTS, kinds::EVENT, event("n1", 1, online())))
+                .await
+                .unwrap();
+            next_ack(&mut node).await;
+            let mut client = dial(addr, Some("good-token")).await;
+            client
+                .send(&f(
+                    STREAM_EVENTS,
+                    kinds::SUBSCRIBE,
+                    v1::Subscribe::default().encode_to_vec(),
+                ))
+                .await
+                .unwrap();
+            let fr = recv(&mut client).await;
+            assert_eq!(fr.kind, kinds::SNAPSHOT);
+            let snap = v1::Snapshot::decode(fr.payload.as_slice()).unwrap();
+            let mut seen = vec![("snapshot", snap.nodes[0].binary.clone())];
+            node.send(&f(STREAM_EVENTS, kinds::EVENT, event("n1", 2, online())))
+                .await
+                .unwrap();
+            next_ack(&mut node).await;
+            seen.push(("live", probe_online_binary(&mut client).await));
+            if !scoped {
+                let mut replay = dial(addr, Some("good-token")).await;
+                replay
+                    .send(&f(
+                        STREAM_EVENTS,
+                        kinds::SUBSCRIBE,
+                        v1::Subscribe { after_pos: Some(0) }.encode_to_vec(),
+                    ))
+                    .await
+                    .unwrap();
+                seen.push(("backlog", probe_online_binary(&mut replay).await));
+            }
+            for (route, shown) in seen {
+                observations += 1;
+                if role == Role::Owner {
+                    assert_eq!(shown, path, "owner full-path control");
+                } else if shown.contains("alice") {
+                    leaks.push(format!("{role:?} scoped={scoped} {route}: {shown}"));
+                } else {
+                    let file = if path.ends_with(".exe") {
+                        "agora.exe"
+                    } else {
+                        "agora"
+                    };
+                    assert_eq!(shown, file, "{role:?} scoped={scoped} {route}");
+                }
+            }
+            task.abort();
+        }
+    }
+    assert_eq!(observations, 39, "all routes and owner controls exercised");
+    assert!(
+        leaks.is_empty(),
+        "{} of 30 nonowner deliveries expose the fixture username: {leaks:?}",
+        leaks.len()
+    );
 }

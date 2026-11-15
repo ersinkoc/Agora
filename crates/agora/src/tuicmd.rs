@@ -165,7 +165,7 @@ fn resume(
             say.text(key!("tui-resumed"), &[("agent", Arg::Str(name))])
         }
         Err(e) if e.code == "approval.signature_invalid" => {
-            not_trusted(say, &device, node_binary(snapshot, node))
+            not_trusted(say, &device, node_binary(snapshot, node).as_deref())
         }
         Err(e) => resume_notice(say, &e),
     }
@@ -329,7 +329,7 @@ fn answer(
                 .find(|a| a.approval_id == selected)
                 .and_then(|a| a.agent_id.split_once('/'))
                 .map_or("", |(n, _)| n);
-            not_trusted(say, &device, node_binary(snapshot, node))
+            not_trusted(say, &device, node_binary(snapshot, node).as_deref())
         }
         Err(code) => say.text(key!("tui-answer-failed"), &[("code", Arg::Str(code))]),
     }
@@ -397,15 +397,21 @@ fn read_start(
 
 const GRANT_TTL: Duration = Duration::from_secs(60 * 60);
 
-/// The `agora` program of `node` when it is not in that machine's `PATH` (ADR-0069 `NodeSnapshot.binary`: its folder and file, or
-/// the full path for the hub's owner); `None` when it is, or from an older machine.
-fn node_binary<'a>(snapshot: &'a Snapshot, node: &str) -> Option<&'a str> {
-    snapshot
+/// Where the `agora` program of `node` is when it is not in that machine's `PATH`, as its folder and file (ADR-0069
+/// `NodeSnapshot.binary`): the hub's owner receives the full path and is shown its last two parts; everyone else receives the file
+/// name alone, which says nothing about where it is, so `None` then, as when it is in the `PATH` or the machine is older.
+fn node_binary(snapshot: &Snapshot, node: &str) -> Option<String> {
+    let full = snapshot
         .nodes
         .iter()
         .find(|n| n.node_id == node)
         .map(|n| n.binary.as_str())
-        .filter(|b| !b.is_empty())
+        .filter(|b| !b.is_empty())?;
+    let sep = if full.contains('\\') { '\\' } else { '/' };
+    let mut parts = full.rsplit(sep).filter(|p| !p.is_empty());
+    let file = parts.next()?;
+    let folder = parts.next()?;
+    Some(format!("{folder}{sep}{file}"))
 }
 
 /// This device is not trusted by `node`: how to trust it there, naming where its `agora` program is when the machine said so.
@@ -928,8 +934,9 @@ fn start_in_folder(
             &[("code", Arg::Str("device".into()))],
         );
     };
-    let not_trusted =
-        |device: &Device, node: &str| not_trusted(say, device, node_binary(snapshot, node));
+    let not_trusted = |device: &Device, node: &str| {
+        not_trusted(say, device, node_binary(snapshot, node).as_deref())
+    };
     let online: Vec<&agora_protocol::v1::NodeSnapshot> =
         snapshot.nodes.iter().filter(|n| n.online).collect();
     if online.is_empty() {
@@ -3235,9 +3242,21 @@ mod adr0069_tests {
         let say = Say(Catalog::english());
         let s = Snapshot {
             nodes: vec![
+                // The hub's owner receives the full path.
                 agora_protocol::v1::NodeSnapshot {
                     node_id: "win".into(),
-                    binary: r"Downloads\agora.exe".into(),
+                    binary: r"C:\Users\alice\Downloads\agora.exe".into(),
+                    ..Default::default()
+                },
+                agora_protocol::v1::NodeSnapshot {
+                    node_id: "lin".into(),
+                    binary: "/home/alice/agora".into(),
+                    ..Default::default()
+                },
+                // Everyone else receives the file name alone.
+                agora_protocol::v1::NodeSnapshot {
+                    node_id: "other".into(),
+                    binary: "agora".into(),
                     ..Default::default()
                 },
                 agora_protocol::v1::NodeSnapshot {
@@ -3247,11 +3266,16 @@ mod adr0069_tests {
             ],
             ..Default::default()
         };
-        assert_eq!(node_binary(&s, "win"), Some(r"Downloads\agora.exe"));
+        assert_eq!(
+            node_binary(&s, "win").as_deref(),
+            Some(r"Downloads\agora.exe")
+        );
+        assert_eq!(node_binary(&s, "lin").as_deref(), Some("alice/agora"));
+        assert_eq!(node_binary(&s, "other"), None);
         assert_eq!(node_binary(&s, "mac"), None);
         assert_eq!(node_binary(&s, "gone"), None);
         let (device, _) = Device::generate().unwrap_or_else(|| panic!("a device key"));
-        let at = not_trusted(&say, &device, node_binary(&s, "win"));
+        let at = not_trusted(&say, &device, node_binary(&s, "win").as_deref());
         assert!(
             at.contains(r"in the folder of Downloads\agora.exe, run: ./agora node trust"),
             "{at}"
