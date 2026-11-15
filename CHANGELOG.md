@@ -14,6 +14,9 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
   (#571). Such links inside a folder it may write are not looked for at each start.
 
 ### Machines
+- The number of changed files a machine shows for a folder is now right when the folder holds new files: a new folder with three files
+  counted as one, and as none if the repository's own settings said not to show untracked files (the repository is written by the
+  agent). The count and the review screen's list now agree (audit finding F401).
 - Windows: a machine could stop updating its agents (memory, state) for good when a process's leftover parent id pointed back
   into the agent's own processes. Walking an agent's processes now visits each one once.
 

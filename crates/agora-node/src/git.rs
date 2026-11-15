@@ -586,12 +586,15 @@ pub fn status(worktree: &Path) -> Result<GitStatus, GitError> {
     // Both commands take the pathspec `.`, like [`diff`]: without one git reports the whole checkout even when run in a folder
     // inside it (a workspace selected inside a repository, ADR-0053), and the count would include files the diff never lists. At a
     // checkout's root `.` is everything, so a worktree the node made is counted as before.
+    // Every untracked file is one entry, as [`diff`] lists each: by default git shows a new folder as one `? dir/` line, and the
+    // repository's own `status.showUntrackedFiles=no` would hide them all.
     let filters = Filters::of(worktree);
     let git = |args: &[&str]| run(hardened_with(worktree, &filters), args);
     let (files_changed, head_commit) = parse_status_v2(&git(&[
         "status",
         "--porcelain=v2",
         "--branch",
+        "--untracked-files=all",
         SUBMODULE_COMMITS_ONLY,
         "--",
         ".",
@@ -1307,6 +1310,22 @@ mod tests {
         let porcelain = r.git(&["status", "--porcelain"]);
         assert_eq!(root.files_changed as usize, porcelain.lines().count());
         assert_eq!(root.files_changed, 7);
+    }
+
+    #[test]
+    fn each_new_file_counts_as_the_diff_lists_it() {
+        let r = Repo::new(None);
+        // A new folder (with a folder of its own) is three files, not one `? new/` line.
+        for f in ["new/a.txt", "new/b.txt", "new/deep/c.txt"] {
+            fs::create_dir_all(r.dir.join(f).parent().expect("parent")).expect("dir");
+            fs::write(r.dir.join(f), "x\n").expect("write");
+        }
+        let listed = |d: &str| d.lines().filter(|l| l.starts_with("diff --git ")).count();
+        assert_eq!(status(&r.dir).expect("status").files_changed, 3);
+        assert_eq!(listed(&diff(&r.dir, None).expect("diff")), 3);
+        // The repository's own config cannot hide them from the count.
+        r.git(&["config", "status.showUntrackedFiles", "no"]);
+        assert_eq!(status(&r.dir).expect("status").files_changed, 3);
     }
 
     #[test]
