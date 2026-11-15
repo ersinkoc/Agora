@@ -620,6 +620,14 @@ pub(crate) fn wrap(
     Ok((SANDBOX_EXEC.into(), v))
 }
 
+/// See [`crate::desktop_notify`]: not yet on macOS. The system's own notifier for a script (`osascript`) posts as *Script Editor*:
+/// it shows only when Script Editor may notify, and a click opens Script Editor instead of Agora (measured on macOS 27.2), so nothing
+/// is posted. The app's own notification (`UNUserNotificationCenter`) is the planned way (#296 follow-up).
+pub(crate) fn desktop_notify(title: &str, body: &str) -> io::Result<()> {
+    let _ = (title, body);
+    Err(io::Error::from(io::ErrorKind::Unsupported))
+}
+
 /// See [`crate::opened_path`]: `F_GETPATH`, the path the kernel has for the open vnode (firmlinks shown as `/Users/...`, as
 /// `canonicalize` shows them).
 pub(crate) fn opened_path(file: &std::fs::File) -> io::Result<PathBuf> {

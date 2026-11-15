@@ -4,6 +4,10 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+### Desktop app
+- On Windows and Linux, the desktop app shows one system notification when approvals are waiting while its window is hidden,
+  minimized or not in front (the count only, in your language). Not on macOS yet: there it stays silent for now.
+
 ### Security
 - macOS: a confined agent is not started when a file it may write also has another name elsewhere (a hard link made outside
   confinement), or when a save copy next to it (`state.json.tmp`) is such a link, since writing it would change that other file too; the message says to remove the link or put a copy in its place
