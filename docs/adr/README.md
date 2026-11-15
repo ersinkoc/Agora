@@ -95,3 +95,4 @@ Date: YYYY-MM-DD
 | 0075 | The node updates in place without stopping its agents | Accepted |
 | 0076 | A token that can only read the hub's numbers | Accepted |
 | 0077 | The Windows binary is code-signed | Accepted |
+| 0078 | A confined agent gets a git configuration the node wrote | Proposed |
