@@ -21,8 +21,8 @@
   | `agora_hub_subscribers` | gauge | windows and terminal clients following the hub now |
   | `agora_hub_approvals_waiting` | gauge | approvals not answered yet |
   | `agora_hub_approval_wait_seconds` | histogram | how long an agent waited for a person's answer (buckets 1 s to 1 h), from the asking machine's times of the request and the answer |
-  | `agora_hub_relays_dropped_total` | counter | terminal relays let go because the window could not keep up (or was gone) |
-  | `agora_hub_terminal_bytes_total` | counter | bytes of terminal frames passed on to windows (`rate()` of it is the terminals' bytes per second) |
+  | `agora_hub_relays_dropped_total` | counter | terminal relays let go because the window could not keep up (or was gone); chat relays are not counted |
+  | `agora_hub_terminal_bytes_total` | counter | bytes of terminal frames (snapshots and output) that reached a window's queue (`rate()` of it is the terminals' bytes per second); chat frames are not counted |
   | `agora_hub_events_stored` | gauge | the position of the last event in the hub's log |
   | `agora_hub_resyncs_total` | counter | lost ranges recorded by resyncs (ADR-0054) |
 
