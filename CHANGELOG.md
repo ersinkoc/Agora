@@ -14,6 +14,8 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
   (#571). Such links inside a folder it may write are not looked for at each start.
 
 ### Machines
+- Asking for the changes of one file whose name contains `[`, `*` or `?` now returns that file only: the name was read as a pattern, so
+  `pages/[id].tsx` also brought `pages/i.tsx`. Nothing outside the workspace folder was ever reachable this way (audit finding F402).
 - Windows: a machine could stop updating its agents (memory, state) for good when a process's leftover parent id pointed back
   into the agent's own processes. Walking an agent's processes now visits each one once.
 
