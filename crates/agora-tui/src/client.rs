@@ -224,16 +224,7 @@ impl Session {
                 Ok(Ok(Some(f)))
                     if f.stream_id == STREAM_EVENTS && f.kind == kinds::POSITIONED_EVENT =>
                 {
-                    if agora_protocol::v1::PositionedEvent::decode(f.payload.as_slice())
-                        .ok()
-                        .and_then(|p| p.event)
-                        .is_some_and(|e| {
-                            matches!(
-                                e.body,
-                                Some(agora_protocol::v1::event::Body::ApprovalRequested(_))
-                            )
-                        })
-                    {
+                    if asks_the_user(&f) {
                         *asked = true;
                     }
                     Update::Changed
@@ -290,6 +281,7 @@ impl Session {
         let kept = &mut self.snapshot;
         let term_frames = &mut self.term_frames;
         let grant_wanted = &mut self.grant_wanted;
+        let asked = &mut self.asked;
         self.rt.block_on(async {
             conn.send(&Frame {
                 stream_id: STREAM_COMMANDS,
@@ -323,7 +315,7 @@ impl Session {
                         None => Ok(CommandOk::default()),
                     };
                 }
-                set_aside(f, changed, kept, term_frames);
+                set_aside(f, changed, asked, kept, term_frames);
             }
         })
     }
@@ -420,6 +412,7 @@ impl Session {
         let changed = &mut self.changed;
         let kept = &mut self.snapshot;
         let term_frames = &mut self.term_frames;
+        let asked = &mut self.asked;
         self.rt.block_on(async {
             conn.send(&Frame {
                 stream_id: stream,
@@ -448,7 +441,7 @@ impl Session {
                         };
                     }
                 } else {
-                    set_aside(f, changed, kept, term_frames);
+                    set_aside(f, changed, asked, kept, term_frames);
                 }
             }
         })
@@ -484,6 +477,7 @@ impl Session {
         let kept = &mut self.snapshot;
         let queue = &mut self.term_frames;
         let grant_wanted = &mut self.grant_wanted;
+        let asked = &mut self.asked;
         self.rt.block_on(async {
             match tokio::time::timeout(wait, conn.recv()).await {
                 Err(_) => TermEvent::Quiet,
@@ -497,7 +491,7 @@ impl Session {
                             *grant_wanted = true;
                         }
                     } else {
-                        set_aside(f, changed, kept, queue);
+                        set_aside(f, changed, asked, kept, queue);
                     }
                     TermEvent::Quiet
                 }
@@ -532,12 +526,13 @@ impl Session {
         let changed = &mut self.changed;
         let kept = &mut self.snapshot;
         let queue = &mut self.term_frames;
+        let asked = &mut self.asked;
         self.rt.block_on(async {
             match tokio::time::timeout(wait, conn.recv()).await {
                 Err(_) => ChatEvent::Quiet,
                 Ok(Ok(Some(f))) if f.stream_id == stream => take(&f).unwrap_or(ChatEvent::Quiet),
                 Ok(Ok(Some(f))) => {
-                    set_aside(f, changed, kept, queue);
+                    set_aside(f, changed, asked, kept, queue);
                     ChatEvent::Quiet
                 }
                 Ok(_) => ChatEvent::Lost,
@@ -1154,17 +1149,35 @@ mod answer_tests {
     }
 }
 
-/// A frame that arrived while something else was waiting for its own: an event marks the hub's state changed, a snapshot is kept
-/// for [`Session::next`] (dropping it lost the hub's first one, which is not sent again: the console stayed at "Connecting…"), and
-/// a frame of a terminal or chat stream is queued for its reader. Anything else is not for a waiting caller.
+/// Whether `f` is an event saying that a request for the user's answer arrived.
+fn asks_the_user(f: &Frame) -> bool {
+    agora_protocol::v1::PositionedEvent::decode(f.payload.as_slice())
+        .ok()
+        .and_then(|p| p.event)
+        .is_some_and(|e| {
+            matches!(
+                e.body,
+                Some(agora_protocol::v1::event::Body::ApprovalRequested(_))
+            )
+        })
+}
+
+/// A frame that arrived while something else was waiting for its own: an event marks the hub's state changed (and `asked` when it
+/// is a request for the user's answer, as [`Session::next`] does), a snapshot is kept for [`Session::next`] (dropping it lost the
+/// hub's first one, which is not sent again: the console stayed at "Connecting…"), and a frame of a terminal or chat stream is
+/// queued for its reader. Anything else is not for a waiting caller.
 fn set_aside(
     f: Frame,
     changed: &mut bool,
+    asked: &mut bool,
     kept: &mut Option<Box<Snapshot>>,
     queue: &mut std::collections::VecDeque<Frame>,
 ) {
     if f.stream_id == STREAM_EVENTS && f.kind == kinds::POSITIONED_EVENT {
         *changed = true;
+        if asks_the_user(&f) {
+            *asked = true;
+        }
     } else if f.stream_id == STREAM_EVENTS && f.kind == kinds::SNAPSHOT {
         if let Ok(s) = Snapshot::decode(f.payload.as_slice()) {
             *kept = Some(Box::new(s));
@@ -1183,6 +1196,7 @@ mod set_aside_tests {
     #[test]
     fn a_snapshot_that_arrives_while_something_waits_is_kept_and_events_and_streams_are_not_lost() {
         let (mut changed, mut kept, mut queue) = (false, None, std::collections::VecDeque::new());
+        let mut asked = false;
         let frame = |stream_id, kind, payload: Vec<u8>| Frame {
             stream_id,
             kind,
@@ -1192,6 +1206,7 @@ mod set_aside_tests {
         set_aside(
             frame(STREAM_EVENTS, kinds::POSITIONED_EVENT, vec![]),
             &mut changed,
+            &mut asked,
             &mut kept,
             &mut queue,
         );
@@ -1206,6 +1221,7 @@ mod set_aside_tests {
         set_aside(
             frame(STREAM_EVENTS, kinds::SNAPSHOT, s.encode_to_vec()),
             &mut changed,
+            &mut asked,
             &mut kept,
             &mut queue,
         );
@@ -1215,6 +1231,7 @@ mod set_aside_tests {
         set_aside(
             frame(STREAM_EVENTS, kinds::POSITIONED_EVENT, vec![]),
             &mut changed,
+            &mut asked,
             &mut kept,
             &mut queue,
         );
@@ -1227,6 +1244,7 @@ mod set_aside_tests {
                 b"x".to_vec(),
             ),
             &mut changed,
+            &mut asked,
             &mut kept,
             &mut queue,
         );
@@ -1235,10 +1253,52 @@ mod set_aside_tests {
         set_aside(
             frame(STREAM_COMMANDS, 1, vec![]),
             &mut changed,
+            &mut asked,
             &mut kept,
             &mut queue,
         );
         assert!(!changed && queue.len() == 1 && kept.is_some());
+        assert!(!asked, "no request for the user's answer came");
+    }
+
+    #[test]
+    fn a_request_for_the_users_answer_that_arrives_while_something_waits_is_still_said() {
+        let (mut changed, mut asked, mut kept, mut queue) =
+            (false, false, None, std::collections::VecDeque::new());
+        let event = |body| Frame {
+            stream_id: STREAM_EVENTS,
+            kind: kinds::POSITIONED_EVENT,
+            seq: None,
+            payload: agora_protocol::v1::PositionedEvent {
+                pos: 1,
+                event: Some(agora_protocol::v1::Event {
+                    body: Some(body),
+                    ..Default::default()
+                }),
+            }
+            .encode_to_vec(),
+        };
+        // Another event changes the state but asks nothing.
+        set_aside(
+            event(agora_protocol::v1::event::Body::ApprovalResolved(
+                Default::default(),
+            )),
+            &mut changed,
+            &mut asked,
+            &mut kept,
+            &mut queue,
+        );
+        assert!(changed && !asked);
+        set_aside(
+            event(agora_protocol::v1::event::Body::ApprovalRequested(
+                Default::default(),
+            )),
+            &mut changed,
+            &mut asked,
+            &mut kept,
+            &mut queue,
+        );
+        assert!(changed && asked, "a full-screen view says the request");
     }
 }
 

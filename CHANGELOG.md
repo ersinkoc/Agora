@@ -5,9 +5,23 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 ## Next
 
 ### Security
+- macOS: a confined agent could read and change any app's settings through `defaults` (the system's settings service did it
+  on its behalf, past the file rules). Settings now follow the same rules as files; the language and locale stay readable.
 - macOS: a confined agent is not started when a file it may write also has another name elsewhere (a hard link made outside
   confinement), or when a save copy next to it (`state.json.tmp`) is such a link, since writing it would change that other file too; the message says to remove the link or put a copy in its place
   (#571). Such links inside a folder it may write are not looked for at each start.
+
+### Console (`agora tui`)
+- A paste that held pieces of the paste markers could end the paste early and type the rest as keys; it now always arrives as
+  one paste.
+- Dragging a selection after the window shrank so the terminal had no rows left closed the console; the drag is now ignored.
+- A request for your answer that arrived while the console was waiting for something else (opening files, a review) was not
+  announced; it is now.
+- A debug build could stop with an arithmetic error while the inspector was hidden and an agent asked to start another.
+- Esc pressed quickly before Enter, Ctrl+C, Tab or Backspace (or both arriving together over SSH) lost the second key; both
+  keys now arrive.
+- On a terminal that sends Latin-1 or Windows-1254 letters (`ç`, `ğ`), the keys typed after such a letter waited until more
+  were typed; they now arrive at once.
 
 ### Machines
 - Windows: a machine could stop updating its agents (memory, state) for good when a process's leftover parent id pointed back
