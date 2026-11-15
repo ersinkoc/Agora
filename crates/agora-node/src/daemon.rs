@@ -170,21 +170,38 @@ fn currency_code(c: &str) -> Option<String> {
 fn binary_off_path() -> String {
     std::env::current_exe()
         .ok()
-        .and_then(|exe| off_path(&exe, std::env::var_os("PATH").as_deref()))
+        .and_then(|exe| {
+            off_path(
+                &exe,
+                std::env::var_os("PATH").as_deref(),
+                std::env::current_dir().ok().as_deref(),
+            )
+        })
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_default()
 }
 
 /// `exe` when its folder is none of the folders in `path_var`, compared as the file system resolves them (links, `.`, case on
-/// Windows); `None` when it is on PATH or has no folder.
-fn off_path(exe: &Path, path_var: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
+/// Windows); `None` when it is on PATH or has no folder. An empty entry is the current folder `cwd`, as a shell reads it
+/// (`PATH=:/usr/bin`).
+fn off_path(exe: &Path, path_var: Option<&std::ffi::OsStr>, cwd: Option<&Path>) -> Option<PathBuf> {
     let dir = exe.parent()?;
     let resolve =
         |p: &Path| agora_platform::canonicalize_plain(p).unwrap_or_else(|_| p.to_path_buf());
     let dir = resolve(dir);
-    let on_path = path_var
-        .map(|v| std::env::split_paths(v).any(|d| !d.as_os_str().is_empty() && resolve(&d) == dir))
-        .unwrap_or(false);
+    let on_path = path_var.is_some_and(|v| {
+        std::env::split_paths(v).any(|d| {
+            let d = if d.as_os_str().is_empty() {
+                match cwd {
+                    Some(c) => c.to_path_buf(),
+                    None => return false,
+                }
+            } else {
+                d
+            };
+            resolve(&d) == dir
+        })
+    });
     (!on_path).then(|| exe.to_path_buf())
 }
 
@@ -2312,14 +2329,16 @@ mod announce_tests {
         let other = dir.join("other");
         std::fs::create_dir_all(&other).unwrap();
         let path = |dirs: &[&Path]| std::env::join_paths(dirs).unwrap();
-        assert_eq!(
-            super::off_path(&exe, Some(&path(&[&other]))),
-            Some(exe.clone())
-        );
-        assert_eq!(super::off_path(&exe, None), Some(exe.clone()));
-        assert_eq!(super::off_path(&exe, Some(&path(&[&other, &bin]))), None);
+        let off = |p: Option<&std::ffi::OsStr>, cwd: Option<&Path>| super::off_path(&exe, p, cwd);
+        assert_eq!(off(Some(&path(&[&other])), None), Some(exe.clone()));
+        assert_eq!(off(None, None), Some(exe.clone()));
+        assert_eq!(off(Some(&path(&[&other, &bin])), None), None);
         // The same folder spelled another way (`bin/.`) is still on PATH.
-        assert_eq!(super::off_path(&exe, Some(&path(&[&bin.join(".")]))), None);
+        assert_eq!(off(Some(&path(&[&bin.join(".")])), None), None);
+        // An empty entry is the current folder (`PATH=:/usr/bin`, the node started from its own folder; review of #598).
+        let empty_first = std::env::join_paths([Path::new(""), other.as_path()]).unwrap();
+        assert_eq!(off(Some(&empty_first), Some(&bin)), None);
+        assert_eq!(off(Some(&empty_first), Some(&other)), Some(exe.clone()));
         let _ = std::fs::remove_dir_all(dir);
     }
 
