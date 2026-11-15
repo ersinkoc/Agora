@@ -4,6 +4,9 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+### Terminal client
+- An agent a machine cannot start is named with the program the machine looked for ("WrongStack (`wstack`)"), and when this
+  device is not trusted yet the hub's owner sees the folder of that machine's `agora` program when it is not in its PATH (ADR-0069).
 ### Faster answers
 - Every answer to something the window asks a machine (an agent list, a file, a diff, a start) arrives about 20 ms sooner: the hub
   sent it on its next 20 ms tick, and now sends it as soon as the machine answers (0.2 ms through the hub, also while another

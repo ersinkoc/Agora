@@ -147,6 +147,18 @@ pub struct Session {
     grant_wanted: bool,
 }
 
+/// An agent a machine offers (`agent.kinds`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Kind {
+    pub kind: String,
+    /// The name to show (the kind itself when the manifest gives none).
+    pub name: String,
+    /// Whether the machine finds its program.
+    pub installed: bool,
+    /// ADR-0069: the program the machine looks for in its `PATH` (a bare name such as `wstack`); empty from an older machine.
+    pub program: String,
+}
+
 /// What the hub sent next.
 pub enum Update {
     Snapshot(Box<Snapshot>),
@@ -757,13 +769,13 @@ impl Session {
         Ok(self
             .agent_kinds_all(node)?
             .into_iter()
-            .filter(|(_, _, installed)| *installed)
-            .map(|(kind, name, _)| (kind, name))
+            .filter(|k| k.installed)
+            .map(|k| (k.kind, k.name))
             .collect())
     }
 
-    /// Every agent a machine offers: `(kind, display name, installed)`, the ones whose program the machine cannot find included.
-    pub fn agent_kinds_all(&mut self, node: &str) -> Result<Vec<(String, String, bool)>, String> {
+    /// Every agent a machine offers, the ones whose program the machine cannot find included.
+    pub fn agent_kinds_all(&mut self, node: &str) -> Result<Vec<Kind>, String> {
         let ok = self.command_ok(
             node,
             command_request::Command::AgentKinds(agora_protocol::v1::AgentKinds {}),
@@ -780,7 +792,12 @@ impl Session {
                 } else {
                     k.display_name
                 };
-                (k.kind, name, k.installed)
+                Kind {
+                    kind: k.kind,
+                    name,
+                    installed: k.installed,
+                    program: k.program,
+                }
             })
             .collect())
     }
