@@ -208,5 +208,11 @@ mod tests {
                 node_id: "old".into()
             }
         );
+        // The target check comes before the owner check, as it did when this was inline: a member who also names a target is told
+        // about the target, not about the owner rule (a reviewer found no test held this order).
+        assert_eq!(
+            route(&member, None, &req("n1", forget_node(false))),
+            Route::TargetNotAllowed
+        );
     }
 }
