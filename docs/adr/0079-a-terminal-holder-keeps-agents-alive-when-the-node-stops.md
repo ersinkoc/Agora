@@ -62,8 +62,11 @@ and typed through them.
 2. **Lifetime.**
    - The holder outlives the node. On Windows it leaves the supervisor's job (`CREATE_BREAKAWAY_FROM_JOB`). On Unix it is started
      in its own session and is not bound to the supervisor's death.
-   - **What ends it:** the last agent of its home ending while no node is attached; a new stop, `agora down --agents` (wording for
-     the maintainer, open question 2), which stops the agents through it; or a machine reboot.
+   - **What ends it:** `agora down --agents` (wording for the maintainer, open question 2), which stops the agents through it; a node
+     that attaches and finds no agent left; or a machine reboot.
+   - **It keeps what a node has not collected** (added in review, after acceptance). An agent that ends while no node is attached
+     leaves its exit status and its buffered output in the holder. The holder keeps them, and keeps running, until a node attaches
+     and takes them; only then does a holder with no agents left end. A holder with nothing but ended agents is one idle process.
    - **Plain `agora down`** stops the node and leaves the agents running in the holder. The next `agora` start reattaches. The
      `agora down` output and `agora status` say how many agents keep running.
 3. **Attach without a hop on the hot path.** When the node attaches, the holder gives it duplicates of each terminal's pipe ends
@@ -79,9 +82,16 @@ and typed through them.
      decision 3), so full-screen agents redraw. A buffer that starts in the middle of an escape sequence is only a few bad cells
      before the redraw.
    - **The screen of a quiet terminal** (added in review, after acceptance; see the note at the end):
-     - **On a clean stop** (`agora down`, an update), the node hands the holder each terminal's screen (its VT snapshot, the cells
-       as the window shows them) before it exits. The next node starts from that snapshot and then feeds it the buffer, so every
-       screen comes back whole.
+     - **On a clean stop** (`agora down`, an update), the node hands each terminal's screen to the holder, in this order:
+       1. It stops reading the terminal first. Output it has not read stays in the pipe, and the holder reads it into the
+          buffer once the node is gone.
+       2. Then it takes the terminal's VT snapshot. That is the emulator's whole state, not only the visible cells: cursor
+          position and visibility, current text attributes, the saved cursor, the scroll region, the alternate screen and the
+          modes the agent set (keypad, mouse, bracketed paste, wrap). With it, later output is read exactly as it would have been.
+          `agora-vt` serializes and restores that state.
+       3. It hands the snapshot to the holder and exits.
+
+       The next node restores the snapshot, then feeds it the buffer, so every screen comes back whole.
      - **After a node crash** there is no snapshot. The new node has only what was written after the crash. A full-screen agent
        redraws on the nudge, but a quiet shell, or a tool waiting for input, shows a blank screen until it writes again (a key
        press, Enter at a prompt). Its process and its state are untouched.
@@ -115,14 +125,22 @@ and typed through them.
      terminals do not hang up by themselves. So the node watches its holder: the link closes, and the same pidfd or `kqueue` watch
      as decision 4. When the holder is gone, the node:
      - closes its copies of the masters, so each session gets the kernel's hangup (`SIGHUP`) once no copy is left;
-     - sends `SIGTERM`, then `SIGKILL` 5 s later, to each agent's process group.
+     - **lists each agent's group members first**: every process whose process group is the agent's, found on Linux through
+       `/proc` and on macOS with `proc_listpids(PROC_PGRP_ONLY)`, each recorded with its pid and start time;
+     - sends `SIGTERM` to each recorded member, then 5 s later `SIGKILL` to each one still running.
 
-     A group is identified as ADR-0060's ledger does it, by pid, start time and boot. A group whose leader is not the recorded
-     process is never signalled.
-   - **Linux, also with no node attached:** the holder starts each agent's first process with `PR_SET_PDEATHSIG(SIGHUP)`, so it is
-     told when the holder dies.
-   - **macOS with no node attached:** the kernel's hangup on the last master is the only signal. An agent that ignores `SIGHUP`
-     keeps running, and the next node reports it `still_running` (ADR-0060), where it can be stopped.
+     Signals go to each recorded member by its pid after its start time is checked again, never to the group id. So a member that
+     outlives its leader is still ended, and a group id reused by someone else is never signalled. An agent's group is found from
+     its leader as ADR-0060's ledger identifies it (pid, start time, boot). A leader that is not the recorded process yields no
+     members.
+   - **With no node attached, Linux and macOS:** nothing is guaranteed to end every process.
+     - On Linux the holder starts each agent's first process with `PR_SET_PDEATHSIG(SIGHUP)`. Only that process is told; it can
+       ignore the signal, and its children do not inherit it.
+     - On both systems, the kernel's hangup on the last master reaches the terminal's foreground process group.
+     - A process that ignores `SIGHUP`, or runs outside that group, can keep running. The next node lists the agent's group members
+       as above, reports the agent `still_running` (ADR-0060) while any member runs, and can stop them.
+
+     This is a v1 limit (Consequences). A crash-proof end on Linux (a cgroup per agent) is open question 6.
    - **Resume** (ADR-0060 and its Amendment A) then brings the conversation back, as after a reboot.
 9. **The ledger** records which agents are held, and by which holder (pid and start time). A node that starts and finds its holder
    alive attaches instead of reporting the agents as interrupted. Only agents whose holder is gone are interrupted.
@@ -161,15 +179,20 @@ and typed through them.
   - a second node is refused while one is attached;
   - a confined agent cannot open the holder's endpoint;
   - a holder version mismatch changes nothing;
-  - `agora down` and then a start: a quiet shell's screen comes back from the snapshot;
+  - `agora down` and then a start: a quiet shell's screen comes back from the snapshot, and the cursor position, text attributes
+    and modes it set carry over too;
+  - output written between the node's last read and its exit reaches the next node;
+  - an agent that ends while no node is attached: its exit status and output reach the next node, and only then does the holder end;
   - kill the holder:
     - on Windows the agents end;
-    - on Linux and macOS with a node attached, the node ends them (hangup, then group signals, only for groups the ledger
-      identifies);
-    - on Linux with no node attached, `PR_SET_PDEATHSIG` ends them;
-    - on macOS with no node attached, an agent that ignores `SIGHUP` is reported `still_running`.
-- **A v1 limit:** after a node *crash*, a quiet terminal's screen is blank until the agent writes again. Its process is untouched
-  (decision 4).
+    - on Linux and macOS with a node attached, the node ends every recorded member of each agent's group, including one that
+      outlived its leader, and never signals a group the ledger does not identify;
+    - with no node attached, an agent whose first process ignores `SIGHUP` is reported `still_running` by the next node, which
+      can stop it.
+- **v1 limits:**
+  - after a node *crash*, a quiet terminal's screen is blank until the agent writes again; its process is untouched (decision 4);
+  - with no node attached when the holder dies on Linux or macOS, a process that ignores `SIGHUP` can survive until the next node
+    stops it (decision 8).
 - **Threat model:** a row for the holder (decision 6).
 
 ## Open questions for the maintainer
@@ -182,7 +205,14 @@ and typed through them.
 5. **A screen that survives a crash** (added in review, after acceptance): should the node also hand the holder a screen snapshot
    every few seconds while attached, so that a quiet terminal's screen survives a node crash too? Proposed: later, after a
    benchmark (ADR-0022), since it costs a snapshot per terminal every few seconds.
+6. **A crash-proof end on Linux** (added in review, after acceptance): should each agent run in a cgroup of its own, so that a
+   holder dying with no node attached still ends every process (`cgroup.kill`)? Proposed: later. It needs a delegated cgroup
+   (systemd user slice), which not every Linux machine gives a user. macOS has no equivalent.
 
-**Note on the review changes (CodeRabbit on #616, after acceptance):** decision 4's quiet-screen rule, decision 8's per-system
-outcome, the matching tests, the v1 limit and question 5 fill gaps the review found. None of them changes a decision the
-maintainer accepted. The merger confirms them with the maintainer before merging.
+**Note on the review changes (CodeRabbit on #616, two rounds, after acceptance):** these fill gaps the review found:
+- decision 2: the holder keeps an ended agent's status and output until a node takes them;
+- decision 4: the quiet-screen rule, the read order and the full VT state on a clean stop;
+- decision 8: the per-system outcome, members that outlive their leader, and the no-node limit;
+- the matching tests, the v1 limits, and questions 5 and 6.
+
+None of them changes a decision the maintainer accepted. The merger confirms them with the maintainer before merging.
