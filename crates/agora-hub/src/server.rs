@@ -770,6 +770,8 @@ where
                 conn.send(&frame(rf.stream, rf.kind, rf.payload)).await?;
                 continue;
             }
+            // A node answered: sent at the top of the loop, now (`answer_ready`).
+            () = an_answer(inflight) => continue,
         };
         match received {
             Ok(Ok(Some(f))) => match (f.stream_id, f.kind) {
@@ -824,9 +826,33 @@ struct Inflight {
     /// A terminal subscription: the stream on the node's connection that was reserved for it.
     relay: Option<u32>,
     reply: tokio::sync::oneshot::Receiver<v1::CommandResponse>,
+    /// The answer [`an_answer`] already took from `reply` (a oneshot gives it once), for [`answer_ready`] to send.
+    answered: Option<Result<v1::CommandResponse, tokio::sync::oneshot::error::RecvError>>,
     deadline: tokio::time::Instant,
     /// The audit row that says this command is on its way (ADR-0049); finished when the answer comes.
     audit: Option<i64>,
+}
+
+/// Resolves when a command on its way has its answer (or lost its node), keeping it in [`Inflight::answered`]: a client gets an
+/// answer as soon as the node gives it. Before, answers waited for the loop's next tick ([`PUSH`]): every command's round trip was
+/// at least 20 ms (architecture review R5 measurement, `tests/flood_latency.rs`).
+fn an_answer(inflight: &mut [Inflight]) -> impl std::future::Future<Output = ()> + '_ {
+    std::future::poll_fn(move |cx| {
+        let mut any = false;
+        for i in inflight.iter_mut().filter(|i| i.answered.is_none()) {
+            if let std::task::Poll::Ready(r) =
+                std::future::Future::poll(std::pin::Pin::new(&mut i.reply), cx)
+            {
+                i.answered = Some(r);
+                any = true;
+            }
+        }
+        if any {
+            std::task::Poll::Ready(())
+        } else {
+            std::task::Poll::Pending
+        }
+    })
 }
 
 /// Who is asking and what they may reach (ADR-0049).
@@ -1022,6 +1048,7 @@ where
             node,
             relay,
             reply,
+            answered: None,
             deadline: tokio::time::Instant::now() + COMMAND_DEADLINE,
             audit: None,
         })
@@ -1059,7 +1086,12 @@ where
     let mut i = 0;
     while i < inflight.len() {
         let item = &mut inflight[i];
-        let resp = match item.reply.try_recv() {
+        let got = match item.answered.take() {
+            Some(Ok(r)) => Ok(r),
+            Some(Err(_)) => Err(TryRecvError::Closed),
+            None => item.reply.try_recv(),
+        };
+        let resp = match got {
             Ok(mut r) => {
                 r.request_id.clone_from(&item.client_request_id);
                 Some(r)
@@ -1902,6 +1934,7 @@ mod audit_cleanup_tests {
             relay: None,
             audit: Some(audit),
             reply,
+            answered: None,
             deadline,
         };
         // answer_ready uses swap_remove: a completed first request moves the newest one in front of an older pending request.

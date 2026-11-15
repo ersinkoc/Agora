@@ -4,6 +4,10 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+### Faster answers
+- Every answer to something the window asks a machine (an agent list, a file, a diff, a start) arrives about 20 ms sooner: the hub
+  sent it on its next 20 ms tick, and now sends it as soon as the machine answers (0.2 ms through the hub, also while another
+  machine floods output).
 ### Desktop app
 - On Windows and Linux, the desktop app shows one system notification when approvals are waiting while its window is hidden,
   minimized or not in front (the count only, in your language). Not on macOS yet: there it stays silent for now.
