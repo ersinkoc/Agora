@@ -3,7 +3,6 @@ Status: Accepted
 Date: 2026-11-14
 Accepted: 2026-11-14 (maintainer's explicit answer to a question listing each Proposed ADR with its summary and "approve as proposed": they ticked 0064, 0065, 0066, 0069, 0071, 0072 and 0074). The open questions' proposed answers stand.
 
-Not accepted. Nothing here may be built until the maintainer accepts it in a message of their own.
 Origin: the Windows agent's first-time-user findings (2026-11-14): "WrongStack: not installed" says nothing about what was looked for or where; a pasted `agora node trust …` fails on a machine where `agora` is not on PATH. The built-in manifests (PR #460) removed the main cause (a release node had no manifests); this closes the explanation gap with two additive fields.
 
 ## Context

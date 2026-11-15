@@ -3,7 +3,6 @@ Status: Accepted
 Date: 2026-11-14
 Accepted: 2026-11-14 (maintainer's explicit answer to a question listing each Proposed ADR with its summary and "approve as proposed": they ticked 0064, 0065, 0066, 0069, 0071, 0072 and 0074). The open questions' proposed answers stand.
 
-Not accepted. Nothing here may be built until the maintainer accepts it in a message of their own.
 Origin: the maintainer: "an agent should even be able to come to Agora over MCP and say: in my folder open a Codex, pick this model and this effort, run this task, as a fait accompli." Amends ADR-0057 (the `agent_start` tool) and ADR-0059 (launch options).
 
 ## Context

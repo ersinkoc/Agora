@@ -1386,7 +1386,18 @@ mod tests {
         let held = guard(&lock).unwrap();
         let remover = {
             let (lock, stopped) = (lock.clone(), stopped.clone());
-            std::thread::spawn(move || remove_lock_of(&lock, &stopped).unwrap())
+            // The guard waits 10 s. A runner that stalls the whole process longer than that (seen on Ubuntu CI: a 14 s gap) lets
+            // the waiting thread run first when it resumes, past its deadline while the guard is still held: TimedOut, although
+            // nothing is wrong. Tried again a bounded number of times; one that never gets the guard still fails.
+            std::thread::spawn(move || {
+                for _ in 0..3 {
+                    match remove_lock_of(&lock, &stopped) {
+                        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => continue,
+                        r => return r.unwrap(),
+                    }
+                }
+                panic!("the guard was never let go");
+            })
         };
         std::thread::sleep(Duration::from_millis(300));
         assert!(lock.exists(), "the removal did not wait for the guard");

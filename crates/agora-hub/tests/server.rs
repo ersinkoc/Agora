@@ -1985,15 +1985,18 @@ async fn a_node_that_goes_silent_on_an_open_connection_is_closed_and_unreachable
 
 #[tokio::test]
 async fn an_idle_node_that_pings_is_never_dropped() {
-    idle_node_pinging_every(Duration::from_millis(400), 4, 20).await;
+    // A quarter of the deadline between pings. The deadline is wide enough that a loaded CI runner pausing this test cannot reach
+    // it; the ratio is what the test is about.
+    idle_node_pinging_every(Duration::from_millis(1600), 4, 6).await;
 }
 
 /// ADR-0070 compatibility: a node from before it pings every 15 s against the hub's 25 s deadline (3/5 of it). It is never dropped.
 #[tokio::test]
 async fn an_old_node_that_pings_every_15_s_is_never_dropped() {
-    let silence = Duration::from_millis(500);
-    // 15/25 of the deadline between pings.
-    idle_node_pinging_every(silence, 0, 8).await;
+    // 15/25 of the deadline between pings. A 500 ms deadline left 200 ms of slack, which loaded macOS runners used up (the hub
+    // closed the link for silence); 2 s leaves 800 ms at the same ratio.
+    let silence = Duration::from_millis(2000);
+    idle_node_pinging_every(silence, 0, 4).await;
 }
 
 /// An idle node that only pings, every `silence / quarters` (or every 3/5 of it when `quarters` is 0), `pings` times.
@@ -2424,14 +2427,46 @@ async fn only_the_owner_reads_the_hubs_metrics_and_only_when_they_are_on() {
         .unwrap();
         next_ack(&mut node).await;
     }
+    // An approval asked and answered 12 s later on the machine's clock: one wait of 12 s.
+    let at = |seq: u64, at_ms: u64, body: Body| {
+        v1::Event {
+            producer_id: "n1".into(),
+            seq,
+            at_ms,
+            body: Some(body),
+        }
+        .encode_to_vec()
+    };
+    let asked = Body::ApprovalRequested(v1::ApprovalRequested {
+        approval_id: "ap1".into(),
+        agent_id: "a1".into(),
+        action: "run_command".into(),
+        ..Default::default()
+    });
+    let answered = Body::ApprovalResolved(v1::ApprovalResolved {
+        approval_id: "ap1".into(),
+        approved: true,
+        ..Default::default()
+    });
+    for e in [at(4, 100_000, asked), at(5, 112_000, answered)] {
+        node.send(&f(STREAM_EVENTS, kinds::EVENT, e)).await.unwrap();
+        next_ack(&mut node).await;
+    }
     let (status, text) = get_metrics(addr, Some(&owner)).await;
     assert_eq!(status, 200, "{text}");
     for line in [
-        "agora_hub_events_ingested_total 3\n",
-        "agora_hub_ingest_seconds_count 3\n",
-        "agora_hub_lock_wait_seconds_count 3\n",
+        "agora_hub_events_ingested_total 5\n",
+        "agora_hub_ingest_seconds_count 5\n",
+        "agora_hub_lock_wait_seconds_count 5\n",
         "agora_hub_nodes_online 1\n",
         "agora_hub_resyncs_total 0\n",
+        "agora_hub_approvals_waiting 0\n",
+        "agora_hub_approval_wait_seconds_bucket{le=\"5\"} 0\n",
+        "agora_hub_approval_wait_seconds_bucket{le=\"15\"} 1\n",
+        "agora_hub_approval_wait_seconds_sum 12\n",
+        "agora_hub_approval_wait_seconds_count 1\n",
+        "agora_hub_relays_dropped_total 0\n",
+        "agora_hub_terminal_bytes_total 0\n",
     ] {
         assert!(text.contains(line), "missing {line:?} in:\n{text}");
     }

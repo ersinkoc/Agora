@@ -4,12 +4,27 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+### Security
+- macOS: a confined agent is not started when a file it may write also has another name elsewhere (a hard link made outside
+  confinement), or when a save copy next to it (`state.json.tmp`) is such a link, since writing it would change that other file too; the message says to remove the link or put a copy in its place
+  (#571). Such links inside a folder it may write are not looked for at each start.
+
+### Machines
+- Windows: a machine could stop updating its agents (memory, state) for good when a process's leftover parent id pointed back
+  into the agent's own processes. Walking an agent's processes now visits each one once.
+
 ## 0.3.13
 
 ### Starting at login
 - After a restart of the machine or of Agora, the agents that were running come back on their own and carry on in their own conversations. At most 8 start at once, the rest 5 seconds apart. The first time, Agora asks once (the default is yes); `agora --resume ask|auto` changes it. The node's own policy file always outranks the flag.
 
 ## 0.3.12
+
+### Known issue (Windows)
+- Microsoft Defender may flag `agora.exe` shortly after `agora service install`. It was seen on one machine with the 0.3.12 release
+  file, whose checksum and signature `agora update` had checked (`Behavior:Win32/Execution.A!ml`, a guess from what the program does,
+  not a known-malware match). Defender then quarantined the file, ended the supervisor and the node, and removed the `agora-node`
+  login task, so the machine went offline and `agora` no longer ran. What you can do is in getting-started ("Windows Defender").
 
 ### Hub
 - A machine whose certificate is revoked while it is connected (for example, another machine enrolled under its name) is shown
