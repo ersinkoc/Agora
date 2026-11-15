@@ -13,9 +13,39 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
   confinement), or when a save copy next to it (`state.json.tmp`) is such a link, since writing it would change that other file too; the message says to remove the link or put a copy in its place
   (#571). Such links inside a folder it may write are not looked for at each start.
 
+### Agents working together
+- A task's title, detail and summary are limited to the same size as a message (16 KiB). They used to take about a megabyte each,
+  kept forever and sent to every agent that listed the tasks; an oversize text is now refused (`mesh.body_too_large`, audit
+  finding F603).
+- A file lock that ran out of time while another agent asked for a lock is now recorded as ended. It used to vanish without a
+  trace: the history never showed it ending, and the shared board and the windows kept showing the path as held (audit finding F602).
+- A task can no longer be handed to an agent of another project: it used to end up claimed by someone who could neither see
+  nor finish it, stuck until its lease ran out. It is refused (`mesh.recipient_unknown`) and stays with its owner (audit finding F601).
+
 ### Machines
 - Asking for the changes of one file whose name contains `[`, `*` or `?` now returns that file only: the name was read as a pattern, so
   `pages/[id].tsx` also brought `pages/i.tsx`. Nothing outside the workspace folder was ever reachable this way (audit finding F402).
+- The number of changed files a machine shows for a folder is now right when the folder holds new files: a new folder with three files
+  counted as one, and as none if the repository's own settings said not to show untracked files (the repository is written by the
+  agent). The count and the review screen's list now agree (audit finding F401).
+- Windows: looking at changes (a diff, the changed files) no longer opens and closes a window for every `git` the machine runs,
+  and no longer takes the focus. A structured agent (opencode, WrongStack, Antigravity) no longer keeps a window open for its
+  whole life.
+- A program can no longer make a terminal use unbounded memory with an endless title or other "operating system command". One that never
+  ended was kept whole (16 MiB sent held 32 MiB), and a long title was copied thousands of times by a title-stack request. The
+  parts past 1024 bytes are now left out; the sequence still ends where it ends (audit finding F704).
+- On macOS a busy node could lose its control socket: a second start while the first one's queue was full took it for a dead
+  leftover, deleted its socket file and bound its own. Each socket now has a lock file beside it (`<socket>.lock`, left in place,
+  harmless) held for as long as it is served; a second start finds it taken and stops (audit finding F202).
+- Accents and joined characters are no longer dropped from what a machine reads off a terminal: a name typed as `cafe` plus a
+  combining accent, a variation selector or an emoji joiner lost its extra part in the detected text and in snapshot lines (audit
+  finding F703). The terminal's own repaint still drops them.
+- `agora doctor` now warns when the manifests folder holds an older description of an agent than the one built into the program.
+  Such a copy (made for an older release) replaces the built-in one for good: on a real machine it kept every Claude Code agent from
+  coming back after a restart. The warning names the file to remove; the shipped descriptions are built in, nothing needs copying.
+- An agent that died in the middle of a screen update no longer leaves the machine's view of its terminal frozen. After a
+  "synchronized update" started and never ended, everything the terminal printed afterwards was held back; it is now let go
+  after 150 ms, at the next output (audit finding F702).
 - Windows: a machine could stop updating its agents (memory, state) for good when a process's leftover parent id pointed back
   into the agent's own processes. Walking an agent's processes now visits each one once.
 

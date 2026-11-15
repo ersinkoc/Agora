@@ -164,7 +164,7 @@ const REFUSED: [&str; 2] = ["-c", "refused-filter-driver"];
 fn config_env_supported() -> bool {
     static SUPPORTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *SUPPORTED.get_or_init(|| {
-        Command::new("git")
+        agora_platform::no_console_window(&mut Command::new("git"))
             .args(["config", "--get", "probe.configenv"])
             .env("GIT_CONFIG_COUNT", "1")
             .env("GIT_CONFIG_KEY_0", "probe.configenv")
@@ -229,6 +229,8 @@ fn made_dirs(dir: &Path) -> Option<(PathBuf, PathBuf, PathBuf)> {
 /// `.git` file (a submodule's, a separate git dir) is followed as git does.
 fn plain_hardened(dir: &Path) -> Command {
     let mut c = Command::new("git");
+    // The node has no console: on Windows each git would otherwise open a window and take the focus (a diff runs several).
+    agora_platform::no_console_window(&mut c);
     c.args(HARDENED)
         .arg("-C")
         .arg(dir)
@@ -586,12 +588,15 @@ pub fn status(worktree: &Path) -> Result<GitStatus, GitError> {
     // Both commands take the pathspec `.`, like [`diff`]: without one git reports the whole checkout even when run in a folder
     // inside it (a workspace selected inside a repository, ADR-0053), and the count would include files the diff never lists. At a
     // checkout's root `.` is everything, so a worktree the node made is counted as before.
+    // Every untracked file is one entry, as [`diff`] lists each: by default git shows a new folder as one `? dir/` line, and the
+    // repository's own `status.showUntrackedFiles=no` would hide them all.
     let filters = Filters::of(worktree);
     let git = |args: &[&str]| run(hardened_with(worktree, &filters), args);
     let (files_changed, head_commit) = parse_status_v2(&git(&[
         "status",
         "--porcelain=v2",
         "--branch",
+        "--untracked-files=all",
         SUBMODULE_COMMITS_ONLY,
         "--",
         ".",
@@ -1336,6 +1341,22 @@ mod tests {
         assert_eq!(files("b[1].txt"), ["diff --git a/b[1].txt b/b[1].txt"]);
         // `.` still selects everything.
         assert_eq!(files(".").len(), 4);
+    }
+
+    #[test]
+    fn each_new_file_counts_as_the_diff_lists_it() {
+        let r = Repo::new(None);
+        // A new folder (with a folder of its own) is three files, not one `? new/` line.
+        for f in ["new/a.txt", "new/b.txt", "new/deep/c.txt"] {
+            fs::create_dir_all(r.dir.join(f).parent().expect("parent")).expect("dir");
+            fs::write(r.dir.join(f), "x\n").expect("write");
+        }
+        let listed = |d: &str| d.lines().filter(|l| l.starts_with("diff --git ")).count();
+        assert_eq!(status(&r.dir).expect("status").files_changed, 3);
+        assert_eq!(listed(&diff(&r.dir, None).expect("diff")), 3);
+        // The repository's own config cannot hide them from the count.
+        r.git(&["config", "status.showUntrackedFiles", "no"]);
+        assert_eq!(status(&r.dir).expect("status").files_changed, 3);
     }
 
     #[test]
