@@ -14,6 +14,9 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
   (#571). Such links inside a folder it may write are not looked for at each start.
 
 ### Machines
+- Accents and joined characters are no longer dropped from what a machine reads off a terminal: a name typed as `cafe` plus a
+  combining accent, a variation selector or an emoji joiner lost its extra part in the detected text and in snapshot lines (audit
+  finding F703). The terminal's own repaint still drops them.
 - Windows: a machine could stop updating its agents (memory, state) for good when a process's leftover parent id pointed back
   into the agent's own processes. Walking an agent's processes now visits each one once.
 
