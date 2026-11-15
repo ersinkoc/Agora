@@ -36,7 +36,8 @@ a signed-in device. A person sitting at a node machine has a node but no panel t
 Adds a small command (and possibly a loopback forwarder) and a trust step; no protocol message change and no change to the
 hub's authority. A forwarder would be a new surface and needs the threat model (`docs/security/threat-model.md`) updated.
 
-## Amendment A (Proposed, 2026-11-15): the panel opens through the node, with no certificate to import
+## Amendment A (Accepted, 2026-11-15): the panel opens through the node, with no certificate to import
+Accepted: 2026-11-15 (the maintainer's explicit message in the merger's chat, answering the merger's message that named ADR-0056 Amendment A (#608) and ADR-0077 (#597) as the answers still owed: they said that the answer to everything they owed was the same, approval, and asked for the waiting work to be done). The open questions' proposed answers stand.
 Origin: the maintainer, after setting up three machines by hand: "we shouldn't suffer this much on every machine; hub and nodes
 should connect easily, and browsers on the network more easily". The chosen answer above (point the browser at the hub and print how
 to trust its CA) is the `certutil` / keychain step that every browser on every machine has to repeat.
