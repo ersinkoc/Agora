@@ -54,16 +54,25 @@ async fn read_head(s: &mut TcpStream) -> Option<(Vec<u8>, usize)> {
 }
 
 /// Whether a request head is addressed to the tunnel on `port`: exactly one `Host` field, whose value is `127.0.0.1:<port>` or
-/// `localhost:<port>` (the port may be left out only when it is 80, as browsers do). Anything else (another name, another port,
-/// no `Host`, two of them, a head that is not UTF-8) is refused.
+/// `localhost:<port>` (the port may be left out only when it is 80, as browsers do), and a request target in origin form (`/…`, or
+/// `*`). Anything else (another name, another port, `localhost.`, no `Host`, two of them, a head that is not UTF-8) is refused. An
+/// absolute target (`GET http://other/ HTTP/1.1`) is refused too, since a server takes the host from it rather than from `Host`
+/// (RFC 9112 3.2.2); a browser sends that form only to a proxy.
 ///
-/// Only the first request on a connection is checked. A browser keeps a connection for the origin it opened it for, so a page on
-/// another name never shares the webview's connection; a local program could send another `Host` later, but such a program can
-/// send the right one anyway, so this check is about browsers only.
+/// Only the first request on a connection is checked. A browser keeps a connection for the origin it opened it for, and does not
+/// pipeline, so a page on another name never shares the webview's connection; a local program could send another request with
+/// another `Host` after the first, but such a program can send the right one anyway, so this check is about browsers only.
 fn addressed_to_tunnel(head: &[u8], port: u16) -> bool {
     let Ok(text) = std::str::from_utf8(head) else {
         return false;
     };
+    let target = text
+        .split("\r\n")
+        .next()
+        .and_then(|line| line.split(' ').nth(1));
+    if !matches!(target, Some(t) if t.starts_with('/') || t == "*") {
+        return false;
+    }
     // The fields follow the request line and end at the blank line. A field name has no space before its colon (RFC 9112 5.1),
     // and a line starting with a space continues the previous field, so neither can count as `Host`.
     let mut hosts = text
@@ -439,6 +448,61 @@ mod tests {
         assert_eq!(send(t.local, &parts).await, PAGE);
     }
 
+    /// The page's WebSocket: after the hub answers the upgrade, bytes flow both ways through the tunnel unread.
+    #[tokio::test]
+    async fn a_websocket_upgrade_passes_and_then_carries_bytes_both_ways() {
+        let ca = Ca::generate("hub CA").unwrap();
+        let (cert, key) = ca.issue_server(&["localhost".to_string()]).unwrap();
+        let acceptor = agora_hub::tls::acceptor_with(&cert, &key, ca.cert_pem(), true).unwrap();
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (s, _) = l.accept().await.unwrap();
+            let mut s = acceptor.accept(s).await.unwrap();
+            // Read the upgrade head, answer 101, then echo every frame back with a prefix.
+            let mut head = Vec::new();
+            let mut b = [0u8; 1];
+            while !head.ends_with(b"\r\n\r\n") {
+                s.read_exact(&mut b).await.unwrap();
+                head.push(b[0]);
+            }
+            assert!(String::from_utf8_lossy(&head).contains("Upgrade: websocket"));
+            s.write_all(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+                .await
+                .unwrap();
+            let mut buf = [0u8; 64];
+            loop {
+                let n = s.read(&mut buf).await.unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                let mut out = b"echo:".to_vec();
+                out.extend_from_slice(&buf[..n]);
+                s.write_all(&out).await.unwrap();
+            }
+        });
+        let t = open(&addr.to_string(), ca.cert_pem(), 0).await.unwrap();
+        let mut c = TcpStream::connect(t.local).await.unwrap();
+        let up = format!("GET /ws HTTP/1.1\r\nHost: {}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n", t.local);
+        c.write_all(up.as_bytes()).await.unwrap();
+        let mut got = Vec::new();
+        let mut b = [0u8; 1];
+        while !got.ends_with(b"\r\n\r\n") {
+            c.read_exact(&mut b).await.unwrap();
+            got.push(b[0]);
+        }
+        assert!(got.starts_with(b"HTTP/1.1 101 "));
+        for frame in ["one", "two"] {
+            c.write_all(frame.as_bytes()).await.unwrap();
+            let mut buf = [0u8; 16];
+            let n = tokio::time::timeout(Duration::from_secs(5), c.read(&mut buf))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(&buf[..n], format!("echo:{frame}").as_bytes());
+        }
+    }
+
     #[tokio::test]
     async fn a_head_too_long_or_never_finished_gets_nothing() {
         let ca = Ca::generate("hub CA").unwrap();
@@ -484,6 +548,16 @@ mod tests {
             b"GET / HTTP/1.1\r\nHost: 127.0.0.1:7000\xff\r\n\r\n",
             7000
         ));
+        // A trailing dot is another name to a browser (another origin), and an absolute or authority-form target overrides `Host`.
+        assert!(!ok("GET / HTTP/1.1\r\nHost: localhost.:7000\r\n\r\n"));
+        assert!(!ok(
+            "GET http://rebind.example:7000/ HTTP/1.1\r\nHost: 127.0.0.1:7000\r\n\r\n"
+        ));
+        assert!(!ok(
+            "CONNECT rebind.example:443 HTTP/1.1\r\nHost: 127.0.0.1:7000\r\n\r\n"
+        ));
+        assert!(!ok("GET\r\nHost: 127.0.0.1:7000\r\n\r\n"));
+        assert!(ok("OPTIONS * HTTP/1.1\r\nHost: 127.0.0.1:7000\r\n\r\n"));
         // Port 80 may be left out, as browsers do.
         assert!(addressed_to_tunnel(
             b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n",
