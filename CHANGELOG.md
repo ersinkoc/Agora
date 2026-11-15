@@ -14,6 +14,9 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
   (#571). Such links inside a folder it may write are not looked for at each start.
 
 ### Machines
+- A program can no longer make a terminal use unbounded memory with an endless title or other "operating system command". One that never
+  ended was kept whole (16 MiB sent held 32 MiB), and a long title was copied thousands of times by a title-stack request. The
+  parts past 1024 bytes are now left out; the sequence still ends where it ends (audit finding F704).
 - Windows: a machine could stop updating its agents (memory, state) for good when a process's leftover parent id pointed back
   into the agent's own processes. Walking an agent's processes now visits each one once.
 
