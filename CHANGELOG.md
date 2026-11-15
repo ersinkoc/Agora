@@ -9,6 +9,9 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
   or the chat (`[A`, `<0;10;5M`), or a paste arrived as keys with its line breaks as Enter. A key now waits 10 ms for its last byte.
 - In the review and the file browser, the mouse wheel, a click, Page Up/Down or Ctrl+arrow closed the view and typed the rest of
   the key into the console. They are now ignored there.
+### Desktop app
+- On Windows and Linux, the desktop app shows one system notification when approvals are waiting while its window is hidden,
+  minimized or not in front (the count only, in your language). Not on macOS yet: there it stays silent for now.
 
 ### Security
 - macOS: a confined agent is not started when a file it may write also has another name elsewhere (a hard link made outside
