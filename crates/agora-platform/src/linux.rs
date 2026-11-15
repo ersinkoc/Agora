@@ -270,7 +270,9 @@ pub(crate) fn desktop_notify(title: &str, body: &str) -> io::Result<()> {
         })
         .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
     let status = std::process::Command::new(program)
-        .args(["--app-name=Agora", "--", title, body])
+        // The application name is the title the caller gave (from `locales/`), never a product name written here.
+        .arg(format!("--app-name={title}"))
+        .args(["--", title, body])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())

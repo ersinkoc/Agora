@@ -34,12 +34,14 @@ whether the window can still sign with its stored device key (approvals, grants,
 (stable identity) removes the prompt. WebView2 on Windows keeps that key with the user's account and does not ask.
 
 Notifications (ADR-0048 decision 5): when the number of approvals waiting (the page's title, `(N) Agora`) grows while the window
-is hidden, minimized or not focused, the shell shows one system notification with the count only, in the system's language. It
+is hidden, minimized or not focused, the shell shows one system notification with the count only, in the system's language.
+Clicking it does not bring the window forward yet (neither notifier reports the click back; ADR-0048 decision 5 stays open for
+that part). It
 uses the system's own notifier with no library (`agora_platform::desktop_notify`): Windows a toast (shown as Windows PowerShell;
 nothing when notifications are turned off for the user), Linux `notify-send` (nothing without it), macOS the app's own
-notification (`UNUserNotificationCenter`, so it shows as Agora and a click brings the app forward; the first one asks for
-permission). On macOS only the bundled app (`.app`) can post: a shell started from a terminal (`cargo run`) stays silent. The hub's
-phone notifications (ntfy, ADR-0051) cover a person away from the window.
+notification (`UNUserNotificationCenter`; the first one asks for permission; only the bundled `.app` can post, a shell started from a
+terminal stays silent; the script notifier `osascript` is not used, as it posts as Script Editor). The hub's phone notifications
+(ntfy, ADR-0051) cover a person away from the window.
 
 Not done yet: signed installers and per-platform signing (needs
 the maintainer's Apple and Windows accounts; unsigned builds are published as such), a real icon (the name and logo are open question Q1).

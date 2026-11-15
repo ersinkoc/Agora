@@ -75,6 +75,9 @@ pub struct LocalListener {
     inner: std::os::unix::net::UnixListener,
     #[cfg(unix)]
     path: PathBuf,
+    /// `<path>.lock`, held while this listener serves the socket (see `unix::local_listen`).
+    #[cfg(unix)]
+    _lock: std::fs::File,
     #[cfg(windows)]
     inner: windows::Listener,
 }
