@@ -23,6 +23,9 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
   nor finish it, stuck until its lease ran out. It is refused (`mesh.recipient_unknown`) and stays with its owner (audit finding F601).
 
 ### Machines
+- On macOS a busy node could lose its control socket: a second start while the first one's queue was full took it for a dead
+  leftover, deleted its socket file and bound its own. Each socket now has a lock file beside it (`<socket>.lock`, left in place,
+  harmless) held for as long as it is served; a second start finds it taken and stops (audit finding F202).
 - Accents and joined characters are no longer dropped from what a machine reads off a terminal: a name typed as `cafe` plus a
   combining accent, a variation selector or an emoji joiner lost its extra part in the detected text and in snapshot lines (audit
   finding F703). The terminal's own repaint still drops them.
