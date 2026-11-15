@@ -29,7 +29,9 @@ webview does not trust.
 A webview trusts the system's certificate store and offers no way to pin one CA, so decision 3 is carried out by a loopback tunnel
 (`crates/agora-desktop-tunnel`, no Tauri dependency, tested): the shell opens `127.0.0.1:<port>`, the webview loads
 `http://127.0.0.1:<port>/`, and each connection is carried to the hub over TLS that trusts only the CA the user confirmed. The tunnel
-copies bytes and holds no credential. The fingerprint to confirm is printed by `agora hub fingerprint` (not `agora hub code`, which
+copies bytes and holds no credential; it reads only the first request's head, and carries a connection only when its `Host` is
+the tunnel itself (`127.0.0.1:<port>` or `localhost:<port>`), so a page on another name cannot reach the hub through it by DNS
+rebinding (threat model T22). The fingerprint to confirm is printed by `agora hub fingerprint` (not `agora hub code`, which
 does not print one). The webview's origin includes the port, and the page's storage (the device key of decision 4, the sign-in)
 is per origin, so the shell keeps one fixed port per hub in its settings.
 

@@ -255,6 +255,35 @@ pub(crate) fn end_with(supervisor: u32) {
 /// replaced, disabled or deleted: [`crate::ServiceProblem::NotOurs`].
 const UNIT_MARKER: &str = "# Login service (ADR-0062 item 6): written and removed by its own service command; edits are not kept.\n";
 
+/// See [`crate::desktop_notify`]: `notify-send` (libnotify), found in a full-path folder of `PATH` and run by that path.
+pub(crate) fn desktop_notify(title: &str, body: &str) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let program = std::env::var_os("PATH")
+        .and_then(|p| {
+            std::env::split_paths(&p)
+                .filter(|d| d.is_absolute())
+                .map(|d| d.join("notify-send"))
+                .find(|p| {
+                    fs::metadata(p)
+                        .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+                })
+        })
+        .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
+    let status = std::process::Command::new(program)
+        // The application name is the title the caller gave (from `locales/`), never a product name written here.
+        .arg(format!("--app-name={title}"))
+        .args(["--", title, body])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!("notify-send: {status}")))
+    }
+}
+
 /// See [`crate::services_available`]: an executable `systemctl` in a full-path folder of `PATH`.
 pub(crate) fn services_available() -> bool {
     std::env::var_os("PATH").is_some_and(|p| systemctl_in(&p).is_some())

@@ -8,3 +8,51 @@ export function machineFor(current: string, online: readonly string[], initialNo
   if (initialNode && online.includes(initialNode)) return initialNode;
   return projects.find(p => online.includes(p.node))?.node ?? online[0] ?? '';
 }
+
+/** ADR-0069: the programs a machine could not find for the agents it marked "not installed", each once, in order; `general` when one
+ * of them came from an older machine that does not name its program, so the general sentence is shown for it. */
+export function missingPrograms(kinds: { installed: boolean; program?: string }[]): { programs: string[]; general: boolean } {
+  const programs: string[] = [];
+  let general = false;
+  for (const k of kinds) {
+    if (k.installed) continue;
+    if (!k.program) general = true;
+    else if (!programs.includes(k.program)) programs.push(k.program);
+  }
+  return { programs, general };
+}
+
+/** ADR-0069: where a machine's program runs from when its folder is not on that machine's PATH, as shown: the last two parts only
+ * (`…\Downloads\agora.exe`), since the full path can hold the machine's user name. */
+export function shortBinary(binary: string, os?: string): string {
+  const sep = isWindows(binary, os) ? '\\' : '/';
+  const parts = binary.split(/[\\/]/).filter(Boolean);
+  return parts.length > 2 ? `…${sep}${parts.slice(-2).join(sep)}` : parts.join(sep);
+}
+
+/** Whether `binary` is a file name only, with no folder (what a member gets from the hub, #598). */
+export function isBareName(binary: string): boolean {
+  return !/[\\/]/.test(binary);
+}
+
+/** Whether the machine runs Windows: from its `os`, which holds whatever form of the path arrives (a bare file name has no `\`); from
+ * the path only when the machine did not say. */
+function isWindows(binary: string, os?: string): boolean {
+  return os ? os === 'windows' : binary.includes('\\');
+}
+
+/** The command that makes a machine trust this device. When the machine's program is not on its PATH (`binary` set), it is run by
+ * its file name from its own folder (`.\agora.exe` on Windows, `./agora` elsewhere), so no full path is shown or needed. A name
+ * with anything beyond letters, digits, `.`, `_` and `-` (a second download is `agora (1).exe`) is quoted so the shell takes it as
+ * one word: PowerShell's call form `& '.\agora (1).exe'` on Windows, `'./agora (1)'` elsewhere. */
+export function trustCommand(binary: string | undefined, os: string | undefined): string {
+  // ADR-0061: the machine fetches this person's registered devices from the hub and asks on its own terminal, after the person
+  // compares the fingerprint with "This device"; no device id or 130-character key to copy.
+  const args = 'node trust --from-hub';
+  if (!binary) return `agora ${args}`;
+  const windows = isWindows(binary, os);
+  const file = binary.split(/[\\/]/).filter(Boolean).pop() ?? 'agora';
+  const plain = /^[A-Za-z0-9._-]+$/.test(file);
+  if (windows) return plain ? `.\\${file} ${args}` : `& '.\\${file.replace(/'/g, "''")}' ${args}`;
+  return plain ? `./${file} ${args}` : `'./${file.replace(/'/g, "'\\''")}' ${args}`;
+}

@@ -86,7 +86,11 @@ const demoChat: ChatSource = {
 };
 
 // ADR-0059: the start window with a kind that offers "Don't ask", for the gallery (nothing is sent anywhere).
-const demoKinds: KindChoice[] = [{ kind: 'codex', name: 'Codex', installed: true, options: [{ id: 'skip-permissions', label: 'option-skip-permissions', skipsPermissions: true }] }];
+// ADR-0069: and one whose program the machine cannot find, named in the explanation.
+const demoKinds: KindChoice[] = [
+  { kind: 'codex', name: 'Codex', installed: true, options: [{ id: 'skip-permissions', label: 'option-skip-permissions', skipsPermissions: true }] },
+  { kind: 'gemini', name: 'Gemini CLI', installed: false, program: 'gemini' },
+];
 function DemoStart({ onClose }: { onClose: () => void }) {
   return <StartAgent projects={[{ node: 'laptop', projectId: 'p', label: 'login-fix', path: '/home/dev/code/login-fix' }]}
     machines={[{ id: 'laptop', name: 'laptop', os: 'linux', online: true, agentsRunning: 1, lastSeenMs: 0 }]}

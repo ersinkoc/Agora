@@ -18,6 +18,7 @@ pub fn run_all<T: Terminal>(make: impl Fn(Size) -> T) {
     alt_screen_is_separate_and_restores(&make);
     title_from_osc(&make);
     wide_characters_use_two_cells(&make);
+    line_keeps_zero_width_characters(&make);
     modes_toggle(&make);
     styles_are_kept_per_cell(&make);
     pen_is_the_style_of_the_next_character(&make);
@@ -152,6 +153,14 @@ fn wide_characters_use_two_cells<T: Terminal>(make: &impl Fn(Size) -> T) {
     assert_eq!(t.cell(0, 4).map(|c| c.ch), Some('a'));
     assert_eq!(t.line(0), "日本a");
     assert_eq!(t.cursor().col, 5);
+}
+
+/// Combining accents and variation selectors stay with their character in the row's text (F703).
+fn line_keeps_zero_width_characters<T: Terminal>(make: &impl Fn(Size) -> T) {
+    let mut t = make(size(20, 2));
+    t.feed("cafe\u{301} \u{26a0}\u{fe0f}!".as_bytes());
+    assert_eq!(t.line(0), "cafe\u{301} \u{26a0}\u{fe0f}!");
+    assert_eq!(t.bottom_non_empty_lines(1), vec![t.line(0)]);
 }
 
 fn modes_toggle<T: Terminal>(make: &impl Fn(Size) -> T) {
