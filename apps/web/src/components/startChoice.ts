@@ -24,17 +24,28 @@ export function missingPrograms(kinds: { installed: boolean; program?: string }[
 
 /** ADR-0069: where a machine's program runs from when its folder is not on that machine's PATH, as shown: the last two parts only
  * (`…\Downloads\agora.exe`), since the full path can hold the machine's user name. */
-export function shortBinary(binary: string): string {
-  const sep = binary.includes('\\') ? '\\' : '/';
+export function shortBinary(binary: string, os?: string): string {
+  const sep = isWindows(binary, os) ? '\\' : '/';
   const parts = binary.split(/[\\/]/).filter(Boolean);
   return parts.length > 2 ? `…${sep}${parts.slice(-2).join(sep)}` : parts.join(sep);
 }
 
+/** Whether the machine runs Windows: from its `os`, which holds whatever form of the path arrives (a bare file name has no `\`); from
+ * the path only when the machine did not say. */
+function isWindows(binary: string, os?: string): boolean {
+  return os ? os === 'windows' : binary.includes('\\');
+}
+
 /** The command that makes a machine trust this device. When the machine's program is not on its PATH (`binary` set), it is run by
- * its file name from its own folder (`.\agora.exe` on Windows, `./agora` elsewhere), so no full path is shown or needed. */
-export function trustCommand(binary: string | undefined, id: string, key: string): string {
-  if (!binary) return `agora node trust ${id} ${key}`;
-  const windows = binary.includes('\\');
+ * its file name from its own folder (`.\agora.exe` on Windows, `./agora` elsewhere), so no full path is shown or needed. A name
+ * with anything beyond letters, digits, `.`, `_` and `-` (a second download is `agora (1).exe`) is quoted so the shell takes it as
+ * one word: PowerShell's call form `& '.\agora (1).exe'` on Windows, `'./agora (1)'` elsewhere. */
+export function trustCommand(binary: string | undefined, os: string | undefined, id: string, key: string): string {
+  const args = `node trust ${id} ${key}`;
+  if (!binary) return `agora ${args}`;
+  const windows = isWindows(binary, os);
   const file = binary.split(/[\\/]/).filter(Boolean).pop() ?? 'agora';
-  return `${windows ? '.\\' : './'}${file} node trust ${id} ${key}`;
+  const plain = /^[A-Za-z0-9._-]+$/.test(file);
+  if (windows) return plain ? `.\\${file} ${args}` : `& '.\\${file.replace(/'/g, "''")}' ${args}`;
+  return plain ? `./${file} ${args}` : `'./${file.replace(/'/g, "'\\''")}' ${args}`;
 }
