@@ -56,7 +56,8 @@ a ledger written by someone else cannot point a stop at another program. A node 
 agents itself. `agora node` has no signal handler: under systemd's default `KillMode=control-group` its agents die with it anyway; a
 plain `kill` of the node process leaves terminal agents running, and they show as still running at the next start.
 
-## Amendment A (Proposed, 2026-11-15): an agent that was working carries on after an automatic resume
+## Amendment A (Accepted, 2026-11-15): an agent that was working carries on after an automatic resume
+Accepted: 2026-11-15 (the maintainer's explicit message in the merger chat, accepting the ADRs listed by number (#613 ADR-0060 Amendment A, #614 ADR-0078, #615 ADR-0080, #616 ADR-0079): they accepted all of them). The open questions' proposed answers stand.
 Origin: the maintainer, about restarts: "these agents should go on with what they were doing, without a break, as if they had never
 dropped". Measured on `win` (0.3.13 release, `resume = "auto"`): after the node was killed, a Claude Code agent came back by itself in
 its own session and remembered what it had been told, then **sat idle**. A task cut off in the middle does not go on until someone
