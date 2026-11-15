@@ -488,6 +488,9 @@ impl Adapter {
         if let Some(sb) = &cfg.sandbox {
             agora_platform::confine_command(&mut cmd, sb)?;
         }
+        // The node has no console: on Windows the adapter (and the agent it starts, which shares its console) would otherwise keep a
+        // window of its own open for the agent's whole life.
+        agora_platform::no_console_window(&mut cmd);
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             // The adapter's own stderr is diagnostics for whoever runs the node; it is not parsed.

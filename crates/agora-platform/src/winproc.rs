@@ -22,7 +22,7 @@ use windows_sys::Win32::System::Threading::{
     CreateProcessW, DeleteProcThreadAttributeList, GetCurrentProcess, GetExitCodeProcess,
     GetProcessTimes, InitializeProcThreadAttributeList, OpenProcess, QueryFullProcessImageNameW,
     TerminateProcess, UpdateProcThreadAttribute, CREATE_BREAKAWAY_FROM_JOB,
-    CREATE_NEW_PROCESS_GROUP, CREATE_UNICODE_ENVIRONMENT, DETACHED_PROCESS,
+    CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, CREATE_UNICODE_ENVIRONMENT, DETACHED_PROCESS,
     EXTENDED_STARTUPINFO_PRESENT, PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION,
     PROCESS_TERMINATE, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, STARTF_USESTDHANDLES, STARTUPINFOEXW,
 };
@@ -170,6 +170,10 @@ pub(crate) fn terminate(pid: u32) -> io::Result<()> {
 
 /// What makes a process detached here: no console of its own and out of this console's Ctrl-C group.
 pub(crate) const DETACHED_FLAGS: u32 = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP;
+
+/// A console program started with this gets a console with no window: nothing appears on screen and nothing takes the focus, and the
+/// programs it starts in turn (git's hooks, `sh`, a credential helper) share that hidden console instead of each opening one.
+pub(crate) const NO_WINDOW_FLAGS: u32 = CREATE_NO_WINDOW;
 
 /// See [`crate::spawn_bound`]: puts this process, once, into a new job that ends every process in it when it is closed, and says
 /// whether it is in one. The handle is never closed: this process holds the only one, so the job closes, and its processes end, exactly
@@ -402,5 +406,61 @@ mod tests {
         assert!(crate::process_cwd(me).is_err());
         let _ = child.kill();
         let _ = child.wait();
+    }
+
+    /// A helper the node starts has a console but no window: nothing flashes on screen or takes the focus (the maintainer saw one
+    /// window per `git` while looking at a diff). The parent must have no console, as the node has none: this test starts its own
+    /// binary detached and that copy runs [`no_window_probe`], which starts the probe both ways. Without the flag the probe gets a
+    /// window of its own (the bug, so the check can tell); with it, none.
+    #[test]
+    fn a_helper_started_with_no_console_window_has_no_window() {
+        let exe = std::env::current_exe().expect("test binary");
+        let mut cmd = std::process::Command::new(exe);
+        cmd.args([
+            "--exact",
+            "winproc::tests::no_window_probe",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("AGORA_NO_WINDOW_PROBE", "1");
+        std::os::windows::process::CommandExt::creation_flags(&mut cmd, DETACHED_FLAGS);
+        let out = cmd.output().expect("detached test binary");
+        let text = String::from_utf8_lossy(&out.stdout);
+        let line = text
+            .lines()
+            .find_map(|l| l.split_once("PROBE ").map(|(_, rest)| rest))
+            .unwrap_or_else(|| panic!("no probe line: {text}"));
+        let (with, without) = line.split_once(' ').expect("two handles");
+        assert_eq!(with, "with=0", "{line}");
+        assert_ne!(without, "without=0", "{line}");
+    }
+
+    /// The probe's console window handle, started with or without [`crate::no_console_window`].
+    fn console_window(hidden: bool) -> String {
+        let mut cmd = std::process::Command::new("powershell.exe");
+        cmd.args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "$w = Add-Type -Name W -Namespace NoWindow -PassThru -MemberDefinition \
+             '[DllImport(\"kernel32.dll\")] public static extern System.IntPtr GetConsoleWindow();'; \
+             [Console]::Out.Write([long]$w::GetConsoleWindow())",
+        ]);
+        if hidden {
+            crate::no_console_window(&mut cmd);
+        }
+        let out = cmd.output().expect("powershell");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// Runs only inside [`a_helper_started_with_no_console_window_has_no_window`]'s detached copy.
+    #[test]
+    fn no_window_probe() {
+        if std::env::var_os("AGORA_NO_WINDOW_PROBE").is_none() {
+            return;
+        }
+        let with = console_window(true);
+        let without = console_window(false);
+        println!("PROBE with={with} without={without}");
     }
 }
