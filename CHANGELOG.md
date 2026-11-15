@@ -6,7 +6,7 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ### Security
 - macOS: a confined agent is not started when a file it may write also has another name elsewhere (a hard link made outside
-  confinement), since writing it would change that other file too; the message says to remove the link or put a copy in its place
+  confinement), or when a save copy next to it (`state.json.tmp`) is such a link, since writing it would change that other file too; the message says to remove the link or put a copy in its place
   (#571). Such links inside a folder it may write are not looked for at each start.
 
 ### Machines
