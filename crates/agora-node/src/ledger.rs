@@ -632,10 +632,14 @@ fn apply(st: &mut State, body: &Body, now: u64) -> bool {
 /// Drops entries older than [`KEEP_MS`], then the oldest ended ones (and then the oldest of any) above [`MAX_ENTRIES`]. Running
 /// agents are never dropped by age.
 fn prune(st: &mut State, now: u64) {
-    let before = st.entries.len();
-    st.entries.retain(|_, e| {
+    let mut removed = Vec::new();
+    st.entries.retain(|id, e| {
         let running = !e.ended && e.interrupted_at_ms == 0;
-        running || now.saturating_sub(e.last_touched()) <= KEEP_MS
+        let keep = running || now.saturating_sub(e.last_touched()) <= KEEP_MS;
+        if !keep {
+            removed.push(id.clone());
+        }
+        keep
     });
     if st.entries.len() > MAX_ENTRIES {
         let mut order: Vec<(bool, u64, String)> = st
@@ -647,11 +651,15 @@ fn prune(st: &mut State, now: u64) {
         let extra = st.entries.len() - MAX_ENTRIES;
         for (_, _, id) in order.into_iter().take(extra) {
             st.entries.remove(&id);
+            removed.push(id);
         }
     }
-    let known: BTreeSet<&String> = st.entries.keys().collect();
-    st.bound.retain(|a, _| known.contains(a));
-    if st.entries.len() != before {
+    // Only the bindings of the entries dropped here go: a binding whose agent's start is not recorded yet (another agent's
+    // write can land between `AgentWorkspaceBound` and `AgentStarted`) is still needed for its folder.
+    for id in &removed {
+        st.bound.remove(id);
+    }
+    if !removed.is_empty() {
         st.dirty = true;
     }
 }
@@ -904,6 +912,50 @@ mod tests {
         );
         l.observe(&started("agent-1", "/wt/a", ""), 2);
         assert_eq!(l.get("agent-1").unwrap().session_id, "native-s-1");
+    }
+
+    #[test]
+    fn a_write_for_another_agent_between_binding_and_start_keeps_the_folder() {
+        // The daemon records `AgentWorkspaceBound` and `AgentStarted` in two calls; another thread's write can land in between
+        // and prune. Forced here by call order.
+        let dir = temp("bound-race");
+        let l = Ledger::open(&dir, 1).unwrap();
+        l.observe(&started("agent-1", "/wt/one", ""), 1);
+        l.observe(
+            &Body::WorkspaceRegistered(v1::WorkspaceRegistered {
+                workspace_id: "directory:/work/two".into(),
+                node_id: "n".into(),
+                project_id: "p".into(),
+                path: "/work/two".into(),
+                git_root: "/work/two".into(),
+                branch: "main".into(),
+                managed_worktree: false,
+                files_changed: 0,
+            }),
+            2,
+        );
+        l.observe(
+            &Body::AgentWorkspaceBound(v1::AgentWorkspaceBound {
+                agent_id: "agent-2".into(),
+                workspace_id: "directory:/work/two".into(),
+            }),
+            2,
+        );
+        l.observe(
+            &Body::AgentExited(v1::AgentExited {
+                agent_id: "agent-1".into(),
+                exit_code: 0,
+            }),
+            3,
+        );
+        l.observe(&started("agent-2", "", ""), 4);
+        let e = l.get("agent-2").unwrap();
+        assert_eq!((e.folder.as_str(), e.directory), ("/work/two", true));
+        drop(l);
+        // And after a restart, where it is offered again in that folder.
+        let e = Ledger::open(&dir, 10).unwrap().get("agent-2").unwrap();
+        assert!(e.interrupted());
+        assert_eq!((e.folder.as_str(), e.directory), ("/work/two", true));
     }
 
     #[test]
