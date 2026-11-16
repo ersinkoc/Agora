@@ -73,8 +73,11 @@ fn a_confined_agent_commits_in_a_checkout_under_the_user_profile() {
     git(&repo, &["commit", "-q", "-m", "init"]);
 
     // The identity is given on the command line: the user's global git config is outside what the agent may read.
-    let script = "echo agent> b.txt && git add b.txt 2> add-err.txt && \
-                  git -c user.name=agent -c user.email=agent@example.com commit -q -m from-agent 2> commit-err.txt && \
+    // `safe.directory` is given here: a CI runner's repository folders are owned by the Administrators group while the agent runs as the
+    // runner user, and the runner's `safe.directory` lives in the system git config, which a confined agent no longer reads (ADR-0078,
+    // `GIT_CONFIG_NOSYSTEM`; a global one is not copied either: the key list is closed). A user's own worktree is owned by the user.
+    let script = "echo agent> b.txt && git -c safe.directory=* add b.txt 2> add-err.txt && \
+                  git -c safe.directory=* -c user.name=agent -c user.email=agent@example.com commit -q -m from-agent 2> commit-err.txt && \
                   echo ok> committed.txt";
     let manifest = Manifest::parse(&format!(
         "kind = \"committer\"\ndisplay_name = \"Committer\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"cmd.exe\", \"/c\", {script:?}]\n"

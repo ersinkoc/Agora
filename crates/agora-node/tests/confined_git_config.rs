@@ -211,7 +211,9 @@ fn the_owners_grant_of_the_global_configuration_is_left_as_it_is() {
     );
     // A file under a folder the agent may write is not written (it could rewrite it).
     let _ = std::fs::remove_file(&before);
-    assert_eq!(by_default.git_config(&wt, std::slice::from_ref(&dir)), None);
+    // (Where the file lies depends on the platform, so the grant is the folder it is in, not a guess at it.)
+    let its_folder = before.parent().unwrap().to_path_buf();
+    assert_eq!(by_default.git_config(&wt, &[its_folder]), None);
     assert!(!before.exists());
     // Not confined: nothing is written either.
     assert_eq!(SandboxPolicy::default().git_config(&wt, &[]), None);
@@ -271,7 +273,10 @@ fn a_really_confined_agent_commits_with_the_copied_identity_and_cannot_read_the_
         "{text}"
     );
     assert!(
-        text.contains("Permission denied") || text.contains("No such file"),
+        // The OS's own wording of a refusal: Landlock says "Permission denied", Seatbelt "Operation not permitted".
+        text.contains("Permission denied")
+            || text.contains("Operation not permitted")
+            || text.contains("No such file"),
         "{text}"
     );
     drop(sup);
@@ -345,33 +350,54 @@ fn the_nodes_own_git_variables_do_not_change_what_is_read_as_the_persons_configu
 
 #[cfg(unix)]
 #[test]
-fn a_worktrees_folder_that_is_a_link_into_a_writable_folder_gets_no_file() {
+fn a_file_whose_folder_is_reached_through_a_link_into_a_writable_folder_is_not_written() {
     let _serial = serial();
     home();
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join(format!("gitcfg-{}-link", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    let writable = dir.join("writable");
-    let real_trees = writable.join("trees");
-    std::fs::create_dir_all(real_trees.join("a")).unwrap();
-    // `worktrees` is a link to a folder below the one the agent may write.
-    let link = dir.join("worktrees");
-    std::os::unix::fs::symlink(&real_trees, &link).unwrap();
     let policy = SandboxPolicy {
         level: Level::Worktree,
         ..Default::default()
     };
-    let wt = link.join("a");
-    let by_link = gitconfig::path_for(&wt);
-    assert_eq!(
-        policy.git_config(&wt, std::slice::from_ref(&writable)),
-        None
-    );
-    assert!(!by_link.exists() && !gitconfig::path_for(&real_trees.join("a")).exists());
-    // Negative control: a grant elsewhere does not stop it (and a plain folder is not a false positive).
     let elsewhere = dir.join("elsewhere");
     std::fs::create_dir_all(&elsewhere).unwrap();
-    let file = policy.git_config(&wt, &[elsewhere]).unwrap();
-    assert!(file.exists());
+
+    // The grant is spelled through a link to the folder the file goes in (on macOS that folder is the system temp folder, whose
+    // `/var` is itself a link to `/private/var`, so the two spellings must be the same place).
+    let wt = dir.join("worktrees/a");
+    std::fs::create_dir_all(&wt).unwrap();
+    let file = gitconfig::path_for(&wt);
+    let folder = file.parent().unwrap();
+    let alias = dir.join("alias");
+    std::os::unix::fs::symlink(folder, &alias).unwrap();
+    let _ = std::fs::remove_file(&file);
+    assert_eq!(policy.git_config(&wt, &[alias]), None);
+    assert!(!file.exists(), "written below a grant reached by a link");
+    // Negative control: a grant elsewhere does not stop it.
+    let made = policy
+        .git_config(&wt, std::slice::from_ref(&elsewhere))
+        .unwrap();
+    assert!(made.exists());
+    let _ = std::fs::remove_file(made);
+
+    // Where the file lies beside the worktree (not where the system's temp folder is the agent's to avoid), a worktrees folder that is
+    // a link into a writable folder is the same case from the other side.
+    if !agora_platform::PRIVATE_TEMP {
+        let writable = dir.join("writable");
+        let real_trees = writable.join("trees");
+        std::fs::create_dir_all(real_trees.join("a")).unwrap();
+        let link = dir.join("linked");
+        std::os::unix::fs::symlink(&real_trees, &link).unwrap();
+        let wt = link.join("a");
+        assert_eq!(
+            policy.git_config(&wt, std::slice::from_ref(&writable)),
+            None
+        );
+        assert!(!gitconfig::path_for(&wt).exists());
+        assert!(!gitconfig::path_for(&real_trees.join("a")).exists());
+        let made = policy.git_config(&wt, &[elsewhere]).unwrap();
+        assert!(made.exists());
+    }
     let _ = std::fs::remove_dir_all(dir);
 }
