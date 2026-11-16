@@ -60,11 +60,12 @@ Each rung ships alone, is usable on its own, and has its own tests. Do not start
 
 | Rung | What a person can do afterwards | Needs |
 | --- | --- | --- |
-| **0 (exists)** | start a hub and a node by hand; use any interface; agents survive any interface | — |
-| **1 front door** | type `agora` on a fresh machine: it starts a hub **and** a node here (loopback), detached, and opens the interface signed in | machine.toml, detached start, a lock |
+| **0 (built)** | start a hub and a node by hand; use any interface; agents survive any interface | — |
+| **1 front door (built)** | type `agora` on a fresh machine: it starts a hub **and** a node here (loopback), detached, and opens the interface signed in | machine.toml, detached start, a lock |
 | **2 join** | on another machine paste ONE string (`agora join <string>`) printed by the hub: it joins, no CA file, no flags | join string, CA pin |
 | **3 honest environment** | tools like `wstack`, `claude`, `codex` are found; a missing one says why | login-shell PATH captured |
 | **4 coming back (built)** | after a restart the agents that were running are resumed (asked once, default yes; 8 at a time) | ledger (ADR-0060) |
-| **5 autostart** | it all starts when you log in (systemd user / LaunchAgent / logon task) | per-OS service |
-| **6 care** | `agora status` / `down`, logs, restart-on-failure, version mismatch hints | — |
-| parallel | trust without typed commands (ADR-0061), a proper terminal UI (ADR-0063) | — |
+| **5 autostart (built)** | it all starts when you log in (`agora service`: systemd user unit / LaunchAgent / logon task) | per-OS service |
+| **6 care (partly built)** | `agora status` / `down`, logs, restart-on-failure are built; version mismatch hints are not | — |
+| parallel | trust without typed commands (ADR-0061), a proper terminal UI (ADR-0063): both built | — |
+| **next** | pairing: find a hub, enter a number (ADR-0065, `docs/specs/pairing.md` is the design; `agora join` is rung 2) | schema, hub pairing |

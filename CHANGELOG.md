@@ -16,7 +16,6 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 - "Up to N helpers like this" (ADR-0057) ended only when the asking agent stopped: after the device that approved it was removed
   (`agora node untrust`, a revocation from another device), ran out or was narrowed to other projects, the agent kept starting
   helpers without asking. The grant now ends for good with that device's trust, and the next start asks again (audit finding F290).
-_Nothing yet._
 
 ### Starting agents
 - A start with a model and an effort now works through the hub too (ADR-0066): your device signs the choice together with the folder and

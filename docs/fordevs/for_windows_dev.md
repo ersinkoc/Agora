@@ -1,7 +1,8 @@
 # For the Windows machine
 
 Role: the daily-driver client and the Windows node (ADR-0045: ConPTY terminals, a named-pipe control channel). Everything Windows
-here has been run only on CI with test agents; this machine is where it meets a real user and a real agent. Read [README.md](README.md)
+here has been run only on CI with test agents; this machine is where it meets a real user and a real agent. Since 2026-11-15 this machine does not start development of its own: it runs the checks only Windows can, answers platform
+questions, reviews on request and finishes pull requests it already opened (see [README.md](README.md), "Who develops"). Read that page
 first for how machines talk.
 
 ## Set up

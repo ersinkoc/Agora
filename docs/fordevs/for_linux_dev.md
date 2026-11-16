@@ -1,7 +1,8 @@
 # For the Linux machine
 
 Role (see [development-setup](../development-setup.md)): the primary development machine and the one that hosts the hub in the
-maintainer's own use. Agents run here, one worktree per task. Read [README.md](README.md) first for how machines talk.
+maintainer's own use. Agents run here, one worktree per task. Since 2026-11-15 this machine's session is the one merger and does all the development; the other machines are asked for
+platform checks (see [README.md](README.md), "Who develops"). Read that page first for how machines talk.
 
 ## Set up
 ```sh
