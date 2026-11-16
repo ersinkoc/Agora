@@ -222,6 +222,7 @@ cli-panel-none = Bu makine bir hub'a kayıtlı değil, açılacak panel yok. Ön
 cli-panel-link = Bu makinenin hub adresi veya sertifikası okunamıyor. "agora node enroll" ile yeniden kaydedin.
 cli-panel-port-taken = Panelin { $port } numaralı portunu başka bir program kullanıyor. O programı kapatıp "agora panel" komutunu yeniden çalıştırın; girişiniz ve cihazınız korunsun diye port değişmez.
 cli-panel-no-port = Panel bu makinede bir port açamadı.
+cli-panel-port-unsaved = Panelin portu kaydedilemedi; bir sonraki "agora panel" başka bir port kullanabilir ve tarayıcınız bunu yeni bir cihaz sayıp yeniden giriş ister. Bu makinedeki node klasörünün yazılabilir olduğunu kontrol edin.
 cli-panel-unreachable = Hub bu makineden yanıt vermiyor, açılacak panel yok. Buradaki ajanlar çalışmaya devam eder.
 cli-panel-untrusted = Hub'ın sertifikası bu makinenin kaydolduğu sertifikadan değil, panel açılmadı.
 

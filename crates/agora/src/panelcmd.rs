@@ -44,6 +44,8 @@ pub(crate) enum PanelError {
 pub(crate) struct Panel {
     _tunnel: Tunnel,
     pub(crate) port: u16,
+    /// Whether the port is kept for the next run; when not, the next run may get another port, which is another origin.
+    pub(crate) port_kept: bool,
 }
 
 /// `host:port` of the hub from the address a node was enrolled with (`wss://host:port` or `wss://host/path`); 443 when none.
@@ -88,13 +90,15 @@ pub(crate) async fn start(dir: &Path, preferred: u16) -> Result<Panel, PanelErro
         },
     };
     let port = tunnel.local.port();
-    if stored_port(dir) != Some(port) {
-        // A port that cannot be kept would change at the next run; the window still works now, so this is not fatal.
-        let _ = std::fs::write(dir.join("panel-port"), port.to_string());
-    }
+    // Owner-only like the rest of `link/`. A port that cannot be kept is reported, not hidden: the window works now, but the
+    // next run may get another port, which is a new origin (a new device and sign-in).
+    let port_kept = stored_port(dir) == Some(port)
+        || agora_platform::write_private(&dir.join("panel-port"), port.to_string().as_bytes())
+            .is_ok();
     Ok(Panel {
         _tunnel: tunnel,
         port,
+        port_kept,
     })
 }
 
@@ -114,6 +118,9 @@ pub fn panel(say: &Say) -> ExitCode {
                     key!("cli-panel"),
                     &[("url", format!("http://127.0.0.1:{}/", p.port).into())],
                 );
+                if !p.port_kept {
+                    say.err(key!("cli-panel-port-unsaved"), &[]);
+                }
                 // Dropping `p` after this closes the port; connections already open end with the process.
                 let _ = tokio::signal::ctrl_c().await;
                 ExitCode::SUCCESS
@@ -301,6 +308,31 @@ mod tests {
         );
         // The port is kept for the next run.
         assert_eq!(stored_port(&dir), Some(port));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_port_that_cannot_be_kept_is_reported_and_a_kept_one_is_owner_only() {
+        let ca = Ca::generate("hub CA").unwrap();
+        let (hub, _) = fake_hub(&ca).await;
+        let dir = enrolment("unsaved", hub, &ca);
+        let p = start(&dir, 0).await.unwrap();
+        assert!(p.port_kept);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(dir.join("panel-port"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o077, 0);
+        }
+        drop(p);
+        // Negative control above; now a folder where the file should be: the write fails and the run says so.
+        std::fs::remove_file(dir.join("panel-port")).unwrap();
+        std::fs::create_dir(dir.join("panel-port")).unwrap();
+        let p = start(&dir, 0).await.unwrap();
+        assert!(!p.port_kept);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

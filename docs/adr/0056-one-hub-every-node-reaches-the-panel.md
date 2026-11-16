@@ -76,3 +76,6 @@ It runs until Ctrl+C and listens on nothing otherwise. The `Host` check (require
 model T22) when this was built; `Origin` is now checked in the same place (a request with an `Origin` other than the tunnel's own is
 refused), which covers both. Threat model T23. Not built: opening the browser itself (the command prints the address; launching a
 browser needs per-OS code in `agora-platform`), the desktop app's own use of a stored port, and ADR-0062's first-run window.
+Known gap (threat model T23): a fixed, predictable port can be bound by another local user while the panel is not running (and, on
+Windows, shared with a `SO_REUSEADDR` binder even while it runs, since tokio sets no exclusive bind); the desktop tunnel has the same
+exposure. The mitigation is a follow-up, an exclusive bind in `agora-platform`. A port that cannot be saved is reported (`cli-panel-port-unsaved`).

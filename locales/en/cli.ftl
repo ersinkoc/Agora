@@ -225,6 +225,7 @@ cli-panel-none = This machine is not enrolled with a hub, so there is no panel t
 cli-panel-link = This machine's hub address or certificate is unreadable. Enroll it again with "agora node enroll".
 cli-panel-port-taken = The panel's port { $port } is taken by another program. Close that program and run "agora panel" again; the port stays the same so that your sign-in and device are kept.
 cli-panel-no-port = The panel could not open a port on this machine.
+cli-panel-port-unsaved = The panel's port could not be saved, so the next "agora panel" may use another port, and your browser would treat it as a new device and ask you to sign in again. Check that this machine's node folder is writable.
 cli-panel-unreachable = The hub does not answer from this machine, so there is no panel to open. The agents here keep running.
 cli-panel-untrusted = The hub's certificate is not from the certificate this machine was enrolled with, so the panel was not opened.
 
