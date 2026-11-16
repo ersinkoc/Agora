@@ -28,3 +28,5 @@ Work in `../agora-worktrees/<task-slug>`: `git worktree add ../agora-worktrees/<
 ## Usually done here
 Cross-review of the other machines' pull requests, schema and ADR drafting (the maintainer accepts ADRs), release preparation
 (the tag itself is the maintainer's: `git tag vX.Y.Z && git push origin vX.Y.Z`; see `CHANGELOG.md`).
+Once SignPath is set up (ADR-0077, the comments in `.github/workflows/release.yml`), the Windows build of a tag waits up to an hour
+for the maintainer to approve its signing request in SignPath; tell them when you push the tag.
