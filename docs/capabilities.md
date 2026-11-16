@@ -19,8 +19,8 @@ L1 is an agent in a terminal read from its screen (a manifest); L2/L3 are struct
 | Node on Windows: ConPTY, job objects, named pipe | ADR-0045 Accepted | yes (W1–W5, [phase 7](backlog/phase-7.md)) | CI on windows-latest | LAN run 2026-11-11: Windows 11 node with real Claude Code and Codex |
 | Hub with the web window, many machines | ADR-0005 Accepted, ADR-0029 Accepted | yes (phase 3) | hub and server tests; `scripts/e2e-*.mjs` in headless Chromium | LAN run 2026-11-11: a Linux hub |
 | A machine is online while its link is (silence noticed in 25 s) | ADR-0070 Accepted | yes | hub tests; `scripts/e2e-link-silent.mjs` | none recorded here |
-| Old machines shown apart; forget one, clean up old ones | ADR-0073 Accepted | hub, CLI and web yes; terminal client in review | hub, server and CLI tests; web tests | none recorded here |
-| `agora` on a fresh machine starts a hub and a node here | ADR-0062 Accepted | rung 1 yes; restart after a crash yes; agents come back after a restart yes (asked once, 8 at a time, 16 at most, the node policy wins); start at login yes on Windows and on Linux with systemd (user unit), not on macOS yet; join and pairing not built | front-door tests (`crates/agora/tests/front_door.rs`), login service against a fake `systemctl` (`crates/agora/tests/service_systemd.rs`) | none recorded here |
+| Old machines shown apart; forget one, clean up old ones | ADR-0073 Accepted | hub, CLI, web and terminal client yes | hub, server and CLI tests; web tests | none recorded here |
+| `agora` on a fresh machine starts a hub and a node here | ADR-0062 Accepted | rung 1 yes; restart after a crash yes; agents come back after a restart yes (asked once, 8 at a time, 16 at most, the node policy wins); start at login yes on Windows (logon task), on Linux with systemd (user unit) and on macOS (LaunchAgent); join and pairing not built | front-door tests (`crates/agora/tests/front_door.rs`), login service against a fake `systemctl` (`crates/agora/tests/service_systemd.rs`) | none recorded here |
 | Pairing: find a hub on the network, approve on the hub | ADR-0065 Accepted | not built | — | — |
 | Machines reachable only over SSH | ADR-0032 Accepted, ADR-0034 Accepted | yes | tests against a stand-in `ssh` | [real SSH run 2026-11-09](reviews/2026-11-09-real-ssh-run.md): a private loopback `sshd`; no other OS as target |
 | Direct client ↔ node path for terminals | ADR-0023 Accepted | not built (terminal streams go through the hub relay) | — | — |
@@ -35,8 +35,8 @@ L1 is an agent in a terminal read from its screen (a manifest); L2/L3 are struct
 | L3: adapter processes, installed from the signed registry | ADR-0004 Accepted, ADR-0044 Accepted | yes | adapter host tests and the conformance transcript | none recorded here |
 | Agents run in the selected folder; worktrees optional | ADR-0052 Accepted | yes | node and web tests | none recorded here |
 | Launch options, including "do not ask" modes | ADR-0059 Accepted | yes | node and web tests | none recorded here |
-| Start with model, effort and mode | ADR-0066 Accepted | not built | — | — |
-| A missing agent kind says why | ADR-0069 Accepted | not built | — | — |
+| Start with model, effort and mode | ADR-0066 Accepted | node and hub yes (a start with settings is signed; the approval card lists them); the start window's and the terminal client's pickers not built | node and hub tests | none recorded here |
+| A missing agent kind says why | ADR-0069 Accepted | yes (protocol, web start window, terminal client) | protocol fixtures; web and terminal-client tests | none recorded here |
 | Resume after the node restarts (session ledger) | ADR-0060 Accepted | yes | node tests | none recorded here |
 | An agent starts helpers, with the user's signed approval | ADR-0057 Accepted | yes | node, hub and web tests | none recorded here |
 | Workspace clean-up and disk limits | ADR-0064 Accepted | not built | — | — |

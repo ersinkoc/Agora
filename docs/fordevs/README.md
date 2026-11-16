@@ -7,6 +7,13 @@ The maintainer works on Agora from three machines (Linux, macOS, Windows) with a
 - [for_macos_dev.md](for_macos_dev.md)
 - [for_windows_dev.md](for_windows_dev.md)
 
+**Who develops (since 2026-11-15):** one session on the Linux machine, the merger, writes the code, opens the pull requests and merges
+them (after CI is green and the cross-review). The Windows and macOS sessions do not start new development or claim tasks: they run the
+checks only their machine can, answer questions about their platform, review on request, and finish pull requests they already opened.
+Codex stays the cross-reviewer. Only the merger merges; another session that thinks a PR is ready says so in a message. The merger
+deletes a branch when its PR is merged, and `main` and `comms` are the only long-lived branches; keep no development worktrees on a
+Windows or macOS machine beyond the check you are running, and delete it after.
+
 Everything in `AGENTS.md` still applies (one task, one branch, DCO sign-off, Conventional Commits, no `unwrap`, platform code
 only in `agora-platform`, text only in `locales/`). This page adds only the cross-machine part.
 
@@ -14,11 +21,16 @@ only in `agora-platform`, text only in `locales/`). This page adds only the cros
 
 | What | Where | How |
 | --- | --- | --- |
-| **Code and docs** | pull requests to `main` | one branch per task: `<agent>/<machine>-<slug>`, for example `claude/windows-confinement-check` |
+| **Code and docs** | pull requests to `main` | one branch per task: `<agent>/<machine>-<slug>`, for example `claude/windows-confinement-check`; deleted when its PR is merged |
 | **Messages and results** | the `comms` branch, folder `log/` | a new file per message, pushed straight to `comms` (no pull request, no CI) |
 
 The `comms` branch exists so that "I ran it on Windows, here is what happened" never waits for a review and never conflicts with code.
-It holds only `log/*.md` files and is never merged into `main`.
+It holds only `log/*.md` files (and `evidence/` and `patches/` folders, each with its own README) and is never merged into `main`.
+
+**The log is kept small.** On 2026-11-16, at the maintainer's order, the old notes (over a thousand, some dated in the future by a machine's wrong
+clock) were removed and one current `log/*-linux-state.md` file posted. Everything earlier stays in the branch's git history (the commit
+before the clean-up is named in `log/README.md` on `comms`). The merger replaces old notes with one current state file when the log grows
+again; a note about a finished task is not kept. Never trust a file name's time over `git log origin/comms`.
 
 ## Sending a message
 
