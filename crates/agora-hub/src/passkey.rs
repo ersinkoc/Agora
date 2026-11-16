@@ -6,6 +6,8 @@
 //! present and verified, the signature counter, and the signature itself. The relying party id is the host the browser
 //! used; the browser itself refuses an id that is not its own origin.
 
+use std::collections::HashMap;
+use std::net::IpAddr;
 use std::sync::Mutex;
 
 use ring::signature::{UnparsedPublicKey, ECDSA_P256_SHA256_ASN1};
@@ -16,8 +18,11 @@ use crate::store::SqliteStore;
 
 /// How long a challenge may wait for its answer.
 pub const CHALLENGE_TTL_MS: u64 = 5 * 60 * 1000;
-/// Challenges waiting at once (older ones are dropped first): bounds memory against a flood of `begin` calls.
-const MAX_PENDING: usize = 32;
+/// Challenges waiting at once: bounds memory against a flood of `begin` calls.
+const MAX_PENDING: usize = 256;
+/// Challenges one client (its rate-limit bucket: an address, an IPv6 /64) may have waiting; its own oldest makes room first, so
+/// `begin` calls from one place never drop another's challenge (T18: a passkey is how the owner gets in).
+const MAX_PENDING_PER_CLIENT: usize = 4;
 /// Passkeys one hub keeps.
 pub const MAX_PASSKEYS: i64 = 32;
 
@@ -81,7 +86,7 @@ pub enum Purpose {
 /// Challenges handed out and not yet answered.
 #[derive(Default)]
 pub struct Challenges {
-    pending: Mutex<Vec<(Purpose, String, u64)>>,
+    pending: Mutex<Vec<(Purpose, String, u64, IpAddr)>>,
 }
 
 impl Challenges {
@@ -89,20 +94,41 @@ impl Challenges {
         Self::default()
     }
 
-    /// A new random challenge (base64url of 32 bytes).
-    pub fn issue(&self, purpose: Purpose, now_ms: u64) -> Result<String, PasskeyError> {
+    /// A new random challenge (base64url of 32 bytes) for `client`.
+    pub fn issue(
+        &self,
+        purpose: Purpose,
+        client: &crate::password::Client,
+        now_ms: u64,
+    ) -> Result<String, PasskeyError> {
         let mut raw = [0u8; 32];
         getrandom::getrandom(&mut raw).map_err(|e| PasskeyError::Store(e.to_string()))?;
         let challenge = b64url_encode(&raw);
+        let from = client.bucket();
         let mut p = self.pending.lock().map_err(|_| PasskeyError::Refused)?;
-        p.retain(|(_, _, exp)| *exp > now_ms);
-        while p.len() >= MAX_PENDING {
-            p.remove(0);
+        p.retain(|(_, _, exp, _)| *exp > now_ms);
+        let mine = p.iter().filter(|(.., f)| *f == from).count();
+        let evict = if mine >= MAX_PENDING_PER_CLIENT {
+            p.iter().position(|(.., f)| *f == from)
+        } else if p.len() >= MAX_PENDING {
+            // Full of other clients' challenges: the oldest of whoever holds the most makes room.
+            let mut held: HashMap<IpAddr, usize> = HashMap::new();
+            for (.., f) in p.iter() {
+                *held.entry(*f).or_default() += 1;
+            }
+            let most = held.values().copied().max().unwrap_or(0);
+            p.iter().position(|(.., f)| held.get(f) == Some(&most))
+        } else {
+            None
+        };
+        if let Some(i) = evict {
+            p.remove(i);
         }
         p.push((
             purpose,
             challenge.clone(),
             now_ms.saturating_add(CHALLENGE_TTL_MS),
+            from,
         ));
         Ok(challenge)
     }
@@ -114,11 +140,11 @@ impl Challenges {
         };
         let Some(i) = p
             .iter()
-            .position(|(pu, c, _)| *pu == purpose && c == challenge)
+            .position(|(pu, c, ..)| *pu == purpose && c == challenge)
         else {
             return false;
         };
-        let (_, _, exp) = p.remove(i);
+        let (_, _, exp, _) = p.remove(i);
         exp > now_ms
     }
 }
@@ -291,6 +317,7 @@ pub fn login(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::password::Client;
     use ring::rand::SystemRandom;
     use ring::signature::{EcdsaKeyPair, KeyPair, ECDSA_P256_SHA256_ASN1_SIGNING};
 
@@ -342,7 +369,7 @@ mod tests {
     }
 
     fn enroll(store: &SqliteStore, ch: &Challenges, d: &Device, id: &str) {
-        let c = ch.issue(Purpose::Register, 0).unwrap();
+        let c = ch.issue(Purpose::Register, &Client::default(), 0).unwrap();
         let cd = Device::client_data("webauthn.create", &c, "https://hub.example:7443");
         register(store, ch, HOST, id, &d.spki(), &cd, 1, None).unwrap();
     }
@@ -356,7 +383,7 @@ mod tests {
         count: u32,
         origin: &str,
     ) -> Result<(), PasskeyError> {
-        let c = ch.issue(Purpose::Login, 10).unwrap();
+        let c = ch.issue(Purpose::Login, &Client::default(), 10).unwrap();
         let cd = Device::client_data("webauthn.get", &c, origin);
         let auth = Device::auth_data(HOST, flags, count);
         let sig = d.sign(&auth, &cd);
@@ -426,12 +453,38 @@ mod tests {
     #[test]
     fn a_challenge_works_once_only_and_for_its_purpose_and_expires() {
         let ch = Challenges::new();
-        let c = ch.issue(Purpose::Login, 0).unwrap();
+        let c = ch.issue(Purpose::Login, &Client::default(), 0).unwrap();
         assert!(!ch.take(Purpose::Register, &c, 1));
         assert!(ch.take(Purpose::Login, &c, 1));
         assert!(!ch.take(Purpose::Login, &c, 1));
-        let late = ch.issue(Purpose::Login, 0).unwrap();
+        let late = ch.issue(Purpose::Login, &Client::default(), 0).unwrap();
         assert!(!ch.take(Purpose::Login, &late, CHALLENGE_TTL_MS + 1));
+    }
+
+    /// `login-begin` needs no session: a flood of it from one place must not drop anyone else's challenge (T18). An audit found
+    /// that 32 calls from one address made every other passkey sign-in fail.
+    #[test]
+    fn begin_calls_from_one_address_drop_only_its_own_challenges() {
+        let ch = Challenges::new();
+        let owner = Client::new(Some([198, 51, 100, 7].into()), "");
+        let theirs = ch.issue(Purpose::Login, &owner, 0).unwrap();
+        let adding = ch.issue(Purpose::Register, &owner, 0).unwrap();
+        let flood = Client::new(Some([203, 0, 113, 66].into()), "");
+        let first = ch.issue(Purpose::Login, &flood, 0).unwrap();
+        let last: Vec<String> = (0..1_000)
+            .map(|_| ch.issue(Purpose::Login, &flood, 0).unwrap())
+            .collect();
+        assert!(!ch.take(Purpose::Login, &first, 1), "its own oldest went");
+        assert!(ch.take(Purpose::Login, &last[last.len() - 1], 1));
+        // Many addresses at once fill the table: whoever holds the most loses first.
+        for i in 0..100u8 {
+            let c = Client::new(Some([192, 0, 2, i].into()), "");
+            for _ in 0..10 {
+                ch.issue(Purpose::Login, &c, 0).unwrap();
+            }
+        }
+        assert!(ch.take(Purpose::Login, &theirs, 1));
+        assert!(ch.take(Purpose::Register, &adding, 1));
     }
 
     #[test]
@@ -440,10 +493,10 @@ mod tests {
         let ch = Challenges::new();
         enroll(&store, &ch, &Device::new(), "c");
         let other = Device::new();
-        let c = ch.issue(Purpose::Register, 0).unwrap();
+        let c = ch.issue(Purpose::Register, &Client::default(), 0).unwrap();
         let cd = Device::client_data("webauthn.create", &c, "https://hub.example:7443");
         assert!(register(&store, &ch, HOST, "c", &other.spki(), &cd, 1, None).is_err());
-        let c = ch.issue(Purpose::Register, 0).unwrap();
+        let c = ch.issue(Purpose::Register, &Client::default(), 0).unwrap();
         let cd = Device::client_data("webauthn.create", &c, "https://hub.example:7443");
         assert!(register(&store, &ch, HOST, "d", b"not a key", &cd, 1, None).is_err());
     }
