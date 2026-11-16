@@ -821,3 +821,10 @@ forget-machine-reason-forbidden = Only the hub's owner can forget machines.
 forget-machine-reason-online = It is connected again, so it was not forgotten.
 forget-machine-reason-gone = The hub no longer knows this machine.
 forget-machine-reason-other = The hub could not forget it. Try again.
+
+# ADR-0066: the model and effort a kind takes, in the start window.
+setting-default = The agent's own default
+setting-default-is = The agent's own default ({ $value })
+start-settings-summary = { $kind } will start with { $settings }.
+start-settings-unsupported = This machine is too old to start an agent with a model or effort. Update it, or choose the agent's own default.
+start-setting-refused = This machine does not take that model or effort for this agent. Choose another, or the agent's own default.

@@ -155,6 +155,7 @@ tui-resume-still-running = Its process from before the restart is still running.
 option-skip-permissions = Don't ask
 setting-model = Model
 setting-effort = Effort
+tui-start-setting = { $name }: { $value }
 option-ask = Ask before acting
 tui-start-acts = How should it act? Press its number; Enter or any other key asks before acting.
 tui-start-confirm-skip = Let the agent act without asking? With "{ $name }" it runs commands and changes files without asking you first, for as long as it runs. Press y to start without asking; any other key keeps asking.
@@ -249,4 +250,3 @@ tui-cleanup-done = { $count ->
     }
 tui-cleanup-failed = Could not forget a machine ({ $code }); { $count } forgotten before it.
 tui-app-start-read = You read the whole request. Press y to allow it or n to deny it.
-tui-start-settings = This request chooses a model or effort, which this terminal cannot show yet. Open the web window to allow it, or press n to deny it.

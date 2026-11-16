@@ -97,3 +97,9 @@ The approval card an agent's `agent_start` with settings produces in the web win
 first prompt is shown in full, and only "this one" can be allowed (`apps/web/src/components/StartApproval.tsx`).
 
 ![](adr66-start-card-settings-dark.png) ![](adr66-start-card-settings-light.png)
+
+The start window's pickers (the agent's own default is preselected and sends nothing; a model is a text box, an effort a list the machine gave)
+and the same window with a model and an effort chosen, which then says what will start (`apps/web/src/components/LaunchSettings.tsx`).
+
+![](adr66-start-pickers-dark.png) ![](adr66-start-pickers-light.png)
+![](adr66-start-confirmation-dark.png) ![](adr66-start-confirmation-light.png)

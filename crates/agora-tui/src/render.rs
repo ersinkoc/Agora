@@ -162,8 +162,11 @@ pub fn render(
         waiting += 1;
         let (on, off) = paint(AgentState::Blocked, color);
         // ADR-0057: a request to start an agent shows what would start, where, and its whole first prompt.
-        if let Some((line, prompt)) = start_card(&a.action, &a.detail, t) {
+        if let Some((line, settings, prompt)) = start_card(&a.action, &a.detail, t) {
             out.push(format!("  {on}!{off} {line}"));
+            for l in settings {
+                out.push(format!("      {l}"));
+            }
             for l in prompt {
                 out.push(format!("      {dim}{l}{reset}"));
             }
@@ -315,7 +318,11 @@ struct StartRequest {
 /// ADR-0057: what an `agent.start` request shows before it is answered: one line saying who asks to start what and where, then its whole
 /// first prompt, line by line. Everything comes from the signed request and every hidden or control character is made visible, since
 /// the answer is signed over exactly that request. `None` for any other request.
-pub(crate) fn start_card(action: &str, detail: &str, t: Text<'_>) -> Option<(String, Vec<String>)> {
+pub(crate) fn start_card(
+    action: &str,
+    detail: &str,
+    t: Text<'_>,
+) -> Option<(String, Vec<String>, Vec<String>)> {
     let start = start_request(action, detail)?;
     let line = t(
         if start.inside {
@@ -333,8 +340,38 @@ pub(crate) fn start_card(action: &str, detail: &str, t: Text<'_>) -> Option<(Str
             ("depth", Arg::Num(start.depth)),
         ],
     );
+    // ADR-0066: every launch setting, in the order the request lists them and the signature covers them, named in this terminal's words.
+    let settings = crate::client::start_setting_rows(detail)
+        .iter()
+        .map(|(label, id, value)| {
+            t(
+                key!("tui-start-setting"),
+                &[
+                    ("name", Arg::Str(setting_name(label, id, t))),
+                    ("value", Arg::Str(visible(value))),
+                ],
+            )
+        })
+        .collect();
     let prompt = visible(&start.prompt).lines().map(str::to_string).collect();
-    Some((line, prompt))
+    Some((line, settings, prompt))
+}
+
+/// ADR-0066: a setting's name in this terminal's words: the machine's label when it is one of this terminal's setting texts
+/// (`setting-model`, `setting-effort`), else the setting's id. Never the requesting agent's words.
+fn setting_name(label: &str, id: &str, t: Text<'_>) -> String {
+    let own = label.starts_with("setting-")
+        && label.len() <= 40
+        && label
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+    if own {
+        let said = t(label, &[]);
+        if said != label {
+            return said;
+        }
+    }
+    visible(id)
 }
 
 /// The kind an `agent.start` request asks for, made visible; `None` for any other request.

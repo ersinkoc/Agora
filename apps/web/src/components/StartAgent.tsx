@@ -5,9 +5,12 @@ import type { MachineModel, ProjectChoice } from '../net/view';
 import { childPath, directoryReasonKey, type DirectoryInfo, type DirectoryListing } from '../net/directory';
 import { Icon } from './Icon';
 import { isBareName, machineFor, missingPrograms, shortBinary, trustCommand } from './startChoice';
+import { LaunchSettings } from './LaunchSettings';
+import { chosenSettings, noSettings, settingName, usableSettings, type LaunchSettingChoice, type SettingsState } from './launchSettings';
 import { ASK, chosenIds, confirmedIds, confirmSkip, harmless, initialLaunch, keepAsking, labelOf, pickPermission, skipping, toggleHarmless, usableOptions, type LaunchOptionChoice } from './launchChoice';
 // ADR-0059: `options` are the kind's launch options as the machine lists them (none from an older machine).
-export interface KindChoice { kind: string; name: string; installed: boolean; options?: LaunchOptionChoice[]; program?: string }
+// ADR-0066: `settings` are the kind's launch settings as the machine lists them (none from an older machine).
+export interface KindChoice { kind: string; name: string; installed: boolean; options?: LaunchOptionChoice[]; program?: string; settings?: LaunchSettingChoice[] }
 
 // The command a machine's owner runs once so the machine trusts this device (ADR-0020), with a Copy button: no hunting for it on another page.
 function TrustCommand({ command }: { command: string }) {
@@ -48,7 +51,7 @@ export function StartAgent({ projects, machines, initialNode, trust, askApproval
   // ADR-0053: the sub-folders of a folder on the machine (empty path: its home folder). Missing, or refused by an older machine: the path is typed.
   list?: (node: string, path: string) => Promise<DirectoryListing>;
   // A failure is a Fluent message id, translated when rendered so an open form follows a language change.
-  onStart: (node: string, info: DirectoryInfo, kind: string, separate: boolean, acceptIdentityChange: boolean, launch: { ids: string[]; confirmed: string[] }) => Promise<string | undefined>;
+  onStart: (node: string, info: DirectoryInfo, kind: string, separate: boolean, acceptIdentityChange: boolean, launch: { ids: string[]; confirmed: string[]; settings: [string, string][] }) => Promise<string | undefined>;
   onClose: () => void;
 }) {
   const online = machines.filter(m => m.online);
@@ -69,7 +72,9 @@ export function StartAgent({ projects, machines, initialNode, trust, askApproval
   const [acceptIdentityChange, setAcceptIdentityChange] = useState(false);
   // ADR-0059: "Ask before acting" until the user picks an option that skips permissions and confirms it; a new agent kind starts over.
   const [launch, setLaunch] = useState(initialLaunch);
-  useEffect(() => { setLaunch(initialLaunch()); }, [kind, node]);
+  useEffect(() => { setLaunch(initialLaunch()); setChosen(noSettings); }, [kind, node]);
+  // ADR-0066: a value per setting, or nothing (the agent's own default); a new kind or machine starts over.
+  const [chosen, setChosen] = useState<SettingsState>(noSettings);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   // The folder picker: what the machine answered for the folder being looked at.
@@ -119,10 +124,13 @@ export function StartAgent({ projects, machines, initialNode, trust, askApproval
   };
   const go = async () => {
     if (!info) return;
-    setBusy(true); setError(await onStart(node, info, kind, separate, acceptIdentityChange, { ids: chosenIds(launch, offered), confirmed: confirmedIds(launch, offered) })); setBusy(false);
+    setBusy(true); setError(await onStart(node, info, kind, separate, acceptIdentityChange, { ids: chosenIds(launch, offered), confirmed: confirmedIds(launch, offered), settings: sending })); setBusy(false);
   };
   // Ids outside `[a-z0-9-]` are never offered (the hub relays the list; the machine decides).
   const offered: LaunchOptionChoice[] = usableOptions((kinds !== 'loading' && kinds !== 'failed' ? kinds.find((k) => k.kind === kind)?.options : undefined) ?? []);
+  // ADR-0066: only what the machine listed, only values it allows; empty when nothing is chosen (then the start is the one without settings).
+  const takes = usableSettings((kinds !== 'loading' && kinds !== 'failed' ? kinds.find((k) => k.kind === kind)?.settings : undefined) ?? []);
+  const sending = chosenSettings(chosen, takes);
   const skips = skipping(offered), plain = harmless(offered);
   const pendingOption = offered.find((o) => o.id === launch.pending);
   // The same folder can be spelled several ways on Windows (`D:\x`, `D:/x`, `\\?\D:\x`): listed once.
@@ -218,6 +226,7 @@ export function StartAgent({ projects, machines, initialNode, trust, askApproval
               {info.gitRoot && <label className="flex items-center gap-2 text-[0.8125rem]"><input type="checkbox" checked={separate} disabled={busy} onChange={e => setSeparate(e.target.checked)} />{t('start-separate-worktree')}</label>}
               {info.previousProjectId && <label className="flex items-center gap-2 text-[0.8125rem]"><input type="checkbox" checked={acceptIdentityChange} disabled={busy} onChange={e => setAcceptIdentityChange(e.target.checked)} />{t('start-identity-change')}</label>}
             </div>}
+            {takes.length > 0 && <LaunchSettings settings={takes} chosen={chosen} onChange={setChosen} disabled={busy} />}
             {offered.length > 0 && <div className="grid gap-1.5">
               <h2 className="m-0">{t('start-how-it-acts')}</h2>
               {skips.length > 0 && <div className="flex flex-wrap gap-1.5" role="radiogroup" aria-label={t('start-how-it-acts')}>
@@ -234,6 +243,7 @@ export function StartAgent({ projects, machines, initialNode, trust, askApproval
               {plain.map((o) => <label key={o.id} className="flex items-center gap-2 text-[0.8125rem]"><input type="checkbox" checked={launch.harmless.includes(o.id)} disabled={busy} onChange={e => { const on = e.target.checked; setLaunch((s) => toggleHarmless(s, o.id, on)); }} />{labelOf(o, t)}</label>)}
             </div>}
           </>}
+          {sending.length > 0 && !error && <p role="status" className="m-0 text-xs text-muted">{t('start-settings-summary', { kind: kinds !== 'loading' && kinds !== 'failed' ? kinds.find((k) => k.kind === kind)?.name ?? kind : kind, settings: sending.map(([id, value]) => `${settingName(takes.find((x) => x.id === id) as LaunchSettingChoice, t)}: ${value}`).join(', ') })}</p>}
           {error && <p role="alert" className="m-0 text-needs-you">{error === 'approval-not-trusted' && trust ? (binary
             // A member gets the file name only (#598): no folder to name, so the sentence asks for the folder where that file is.
             ? isBareName(binary)

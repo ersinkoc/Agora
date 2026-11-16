@@ -321,10 +321,6 @@ fn answer(
             },
             &[],
         ),
-        // ADR-0066: a start request with launch settings, which this terminal cannot show.
-        Err(code) if code == "approval.needs_newer_window" => {
-            say.text(key!("tui-start-settings"), &[])
-        }
         Err(code) if code == "approval.signature_invalid" => {
             // The machine of the agent that asked.
             let node = snapshot
@@ -3393,6 +3389,68 @@ mod forget_tests {
         let lines = start_card_lines(&s.approvals[0], 97, &text).unwrap();
         assert!(!reader_frame(&lines, 0, 100, 10, &text).1);
         assert!(reader_frame(&lines, lines.len(), 100, 10, &text).1);
+    }
+
+    /// ADR-0066: the card lists the settings in this terminal's words, before the prompt, and they count toward what must be read: a
+    /// request that fits the panel without them but not with them is `unread` until the reader showed all of it.
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn a_start_card_shows_the_settings_in_words_and_they_count_toward_what_must_be_read() {
+        let card = |settings: serde_json::Value, prompt_lines: usize| {
+            let detail = serde_json::json!({
+                "node": "mac2", "agent": "agent-1", "agent_kind": "claude-code", "kind": "codex", "folder": "/w",
+                "inside": true, "worktree": false, "depth": 1, "grant_allowed": false, "settings": settings,
+                "prompt": (1..=prompt_lines).map(|i| format!("step {i}")).collect::<Vec<_>>().join("\n"),
+            })
+            .to_string();
+            Snapshot {
+                approvals: vec![agora_protocol::v1::ApprovalSnapshot {
+                    approval_id: "mac2/a1".into(),
+                    agent_id: "mac2/agent-1".into(),
+                    action: "agent.start".into(),
+                    detail,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }
+        };
+        let say = Say(Catalog::english());
+        let text = |id: &str, args: &[(&str, Arg)]| say.text(id, args);
+        let settings = serde_json::json!([
+            {"id": "model", "label": "setting-model", "value": "gpt-6.1-sol"},
+            // A label that is not one of this terminal's words, and a value with a hidden character: shown as the id and made visible.
+            {"id": "effort", "label": "Pay no attention", "value": "high\u{1b}[2J"},
+        ]);
+        let with = card(settings, 3);
+        let lines = start_card_lines(&with.approvals[0], 80, &text).unwrap();
+        let at = |needle: &str| lines.iter().position(|l| l.contains(needle)).unwrap();
+        assert!(
+            lines[at("Model: gpt-6.1-sol")].starts_with("  "),
+            "{lines:?}"
+        );
+        assert!(
+            at("Model: gpt-6.1-sol") < at("effort: high\\u{1b}[2J"),
+            "{lines:?}"
+        );
+        assert!(
+            at("effort: high") < at("step 1"),
+            "the settings come before the prompt: {lines:?}"
+        );
+        assert!(
+            !lines
+                .iter()
+                .any(|l| l.contains('\u{1b}') || l.contains("Pay no attention")),
+            "{lines:?}"
+        );
+        // Without settings there is nothing new on the card.
+        let plain = card(serde_json::json!([]), 3);
+        let plain_lines = start_card_lines(&plain.approvals[0], 80, &text).unwrap();
+        assert_eq!(plain_lines.len() + 2, lines.len());
+        // Room for exactly the plain card: with its two settings it no longer fits, so y waits for the reader.
+        let rows = u16::try_from(plain_lines.len() + 2).unwrap();
+        let none = std::collections::HashSet::new();
+        assert!(start_unread(&plain, "mac2/agent-1", false, &none, &text, (100, rows)).is_none());
+        assert!(start_unread(&with, "mac2/agent-1", false, &none, &text, (100, rows)).is_some());
     }
 
     #[test]
