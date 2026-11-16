@@ -357,19 +357,37 @@ impl crate::web::SessionApi for HubSessions {
         self.hub.metrics_on()
     }
 
-    fn metrics(&self, bearer: Option<&str>) -> (u16, String) {
-        // The token first: nobody but the owner makes the hub count anything (#562 review).
+    fn metrics(&self, bearer: Option<&str>, client: &Client) -> (u16, String) {
+        // The token first: nobody but the owner, or a metrics token, makes the hub count anything (#562 review).
         let Some(token) = bearer else {
             return (401, String::new());
         };
-        match self.signin().access(token, crate::server::now_ms()) {
-            None => (401, String::new()),
-            Some(a) if a.role != crate::users::Role::Owner => (403, String::new()),
-            Some(_) => self
-                .hub
-                .metrics_text()
-                .map_or((404, String::new()), |text| (200, text)),
+        let now = crate::server::now_ms();
+        // A try is counted when it starts and given back when it proves itself (ADR-0076 item 4): a burst of wrong tokens from one
+        // address locks that address out of sign-in too. Per address only, so a stranger cannot lock the hub for everyone.
+        if self.guard.attempt(client, Scope::AddressOnly, now).is_err() {
+            return (429, String::new());
         }
+        // A metrics token is looked up among metrics tokens only, and anything else among sessions only.
+        let allowed = if crate::metrics_token::looks_like(token) {
+            crate::metrics_token::MetricsTokens::new(self.hub.store()).check(token, now)
+        } else {
+            match self.signin().access(token, now) {
+                None => false,
+                Some(a) if a.role != crate::users::Role::Owner => {
+                    self.guard.succeeded(client, Scope::AddressOnly);
+                    return (403, String::new());
+                }
+                Some(_) => true,
+            }
+        };
+        if !allowed {
+            return (401, String::new());
+        }
+        self.guard.succeeded(client, Scope::AddressOnly);
+        self.hub
+            .metrics_text()
+            .map_or((404, String::new()), |text| (200, text))
     }
 
     fn info(&self, client: &Client) -> serde_json::Value {
@@ -565,7 +583,7 @@ impl HubSessions {
                     Err(e) => return e,
                 };
                 if op == "register-begin" {
-                    return match self.challenges.issue(Purpose::Register, now) {
+                    return match self.challenges.issue(Purpose::Register, client, now) {
                         Ok(c) => {
                             json(serde_json::json!({ "challenge": c, "rpId": pk::rp_id(host) }))
                         }
@@ -573,6 +591,10 @@ impl HubSessions {
                     };
                 }
                 let id = body.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                // A passkey added without the password never inherits a vouch left by a removed passkey with the same id.
+                if !vouched && crate::password::forget_stale_vouch(store, id).is_err() {
+                    return (500, String::new());
+                }
                 match (field("publicKey"), field("clientDataJSON")) {
                     (Some(key), Some(cd)) => {
                         match pk::register(
@@ -599,7 +621,10 @@ impl HubSessions {
                 }
             }
             "register-begin" | "register-finish" => (401, String::new()),
-            "login-begin" => match (pk::ids(store), self.challenges.issue(Purpose::Login, now)) {
+            "login-begin" => match (
+                pk::ids(store),
+                self.challenges.issue(Purpose::Login, client, now),
+            ) {
                 (Ok(ids), Ok(c)) => {
                     json(serde_json::json!({ "challenge": c, "rpId": pk::rp_id(host), "ids": ids }))
                 }
@@ -1164,6 +1189,62 @@ mod tests {
                 crate::passkey::ids(hub.store()).unwrap(),
                 ["at-the-machine"]
             );
+        }
+
+        /// A passkey's id is chosen by the client: one added from elsewhere without the password under the id of a vouched
+        /// passkey that went with its person must not inherit that vouch (an audit found it survived the password being set).
+        #[test]
+        fn a_reused_id_does_not_inherit_the_vouch_of_a_removed_passkey() {
+            use crate::passkey::{b64url_encode, SPKI_P256_PREFIX};
+            let (hub, api) = hub();
+            let add = |tok: &str, client: &Client, id: &str| {
+                let (st, out) = api.passkey(
+                    "register-begin",
+                    Some(tok),
+                    "hub.example",
+                    client,
+                    &serde_json::json!({}),
+                );
+                assert_eq!(st, 200);
+                let ch: serde_json::Value = serde_json::from_str(&out).unwrap();
+                let cd = serde_json::json!({"type": "webauthn.create", "challenge": ch["challenge"], "origin": "https://hub.example"});
+                let mut spki = SPKI_P256_PREFIX.to_vec();
+                spki.extend_from_slice(&[4; 65]);
+                let body = serde_json::json!({"id": id, "publicKey": b64url_encode(&spki), "clientDataJSON": b64url_encode(cd.to_string().as_bytes())});
+                api.passkey("register-finish", Some(tok), "hub.example", client, &body)
+                    .0
+            };
+            let now = crate::server::now_ms();
+            let member = crate::users::Users::new(hub.store())
+                .add("Eda", crate::users::Role::Member, now)
+                .unwrap();
+            let m = si(hub.store())
+                .redeem(
+                    &si(hub.store())
+                        .create_code_for(Some(&member.id), now)
+                        .unwrap(),
+                    now,
+                )
+                .unwrap();
+            assert_eq!(add(&m, &home(), "reused"), 200, "vouched: at the machine");
+            crate::users::Users::new(hub.store())
+                .remove(&member.id)
+                .unwrap();
+            let owner = token(sign_in(&api, &code(&hub), None, &home())).unwrap();
+            assert_eq!(add(&owner, &away(5), "reused"), 200, "no password yet");
+            assert_eq!(add(&owner, &home(), "kept"), 200);
+            assert_eq!(add(&owner, &away(5), "kept"), 403, "a live id is not taken");
+            assert_eq!(
+                api.account(
+                    "password",
+                    Some(&owner),
+                    &home(),
+                    &serde_json::json!({"password": PW})
+                )
+                .0,
+                200
+            );
+            assert_eq!(crate::passkey::ids(hub.store()).unwrap(), ["kept"]);
         }
     }
 }

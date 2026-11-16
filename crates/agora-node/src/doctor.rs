@@ -92,6 +92,10 @@ pub fn run(inputs: &Inputs) -> Vec<Check> {
     ));
     if level != crate::sandbox::Level::Off {
         out.extend(policy_paths(&policy_file));
+        // ADR-0078: a confined agent commits with the identity the node copies from the person's git configuration.
+        if crate::gitconfig::identity_missing() {
+            out.push(check("git-identity-missing", Status::Warn, ""));
+        }
     }
     out.extend(authority(&inputs.data_dir, &policy, now_ms()));
 

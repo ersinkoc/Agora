@@ -36,7 +36,9 @@ machine's buffer is not lost. The drill fails when the present takes longer than
 
 ## Implementation status
 `agora-hub::store`: `SqliteStore::backup_to` (online, consistent, refuses to overwrite), `verify` (integrity check and
-schema version) and `restore` (verifies first, keeps the replaced file as `<db>.before-restore`, drops stale WAL files).
+schema version) and `restore` (verifies first, keeps the replaced file as `<db>.before-restore` together with
+its write-ahead log (`<db>.before-restore-wal`, which after a crash holds its last commits; to undo a restore, move both
+back), and drops stale WAL files).
 A test restores an older backup and replays the gap from the node's side. CLI: `agora hub backup [FILE] [--keep N]` (without FILE: `<hub dir>/backups/hub-<unix ms>.db`, newest N kept, default 7;
 a given FILE is never overwritten) and `agora hub restore FILE` (stop the hub first). Not yet: running backups on a schedule
 from the hub itself (use cron or a timer for now) and encryption.

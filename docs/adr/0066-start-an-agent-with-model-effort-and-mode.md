@@ -30,7 +30,7 @@ Manifest format (`[[launch.setting]]`), schema (`AgentStart`/`AgentLaunch` setti
   settings over `agora-approval-start-v2`, both length-prefixed and in the order sent or shown (decision 2); the node verifies them and applies exactly
   the signed settings; the capability `agent.launch_settings` makes an older hub or node pair refuse rather than drop them; the mesh tool
   `agent_start` takes `settings`; the web approval card lists them in the window's words (decision 2); a request with settings offers no
-  grant. Specs: `docs/specs/protocol.md`; threat model T23.
+  grant. Specs: `docs/specs/protocol.md`; threat model T28.
 - **Not built yet:** the start window's and the TUI's pickers and the TUI card (decision 3, "remembers the last choice"), the owner's
   `start.models` allow-list and the model's price class on the card (decision 4 and 5), `mode` as a shipped setting, and keeping the
   settings across a resume after a node restart.

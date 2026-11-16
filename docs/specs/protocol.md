@@ -90,6 +90,9 @@ the acknowledgement to send back. Clients page the log by global position. Paylo
 Hub node session (`agora-hub::session`): a state machine over decoded messages, independent of transport and framing.
 The producer id is the node's authenticated identity; an event naming another producer is `protocol.producer_mismatch`
 (`node_id`, `producer_id`).
+An event whose body names a node (its `node_id`) must name that producer, or it is `protocol.invalid_message` (field `node_id`);
+`NodeLink`, `NodeForgotten` and `AgentForgotten` are written by the hub only, and one from a node is `protocol.invalid_message`
+(field `node_link`, `node_forgotten`, `agent_forgotten`). Threat model T19.
 When the hub ends a node's connection because the node broke the protocol (such as
 `protocol.producer_mismatch`), it first sends a WebSocket close (code 1008) whose reason is the stable error code, logs
 `node refused: <node> <code> <params>`, and reads until the node's side of the close (at most 5 s) so the reason is not lost
@@ -219,6 +222,13 @@ bits, 10 minutes, single use). The web app trades it with `POST /api/session` (`
 wrong, expired or used code, 429 after five misses in a row) for a session token: 128 random bits, valid 12 hours, stored only as a
 hash. The token is the bearer credential above. `<hub dir>/token` stays valid for scripts. 
 
+Metrics token (ADR-0076, `agora-hub::metrics_token`; no protocol message, the hub's HTTP surface only): `GET` or `HEAD /api/metrics`
+(only with `agora hub run --metrics`, else answered as an unknown path) accepts `Authorization: Bearer agm_<64 hex digits>` besides the
+owner's session. That token is made with `agora hub metrics-token create NAME [--expires DAYS]`, kept only as a SHA-256 hash in the
+`metrics_tokens` table, looked up on every request, and accepted nowhere else: any other path and the WebSocket treat it as an unknown
+token (401). A bearer that is neither a live metrics token nor the owner's session is 401, counts toward the address's sign-in
+lockout, and is 429 while locked out; a member's or viewer's session is 403.
+
 Screen password (ADR-0067, `agora-hub::password`; additive JSON on the same HTTP routes, no protocol message): `GET /api/session` →
 `{"passwordRequired": bool, "passwordSet": bool}` (required only when one is set and the TCP peer is not loopback). `POST /api/session`
 also takes `"password"`; without the right one from a non-loopback peer it is 401 like a bad code (the code is not spent). Wrong codes,
@@ -228,7 +238,8 @@ session ("Lock"). `POST /api/password` (`{"password", "current"?}`, owner sessio
 every other session (400 `{"code":"password.too_short"|"password.too_long"}`, 401 wrong current, 403 not the owner).
 From a non-loopback peer with a password set, `POST /api/passkey/register-begin` and `register-finish` also need `"password"` (401
 without it, counted like a sign-in); changing or clearing the password deletes passkeys added from elsewhere without it (their ids are
-not in the setting `passkeys_vouched`). Passkey `login-finish` counts only toward the per-address limit. The idle lock of a window
+not in the setting `passkeys_vouched`; a passkey added from elsewhere without it under the id of a removed passkey first takes that
+id off the list). Passkey `login-finish` counts only toward the per-address limit. The idle lock of a window
 uses `DELETE /api/session`. The hash is a setting (`screen_password`: `pbkdf2-sha256$<rounds>$<salt hex>$<hash hex>`), not a schema change.
 
 Passkeys (`agora-hub::passkey`, WebAuthn, ES256 only, no attestation): a signed-in session adds one with
@@ -236,7 +247,8 @@ Passkeys (`agora-hub::passkey`, WebAuthn, ES256 only, no attestation): a signed-
 (`{"id","publicKey"(SPKI),"clientDataJSON"}`, all base64url). Without a session: `login-begin` (→ `{"challenge","rpId","ids"}`) and
 `login-finish` (`{"id","authenticatorData","clientDataJSON","signature"}` → `{"token"}`, 401 on any failed proof, 429 while locked
 out). The relying party id is the request's `Host` without the port and the origin must be that host; challenges are single use and
-last 5 minutes; user presence and verification are required; a signature counter that counts must rise. The hub stores public keys only
+last 5 minutes, at most 4 waiting per address (an IPv6 address by its /64; a fifth drops that address's oldest) and 256 hub-wide (when
+full, the address holding the most loses its oldest); user presence and verification are required; a signature counter that counts must rise. The hub stores public keys only
 (schema v4, table `passkeys`, at most 32).
 
 Mesh posts between nodes (ADR-0031): a node sends `CommandRequest{mesh_post{to: "<node>/<agent>", body, from_agent}}` on stream 1
@@ -349,7 +361,8 @@ opened by sending `TerminalSubscribe` on a dynamic stream id (3+) chosen by the 
 node writes that terminal's frames on that stream: kind 1 snapshot (ANSI that repaints the screen, with its colours and
 attributes, then restores the program's bracketed-paste and application-cursor modes and its current style), each one followed by kind 2 with the size it was painted at, kind 0 raw
 output, kind 2 resize (cols, rows as u16 LE), kind 3 exit (i32 LE; negative = signal). A client that falls behind
-gets a fresh snapshot instead of the dropped output; it never slows the terminal. Input and resize are ordinary
+gets a fresh snapshot instead of the dropped output; it never slows the terminal. When the exit was among what it
+missed it still gets the exit frame, with `i32::MIN` (unknown) when the node no longer has the code. Input and resize are ordinary
 commands. Terminal ids are `t-<agent id>` (one terminal per agent). Implemented commands: `project.list`,
 `agent.start`, `agent.stop`, `agent.prompt`, `terminal.input`, `terminal.resize`, `terminal.subscribe`; the rest
 answer `protocol.capability_missing`. `agent.list` (ADR-0025) and `agent.kinds` (ADR-0030: the node's built-in and folder manifests, one per kind (agent-manifest.md, "Where agent kinds come from"), with display name, integration level and whether the launch program is on `PATH`; invalid manifests omitted; `agora agent kinds`). ADR-0069 (capability `kinds.program`): each kind also names `program`, the file name the node looks for on its `PATH` (never a path, and never the node's `PATH` itself), so a kind that is not installed can say what is missing; `NodeOnline.binary` (and `NodeSnapshot.binary`, from the node's latest start) is the node's own executable only when its folder is not on the node's `PATH`, empty otherwise, so a client can say to run `agora` from that folder. It is a full path that may contain a user name: only the owner receives it whole; the hub sends members and viewers its file name alone (snapshot, live and replayed events alike), since any folder, the one it is in included, may be the user's home; the owner's client shows the last two components unless asked for the whole path. Old nodes send both empty.
@@ -386,7 +399,7 @@ project's board; see `docs/specs/mesh-tools.md#shared-board-adr-0039`. New error
 
 `BoardJoin` (command 66, hub → node only; a client's is refused) and `BoardJoinResult` (`CommandOk` field 20, with `BoardJoinLease` and `BoardJoinTask`), ADR-0039 amendment B: when a project becomes shared, the hub asks each node with a checkout for its unfinished local work and puts it on the board. Sent only to nodes that offer the capability `board.join`.
 
-`GrantCreate` (63), `GrantList` (64), `GrantRevoke` (65) and `GrantListResult` (`CommandOk` field 17), ADR-0041: user-signed grants for the commands a node's policy lists in `signed_commands`; see `docs/security/threat-model.md`. New error code `approval.grant_required` (`command`). The node answers them itself; the local control socket refuses them.
+`GrantCreate` (63), `GrantList` (64), `GrantRevoke` (65) and `GrantListResult` (`CommandOk` field 17), ADR-0041: user-signed grants for the commands a node's policy lists in `signed_commands`; see `docs/security/threat-model.md`. New error code `approval.grant_required` (`command`). The node answers them itself; the local control socket refuses them. A grant covers commands only while the device that signed it is still trusted on the node, in the same term and within its limits: when that device is removed or revoked, its endorsement runs out, or its limits no longer allow the grant's scope, the grant ends and `GrantList` no longer shows it; trusting the device again does not bring it back.
 
 ### Agents that start agents (ADR-0057)
 
@@ -509,6 +522,7 @@ All additions; nothing published changed.
   every such agent whatever its kind and folder, but only when the policy has no `resume` line: a `resume` line always wins (`ask`
   stops it, `auto` keeps it to the listed kinds and folders). Either way at most 16 at one start, 8 at a time (the next round 5 s
   later), and never an agent the node brought back by itself in the last 10 minutes (`auto_resumed_at_ms` in the ledger).
+  `resume.continue = on | off` (default on, wherever automatic resume is on; Amendment A of ADR-0060) decides whether an agent that was *working* when the node stopped is given its kind's one "carry on" message (`[resume] continue_argv`, `docs/specs/agent-manifest.md`) with that resume; never for an agent that was waiting for a person, idle, finished or unknown, never when a person pressed Resume, and once for each interruption. No command or message carries the policy line or the sentence.
 
 ### Launch settings (ADR-0066)
 
