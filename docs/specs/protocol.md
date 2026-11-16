@@ -219,6 +219,13 @@ bits, 10 minutes, single use). The web app trades it with `POST /api/session` (`
 wrong, expired or used code, 429 after five misses in a row) for a session token: 128 random bits, valid 12 hours, stored only as a
 hash. The token is the bearer credential above. `<hub dir>/token` stays valid for scripts. 
 
+Metrics token (ADR-0076, `agora-hub::metrics_token`; no protocol message, the hub's HTTP surface only): `GET` or `HEAD /api/metrics`
+(only with `agora hub run --metrics`, else answered as an unknown path) accepts `Authorization: Bearer agm_<64 hex digits>` besides the
+owner's session. That token is made with `agora hub metrics-token create NAME [--expires DAYS]`, kept only as a SHA-256 hash in the
+`metrics_tokens` table, looked up on every request, and accepted nowhere else: any other path and the WebSocket treat it as an unknown
+token (401). A bearer that is neither a live metrics token nor the owner's session is 401, counts toward the address's sign-in
+lockout, and is 429 while locked out; a member's or viewer's session is 403.
+
 Screen password (ADR-0067, `agora-hub::password`; additive JSON on the same HTTP routes, no protocol message): `GET /api/session` →
 `{"passwordRequired": bool, "passwordSet": bool}` (required only when one is set and the TCP peer is not loopback). `POST /api/session`
 also takes `"password"`; without the right one from a non-loopback peer it is 401 like a bad code (the code is not spent). Wrong codes,

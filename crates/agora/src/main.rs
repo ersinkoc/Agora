@@ -157,6 +157,8 @@ pub(crate) struct Opts {
     refuse_return: bool,
     /// `agora hub run --metrics`: the hub answers `GET /api/metrics` (owner only).
     metrics: bool,
+    /// ADR-0076: `agora hub metrics-token create NAME --expires DAYS`.
+    expires: Option<u64>,
     ui: Option<String>,
     /// ADR-0062 item 4: `agora --resume ask|auto [--save]` and `agora node run --resume auto`.
     resume: Option<String>,
@@ -200,6 +202,7 @@ fn parse(args: &[String]) -> Option<Opts> {
             "--test" => o.test = true,
             "--yes" => o.yes = true,
             "--metrics" => o.metrics = true,
+            "--expires" => o.expires = Some(it.next()?.parse().ok()?),
             "--old" => o.old = true,
             "--refuse-return" => o.refuse_return = true,
             "--unsigned" => o.unsigned = true,
@@ -333,6 +336,7 @@ fn main() -> ExitCode {
         ["hub", "fingerprint"] => hubcli::hub_fingerprint(&say, &opts),
         ["hub", "login"] => hubcli::hub_login(&say, &opts),
         ["hub", "user"] => hubcli::hub_user(&say, &opts),
+        ["hub", "metrics-token"] => hubcli::hub_metrics_token(&say, &opts),
         ["hub", "audit"] => hubcli::hub_audit(&say, &opts),
         ["hub", "devices"] => hubcli::hub_devices(&say, &opts),
         ["hub", "machines"] => hubcli::hub_machines(&say, &opts),
