@@ -1,0 +1,1615 @@
+From 5b34ae0f400893684bad97d09fe5ac54292986c9 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Ersin=20KO=C3=87?= <ersinkoc@gmail.com>
+Date: Wed, 11 Nov 2026 21:58:34 +0200
+Subject: [PATCH 1/3] feat(desktop): an OS notification when approvals wait
+ while the window is out of sight (draft)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+ADR-0048 decision 5, without a bridge to the hub's page (decision 2) and without a credential in the shell: the
+web app already writes the waiting-approval count into the page title (`(N) …`); the shell watches title changes
+(Tauri `on_document_title_changed`) and, when N grows while the window is hidden, minimized or not focused, shows
+one OS notification with the count only. Words from locales/{en,tr}/notify.ftl through agora-i18n; the shell's
+own screen reports the system language (`use_locale`). The main window is now built in `setup` from its
+tauri.conf.json entry (`create: false`) so the title watch can be attached.
+
+Draft: tauri-plugin-notification pulls zbus (Linux D-Bus) whose zvariant/zbus_names carry 2026 "unmaintained"
+advisories, so cargo-deny for the desktop workspace fails; the choice is in the PR.
+
+Signed-off-by: Ersin KOÇ <ersinkoc@gmail.com>
+---
+ apps/desktop/src-tauri/Cargo.lock      | 633 ++++++++++++++++++++++++-
+ apps/desktop/src-tauri/Cargo.toml      |   4 +
+ apps/desktop/src-tauri/src/main.rs     |  92 +++-
+ apps/desktop/src-tauri/tauri.conf.json |   2 +-
+ apps/desktop/ui/shell.js               |   2 +
+ locales/en/notify.ftl                  |   5 +
+ locales/tr/notify.ftl                  |   5 +
+ 7 files changed, 739 insertions(+), 4 deletions(-)
+
+diff --git a/apps/desktop/src-tauri/Cargo.lock b/apps/desktop/src-tauri/Cargo.lock
+index d6cd13d9..a8c37035 100644
+--- a/apps/desktop/src-tauri/Cargo.lock
++++ b/apps/desktop/src-tauri/Cargo.lock
+@@ -13,10 +13,12 @@ name = "agora-desktop"
+ version = "0.2.1"
+ dependencies = [
+  "agora-desktop-tunnel",
++ "agora-i18n",
+  "serde",
+  "serde_json",
+  "tauri",
+  "tauri-build",
++ "tauri-plugin-notification",
+ ]
+ 
+ [[package]]
+@@ -29,6 +31,10 @@ dependencies = [
+  "tokio-rustls",
+ ]
+ 
++[[package]]
++name = "agora-i18n"
++version = "0.2.1"
++
+ [[package]]
+ name = "aho-corasick"
+ version = "1.1.5"
+@@ -68,6 +74,137 @@ version = "1.0.104"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
+ 
++[[package]]
++name = "async-broadcast"
++version = "0.7.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "435a87a52755b8f27fcf321ac4f04b2802e337c8c4872923137471ec39c37532"
++dependencies = [
++ "event-listener",
++ "event-listener-strategy",
++ "futures-core",
++ "pin-project-lite",
++]
++
++[[package]]
++name = "async-channel"
++version = "2.5.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "924ed96dd52d1b75e9c1a3e6275715fd320f5f9439fb5a4a11fa51f4221158d2"
++dependencies = [
++ "concurrent-queue",
++ "event-listener-strategy",
++ "futures-core",
++ "pin-project-lite",
++]
++
++[[package]]
++name = "async-executor"
++version = "1.14.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "f426a31126c735126297bc5ea7a521263c9faff4f63ca415267ee625651c4f37"
++dependencies = [
++ "async-task",
++ "concurrent-queue",
++ "fastrand",
++ "futures-lite",
++ "pin-project-lite",
++ "slab",
++]
++
++[[package]]
++name = "async-io"
++version = "2.6.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "456b8a8feb6f42d237746d4b3e9a178494627745c3c56c6ea55d92ba50d026fc"
++dependencies = [
++ "autocfg",
++ "cfg-if",
++ "concurrent-queue",
++ "futures-io",
++ "futures-lite",
++ "parking",
++ "polling",
++ "rustix",
++ "slab",
++ "windows-sys 0.61.2",
++]
++
++[[package]]
++name = "async-lock"
++version = "3.5.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "0876700b0d007ad25d5508865a4259c3af9af6d296bf663a0d586d0bc3369f6f"
++dependencies = [
++ "event-listener",
++ "event-listener-strategy",
++ "pin-project-lite",
++]
++
++[[package]]
++name = "async-process"
++version = "2.5.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "fc50921ec0055cdd8a16de48773bfeec5c972598674347252c0399676be7da75"
++dependencies = [
++ "async-channel",
++ "async-io",
++ "async-lock",
++ "async-signal",
++ "async-task",
++ "blocking",
++ "cfg-if",
++ "event-listener",
++ "futures-lite",
++ "rustix",
++]
++
++[[package]]
++name = "async-recursion"
++version = "1.2.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "4f8abc12baad266b1c8cec146854c195b5864b4221d4b2ca7296a7ae82d9e451"
++dependencies = [
++ "proc-macro2",
++ "quote",
++ "syn 3.0.10",
++]
++
++[[package]]
++name = "async-signal"
++version = "0.2.14"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "52b5aaafa020cf5053a01f2a60e8ff5dccf550f0f77ec54a4e47285ac2bab485"
++dependencies = [
++ "async-io",
++ "async-lock",
++ "atomic-waker",
++ "cfg-if",
++ "futures-core",
++ "futures-io",
++ "rustix",
++ "signal-hook-registry",
++ "slab",
++ "windows-sys 0.61.2",
++]
++
++[[package]]
++name = "async-task"
++version = "4.7.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "8b75356056920673b02621b35afd0f7dda9306d03c79a30f5c56c44cf256e3de"
++
++[[package]]
++name = "async-trait"
++version = "0.1.92"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "82f6aeea286b8eb4dd3431a1be1b59d290ace00f5bfd8e2a159bc2a05e2c1667"
++dependencies = [
++ "proc-macro2",
++ "quote",
++ "syn 3.0.10",
++]
++
+ [[package]]
+ name = "atk"
+ version = "0.18.2"
+@@ -178,6 +315,19 @@ dependencies = [
+  "objc2",
+ ]
+ 
++[[package]]
++name = "blocking"
++version = "1.7.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "a70e4329df6cb94385eed412ec92375c3cdd8a6e502493d1229b6414e4036dfa"
++dependencies = [
++ "async-channel",
++ "async-task",
++ "futures-io",
++ "futures-lite",
++ "piper",
++]
++
+ [[package]]
+ name = "brotli"
+ version = "9.1.1"
+@@ -346,6 +496,17 @@ version = "1.0.5"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
+ 
++[[package]]
++name = "chacha20"
++version = "0.10.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "65c35e4b699c7e15ccbe7ee35c005e4fc0a278d22238a2857e6ce2dadeda1b06"
++dependencies = [
++ "cfg-if",
++ "cpufeatures 0.3.1",
++ "rand_core",
++]
++
+ [[package]]
+ name = "chrono"
+ version = "0.4.45"
+@@ -368,6 +529,15 @@ dependencies = [
+  "memchr",
+ ]
+ 
++[[package]]
++name = "concurrent-queue"
++version = "2.5.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "4ca0197aee26d1ae37445ee532fefce43251d24cc7c166799f4d46817f1d3973"
++dependencies = [
++ "crossbeam-utils",
++]
++
+ [[package]]
+ name = "cookie"
+ version = "0.18.2"
+@@ -427,6 +597,15 @@ dependencies = [
+  "libc",
+ ]
+ 
++[[package]]
++name = "cpufeatures"
++version = "0.3.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "5ca28b0ae3115b884660db4118d803791fd6756b6e88f39c0f3f7859060d7566"
++dependencies = [
++ "libc",
++]
++
+ [[package]]
+ name = "crc32fast"
+ version = "1.5.5"
+@@ -741,6 +920,33 @@ version = "1.2.2"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "4ef6b89e5b37196644d8796de5268852ff179b44e96276cf4290264843743bb7"
+ 
++[[package]]
++name = "endi"
++version = "1.1.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "66b7e2430c6dff6a955451e2cfc438f09cea1965a9d6f87f7e3b90decc014099"
++
++[[package]]
++name = "enumflags2"
++version = "0.7.12"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "1027f7680c853e056ebcec683615fb6fbbc07dbaa13b4d5d9442b146ded4ecef"
++dependencies = [
++ "enumflags2_derive",
++ "serde",
++]
++
++[[package]]
++name = "enumflags2_derive"
++version = "0.7.12"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "67c78a4d8fdf9953a5c9d458f9efe940fd97a0cab0941c075a813ac594733827"
++dependencies = [
++ "proc-macro2",
++ "quote",
++ "syn 2.0.119",
++]
++
+ [[package]]
+ name = "equivalent"
+ version = "1.0.3"
+@@ -758,6 +964,36 @@ dependencies = [
+  "typeid",
+ ]
+ 
++[[package]]
++name = "errno"
++version = "0.3.14"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
++dependencies = [
++ "libc",
++ "windows-sys 0.61.2",
++]
++
++[[package]]
++name = "event-listener"
++version = "5.4.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "5a23add41df1562121a9393cb065eab5146a1242410f23a644851e90cfd669d2"
++dependencies = [
++ "parking",
++ "pin-project-lite",
++]
++
++[[package]]
++name = "event-listener-strategy"
++version = "0.5.4"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "8be9f3dfaaffdae2972880079a491a1a8bb7cbed0b8dd7a347f668b4150a3b93"
++dependencies = [
++ "event-listener",
++ "pin-project-lite",
++]
++
+ [[package]]
+ name = "fastrand"
+ version = "2.5.0"
+@@ -880,6 +1116,19 @@ version = "0.3.34"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "53c0fa8157de1303bfffdaa1cc2a673bfffb60102f76b0ef4441659124373fed"
+ 
++[[package]]
++name = "futures-lite"
++version = "2.6.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "f78e10609fe0e0b3f4157ffab1876319b5b0db102a2c60dc4626306dc46b44ad"
++dependencies = [
++ "fastrand",
++ "futures-core",
++ "futures-io",
++ "parking",
++ "pin-project-lite",
++]
++
+ [[package]]
+ name = "futures-macro"
+ version = "0.3.34"
+@@ -1060,6 +1309,7 @@ dependencies = [
+  "cfg-if",
+  "libc",
+  "r-efi 6.0.0",
++ "rand_core",
+ ]
+ 
+ [[package]]
+@@ -1234,6 +1484,12 @@ version = "0.5.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
+ 
++[[package]]
++name = "hermit-abi"
++version = "0.5.3"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "e17592d60ebacc7d5e169f4663c5f84f9161cc90328abcfe8456f41e4dfcb284"
++
+ [[package]]
+ name = "hex"
+ version = "0.4.3"
+@@ -1751,6 +2007,12 @@ dependencies = [
+  "libc",
+ ]
+ 
++[[package]]
++name = "linux-raw-sys"
++version = "0.12.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
++
+ [[package]]
+ name = "litemap"
+ version = "0.8.3"
+@@ -1772,6 +2034,20 @@ version = "0.4.35"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
+ 
++[[package]]
++name = "mac-notification-sys"
++version = "0.6.15"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "fd604973958ddcc11b561193c0fb96ba146506ef2f231ef2e7c35fd2cbc9beca"
++dependencies = [
++ "cc",
++ "log",
++ "objc2",
++ "objc2-foundation",
++ "time",
++ "uuid",
++]
++
+ [[package]]
+ name = "markup5ever"
+ version = "0.39.0"
+@@ -1903,6 +2179,20 @@ version = "1.0.6"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
+ 
++[[package]]
++name = "notify-rust"
++version = "4.19.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "57da5b5d3b7809bf71858da5a2818c3404ca4688c02c8abecdda0fcdec235df3"
++dependencies = [
++ "futures-lite",
++ "log",
++ "mac-notification-sys",
++ "serde",
++ "tauri-winrt-notification",
++ "zbus 6.2.1",
++]
++
+ [[package]]
+ name = "num-conv"
+ version = "0.2.2"
+@@ -2064,6 +2354,7 @@ checksum = "e3e0adef53c21f888deb4fa59fc59f7eb17404926ee8a6f59f5df0fd7f9f3272"
+ dependencies = [
+  "bitflags 2.13.2",
+  "block2",
++ "libc",
+  "objc2",
+  "objc2-core-foundation",
+ ]
+@@ -2148,6 +2439,16 @@ version = "0.2.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
+ 
++[[package]]
++name = "ordered-stream"
++version = "0.2.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "9aa2b01e1d916879f73a53d01d1d6cee68adbb31d6d9177a8cfce093cced1d50"
++dependencies = [
++ "futures-core",
++ "pin-project-lite",
++]
++
+ [[package]]
+ name = "pango"
+ version = "0.18.3"
+@@ -2173,6 +2474,12 @@ dependencies = [
+  "system-deps",
+ ]
+ 
++[[package]]
++name = "parking"
++version = "2.2.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "f38d5652c16fde515bb1ecef450ab0f6a219d619a7274976324d5e377f7dceba"
++
+ [[package]]
+ name = "parking_lot"
+ version = "0.12.5"
+@@ -2314,6 +2621,17 @@ version = "0.2.17"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
+ 
++[[package]]
++name = "piper"
++version = "0.2.5"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "c835479a4443ded371d6c535cbfd8d31ad92c5d23ae9770a61bc155e4992a3c1"
++dependencies = [
++ "atomic-waker",
++ "fastrand",
++ "futures-io",
++]
++
+ [[package]]
+ name = "pkg-config"
+ version = "0.3.34"
+@@ -2346,6 +2664,20 @@ dependencies = [
+  "miniz_oxide 0.8.9",
+ ]
+ 
++[[package]]
++name = "polling"
++version = "3.11.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "5d0e4f59085d47d8241c88ead0f274e8a0cb551f3625263c05eb8dd897c34218"
++dependencies = [
++ "cfg-if",
++ "concurrent-queue",
++ "hermit-abi",
++ "pin-project-lite",
++ "rustix",
++ "windows-sys 0.61.2",
++]
++
+ [[package]]
+ name = "portable-atomic"
+ version = "1.15.0"
+@@ -2474,6 +2806,23 @@ version = "6.0.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
+ 
++[[package]]
++name = "rand"
++version = "0.10.3"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "65c9fb96cbc91e3478eaae79a69fcd3f1ae4ad052e471fe6732fff548984b4af"
++dependencies = [
++ "chacha20",
++ "getrandom 0.4.3",
++ "rand_core",
++]
++
++[[package]]
++name = "rand_core"
++version = "0.10.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "63b8176103e19a2643978565ca18b50549f6101881c443590420e4dc998a3c69"
++
+ [[package]]
+ name = "raw-window-handle"
+ version = "0.6.2"
+@@ -2611,6 +2960,19 @@ dependencies = [
+  "semver",
+ ]
+ 
++[[package]]
++name = "rustix"
++version = "1.1.6"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "e5e76742e5294153d4dde1207dbec5bdd81eef6fabdc0d2118babadabfd858aa"
++dependencies = [
++ "bitflags 2.13.2",
++ "errno",
++ "libc",
++ "linux-raw-sys",
++ "windows-sys 0.61.2",
++]
++
+ [[package]]
+ name = "rustls"
+ version = "0.23.46"
+@@ -2938,7 +3300,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
+ dependencies = [
+  "cfg-if",
+- "cpufeatures",
++ "cpufeatures 0.2.17",
+  "digest",
+ ]
+ 
+@@ -2948,6 +3310,16 @@ version = "2.0.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
+ 
++[[package]]
++name = "signal-hook-registry"
++version = "1.4.8"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b"
++dependencies = [
++ "errno",
++ "libc",
++]
++
+ [[package]]
+ name = "simd-adler32"
+ version = "0.3.10"
+@@ -3350,6 +3722,42 @@ dependencies = [
+  "tauri-utils",
+ ]
+ 
++[[package]]
++name = "tauri-plugin"
++version = "2.7.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "67fb21a77e8f94e8beb3325e583102488659365af0a3948b7ea244c5b779c291"
++dependencies = [
++ "anyhow",
++ "glob",
++ "plist",
++ "schemars 0.8.22",
++ "serde",
++ "serde_json",
++ "tauri-utils",
++ "walkdir",
++]
++
++[[package]]
++name = "tauri-plugin-notification"
++version = "2.8.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "14a226bfb8189ec4ab2c1936e66330ad06c44d9f6c54a674338208491dee177f"
++dependencies = [
++ "log",
++ "notify-rust",
++ "rand",
++ "serde",
++ "serde_json",
++ "serde_repr",
++ "tauri",
++ "tauri-plugin",
++ "thiserror 2.0.21",
++ "time",
++ "url",
++ "zbus 5.19.0",
++]
++
+ [[package]]
+ name = "tauri-runtime"
+ version = "2.12.2"
+@@ -3449,6 +3857,30 @@ dependencies = [
+  "toml 1.2.1+spec-1.1.0",
+ ]
+ 
++[[package]]
++name = "tauri-winrt-notification"
++version = "0.8.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "f37a6c354fd28fc9e322ed9bd47e3959576dad28c9d58ea1cf888cce1c7ccb36"
++dependencies = [
++ "thiserror 2.0.21",
++ "windows",
++ "windows-version",
++]
++
++[[package]]
++name = "tempfile"
++version = "3.27.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
++dependencies = [
++ "fastrand",
++ "getrandom 0.4.3",
++ "once_cell",
++ "rustix",
++ "windows-sys 0.61.2",
++]
++
+ [[package]]
+ name = "tendril"
+ version = "0.5.1"
+@@ -3729,9 +4161,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "63e71662fa4b2a2c3a26f570f037eb95bb1f85397f3cd8076caed2f026a6d100"
+ dependencies = [
+  "pin-project-lite",
++ "tracing-attributes",
+  "tracing-core",
+ ]
+ 
++[[package]]
++name = "tracing-attributes"
++version = "0.1.31"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "7490cfa5ec963746568740651ac6781f701c9c5ea257c58e057f3ba8cf69e8da"
++dependencies = [
++ "proc-macro2",
++ "quote",
++ "syn 2.0.119",
++]
++
+ [[package]]
+ name = "tracing-core"
+ version = "0.1.36"
+@@ -3781,6 +4225,17 @@ version = "1.20.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
+ 
++[[package]]
++name = "uds_windows"
++version = "1.2.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "f2f6fb2847f6742cd76af783a2a2c49e9375d0a111c7bef6f71cd9e738c72d6e"
++dependencies = [
++ "memoffset",
++ "tempfile",
++ "windows-sys 0.61.2",
++]
++
+ [[package]]
+ name = "unicode-ident"
+ version = "1.0.27"
+@@ -4548,6 +5003,128 @@ dependencies = [
+  "synstructure",
+ ]
+ 
++[[package]]
++name = "zbus"
++version = "5.19.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "5db4be7c075cb421e4b7ee645541604239bd243ba7c357511f4ff3a74b555907"
++dependencies = [
++ "async-broadcast",
++ "async-executor",
++ "async-io",
++ "async-lock",
++ "async-process",
++ "async-recursion",
++ "async-task",
++ "async-trait",
++ "blocking",
++ "enumflags2",
++ "event-listener",
++ "futures-core",
++ "futures-lite",
++ "hex",
++ "libc",
++ "ordered-stream",
++ "rustix",
++ "serde",
++ "serde_repr",
++ "tracing",
++ "uds_windows",
++ "uuid",
++ "windows-sys 0.61.2",
++ "winnow 1.0.5",
++ "zbus_macros 5.19.0",
++ "zbus_names",
++ "zvariant",
++]
++
++[[package]]
++name = "zbus"
++version = "6.2.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "0ddb2961d9587ef9f24ad14cde1c3bc4c5edc9f1525932a8cffdd5bd98886eb9"
++dependencies = [
++ "async-trait",
++ "bitflags 2.13.2",
++ "endi",
++ "futures-core",
++ "hex",
++ "libc",
++ "ordered-stream",
++ "rustix",
++ "serde",
++ "serde_repr",
++ "socket2",
++ "uds_windows",
++ "uuid",
++ "windows-sys 0.61.2",
++ "winnow 1.0.5",
++ "zbus_macros 6.2.1",
++ "zbus_utils",
++ "zcheapstr",
++ "zruntime",
++]
++
++[[package]]
++name = "zbus_macros"
++version = "5.19.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "2990635d09ade6df1868f72f8cac69a876a90981e8bd3c40b1be413f8dc88f40"
++dependencies = [
++ "proc-macro-crate 3.5.0",
++ "proc-macro2",
++ "quote",
++ "syn 3.0.10",
++ "zbus_names",
++ "zvariant",
++ "zvariant_utils",
++]
++
++[[package]]
++name = "zbus_macros"
++version = "6.2.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "083b38add47c340fc12ec560124fb1d9c23acb584f7021099f85ec6587a03c54"
++dependencies = [
++ "proc-macro2",
++ "quote",
++ "syn 3.0.10",
++ "zbus_utils",
++]
++
++[[package]]
++name = "zbus_names"
++version = "4.3.5"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "812a12be4ead7a59e18ea8f047d08add0066b73bc62fc1467066a2472ae088dd"
++dependencies = [
++ "serde",
++ "winnow 1.0.5",
++ "zvariant",
++]
++
++[[package]]
++name = "zbus_utils"
++version = "6.1.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "af55e52da295311b368c45bcae221f020e28e97a2420360170ce389218e76ec7"
++dependencies = [
++ "proc-macro2",
++ "quote",
++ "serde",
++ "syn 3.0.10",
++ "winnow 1.0.5",
++]
++
++[[package]]
++name = "zcheapstr"
++version = "1.2.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "939f186d9ecebe044315a5cb6d6f78568bbc21152adc954d5a0c2f58bdbc9920"
++dependencies = [
++ "serde",
++]
++
+ [[package]]
+ name = "zerofrom"
+ version = "0.1.8"
+@@ -4619,3 +5196,57 @@ name = "zmij"
+ version = "1.0.23"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
++
++[[package]]
++name = "zruntime"
++version = "0.2.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "23ef5ed7d628cdf0af82f93dfe03330a8e37383bf7422a1d3d6eb72326680be5"
++dependencies = [
++ "futures-core",
++ "futures-io",
++ "rustix",
++ "socket2",
++ "windows-sys 0.61.2",
++]
++
++[[package]]
++name = "zvariant"
++version = "5.15.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "80bf6d6cd6a4b601acb64cfb8284cdc643fcfa75ef26ae3c46ec8aa4e8a1fbb7"
++dependencies = [
++ "endi",
++ "enumflags2",
++ "serde",
++ "winnow 1.0.5",
++ "zcheapstr",
++ "zvariant_derive",
++ "zvariant_utils",
++]
++
++[[package]]
++name = "zvariant_derive"
++version = "5.15.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "ef2672456ba1cb54b5eaec136e63135b3c7495fb938e53b28a62e633496d486d"
++dependencies = [
++ "proc-macro-crate 3.5.0",
++ "proc-macro2",
++ "quote",
++ "syn 3.0.10",
++ "zvariant_utils",
++]
++
++[[package]]
++name = "zvariant_utils"
++version = "4.2.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "bad0294361a320b694a328460dc73add56c306150f5cb6bfafc44446120008a3"
++dependencies = [
++ "proc-macro2",
++ "quote",
++ "serde",
++ "syn 3.0.10",
++ "winnow 1.0.5",
++]
+diff --git a/apps/desktop/src-tauri/Cargo.toml b/apps/desktop/src-tauri/Cargo.toml
+index e87bb29b..ef9ad07f 100644
+--- a/apps/desktop/src-tauri/Cargo.toml
++++ b/apps/desktop/src-tauri/Cargo.toml
+@@ -18,6 +18,10 @@ serde = { version = "1", features = ["derive"] }
+ serde_json = "1"
+ # The pinned-CA loopback tunnel (ADR-0048 decision 3).
+ agora-desktop-tunnel = { path = "../../../crates/agora-desktop-tunnel" }
++# ADR-0048 decision 5: an OS notification for a waiting approval while the window is hidden (decision 7: Tauri crates stay here).
++tauri-plugin-notification = "2"
++# The notification's words, from `locales/` like every other text (no dependencies of its own).
++agora-i18n = { path = "../../../crates/agora-i18n" }
+ 
+ [profile.release]
+ lto = "thin"
+diff --git a/apps/desktop/src-tauri/src/main.rs b/apps/desktop/src-tauri/src/main.rs
+index 7e4a06ee..e360553f 100644
+--- a/apps/desktop/src-tauri/src/main.rs
++++ b/apps/desktop/src-tauri/src/main.rs
+@@ -4,7 +4,8 @@
+ #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+ 
+ use std::path::PathBuf;
+-use std::sync::Mutex;
++use std::sync::atomic::{AtomicU32, Ordering};
++use std::sync::{Arc, Mutex};
+ 
+ use agora_desktop_tunnel::{check, fingerprint, open, Tunnel, TunnelError};
+ use serde::{Deserialize, Serialize};
+@@ -22,6 +23,52 @@ struct Saved {
+ #[derive(Default)]
+ struct Tunnels(Mutex<Option<Tunnel>>);
+ 
++/// The language the notification is written in: the shell's own screen reports the system's at start (`use_locale`); before
++/// that, the environment's.
++struct Locale(Mutex<String>);
++
++/// The number of waiting approvals the hub's page shows in its title (`(N) …`, `apps/web/src/net/alert.ts`); 0 without one.
++/// The title is the page's own text: the shell reads nothing else from it (ADR-0048 decisions 2 and 5).
++fn waiting(title: &str) -> u32 {
++    title
++        .strip_prefix('(')
++        .and_then(|rest| rest.split_once(") "))
++        .and_then(|(n, _)| n.parse().ok())
++        .unwrap_or(0)
++}
++
++/// Shows one OS notification that `count` approvals are waiting. Clicking it brings the app forward (the system's default), where
++/// the home screen lists them; it carries no approval content.
++fn notify_waiting(app: &tauri::AppHandle, count: u32) {
++    use tauri_plugin_notification::NotificationExt;
++    let tag = app
++        .state::<Locale>()
++        .0
++        .lock()
++        .map(|l| l.clone())
++        .unwrap_or_default();
++    let words = agora_i18n::catalog::Catalog::for_locale(&tag);
++    let n = i64::from(count);
++    let (Some(title), Some(body)) = (
++        words.render("notify-title", &[]),
++        words.render(
++            "notify-desktop-approvals",
++            &[("count", agora_i18n::catalog::Arg::Num(n))],
++        ),
++    ) else {
++        return;
++    };
++    let _ = app.notification().builder().title(title).body(body).show();
++}
++
++/// The shell's own screen reports the system language once (`navigator.language`).
++#[tauri::command]
++fn use_locale(locale: State<'_, Locale>, tag: String) {
++    if let Ok(mut l) = locale.0.lock() {
++        *l = tag;
++    }
++}
++
+ fn config_file(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+     let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+@@ -93,13 +140,54 @@ fn forget(app: tauri::AppHandle, tunnels: State<'_, Tunnels>) -> Result<(), Stri
+ 
+ fn main() {
+     tauri::Builder::default()
++        .plugin(tauri_plugin_notification::init())
+         .manage(Tunnels::default())
++        .manage(Locale(Mutex::new(agora_i18n::catalog::locale_from_env())))
+         .invoke_handler(tauri::generate_handler![
+             ca_fingerprint,
+             saved,
+             connect,
+-            forget
++            forget,
++            use_locale
+         ])
++        .setup(|app| {
++            // The window from the configuration, plus a watch on its title: when the page's count of waiting approvals grows while
++            // the window is out of sight, one notification (ADR-0048 decision 5).
++            let config = app
++                .config()
++                .app
++                .windows
++                .iter()
++                .find(|w| w.label == "main")
++                .cloned()
++                .ok_or("no main window in tauri.conf.json")?;
++            let last = Arc::new(AtomicU32::new(0));
++            tauri::WebviewWindowBuilder::from_config(app.handle(), &config)?
++                .on_document_title_changed(move |window, title| {
++                    let now = waiting(&title);
++                    let before = last.swap(now, Ordering::Relaxed);
++                    let away = !window.is_visible().unwrap_or(true)
++                        || window.is_minimized().unwrap_or(false)
++                        || !window.is_focused().unwrap_or(true);
++                    if now > before && away {
++                        notify_waiting(window.app_handle(), now);
++                    }
++                })
++                .build()?;
++            Ok(())
++        })
+         .run(tauri::generate_context!())
+         .expect("the desktop shell could not start");
+ }
++
++#[cfg(test)]
++mod tests {
++    #[test]
++    fn the_waiting_count_is_read_from_the_title_prefix_only() {
++        assert_eq!(super::waiting("(3) Agora"), 3);
++        assert_eq!(super::waiting("Agora"), 0);
++        assert_eq!(super::waiting("(x) Agora"), 0);
++        assert_eq!(super::waiting("Agora (3)"), 0);
++        assert_eq!(super::waiting("(12) Agora — Activity"), 12);
++    }
++}
+diff --git a/apps/desktop/src-tauri/tauri.conf.json b/apps/desktop/src-tauri/tauri.conf.json
+index 785be50d..1114d910 100644
+--- a/apps/desktop/src-tauri/tauri.conf.json
++++ b/apps/desktop/src-tauri/tauri.conf.json
+@@ -6,7 +6,7 @@
+   "build": { "frontendDist": "../ui" },
+   "app": {
+     "withGlobalTauri": true,
+-    "windows": [{ "label": "main", "title": "Agora", "width": 1200, "height": 800, "minWidth": 480, "minHeight": 480 }],
++    "windows": [{ "label": "main", "title": "Agora", "width": 1200, "height": 800, "minWidth": 480, "minHeight": 480, "create": false }],
+     "security": { "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost" }
+   },
+   "bundle": {
+diff --git a/apps/desktop/ui/shell.js b/apps/desktop/ui/shell.js
+index 571d283e..8788d582 100644
+--- a/apps/desktop/ui/shell.js
++++ b/apps/desktop/ui/shell.js
+@@ -24,6 +24,8 @@ const t = T[(navigator.language || 'en').toLowerCase().startsWith('tr') ? 'tr' :
+ for (const el of document.querySelectorAll('[data-t]')) el.textContent = t[el.dataset.t];
+ 
+ const { invoke } = window.__TAURI__.core;
++// The shell's notification for waiting approvals speaks the system's language (ADR-0048 decision 5).
++invoke('use_locale', { tag: navigator.language || 'en' }).catch(() => {});
+ const $ = (id) => document.getElementById(id);
+ const fail = (msg) => { $('error').textContent = msg; $('error').hidden = false; };
+ // The shell's `connect` answers with a stable code; anything else is the general message.
+diff --git a/locales/en/notify.ftl b/locales/en/notify.ftl
+index a635b01c..78ae0175 100644
+--- a/locales/en/notify.ftl
++++ b/locales/en/notify.ftl
+@@ -14,3 +14,8 @@ notify-digest =
+     }
+ notify-title = Agora
+ notify-test = Agora notifications work.
++notify-desktop-approvals =
++    { $count ->
++        [one] An approval is waiting for you.
++       *[other] { $count } approvals are waiting for you.
++    }
+diff --git a/locales/tr/notify.ftl b/locales/tr/notify.ftl
+index f19a933c..85624400 100644
+--- a/locales/tr/notify.ftl
++++ b/locales/tr/notify.ftl
+@@ -15,3 +15,8 @@ notify-digest =
+ 
+ notify-title = Agora
+ notify-test = Agora bildirimleri çalışıyor.
++notify-desktop-approvals =
++    { $count ->
++        [one] Sizi bekleyen bir onay var.
++       *[other] Sizi bekleyen { $count } onay var.
++    }
+-- 
+2.53.0
+
+
+From f2c002504309111e635b9f6fb7a337ac91c1b7e8 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Ersin=20KO=C3=87?= <ersinkoc@gmail.com>
+Date: Sun, 15 Nov 2026 15:52:23 +0200
+Subject: [PATCH 2/3] fix(platform): no macOS notification yet (osascript posts
+ as Script Editor); Windows says when notifications are off
+
+Merger's pick (a) on #296: Windows and Linux notify; macOS desktop_notify returns Unsupported and the docs say a silent Mac is
+expected for now (the app's own UNUserNotificationCenter is the follow-up). Windows: the toast script exits 3 when
+ToastNotifier.Setting is not Enabled, reported as PermissionDenied (windows' suggestion 1).
+---
+ CHANGELOG.md                            |  4 ++++
+ apps/desktop/README.md                  | 10 +++++++++-
+ crates/agora-platform/src/lib.rs        |  5 +++--
+ crates/agora-platform/src/macos.rs      | 26 +++++--------------------
+ crates/agora-platform/src/winservice.rs | 13 ++++++++-----
+ docs/backlog/phase-7.md                 |  2 +-
+ 6 files changed, 30 insertions(+), 30 deletions(-)
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index a1bcfb8b..73093bfd 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -4,6 +4,10 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
+ 
+ ## Next
+ 
++### Desktop app
++- On Windows and Linux, the desktop app shows one system notification when approvals are waiting while its window is hidden,
++  minimized or not in front (the count only, in your language). Not on macOS yet: there it stays silent for now.
++
+ ### Security
+ - macOS: a confined agent is not started when a file it may write also has another name elsewhere (a hard link made outside
+   confinement), or when a save copy next to it (`state.json.tmp`) is such a link, since writing it would change that other file too; the message says to remove the link or put a copy in its place
+diff --git a/apps/desktop/README.md b/apps/desktop/README.md
+index 8ed22967..e6dc40ff 100644
+--- a/apps/desktop/README.md
++++ b/apps/desktop/README.md
+@@ -33,6 +33,14 @@ Allow" applies to that build only. Allow it: seen with the 0.3.4 image on macOS
+ whether the window can still sign with its stored device key (approvals, grants, folder listing) is not tested. A Developer ID signature
+ (stable identity) removes the prompt. WebView2 on Windows keeps that key with the user's account and does not ask.
+ 
+-Not done yet: native notifications for a waiting approval while the window is hidden, signed installers and per-platform signing (needs
++Notifications (ADR-0048 decision 5): when the number of approvals waiting (the page's title, `(N) Agora`) grows while the window
++is hidden, minimized or not focused, the shell shows one system notification with the count only, in the system's language. It
++uses the system's own notifier with no library (`agora_platform::desktop_notify`): Windows a toast (shown as Windows PowerShell;
++nothing when notifications are turned off for the user), Linux `notify-send` (nothing without it). **macOS: not yet.** The script
++notifier posts as Script Editor (shown only if Script Editor may notify, and a click opens Script Editor), so the shell posts
++nothing there; the app's own notification is a follow-up. A silent Mac is expected for now; the hub's phone notifications
++(ntfy, ADR-0051) cover a person away from the window.
++
++Not done yet: signed installers and per-platform signing (needs
+ the maintainer's Apple and Windows accounts; unsigned builds are published as such), a real icon (the name and logo are open question Q1).
+ The product name appears in `src-tauri/tauri.conf.json` (`productName`, window title) and `ui/index.html`; renaming is a change to those.
+diff --git a/crates/agora-platform/src/lib.rs b/crates/agora-platform/src/lib.rs
+index 03132a43..4ee8644c 100644
+--- a/crates/agora-platform/src/lib.rs
++++ b/crates/agora-platform/src/lib.rs
+@@ -1841,9 +1841,10 @@ pub fn service_status(name: &str) -> io::Result<ServiceState> {
+ 
+ /// Shows one notification of the system's own, with `title` and `body` (ADR-0048 decision 5: the desktop shell tells the user that
+ /// approvals wait while its window is out of sight). No library: the system's own notifier is run by its full path with a fixed
+-/// argument list, and the words travel as separate arguments (macOS `osascript` reads them from `argv`; Linux `notify-send`) or as
++/// argument list, and the words travel as separate arguments (Linux `notify-send`) or as
+ /// environment variables (Windows PowerShell), never inside a script, so no text can change what runs. The words come from
+-/// `locales/` (the caller's). Waits for the notifier; `NotFound` where there is none (Linux without `notify-send`).
++/// `locales/` (the caller's). Waits for the notifier; `NotFound` where there is none (Linux without `notify-send`),
++/// `PermissionDenied` where the user turned notifications off (Windows), `Unsupported` on macOS for now (see `macos.rs`).
+ pub fn desktop_notify(title: &str, body: &str) -> io::Result<()> {
+     #[cfg(target_os = "macos")]
+     {
+diff --git a/crates/agora-platform/src/macos.rs b/crates/agora-platform/src/macos.rs
+index 6aa7c734..fb0ca149 100644
+--- a/crates/agora-platform/src/macos.rs
++++ b/crates/agora-platform/src/macos.rs
+@@ -620,28 +620,12 @@ pub(crate) fn wrap(
+     Ok((SANDBOX_EXEC.into(), v))
+ }
+ 
+-/// See [`crate::desktop_notify`]: `osascript` with a fixed script that reads the title and the body from its arguments.
++/// See [`crate::desktop_notify`]: not yet on macOS. The system's own notifier for a script (`osascript`) posts as *Script Editor*:
++/// it shows only when Script Editor may notify, and a click opens Script Editor instead of Agora (measured on macOS 27.2), so nothing
++/// is posted. The app's own notification (`UNUserNotificationCenter`) is the planned way (#296 follow-up).
+ pub(crate) fn desktop_notify(title: &str, body: &str) -> io::Result<()> {
+-    let status = std::process::Command::new("/usr/bin/osascript")
+-        .args([
+-            "-e",
+-            "on run argv",
+-            "-e",
+-            "display notification (item 2 of argv) with title (item 1 of argv)",
+-            "-e",
+-            "end run",
+-            title,
+-            body,
+-        ])
+-        .stdin(std::process::Stdio::null())
+-        .stdout(std::process::Stdio::null())
+-        .stderr(std::process::Stdio::null())
+-        .status()?;
+-    if status.success() {
+-        Ok(())
+-    } else {
+-        Err(io::Error::other(format!("osascript: {status}")))
+-    }
++    let _ = (title, body);
++    Err(io::Error::from(io::ErrorKind::Unsupported))
+ }
+ 
+ /// See [`crate::opened_path`]: `F_GETPATH`, the path the kernel has for the open vnode (firmlinks shown as `/Users/...`, as
+diff --git a/crates/agora-platform/src/winservice.rs b/crates/agora-platform/src/winservice.rs
+index 40ec9632..37aca281 100644
+--- a/crates/agora-platform/src/winservice.rs
++++ b/crates/agora-platform/src/winservice.rs
+@@ -38,7 +38,9 @@ $t = $x.GetElementsByTagName('text');\
+ $t.Item(0).AppendChild($x.CreateTextNode($env:AGORA_NOTIFY_TITLE)) | Out-Null;\
+ $t.Item(1).AppendChild($x.CreateTextNode($env:AGORA_NOTIFY_BODY)) | Out-Null;\
+ $id = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe';\
+-[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($id).Show([Windows.UI.Notifications.ToastNotification]::new($x))";
++$n = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($id);\
++if ($n.Setting -ne 'Enabled') { exit 3 };\
++$n.Show([Windows.UI.Notifications.ToastNotification]::new($x))";
+ 
+ /// See [`crate::desktop_notify`]: Windows PowerShell by its full path, with [`TOAST_SCRIPT`]; the words are environment variables.
+ pub(crate) fn desktop_notify(title: &str, body: &str) -> io::Result<()> {
+@@ -53,10 +55,11 @@ pub(crate) fn desktop_notify(title: &str, body: &str) -> io::Result<()> {
+         .stdout(std::process::Stdio::null())
+         .stderr(std::process::Stdio::null())
+         .status()?;
+-    if status.success() {
+-        Ok(())
+-    } else {
+-        Err(io::Error::other(format!("powershell: {status}")))
++    match status.code() {
++        Some(0) => Ok(()),
++        // Notifications are turned off for this user or this notifier (`ToastNotifier.Setting` is not `Enabled`): nothing was shown.
++        Some(3) => Err(io::Error::from(io::ErrorKind::PermissionDenied)),
++        _ => Err(io::Error::other(format!("powershell: {status}"))),
+     }
+ }
+ 
+diff --git a/docs/backlog/phase-7.md b/docs/backlog/phase-7.md
+index 2d639d25..5bb44287 100644
+--- a/docs/backlog/phase-7.md
++++ b/docs/backlog/phase-7.md
+@@ -9,7 +9,7 @@ Started with the Windows node (ADR-0045). The only machine used for development
+ | P7-03 W3: process view (tree, name, stats; no cwd) | done (W3) | `crates/agora-platform/src/winproc.rs`: `process_name` (image file name without `.exe`, `QueryFullProcessImageNameW`), `process_stats` (`GetProcessTimes`, `GetProcessMemoryInfo` working set), `process_children`/`process_tree` (toolhelp snapshot). `process_cwd` stays unsupported (the PEB is undocumented). A program started through a `.cmd` shim (most npm-installed agents) shows as the interpreter (`node`), so manifest `names` do not match it: detection there relies on screen rules and hooks. Two tests in `winproc.rs` run on `windows-latest` |
+ | P7-04 W4: supervisor, terminal and node integration tests on `windows-latest` | done (W4) | `PTY_SUPPORTED` is true on Windows; `terminal.rs` and `supervisor.rs` lost their `cfg(unix)`; the control, supervisor, terminal, CLI (`start`, `attach`, `stop` in a real pseudo-terminal), ACP, hub and usage-file tests run there against real ConPTY terminals and named pipes. Also added for this: raw console mode (`ENABLE_VIRTUAL_TERMINAL_INPUT`, no line editing or echo) and the window size on Windows, so `agora terminal attach` and `agora tui` can run there. One test stays off on Windows by design: the usage test whose "agent" is a POSIX shell writing its own `$PWD` (Git's `sh` reports `/d/a/...`, which is not the worktree's native path). Not covered: a real agent (Claude Code, Codex) on Windows, and `.cmd` shims, which show as the interpreter |
+ | P7-05 W5: docs and the install story | done (W5) | README, `architecture.md` (platform table), `development-setup.md` and `resource-limits.md` say what exists. Install story: there is no `agora hub ssh install` to a Windows host; on Windows the release binary `agora-x86_64-pc-windows-msvc.exe` is installed by hand and updated with `agora update` (the old program is moved aside to `.old`). A Windows service or Task Scheduler entry is out of scope (ADR-0045 item 6) |
+-| P7-06 Desktop app (Tauri) | in progress (ADR-0048) | D1 done: `crates/agora-desktop-tunnel` (a loopback tunnel to the hub over TLS trusting only the pinned CA; `fingerprint`; tested against a real TLS server, including a server signed by another CA) and `agora hub fingerprint`. D2: the shell is in `apps/desktop/src-tauri` (its own Cargo workspace, so Tauri never enters the main build): one local screen to enter a hub address and paste its CA, which shows the fingerprint to compare with `agora hub fingerprint`; commands `ca_fingerprint`, `saved`, `connect`, `forget` (the tunnel, a fixed loopback port per hub so the page's storage survives a restart, the choice saved in the app config folder); the hub's page is a remote origin with no capability granted (`capabilities/default.json`); its own `deny.toml` allows MPL-2.0 (Mozilla's CSS parser under Tauri's build tooling) and ignores the unmaintained build-time `proc-macro-error` (RUSTSEC-2024-0370, via gtk-rs), each with its reason. A `desktop` workflow checks it with rustfmt and clippy on the three systems (Linux installs WebKitGTK) and runs cargo-deny; it could not be built on the development machine, so CI is its first build. Not done: native notifications for a waiting approval while the window is hidden, installers and per-platform signing (the maintainer's accounts), a real icon (Q1) |
++| P7-06 Desktop app (Tauri) | in progress (ADR-0048) | D1 done: `crates/agora-desktop-tunnel` (a loopback tunnel to the hub over TLS trusting only the pinned CA; `fingerprint`; tested against a real TLS server, including a server signed by another CA) and `agora hub fingerprint`. D2: the shell is in `apps/desktop/src-tauri` (its own Cargo workspace, so Tauri never enters the main build): one local screen to enter a hub address and paste its CA, which shows the fingerprint to compare with `agora hub fingerprint`; commands `ca_fingerprint`, `saved`, `connect`, `forget` (the tunnel, a fixed loopback port per hub so the page's storage survives a restart, the choice saved in the app config folder); the hub's page is a remote origin with no capability granted (`capabilities/default.json`); its own `deny.toml` allows MPL-2.0 (Mozilla's CSS parser under Tauri's build tooling) and ignores the unmaintained build-time `proc-macro-error` (RUSTSEC-2024-0370, via gtk-rs), each with its reason. A `desktop` workflow checks it with rustfmt and clippy on the three systems (Linux installs WebKitGTK) and runs cargo-deny; it could not be built on the development machine, so CI is its first build. Native notifications for a waiting approval while the window is out of sight: Windows (toast) and Linux (`notify-send`) through the system's own notifier, no library (#296); macOS not yet (the script notifier posts as Script Editor; the app's own notification is a follow-up). Not done: installers and per-platform signing (the maintainer's accounts), a real icon (Q1) |
+ | P7-08 Agent sandboxing (ADR-0047) | in progress | S1 done: `agora_platform::Sandbox`, `sandbox_supported()` and `PtyConfig.sandbox` (Linux Landlock set up before the fork and applied between fork and exec, `NO_NEW_PRIVS` set; `spawn` refuses with `Unsupported` where it cannot confine, never runs unconfined); tested with a real confined shell in `crates/agora-platform/tests/sandbox.rs` (skips on a kernel without Landlock). S2 done: `sandbox = off|worktree|worktree-offline`, `sandbox.read`, `sandbox.write` in `<data>/policy` (`agora-node::sandbox`; an unknown value is the strictest level), the profile (system folders, the program's folder, the worktree, its git folders, `/tmp`, `/dev`), `agent.sandbox_unavailable` (nothing started, no worktree made), tested with a real confined agent in `crates/agora-node/tests/sandboxed_agent.rs`. `agora doctor` says whether this machine can confine agents and what the policy asks. S3 done: adapter-hosted (L2/L3) agents are confined too (`agora_platform::confine_command` on the adapter process, which the agent it hosts inherits; also on adapter restarts), tested in `crates/agora-adapters/tests/host.rs`. S4 done: a manifest's `[sandbox] read/write` are honoured only for kinds in `sandbox.trust_manifest` (`~/` expanded, relative and `..` paths dropped); the owner's policy line stands in for the ADR's signed grant (see the ADR's note). macOS done: the command runs under `sandbox-exec -p <profile>` (writes only below the `write` folders, file contents below `/Users`, `/Volumes` and the temp folders unreadable unless listed; the system stays readable). Checked with a real node on macOS 27: the listed folders are allowed with `file-read-data` itself (a `file-read*` allow does not undo the deny, which had left agents unable to read their own worktree), and a listed parent of a private folder (`/var`, which holds the user temp folders) is left out so it cannot reopen it. A confined agent on macOS and Windows gets a temp folder of its own (`TMPDIR`, `TEMP`, `TMP`; `agora_platform::PRIVATE_TEMP`), which Python, Node, Rust and `mktemp "$TMPDIR/..."` use; on macOS plain `mktemp`, `xcrun` and `cc` use the per-user temp folder whatever `TMPDIR` says. `sandbox.read`/`sandbox.write` accept `~/` (relative and `..` paths are dropped). A real toolchain needs the owner to list: `~/.gitconfig` in `sandbox.read` (git stops on an unreadable one; not a default, a git config can hold credentials), on macOS the user temp and cache folders (`getconf DARWIN_USER_TEMP_DIR`, `DARWIN_USER_CACHE_DIR`) in `sandbox.write` for `cc`/`xcrun`, and `~/.rustup`, `~/.cargo`, the Node folder in `sandbox.read` with `~/.cargo/registry`, `~/.npm` in `sandbox.write`. Windows (ADR-0050) written but **switched off**: a restricted token with a per-agent restricting SID, folder permissions recorded in a ledger and undone on exit and by `recover_sandbox_leftovers` at node start, a narrow Git write set (`NARROW_GIT_WRITES`), a private temp folder; ConPTY agents only (adapter commands still refuse). Enable by setting `ENABLED = true` in `agora-platform/src/winconfine.rs` after a real-machine check (`AGORA_WINDOWS_CONFINEMENT=1` enables one run); real Windows CI tests in `crates/agora-platform/tests/winsandbox.rs`. `worktree-offline` on macOS: `Sandbox.offline` adds `(deny network*)`, keeps outbound connections to this machine (`localhost`, a local model) and unix sockets only below `Sandbox.sockets`, which the supervisor sets to the agent's own mesh socket and private temp folder (not `/tmp`, where a tmux server's or an SSH agent's socket is a way out, and not other agents' mesh sockets); no TCP listener (Seatbelt cannot tell a loopback-only listener from one on every interface: an inbound-localhost rule let a LAN peer in through `0.0.0.0`). `agora_platform::offline_supported()` is true on macOS only; Linux and Windows still refuse the level. Seatbelt names only `localhost` or every host, so ADR-0047's "hosts the manifest names" is not expressible there. Tested: platform (`an_offline_process_reaches_this_machine_and_its_sockets_but_nothing_else`), node (`an_offline_agent_works_in_its_worktree_but_reaches_no_other_machine`), and a real node (internet and another LAN machine refused; localhost, its mesh socket and its worktree reachable). Not done: network rules on Linux (Landlock) and Windows, manifest-named hosts, Windows adapter commands |
+ | P7-07 Mobile: the web client as a PWA (ADR-0046) | done (manifest, notification link) | the hub serves `/manifest.webmanifest` (name from `notify-title`, standalone, token colours, `icon.svg`); the page links it; no service worker. With `<hub dir>/public-url` set, an approval notice ends with `<public-url>/#/approvals/<node>%2F<id>` (an unknown hash shows the home screen, where waiting approvals are; a notice never approves). Web Push is not planned (ADR-0051); ntfy is the phone channel, with an upstream push service needed for instant iOS delivery. ADR-0067 rung 2 added the phone-sized window, the terminal key bar, PNG and maskable icons, and agent links in notices ([docs/ux/phone.md](../ux/phone.md)); screenshots at phone widths come from `scripts/e2e-phone.mjs` in emulated Chromium. Not done: a run on a real phone |
+ | P7-09 Team mode (ADR-0049) | in progress | T1a done: `users` table (schema 5), roles `owner`/`member`/`viewer`, sessions carry their person (a session with none is the owner's, so a one-person hub is unchanged), `agora hub user add NAME [--role] | list | role ID ROLE | remove ID | login ID`; the hub asks for the role on every command (a demotion or removal applies to the open connection at once) and stops a viewer's commands that change anything with `auth.forbidden` (`action` = the command's schema name), before any node hears of them (`agora_hub::users::viewer_may` lists what a viewer may still do; a new command is refused to viewers until listed). No schema or error-code change. T2a done: an append-only `audit` table (schema 6; triggers refuse deletes and any edit but the one-time outcome of a `sent` row) with who (person id, `owner` for the owner), what (the command's schema name, `sign_in`, `user.add|role|remove`), where (node) and the outcome (`ok` or the error code; `sent` while a command has no answer); every routed command is recorded when it is sent and finished when the node answers, a refused one at once, sign-ins and changes to the team too; `agora hub audit export [--since MS] [--who ID]` writes JSON lines. Terminal bytes and message bodies are not in it. T1b done: a member or viewer sees and works in only the projects they were granted (`agora hub user grant|revoke ID NODE/PROJECT`, schema 7; an owner needs none; a member with no grant sees nothing). `agora_hub::scope::Scope` follows the event stream a client gets, remembers which project each agent, worktree, terminal and approval belongs to, and decides for every event and every command whether it is theirs; a restricted client always gets a snapshot cut to its projects (whatever position it asks to replay from) and then only its own events, and the hub refuses (`auth.forbidden`) any command that does not name something in a granted project, including everything about a whole machine (`ProjectList`, `AgentList`, `NodePolicyGet`, `TerminalOpen`, grants, usage). A machine shows up only if it hosts a granted project. A change of role or grants ends the open connection and the client reconnects into what it may now see. Hidden on purpose: terminals that belong to no agent, the shared board of a project that spans machines (tasks), messages from agents the person cannot see. Tested with plain event sequences in `scope.rs` and end to end in `crates/agora-hub/tests/server.rs`. T2b done: the owner reads the trail in the web app (`#/audit`, "Activity" in the command palette): `GET /api/audit?since=&who=&limit=` with the session token, owner only (401 without a live session, 403 for a member or viewer, 400 for a query it does not understand), newest first, filterable by person; actions are named in words from `locales/{en,tr}/web.ftl` (an action this build has no words for shows as the hub named it). Screenshots in `docs/screenshots/audit-*.png`. Each row names the session that made it by a short id (schema 10, L16), the sign-in row included. T1c done (node side): `device.<id>.projects = a, b` in the node's `policy` (`agora_node::limits::DeviceLimits`): a limited trusted device can sign grants only scoped `project:X` or `agent:A` of its projects (never `node`; `auth.forbidden` `grant.create`) and can answer approvals only for agents of its projects (`auth.forbidden` `approval.resolve`, nothing consumed); an unnamed device is limited by nothing; a named one with no projects acts in none. No schema change. With limited devices and no `signed_commands` line, the node requires a grant for every command that changes something (`SignedCommands::team_default`), so the limits bind them; whole-machine commands stay the owner's. Not done: approval decisions as their own rows (they are `ApprovalResolve` commands today), devices owned by a user, Postgres (T3), the shared board for members |
+-- 
+2.53.0
+
+
+From d03a2d5c124263bdb1cb996401e2681c1b3d2daa Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Ersin=20KO=C3=87?= <ersinkoc@gmail.com>
+Date: Sun, 15 Nov 2026 18:19:29 +0200
+Subject: [PATCH 3/3] feat(platform): macOS desktop notifications through the
+ app's own UNUserNotificationCenter, no crate (#296 follow-up (b))
+
+Objective-C runtime calls in agora-platform/src/macnotify.rs: only inside an app bundle (outside one the center throws and ends the
+process: measured), permission asked through a hand-built global block (Block ABI layout, tested), words as NSStrings, owned
+objects released, an autorelease pool around it.
+---
+ CHANGELOG.md                           |   4 +-
+ apps/desktop/README.md                 |   8 +-
+ crates/agora-platform/src/lib.rs       |   7 +-
+ crates/agora-platform/src/macnotify.rs | 262 +++++++++++++++++++++++++
+ crates/agora-platform/src/macos.rs     |   8 -
+ docs/backlog/phase-7.md                |   2 +-
+ 6 files changed, 274 insertions(+), 17 deletions(-)
+ create mode 100644 crates/agora-platform/src/macnotify.rs
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 73093bfd..c7e1b30a 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -5,8 +5,8 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
+ ## Next
+ 
+ ### Desktop app
+-- On Windows and Linux, the desktop app shows one system notification when approvals are waiting while its window is hidden,
+-  minimized or not in front (the count only, in your language). Not on macOS yet: there it stays silent for now.
++- The desktop app shows one system notification when approvals are waiting while its window is hidden, minimized or not in
++  front (the count only, in your language). On macOS it asks for permission the first time.
+ 
+ ### Security
+ - macOS: a confined agent is not started when a file it may write also has another name elsewhere (a hard link made outside
+diff --git a/apps/desktop/README.md b/apps/desktop/README.md
+index e6dc40ff..3273f49a 100644
+--- a/apps/desktop/README.md
++++ b/apps/desktop/README.md
+@@ -36,10 +36,10 @@ whether the window can still sign with its stored device key (approvals, grants,
+ Notifications (ADR-0048 decision 5): when the number of approvals waiting (the page's title, `(N) Agora`) grows while the window
+ is hidden, minimized or not focused, the shell shows one system notification with the count only, in the system's language. It
+ uses the system's own notifier with no library (`agora_platform::desktop_notify`): Windows a toast (shown as Windows PowerShell;
+-nothing when notifications are turned off for the user), Linux `notify-send` (nothing without it). **macOS: not yet.** The script
+-notifier posts as Script Editor (shown only if Script Editor may notify, and a click opens Script Editor), so the shell posts
+-nothing there; the app's own notification is a follow-up. A silent Mac is expected for now; the hub's phone notifications
+-(ntfy, ADR-0051) cover a person away from the window.
++nothing when notifications are turned off for the user), Linux `notify-send` (nothing without it), macOS the app's own
++notification (`UNUserNotificationCenter`, so it shows as Agora and a click brings the app forward; the first one asks for
++permission). On macOS only the bundled app (`.app`) can post: a shell started from a terminal (`cargo run`) stays silent. The hub's
++phone notifications (ntfy, ADR-0051) cover a person away from the window.
+ 
+ Not done yet: signed installers and per-platform signing (needs
+ the maintainer's Apple and Windows accounts; unsigned builds are published as such), a real icon (the name and logo are open question Q1).
+diff --git a/crates/agora-platform/src/lib.rs b/crates/agora-platform/src/lib.rs
+index 4ee8644c..ba75829f 100644
+--- a/crates/agora-platform/src/lib.rs
++++ b/crates/agora-platform/src/lib.rs
+@@ -25,6 +25,8 @@ use winproc as procinfo;
+ #[cfg(target_os = "linux")]
+ mod linux;
+ #[cfg(target_os = "macos")]
++mod macnotify;
++#[cfg(target_os = "macos")]
+ mod macos;
+ #[cfg(target_os = "macos")]
+ mod macservice;
+@@ -1844,11 +1846,12 @@ pub fn service_status(name: &str) -> io::Result<ServiceState> {
+ /// argument list, and the words travel as separate arguments (Linux `notify-send`) or as
+ /// environment variables (Windows PowerShell), never inside a script, so no text can change what runs. The words come from
+ /// `locales/` (the caller's). Waits for the notifier; `NotFound` where there is none (Linux without `notify-send`),
+-/// `PermissionDenied` where the user turned notifications off (Windows), `Unsupported` on macOS for now (see `macos.rs`).
++/// `PermissionDenied` where the user turned notifications off or did not allow them, `Unsupported` where it cannot post (macOS:
++/// outside an app bundle, see `macnotify.rs`).
+ pub fn desktop_notify(title: &str, body: &str) -> io::Result<()> {
+     #[cfg(target_os = "macos")]
+     {
+-        macos::desktop_notify(title, body)
++        macnotify::desktop_notify(title, body)
+     }
+     #[cfg(target_os = "linux")]
+     {
+diff --git a/crates/agora-platform/src/macnotify.rs b/crates/agora-platform/src/macnotify.rs
+new file mode 100644
+index 00000000..9442d822
+--- /dev/null
++++ b/crates/agora-platform/src/macnotify.rs
+@@ -0,0 +1,262 @@
++//! macOS half of [`crate::desktop_notify`]: the app's own notification through `UNUserNotificationCenter` (ADR-0048 decision 5), so
++//! it shows under the app's name and a click brings the app forward. Called through the Objective-C runtime: no crate.
++//!
++//! - Only inside an app bundle. `+[UNUserNotificationCenter currentNotificationCenter]` throws (and ends the process) in a program
++//!   that is not one (measured on macOS 27.2: `bundleProxyForCurrentProcess is nil`), so without a bundle identifier nothing is
++//!   called and the answer is `Unsupported`. A program run from a terminal (`cargo run`, the CLI) is never one.
++//! - Permission: the first call asks the user (the system's own question); the answer is awaited for at most 30 s. Denied, or
++//!   turned off later in System Settings > Notifications: `PermissionDenied`, nothing shown.
++//! - The callback the permission request needs is an Objective-C block. It is a *global* block built by hand (no captures, never
++//!   copied or freed by the runtime, with the layout of the Block ABI); its only effect is to store the answer in a static.
++//! - The words travel as `NSString` objects, never inside a format or a script.
++
++use std::ffi::{c_char, c_int, c_ulong, c_void};
++use std::io;
++use std::sync::atomic::{AtomicU8, Ordering};
++use std::time::{Duration, Instant};
++
++type Id = *mut c_void;
++type Sel = *mut c_void;
++
++#[link(name = "objc")]
++extern "C" {
++    fn objc_getClass(name: *const c_char) -> Id;
++    fn sel_registerName(name: *const c_char) -> Sel;
++    fn class_getClassMethod(cls: Id, sel: Sel) -> *mut c_void;
++    fn class_getInstanceMethod(cls: Id, sel: Sel) -> *mut c_void;
++    fn objc_msgSend();
++    fn objc_autoreleasePoolPush() -> *mut c_void;
++    fn objc_autoreleasePoolPop(pool: *mut c_void);
++}
++
++#[link(name = "Foundation", kind = "framework")]
++extern "C" {}
++
++#[link(name = "UserNotifications", kind = "framework")]
++extern "C" {}
++
++// The isa of every global block (libSystem's libclosure).
++extern "C" {
++    static _NSConcreteGlobalBlock: c_void;
++}
++
++/// `UNAuthorizationOptionAlert`.
++const OPTION_ALERT: c_ulong = 1 << 2;
++/// `BLOCK_IS_GLOBAL`: the runtime never copies, retains or frees it.
++const BLOCK_IS_GLOBAL: c_int = 1 << 28;
++
++/// The permission answer: 0 waiting, 1 granted, 2 denied.
++static ANSWER: AtomicU8 = AtomicU8::new(0);
++
++#[repr(C)]
++struct BlockDescriptor {
++    reserved: c_ulong,
++    size: c_ulong,
++}
++
++/// The Block ABI's literal layout for a block without captures.
++#[repr(C)]
++struct Block {
++    isa: *const c_void,
++    flags: c_int,
++    reserved: c_int,
++    invoke: unsafe extern "C" fn(*const Block, i8, Id),
++    descriptor: *const BlockDescriptor,
++}
++
++// SAFETY: the block is immutable static data; the runtime only reads it and calls `invoke`, which touches an atomic.
++unsafe impl Sync for Block {}
++
++static DESCRIPTOR: BlockDescriptor = BlockDescriptor {
++    reserved: 0,
++    size: std::mem::size_of::<Block>() as c_ulong,
++};
++
++/// `^(BOOL granted, NSError *error)`: stores the answer.
++unsafe extern "C" fn answered(_block: *const Block, granted: i8, _error: Id) {
++    ANSWER.store(if granted != 0 { 1 } else { 2 }, Ordering::SeqCst);
++}
++
++static ON_ANSWER: Block = Block {
++    // Only the address of the runtime's static is taken.
++    isa: std::ptr::addr_of!(_NSConcreteGlobalBlock),
++    flags: BLOCK_IS_GLOBAL,
++    reserved: 0,
++    invoke: answered,
++    descriptor: &DESCRIPTOR,
++};
++
++/// `objc_msgSend` as a function of the given signature.
++macro_rules! send {
++    ($ty:ty) => {
++        // SAFETY (at each use): the receiver and selector were checked to exist, and `$ty` is that method's exact C signature.
++        unsafe { std::mem::transmute::<unsafe extern "C" fn(), $ty>(objc_msgSend as unsafe extern "C" fn()) }
++    };
++}
++
++fn class(name: &std::ffi::CStr) -> Option<Id> {
++    // SAFETY: a NUL-terminated name.
++    let c = unsafe { objc_getClass(name.as_ptr()) };
++    (!c.is_null()).then_some(c)
++}
++
++fn sel(name: &std::ffi::CStr) -> Sel {
++    // SAFETY: a NUL-terminated name; selectors are interned for the life of the process.
++    unsafe { sel_registerName(name.as_ptr()) }
++}
++
++fn has_class_method(cls: Id, s: Sel) -> bool {
++    // SAFETY: `cls` is a class from `objc_getClass`.
++    !unsafe { class_getClassMethod(cls, s) }.is_null()
++}
++
++fn has_method(cls: Id, s: Sel) -> bool {
++    // SAFETY: `cls` is a class from `objc_getClass`.
++    !unsafe { class_getInstanceMethod(cls, s) }.is_null()
++}
++
++/// An autoreleased `NSString` with `text`.
++fn ns_string(text: &str) -> Option<Id> {
++    let c = std::ffi::CString::new(text).ok()?;
++    let cls = class(c"NSString")?;
++    let s = sel(c"stringWithUTF8String:");
++    if !has_class_method(cls, s) {
++        return None;
++    }
++    let f = send!(unsafe extern "C" fn(Id, Sel, *const c_char) -> Id);
++    // SAFETY: see `send!`; `c` lives for the call.
++    let out = unsafe { f(cls, s, c.as_ptr()) };
++    (!out.is_null()).then_some(out)
++}
++
++/// Whether this process runs from an app bundle (its main bundle has an identifier).
++fn in_bundle() -> bool {
++    let (Some(cls), s, id) = (
++        class(c"NSBundle"),
++        sel(c"mainBundle"),
++        sel(c"bundleIdentifier"),
++    ) else {
++        return false;
++    };
++    if !has_class_method(cls, s) || !has_method(cls, id) {
++        return false;
++    }
++    let main = send!(unsafe extern "C" fn(Id, Sel) -> Id);
++    // SAFETY: see `send!`.
++    let bundle = unsafe { main(cls, s) };
++    if bundle.is_null() {
++        return false;
++    }
++    let ident = send!(unsafe extern "C" fn(Id, Sel) -> Id);
++    // SAFETY: see `send!`; `bundle` is an NSBundle.
++    !unsafe { ident(bundle, id) }.is_null()
++}
++
++pub(crate) fn desktop_notify(title: &str, body: &str) -> io::Result<()> {
++    let unsupported = || io::Error::from(io::ErrorKind::Unsupported);
++    if !in_bundle() {
++        return Err(unsupported());
++    }
++    // SAFETY: balanced with the pop below; nothing between them unwinds (no panicking code).
++    let pool = unsafe { objc_autoreleasePoolPush() };
++    let result = post(title, body);
++    // SAFETY: the pool pushed above.
++    unsafe { objc_autoreleasePoolPop(pool) };
++    result
++}
++
++fn post(title: &str, body: &str) -> io::Result<()> {
++    let unsupported = || io::Error::from(io::ErrorKind::Unsupported);
++    let center_cls = class(c"UNUserNotificationCenter").ok_or_else(unsupported)?;
++    let content_cls = class(c"UNMutableNotificationContent").ok_or_else(unsupported)?;
++    let request_cls = class(c"UNNotificationRequest").ok_or_else(unsupported)?;
++    let current = sel(c"currentNotificationCenter");
++    let authorize = sel(c"requestAuthorizationWithOptions:completionHandler:");
++    let add = sel(c"addNotificationRequest:withCompletionHandler:");
++    let new = sel(c"new");
++    let set_title = sel(c"setTitle:");
++    let set_body = sel(c"setBody:");
++    let make = sel(c"requestWithIdentifier:content:trigger:");
++    let release = sel(c"release");
++    if !has_class_method(center_cls, current)
++        || !has_method(center_cls, authorize)
++        || !has_method(center_cls, add)
++        || !has_class_method(content_cls, new)
++        || !has_method(content_cls, set_title)
++        || !has_method(content_cls, set_body)
++        || !has_class_method(request_cls, make)
++    {
++        return Err(unsupported());
++    }
++    let get = send!(unsafe extern "C" fn(Id, Sel) -> Id);
++    // SAFETY: see `send!`; inside a bundle (checked by the caller), so this does not throw.
++    let center = unsafe { get(center_cls, current) };
++    if center.is_null() {
++        return Err(unsupported());
++    }
++    // Asked once per call; after the first answer the system answers at once without asking again.
++    ANSWER.store(0, Ordering::SeqCst);
++    let ask = send!(unsafe extern "C" fn(Id, Sel, c_ulong, *const Block));
++    // SAFETY: see `send!`; `ON_ANSWER` is a static global block.
++    unsafe { ask(center, authorize, OPTION_ALERT, &ON_ANSWER) };
++    let asked = Instant::now();
++    while ANSWER.load(Ordering::SeqCst) == 0 && asked.elapsed() < Duration::from_secs(30) {
++        std::thread::sleep(Duration::from_millis(50));
++    }
++    if ANSWER.load(Ordering::SeqCst) != 1 {
++        return Err(io::Error::from(io::ErrorKind::PermissionDenied));
++    }
++    let (Some(t), Some(b), Some(ident)) = (
++        ns_string(title),
++        ns_string(body),
++        ns_string("agora-approvals"),
++    ) else {
++        return Err(io::Error::from(io::ErrorKind::InvalidInput));
++    };
++    let make_content = send!(unsafe extern "C" fn(Id, Sel) -> Id);
++    // SAFETY: see `send!`; `new` returns an owned object, released below.
++    let content = unsafe { make_content(content_cls, new) };
++    if content.is_null() {
++        return Err(io::Error::other("UNMutableNotificationContent"));
++    }
++    let set = send!(unsafe extern "C" fn(Id, Sel, Id));
++    // SAFETY: see `send!`; `content` is a UNMutableNotificationContent, `t` and `b` NSStrings.
++    unsafe {
++        set(content, set_title, t);
++        set(content, set_body, b);
++    }
++    let request = send!(unsafe extern "C" fn(Id, Sel, Id, Id, Id) -> Id);
++    // SAFETY: see `send!`; a nil trigger means "now". The request is autoreleased.
++    let req = unsafe { request(request_cls, make, ident, content, std::ptr::null_mut()) };
++    let drop_content = send!(unsafe extern "C" fn(Id, Sel));
++    // SAFETY: `content` was made by `new` above and is no longer used here (the request keeps its own copy).
++    unsafe { drop_content(content, release) };
++    if req.is_null() {
++        return Err(io::Error::other("UNNotificationRequest"));
++    }
++    let post = send!(unsafe extern "C" fn(Id, Sel, Id, *const c_void));
++    // SAFETY: see `send!`; a nil completion handler is allowed.
++    unsafe { post(center, add, req, std::ptr::null()) };
++    Ok(())
++}
++
++#[cfg(test)]
++#[allow(clippy::unwrap_used)]
++mod tests {
++    #[test]
++    fn a_program_that_is_not_an_app_bundle_never_calls_the_notification_center() {
++        // A test binary has no bundle identifier: the call that would end the process is never made.
++        assert!(!super::in_bundle());
++        assert_eq!(
++            super::desktop_notify("Agora", "test").unwrap_err().kind(),
++            std::io::ErrorKind::Unsupported
++        );
++    }
++
++    #[test]
++    fn the_block_has_the_layout_of_the_block_abi() {
++        // isa, flags, reserved, invoke, descriptor: 8 + 4 + 4 + 8 + 8 on 64-bit macOS.
++        assert_eq!(std::mem::size_of::<super::Block>(), 32);
++        assert_eq!(super::DESCRIPTOR.size, 32);
++    }
++}
+diff --git a/crates/agora-platform/src/macos.rs b/crates/agora-platform/src/macos.rs
+index fb0ca149..124b3a4f 100644
+--- a/crates/agora-platform/src/macos.rs
++++ b/crates/agora-platform/src/macos.rs
+@@ -620,14 +620,6 @@ pub(crate) fn wrap(
+     Ok((SANDBOX_EXEC.into(), v))
+ }
+ 
+-/// See [`crate::desktop_notify`]: not yet on macOS. The system's own notifier for a script (`osascript`) posts as *Script Editor*:
+-/// it shows only when Script Editor may notify, and a click opens Script Editor instead of Agora (measured on macOS 27.2), so nothing
+-/// is posted. The app's own notification (`UNUserNotificationCenter`) is the planned way (#296 follow-up).
+-pub(crate) fn desktop_notify(title: &str, body: &str) -> io::Result<()> {
+-    let _ = (title, body);
+-    Err(io::Error::from(io::ErrorKind::Unsupported))
+-}
+-
+ /// See [`crate::opened_path`]: `F_GETPATH`, the path the kernel has for the open vnode (firmlinks shown as `/Users/...`, as
+ /// `canonicalize` shows them).
+ pub(crate) fn opened_path(file: &std::fs::File) -> io::Result<PathBuf> {
+diff --git a/docs/backlog/phase-7.md b/docs/backlog/phase-7.md
+index 5bb44287..e8563f89 100644
+--- a/docs/backlog/phase-7.md
++++ b/docs/backlog/phase-7.md
+@@ -9,7 +9,7 @@ Started with the Windows node (ADR-0045). The only machine used for development
+ | P7-03 W3: process view (tree, name, stats; no cwd) | done (W3) | `crates/agora-platform/src/winproc.rs`: `process_name` (image file name without `.exe`, `QueryFullProcessImageNameW`), `process_stats` (`GetProcessTimes`, `GetProcessMemoryInfo` working set), `process_children`/`process_tree` (toolhelp snapshot). `process_cwd` stays unsupported (the PEB is undocumented). A program started through a `.cmd` shim (most npm-installed agents) shows as the interpreter (`node`), so manifest `names` do not match it: detection there relies on screen rules and hooks. Two tests in `winproc.rs` run on `windows-latest` |
+ | P7-04 W4: supervisor, terminal and node integration tests on `windows-latest` | done (W4) | `PTY_SUPPORTED` is true on Windows; `terminal.rs` and `supervisor.rs` lost their `cfg(unix)`; the control, supervisor, terminal, CLI (`start`, `attach`, `stop` in a real pseudo-terminal), ACP, hub and usage-file tests run there against real ConPTY terminals and named pipes. Also added for this: raw console mode (`ENABLE_VIRTUAL_TERMINAL_INPUT`, no line editing or echo) and the window size on Windows, so `agora terminal attach` and `agora tui` can run there. One test stays off on Windows by design: the usage test whose "agent" is a POSIX shell writing its own `$PWD` (Git's `sh` reports `/d/a/...`, which is not the worktree's native path). Not covered: a real agent (Claude Code, Codex) on Windows, and `.cmd` shims, which show as the interpreter |
+ | P7-05 W5: docs and the install story | done (W5) | README, `architecture.md` (platform table), `development-setup.md` and `resource-limits.md` say what exists. Install story: there is no `agora hub ssh install` to a Windows host; on Windows the release binary `agora-x86_64-pc-windows-msvc.exe` is installed by hand and updated with `agora update` (the old program is moved aside to `.old`). A Windows service or Task Scheduler entry is out of scope (ADR-0045 item 6) |
+-| P7-06 Desktop app (Tauri) | in progress (ADR-0048) | D1 done: `crates/agora-desktop-tunnel` (a loopback tunnel to the hub over TLS trusting only the pinned CA; `fingerprint`; tested against a real TLS server, including a server signed by another CA) and `agora hub fingerprint`. D2: the shell is in `apps/desktop/src-tauri` (its own Cargo workspace, so Tauri never enters the main build): one local screen to enter a hub address and paste its CA, which shows the fingerprint to compare with `agora hub fingerprint`; commands `ca_fingerprint`, `saved`, `connect`, `forget` (the tunnel, a fixed loopback port per hub so the page's storage survives a restart, the choice saved in the app config folder); the hub's page is a remote origin with no capability granted (`capabilities/default.json`); its own `deny.toml` allows MPL-2.0 (Mozilla's CSS parser under Tauri's build tooling) and ignores the unmaintained build-time `proc-macro-error` (RUSTSEC-2024-0370, via gtk-rs), each with its reason. A `desktop` workflow checks it with rustfmt and clippy on the three systems (Linux installs WebKitGTK) and runs cargo-deny; it could not be built on the development machine, so CI is its first build. Native notifications for a waiting approval while the window is out of sight: Windows (toast) and Linux (`notify-send`) through the system's own notifier, no library (#296); macOS not yet (the script notifier posts as Script Editor; the app's own notification is a follow-up). Not done: installers and per-platform signing (the maintainer's accounts), a real icon (Q1) |
++| P7-06 Desktop app (Tauri) | in progress (ADR-0048) | D1 done: `crates/agora-desktop-tunnel` (a loopback tunnel to the hub over TLS trusting only the pinned CA; `fingerprint`; tested against a real TLS server, including a server signed by another CA) and `agora hub fingerprint`. D2: the shell is in `apps/desktop/src-tauri` (its own Cargo workspace, so Tauri never enters the main build): one local screen to enter a hub address and paste its CA, which shows the fingerprint to compare with `agora hub fingerprint`; commands `ca_fingerprint`, `saved`, `connect`, `forget` (the tunnel, a fixed loopback port per hub so the page's storage survives a restart, the choice saved in the app config folder); the hub's page is a remote origin with no capability granted (`capabilities/default.json`); its own `deny.toml` allows MPL-2.0 (Mozilla's CSS parser under Tauri's build tooling) and ignores the unmaintained build-time `proc-macro-error` (RUSTSEC-2024-0370, via gtk-rs), each with its reason. A `desktop` workflow checks it with rustfmt and clippy on the three systems (Linux installs WebKitGTK) and runs cargo-deny; it could not be built on the development machine, so CI is its first build. Native notifications for a waiting approval while the window is out of sight: Windows (toast) and Linux (`notify-send`) through the system's own notifier, no library (#296); macOS through the app's own `UNUserNotificationCenter` (only in the bundled app). Not done: installers and per-platform signing (the maintainer's accounts), a real icon (Q1) |
+ | P7-08 Agent sandboxing (ADR-0047) | in progress | S1 done: `agora_platform::Sandbox`, `sandbox_supported()` and `PtyConfig.sandbox` (Linux Landlock set up before the fork and applied between fork and exec, `NO_NEW_PRIVS` set; `spawn` refuses with `Unsupported` where it cannot confine, never runs unconfined); tested with a real confined shell in `crates/agora-platform/tests/sandbox.rs` (skips on a kernel without Landlock). S2 done: `sandbox = off|worktree|worktree-offline`, `sandbox.read`, `sandbox.write` in `<data>/policy` (`agora-node::sandbox`; an unknown value is the strictest level), the profile (system folders, the program's folder, the worktree, its git folders, `/tmp`, `/dev`), `agent.sandbox_unavailable` (nothing started, no worktree made), tested with a real confined agent in `crates/agora-node/tests/sandboxed_agent.rs`. `agora doctor` says whether this machine can confine agents and what the policy asks. S3 done: adapter-hosted (L2/L3) agents are confined too (`agora_platform::confine_command` on the adapter process, which the agent it hosts inherits; also on adapter restarts), tested in `crates/agora-adapters/tests/host.rs`. S4 done: a manifest's `[sandbox] read/write` are honoured only for kinds in `sandbox.trust_manifest` (`~/` expanded, relative and `..` paths dropped); the owner's policy line stands in for the ADR's signed grant (see the ADR's note). macOS done: the command runs under `sandbox-exec -p <profile>` (writes only below the `write` folders, file contents below `/Users`, `/Volumes` and the temp folders unreadable unless listed; the system stays readable). Checked with a real node on macOS 27: the listed folders are allowed with `file-read-data` itself (a `file-read*` allow does not undo the deny, which had left agents unable to read their own worktree), and a listed parent of a private folder (`/var`, which holds the user temp folders) is left out so it cannot reopen it. A confined agent on macOS and Windows gets a temp folder of its own (`TMPDIR`, `TEMP`, `TMP`; `agora_platform::PRIVATE_TEMP`), which Python, Node, Rust and `mktemp "$TMPDIR/..."` use; on macOS plain `mktemp`, `xcrun` and `cc` use the per-user temp folder whatever `TMPDIR` says. `sandbox.read`/`sandbox.write` accept `~/` (relative and `..` paths are dropped). A real toolchain needs the owner to list: `~/.gitconfig` in `sandbox.read` (git stops on an unreadable one; not a default, a git config can hold credentials), on macOS the user temp and cache folders (`getconf DARWIN_USER_TEMP_DIR`, `DARWIN_USER_CACHE_DIR`) in `sandbox.write` for `cc`/`xcrun`, and `~/.rustup`, `~/.cargo`, the Node folder in `sandbox.read` with `~/.cargo/registry`, `~/.npm` in `sandbox.write`. Windows (ADR-0050) written but **switched off**: a restricted token with a per-agent restricting SID, folder permissions recorded in a ledger and undone on exit and by `recover_sandbox_leftovers` at node start, a narrow Git write set (`NARROW_GIT_WRITES`), a private temp folder; ConPTY agents only (adapter commands still refuse). Enable by setting `ENABLED = true` in `agora-platform/src/winconfine.rs` after a real-machine check (`AGORA_WINDOWS_CONFINEMENT=1` enables one run); real Windows CI tests in `crates/agora-platform/tests/winsandbox.rs`. `worktree-offline` on macOS: `Sandbox.offline` adds `(deny network*)`, keeps outbound connections to this machine (`localhost`, a local model) and unix sockets only below `Sandbox.sockets`, which the supervisor sets to the agent's own mesh socket and private temp folder (not `/tmp`, where a tmux server's or an SSH agent's socket is a way out, and not other agents' mesh sockets); no TCP listener (Seatbelt cannot tell a loopback-only listener from one on every interface: an inbound-localhost rule let a LAN peer in through `0.0.0.0`). `agora_platform::offline_supported()` is true on macOS only; Linux and Windows still refuse the level. Seatbelt names only `localhost` or every host, so ADR-0047's "hosts the manifest names" is not expressible there. Tested: platform (`an_offline_process_reaches_this_machine_and_its_sockets_but_nothing_else`), node (`an_offline_agent_works_in_its_worktree_but_reaches_no_other_machine`), and a real node (internet and another LAN machine refused; localhost, its mesh socket and its worktree reachable). Not done: network rules on Linux (Landlock) and Windows, manifest-named hosts, Windows adapter commands |
+ | P7-07 Mobile: the web client as a PWA (ADR-0046) | done (manifest, notification link) | the hub serves `/manifest.webmanifest` (name from `notify-title`, standalone, token colours, `icon.svg`); the page links it; no service worker. With `<hub dir>/public-url` set, an approval notice ends with `<public-url>/#/approvals/<node>%2F<id>` (an unknown hash shows the home screen, where waiting approvals are; a notice never approves). Web Push is not planned (ADR-0051); ntfy is the phone channel, with an upstream push service needed for instant iOS delivery. ADR-0067 rung 2 added the phone-sized window, the terminal key bar, PNG and maskable icons, and agent links in notices ([docs/ux/phone.md](../ux/phone.md)); screenshots at phone widths come from `scripts/e2e-phone.mjs` in emulated Chromium. Not done: a run on a real phone |
+ | P7-09 Team mode (ADR-0049) | in progress | T1a done: `users` table (schema 5), roles `owner`/`member`/`viewer`, sessions carry their person (a session with none is the owner's, so a one-person hub is unchanged), `agora hub user add NAME [--role] | list | role ID ROLE | remove ID | login ID`; the hub asks for the role on every command (a demotion or removal applies to the open connection at once) and stops a viewer's commands that change anything with `auth.forbidden` (`action` = the command's schema name), before any node hears of them (`agora_hub::users::viewer_may` lists what a viewer may still do; a new command is refused to viewers until listed). No schema or error-code change. T2a done: an append-only `audit` table (schema 6; triggers refuse deletes and any edit but the one-time outcome of a `sent` row) with who (person id, `owner` for the owner), what (the command's schema name, `sign_in`, `user.add|role|remove`), where (node) and the outcome (`ok` or the error code; `sent` while a command has no answer); every routed command is recorded when it is sent and finished when the node answers, a refused one at once, sign-ins and changes to the team too; `agora hub audit export [--since MS] [--who ID]` writes JSON lines. Terminal bytes and message bodies are not in it. T1b done: a member or viewer sees and works in only the projects they were granted (`agora hub user grant|revoke ID NODE/PROJECT`, schema 7; an owner needs none; a member with no grant sees nothing). `agora_hub::scope::Scope` follows the event stream a client gets, remembers which project each agent, worktree, terminal and approval belongs to, and decides for every event and every command whether it is theirs; a restricted client always gets a snapshot cut to its projects (whatever position it asks to replay from) and then only its own events, and the hub refuses (`auth.forbidden`) any command that does not name something in a granted project, including everything about a whole machine (`ProjectList`, `AgentList`, `NodePolicyGet`, `TerminalOpen`, grants, usage). A machine shows up only if it hosts a granted project. A change of role or grants ends the open connection and the client reconnects into what it may now see. Hidden on purpose: terminals that belong to no agent, the shared board of a project that spans machines (tasks), messages from agents the person cannot see. Tested with plain event sequences in `scope.rs` and end to end in `crates/agora-hub/tests/server.rs`. T2b done: the owner reads the trail in the web app (`#/audit`, "Activity" in the command palette): `GET /api/audit?since=&who=&limit=` with the session token, owner only (401 without a live session, 403 for a member or viewer, 400 for a query it does not understand), newest first, filterable by person; actions are named in words from `locales/{en,tr}/web.ftl` (an action this build has no words for shows as the hub named it). Screenshots in `docs/screenshots/audit-*.png`. Each row names the session that made it by a short id (schema 10, L16), the sign-in row included. T1c done (node side): `device.<id>.projects = a, b` in the node's `policy` (`agora_node::limits::DeviceLimits`): a limited trusted device can sign grants only scoped `project:X` or `agent:A` of its projects (never `node`; `auth.forbidden` `grant.create`) and can answer approvals only for agents of its projects (`auth.forbidden` `approval.resolve`, nothing consumed); an unnamed device is limited by nothing; a named one with no projects acts in none. No schema change. With limited devices and no `signed_commands` line, the node requires a grant for every command that changes something (`SignedCommands::team_default`), so the limits bind them; whole-machine commands stay the owner's. Not done: approval decisions as their own rows (they are `ApprovalResolve` commands today), devices owned by a user, Postgres (T3), the shared board for members |
+-- 
+2.53.0
+
