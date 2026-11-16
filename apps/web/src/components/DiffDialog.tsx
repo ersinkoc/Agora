@@ -2,6 +2,7 @@ import * as Dialog from '@radix-ui/react-dialog';
 import { useCallback, useRef } from 'react';
 import { t } from '../i18n';
 import type { AgentTileModel } from '../model';
+import type { DiffSource } from '../net/diff';
 import { ChangesView } from './ChangesView';
 import { Icon } from './Icon';
 
@@ -10,7 +11,7 @@ import { Icon } from './Icon';
 // when another agent's are shown.
 export function DiffDialog({ agent, load, read, onClose }: {
   agent: AgentTileModel;
-  load: (a: AgentTileModel, path?: string) => Promise<string>;
+  load: (a: AgentTileModel, path?: string) => Promise<DiffSource>;
   read?: (path: string) => Promise<Uint8Array>;
   onClose: () => void;
 }) {

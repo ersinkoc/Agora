@@ -1,6 +1,8 @@
 # For the macOS machine
 
-Role: the second platform: macOS-specific node work and checks, and the Tauri desktop app. Read [README.md](README.md) first for how
+Role: the second platform: macOS-specific node work and checks, and the Tauri desktop app. Since 2026-11-15 this machine does not start development of its own: it runs the
+checks only a Mac can, answers platform questions, reviews on request and finishes pull requests it already opened (see
+[README.md](README.md), "Who develops"). Read that page first for how
 machines talk.
 
 ## Set up
@@ -13,7 +15,7 @@ git clone https://github.com/ersinkoc/Agora && cd Agora
 (cd apps/web && npm ci && npm run gen && npm run build)
 just check
 ```
-Use a worktree per task (`git worktree add ../agora-worktrees/<slug> -b claude/<slug> origin/main`).
+Use a worktree for a check or a pull request you finish, and delete it when its PR is merged (`git worktree add ../agora-worktrees/<slug> -b claude/<slug> origin/main`).
 
 ## What only this machine can check
 1. **Seatbelt confinement** (ADR-0047, `crates/agora-platform/src/macos.rs`): CI runs it, but a real session should confirm it.

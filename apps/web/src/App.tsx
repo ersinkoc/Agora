@@ -4,6 +4,7 @@ import { demoAgents, demoApprovals, demoList, demoMachines, demoProjects } from 
 import { demoDiff, demoFiles } from './demoWorkspace';
 import { chooseLanguage, getLanguage, subscribeLanguage, t } from './i18n';
 import { nextNeedingMe, type AgentTileModel, type ResumeAction } from './model';
+import type { DiffSource } from './net/diff';
 import { connectLive, type CommandBody, type Live, type LinkState } from './net/live';
 import { GrantDialog } from './components/GrantDialog';
 import { grantFor, signGrant, type GrantAsk } from './net/grant';
@@ -32,6 +33,7 @@ import { num } from './net/view';
 import { loadAudit } from './net/audit';
 import { agentTarget } from './components/sessionChoice';
 import { usableId } from './components/launchChoice';
+import { launchSettingsField } from './components/launchSettings';
 import { PhoneAgent, PhoneHome, PhoneTheme, usePhone } from './phone/Phone';
 import { approvalRedirect, phoneScreen } from './phone/nav';
 import { requestPanel } from './layout/requests';
@@ -110,6 +112,8 @@ export function App() {
       // ADR-0069: the program the machine looks for in its PATH (empty from an older machine).
       program: k.program ?? '',
       // ADR-0059: the kind's launch options (the machine keeps their arguments).
+      // ADR-0066: the kind's launch settings (model, effort) and what each takes.
+      settings: (k.settings ?? []).map((st) => ({ id: st.id ?? '', label: st.label ?? '', values: st.values ?? [], defaultValue: st.defaultValue ?? '' })),
       options: (k.launchOptions ?? []).filter((o) => usableId(o.id ?? '')).map((o) => ({ id: o.id ?? '', label: o.label ?? '', skipsPermissions: !!o.skipsPermissions })),
     }));
   }, [api]);
@@ -129,12 +133,12 @@ export function App() {
     if (!d) throw { code: 'protocol.capability_missing' };
     return { path: d.path ?? '', parent: d.parent ?? '', entries: (d.entries ?? []).map((e) => ({ name: e.name ?? '', isGit: !!e.isGit })), truncated: !!d.truncated };
   }, [api, device]);
-  const startAgent = useCallback(async (node: string, info: DirectoryInfo, kind: string, separateWorktree: boolean, acceptIdentityChange: boolean, launch: { ids: string[]; confirmed: string[] }): Promise<string | undefined> => {
+  const startAgent = useCallback(async (node: string, info: DirectoryInfo, kind: string, separateWorktree: boolean, acceptIdentityChange: boolean, launch: { ids: string[]; confirmed: string[]; settings: [string, string][] }): Promise<string | undefined> => {
     try {
       if (!api || !device) return 'approval-not-trusted';
       // ADR-0059: the device signs the chosen launch options too, so the hub can neither add nor remove one.
-      const authorization = await signDirectory(device, node, 'launch', info.path, kind, info.projectId, separateWorktree, acceptIdentityChange, launch.ids, launch.confirmed);
-      const ok = await api.command(node, { agentLaunch: { path: info.path, projectId: info.projectId, kind, separateWorktree, acceptIdentityChange, authorization, launchOptions: launch.ids, confirmedLaunchOptions: launch.confirmed } });
+      const authorization = await signDirectory(device, node, 'launch', info.path, kind, info.projectId, separateWorktree, acceptIdentityChange, launch.ids, launch.confirmed, launch.settings);
+      const ok = await api.command(node, { agentLaunch: { path: info.path, projectId: info.projectId, kind, separateWorktree, acceptIdentityChange, authorization, launchOptions: launch.ids, confirmedLaunchOptions: launch.confirmed, ...launchSettingsField(launch.settings) } });
       const id = ok.agentLaunch?.agentId;
       setStarting(false);
       if (id) window.location.hash = `#/agent/${encodeURIComponent(`${node}/${id}`)}`;
@@ -144,6 +148,8 @@ export function App() {
       if (code === 'agent.option_forbidden') return optionForbidden(e);
       if (code === 'agent.option_unconfirmed') return 'start-option-unconfirmed';
       if (code === 'agent.option_invalid') return 'start-option-invalid';
+      if (code === 'agent.setting_unknown' || code === 'agent.setting_invalid') return 'start-setting-refused';
+      if (code === 'protocol.capability_missing' && launch.settings.length > 0) return 'start-settings-unsupported';
       if (code === 'protocol.capability_missing' && launch.ids.length > 0) return 'start-options-unsupported';
       return code === 'agent.mode_unsupported' ? 'start-directory-agent-unsupported' : code === 'approval.signature_invalid' ? 'approval-not-trusted' : code === 'protocol.capability_missing' ? 'start-directory-unsupported' : code === 'agent.kind_unknown' ? 'start-kind-unknown' : code === 'node.resource_limit' ? 'start-limit' : code === 'auth.forbidden' ? 'start-directory-forbidden' : 'start-failed';
     }
@@ -352,10 +358,12 @@ export function App() {
     return s;
   }, [api, agents]);
 
-  const loadDiff = useCallback(async (a: AgentTileModel, path = ''): Promise<string> => {
+  const loadDiff = useCallback(async (a: AgentTileModel, path = ''): Promise<DiffSource> => {
     if (!api || !a.workspaceRef) return '';
     const ok = await api.command(a.workspaceRef.node, a.workspaceRef.directory ? { workspaceQuery: { workspaceId: a.workspaceRef.id, operation: 'diff', path } } : { gitDiff: { worktreeId: a.workspaceRef.id, path } });
-    return ok.gitDiff?.diff ?? '';
+    const diff = ok.gitDiff?.diff ?? '';
+    const secret = (ok.gitDiff?.secretFiles ?? []).map((c) => ({ path: c.path ?? '', added: Number(c.added ?? 0), removed: Number(c.removed ?? 0) }));
+    return secret.length > 0 ? { diff, secretFiles: secret } : diff;
   }, [api]);
 
   // File access per workspace, kept stable so an open file browser does not reload when the fleet updates.
@@ -370,7 +378,7 @@ export function App() {
       f = {
         list: async (path) => {
           const ok = await api.command(w.node, w.directory ? { workspaceQuery: { workspaceId: w.id, operation: 'list', path } } : { filesList: { worktreeId: w.id, path } });
-          return (ok.filesList?.entries ?? []).map((e) => ({ name: e.name ?? '', isDir: !!e.isDir, size: Number(e.sizeBytes ?? 0) }));
+          return (ok.filesList?.entries ?? []).map((e) => ({ name: e.name ?? '', isDir: !!e.isDir, size: Number(e.sizeBytes ?? 0), ...(e.secret ? { secret: true } : {}) }));
         },
         read: async (path) => (await api.command(w.node, w.directory ? { workspaceQuery: { workspaceId: w.id, operation: 'read', path } } : { filesRead: { worktreeId: w.id, path } })).filesRead?.data ?? new Uint8Array(),
       };

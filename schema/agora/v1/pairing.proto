@@ -1,0 +1,156 @@
+syntax = "proto3";
+
+package agora.v1;
+
+// ADR-0065 (docs/specs/pairing.md): find a hub, compare a number, connected. Capability `pairing.v1`.
+//
+// Carriage: the machine's `PairRequest` and `PairReveal` are `CommandRequest` arms and `PairChallenge`, `PairResult` and
+// `PairStatusResult` are `CommandOk` arms, on a `wss://` connection that carries the pairing and nothing else (like `enroll`).
+// The owner's `PairOpen`, `PairClose`, `PairStatus`, `PairApprove` and `PairDeny` are commands too. The browser messages,
+// `PairRequested` and `PairDecided` are standalone: a browser has no command stream before it is signed in (its messages travel
+// as proto3 JSON over the hub's HTTP interface, the poll token in a request header), and the two notices are memory-only state of
+// a pairing session, never events in the event store (the number is never logged, pairing.md section 8). How they reach a window
+// is decided with the hub's code. `HubAnnouncement` is the reply of the UDP discovery (the request is raw bytes, not a message).
+
+enum PairKind {
+  // Unknown or not set. Receivers must treat an unrecognised value like this one.
+  PAIR_KIND_UNSPECIFIED = 0;
+  PAIR_KIND_MACHINE = 1;
+  PAIR_KIND_BROWSER = 2;
+}
+
+enum PairOutcome {
+  // Unknown or not set. Receivers must treat an unrecognised value like this one.
+  PAIR_OUTCOME_UNSPECIFIED = 0;
+  PAIR_OUTCOME_APPROVED = 1;
+  PAIR_OUTCOME_DENIED = 2;
+  // Nobody answered in time.
+  PAIR_OUTCOME_EXPIRED = 3;
+  // The switch closed, or the connection that owned the session ended or broke a rule.
+  PAIR_OUTCOME_CLOSED = 4;
+}
+
+// UDP discovery reply, unicast to the sender, only while the hub is open for pairing. A candidate, never a trust anchor.
+message HubAnnouncement {
+  string name = 1;
+  // The port of the hub's `wss://` listener.
+  uint32 port = 2;
+  // SHA-256 of the CA certificate's DER, 32 bytes. Public information, shown next to the name.
+  bytes ca_fingerprint = 3;
+  // Always true in a reply (a closed hub does not answer).
+  bool accepts_pairing = 4;
+  string version = 5;
+}
+
+// ---- machine, on the pairing connection (hub-side: refused with `pair.closed` while the switch is closed) ----
+
+// Step 1. `commitment` = SHA-256("agora/pair/v1/commit" || nonce_n || csr_hash), 32 bytes.
+message PairRequest {
+  bytes commitment = 1;
+  // Untrusted text the owner sees on the card.
+  string node_name = 2;
+  string os = 3;
+  string version = 4;
+}
+
+// Step 2, hub -> machine, in `CommandOk`. `pair_id` is a lookup key, never a capability; `nonce_h` is 16 bytes.
+message PairChallenge {
+  // 128 random bits, 16 bytes.
+  bytes pair_id = 1;
+  bytes nonce_h = 2;
+}
+
+// Step 3. `nonce_n` is 16 bytes.
+message PairReveal {
+  bytes pair_id = 1;
+  bytes nonce_n = 2;
+  string csr_pem = 3;
+}
+
+// Step 5, hub -> machine, in `CommandOk`, once, on the owning connection. When `approved` is false the other fields are empty.
+message PairResult {
+  bool approved = 1;
+  string cert_pem = 2;
+  string ca_pem = 3;
+}
+
+// ---- owner, from an owner window (anyone else: `auth.forbidden`) ----
+
+// Opens the switch for 10 minutes.
+message PairOpen {}
+
+message PairClose {}
+
+message PairStatus {}
+
+// In `CommandOk`.
+message PairStatusResult {
+  bool open = 1;
+  // Milliseconds since the Unix epoch, hub clock, when the switch closes by itself; 0 when closed.
+  uint64 closes_at_ms = 2;
+  // Sessions and browser requests waiting for a decision.
+  uint32 pending = 3;
+}
+
+// Approve is terminal and one-shot. For a machine, a node id that already belongs to another machine is refused unless `replace`.
+message PairApprove {
+  bytes pair_id = 1;
+  bool replace = 2;
+}
+
+message PairDeny {
+  bytes pair_id = 1;
+}
+
+// ---- hub -> windows (and notifiers, ADR-0051) ----
+
+// A card: "New machine 'laptop' (Windows, 192.168.1.50) wants to join. Number 482-193."
+message PairRequested {
+  bytes pair_id = 1;
+  PairKind kind = 2;
+  // The machine's name, or the browser's ("Chrome on Mac"). Untrusted text.
+  string name = 3;
+  string os = 4;
+  // The address the request came from.
+  string address = 5;
+  // Six ASCII digits, `482193`; clients show `482-193`.
+  string number = 6;
+  // Milliseconds since the Unix epoch, hub clock.
+  uint64 expires_ms = 7;
+}
+
+message PairDecided {
+  bytes pair_id = 1;
+  PairOutcome outcome = 2;
+}
+
+// ---- browser (HTTP, proto3 JSON; pairing.md section 6) ----
+
+message BrowserPairRequest {
+  // What the owner's card says ("Chrome on Mac"). Untrusted text.
+  string name = 1;
+}
+
+// The response that creates the request. `poll_token` (at least 256 random bits) is returned only here; the page keeps it in
+// memory and sends it in a request header on each poll. The hub stores its SHA-256 only.
+message BrowserPairCreated {
+  bytes pair_id = 1;
+  // Six ASCII digits, a locator and never a password.
+  string number = 2;
+  // Lowercase hex.
+  string poll_token = 3;
+  uint64 expires_ms = 4;
+}
+
+// The token is in a header, not here; `pair_id` only says which request.
+message BrowserPairPoll {
+  bytes pair_id = 1;
+}
+
+// The answer to a poll. When `outcome` is approved the session cookie is in the response's `Set-Cookie`, once.
+message BrowserPairState {
+  bool pending = 1;
+  // Set once `pending` is false.
+  PairOutcome outcome = 2;
+  uint64 expires_ms = 3;
+}

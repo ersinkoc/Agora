@@ -569,9 +569,13 @@ All additions; nothing published changed.
   settings is decided only over v2 (a client that signs the v1 message does not name the settings and is refused with
   `approval.signature_invalid`); one without keeps `agora-approval-start-v1`. Vectors: `schema/fixtures/signing/approval-start-v2.json`
   (node and web window). The helper starts with exactly the settings shown and signed, and never with a launch option. The node enforces "no grant" itself: a signed `helper_grant` or `helpers_may_start` on a request with settings is ignored.
-- **What is not built yet.** The TUI's `agent.start` card does not list settings: it never allows a request that has them (it says so, `tui-start-settings`) but can deny one (signed over v2); the web window's start pickers and the TUI's offer the settings later (the machine already sends what each kind
-  takes in `AgentKind.settings`); the owner's `start.models` allow-list and the price class on the card; settings are not kept across a
-  node restart's resume.
+- **Clients.** The web start window and the TUI's approval card are built. The window offers each `AgentKind.settings` entry (a list only
+  among its `values`; with no list a text box limited to the node's plain-token rule), sends nothing for "the agent's own default" (that
+  `AgentLaunch` has no `settings` and is signed over `directory-action-v1`/`v3` as before) and signs the chosen pairs in the kind's order
+  over `directory-action-v4`. The TUI card lists the settings under the request line and signs `agora-approval-start-v2` for an
+  `agent.start` that carries them (v1 byte for byte without); there is no other message it signs for a start.
+- **What is not built yet.** The TUI's own start picker; remembering the last choice per kind and machine; the owner's `start.models`
+  allow-list and the price class on the card; settings are not kept across a node restart's resume.
 
 ### Launch options (ADR-0059)
 
@@ -702,3 +706,25 @@ or when a device it already trusts signs an **endorsement** of it. The hub only 
 
 Shared vectors for the four signed messages and the fingerprint, checked by the node, the terminal client and the web window:
 `schema/fixtures/signing/device-trust-v1.json`.
+
+### Pairing (ADR-0065)
+
+Schema only so far (`schema/agora/v1/pairing.proto`, `docs/specs/pairing.md` is the design); no hub or node sends or handles these messages
+yet. All additions; nothing published changed. Capability `pairing.v1` is offered by both the hub and the node and means "speaks these
+messages"; it gates nothing until the code exists. A peer that gets a pairing command it does not handle answers
+`protocol.capability_missing`, as for any command it does not know.
+
+- **Commands** (`CommandRequest` fields): `PairOpen` (94), `PairClose` (95), `PairStatus` (96), `PairApprove` (97: `pair_id`, `replace`),
+  `PairDeny` (98), all from an owner window to the hub; `PairRequest` (99: `commitment`, `node_name`, `os`, `version`) and `PairReveal`
+  (100: `pair_id`, `nonce_n`, `csr_pem`) from a machine, accepted only on a pairing connection (like `enroll`). `pair_id` is 16 bytes.
+- **Results** (`CommandOk` fields): `PairChallenge` (23: `pair_id`, `nonce_h`), `PairResult` (24: `approved`, `cert_pem`, `ca_pem`; the
+  last two are empty unless approved), `PairStatusResult` (25: `open`, `closes_at_ms`, `pending`).
+- **Standalone** (not in the command or event oneofs): `PairRequested` (`pair_id`, `kind`, `name`, `os`, `address`, `number` as six digits,
+  `expires_ms`) and `PairDecided` (`pair_id`, `outcome`) are what a window renders as a card; they are memory-only state of a session and
+  never events in the event store (the number is never logged). `HubAnnouncement` is the UDP discovery reply; the request is 128 raw bytes,
+  not a message. `BrowserPairRequest`, `BrowserPairCreated` (the poll token is returned once, here), `BrowserPairPoll` and
+  `BrowserPairState` are proto3 JSON over HTTP; the poll token travels in a request header and the session cookie in `Set-Cookie`. A
+  browser approves or denies with `PairApprove` and `PairDeny`. Enums `PairKind` (machine, browser) and `PairOutcome` (approved, denied,
+  expired, closed). How the notices reach a window is decided with the hub's code.
+- **Errors**: `pair.closed`, `pair.limit` (`seconds`), `pair.expired`, `pair.mismatch`, `pair.denied`, `pair.unknown`, `pair.state`
+  (`state`), `pair.insecure_transport`, and the machine-local, never-sent `pair.name_unverified` (`name`); see `error-codes.md`.

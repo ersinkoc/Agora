@@ -82,4 +82,13 @@ or a local response timeout has a localized retry message.
 | `adapter.agent_exited` | `stage`, `exit_code`, `stderr_tail` | ADR-0058: the agent behind an adapter (an ACP agent behind the bridge) exited before it was ready. `stage` is `initialize` or `session`; `exit_code` is its exit code, `?` when it had none; `stderr_tail` the last lines of its error output with secrets removed (docs/specs/adapter-protocol.md), possibly empty |
 | `adapter.agent_refused` | `stage` | ADR-0058: the agent behind an adapter answered `initialize` or the new session (`stage`) with an error |
 | `adapter.option_refused` | `id` | ADR-0058: the agent did not switch to that mode or model |
+| `pair.closed` | — | ADR-0065: the hub is not open for pairing (the switch is closed, or closed while this session was open) |
+| `pair.limit` | `seconds` | ADR-0065: a pairing limit: pending sessions, admissions per address or for the hub, a poll over its rate, or the address is locked out. `seconds` is how long to wait before trying again |
+| `pair.expired` | — | ADR-0065: the pairing was not decided or revealed in time |
+| `pair.mismatch` | — | ADR-0065: the revealed nonce and CSR do not match the commitment; ends the session and counts as a failure |
+| `pair.denied` | — | ADR-0065: the owner denied the pairing |
+| `pair.unknown` | — | ADR-0065: no such session on this connection (another connection's `pair_id` looks the same); counts as a failure for the sender's address |
+| `pair.state` | `state` | ADR-0065 section 5a: the message is not allowed in the session's current state (a second request or reveal, a reveal out of order, a decision on a session that is no longer pending); ends the session. `state` is `awaiting_reveal`, `pending` or `decided` |
+| `pair.insecure_transport` | — | ADR-0065 section 6: a browser asked to pair over a transport that cannot carry the session safely (plain HTTP from another machine) |
+| `pair.name_unverified` | `name` | ADR-0065 section 5, step 6b: **machine-local, never sent.** The leaf the machine saw does not carry the name or address it dialled (`name`), or does not chain to the CA it was given; nothing is stored |
 | `internal` | `incident_id` | Unexpected failure; details only in logs |

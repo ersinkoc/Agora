@@ -1,0 +1,9 @@
+{
+  "pairId": "AQID",
+  "kind": "PAIR_KIND_MACHINE",
+  "name": "x",
+  "os": "x",
+  "address": "x",
+  "number": "x",
+  "expiresMs": "1"
+}

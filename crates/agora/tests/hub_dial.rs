@@ -2333,19 +2333,34 @@ flag = ["--mcp-config", "{config_file}"]
         );
     }
     assert_eq!(node.approvals.pending_count(), 1, "still waiting");
-    resolve(
-        &mut session,
-        sign(agora_tui::device::start_message_v2(
-            "laptop",
-            &local_approval,
-            true,
-            0,
-            false,
-            &signed,
-            &card,
-        )),
-    )
-    .unwrap();
+    // The terminal console's own answer (ADR-0066): it reads the card from the hub's snapshot, shows its settings and signs over
+    // `agora-approval-start-v2` by itself, with no help from this test. A stranger's key is still refused, and the request keeps waiting.
+    let console_snapshot = {
+        let end = Instant::now() + Duration::from_secs(20);
+        loop {
+            let mut fresh = Session::connect(&console, "client-token").unwrap();
+            if let agora_tui::client::Update::Snapshot(s) = fresh.next(Duration::from_secs(2)) {
+                if s.approvals.iter().any(|a| a.action == "agent.start") {
+                    break *s;
+                }
+            }
+            assert!(Instant::now() < end, "the card never reached the console");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    };
+    let shown_rows =
+        agora_tui::client::decision_message("laptop", &local_approval, "agent.start", &card, true);
+    assert!(shown_rows.starts_with(b"agora-approval-start-v2\0"));
+    let (stranger, _) = agora_tui::device::Device::generate().unwrap();
+    assert_eq!(
+        session.resolve_first_approval(&console_snapshot, &stranger, true),
+        Err("approval.signature_invalid".to_string())
+    );
+    assert_eq!(node.approvals.pending_count(), 1, "still waiting");
+    assert_eq!(
+        session.resolve_first_approval(&console_snapshot, &device, true),
+        Ok(true)
+    );
     line.clear();
     reader.read_line(&mut line).unwrap();
     let reply: serde_json::Value = serde_json::from_str(&line).unwrap();

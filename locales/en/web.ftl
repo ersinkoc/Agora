@@ -258,6 +258,7 @@ changes-next = Next file
 changes-keys = next and previous file
 changes-binary = This file is not text, so its changes are not shown.
 changes-no-lines = Only the name or the permissions of this file changed.
+changes-secret = Changed, content hidden
 changes-no-eol = No line break at the end of the file
 changes-gap = { $count ->
     [one] Show 1 unchanged line
@@ -300,6 +301,8 @@ files-tree = Folders and files
 files-pick = Pick a file on the left to read it.
 files-binary = This file is not text, so it is not shown.
 files-too-large = This file could not be read (it may be too large).
+files-secret = Kept private: it may hold a secret
+files-secret-row = { $name }, kept private
 files-failed = Could not list this folder.
 files-filter = Filter files by name
 files-only-changed = Show only the changed files
@@ -818,3 +821,10 @@ forget-machine-reason-forbidden = Only the hub's owner can forget machines.
 forget-machine-reason-online = It is connected again, so it was not forgotten.
 forget-machine-reason-gone = The hub no longer knows this machine.
 forget-machine-reason-other = The hub could not forget it. Try again.
+
+# ADR-0066: the model and effort a kind takes, in the start window.
+setting-default = The agent's own default
+setting-default-is = The agent's own default ({ $value })
+start-settings-summary = { $kind } will start with { $settings }.
+start-settings-unsupported = This machine is too old to start an agent with a model or effort. Update it, or choose the agent's own default.
+start-setting-refused = This machine does not take that model or effort for this agent. Choose another, or the agent's own default.

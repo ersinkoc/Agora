@@ -258,6 +258,7 @@ changes-next = Sonraki dosya
 changes-keys = sonraki ve önceki dosya
 changes-binary = Bu dosya metin olmadığı için değişiklikleri gösterilmiyor.
 changes-no-lines = Bu dosyanın yalnızca adı ya da izinleri değişti.
+changes-secret = Değişti, içerik gizli
 changes-no-eol = Dosyanın sonunda satır sonu yok
 changes-gap = { $count ->
     [one] Değişmeyen 1 satırı göster
@@ -285,6 +286,8 @@ files-tree = Klasörler ve dosyalar
 files-pick = Okumak için soldan bir dosya seçin.
 files-binary = Bu dosya metin olmadığı için gösterilmiyor.
 files-too-large = Bu dosya okunamadı (çok büyük olabilir).
+files-secret = Gizli tutuluyor: bir sır içeriyor olabilir
+files-secret-row = { $name }, gizli tutuluyor
 files-failed = Bu klasör listelenemedi.
 files-filter = Dosyaları ada göre süz
 files-only-changed = Yalnızca değişen dosyaları göster
@@ -803,3 +806,10 @@ forget-machine-reason-forbidden = Makineleri yalnızca hub'ın sahibi unutabilir
 forget-machine-reason-online = Yeniden bağlandı, bu yüzden unutulmadı.
 forget-machine-reason-gone = Hub bu makineyi artık tanımıyor.
 forget-machine-reason-other = Hub unutamadı. Yeniden deneyin.
+
+# ADR-0066: bir türün aldığı model ve efor, başlatma penceresinde.
+setting-default = Ajanın kendi varsayılanı
+setting-default-is = Ajanın kendi varsayılanı ({ $value })
+start-settings-summary = { $kind } şu ayarlarla başlayacak: { $settings }.
+start-settings-unsupported = Bu makine, model veya eforla ajan başlatmak için fazla eski. Güncelleyin ya da ajanın kendi varsayılanını seçin.
+start-setting-refused = Bu makine, bu ajan için o modeli veya eforu almıyor. Başka birini ya da ajanın kendi varsayılanını seçin.

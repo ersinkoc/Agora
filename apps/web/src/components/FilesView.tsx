@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { t } from '../i18n';
-import { baseName, isTruncated, parseDiff, type DiffFile, type DiffStatus } from '../net/diff';
+import { baseName, diffText, isTruncated, readDiff, type DiffFile, type DiffSource, type DiffStatus } from '../net/diff';
 import { ancestors, changedFolders, changeMarks, crumbs, findMatches, statusByPath, type ChangeMark, type Match } from '../net/fileview';
-import { decodeText, formatSize, joinPath, type FileItem, type WorkspaceFiles } from '../net/files';
+import { decodeText, formatSize, joinPath, readFailure, type FileItem, type WorkspaceFiles } from '../net/files';
 import { markRanges } from '../net/highlight';
 import { useHighlightedFile } from '../highlight/useHighlight';
 import { StatusBadge } from './ChangesView';
@@ -14,7 +14,7 @@ import { Resizer } from './Resizer';
 // Read-only. The text is drawn a screenful at a time, so a 512 KiB file costs what its visible lines cost.
 
 type Listing = FileItem[] | 'loading' | 'failed';
-type Content = { lines: string[]; bytes: number } | 'loading' | 'binary' | 'failed';
+type Content = { lines: string[]; bytes: number } | 'loading' | 'binary' | 'failed' | 'secret';
 interface Tab { path: string; size: number }
 
 const LINE = 20; // px per line: text-xs with leading-5
@@ -24,7 +24,7 @@ const MAX_TABS = 12;
 export function FilesView({ files, load, changed, compact = false }: {
   files: WorkspaceFiles;
   /** The workspace's diff, for the change marks; absent for a folder without Git. */
-  load?: (path?: string) => Promise<string>;
+  load?: (path?: string) => Promise<DiffSource>;
   /** How many files the node counts as changed (it counts every few seconds): the marks are read again when it moves, so they
    *  follow an agent at work, and a first read made before the node had the workspace is not the last. */
   changed?: number;
@@ -80,7 +80,7 @@ export function FilesView({ files, load, changed, compact = false }: {
       if (!loader) { setChanges([]); setCut(false); return; }
       const again = () => { if (live && n < 3) timer = setTimeout(() => attempt(n + 1), 1500 * (n + 1)); };
       loader().then(
-        (d) => { if (!live) return; const parsed = parseDiff(d); setChanges(parsed); setCut(isTruncated(d)); if (parsed.length === 0 && (changed ?? 0) > 0) again(); },
+        (d) => { if (!live) return; const parsed = readDiff(d); setChanges(parsed); setCut(isTruncated(diffText(d))); if (parsed.length === 0 && (changed ?? 0) > 0) again(); },
         () => { if (live) { setChanges([]); setCut(false); again(); } },
       );
     };
@@ -89,6 +89,15 @@ export function FilesView({ files, load, changed, compact = false }: {
   }, [hasDiff, round, changed]);
   const status = useMemo(() => statusByPath(changes), [changes]);
   const folders = useMemo(() => changedFolders(status.keys()), [status]);
+  // Files the node keeps private (ADR-0080): from the listings, and from the changes (a changed one may sit in a folder not opened).
+  const secrets = useMemo(() => {
+    const out = new Set<string>();
+    for (const [dir, l] of listings) if (Array.isArray(l)) for (const f of l) if (f.secret && !f.isDir) out.add(joinPath(dir, f.name));
+    for (const c of changes) if (c.secret) out.add(c.path);
+    return out;
+  }, [listings, changes]);
+  // A secret file is never opened: its row says why (and so does the line under the tree), and no request is sent.
+  const [secretNote, setSecretNote] = useState<string | undefined>();
   const changeOf = (path: string) => changes.find((c) => c.path === path);
 
   // The tree is one Tab stop (WAI-ARIA tree): the item last focused, else the open file, else the first; arrows move between the
@@ -135,10 +144,12 @@ export function FilesView({ files, load, changed, compact = false }: {
         if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop();
         return new Map(c).set(path, { lines, bytes: b.length });
       }),
-      () => setContents((c) => new Map(c).set(path, 'failed')),
+      (e) => setContents((c) => new Map(c).set(path, readFailure(e))),
     );
   }, [files]);
   const openFile = (path: string, size: number) => {
+    if (secrets.has(path)) { setSecretNote(path); return; }
+    setSecretNote(undefined);
     setTabs((ts) => (ts.some((x) => x.path === path) ? ts : [...ts, { path, size }].slice(-MAX_TABS)));
     setActive(path);
     setHit(0);
@@ -237,11 +248,13 @@ export function FilesView({ files, load, changed, compact = false }: {
               : flat.map(([path, size]) => {
                 const st = status.get(path);
                 const gone = st === 'deleted';
+                const secret = secrets.has(path);
                 return (
                   <button key={path} type="button" role="treeitem" aria-level={1} data-path={path} aria-selected={path === active} aria-current={path === active} disabled={gone}
-                    className="ide-row font-mono text-xs disabled:opacity-60" title={gone ? t('files-deleted') : path}
-                    onClick={() => { if (!gone) { openFile(path, size < 0 ? 0 : size); reveal(path); } }}>
-                    <Icon name="files" className="size-3.5 flex-none text-muted" />
+                    aria-disabled={secret || undefined} aria-label={secret ? t('files-secret-row', { name: path }) : undefined}
+                    className="ide-row font-mono text-xs disabled:opacity-60" title={gone ? t('files-deleted') : secret ? t('files-secret') : path}
+                    onClick={() => { if (!gone) { openFile(path, size < 0 ? 0 : size); if (!secret) reveal(path); } }}>
+                    <Icon name={secret ? 'lock' : 'files'} className="size-3.5 flex-none text-muted" />
                     <span className={`min-w-0 flex-1 truncate text-start ${gone ? 'line-through' : ''}`} dir="ltr">{path}</span>
                     {st && <StatusBadge status={st} />}
                   </button>
@@ -251,6 +264,7 @@ export function FilesView({ files, load, changed, compact = false }: {
             <TreeLevel dir="" depth={0} listings={listings} open={open} list={list} toggle={toggle} pick={openFile} active={active} status={status} folders={folders} />
           )}
         </div>
+        {secretNote !== undefined && <p role="status" className="m-0 flex flex-none items-start gap-1.5 border-t border-line px-3 py-1.5 text-xs text-muted"><Icon name="lock" className="mt-0.5 size-3.5" /><span className="min-w-0"><span className="font-mono text-ink" dir="ltr">{baseName(secretNote)}</span>. {t('files-secret')}</span></p>}
       </div>
       <div className="hidden @2xl:block"><Resizer side="start" value={treeWidth} min={160} max={520} onChange={setTreeWidth} /></div>
 
@@ -316,6 +330,7 @@ export function FilesView({ files, load, changed, compact = false }: {
             <div className="min-h-0 flex-1 bg-surface-0">
               {content === undefined || content === 'loading' ? <p className="muted p-4" aria-busy="true">{t('start-loading')}</p>
                 : content === 'binary' ? <p className="muted p-4">{t('files-binary')}</p>
+                : content === 'secret' ? <p role="note" className="flex items-center gap-2 p-4 text-muted"><Icon name="lock" className="size-4" />{t('files-secret')}</p>
                 : content === 'failed' ? <p role="alert" className="p-4">{activeStatus === 'deleted' ? t('files-deleted') : t('files-too-large')}</p>
                 : <CodeView key={active} label={active ?? ''} lines={content.lines} html={html} marks={marks} matches={finding ? matches : []} current={current} />}
             </div>
@@ -330,7 +345,7 @@ export function FilesView({ files, load, changed, compact = false }: {
   );
 }
 
-function TreeLevel({ dir, depth, listings, open, list, toggle, pick, active, status, folders }: {
+export function TreeLevel({ dir, depth, listings, open, list, toggle, pick, active, status, folders }: {
   dir: string; depth: number; listings: Map<string, Listing>; open: Set<string>; list: (dir: string) => void; toggle: (path: string) => void;
   pick: (path: string, size: number) => void; active?: string; status: Map<string, DiffStatus>; folders: Set<string>;
 }) {
@@ -346,13 +361,15 @@ function TreeLevel({ dir, depth, listings, open, list, toggle, pick, active, sta
         const path = joinPath(dir, f.name);
         const st = status.get(path);
         const isOpen = open.has(path);
+        const secret = !f.isDir && f.secret === true;
         return (
           <div key={path}>
             <button type="button" role="treeitem" aria-level={depth + 1} data-path={path} aria-expanded={f.isDir ? isOpen : undefined} aria-selected={path === active} aria-current={path === active}
-              className="ide-row gap-1.5 py-0.5 font-mono text-xs" style={pad} title={path}
+              aria-disabled={secret || undefined} aria-label={secret ? t('files-secret-row', { name: f.name }) : undefined}
+              className="ide-row gap-1.5 py-0.5 font-mono text-xs" style={pad} title={secret ? t('files-secret') : path}
               onClick={() => (f.isDir ? toggle(path) : pick(path, f.size))}>
               <span className="w-3 flex-none text-muted">{f.isDir && <Icon name="chevron" className={`size-3 transition-transform duration-150 ${isOpen ? 'rotate-90' : 'rtl:rotate-180'}`} />}</span>
-              <Icon name={f.isDir ? 'folder' : 'files'} className={`size-3.5 flex-none ${f.isDir ? 'text-muted' : 'text-muted/70'}`} />
+              <Icon name={f.isDir ? 'folder' : secret ? 'lock' : 'files'} className={`size-3.5 flex-none ${f.isDir ? 'text-muted' : 'text-muted/70'}`} />
               <span className={`min-w-0 flex-1 truncate text-start ${st ? 'text-ink' : ''}`} dir="ltr">{f.name}</span>
               {f.isDir && folders.has(path) && <span className="size-1.5 flex-none rounded-full bg-working" title={t('files-folder-changed')} />}
               {st && <StatusBadge status={st} />}

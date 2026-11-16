@@ -14,6 +14,7 @@ import { PromptBox } from '../components/PromptBox';
 import { ClosedSummary } from '../components/ClosedSummary';
 import { DiffDialog } from '../components/DiffDialog';
 import { FilesDialog } from '../components/FilesDialog';
+import type { DiffSource } from '../net/diff';
 import type { WorkspaceFiles } from '../net/files';
 import { StartApproval, type StartChoice } from '../components/StartApproval';
 import { ThemeEditor } from '../themes/ThemeEditor';
@@ -189,7 +190,7 @@ export function PhoneAgent({ agent, agents, approvals, machines, onResolve, untr
   chooseOption?: (agentKey: string, kind: 'mode' | 'model', id: string) => Promise<boolean>;
   costMicroUsd?: number;
   /** What the agent changed (the review screen) and its files (the file browser), as on the desktop; absent without a hub. */
-  loadDiff?: (agent: AgentTileModel, path?: string) => Promise<string>;
+  loadDiff?: (agent: AgentTileModel, path?: string) => Promise<DiffSource>;
   filesOf?: (agent: AgentTileModel) => WorkspaceFiles | undefined;
   onOpen: (id: string) => void;
   onBack: () => void;
