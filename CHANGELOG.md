@@ -77,6 +77,10 @@ _Nothing yet._
   nor finish it, stuck until its lease ran out. It is refused (`mesh.recipient_unknown`) and stays with its owner (audit finding F601).
 
 ### Machines
+- A machine's control connection no longer keeps everything it receives: when a read ended in the middle of a message (the usual
+  case), the part already handled stayed in memory, so a console watching a busy terminal, or the machine serving it, grew by every
+  byte of output for as long as it stayed connected (4 MB streamed held 4 MB). It now holds at most one unfinished message, and
+  reading got faster too (audit finding F240).
 - A terminal resized to one column stopped its machine's screen for that terminal: a wide character (Chinese, Japanese,
   an emoji) crashed it, and narrowing a screen holding one never finished. A terminal's screen is now at least two columns.
 - Asking for the changes of one file whose name contains `[`, `*` or `?` now returns that file only: the name was read as a pattern, so
