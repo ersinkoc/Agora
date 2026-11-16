@@ -428,6 +428,7 @@ fn doctor(say: &Say, o: &Opts) -> ExitCode {
             ("local-sockets", _) => key!("doctor-local-sockets-unsupported"),
             ("sandbox", Status::Ok) => key!("doctor-sandbox"),
             ("sandbox", _) => key!("doctor-sandbox-unsupported"),
+            ("git-identity-missing", _) => key!("doctor-git-identity-missing"),
             ("git", Status::Ok) => key!("doctor-git"),
             ("git", _) => key!("doctor-git-missing"),
             ("data-dir", Status::Ok) => key!("doctor-data-dir"),

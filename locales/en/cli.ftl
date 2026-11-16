@@ -70,6 +70,7 @@ doctor-sandbox = Agents can be confined to their workspace on this machine (the 
 doctor-sandbox-unsupported = Agents cannot be confined on this machine (the node's policy: { $detail }). Anything but "off" means agents will not start here.
 doctor-git = Git is available ({ $detail }).
 doctor-git-missing = Git was not found. Agora needs it to give each agent its own workspace.
+doctor-git-identity-missing = Agents here have no git identity, so they cannot commit. Set "user.name" and "user.email" with "git config --global".
 doctor-data-dir = The data folder is writable: { $detail }
 doctor-data-dir-unwritable = The data folder cannot be written: { $detail }
 doctor-node = A node is running at { $detail }.
