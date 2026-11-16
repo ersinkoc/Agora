@@ -17,10 +17,10 @@ only these keys, each copied if you have set it in your own global configuration
 copied: no `credential.*`, `include`/`includeIf`, `url.*`, `alias.*`, `core.sshCommand`, `core.hooksPath`, `core.fsmonitor`, `core.pager`,
 `core.editor`, `http.*`, `gpg.*` or `commit.gpgsign`. The node reads the keys with `git config --global --no-includes`, so an identity that
 lives only in a file you `include` is not found; set it in the global file itself. A value that is empty, long, holds a control character
-(a newline too), or, for a key other than the two identity ones, anything but letters, digits, `_`, `-` and `.`, is dropped.
+(a newline too), or, for a key other than the two identity ones, anything but letters, digits, `_`, `-` and `.`, is dropped. The file is not written at all if its folder is one the agent may write (a worktrees folder under `/tmp`), and it stays on disk after the agent ends until the next start rewrites it.
 
 If you list `~/.gitconfig` in `sandbox.read` yourself, the node does not set `GIT_CONFIG_GLOBAL` and your choice stands as before; that is also
-the way to get a key outside the list. `agora doctor` warns when a machine that confines agents has no `user.name` or `user.email`.
+the way to get a key outside the list. `agora doctor` warns when a machine that confines agents has no `user.name` or `user.email` that the node can copy (one found only through an `include` or the system file counts as missing, because the agent would not get it).
 
 ## macOS (Seatbelt)
 

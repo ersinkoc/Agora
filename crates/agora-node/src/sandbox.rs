@@ -219,9 +219,14 @@ impl SandboxPolicy {
 
     /// Writes the global git configuration of the confined agent that works in `worktree` (ADR-0078) and returns its path, to be
     /// granted for reading and named in `GIT_CONFIG_GLOBAL`. `None` when agents are not confined, the owner grants `~/.gitconfig`
-    /// themselves, or the file could not be written.
-    pub fn git_config(&self, worktree: &Path) -> Option<PathBuf> {
+    /// themselves, the file would lie under a folder the agent may write (`write`: then it could rewrite it, so nothing is written and
+    /// git behaves as it did before), or the file could not be written.
+    pub fn git_config(&self, worktree: &Path, write: &[PathBuf]) -> Option<PathBuf> {
         if self.level == Level::Off || self.grants_gitconfig() {
+            return None;
+        }
+        let file = crate::gitconfig::path_for(worktree);
+        if write.iter().any(|w| file.starts_with(w)) {
             return None;
         }
         crate::gitconfig::write_for(worktree)

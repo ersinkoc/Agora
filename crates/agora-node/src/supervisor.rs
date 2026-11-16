@@ -643,7 +643,8 @@ impl Supervisor {
             .and_then(|k| k.manifest.sandbox.as_ref());
         let mut profile = self.sandbox.profile(kind, needs, worktree, program)?;
         // ADR-0078: the file of git settings the node wrote for this start, readable and not writable.
-        profile.read.extend(self.sandbox.git_config(worktree));
+        let file = self.sandbox.git_config(worktree, &profile.write);
+        profile.read.extend(file);
         Some(profile)
     }
 

@@ -96,6 +96,9 @@ pub fn read_key(key: &str) -> Option<String> {
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("LC_ALL", "C")
+        // Nothing the node was started with may stand in for the person's own file.
+        .env_remove("GIT_CONFIG_GLOBAL")
+        .env_remove("GIT_CONFIG_SYSTEM")
         .env_remove("GIT_CONFIG_COUNT")
         .env_remove("GIT_CONFIG_PARAMETERS")
         .env_remove("GIT_DIR")
@@ -121,8 +124,9 @@ pub fn read_allowed() -> Vec<(String, String)> {
         .collect()
 }
 
-/// Whether the person has no git identity (no `user.name` or no `user.email`) anywhere git reads for them, which `agora doctor` names
-/// on a machine that confines agents (decision 5).
+/// Whether the agents have no git identity: no `user.name` or no `user.email` that [`read_key`] finds, which is exactly what is copied
+/// (so an identity only in an `include` or the system file is reported missing, because a confined agent would not get it either).
+/// `agora doctor` names it on a machine that confines agents (decision 5).
 pub fn identity_missing() -> bool {
     ["user.name", "user.email"]
         .iter()
@@ -156,7 +160,10 @@ pub fn write_for(worktree: &Path) -> Option<PathBuf> {
 
 fn write_values(worktree: &Path, values: &[(String, String)]) -> Option<PathBuf> {
     let path = path_for(worktree);
-    let tmp = path.with_extension("new");
+    // Appended, not `with_extension`: that would cut a worktree name such as `fix.v1` and share one name with `fix.v2`.
+    let mut tmp_name = path.as_os_str().to_owned();
+    tmp_name.push(".new");
+    let tmp = PathBuf::from(tmp_name);
     let _ = std::fs::remove_file(&tmp);
     let text = render(values);
     {
@@ -175,9 +182,13 @@ fn write_values(worktree: &Path, values: &[(String, String)]) -> Option<PathBuf>
     Some(path)
 }
 
-/// The environment that points a confined agent's git at its file (decisions 1 and 3).
+/// The environment that points a confined agent's git at its file (decisions 1 and 3). The node's own environment may carry git
+/// settings that apply on top of any global file (`GIT_CONFIG_COUNT` with `GIT_CONFIG_KEY_n`/`VALUE_n`, `GIT_CONFIG_PARAMETERS`, which
+/// `git -c` leaves for child gits): the count is set to 0 (the key and value variables are then not read) and the parameters emptied.
 pub fn env_for(file: &Path) -> Vec<(String, String)> {
     vec![
+        ("GIT_CONFIG_COUNT".into(), "0".into()),
+        ("GIT_CONFIG_PARAMETERS".into(), String::new()),
         (
             "GIT_CONFIG_GLOBAL".into(),
             file.to_string_lossy().into_owned(),
@@ -277,6 +288,23 @@ mod tests {
         );
         // The comment characters stay inside the quotes.
         assert!(render(&pairs(&[("user.name", "A # B ; C")])).contains("\"A # B ; C\""));
+    }
+
+    #[test]
+    fn a_dotted_worktree_name_has_a_temp_name_of_its_own() {
+        let dir = std::env::temp_dir().join(format!("agora-gc-dot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (a, b) = (dir.join("fix.v1"), dir.join("fix.v2"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let pa = write_values(&a, &pairs(&[("user.name", "A")])).unwrap();
+        let pb = write_values(&b, &pairs(&[("user.name", "B")])).unwrap();
+        assert_ne!(pa, pb);
+        assert!(std::fs::read_to_string(&pa).unwrap().contains("\"A\""));
+        assert!(std::fs::read_to_string(&pb).unwrap().contains("\"B\""));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_file(pa);
+        let _ = std::fs::remove_file(pb);
     }
 
     #[test]

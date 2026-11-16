@@ -195,7 +195,7 @@ fn the_owners_grant_of_the_global_configuration_is_left_as_it_is() {
         ..Default::default()
     };
     assert!(!by_default.grants_gitconfig());
-    assert!(by_default.git_config(&wt).is_some());
+    assert!(by_default.git_config(&wt, &[]).is_some());
     let granted = SandboxPolicy {
         level: Level::Worktree,
         read: vec![h.join(".gitconfig")],
@@ -204,13 +204,17 @@ fn the_owners_grant_of_the_global_configuration_is_left_as_it_is() {
     assert!(granted.grants_gitconfig());
     let before = gitconfig::path_for(&wt);
     let _ = std::fs::remove_file(&before);
-    assert_eq!(granted.git_config(&wt), None);
+    assert_eq!(granted.git_config(&wt, &[]), None);
     assert!(
         !before.exists(),
         "a file was written although the owner granted theirs"
     );
+    // A file under a folder the agent may write is not written (it could rewrite it).
+    let _ = std::fs::remove_file(&before);
+    assert_eq!(by_default.git_config(&wt, std::slice::from_ref(&dir)), None);
+    assert!(!before.exists());
     // Not confined: nothing is written either.
-    assert_eq!(SandboxPolicy::default().git_config(&wt), None);
+    assert_eq!(SandboxPolicy::default().git_config(&wt, &[]), None);
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -272,4 +276,69 @@ fn a_really_confined_agent_commits_with_the_copied_identity_and_cannot_read_the_
     );
     drop(sup);
     let _ = std::fs::remove_dir_all(dir);
+}
+
+/// The node's own environment (`GIT_CONFIG_COUNT` and friends, `GIT_CONFIG_PARAMETERS`) applies on top of any global file unless the
+/// agent's environment cancels it.
+#[test]
+fn settings_in_the_nodes_environment_do_not_reach_a_confined_agents_git() {
+    let _serial = serial();
+    let h = home();
+    let (dir, repo) = repo("envleak");
+    let wt = dir.join("worktrees/a");
+    std::fs::create_dir_all(&wt).unwrap();
+    let file = gitconfig::write_for(&wt).unwrap();
+    let run = |cancel: bool| {
+        let mut c = Command::new("git");
+        c.current_dir(&repo)
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap())
+            .env("HOME", h)
+            // What the node was started with.
+            .env("GIT_CONFIG_COUNT", "1")
+            .env("GIT_CONFIG_KEY_0", "core.sshCommand")
+            .env("GIT_CONFIG_VALUE_0", "evil-count")
+            .env("GIT_CONFIG_PARAMETERS", "'alias.zz'='!evil-params'")
+            .args(["config", "--get-regexp", "^(core.sshcommand|alias.zz)$"]);
+        if cancel {
+            c.envs(gitconfig::env_for(&file));
+        } else {
+            // The same, with only the two variables of decisions 1 and 3.
+            c.env("GIT_CONFIG_GLOBAL", &file)
+                .env("GIT_CONFIG_NOSYSTEM", "1");
+        }
+        String::from_utf8_lossy(&c.output().unwrap().stdout).into_owned()
+    };
+    // Negative control: without the cancelling variables both settings apply.
+    let leaked = run(false);
+    assert!(
+        leaked.contains("evil-count") && leaked.contains("evil-params"),
+        "{leaked}"
+    );
+    assert_eq!(run(true), "");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn the_nodes_own_git_variables_do_not_change_what_is_read_as_the_persons_configuration() {
+    let _serial = serial();
+    let h = home();
+    let other = h.join("elsewhere");
+    std::fs::write(&other, "[user]\n\tname = Mallory\n").unwrap();
+    std::env::set_var("GIT_CONFIG_GLOBAL", &other);
+    std::env::set_var("GIT_CONFIG_COUNT", "1");
+    std::env::set_var("GIT_CONFIG_KEY_0", "user.name");
+    std::env::set_var("GIT_CONFIG_VALUE_0", "Mallory");
+    std::env::set_var("GIT_CONFIG_PARAMETERS", "'user.name'='Mallory'");
+    let name = gitconfig::read_key("user.name");
+    for v in [
+        "GIT_CONFIG_GLOBAL",
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_KEY_0",
+        "GIT_CONFIG_VALUE_0",
+        "GIT_CONFIG_PARAMETERS",
+    ] {
+        std::env::remove_var(v);
+    }
+    assert_eq!(name.as_deref(), Some("Ada Example"));
 }
