@@ -30,6 +30,13 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 - macOS: a confined agent is not started when a file it may write also has another name elsewhere (a hard link made outside
   confinement), or when a save copy next to it (`state.json.tmp`) is such a link, since writing it would change that other file too; the message says to remove the link or put a copy in its place
   (#571). Such links inside a folder it may write are not looked for at each start.
+- A passkey added from another machine before the screen password was set now goes away when the password is set, also when it
+  was added under the name (credential id) of a removed person's passkey. It used to take over that old passkey's place among the
+  ones added at the hub's machine or with the password, so it stayed and kept signing in from elsewhere without the password
+  (audit finding F211).
+- Someone who can reach the hub's address can no longer stop passkey sign-in: asking for many passkey sign-ins without finishing
+  them threw away everyone else's waiting one, so the owner's passkey sign-in failed and adding a passkey was refused. One address
+  now keeps at most 4 waiting and only loses its own (audit finding F210).
 
 ### Agents working together
 - A task's title, detail and summary are limited to the same size as a message (16 KiB). They used to take about a megabyte each,

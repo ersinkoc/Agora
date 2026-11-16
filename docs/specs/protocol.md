@@ -228,7 +228,8 @@ session ("Lock"). `POST /api/password` (`{"password", "current"?}`, owner sessio
 every other session (400 `{"code":"password.too_short"|"password.too_long"}`, 401 wrong current, 403 not the owner).
 From a non-loopback peer with a password set, `POST /api/passkey/register-begin` and `register-finish` also need `"password"` (401
 without it, counted like a sign-in); changing or clearing the password deletes passkeys added from elsewhere without it (their ids are
-not in the setting `passkeys_vouched`). Passkey `login-finish` counts only toward the per-address limit. The idle lock of a window
+not in the setting `passkeys_vouched`; a passkey added from elsewhere without it under the id of a removed passkey first takes that
+id off the list). Passkey `login-finish` counts only toward the per-address limit. The idle lock of a window
 uses `DELETE /api/session`. The hash is a setting (`screen_password`: `pbkdf2-sha256$<rounds>$<salt hex>$<hash hex>`), not a schema change.
 
 Passkeys (`agora-hub::passkey`, WebAuthn, ES256 only, no attestation): a signed-in session adds one with
@@ -236,7 +237,8 @@ Passkeys (`agora-hub::passkey`, WebAuthn, ES256 only, no attestation): a signed-
 (`{"id","publicKey"(SPKI),"clientDataJSON"}`, all base64url). Without a session: `login-begin` (→ `{"challenge","rpId","ids"}`) and
 `login-finish` (`{"id","authenticatorData","clientDataJSON","signature"}` → `{"token"}`, 401 on any failed proof, 429 while locked
 out). The relying party id is the request's `Host` without the port and the origin must be that host; challenges are single use and
-last 5 minutes; user presence and verification are required; a signature counter that counts must rise. The hub stores public keys only
+last 5 minutes, at most 4 waiting per address (an IPv6 address by its /64; a fifth drops that address's oldest) and 256 hub-wide (when
+full, the address holding the most loses its oldest); user presence and verification are required; a signature counter that counts must rise. The hub stores public keys only
 (schema v4, table `passkeys`, at most 32).
 
 Mesh posts between nodes (ADR-0031): a node sends `CommandRequest{mesh_post{to: "<node>/<agent>", body, from_agent}}` on stream 1
