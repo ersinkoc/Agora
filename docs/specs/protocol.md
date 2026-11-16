@@ -90,6 +90,9 @@ the acknowledgement to send back. Clients page the log by global position. Paylo
 Hub node session (`agora-hub::session`): a state machine over decoded messages, independent of transport and framing.
 The producer id is the node's authenticated identity; an event naming another producer is `protocol.producer_mismatch`
 (`node_id`, `producer_id`).
+An event whose body names a node (its `node_id`) must name that producer, or it is `protocol.invalid_message` (field `node_id`);
+`NodeLink`, `NodeForgotten` and `AgentForgotten` are written by the hub only, and one from a node is `protocol.invalid_message`
+(field `node_link`, `node_forgotten`, `agent_forgotten`). Threat model T19.
 When the hub ends a node's connection because the node broke the protocol (such as
 `protocol.producer_mismatch`), it first sends a WebSocket close (code 1008) whose reason is the stable error code, logs
 `node refused: <node> <code> <params>`, and reads until the node's side of the close (at most 5 s) so the reason is not lost
@@ -228,7 +231,8 @@ session ("Lock"). `POST /api/password` (`{"password", "current"?}`, owner sessio
 every other session (400 `{"code":"password.too_short"|"password.too_long"}`, 401 wrong current, 403 not the owner).
 From a non-loopback peer with a password set, `POST /api/passkey/register-begin` and `register-finish` also need `"password"` (401
 without it, counted like a sign-in); changing or clearing the password deletes passkeys added from elsewhere without it (their ids are
-not in the setting `passkeys_vouched`). Passkey `login-finish` counts only toward the per-address limit. The idle lock of a window
+not in the setting `passkeys_vouched`; a passkey added from elsewhere without it under the id of a removed passkey first takes that
+id off the list). Passkey `login-finish` counts only toward the per-address limit. The idle lock of a window
 uses `DELETE /api/session`. The hash is a setting (`screen_password`: `pbkdf2-sha256$<rounds>$<salt hex>$<hash hex>`), not a schema change.
 
 Passkeys (`agora-hub::passkey`, WebAuthn, ES256 only, no attestation): a signed-in session adds one with
@@ -236,7 +240,8 @@ Passkeys (`agora-hub::passkey`, WebAuthn, ES256 only, no attestation): a signed-
 (`{"id","publicKey"(SPKI),"clientDataJSON"}`, all base64url). Without a session: `login-begin` (→ `{"challenge","rpId","ids"}`) and
 `login-finish` (`{"id","authenticatorData","clientDataJSON","signature"}` → `{"token"}`, 401 on any failed proof, 429 while locked
 out). The relying party id is the request's `Host` without the port and the origin must be that host; challenges are single use and
-last 5 minutes; user presence and verification are required; a signature counter that counts must rise. The hub stores public keys only
+last 5 minutes, at most 4 waiting per address (an IPv6 address by its /64; a fifth drops that address's oldest) and 256 hub-wide (when
+full, the address holding the most loses its oldest); user presence and verification are required; a signature counter that counts must rise. The hub stores public keys only
 (schema v4, table `passkeys`, at most 32).
 
 Mesh posts between nodes (ADR-0031): a node sends `CommandRequest{mesh_post{to: "<node>/<agent>", body, from_agent}}` on stream 1
@@ -510,6 +515,7 @@ All additions; nothing published changed.
   every such agent whatever its kind and folder, but only when the policy has no `resume` line: a `resume` line always wins (`ask`
   stops it, `auto` keeps it to the listed kinds and folders). Either way at most 16 at one start, 8 at a time (the next round 5 s
   later), and never an agent the node brought back by itself in the last 10 minutes (`auto_resumed_at_ms` in the ledger).
+  `resume.continue = on | off` (default on, wherever automatic resume is on; Amendment A of ADR-0060) decides whether an agent that was *working* when the node stopped is given its kind's one "carry on" message (`[resume] continue_argv`, `docs/specs/agent-manifest.md`) with that resume; never for an agent that was waiting for a person, idle, finished or unknown, never when a person pressed Resume, and once for each interruption. No command or message carries the policy line or the sentence.
 
 ### Launch settings (ADR-0066, first part)
 

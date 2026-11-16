@@ -571,7 +571,8 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
             })
         }
         Cmd::AgentResume(a) => {
-            resume_agent(ctx, &a.agent_id, a.new_session).map(|r| v1::CommandOk {
+            // A person pressed Resume: they are there and can say what they want, so no "carry on" message (ADR-0060 Amendment A).
+            resume_agent(ctx, &a.agent_id, a.new_session, false).map(|r| v1::CommandOk {
                 result: Some(Ok_::AgentLaunch(r)),
             })
         }
@@ -935,10 +936,13 @@ fn stop_survivor(
 /// when the ledger does not hold it as interrupted, when Resume is asked without a session the kind can continue, when the folder is
 /// gone or changed identity (ADR-0052), for a helper whose parent does not run (ADR-0057; its grants and approvals are not restored),
 /// and by the same confinement and limits as a start. The routed path checks the device signature before this (`Grants`).
+/// `carry_on` (Amendment A, only for the node's own automatic resume of an agent that was working): the resume carries the kind's one
+/// "carry on" message when its manifest has one; the ledger then records that it was sent.
 pub(crate) fn resume_agent(
     ctx: &ControlContext,
     agent_id: &str,
     new_session: bool,
+    carry_on: bool,
 ) -> Result<v1::AgentLaunchResult, Error> {
     let ledger = ctx
         .ledger
@@ -1011,13 +1015,14 @@ pub(crate) fn resume_agent(
         directory: entry.directory,
         branch: entry.branch.clone(),
         session: (!new_session).then(|| entry.session_id.clone()),
+        carry_on: carry_on && !new_session,
         private_config: (entry.directory && !entry.managed_worktree).then(|| {
             ctx.worktree_root
                 .join(".sessions")
                 .join(format!("resume-{agent_id}"))
         }),
     };
-    let (events, views, has_terminal) = {
+    let (events, views, has_terminal, carried) = {
         let mut sup = ctx.sup();
         if !sup.sandbox_policy().enforceable() {
             return Err(SupervisorError::SandboxUnavailable(
@@ -1035,13 +1040,23 @@ pub(crate) fn resume_agent(
             sup.set_parent(&id, p);
         }
         match sup.resume(&id, Instant::now()) {
-            Ok(events) => (events, sup.list(), sup.terminal(&id).is_some()),
+            Ok(events) => (
+                events,
+                sup.list(),
+                sup.terminal(&id).is_some(),
+                sup.carried_on(&id),
+            ),
             Err(e) => {
                 sup.unrestore(&id);
                 return Err(sup_err(e));
             }
         }
     };
+    // Said once for this interruption: the ledger remembers it (so it is not sent again), and the node's log says it was sent.
+    if carried {
+        ledger.mark_continue_sent(agent_id, crate::daemon::now_ms());
+        eprintln!("resume: {agent_id} was working when the node stopped; its resume carried the kind's \"carry on\" message");
+    }
     if new_session {
         ledger.forget_session(agent_id, crate::daemon::now_ms());
     }
