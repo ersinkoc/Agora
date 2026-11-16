@@ -1,0 +1,417 @@
+diff --git a/crates/agora-platform/src/conpty.rs b/crates/agora-platform/src/conpty.rs
+index fc0fc08b..5f560185 100644
+--- a/crates/agora-platform/src/conpty.rs
++++ b/crates/agora-platform/src/conpty.rs
+@@ -100,6 +100,69 @@ pub(crate) fn quote_arg(arg: &str) -> String {
+     out
+ }
+ 
++/// Whether `program` names a batch file, which `CreateProcess` runs through `cmd.exe` (a name's trailing dots and spaces are ignored).
++fn is_batch(program: &str) -> bool {
++    let p = program.trim_end_matches(['.', ' ']).to_ascii_lowercase();
++    p.ends_with(".bat") || p.ends_with(".cmd")
++}
++
++/// The command line for a batch file. `cmd.exe` reads it, not the C runtime, so [`quote_arg`]'s `\"` would end the quoting and a `&`
++/// or `|` after it would run another command (CVE-2024-24576). Built as the standard library builds it since Rust 1.77.2: the script
++/// run by `cmd.exe /e:ON /v:OFF /d /c "..."`, any argument with an ASCII symbol or a control character quoted, `"` doubled, `%` broken
++/// up so no variable expands. `InvalidInput` for a line break or NUL in an argument, or a script name `cmd.exe` cannot carry.
++fn batch_command_line(argv: &[String]) -> io::Result<String> {
++    let invalid = || io::Error::from(io::ErrorKind::InvalidInput);
++    let (script, args) = argv.split_first().ok_or_else(invalid)?;
++    if script.contains('"') || script.ends_with('\\') {
++        return Err(invalid());
++    }
++    let cmd = std::path::PathBuf::from(
++        std::env::var_os("SystemRoot").unwrap_or_else(|| OsString::from(r"C:\Windows")),
++    )
++    .join(r"System32\cmd.exe");
++    let mut line = format!(
++        "\"{}\" /e:ON /v:OFF /d /c \"\"{script}\"",
++        cmd.to_string_lossy()
++    );
++    for arg in args {
++        if arg.contains(['\r', '\n', '\0']) {
++            return Err(invalid());
++        }
++        line.push(' ');
++        let quote = arg.is_empty()
++            || arg.ends_with('\\')
++            || arg.chars().any(|c| {
++                c.is_control()
++                    || (c.is_ascii() && !(c.is_ascii_alphanumeric() || r"#$*+-./:?@\_".contains(c)))
++            });
++        if quote {
++            line.push('"');
++        }
++        let mut backslashes = 0;
++        for c in arg.chars() {
++            if c == '\\' {
++                backslashes += 1;
++            } else {
++                if c == '"' {
++                    line.push_str(&"\\".repeat(backslashes));
++                    line.push('"');
++                } else if c == '%' {
++                    // `%cd:~,%` is an empty piece of the built-in `cd`: it splits `%VAR%` so `cmd.exe` expands nothing.
++                    line.push_str("%%cd:~,");
++                }
++                backslashes = 0;
++            }
++            line.push(c);
++        }
++        if quote {
++            line.push_str(&"\\".repeat(backslashes));
++            line.push('"');
++        }
++    }
++    line.push('"');
++    Ok(line)
++}
++
+ /// `vars_os`, not `vars`: Windows allows variables that are not valid Unicode, and `vars` panics on them.
+ fn environment(extra: &[(String, String)], remove: &[String]) -> Vec<u16> {
+     let mut vars: Vec<(OsString, OsString)> = std::env::vars_os()
+@@ -311,19 +374,20 @@ pub(crate) fn spawn(config: &PtyConfig) -> io::Result<Box<dyn Pty>> {
+ }
+ 
+ fn start_process(config: &PtyConfig, hpc: HPCON) -> io::Result<(Handle, u32, Option<Confinement>)> {
+-    let confinement = config
+-        .sandbox
+-        .as_ref()
+-        .map(|s| Confinement::new(s, config.identity.as_deref()))
+-        .transpose()?;
+-    let mut cmdline = wide(
+-        &config
++    let mut cmdline = wide(&match config.argv.first() {
++        Some(program) if is_batch(program) => batch_command_line(&config.argv)?,
++        _ => config
+             .argv
+             .iter()
+             .map(|a| quote_arg(a))
+             .collect::<Vec<_>>()
+             .join(" "),
+-    );
++    });
++    let confinement = config
++        .sandbox
++        .as_ref()
++        .map(|s| Confinement::new(s, config.identity.as_deref()))
++        .transpose()?;
+     let env = environment(&config.env, &config.env_remove);
+     // Not lossily: a folder name need not be valid Unicode.
+     let cwd: Option<Vec<u16>> = config.cwd.as_ref().map(|c| {
+@@ -542,6 +606,34 @@ mod tests {
+         assert_eq!(quote_arg("dir\\ name\\"), "\"dir\\ name\\\\\"");
+     }
+ 
++    #[test]
++    fn an_argument_to_a_batch_file_runs_no_second_command() {
++        // CVE-2024-24576: `cmd.exe` reads a batch file's command line, where the C runtime's `\"` ends the quoting.
++        assert!(is_batch(r"C:\tools\Run.CMD. "));
++        assert!(!is_batch("cmd.exe"));
++        let dir = std::env::temp_dir().join(format!("agora-conpty-bat-{}", std::process::id()));
++        std::fs::create_dir_all(&dir).unwrap();
++        let script = dir.join("run.cmd");
++        std::fs::write(&script, "@exit /b 5\r\n").unwrap();
++        let mut cfg = PtyConfig::new(vec![
++            script.display().to_string(),
++            "a\"&type nul>injected.txt&\"b".into(),
++            r"C:\R&D\dir\".into(),
++        ]);
++        cfg.cwd = Some(dir.clone());
++        let mut p = spawn(&cfg).unwrap();
++        assert_eq!(p.wait().unwrap().code, Some(5));
++        assert!(!dir.join("injected.txt").exists());
++        // A line break cannot be carried to a batch file: refused, nothing started.
++        let mut cfg = PtyConfig::new(vec![script.display().to_string(), "a\r\nb".into()]);
++        cfg.cwd = Some(dir.clone());
++        assert_eq!(
++            spawn(&cfg).err().map(|e| e.kind()),
++            Some(io::ErrorKind::InvalidInput)
++        );
++        let _ = std::fs::remove_dir_all(&dir);
++    }
++
+     #[test]
+     fn a_program_in_a_console_prints_and_its_exit_code_comes_back() {
+         let mut p = cmd(&["/c", "echo agora-conpty-ok & exit 7"]);
+diff --git a/crates/agora-platform/src/winconfine.rs b/crates/agora-platform/src/winconfine.rs
+index 5703ccd4..21f350e0 100644
+--- a/crates/agora-platform/src/winconfine.rs
++++ b/crates/agora-platform/src/winconfine.rs
+@@ -797,31 +797,44 @@ pub(crate) fn preflight(sandbox: &Sandbox) -> Result<(), (PathBuf, SandboxRefusa
+ /// Serializes every decision about a shared folder's label (planning and labelling at start, removal at stop and in recovery) across
+ /// all nodes of this user: otherwise an agent ending while another starts in the same folder can remove a label the starting agent
+ /// has just counted on.
+-struct LedgerLock(HANDLE);
++///
++/// A lock on an owner-only file beside the ledger folder (`<folder>.lock`, not in it: recovery reads every file there), which a
++/// confined agent cannot open. A named object (`Local\...`) can be opened, or made first, by a confined agent and held for good, and
++/// every start and end would wait on it. The system releases the lock of a process that ended. Taken again on the thread that holds
++/// it (a failed start drops its confinement while the start still holds the lock), it is already held.
++struct LedgerLock {
++    /// Held for its lock (released when it closes); `None` when this thread already holds it or it could not be taken.
++    _held: Option<std::fs::File>,
++}
++
++thread_local! {
++    static LEDGER_LOCK_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
++}
+ 
+ impl LedgerLock {
+-    fn acquire() -> Option<Self> {
+-        use windows_sys::Win32::System::Threading::{CreateMutexW, WaitForSingleObject, INFINITE};
+-        let name = wide("Local\\agora-acl-ledger".as_ref());
+-        // SAFETY: a NUL-terminated name; no security attributes.
+-        let h = unsafe { CreateMutexW(null(), 0, name.as_ptr()) };
+-        if h.is_null() {
+-            return None;
++    fn acquire(ledgers: &Path) -> Self {
++        if LEDGER_LOCK_DEPTH.with(|d| d.replace(d.get() + 1)) > 0 {
++            return Self { _held: None };
+         }
+-        // SAFETY: a valid mutex handle. WAIT_ABANDONED (a crashed holder) also grants ownership.
+-        unsafe { WaitForSingleObject(h, INFINITE) };
+-        Some(Self(h))
++        let mut name = ledgers.as_os_str().to_owned();
++        name.push(".lock");
++        let locked = (|| {
++            if let Some(dir) = ledgers.parent() {
++                std::fs::create_dir_all(dir)?;
++            }
++            let file = crate::open_lock_private(Path::new(&name))?;
++            file.lock()?;
++            Ok::<_, io::Error>(file)
++        })();
++        // Not lockable (no folder for it): go on unlocked, as the named lock did when it could not be made.
++        Self { _held: locked.ok() }
+     }
+ }
+ 
+ impl Drop for LedgerLock {
+     fn drop(&mut self) {
+-        use windows_sys::Win32::System::Threading::ReleaseMutex;
+-        // SAFETY: owned since `acquire`, released and closed once.
+-        unsafe {
+-            ReleaseMutex(self.0);
+-            CloseHandle(self.0);
+-        }
++        // Closing the file (after this) releases the lock.
++        LEDGER_LOCK_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+     }
+ }
+ 
+@@ -983,7 +996,7 @@ impl Confinement {
+         let sid = Sid::from_string(&sid_text)?;
+         // Held until every label of this agent is in place (see `LedgerLock`), and over the check below, so no other agent's start or
+         // end changes these folders in between.
+-        let _lock = LedgerLock::acquire();
++        let _lock = LedgerLock::acquire(dir);
+         // Amendment B, 4: refused before anything changes, so there is nothing to roll back. The caller maps `PermissionDenied` to
+         // `agent.sandbox_unavailable`.
+         if let Err((_, why)) = preflight(sandbox) {
+@@ -1105,7 +1118,7 @@ impl Confinement {
+ impl Drop for Confinement {
+     fn drop(&mut self) {
+         let mut all_removed = true;
+-        let _lock = LedgerLock::acquire();
++        let _lock = LedgerLock::acquire(self.ledger.parent().unwrap_or(Path::new("")));
+         // Labels first (setting them may need the self-grant), each only when no other live agent still uses that folder.
+         for path in &self.labelled {
+             let line = format!("{LABEL_LINE}\t{}", ledger_path(path));
+@@ -1408,7 +1421,7 @@ fn recover_in(ledgers: &Path) {
+     for entry in dir.flatten() {
+         let path = entry.path();
+         // One stale ledger at a time under the lock, so a starting agent never counts on a label this is removing.
+-        let _lock = LedgerLock::acquire();
++        let _lock = LedgerLock::acquire(ledgers);
+         let Ok(text) = std::fs::read_to_string(&path) else {
+             continue;
+         };
+@@ -1540,6 +1553,58 @@ mod tests {
+             .collect()
+     }
+ 
++    /// A confined agent can open, or make first, a named object such as `Local\agora-acl-ledger` and hold it (measured): starts and
++    /// ends must not wait on one. The lock is a file beside the ledger folder, which only the user can open.
++    #[test]
++    fn a_start_and_its_end_do_not_wait_on_a_named_lock_another_process_holds() {
++        use windows_sys::Win32::System::Threading::{
++            CreateMutexW, ReleaseMutex, WaitForSingleObject, INFINITE,
++        };
++        let root = scratch("namedlock");
++        let work = root.join("work");
++        std::fs::create_dir_all(&work).unwrap();
++        let (held_tx, held_rx) = std::sync::mpsc::channel();
++        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
++        let holder = std::thread::spawn(move || {
++            let name = wide("Local\\agora-acl-ledger".as_ref());
++            // SAFETY: a NUL-terminated name; the handle is released and closed once, below.
++            unsafe {
++                let h = CreateMutexW(null(), 0, name.as_ptr());
++                WaitForSingleObject(h, INFINITE);
++                held_tx.send(()).unwrap();
++                let _ = done_rx.recv();
++                ReleaseMutex(h);
++                CloseHandle(h);
++            }
++        });
++        held_rx.recv().unwrap();
++        let (ledgers, sandbox) = (
++            root.join("ledgers"),
++            Sandbox {
++                read: vec![],
++                write: vec![work.clone()],
++                ..Default::default()
++            },
++        );
++        let (ran_tx, ran_rx) = std::sync::mpsc::channel();
++        std::thread::spawn(move || {
++            let c = Confinement::in_ledger_dir(&sandbox, &ledgers, None);
++            let started = c.is_ok();
++            drop(c);
++            let _ = ran_tx.send(started);
++        });
++        // Generous: only a lock that is never released makes this run out.
++        let ran = ran_rx.recv_timeout(std::time::Duration::from_secs(60));
++        done_tx.send(()).unwrap();
++        holder.join().unwrap();
++        let _ = std::fs::remove_dir_all(&root);
++        assert_eq!(
++            ran,
++            Ok(true),
++            "the start or its end waited on the named lock"
++        );
++    }
++
+     /// Review of #273, 3: a start that fails after it has changed something (the first folder granted, the second refusing the DACL
+     /// change) leaves no grant of the agent anywhere, and no ledger once everything is taken back. This guards the contract; the one
+     /// step that could change a folder and still fail (the self-grant before a label) is unreachable while the self-grant is off.
+diff --git a/crates/agora-platform/src/windows.rs b/crates/agora-platform/src/windows.rs
+index 7bd71a0c..c8111c16 100644
+--- a/crates/agora-platform/src/windows.rs
++++ b/crates/agora-platform/src/windows.rs
+@@ -312,7 +312,9 @@ pub(crate) fn link_facts(file: &std::fs::File) -> io::Result<(u32, bool)> {
+ pub(crate) fn create_private_new(path: &Path) -> io::Result<std::fs::File> {
+     use std::os::windows::ffi::OsStrExt;
+     use std::os::windows::io::FromRawHandle;
+-    use windows_sys::Win32::Storage::FileSystem::{CREATE_NEW, FILE_ATTRIBUTE_NORMAL};
++    use windows_sys::Win32::Storage::FileSystem::{
++        CREATE_NEW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_OPEN_REPARSE_POINT,
++    };
+     let sd = owner_only_descriptor(false)?;
+     let attrs = SECURITY_ATTRIBUTES {
+         nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+@@ -332,7 +334,8 @@ pub(crate) fn create_private_new(path: &Path) -> io::Result<std::fs::File> {
+             0,
+             &attrs,
+             CREATE_NEW,
+-            FILE_ATTRIBUTE_NORMAL,
++            // `CREATE_NEW` alone follows a link whose target does not exist yet and creates that target, wherever it is.
++            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+             null_mut(),
+         )
+     };
+diff --git a/crates/agora-platform/src/winproc.rs b/crates/agora-platform/src/winproc.rs
+index a1f19851..8885a92c 100644
+--- a/crates/agora-platform/src/winproc.rs
++++ b/crates/agora-platform/src/winproc.rs
+@@ -7,7 +7,7 @@ use std::path::Path;
+ 
+ use windows_sys::Win32::Foundation::{
+     CloseHandle, GetLastError, SetHandleInformation, ERROR_ACCESS_DENIED, FILETIME, HANDLE,
+-    HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, STILL_ACTIVE,
++    HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, STILL_ACTIVE, WAIT_OBJECT_0,
+ };
+ use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+@@ -21,10 +21,11 @@ use windows_sys::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_ME
+ use windows_sys::Win32::System::Threading::{
+     CreateProcessW, DeleteProcThreadAttributeList, GetCurrentProcess, GetExitCodeProcess,
+     GetProcessTimes, InitializeProcThreadAttributeList, OpenProcess, QueryFullProcessImageNameW,
+-    TerminateProcess, UpdateProcThreadAttribute, CREATE_BREAKAWAY_FROM_JOB,
++    TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject, CREATE_BREAKAWAY_FROM_JOB,
+     CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, CREATE_UNICODE_ENVIRONMENT, DETACHED_PROCESS,
+     EXTENDED_STARTUPINFO_PRESENT, PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION,
+-    PROCESS_TERMINATE, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, STARTF_USESTDHANDLES, STARTUPINFOEXW,
++    PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
++    STARTF_USESTDHANDLES, STARTUPINFOEXW,
+ };
+ 
+ fn last_error() -> io::Error {
+@@ -137,10 +138,27 @@ pub(crate) fn children(pid: u32) -> io::Result<Vec<u32>> {
+ 
+ /// See [`crate::process_start_time`]: the creation time (100 ns units since 1601) of a process that has not ended.
+ pub(crate) fn start_time(pid: u32) -> Option<u64> {
+-    let p = Process::open(pid).ok()?;
++    // Also SYNCHRONIZE where allowed: a process may end with 259, the `STILL_ACTIVE` value, so only waiting tells it apart. Without it
++    // the wait below fails and the process is taken as running, as before.
++    // SAFETY: plain call; the handle is closed on drop.
++    let h = unsafe {
++        OpenProcess(
++            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
++            0,
++            pid,
++        )
++    };
++    let p = if h.is_null() {
++        Process::open(pid).ok()?
++    } else {
++        Process(h)
++    };
+     let mut code = 0u32;
+-    // SAFETY: a live handle and a valid out pointer.
+-    if unsafe { GetExitCodeProcess(p.0, &mut code) } == 0 || code != STILL_ACTIVE as u32 {
++    // SAFETY: a live handle and a valid out pointer; a zero timeout only polls.
++    if unsafe { GetExitCodeProcess(p.0, &mut code) } == 0
++        || code != STILL_ACTIVE as u32
++        || unsafe { WaitForSingleObject(p.0, 0) } == WAIT_OBJECT_0
++    {
+         return None;
+     }
+     // SAFETY: all-zero FILETIMEs are valid out-buffers.
+@@ -357,6 +375,18 @@ mod tests {
+ 
+     use super::*;
+ 
++    #[test]
++    fn a_process_that_ended_with_code_259_has_no_start_time() {
++        // 259 is also what `GetExitCodeProcess` answers for a live process (`STILL_ACTIVE`); the handle held here keeps the id.
++        let mut child = std::process::Command::new("cmd.exe")
++            .args(["/c", "exit 259"])
++            .spawn()
++            .unwrap();
++        assert_eq!(child.wait().unwrap().code(), Some(259));
++        assert_eq!(start_time(child.id()), None);
++        assert!(start_time(std::process::id()).is_some());
++    }
++
+     #[test]
+     fn a_process_older_than_its_listed_parent_is_not_its_child() {
+         // A parent id reused: the "child" was created before this parent.
+diff --git a/crates/agora-platform/tests/private_log.rs b/crates/agora-platform/tests/private_log.rs
+index f236ffcb..a5bc55f2 100644
+--- a/crates/agora-platform/tests/private_log.rs
++++ b/crates/agora-platform/tests/private_log.rs
+@@ -108,6 +108,20 @@ fn a_symlinked_log_is_refused_and_its_target_untouched() {
+     let _ = std::fs::remove_dir_all(d);
+ }
+ 
++#[test]
++fn a_symlinked_log_whose_target_does_not_exist_is_refused_and_nothing_is_created() {
++    let d = tmp("dangling");
++    let target = d.join("planted.txt");
++    let log = d.join("node.log");
++    if !symlink_file(&target, &log) {
++        return;
++    }
++    let err = agora_platform::open_append_private(&log).unwrap_err();
++    assert_eq!(err.kind(), ErrorKind::InvalidInput);
++    assert!(!target.exists(), "the link's target was created");
++    let _ = std::fs::remove_dir_all(d);
++}
++
+ /// An existing log others could read (one name, this user's) is made the user's only through its own descriptor.
+ #[cfg(unix)]
+ #[test]
