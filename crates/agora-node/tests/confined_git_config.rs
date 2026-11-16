@@ -404,3 +404,44 @@ fn a_file_whose_folder_is_reached_through_a_link_into_a_writable_folder_is_not_w
     }
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// On a machine that has not run the node before (no `agora-git-config` folder, a temp folder of its own) the file is still written:
+/// the folder must exist before the check that resolves it (found in the review of #638: written the other way round, the check could
+/// not resolve the missing folder, failed closed and the file was never made on macOS and Windows). Where the file lies beside the
+/// worktree there is no such folder and the test shows only that the file is written.
+#[test]
+fn the_file_is_written_on_a_machine_with_no_private_folder_yet() {
+    let _serial = serial();
+    home();
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("gitcfg-{}-fresh", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let temp = root.join("temp");
+    std::fs::create_dir_all(&temp).unwrap();
+    let old: Vec<_> = ["TMPDIR", "TEMP", "TMP"]
+        .iter()
+        .map(|k| (*k, std::env::var_os(k)))
+        .collect();
+    for (k, _) in &old {
+        std::env::set_var(k, &temp);
+    }
+    let wt = root.join("worktrees/a");
+    std::fs::create_dir_all(&wt).unwrap();
+    let policy = SandboxPolicy {
+        level: Level::Worktree,
+        ..Default::default()
+    };
+    let got = policy.git_config(&wt, &[]);
+    for (k, v) in old {
+        match v {
+            Some(v) => std::env::set_var(k, v),
+            None => std::env::remove_var(k),
+        }
+    }
+    let file = got.expect("no file on a fresh machine");
+    assert!(file.exists());
+    if agora_platform::PRIVATE_TEMP {
+        assert!(file.starts_with(&temp), "{file:?}");
+    }
+    let _ = std::fs::remove_dir_all(root);
+}

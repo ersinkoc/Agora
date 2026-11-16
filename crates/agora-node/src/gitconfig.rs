@@ -134,10 +134,20 @@ pub fn identity_missing() -> bool {
 }
 
 /// The folder of the files where the system's temp folder is out of the agent's reach (macOS, Windows): one of the node's own inside
-/// it, made private by the platform ([`agora_platform::create_private_folder`]) before anything is written, because the temp folder's
+/// it, made private by the platform ([`agora_platform::ensure_private_dir`]) before anything is written, because the temp folder's
 /// own permissions can admit other programs (on Windows, other sandboxes) that could then rewrite what the agent trusts.
 fn private_folder() -> PathBuf {
     std::env::temp_dir().join("agora-git-config")
+}
+
+/// Makes the folder the file goes in ready, where it is one of the node's own (macOS, Windows): created if missing, then checked and
+/// made private through one handle of the folder itself (`agora_platform::ensure_private_dir`: not a link, this user's, mode 0700 or an
+/// owner-only ACL). Nothing to do where the file lies beside the worktree. An error means the folder cannot be trusted: no file.
+pub fn prepare_folder() -> std::io::Result<()> {
+    if agora_platform::PRIVATE_TEMP {
+        agora_platform::ensure_private_dir(&private_folder())?;
+    }
+    Ok(())
 }
 
 /// A short, stable (across runs and versions, unlike `DefaultHasher`) number for a path: FNV-1a over its bytes, folded to 32 bits.
@@ -190,9 +200,7 @@ pub fn write_for_result(worktree: &Path) -> std::io::Result<PathBuf> {
 
 fn write_values(worktree: &Path, values: &[(String, String)]) -> std::io::Result<PathBuf> {
     let path = path_for(worktree);
-    if agora_platform::PRIVATE_TEMP {
-        agora_platform::create_private_folder(&private_folder())?;
-    }
+    prepare_folder()?;
     let tmp = temp_name(&path);
     let _ = std::fs::remove_file(&tmp);
     let text = render(values);
@@ -204,18 +212,27 @@ fn write_values(worktree: &Path, values: &[(String, String)]) -> std::io::Result
             .open(&tmp)?;
         f.write_all(text.as_bytes())?;
     }
-    // Another program (a virus scanner, an indexer) may hold the old file for a moment, which makes a rename over it fail on some
-    // systems: try again briefly, then replace it by removing it first (a name that is then a link or a folder is not followed).
+    // Another program (a virus scanner, an indexer) may hold the old file for a moment, which makes a rename over it fail with a sharing
+    // or access error on Windows: only that is tried again. Any other error ends it, and the old file is never removed first, so the agent
+    // is never left with no file where it had one (it keeps the last one, or, failing the first write, none: git then behaves as before).
     let mut last = None;
-    for attempt in 0..5 {
+    for _ in 0..5 {
         match std::fs::rename(&tmp, &path) {
             Ok(()) => return Ok(path),
-            Err(e) => last = Some(e),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ResourceBusy
+                ) =>
+            {
+                last = Some(e);
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(e) => {
+                last = Some(e);
+                break;
+            }
         }
-        if attempt >= 2 {
-            let _ = std::fs::remove_file(&path);
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
     }
     let _ = std::fs::remove_file(&tmp);
     Err(last.unwrap_or_else(|| std::io::Error::other("rename failed")))

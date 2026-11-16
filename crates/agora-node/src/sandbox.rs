@@ -244,6 +244,9 @@ impl SandboxPolicy {
         if self.level == Level::Off || self.grants_gitconfig() {
             return None;
         }
+        // The folder first: the check below resolves it, which a folder that does not exist yet (a fresh machine) cannot be, and an
+        // unresolvable one counts as under a grant. A folder that cannot be made private is not used.
+        crate::gitconfig::prepare_folder().ok()?;
         let file = crate::gitconfig::path_for(worktree);
         if under_a_grant(&file, write) {
             return None;
