@@ -9,6 +9,8 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
   (waiting up to 2 s between tries, giving up after 15 minutes) and the agent's session stays open. A call made at that moment fails at once with
   `mesh.unavailable` and can be repeated (ADR-0075, the first step; applies to agents started by this version).
 ### Security
+- A large paste made of nested terminal paste markers no longer freezes the terminal client for seconds (192 KB took about 6 s): the markers
+  are now removed in one linear pass with the same result (#655).
 - A machine that stops reading its connection can no longer make the hub pile up commands for it without end: at most 1024 wait for one
   machine, and the next one is refused at once (`node.resource_limit`, never sent, so it is safe to repeat) (architecture review R5).
 - "Up to N helpers like this" (ADR-0057) ended only when the asking agent stopped: after the device that approved it was removed
