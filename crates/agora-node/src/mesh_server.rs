@@ -7,7 +7,7 @@
 //! cannot reach another's socket by guessing a name in a tool call, because no call names a sender.
 
 use std::collections::{HashMap, HashSet};
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -1168,8 +1168,12 @@ fn serve(
     // (request id, ask id, deadline) of asks still waiting for an answer.
     let mut waiting: Vec<WaitingAsk> = Vec::new();
     while !stop.load(Ordering::Acquire) {
-        match reader.read_until(b'\n', &mut line) {
+        // At most one byte past the limit is read into the line: a client that keeps sending without a newline is cut off
+        // there, instead of growing the line (and holding this loop) for as long as it sends.
+        let room = (MAX_LINE + 1).saturating_sub(line.len()) as u64;
+        match (&mut reader).take(room).read_until(b'\n', &mut line) {
             Ok(0) => break,
+            Ok(_) if line.len() > MAX_LINE => break,
             Ok(_) if line.ends_with(b"\n") => {
                 let text = String::from_utf8_lossy(&line).trim().to_string();
                 line.clear();
@@ -1411,6 +1415,65 @@ mod tests {
         // Handed over once: a second ask finds nothing left.
         let again = server.board_join("p").unwrap();
         assert!(again.tasks.is_empty() && again.leases.is_empty());
+        drop(server);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// F250: the line limit holds while bytes keep coming, not only after a pause: an agent that sends without a newline is cut off
+    /// near `MAX_LINE`, a complete line one byte over it is refused, and a line exactly at it is answered.
+    #[test]
+    fn a_line_over_the_limit_is_cut_off_even_when_the_bytes_never_pause() {
+        if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("agora-ml-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let server = MeshServer::new(&dir, Limits::default()).unwrap();
+        let id = AgentId::new("a1");
+        let sock = server
+            .register(AgentInfo {
+                id: id.clone(),
+                kind: "fixture".into(),
+                node: "n".into(),
+                project: "p".into(),
+                label: "a1".into(),
+                worktree: String::new(),
+                state: "idle".into(),
+            })
+            .unwrap();
+        // A `ping` of exactly `len` bytes, its newline included.
+        let ping = |len: usize| {
+            let frame = |pad: &str| {
+                format!(r#"{{"jsonrpc":"2.0","id":1,"method":"ping","params":{{"pad":"{pad}"}}}}"#)
+                    + "\n"
+            };
+            let pad = "x".repeat(len - frame("").len());
+            frame(&pad).into_bytes()
+        };
+        let answered = |line: &[u8]| {
+            let mut w = agora_platform::local_connect(&sock).unwrap();
+            let r = w.try_clone().unwrap();
+            r.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+            if w.write_all(line).is_err() {
+                return false;
+            }
+            let mut s = String::new();
+            matches!(BufReader::new(r).read_line(&mut s), Ok(n) if n > 0 && s.contains("\"result\""))
+        };
+        assert!(answered(&ping(MAX_LINE)));
+        assert!(!answered(&ping(MAX_LINE + 1)));
+
+        let mut w = agora_platform::local_connect(&sock).unwrap();
+        let chunk = vec![b'x'; 64 * 1024];
+        let mut taken = 0;
+        while taken < 64 * 1024 * 1024 && w.write_all(&chunk).is_ok() {
+            taken += chunk.len();
+        }
+        assert!(
+            taken < 8 * 1024 * 1024,
+            "the node took {taken} bytes of one line"
+        );
+        server.unregister(&id);
         drop(server);
         let _ = std::fs::remove_dir_all(dir);
     }
