@@ -69,6 +69,12 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 - `agora hub machines` (and `hub devices`, `hub audit`, `hub fingerprint`) on a machine that does not run the hub
   now says so and where to run it, instead of "unable to open database file".
 
+### Backup and restore
+- `agora hub restore` keeps the database it replaces as `hub.db.before-restore` so a wrong restore can be undone, but after the hub
+  had crashed or been killed that copy could miss its newest events: they were still in the database's write-ahead log
+  (`hub.db-wal`), which the restore deleted. The log now moves with the kept copy (`hub.db.before-restore-wal`; to undo the restore,
+  move both back), so the copy holds everything the replaced database held (audit finding F232).
+
 ## 0.3.13
 
 ### Starting at login
