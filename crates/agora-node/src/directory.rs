@@ -395,6 +395,69 @@ pub fn launch_signed_message(
     out
 }
 
+/// ADR-0066: a list of `(id, value)` pairs as signed: its count, then each pair as `:<id byte length>:<id>:<value byte length>:<value>`
+/// (`[("model","x")]` is `1:5:model:1:x`), in the order given, so a settings list can be neither added to, changed nor reordered
+/// without changing the bytes, and no two different lists sign the same bytes.
+pub fn signed_pairs(items: &[(String, String)]) -> String {
+    let mut out = items.len().to_string();
+    for (id, value) in items {
+        for part in [id, value] {
+            out.push(':');
+            out.push_str(&part.len().to_string());
+            out.push(':');
+            out.push_str(part);
+        }
+    }
+    out
+}
+
+/// ADR-0066: what a device signs for an `agent.launch` that chose launch settings (model, effort, ...): the `directory-action-v3`
+/// fields under the domain `directory-action-v4`, then the settings as a [`signed_pairs`] list before the nonce. A launch with settings
+/// is signed only this way (a v1 or v3 signature over the same launch fails), and one without keeps [`launch_signed_message`] or
+/// [`signed_message`], so a signature can neither gain nor lose a setting. Shared test vectors:
+/// `schema/fixtures/signing/directory-action-v4.json`.
+#[allow(clippy::too_many_arguments)]
+pub fn launch_signed_message_v4(
+    node: &str,
+    path: &str,
+    kind: &str,
+    project: &str,
+    separate_worktree: bool,
+    identity_change: bool,
+    launch_options: &[String],
+    confirmed: &[String],
+    settings: &[(String, String)],
+    nonce: &str,
+    expires: u64,
+) -> Vec<u8> {
+    let (options, confirmed, settings) = (
+        signed_list(launch_options),
+        signed_list(confirmed),
+        signed_pairs(settings),
+    );
+    let fields = [
+        node,
+        "launch",
+        path,
+        kind,
+        project,
+        if separate_worktree { "1" } else { "0" },
+        if identity_change { "1" } else { "0" },
+        options.as_str(),
+        confirmed.as_str(),
+        settings.as_str(),
+        nonce,
+    ];
+    let mut out = b"directory-action-v4".to_vec();
+    for f in fields {
+        out.push(0);
+        out.extend_from_slice(f.as_bytes());
+    }
+    out.push(0);
+    out.extend_from_slice(expires.to_string().as_bytes());
+    out
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod launch_vector_tests {
@@ -422,6 +485,56 @@ mod launch_vector_tests {
                 c["identity_change"].as_bool().unwrap(),
                 &list(&c["options"]),
                 &list(&c["confirmed"]),
+                c["nonce"].as_str().unwrap(),
+                c["expires"].as_u64().unwrap(),
+            );
+            let hex: String = m.iter().map(|b| format!("{b:02x}")).collect();
+            assert_eq!(hex, c["hex"].as_str().unwrap(), "{}", c["name"]);
+            assert!(
+                seen.insert(hex),
+                "two cases sign the same bytes: {}",
+                c["name"]
+            );
+        }
+    }
+
+    /// ADR-0066: the same for `directory-action-v4`, the launch with settings.
+    #[test]
+    fn the_shared_launch_settings_signing_vectors_match() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../schema/fixtures/signing/directory-action-v4.json");
+        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let list = |x: &serde_json::Value| -> Vec<String> {
+            x.as_array()
+                .unwrap()
+                .iter()
+                .map(|s| s.as_str().unwrap().to_string())
+                .collect()
+        };
+        let pairs = |x: &serde_json::Value| -> Vec<(String, String)> {
+            x.as_array()
+                .unwrap()
+                .iter()
+                .map(|p| {
+                    (
+                        p[0].as_str().unwrap().to_string(),
+                        p[1].as_str().unwrap().to_string(),
+                    )
+                })
+                .collect()
+        };
+        let mut seen = std::collections::HashSet::new();
+        for c in v["cases"].as_array().unwrap() {
+            let m = super::launch_signed_message_v4(
+                c["node"].as_str().unwrap(),
+                c["path"].as_str().unwrap(),
+                c["kind"].as_str().unwrap(),
+                c["project"].as_str().unwrap(),
+                c["separate"].as_bool().unwrap(),
+                c["identity_change"].as_bool().unwrap(),
+                &list(&c["options"]),
+                &list(&c["confirmed"]),
+                &pairs(&c["settings"]),
                 c["nonce"].as_str().unwrap(),
                 c["expires"].as_u64().unwrap(),
             );

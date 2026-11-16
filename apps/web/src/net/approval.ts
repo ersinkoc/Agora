@@ -23,13 +23,39 @@ export async function startSignedMessage(
 ): Promise<Uint8Array> {
   const enc = new TextEncoder();
   const hash = toHex(new Uint8Array(await subtle.digest('SHA-256', enc.encode(detail) as BufferSource)));
-  const parts = ['agora-approval-start-v1', nodeId, approvalId, approved ? '1' : '0', String(helperGrant), helpersMayStart ? '1' : '0', hash];
+  // ADR-0066: a request that lists settings is decided only over `agora-approval-start-v2`, which names them (length-prefixed) before the
+  // hash; one without keeps v1 exactly. The settings are read from the same detail that is shown and hashed.
+  const settings = detailSettings(detail);
+  const parts = settings.length > 0
+    ? ['agora-approval-start-v2', nodeId, approvalId, approved ? '1' : '0', String(helperGrant), helpersMayStart ? '1' : '0', signedPairs(settings), hash]
+    : ['agora-approval-start-v1', nodeId, approvalId, approved ? '1' : '0', String(helperGrant), helpersMayStart ? '1' : '0', hash];
   const out: number[] = [];
   parts.forEach((p, i) => {
     if (i > 0) out.push(0);
     out.push(...enc.encode(p));
   });
   return Uint8Array.from(out);
+}
+
+/** ADR-0066: `[id, value]` pairs as signed: the count, then `:<id byte length>:<id>:<value byte length>:<value>` per pair in the order given (UTF-8
+ * lengths), so a list can be neither added to, changed nor reordered without changing the bytes. */
+export function signedPairs(items: readonly (readonly [string, string])[]): string {
+  const n = (x: string) => new TextEncoder().encode(x).length;
+  return String(items.length) + items.map(([id, value]) => `:${n(id)}:${id}:${n(value)}:${value}`).join('');
+}
+
+/** ADR-0066: the settings a start request's detail lists, read as the node reads them (a `settings` list of `{id, value}`). */
+export function detailSettings(detail: string): [string, string][] {
+  try {
+    const d = JSON.parse(detail) as { settings?: unknown };
+    if (!Array.isArray(d.settings)) return [];
+    return d.settings.map((x) => {
+      const o = (typeof x === 'object' && x !== null ? x : {}) as Record<string, unknown>;
+      return [typeof o.id === 'string' ? o.id : '', typeof o.value === 'string' ? o.value : ''] as [string, string];
+    });
+  } catch {
+    return [];
+  }
 }
 
 /** Why an answer to an approval did not go through, as one of the web's own texts. `auth.forbidden` is lasting (this device or this

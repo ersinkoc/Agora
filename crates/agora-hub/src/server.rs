@@ -1631,11 +1631,22 @@ fn audit_action(req: &v1::CommandRequest) -> String {
         Some(command_request::Command::AgentStart(a)) => a.launch_options.as_slice(),
         _ => &[],
     };
+    // ADR-0066: and the settings, `AgentLaunch[model=x,effort=high]`, so the audit trail shows what an agent was asked to run with.
+    let settings = match &req.command {
+        Some(command_request::Command::AgentLaunch(a)) => a.settings.as_slice(),
+        Some(command_request::Command::AgentStart(a)) => a.settings.as_slice(),
+        _ => &[],
+    };
     let name = command_name(req);
-    if options.is_empty() {
+    let chosen: Vec<String> = options
+        .iter()
+        .cloned()
+        .chain(settings.iter().map(|st| format!("{}={}", st.id, st.value)))
+        .collect();
+    if chosen.is_empty() {
         name
     } else {
-        format!("{name}[{}]", options.join(","))
+        format!("{name}[{}]", chosen.join(","))
     }
 }
 

@@ -17,7 +17,7 @@ the node per MCP connection; agents cannot impersonate each other.
 | `lease_acquire` | `{ paths: [glob], ttl_s: number, reason }` | `{ lease_id, expires_at }` or `lease.held` |
 | `lease_release` | `{ lease_id }` | `{ ok }` |
 | `handoff` | `{ to, task_id?, summary, refs }` | `{ handoff_id }` |
-| `agent_start` | `{ kind, prompt?, folder?, worktree?: bool, node? }` | `{ agent_id }` after the user's decision (ADR-0057) |
+| `agent_start` | `{ kind, prompt?, folder?, worktree?: bool, node?, settings?: { id: value } }` | `{ agent_id }` after the user's decision (ADR-0057) |
 | `agent_wait` | `{ agent_id, state: "idle"\|"working"\|"blocked"\|"done"\|"exited", timeout_s?: number (default 600, at most 3600) }` | `{ agent_id, state }` or `mesh.timeout` |
 | `agent_output` | `{ agent_id, lines?: number (default 40, at most 200) }` | `{ agent_id, source: "screen"\|"transcript", lines }` |
 
@@ -57,7 +57,16 @@ Each agent the node starts gets its own owner-only local socket (`<node dir>/m/<
 conversation above, backed by a node-local broker, so agents on one machine coordinate with no hub (nodes are autonomous).
 Whatever connects to a socket is that agent as far as the broker is concerned, so the socket path is only given to that
 agent's process. `agora mesh stdio --socket PATH` is what an agent's MCP client runs as its server: it carries stdin/stdout to
-that socket. The node registers the agent on start, keeps its state current for `agents_list`, and on stop or exit
+that socket. The bridge survives its connection ending (ADR-0075 decision 6; the node re-executing or restarting leaves the
+socket path the same): it answers each request in flight, and each request that arrives while it has no connection, at once with a
+JSON-RPC error `-32000` whose `data` is `{ "code": "mesh.unavailable", "params": {} }` (the agent may repeat the call; a JSON-RPC batch gets a batch of such errors, one per request in it, and notifications get no answer), keeps its
+stdout open so the client's session stays, and reconnects to the same path with a wait that doubles from 50 ms to 2 s. A new
+connection starts uninitialized on the node, so the bridge replays the client's own `initialize` request (and its
+`notifications/initialized`) and discards the answer, exactly as at start; it carries nothing else over, and a peer that does not
+answer `initialize` with a result is not given the client's calls. It retries while its client keeps stdin open and gives up (exit 1)
+after 15 minutes without a connection. The bridge ends when its client's output closes. A bridge started by an older version does not do this and ends with its connection. The node
+side is unchanged: the endpoint's owner-only access (and, on Windows, the per-agent identity) applies to every new connection.
+The node registers the agent on start, keeps its state current for `agents_list`, and on stop or exit
 unregisters it, which gives back its tasks, leases and open asks and closes the endpoint. Pending `ask`s are answered on the
 same connection without blocking the agent's other calls. The connection owns its outstanding ask IDs independently
 of its polling queue. On EOF, input/output failure or shutdown it discards those asks (including already answered ones)
@@ -122,6 +131,11 @@ the node answers them itself (`agora-node::spawn`), not the broker. The caller i
   device's signed decision has been verified on this node: `{ agent_id }`, `mesh.start_denied` (refused, or withdrawn) or
   `approval.expired`. The decision is signed over a hash of the request as announced, so a hub cannot change what starts. The call
   does not block the agent's other calls; if the connection ends first, the request is withdrawn.
+- **Settings (ADR-0066).** `settings` names launch settings the kind declares (`model`, `effort`, ...; values are strings). The node checks
+  them against its manifest before anyone is asked (`agent.setting_unknown`, `agent.setting_invalid`; nothing is announced and nothing
+  starts), the card lists every one next to the kind, folder and prompt, and the decision is signed over them (`agora-approval-start-v2`,
+  `protocol.md`), so the helper starts with exactly what the user was shown. A request with settings offers no grant (`grant_allowed:
+  false`) and a start with settings is always asked, even under a grant. A helper never gets a launch option (ADR-0059).
 - **A grant.** The decision may allow "up to N helpers of this kind in this folder" (N at most 10, this start included) and, separately,
   that the helpers it starts may ask in turn. Later starts that match the grant (same asking agent, kind, folder and `worktree`
   choice) start at once. A grant ends when the asking agent exits or is stopped, or when revoked (`GrantRevoke` with the approval id;

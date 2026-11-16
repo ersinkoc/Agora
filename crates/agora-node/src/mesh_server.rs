@@ -72,6 +72,8 @@ pub struct StartArgs {
     pub folder: Option<String>,
     pub worktree: bool,
     pub node: Option<String>,
+    /// ADR-0066: the launch settings asked for (`(id, value)`, at most one per id); the node checks them against its manifest.
+    pub settings: Vec<(String, String)>,
 }
 
 /// The helper a start produced, or why it did not.
@@ -969,12 +971,29 @@ fn spawn_call(
                 Some(Value::Bool(b)) => *b,
                 Some(_) => return bad(),
             };
+            // ADR-0066: `settings` is an object of setting id to value (strings only); anything else is a malformed call. Whether
+            // the kind declares them, and the values, are the node's to judge against its manifest.
+            let settings = match args.get("settings") {
+                None | Some(Value::Null) => Vec::new(),
+                Some(Value::Object(m)) => {
+                    let mut out = Vec::with_capacity(m.len());
+                    for (id, v) in m {
+                        let Some(v) = v.as_str() else {
+                            return bad();
+                        };
+                        out.push((id.clone(), v.to_string()));
+                    }
+                    out
+                }
+                Some(_) => return bad(),
+            };
             let a = StartArgs {
                 kind: kind.to_string(),
                 prompt: prompt.unwrap_or_default(),
                 folder,
                 worktree,
                 node,
+                settings,
             };
             match helpers.start(me, &a) {
                 Ok(ticket) => {

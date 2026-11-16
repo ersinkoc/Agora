@@ -321,6 +321,10 @@ fn answer(
             },
             &[],
         ),
+        // ADR-0066: a start request with launch settings, which this terminal cannot show.
+        Err(code) if code == "approval.needs_newer_window" => {
+            say.text(key!("tui-start-settings"), &[])
+        }
         Err(code) if code == "approval.signature_invalid" => {
             // The machine of the agent that asked.
             let node = snapshot

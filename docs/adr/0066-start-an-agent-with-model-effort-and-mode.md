@@ -22,3 +22,15 @@ although every real tool has them (`claude --model`, `codex -m` and `-c model_re
 
 ## Consequences
 Manifest format (`[[launch.setting]]`), schema (`AgentStart`/`AgentLaunch` settings fields, new signing domain version, error codes), the node start path, the mesh tool schema and `mesh-tools.md`, clients (start window, TUI, approval card), shipped manifests with checked flags, tests with the fake agent, threat model (an agent choosing an expensive model or a risky mode: always on the card, optionally allow-listed).
+
+## Status of the build
+- **PR 1 (#605, built):** `[[launch.setting]]` in manifests (engine 3), `AgentStart`/`AgentLaunch.settings`, `AgentKind.settings`, the node's checks
+  (`agent.setting_unknown`, `agent.setting_invalid`), `agora agent start --setting`, Claude Code and Codex `model` and `effort`.
+- **PR 2 (built):** the signing. `AgentLaunch` with settings is authorized over `directory-action-v4` and an `agent.start` approval with
+  settings over `agora-approval-start-v2`, both length-prefixed and in the order sent or shown (decision 2); the node verifies them and applies exactly
+  the signed settings; the capability `agent.launch_settings` makes an older hub or node pair refuse rather than drop them; the mesh tool
+  `agent_start` takes `settings`; the web approval card lists them in the window's words (decision 2); a request with settings offers no
+  grant. Specs: `docs/specs/protocol.md`; threat model T28.
+- **Not built yet:** the start window's and the TUI's pickers and the TUI card (decision 3, "remembers the last choice"), the owner's
+  `start.models` allow-list and the model's price class on the card (decision 4 and 5), `mode` as a shipped setting, and keeping the
+  settings across a resume after a node restart.

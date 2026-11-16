@@ -4,7 +4,19 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 ## Next
 
+### Agents' mesh tools
+- An agent's mesh tools no longer end for good when the node restarts: the bridge the agent's client runs reconnects to the node
+  (waiting up to 2 s between tries, giving up after 15 minutes) and the agent's session stays open. A call made at that moment fails at once with
+  `mesh.unavailable` and can be repeated (ADR-0075, the first step; applies to agents started by this version).
 _Nothing yet._
+
+### Starting agents
+- A start with a model and an effort now works through the hub too (ADR-0066): your device signs the choice together with the folder and
+  the agent, so the hub cannot change, add or drop the model on the way. A machine that does not know this yet says so instead of
+  starting the agent with the tool's own model.
+- An agent that asks for a helper can ask for a model and an effort (`agent_start` with `settings`). The approval card in the web window
+  lists them, you approve exactly what you see, and the helper starts with exactly those. The terminal console cannot approve such a
+  request yet, and the start window does not offer the pickers yet.
 
 ## 0.3.14
 

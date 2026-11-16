@@ -38,6 +38,8 @@ const HUB_CAPABILITIES: &[&str] = &[
     "agent.resume",
     // ADR-0059
     "agent.launch_options",
+    // ADR-0066
+    "agent.launch_settings",
     // ADR-0061: the hub carries endorsements and revocations to nodes that verify them (`device.trust`), and answers a node's
     // `DeviceList` on a connection of its own (`device.list`).
     "device.trust",

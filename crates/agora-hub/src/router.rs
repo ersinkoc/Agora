@@ -675,6 +675,23 @@ impl Router {
             return Err(Error::new(ErrorCode::ProtocolCapabilityMissing)
                 .with("capability", "agent.launch_options"));
         }
+        // ADR-0066: a start with settings (model, effort) goes only to a node that verifies a signature over them. An older node would
+        // start the agent with its own defaults (or, before ADR-0066, ignore the field), so it is refused here instead: never
+        // silently dropped.
+        let settings = match &request.command {
+            Some(command_request::Command::AgentLaunch(a)) => !a.settings.is_empty(),
+            Some(command_request::Command::AgentStart(a)) => !a.settings.is_empty(),
+            _ => false,
+        };
+        if settings
+            && !link
+                .capabilities
+                .iter()
+                .any(|c| c == "agent.launch_settings")
+        {
+            return Err(Error::new(ErrorCode::ProtocolCapabilityMissing)
+                .with("capability", "agent.launch_settings"));
+        }
         if matches!(
             request.command,
             Some(command_request::Command::BoardJoin(_))
@@ -819,6 +836,46 @@ mod tests {
         assert!(r
             .send("new", launch(vec!["skip-permissions".into()]))
             .is_ok());
+        assert!(matches!(new_rx.try_recv(), Ok(ToNode::Command { .. })));
+    }
+
+    #[test]
+    fn a_start_with_settings_goes_only_to_a_node_that_verifies_them() {
+        // ADR-0066: an older node (with or without `agent.launch_options`) is refused, never sent a start whose model it would drop.
+        let r = Router::new();
+        let (_old, mut old_rx) = r.register_with_capabilities(
+            "old",
+            vec!["workspace.directory".into(), "agent.launch_options".into()],
+        );
+        let (_new, mut new_rx) = r.register_with_capabilities(
+            "new",
+            vec!["workspace.directory".into(), "agent.launch_settings".into()],
+        );
+        let setting = vec![v1::LaunchSetting {
+            id: "model".into(),
+            value: "gpt-6.1-sol".into(),
+        }];
+        let launch = |settings: Vec<v1::LaunchSetting>| {
+            let mut request = req("old");
+            request.command = Some(command_request::Command::AgentLaunch(v1::AgentLaunch {
+                settings,
+                ..Default::default()
+            }));
+            request
+        };
+        let refused = r.send("old", launch(setting.clone())).err().unwrap();
+        assert_eq!(refused.code, ErrorCode::ProtocolCapabilityMissing);
+        assert!(old_rx.try_recv().is_err());
+        let mut start = req("old");
+        start.command = Some(command_request::Command::AgentStart(v1::AgentStart {
+            settings: setting.clone(),
+            ..Default::default()
+        }));
+        assert!(r.send("old", start).is_err());
+        // Without settings an older node still gets the launch; a node that offers the capability gets one with them.
+        assert!(r.send("old", launch(Vec::new())).is_ok());
+        assert!(matches!(old_rx.try_recv(), Ok(ToNode::Command { .. })));
+        assert!(r.send("new", launch(setting)).is_ok());
         assert!(matches!(new_rx.try_recv(), Ok(ToNode::Command { .. })));
     }
 

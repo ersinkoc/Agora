@@ -90,3 +90,10 @@ smaller window's size; the bigger window has it at its top left with a hairline 
 
 ![](shared-size/shared-size-big-dark.png) ![](shared-size/shared-size-big-light.png)
 ![](shared-size/shared-size-small-dark.png) ![](shared-size/shared-size-small-light.png)
+
+## ADR-0066: a start request with a model and an effort
+
+The approval card an agent's `agent_start` with settings produces in the web window: the settings sit next to the folder, the
+first prompt is shown in full, and only "this one" can be allowed (`apps/web/src/components/StartApproval.tsx`).
+
+![](adr66-start-card-settings-dark.png) ![](adr66-start-card-settings-light.png)
