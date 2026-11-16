@@ -36,6 +36,13 @@ _Nothing yet._
 - macOS: a confined agent is not started when a file it may write also has another name elsewhere (a hard link made outside
   confinement), or when a save copy next to it (`state.json.tmp`) is such a link, since writing it would change that other file too; the message says to remove the link or put a copy in its place
   (#571). Such links inside a folder it may write are not looked for at each start.
+- A connected machine can no longer speak for another one. Before, it could show another machine's running agents as done and
+  give back their tasks, show that machine online or offline, change its numbers, list its own agents, folders and terminals on
+  it, or hide one of its agents from every window. The hub now refuses such a message and closes the sender's connection.
+  A history written before this check is read the same way: what a machine reports (that it started or left, an agent, a terminal, a folder, its
+  numbers) counts for that machine only, and only the hub can hide an agent.
+  A window that reconnects to a hub holding such an old record is given a fresh snapshot instead of the stored events, so it
+  never applies one (and one that did before is corrected).
 
 ### Console (`agora tui`)
 - A paste that held pieces of the paste markers could end the paste early and type the rest as keys; it now always arrives as
