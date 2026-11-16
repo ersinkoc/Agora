@@ -19,6 +19,7 @@ cli-usage =
       agora mesh stdio --socket YOL
       agora hub run [--listen ADDR] [--hub-dir DIR] [--name HOST]... [--web DIR] [--metrics]
       agora hub code [--hub-dir DIR]
+      agora hub metrics-token create NAME [--expires DAYS] | list | revoke NAME [--hub-dir DIR]
       agora hub ssh install AD [--yes] [--unsigned] [--release-url URL] [--hub-dir DIR]
       agora hub login [--hub-dir DİZİN]
       agora password set|clear|status [--hub-dir DİZİN]
@@ -69,6 +70,7 @@ doctor-sandbox = Bu makinede ajanlar çalışma alanına kısıtlanabilir (düğ
 doctor-sandbox-unsupported = Bu makinede ajanlar kısıtlanamaz (düğümün ilkesi: { $detail }). "off" dışındaki bir değer, ajanların burada başlamayacağı anlamına gelir.
 doctor-git = Git kullanılabilir ({ $detail }).
 doctor-git-missing = Git bulunamadı. Agora, her ajana ayrı bir çalışma alanı vermek için buna ihtiyaç duyar.
+doctor-git-identity-missing = Buradaki ajanların git kimliği yok, bu yüzden commit yapamazlar. "git config --global" ile "user.name" ve "user.email" değerlerini ayarlayın.
 doctor-data-dir = Veri klasörüne yazılabiliyor: { $detail }
 doctor-data-dir-unwritable = Veri klasörüne yazılamıyor: { $detail }
 doctor-node = { $detail } adresinde bir düğüm çalışıyor.
@@ -218,8 +220,14 @@ cli-adapter-listed-revoked = { $name } { $version } (yayımcı { $publisher }, e
 
 cli-project-identity = Proje kimliği: { $id } (klasör: { $path }). .agent-project.json dosyasını projenin diğer kopyalarına taşıyın.
 
-cli-panel = Hub'ın panelini tarayıcıda şu adreste açın: { $url }. Bu makinenin tarayıcısı hub'ın sertifikasına güvenmeli: { $ca } dosyasını sertifika otoritesi olarak içe aktarın (Windows'ta: certutil -user -addstore Root { $ca }). Giriş için hub makinesinde "agora hub login" ile alınan kodu kullanın.
+cli-panel = Hub'ın paneli bu makinede şu adreste açık: { $url }. Bu adresi tarayıcıda açın; sertifika gerekmez. Giriş için, her tarayıcıda olduğu gibi, hub makinesinde "agora hub login" ile alınan kodu kullanın. Kapatmak için Ctrl+C'ye basın.
 cli-panel-none = Bu makine bir hub'a kayıtlı değil, açılacak panel yok. Önce "agora node enroll" ile kaydedin.
+cli-panel-link = Bu makinenin hub adresi veya sertifikası okunamıyor. "agora node enroll" ile yeniden kaydedin.
+cli-panel-port-taken = Panelin { $port } numaralı portunu başka bir program kullanıyor. O programı kapatıp "agora panel" komutunu yeniden çalıştırın; girişiniz ve cihazınız korunsun diye port değişmez.
+cli-panel-no-port = Panel bu makinede bir port açamadı.
+cli-panel-port-unsaved = Panelin portu kaydedilemedi; bir sonraki "agora panel" başka bir port kullanabilir ve tarayıcınız bunu yeni bir cihaz sayıp yeniden giriş ister. Bu makinedeki node klasörünün yazılabilir olduğunu kontrol edin.
+cli-panel-unreachable = Hub bu makineden yanıt vermiyor, açılacak panel yok. Buradaki ajanlar çalışmaya devam eder.
+cli-panel-untrusted = Hub'ın sertifikası bu makinenin kaydolduğu sertifikadan değil, panel açılmadı.
 
 # ADR-0062: yalın `agora` (ön kapı), `agora web`, `agora status`, `agora down`.
 frontdoor-welcome = Agora'ya hoş geldiniz. Bu makine ne yapsın?
@@ -349,3 +357,15 @@ cli-machines-not-asked = Hiçbir şey unutulmadı: bu terminal cevap veremiyor. 
 cli-machines-hub-unreachable = Çalışan hub'a klasöründen ulaşılamadı ({ $reason }). Makineleri çalışan hub unutur; "agora" ya da "agora hub run" ile başlatın.
 cli-machine-forgotten = { $id } unutuldu.
 cli-machine-not-forgotten = { $id } unutulamadı ({ $code }).
+
+cli-metrics-token-created = Metrik anahtarı { $name }: { $token }  Yalnızca şimdi gösterilir. Yalnızca `/api/metrics` adresini okuyabilir (hub'ı --metrics ile başlatın); `agora hub metrics-token revoke { $name }` onu sonlandırır.
+cli-metrics-token-bad-name = Anahtar adı 1 ile 64 arasında harf, rakam, nokta, tire veya alt çizgiden oluşur.
+cli-metrics-token-exists = { $name } adında bir metrik anahtarı zaten var. Önce onu iptal edin ya da başka bir ad seçin.
+cli-metrics-token-none = Henüz metrik anahtarı yok. `agora hub metrics-token create AD` ile bir tane oluşturun.
+cli-metrics-token-line = { $name } · oluşturuldu { $created } · son kullanım { $used } · bitiş { $expires }{ $state }
+cli-metrics-token-never-used = hiç
+cli-metrics-token-no-expiry = yok
+cli-metrics-token-state-revoked = {" "}· iptal edildi
+cli-metrics-token-state-expired = {" "}· süresi doldu
+cli-metrics-token-revoked = { $name } metrik anahtarı iptal edildi. Bir sonraki kullanımda reddedilir.
+cli-metrics-token-unknown = { $name } adında geçerli bir metrik anahtarı yok.

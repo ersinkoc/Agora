@@ -87,6 +87,35 @@ pub fn start_message(
     m
 }
 
+/// ADR-0066: the bytes a device signs to decide an `agent.start` request whose detail lists launch settings (`agora-node::approvals::
+/// start_signed_message_v2`, which a test compares against): the v1 fields under the domain `agora-approval-start-v2`, with the settings as
+/// a length-prefixed pair list before the hash. A request with settings is decided only over this message.
+pub fn start_message_v2(
+    node_id: &str,
+    approval_id: &str,
+    approved: bool,
+    helper_grant: u32,
+    helpers_may_start: bool,
+    settings: &[(String, String)],
+    detail: &str,
+) -> Vec<u8> {
+    let hash = hex(ring::digest::digest(&ring::digest::SHA256, detail.as_bytes()).as_ref());
+    let mut m = b"agora-approval-start-v2".to_vec();
+    for part in [
+        node_id,
+        approval_id,
+        if approved { "1" } else { "0" },
+        &helper_grant.to_string(),
+        if helpers_may_start { "1" } else { "0" },
+        &signed_pairs(settings),
+        &hash,
+    ] {
+        m.push(0);
+        m.extend_from_slice(part.as_bytes());
+    }
+    m
+}
+
 /// The exact bytes a device signs for a grant (ADR-0041): a domain tag, then node id, grant id, scope, the commands joined by commas and
 /// the expiry in decimal milliseconds, NUL-separated.
 pub fn grant_message(
@@ -191,6 +220,60 @@ pub fn launch_message(
     m
 }
 
+/// ADR-0066: `(id, value)` pairs as signed: the count, then `:<id length>:<id>:<value length>:<value>` per pair in the order given (the
+/// node's `agora_node::directory::signed_pairs`).
+fn signed_pairs(items: &[(String, String)]) -> String {
+    let mut out = items.len().to_string();
+    for (id, value) in items {
+        out.push_str(&format!(":{}:{id}:{}:{value}", id.len(), value.len()));
+    }
+    out
+}
+
+/// ADR-0066: what a device signs for a launch that chose launch settings (model, effort): the launch fields under the domain
+/// `directory-action-v4`, with the options, the confirmations and the settings as length-prefixed lists before the nonce. Checked against
+/// `schema/fixtures/signing/directory-action-v4.json`, as the node and the web window are.
+#[allow(clippy::too_many_arguments)] // the fields the node binds, each on its own
+pub fn launch_message_v4(
+    node: &str,
+    path: &str,
+    kind: &str,
+    project: &str,
+    separate: bool,
+    identity_change: bool,
+    launch_options: &[String],
+    confirmed: &[String],
+    settings: &[(String, String)],
+    nonce: &str,
+    expires_at_ms: u64,
+) -> Vec<u8> {
+    let (options, confirmed, settings) = (
+        signed_list(launch_options),
+        signed_list(confirmed),
+        signed_pairs(settings),
+    );
+    let mut m = b"directory-action-v4".to_vec();
+    for part in [
+        node,
+        "launch",
+        path,
+        kind,
+        project,
+        if separate { "1" } else { "0" },
+        if identity_change { "1" } else { "0" },
+        options.as_str(),
+        confirmed.as_str(),
+        settings.as_str(),
+        nonce,
+    ] {
+        m.push(0);
+        m.extend_from_slice(part.as_bytes());
+    }
+    m.push(0);
+    m.extend_from_slice(expires_at_ms.to_string().as_bytes());
+    m
+}
+
 /// How long a signed folder action stays valid (the node refuses more than five minutes ahead).
 const FOLDER_ACTION_TTL_MS: u64 = 2 * 60 * 1000;
 
@@ -272,6 +355,61 @@ impl Device {
             identity_change,
             launch_options,
             confirmed,
+            &nonce,
+            expires_at_ms,
+        );
+        Some(agora_protocol::v1::DirectoryAuthorization {
+            device_id: self.id.clone(),
+            nonce,
+            expires_at_ms,
+            signature: self.sign(&message)?,
+        })
+    }
+
+    /// [`Self::authorize_launch`] with launch settings chosen (ADR-0066): the signature covers them, in the order given, which must be
+    /// the order they are sent in. With none it is exactly [`Self::authorize_launch`].
+    #[allow(clippy::too_many_arguments)] // the fields the node binds, each on its own
+    pub fn authorize_launch_with_settings(
+        &self,
+        node: &str,
+        path: &str,
+        kind: &str,
+        project: &str,
+        separate: bool,
+        identity_change: bool,
+        launch_options: &[String],
+        confirmed: &[String],
+        settings: &[(String, String)],
+        now_ms: u64,
+    ) -> Option<agora_protocol::v1::DirectoryAuthorization> {
+        if settings.is_empty() {
+            return self.authorize_launch(
+                node,
+                path,
+                kind,
+                project,
+                separate,
+                identity_change,
+                launch_options,
+                confirmed,
+                now_ms,
+            );
+        }
+        use ring::rand::SecureRandom;
+        let mut b = [0u8; 16];
+        SystemRandom::new().fill(&mut b).ok()?;
+        let nonce = hex(&b);
+        let expires_at_ms = now_ms + FOLDER_ACTION_TTL_MS;
+        let message = launch_message_v4(
+            node,
+            path,
+            kind,
+            project,
+            separate,
+            identity_change,
+            launch_options,
+            confirmed,
+            settings,
             &nonce,
             expires_at_ms,
         );
@@ -542,6 +680,62 @@ mod tests {
                 1_000
             )
             .is_some());
+    }
+
+    #[test]
+    fn a_launch_with_settings_signs_the_shared_vectors() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../schema/fixtures/signing/directory-action-v4.json");
+        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let list = |x: &serde_json::Value| -> Vec<String> {
+            x.as_array()
+                .unwrap()
+                .iter()
+                .map(|s| s.as_str().unwrap().to_string())
+                .collect()
+        };
+        for c in v["cases"].as_array().unwrap() {
+            let settings: Vec<(String, String)> = c["settings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|p| {
+                    (
+                        p[0].as_str().unwrap().to_string(),
+                        p[1].as_str().unwrap().to_string(),
+                    )
+                })
+                .collect();
+            let m = launch_message_v4(
+                c["node"].as_str().unwrap(),
+                c["path"].as_str().unwrap(),
+                c["kind"].as_str().unwrap(),
+                c["project"].as_str().unwrap(),
+                c["separate"].as_bool().unwrap(),
+                c["identity_change"].as_bool().unwrap(),
+                &list(&c["options"]),
+                &list(&c["confirmed"]),
+                &settings,
+                c["nonce"].as_str().unwrap(),
+                c["expires"].as_u64().unwrap(),
+            );
+            assert_eq!(hex(&m), c["hex"].as_str().unwrap(), "{}", c["name"]);
+        }
+    }
+
+    #[test]
+    fn a_start_decision_with_settings_matches_the_nodes_message() {
+        let settings = vec![
+            ("model".to_string(), "gpt-6.1-sol".to_string()),
+            ("effort".to_string(), "high".to_string()),
+        ];
+        let detail = "{\"prompt\":\"Grüße 🚀\"}";
+        assert_eq!(
+            start_message_v2("laptop", "ap-1", true, 0, false, &settings, detail),
+            agora_node::approvals::start_signed_message_v2(
+                "laptop", "ap-1", true, 0, false, &settings, detail
+            )
+        );
     }
 
     #[test]

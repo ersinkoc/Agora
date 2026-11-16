@@ -553,6 +553,41 @@ impl Supervisor {
         )
     }
 
+    /// ADR-0066: the settings an agent's `agent_start` asks for, checked against this node's manifest for `kind` (unknown, repeated or
+    /// invalid ones are refused, so nothing is asked about nor started) and returned as `(id, label, value)` in the manifest's order,
+    /// which is the order the approval card shows, the signature covers and the launch applies. Empty in, empty out.
+    pub fn checked_settings(
+        &self,
+        kind: &str,
+        settings: &[(String, String)],
+    ) -> Result<Vec<(String, String, String)>, SupervisorError> {
+        if settings.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.launch_choice(
+            kind,
+            &Requested {
+                settings: settings.to_vec(),
+                ..Requested::default()
+            },
+        )?;
+        let k = self
+            .kinds
+            .get(kind)
+            .ok_or_else(|| SupervisorError::UnknownKind(kind.to_string()))?;
+        Ok(k.manifest
+            .launch
+            .setting
+            .iter()
+            .filter_map(|st| {
+                settings
+                    .iter()
+                    .find(|(id, _)| *id == st.id)
+                    .map(|(id, value)| (id.clone(), st.label.clone(), value.clone()))
+            })
+            .collect())
+    }
+
     /// ADR-0057: `child` was started by `parent` (an agent's `agent_start`). Carried in every view of `child`.
     pub fn set_parent(&mut self, child: &AgentId, parent: &AgentId) {
         self.parents.insert(child.clone(), parent.clone());
@@ -648,7 +683,11 @@ impl Supervisor {
             .kinds
             .get(kind)
             .and_then(|k| k.manifest.sandbox.as_ref());
-        self.sandbox.profile(kind, needs, worktree, program)
+        let mut profile = self.sandbox.profile(kind, needs, worktree, program)?;
+        // ADR-0078: the file of git settings the node wrote for this start, readable and not writable.
+        let file = self.sandbox.git_config(worktree, &profile.write);
+        profile.read.extend(file);
+        Some(profile)
     }
 
     /// With confinement on, a launch in a folder that would make the confinement meaningless is refused before anything starts.
@@ -1536,6 +1575,9 @@ impl Supervisor {
                 .collect();
         }
         cfg.env.extend(extras.env.iter().cloned());
+        if let Some(profile) = &cfg.sandbox {
+            cfg.env.extend(git_env(profile, worktree));
+        }
         if cfg.sandbox.is_some() && agora_platform::PRIVATE_TEMP {
             let temp = crate::sandbox::agent_temp(worktree).display().to_string();
             cfg.env.push(("TMPDIR".into(), temp.clone()));
@@ -2377,6 +2419,9 @@ fn launch_adapter(
     if let Some(profile) = &mut sandbox {
         offline_sockets(profile, mesh.map(|m| m.socket.as_path()), worktree);
     }
+    if let Some(profile) = &sandbox {
+        env.extend(git_env(profile, worktree));
+    }
     // A confined adapter works in its own private temporary folder, as a confined terminal agent does.
     if sandbox.is_some() && agora_platform::PRIVATE_TEMP {
         let temp = crate::sandbox::agent_temp(worktree).display().to_string();
@@ -2419,6 +2464,17 @@ fn launch_adapter(
         )
         .map_err(adapter_error)?;
     Ok((adapter, session_id, init.capabilities))
+}
+
+/// ADR-0078: points a confined agent's git at the file the node wrote, when the profile grants that file for reading (it does not when
+/// the owner grants `~/.gitconfig` themselves, or the file could not be written).
+fn git_env(profile: &agora_platform::Sandbox, worktree: &Path) -> Vec<(String, String)> {
+    let file = crate::gitconfig::path_for(worktree);
+    if profile.read.contains(&file) {
+        crate::gitconfig::env_for(&file)
+    } else {
+        Vec::new()
+    }
 }
 
 /// The unix sockets a confined agent may reach although the node's own folders are closed (its own mesh socket, #475); offline

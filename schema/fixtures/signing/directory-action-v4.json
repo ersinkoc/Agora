@@ -1,0 +1,265 @@
+{
+ "about": "ADR-0066 directory-action-v4: the signed bytes of an agent.launch that chose launch settings (model, effort, ...). Checked by the node (crates/agora-node/src/directory.rs), the terminal client (crates/agora-tui/src/device.rs) and the web window (apps/web/src/net/directory.test.ts). Lists are `<count>` then `:<byte length>:<item>` per item; settings are `<count>` then `:<id length>:<id>:<value length>:<value>` per pair, in the order sent.",
+ "cases": [
+  {
+   "node": "laptop",
+   "path": "/home/dev/code/login-fix",
+   "kind": "codex",
+   "project": "id:7c9e6679-7425-40de-944b-e07fc1f90ae7",
+   "separate": false,
+   "identity_change": false,
+   "nonce": "00112233445566778899aabbccddeeff",
+   "expires": 1700000120000,
+   "options": [],
+   "confirmed": [],
+   "settings": [
+    [
+     "model",
+     "gpt-6.1-sol"
+    ],
+    [
+     "effort",
+     "high"
+    ]
+   ],
+   "name": "model and effort",
+   "hex": "6469726563746f72792d616374696f6e2d7634006c6170746f70006c61756e6368002f686f6d652f6465762f636f64652f6c6f67696e2d66697800636f6465780069643a37633965363637392d373432352d343064652d393434622d653037666331663930616537003000300030003000323a353a6d6f64656c3a31313a6770742d362e312d736f6c3a363a6566666f72743a343a686967680030303131323233333434353536363737383839396161626263636464656566660031373030303030313230303030"
+  },
+  {
+   "node": "laptop",
+   "path": "/home/dev/code/login-fix",
+   "kind": "codex",
+   "project": "id:7c9e6679-7425-40de-944b-e07fc1f90ae7",
+   "separate": false,
+   "identity_change": false,
+   "nonce": "00112233445566778899aabbccddeeff",
+   "expires": 1700000120000,
+   "options": [],
+   "confirmed": [],
+   "settings": [
+    [
+     "effort",
+     "high"
+    ],
+    [
+     "model",
+     "gpt-6.1-sol"
+    ]
+   ],
+   "name": "same pairs reordered",
+   "hex": "6469726563746f72792d616374696f6e2d7634006c6170746f70006c61756e6368002f686f6d652f6465762f636f64652f6c6f67696e2d66697800636f6465780069643a37633965363637392d373432352d343064652d393434622d653037666331663930616537003000300030003000323a363a6566666f72743a343a686967683a353a6d6f64656c3a31313a6770742d362e312d736f6c0030303131323233333434353536363737383839396161626263636464656566660031373030303030313230303030"
+  },
+  {
+   "node": "laptop",
+   "path": "/home/dev/code/login-fix",
+   "kind": "codex",
+   "project": "id:7c9e6679-7425-40de-944b-e07fc1f90ae7",
+   "separate": false,
+   "identity_change": false,
+   "nonce": "00112233445566778899aabbccddeeff",
+   "expires": 1700000120000,
+   "options": [],
+   "confirmed": [],
+   "settings": [
+    [
+     "model",
+     "gpt-6.1-sol"
+    ]
+   ],
+   "name": "one setting",
+   "hex": "6469726563746f72792d616374696f6e2d7634006c6170746f70006c61756e6368002f686f6d652f6465762f636f64652f6c6f67696e2d66697800636f6465780069643a37633965363637392d373432352d343064652d393434622d653037666331663930616537003000300030003000313a353a6d6f64656c3a31313a6770742d362e312d736f6c0030303131323233333434353536363737383839396161626263636464656566660031373030303030313230303030"
+  },
+  {
+   "node": "laptop",
+   "path": "/home/dev/code/login-fix",
+   "kind": "codex",
+   "project": "id:7c9e6679-7425-40de-944b-e07fc1f90ae7",
+   "separate": false,
+   "identity_change": false,
+   "nonce": "00112233445566778899aabbccddeeff",
+   "expires": 1700000120000,
+   "options": [],
+   "confirmed": [],
+   "settings": [
+    [
+     "model",
+     "a:1:b"
+    ]
+   ],
+   "name": "pairs that join into the same text differ",
+   "hex": "6469726563746f72792d616374696f6e2d7634006c6170746f70006c61756e6368002f686f6d652f6465762f636f64652f6c6f67696e2d66697800636f6465780069643a37633965363637392d373432352d343064652d393434622d653037666331663930616537003000300030003000313a353a6d6f64656c3a353a613a313a620030303131323233333434353536363737383839396161626263636464656566660031373030303030313230303030"
+  },
+  {
+   "node": "laptop",
+   "path": "/home/dev/code/login-fix",
+   "kind": "codex",
+   "project": "id:7c9e6679-7425-40de-944b-e07fc1f90ae7",
+   "separate": true,
+   "identity_change": true,
+   "nonce": "00112233445566778899aabbccddeeff",
+   "expires": 1700000120000,
+   "options": [
+    "skip-permissions",
+    "resume-last"
+   ],
+   "confirmed": [
+    "skip-permissions"
+   ],
+   "settings": [
+    [
+     "model",
+     "gpt-6.1-sol"
+    ],
+    [
+     "effort",
+     "low"
+    ]
+   ],
+   "name": "settings next to a confirmed option, worktree, identity change",
+   "hex": "6469726563746f72792d616374696f6e2d7634006c6170746f70006c61756e6368002f686f6d652f6465762f636f64652f6c6f67696e2d66697800636f6465780069643a37633965363637392d373432352d343064652d393434622d6530376663316639306165370031003100323a31363a736b69702d7065726d697373696f6e733a31313a726573756d652d6c61737400313a31363a736b69702d7065726d697373696f6e7300323a353a6d6f64656c3a31313a6770742d362e312d736f6c3a363a6566666f72743a333a6c6f770030303131323233333434353536363737383839396161626263636464656566660031373030303030313230303030"
+  },
+  {
+   "node": "laptop",
+   "path": "/home/dev/code/login-fix",
+   "kind": "codex",
+   "project": "id:7c9e6679-7425-40de-944b-e07fc1f90ae7",
+   "separate": false,
+   "identity_change": false,
+   "nonce": "00112233445566778899aabbccddeeff",
+   "expires": 1700000120000,
+   "options": [],
+   "confirmed": [],
+   "settings": [],
+   "name": "no settings under v4 (never sent: such a launch is signed as v1 or v3)",
+   "hex": "6469726563746f72792d616374696f6e2d7634006c6170746f70006c61756e6368002f686f6d652f6465762f636f64652f6c6f67696e2d66697800636f6465780069643a37633965363637392d373432352d343064652d393434622d653037666331663930616537003000300030003000300030303131323233333434353536363737383839396161626263636464656566660031373030303030313230303030"
+  },
+  {
+   "node": "laptop",
+   "path": "/home/dev/code/login-fix",
+   "kind": "codex",
+   "project": "id:7c9e6679-7425-40de-944b-e07fc1f90ae7",
+   "separate": false,
+   "identity_change": false,
+   "nonce": "00112233445566778899aabbccddeeff",
+   "expires": 1700000120000,
+   "options": [],
+   "confirmed": [],
+   "name": "unicode value, NFC (U+00E9, 2 bytes)",
+   "settings": [
+    [
+     "model",
+     "\u00e9"
+    ]
+   ],
+   "hex": "6469726563746f72792d616374696f6e2d7634006c6170746f70006c61756e6368002f686f6d652f6465762f636f64652f6c6f67696e2d66697800636f6465780069643a37633965363637392d373432352d343064652d393434622d653037666331663930616537003000300030003000313a353a6d6f64656c3a323ac3a90030303131323233333434353536363737383839396161626263636464656566660031373030303030313230303030"
+  },
+  {
+   "node": "laptop",
+   "path": "/home/dev/code/login-fix",
+   "kind": "codex",
+   "project": "id:7c9e6679-7425-40de-944b-e07fc1f90ae7",
+   "separate": false,
+   "identity_change": false,
+   "nonce": "00112233445566778899aabbccddeeff",
+   "expires": 1700000120000,
+   "options": [],
+   "confirmed": [],
+   "name": "unicode value, NFD (e + U+0301, 3 bytes): differs from NFC",
+   "settings": [
+    [
+     "model",
+     "e\u0301"
+    ]
+   ],
+   "hex": "6469726563746f72792d616374696f6e2d7634006c6170746f70006c61756e6368002f686f6d652f6465762f636f64652f6c6f67696e2d66697800636f6465780069643a37633965363637392d373432352d343064652d393434622d653037666331663930616537003000300030003000313a353a6d6f64656c3a333a65cc810030303131323233333434353536363737383839396161626263636464656566660031373030303030313230303030"
+  },
+  {
+   "node": "laptop",
+   "path": "/home/dev/code/login-fix",
+   "kind": "codex",
+   "project": "id:7c9e6679-7425-40de-944b-e07fc1f90ae7",
+   "separate": false,
+   "identity_change": false,
+   "nonce": "00112233445566778899aabbccddeeff",
+   "expires": 1700000120000,
+   "options": [],
+   "confirmed": [],
+   "name": "an empty value (the node refuses it: agent.setting_invalid)",
+   "settings": [
+    [
+     "model",
+     ""
+    ]
+   ],
+   "hex": "6469726563746f72792d616374696f6e2d7634006c6170746f70006c61756e6368002f686f6d652f6465762f636f64652f6c6f67696e2d66697800636f6465780069643a37633965363637392d373432352d343064652d393434622d653037666331663930616537003000300030003000313a353a6d6f64656c3a303a0030303131323233333434353536363737383839396161626263636464656566660031373030303030313230303030"
+  },
+  {
+   "node": "laptop",
+   "path": "/home/dev/code/login-fix",
+   "kind": "codex",
+   "project": "id:7c9e6679-7425-40de-944b-e07fc1f90ae7",
+   "separate": false,
+   "identity_change": false,
+   "nonce": "00112233445566778899aabbccddeeff",
+   "expires": 1700000120000,
+   "options": [],
+   "confirmed": [],
+   "name": "a value of 129 bytes (over the 128 the node takes; refused before the signature is checked)",
+   "settings": [
+    [
+     "model",
+     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ]
+   ],
+   "hex": "6469726563746f72792d616374696f6e2d7634006c6170746f70006c61756e6368002f686f6d652f6465762f636f64652f6c6f67696e2d66697800636f6465780069643a37633965363637392d373432352d343064652d393434622d653037666331663930616537003000300030003000313a353a6d6f64656c3a3132393a6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161610030303131323233333434353536363737383839396161626263636464656566660031373030303030313230303030"
+  },
+  {
+   "node": "laptop",
+   "path": "/home/dev/code/login-fix",
+   "kind": "codex",
+   "project": "id:7c9e6679-7425-40de-944b-e07fc1f90ae7",
+   "separate": false,
+   "identity_change": false,
+   "nonce": "00112233445566778899aabbccddeeff",
+   "expires": 1700000120000,
+   "options": [],
+   "confirmed": [],
+   "name": "the same id twice (signed as sent; the node refuses it: agent.setting_unknown)",
+   "settings": [
+    [
+     "model",
+     "a"
+    ],
+    [
+     "model",
+     "b"
+    ]
+   ],
+   "hex": "6469726563746f72792d616374696f6e2d7634006c6170746f70006c61756e6368002f686f6d652f6465762f636f64652f6c6f67696e2d66697800636f6465780069643a37633965363637392d373432352d343064652d393434622d653037666331663930616537003000300030003000323a353a6d6f64656c3a313a613a353a6d6f64656c3a313a620030303131323233333434353536363737383839396161626263636464656566660031373030303030313230303030"
+  },
+  {
+   "node": "laptop",
+   "path": "/home/dev/code/login-fix",
+   "kind": "codex",
+   "project": "id:7c9e6679-7425-40de-944b-e07fc1f90ae7",
+   "separate": false,
+   "identity_change": false,
+   "nonce": "00112233445566778899aabbccddeeff",
+   "expires": 1700000120000,
+   "options": [],
+   "confirmed": [],
+   "name": "an empty id and a unicode id",
+   "settings": [
+    [
+     "",
+     "x"
+    ],
+    [
+     "m\u00f6del",
+     "x"
+    ]
+   ],
+   "hex": "6469726563746f72792d616374696f6e2d7634006c6170746f70006c61756e6368002f686f6d652f6465762f636f64652f6c6f67696e2d66697800636f6465780069643a37633965363637392d373432352d343064652d393434622d653037666331663930616537003000300030003000323a303a3a313a783a363a6dc3b664656c3a313a780030303131323233333434353536363737383839396161626263636464656566660031373030303030313230303030"
+  }
+ ]
+}

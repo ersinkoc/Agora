@@ -246,9 +246,13 @@ fn a_request_below_the_minimum_width_is_the_size_everyone_has() {
     }
     let _ = std::fs::remove_file(&out);
     assert_eq!(said.trim(), "7 2", "the process sees the screen's size");
+    // The shell's echo of the `stty` line and its prompt arrive on the same subscription: only the resizes count, and a byte frame
+    // in front of them must not end the count (it did, once, on a slow runner).
     let mut resizes = Vec::new();
-    while let Ok(Output::Resize(s)) = sub.recv_timeout(Duration::from_millis(100)) {
-        resizes.push(s);
+    while let Ok(out) = sub.recv_timeout(Duration::from_millis(100)) {
+        if let Output::Resize(s) = out {
+            resizes.push(s);
+        }
     }
     assert_eq!(resizes, [real], "one resize, to the real size");
     h.kill().unwrap();

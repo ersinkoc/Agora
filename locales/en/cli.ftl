@@ -19,6 +19,7 @@ cli-usage =
       agora mesh stdio --socket PATH
       agora hub run [--listen ADDR] [--hub-dir DIR] [--name HOST]... [--web DIR] [--metrics]
       agora hub code [--hub-dir DIR]
+      agora hub metrics-token create NAME [--expires DAYS] | list | revoke NAME [--hub-dir DIR]
       agora hub ssh install NAME [--yes] [--unsigned] [--release-url URL] [--hub-dir DIR]
       agora hub login [--hub-dir DIR]
       agora password set|clear|status [--hub-dir DIR]
@@ -69,6 +70,7 @@ doctor-sandbox = Agents can be confined to their workspace on this machine (the 
 doctor-sandbox-unsupported = Agents cannot be confined on this machine (the node's policy: { $detail }). Anything but "off" means agents will not start here.
 doctor-git = Git is available ({ $detail }).
 doctor-git-missing = Git was not found. Agora needs it to give each agent its own workspace.
+doctor-git-identity-missing = Agents here have no git identity, so they cannot commit. Set "user.name" and "user.email" with "git config --global".
 doctor-data-dir = The data folder is writable: { $detail }
 doctor-data-dir-unwritable = The data folder cannot be written: { $detail }
 doctor-node = A node is running at { $detail }.
@@ -221,8 +223,14 @@ cli-adapter-listed-revoked = { $name } { $version } (publisher { $publisher }, r
 
 cli-project-identity = Project identity: { $id } (folder: { $path }). Share .agent-project.json with the other copies of this project.
 
-cli-panel = Open the hub's panel at { $url } in a browser. This machine's browser must trust the hub's certificate: import { $ca } as a certificate authority (on Windows: certutil -user -addstore Root { $ca }). Sign in with a code from "agora hub login" on the hub machine.
+cli-panel = The hub's panel is open at { $url } on this machine. Open that address in a browser; no certificate is needed. Sign in with a code from "agora hub login" on the hub machine, as from any browser. Press Ctrl+C to close it.
 cli-panel-none = This machine is not enrolled with a hub, so there is no panel to open. Enroll it first with "agora node enroll".
+cli-panel-link = This machine's hub address or certificate is unreadable. Enroll it again with "agora node enroll".
+cli-panel-port-taken = The panel's port { $port } is taken by another program. Close that program and run "agora panel" again; the port stays the same so that your sign-in and device are kept.
+cli-panel-no-port = The panel could not open a port on this machine.
+cli-panel-port-unsaved = The panel's port could not be saved, so the next "agora panel" may use another port, and your browser would treat it as a new device and ask you to sign in again. Check that this machine's node folder is writable.
+cli-panel-unreachable = The hub does not answer from this machine, so there is no panel to open. The agents here keep running.
+cli-panel-untrusted = The hub's certificate is not from the certificate this machine was enrolled with, so the panel was not opened.
 
 # ADR-0062: plain `agora` (the front door), `agora web`, `agora status`, `agora down`.
 frontdoor-welcome = Welcome to Agora. What should this machine do?
@@ -355,3 +363,15 @@ cli-machines-not-asked = Nothing was forgotten: this terminal cannot answer. Run
 cli-machines-hub-unreachable = The running hub could not be reached from its folder ({ $reason }). Machines are forgotten by the running hub; start it with "agora" or "agora hub run".
 cli-machine-forgotten = { $id } is forgotten.
 cli-machine-not-forgotten = { $id } was not forgotten ({ $code }).
+
+cli-metrics-token-created = Metrics token { $name }: { $token }  It is shown only now. It can read `/api/metrics` and nothing else (start the hub with --metrics); `agora hub metrics-token revoke { $name }` ends it.
+cli-metrics-token-bad-name = A token name has 1 to 64 letters, digits, dots, dashes or underscores.
+cli-metrics-token-exists = A metrics token called { $name } already exists. Revoke it first, or pick another name.
+cli-metrics-token-none = No metrics tokens yet. Make one with `agora hub metrics-token create NAME`.
+cli-metrics-token-line = { $name } · made { $created } · last used { $used } · expires { $expires }{ $state }
+cli-metrics-token-never-used = never
+cli-metrics-token-no-expiry = never
+cli-metrics-token-state-revoked = {" "}· revoked
+cli-metrics-token-state-expired = {" "}· expired
+cli-metrics-token-revoked = Metrics token { $name } is revoked. It fails at its next use.
+cli-metrics-token-unknown = There is no live metrics token called { $name }.

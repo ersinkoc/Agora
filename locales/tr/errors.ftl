@@ -72,6 +72,7 @@ mesh-helper_limit = Ajan şu anda başka bir yardımcı başlatamaz (sınır: { 
         [prompt] İlk istemi çok uzun.
        *[other] Zaten izin verilen sayıda yardımcı çalıştırıyor.
     }
+mesh-unavailable = Ağ yeniden bağlanıyor. Biraz sonra tekrar deneyin.
 mesh-start_denied = Başlatma reddedildi ({ $approval_id }).
 task-not_found = { $task_id } görevi bulunamadı.
 task-not_open = { $task_id } görevi zaten alınmış veya bitmiş.

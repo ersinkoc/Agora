@@ -1728,3 +1728,51 @@ fn the_owners_policy_switch_shows_secret_files() {
         stop_helpers: false,
     })));
 }
+
+/// F251: a subscriber that fell behind (it stopped reading while the agent printed far more than the node queues for it) still
+/// hears that the terminal ended, even though the exit was among what was dropped.
+#[test]
+fn a_subscriber_that_fell_behind_still_gets_the_exit_frame() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
+        return;
+    }
+    const OUTPUT: usize = 32 * 1024 * 1024;
+    let e = env("lagexit");
+    let n = node(&e, NodeLimits::default());
+    let mut c = Client::connect(n.socket().unwrap()).unwrap();
+    let s = started(ok(c.call(start_cmd("shell"))));
+    ok(c.call_on(
+        3,
+        Cmd::TerminalSubscribe(v1::TerminalSubscribe {
+            terminal_id: s.terminal_id.clone(),
+            format: "terminal.raw".into(),
+        }),
+    ));
+    ok(c.call(Cmd::TerminalInput(v1::TerminalInput {
+        terminal_id: s.terminal_id.clone(),
+        data: format!("head -c {OUTPUT} /dev/zero | tr '\\0' x; exit 0\n").into_bytes(),
+    })));
+    // Not reading the stream until the agent has ended.
+    let id = agora_core::AgentId::new(&s.agent_id);
+    let end = Instant::now() + Duration::from_secs(180);
+    while n
+        .supervisor
+        .lock()
+        .unwrap()
+        .list()
+        .iter()
+        .any(|v| v.id == id && v.running)
+    {
+        assert!(Instant::now() < end, "the agent never ended");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let mut data = 0;
+    let exit = wait_frame(&mut c, 3, |f| {
+        if f.kind == KIND_TERM_DATA {
+            data += f.payload.len();
+        }
+        f.kind == KIND_TERM_EXIT
+    });
+    assert!(data < OUTPUT, "the subscriber never fell behind");
+    assert_eq!(exit.payload.len(), 4);
+}

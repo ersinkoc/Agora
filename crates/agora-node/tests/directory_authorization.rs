@@ -319,6 +319,137 @@ fn launch_options_are_signed_so_a_hub_can_neither_add_nor_remove_one() {
         .is_ok());
 }
 
+/// ADR-0066: a launch that chose settings (model, effort) is signed over them under `directory-action-v4`: a hub can neither add,
+/// change, drop or reorder one, an older signature (no settings, or only options) does not carry over, and a signature from another
+/// device or for another node is refused.
+#[test]
+fn launch_settings_are_signed_so_a_hub_can_neither_add_change_nor_reorder_one() {
+    let key = key();
+    let pairs = |v: &[(&str, &str)]| -> Vec<v1::LaunchSetting> {
+        v.iter()
+            .map(|(i, x)| v1::LaunchSetting {
+                id: (*i).into(),
+                value: (*x).into(),
+            })
+            .collect()
+    };
+    let sign_as =
+        |signer: &signature::EcdsaKeyPair, node: &str, settings: &[(&str, &str)], nonce: &str| {
+            let owned: Vec<(String, String)> = settings
+                .iter()
+                .map(|(i, x)| ((*i).to_string(), (*x).to_string()))
+                .collect();
+            let message = agora_node::directory::launch_signed_message_v4(
+                node,
+                "/selected",
+                "probe",
+                "id:project",
+                false,
+                false,
+                &[],
+                &[],
+                &owned,
+                nonce,
+                101_000,
+            );
+            let mut a = launch(signer, nonce);
+            a.settings = pairs(settings);
+            a.authorization.as_mut().unwrap().signature = signer
+                .sign(&SystemRandom::new(), &message)
+                .unwrap()
+                .as_ref()
+                .to_vec();
+            a
+        };
+    let sign = |settings: &[(&str, &str)], nonce: &str| sign_as(&key, "node-a", settings, nonce);
+    let g = grants(&key);
+    let n = |i: u8| format!("{i:032x}");
+    // Signed without settings (v1): the hub adds one.
+    let mut added = launch(&key, &n(1));
+    added.settings = pairs(&[("model", "gpt-6.1-sol")]);
+    assert!(g
+        .directory_action(&Cmd::AgentLaunch(added), 100_000)
+        .is_err());
+    // Signed with options only (v3): the hub adds a setting.
+    let mut v3 = launch(&key, &n(2));
+    v3.launch_options = vec!["resume-last".into()];
+    let message = agora_node::directory::launch_signed_message(
+        "node-a",
+        "/selected",
+        "probe",
+        "id:project",
+        false,
+        false,
+        &v3.launch_options,
+        &[],
+        &n(2),
+        101_000,
+    );
+    v3.authorization.as_mut().unwrap().signature = key
+        .sign(&SystemRandom::new(), &message)
+        .unwrap()
+        .as_ref()
+        .to_vec();
+    v3.settings = pairs(&[("model", "gpt-6.1-sol")]);
+    assert!(g.directory_action(&Cmd::AgentLaunch(v3), 100_000).is_err());
+    // Signed with two settings: changed, extra, dropped, reordered, split into other pairs.
+    let signed = sign(&[("model", "gpt-6.1-sol"), ("effort", "high")], &n(3));
+    for variant in [
+        vec![("model", "gpt-6.1-terra"), ("effort", "high")],
+        vec![("model", "gpt-6.1-sol"), ("effort", "low")],
+        vec![("model", "gpt-6.1-sol")],
+        vec![("effort", "high"), ("model", "gpt-6.1-sol")],
+        vec![
+            ("model", "gpt-6.1-sol"),
+            ("effort", "high"),
+            ("mode", "plan"),
+        ],
+        vec![
+            ("model", "gpt-6.1-sol"),
+            ("effort", "high"),
+            ("effort", "high"),
+        ],
+        vec![("modele", "ffort"), ("high", "")],
+        vec![],
+    ] {
+        let mut b = signed.clone();
+        b.settings = pairs(&variant);
+        assert!(
+            g.directory_action(&Cmd::AgentLaunch(b), 100_000).is_err(),
+            "{variant:?}"
+        );
+    }
+    // Options and confirmations are still covered next to settings.
+    let mut options = signed.clone();
+    options.launch_options = vec!["skip-permissions".into()];
+    assert!(g
+        .directory_action(&Cmd::AgentLaunch(options), 100_000)
+        .is_err());
+    // Another device (trusted by nobody here), and another node's signature.
+    let stranger = self::key();
+    let foreign = sign_as(&stranger, "node-a", &[("model", "x")], &n(4));
+    assert!(g
+        .directory_action(&Cmd::AgentLaunch(foreign), 100_000)
+        .is_err());
+    let other_node = sign_as(&key, "node-b", &[("model", "x")], &n(5));
+    assert!(g
+        .directory_action(&Cmd::AgentLaunch(other_node), 100_000)
+        .is_err());
+    // Too many pairs are refused before the signature is looked at.
+    let many: Vec<(&str, &str)> = vec![("model", "x"); 9];
+    let too_many = sign(&many, &n(6));
+    assert!(g
+        .directory_action(&Cmd::AgentLaunch(too_many), 100_000)
+        .is_err());
+    // The one that was signed passes, once.
+    assert!(g
+        .directory_action(&Cmd::AgentLaunch(signed.clone()), 100_000)
+        .is_ok());
+    assert!(g
+        .directory_action(&Cmd::AgentLaunch(signed), 100_000)
+        .is_err());
+}
+
 /// A device limited to some projects (ADR-0049) takes directory actions only inside its own projects, as the node itself knows
 /// them (folders launches confirmed, registered checkouts, the ledger), and keeps exactly that after the node restarts.
 mod limited_device {

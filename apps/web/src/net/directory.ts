@@ -1,4 +1,4 @@
-import { toHex, type Device } from './approval';
+import { signedPairs, toHex, type Device } from './approval';
 
 export interface DirectoryInfo { path: string; projectId: string; gitRoot: string; branch: string; portable: boolean; previousProjectId?: string }
 export function directoryMessage(node: string, operation: string, path: string, kind: string, project: string, option: boolean, identityChange: boolean, nonce: string, expires: number): Uint8Array {
@@ -13,10 +13,17 @@ export function signedList(items: readonly string[]): string {
 export function launchMessage(node: string, path: string, kind: string, project: string, separate: boolean, identityChange: boolean, launchOptions: readonly string[], confirmed: readonly string[], nonce: string, expires: number): Uint8Array {
   return new TextEncoder().encode(['directory-action-v3', node, 'launch', path, kind, project, separate ? '1' : '0', identityChange ? '1' : '0', signedList(launchOptions), signedList(confirmed), nonce, String(expires)].join('\0'));
 }
-export async function signDirectory(device: Device, node: string, operation: 'inspect' | 'launch' | 'list' | 'resume', path: string, kind = '', project = '', option = false, identityChange = false, launchOptions: readonly string[] = [], confirmed: readonly string[] = []) {
+/** ADR-0066: a launch that chose launch settings (model, effort) signs them too, in the order they are sent (`directory-action-v4`; vectors in
+ * schema/fixtures/signing/directory-action-v4.json, shared with the node and the terminal client). */
+export function launchMessageV4(node: string, path: string, kind: string, project: string, separate: boolean, identityChange: boolean, launchOptions: readonly string[], confirmed: readonly string[], settings: readonly (readonly [string, string])[], nonce: string, expires: number): Uint8Array {
+  return new TextEncoder().encode(['directory-action-v4', node, 'launch', path, kind, project, separate ? '1' : '0', identityChange ? '1' : '0', signedList(launchOptions), signedList(confirmed), signedPairs(settings), nonce, String(expires)].join('\0'));
+}
+export async function signDirectory(device: Device, node: string, operation: 'inspect' | 'launch' | 'list' | 'resume', path: string, kind = '', project = '', option = false, identityChange = false, launchOptions: readonly string[] = [], confirmed: readonly string[] = [], settings: readonly (readonly [string, string])[] = []) {
   const nonce = toHex(crypto.getRandomValues(new Uint8Array(16)));
   const expiresAtMs = Date.now() + 120_000;
-  const message = operation === 'launch' && (launchOptions.length > 0 || confirmed.length > 0)
+  const message = operation === 'launch' && settings.length > 0
+    ? launchMessageV4(node, path, kind, project, option, identityChange, launchOptions, confirmed, settings, nonce, expiresAtMs)
+    : operation === 'launch' && (launchOptions.length > 0 || confirmed.length > 0)
     ? launchMessage(node, path, kind, project, option, identityChange, launchOptions, confirmed, nonce, expiresAtMs)
     : directoryMessage(node, operation, path, kind, project, option, identityChange, nonce, expiresAtMs);
   const signature = new Uint8Array(await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, device.keys.privateKey, message as BufferSource));

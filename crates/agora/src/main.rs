@@ -27,6 +27,8 @@ const TERMINAL_STREAM: u32 = 3;
 mod adaptercmd;
 mod frontdoor;
 mod hubcli;
+mod meshbridge;
+mod panelcmd;
 mod servicecmd;
 mod supervise;
 mod trustcli;
@@ -157,6 +159,8 @@ pub(crate) struct Opts {
     refuse_return: bool,
     /// `agora hub run --metrics`: the hub answers `GET /api/metrics` (owner only).
     metrics: bool,
+    /// ADR-0076: `agora hub metrics-token create NAME --expires DAYS`.
+    expires: Option<u64>,
     ui: Option<String>,
     /// ADR-0062 item 4: `agora --resume ask|auto [--save]` and `agora node run --resume auto`.
     resume: Option<String>,
@@ -200,6 +204,7 @@ fn parse(args: &[String]) -> Option<Opts> {
             "--test" => o.test = true,
             "--yes" => o.yes = true,
             "--metrics" => o.metrics = true,
+            "--expires" => o.expires = Some(it.next()?.parse().ok()?),
             "--old" => o.old = true,
             "--refuse-return" => o.refuse_return = true,
             "--unsigned" => o.unsigned = true,
@@ -311,7 +316,7 @@ fn main() -> ExitCode {
         ["agent", "list"] => agent_list(&say, &opts),
         ["agent", "kinds"] => agent_kinds(&say, &opts),
         ["terminal", "attach"] => terminal_attach(&say, &opts),
-        ["panel"] => hubcli::panel(&say),
+        ["panel"] => panelcmd::panel(&say),
         ["doctor"] => doctor(&say, &opts),
         ["tui"] => tuicmd::tui(&say, &opts),
         ["update"] => update::update(&say, &opts),
@@ -333,6 +338,7 @@ fn main() -> ExitCode {
         ["hub", "fingerprint"] => hubcli::hub_fingerprint(&say, &opts),
         ["hub", "login"] => hubcli::hub_login(&say, &opts),
         ["hub", "user"] => hubcli::hub_user(&say, &opts),
+        ["hub", "metrics-token"] => hubcli::hub_metrics_token(&say, &opts),
         ["hub", "audit"] => hubcli::hub_audit(&say, &opts),
         ["hub", "devices"] => hubcli::hub_devices(&say, &opts),
         ["hub", "machines"] => hubcli::hub_machines(&say, &opts),
@@ -347,7 +353,13 @@ fn main() -> ExitCode {
         ["node", "stdio"] => bridge_stdio(&say, &socket_path(&opts)),
         ["mesh", "stdio"] => match &opts.socket {
             // An agent's MCP client starts this as its mesh server; the node told it which socket is its own.
-            Some(path) => bridge_stdio(&say, path),
+            Some(path) => match meshbridge::mesh_stdio(path) {
+                Ok(code) => code,
+                Err(e) => {
+                    say_unreachable(&say, path, &e);
+                    ExitCode::from(1)
+                }
+            },
             None => {
                 say.err(key!("cli-bad-arguments"), &[]);
                 ExitCode::from(2)
@@ -424,6 +436,7 @@ fn doctor(say: &Say, o: &Opts) -> ExitCode {
             ("local-sockets", _) => key!("doctor-local-sockets-unsupported"),
             ("sandbox", Status::Ok) => key!("doctor-sandbox"),
             ("sandbox", _) => key!("doctor-sandbox-unsupported"),
+            ("git-identity-missing", _) => key!("doctor-git-identity-missing"),
             ("git", Status::Ok) => key!("doctor-git"),
             ("git", _) => key!("doctor-git-missing"),
             ("data-dir", Status::Ok) => key!("doctor-data-dir"),

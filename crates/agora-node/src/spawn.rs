@@ -37,6 +37,7 @@ use serde_json::{json, Value};
 
 use crate::approvals::{HelperGrant, NodeApprovals, Pending};
 use crate::daemon::EventSink;
+use crate::launch_options::Requested;
 use crate::mesh_server::{Helpers, StartArgs, StartOutcome};
 use crate::supervisor::{AgentView, ScreenCheck, StartRequest, Supervisor};
 
@@ -78,6 +79,8 @@ struct Request {
     inside: bool,
     worktree: bool,
     prompt: String,
+    /// ADR-0066: `(id, label, value)` in the manifest's order, as shown on the card and signed; empty when none were asked for.
+    settings: Vec<(String, String, String)>,
     depth: u8,
     /// A scoped grant may cover this kind (not a shell or a plain terminal program, see `Supervisor::grantable`).
     grantable: bool,
@@ -453,6 +456,12 @@ impl Spawner {
                 Error::new(ErrorCode::AgentKindUnknown).with("kind", cut(&a.kind, MAX_FIELD))
             );
         }
+        // ADR-0066: the settings are checked against this node's manifest before anyone is asked: an unknown, repeated or invalid one
+        // refuses the start (`agent.setting_unknown`, `agent.setting_invalid`), so the card never shows what could not be applied.
+        let settings = self
+            .sup()
+            .checked_settings(&a.kind, &a.settings)
+            .map_err(|e| e.to_protocol())?;
         // The ceiling on confinement, the same on every platform: with agents confined, a helper of another kind gets the node's
         // profile plus what its manifest asks only if the owner trusts that manifest, which would make it wider than the asker.
         if confined && a.kind != me.kind && trusted.contains(&a.kind) {
@@ -498,6 +507,7 @@ impl Spawner {
             inside,
             worktree: a.worktree,
             prompt: a.prompt.clone(),
+            settings,
             depth,
             grantable,
             ticket: 0,
@@ -517,7 +527,7 @@ impl Spawner {
     }
 
     fn detail(&self, r: &Request, caller_kind: &str) -> String {
-        json!({
+        let mut detail = json!({
             "node": self.node_id,
             "agent": r.caller.as_str(),
             "agent_kind": caller_kind,
@@ -526,10 +536,21 @@ impl Spawner {
             "inside": r.inside,
             "worktree": r.worktree,
             "depth": r.depth,
-            "grant_allowed": r.inside && r.grantable,
+            // A scoped grant covers starts as they were approved here, and a later start never carries settings under a grant
+            // (it is always asked), so a request with settings offers none: what the user approves is exactly this start.
+            "grant_allowed": r.inside && r.grantable && r.settings.is_empty(),
             "prompt": r.prompt,
-        })
-        .to_string()
+        });
+        // ADR-0066: shown on the card (`label` is the manifest's Fluent id, the window's own text names it) and signed with the request
+        // (`agora-approval-start-v2`). Only present when there are some, so a request without settings is byte for byte what it was.
+        if !r.settings.is_empty() {
+            detail["settings"] = r
+                .settings
+                .iter()
+                .map(|(id, label, value)| json!({"id": id, "label": label, "value": value}))
+                .collect();
+        }
+        detail.to_string()
     }
 
     /// Starts the helper the user (or a grant) allowed. Called with the caller's slot held; limits are checked again, since things
@@ -559,12 +580,23 @@ impl Spawner {
             base: None,
         };
         let mut sup = self.sup();
+        // ADR-0066: the settings the user approved, exactly (never an option: a helper gets none, ADR-0059). Checked again against the
+        // manifest as it is now.
+        let chosen = Requested {
+            settings: r
+                .settings
+                .iter()
+                .map(|(id, _, value)| (id.clone(), value.clone()))
+                .collect(),
+            ..Requested::default()
+        };
         let id = sup
-            .start_selected(
+            .start_selected_with_options(
                 &req,
                 project,
                 Path::new(&info.git_root),
                 r.worktree,
+                &chosen,
                 Instant::now(),
             )
             .map_err(|e| e.to_protocol())?;
@@ -663,12 +695,14 @@ impl Spawner {
         let (outcome, grant, nested) = if r.approved {
             // A grant and permission to go deeper are honoured only inside the asker's own folder, and a grant never for a shell or
             // a plain terminal program (it would mean "run any N programs without asking").
-            let grant = if req.inside && req.grantable {
+            // ADR-0066: nor for a request with settings, whatever the signed decision says (a start with settings is always asked).
+            let grant = if req.inside && req.grantable && req.settings.is_empty() {
                 r.helper_grant.min(MAX_GRANT)
             } else {
                 0
             };
-            let nested = req.inside && req.grantable && r.helpers_may_start;
+            let nested =
+                req.inside && req.grantable && req.settings.is_empty() && r.helpers_may_start;
             let outcome = self.launch(&req, nested);
             if outcome.is_ok() {
                 (outcome, grant, nested)
@@ -936,7 +970,8 @@ impl Helpers for Spawner {
             Err(e) => return Err(refuse(e)),
         };
         // A grant covers this start without asking: same asker, kind, folder and worktree choice, inside its own folder.
-        if req.inside && req.grantable {
+        // ADR-0066: not one with settings, which are always asked (a grant approved a start as shown, not a model or effort).
+        if req.inside && req.grantable && req.settings.is_empty() {
             if let Some(nested) =
                 self.approvals
                     .use_helper_grant(caller, &req.kind, &req.folder, req.worktree)

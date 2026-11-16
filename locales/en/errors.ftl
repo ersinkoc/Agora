@@ -73,6 +73,7 @@ mesh-helper_limit = The agent cannot start another helper now (limit: { $limit }
         [prompt] Its first prompt is too long.
        *[other] It already runs as many helpers as allowed.
     }
+mesh-unavailable = The mesh is reconnecting. Try again in a moment.
 mesh-start_denied = The start was refused ({ $approval_id }).
 task-not_found = Task { $task_id } was not found.
 task-not_open = Task { $task_id } is already taken or done.

@@ -484,8 +484,11 @@ impl<'a> Devices<'a> {
                 [id],
             )
             .map_err(|e| store_error(e.into()))?;
-        conn.execute("DELETE FROM device_endorsements WHERE device_id = ?1", [id])
-            .map_err(|e| store_error(e.into()))?;
+        // Only a device that was forgotten loses its endorsements: a live one keeps them for the machines that connect later.
+        if n > 0 {
+            conn.execute("DELETE FROM device_endorsements WHERE device_id = ?1", [id])
+                .map_err(|e| store_error(e.into()))?;
+        }
         Ok(n > 0)
     }
 

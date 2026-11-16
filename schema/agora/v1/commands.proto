@@ -654,9 +654,8 @@ message AgentLaunch {
   repeated string launch_options = 7;
   // ADR-0059: as `AgentStart.confirmed_launch_options`; signed with `launch_options` as a separate list.
   repeated string confirmed_launch_options = 8;
-  // ADR-0066: values for the kind's `[[launch.setting]]`s. Accepted only on the node's own control socket for now: `authorization`
-  // does not cover them yet, so a launch with settings that came through the hub is refused (`agent.option_forbidden`,
-  // `policy: signature`) until a signing domain version that includes them.
+  // ADR-0066: values for the kind's `[[launch.setting]]`s (capability `agent.launch_settings`). When not empty the authorization signs
+  // them too (`directory-action-v4`, docs/specs/protocol.md), in the order sent, so a hub can neither add, change, drop nor reorder one.
   repeated LaunchSetting settings = 9;
 }
 message AgentLaunchResult {
