@@ -1,9 +1,9 @@
 # 0082. A confined agent cannot use the node's control socket
-Status: Proposed
+Status: Accepted
 Date: 2026-11-16
+Accepted: 2026-11-17 (the maintainer's own reply in the merger chat, "1 kabul et geç", to the merger's list that named ADR-0081, ADR-0082, ADR-0083 and ADR-0084 as the decisions waiting for them). The open questions' proposed answers stand.
 Origin: issue #440 (T16), found in the ADR-0059 security review; its Windows half was measured on 2026-11-14.
 
-Not accepted. Nothing here may be built until the maintainer names this ADR in an acceptance message.
 
 ## Context
 - The node's control socket (`crates/agora-node/src/control.rs`, `ControlServer::start`, `local_listen` in `crates/agora-platform/src/unix.rs`)

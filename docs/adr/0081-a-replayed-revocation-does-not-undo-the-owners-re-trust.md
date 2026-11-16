@@ -1,7 +1,7 @@
 # 0081. A replayed revocation does not undo the owner's re-trust
-Status: Proposed
+Status: Accepted
 Date: 2026-11-16
-Note (2026-11-16): a session recorded that the maintainer approved this ADR in another chat ("0081'i onaylıyorum, kabul vs"). The merger accepts an ADR only on the maintainer's own message in the merger chat, so it stays Proposed here until that message names it. The open questions' proposed answers are the ones the implementation (#657) follows.
+Accepted: 2026-11-17 (the maintainer's own reply in the merger chat, "1 kabul et geç", to the merger's list that named ADR-0081, ADR-0082, ADR-0083 and ADR-0084 as the decisions waiting for them). The open questions' proposed answers stand.
 Origin: evidence audit finding F220 (device trust). A proof run against `main` printed `PROBLEM CONFIRMED`: a revocation dated ahead of the
 machine's clock, sent again by the hub after the owner trusted the device again on the machine, removed the device again.
 
