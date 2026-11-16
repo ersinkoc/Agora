@@ -5,6 +5,7 @@ package agora.v1;
 import "agora/v1/common.proto";
 import "agora/v1/devices.proto";
 import "agora/v1/enroll.proto";
+import "agora/v1/pairing.proto";
 
 // Commands flow client -> hub -> node (docs/specs/protocol.md section 4). Every request has a request_id
 // and an idempotency_key; the response is Ok or Err.
@@ -76,6 +77,15 @@ message CommandRequest {
     DeviceAskApproval device_ask_approval = 92;
     // ADR-0073: answered by the hub (owner only, capability `node.forget`); refused with `node.online` while the machine is connected.
     NodeForget node_forget = 93;
+    // ADR-0065, capability `pairing.v1`. The owner's switch and decision (hub only); the machine's two messages are accepted
+    // only on a pairing connection, like `enroll` (docs/specs/pairing.md).
+    PairOpen pair_open = 94;
+    PairClose pair_close = 95;
+    PairStatus pair_status = 96;
+    PairApprove pair_approve = 97;
+    PairDeny pair_deny = 98;
+    PairRequest pair_request = 99;
+    PairReveal pair_reveal = 100;
   }
 }
 
@@ -113,6 +123,10 @@ message CommandOk {
     DirectoryEntries directory_entries = 21;
     // ADR-0061
     DeviceListResult device_list = 22;
+    // ADR-0065
+    PairChallenge pair_challenge = 23;
+    PairResult pair_result = 24;
+    PairStatusResult pair_status = 25;
   }
 }
 

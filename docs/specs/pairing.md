@@ -24,7 +24,7 @@ to compare. The join string and the code stay as the fallback.
 - An announcement is a **candidate**, never a trust anchor: nothing is shared with the hub because it answered. The fingerprint is shown to the person
   next to the hub's name and is public information. (A rogue responder can only get itself listed; it still cannot pass section 5.)
 
-## 4. Messages (new, append-only; ids in `commands.proto` / `events.proto` / `client.proto` at implementation)
+## 4. Messages (new, append-only; defined in `schema/agora/v1/pairing.proto`, field numbers and carriage in docs/specs/protocol.md "Pairing")
 Machine to hub, on a `wss://` connection, in this order: `PairRequest`, `PairReveal`. Hub to machine: `PairChallenge`, `PairResult`.
 Owner to hub (from an owner window): `PairApprove { pair_id }`, `PairDeny { pair_id }`, `PairOpen`, `PairClose`, `PairStatus`.
 Hub to windows: `PairRequested { pair_id, kind (machine|browser), name, os, address, number, expires_ms }` and `PairDecided { pair_id, outcome }`.
@@ -194,7 +194,7 @@ The ids below are **placeholders**; the real ids are assigned when the rows go i
   `pair open`; failure is explicit (`pair.name_unverified`, or `pair open` refusing); never a skipped check.
 
 ## 10. Order of work (each its own pull request, each security-reviewed)
-1. The messages, error codes and golden fixtures (append-only), and this document updated with the ids.
+1. The messages, error codes and golden fixtures (append-only), and this document updated with the ids. (Done: schema only, capability `pairing.v1`.)
 2. The pairing core in the hub, pure and unit-tested (states, limits, SAS, commitment), `agora pair open|close|status`, audit.
 3. The command path for approve/deny and `PairRequested` to windows and notifiers; the machine handshake over TLS.
 4. The discovery responder (hub) and the finder, `agora join`, with the trust question (node).
