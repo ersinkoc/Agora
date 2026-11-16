@@ -41,6 +41,10 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
   nor finish it, stuck until its lease ran out. It is refused (`mesh.recipient_unknown`) and stays with its owner (audit finding F601).
 
 ### Machines
+- A machine's control connection no longer keeps everything it receives: when a read ended in the middle of a message (the usual
+  case), the part already handled stayed in memory, so a console watching a busy terminal, or the machine serving it, grew by every
+  byte of output for as long as it stayed connected (4 MB streamed held 4 MB). It now holds at most one unfinished message, and
+  reading got faster too (audit finding F240).
 - Asking for the changes of one file whose name contains `[`, `*` or `?` now returns that file only: the name was read as a pattern, so
   `pages/[id].tsx` also brought `pages/i.tsx`. Nothing outside the workspace folder was ever reachable this way (audit finding F402).
 - The number of changed files a machine shows for a folder is now right when the folder holds new files: a new folder with three files
