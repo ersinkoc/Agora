@@ -51,6 +51,7 @@ pub fn code_for_transport(text: &str) -> &'static str {
     } else if has("no route to host")
         || has("network is unreachable")
         || has("host is unreachable")
+        || has("timed out")
         || has("os error 65)")
         || has("os error 51)")
         || has("os error 101)")
@@ -162,6 +163,7 @@ mod tests {
             ("Network is unreachable (os error 101)", UNREACHABLE),
             ("Operation not permitted (os error 1)", NOT_PERMITTED),
             ("Permission denied (os error 13)", NOT_PERMITTED),
+            ("timed out", UNREACHABLE),
             ("Connection refused (os error 111)", REFUSED),
             ("Connection refused (os error 61)", REFUSED),
             ("invalid peer certificate: UnknownIssuer", CERTIFICATE),

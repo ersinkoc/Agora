@@ -2610,7 +2610,7 @@ fn a_node_enrolled_again_under_another_name_links_and_keeps_the_old_log() {
 /// "up" once the hub has taken the connection.
 #[test]
 fn the_node_reports_its_hub_link_state_for_status() {
-    use agora_node::link_state::{LinkState, REFUSED};
+    use agora_node::link_state::{LinkState, REFUSED, UNREACHABLE};
     // A port nothing listens on.
     let closed = {
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -2623,10 +2623,11 @@ fn the_node_reports_its_hub_link_state_for_status() {
     let mut link = hub.link(closed);
     link.state_dir = Some(dir.clone());
     let _refused = spawn(Arc::clone(&sink), link).unwrap();
-    wait(
-        "a refusal to be recorded",
-        || matches!(LinkState::read(&dir), Some(LinkState::Down { code, .. }) if code == REFUSED),
-    );
+    wait("a refusal to be recorded", || {
+        matches!(LinkState::read(&dir), Some(LinkState::Down { code, .. })
+            // Windows gives up on a closed loopback port as a timeout, Unix refuses it.
+            if code == REFUSED || (cfg!(windows) && code == UNREACHABLE))
+    });
     assert_ne!(LinkState::read(&dir), Some(LinkState::Up));
 
     let addr = hub.listen("127.0.0.1:0");
